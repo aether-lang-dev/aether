@@ -17,6 +17,15 @@ void send_buffer_flush(void) {
     }
     
     ActorBase* actor = (ActorBase*)g_send_buffer.target;
+    // An actor with its own thread takes every message in its inbox (#2598):
+    // its SPSC queue and mailbox are not a sender's to write.
+    if (actor->auto_process) {
+        for (int i = 0; i < g_send_buffer.count; i++) {
+            scheduler_actor_thread_deliver(actor, g_send_buffer.buffer[i]);
+        }
+        g_send_buffer.count = 0;
+        return;
+    }
     int target_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
     
     // Fast path: same core, use lock-free SPSC queue

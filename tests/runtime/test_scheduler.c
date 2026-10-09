@@ -11,6 +11,7 @@
 #include "../../runtime/aether_process_mem.h"
 #include <stdatomic.h>
 
+
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -1164,6 +1165,207 @@ void test_scheduler_teardown_with_live_actor_thread(void) {
     scheduler_cleanup();
 }
 
+// #2592: an actor thread with nothing to do sleeps instead of spinning for
+// as long as the actor lives, and a message and its release each wake it.
+// The park's timed wait is set to a minute, so a wake that never came shows
+// as a stall of a minute rather than as a 32 ms delay; the waits below give
+// up after 10 s. They are bounded by the clock: sleep_ms(1) is a timer tick,
+// about 15 ms, on Windows, so a bound in iterations is not a bound in time.
+static int wait_thread_parked(ActorBase* a) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(&a->thread_parked)) {
+        if ((long long)get_time_ms() > deadline) return 0;
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+static int wait_thread_gone(ActorBase* a) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!(atomic_load(&a->dead) & AETHER_ACTOR_THREAD_GONE)) {
+        if ((long long)get_time_ms() > deadline) return 0;
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+// Waits until *count reaches `want`, at most 10 s; returns the count.
+static int wait_count(atomic_int* count, int want) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(count) < want && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(count);
+}
+
+void test_scheduler_actor_thread_parks_when_idle(void) {
+    scheduler_init(1);
+    scheduler_set_actor_park_ms(60000);
+    // Two actors first, so the core thread runs (as in the teardown cycle).
+    for (int i = 0; i < 2; i++) {
+        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    }
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_store(&a->count, 0);
+    a->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&a->thread, NULL, aether_actor_thread, a));
+
+    // Idle from the start: it spins a while, then sleeps; a message wakes it.
+    for (int round = 1; round <= 3; round++) {
+        ASSERT_TRUE(wait_thread_parked((ActorBase*)a));
+        Message msg = message_create_simple(1, 0, round);
+        scheduler_send_remote((ActorBase*)a, msg, -1);
+        ASSERT_EQ(round, wait_count(&a->count, round));
+        ASSERT_EQ(round, atomic_load(&a->last_value));
+    }
+
+    // Asleep again; the release wakes it, it leaves its loop and ends the
+    // actor.
+    ASSERT_TRUE(wait_thread_parked((ActorBase*)a));
+    pthread_t t = a->thread;
+    scheduler_release_actor((ActorBase*)a);
+    ASSERT_TRUE(wait_thread_gone((ActorBase*)a));
+    pthread_join(t, NULL);
+    ASSERT_EQ(0, wait_no_pending());
+
+    scheduler_set_actor_park_ms(0);   // back to the default
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
+// #2598: an actor thread's inbox takes any number of senders at once and
+// keeps each one's order. The actor's first step holds it at a gate while
+// three threads send the first half of their 400 messages: the inbox's ring
+// fills and the rest waits in its list. The gate opens and the threads send
+// their second halves while the actor works through that backlog, so the
+// ring has room again while older messages still wait in the list: each new
+// one must go behind them. Then a core-mate's step sends 400 from the core
+// thread, and the actor 400 to itself. All 2,002 must come out, each sender's
+// in the order it sent them. The single-producer queue this replaced lost
+// messages here: past its 63 slots, past the 32 its thread moved into the
+// mailbox, and whenever two senders wrote the same slot.
+#define ORDER_SENDERS 5    // three threads, the core-mate, the actor itself
+#define ORDER_EACH 400
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int count;
+    atomic_int out_of_order;
+    atomic_int next[ORDER_SENDERS];   // each sender's next sequence number
+} OrderedActor;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* target;
+    atomic_int done;
+} BurstActor;
+
+static atomic_int g_order_gate;
+static atomic_int g_order_halves;   // sender threads past their first half
+
+static void ordered_step(void* self) {
+    OrderedActor* a = (OrderedActor*)self;
+    Message msg;
+    if (!mailbox_receive(&a->mailbox, &msg)) return;
+    if (msg.type == 1) {
+        atomic_fetch_add(&a->count, 1);   // counted first: the test waits on it
+        while (!atomic_load(&g_order_gate)) sleep_ms(1);
+        return;
+    } else if (msg.type == 2) {
+        int from = msg.sender_id;
+        if (from < 0 || from >= ORDER_SENDERS ||
+            msg.payload_int != atomic_load(&a->next[from])) {
+            atomic_fetch_add(&a->out_of_order, 1);
+        } else {
+            atomic_fetch_add(&a->next[from], 1);
+        }
+    } else if (msg.type == 3) {
+        // From its own thread, to itself.
+        for (int i = 0; i < ORDER_EACH; i++) {
+            scheduler_send_local((ActorBase*)a, message_create_simple(2, 4, i));
+        }
+    }
+    atomic_fetch_add(&a->count, 1);
+}
+
+static void burst_step(void* self) {
+    BurstActor* b = (BurstActor*)self;
+    Message msg;
+    while (mailbox_receive(&b->mailbox, &msg)) {
+        // On the core thread, to an actor of the same core.
+        for (int i = 0; i < ORDER_EACH; i++) {
+            scheduler_send_local(b->target, message_create_simple(2, 3, i));
+        }
+        atomic_store(&b->done, 1);
+    }
+    atomic_store_explicit(&b->active, (b->mailbox.count > 0), memory_order_relaxed);
+}
+
+typedef struct {
+    ActorBase* target;
+    int sender;
+} OrderSender;
+
+static void* order_sender_thread(void* arg) {
+    OrderSender* s = (OrderSender*)arg;
+    for (int i = 0; i < ORDER_EACH; i++) {
+        if (i == ORDER_EACH / 2) {
+            atomic_fetch_add(&g_order_halves, 1);
+            while (!atomic_load(&g_order_gate)) sleep_ms(1);
+        }
+        scheduler_send_remote(s->target, message_create_simple(2, s->sender, i), -1);
+    }
+    return NULL;
+}
+
+void test_scheduler_actor_thread_inbox_keeps_order(void) {
+    scheduler_init(1);
+    ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    BurstActor* burst = (BurstActor*)scheduler_spawn_actor(-1, burst_step, sizeof(BurstActor));
+    ASSERT_NOT_NULL(burst);
+    atomic_init(&burst->done, 0);
+    OrderedActor* a = (OrderedActor*)scheduler_spawn_actor(-1, ordered_step, sizeof(OrderedActor));
+    ASSERT_NOT_NULL(a);
+    atomic_init(&a->count, 0);
+    atomic_init(&a->out_of_order, 0);
+    for (int i = 0; i < ORDER_SENDERS; i++) atomic_init(&a->next[i], 0);
+    burst->target = (ActorBase*)a;
+    atomic_store(&g_order_gate, 0);
+    a->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&a->thread, NULL, aether_actor_thread, a));
+
+    scheduler_send_remote((ActorBase*)a, message_create_simple(1, 0, 0), -1);
+    ASSERT_EQ(1, wait_count(&a->count, 1));   // its thread waits at the gate
+
+    atomic_store(&g_order_halves, 0);
+    pthread_t senders[3];
+    OrderSender args[3];
+    for (int i = 0; i < 3; i++) {
+        args[i].target = (ActorBase*)a;
+        args[i].sender = i;
+        ASSERT_EQ(0, pthread_create(&senders[i], NULL, order_sender_thread, &args[i]));
+    }
+    ASSERT_EQ(3, wait_count(&g_order_halves, 3));
+    atomic_store(&g_order_gate, 1);
+    for (int i = 0; i < 3; i++) pthread_join(senders[i], NULL);
+    scheduler_send_remote((ActorBase*)burst, message_create_simple(1, 0, 0), -1);
+    ASSERT_EQ(1, wait_count(&burst->done, 1));
+    scheduler_send_remote((ActorBase*)a, message_create_simple(3, 0, 0), -1);
+
+    int total = 1 + 4 * ORDER_EACH + 1 + ORDER_EACH;
+    ASSERT_EQ(total, wait_count(&a->count, total));
+    ASSERT_EQ(0, atomic_load(&a->out_of_order));
+    for (int i = 0; i < ORDER_SENDERS; i++) ASSERT_EQ(ORDER_EACH, atomic_load(&a->next[i]));
+    scheduler_wait();   // returns: every message counted as sent was processed
+
+    pthread_t t = a->thread;
+    scheduler_release_actor((ActorBase*)a);
+    ASSERT_TRUE(wait_thread_gone((ActorBase*)a));
+    pthread_join(t, NULL);
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1177,6 +1379,8 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);

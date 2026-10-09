@@ -135,8 +135,8 @@ HTTPS request in under a second. That is slower than OpenSSL but well inside any
 server's handshake deadline. An earlier version of this note measured 12–22
 seconds and warned that the default request timeout could expire mid-handshake;
 that cost was `std.bignum`'s bit-serial division inside every P-256 and P-384
-field reduction, and it is gone — both curves now reduce mod their prime with
-shifts and adds. No timeout adjustment is needed.
+field reduction, and it is gone: the division is Knuth's Algorithm D (#2595),
+and a P-256 signature check takes about 15 ms. No timeout adjustment is needed.
 
 See also `std.http.server.lb` for load balancing, `std.tcp` for raw sockets,
 and `docs/http-server.md` for routing, middleware, TLS and the HTTP/2 path.

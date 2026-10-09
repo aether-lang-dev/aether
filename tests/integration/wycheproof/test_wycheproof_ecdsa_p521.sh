@@ -1,11 +1,12 @@
 #!/bin/sh
 # Wycheproof adversarial vector suites — ECDSA P-521 (P1363 + DER forms), wave 5.
 #
-# Its own harness slot AND its own high default stride: a P-521 verify is two
-# 521-bit bignum scalar multiplications (~6s each at CI's -O0), so even a
-# handful of cases per driver fills much of the 180s budget. Default stride 40
-# samples ~14 (DER) + ~8 (P1363) cases; WYCHEPROOF_FULL=1 (the nightly)
-# sweeps all 860, WYCHEPROOF_STRIDE=N picks a custom density.
+# Its own harness slot. A P-521 verify is two 521-bit scalar multiplications,
+# which took seconds each while std.bignum divided a bit at a time, so the
+# drivers sampled every 40th vector. With Algorithm D (#2595) one takes about
+# 60 ms; the default stride is now 10, as for P-256 and P-384, about 55 (DER)
+# + 32 (P1363) cases. WYCHEPROOF_FULL=1 (the nightly) sweeps all 860,
+# WYCHEPROOF_STRIDE=N picks a custom density.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

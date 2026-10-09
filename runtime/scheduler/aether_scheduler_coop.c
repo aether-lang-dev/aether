@@ -147,6 +147,9 @@ void scheduler_reader_online(void) {}
 void scheduler_reader_quiescent(void) {}
 void scheduler_reader_offline(void) {}
 void scheduler_actor_thread_exit(ActorBase* actor) { (void)actor; }
+int scheduler_actor_thread_park(ActorBase* actor) { (void)actor; return 0; }
+void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) { (void)actor; (void)msg; }
+void scheduler_set_actor_park_ms(int ms) { (void)ms; }
 
 // Frees the released actors once no walk and no inline send is running.
 static void coop_free_released(void) {

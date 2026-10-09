@@ -4,8 +4,10 @@
 // the real tls13_cert.split_ecdsa_sig (coord width 66), then p521.ecdsa_verify.
 //   "valid"   -> parse+verify MUST succeed (1).
 //   "invalid" -> parse MUST error or verify MUST return 0.
-// Stride sampling (default 40 — P-521 verify is ~6s each; WYCHEPROOF_FULL=1
-// sweeps all, WYCHEPROOF_STRIDE=N overrides).
+// Stride sampling (default 10, as P-256 and P-384; WYCHEPROOF_FULL=1 sweeps
+// all, WYCHEPROOF_STRIDE=N overrides). It was 40 while std.bignum divided a
+// bit at a time and a P-521 verify took seconds; with Algorithm D (#2595)
+// it takes about 60 ms, and the full suite passes.
 //
 // P-521 hash note: the curve order is 521 bits (66 bytes), but SHA-512 is
 // only 64 bytes. FIPS 186-5 uses the whole digest as the integer z when the
@@ -84,7 +86,7 @@ fn hash66(b: ptr, n: int) -> ptr {
 }
 
 main() {
-    stride = 40
+    stride = 10
     wf = os.os_getenv("WYCHEPROOF_FULL")
     if wf != 0 {
         if wf == "1" { stride = 1 }

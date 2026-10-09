@@ -1,10 +1,10 @@
 #!/bin/sh
 # Wycheproof adversarial vector suites — Ed448 signature verify + AES-CMAC, wave 6.
 #
-# Two families sharing one harness slot. AES-CMAC is symmetric-fast (full sweep
-# by default). Ed448 verify is bignum-heavy (~4s each), so it stride-samples
-# (default 4); WYCHEPROOF_FULL=1 (the nightly) sweeps all 87, WYCHEPROOF_STRIDE=N
-# overrides both.
+# Two families sharing one harness slot, both swept in full by default:
+# AES-CMAC is symmetric-fast, and Ed448's 87 verifies take about 2 s since
+# std.bignum's division is Algorithm D (#2595; at seconds each it sampled every
+# 4th). WYCHEPROOF_STRIDE=N samples both.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

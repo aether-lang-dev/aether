@@ -86,11 +86,24 @@ static int udp_set_nonblocking(int fd) {
 #endif
 }
 
+/* 0 when `host` holds a space or a control character, which no address
+ * literal and no host name can contain, so the resolver is not asked: it
+ * would look the string up all the same, and on macOS that waits out a DNS
+ * timeout, about 5 s, before it fails (#2596). Anything else goes to the
+ * resolver, which knows its own rules (an IDN name, an IPv6 zone). */
+static int udp_host_is_well_formed(const char* host) {
+    for (const unsigned char* c = (const unsigned char*)host; *c; c++) {
+        if (*c <= ' ' || *c == 0x7f) return 0;
+    }
+    return 1;
+}
+
 /* getaddrinfo for a datagram endpoint. `passive` picks the wildcard for
  * an empty host, as a bind wants; a send wants a real destination. Fills
  * `out` with the first result and returns 0, or -1. */
 static int udp_lookup(const char* host, int port, int passive, struct UdpAddr* out) {
     if (port < 0 || port > 65535) return -1;
+    if (host && !udp_host_is_well_formed(host)) return -1;
     char port_str[16];
     snprintf(port_str, sizeof(port_str), "%d", port);
     struct addrinfo hints;

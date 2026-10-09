@@ -28,6 +28,7 @@
 #include "../aether_numa.h"
 #include "../actors/aether_send_buffer.h"
 #include "../actors/aether_panic.h"
+#include "../actors/aether_actor_inbox.h"
 
 
 // Forward declaration to avoid header cycle with aether_send_message.h
@@ -421,6 +422,149 @@ static inline void sched_wake(Scheduler* target) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Idle park of actor threads (#2592)
+//
+// An auto_process actor's thread (aether_actor_thread) that has spun a while
+// with nothing to do sleeps on its core's condition below. A message wakes
+// it (every send to it goes through scheduler_actor_thread_deliver), and so
+// do its release, the scheduler's stop and its teardown. One condition
+// serves every such thread of a core and is broadcast, since a wake is for
+// one actor; the others look at their inboxes and sleep again. The wait is
+// timed as well, so a wake that is missed costs latency, never a hang.
+//
+// The conditions are made once per process and never again. A core's own
+// park_mutex is remade by each scheduler_init(), after its thread was
+// joined; an actor thread is not joined by the scheduler and may still be
+// leaving the park when the next scheduler_init() runs.
+// ---------------------------------------------------------------------------
+
+static pthread_mutex_t g_actor_park_mutex[MAX_CORES];
+static pthread_cond_t  g_actor_park_cond[MAX_CORES];
+static atomic_int g_actor_park_state = 0;   // 0 not made, 1 making, 2 ready
+static atomic_int g_actor_park_ms = PARK_MS_MAX;
+
+void scheduler_set_actor_park_ms(int ms) {
+    atomic_store_explicit(&g_actor_park_ms, ms > 0 ? ms : PARK_MS_MAX, memory_order_relaxed);
+}
+
+static void actor_park_init_once(void) {
+    int expected = 0;
+    if (atomic_compare_exchange_strong(&g_actor_park_state, &expected, 1)) {
+        for (int i = 0; i < MAX_CORES; i++) {
+            pthread_mutex_init(&g_actor_park_mutex[i], NULL);
+            pthread_cond_init(&g_actor_park_cond[i], NULL);
+        }
+        atomic_store_explicit(&g_actor_park_state, 2, memory_order_release);
+    } else {
+        while (atomic_load_explicit(&g_actor_park_state, memory_order_acquire) != 2) {
+            AETHER_PAUSE();
+        }
+    }
+}
+
+// The core an actor thread parks on, or -1. Such an actor stays on the core
+// it was registered on: no core steps it, so neither migration nor work
+// stealing moves it.
+static inline int actor_park_core(ActorBase* actor) {
+    int core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
+    return (core >= 0 && core < MAX_CORES) ? core : -1;
+}
+
+// Wakes every actor thread parked on `core`. Takes the mutex, so a thread
+// that has not reached its wait yet is past its last look first, and that
+// look sees whatever the caller set before calling.
+static void actor_park_broadcast(int core) {
+    if (core < 0 ||
+        atomic_load_explicit(&g_actor_park_state, memory_order_acquire) != 2) {
+        return;
+    }
+    pthread_mutex_lock(&g_actor_park_mutex[core]);
+    pthread_cond_broadcast(&g_actor_park_cond[core]);
+    pthread_mutex_unlock(&g_actor_park_mutex[core]);
+}
+
+static void actor_thread_wake(ActorBase* actor) {
+    // Pairs with the fence in scheduler_actor_thread_park. The message the
+    // caller has just put in the inbox is seen by the thread's last look at
+    // it, or this load sees the thread parked, or both: without the two
+    // fences each side could miss the other's store, and the thread would
+    // sleep on a message for a whole timed wait.
+    atomic_thread_fence(memory_order_seq_cst);
+    if (atomic_load_explicit(&actor->thread_parked, memory_order_relaxed)) {
+        actor_park_broadcast(actor_park_core(actor));
+    }
+}
+
+int scheduler_actor_thread_park(ActorBase* actor) {
+    int core = actor_park_core(actor);
+    if (core < 0 ||
+        atomic_load_explicit(&g_actor_park_state, memory_order_acquire) != 2) {
+        return 0;
+    }
+    // Asleep, the thread holds no actor and reads no table, so it stops
+    // being a reader: otherwise the epoch it last published would hold every
+    // release back for as long as it sleeps.
+    scheduler_reader_offline();
+    pthread_mutex_lock(&g_actor_park_mutex[core]);
+    atomic_store_explicit(&actor->thread_parked, 1, memory_order_relaxed);
+    atomic_thread_fence(memory_order_seq_cst);
+    // The last look, after `thread_parked` is published. A release or a stop
+    // sets its mark and then broadcasts under this mutex, so the mark is seen
+    // here or the broadcast ends the wait below.
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+    if (!atomic_load_explicit(&actor->dead, memory_order_acquire) &&
+        atomic_load_explicit(&schedulers[core].running, memory_order_acquire) &&
+        atomic_load_explicit(&actor->mailbox.count, memory_order_acquire) == 0 &&
+        (!ib || atomic_load_explicit(&ib->count, memory_order_acquire) == 0)) {
+        struct timespec deadline;
+        aether_park_deadline(&deadline,
+                             atomic_load_explicit(&g_actor_park_ms, memory_order_relaxed));
+        pthread_cond_timedwait(&g_actor_park_cond[core], &g_actor_park_mutex[core],
+                               &deadline);
+    }
+    atomic_store_explicit(&actor->thread_parked, 0, memory_order_relaxed);
+    pthread_mutex_unlock(&g_actor_park_mutex[core]);
+    scheduler_reader_online();
+    return 1;
+}
+
+// The actor's inbox, made by the first send. Two first sends at once each
+// make one; the loser frees its own.
+static ActorInbox* actor_inbox_of(ActorBase* actor) {
+    ActorInbox* ib = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+    if (likely(ib != NULL)) return ib;
+    ActorInbox* fresh = actor_inbox_new();
+    if (!fresh) return NULL;
+    ActorInbox* expected = NULL;
+    if (atomic_compare_exchange_strong_explicit(&actor->inbox, &expected, fresh,
+                                                memory_order_acq_rel,
+                                                memory_order_acquire)) {
+        return fresh;
+    }
+    free(fresh);
+    return expected;
+}
+
+void scheduler_actor_thread_deliver(ActorBase* actor, Message msg) {
+    AETHER_TRACE_EVENT(AE_TRACE_SPSC_ENQUEUE, actor->id, msg.type, msg.sender_id);
+    ActorInbox* ib = actor_inbox_of(actor);
+    if (unlikely(!ib || !actor_inbox_push(ib, msg))) {
+        // Out of memory: the message cannot be kept. It was counted as
+        // sent, so it is released and credited as processed, or
+        // scheduler_wait() would wait for it forever.
+        fprintf(stderr, "aether: out of memory queueing a message for actor %d; "
+                        "it is dropped\n", actor->id);
+        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
+        if (msg._reply_slot) reply_slot_decref((ActorReplySlot*)msg._reply_slot);
+        atomic_fetch_add_explicit(&schedulers[0].messages_processed, 1, memory_order_relaxed);
+        return;
+    }
+    atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
+    actor_thread_wake(actor);
+}
+
 static void overflow_append(int target, ActorBase* actor, Message msg) {
     if (unlikely(target < 0 || target > MAX_CORES)) {
         fprintf(stderr, "aether: overflow_append: target %d out of range [0, %d]\n",
@@ -586,17 +730,6 @@ static void overflow_flush(int from_core) {
         schedulers[from_core].messages_processed += direct_processed;
     }
     tls_overflow_any = any;
-}
-
-// Lazy-allocate the SPSC queue for auto_process actors.
-// Called on the first spsc_enqueue; regular actors never allocate this.
-static inline SPSCQueue* ensure_spsc_queue(ActorBase* actor) {
-    if (likely(actor->spsc_queue)) return actor->spsc_queue;
-    SPSCQueue* q = calloc(1, sizeof(SPSCQueue));
-    if (!q) { fprintf(stderr, "aether: OOM allocating SPSCQueue\n"); abort(); }
-    spsc_queue_init(q);
-    actor->spsc_queue = q;
-    return q;
 }
 
 // Pin thread to specific CPU core (NUMA awareness)
@@ -1124,9 +1257,29 @@ static void actor_free_now(ActorBase* actor) {
         atomic_fetch_add_explicit(&schedulers[0].messages_processed,
                                   (uint64_t)drained, memory_order_relaxed);
     }
-    // The same-core SPSC queue is the actor's alone (calloc'd by
-    // ensure_spsc_queue / send_buffer_flush); the block kept below does not
-    // cover it.
+    // So is whatever still waits in an actor thread's inbox (#2598): it was
+    // counted as sent and is released and credited the same way. The inbox
+    // is the actor's alone, as is the SPSC queue send_buffer_flush makes;
+    // the block kept below covers neither.
+    ActorInbox* ib = atomic_exchange_explicit(&actor->inbox, NULL, memory_order_acq_rel);
+    if (ib) {
+        int left = 0;
+        Message spill[AETHER_INBOX_RING];
+        int got;
+        while ((got = actor_inbox_take(ib, spill, AETHER_INBOX_RING)) > 0) {
+            for (int k = 0; k < got; k++) {
+                if (spill[k].payload_ptr) aether_free_message(spill[k].payload_ptr);
+                if (spill[k].zerocopy.owned && spill[k].zerocopy.data) free(spill[k].zerocopy.data);
+                if (spill[k]._reply_slot) reply_slot_decref((ActorReplySlot*)spill[k]._reply_slot);
+            }
+            left += got;
+        }
+        if (left > 0) {
+            atomic_fetch_add_explicit(&schedulers[0].messages_processed,
+                                      (uint64_t)left, memory_order_relaxed);
+        }
+        free(ib);
+    }
     if (actor->spsc_queue) {
         free(actor->spsc_queue);
         actor->spsc_queue = NULL;
@@ -1398,18 +1551,12 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                 continue;
             }
 
-            // auto_process actors own their mailbox from their thread;
-            // deliver via SPSC queue (thread-safe) instead of mailbox.
+            // An actor with its own thread takes messages in its inbox
+            // (#2598). Sends put them there directly; what comes through a
+            // channel is the runtime's own (an I/O readiness event, say).
             if (unlikely(actor->auto_process)) {
-                if (!spsc_enqueue(ensure_spsc_queue(actor), msg)) {
-                    // SPSC full - re-queue for next iteration via self-channel.
-                    // Overflow to TLS buffer if self-channel also full.
-                    if (!queue_enqueue(&sched->from_queues[sched->core_id], actor, msg)) {
-                        overflow_append(sched->core_id, actor, msg);
-                    }
-                } else {
-                    work_done = 1;
-                }
+                scheduler_actor_thread_deliver(actor, msg);
+                work_done = 1;
                 continue;
             }
 
@@ -1559,10 +1706,10 @@ void* AETHER_HOT scheduler_thread(void* arg) {
 
             // Skip actors processed on main thread
             if (unlikely(atomic_load_explicit(&actor->main_thread_only, memory_order_acquire))) continue;
-            if (unlikely(actor->auto_process)) {
-                work_done = 1;
-                continue;
-            }
+            // An actor with its own thread is stepped there. Counting it as
+            // work, as this used to, kept the core from ever going idle and
+            // parking for as long as such an actor existed (#2592).
+            if (unlikely(actor->auto_process)) continue;
 
             // Skip actors with no pending messages AND no migration request.
             // This is the key optimization: with 200k+ actors per workload,
@@ -1728,6 +1875,11 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                                              memory_order_relaxed) == 0) {
                                         continue;  // freshly spawned or fully idle, skip
                                     }
+                                    // No core steps an actor that has its own
+                                    // thread, so stealing one gains nothing,
+                                    // and the move would change the core its
+                                    // thread parks on and stops with (#2598).
+                                    if (candidate->auto_process) continue;
                                     // Move the last actor into its slot and steal it
                                     actor_table_remove_locked(victim, s);
                                     stolen = candidate;
@@ -1937,6 +2089,7 @@ void scheduler_init(int cores) {
         pthread_mutex_init(&schedulers[i].foreign_lock, NULL);
         atomic_store_explicit(&schedulers[i].parked, 0, memory_order_relaxed);
     }
+    actor_park_init_once();
     atomic_store_explicit(&g_sched_state, 2, memory_order_release);
 }
 
@@ -2019,11 +2172,13 @@ void scheduler_stop(void) {
     }
 
     // And wake anyone parked on the condvar, or shutdown waits out their
-    // timeout for no reason (#1517).
+    // timeout for no reason (#1517). The actor threads of each core too
+    // (#2592): they leave their loop once their core has stopped.
     for (int i = 0; i < num_cores; i++) {
         pthread_mutex_lock(&schedulers[i].park_mutex);
         pthread_cond_broadcast(&schedulers[i].park_cond);
         pthread_mutex_unlock(&schedulers[i].park_mutex);
+        actor_park_broadcast(i);
     }
 }
 
@@ -2250,6 +2405,9 @@ static void scheduler_free_core_tables(void) {
         atomic_store_explicit(&sched->actor_table, NULL, memory_order_release);
         atomic_store_explicit(&sched->actor_count, 0, memory_order_relaxed);
         spinlock_unlock(&sched->actor_lock);
+        // An actor thread asleep in its park sees the mark set above now,
+        // not at the end of its timed wait (#2592).
+        actor_park_broadcast(i);
         // The live table and every table it replaced, each with its own size:
         // a grown table is bigger than MAX_ACTORS_PER_CORE slots (#2486).
         actor_table_free_chain(table);
@@ -2282,6 +2440,8 @@ static int register_actor(ActorBase* actor, int preferred_core);
 // An actor the caller allocated: the scheduler runs it and never frees it.
 int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
+    atomic_init(&actor->inbox, NULL);
+    atomic_init(&actor->thread_parked, 0);
     return register_actor(actor, preferred_core);
 }
 
@@ -2339,8 +2499,8 @@ static int register_actor(ActorBase* actor, int preferred_core) {
 
     atomic_store_explicit(&actor->assigned_core, preferred_core, memory_order_relaxed);
 
-    // SPSC queue is lazy-allocated: only when auto_process is set.
-    // actor->spsc_queue stays NULL for regular actors (saves 3 KB/actor).
+    // The SPSC queue and an actor thread's inbox are both made on first use
+    // (saves 3 KB/actor).
 
     actor_table_push_locked(sched, actor);
 
@@ -2521,11 +2681,10 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
         // Main thread (rare) - use atomic
         atomic_fetch_add_explicit(&main_thread_sent, 1, memory_order_relaxed);
     }
-    // auto_process actors own their mailbox; deliver via thread-safe SPSC.
+    // An actor with its own thread owns its mailbox: the message goes in its
+    // inbox (#2598).
     if (unlikely(actor->auto_process)) {
-        AETHER_TRACE_EVENT(AE_TRACE_SPSC_ENQUEUE, actor->id, msg.type, msg.sender_id);
-        spsc_enqueue(ensure_spsc_queue(actor), msg);
-        atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
+        scheduler_actor_thread_deliver(actor, msg);
     } else {
         AETHER_TRACE_EVENT(AE_TRACE_MAILBOX_SEND, actor->id, msg.type, msg.sender_id);
         // Set active=1 BEFORE the mailbox_send count++ (release).
@@ -2559,7 +2718,14 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
     //
     // When overflow sends are pending, still allow inlining (to make progress)
     // but flush overflow between inline calls to prevent unbounded growth.
+    //
+    // Never an actor with its own thread: that thread steps it, without the
+    // step_lock, and its mailbox is the thread's alone. Its count can read 1
+    // here when the thread has just moved a message in and is about to step,
+    // and stepping it here as well ran its handler on two threads at once
+    // (#2598).
     if (likely(current_core_id >= 0) &&
+        !actor->auto_process &&
         inline_depth < MAX_INLINE_DEPTH &&
         atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == current_core_id &&
         atomic_load_explicit(&actor->mailbox.count, memory_order_relaxed) == 1 &&
@@ -2586,6 +2752,18 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
         send_to_dead_actor(actor, &msg);
+        return;
+    }
+    // An actor with its own thread takes the message in its inbox, from any
+    // thread (#2598): not through a core, which would only pass it on, and
+    // never stepped inline here, which would run it on a second thread.
+    if (unlikely(actor->auto_process)) {
+        if (likely(current_core_id >= 0)) {
+            schedulers[current_core_id].messages_sent++;
+        } else {
+            atomic_fetch_add_explicit(&main_thread_sent, 1, memory_order_relaxed);
+        }
+        scheduler_actor_thread_deliver(actor, msg);
         return;
     }
     // INLINE MODE: For single-actor programs, process synchronously on the main thread.
@@ -2626,14 +2804,10 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     // from racing with the scheduler thread on mailbox access.
     if (from_core >= 0 && from_core == target_core &&
         from_core == current_core_id) {
-        if (unlikely(actor->auto_process)) {
-            spsc_enqueue(ensure_spsc_queue(actor), msg);
-        } else {
-            if (unlikely(!mailbox_send(&actor->mailbox, msg))) {
-                // Mailbox full: re-queue via self-channel or overflow.
-                if (!queue_enqueue(&schedulers[from_core].from_queues[from_core], actor, msg)) {
-                    overflow_append(from_core, actor, msg);
-                }
+        if (unlikely(!mailbox_send(&actor->mailbox, msg))) {
+            // Mailbox full: re-queue via self-channel or overflow.
+            if (!queue_enqueue(&schedulers[from_core].from_queues[from_core], actor, msg)) {
+                overflow_append(from_core, actor, msg);
             }
         }
         atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
@@ -2745,6 +2919,12 @@ void scheduler_send_batch_add(ActorBase* actor, Message msg) {
     // Drop messages to dead actors (see scheduler_send_local).
     if (unlikely(!actor || atomic_load_explicit(&actor->dead, memory_order_acquire))) {
         send_to_dead_actor(actor, &msg);
+        return;
+    }
+    // An actor with its own thread: straight to its inbox, as from
+    // scheduler_send_remote, never stepped inline (#2598).
+    if (unlikely(actor->auto_process)) {
+        scheduler_send_remote(actor, msg, current_core_id);
         return;
     }
     // FAST PATH: Single-actor programs bypass batching entirely
@@ -2900,7 +3080,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->active, 0);  // inactive until first message send
     actor->thread = 0;
     actor->auto_process = 0;
-    actor->spsc_queue = NULL;  // Lazy-allocated only for auto_process actors
+    actor->spsc_queue = NULL;  // Lazy-allocated by send_buffer_flush
+    atomic_init(&actor->inbox, NULL);
+    atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->main_thread_only, 0);
@@ -3002,6 +3184,11 @@ void scheduler_release_actor(ActorBase* actor) {
         aether_leave_main_thread_mode();
     }
 
+    // Read before the mark: once it is set, the actor's own thread may end
+    // the actor at any moment, and nothing below touches it after that.
+    int own_thread = actor->auto_process;
+    int park_core = own_thread ? actor_park_core(actor) : -1;
+
     // A message that still reaches the actor is dropped, not delivered.
     int was = atomic_fetch_or_explicit(&actor->dead, AETHER_ACTOR_RELEASED, memory_order_acq_rel);
     if (was & AETHER_ACTOR_RELEASED) return;   // released twice: ended once
@@ -3013,7 +3200,12 @@ void scheduler_release_actor(ActorBase* actor) {
     // set and ends the actor itself (scheduler_actor_thread_exit), unless it
     // has left already, in which case that is done here. The two bits make
     // the second of the two the one that ends it.
-    if (actor->auto_process && !(was & AETHER_ACTOR_THREAD_GONE)) return;
+    // If the thread is asleep in its idle park (#2592), it is woken to see
+    // the mark now rather than at the end of its timed wait.
+    if (own_thread && !(was & AETHER_ACTOR_THREAD_GONE)) {
+        actor_park_broadcast(park_core);
+        return;
+    }
     actor_end(actor);
 }
 

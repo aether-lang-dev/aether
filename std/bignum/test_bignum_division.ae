@@ -1,0 +1,151 @@
+// MIT License (https://opensource.org/licenses/MIT)
+//
+// Portions copyright (c) 2026 Aether Developers.
+//
+// Regression: std.bignum division is Knuth's Algorithm D (#2595). It
+// replaced a bit-at-a-time long division that allocated a few bignums per
+// quotient bit and made one P-521 signature check take seconds.
+//
+// The fixed cases are the hard inputs of Hacker's Delight's `divmnu` tests,
+// in base 2^32: the ones where the quotient estimate is one too large and a
+// divisor must be added back, the ones whose multiply-subtract quantity
+// does not fit a signed limb, a divisor whose top limb already has its high
+// bit set (no normalising shift), and single-limb divisors (the short
+// division path). Their expected quotients and remainders come from
+// Python's arbitrary-precision ints. The sweep then checks q*b + r == a and
+// 0 <= r < b for pseudo-random operands of every length pair up to 40
+// bytes, plus a P-521-sized product reduction.
+
+import std.bignum
+import std.bytes
+import std.string
+import std.bits
+
+hv(c: int) -> int {
+    if c >= 48 { if c <= 57 { return c - 48 } }
+    if c >= 97 { if c <= 102 { return c - 87 } }
+    return 0
+}
+
+// Parse an unsigned hex string ("1a2b" / "0") into a bignum.
+parse(h: string) -> ptr {
+    n = string.length(h)
+    nbytes = (n + 1) / 2
+    b = bytes.new(nbytes)
+    bi = nbytes - 1
+    i = n - 1
+    while i >= 0 {
+        lo = hv(string_char_at_n(h, n, i))
+        hi = 0
+        if i - 1 >= 0 { hi = hv(string_char_at_n(h, n, i - 1)) }
+        bytes.set(b, bi, hi * 16 + lo)
+        bi = bi - 1
+        i = i - 2
+    }
+    v = bignum.from_bytes_unsigned(b, nbytes)
+    bytes.free(b)
+    return v
+}
+
+// a / b and a % b against the oracle's quotient and remainder.
+check(ah: string, bh: string, qh: string, rh: string) -> int {
+    a = parse(ah)
+    b = parse(bh)
+    q = bignum.divide(a, b)
+    r = bignum.remainder(a, b)
+    bad = 0
+    if string.equals(bignum.to_hex(q), qh) != 1 {
+        print("FAIL ${ah} / ${bh}: quotient ${bignum.to_hex(q)}, want ${qh}\n")
+        bad = 1
+    }
+    if string.equals(bignum.to_hex(r), rh) != 1 {
+        print("FAIL ${ah} % ${bh}: remainder ${bignum.to_hex(r)}, want ${rh}\n")
+        bad = 1
+    }
+    bignum.free(q); bignum.free(r); bignum.free(a); bignum.free(b)
+    return bad
+}
+
+// q*b + r == a and 0 <= r < b, for a >= 0 and b > 0.
+holds(a: ptr, b: ptr) -> int {
+    q = bignum.divide(a, b)
+    r = bignum.remainder(a, b)
+    qb = bignum.multiply(q, b)
+    back = bignum.add(qb, r)
+    ok = 1
+    if bignum.compare(back, a) != 0 { ok = 0 }
+    if bignum.sign(r) < 0 { ok = 0 }
+    if bignum.compare(r, b) >= 0 { ok = 0 }
+    if ok == 0 {
+        print("FAIL ${bignum.to_hex(a)} / ${bignum.to_hex(b)}: q=${bignum.to_hex(q)} r=${bignum.to_hex(r)}\n")
+    }
+    bignum.free(back); bignum.free(qb); bignum.free(q); bignum.free(r)
+    if ok == 1 { return 0 }
+    return 1
+}
+
+// A bignum of n pseudo-random bytes: the top bytes of a 64-bit LCG
+// (Knuth's MMIX constants) started from `seed`.
+random_bn(seed: long, n: int) -> ptr {
+    b = bytes.new(n)
+    long x = seed
+    i = 0
+    while i < n {
+        x = bits.wrapping_add64(bits.wrapping_mul64(x, 6364136223846793005), 1442695040888963407)
+        bytes.set(b, i, bits.lsr64(x, 56) & 0xff)
+        i = i + 1
+    }
+    v = bignum.from_bytes_unsigned(b, n)
+    bytes.free(b)
+    return v
+}
+
+main() {
+    print("=== std.bignum division (Algorithm D) ===\n")
+    fails = 0
+
+    // Hacker's Delight's hard cases: most need the add-back step.
+    fails = fails + check("800000000000000000000003", "200000000000000000000001", "3", "200000000000000000000000")
+    fails = fails + check("80000000000000000003", "20000000000000000001", "3", "20000000000000000000")
+    fails = fails + check("7fff000080000000000000000000", "80000000000000000001", "fffe0000", "7fffffffffff00020000")
+    // The multiply-subtract quantity cannot be treated as a signed limb.
+    fails = fails + check("8000000000000000fffe00000000", "8000000000000000ffff", "ffffffff", "7fffffffffff0000ffff")
+    fails = fails + check("8000000000000000fffffffe00000000", "80000000000000000000ffff", "100000000", "fffeffff00000000")
+    fails = fails + check("8000000000000000fffffffe00000000", "8000000000000000ffffffff", "ffffffff", "7fffffffffffffffffffffff")
+    // Divisor top limb all ones / high bit set: no normalising shift.
+    fails = fails + check("ffffffffffffffffffffffffffffffff", "ffffffffffffffff", "10000000000000001", "0")
+    fails = fails + check("8000000000000000000000000000000000000000", "8000000000000000", "1000000000000000000000000", "0")
+    // Single-limb divisor: the short division path.
+    fails = fails + check("1876543210fedcba99abcdef012345678", "ffffffff", "18765432297530ecc320fedbc", "44444434")
+
+    // Sweep every (dividend, divisor) byte-length pair up to 40 bytes.
+    na = 1
+    while na <= 40 {
+        nb = 1
+        while nb <= na {
+            a = random_bn(na * 100 + nb, na)
+            b = random_bn(na * 100 + nb + 50, nb)
+            if bignum.is_zero(b) == 0 {
+                fails = fails + holds(a, b)
+            }
+            bignum.free(a); bignum.free(b)
+            nb = nb + 1
+        }
+        na = na + 1
+    }
+
+    // A P-521-sized reduction: a 1042-bit product mod a 521-bit modulus.
+    p = parse("1ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+    x = random_bn(5210, 66)
+    y = random_bn(5211, 66)
+    xy = bignum.multiply(x, y)
+    fails = fails + holds(xy, p)
+    bignum.free(xy); bignum.free(x); bignum.free(y); bignum.free(p)
+
+    if fails == 0 {
+        print("PASS: std.bignum division\n")
+    } else {
+        print("FAILED: ${fails}\n")
+        exit(1)
+    }
+}

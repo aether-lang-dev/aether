@@ -22,8 +22,8 @@
 // The full surface: representation + from/to_bytes + compare + add/sub/
 // negate/abs/shift + bit_length + multiply + divide/remainder/mod + mod_pow
 // + gcd + mod_inverse + is_probable_prime. The arithmetic uses textbook
-// algorithms chosen for verifiability (binary long division, fixed-base
-// Miller-Rabin). Two BC-style fast paths are layered on top WITHOUT
+// algorithms chosen for verifiability (Knuth's Algorithm D for division,
+// fixed-base Miller-Rabin). Two BC-style fast paths are layered on top WITHOUT
 // changing any observable result: (1) Karatsuba multiply for large
 // operands (>= karatsuba_threshold() limbs in the smaller operand), with the
 // schoolbook multiply as the sub-threshold base case and fallback; and
@@ -937,15 +937,17 @@ multiply(a: ptr, b: ptr) -> ptr {
     return bn_from_mag_checked(rsign, res, reslen)
 }
 
-// ---- division (binary long division) ----
+// ---- division (Knuth's Algorithm D) ----
 //
-// Rather than port BC's optimized shift-and-subtract Divide (which mutates
-// its dividend in place and is intricate to get right), we use a plain
-// bit-at-a-time long division over the unsigned magnitudes. It is O(n^2)
-// in the bit length but obviously correct and easy to verify against an
-// arbitrary-precision oracle; the RSA hot path will use Montgomery
-// reduction (a later slice), not this. Signs follow BC: quotient sign =
-// a.sign*b.sign (truncated toward zero), remainder sign = a.sign.
+// Long division one 32-bit limb at a time: Knuth, TAOCP vol. 2, 4.3.1,
+// Algorithm D, in the form of Hacker's Delight's `divmnu`, on little-endian
+// scratch copies of the magnitudes (index 0 = least-significant limb, as the
+// Karatsuba path below uses). O(n*m) limb operations and no allocation in
+// the loop. It replaced a bit-at-a-time long division that allocated a few
+// bignums per quotient bit; every `mod` of a multiplication's result went
+// through it, which made a P-521 signature verification take seconds
+// (#2595). Signs follow BC: quotient sign = a.sign*b.sign (truncated toward
+// zero), remainder sign = a.sign.
 
 // Test bit `pos` (0 = LSB) of a magnitude (big-endian limbs).
 mag_test_bit(mag: ptr, len: int, pos: int) -> int {
@@ -961,71 +963,149 @@ mag_test_bit(mag: ptr, len: int, pos: int) -> int {
     return 0
 }
 
-// Unsigned magnitude divide: returns (quotient_bn, remainder_bn) as BNs
-// (both non-negative, canonical). Caller adjusts signs and frees.
-mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
-    // quotient and remainder accumulate as BNs; we iterate bit positions
-    // from the most-significant bit of the numerator down to 0.
-    q = bn_zero()
-    r = bn_zero()
-    den_bn = bn_alloc(1, mag_clone(den, denlen), denlen)
-    nbits = mag_bit_length(num, numlen)
-    pos = nbits - 1
-    while pos >= 0 {
-        // r = (r << 1) | bit(num, pos)
-        r2 = shift_left(r, 1)
-        free(r)
-        r = r2
-        if mag_test_bit(num, numlen, pos) == 1 {
-            // set r's low bit: r = r + 1
-            one = from_int(1)
-            r3 = add(r, one)
-            free(one)
-            free(r)
-            r = r3
-        }
-        // if r >= den: r -= den; q |= (1 << pos)
-        if compare_mag_bn(r, den_bn) >= 0 {
-            r4 = subtract(r, den_bn)
-            free(r)
-            r = r4
-            bitval = make_pow2(pos)
-            q2 = add(q, bitval)
-            free(bitval)
-            free(q)
-            q = q2
-        }
-        pos = pos - 1
-    }
-    free(den_bn)
-    return q, r
+// Limb i of a little-endian scratch array, as an unsigned 32-bit value.
+ul(a: ptr, i: int) -> long {
+    return intarr_get_raw(a, i) & 0xFFFFFFFF
 }
 
-// Compare two non-negative BNs by magnitude (both sign >= 0).
-compare_mag_bn(x: ptr, y: ptr) -> int {
-    bx = x as *BN
-    by = y as *BN
-    if bx.sign == 0 {
-        if by.sign == 0 {
-            return 0
-        }
-        return -1
-    }
-    if by.sign == 0 {
+// D3's test that the quotient estimate is too large: qhat >= 2^32, or
+// qhat * vnext > rhat * 2^32 + next, all as unsigned 64-bit values. The
+// product is only formed once qhat < 2^32, so it cannot wrap.
+qhat_too_big(qhat: long, rhat: long, vnext: long, next: long) -> int {
+    if bits.ucmp64(qhat, 4294967296) >= 0 {
         return 1
     }
-    return compare_mag(bx.mag, bx.len, by.mag, by.len)
+    if bits.ucmp64(bits.wrapping_mul64(qhat, vnext), join(rhat, next)) > 0 {
+        return 1
+    }
+    return 0
 }
 
-// Build the BN value 2^pos (a single set bit).
-make_pow2(pos: int) -> ptr {
-    one = from_int(1)
-    if pos == 0 {
-        return one
+// hi * 2^32 + lo for 32-bit limbs hi and lo, as the bit pattern a C
+// uint64_t would hold. `hi << 32` on a signed long overflows once hi has
+// its top bit set, which C leaves undefined; the wrapping multiply does not.
+join(hi: long, lo: long) -> long {
+    return bits.wrapping_mul64(hi, 4294967296) | lo
+}
+
+// Unsigned magnitude divide: returns (quotient_bn, remainder_bn) as BNs
+// (both non-negative, canonical). The caller guarantees den is non-zero and
+// no larger than num, both canonical (no leading zero limbs); it adjusts
+// signs and frees.
+mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
+    m = numlen
+    n = denlen
+    u = le_from_mag(num, m)
+    v = le_from_mag(den, n)
+    qlen = m - n + 1
+    q = intarr_new_raw(qlen)
+    r = intarr_new_raw(n)
+    long b = 4294967296
+    long mask = 0xFFFFFFFF
+
+    if n == 1 {
+        // Short division by one limb: the running remainder is below the
+        // divisor, so each step's dividend fits 64 bits unsigned.
+        long d = ul(v, 0)
+        long k = 0
+        j = m - 1
+        while j >= 0 {
+            long cur = join(k, ul(u, j))
+            intarr_set_raw(q, j, bits.udiv64(cur, d) & mask)
+            k = bits.urem64(cur, d)
+            j = j - 1
+        }
+        intarr_set_raw(r, 0, k & mask)
+    } else {
+        // D1: normalise, so the divisor's top limb has its high bit set.
+        // un has one limb more than u. A shift of 0 leaves both as they are
+        // (a 64-bit shift right by 32 of a 32-bit limb is 0), and no left
+        // shift here reaches the sign bit (a limb shifted by at most 31).
+        sh = bits.clz32(intarr_get_raw(v, n - 1))
+        vn = intarr_new_raw(n)
+        i = n - 1
+        while i > 0 {
+            intarr_set_raw(vn, i, ((ul(v, i) << sh) | bits.lsr64(ul(v, i - 1), 32 - sh)) & mask)
+            i = i - 1
+        }
+        intarr_set_raw(vn, 0, (ul(v, 0) << sh) & mask)
+        un = intarr_new_raw(m + 1)
+        intarr_set_raw(un, m, bits.lsr64(ul(u, m - 1), 32 - sh))
+        i = m - 1
+        while i > 0 {
+            intarr_set_raw(un, i, ((ul(u, i) << sh) | bits.lsr64(ul(u, i - 1), 32 - sh)) & mask)
+            i = i - 1
+        }
+        intarr_set_raw(un, 0, (ul(u, 0) << sh) & mask)
+
+        long vtop = ul(vn, n - 1)
+        long vnext = ul(vn, n - 2)
+        j = m - n
+        while j >= 0 {
+            // D3: estimate qhat from the top two limbs, then correct it with
+            // the next one (at most twice).
+            long top = join(ul(un, j + n), ul(un, j + n - 1))
+            long qhat = bits.udiv64(top, vtop)
+            long rhat = bits.urem64(top, vtop)
+            while qhat_too_big(qhat, rhat, vnext, ul(un, j + n - 2)) == 1 {
+                qhat = qhat - 1
+                rhat = rhat + vtop
+                if rhat >= b {
+                    break
+                }
+            }
+            // D4: multiply and subtract. t stays within (-2^33, 2^32) and
+            // the borrow k below 2^32 + 2, so both fit a signed long; `>>`
+            // on a long is arithmetic, as the borrow needs.
+            long k = 0
+            long t = 0
+            i = 0
+            while i < n {
+                long p = bits.wrapping_mul64(qhat, ul(vn, i))
+                t = ul(un, i + j) - k - (p & mask)
+                intarr_set_raw(un, i + j, t & mask)
+                k = bits.lsr64(p, 32) - (t >> 32)
+                i = i + 1
+            }
+            t = ul(un, j + n) - k
+            intarr_set_raw(un, j + n, t & mask)
+            // D5/D6: the estimate was one too large (rare): add one divisor
+            // back.
+            if t < 0 {
+                qhat = qhat - 1
+                k = 0
+                i = 0
+                while i < n {
+                    t = ul(un, i + j) + ul(vn, i) + k
+                    intarr_set_raw(un, i + j, t & mask)
+                    k = bits.lsr64(t, 32)
+                    i = i + 1
+                }
+                intarr_set_raw(un, j + n, (ul(un, j + n) + k) & mask)
+            }
+            intarr_set_raw(q, j, qhat & mask)
+            j = j - 1
+        }
+        // D8: the remainder is un's low n limbs shifted back. Only the low
+        // sh bits of the limb above reach the result, so those are masked
+        // before the left shift, which then never passes bit 31.
+        long low = bits.lsr64(mask, 32 - sh)
+        i = 0
+        while i < n - 1 {
+            intarr_set_raw(r, i, bits.lsr64(ul(un, i), sh) | ((ul(un, i + 1) & low) << (32 - sh)))
+            i = i + 1
+        }
+        intarr_set_raw(r, n - 1, bits.lsr64(ul(un, n - 1), sh))
+        intarr_free(vn)
+        intarr_free(un)
     }
-    r = shift_left(one, pos)
-    free(one)
-    return r
+    intarr_free(u)
+    intarr_free(v)
+    qbe = mag_from_le(q, qlen)
+    rbe = mag_from_le(r, n)
+    intarr_free(q)
+    intarr_free(r)
+    return bn_from_mag_checked(1, qbe, qlen), bn_from_mag_checked(1, rbe, n)
 }
 
 divide(a: ptr, b: ptr) -> ptr {
@@ -1091,7 +1171,7 @@ mod(a: ptr, b: ptr) -> ptr {
 
 // ---- modular exponentiation / gcd / inverse / primality ----
 //
-// These build on multiply + mod (and the binary divide underneath). BC's
+// These build on multiply + mod (and Algorithm D underneath). BC's
 // ModPow uses Barrett / Montgomery reduction and its primality test uses
 // Montgomery-form Miller-Rabin; we use the textbook square-and-multiply +
 // extended-Euclid + plain Miller-Rabin instead — same results, no extern
@@ -1102,8 +1182,8 @@ mod(a: ptr, b: ptr) -> ptr {
 //
 // REDC-based modular exponentiation. For an ODD modulus m with n limbs,
 // R = 2^(32n). We work in Montgomery form (a*R mod m) and use CIOS
-// Montgomery multiplication so the square-and-multiply ladder never calls
-// the O(bits^2) binary divide. Converting to/from Montgomery form uses the
+// Montgomery multiplication so the square-and-multiply ladder never divides.
+// Converting to/from Montgomery form uses the
 // existing mod()/multiply() exactly once each at the boundary, so the final
 // integer result is identical to the schoolbook mod_pow — this is a pure
 // speed path, gated on `m` being odd; even moduli fall back below.
