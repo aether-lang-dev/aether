@@ -112,6 +112,45 @@ else
     fail=$((fail + 1))
 fi
 
+# ---- 7. a program's own extern is the extern capability ----
+#
+# `extern system(...)` reaches what `import std.os` would, so without
+# --with=extern a capability-empty library may not declare one: not in the
+# entry file, not with @extern, not in a local module. std/contrib modules'
+# own externs are unaffected (they sit behind the gates above).
+
+ext_case() {   # <name> <dir> <entry> <flags> <accept|reject>
+    name="$1"; dir="$2"; entry="$3"; flags="$4"; want="$5"
+    if (cd "$dir" && AETHER_HOME="" "$ROOT/build/aetherc" $flags "$entry" "$TMPDIR/ext.c" \
+            >"$TMPDIR/stdout" 2>"$TMPDIR/stderr"); then got=accept; else got=reject; fi
+    if [ "$got" != "$want" ]; then
+        echo "  [FAIL] $name: $got, want $want"; sed 's/^/    /' "$TMPDIR/stderr" | head -5
+        fail=$((fail + 1))
+    elif [ "$want" = reject ] && ! grep -q "without --with=extern" "$TMPDIR/stderr"; then
+        echo "  [FAIL] $name: rejected, but not by the extern gate"; sed 's/^/    /' "$TMPDIR/stderr" | head -5
+        fail=$((fail + 1))
+    else
+        echo "  [PASS] $name"; pass=$((pass + 1))
+    fi
+}
+
+mkdir -p "$TMPDIR/ext" "$TMPDIR/extmod"
+printf 'extern system(cmd: string) -> int\n\nf() -> int {\n    return system("true")\n}\n' > "$TMPDIR/ext/plain.ae"
+printf '@extern("system") run_it(cmd: string) -> int\n\nf() -> int {\n    return run_it("true")\n}\n' > "$TMPDIR/ext/at.ae"
+printf 'import std.json\n\nf(s: string) -> int {\n    return 1\n}\n' > "$TMPDIR/ext/stdonly.ae"
+printf 'extern fopen(path: string, mode: string) -> ptr\n\nopen_it(p: string) -> ptr {\n    return fopen(p, "r")\n}\n' > "$TMPDIR/extmod/helper.ae"
+printf 'import helper\n\ng(p: string) -> int {\n    if helper.open_it(p) == null { return 0 }\n    return 1\n}\n' > "$TMPDIR/extmod/main.ae"
+
+ext_case "an extern in the entry file is rejected"        "$TMPDIR/ext"    plain.ae    "--emit=lib"                 reject
+ext_case "an @extern(...) binding is rejected"            "$TMPDIR/ext"    at.ae       "--emit=lib"                 reject
+ext_case "an extern in a local module is rejected"        "$TMPDIR/extmod" main.ae     "--emit=lib"                 reject
+ext_case "--with=extern accepts it"                       "$TMPDIR/ext"    plain.ae    "--emit=lib --with=extern"   accept
+ext_case "--with=extern accepts a local module's extern"  "$TMPDIR/extmod" main.ae     "--emit=lib --with=extern"   accept
+ext_case "--with=all includes extern"                     "$TMPDIR/ext"    plain.ae    "--emit=lib --with=all"      accept
+ext_case "--with=fs,net,os does not include extern"       "$TMPDIR/ext"    plain.ae    "--emit=lib --with=fs,net,os" reject
+ext_case "std modules' own externs are not the program's" "$TMPDIR/ext"    stdonly.ae  "--emit=lib"                 accept
+ext_case "an exe build is unaffected"                     "$TMPDIR/ext"    plain.ae    ""                           accept
+
 echo ""
 echo "emit_lib_with_capability: $pass passed, $fail failed"
 [ "$fail" -eq 0 ]

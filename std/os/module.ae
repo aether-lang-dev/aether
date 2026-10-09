@@ -661,7 +661,7 @@ platform() -> string {
 // platform(). Returns a normalized token from the ecosystem vocabulary the
 // release assets, aeb, and aeo already use:
 //   "x86_64" (never "amd64"), "arm64" (never "aarch64"), "i386", "arm",
-//   "riscv64", "ppc64le", "s390x", "wasm32", "wasm64", or "unknown".
+//   "riscv64", "loongarch64", "ppc64le", "s390x", "wasm32", "wasm64", or "unknown".
 //
 // So platform() + arch() reconstruct the "<os>-<arch>" release-asset token
 // (e.g. "linux-x86_64", "macos-arm64") with no shell — the thing a fetch-a-

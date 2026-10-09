@@ -29,6 +29,12 @@ ASTNode* optimize_ast(ASTNode* node);
 // compile-time constant (the driver aborts the build).
 int resolve_when_statements(ASTNode* program);
 
+// The build target `when target.os / target.arch` evaluates against, when it
+// is not the host (a cross build: ae passes --target-os / --target-arch).
+// NULL keeps the host value. Returns 0 if a name is not one the compiler
+// knows, so the caller can reject it.
+int when_set_target(const char* os, const char* arch);
+
 // Optimization statistics
 typedef struct {
     int constants_folded;

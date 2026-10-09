@@ -216,6 +216,13 @@ static char* tc_lib_flags(void) {
 // by cmd_build's arg loop when the user passes `--with=fs` etc. Just
 // a string because the aetherc side owns parsing and validation.
 static char g_with_caps[128] = "";
+/* " --binimport-stub-dir=<dir>" for each binary-import stub directory this
+ * build generated (defined with the stub bookkeeping below). */
+static void ae_binimport_stub_flags(char* out, size_t cap);
+/* The --target of the current build, for the compile-time `target.os` /
+ * `target.arch` aetherc reports to `when` (cross_target_os_arch). NULL for a
+ * native build. Set by cmd_build before build_aetherc_cmd runs. */
+static const char* g_build_target = NULL;
 
 /* -D NAME build symbols, accumulated as the flags they will become on the
  * aetherc line. `when defined(NAME)` tests them, and a region that loses is
@@ -620,9 +627,23 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
     // --with= is forwarded verbatim to aetherc, which owns parsing and
     // the reject messages. Only attached when non-empty so exe builds
     // don't see a spurious flag.
-    char with_flag[160] = "";
+    char with_flag[256] = "";
     if (g_with_caps[0]) {
         snprintf(with_flag, sizeof(with_flag), " --with=%s", g_with_caps);
+    }
+    /* The modules ae generated for binary imports bind another library's
+     * exports with externs; aetherc's --emit=lib extern gate trusts those
+     * directories, and only because ae names them here. */
+    char stub_flags[1600] = "";
+    ae_binimport_stub_flags(stub_flags, sizeof(stub_flags));
+    /* A cross build tells aetherc what it is building for, so a `when
+     * target.os / target.arch` arm is chosen for the target, not the host. */
+    const char* t_os = NULL;
+    const char* t_arch = NULL;
+    if (cross_target_os_arch(g_build_target, &t_os, &t_arch)) {
+        size_t wl = strlen(with_flag);
+        snprintf(with_flag + wl, sizeof(with_flag) - wl,
+                 " --target-os=%s --target-arch=%s", t_os, t_arch);
     }
 
     /* Emit one `--lib <dir>` per entry rather than a single
@@ -640,8 +661,8 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
-    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
-                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
+    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag, stub_flags,
                      g_lib_package_flag, shared_rt_flag, lib_actors_flag, defines_flags(), lib_flags,
                      deps_flag, input, output);
     free(lib_flags);
@@ -5119,6 +5140,14 @@ static void ae_remove_tree(const char* path) {
 #endif
 }
 
+static void ae_binimport_stub_flags(char* out, size_t cap) {
+    size_t off = 0;
+    out[0] = '\0';
+    for (int i = 0; i < g_binimport_stubdir_count && off < cap; i++)
+        off += (size_t)snprintf(out + off, cap - off, " \"--binimport-stub-dir=%s\"",
+                                g_binimport_stubdirs[i]);
+}
+
 static void ae_remove_binimport_stubdirs(void) {
     for (int i = 0; i < g_binimport_stubdir_count; i++)
         ae_remove_tree(g_binimport_stubdirs[i]);
@@ -8301,11 +8330,13 @@ static int cmd_build(int argc, char** argv) {
     // Validate target. Beyond native/wasm, a cross triple routes the
     // build through the zig cc backend (#1105).
     const char* ztriple = cross_target_to_zig(target);
+    g_build_target = target;
     if (target && strcmp(target, "wasm") != 0 && strcmp(target, "native") != 0 && !ztriple) {
         fprintf(stderr, "Error: Unknown target '%s'.\n", target);
         fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "
                         "(aarch64-macos, x86_64-macos, aarch64-linux, x86_64-linux, "
                         "aarch64-linux-musl, x86_64-linux-musl, "
+                        "riscv64-linux-musl, loongarch64-linux-musl, "
                         "aarch64-freebsd, x86_64-freebsd, aarch64-linux-android, x86_64-windows, "
                         "aarch64-windows, wasm32-wasi, aarch64-ios, "
                         "aarch64-ios-simulator, x86_64-ios-simulator, "
@@ -8393,7 +8424,8 @@ static int cmd_build(int argc, char** argv) {
         fprintf(stderr, "             by default: a wasm --emit=lib drops ~38x)\n");
         fprintf(stderr, "  --target   Cross-compile via zig cc: wasm, aarch64-macos, x86_64-macos,\n");
         fprintf(stderr, "             aarch64-linux, x86_64-linux (glibc; carries a GLIBC floor),\n");
-        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl (static; no libc floor),\n");
+        fprintf(stderr, "             aarch64-linux-musl, x86_64-linux-musl, riscv64-linux-musl,\n");
+        fprintf(stderr, "             loongarch64-linux-musl (static; no libc floor),\n");
         fprintf(stderr, "             aarch64-freebsd, x86_64-freebsd,\n");
         fprintf(stderr, "             aarch64-linux-android (bionic, API 29+; AETHER_ANDROID_API to change),\n");
         fprintf(stderr, "             x86_64-windows, aarch64-windows (-> foo.exe; self-contained)\n");

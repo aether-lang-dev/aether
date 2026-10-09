@@ -376,8 +376,12 @@ extern fopen(path: string, mode: string) -> ptr
 It can call `fopen` directly, bypassing `file_open` and its sandbox
 check entirely. The sandbox enforces stdlib calls, not raw C.
 
-**Today:** this is not enforced. Extern calls inside sandboxed closures
-compile and run without restriction.
+**Today:** under `--emit=lib` it is enforced at compile time: a library
+built without `--with=extern` may not declare its own externs (see
+`docs/emit-lib.md`, "Capability-empty default"), so a capability-empty
+library cannot name `fopen` or `system` itself. In an executable, extern
+calls inside sandboxed closures still compile and run without restriction;
+the check below is the remaining step.
 
 **Impact:** the sandbox is effective when you control compilation and
 don't put `extern` declarations in contained code. It's the same trust
