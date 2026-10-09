@@ -5176,8 +5176,13 @@ ASTNode* parse_extern_declaration(Parser* parser) {
         return td;
     }
 
-    if (peek_token(parser) && peek_token(parser)->type == TOKEN_STRUCT) {
-        advance_token(parser);  // consume `struct`
+    if (peek_token(parser) && (peek_token(parser)->type == TOKEN_STRUCT ||
+                               peek_token(parser)->type == TOKEN_UNION)) {
+        /* #2561: `extern union Name @c_import { ... }` declares a union the
+         * header defines, spelled `union Name` in the C. Only imported: its
+         * fields share storage, a layout Aether does not emit. */
+        int is_union = peek_token(parser)->type == TOKEN_UNION;
+        advance_token(parser);  // consume `struct` / `union`
         Token* sname = expect_token(parser, TOKEN_IDENTIFIER);
         if (!sname) return NULL;
         ASTNode* sd = create_ast_node(AST_STRUCT_DEFINITION, sname->value,
@@ -5232,9 +5237,17 @@ ASTNode* parse_extern_declaration(Parser* parser) {
             free_ast_node(sd);
             return NULL;
         }
+        if (is_union && !has_c_import) {
+            parser_error(parser,
+                "an extern union needs @c_import: its fields share storage, "
+                "a layout only the C header that defines it can give "
+                "(`extern union Name @c_import { ... }`)");
+            free_ast_node(sd);
+            return NULL;
+        }
         if (has_c_import) {
             free(sd->annotation);
-            sd->annotation = strdup("extern_c_import");
+            sd->annotation = strdup(is_union ? "extern_c_import_union" : "extern_c_import");
         } else if (has_packed) {
             free(sd->annotation);
             sd->annotation = strdup("extern_packed");

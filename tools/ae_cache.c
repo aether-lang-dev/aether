@@ -571,6 +571,79 @@ void cache_depfile_path(const char* ae_file, char* out, size_t outsz) {
     snprintf(out, outsz, "%s/%016llx.deps", s_cache_dir, h);
 }
 
+/* #2577: the headers a header pulls in with `#include "..."`, found beside
+ * it, folded in after it, and theirs in turn. The manifest names the
+ * `@c_include` header aetherc reads (#2560), not what the C compiler reads
+ * through it: an edit to a header that header includes left the key as it
+ * was, and the build was served from the cache. A text scan, not the
+ * preprocessor's: an include under an `#if` that is off is keyed as well,
+ * which costs a rebuild at most. One not found beside the header is keyed
+ * by its absence, so it busts the key once it appears there; one the
+ * compiler finds through an `-I` directory instead is not followed. An
+ * angle-bracket include is the system's. More headers than the scan holds
+ * makes the manifest untrusted (`*overflow`), so the key falls back to the
+ * tree walk rather than to a partial list. */
+#define HEADER_SCAN_MAX 128
+static int is_header_path(const char* path) {
+    const char* dot = strrchr(path, '.');
+    return dot && (strcmp(dot, ".h") == 0 || strcmp(dot, ".hh") == 0 ||
+                   strcmp(dot, ".hpp") == 0);
+}
+
+static void fold_header_includes(const char* header, unsigned long long* acc,
+                                 char** seen, int* nseen, int depth, int* overflow) {
+    if (depth > 16) { *overflow = 1; return; }
+    FILE* f = fopen(header, "r");
+    if (!f) return;
+    /* The header's directory, separator included. */
+    const char* cut = strrchr(header, '/');
+#ifdef _WIN32
+    const char* bcut = strrchr(header, '\\');
+    if (!cut || (bcut && bcut > cut)) cut = bcut;
+#endif
+    size_t dlen = cut ? (size_t)(cut - header) + 1 : 0;
+    char* line = NULL;
+    size_t cap = 0;
+    while (!*overflow && ae_read_line(f, &line, &cap) > 0) {
+        const char* p = line;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '#') continue;
+        p++;
+        while (*p == ' ' || *p == '\t') p++;
+        if (strncmp(p, "include", 7) != 0) continue;
+        p += 7;
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p != '"') continue;
+        const char* name = p + 1;
+        const char* end = strchr(name, '"');
+        if (!end || end == name) continue;
+        size_t nlen = (size_t)(end - name);
+        size_t plen = cache_path_is_absolute(name) ? 0 : dlen;
+        char* path = (char*)malloc(plen + nlen + 1);
+        if (!path) break;
+        memcpy(path, header, plen);
+        memcpy(path + plen, name, nlen);
+        path[plen + nlen] = '\0';
+        int known = 0;
+        for (int i = 0; i < *nseen; i++) {
+            if (strcmp(seen[i], path) == 0) { known = 1; break; }
+        }
+        if (known) { free(path); continue; }
+        if (*nseen >= HEADER_SCAN_MAX) { free(path); *overflow = 1; break; }
+        seen[(*nseen)++] = path;
+        *acc ^= fnv64_str(path);
+        if (access(path, F_OK) != 0) {
+            /* Absent: a presence bit of 0, as a manifest `absent` line. */
+            *acc = (*acc * 1099511628211ULL) ^ 0ULL;
+            continue;
+        }
+        *acc = (*acc * 1099511628211ULL) ^ fnv64_file(path);
+        fold_header_includes(path, acc, seen, nseen, depth + 1, overflow);
+    }
+    free(line);
+    fclose(f);
+}
+
 /* Fold a depfile's contents into `acc`. Returns 1 if a valid v1 manifest was
  * read (so the caller uses this key and SKIPS the tree walk), 0 otherwise
  * (missing/unreadable/wrong-version → caller falls back to the tree hash).
@@ -601,6 +674,9 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
     int any = 0;
     int trusted = 1;
     int got;
+    char* seen[HEADER_SCAN_MAX];
+    int nseen = 0;
+    int overflow = 0;
     while ((got = ae_read_line(f, &line, &cap)) > 0) {
         size_t n = strlen(line);
         if (n == 0 || line[n - 1] != '\n') { trusted = 0; break; }   /* cut short */
@@ -614,6 +690,7 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
         *acc ^= fnv64_str(path);
         if (strcmp(kind, "read") == 0) {
             *acc = (*acc * 1099511628211ULL) ^ fnv64_file(path);
+            if (is_header_path(path)) fold_header_includes(path, acc, seen, &nseen, 0, &overflow);
             any = 1;
         } else if (strcmp(kind, "absent") == 0) {
             /* presence bit: 1 iff the once-missing path now exists */
@@ -625,9 +702,10 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
             break;
         }
     }
+    for (int i = 0; i < nseen; i++) free(seen[i]);
     free(line);
     fclose(f);
-    return (got < 0 || !trusted) ? 0 : any;
+    return (got < 0 || !trusted || overflow) ? 0 : any;
 }
 
 // Compute a cache key from: source content + compiler mtime + lib mtime +

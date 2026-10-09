@@ -1,0 +1,38 @@
+// `extern union ... @c_import` (#2561): a union the C header defines. Its
+// size, a pointer cast to it, a parameter of its pointer type and its fields
+// must all reach C as `union onion`, since the header has no `struct onion`.
+
+extern union onion @c_import {
+    f: float[4]
+    i: int[4]
+}
+
+extern struct tag_s @c_import {
+    text: string
+    n: int
+}
+
+// A module-level struct literal of a header struct (#2590): its string
+// field reaches C as a plain C string.
+var g_tag: tag_s = tag_s { text: "hello", n: 2 }
+
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern onion_first(o: *onion) -> float @c_import
+extern tag_len(t: *tag_s) -> int @c_import
+
+fill(o: *onion, v: float) {
+    o.f[0] = v
+}
+
+main() {
+    n = sizeof(onion)
+    o = calloc(1, sizeof(onion)) as *onion
+    fill(o, 2.5)
+    first = onion_first(o)
+    println("size ${n} first ${first}")
+    // The members share storage: an int view of 2.5f.
+    println("bits ${o.i[0]}")
+    println("tag ${tag_len(&g_tag)}")
+    free(o)
+}

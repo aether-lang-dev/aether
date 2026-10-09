@@ -1,0 +1,79 @@
+// Regression (#2584): a function that returns a struct holding its string
+// parameter. `cursor(text) -> Cursor { return Cursor { text: text, ... } }`
+// was taken for a call that hands its parameter back (only a call whose
+// value is a string can be), so `c = cursor(body)` was typed as the string
+// and the C did not compile. Then, compiling, the parameter kept in the
+// returned struct took no reference of its own while the caller, seeing it
+// kept, stopped freeing its argument: nobody freed it. Now the function takes
+// its own reference, the returned struct owns it, and the caller frees its
+// own string.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Cursor {
+    text: string
+    length: int
+}
+
+struct Pair {
+    left: Cursor
+    right: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+cursor(text: string) -> Cursor {
+    return Cursor { text: text, length: string.length(text) }
+}
+
+// The parameter one level down, in a nested literal.
+pair(a: string, b: string) -> Pair {
+    return Pair { left: Cursor { text: a, length: 1 }, right: b }
+}
+
+round(word: string) -> int {
+    body = string.concat(word, "ord")
+    c = cursor(body)
+    check(c.text == "word" && c.length == 4, "a struct holding the string parameter")
+    p = pair(string.concat(word, "1"), body)
+    check(p.left.text == "w1" && p.right == "word", "a nested struct holding the parameters")
+    return c.length + string.length(p.left.text) + string.length(p.right)
+}
+
+main() {
+    println("=== test_struct_holding_string_param ===")
+    // The issue's program.
+    hello = string.substring("hello world", 0, 5)
+    c = cursor(hello)
+    println("${c.length} ${c.text}")
+    check(round("w") == 10, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_struct_holding_string_param passed ===")
+}

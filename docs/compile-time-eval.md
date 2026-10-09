@@ -22,6 +22,7 @@ codegen so they inline correctly and run once, not per use. It is a
 | `string.from_float(<num const>)` | `"3.14"` | `%g` formatting. |
 | `string.concat(<str const>, <str const>)` | `"ab"` | Both operands must be string literals (or fold to them). |
 | `const A: int[3] = [1, 2, 3]` / `const A[] = [...]` | `static const int A[] = {1, 2, 3}` | Const array literal. Every element must itself be a compile-time constant. |
+| `var g: Pair = Pair { a: 0, b: 0 }` (a module-level `var`) | `static Pair g = { .a = 0, .b = 0 }` | A struct literal whose every field is a compile-time constant or such a literal itself, nested ones included (#2590). Only a `var`: a `const` is substituted at each use. |
 
 Folds compose: `string.concat(string.from_int(1), "x")` folds to `"1x"`
 because the optimizer recurses into arguments before folding the

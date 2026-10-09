@@ -1647,6 +1647,22 @@ static int is_const_array_element(ASTNode* elem, SymbolTable* table) {
     return is_const_expression(elem, table);
 }
 
+/* #2590: a struct literal whose every field is a compile-time constant or
+ * such a literal itself. A module-level `var` takes one: it lowers to an
+ * initializer list (`static T g = { .a = 0 };`), which C accepts for a
+ * file-scope static, where the compound literal a struct literal is
+ * elsewhere (`(T){ ... }`) is not a constant. */
+static int is_const_struct_literal(ASTNode* e, SymbolTable* table) {
+    if (!e || e->type != AST_STRUCT_LITERAL) return 0;
+    for (int i = 0; i < e->child_count; i++) {
+        ASTNode* f = e->children[i];
+        if (!f || f->type != AST_ASSIGNMENT || f->child_count < 1) return 0;
+        ASTNode* v = f->children[0];
+        if (!is_const_expression(v, table) && !is_const_struct_literal(v, table)) return 0;
+    }
+    return 1;
+}
+
 /* Defined below, beside typecheck_function_call — used by the
  * variable-declaration arm, which appears earlier in this file. */
 static int call_yields_no_value(ASTNode* call, SymbolTable* table);
@@ -7143,7 +7159,16 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             }
                         }
                     }
-                    if (!is_array_const) {
+                    /* Only as the var's own struct: an initializer list
+                     * is not one for an optional or a sum wrapping it. */
+                    Type* dt = stmt->node_type;
+                    int struct_typed = !dt || dt->kind == TYPE_UNKNOWN ||
+                                       (dt->kind == TYPE_STRUCT && dt->struct_name &&
+                                        init->value && strcmp(dt->struct_name, init->value) == 0);
+                    int is_struct_init = stmt->annotation &&
+                                         strcmp(stmt->annotation, "global_var") == 0 &&
+                                         struct_typed && is_const_struct_literal(init, table);
+                    if (!is_array_const && !is_struct_init) {
                         char msg[512];
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
                             /* #701: a module-level `var` lowers to a C file-scope
@@ -8674,6 +8699,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     snprintf(msg, sizeof(msg), "'~' is not defined on %s: it has float lanes",
                              type_name_of_kind(ot->kind));
                     type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
+                /* #2591: `&` takes the address of storage, and a call's
+                 * result has none: it reached the C compiler as "lvalue
+                 * required as unary '&' operand". Storage for it would end
+                 * with the statement or block that made it, so a pointer
+                 * kept past that dangles; a local is explicit about how
+                 * long it lives. `ref_get(r)` lowers to the cell itself, so
+                 * it has an address. */
+                if (expr->value && strcmp(expr->value, "&") == 0 &&
+                    expr->children[0]->type == AST_FUNCTION_CALL &&
+                    !(expr->children[0]->value &&
+                      strcmp(expr->children[0]->value, "ref_get") == 0)) {
+                    type_error("`&` needs a value stored somewhere, and a call's result is not: "
+                               "bind it to a local first (`v = f()`, then `&v`)",
+                               expr->line, expr->column);
                     return 0;
                 }
                 expr->node_type = infer_unary_type(expr->children[0],

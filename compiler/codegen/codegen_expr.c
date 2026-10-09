@@ -4917,6 +4917,7 @@ void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count) {
     g_stmt_temp_count = count;
 }
 
+
 /* The temporary holding call `expr`'s struct result in the statement being
  * emitted, or NULL. */
 const char* stmt_struct_temp_of(const ASTNode* expr) {
@@ -5363,7 +5364,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             // types emit as `struct <Name>` (same convention as
             // `as *StructName`), so the value always tracks the real C
             // layout.
-            fprintf(gen->output, "((int)sizeof(struct %s))", expr->value);
+            fprintf(gen->output, "((int)sizeof(%s %s))", aether_c_tag(expr->value), expr->value);
             break;
 
         case AST_SCHEMA_OF:
@@ -5375,7 +5376,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         case AST_OFFSETOF:
             // offsetof(TypeName, field) → C offsetof(struct TypeName, field).
             if (expr->child_count >= 1 && expr->children[0]->value) {
-                fprintf(gen->output, "((int)offsetof(struct %s, %s))",
+                fprintf(gen->output, "((int)offsetof(%s %s, %s))", aether_c_tag(expr->value),
                         expr->value, expr->children[0]->value);
             } else {
                 fprintf(gen->output, "/* malformed offsetof */0");
@@ -5740,7 +5741,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * member access lowers to mem_get_* / set_* at offsets. */
                     fprintf(gen->output, "((void*)(");
                 } else if (aether_is_c_import_struct(expr->value)) {
-                    fprintf(gen->output, "((struct %s*)(", expr->value);
+                    fprintf(gen->output, "((%s %s*)(", aether_c_tag(expr->value), expr->value);
                 } else {
                     fprintf(gen->output, "((%s*)(", expr->value);
                 }
@@ -6388,7 +6389,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     const char* recv_c = safe_value_name(recv);
                     const char* field_c = safe_value_name(dot + 1);
                     Type* field_sig = fnptr_field_signature(gen, recv, dot + 1);
-                    int narrow = !gen->discard_call_value && fnptr_returns_bool(field_sig);
+                    int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
                     fprintf(gen->output, "(%s%s%s)(",
                             recv_c, is_ptr ? "->" : ".", field_c);
@@ -6405,14 +6406,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * stdlib functions by name. */
                 const char* func_name_norm =
                     codegen_normalise_callee(func_name);
-                /* Capture + clear the discarded-value flag at the top of
-                 * the call codegen so it governs THIS call only and never
-                 * leaks into nested argument calls (whose values ARE
-                 * consumed). When set, the arg-temp drain below treats the
-                 * parent as void-yielding so heap inline args still free.
-                 * See discard_call_value in codegen.h. */
-                int ad_call_discarded = gen->discard_call_value;
-                gen->discard_call_value = 0;
+                /* Is this the call its statement throws the value of away?
+                 * Then the arg-temp drain below treats it as void-yielding,
+                 * so heap inline args still free. See discard_call_node in
+                 * codegen.h. */
+                int ad_call_discarded = gen->discard_call_node == expr;
 
                 /* Typed fn-pointer local call: `fp(a, b)` where `fp` was
                  * declared as `fn(T1, T2, ...) -> R` (or initialised from
@@ -8466,7 +8464,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 fprintf(gen->output, "%s _ae_slit = ", expr->value);
             }
-            fprintf(gen->output, c_imported ? "(struct %s){" : "(%s){", expr->value);
+            if (c_imported) fprintf(gen->output, "(%s %s){", aether_c_tag(expr->value), expr->value);
+            else fprintf(gen->output, "(%s){", expr->value);
             int emitted = 0;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
