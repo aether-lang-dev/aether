@@ -1,0 +1,124 @@
+// Regression: an assignment written as an unbraced match arm (`1 -> o.f = s`,
+// `1 -> x = s`) is the statement it would be inside braces (#2575): the
+// parser gives it the tree `1 -> { o.f = s }` has.
+//
+// The arm was parsed as an expression and emitted as a bare C assignment: a
+// struct field neither freed the string it replaced nor took ownership of
+// the new one, and a heap-tracked local skipped the reassignment that frees
+// its old value and records what it holds now. Each arm taken leaked. A
+// local stored by an arm also counted as escaping, so it leaked whenever
+// another arm ran (#2578).
+//
+// The heap check runs where the count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Slot {
+    tag: string
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// File-local (`name_`, #279), so every call is seen and the store through
+// `s` frees what it replaces (#2565).
+pick_(s: *Slot, w: string, k: int) {
+    match k {
+        1 -> s.tag = string.concat(w, "?")
+        2 -> s.tag = string.concat(w, "!")
+        _ -> s.tag = "none"
+    }
+}
+
+// A local stored by an arm moves into the field; on the other arm it is
+// freed at exit.
+stash_(s: *Slot, w: string, k: int) {
+    v = string.concat(w, "#")
+    match k {
+        1 -> s.tag = v
+        _ -> s.tag = "none"
+    }
+}
+
+label(w: string, k: int) -> int {
+    x = string.concat(w, "a")
+    match k {
+        1 -> x = string.concat(w, "bb")
+        _ -> x = string.concat(w, "ccc")
+    }
+    return string.length(x)
+}
+
+// Arms that rebind a parameter: a function value, and a string the arm
+// builds from it (its tracker declared with the function's, not in the arm).
+twice(x: int) -> int { return x * 2 }
+inc(x: int) -> int { return x + 1 }
+
+apply(f: fn(int) -> int, g: fn(int) -> int, k: int) -> int {
+    match k {
+        1 -> f = g
+        _ -> {}
+    }
+    return f(k)
+}
+
+grow(p: string, k: int) -> int {
+    match k {
+        1 -> p = string.concat(p, "a")
+        2 -> p = string.concat(p, "bb")
+        _ -> {}
+    }
+    return string.length(p)
+}
+
+round(w: string) -> int {
+    s = heap.new(Slot)
+    pick_(s, w, 1)
+    check(s.tag == "w?", "a fresh string stored by an arm")
+    pick_(s, w, 2)
+    check(s.tag == "w!", "another one replacing it")
+    pick_(s, w, 3)
+    check(s.tag == "none", "a literal stored by an arm")
+    stash_(s, w, 2)
+    check(s.tag == "none", "the other arm of a local's store")
+    stash_(s, w, 1)
+    check(s.tag == "w#", "a local stored by an arm")
+    pick_(s, w, 1)
+    n = string.length(s.tag) + label(w, 1) + label(w, 2)
+    heap.free(s)
+    return n
+}
+
+main() {
+    println("=== test_match_arm_assignment_ownership ===")
+    check(round("w") == 9, "the arms' values")
+    check(apply(twice, inc, 1) == 2 && apply(twice, inc, 2) == 4, "a function rebound by an arm")
+    check(grow("p", 1) == 2 && grow("p", 2) == 3 && grow("p", 3) == 1, "a parameter rebound by arms")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_match_arm_assignment_ownership passed ===")
+}

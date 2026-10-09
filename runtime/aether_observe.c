@@ -239,7 +239,9 @@ int aether_unobserve(void* obj, long token) {
 }
 
 int aether_unobserve_all(void* obj) {
-    if (!obj) return 0;
+    /* The notify fast path's gate: `heap.free` of every @observable box calls
+     * this, and almost none has an observer. */
+    if (!obj || obs_total_load() == 0) return 0;
     int removed = 0;
     pthread_mutex_lock(obs_lock());
     Slot* s = obs_find(obj);

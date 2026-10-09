@@ -2554,6 +2554,33 @@ int get_operator_precedence(AeTokenType type) {
     }
 }
 
+/* Does the arm body at the cursor assign: a name, followed by fields and
+ * indexes, then `=` or a compound assignment? */
+static int arm_body_is_assignment(Parser* parser) {
+    Token* t = peek_ahead(parser, 0);
+    if (!t || t->type != TOKEN_IDENTIFIER) return 0;
+    int i = 1;
+    for (;;) {
+        t = peek_ahead(parser, i);
+        if (!t) return 0;
+        if (t->type == TOKEN_DOT) {
+            Token* name = peek_ahead(parser, i + 1);
+            if (!name || name->type != TOKEN_IDENTIFIER) return 0;
+            i += 2;
+        } else if (t->type == TOKEN_LEFT_BRACKET) {
+            int depth = 0;
+            do {
+                t = peek_ahead(parser, i++);
+                if (!t || t->type == TOKEN_EOF) return 0;
+                if (t->type == TOKEN_LEFT_BRACKET) depth++;
+                else if (t->type == TOKEN_RIGHT_BRACKET) depth--;
+            } while (depth > 0);
+        } else {
+            return t->type == TOKEN_ASSIGN || token_is_compound_assign(t);
+        }
+    }
+}
+
 ASTNode* parse_statement(Parser* parser) {
     if (!parse_depth_enter(parser)) return NULL;
     ASTNode* _r = parse_statement_inner(parser);
@@ -3736,6 +3763,18 @@ ASTNode* parse_match_case(Parser* parser) {
     if (next && next->type == TOKEN_LEFT_BRACE) {
         // Block result
         result = parse_block(parser);
+    } else if (arm_body_is_assignment(parser)) {
+        /* #2575: `1 -> o.f = v` / `1 -> x = v` is the statement `{ o.f = v }`
+         * and parsed as one, so every pass sees the tree a braced arm has.
+         * Parsed as an expression it was emitted as a bare C assignment:
+         * a field store neither freed what it replaced nor took ownership,
+         * and a local's reassignment skipped its tracker. */
+        Token* at = next;
+        ASTNode* stmt = parse_statement(parser);
+        if (stmt) {
+            result = create_ast_node(AST_BLOCK, NULL, at->line, at->column);
+            add_child(result, stmt);
+        }
     } else if (next && next->type == TOKEN_PRINT) {
         // print/println is a statement keyword, not an expression
         result = parse_statement(parser);

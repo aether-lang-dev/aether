@@ -84,7 +84,7 @@ where a `distinct` is required and you get a compile error, not a crash:
 
 ```aether,fragment
 birthday_message(30)
-// error[E0200]: Argument 1 'a' of 'birthday_message': expected int, got int,
+// error[E0200]: Argument 1 'a' of 'birthday_message': expected Age, got int,
 //   a distinct type needs an explicit `as` cast at the boundary
 ```
 

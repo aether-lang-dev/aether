@@ -1,0 +1,102 @@
+// Regression: a heap string local stored into an Aether struct's string
+// field on one path only. The store moves the local's ownership into the
+// field, so the local keeps its exit free for every other path. Before, the
+// store counted as an escape, which dropped the local's exit free on every
+// path: std.jsonpath's speculative parses save `p.err` in a local and put it
+// back only when the attempt fails, so the saved copy leaked on every
+// success (test_jsonpath_parse_releases covers that through the library).
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Cursor {
+    err: string
+    tries: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Overwrites c.err, and puts the saved value back only when told to fail.
+// File-local (`name_`, #279), so the compiler sees every call and frees the
+// value each store replaces (test_field_store_through_box_parameter).
+attempt_(c: *Cursor, word: string, fail: int) -> int {
+    saved = c.err
+    c.err = string.concat(word, "?")
+    c.tries = c.tries + 1
+    if fail == 1 {
+        c.err = saved
+        return 0
+    }
+    return 1
+}
+
+// A store inside a closure is emitted in the closure, where the local is a
+// capture the closure's environment holds: the field takes a copy of its
+// own, and the function frees its local at exit (#2574). The field used to
+// borrow the environment's reference, so the local was kept alive for ever.
+fill_in_closure_(c: *Cursor, word: string) {
+    s = string.concat(word, "!")
+    set = || { c.err = s }
+    set()
+}
+
+closure_round(word: string) -> int {
+    held = heap.new(Cursor)
+    fill_in_closure_(held, word)
+    fill_in_closure_(held, word)
+    churn = string.concat(word, "~")
+    check(held.err == "w!" && churn == "w~", "a field stored in a closure keeps its string")
+    n = string.length(held.err)
+    heap.free(held)
+    return n
+}
+
+round(word: string) -> int {
+    first = string.concat(word, "!")
+    c = heap.new(Cursor)
+    c.err = string.concat(word, "!")
+    ok = attempt_(c, word, 1)
+    check(c.err == first, "a failed attempt puts the saved value back")
+    ok = ok + attempt_(c, word, 0)
+    check(c.err != first && string.length(c.err) == 2, "a successful attempt keeps its own value")
+    ok = ok + attempt_(c, word, 1) + attempt_(c, word, 0)
+    n = ok * 100 + string.length(c.err) + c.tries
+    heap.free(c)
+    return n
+}
+
+main() {
+    println("=== test_field_store_local_one_path ===")
+    check(round("w") == 206, "two of four attempts succeed and c.err is w?")
+    check(closure_round("w") == 2, "a closure's store")
+    i = 0
+    while i < 20 {
+        round("w")
+        closure_round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    closure_round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_field_store_local_one_path passed ===")
+}

@@ -1,0 +1,108 @@
+// Regression: a string field replaced through a pointer-to-struct parameter
+// frees the value it replaces when every call of the function passes a
+// heap.new box.
+//
+// Freeing the old value reads the box's `_heap_<field>` tracker, which only
+// a heap.new box is known to have initialised (#1873: a `malloc(n) as *T`
+// box holds garbage there). #2369 traced a box back through calls, fields
+// and casts, but a parameter was always of unknown origin, so every helper
+// written as `set(p: *T)` leaked each string it replaced. A parameter now
+// holds what its callers pass: a box made there, or a parameter of the
+// caller that holds one, followed through chains of helpers and through
+// recursion. That takes seeing every call, so it holds for a function with
+// internal linkage: an imported module's, or a file-local `name_` (#279) as
+// below. A top-level function of the entry file is an external symbol C
+// code may call, and a function with any caller passing something other
+// than a box keeps the old behaviour (heap_field_setter_malloc_box).
+//
+// The check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Note {
+    text: string
+    count: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// A setter.
+set_text_(n: *Note, word: string) {
+    n.text = string.concat(word, "!")
+    n.count = n.count + 1
+}
+
+// A chain of helpers handing the pointer on.
+relay_(n: *Note, word: string) {
+    set_text_(n, word)
+}
+
+// Recursion through the parameter itself.
+fill_(n: *Note, word: string, times: int) {
+    if times > 0 {
+        n.text = string.concat(word, "?")
+        n.count = n.count + 1
+        fill_(n, word, times - 1)
+    }
+}
+
+// Mutual recursion.
+ping_(n: *Note, word: string, times: int) {
+    if times > 0 {
+        n.text = string.concat(word, "<")
+        pong_(n, word, times - 1)
+    }
+}
+
+pong_(n: *Note, word: string, times: int) {
+    if times > 0 {
+        n.text = string.concat(word, ">")
+        ping_(n, word, times - 1)
+    }
+}
+
+round(word: string) -> int {
+    n = heap.new(Note)
+    set_text_(n, word)
+    relay_(n, word)
+    check(n.text == "w!", "a store through a chain of helpers")
+    fill_(n, word, 3)
+    check(n.text == "w?", "a store through recursion")
+    ping_(n, word, 3)
+    check(n.text == "w<", "a store through mutual recursion")
+    total = n.count + string.length(n.text)
+    heap.free(n)
+    return total
+}
+
+main() {
+    println("=== test_field_store_through_box_parameter ===")
+    check(round("w") == 7, "five stores counted and the last text")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_field_store_through_box_parameter passed ===")
+}

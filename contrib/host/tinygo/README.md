@@ -65,7 +65,7 @@ func Add(a, b int32) int32 { return a + b }
 //export Greet
 func Greet(name *C.char) *C.char {
     msg := "hello, " + C.GoString(name)
-    return C.CString(msg)  // Go-allocated, leaked unless freed (see notes)
+    return C.CString(msg)  // malloc'd by cgo, leaked unless freed (see notes)
 }
 
 func main() {}  // c-shared still requires a main() — empty body is fine
@@ -110,8 +110,7 @@ main() {
 
 ## Calling-convention surface
 
-v1 ships pre-defined wrapper signatures for the most common
-shapes:
+The original wrappers, named for their shapes:
 
 | Aether call | Matches TinyGo c-shared signature |
 |---|---|
@@ -121,27 +120,29 @@ shapes:
 | `tinygo.call_void_int(h, "F", a)` | `void F(int)` |
 | `tinygo.call_str_str(h, "F", s)` | `const char* F(const char*)` |
 
-Adding a new shape is a one-line C extension in
+Beside them, `call_<ret>_<args>` covers every combination in
+[`module.ae`](module.ae)'s export list, up to three arguments, with
+one letter per type: `v` void, `i` int32, `l` int64, `d` double,
+`s` string, `p` ptr. `call_s_i(h, "F", 7)` calls
+`const char* F(int)`. Adding a shape is one line in
 [`aether_host_tinygo.c`](aether_host_tinygo.c) plus a matching
-`extern` + wrapper in [`module.ae`](module.ae). Patches welcome.
+`extern` and wrapper in [`module.ae`](module.ae).
 
-Fully-dynamic dispatch (libffi) is intentionally out of scope for
-v1: libffi is a system dependency 95% of users do not need, and
-covering 80% of real call sites with five fixed shapes keeps the
-contrib module dependency-free.
+For any other signature, `call_dynamic` dispatches through libffi
+when the bridge is built with `AETHER_HAS_LIBFFI` defined. Without
+libffi it returns 0 and `last_error()` says libffi is unavailable,
+so the module itself needs nothing beyond `std.dl`.
 
 ## Memory ownership
 
-TinyGo's `C.CString(...)` allocates with `malloc` on the C heap
-and is **not garbage-collected** by the Go runtime. Without an
-explicit `C.free`, every call leaks. v1 of this module accepts
-the leak for short-lived demos; for long-running programs, expose
-a `Free(p *C.char)` from the Go side and call it from Aether.
-
-Pointers returned from TinyGo are valid until the next call into
-the library on the same handle, or until `tinygo.unload(handle)`.
-Copy via `string_concat(s, "")` if you need to outlive that
-window.
+A string result is the pointer the Go function returned, and
+Aether only borrows it: nothing on this side frees it. cgo's
+`C.CString(...)` allocates it with `malloc` on the C heap, outside
+the Go collector, so it stays valid until something frees it and
+every call that returns one leaks it. For a long-running program,
+export a `Free(p *C.char)` that calls `C.free` from the Go side and
+call it with each result once you are done with it. Whether the
+bridge should take the result over itself is open in #2569.
 
 ## Limitations
 

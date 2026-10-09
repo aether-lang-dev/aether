@@ -6,6 +6,7 @@ Values are immutable: every operation returns a new bignum rather than
 mutating its operands, which is what makes them safe to share and awkward to
 use in a tight loop. The module exists mainly to serve `std.cryptography` —
 RSA, DSA and the elliptic-curve arithmetic all need integers far past 64 bits.
+Each value is an allocation of its own, released with `bignum.free`.
 
 ```aether,run
 import std.bignum
@@ -13,6 +14,7 @@ import std.bignum
 main() {
     a = bignum.from_int(255)
     b = bignum.from_int(2)
+    zero = bignum.from_int(0)
 
     sum = bignum.add(a, b)
     println("bits: ${bignum.bit_length(sum)}")
@@ -21,7 +23,12 @@ main() {
     // sign is -1, 0 or 1; compare is the usual three-way result.
     println("sign:    ${bignum.sign(sum)}")
     println("compare: ${bignum.compare(a, b)}")
-    println("zero?    ${bignum.is_zero(bignum.from_int(0))}")
+    println("zero?    ${bignum.is_zero(zero)}")
+
+    bignum.free(sum)
+    bignum.free(zero)
+    bignum.free(b)
+    bignum.free(a)
 }
 ```
 ```output

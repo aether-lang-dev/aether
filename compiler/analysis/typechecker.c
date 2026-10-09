@@ -1089,7 +1089,8 @@ static const char* type_name_of_kind(TypeKind k) {
     }
 }
 
-static const char* type_name(Type* t) {
+/* The name of t's representation: a distinct type reads as its base. */
+static const char* base_type_name(Type* t) {
     if (!t) return "unknown";
     /* C ABI alias — report the spelling the user wrote (size_t, ...). */
     if (t->c_alias) return t->c_alias;
@@ -1131,6 +1132,13 @@ static const char* type_name(Type* t) {
         case TYPE_UNKNOWN:  return "unknown";
         default:            return "unknown";
     }
+}
+
+/* t as the user named it: a distinct type by its own name, which is what
+ * tells `expected Tag, got string` apart from a plain mismatch. */
+static const char* type_name(Type* t) {
+    if (t && t->distinct_name) return t->distinct_name;
+    return base_type_name(t);
 }
 
 /* #2516: a fixed-size array or slice spelled as written (`int[3]`,
@@ -7799,12 +7807,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     }
                     if (!is_assignable(result, symbol->type)) {
                         char emsg[300];
-                        const char* rn = result->distinct_name ? result->distinct_name : type_name(result);
-                        const char* sn = symbol->type->distinct_name ? symbol->type->distinct_name
-                                                                     : type_name(symbol->type);
                         snprintf(emsg, sizeof(emsg),
                                  "Type mismatch in '%s': the result is %s but '%s' is %s%s",
-                                 opstr, rn, stmt->value, sn,
+                                 opstr, type_name(result), stmt->value, type_name(symbol->type),
                                  symbol->type->distinct_name ? " (a distinct type; convert with `as`)" : "");
                         type_error(emsg, stmt->line, stmt->column);
                         free_type(result);
@@ -11023,7 +11028,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 // use its struct type's name.
                 Symbol* recv_sym = lookup_symbol(table, prefix);
                 if (recv_sym && recv_sym->type) {
-                    const char* tn = type_name(recv_sym->type);
+                    const char* tn = base_type_name(recv_sym->type);
                     if (tn && tn[0] != '\0' &&
                         strlen(tn) < sizeof(type_name_buf) &&
                         strcmp(tn, "unknown") != 0 &&

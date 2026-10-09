@@ -89,7 +89,7 @@ header comment is the authoritative description.
 | `std.tsid` | TSID: 64-bit time-sortable identifier, Crockford base32. | 1 | [guide](../std/tsid/README.md) · [source](../std/tsid/module.ae) |
 | `std.ulid` | ULID: 128-bit lexicographically sortable identifier. | 1 | [guide](../std/ulid/README.md) · [source](../std/ulid/module.ae) |
 | `std.unicode` | Unicode normalization, case/accent folding and grapheme-aware length/substring (utf8proc). | 8 | [guide](../std/unicode/README.md) · [source](../std/unicode/module.ae) |
-| `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 7 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
+| `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 8 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 19 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
 | `std.xml` | XML pull parsing and document writing. | 45 | [full section](#xml-stdxml) |
@@ -2528,11 +2528,11 @@ main() {
 
     q, err = url.parse_query("tag=go&tag=rust&page=2")
     if string.length(err) > 0 { println("bad query: ${err}"); return }
-    defer string_list_free(q)
+    defer url.query_free(q)
 
     println(url.query_get(q, "page"))
     tags = url.query_get_all(q, "tag")
-    defer string_list_free(tags)
+    defer url.query_free(tags)
     println("tags: ${string_list_size(tags)}, first ${string_list_get(tags, 0)}")
 }
 ```
@@ -2551,6 +2551,7 @@ tags: 2, first go
 - `url.parse_query(s)` → `(ptr, string)` - Parse a query string (a leading `?` is tolerated) into a `string_list`
 - `url.query_get(list, name)` → `string` - The first value for `name`, `""` when absent
 - `url.query_get_all(list, name)` → `ptr` - Every value for a repeated key, as a fresh `string_list`
+- `url.query_free(list)` - Release a list `parse_query` or `query_get_all` returned (null is a no-op)
 
 ### HTTP/1.1 response reader (`std.http1`)
 

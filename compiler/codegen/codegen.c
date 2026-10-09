@@ -622,6 +622,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->discard_call_value = 0;
     gen->current_env_captures = NULL;
     gen->current_env_capture_count = 0;
+    gen->current_alias_captures = NULL;
+    gen->current_alias_capture_count = 0;
     gen->current_promoted_captures = NULL;
     gen->current_promoted_capture_count = 0;
     gen->promoted_funcs = NULL;
@@ -660,6 +662,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->callee_memo = NULL;
     gen->callee_memo_cap = 0;
     gen->callee_memo_count = 0;
+    gen->zb_params = NULL;
+    gen->zb_params_state = 0;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -769,7 +773,10 @@ CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, con
     return gen;
 }
 
-void free_code_generator(CodeGenerator* gen) {
+/* Everything a generator owns, not the generator itself: a heap one goes
+ * through free_code_generator, a stack one (codegen_diagnose_ownership)
+ * through this directly. */
+void code_generator_release(CodeGenerator* gen) {
     if (gen) {
         program_index_reset();
         free(gen->order_fn_effects);   /* #2478 */
@@ -777,6 +784,7 @@ void free_code_generator(CodeGenerator* gen) {
         clear_captured_string_params(gen);
         free(gen->callee_memo);
         gen->callee_memo = NULL;
+        zb_params_free(gen);
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -920,8 +928,12 @@ void free_code_generator(CodeGenerator* gen) {
             }
             free(gen->reply_type_map);
         }
-        free(gen);
     }
+}
+
+void free_code_generator(CodeGenerator* gen) {
+    code_generator_release(gen);
+    free(gen);
 }
 
 // Helper: check if variable was already declared in current function
@@ -5479,6 +5491,35 @@ static void mangle_value_idents_in(ASTNode* node, ASTNode* program) {
     }
 }
 
+/* `e as T` from a string to a string (into or out of `type Tag = distinct
+ * string`) renames a type the checker has already enforced: in C it is the
+ * operand's own pointer. Codegen decides who owns a string from the shape of
+ * the expression that yields it (a local, a field read, a call, a literal),
+ * so the cast is removed before any pass reads the tree, leaving the operand
+ * to be seen as it is. Kept, it hid that shape from every one of them: `t =
+ * x as Tag` borrowed the local x where `t = x` copies or moves it, so a
+ * function returning t returned the buffer its exit freed, and `return
+ * language(tag) as Tag` was not seen to hand over the call's result, so
+ * every caller of std.language's base() leaked it. */
+void erase_string_retype_casts(ASTNode* node) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        /* A C spelling (`cstring` is `char*`) is a real C cast: kept. */
+        while (c && c->type == AST_VALUE_CAST && c->child_count == 1 && c->children[0] &&
+               c->node_type && c->node_type->kind == TYPE_STRING && !c->node_type->c_alias &&
+               c->children[0]->node_type && c->children[0]->node_type->kind == TYPE_STRING &&
+               !c->children[0]->node_type->c_alias) {
+            ASTNode* operand = c->children[0];
+            c->child_count = 0;
+            free_ast_node(c);
+            c = operand;
+        }
+        node->children[i] = c;
+        erase_string_retype_casts(c);
+    }
+}
+
 static void mangle_keyword_value_idents(ASTNode* program) {
     mangle_value_idents_in(program, program);
 }
@@ -6287,6 +6328,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* The rename changed definition names, which are the index's keys,
        without changing the child count it is keyed on. */
     program_index_reset();
+    erase_string_retype_casts(program);
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
     // here means every per-fn codegen pass beyond this point can
@@ -7080,6 +7122,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern void aether_unwind_track(const void*, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_track_if(const void*, int, AetherUnwindFree);");
     print_line(gen, "extern void aether_unwind_forget(const void*);");
+    /* Is `s` a counted AetherString, the one shape string_release frees?
+     * The same byte-by-byte probe as aether_heap_str_free below. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_str_is_counted(const char* s) {");
+    print_line(gen, "    const unsigned char* _hp = (const unsigned char*)s;");
+    print_line(gen, "    return s && _hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X;",
+               AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
+    print_line(gen, "}");
     print_line(gen, "static inline void aether_heap_str_free(const char* s) {");
     print_line(gen, "    if (!s) return;");
     print_line(gen, "    aether_unwind_forget(s);");
@@ -7434,6 +7483,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * struct field emits a call to it. Defined in runtime/aether_observe.c. */
     print_line(gen, "extern void aether_observe_notify(void* obj);");
     print_line(gen, "extern void aether_observe_notify_field(void* obj, int field);");
+    /* heap.free of an @observable box removes its observers first. */
+    print_line(gen, "extern int aether_unobserve_all(void* obj);");
     /* Boxed form. The tag sits AFTER the {fn, env} prefix on purpose: that
      * prefix is the FFI layout std/collections and std/worker mirror and
      * embedders are documented to rely on, so putting the tag first would

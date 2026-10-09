@@ -1104,6 +1104,34 @@ static void order_hoist_operand(CodeGenerator* gen, ASTNode* op) {
     order_bind(op, buf);
 }
 
+/* A field read evaluated ahead of a call that frees it: handed over where
+ * it is read (emit_string_field_handoff), once, in its place in the order.
+ * At the call it is the temp, and the struct the path named then may not
+ * be the one a later operand left there. */
+static void order_hoist_handoff(CodeGenerator* gen, ASTNode* op) {
+    char buf[32];
+    snprintf(buf, sizeof(buf), "_eo%d", g_order_counter++);
+    fprintf(gen->output, "__auto_type %s = (", buf);
+    emit_string_field_handoff(gen, op);
+    fprintf(gen->output, "); ");
+    order_bind(op, buf);
+}
+
+/* Is operand `k` of `call` a field read handed to a parameter the callee
+ * frees? Only where operands and parameters line up one to one: no named
+ * argument, trailing block or injected builder context. */
+static int order_operand_hands_off(CodeGenerator* gen, ASTNode* call, int k) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
+        is_builder_func_reg(gen, call->value)) return 0;
+    for (int i = 0; i < call->child_count; i++) {
+        ASTNode* a = call->children[i];
+        if (!a || a->type == AST_NAMED_ARG ||
+            (a->type == AST_CLOSURE && a->value && strcmp(a->value, "trailing") == 0)) return 0;
+    }
+    return k < call->child_count && field_read_can_hand_off(call->children[k]) &&
+           callee_consumes_string_arg(gen, call->value, k);
+}
+
 int order_prelude_depth(void) {
     return g_order_count;
 }
@@ -1153,8 +1181,11 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
     int saved = g_order_count;
     fprintf(gen->output, "({ ");
-    for (int k = 0; k < n; k++)
-        if (hoist[k]) order_hoist_operand(gen, ops[k]);
+    for (int k = 0; k < n; k++) {
+        if (!hoist[k]) continue;
+        if (order_operand_hands_off(gen, expr, k)) order_hoist_handoff(gen, ops[k]);
+        else order_hoist_operand(gen, ops[k]);
+    }
     ASTNode* saved_emitting = g_order_emitting;
     g_order_emitting = expr;
     generate_expression(gen, expr);
@@ -3690,6 +3721,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
         }
 
         // Emit capture aliases.
+        const char** alias_caps = NULL;
+        int alias_cap_count = 0;
         for (int i = 0; i < cap_count; i++) {
             int is_env_backed = 0;
             for (int j = 0; j < env_capture_count; j++) {
@@ -3719,7 +3752,14 @@ void emit_closure_definitions(CodeGenerator* gen) {
             } else {
                 fprintf(gen->output, "    %s %s = _env->%s;\n",
                         ctype, captures[i], captures[i]);
+                alias_caps = aether_xrealloc(alias_caps, sizeof(char*) * (size_t)(alias_cap_count + 1));
+                alias_caps[alias_cap_count++] = captures[i];
             }
+        }
+        if (!body) {
+            free(alias_caps);
+            alias_caps = NULL;
+            alias_cap_count = 0;
         }
 
         if (body) {
@@ -3798,6 +3838,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
             int prev_env_count = gen->current_env_capture_count;
             gen->current_env_captures = env_captures;
             gen->current_env_capture_count = env_capture_count;
+            const char** prev_alias = gen->current_alias_captures;
+            int prev_alias_count = gen->current_alias_capture_count;
+            gen->current_alias_captures = alias_caps;
+            gen->current_alias_capture_count = alias_cap_count;
             // Publish promoted names visible to this closure body so
             // reads/writes dereference through the pointer alias we just
             // emitted above.
@@ -3962,6 +4006,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
             exit_scope(gen);
             gen->current_env_captures = prev_env;
             gen->current_env_capture_count = prev_env_count;
+            gen->current_alias_captures = prev_alias;
+            gen->current_alias_capture_count = prev_alias_count;
+            free(alias_caps);
             gen->current_promoted_captures = prev_promoted;
             gen->current_promoted_capture_count = prev_promoted_count;
             free(body_promoted);
@@ -4858,10 +4905,25 @@ static const char** g_stmt_temp_names = NULL;
 static int g_stmt_temp_count = 0;
 static const ASTNode* g_stmt_temp_wrapping = NULL;
 
+/* Is a call to `fn` the runtime free `sym`, by name or `@extern` alias? */
+static int cfree_sym_is(CodeGenerator* gen, const char* fn, const char* sym) {
+    const char* got = consuming_free_symbol(gen, fn);
+    return got && strcmp(got, sym) == 0;
+}
+
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count) {
     g_stmt_temp_nodes = nodes;
     g_stmt_temp_names = names;
     g_stmt_temp_count = count;
+}
+
+/* The temporary holding call `expr`'s struct result in the statement being
+ * emitted, or NULL. */
+const char* stmt_struct_temp_of(const ASTNode* expr) {
+    for (int i = 0; expr && i < g_stmt_temp_count; i++) {
+        if (g_stmt_temp_nodes[i] == expr) return g_stmt_temp_names[i];
+    }
+    return NULL;
 }
 
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
@@ -6269,15 +6331,28 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 expr->child_count == 1) {
                 ASTNode* arg = expr->children[0];
                 const char* typed_free = NULL;
+                int observable = 0;
                 if (arg && arg->node_type && arg->node_type->kind == TYPE_PTR &&
                     arg->node_type->element_type &&
                     arg->node_type->element_type->kind == TYPE_STRUCT &&
                     arg->node_type->element_type->struct_name && gen->program) {
-                    ASTNode* sdef = find_struct_definition_by_name(
-                        gen->program, arg->node_type->element_type->struct_name);
-                    if (sdef && struct_owns_heap_strings(gen, sdef)) {
-                        typed_free = arg->node_type->element_type->struct_name;
-                    }
+                    const char* sname = arg->node_type->element_type->struct_name;
+                    ASTNode* sdef = find_struct_definition_by_name(gen->program, sname);
+                    if (sdef && struct_owns_heap_strings(gen, sdef)) typed_free = sname;
+                    observable = struct_is_observable(gen, sname);
+                }
+                if (observable) {
+                    /* An @observable box's observers go with it: they hold
+                     * closure environments, and an object later allocated at
+                     * the same address would inherit them (std.observe). */
+                    fprintf(gen->output, "({ void* _ae_hf = (void*)(");
+                    generate_expression(gen, arg);
+                    fprintf(gen->output, "); aether_unobserve_all(_ae_hf); ");
+                    if (typed_free)
+                        fprintf(gen->output, "%s_heap_free((%s*)_ae_hf); })", typed_free, typed_free);
+                    else
+                        fprintf(gen->output, "free(_ae_hf); })");
+                    break;
                 }
                 if (typed_free) {
                     fprintf(gen->output, "%s_heap_free(", typed_free);
@@ -6789,6 +6864,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
                                 "%s = NULL; _heap_%s = 0; } else { string_release(%s); } })",
                                 arg->value, arg->value, arg->value, arg->value, arg->value);
+                        } else if (field_read_can_hand_off(arg)) {
+                            emit_string_field_free(gen, arg, "string_release");
                         } else {
                             fprintf(gen->output, "string_release(");
                             generate_expression(gen, arg);
@@ -6823,7 +6900,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // Non-heap-var arguments (literals, borrowed params) fall
                 // through to the plain, literal-safe string_release call.
                 else if ((strcmp(func_name, "string_release") == 0 ||
-                          strcmp(func_name, "string.release") == 0) &&
+                          strcmp(func_name, "string.release") == 0 ||
+                          cfree_sym_is(gen, func_name_norm, "string_release")) &&
                          expr->child_count == 1 &&
                          expr->children[0]->type == AST_IDENTIFIER &&
                          expr->children[0]->value &&
@@ -6854,7 +6932,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 // not cover, which is what a magic AetherString arriving
                 // unflagged needs (string.from_double returns one).
                 else if ((strcmp(func_name, "string_free") == 0 ||
-                          strcmp(func_name, "string.free") == 0) &&
+                          strcmp(func_name, "string.free") == 0 ||
+                          cfree_sym_is(gen, func_name_norm, "string_free")) &&
                          expr->child_count == 1 &&
                          expr->children[0]->type == AST_IDENTIFIER &&
                          expr->children[0]->value &&
@@ -6864,6 +6943,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         "({ if (_heap_%s) { aether_heap_str_free((void*)%s); "
                         "%s = NULL; _heap_%s = 0; } else { string_free(%s); } })",
                         arg->value, arg->value, arg->value, arg->value, arg->value);
+                }
+                // The same for a struct's string field, which owns its value
+                // as a tracked local does: freed here, it must not be freed
+                // again by the next store into the field or by the struct's
+                // destructor (emit_string_field_free).
+                else if ((cfree_sym_is(gen, func_name_norm, "string_free") ||
+                          cfree_sym_is(gen, func_name_norm, "string_release")) &&
+                         expr->child_count == 1 &&
+                         field_read_can_hand_off(expr->children[0])) {
+                    emit_string_field_free(gen, expr->children[0],
+                                           consuming_free_symbol(gen, func_name_norm));
                 }
                 // string.seq_free(seq) — explicit refcount-decrement on a
                 // *StringSeq. For a tracked seq local, clear the ownership
@@ -8014,6 +8104,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "aether_string_data(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
+                        } else if (expected == TYPE_STRING && !order_bound(arg) &&
+                                   field_read_can_hand_off(arg) &&
+                                   callee_consumes_string_arg(gen, func_name, arg_printed)) {
+                            /* The callee frees what it is handed: the field
+                             * gives its reference up (callee_consumes_string_arg). */
+                            emit_string_field_handoff(gen, arg);
                         } else {
                             generate_expression(gen, arg);
                         }

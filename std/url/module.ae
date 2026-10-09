@@ -23,7 +23,8 @@
 // url.parse_query(s) walks a `?`-stripped query string ("a=1&b=2&a=3")
 // and returns a list of (key, value) tuples — supports repeated keys
 // (the form `?a=1&a=2` carries both values; HTTP form spec, JSON
-// API conventions). Closes the parser hole #625 surfaced.
+// API conventions). Closes the parser hole #625 surfaced. The caller
+// owns the list and releases it with url.query_free.
 
 import std.string
 import std.bytes
@@ -31,7 +32,7 @@ import std.collections
 
 exports(
     encode, encode_path, encode_strict, decode,
-    parse_query, query_get, query_get_all
+    parse_query, query_get, query_get_all, query_free
 )
 
 // ---------- encoders ----------
@@ -185,12 +186,15 @@ decode(s: string) -> {
 // on it. This decoupling lets callers iterate manually too.
 
 // Parse a query string. Returns (list, ""), where list is a
-// std.collections.string_list of decoded "key=value" entries. Within the key
-// part, a `%` or `=` the key decoded to stays encoded (`%25`, `%3D`), so the
-// first `=` always ends the key: an `a%3Db=1` entry for key "a=b" is
-// "a%3Db=1", and cannot be read as key "a" with value "b=1".
-// Returns ("", error) on a malformed percent-encoding inside any
-// key or value.
+// std.collections.string_list of decoded "key=value" entries, the caller's
+// to release with query_free. Within the key part, a `%` or `=` the key
+// decoded to stays encoded (`%25`, `%3D`), so the first `=` always ends the
+// key: an `a%3Db=1` entry for key "a=b" is "a%3Db=1", and cannot be read as
+// key "a" with value "b=1".
+// Returns (null, error) on a malformed percent-encoding inside any key or
+// value: the entries parsed so far are freed here, since a caller checking
+// the error never sees them (they leaked when the partial list came back).
+// query_get, query_get_all and query_free take null as an empty query.
 //
 // Leading '?' is tolerated (stripped before parsing) so callers can
 // pass the raw `request.query_string` or a string they hand-built
@@ -236,11 +240,13 @@ parse_query(s: string) -> {
             }
             key, k_err = decode(key_raw)
             if k_err != "" {
-                return list, k_err
+                string_list_free(list)
+                return null, k_err
             }
             val, v_err = decode(val_raw)
             if v_err != "" {
-                return list, v_err
+                string_list_free(list)
+                return null, v_err
             }
             entry = string.concat(_query_key_escape(key), "=")
             entry = string.concat(entry, val)
@@ -280,7 +286,8 @@ query_get(list: ptr, name: string) -> string {
 }
 
 // Get every value for `name` (for repeated-key queries like
-// `?a=1&a=2`). Returns a fresh string_list. Empty list if absent.
+// `?a=1&a=2`). Returns a fresh string_list, released with query_free.
+// Empty list if absent.
 query_get_all(list: ptr, name: string) -> ptr {
     out = string_list_new()
     n = string_list_size(list)
@@ -296,4 +303,10 @@ query_get_all(list: ptr, name: string) -> ptr {
         i = i + 1
     }
     return out
+}
+
+// Release a list parse_query or query_get_all returned, with its entries.
+// Null (a failed parse) is a no-op.
+query_free(list: ptr) {
+    string_list_free(list)
 }

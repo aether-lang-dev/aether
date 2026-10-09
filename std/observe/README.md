@@ -123,9 +123,11 @@ re-entrancy guard included.
 ## Lifetime
 
 An observer holds its closure environment until `unobserve` / `unobserve_all`
-releases it. Removing an observer from inside its own callback is safe: the
-release waits for the pass to end. Remove observers before freeing an object;
-otherwise a later value at the same address inherits them.
+releases it, or until `heap.free` frees the `@observable` box it watches, which
+removes its observers first. Removing an observer from inside its own callback
+is safe: the release waits for the pass to end. An object freed any other way
+(a raw `free`, an arena) needs `unobserve_all` first; otherwise a later value
+at the same address inherits its observers.
 
 Stores made on another thread notify on that thread. Marshal to the loop
 thread in the observer when the work belongs there (`std.worker`'s poster is
@@ -140,7 +142,7 @@ the tool for that).
 | `notify(obj: ptr)` | | runs `obj`'s observers with `ANY_FIELD`; a null `obj` is a no-op |
 | `notify_field(obj: ptr, field: int)` | | runs `obj`'s observers for field `field` |
 | `unobserve(obj: ptr, token: long)` | `bool` | `false` when the token is not registered on `obj` |
-| `unobserve_all(obj: ptr)` | `int` removed | call before freeing `obj` |
+| `unobserve_all(obj: ptr)` | `int` removed | `heap.free` does it for an `@observable` box; call it before freeing `obj` any other way |
 | `observer_count(obj: ptr)` | `int` | |
 | `is_notifying(obj: ptr)` | `bool` | true while a pass on `obj` runs |
 

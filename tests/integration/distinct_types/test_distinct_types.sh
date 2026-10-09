@@ -20,6 +20,12 @@ check_rejected() {
 }
 check_rejected reject_raw_assign
 check_rejected reject_cross_call
+# The diagnostic names both distinct types; reported by their base, it read
+# "expected float, got float".
+if ! grep -q 'expected USD, got EUR' "$TMPDIR/reject_cross_call.log"; then
+    echo "  [FAIL] distinct_types: the cross-call diagnostic does not name USD and EUR"
+    sed 's/^/    /' "$TMPDIR/reject_cross_call.log" | head -8; exit 1
+fi
 check_rejected reject_unwrap
 echo "  [PASS] distinct_types: raw-assign / cross-distinct-call / unwrap-without-cast all rejected"
 exit 0
