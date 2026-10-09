@@ -1,0 +1,215 @@
+// Every function here can reach its end without the value its result needs
+// (#2684). test_missing_return.sh expects each one reported at its closing
+// brace, by name, and nothing else reported.
+import std.string
+
+message Ping {
+    n: int
+}
+
+holder() -> ptr {
+    return null
+}
+
+// The trailing expression of a block body is not returned.
+trailing_value(n: int) -> string {
+    msg = "n=${n}"
+    msg
+}
+
+if_no_else(n: int) -> int {
+    if n > 0 {
+        return 1
+    }
+}
+
+else_if_no_else(n: int) -> int {
+    if n > 0 {
+        return 1
+    } else if n < 0 {
+        return -1
+    }
+}
+
+else_falls(n: int) -> int {
+    if n > 0 {
+        return 1
+    } else {
+        println("not positive")
+    }
+}
+
+match_no_catchall(n: int) -> string {
+    match n {
+        1 -> { return "one" }
+        2 -> { return "two" }
+    }
+}
+
+// A match in statement position: its arms' values are dropped.
+match_value_dropped(n: int) -> string {
+    match n {
+        1 -> "one"
+        _ -> "other"
+    }
+}
+
+optional_some_only(v: int?) -> int {
+    match v {
+        some(x) -> { return x }
+    }
+}
+
+while_can_end(n: int) -> int {
+    i = 0
+    while i < n {
+        if i == 7 {
+            return i
+        }
+        i = i + 1
+    }
+}
+
+while_true_break(n: int) -> int {
+    while true {
+        if n > 0 {
+            break
+        }
+        n = n + 1
+    }
+}
+
+labeled_break(n: int) -> int {
+    outer: while true {
+        while true {
+            if n > 0 {
+                break outer
+            }
+            return 1
+        }
+    }
+}
+
+for_range(n: int) -> int {
+    for i in 0..n {
+        if i == 3 {
+            return i
+        }
+    }
+}
+
+switch_no_default(n: int) -> int {
+    switch n {
+        case 1: return 10
+        case 2: return 20
+    }
+}
+
+catch_falls(n: int) -> int {
+    try {
+        return n
+    } catch e {
+        println(e)
+    }
+}
+
+panic_on_one_path(n: int) -> int {
+    if n < 0 {
+        panic("negative")
+    }
+}
+
+defer_is_no_return(n: int) -> int {
+    defer println("done")
+    if n > 0 {
+        return n
+    }
+}
+
+nested_if(n: int) -> int {
+    if n > 0 {
+        if n > 10 {
+            return 2
+        }
+    } else {
+        return 0
+    }
+}
+
+// Each clause of a set is checked, the guarded one included.
+guarded(n: int) when n > 0 -> int {
+    if n > 5 {
+        return 1
+    }
+}
+guarded(n: int) -> int {
+    return 0
+}
+
+// A clause that declares a result must return it.
+clause_declared(0) -> int {
+    println("zero")
+}
+clause_declared(n: int) -> int {
+    return n
+}
+
+// No result written: it returns a value on one path, so on every path.
+unannotated(n) {
+    if n > 0 {
+        return n
+    }
+}
+
+tuple_result(n: int) -> (int, string) {
+    if n > 0 {
+        return n, "positive"
+    }
+}
+
+empty_body() -> int {
+}
+
+// A trailing block runs inline: its `return` is this function's.
+trailing_block_falls(n: int) -> int {
+    holder() {
+        if n > 0 {
+            return n
+        }
+    }
+}
+
+// An arrow body ending in a statement returns only what that statement does.
+arrow_if(n: int) -> {
+    if n > 0 {
+        return 1
+    }
+}
+
+closure_falls() -> int {
+    f = | x: int | {
+        if x > 0 {
+            return x
+        }
+    }
+    return call(f, 1)
+}
+
+actor Counter {
+    state total = 0
+
+    receive {
+        Ping(n) -> {
+            g = | x: int | {
+                if x > 0 {
+                    return x
+                }
+            }
+            total = total + call(g, n)
+        }
+    }
+}
+
+main() {
+    println("checked, not run")
+}

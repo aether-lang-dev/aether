@@ -80,7 +80,7 @@ answer the parse depended on, payload hash and length) followed by the
 module's parsed AST. The header can be read with `head`:
 
 ```
-AEA 2
+AEA 3
 aether_version 0.741.0
 frontend 1167604807-508798
 module std.cryptography.md2

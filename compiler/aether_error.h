@@ -16,6 +16,7 @@ typedef enum {
     AETHER_ERR_REDEFINITION = 400,
     AETHER_ERR_INVALID_OPERAND = 500,
     AETHER_ERR_ACTOR_ERROR = 600,
+    AETHER_ERR_MISSING_RETURN = 700,     // control can reach the end of a function whose result is not void (#2684)
     // Warnings (W-series)
     AETHER_WARN_UNUSED_VAR = 1001,
     AETHER_WARN_UNREACHABLE = 1002,

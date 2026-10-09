@@ -880,9 +880,16 @@ ASTNode* optimize_dead_code(ASTNode* node) {
         }
     }
     
-    // Recursively optimize children
+    // Recursively optimize children. A child this pass removes leaves the
+    // list; a slot the parser left empty keeps its place, since a node may
+    // read its children by position: `for (;;)` is a loop with no init,
+    // condition or step, and closing those gaps made its body the init.
     int new_count = 0;
     for (int i = 0; i < node->child_count; i++) {
+        if (!node->children[i]) {
+            node->children[new_count++] = NULL;
+            continue;
+        }
         ASTNode* optimized = optimize_dead_code(node->children[i]);
         if (optimized) {
             node->children[new_count++] = optimized;

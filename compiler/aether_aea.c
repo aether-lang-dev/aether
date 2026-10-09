@@ -136,6 +136,8 @@ static int encode_node(Buf* b, const ASTNode* n, const char* source_file,
     buf_int(b, n->bit_lo);
     buf_int(b, n->bit_hi);
     buf_int(b, n->type_inferred);
+    buf_int(b, n->end_line);
+    buf_int(b, n->end_column);
     /* A string literal holding a NUL is value_len bytes (#2520). */
     buf_bytes(b, n->value, n->value ? (size_t)ast_literal_length(n) : 0);
     buf_int(b, n->value_len);
@@ -349,6 +351,8 @@ static ASTNode* decode_node(Cursor* c, int depth) {
     n->bit_lo = (int)cur_int(c);
     n->bit_hi = (int)cur_int(c);
     n->type_inferred = (int)cur_int(c);
+    n->end_line = (int)cur_int(c);
+    n->end_column = (int)cur_int(c);
     size_t value_bytes = 0;
     n->value = cur_bytes(c, &value_bytes);
     n->value_len = cur_count(c);

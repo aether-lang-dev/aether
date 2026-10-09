@@ -65,6 +65,8 @@ static const char* get_common_suggestion(AetherErrorCode code) {
             return "ensure operands have compatible types for this operation";
         case AETHER_ERR_ACTOR_ERROR:
             return "check actor definition syntax and state variables";
+        case AETHER_ERR_MISSING_RETURN:
+            return "return a value on every path that reaches the end of the function";
         case AETHER_WARN_UNUSED_VAR:
             return "prefix with '_' to suppress this warning";
         case AETHER_WARN_UNREACHABLE:

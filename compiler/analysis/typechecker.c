@@ -9,6 +9,7 @@
 #include "type_inference.h"
 #include "../aether_strmap.h"
 #include "actor_reply.h"
+#include "missing_return.h"
 
 /* Defined with typecheck_program below; infer_type needs it far earlier. */
 static ASTNode* aether_typecheck_program_node(void);
@@ -5552,6 +5553,11 @@ int typecheck_program(ASTNode* program) {
     }
 
     free(global_var_names);
+
+    /* #2684: a function whose result is not void must return on every path.
+     * Asked once the program type-checks: whether a `match` covers its type
+     * depends on the type the checker gave the value it matches on. */
+    if (error_count == 0) error_count += check_missing_returns(program);
 
     // #481: validate effect tags over the whole-program call graph.
     check_effect_tags(program);
