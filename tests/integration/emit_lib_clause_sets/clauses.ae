@@ -1,0 +1,41 @@
+// A library whose exports are written as clauses or bound to C symbols
+// (#2665, #2666).
+
+// Guards only.
+sign(n: int) when n < 0 -> int {
+    return 0 - 1
+}
+sign(n: int) -> int {
+    return 1
+}
+
+// A literal pattern first: the set's signature is (int) -> int.
+fact(0) -> int {
+    return 1
+}
+fact(n: int) -> int {
+    return n * fact(n - 1)
+}
+
+// Bound to a C symbol; its alias calls the symbol.
+@c_callback("cl_triple")
+triple(n: int) -> int {
+    return n * 3
+}
+
+// A clause set bound to a C symbol.
+@c_callback("cl_pick")
+pick(0) -> int {
+    return 100
+}
+pick(n: int) -> int {
+    return n + 1
+}
+
+export add(a: int, b: int) -> int {
+    return a + b
+}
+
+plain(n: int) -> int {
+    return n + 1
+}

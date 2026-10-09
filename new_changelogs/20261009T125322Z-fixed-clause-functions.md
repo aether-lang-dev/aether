@@ -51,3 +51,17 @@
   takes the symbol its first annotated clause binds, for its prototype, its
   dispatcher and the load-time registry, where a later annotated clause left
   the registry naming an undeclared symbol (#2664).
+- **`--emit=lib` exports a function written as several clauses once.** The
+  catalog (the JSON and the `aether_lib_meta` table) listed a clause set
+  once per clause, its alias stub was emitted once per clause, so the
+  library failed to build ("redefinition of 'aether_sign'"), and a set whose
+  first clause has a literal pattern (`fact(0)`) got no alias while the
+  catalog still named `aether_fact`, which the library did not define. A set
+  is one export with its set's signature (a parameter for each position, of
+  the type its clauses give it, and the set's return type), listed once in
+  the catalog and the header, and gets its `aether_<name>` alias whenever
+  that signature crosses the ABI (#2665).
+- **The `aether_<name>` stub of a `@c_callback("sym")` function calls
+  `sym`.** It called the Aether name, which no C function carries, so any
+  library exporting such a function failed to build with "implicit
+  declaration of function" (#2666).
