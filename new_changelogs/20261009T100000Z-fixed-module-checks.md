@@ -42,3 +42,13 @@
   function of that name. The file's own function, builder, constant or
   extern now wins, as a local item shadows a glob import in Rust; a
   selective import of the same name stays the E1000 clash (#2632).
+- **A glob import inside a module binds the imported module's
+  extern-backed names in a build.** The merge took only a glob's Aether
+  functions, so a module with `import std.string (*)` calling `length("xy")`
+  (the extern `string_length`) failed every build that imported it with
+  E0301, while `ae check` of the module and a plain program accepted it. It
+  now takes the externs named `<ns>_<name>` too, keeping #2632's rule. The
+  same renamer also turned a module's call through a local of a function's
+  name (a closure bound to `helper`) into a call of the module's `helper`;
+  a local now shadows it, as it does in `ae check` and in a plain program,
+  and a closure's own parameters shadow only inside that closure (#2637).

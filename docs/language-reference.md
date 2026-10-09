@@ -2628,7 +2628,9 @@ does `import std.fs (*)` and calls a glob-brought `clean(...)` resolves
 correctly whether it is the compilation entry point or is imported by
 another module. (The bare glob-brought names are rewritten to their
 canonical prefixed form when the module is merged into a consumer, the
-same way selective and qualified imports are.)
+same way selective and qualified imports are, extern-backed ones such as
+std.string's `length` included (#2637). A local or parameter of that name
+in the module is the local, not the import, as in any other file.)
 
 **A file's own names win over its globs.** A glob import binds only the
 names the importing file does not define itself. A function, builder,

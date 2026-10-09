@@ -21,7 +21,11 @@
 #      `ae check`;
 #   2. a program's own `extern abs` wins over mathy's;
 #   3. a module checked on its own (lib/numfmt) passes, and a program
-#      importing it runs its own `bytes` and libc's `abs`;
+#      importing it runs its own `bytes` and libc's `abs`, the glob's
+#      extern-backed `length` (#2637: the merge took only a glob's Aether
+#      functions, so a build failed E0301 where `ae check` passed), and in
+#      `pad` the closures bound to `bytes` and `trim` rather than the
+#      module's or the glob's functions of those names (#2637);
 #   4. `ae check std/number/module.ae` passes;
 #   5. a selective import of a name the file defines stays the E1000 clash.
 
@@ -68,8 +72,8 @@ if ! "$AE" check lib/numfmt/module.ae >"$TMP/mod_check.log" 2>&1; then
     echo "  [FAIL] ae check lib/numfmt/module.ae rejects the module's own names:"
     sed 's/^/        /' "$TMP/mod_check.log" | head -10
     fail=1
-elif runs main_mod.ae "7 B -14" "module's own names vs its globs"; then
-    echo "  [PASS] a module's own function and extern shadow its globs, checked alone and merged"
+elif runs main_mod.ae "7 B 2 -14 [<s>]" "module's own names vs its globs"; then
+    echo "  [PASS] a module binds its globs (extern-backed too) and keeps its own names and locals, checked alone and merged"
 fi
 
 # --- 4. std.number checks on its own -----------------------------------------
@@ -94,8 +98,8 @@ else
 fi
 
 if [ "$fail" -eq 0 ]; then
-    echo "PASS: glob_import_own_name (#2632)"
+    echo "PASS: glob_import_own_name (#2632, #2637)"
     exit 0
 fi
-echo "FAIL: glob_import_own_name (#2632)"
+echo "FAIL: glob_import_own_name (#2632, #2637)"
 exit 1

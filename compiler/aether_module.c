@@ -2408,6 +2408,12 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
     for (int i = 0; i < node->child_count; i++) {
         // Don't recurse into nested function definitions (they have their own scope)
         if (node->children[i] && node->children[i]->type == AST_FUNCTION_DEFINITION) continue;
+        /* Nor into a nested closure: its parameters and locals are its own
+         * scope, which the walkers add when they enter it (the AST_CLOSURE
+         * branches). Collected here they shadowed the enclosing function's
+         * whole body, so a call to the module's `item` beside a closure
+         * whose parameter is `item` was taken for the parameter (#2637). */
+        if (node->children[i] && node->children[i]->type == AST_CLOSURE) continue;
         collect_local_names(node->children[i], names, count, max);
     }
 }
@@ -2426,9 +2432,16 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
     if (node->type == AST_OFFSETOF) return;
 
     if (node->type == AST_FUNCTION_CALL && node->value) {
-        // Check if this call targets a function defined in the same module
-        int renamed = 0;
-        for (int i = 0; i < func_count; i++) {
+        // Check if this call targets a function defined in the same module.
+        /* #2637: a call through a local or parameter of that name (a
+         * closure bound to `helper`, say) is the local's, as the checker
+         * resolves it; renaming it to `<prefix>_helper` called the module's
+         * function instead, so the build failed or ran the wrong code where
+         * `ae check` of the module and a plain program ran the closure. It
+         * matters more now that a glob binds an imported module's whole
+         * extern surface (`trim`, `length`, ...) in a merged module. */
+        int renamed = name_in_list(node->value, local_names, local_count);
+        for (int i = 0; !renamed && i < func_count; i++) {
             if (strcmp(node->value, func_names[i]) == 0) {
                 char prefixed[256];
                 snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
@@ -3194,6 +3207,27 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                     !module_defines_own_name(mod_ast, sub_const_names[k])) {
                     sel_const_names[sel_const_count++] = sub_const_names[k];
                 }
+            }
+            /* #2637: and its extern-backed names, as the checker's glob binds
+             * them for a program or for M checked on its own: an extern
+             * `<sub_ns>_<name>` (std.string's `string_length`) is the glob's
+             * bare `<name>`. Only Aether functions were taken, so M's bare
+             * `length("xy")` stayed bare in every build and failed E0301
+             * while `ae check` of M passed. The rename below turns it into
+             * `<sub_ns>_<name>`, the extern itself. Same privacy and #2632
+             * rules as the functions above. */
+            size_t sub_ns_len = strlen(sub_ns);
+            for (int j = 0; j < sub_mod->ast->child_count &&
+                            sel_func_count < AETHER_MODULE_MAX_DECLS; j++) {
+                ASTNode* ext = unwrap_export(sub_mod->ast->children[j]);
+                if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->value) continue;
+                if (strncmp(ext->value, sub_ns, sub_ns_len) != 0 ||
+                    ext->value[sub_ns_len] != '_') continue;
+                const char* tail = ext->value + sub_ns_len + 1;
+                if (!*tail || tail[0] == '_') continue;
+                if (module_defines_own_name(mod_ast, tail)) continue;
+                if (name_in_list(tail, sel_func_names, sel_func_count)) continue;
+                sel_func_names[sel_func_count++] = tail;
             }
         } else {
             for (int k = 0; k < imp->child_count; k++) {
