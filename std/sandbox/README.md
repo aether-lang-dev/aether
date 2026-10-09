@@ -46,15 +46,20 @@ after:     PATH visible = true
 | `grant_fs(path)` | both of those, plus directory operations such as `os.chdir` |
 | `grant_exec(cmd)` | running commands whose command line matches |
 | `grant_env(name)` | reading environment variables |
-| `grant_tcp(host)` | outbound TCP to matching hosts (ports are not checked) |
+| `grant_tcp(host, port)` | outbound TCP to matching hosts on `port`, or any port when `port` is 0 |
 | `grant_tcp_listen()` | listening for and accepting TCP connections |
-| `grant_udp(host)` | UDP with matching hosts |
+| `grant_udp(host, port)` | UDP with matching hosts on `port` (0 = any) |
 | `grant_native(path)` | loading native libraries (`dlopen`) |
 | `grant_all()` | everything |
 
 A pattern is `"*"` (anything), a prefix ending in `*` (`"/etc/*"`, `"echo *"`),
 a suffix starting with `*` (`"*.example.com"`), or an exact string. A grant
 list with no grants denies everything.
+
+`sandbox.new` returns a `sandbox.Grants`, an opaque type: it can be passed to
+`enforce`, to `free`, and to the `contrib/host/<lang>` `run_sandboxed` calls, but
+it is not a `std.list`, so code holding one cannot add entries to it. The
+grants go in through the `grant_*` calls in the trailing block.
 
 Nested `enforce` blocks intersect: an operation is allowed only when every
 enclosing grant list allows it, so an inner block can narrow its parent's

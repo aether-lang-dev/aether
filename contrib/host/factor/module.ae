@@ -21,16 +21,18 @@
 //
 // The VM is persistent across calls, so set/eval/get share state — a live
 // k-v map handed in and read back, same process.
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (factor_run_sandboxed, factor_run_sandboxed_with_map,
          factor_run, factor_eval,
          factor_set, factor_get, factor_init, factor_finalize)
 
-extern factor_run_sandboxed(perms: ptr, code: string) -> int
+extern factor_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Factor script reads/writes the Aether-owned
 // shared map live via FFI words aether-map-get / aether-map-put, so keys the
 // script discovers at runtime come back too. Enumerate with map.keys(map).
-extern factor_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern factor_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern factor_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured output as a
 // string ("" on failure). State persists across calls. The string is a

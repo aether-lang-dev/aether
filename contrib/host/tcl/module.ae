@@ -13,10 +13,12 @@
 //       grant_fs_read("/etc/*")
 //   }
 //   tcl.run_sandboxed(worker, "puts $::env(HOME)")
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (tcl_run_sandboxed, tcl_run, tcl_init, tcl_finalize)
 
-extern tcl_run_sandboxed(perms: ptr, code: string) -> int
+extern tcl_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 extern tcl_run(code: string) -> int
 extern tcl_init() -> int
 extern tcl_finalize()

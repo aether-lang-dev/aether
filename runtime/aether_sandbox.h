@@ -10,6 +10,8 @@
 #ifndef AETHER_SANDBOX_H
 #define AETHER_SANDBOX_H
 
+#include "aether_sandbox_match.h"   /* aether_net_resource, the shared matcher */
+
 #ifdef AETHER_HAS_SANDBOX
 
 // Permission check callback type.
@@ -38,8 +40,10 @@ static inline int aether_sandbox_check(const char* category, const char* resourc
 
 #else
 
-// No sandbox compiled in — always allow, zero overhead
-#define aether_sandbox_check(category, resource) 1
+// No sandbox compiled in — always allow. The arguments are evaluated for
+// their side effects only, so a resource built in a local buffer
+// (aether_net_resource) does not leave that buffer unused.
+#define aether_sandbox_check(category, resource) ((void)(category), (void)(resource), 1)
 
 #endif // AETHER_HAS_SANDBOX
 

@@ -18,6 +18,8 @@ import std.os
 import std.fs
 import std.list
 import std.string
+import std.tcp
+import std.audit
 
 extern exit(code: int)
 
@@ -26,7 +28,7 @@ fn same(a: string, b: string) -> int { return string.equals(a, b) }
 // 1 when grant number i in `perms` is the (category, pattern) pair given.
 // Code running inside a sandbox that has been handed the grant list, the way
 // any ptr can reach a callee, tries to grant itself more.
-fn widen(perms: ptr) {
+fn widen(perms: sandbox.Grants) {
     sandbox.grant_env(perms, "AE_SANDBOX_TEST_SECRET")
 }
 
@@ -57,22 +59,62 @@ main() {
                 grant_fs_write("/w/*")
                 grant_exec("echo *")
                 grant_env("HOME")
-                grant_tcp("*.corp")
+                grant_tcp("*.corp", 0)
                 grant_tcp_listen()
-                grant_udp("dns.local")
+                grant_udp("dns.local", 0)
                 grant_native("/opt/lib/*")
                 grant_all()
             }
-            spec.assert_eq(list.size(g), 18, "nine grants, two entries each")
-            spec.assert_true(has_grant(g, 0, "fs_read", "/r/*"), "grant_fs_read")
-            spec.assert_true(has_grant(g, 1, "fs_write", "/w/*"), "grant_fs_write")
-            spec.assert_true(has_grant(g, 2, "exec", "echo *"), "grant_exec")
-            spec.assert_true(has_grant(g, 3, "env", "HOME"), "grant_env")
-            spec.assert_true(has_grant(g, 4, "tcp", "*.corp"), "grant_tcp")
-            spec.assert_true(has_grant(g, 5, "tcp_listen", "*"), "grant_tcp_listen")
-            spec.assert_true(has_grant(g, 6, "udp", "dns.local"), "grant_udp")
-            spec.assert_true(has_grant(g, 7, "native", "/opt/lib/*"), "grant_native")
-            spec.assert_true(has_grant(g, 8, "*", "*"), "grant_all")
+            spec.assert_eq(list.size(g as ptr), 18, "nine grants, two entries each")
+            spec.assert_true(has_grant(g as ptr, 0, "fs_read", "/r/*"), "grant_fs_read")
+            spec.assert_true(has_grant(g as ptr, 1, "fs_write", "/w/*"), "grant_fs_write")
+            spec.assert_true(has_grant(g as ptr, 2, "exec", "echo *"), "grant_exec")
+            spec.assert_true(has_grant(g as ptr, 3, "env", "HOME"), "grant_env")
+            spec.assert_true(has_grant(g as ptr, 4, "tcp", "*.corp"), "grant_tcp")
+            spec.assert_true(has_grant(g as ptr, 5, "tcp_listen", "*"), "grant_tcp_listen")
+            spec.assert_true(has_grant(g as ptr, 6, "udp", "dns.local"), "grant_udp")
+            spec.assert_true(has_grant(g as ptr, 7, "native", "/opt/lib/*"), "grant_native")
+            spec.assert_true(has_grant(g as ptr, 8, "*", "*"), "grant_all")
+            sandbox.free(g)
+        }
+
+        spec.it("grant_tcp and grant_udp name a port, or any port with 0") callback {
+            g = sandbox.new("ports") {
+                grant_tcp("db.internal", 5432)
+                grant_tcp("*.corp", 0)
+                grant_udp("::1", 53)
+            }
+            spec.assert_true(has_grant(g as ptr, 0, "tcp", "db.internal:5432"), "host and port")
+            spec.assert_true(has_grant(g as ptr, 1, "tcp", "*.corp"), "port 0 is any port")
+            spec.assert_true(has_grant(g as ptr, 2, "udp", "[::1]:53"), "an IPv6 host is bracketed")
+            sandbox.free(g)
+        }
+
+        spec.it("checks the port a connection goes to") callback {
+            // Nothing listens on these ports: the sandbox decision is
+            // recorded (std.audit) before the connect is attempted.
+            g = sandbox.new("one-port") {
+                grant_tcp("127.0.0.1", 47911)
+            }
+            audit.clear()
+            sandbox.enforce(g) callback {
+                _a, _ea = tcp.connect("127.0.0.1", 47911)
+                _b, _eb = tcp.connect("127.0.0.1", 47912)
+            }
+            granted = -1
+            other = -1
+            n = audit.count()
+            i = 0
+            while i < n {
+                cat, res, allowed = audit.entry(i)
+                if string.equals(cat, "tcp") == 1 {
+                    if string.equals(res, "127.0.0.1:47911") == 1 { granted = allowed }
+                    if string.equals(res, "127.0.0.1:47912") == 1 { other = allowed }
+                }
+                i = i + 1
+            }
+            spec.assert_eq(granted, 1, "the granted port is allowed")
+            spec.assert_eq(other, 0, "another port on the same host is refused")
             sandbox.free(g)
         }
 
@@ -80,10 +122,10 @@ main() {
             g = sandbox.new("fs") {
                 grant_fs("/data/*")
             }
-            spec.assert_eq(list.size(g), 6, "three grants")
-            spec.assert_true(has_grant(g, 0, "fs_read", "/data/*"), "read")
-            spec.assert_true(has_grant(g, 1, "fs_write", "/data/*"), "write")
-            spec.assert_true(has_grant(g, 2, "fs", "/data/*"), "directory operations")
+            spec.assert_eq(list.size(g as ptr), 6, "three grants")
+            spec.assert_true(has_grant(g as ptr, 0, "fs_read", "/data/*"), "read")
+            spec.assert_true(has_grant(g as ptr, 1, "fs_write", "/data/*"), "write")
+            spec.assert_true(has_grant(g as ptr, 2, "fs", "/data/*"), "directory operations")
             sandbox.free(g)
         }
     }
@@ -209,7 +251,7 @@ main() {
             }
             sandbox.enforce(g) | ctx: ptr | {
                 spec.assert_true(ctx == null, "the block's parameter is null")
-                sandbox.grant_env(ctx, "AE_SANDBOX_TEST_SECRET")
+                sandbox.grant_env(ctx as sandbox.Grants, "AE_SANDBOX_TEST_SECRET")
                 spec.assert_true(os.getenv("AE_SANDBOX_TEST_SECRET") == null, "granting through it does nothing")
             }
             sandbox.free(g)

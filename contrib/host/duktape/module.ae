@@ -16,14 +16,16 @@
 // `contrib.host.js` is kept as a back-compat alias module that
 // re-exports these functions — new code should import this
 // `contrib.host.duktape` module directly.
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     duktape_run_sandboxed, duktape_run_sandboxed_with_map,
     duktape_run, duktape_init, duktape_finalize
 )
 
-extern duktape_run_sandboxed(perms: ptr, code: string) -> int
-extern duktape_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern duktape_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+extern duktape_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern duktape_run(code: string) -> int
 extern duktape_init() -> int
 extern duktape_finalize()

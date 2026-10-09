@@ -51,7 +51,7 @@ main() {
     worker = sandbox.new("db-worker") {
         grant_env("HOME")
         grant_env("USER")
-        grant_tcp("*.internal") // suffix: any *.internal host
+        grant_tcp("*.internal", 0) // suffix: any *.internal host, any port
         grant_fs_read("/etc/*") // prefix: any file in /etc/
         grant_fs_write("/tmp/worker/*") // prefix: write only under /tmp/worker/
         grant_exec("echo *") // prefix: echo anything
@@ -59,7 +59,7 @@ main() {
 
     plugin = sandbox.new("untrusted-plugin") {
         grant_env("TERM")
-        grant_tcp("api.example.com") // exact: one host only
+        grant_tcp("api.example.com", 443) // exact: one host, one port
     }
 
     app = sandbox.new("app") {

@@ -158,7 +158,7 @@ diagnostic.
 
 ```aether,fragment
 handler = sandbox.new("payment-handler") {
-    grant_tcp("payments.example.com")
+    grant_tcp("payments.example.com", 0)
 }
 sandbox.enforce(handler) callback {
     seal except req, res, payment_client, logger

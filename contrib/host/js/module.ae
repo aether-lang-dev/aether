@@ -16,14 +16,16 @@
 // This shim has NO C-side artifacts of its own. The `@extern("...")`
 // annotations bind the Aether-side `js_*` names to the renamed C
 // symbols (`duktape_*`) in libaether_host_duktape.a.
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     js_run_sandboxed, js_run_sandboxed_with_map,
     js_run, js_init, js_finalize
 )
 
-@extern("duktape_run_sandboxed") js_run_sandboxed(perms: ptr, code: string) -> int
-@extern("duktape_run_sandboxed_with_map") js_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+@extern("duktape_run_sandboxed") js_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+@extern("duktape_run_sandboxed_with_map") js_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 @extern("duktape_run") js_run(code: string) -> int
 @extern("duktape_init") js_init() -> int
 @extern("duktape_finalize") js_finalize()

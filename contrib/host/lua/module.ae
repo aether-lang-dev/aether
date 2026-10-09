@@ -36,6 +36,8 @@
 //             lua.push_str(vm, "OK")
 //             return 1
 //         }
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     lua_run_sandboxed, lua_run_sandboxed_with_map, lua_run,
@@ -66,8 +68,8 @@ const LUA_TERR   = 5
 const LUA_TOTHER = 6
 
 // --- Tier 1: fire-and-forget -----------------------------------------------
-extern lua_run_sandboxed(perms: ptr, code: string) -> int
-extern lua_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern lua_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+extern lua_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern lua_run(code: string) -> int
 extern lua_init() -> int
 extern lua_finalize()

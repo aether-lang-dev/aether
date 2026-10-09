@@ -46,7 +46,7 @@ main() {
     worker = sandbox.new("my-java-app") {
         java.grant_jvm_runtime()         // JVM bring-up (29 grants)
         grant_fs_read("/app/data/*")      // application-specific
-        grant_tcp("api.example.com")
+        grant_tcp("api.example.com", 443)
     }
     spawn_sandboxed(worker, "java",
         "--enable-native-access=ALL-UNNAMED",

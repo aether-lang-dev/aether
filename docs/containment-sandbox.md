@@ -49,8 +49,8 @@ exceed its parent's permissions, it can only narrow them.
 
 ```
 outermost: grant("*")              → everything allowed
-  child:   grant_tcp("*.corp")  → only TCP to *.corp hosts
-    inner:  grant_tcp("db.corp") → only TCP to db.corp
+  child:   grant_tcp("*.corp", 0)  → only TCP to *.corp hosts
+    inner:  grant_tcp("db.corp", 0) → only TCP to db.corp
 ```
 
 ### Aether implementation
@@ -209,12 +209,12 @@ Sandboxes nest, and each level can only narrow permissions:
 
 ```aether,fragment
 outer = sandbox.new("outer") {
-    grant_tcp("*")           // any TCP
+    grant_tcp("*", 0)           // any TCP
     grant_fs_read("*")       // any file read
 }
 
 inner = sandbox.new("inner") {
-    grant_tcp("db.corp")     // narrowed to one host
+    grant_tcp("db.corp", 0)     // narrowed to one host
     grant_env("HOME")        // outer has no env grant, so this adds nothing
 }
 
@@ -242,7 +242,7 @@ the *next* `enforce`, not the running one.
 
 `grant_all()` adds the wildcard category and pattern `("*", "*")`, which
 matches every check. Within a category, a pattern of `"*"` matches any
-resource (`grant_tcp("*")` is any host), `"/etc/*"` a prefix, and
+resource (`grant_tcp("*", 0)` is any host on any port), `"/etc/*"` a prefix, and
 `"*.example.com"` a suffix.
 
 ## Mapping to your Java SecurityPolicyDemo
@@ -252,7 +252,7 @@ resource (`grant_tcp("*")` is any host), `"/etc/*"` a prefix, and
 | `new SecureSystem() {{ ... }}` | `sandbox.new("name") { ... }` |
 | `classLoader(() -> { ... })` | a nested `sandbox.enforce(child) { ... }` |
 | `classPathElement("x.jar")` | Not applicable (Aether is single-binary) |
-| `grant(new SocketPermission(...))` | `grant_tcp("host")` |
+| `grant(new SocketPermission(...))` | `grant_tcp("host", port)` |
 | `component("Bear")` | `sandbox.enforce(perms) { bear_code() }` |
 | SecurityManager check | the checker `sandbox.enforce` installs, consulted by std |
 | ClassLoader isolation | `seal except` on the enforced block |
@@ -264,9 +264,9 @@ resource (`grant_tcp("*")` is any host), `"/etc/*"` a prefix, and
 | Container image | `sandbox.new("name") { grants... }` |
 | Volume mount (read-only) | `grant_fs_read("/path")` |
 | Volume mount (read-write) | `grant_fs_write("/path")` |
-| Port mapping | `grant_tcp("host")` (hosts only; ports are not checked) |
+| Port mapping | `grant_tcp("host", port)` (0 = any port) |
 | `--cap-drop ALL` | No `grant_all()` deny by default |
-| `--cap-add NET_RAW` | `grant_tcp("*")` |
+| `--cap-add NET_RAW` | `grant_tcp("*", 0)` |
 | Entrypoint/CMD | `sandbox.enforce(perms) { code }` |
 | Namespace isolation | `seal except` on the enforced block |
 
@@ -324,7 +324,7 @@ classify(req: Request) -> int { ... }            // must touch no filesystem
 
 | Pattern | Matches | Example |
 |---------|---------|---------|
-| `"*"` | Anything | `grant_tcp("*")` |
+| `"*"` | Anything | `grant_tcp("*", 0)` |
 | `"/etc/*"` | Prefix match | `/etc/hostname`, `/etc/app/config.yaml` |
 | `"*.example.com"` | Suffix match | `api.example.com`, `db.example.com` |
 | `"echo *"` | Prefix match | `echo hello`, `echo goodbye` |
@@ -419,9 +419,10 @@ should have both.
   needed. There is no way to grant broadly then carve exceptions.
   This is intentional for the initial release.
 
-- **No per-connection port filtering.** `grant_tcp("host")` allows
-  any port on that host. Port-level grants would require extending
-  the pattern format.
+- **Ports are checked.**
+  `grant_tcp("db.internal", 5432)` allows that port only; `0` allows any
+  port. The check names the resource `host:port` (`[v6]:port` for IPv6),
+  in std.net and in the `LD_PRELOAD` layer's `connect()` alike.
 
 - **Application-level only.** See "Cross-process containment" below
   for extending enforcement to child processes.
@@ -593,7 +594,7 @@ Review grants like you'd review Docker capabilities:
 worker = sandbox.new("worker") {
     grant_env("DATABASE_URL")       // needs DB connection string
     grant_fs_read("/app/config/*")  // needs config files
-    grant_tcp("db.internal")        // talks to database
+    grant_tcp("db.internal", 0)        // talks to database
     // Nothing else, deny by default
 }
 ```
@@ -792,7 +793,7 @@ compile_sandbox = sandbox.new("compile") {
 
 deploy_sandbox = sandbox.new("deploy") {
     grant_fs_read("build/bin/*")
-    grant_tcp("deploy.internal")
+    grant_tcp("deploy.internal", 0)
     grant_exec("/usr/bin/bash")
     grant_exec("/usr/bin/scp")
     grant_env("DEPLOY_TOKEN")
@@ -875,7 +876,7 @@ grant list, the child process has no idea.
 Aether process                     Python process
 ─────────────                      ──────────────
 worker = sandbox.new("worker") {   import socket
-    grant_tcp("api.example.com")   s.connect(("api.example.com", 443))  → OK
+    grant_tcp("api.example.com", 443)   s.connect(("api.example.com", 443))  → OK
     grant_fs_read("/app/data/*")   open("/app/data/input.csv")          → OK
     grant_env("DATABASE_URL")      os.getenv("DATABASE_URL")            → OK
 }                                  s.connect(("evil.com", 80))          → denied
@@ -911,7 +912,7 @@ spawn_sandboxed(worker,            os.getenv("AWS_SECRET_KEY")          → deni
 | gVisor | No, full kernel reimpl, massive dependency | Yes | No |
 
 LD_PRELOAD is the only approach that preserves:
-- **Same grant DSL**, `grant_tcp("*.example.com")` works identically
+- **Same grant DSL**, `grant_tcp("*.example.com", 0)` works identically
 - **Same glob patterns**, prefix, suffix, wildcard, exact
 - **Same invisibility**, the child can't tell it's sandboxed
 - **Same nesting**, parent and child share a grant stack via shared memory
@@ -929,8 +930,8 @@ This technique is proven in production:
 
 ```aether,fragment
 worker = sandbox.new("python-worker") {
-    grant_tcp("*.internal")
-    grant_tcp("api.example.com")
+    grant_tcp("*.internal", 0)
+    grant_tcp("api.example.com", 443)
     grant_fs_read("/app/data/*")
     grant_fs_write("/tmp/output/*")
     grant_env("DATABASE_URL")
@@ -1048,7 +1049,7 @@ unveil(NULL, NULL);                // lock it down, no more unveil calls
 worker = sandbox.new("worker") {
     grant_fs_read("/etc/*")
     grant_fs_write("/tmp/*")
-    grant_tcp("*")
+    grant_tcp("*", 0)
 }
 ```
 
@@ -1082,7 +1083,7 @@ deno run --allow-net=api.example.com --allow-read=/tmp --allow-env=HOME app.ts
 ```aether,fragment
 // Aether equivalent
 app = sandbox.new("app") {
-    grant_tcp("api.example.com")
+    grant_tcp("api.example.com", 443)
     grant_fs_read("/tmp/*")
     grant_env("HOME")
 }
@@ -1100,7 +1101,7 @@ app = sandbox.new("app") {
 
 **Inspiration:** Deno proved that per-resource grants work in practice
 for real applications. The `--allow-net=host` model maps directly to
-`grant_tcp("host")`. Deno's mistake was CLI flags, policy should be
+`grant_tcp("host", port)`. Deno's mistake was CLI flags, policy should be
 code, not command-line arguments. Aether's builder DSL fixes this.
 
 **Inspiration:** Deno's deny-by-default. Before Deno, Node.js had no
