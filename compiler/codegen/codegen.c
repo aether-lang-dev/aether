@@ -8538,7 +8538,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * so they must follow the user fn definitions). */
     discover_bare_fn_adapters(gen);
     compute_closure_args_borrowed(gen);   /* #2499: needs closures and adapters */
+    discover_fn_values(gen);              /* #2586 */
     emit_bare_fn_adapter_decls(gen);
+    emit_fn_value_adapter_decls(gen);
 
     if (gen->closure_count > 0) {
         print_line(gen, "// Closure declarations");
@@ -8546,6 +8548,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     }
 
     emit_bare_fn_adapters(gen);
+    emit_fn_value_adapters(gen);          /* #2586 */
 
     // Pre-pass: build request->reply type map from actor receive handlers.
     // This lets the ? operator know the reply message type at codegen time.

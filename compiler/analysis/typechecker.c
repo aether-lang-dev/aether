@@ -10545,6 +10545,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (symbol && !symbol->is_function && symbol->type &&
         symbol->type->kind == TYPE_FUNCTION && symbol->type->is_fnptr &&
         call->value) {
+        /* #2586: codegen's ownership analyses tell such a call from a
+         * direct one without its function's locals registered. */
+        if (!call->annotation) call->annotation = strdup("fnptr_local_call");
         for (int i = 0; i < call->child_count; i++) {
             typecheck_expression(call->children[i], table);
         }

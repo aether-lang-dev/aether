@@ -277,9 +277,12 @@ typedef struct ArgDrainWrap {
  * Soundness: we only ADD a drain where non-escape is proven; anything
  * unprovable stays "escapes". False-escape = leak (safe); false-non-escape
  * = UAF (never introduced). */
+static int g_fnptr_drain = 0;   /* #2586: the call goes through a typed fn pointer */
+
 static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode* closure,
                              int ai, int first_arg, const ArgDrainWrap* w) {
     if (!func_name) {
+        if (!closure && g_fnptr_drain) return fnptr_args_borrowed() ? 0 : -1;
         if (!closure) return gen->closure_args_borrowed ? 0 : -1;
         int pi = ai - first_arg;
         /* A closure keeps a `string` parameter only through a reference of
@@ -1385,6 +1388,17 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
                                       const char* local_name, ASTNode* call,
                                       int discarded) {
     const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    /* #2586: an owned string argument is freed after the call, under the
+     * fn-value convention (fnptr_args_borrowed). */
+    ArgDrainWrap ad;
+    ad.ret_ct = ret_c;
+    ad.ret_type = NULL;
+    ad.have_value = strcmp(ret_c, "void") != 0;
+    ad.discarded = discarded;
+    g_fnptr_drain = 1;
+    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad);
+    g_fnptr_drain = 0;
+    arg_drain_open(gen, call, &ad);
     int narrow = !discarded && fnptr_returns_bool(sig);
     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
     fprintf(gen->output, "((%s(*)(", ret_c);
@@ -1397,6 +1411,7 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     generate_fnptr_call_args(gen, sig, call);
     fprintf(gen->output, ")");
     if (narrow) fprintf(gen->output, "))");
+    arg_drain_close(gen, call, &ad);
 }
 
 /* The declaration of `name` inside `n`: a parameter, a local or a closure
@@ -1436,6 +1451,22 @@ static Type* fnptr_field_signature(CodeGenerator* gen, const char* recv, const c
         }
     }
     return NULL;
+}
+
+/* #2586: is `call` a call through a typed fn pointer (a local, a global or
+ * a struct field) that returns a string? Its result is the caller's, under
+ * the fn-value convention (discover_fn_values). */
+int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
+        !call->node_type || call->node_type->kind != TYPE_STRING) return 0;
+    /* Decided from the tree alone, as the analyses that ask (a function's
+     * returns judged from outside its body) run before its locals are
+     * registered: the checker stamps a call through a typed fn-pointer
+     * local or field. */
+    if (call->annotation && (strcmp(call->annotation, "fnptr_local_call") == 0 ||
+                             strncmp(call->annotation, "fnfield_", 8) == 0)) return 1;
+    Type* sig = lookup_fnptr_global(gen, call->value);
+    return sig && sig->kind == TYPE_FUNCTION && sig->is_fnptr;
 }
 
 /* Translate an Aether integer-literal text into a form C accepts.
@@ -5601,6 +5632,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     break;
                 }
             }
+            /* #2586: a named function used as a typed fn pointer value
+             * (bare, or under `as fn(...)`) hands its string result over
+             * owned, through its adapter (fnval_string_adapter). After the
+             * closure lowering and the @c_callback symbol above. */
+            {
+                const char* adapter = bare_top_level_fn(gen, expr)
+                                      ? fnval_string_adapter(gen, expr->value) : NULL;
+                if (adapter) {
+                    fprintf(gen->output, "%s", adapter);
+                    break;
+                }
+            }
             /* A function's address under `as fn(...)`: the definition's C
              * spelling, which safe_c_name mangles away from libc symbols.
              * After the @c_callback lookup, whose bound symbol is the
@@ -6442,6 +6485,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     const char* recv_c = safe_value_name(recv);
                     const char* field_c = safe_value_name(dot + 1);
                     Type* field_sig = fnptr_field_signature(gen, recv, dot + 1);
+                    /* #2586: owned string arguments freed after the call. */
+                    ArgDrainWrap fad;
+                    fad.ret_ct = field_sig && field_sig->return_type
+                                 ? get_c_type(field_sig->return_type) : NULL;
+                    fad.ret_type = NULL;
+                    fad.have_value = fad.ret_ct && strcmp(fad.ret_ct, "void") != 0;
+                    fad.discarded = gen->discard_call_node == expr;
+                    g_fnptr_drain = 1;
+                    arg_drain_select(gen, expr, 0, NULL, NULL,
+                                     !fad.have_value || fad.discarded, &fad);
+                    g_fnptr_drain = 0;
+                    arg_drain_open(gen, expr, &fad);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
                     fprintf(gen->output, "(%s%s%s)(",
@@ -6449,6 +6504,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_fnptr_call_args(gen, field_sig, expr);
                     fprintf(gen->output, ")");
                     if (narrow) fprintf(gen->output, "))");
+                    arg_drain_close(gen, expr, &fad);
                     break;
                 }
             }

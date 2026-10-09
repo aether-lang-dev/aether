@@ -1,0 +1,160 @@
+// Regression (#2586): a string returned through a typed fn pointer
+// (`fn(ptr) -> string`) is the caller's.
+//
+// A `string` function that returns a field returns a copy of its own (the
+// uniform-heap return), and a direct caller frees it. A call through a typed
+// fn pointer could not tell which function was behind it and took the result
+// as borrowed, so ae3d's component copy, `setter(dst, getter(src))`, leaked
+// one string per call. Now a named function used as such a value hands its
+// result over owned (as it is when it returns owned strings, copied when it
+// returns a literal or a borrow), a call through the pointer frees it after
+// use, and an owned string argument to such a call is freed after the call.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Thing {
+    name: string
+    n: int
+}
+
+struct Field {
+    get_text: fn(ptr) -> string
+    set_text: fn(ptr, string)
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+text(value: string) -> string {
+    if value == null {
+        return ""
+    }
+    return value
+}
+
+set_owned(previous: string, value: string) -> string {
+    fresh = string.copy(value)
+    if previous != null {
+        string.free(previous)
+    }
+    return fresh
+}
+
+// A field, returned as a copy of its own.
+name_of(p: ptr) -> string {
+    return (p as *Thing).name
+}
+
+// A fresh string.
+loud_name(p: ptr) -> string {
+    return string.concat((p as *Thing).name, "!")
+}
+
+// The caller's own pointer or a literal, handed back as it came.
+plain_name(p: ptr) -> string {
+    return text((p as *Thing).name)
+}
+
+set_name(p: ptr, value: string) {
+    t = p as *Thing
+    t.name = set_owned(t.name, value)
+}
+
+new_thing(w: string) -> *Thing {
+    t = heap.new(Thing)
+    t.name = string.concat(w, "#")
+    return t
+}
+
+new_field(g: fn(ptr) -> string, s: fn(ptr, string)) -> *Field {
+    f = heap.new(Field)
+    f.get_text = g
+    f.set_text = s
+    return f
+}
+
+// ae3d's copy_field: the getter's string goes straight to the setter.
+copy_field(dst: ptr, src: ptr, f: *Field) {
+    getter = f.get_text
+    setter = f.set_text
+    if getter != null && setter != null {
+        setter(dst, getter(src))
+    }
+}
+
+// ae3d's get_text: a function that returns what the pointer returned.
+get_text(t: ptr, f: *Field) -> string {
+    if t == null || f.get_text == null {
+        return ""
+    }
+    getter = f.get_text
+    return getter(t)
+}
+
+round(fields: ptr, a: *Thing, b: *Thing) -> int {
+    total = 0
+    k = 0
+    while k < 3 {
+        f = list_field(fields, k)
+        copy_field(b as ptr, a as ptr, f)
+        total = total + string.length(get_text(b as ptr, f))
+        // A field call: the struct's fn-pointer member called directly.
+        total = total + string.length(f.get_text(a as ptr))
+        k = k + 1
+    }
+    // A function name passed for a typed fn-pointer parameter.
+    total = total + length_through(loud_name, a as ptr)
+    return total
+}
+
+length_through(g: fn(ptr) -> string, p: ptr) -> int {
+    return string.length(g(p))
+}
+
+list_field(fields: ptr, k: int) -> *Field {
+    return list.get_raw(fields, k) as *Field
+}
+
+main() {
+    println("=== test_fnptr_string_results ===")
+    a = new_thing("w")
+    b = new_thing("v")
+    fields = list.new()
+    list.add(fields, new_field(name_of, set_name) as ptr)
+    list.add(fields, new_field(loud_name, set_name) as ptr)
+    list.add(fields, new_field(plain_name, set_name) as ptr)
+    // Per field: b after the copy, read back, then a read directly. The
+    // loud getter adds "!" to whatever it reads: "w#!" copied into b reads
+    // back as "w#!!". The last field copies plain_name's "w#".
+    check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3, "a round adds up")
+    check(b.name == "w#", "the copied field holds its own string")
+    i = 0
+    while i < 20 {
+        round(fields, a, b)
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(fields, a, b)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_fnptr_string_results passed ===")
+}

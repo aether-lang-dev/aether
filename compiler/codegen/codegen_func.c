@@ -417,6 +417,132 @@ static ASTNode* emit_bare_fn_adapter_signature(CodeGenerator* gen,
     return fdef;
 }
 
+/* #2586: named functions used as values (a bare name that is not a call),
+ * found by a walk over the whole program before any body is emitted.
+ *
+ * A function pointer typed `fn(...) -> string` follows one convention, as
+ * a closure does (#2054): the string a call through it returns is the
+ * caller's, freed by the caller. The caller cannot tell which function is
+ * behind the pointer, and since 0.792 a `string` function returning a field
+ * returns a copy of its own, so a borrowed reading leaked one string per
+ * call (ae3d's component getters, called as `setter(dst, getter(src))`).
+ * A named function used as such a value is taken through an adapter that
+ * hands its result over owned: as it is when the function returns owned
+ * strings, copied when it returns a literal or a borrow.
+ *
+ * The arguments follow the closure convention too: a call through such a
+ * pointer frees an owned string argument after the call when no function
+ * used as a value keeps one of its `string` parameters as it came (a named
+ * function keeps one only through a reference of its own, unless it stores
+ * it where nothing releases it). A pointer made from a raw `ptr` points at
+ * C the compiler never saw: its function must return a string the caller
+ * may free (docs/c-interop.md). */
+static char** g_fnval_names = NULL;
+static int g_fnval_count = 0;
+static int g_fnval_cap = 0;
+static int g_fnptr_args_borrowed = 0;
+
+static ASTNode* fnval_definition(CodeGenerator* gen, const char* name) {
+    ASTNode* fd = find_function_definition_by_name(gen->program, name);
+    return fd && fd->type == AST_FUNCTION_DEFINITION ? fd : NULL;
+}
+
+static void fnval_add(const char* name) {
+    for (int i = 0; i < g_fnval_count; i++)
+        if (strcmp(g_fnval_names[i], name) == 0) return;
+    if (g_fnval_count == g_fnval_cap) {
+        g_fnval_cap = g_fnval_cap ? g_fnval_cap * 2 : 16;
+        g_fnval_names = (char**)aether_xrealloc(g_fnval_names, sizeof(char*) * (size_t)g_fnval_cap);
+    }
+    g_fnval_names[g_fnval_count++] = strdup(name);
+}
+
+static void discover_fn_values_walk(CodeGenerator* gen, ASTNode* n) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value && fnval_definition(gen, n->value))
+        fnval_add(n->value);
+    for (int i = 0; i < n->child_count; i++) discover_fn_values_walk(gen, n->children[i]);
+}
+
+void discover_fn_values(CodeGenerator* gen) {
+    for (int i = 0; i < g_fnval_count; i++) free(g_fnval_names[i]);
+    g_fnval_count = 0;
+    g_fnptr_args_borrowed = 1;
+    if (!gen || !gen->program) return;
+    discover_fn_values_walk(gen, gen->program);
+    for (int i = 0; i < g_fnval_count && g_fnptr_args_borrowed; i++) {
+        ASTNode* fd = fnval_definition(gen, g_fnval_names[i]);
+        for (int k = 0; fd && k < fd->child_count; k++) {
+            if (callee_param_is_string(gen, g_fnval_names[i], k) &&
+                callee_keeps_string_arg(gen, g_fnval_names[i], k, 0)) {
+                g_fnptr_args_borrowed = 0;
+                break;
+            }
+        }
+    }
+}
+
+int fnptr_args_borrowed(void) {
+    return g_fnptr_args_borrowed;
+}
+
+/* The adapter a bare `name` decays to, or NULL when it decays to the
+ * function itself (it returns no string, or is not a function used as a
+ * value). */
+const char* fnval_string_adapter(CodeGenerator* gen, const char* name) {
+    if (!name) return NULL;
+    for (int i = 0; i < g_fnval_count; i++) {
+        if (strcmp(g_fnval_names[i], name) != 0) continue;
+        ASTNode* fd = fnval_definition(gen, name);
+        if (!fd || !fd->node_type || fd->node_type->kind != TYPE_STRING) return NULL;
+        return cg_internf("_aether_fnptr_adapter_%s", name);
+    }
+    return NULL;
+}
+
+static ASTNode* fnval_signature(CodeGenerator* gen, const char* name) {
+    ASTNode* fd = fnval_definition(gen, name);
+    if (!fd || !fd->node_type || fd->node_type->kind != TYPE_STRING) return NULL;
+    fprintf(gen->output, "static AETHER_MAYBE_UNUSED const char* _aether_fnptr_adapter_%s(", name);
+    int pc = 0;
+    for (int k = 0; k < fd->child_count; k++) {
+        ASTNode* p = fd->children[k];
+        if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK) continue;
+        fprintf(gen->output, "%s%s _a%d", pc ? ", " : "",
+                p->node_type ? get_c_type(p->node_type) : "int", pc);
+        pc++;
+    }
+    if (pc == 0) fprintf(gen->output, "void");
+    fprintf(gen->output, ")");
+    return fd;
+}
+
+void emit_fn_value_adapter_decls(CodeGenerator* gen) {
+    for (int i = 0; i < g_fnval_count; i++) {
+        if (!fnval_string_adapter(gen, g_fnval_names[i])) continue;
+        if (fnval_signature(gen, g_fnval_names[i])) fprintf(gen->output, ";\n");
+    }
+}
+
+void emit_fn_value_adapters(CodeGenerator* gen) {
+    for (int i = 0; i < g_fnval_count; i++) {
+        const char* name = g_fnval_names[i];
+        if (!fnval_string_adapter(gen, name)) continue;
+        ASTNode* fd = fnval_signature(gen, name);
+        if (!fd) continue;
+        fprintf(gen->output, " {\n    return aether_uniform_heap_str((const char*)(%s(",
+                safe_c_name(name));
+        int pc = 0;
+        for (int k = 0; k < fd->child_count; k++) {
+            ASTNode* p = fd->children[k];
+            if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK) continue;
+            fprintf(gen->output, "%s_a%d", pc ? ", " : "", pc);
+            pc++;
+        }
+        fprintf(gen->output, ")), %d);\n}\n", function_def_returns_heap_string(gen, fd) ? 1 : 0);
+    }
+}
+
 /* #943: emit FORWARD DECLARATIONS for every registered bare-fn adapter.
  * Closure bodies (emitted before emit_bare_fn_adapters) may reference an
  * adapter, so its prototype must be in scope by then — otherwise the closure

@@ -1218,6 +1218,10 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
      * what it yields is a fresh heap string, adopted or freed as one. */
     if (expr->type == AST_FUNCTION_CALL && call_returns_view_of_temp(gen, expr)) return 1;
 
+    /* #2586: a string a call through a typed fn pointer returns is the
+     * caller's (the fn-value convention, discover_fn_values). */
+    if (expr->type == AST_FUNCTION_CALL && fnptr_call_returns_string(gen, expr)) return 1;
+
     // String interpolation (non-printf mode) allocates via _aether_interp.
     if (expr->type == AST_STRING_INTERP) {
         return 1;

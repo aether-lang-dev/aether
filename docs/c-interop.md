@@ -770,6 +770,8 @@ The `@aether` annotation is a sibling to the `: ptr` escape hatch above. Both op
 
 A call through a typed function pointer (`f = p as fn(uint32, string) -> int`, a `cb: fn(string) -> int` parameter, or a `fn(...)`-typed struct field) unwraps a `string` argument the same way: `f(7, name)` emits `f(7, aether_string_data(name))`. A `ptr` parameter in the pointer's type passes the value as it is, for a callee that wants the header.
 
+A `string` a typed function pointer returns is the caller's: the caller frees it once done (#2586). An Aether function used as such a pointer is taken through an adapter that makes that true, handing its result over as it is when the function returns owned strings and copying it when it returns a literal or a borrowed one. A pointer made from a raw `ptr` (`p as fn(...) -> string`) points at a C function the compiler never saw, so that function must return a string the caller may free with `free()`. An owned `string` argument to such a call is freed after the call when no Aether function used as a pointer keeps one of its `string` parameters as it came (see [memory-management.md](memory-management.md#closure-arguments-are-borrowed)).
+
 The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 
 **Length-clamp hazard for binary content.** Once the auto-unwrap has fired, a C shim that receives a `string`-typed parameter has only payload bytes, no header, no stored length. A common defensive pattern is fatal here:
