@@ -22,9 +22,12 @@
   main passed with 86 uninitialised reads: `create_code_generator` never
   set `lib_actors`, which every codegen unit test then read. The generator
   is zeroed at creation, and the job now fails on any memcheck error, any
-  failed test and any leak. It also runs Valgrind with `--fair-sched=yes`,
-  writes Valgrind's report to a file of its own, and lists the slowest tests
-  in its summary (#2599, #2593).
+  failed test and any leak. It also runs Valgrind with `--fair-sched=yes`
+  (its default lock starved threads waiting on a busy one), writes
+  Valgrind's report to a file of its own, lists the slowest tests in its
+  summary and stops at 15 minutes. With the actor-thread park, the job takes
+  about a minute instead of an hour: the suite's time under Valgrind went
+  from 4,044 s to 24 s (#2599, #2593).
 - **`std.udp` fails at once on a host with a space or a control character.**
   No address or name can contain one, and on macOS the system resolver
   waited out a DNS timeout, about 5 s, before saying so (#2596).

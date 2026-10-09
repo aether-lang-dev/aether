@@ -42,6 +42,12 @@ jobs:
   valgrind-test:
     name: Valgrind Memory Leak Check
     runs-on: ubuntu-latest
+    # A healthy run takes about a minute: 66 s on PR #2601, 25 s of it the
+    # Valgrind run itself. It used to take an hour, while idle actor threads
+    # spun (#2592) and Valgrind's default lock starved the threads they waited
+    # on (#2593). A run that long again is a hang or a regression, so it fails
+    # at 15 minutes rather than at GitHub's default of 6 hours.
+    timeout-minutes: 15
 
     steps:
     - name: Checkout code
