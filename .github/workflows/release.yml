@@ -630,7 +630,14 @@ jobs:
       run: |
         VERSION=$(cat VERSION | tr -d '[:space:]')
         sh scripts/stage-release.sh build release --module-artifacts build/aetherc.exe
-        cd release && zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
+        # A zip entry's main timestamp is a DOS date and time with no zone,
+        # written in the packer's local zone and read back in the
+        # extractor's. Packed in UTC, the files of the archive extracted
+        # hours in the future on any machine west of UTC (#2621). Written in
+        # the westernmost zone, UTC-12, they read at or before the real time
+        # everywhere; the extended timestamp zip adds beside it keeps the
+        # exact UTC time for extractors that read it.
+        cd release && TZ=UTC+12 zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 
     - name: Upload artifact
       uses: actions/upload-artifact@v4
