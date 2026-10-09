@@ -1,0 +1,148 @@
+// Regression: a struct a call returns by value, owning strings, used inside a
+// declaration, an assignment or a return without being kept (#2582). Only an
+// expression statement kept such a struct in a temporary and destroyed it, so
+// `n = string.length(make_item(w).name)` leaked both of the struct's strings
+// on every call. Now each of these statements keeps it in a temporary,
+// destroyed once the statement is done, and leaves alone the struct it does
+// keep: a binding of the whole struct, one an `if` passes on, a struct
+// literal's field, a returned struct.
+//
+// A function that hands its struct parameter back gives the caller strings of
+// its own (it takes references on entry), so the argument, a temporary, can
+// be destroyed after the statement while the result lives on.
+//
+// Also: a function returning a struct that holds its string parameter is no
+// hand-back of that parameter (#2584).
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Holder {
+    item: Item
+    count: int
+}
+
+struct Cursor {
+    text: string
+    length: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+// #2584: keeps its parameter in the struct it returns.
+cursor(text: string) -> Cursor {
+    return Cursor { text: text, length: string.length(text) }
+}
+
+// A declaration, an assignment and a return that each read a field of a
+// struct they do not keep.
+in_declaration(w: string) -> int {
+    n = string.length(make_item(w).name)
+    return n
+}
+
+in_assignment(w: string) -> int {
+    n = 0
+    n = string.length(make_item(w).tag) + n
+    return n
+}
+
+in_return(w: string) -> int {
+    return string.length(make_item(w).name) + string.length(make_item(w).tag)
+}
+
+// The string a declaration takes from a temporary's field is its own copy.
+name_of(w: string) -> string {
+    s = make_item(w).name
+    return string.concat(s, "!")
+}
+
+// Kept: the whole struct, one an `if` passes on, a struct literal's field.
+kept(w: string, pick: int) -> int {
+    a = make_item(w)
+    b = if pick > 0 { make_item(w) } else { make_item("z") }
+    h = Holder { item: make_item(w), count: 1 }
+    return string.length(a.name) + string.length(b.tag) + string.length(h.item.name) + h.count
+}
+
+// Kept: a returned struct is the caller's.
+returned(w: string) -> Item {
+    return make_item(w)
+}
+
+// A struct handed back as it came: the call that returns it is kept, and so
+// is the argument, which is the same struct.
+identity(i: Item) -> Item {
+    return i
+}
+
+through_identity(w: string) -> Item {
+    return identity(make_item(w))
+}
+
+bound_through_identity(w: string) -> int {
+    x = identity(make_item(w))
+    return string.length(x.name) + string.length(x.tag)
+}
+
+round(word: string) -> int {
+    total = in_declaration(word) + in_assignment(word) + in_return(word)
+    s = name_of(word)
+    check(s == "w#!", "a declaration keeps its own copy of a temporary's field")
+    total = total + kept(word, 1)
+    r = returned(word)
+    check(r.name == "w#" && r.tag == "w%", "a returned struct keeps its strings")
+    t = through_identity(word)
+    check(t.name == "w#" && t.tag == "w%", "a struct returned through identity keeps its strings")
+    check(bound_through_identity(word) == 4, "a struct bound through identity")
+    body = string.concat(word, "ord")
+    c = cursor(body)
+    check(c.length == 4 && c.text == "word", "a struct holding a string parameter")
+    return total + c.length
+}
+
+main() {
+    println("=== test_value_struct_temporaries ===")
+    check(in_declaration("w") == 2, "declaration")
+    check(in_assignment("w") == 2, "assignment")
+    check(in_return("w") == 4, "return")
+    check(kept("w", 1) == 7, "kept structs")
+    check(round("w") == 19, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_value_struct_temporaries passed ===")
+}

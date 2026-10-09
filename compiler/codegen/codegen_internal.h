@@ -371,6 +371,9 @@ ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
+void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
+int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
+void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);
 void mark_captured_string_param(CodeGenerator* gen, const char* var_name);

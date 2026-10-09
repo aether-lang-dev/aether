@@ -4000,20 +4000,26 @@ void emit_closure_definitions(CodeGenerator* gen) {
             /* #2606: a struct parameter borrows the caller's strings, as a
              * function's does (codegen_func.c): its trackers are cleared on
              * entry, so the closure frees, at its exit, only the strings it
-             * stores itself, and a parameter it returns hands back no
-             * strings the caller's argument still owns. Left set, a struct
-             * argument that a call returned was freed by the caller's
-             * statement temporaries twice. A closure field is retained. */
+             * stores itself. Left set, a struct argument that a call
+             * returned was freed by the caller's statement temporaries
+             * twice. A closure field is retained. One the body keeps as a
+             * whole value (returns, aliases, stores, captures) takes
+             * references of its own instead (#2582), so what it hands back
+             * is its own. */
             for (int i = 0; i < closure->child_count; i++) {
                 ASTNode* p = closure->children[i];
                 if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
                 const char* owning = struct_owning_strings(gen, p->node_type);
                 if (!owning) continue;
+                int kept = struct_param_kept(gen, body, p->value);
                 if (closure_param_is_promoted(gen, closure, p->value)) {
-                    emit_struct_disown(gen, owning, cg_internf("(*%s)", p->value), 1);
+                    const char* cell = cg_internf("(*%s)", p->value);
+                    if (kept) emit_struct_capture(gen, owning, cell);
+                    else emit_struct_disown(gen, owning, cell, 1);
                     continue;
                 }
-                emit_struct_disown(gen, owning, safe_value_name(p->value), 1);
+                if (kept) emit_struct_capture(gen, owning, safe_value_name(p->value));
+                else emit_struct_disown(gen, owning, safe_value_name(p->value), 1);
                 /* The destroy is spelled with the raw name, as a struct
                  * local's is, so a renamed parameter is not destroyed. */
                 if (strcmp(safe_value_name(p->value), p->value) == 0)
@@ -4940,6 +4946,14 @@ void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count) {
     g_stmt_temp_count = count;
 }
 
+/* The temporaries in force, so a statement emitted inside another one's
+ * value (an `or` handler's, a closure body's) can put them back when it is
+ * done rather than clearing them under the outer statement (#2582). */
+void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count) {
+    *nodes = g_stmt_temp_nodes;
+    *names = g_stmt_temp_names;
+    *count = g_stmt_temp_count;
+}
 
 /* The temporary holding call `expr`'s struct result in the statement being
  * emitted, or NULL. */
