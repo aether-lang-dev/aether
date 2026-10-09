@@ -51,6 +51,36 @@ int sandbox_trust_site_of_enforce(const ASTNode* call) {
     return 0;
 }
 
+/* #2613: drop what the pass recorded inside `node`, a definition about to be
+ * freed. Marked calls are removed, so codegen emits no wrapper for a call
+ * that is gone (or an `#error` for a target dropped with it); a site keeps
+ * its number but stops matching, so a later node at a reused address
+ * cannot claim it. */
+static void forget_node(const ASTNode* n) {
+    for (int i = 0; i < g_mark_count; i++) {
+        if (g_marks[i].call == n) {
+            memmove(&g_marks[i], &g_marks[i + 1],
+                    (size_t)(g_mark_count - i - 1) * sizeof(MarkedCall));
+            g_mark_count--;
+            break;
+        }
+    }
+    for (int i = 0; i < g_site_count; i++) {
+        if (g_sites[i] == n) g_sites[i] = NULL;
+    }
+}
+
+static void forget_within(const ASTNode* n) {
+    if (!n) return;
+    forget_node(n);
+    for (int i = 0; i < n->child_count; i++) forget_within(n->children[i]);
+}
+
+void sandbox_trust_forget_within(const ASTNode* node) {
+    if (g_mark_count == 0 && g_site_count == 0) return;
+    forget_within(node);
+}
+
 int sandbox_trust_call_count(void) { return g_mark_count; }
 
 const ASTNode* sandbox_trust_call_at(int i) {

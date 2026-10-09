@@ -601,6 +601,14 @@ typedef struct ASTNode {
      * static, length-carrying AetherString. 0 on every other node: `value`
      * is a C string. ast_literal_length reads either. */
     int value_len;
+
+    /* #2614: on a function, builder, actor or constant cloned in by
+     * module_merge_into_program, the registered name of the module it was
+     * written in; NULL on the program's own code. A qualified `ns.name` in
+     * such a body resolves against that module's imports, not the program's,
+     * so a module that calls another module it never imported is rejected
+     * in every program, exactly as `ae check` of the module rejects it. */
+    char* origin_module;
 } ASTNode;
 
 // Type functions

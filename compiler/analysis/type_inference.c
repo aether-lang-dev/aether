@@ -1192,15 +1192,15 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     unsigned prev_walk_id = ctx->walk_id;
     ctx->walk_id = new_walk_id();
 
-    /* Issue #243 sealed scopes: relax qualified-call visibility
-     * while walking the body of a cloned merged-module function so
-     * internal calls into transitively-merged namespaces (e.g.
-     * `json.parse` inside a merged http.client function) resolve
-     * correctly. Save/restore the SymbolTable flag — same channel
-     * the typechecker uses, just transient over this walk. */
-    int saved_inside_merged = ctx->symbols ? ctx->symbols->inside_merged_body : 0;
-    if (node->is_imported && ctx->symbols) {
-        ctx->symbols->inside_merged_body = 1;
+    /* Issue #243 sealed scopes, #2614: while walking the body of a
+     * cloned merged-module function, qualified calls resolve against
+     * the imports of the module it was written in (e.g. `json.parse`
+     * inside a merged http.client function). Save/restore the
+     * SymbolTable origin, the same channel the typechecker uses, just
+     * transient over this walk. */
+    const char* saved_merged_from = ctx->symbols ? ctx->symbols->merged_from : NULL;
+    if (node->origin_module && ctx->symbols) {
+        ctx->symbols->merged_from = node->origin_module;
     }
 
     // Add parameters to symbol table so identifiers in function body can look them up
@@ -1268,7 +1268,7 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
         }
     }
 
-    if (ctx->symbols) ctx->symbols->inside_merged_body = saved_inside_merged;
+    if (ctx->symbols) ctx->symbols->merged_from = saved_merged_from;
     ctx->walk_id = prev_walk_id;
 }
 

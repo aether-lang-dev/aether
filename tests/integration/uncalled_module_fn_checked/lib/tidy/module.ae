@@ -1,0 +1,11 @@
+exports(used, unused)
+
+used() -> int {
+    return 1
+}
+
+// Correct and called by nothing: it is type-checked like every function of
+// the module, then left out of the emitted C.
+unused() -> int {
+    return 2
+}

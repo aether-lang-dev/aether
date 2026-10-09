@@ -1,0 +1,8 @@
+import mid
+import low
+
+exports(top_value)
+
+top_value() -> int {
+    return low.low_value() + mid.mid_value()
+}

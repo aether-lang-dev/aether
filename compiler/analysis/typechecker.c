@@ -62,9 +62,10 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->hidden_names = NULL;
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
-    // Inherit merged-body flag so nested scopes (loops, blocks, closures
-    // inside a merged function) keep the relaxed namespace visibility.
-    table->inside_merged_body = parent ? parent->inside_merged_body : 0;
+    // Inherit the merged-body origin so nested scopes (loops, blocks,
+    // closures inside a merged function) resolve qualified names against
+    // the same module's imports.
+    table->merged_from = parent ? parent->merged_from : NULL;
     // dsl_receiver does NOT inherit. It is a per-trailing-closure-scope
     // marker that typecheck_function_call stamps on the immediate
     // closure body. Nested closures inside that body get their own
@@ -522,29 +523,30 @@ int is_imported_namespace(const char* name);
 
 // Gate for qualified-call resolution. A qualified call `mod.fn()` is
 // allowed if either:
-//   - The caller is inside a merged-module body (typechecker propagates
-//     SymbolTable::inside_merged_body from the cloned function decl);
-//     in that case ANY transitively-merged namespace is fair game,
-//     because cloned bodies need to call into their original module's
-//     transitive deps to compile.
-//   - The caller is user code (inside_merged_body == 0); in that case
-//     only namespaces the user explicitly imported are visible. This
-//     closes the encapsulation hole left after the round-1 BFS-merge
-//     fix for issue #243.
+//   - The caller is inside a merged-module body (SymbolTable::merged_from,
+//     propagated from the cloned declaration's origin_module): the
+//     namespace is that module's own or one it imports. A module reaches
+//     what it imported, not what some other module of the program did
+//     (#2614): `top` calling `low.f()` while only `mid` imports `low`
+//     built in every program and failed `ae check` of `top`, so `top`
+//     worked by the accident of what else was linked in, and broke with
+//     an error pointing at untouched code the day `mid` dropped `low`.
+//   - The caller is user code (merged_from NULL); in that case only
+//     namespaces the user explicitly imported are visible. This closes
+//     the encapsulation hole left after the round-1 BFS-merge fix for
+//     issue #243.
 //
 // `table` may be NULL during early symbol-table population; treat NULL
 // as user-context (the strict path) — early registration paths don't
 // resolve qualified user calls, so this is safe.
 int is_visible_namespace(const char* name, SymbolTable* table) {
-    /* Single channel: the SymbolTable's inside_merged_body flag.
-     * Both walkers (the typechecker — which creates per-function
-     * child tables — and the type-inference pass — which walks
-     * against the global symbol table directly) flip this flag
-     * transiently while inside a `is_imported` function body, then
-     * restore it on exit. Save/restore is the standard scope-
-     * stack pattern; no global mutable state required. */
-    if (table && table->inside_merged_body) {
-        return is_imported_namespace(name);
+    /* Single channel: the SymbolTable's merged_from. Both walkers (the
+     * typechecker, which creates per-function child tables, and the
+     * type-inference pass, which walks against the global symbol table
+     * directly) set it while inside a merged declaration, then restore
+     * it on exit. */
+    if (table && table->merged_from) {
+        return module_sees_namespace(table->merged_from, name);
     }
     return is_user_explicit_namespace(name);
 }
@@ -653,10 +655,10 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         }
 
         // Check if prefix is a namespace visible from this scope.
-        // Issue #243: user code can only see namespaces it explicitly
-        // imported; merged-body code can see all transitively-merged
-        // namespaces. is_visible_namespace picks the right set based
-        // on the table's inside_merged_body flag.
+        // Issue #243, #2614: user code can only see namespaces it
+        // explicitly imported; merged-body code sees its own module and
+        // the modules that module imports. is_visible_namespace picks the
+        // right set based on the table's merged_from.
         // Convert string.new -> string_new
         if (is_visible_namespace(prefix, table)) {
             // Enforce export visibility
@@ -825,6 +827,43 @@ static void type_error_hint(const char* message, const char* hint, int line, int
                       AETHER_ERR_TYPE_MISMATCH };
     aether_error_report(&e);
     error_count++;
+}
+
+/* type_error_hint under a chosen error code. */
+static void type_error_code_hint(const char* message, const char* hint,
+                                 int line, int column, AetherErrorCode code) {
+    AetherError e = { g_tc_file, NULL, line, column, message, hint, NULL, code };
+    aether_error_report(&e);
+    error_count++;
+}
+
+/* #2614: when `prefix` in `prefix.name` is a module the program loaded but
+ * the scope does not import, write the `help:` line naming the import and
+ * return 1. Such a module is loaded because some other module imports it,
+ * which is exactly why the call used to build: say so, since "check the
+ * spelling" sends the reader the wrong way. A local of that name is not a
+ * module reference, so it gets no hint. */
+static int missing_import_hint(const char* prefix, SymbolTable* table,
+                               char* out, size_t cap) {
+    if (!prefix || !global_module_registry || is_visible_namespace(prefix, table))
+        return 0;
+    Symbol* local = lookup_symbol(table, prefix);
+    if (local && !local->is_module_alias) return 0;
+    AetherModule* m = module_find_by_namespace(prefix);
+    if (!m || !m->name) return 0;
+    if (table && table->merged_from) {
+        snprintf(out, cap,
+                 "module '%s' does not import '%s': add `import %s` to it "
+                 "(another module of the program importing '%s' does not "
+                 "make it visible here)",
+                 table->merged_from, m->name, m->name, m->name);
+    } else {
+        snprintf(out, cap,
+                 "'%s' is not imported by this file: add `import %s` "
+                 "(another module of the program importing it does not make "
+                 "it visible here)", m->name, m->name);
+    }
+    return 1;
 }
 
 void type_warning(const char* message, int line, int column);
@@ -1408,14 +1447,14 @@ static int has_ctx_first_param(ASTNode* func) {
  * `builder` function? "Same module" is matched by `source_file`: every node
  * keeps the .ae path it was parsed from.
  *
- * This scans the MODULE REGISTRY's un-pruned per-module ASTs rather than the
- * merged program AST. The program AST is not a reliable source here: it is
- * tree-shaken (module_prune_unreachable) before typecheck runs, so a builder
- * the entry file never calls has already been removed — exactly the misuse
- * case, where `mod.rspec() {...}` is written INSTEAD of `mod.bundle() {...}`
- * and so `bundle` is unreferenced and pruned. The registry holds each
- * module's full parsed AST (AetherModule.ast, file_path == the nodes'
- * source_file), so the builder is always visible there.
+ * This scans the MODULE REGISTRY's per-module ASTs rather than the merged
+ * program AST. The registry holds each module's full parsed AST
+ * (AetherModule.ast, file_path == the nodes' source_file), so the builder
+ * is visible there whatever the merge and the prune do with it; this was
+ * written when the prune ran before type checking and had already removed
+ * a builder the entry file never calls, exactly the misuse case, where
+ * `mod.rspec() {...}` is written INSTEAD of `mod.bundle() {...}`. (Since
+ * #2613 the prune drops unreached functions only after type checking.)
  *
  * This is the discriminator for the "setter called as node builder"
  * diagnostic below: a widget-style DSL module (panel/button, no builders)
@@ -4308,7 +4347,11 @@ static void resolve_const_initializer_types(ASTNode* program, SymbolTable* table
                 continue;
             Symbol* s = lookup_symbol_local(table, c->value);
             if (!s || (s->type && s->type->kind != TYPE_UNKNOWN)) continue;
+            /* #2614: a merged constant names the modules its own module
+             * imports, as the second pass checks it. */
+            table->merged_from = c->origin_module;
             Type* t = const_initializer_type(c->children[0], table);
+            table->merged_from = NULL;
             if (!t || t->kind == TYPE_UNKNOWN) {
                 if (t) free_type(t);
                 continue;
@@ -5245,7 +5288,12 @@ int typecheck_program(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         g_tc_file = top ? top->source_file : NULL;
+        /* #2614: a merged declaration (a module's function, actor or
+         * constant) resolves qualified names against its own module's
+         * imports, whatever kind of node it is. */
+        global_table->merged_from = top ? top->origin_module : NULL;
         typecheck_node(top, global_table);
+        global_table->merged_from = NULL;
         warn_erased_result_closures();   /* #2484 */
     }
     g_tc_file = NULL;
@@ -6614,14 +6662,12 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
 
     SymbolTable* func_table = create_symbol_table(table);
 
-    // Issue #243 sealed scopes: cloned function bodies from
-    // module_merge_into_program's BFS transitive-merge pass need
-    // relaxed qualified-call resolution so they can reach into other
-    // transitively-merged namespaces. The flag propagates from
-    // parent in create_symbol_table, so nested scopes inside this
-    // body inherit it; on function exit we just free func_table.
-    if (func->is_imported) {
-        func_table->inside_merged_body = 1;
+    // Issue #243 sealed scopes, #2614: a function cloned in from a module
+    // resolves qualified calls against that module's imports. The origin
+    // propagates from parent in create_symbol_table, so nested scopes
+    // inside this body inherit it; on function exit we just free func_table.
+    if (func->origin_module) {
+        func_table->merged_from = func->origin_module;
     }
 
     // Add parameters to function's symbol table
@@ -9127,6 +9173,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                              expr->value);
                 } else {
                     snprintf(error_msg, sizeof(error_msg), "Undefined variable '%s'", expr->value ? expr->value : "?");
+                    /* #2614: `low` of a `low.CONST` this scope cannot see. */
+                    char hint[512];
+                    if (missing_import_hint(expr->value, table, hint, sizeof(hint))) {
+                        type_error_code_hint(error_msg, hint, expr->line, expr->column,
+                                             AETHER_ERR_UNDEFINED_VAR);
+                        return 0;
+                    }
                 }
                 type_error(error_msg, expr->line, expr->column);
                 return 0;
@@ -10792,6 +10845,15 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             char* tmp = strdup(call->value);
             char* dot = strchr(tmp, '.');
             *dot = '\0';
+            char hint[512];
+            if (missing_import_hint(tmp, table, hint, sizeof(hint))) {
+                snprintf(error_msg, sizeof(error_msg),
+                         "Undefined function '%s'", call->value);
+                free(tmp);
+                type_error_code_hint(error_msg, hint, call->line, call->column,
+                                     AETHER_ERR_UNDEFINED_FUNC);
+                return 0;
+            }
             if (is_export_blocked(tmp, dot + 1)) {
                 snprintf(error_msg, sizeof(error_msg),
                          "'%s' is not exported from module '%s'", dot + 1, tmp);

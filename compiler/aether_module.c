@@ -7,6 +7,8 @@
 #include "parser/lexer.h"
 #include "parser/parser.h"
 #include "analysis/typechecker.h"
+#include "analysis/sandbox_trust.h"   // module_sweep_unreachable (#2613)
+#include <stdint.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -313,7 +315,12 @@ void module_registry_init(void) {
     }
 }
 
+static void module_sees_reset(void);
+static void module_unreachable_reset(void);
+
 void module_registry_shutdown(void) {
+    module_sees_reset();
+    module_unreachable_reset();
     if (global_module_registry) {
         for (int i = 0; i < global_module_registry->module_count; i++) {
             module_free(global_module_registry->modules[i]);
@@ -528,6 +535,45 @@ void module_add_import(AetherModule* module, const char* module_name) {
     if (!new_imports) return;
     module->imports = new_imports;
     module->imports[module->import_count++] = strdup(module_name);
+}
+
+/* #2614: the namespaces code written in one module may qualify a name with.
+ * Asked once per qualified name the checker resolves inside a merged body,
+ * and consecutive asks come from the same function, so the last module's
+ * list is kept; module_registry_shutdown drops it with the modules. */
+static AetherModule* g_sees_module = NULL;
+static const char** g_sees_ns = NULL;
+static int g_sees_count = 0;
+
+static void module_sees_reset(void) {
+    free(g_sees_ns);
+    g_sees_ns = NULL;
+    g_sees_count = 0;
+    g_sees_module = NULL;
+}
+
+int module_sees_namespace(const char* module_name, const char* ns) {
+    if (!module_name || !ns) return 0;
+    if (!g_sees_module || strcmp(g_sees_module->name, module_name) != 0) {
+        AetherModule* m = module_find(module_name);
+        if (!m) return 0;
+        const char** list = malloc(sizeof(const char*) * (size_t)(m->import_count + 1));
+        if (!list) return 0;
+        int n = 0;
+        /* A module names itself (#1780: `audio.x` inside module `audio`). */
+        list[n++] = module_namespace_of(m->name);
+        for (int i = 0; i < m->import_count; i++) {
+            if (m->imports[i]) list[n++] = module_namespace_of(m->imports[i]);
+        }
+        free(g_sees_ns);
+        g_sees_ns = list;
+        g_sees_count = n;
+        g_sees_module = m;
+    }
+    for (int i = 0; i < g_sees_count; i++) {
+        if (strcmp(g_sees_ns[i], ns) == 0) return 1;
+    }
+    return 0;
 }
 
 int module_is_exported(AetherModule* module, const char* symbol) {
@@ -2236,27 +2282,19 @@ static int check_namespace_prefix_collision(ASTNode* program) {
         if (!mod || !mod->ast) continue;
         const char* ns = module_get_namespace(child->value);
         if (!ns) continue;
-        int has_selection = import_has_selection(child);
 
         for (int j = 0; j < mod->ast->child_count; j++) {
             ASTNode* decl = unwrap_export(mod->ast->children[j]);
             if (!decl || !decl->value) continue;
             // Only entities the merge prefixes into a callable `ns_name`
             // C symbol: Aether functions/builders and public `@extern`s.
+            // Every one of them, whatever a selective import names: the
+            // merge clones the whole module (#2613).
             int callable = (decl->type == AST_FUNCTION_DEFINITION ||
                             decl->type == AST_BUILDER_FUNCTION ||
                             (decl->type == AST_EXTERN_FUNCTION && decl->annotation &&
                              strncmp(decl->annotation, "c_symbol:", 9) == 0));
             if (!callable) continue;
-            if (has_selection) {
-                int selected = 0;
-                for (int k = 0; k < child->child_count; k++) {
-                    ASTNode* sel = child->children[k];
-                    if (sel && sel->type == AST_IDENTIFIER && sel->value &&
-                        strcmp(sel->value, decl->value) == 0) { selected = 1; break; }
-                }
-                if (!selected) continue;
-            }
             char prefixed[256];
             snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
             for (int u = 0; u < un; u++) {
@@ -3129,60 +3167,6 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
     }
 }
 
-// Walk a node looking for AST_FUNCTION_CALL targets that match a
-// "<ns>_<name>" prefix where <name> is one of the module's own function
-// names. Append unique matches into `out` (storing the bare name).
-// Used to discover transitive intra-module callees in a cloned-and-
-// renamed function body — see #171 P2.
-static void collect_intra_module_callees(ASTNode* node, const char* ns,
-                                          const char** mod_func_names, int mod_func_count,
-                                          const char** out, int* out_count, int max) {
-    if (!node || *out_count >= max) return;
-    if (node->type == AST_FUNCTION_CALL && node->value) {
-        size_t ns_len = strlen(ns);
-        if (strncmp(node->value, ns, ns_len) == 0 && node->value[ns_len] == '_') {
-            const char* bare = node->value + ns_len + 1;
-            for (int i = 0; i < mod_func_count; i++) {
-                if (strcmp(bare, mod_func_names[i]) == 0) {
-                    if (!name_in_list(bare, out, *out_count) && *out_count < max) {
-                        out[(*out_count)++] = mod_func_names[i];
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    /* `builder name(...) with <factory>` carries the factory function
-     * name in the builder's `annotation` field. After
-     * rename_intra_module_refs has run, it's the already-prefixed
-     * `<ns>_<factory>` form. Treat it as a callee dependency of the
-     * builder so the transitive-pull-in loop above clones the
-     * factory's body into the consumer TU. Without this, a
-     * selectively-imported `builder win(...) with mkfac` from module
-     * `smod` resolves `smod_win` correctly but leaves `smod_mkfac`
-     * unresolved — bare `mkfac()` in the emitted C with no
-     * declaration. Filed in aether/new_aevg_asks.md ASK 1. */
-    if (node->type == AST_BUILDER_FUNCTION && node->annotation) {
-        size_t ns_len = strlen(ns);
-        if (strncmp(node->annotation, ns, ns_len) == 0 && node->annotation[ns_len] == '_') {
-            const char* bare = node->annotation + ns_len + 1;
-            for (int i = 0; i < mod_func_count; i++) {
-                if (strcmp(bare, mod_func_names[i]) == 0) {
-                    if (!name_in_list(bare, out, *out_count) && *out_count < max) {
-                        out[(*out_count)++] = mod_func_names[i];
-                    }
-                    break;
-                }
-            }
-        }
-    }
-    for (int i = 0; i < node->child_count; i++) {
-        collect_intra_module_callees(node->children[i], ns,
-                                     mod_func_names, mod_func_count,
-                                     out, out_count, max);
-    }
-}
-
 // Insert a node into program->children at a specific index, shifting others right.
 static void insert_child_at(ASTNode* parent, ASTNode* child, int index) {
     if (!parent || !child) return;
@@ -3196,6 +3180,14 @@ static void insert_child_at(ASTNode* parent, ASTNode* child, int index) {
     }
     parent->children[index] = child;
     parent->child_count++;
+}
+
+/* #2614: record the module a merged declaration was written in, so the
+ * checker resolves its qualified names against that module's imports. */
+static void stamp_origin(ASTNode* clone, const AetherModule* m) {
+    if (!clone || !m || !m->name) return;
+    free(clone->origin_module);
+    clone->origin_module = strdup(m->name);
 }
 
 // Merge pure Aether module functions into the main program AST.
@@ -3320,9 +3312,17 @@ void module_merge_into_program(ASTNode* program) {
         int const_count = collect_module_const_names(mod_ast, const_names,
                                                      AETHER_MODULE_MAX_DECLS);
 
-        // Check for selective import: if import has AST_IDENTIFIER children,
-        // only merge functions/constants that appear in the selection list
-        int has_selection = import_has_selection(child);
+        /* #2613: a selective import (`import m (a, b)`) merges the whole
+         * module like a bare one. The selection decides which names the
+         * importing file may write bare (the second pass below and the
+         * typechecker's alias table), not which of the module's
+         * declarations exist: every function of every module in the build
+         * is type-checked, the ones nothing calls included, and the prune
+         * after type checking drops those from the C. Filtering here left a
+         * module's unselected functions unchecked, a selected function that
+         * read an unselected constant undefined (`Undefined variable
+         * 'clib_K'`), and the qualified `m.other()` a selective import
+         * keeps (#878) unresolvable. */
 
         // #870: re-open the qualified-call surface for any module this
         // imported module bare-imports, so its merged bodies' `ns.fn(...)`
@@ -3334,23 +3334,6 @@ void module_merge_into_program(ASTNode* program) {
             ASTNode* decl = unwrap_export(mod_ast->children[j]);
 
             if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
-                // Skip if not in selective import list. Note: even when
-                // skipped here, the function may still be cloned later
-                // by the transitive-pull-in pass below if a selectively
-                // imported sibling calls it. See #171 P2.
-                if (has_selection) {
-                    int selected = 0;
-                    for (int k = 0; k < child->child_count; k++) {
-                        ASTNode* sel = child->children[k];
-                        if (sel && sel->type == AST_IDENTIFIER &&
-                            strcmp(sel->value, decl->value) == 0) {
-                            selected = 1;
-                            break;
-                        }
-                    }
-                    if (!selected) continue;
-                }
-
                 // Build prefixed name: "double_it" -> "mymath_double_it"
                 char prefixed[256];
                 snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
@@ -3374,6 +3357,7 @@ void module_merge_into_program(ASTNode* program) {
                 // when several .o files are linked together (e.g. macOS
                 // ld64, which does not support --allow-multiple-definition).
                 clone->is_imported = 1;
+                stamp_origin(clone, mod);
 
                 // Rename intra-module function calls and constant refs within the cloned body
                 rename_intra_module_refs(clone, ns, func_names, func_count,
@@ -3399,19 +3383,6 @@ void module_merge_into_program(ASTNode* program) {
                 // `@extern` (e.g. std.strbuilder's `append_format`)
                 // reachable cross-module — an ordinary wrapper cannot
                 // forward a `...` tail.
-                if (has_selection) {
-                    int selected = 0;
-                    for (int k = 0; k < child->child_count; k++) {
-                        ASTNode* sel = child->children[k];
-                        if (sel && sel->type == AST_IDENTIFIER &&
-                            strcmp(sel->value, decl->value) == 0) {
-                            selected = 1;
-                            break;
-                        }
-                    }
-                    if (!selected) continue;
-                }
-
                 char prefixed[256];
                 snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
 
@@ -3433,30 +3404,11 @@ void module_merge_into_program(ASTNode* program) {
                 clone->value = strdup(prefixed);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
-                /* A module-level `var` (#701) is this node with a `global_var`
-                 * annotation, and it is module-private STATE, not part of the
-                 * import surface: the module's own functions read and write it.
-                 * A selectively imported function carries a renamed reference
-                 * to it, so the cell has to come along or that reference
-                 * dangles (#1573: `import std.spec (fail)` failed with
-                 * "Undefined variable 'spec_current_fw'"). Selection filters
-                 * the surface a caller names; it does not filter the state the
-                 * selected code closes over. */
-                int is_module_var = (decl->annotation &&
-                                     strcmp(decl->annotation, "global_var") == 0);
-                // Skip if not in selective import list
-                if (has_selection && !is_module_var) {
-                    int selected = 0;
-                    for (int k = 0; k < child->child_count; k++) {
-                        ASTNode* sel = child->children[k];
-                        if (sel && sel->type == AST_IDENTIFIER &&
-                            strcmp(sel->value, decl->value) == 0) {
-                            selected = 1;
-                            break;
-                        }
-                    }
-                    if (!selected) continue;
-                }
+                /* Constants and module-level `var`s (#701) merge whatever the
+                 * import selects: the module's functions read them (#1573:
+                 * `import std.spec (fail)` failed with "Undefined variable
+                 * 'spec_current_fw'"), and every one of its functions is now
+                 * merged (#2613). */
 
                 // Skip if already merged (e.g. from a prior import of the same
                 // module, or a synthetic revisit — aether#1009). Without this
@@ -3469,6 +3421,7 @@ void module_merge_into_program(ASTNode* program) {
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
                 clone->value = strdup(prefixed);
+                stamp_origin(clone, mod);
 
                 // Rename references to other module constants in the value expression
                 rename_intra_module_refs(clone, ns, func_names, func_count,
@@ -3492,22 +3445,18 @@ void module_merge_into_program(ASTNode* program) {
                 int kept = 0;
                 for (int mi = 0; mi < clone->child_count; mi++) {
                     ASTNode* mem = clone->children[mi];
-                    if (!mem || !mem->value) continue;
-                    /* Selective import: `import ns (Name)` filters members. */
-                    if (has_selection) {
-                        int selected = 0;
-                        for (int k = 0; k < child->child_count; k++) {
-                            ASTNode* sel = child->children[k];
-                            if (sel && sel->type == AST_IDENTIFIER && sel->value &&
-                                strcmp(sel->value, mem->value) == 0) {
-                                selected = 1; break;
-                            }
-                        }
-                        if (!selected) continue;
+                    if (!mem || !mem->value) {
+                        free_ast_node(mem);
+                        continue;
                     }
+                    /* Every member, whatever a selective import names: the
+                     * module's own functions may return any of them (#2613). */
                     char sym[256];
                     snprintf(sym, sizeof(sym), "%s_%s", ns, mem->value);
-                    if (program_has_fault_member(program, sym)) continue;
+                    if (program_has_fault_member(program, sym)) {
+                        free_ast_node(mem);
+                        continue;
+                    }
                     char qualified[512];
                     snprintf(qualified, sizeof(qualified), "%s.%s", ns, mem->value);
                     /* Rewrite the interned content (children[0], an
@@ -3644,6 +3593,7 @@ void module_merge_into_program(ASTNode* program) {
                 if (definition_already_merged(program, decl, "actor")) continue;
                 ASTNode* clone = clone_ast_node(decl);
                 clone->is_imported = 1;
+                stamp_origin(clone, mod);
                 // Unlike structs, an actor has a body: its receive handlers may
                 // call module-local functions or read module constants, which
                 // were cloned above under their `<ns>_` prefixed names. Rewrite
@@ -3656,90 +3606,6 @@ void module_merge_into_program(ASTNode* program) {
             // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
         }
     }
-
-    // Transitive pull-in: a selectively imported function may call
-    // sibling helpers defined in the same module that weren't named in
-    // the import list. The first-pass rename above rewrote those calls
-    // to the prefixed `<ns>_<name>` form, but the helpers themselves
-    // were skipped — leaving an unresolvable reference. Walk the merged
-    // program until no new helpers appear (#171 P2).
-    //
-    // Visibility from outside the module is unchanged: the user's own
-    // code still sees only the names it imported; the typechecker's
-    // is_export_blocked path keeps unselected names off-limits at
-    // qualified-call sites. This pass only ensures the symbol exists
-    // in the merged AST so the cloned caller can link.
-    int progressed;
-    do {
-        progressed = 0;
-        for (int i = 0; i < orig_count; i++) {
-            ASTNode* child = program->children[i];
-            if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
-
-            // Only selective imports trigger transitive pull-in. Non-
-            // selective imports already merged everything (they have no
-            // selection list so the `if (!selected) continue;` guard
-            // above never fired).
-            if (!import_has_selection(child)) continue;
-
-            AetherModule* mod = module_find(child->value);
-            if (!mod || !mod->ast) continue;
-            ASTNode* mod_ast = mod->ast;
-            const char* ns = module_get_namespace(child->value);
-
-            const char* mod_func_names[AETHER_MODULE_MAX_DECLS];
-            int mod_func_count = collect_module_func_names(mod_ast, mod_func_names,
-                                                           AETHER_MODULE_MAX_DECLS);
-            const char* mod_const_names[AETHER_MODULE_MAX_DECLS];
-            int mod_const_count = collect_module_const_names(mod_ast, mod_const_names,
-                                                             AETHER_MODULE_MAX_DECLS);
-
-            // Collect bare names of intra-module callees referenced from
-            // any function already merged from this module.
-            const char* needed[AETHER_MODULE_MAX_DECLS];
-            int needed_count = 0;
-            for (int m = 0; m < program->child_count; m++) {
-                ASTNode* top = program->children[m];
-                if (!top || !top->is_imported) continue;
-                if (top->type != AST_FUNCTION_DEFINITION &&
-                    top->type != AST_BUILDER_FUNCTION) continue;
-                if (!top->value) continue;
-                size_t ns_len = strlen(ns);
-                if (strncmp(top->value, ns, ns_len) != 0 || top->value[ns_len] != '_') continue;
-                collect_intra_module_callees(top, ns, mod_func_names, mod_func_count,
-                                             needed, &needed_count,
-                                             AETHER_MODULE_MAX_DECLS);
-            }
-
-            for (int n = 0; n < needed_count; n++) {
-                const char* bare = needed[n];
-                char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, bare);
-                if (program_has_function(program, prefixed)) continue;
-                if (module_has_extern_named(mod_ast, prefixed)) continue;
-
-                // Locate the helper in the source module and clone it.
-                for (int j = 0; j < mod_ast->child_count; j++) {
-                    ASTNode* decl = unwrap_export(mod_ast->children[j]);
-                    if (!decl || !decl->value) continue;
-                    if ((decl->type != AST_FUNCTION_DEFINITION &&
-                         decl->type != AST_BUILDER_FUNCTION)) continue;
-                    if (strcmp(decl->value, bare) != 0) continue;
-
-                    ASTNode* clone = clone_ast_node(decl);
-                    free(clone->value);
-                    clone->value = strdup(prefixed);
-                    clone->is_imported = 1;
-                    rename_intra_module_refs(clone, ns, mod_func_names, mod_func_count,
-                                             mod_const_names, mod_const_count, NULL, 0);
-                    apply_inherited_selective_imports(clone, mod_ast);
-                    insert_child_at(program, clone, insert_idx++);
-                    progressed = 1;
-                    break;
-                }
-            }
-        }
-    } while (progressed);
 
     // Transitive cross-module merge (#243). When user code does
     // `import std.http.client` and that module's body internally does
@@ -3767,14 +3633,6 @@ void module_merge_into_program(ASTNode* program) {
     {
         // Collect direct imports as the BFS frontier.
         const char* visited[256];
-        // #1097: was this module reached as a *transitive dependency* of some
-        // other module (as opposed to only being a direct top-level import)?
-        // A direct import merged only its selected subset in the main loop, so
-        // a module that is ALSO transitively needed must have its remaining
-        // exports merged here — otherwise a wrapper the top-level import
-        // omitted (`poll2`) but a library uses stays un-instantiated and its
-        // call site degrades to an undefined `<ns>_<name>`.
-        int reached_transitively[256];
         int visited_count = 0;
         const char* queue[256];
         int q_head = 0, q_tail = 0;
@@ -3783,15 +3641,12 @@ void module_merge_into_program(ASTNode* program) {
             ASTNode* child = program->children[i];
             if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
             if (visited_count >= 256) break;
-            reached_transitively[visited_count] = 0;
             visited[visited_count++] = child->value;
             if (q_tail < 256) queue[q_tail++] = child->value;
         }
 
         // BFS: for each enqueued module, look at its `imports` list and
-        // enqueue any not yet visited. A dep discovered here is marked
-        // reached-transitively even if it was already seeded as a direct
-        // import (#1097) — that's the union signal the merge below needs.
+        // enqueue any not yet visited.
         while (q_head < q_tail) {
             const char* mod_path = queue[q_head++];
             AetherModule* mod = module_find(mod_path);
@@ -3803,17 +3658,12 @@ void module_merge_into_program(ASTNode* program) {
                 int seen = 0;
                 for (int v = 0; v < visited_count; v++) {
                     if (strcmp(visited[v], dep) == 0) {
-                        // Already visited — but now we know it's also a
-                        // transitive dep, so record that (a direct selective
-                        // import seeded it with the flag clear). #1097.
-                        reached_transitively[v] = 1;
                         seen = 1;
                         break;
                     }
                 }
                 if (seen) continue;
                 if (visited_count >= 256) break;
-                reached_transitively[visited_count] = 1;
                 visited[visited_count++] = dep;
                 if (q_tail < 256) queue[q_tail++] = dep;
             }
@@ -3824,15 +3674,10 @@ void module_merge_into_program(ASTNode* program) {
         for (int v = 0; v < visited_count; v++) {
             const char* dep_path = visited[v];
 
-            // Skip modules that are *only* a direct user import — the main
-            // loop already merged them (its selective filter is the intended
-            // user-facing scope). But a direct import that is ALSO a
-            // transitive dependency of another merged module must fall
-            // through: the main loop merged only its selected subset, and the
-            // library needs the rest. The clone dedup guards below
-            // (program_has_function / _const / _struct) make re-merging the
-            // already-cloned subset a no-op, so this only adds the missing
-            // transitively-used exports. #1097.
+            // Skip the program's direct imports: the main loop merged every
+            // declaration of each, selective or not (#2613). Before that a
+            // selective direct import that another module also needed had to
+            // fall through here for the rest of its exports (#1097).
             int is_direct = 0;
             for (int i = 0; i < orig_count; i++) {
                 ASTNode* child = program->children[i];
@@ -3842,7 +3687,7 @@ void module_merge_into_program(ASTNode* program) {
                     break;
                 }
             }
-            if (is_direct && !reached_transitively[v]) continue;
+            if (is_direct) continue;
 
             AetherModule* dep_mod = module_find(dep_path);
             if (!dep_mod || !dep_mod->ast) continue;
@@ -3875,11 +3720,11 @@ void module_merge_into_program(ASTNode* program) {
             // qualified calls) BUT skip the user-explicit registry
             // (so user code can't accidentally call into the
             // transitively-pulled-in namespace it never imported).
-            // #1097: a direct-but-also-transitive dep already carries a
-            // user-written import for this path, so the namespace is already
-            // registered — don't add a redundant synthetic node for it. Only
-            // inject the synthetic import when the program has no import of
-            // this path yet (the pure-transitive case #243 targeted).
+            // A dep the program already carries an import for (a #870
+            // synthetic one) has its namespace registered; don't add a
+            // redundant synthetic node for it. Only inject the synthetic
+            // import when the program has no import of this path yet (the
+            // pure-transitive case #243 targeted).
             int has_import_of_dep = 0;
             for (int p = 0; p < program->child_count; p++) {
                 ASTNode* pc = program->children[p];
@@ -3912,6 +3757,7 @@ void module_merge_into_program(ASTNode* program) {
                     free(clone->value);
                     clone->value = strdup(prefixed);
                     clone->is_imported = 1;
+                    stamp_origin(clone, dep_mod);
 
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
@@ -3931,6 +3777,7 @@ void module_merge_into_program(ASTNode* program) {
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
                     clone->value = strdup(prefixed);
+                    stamp_origin(clone, dep_mod);
 
                     rename_intra_module_refs(clone, ns, func_names, func_count,
                                              const_names, const_count, NULL, 0);
@@ -4114,6 +3961,7 @@ void module_merge_into_program(ASTNode* program) {
                     free(clone->value);
                     clone->value = strdup(prefixed);
                     clone->is_imported = 1;
+                    stamp_origin(clone, origin);
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
@@ -4125,6 +3973,7 @@ void module_merge_into_program(ASTNode* program) {
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
                     clone->value = strdup(prefixed);
+                    stamp_origin(clone, origin);
                     rename_intra_module_refs(clone, ons, of_names, of_count,
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
@@ -4146,9 +3995,17 @@ void module_merge_into_program(ASTNode* program) {
 //
 // Without filtering, the C compiler then has to compile (and the linker
 // has to discard) thousands of dead functions per build. Removing them
-// at the AST level skips that wasted gcc work entirely AND skips the
-// equivalent typecheck work, since the typechecker walks every top-
-// level decl in the program AST.
+// at the AST level skips that wasted gcc work entirely.
+//
+// They are still type-checked (#2613). The prune used to run before the
+// typechecker, so a function of an imported module that nothing called
+// was never checked at all: a library's type error built clean in every
+// consumer until one of them first called it, while the same function
+// uncalled in the main file failed the build. So the mark runs before
+// type checking (module_mark_unreachable: what the program reaches is
+// decided on the merged source, as before) and the sweep after it
+// (module_sweep_unreachable): every function of every module in the
+// build is checked, and only the reachable ones reach the C.
 //
 // Algorithm: classic mark-and-sweep over the call graph.
 //   1. Seed the reachable set from main + actor handlers + exports +
@@ -4157,11 +4014,12 @@ void module_merge_into_program(ASTNode* program) {
 //      AST_IDENTIFIER references that name a top-level function.
 //   3. For each newly-discovered name, find its definition in the
 //      program AST and walk it the same way. Repeat until fixed point.
-//   4. Sweep: drop any AST_FUNCTION_DEFINITION / AST_BUILDER_FUNCTION
-//      whose `is_imported` flag is set and whose name is NOT in the
-//      reachable set. Constants stay: they're cheap, and pruning them
-//      would need an additional reachability pass keyed on identifier
-//      references, which isn't worth it for the size of a constant.
+//   4. Record any AST_FUNCTION_DEFINITION / AST_BUILDER_FUNCTION whose
+//      `is_imported` flag is set and whose name is NOT in the reachable
+//      set; the sweep drops exactly those once they are checked.
+//      Constants stay: they're cheap, and pruning them would need an
+//      additional reachability pass keyed on identifier references,
+//      which isn't worth it for the size of a constant.
 //
 // Qualified call sites carry dotted names (`os.argv0`); codegen rewrites
 // dot-to-underscore at emission. We normalise the same way when adding
@@ -4501,7 +4359,28 @@ AetherModule* module_lib_package_module_of(const ASTNode* decl) {
     return module_in_lib_package(m) ? m : NULL;
 }
 
-void module_prune_unreachable(ASTNode* program) {
+/* #2613: the imported definitions the closure did not reach, recorded by
+ * module_mark_unreachable before type checking and dropped by
+ * module_sweep_unreachable after it. Held by pointer: the passes between
+ * the two (derive, `when`, the typechecker) rewrite definitions in place
+ * and never replace a merged one. */
+static ASTNode** g_unreachable = NULL;
+static int g_unreachable_count = 0;
+
+static void module_unreachable_reset(void) {
+    free(g_unreachable);
+    g_unreachable = NULL;
+    g_unreachable_count = 0;
+}
+
+static int unreachable_ptr_cmp(const void* a, const void* b) {
+    uintptr_t x = (uintptr_t)*(ASTNode* const*)a;
+    uintptr_t y = (uintptr_t)*(ASTNode* const*)b;
+    return (x > y) - (x < y);
+}
+
+void module_mark_unreachable(ASTNode* program) {
+    module_unreachable_reset();
     if (!program) return;
 
     NameSet reachable = {0};
@@ -4561,26 +4440,56 @@ void module_prune_unreachable(ASTNode* program) {
     free(worklist.names);
     prune_index_free(&index);
 
-    // Sweep: drop imported functions/builders that the closure never
-    // reached. Compaction is in-place; freeing the dead AST sub-trees
-    // releases the memory the typechecker would otherwise traverse.
+    // Record the imported functions/builders the closure never reached;
+    // they stay in the program until module_sweep_unreachable, so the
+    // typechecker checks them like every other function.
+    int cap = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!(c && c->is_imported && c->value &&
+              (c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) &&
+              !nameset_contains(&reachable, c->value))) continue;
+        if (g_unreachable_count == cap) {
+            int new_cap = cap ? cap * 2 : 64;
+            ASTNode** grown = realloc(g_unreachable, sizeof(ASTNode*) * (size_t)new_cap);
+            if (!grown) break;   /* OOM: what is not recorded is kept and emitted */
+            g_unreachable = grown;
+            cap = new_cap;
+        }
+        g_unreachable[g_unreachable_count++] = c;
+    }
+
+    nameset_free(&reachable);
+}
+
+void module_sweep_unreachable(ASTNode* program) {
+    if (!program || g_unreachable_count == 0) {
+        module_unreachable_reset();
+        return;
+    }
+    qsort(g_unreachable, (size_t)g_unreachable_count, sizeof(ASTNode*),
+          unreachable_ptr_cmp);
+    // Compaction is in-place; freeing the dead AST sub-trees keeps them
+    // out of every pass after type checking and out of the C.
     int kept = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        int drop = 0;
-        if (c && c->is_imported && c->value &&
-            (c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) &&
-            !nameset_contains(&reachable, c->value)) {
-            drop = 1;
-        }
-        if (drop) {
+        if (c && bsearch(&c, g_unreachable, (size_t)g_unreachable_count,
+                         sizeof(ASTNode*), unreachable_ptr_cmp)) {
+            /* The trusted-call pass recorded the calls of every checked
+             * body; the ones in this body go with it. */
+            sandbox_trust_forget_within(c);
             free_ast_node(c);
         } else {
             program->children[kept++] = c;
         }
     }
     program->child_count = kept;
+    module_unreachable_reset();
+}
 
-    nameset_free(&reachable);
+void module_prune_unreachable(ASTNode* program) {
+    module_mark_unreachable(program);
+    module_sweep_unreachable(program);
 }
 

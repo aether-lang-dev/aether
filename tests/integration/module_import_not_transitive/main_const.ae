@@ -1,0 +1,5 @@
+import topconst
+
+main() {
+    println("${topconst.top_value()}")
+}

@@ -77,16 +77,18 @@ typedef struct SymbolTable {
     NameNode* hidden_names;       // names blocked from outer scopes
     NameNode* seal_whitelist;     // if non-NULL, ONLY these names may resolve to outer scopes
     int is_sealed;                // 1 if a `seal except` directive is in effect (whitelist may be empty)
-    // Issue #243 sealed-scope follow-up: 1 when this scope (or any
-    // ancestor) is the body of a function that was cloned in from a
-    // transitively-merged module via module_merge_into_program. Such
-    // bodies legitimately need to call into other transitively-merged
-    // namespaces (e.g. a cloned `client_post_json` calls
-    // `json.stringify(...)`) even though the user never wrote
-    // `import std.json` themselves. User code (where this flag is 0)
-    // can only resolve qualified calls to namespaces it explicitly
-    // imported. Propagated from parent in create_symbol_table.
-    int inside_merged_body;
+    // Issue #243 sealed scopes, #2614: when this scope (or any ancestor)
+    // is code cloned in from a module by module_merge_into_program, the
+    // registered name of that module (the node's origin_module, which
+    // outlives the table); NULL for the program's own code. A merged body
+    // resolves a qualified `ns.name` against the imports of the module it
+    // was written in (a cloned `client_post_json` reaches `json.stringify`
+    // because std.http.client imports std.json, though the user never
+    // did), and only those: a namespace some OTHER module of the program
+    // imports is not visible to it, exactly as `ae check` of the module
+    // sees it. User code (NULL) resolves against the imports the user
+    // wrote. Propagated from parent in create_symbol_table.
+    const char* merged_from;
     // Issue #333 DSL block receiver scoping: when this scope is the
     // body of a trailing closure bound to a member-access call
     // (`receiver.method(args) { body }`), this names the receiver's
@@ -120,11 +122,11 @@ void add_module_alias(SymbolTable* table, const char* alias, const char* module_
 Symbol* resolve_module_alias(SymbolTable* table, const char* name);
 Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name);
 
-// Namespace-visibility helper (issue #243). Returns 1 if a qualified
-// call `<name>.<member>` is allowed from a scope whose `table` is
-// passed in. Merged-body scopes (table->inside_merged_body) see all
-// transitively-merged namespaces; user code only sees explicit
-// imports.
+// Namespace-visibility helper (issue #243, #2614). Returns 1 if a
+// qualified call `<name>.<member>` is allowed from a scope whose `table`
+// is passed in. A merged-body scope (table->merged_from) sees its own
+// module and the modules that module imports; user code sees the modules
+// the user imported.
 int is_visible_namespace(const char* name, SymbolTable* table);
 /* Is `name` a builtin codegen lowers by name (`println`, `exit`, `sleep`,
  * ...)? Such a name belongs to no module and needs no import. */

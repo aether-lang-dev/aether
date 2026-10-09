@@ -634,6 +634,7 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->warned = 0;
     node->source_name = NULL;
     node->value_len = 0;
+    node->origin_module = NULL;
     return node;
 }
 
@@ -691,6 +692,7 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->source_file = node->source_file ? strdup(node->source_file) : NULL;
     clone->type_inferred = node->type_inferred;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
+    clone->origin_module = node->origin_module ? strdup(node->origin_module) : NULL;
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
     for (int i = 0; i < node->child_count; i++) {
@@ -718,6 +720,8 @@ void free_ast_node(ASTNode* node) {
     if (node->source_name) {
         free(node->source_name);
     }
+
+    free(node->origin_module);
 
     if (node->node_type) {
         free_type(node->node_type);

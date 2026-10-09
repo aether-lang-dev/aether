@@ -1,0 +1,10 @@
+import mid
+
+exports(top_value)
+
+// Calls `low` without importing it: only `mid` does (#2614). This used to
+// build in every program, because `mid` brought `low` in, while
+// `ae check` of this file rejected it.
+top_value() -> int {
+    return low.low_value() + mid.mid_value()
+}

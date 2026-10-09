@@ -161,6 +161,7 @@ tests/integration/malloc_literal_struct_cast_warn/
 tests/integration/match_arm_unreachable/
 tests/integration/message_trace/
 tests/integration/module_extern_auto_unwrap/
+tests/integration/module_import_not_transitive/
 tests/integration/module_leaf_collision/
 tests/integration/std_leaf_collision/
 tests/integration/module_name_local_shadow/
@@ -213,6 +214,7 @@ tests/integration/sum_exhaustiveness/
 tests/integration/tcp_poll_fullduplex/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
+tests/integration/uncalled_module_fn_checked/
 tests/integration/varargs_forward/
 tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/

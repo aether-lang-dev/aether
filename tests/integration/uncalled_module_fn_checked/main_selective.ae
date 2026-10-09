@@ -1,0 +1,5 @@
+import shapes(area)
+
+main() {
+    println("${area(2.0)}")
+}

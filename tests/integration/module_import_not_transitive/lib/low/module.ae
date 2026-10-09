@@ -1,0 +1,7 @@
+exports(low_value, LOW_BASE)
+
+const LOW_BASE = 7
+
+low_value() -> int {
+    return LOW_BASE
+}

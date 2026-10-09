@@ -571,3 +571,78 @@ TEST_CATEGORY(merge_rewrites_a_library_import_inside_its_cloned_body, TEST_CATEG
     free_ast_node(program);
     module_registry_shutdown();
 }
+
+/* #2613: the prune is split around type checking. The mark leaves the
+ * unreached imported function in the program, so the typechecker sees it;
+ * only the sweep drops it. */
+TEST_CATEGORY(prune_mark_keeps_unreached_fn_until_sweep, TEST_CATEGORY_COMPILER) {
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    add_child(program, prune_main(prune_node(AST_FUNCTION_CALL, "glyphs_find", NULL)));
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "glyphs_find", NULL));
+    add_child(program, prune_imported(AST_FUNCTION_DEFINITION, "glyphs_unused", NULL));
+
+    module_mark_unreachable(program);
+    ASSERT_TRUE(prune_has(program, "glyphs_find"));
+    ASSERT_TRUE(prune_has(program, "glyphs_unused"));
+
+    module_sweep_unreachable(program);
+    ASSERT_TRUE(prune_has(program, "glyphs_find"));
+    ASSERT_FALSE(prune_has(program, "glyphs_unused"));
+    free_ast_node(program);
+}
+
+/* #2614: code written in a module sees its own namespace and the modules it
+ * imports, never one that only another module of the program imports. */
+TEST_CATEGORY(module_sees_only_the_modules_it_imports, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    ns_register("low");
+    AetherModule* mid = ns_register("mid");
+    module_add_import(mid, "low");
+    AetherModule* top = ns_register("top");
+    module_add_import(top, "mid");
+    module_assign_namespaces();
+
+    ASSERT_TRUE(module_sees_namespace("top", "top"));
+    ASSERT_TRUE(module_sees_namespace("top", "mid"));
+    ASSERT_FALSE(module_sees_namespace("top", "low"));
+    /* The answer follows the module asked about, not the one asked before. */
+    ASSERT_TRUE(module_sees_namespace("mid", "low"));
+    ASSERT_FALSE(module_sees_namespace("top", "low"));
+    ASSERT_FALSE(module_sees_namespace("nosuch", "low"));
+
+    module_registry_shutdown();
+}
+
+/* #2613, #2614: a selective import merges every function of the module, and
+ * each clone records the module it was written in. */
+TEST_CATEGORY(merge_selective_import_merges_whole_module_with_origin, TEST_CATEGORY_COMPILER) {
+    module_registry_init();
+    AetherModule* m = ns_register("shapes");
+    m->ast = ns_module_ast("area");
+    ASTNode* extra = create_ast_node(AST_FUNCTION_DEFINITION, "unselected", 0, 0);
+    add_child(extra, create_ast_node(AST_BLOCK, NULL, 0, 0));
+    add_child(m->ast, extra);
+    module_assign_namespaces();
+
+    ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
+    ASTNode* imp = ns_import("shapes", NULL);
+    add_child(imp, create_ast_node(AST_IDENTIFIER, "area", 0, 0));
+    add_child(program, imp);
+    ASTNode* call = NULL;
+    add_child(program, ns_main_calling("area", &call));
+
+    module_merge_into_program(program);
+
+    ASSERT_TRUE(ns_program_has_function(program, "shapes_area"));
+    ASSERT_TRUE(ns_program_has_function(program, "shapes_unselected"));
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_FUNCTION_DEFINITION) {
+            ASSERT_NOT_NULL(c->origin_module);
+            ASSERT_STREQ("shapes", c->origin_module);
+        }
+    }
+
+    free_ast_node(program);
+    module_registry_shutdown();
+}

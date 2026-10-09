@@ -1,0 +1,31 @@
+import std.sandbox
+import std.os
+
+exports(peek, run_guarded, unused_guarded)
+
+peek() -> string {
+    v = os.getenv("AE_TRUST_SECRET")
+    if v == null {
+        return "hidden"
+    }
+    return v
+}
+
+hidden_peek() -> string {
+    return peek()
+}
+
+run_guarded() -> int {
+    return 1
+}
+
+// Never called, and neither is hidden_peek. The trusted call below is
+// type-checked with the rest of the module, then dropped with this
+// function: no wrapper may be emitted for it (#2613).
+unused_guarded() {
+    w = sandbox.new("nothing") {}
+    sandbox.enforce(w, hidden_peek) callback {
+        println("hidden_peek: ${hidden_peek()}")
+    }
+    sandbox.free(w)
+}

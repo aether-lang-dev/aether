@@ -1,0 +1,8 @@
+import mid
+
+exports(top_value)
+
+// The constant form of the same missing import (#2614).
+top_value() -> int {
+    return low.LOW_BASE + mid.mid_value()
+}

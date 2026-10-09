@@ -262,6 +262,90 @@ sealed-scope isolation is preserved: user code still cannot call into a
 namespace it never imported. This mirrors how transitive dependencies already
 get synthetic imports during merge.
 
+## A module reaches only what it imports
+
+A qualified name, `ns.name(...)` or `ns.CONST`, resolves against the imports
+of the file it is written in: the entry program's own imports for the
+program's code, and a module's own imports (plus the module itself) for that
+module's functions, actors and constants, wherever they end up merged. A
+module that another module imports is loaded and merged into the program, but
+that does not make it visible to anyone else:
+
+```aether,fragment
+// lib/low/module.ae
+exports (low_value)
+low_value() -> int { return 7 }
+
+// lib/mid/module.ae
+import low
+exports (mid_value)
+mid_value() -> int { return low.low_value() + 1 }
+
+// lib/top/module.ae
+import mid
+exports (top_value)
+top_value() -> int { return low.low_value() + mid.mid_value() }   // E0301
+```
+
+`top` calls `low` without importing it. Every program that imports `top` is
+rejected at that call, exactly as `ae check lib/top/module.ae` rejects it:
+
+```
+error[E0301]: Undefined function 'low.low_value'
+  --> lib/top/module.ae:3:32
+  help: module 'top' does not import 'low': add `import low` to it (another module of the program importing 'low' does not make it visible here)
+```
+
+Before #2614 a merged module body could reach any namespace loaded anywhere in
+the build, so `top` built in every program (because `mid` brought `low` in)
+while `ae check` of `top` failed. A module then worked by the accident of what
+else was linked in, and broke, at a line nobody had touched, the day `mid`
+stopped importing `low`. Now `ae build` and `ae check` apply the one rule: the
+stricter one, which matches what a reader of the file sees. The fix is always
+the import the help line names.
+
+## Every function of every module is checked
+
+`ae build` and `ae check` of a program type-check every function of every
+module in the build, whether or not the program calls it. A library's
+uncalled function with a type error fails the build of every program that
+imports the library, at the line in the library:
+
+```aether,fragment
+// lib/mylib/module.ae
+exports (used, unused)
+struct A { x: float }
+struct B { y: int }
+used() -> int { return 1 }
+unused(a: A) -> int {
+    b = B { y: 2 }
+    b.y = a            // E0200 in every program that imports mylib
+    return b.y
+}
+```
+
+A selective import is no exception: `import mylib (used)` decides which names
+the importing file may write bare, not which of the module's functions are
+checked, so `unused` is checked there too.
+
+Checking is not emitting. The tree-shake still drops the functions nothing
+reaches, after they are checked, so a program emits the same functions it did
+and the C compiler's work is unchanged (a selective import's unselected
+constants now come along, as cheap unused `static const`s, and merged
+declarations may land in another order). The cost is the checking itself: on a
+program that pulls in the TLS stack (`std.cryptography.tls13_client`, about
+25,000 lines of emitted C) the compiler front end takes 50 to 90 ms (10 to
+20%) longer, which is within the noise of a whole `ae build`; on most
+programs it is not measurable.
+
+Before #2613 the tree-shake ran before the typechecker, so a function nothing
+called was never checked at all: a library could carry a type error for
+months and build clean in every consumer until one of them first called it,
+while the same function, uncalled, in the main file failed the build. The
+library's own tests, which build programs, could not catch it. Now building
+any program that imports a library is as strict a check of the library as
+`ae check` of each of its modules.
+
 ## Re-exports
 
 A module can re-export a symbol it imports from another module by listing that
@@ -619,7 +703,7 @@ main() {
 
 After module orchestration, the compiler clones each module's function and constant AST nodes into the main program with namespace-prefixed names (`double_it` → `mymath_double_it`). Intra-module calls, constant references, and constant-to-constant references (e.g., `const DOUBLE_BASE = BASE * 2`) are renamed automatically. Function parameters and local variables correctly shadow module constants, `check(SCALE) { return SCALE }` returns the parameter, not the module constant `SCALE`. This makes the entire downstream pipeline (type inference, type checking, codegen) work without modification, merged functions are just regular top-level functions.
 
-**Tree-shake of unused merges.** Immediately after merging and before typechecking, `module_prune_unreachable` runs a mark-and-sweep over the program AST. It seeds reachability from `main`, every actor handler, every `export` statement, and every non-imported user function/builder, then closes over `AST_FUNCTION_CALL`, `AST_IDENTIFIER`, and `AST_MEMBER_ACCESS` references, including suffix matches that handle glob-import (`import mymath (*)`) and selective-import (`import mymath [cube]`) shorthands. Imported function and builder definitions outside the closure are dropped from the AST so the typechecker doesn't walk them and the C compiler doesn't emit them. Constants stay (cheap, and pruning them would need a separate pass keyed on identifier references). The whole pass is invisible to user code; programs that *do* call every imported function build identically before and after.
+**Tree-shake of unused merges.** Immediately after merging and before typechecking, `module_mark_unreachable` runs a mark over the program AST. It seeds reachability from `main`, every actor handler, every `export` statement, and every non-imported user function/builder, then closes over `AST_FUNCTION_CALL`, `AST_IDENTIFIER`, and `AST_MEMBER_ACCESS` references, including suffix matches that handle glob-import (`import mymath (*)`) and selective-import (`import mymath (cube)`) shorthands. Imported function and builder definitions outside the closure are only recorded: the typechecker checks them like every other function (see [Every function of every module is checked](#every-function-of-every-module-is-checked)), and `module_sweep_unreachable` drops them from the AST right after type checking, so the C compiler never sees them. Constants stay (cheap, and pruning them would need a separate pass keyed on identifier references). A program emits the same functions as when the prune ran before checking; only the checking covers more.
 
 **Native link dependencies (`@link`).** A module that wraps a native
 library declares its own link flags at the top of `module.ae`:

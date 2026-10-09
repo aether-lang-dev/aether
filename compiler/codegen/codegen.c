@@ -442,10 +442,10 @@ int contains_send_expression(ASTNode* node) {
     return 0;
 }
 
-// Tree-shake of merged-but-unused stdlib functions runs in
-// module_prune_unreachable() before typecheck — see aether_module.c.
-// Codegen no longer needs a separate pass; by this point the AST only
-// contains functions the user actually reaches.
+// Tree-shake of merged-but-unused stdlib functions runs around typecheck
+// (module_mark_unreachable before it, module_sweep_unreachable after it,
+// #2613); see aether_module.c. Codegen no longer needs a separate pass;
+// by this point the AST only contains functions the user actually reaches.
 
 static int is_inlineable_scalar(int type_kind) {
     switch (type_kind) {

@@ -1432,20 +1432,21 @@ int compile_source(const char* input_path, const char* output_path) {
         return 0;
     }
 
-    // Step 2.65: Tree-shake imported functions the program never calls.
-    // Reduces typecheck and gcc compile time on programs that only use
-    // a slice of large stdlib modules. Must run after merge (so the
-    // closure can see merged helpers) and before typecheck (so dead
-    // bodies don't slow it down). See module_prune_unreachable.
-    module_prune_unreachable(program);
+    // Step 2.65: Mark the imported functions the program never calls.
+    // Must run after merge (so the closure can see merged helpers). They
+    // are only recorded here: the typechecker checks every function of
+    // every module in the build (#2613), and module_sweep_unreachable
+    // drops them after it, which keeps gcc compile time down on programs
+    // that only use a slice of large stdlib modules.
+    module_mark_unreachable(program);
 
     // Step 2.67: `@derive(...)` synthesizer (#338).
     // Walks AST_STRUCT_DEFINITION nodes carrying a `derive:<list>`
     // annotation, synthesizes the helper function definitions
     // (T_eq today; format / clone / hash in follow-up commits),
     // and inserts them as siblings into the program. Runs AFTER
-    // module_prune_unreachable so synthesized functions don't get
-    // pruned as "unused" before the call sites that need them
+    // module_mark_unreachable so synthesized functions are never
+    // recorded as "unused" before the call sites that need them
     // type-check, and BEFORE typecheck_program so synthesized
     // bodies type-check normally.
     if (derive_synthesize_pass(program) != 0) {
@@ -1542,6 +1543,11 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     
     if (verbose_mode) printf("Type checking successful\n");
+
+    // Step 3.1: drop the imported functions marked unreachable in step
+    // 2.65, now that they are checked (#2613). Before every mode below,
+    // so each sees the program it saw when the prune ran before checking.
+    module_sweep_unreachable(program);
 
     // --list-functions: post-typecheck so node_type is populated.
     if (list_functions_mode) {

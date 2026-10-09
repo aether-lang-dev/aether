@@ -33,4 +33,8 @@ int sandbox_trust_site_of_enforce(const ASTNode* call);
 int sandbox_trust_call_count(void);
 const ASTNode* sandbox_trust_call_at(int i);
 
+/* #2613: forget the marked calls and sites inside `node`, a definition the
+ * prune drops after type checking (module_sweep_unreachable). */
+void sandbox_trust_forget_within(const ASTNode* node);
+
 #endif
