@@ -14,6 +14,39 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.802.0]
+
+### Changed
+
+- **Sandbox grants check ports, and a grant list is opaque.**
+  `grant_tcp(host, port)` and `grant_udp(host, port)` take a port (0 = any).
+  The checks name the resource `host:port` (`[v6]:port` for IPv6) in std.net,
+  std.udp and the `LD_PRELOAD` layer's `connect()`, so `grant_tcp("db",
+  5432)` no longer lets a sandboxed program reach `db:22`. `sandbox.new`
+  returns a `sandbox.Grants`, a distinct type that `enforce`, `free` and the
+  `contrib/host/*` `run_sandboxed` calls take, and that `std.list` does not:
+  code holding a grant list cannot add entries to it. Grant matching is now
+  one shared header (`runtime/aether_sandbox_match.h`) instead of nine copies
+  that had drifted (only some normalised IPv4-mapped IPv6 addresses).
+  **Breaking:** `grant_tcp` / `grant_udp` need a port argument, and
+  `perms: ptr` parameters become `sandbox.Grants`.
+  Imported C extern signatures resolve distinct parameter and return types,
+  so host bridges accept the same `Grants` returned by `sandbox.new`.
+
+### Fixed
+
+- **`spawn_sandboxed`'s kernel fork fence covers every ABI and more
+  architectures.** The seccomp filter trapped x86_64 syscall numbers and
+  allowed every other ABI, so a static 32-bit binary (i386 ABI, out of
+  `LD_PRELOAD`'s reach too) forked freely inside a sandbox with no `fork`
+  grant, and on arm64, riscv64 and loongarch64 there was no kernel fence at
+  all. The filter now traps clone/clone3/fork/vfork with each ABI's own
+  numbers (x86_64 with x32 and i386, aarch64 with 32-bit ARM, riscv64,
+  loongarch64), kills any other ABI, and `spawn_sandboxed` refuses to run the
+  child on an architecture it does not cover instead of falling back to the
+  libc fence alone. `sandbox_clone_fence` checks the i386 case live and every
+  syscall number against the kernel headers for its architecture.
+
 ## [0.801.0]
 
 ### Added
