@@ -246,6 +246,17 @@ typedef struct HttpServer {
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
 
+    // The connections workers are serving right now: http_server_stop shuts
+    // each one down, so a worker blocked waiting for a keep-alive client's
+    // next request (up to the idle timeout) returns at once and the pool,
+    // and a background server's thread, can be joined. A worker takes its
+    // descriptor out before it closes or parks the connection, so stop
+    // never shuts down a number the system has since handed out again.
+    pthread_mutex_t live_lock;
+    int* live_fds;
+    int live_count;
+    int live_cap;
+
     // Per-request observation hook chain (#260 Tier 3 F1 / F2).
     // Hooks fire once per completed request with timing.
     struct HttpRequestHookNode* request_hook_chain;
@@ -294,6 +305,16 @@ typedef struct HttpServer {
     // intercept a process-directed signal meant for the host application.
     // std-http-server-background-sigurg-poisons-harness.md
     int background;
+    // The background server's thread, which http_server_stop joins so the
+    // accept loop and its workers are done before stop returns: left
+    // detached, they were still in Winsock calls when the program went on
+    // to exit (an access violation on Windows). background_tid is set by
+    // the thread itself, so a stop called from a handler does not join
+    // the thread it runs on.
+    pthread_t background_thread;
+    int background_joinable;
+    int background_tid_set;
+    aether_tid_t background_tid;
     // Multi-accept: one accept thread per core with SO_REUSEPORT (opt-in)
     int multi_accept;               // 0 = single accept (default), 1 = SO_REUSEPORT multi-accept
     int accept_thread_count;
