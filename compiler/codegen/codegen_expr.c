@@ -4011,20 +4011,21 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
                 const char* owning = struct_owning_strings(gen, p->node_type);
                 if (!owning) continue;
-                int kept = struct_param_kept(gen, body, p->value);
+                /* A parameter named like a C keyword is renamed in the C
+                 * signature and in the body (`volatile` is `ae_volatile`),
+                 * so the walk, the capture and the destroy all use that
+                 * name. */
+                const char* cname = safe_value_name(p->value);
+                int kept = struct_param_kept(gen, body, cname);
                 if (closure_param_is_promoted(gen, closure, p->value)) {
                     const char* cell = cg_internf("(*%s)", p->value);
                     if (kept) emit_struct_capture(gen, owning, cell);
                     else emit_struct_disown(gen, owning, cell, 1);
                     continue;
                 }
-                if (kept) emit_struct_capture(gen, owning, safe_value_name(p->value));
-                else emit_struct_disown(gen, owning, safe_value_name(p->value), 1);
-                /* The destroy is spelled with the raw name, as a struct
-                 * local's is, so a renamed parameter is not destroyed. */
-                if (strcmp(safe_value_name(p->value), p->value) == 0)
-                    push_struct_destroy_defer(gen, p->value, p->node_type,
-                                              p->line, p->column);
+                if (kept) emit_struct_capture(gen, owning, cname);
+                else emit_struct_disown(gen, owning, cname, 1);
+                push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);

@@ -3207,10 +3207,11 @@ int os_kill_raw(int pid, int sig) {
 
     /* Resolve a spawn token through the process table first, so kill() takes
      * the same identity os_spawn_raw / os_wait_* hand out on every platform
-     * (issue #1278). A token is a small table index, NOT an OS pid, so
+     * (issue #1278). A token is a table key, NOT an OS pid, so
      * OpenProcess((DWORD)token) would hit an unrelated process. When the int
-     * is not a live token we fall back to treating it as a real pid, which
-     * keeps kill() working for pids obtained by other means. The table HANDLE
+     * is not a live token and is below the token range we fall back to
+     * treating it as a real pid, which keeps kill() working for pids
+     * obtained by other means; in the range it is a reaped token (#2609). The table HANDLE
      * is borrowed (do NOT CloseHandle it here — the owning wait reaps it). */
     HANDLE tok_h = winproc_find(pid);
     if (tok_h) {

@@ -8783,18 +8783,79 @@ void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char
     fprintf(gen->output, "\n");
 }
 
-/* #2582: is `n` a member access chain rooted at identifier `pname`? */
-static int member_chain_rooted_at(ASTNode* n, const char* pname) {
-    while (n && n->type == AST_MEMBER_ACCESS && n->child_count >= 1) n = n->children[0];
+/* #2582: is `n` an access chain (fields, elements) rooted at identifier
+ * `pname`? */
+static int access_chain_rooted_at(ASTNode* n, const char* pname) {
+    while (n && (n->type == AST_MEMBER_ACCESS || n->type == AST_ARRAY_ACCESS) &&
+           n->child_count >= 1)
+        n = n->children[0];
     return n && n->type == AST_IDENTIFIER && n->value && strcmp(n->value, pname) == 0;
 }
 
-/* #2582: may call `call` hand back one of its struct arguments as it is?
- * A function or closure the compiler emits does not: a struct parameter it
- * keeps takes references of its own on entry (struct_param_kept), so what it
- * returns is its own. A C function could return what it was given, so its
- * argument is not the statement's to destroy unless its result cannot hold
- * one (a number, a bool). */
+/* #2582: does a value of type `t` own strings: a struct that does, or an
+ * array of such structs or of strings? */
+static int type_owns_strings(CodeGenerator* gen, Type* t) {
+    if (!t) return 0;
+    if (struct_owning_strings(gen, t)) return 1;
+    return t->kind == TYPE_ARRAY && t->element_type &&
+           (t->element_type->kind == TYPE_STRING ||
+            struct_owning_strings(gen, t->element_type));
+}
+
+/* #2582: can a value of type `t` point into memory an argument owns: a
+ * string, a pointer, an array or a tuple holding one? */
+static int type_can_view(Type* t) {
+    if (!t) return 1;
+    if (t->kind == TYPE_STRING || t->kind == TYPE_PTR || t->kind == TYPE_ARRAY) return 1;
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; i < t->tuple_count; i++)
+            if (type_can_view(t->tuple_types[i])) return 1;
+    }
+    return 0;
+}
+
+static int mentions_any_param(ASTNode* fn_def, ASTNode* e) {
+    for (int i = 0; i < fn_def->child_count; i++) {
+        ASTNode* prm = fn_def->children[i];
+        if (prm && prm->value &&
+            (prm->type == AST_PATTERN_VARIABLE || prm->type == AST_VARIABLE_DECLARATION) &&
+            subtree_mentions_param(e, prm->value)) return 1;
+    }
+    return 0;
+}
+
+/* Does a `return` under `n` give, where the result can point into memory
+ * (type_can_view, per tuple position), a value that mentions a parameter
+ * of `fn_def`? A nested closure's returns are its own. */
+static int returns_view_params_walk(ASTNode* fn_def, ASTNode* n, Type* rt) {
+    if (!n || n->type == AST_CLOSURE) return 0;
+    if (n->type == AST_RETURN_STATEMENT) {
+        for (int j = 0; j < n->child_count; j++) {
+            Type* pt = (rt && rt->kind == TYPE_TUPLE && n->child_count > 1 && j < rt->tuple_count)
+                       ? rt->tuple_types[j] : rt;
+            if (type_can_view(pt) && mentions_any_param(fn_def, n->children[j])) return 1;
+        }
+        return 0;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (returns_view_params_walk(fn_def, n->children[i], rt)) return 1;
+    return 0;
+}
+
+/* #2582: may call `call`'s result be, or point into, one of its arguments as
+ * it came? Then an argument is not the statement's to destroy while the
+ * result lives.
+ *
+ * A scalar result holds nothing, and neither does a fresh heap string
+ * (`string.concat`, a function whose every return is one). A function or
+ * closure the compiler emits returns a struct of its own (a struct
+ * parameter it keeps takes references on entry, struct_param_kept); any
+ * other result it gives can be an argument only through a `return` whose
+ * value mentions a parameter where the result can point into memory, as
+ * `first(s, n) { return s }` hands back the caller's pointer, which may
+ * point into the argument's struct (`first(make_item(w).name, 1)`). A
+ * fallible `int!` returning a literal error is no view. Anything a C
+ * function returns could be its argument. */
 static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
     if (!call || call->type != AST_FUNCTION_CALL) return 0;
     Type* rt = call->node_type;
@@ -8809,30 +8870,44 @@ static int call_may_hand_back_args(CodeGenerator* gen, ASTNode* call) {
                 break;
         }
     }
+    if (rt && rt->kind == TYPE_STRING && is_heap_string_expr(gen, call) &&
+        !handback_take_leaf(gen, call)) return 0;
     const char* fn = call->value ? codegen_normalise_callee(call->value) : NULL;
     if (!fn) return 1;
-    if (strcmp(fn, "call") == 0) return !gen->closure_args_borrowed;
+    if (strcmp(fn, "call") == 0) {
+        /* A closure follows the convention the compiler emits it by: a
+         * struct or string it returns is its own (a uniform-heap string
+         * return, #2499). One it did not see could return anything. */
+        if (!gen->closure_args_borrowed) return 1;
+        return !(rt && (rt->kind == TYPE_STRUCT || rt->kind == TYPE_STRING));
+    }
     if (is_nonstoring_builtin(fn)) return 0;
-    return !callee_has_visible_body(gen, call->value);
+    if (!callee_has_visible_body(gen, call->value)) return 1;
+    if (rt && rt->kind == TYPE_STRUCT) return 0;
+    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
+    if (!fn_def) return 1;
+    return returns_view_params_walk(fn_def, fn_def, rt);
 }
 
 /* #2582: does a body keep its struct parameter `pname` as a whole value?
- * Any use of the bare name counts but these: the object of a field read or
- * store (`p.name`, `p.n = 1`) whose field is not a struct owning strings,
- * and an argument of a call that hands back nothing of its arguments
+ * Any use of the bare name counts but these: the object of an access
+ * (`p.name`, `p.items[0].tag`, `p.n = 1`) whose value owns no strings, and
+ * an argument of a call that hands back nothing of its arguments
  * (call_may_hand_back_args): such a callee borrows it, and keeps what it
  * keeps by its own entry. Returned (directly, in an `if` or `match` arm, a
- * tuple, an optional), aliased (`q = p`), stored, captured by a closure, or
- * read as a struct field (`p.inner`), the parameter could reach the caller
- * or outlive the call as a view of the caller's argument, whose strings the
- * caller frees. Conservative: a keep the walk cannot rule out costs a copy
- * of each string field on entry, never a free under someone else. */
+ * tuple), aliased (`q = p`), stored, captured by a closure, or read as a
+ * field or element that owns strings (`p.inner`, `p.items[0]`), the
+ * parameter could reach the caller or outlive the call as a view of the
+ * caller's argument, whose strings the caller frees. Conservative: a keep
+ * the walk cannot rule out costs a copy of each string field on entry,
+ * never a free under someone else. */
 static int struct_param_kept_walk(CodeGenerator* gen, ASTNode* n, ASTNode* parent,
                                   const char* pname, int depth) {
     if (!n || depth > 512) return n != NULL;
+    int is_access_object = parent && parent->child_count >= 1 && parent->children[0] == n &&
+                           (parent->type == AST_MEMBER_ACCESS || parent->type == AST_ARRAY_ACCESS);
     if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, pname) == 0) {
-        if (parent && parent->type == AST_MEMBER_ACCESS && parent->child_count >= 1 &&
-            parent->children[0] == n) return 0;   /* judged at the access */
+        if (is_access_object) return 0;   /* judged at the outermost access */
         if (parent && parent->type == AST_FUNCTION_CALL && !call_may_hand_back_args(gen, parent)) {
             const char* fn = parent->value ? codegen_normalise_callee(parent->value) : NULL;
             /* A closure call's slot 0 is the closure invoked, not an argument. */
@@ -8841,11 +8916,9 @@ static int struct_param_kept_walk(CodeGenerator* gen, ASTNode* n, ASTNode* paren
         }
         return 1;
     }
-    if (n->type == AST_MEMBER_ACCESS && member_chain_rooted_at(n, pname) &&
-        !(parent && parent->type == AST_MEMBER_ACCESS && parent->child_count >= 1 &&
-          parent->children[0] == n) &&
-        struct_owning_strings(gen, n->node_type)) {
-        /* A struct field of the parameter used as a value. Stored into
+    if ((n->type == AST_MEMBER_ACCESS || n->type == AST_ARRAY_ACCESS) && !is_access_object &&
+        access_chain_rooted_at(n, pname) && type_owns_strings(gen, n->node_type)) {
+        /* A part of the parameter used as a value. Stored into
          * (`p.inner = v`), it is replaced, not kept. */
         int stored = parent && parent->child_count >= 1 && parent->children[0] == n &&
                      (parent->type == AST_ASSIGNMENT ||
@@ -8864,68 +8937,81 @@ int struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname) {
     return struct_param_kept_walk(gen, body, NULL, pname, 0);
 }
 
-/* #2582: the struct-returning calls in the value of a declaration, an
- * assignment or a return that the statement does not keep. `kept` is 1
- * where the value lands in what the statement keeps (the variable, the
- * returned value): a call's struct there is that value, not a temporary,
- * and so is one an `if` arm, an `or` default, a cast, a struct literal's
- * field or an array element passes on. Everything else (an argument, the
- * object of a field read) is a temporary, except an argument of a call that
- * may hand it back as it is (call_may_hand_back_args), which its result
- * keeps. A block, a `match` or a closure holds statements of its own, with
- * temporaries of their own. */
+/* #2582: what a statement's value holds of the struct-returning calls in it.
+ * TEMP_FREE: the statement keeps nothing of `e` past its own evaluation (an
+ * argument consumed by its call, the object of a read the slot copies): a
+ * struct a call returns there is a temporary. TEMP_KEPT: `e` is what the
+ * statement keeps (the bound or returned value, an `if` arm or `or` default
+ * that becomes it, a struct literal's field, an array element); the slot
+ * that takes it copies a view (a field read), so the object of such a read
+ * is still a temporary. TEMP_RAW: `e` flows as it is into a kept value
+ * (an argument a call may hand back), so neither it nor the struct a read
+ * of it reaches into is a temporary. */
+enum { TEMP_FREE = 0, TEMP_KEPT = 1, TEMP_RAW = 2 };
+
+static void add_value_temp(ASTNode* e, ASTNode*** nodes, int* count, int* cap) {
+    if (*count == *cap) {
+        *cap = *cap ? *cap * 2 : 4;
+        *nodes = (ASTNode**)aether_xrealloc(*nodes, sizeof(ASTNode*) * (size_t)*cap);
+    }
+    (*nodes)[(*count)++] = e;
+}
+
+/* #2582: collects the struct-returning calls in `e` that are temporaries of
+ * the statement, given how much of `e` it keeps. A block, a `match` or a
+ * closure holds statements of its own, with temporaries of their own. */
 static void collect_value_struct_temps(CodeGenerator* gen, ASTNode* e, int kept,
                                        ASTNode*** nodes, int* count, int* cap) {
     if (!e || e->type == AST_CLOSURE || e->type == AST_BLOCK ||
         e->type == AST_MATCH_STATEMENT) return;
-    if (kept) {
-        if (e->type == AST_IF_EXPRESSION) {
-            for (int i = 0; i < e->child_count; i++)
-                collect_value_struct_temps(gen, e->children[i], i > 0, nodes, count, cap);
-            return;
-        }
-        if (e->type == AST_OR_ELSE || e->type == AST_NULL_COALESCE) {
-            for (int i = 0; i < e->child_count; i++)
-                collect_value_struct_temps(gen, e->children[i], 1, nodes, count, cap);
-            return;
-        }
-        if (e->type == AST_VALUE_CAST) {
-            for (int i = 0; i < e->child_count; i++)
-                collect_value_struct_temps(gen, e->children[i], 1, nodes, count, cap);
-            return;
-        }
-        if (e->type == AST_STRUCT_LITERAL || e->type == AST_ARRAY_LITERAL) {
-            for (int i = 0; i < e->child_count; i++) {
-                ASTNode* c = e->children[i];
-                /* A struct literal's field is an AST_ASSIGNMENT named by the
-                 * field, holding its value. */
-                if (c && e->type == AST_STRUCT_LITERAL && c->type == AST_ASSIGNMENT) {
-                    for (int k = 0; k < c->child_count; k++)
-                        collect_value_struct_temps(gen, c->children[k], 1, nodes, count, cap);
-                } else {
-                    collect_value_struct_temps(gen, c, 1, nodes, count, cap);
+    if (kept != TEMP_FREE) {
+        switch (e->type) {
+            case AST_IF_EXPRESSION:
+                for (int i = 0; i < e->child_count; i++)
+                    collect_value_struct_temps(gen, e->children[i], i > 0 ? kept : TEMP_FREE,
+                                               nodes, count, cap);
+                return;
+            case AST_OR_ELSE: case AST_NULL_COALESCE: case AST_VALUE_CAST:
+                for (int i = 0; i < e->child_count; i++)
+                    collect_value_struct_temps(gen, e->children[i], kept, nodes, count, cap);
+                return;
+            case AST_STRUCT_LITERAL: case AST_ARRAY_LITERAL:
+                for (int i = 0; i < e->child_count; i++) {
+                    ASTNode* c = e->children[i];
+                    /* A struct literal's field is an AST_ASSIGNMENT named by
+                     * the field, holding its value. */
+                    if (c && e->type == AST_STRUCT_LITERAL && c->type == AST_ASSIGNMENT) {
+                        for (int k = 0; k < c->child_count; k++)
+                            collect_value_struct_temps(gen, c->children[k], kept, nodes, count, cap);
+                    } else {
+                        collect_value_struct_temps(gen, c, kept, nodes, count, cap);
+                    }
                 }
+                return;
+            case AST_FUNCTION_CALL: {
+                int raw = call_may_hand_back_args(gen, e);
+                for (int i = 0; i < e->child_count; i++)
+                    collect_value_struct_temps(gen, e->children[i], raw ? TEMP_RAW : TEMP_FREE,
+                                               nodes, count, cap);
+                return;
             }
-            return;
-        }
-        if (e->type == AST_FUNCTION_CALL) {
-            int hands_back = call_may_hand_back_args(gen, e);
-            for (int i = 0; i < e->child_count; i++)
-                collect_value_struct_temps(gen, e->children[i], hands_back, nodes, count, cap);
-            return;
+            case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
+                if (kept == TEMP_RAW) {
+                    for (int i = 0; i < e->child_count; i++)
+                        collect_value_struct_temps(gen, e->children[i], i == 0 ? TEMP_RAW : TEMP_FREE,
+                                                   nodes, count, cap);
+                    return;
+                }
+                break;
+            default:
+                break;
         }
     }
     if (e->type == AST_FUNCTION_CALL && e->node_type &&
-        e->node_type->kind == TYPE_STRUCT && struct_owning_strings(gen, e->node_type)) {
-        if (*count == *cap) {
-            *cap = *cap ? *cap * 2 : 4;
-            *nodes = (ASTNode**)aether_xrealloc(*nodes, sizeof(ASTNode*) * (size_t)*cap);
-        }
-        (*nodes)[(*count)++] = e;
-    }
-    int hands_back = e->type == AST_FUNCTION_CALL && call_may_hand_back_args(gen, e);
+        e->node_type->kind == TYPE_STRUCT && struct_owning_strings(gen, e->node_type))
+        add_value_temp(e, nodes, count, cap);
     for (int i = 0; i < e->child_count; i++)
-        collect_value_struct_temps(gen, e->children[i], hands_back, nodes, count, cap);
+        collect_value_struct_temps(gen, e->children[i], TEMP_FREE, nodes, count, cap);
 }
 
 /* A call with a trailing block (a builder) is emitted twice by the
@@ -8947,25 +9033,26 @@ static int has_trailing_block_call(ASTNode* e) {
 /* #2582: the temporaries of a declaration's initializer, an assignment's
  * value or a return's values. The expression statement collects its own
  * (collect_stmt_struct_temps). A return in main() leaves through
- * main_exit, a return lowered from a `match` returns from inside its arms,
- * and a return of a call with no value runs the defers before the call, so
- * those are left as they were. */
+ * main_exit, a return lowered from a `match` returns from inside its arms
+ * (emit_match_result_value has their temporaries), and a return of a call
+ * with no value runs the defers before the call, so those are left as they
+ * were. */
 static int statement_value_struct_temps(CodeGenerator* gen, ASTNode* stmt,
                                         ASTNode*** nodes, int* count, int* cap) {
     switch (stmt->type) {
         case AST_VARIABLE_DECLARATION:
             if (stmt->child_count < 1 || has_trailing_block_call(stmt->children[0])) return 0;
-            collect_value_struct_temps(gen, stmt->children[0], 1, nodes, count, cap);
+            collect_value_struct_temps(gen, stmt->children[0], TEMP_KEPT, nodes, count, cap);
             break;
         case AST_ASSIGNMENT:
             if (stmt->child_count < 2 || has_trailing_block_call(stmt->children[1])) return 0;
-            collect_value_struct_temps(gen, stmt->children[1], 1, nodes, count, cap);
+            collect_value_struct_temps(gen, stmt->children[1], TEMP_KEPT, nodes, count, cap);
             break;
         case AST_TUPLE_DESTRUCTURE: {
             /* `a, b = f(...)`: the last child is the value. */
             ASTNode* v = stmt->child_count >= 2 ? stmt->children[stmt->child_count - 1] : NULL;
             if (!v || has_trailing_block_call(v)) return 0;
-            collect_value_struct_temps(gen, v, 1, nodes, count, cap);
+            collect_value_struct_temps(gen, v, TEMP_KEPT, nodes, count, cap);
             break;
         }
         case AST_RETURN_STATEMENT:
@@ -8976,7 +9063,7 @@ static int statement_value_struct_temps(CodeGenerator* gen, ASTNode* stmt,
                     v->node_type->kind == TYPE_VOID || has_trailing_block_call(v)) return 0;
             }
             for (int i = 0; i < stmt->child_count; i++)
-                collect_value_struct_temps(gen, stmt->children[i], 1, nodes, count, cap);
+                collect_value_struct_temps(gen, stmt->children[i], TEMP_KEPT, nodes, count, cap);
             break;
         default:
             return 0;
@@ -8989,47 +9076,52 @@ typedef struct {
     const char** names;
     ASTNode** carriers;
     int count;
+    int mapped;
     ASTNode** outer_nodes;
     const char** outer_names;
     int outer_count;
 } ValueTemps;
 
-/* #2582: declares each temporary of `stmt` zeroed just ahead of it, so one
- * a short circuit skips destroys nothing, and puts its destroy on the defer
- * stack while the statement is emitted: a `return` or `break` from inside
- * the statement's value (an `or` handler) destroys it on the way out. */
-static int value_temps_open(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt) {
-    memset(vt, 0, sizeof(*vt));
-    if (stmt->type != AST_VARIABLE_DECLARATION && stmt->type != AST_ASSIGNMENT &&
-        stmt->type != AST_TUPLE_DESTRUCTURE && stmt->type != AST_RETURN_STATEMENT) return 0;
-    int cap = 0;
-    if (statement_value_struct_temps(gen, stmt, &vt->nodes, &vt->count, &cap) == 0) {
-        free(vt->nodes);
-        vt->nodes = NULL;
-        return 0;
-    }
+/* #2582: declares each temporary in `nodes` zeroed on a line of its own
+ * where code is being emitted, so one a short circuit skips destroys
+ * nothing, puts its destroy on the defer stack (a `return` or `break` from
+ * inside the value, as from an `or` handler, destroys it on the way out),
+ * and maps the calls to their temporaries for the call emitter. Takes
+ * ownership of `nodes`. */
+static void temps_open(CodeGenerator* gen, ASTNode** nodes, int count, int line, int column,
+                       ValueTemps* vt) {
     static int seq = 0;
-    vt->names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)vt->count);
-    vt->carriers = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)vt->count);
-    for (int i = 0; i < vt->count; i++) {
+    memset(vt, 0, sizeof(*vt));
+    vt->nodes = nodes;
+    vt->count = count;
+    vt->names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)count);
+    vt->carriers = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)count);
+    for (int i = 0; i < count; i++) {
         vt->names[i] = cg_internf("_ae_vtmp%d", seq++);
         print_indent(gen);
-        fprintf(gen->output, "%s %s = {0};\n", get_c_type(vt->nodes[i]->node_type), vt->names[i]);
+        fprintf(gen->output, "%s %s = {0};\n", get_c_type(nodes[i]->node_type), vt->names[i]);
         int before = gen->defer_count;
-        push_struct_destroy_defer(gen, vt->names[i], vt->nodes[i]->node_type,
-                                  stmt->line, stmt->column);
+        push_struct_destroy_defer(gen, vt->names[i], nodes[i]->node_type, line, column);
         vt->carriers[i] = gen->defer_count > before ? gen->defer_stack[before] : NULL;
     }
     stmt_struct_temps_get(&vt->outer_nodes, &vt->outer_names, &vt->outer_count);
     stmt_struct_temps_set(vt->nodes, vt->names, vt->count);
-    return 1;
+    vt->mapped = 1;
 }
 
-/* After the statement: each temporary leaves the defer stack and is
- * destroyed in place, unless the statement was a return, whose exit already
- * destroyed it with the other defers. */
-static void value_temps_close(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt) {
+/* The calls are emitted: later code emitted inside the temporaries' life
+ * (a match's arms) maps calls of its own. */
+static void temps_unmap(ValueTemps* vt) {
+    if (!vt->mapped) return;
     stmt_struct_temps_set(vt->outer_nodes, vt->outer_names, vt->outer_count);
+    vt->mapped = 0;
+}
+
+/* Each temporary leaves the defer stack and, unless `destroy` is 0 (a
+ * return, whose exit already destroyed it with the other defers), is
+ * destroyed in place. */
+static void temps_close(CodeGenerator* gen, ValueTemps* vt, int destroy) {
+    temps_unmap(vt);
     for (int i = vt->count - 1; i >= 0; i--) {
         for (int d = gen->defer_count - 1; vt->carriers[i] && d >= 0; d--) {
             if (gen->defer_stack[d] == vt->carriers[i]) {
@@ -9038,7 +9130,7 @@ static void value_temps_close(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt)
                 break;
             }
         }
-        if (stmt->type != AST_RETURN_STATEMENT) {
+        if (destroy) {
             print_indent(gen);
             fprintf(gen->output, "%s_destroy(&%s);\n",
                     struct_owning_strings(gen, vt->nodes[i]->node_type), vt->names[i]);
@@ -9051,6 +9143,85 @@ static void value_temps_close(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt)
     free(vt->nodes);
     free(vt->names);
     free(vt->carriers);
+    vt->nodes = NULL;
+    vt->count = 0;
+}
+
+/* #2582: the temporaries of `e`, given how much of it the code around keeps,
+ * opened where code is being emitted. 0 when there are none. */
+static int value_temps_open_expr(CodeGenerator* gen, ASTNode* e, int kept, ValueTemps* vt) {
+    ASTNode** nodes = NULL;
+    int count = 0, cap = 0;
+    collect_value_struct_temps(gen, e, kept, &nodes, &count, &cap);
+    if (count == 0) {
+        free(nodes);
+        memset(vt, 0, sizeof(*vt));
+        return 0;
+    }
+    temps_open(gen, nodes, count, e->line, e->column, vt);
+    return 1;
+}
+
+/* #2582: a declaration's, an assignment's, a tuple destructure's or a
+ * return's temporaries, opened just ahead of the statement. */
+static int value_temps_open(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt) {
+    memset(vt, 0, sizeof(*vt));
+    if (stmt->type != AST_VARIABLE_DECLARATION && stmt->type != AST_ASSIGNMENT &&
+        stmt->type != AST_TUPLE_DESTRUCTURE && stmt->type != AST_RETURN_STATEMENT) return 0;
+    ASTNode** nodes = NULL;
+    int count = 0, cap = 0;
+    if (statement_value_struct_temps(gen, stmt, &nodes, &count, &cap) == 0) {
+        free(nodes);
+        return 0;
+    }
+    temps_open(gen, nodes, count, stmt->line, stmt->column, vt);
+    return 1;
+}
+
+static void value_temps_close(CodeGenerator* gen, ASTNode* stmt, ValueTemps* vt) {
+    temps_close(gen, vt, stmt->type != AST_RETURN_STATEMENT);
+}
+
+/* #2582: an `if` or loop condition. Its value is a bool, which holds nothing
+ * of a struct a call in it returns, so each such struct is destroyed as
+ * soon as the condition is evaluated, every time it is: the condition
+ * becomes a statement expression holding the temporaries. */
+static void emit_condition(CodeGenerator* gen, ASTNode* cond) {
+    ASTNode** nodes = NULL;
+    int count = 0, cap = 0;
+    collect_value_struct_temps(gen, cond, TEMP_FREE, &nodes, &count, &cap);
+    gen->in_condition = 1;
+    if (count == 0) {
+        free(nodes);
+        generate_expression(gen, cond);
+        gen->in_condition = 0;
+        return;
+    }
+    static int seq = 0;
+    int id = seq++;
+    const char** names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)count);
+    fprintf(gen->output, "({ ");
+    for (int i = 0; i < count; i++) {
+        names[i] = cg_internf("_ae_ctmp%d_%d", id, i);
+        fprintf(gen->output, "%s %s = {0}; ", get_c_type(nodes[i]->node_type), names[i]);
+    }
+    ASTNode** outer_nodes;
+    const char** outer_names;
+    int outer_count;
+    stmt_struct_temps_get(&outer_nodes, &outer_names, &outer_count);
+    stmt_struct_temps_set(nodes, names, count);
+    fprintf(gen->output, "int _ae_cv%d = !!(", id);
+    generate_expression(gen, cond);
+    fprintf(gen->output, "); ");
+    stmt_struct_temps_set(outer_nodes, outer_names, outer_count);
+    for (int i = 0; i < count; i++) {
+        fprintf(gen->output, "%s_destroy(&%s); ",
+                struct_owning_strings(gen, nodes[i]->node_type), names[i]);
+    }
+    fprintf(gen->output, "_ae_cv%d; })", id);
+    gen->in_condition = 0;
+    free(nodes);
+    free(names);
 }
 
 /* #2497: the struct counterpart of emit_string_take. A struct that owns
@@ -9283,7 +9454,19 @@ static void emit_match_arm_block(CodeGenerator* gen, ASTNode* block) {
 // match is an expression, else evaluated as a statement. #2461: an owning
 // string result takes the value (emit_string_take) and records in the
 // match's flag whether it owns it.
+static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result);
+
+/* #2582: an arm's value, with the temporaries of the structs calls in it
+ * return, destroyed once the match's result has taken what it keeps. */
 static void emit_match_result_value(CodeGenerator* gen, ASTNode* result) {
+    ValueTemps vt;
+    int has = value_temps_open_expr(gen, result,
+                                    gen->match_result_var ? TEMP_KEPT : TEMP_FREE, &vt);
+    emit_match_result_value_now(gen, result);
+    if (has) temps_close(gen, &vt, 1);
+}
+
+static void emit_match_result_value_now(CodeGenerator* gen, ASTNode* result) {
     print_indent(gen);
     if (gen->match_result_var && gen->match_result_cell) {
         /* #2514: a closure's variable takes the arm's value in its cell. */
@@ -9395,12 +9578,21 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
      * adopts what it gets, so it gets a copy. */
     {
         ASTNode* v = stmt->children[0];
-        const char* rs = struct_owning_strings(gen, gen->current_func_return_type);
+        /* A closure body has no declared return type here: its value's
+         * type says. */
+        Type* srt = gen->current_func_return_type ? gen->current_func_return_type
+                                                   : (v ? v->node_type : NULL);
+        const char* rs = struct_owning_strings(gen, srt);
         /* An `if` is taken arm by arm (#2582): an arm naming a local or a
          * parameter that owns its strings moves them out, or copies them,
-         * so the exit's destroy of it does not free what is returned. */
+         * so the exit's destroy of it does not free what is returned. A
+         * struct a closure captured is its environment's, which frees it
+         * when the closure goes: returned, the caller gets a copy. */
+        int captured = v && v->type == AST_IDENTIFIER && v->value &&
+                       (is_env_capture_name(gen, v->value) ||
+                        is_alias_capture_name(gen, v->value));
         if (rs && v && (v->type == AST_MEMBER_ACCESS || v->type == AST_ARRAY_ACCESS ||
-                        v->type == AST_IF_EXPRESSION)) {
+                        v->type == AST_IF_EXPRESSION || captured)) {
             emit_struct_take(gen, v, rs, NULL);
             return;
         }
@@ -10436,6 +10628,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->value, stmt->value);
                         emit_closure_take(gen, stmt->children[0]);
                         fprintf(gen->output, "; _aether_closure_env_release(_ae_old); }\n");
+                        break;
+                    }
+                    /* A struct that owns strings is taken as a string is
+                     * above: a local or parameter moved on its last use or
+                     * copied, a view copied, a fresh one adopted. Stored as
+                     * it was, the global shared strings its source freed at
+                     * its exit. */
+                    const char* gsname = grhs ? struct_owning_strings(gen, grhs->node_type) : NULL;
+                    if (gsname) {
+                        fprintf(gen->output, "%s = ", stmt->value);
+                        emit_struct_take(gen, grhs, gsname, NULL);
+                        fprintf(gen->output, ";\n");
                         break;
                     }
                     fprintf(gen->output, "%s", stmt->value);
@@ -11785,11 +11989,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
 
             fprintf(gen->output, "if (");
-            if (stmt->child_count > 0) {
-                gen->in_condition = 1;
-                generate_expression(gen, stmt->children[0]);
-                gen->in_condition = 0;
-            }
+            if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
             fprintf(gen->output, ") {\n");
 
             {
@@ -11938,11 +12138,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
             if (td_id) print_indent(gen);   /* the table ended on a fresh line */
             fprintf(gen->output, "while (");
-            if (stmt->child_count > 0) {
-                gen->in_condition = 1;
-                generate_expression(gen, stmt->children[0]);
-                gen->in_condition = 0;
-            }
+            if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
             fprintf(gen->output, ") {\n");
 
             indent(gen);
@@ -12160,6 +12356,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int is_seq_match = uses_list_patterns &&
                     is_string_seq_ptr_type(match_expr->node_type);
                 char len_name[64] = "_match_len";
+                ValueTemps subject_temps;
+                int has_subject_temps = 0;
 
                 // Wrap match in a block and store the match expression in a temp
                 // to avoid evaluating it multiple times (could have side effects).
@@ -12202,10 +12400,16 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         else if (mexpr_type->kind == TYPE_BOOL)
                             match_c_type = "bool";
                     }
+                    /* #2582: a struct a call in the subject returns lives
+                     * until the match is done, since the subject (a string
+                     * field of it, say) is read by every arm. */
+                    has_subject_temps = value_temps_open_expr(gen, match_expr, TEMP_KEPT,
+                                                              &subject_temps);
                     print_indent(gen);
                     fprintf(gen->output, "%s _match_val = ", match_c_type);
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ";\n");
+                    if (has_subject_temps) temps_unmap(&subject_temps);
                 }
 
                 for (int i = 1; i < stmt->child_count; i++) {
@@ -12292,6 +12496,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "}");
                 }
 
+                if (has_subject_temps) temps_close(gen, &subject_temps, 1);
                 // Close the match scoping block
                 unindent(gen);
                 print_line(gen, "}");

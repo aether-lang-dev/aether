@@ -3,8 +3,12 @@
   in a declaration, an assignment, a tuple destructure or a `return`
   (`n = string.length(make_item(w).name)`, `x = count(make_item(w))`) its
   strings were owned by nobody and leaked on every call. Each of those
-  statements now destroys it once done, and on a `return` or `break` from
-  inside its `or` handler (#2582).
+  statements now destroys it once done, and on a `return`, `break` or
+  `continue` from inside its `or` handler, and so do an `if` or `while`
+  condition, a `match` subject (once the match is done) and a `match` arm
+  (#2582). An argument stays alive when the call's result may point into it:
+  a `string` function that returns its parameter as it came, or anything a
+  C function returns (#2619 tracks copying such a view instead).
 - **A function or closure that hands its struct parameter back gives the
   caller strings of its own.** A struct parameter borrows its caller's
   strings, so returning it (directly, through an alias, in an `if` arm, in a
@@ -21,3 +25,9 @@
   destroy stayed for the rest of the function, so every later exit skipped
   the destroy and leaked the local's strings; it now belongs to its own
   `return` (#2612).
+- **A closure returning a struct it captured hands back a copy.** It handed
+  back its environment's struct as it was, and releasing the closure then
+  freed those strings under the caller: heap corruption (#2617).
+- **A struct assigned to a module-level `var` is taken, not shared.** The
+  global held the strings its source freed at its exit; it now moves or
+  copies them, as it does a string (#2616).
