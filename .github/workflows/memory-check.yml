@@ -59,48 +59,68 @@ jobs:
         make test-build CFLAGS="-O0 -g"
 
     - name: Run Valgrind on test suite
+      id: valgrind
+      # --fair-sched=yes: Valgrind runs one thread at a time, and its default
+      # lock lets the thread that has just given it up take it straight back
+      # (manual, 2.8.1). A thread busy-waiting for another, as the scheduler
+      # tests' threads do, then kept it slice after slice while the thread it
+      # waited on barely ran: two tests that take 13 s under massif took 23
+      # and 40 minutes here (#2593). The futex lock hands it out in turn.
+      #
+      # The status is kept for the next step: the run is not cut short by it,
+      # so the log is complete either way.
       run: |
+        set +e
         valgrind --leak-check=full \
                  --show-leak-kinds=all \
                  --track-origins=yes \
+                 --fair-sched=yes \
                  --verbose \
                  --error-exitcode=1 \
                  --suppressions=.valgrind-suppressions \
-                 ./build/test_runner 2>&1 | tee valgrind-output.txt || true
+                 ./build/test_runner 2>&1 | tee valgrind-output.txt
+        echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
-    - name: Check for leaks
+    - name: Check for errors, failed tests and leaks
+      # Any memcheck error fails the job, not only an invalid read, write or
+      # free, and so does a failed unit test: the status of the run above is
+      # Valgrind's --error-exitcode on an error or a definite or possible
+      # leak, else the test runner's own. It used to be piped away, and this
+      # step looked for three kinds of error by name, so main passed with 86
+      # uninitialised reads (#2599).
+      env:
+        STATUS: ${{ steps.valgrind.outputs.status }}
       run: |
-        # Check if valgrind reported no leaks at all
-        if grep -q "All heap blocks were freed -- no leaks are possible" valgrind-output.txt; then
-          echo "SUCCESS: All heap blocks were freed - no leaks possible"
+        sed 's/\x1b\[[0-9;]*m//g' valgrind-output.txt > valgrind-clean.txt
+        grep -E '^Summary: ' valgrind-clean.txt || echo "No test summary: the runner did not finish."
+        grep -E '^==[0-9]+== +(ERROR SUMMARY|definitely lost|indirectly lost|possibly lost):' valgrind-clean.txt | sort -u
+        if [ "$STATUS" = "0" ]; then
+          echo "SUCCESS: no memcheck errors, no leaks, no failed tests"
           exit 0
         fi
+        echo "ERROR: the Valgrind run exited with status $STATUS"
+        grep -E '\[FAIL\]' valgrind-clean.txt | head -20 || true
+        # Valgrind's own report of each error and leak, with its stack.
+        grep -E -A 14 '^==[0-9]+== (Conditional jump|Use of uninitialised|Invalid (read|write|free)|Mismatched free|Syscall param|Source and destination overlap|[0-9,]+ (\(.*\) )?bytes in [0-9,]+ blocks are (definitely|possibly|indirectly) lost)' valgrind-clean.txt | head -120 || true
+        exit 1
 
-        # Extract definitely lost bytes (portable grep without -P)
-        definitely_lost=$(grep "definitely lost:" valgrind-output.txt | sed 's/.*definitely lost: \([0-9,]*\) bytes.*/\1/' | tr -d ',' | head -1)
-        indirectly_lost=$(grep "indirectly lost:" valgrind-output.txt | sed 's/.*indirectly lost: \([0-9,]*\) bytes.*/\1/' | tr -d ',' | head -1)
-
-        # Default to 0 if empty
-        definitely_lost=${definitely_lost:-0}
-        indirectly_lost=${indirectly_lost:-0}
-
-        echo "Definitely lost: $definitely_lost bytes"
-        echo "Indirectly lost: $indirectly_lost bytes"
-
-        if [ "$definitely_lost" != "0" ] || [ "$indirectly_lost" != "0" ]; then
-          echo "ERROR: Memory leaks detected!"
-          echo "Leak details:"
-          grep -A 10 "definitely lost\|indirectly lost" valgrind-output.txt | head -50
-          exit 1
-        fi
-
-        # Check for actual memory errors (not just possible leaks)
-        if grep -q "Invalid read\|Invalid write\|Invalid free" valgrind-output.txt; then
-          echo "ERROR: Memory errors detected!"
-          exit 1
-        fi
-
-        echo "SUCCESS: No memory leaks detected"
+    - name: Slowest tests under Valgrind
+      if: always()
+      # Each test's own time, slowest first, in the job summary, so a test
+      # that slows down under Valgrind shows there and not only in how long
+      # the job took (#2593).
+      run: |
+        [ -f valgrind-output.txt ] || exit 0
+        {
+          echo "### Slowest tests under Valgrind"
+          echo
+          echo "| ms | test |"
+          echo "|---:|---|"
+          sed 's/\x1b\[[0-9;]*m//g' valgrind-output.txt \
+            | sed -nE 's/.*\[(PASS|FAIL)\] (.*) \(([0-9]+)ms\)$/\3|\2/p' \
+            | sort -t'|' -k1,1 -rn | head -15 \
+            | awk -F'|' '{ printf "| %s | %s |\n", $1, $2 }'
+        } >> "$GITHUB_STEP_SUMMARY"
 
     - name: Upload Valgrind report
       if: always()

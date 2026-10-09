@@ -51,8 +51,14 @@ not a program; if a block has a `main()` and is meant to work, leave it bare so
 this compiles it.
 
 Needs a built ./build/ae (skips cleanly without one).
+
+The blocks are built and run in parallel, NPROC at a time (the Makefile's
+job count, else the machine's), each in a directory of its own; results are
+reported in source order. One at a time, they were 4.5 minutes of every
+Windows CI leg (#2594).
 """
 
+import concurrent.futures
 import os
 import re
 import subprocess
@@ -226,41 +232,61 @@ def main():
     failures = []
     unknown = []
 
-    with tempfile.TemporaryDirectory() as workdir:
-        for path in doc_files(root):
-            rel = os.path.relpath(path, root)
-            for line, label, code, expected in blocks_in(path):
-                if label not in KNOWN:
-                    unknown.append((rel, line, label))
-                    continue
-                if label == "fragment":
-                    skipped += 1
-                    continue
-                if label == "run":
-                    if expected is None:
-                        failures.append(
-                            (rel, line,
-                             "labelled `run` but no ```output block follows "
-                             "it: a run block declares what it prints"))
-                        continue
-                    ran += 1
-                    ok, err = runs(ae, code, expected, workdir)
-                    if not ok:
-                        failures.append((rel, line, err))
-                    continue
-                ok, err = compiles(ae, code, workdir,
-                                   allow_unresolved=(label == "nolink"))
-                if label == "fails":
-                    counter += 1
-                    if ok:
-                        failures.append(
-                            (rel, line,
-                             "labelled `fails` but it compiles: either the "
-                             "example is no longer wrong, or the label is"))
-                    continue
-                checked += 1
-                if not ok:
-                    failures.append((rel, line, err or "does not compile"))
+    # Sort the blocks first, then build and run the checkable ones on a pool;
+    # each job has a directory of its own and its verdict lands in its slot,
+    # so the report keeps the source order.
+    jobs = []   # (rel, line, label, code, expected)
+    for path in doc_files(root):
+        rel = os.path.relpath(path, root)
+        for line, label, code, expected in blocks_in(path):
+            if label not in KNOWN:
+                unknown.append((rel, line, label))
+            elif label == "fragment":
+                skipped += 1
+            elif label == "run" and expected is None:
+                failures.append(
+                    (rel, line,
+                     "labelled `run` but no ```output block follows "
+                     "it: a run block declares what it prints"))
+            else:
+                jobs.append((rel, line, label, code, expected))
+
+    def check(job, workdir):
+        _rel, _line, label, code, expected = job
+        if label == "run":
+            return runs(ae, code, expected, workdir)
+        return compiles(ae, code, workdir, allow_unresolved=(label == "nolink"))
+
+    try:
+        workers = int(os.environ.get("NPROC", "") or 0)
+    except ValueError:
+        workers = 0
+    workers = max(1, workers or os.cpu_count() or 1)
+
+    with tempfile.TemporaryDirectory() as tmp:
+        dirs = [os.path.join(tmp, str(i)) for i in range(len(jobs))]
+        for d in dirs:
+            os.mkdir(d)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            verdicts = list(pool.map(check, jobs, dirs))
+
+    for (rel, line, label, _code, _expected), (ok, err) in zip(jobs, verdicts):
+        if label == "run":
+            ran += 1
+            if not ok:
+                failures.append((rel, line, err))
+        elif label == "fails":
+            counter += 1
+            if ok:
+                failures.append(
+                    (rel, line,
+                     "labelled `fails` but it compiles: either the "
+                     "example is no longer wrong, or the label is"))
+        else:
+            checked += 1
+            if not ok:
+                failures.append((rel, line, err or "does not compile"))
+    failures.sort(key=lambda f: (f[0], f[1]))
 
     for rel, line, label in unknown:
         print(f"  {rel}:{line}: unknown block label `{label}` "

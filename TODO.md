@@ -160,6 +160,5 @@ complete and oracle-verified; Montgomery `mod_pow` (odd moduli) and Karatsuba
 multiplication have shipped. Still deferred, none blocking correctness:
 
 - Barrett reduction for the even-modulus `mod_pow` path.
-- Optimized long division (schoolbook division is the current throughput floor).
 - Toom-Cook multiplication above the Karatsuba threshold for very large operands.
 - Random-witness Miller-Rabin (the primality test currently uses fixed witnesses).

@@ -11,6 +11,8 @@
 #include "../../runtime/aether_process_mem.h"
 #include <stdatomic.h>
 
+extern AETHER_TLS int current_core_id;
+
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -1164,6 +1166,116 @@ void test_scheduler_teardown_with_live_actor_thread(void) {
     scheduler_cleanup();
 }
 
+// #2592: an actor thread with nothing to do sleeps instead of spinning for
+// as long as the actor lives, and a message and its release each wake it.
+// The waits below are bounded by the clock: sleep_ms(1) is a timer tick,
+// about 15 ms, on Windows, so a bound in iterations is not a bound in time.
+static int wait_thread_parked(ActorBase* a) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(&a->thread_parked)) {
+        if ((long long)get_time_ms() > deadline) return 0;
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+// Waits until *count reaches `want`, at most 10 s; returns the count.
+static int wait_count(atomic_int* count, int want) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(count) < want && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(count);
+}
+
+void test_scheduler_actor_thread_parks_when_idle(void) {
+    scheduler_init(1);
+    // Two actors first, so the core thread runs (as in the teardown cycle).
+    for (int i = 0; i < 2; i++) {
+        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    }
+    CounterActor* a = (CounterActor*)scheduler_spawn_actor(-1, (void (*)(void*))counter_step,
+                                                           sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    atomic_store(&a->count, 0);
+    a->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&a->thread, NULL, aether_actor_thread, a));
+
+    // Idle from the start: it spins a while, then sleeps.
+    ASSERT_TRUE(wait_thread_parked((ActorBase*)a));
+
+    // A message wakes it.
+    Message msg = message_create_simple(1, 0, 7);
+    scheduler_send_remote((ActorBase*)a, msg, -1);
+    ASSERT_EQ(1, wait_count(&a->count, 1));
+    ASSERT_EQ(7, atomic_load(&a->last_value));
+
+    // Asleep again; the release wakes it, it leaves its loop and ends the
+    // actor.
+    ASSERT_TRUE(wait_thread_parked((ActorBase*)a));
+    pthread_t t = a->thread;
+    scheduler_release_actor((ActorBase*)a);
+    pthread_join(t, NULL);
+    ASSERT_EQ(0, wait_no_pending());
+
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
+// #2598: an actor thread's queue holds 63 messages and its mailbox 32. A
+// send from a thread of its core dropped a message the queue could not take,
+// and the thread, draining the queue, dropped what did not fit the mailbox;
+// both had been counted as sent. The actor's first step holds it at a gate
+// while 200 more are sent from a thread standing in for another actor
+// thread of the core, so the queue fills and stays full, then every one of
+// them must be processed.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int* gate;    // the first step waits here
+    atomic_int count;
+} GateActor;
+
+static void gate_step(void* self) {
+    GateActor* a = (GateActor*)self;
+    Message msg;
+    if (mailbox_receive(&a->mailbox, &msg)) {
+        if (atomic_fetch_add(&a->count, 1) == 0) {
+            while (!atomic_load(a->gate)) sleep_ms(1);
+        }
+    }
+}
+
+void test_scheduler_actor_thread_full_queue_keeps_messages(void) {
+    scheduler_init(1);
+    for (int i = 0; i < 2; i++) {
+        ASSERT_NOT_NULL(scheduler_spawn_actor(-1, (void (*)(void*))counter_step, sizeof(CounterActor)));
+    }
+    atomic_int gate;
+    atomic_init(&gate, 0);
+    GateActor* a = (GateActor*)scheduler_spawn_actor(-1, gate_step, sizeof(GateActor));
+    ASSERT_NOT_NULL(a);
+    a->gate = &gate;
+    atomic_init(&a->count, 0);
+    a->auto_process = 1;
+    ASSERT_EQ(0, pthread_create(&a->thread, NULL, aether_actor_thread, a));
+
+    Message msg = message_create_simple(1, 0, 0);
+    scheduler_send_remote((ActorBase*)a, msg, -1);
+    ASSERT_EQ(1, wait_count(&a->count, 1));   // its thread waits at the gate
+
+    current_core_id = 0;
+    for (int i = 0; i < 200; i++) scheduler_send_local((ActorBase*)a, msg);
+    current_core_id = -1;
+    atomic_store(&gate, 1);
+
+    ASSERT_EQ(201, wait_count(&a->count, 201));
+    scheduler_wait();   // returns: every message counted as sent was processed
+
+    pthread_t t = a->thread;
+    scheduler_release_actor((ActorBase*)a);
+    pthread_join(t, NULL);
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1177,6 +1289,8 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it stepped", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor thread parks when idle", test_scheduler_actor_thread_parks_when_idle, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler actor thread keeps messages past a full queue", test_scheduler_actor_thread_full_queue_keeps_messages, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler basic messaging", test_scheduler_basic_messaging, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler message ordering", test_scheduler_message_ordering, TEST_CATEGORY_RUNTIME);

@@ -7,8 +7,9 @@
 // internally (SHAKE256), so the message is passed raw.
 //   "valid"   -> verify MUST return 1.
 //   "invalid" -> verify MUST return 0 (a forgery must be rejected).
-// Ed448 verify is bignum-heavy; stride-sample (default 4; WYCHEPROOF_FULL=1 or
-// WYCHEPROOF_STRIDE=N).
+// Every vector by default (WYCHEPROOF_STRIDE=N samples). It sampled every
+// 4th while std.bignum divided a bit at a time and a verify took seconds;
+// with Algorithm D (#2595) all 87 take about 2 s.
 
 import std.cryptography.ed448
 import std.os
@@ -46,7 +47,7 @@ fn from_hex(s: string) -> ptr {
 }
 
 main() {
-    stride = 4
+    stride = 1
     wf = os.os_getenv("WYCHEPROOF_FULL")
     if wf != 0 {
         if wf == "1" { stride = 1 }

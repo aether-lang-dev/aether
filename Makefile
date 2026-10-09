@@ -3098,7 +3098,7 @@ check-docs: compiler ae stdlib
 	    $$py tests/scripts/check_stdlib_index.py && \
 	    $$py tests/scripts/check_module_readmes.py && \
 	    $$py tests/scripts/check_shipped_module_leaves.py && \
-	    $$py tests/scripts/check_doc_blocks.py; \
+	    NPROC=$(NPROC) $$py tests/scripts/check_doc_blocks.py; \
 	else \
 	    echo "  [SKIP] documentation examples — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

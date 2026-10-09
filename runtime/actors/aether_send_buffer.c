@@ -32,6 +32,8 @@ void send_buffer_flush(void) {
         if (sent == g_send_buffer.count) {
             atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
             g_send_buffer.count = 0;
+            // An actor with its own thread may be asleep in its park (#2592).
+            if (actor->auto_process) scheduler_actor_thread_wake(actor);
             return;
         }
         

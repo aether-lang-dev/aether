@@ -510,7 +510,10 @@ void codegen_own_node(CodeGenerator* gen, ASTNode* node) {
 }
 
 CodeGenerator* create_code_generator(FILE* output) {
-    CodeGenerator* gen = malloc(sizeof(CodeGenerator));
+    /* Zeroed, so a field nothing below sets starts at 0, NULL or false, not
+     * garbage. lib_actors (#2297) was one: aetherc sets it, and every codegen
+     * unit test read whatever malloc left there (#2599). */
+    CodeGenerator* gen = calloc(1, sizeof(CodeGenerator));
     gen->synthesised_nodes = NULL;
     gen->synthesised_count = 0;
     gen->synthesised_cap = 0;

@@ -131,6 +131,10 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     atomic_int main_thread_only; \
     /* Lock-free same-core messaging (lazy, only for auto_process) */ \
     SPSCQueue* spsc_queue; \
+    /* 1 while the actor's own thread (auto_process) sleeps in its idle \
+     * park (#2592): a sender that has just queued a message for it and \
+     * reads 1 wakes it (scheduler_actor_thread_wake). */ \
+    atomic_int thread_parked; \
     /* Non-NULL only while an ask/reply is in flight */ \
     _Atomic(ActorReplySlot*) reply_slot; \
     /* Prevents concurrent step() calls during work-steal handoff. \
@@ -336,6 +340,16 @@ void scheduler_reader_offline(void);
  * ended, as a release ends any other, if it has been released; a release
  * that comes later ends it then. */
 void scheduler_actor_thread_exit(ActorBase* actor);
+/* An auto_process actor's thread with nothing to do sleeps here (#2592),
+ * after spinning a while, instead of spinning for good: until a message for
+ * the actor, its release or the scheduler's stop wakes it, with a timed wait
+ * behind those. While asleep the thread is not a reader, so it holds no
+ * reclamation back. Returns 0 without sleeping for an actor on no core, 1
+ * otherwise. */
+int scheduler_actor_thread_park(ActorBase* actor);
+/* Wakes `actor`'s own thread if it is asleep in that park. Whatever puts a
+ * message in an auto_process actor's SPSC queue calls it afterwards. */
+void scheduler_actor_thread_wake(ActorBase* actor);
 /* Called by the inline (main-thread-mode) send once the step it ran has
  * returned and it no longer touches the actor: an actor that released itself
  * in that step is released now (#2509). */

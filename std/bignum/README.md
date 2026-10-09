@@ -88,6 +88,11 @@ Conversion divides by 10^9 — nine digits per pass — rather than one digit at
 time, so a thousand-digit value costs about a ninth of the big-integer
 divisions the naive form would.
 
+`divide`, `remainder` and `mod` use Knuth's Algorithm D, one 32-bit limb of
+the quotient per step, with no allocation inside the loop. They used to work
+a bit at a time, allocating as they went, which made a P-521 signature check
+take seconds; it takes about 60 ms now (#2595).
+
 ## Exports
 
 `from_int`, `from_bytes`, `from_bytes_unsigned`, `to_bytes`,
