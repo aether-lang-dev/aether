@@ -10560,7 +10560,20 @@ static int cmd_cflags(int argc, char** argv) {
             if (!slash) slash = strrchr(libdir, '\\');
             if (slash) *slash = '\0';
             if (wrote_anything) fputc(' ', stdout);
-            printf("-L%s -laether", libdir);
+            printf("-L%s", libdir);
+#if defined(_WIN32)
+            /* The C entry point of an --emit=obj object on Windows, where a
+             * COFF weak main() is not reliably kept from libmingw32's WinMain
+             * one (runtime/windows/aether_lib_main.c): an archive member,
+             * linked only for a program with no main() of its own. Named
+             * first, ahead of -laether and the compiler's -lmingw32. */
+            {
+                char entry[1100];
+                snprintf(entry, sizeof(entry), "%s/libaether_main.a", libdir);
+                if (path_exists(entry)) fputs(" -laether_main", stdout);
+            }
+#endif
+            fputs(" -laether", stdout);
             wrote_anything = 1;
         }
         if (wrote_anything) fputc(' ', stdout);

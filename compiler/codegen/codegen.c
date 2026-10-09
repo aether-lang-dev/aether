@@ -5468,12 +5468,21 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
  * definition beats a weak one, and a shared library's main is never what a
  * process starts in. Not emitted for wasm, where emscripten runs a module's
  * main() on load and would turn a library into a program, nor for a compiler
- * without weak definitions (the host then supplies main, as before). */
+ * without weak definitions (the host then supplies main, as before).
+ *
+ * Nor on Windows: a COFF weak definition is a weak external, and GNU ld (up
+ * to 2.46 at least) still searched the archives for `main`, pulled
+ * libmingw32.a's crtexewin.o (a strong main() that calls WinMain) and failed
+ * with `undefined reference to 'WinMain'`. There the same entry is the one
+ * member of libaether_main.a (runtime/windows/aether_lib_main.c), which
+ * `ae cflags --libs` names first: archive semantics give exactly the weak
+ * main's behaviour, with nothing left to the linker's weak externals. */
 static void emit_lib_weak_main(CodeGenerator* gen) {
     print_line(gen, "");
     print_line(gen, "/* The executable's entry, for whoever links this into a program; a host's");
-    print_line(gen, " * own main() wins (weak). See docs/emit-lib.md. */");
-    print_line(gen, "#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__) && !defined(__wasm__) && !defined(AETHER_NO_LIB_MAIN)");
+    print_line(gen, " * own main() wins (weak). On Windows the entry is libaether_main.a instead.");
+    print_line(gen, " * See docs/emit-lib.md. */");
+    print_line(gen, "#if (defined(__GNUC__) || defined(__clang__)) && !defined(__EMSCRIPTEN__) && !defined(__wasm__) && !defined(_WIN32) && !defined(AETHER_NO_LIB_MAIN)");
     print_line(gen, "__attribute__((weak)) int main(int argc, char** argv) {");
     indent(gen);
     print_line(gen, "int rc = aether_main(argc, argv);");

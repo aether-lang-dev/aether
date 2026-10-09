@@ -36,7 +36,11 @@
 #      c.program; aeb asks/c-program-aether-source-main-entry.md) -- links a
 #      working program with no C main() of its own, exit code and all; and a
 #      host that brings its own main() still gets its own (strong beats weak);
-#      a shared library ae links (native and cross) exports no main at all
+#      a shared library ae links (native and cross) exports no main at all.
+#      On Windows the object carries no main() and the entry is
+#      libaether_main.a, which `ae cflags --libs` names (a COFF weak main left
+#      `main` to archive search, and libmingw32's WinMain entry won the link:
+#      "undefined reference to `WinMain'"); 9c checks that layout there.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -235,13 +239,26 @@ HC
         "$TMP/hostprog" >"$TMP/hostprog.out" 2>&1; hrc=$?
         if [ "$hrc" -eq 0 ] && [ "$(head -1 "$TMP/hostprog.out")" = "hostmain: first" ] \
            && grep -q '^hostmain: last, rc 42' "$TMP/hostprog.out"; then
-            ok "a host's own main() beats the object's weak one"
+            ok "a host's own main() wins over the object's entry"
         else
             bad "host main() did not win (exit $hrc)"; cat "$TMP/hostprog.out"
         fi
     else
         bad "cc app.o hostmain.c: link failed (duplicate main?)"; tail -5 "$TMP/hostlink.log"
     fi
+    # 9c. Windows: the object leaves main() to libaether_main.a, named by
+    #     `ae cflags --libs`, so no linker's handling of COFF weak externals
+    #     decides which entry a program gets.
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            if nm "$TMP/app.o" 2>/dev/null | grep -E "[[:space:]][TtWw][[:space:]]+main\$" >/dev/null; then
+                bad "windows: the object defines main() (it belongs to libaether_main.a)"
+            elif ! printf '%s\n' "$LIBS" | grep -q -- "-laether_main -laether"; then
+                bad "windows: ae cflags --libs does not name -laether_main before -laether: $LIBS"
+            else
+                ok "windows: the object leaves main() to libaether_main.a, named by ae cflags --libs"
+            fi ;;
+    esac
 else
     bad "ae build --emit=obj app.ae"; cat "$TMP/obj.log"
 fi

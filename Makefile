@@ -479,6 +479,18 @@ ifdef IS_WINDOWS
   endif
 endif
 
+# Windows: the C entry point of an --emit=obj object
+# (runtime/windows/aether_lib_main.c). Elsewhere the object carries a weak
+# main(); a COFF weak definition does not reliably keep libmingw32's WinMain
+# entry out of the link, so on Windows the entry is this one-member archive,
+# which `ae cflags --libs` names ahead of -laether: linked only when the
+# program has no main() of its own. Kept out of libaether.a because the shared
+# runtime DLL is linked from that whole archive and must define no main.
+LIB_MAIN_ARCHIVE :=
+ifdef IS_WINDOWS
+  LIB_MAIN_ARCHIVE := $(BUILD_DIR)/libaether_main.a
+endif
+
 # Optional OpenSSL detection (enables HTTPS client). Probes pkg-config;
 # falls back silently if OpenSSL isn't installed — the HTTP client still
 # works for `http://` URLs and returns a clean error for `https://`.
@@ -1966,7 +1978,7 @@ endif
 endif
 
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(BUILD_TARGET_STAMP) $(SHARED_RT)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT)
 
 ifneq ($(SHARED_RT),)
 $(SHARED_RT): $(BUILD_DIR)/libaether.a
@@ -1978,6 +1990,13 @@ $(SHARED_RT): $(BUILD_DIR)/libaether.a
 shared-runtime: $(SHARED_RT)
 .PHONY: shared-runtime
 endif
+
+$(BUILD_DIR)/libaether_main.a: runtime/windows/aether_lib_main.c $(BUILD_FLAGS_STAMP)
+	@mkdir -p $(OBJ_DIR)/runtime/windows
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c runtime/windows/aether_lib_main.c -o $(OBJ_DIR)/runtime/windows/aether_lib_main.o
+	@rm -f $@.tmp
+	@ar rcs $@.tmp $(OBJ_DIR)/runtime/windows/aether_lib_main.o
+	@mv $@.tmp $@
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."
