@@ -14,6 +14,177 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.797.0]
+
+### Changed
+
+- **Every stage of `make ci` has a time bound, and a hung C test is named.**
+  The C unit tests, the doc and standalone checks, the examples, the install,
+  differential and archive checks, and each test's build in the `.ae` sweep
+  ran without one, so a hang ran for as long as the job could. Five Windows
+  runs ended about an hour in with the runner lost and no log (#2608). A
+  stage that runs past its bound now fails as `[TIMEOUT] stage <name>` with
+  the processes still running and their memory, and the C test harness ends a
+  test that runs past `AE_C_TEST_TIMEOUT` seconds (120 by default) with its
+  name. The `ae test` smoke check no longer reports a pass when `ae test`
+  fails.
+
+### Fixed
+
+- **A closure's struct parameter borrows the caller's strings, as a
+  function's does.** Its string trackers were left set on entry, so a closure
+  that returned its parameter handed the caller's strings back still owned:
+  `cb(make_item("w")).name` freed them twice and crashed with heap corruption,
+  and a field store into the parameter freed the caller's string. The
+  parameter is now disowned on entry, and the closure frees at its exit only
+  the strings it stored itself (#2606).
+- **A struct literal copies a string local that is used again.** The literal
+  moved the local's string into the field and cleared the local's flag even
+  when the local was read or freed later, so `h = Holder { text: text }`
+  followed by `string.free(text)` freed the string the struct owned, and the
+  struct freed it again (a segfault). A local used again is now copied, as an
+  alias of it is; one the literal uses last is still moved (#2602).
+- **A struct literal takes any number of string locals.** It recorded at most
+  16 moved locals, so the 17th kept its flag and its string was freed by both
+  the local and the struct (#2610).
+- **On Windows, a reaped spawn token is never taken for a pid.** `os.kill`
+  and `os.wait_pid_timeout` take a token or a real pid, and a token the table
+  no longer held was opened as a pid: tokens counted from 1, so a stale one
+  reached whatever process had that number, on an elevated CI runner another
+  test's or the runner's own. Tokens now start above any pid Windows hands out,
+  and a reaped one is reported gone (#2609).
+
+- **A struct a call returns is destroyed after any statement that does not
+  keep it.** Only an expression statement held such a struct in a temporary;
+  in a declaration, an assignment, a tuple destructure or a `return`
+  (`n = string.length(make_item(w).name)`, `x = count(make_item(w))`) its
+  strings were owned by nobody and leaked on every call. Each of those
+  statements now destroys it once done, and on a `return`, `break` or
+  `continue` from inside its `or` handler, and so do an `if` or `while`
+  condition, a `match` subject (once the match is done) and a `match` arm
+  (#2582). A `string` a call may hand back from such a struct, as
+  `first(make_item(w).name, 1)` does when `first` returns its parameter as
+  it came, is copied where it is made, so the struct still goes with its
+  statement (#2619). A tuple or pointer such a call returns, or anything a C
+  function returns, keeps its argument alive instead.
+- **A function or closure that hands its struct parameter back gives the
+  caller strings of its own.** A struct parameter borrows its caller's
+  strings, so returning it (directly, through an alias, in an `if` arm, in a
+  tuple or inside another struct) handed back a view of the caller's
+  argument, valid only while the argument lived. A parameter the body keeps
+  as a whole value now takes its own references on entry (a counted string
+  retained, anything else copied); one that is only read still borrows
+  (#2582).
+- **A struct local returned through an `if` is no longer freed under the
+  caller, and one returned on one path is destroyed on the others.**
+  `return if k > 0 { x } else { make_item("q") }` returned `x` and then
+  destroyed it, so the caller read freed memory; the `if` now moves or copies
+  the struct it picks. And the mark that holds back a returned local's
+  destroy stayed for the rest of the function, so every later exit skipped
+  the destroy and leaked the local's strings; it now belongs to its own
+  `return` (#2612).
+- **A closure returning a struct it captured hands back a copy.** It handed
+  back its environment's struct as it was, and releasing the closure then
+  freed those strings under the caller: heap corruption (#2617).
+- **A struct assigned to a module-level `var` is taken, not shared.** The
+  global held the strings its source freed at its exit; it now moves or
+  copies them, as it does a string (#2616).
+
+- **`ae` removes the stub directory of a binary import when it exits.** A
+  build that imports a binary package writes the import's interface stub
+  into a fresh `ae-binimport-*` temp directory, read only by the compile
+  that follows, and left it there: every such build added one for good (889
+  on one Windows CI machine). It is removed when `ae` exits, and on Linux and
+  macOS it is made under `TMPDIR` as other temp files are, rather than
+  always under `/tmp` (#2620).
+
+- **`std.http.script_gateway` mounts a script on Windows.** It was a stub
+  there that answered every mount with `KIND_UNAVAILABLE`. It now loads the
+  script DLL with `LoadLibrary` and calls its `aether_script_handle`, as the
+  POSIX build does with `dlopen`. Windows has no `-rdynamic` for a script to
+  bind its runtime calls to the host's runtime, so the host and the script
+  are both built with `ae build --shared-runtime` and share `aether.dll`. A
+  host or a script on its own static runtime is refused at mount with
+  `KIND_IO` and a message naming the flag. Otherwise the two would each keep
+  their own caps and config while handing each other heap objects (#2547).
+- **A Windows DLL that `ae` builds exports its `@c_callback` functions.** A
+  `@c_callback` definition is emitted weak, so two translation units carrying
+  one module can share a link, and PE cannot export a weak definition. So a
+  C host's `GetProcAddress` never found a `@c_callback` in an `--emit=lib`
+  DLL, which is the one thing the annotation is for. The script gateway's
+  `aether_script_handle` was the first to need it. A DLL `ae` links is one
+  translation unit, so its `@c_callback` definitions are now strong, as
+  `aether_lib_meta` already was (#2547).
+- **The HTTP server's refusals reach a Windows client.** A 413, 414, 431 or
+  framing 400 goes out while the client may still be sending the rest of the
+  request, and closing with those bytes unread makes the kernel reset the
+  connection. A Windows client discards what it had received but not read on
+  a reset, so an upload refused with 413 arrived there as "connection reset"
+  about half the time. The server now closes in stages, as RFC 9112 9.6 asks:
+  it half-closes after the refusal and reads off what the client still sends,
+  for at most two seconds, before it closes (#2547).
+- **Twenty-six integration tests that skipped on Windows run there (#2547).**
+  These are the namespace round trips (C, Python, Ruby and Java hosts), the
+  raw-socket HTTP client and server probes (`http_client_bad_status` and
+  `http_client_dechunk` among them), `http_server_background_quiet`,
+  `std_testing_arms`, `http_script_gateway`, `emit_csrc`, `emit_lib_swig`,
+  `wasm_installed_prefix_paths`, `notify`, `liquid_sandbox_gate` and
+  `manifest_srcs_long_path`. The raw-socket fixtures share
+  `tests/lib/raw_socket.h`, and `tests/lib/raw_exchange.c` replaces `nc`,
+  which neither a Windows nor every Linux runner has. A test that needs Ruby,
+  a JDK 22 or SWIG still skips where that tool is missing.
+  `manifest_srcs_long_path` had built from the short root on every platform:
+  `ae` takes its root from its own path, which `AETHER_HOME` does not
+  override, and a cached binary was served anyway. Its check now runs `ae`
+  from the long path with a fresh cache, checks the root it built from, and
+  lives in `message_trace`, whose traced build it shares (#2596).
+
+### Performance
+
+- **`win_batch_compiler_long_cmdline` no longer lists the network root.**
+  Its `--extra` paths are past 260 characters, so `cygpath` writes them in
+  the long-path form `//?/C:/...`, and the unquoted expansion that splits
+  them into words also globbed each one: the `?` made the shell list `//`,
+  about three seconds a path, some 80 s before each of its two builds.
+  Pathname expansion is off for those words, which never matched anything;
+  the test took 166 s on Windows and takes 7 to 12 s (#2596).
+- **`message_trace` carries the `manifest_srcs_long_path` check, which now
+  builds from a long root.** That test ran `build/ae` with `AETHER_HOME`
+  naming a link to the tree, but `ae` takes its root from where its own
+  binary sits, so it built from the tree's short path every time, and on
+  Windows `ln -s` first copied the whole tree. The traced build now runs
+  from copies of `ae` and `aetherc` under the long directory, with the
+  source trees linked in (junctions on Windows), checks that the build
+  resolved that root, and serves both checks, so the sweep compiles the
+  runtime from source once instead of twice: the two tests took 100 to
+  134 s on Windows, the one now takes 55 to 62 s (#2596).
+- **`fmt_gate` starts fewer processes.** The idempotence tier copies its
+  sample with one `tar` and formats it by name, and the IR tier compares a
+  pair of generated C files with one `awk` instead of checksumming each
+  through four processes: thirteen processes a sampled file became six.
+  In back-to-back runs on Windows, 67, 84 and 109 s became 33, 69 and
+  41 s (#2596).
+- **An install builds the compiled module artifacts in one `aetherc`.**
+  `aetherc --emit=aea` takes any number of `<module.ae> <out.aea>` pairs,
+  and `scripts/build_module_artifacts.sh` hands it the std tree: the 157
+  artifacts took 37 s one process each and take 1.3 s, byte for byte the
+  same (`aea_artifacts` checks a batch's artifacts against ones written
+  alone). `install.sh` also copies the headers with one `tar` per tree
+  instead of three processes a header, and `trim_contrib_sources.sh` reads
+  only the `.ae` files that say `@source` and matches the rest in the
+  shell. An install took 41 s on Windows and takes 9 s, the installed tree
+  byte-identical, and every test that installs gains: `install_manifest`
+  went from 131 s to 37 s and `aea_artifacts` from 25 s to 7 s (#2596).
+- **`install_contrib_resolves` reads only the `.ae` files that say
+  `@source`.** Collecting the `@source`d C files ran a `dirname` and a `sed`
+  for each of the 121 contrib `.ae` files, twice. With the faster install
+  the test went from 97 s to 15 s on Windows (#2596).
+- **`flat_lib_fallback` installs the tree the sweep built.** It ran
+  `install.sh` without `AETHER_INSTALL_NO_BUILD=1`, so every run invoked
+  `make` four times over the shared tree, built the language server and
+  fetched git tags. With the faster install the test went from 132 s to
+  22 s on Windows (#2596).
+
 ## [0.796.0]
 
 ### Fixed
