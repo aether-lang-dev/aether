@@ -178,7 +178,7 @@ struct Hooks {
 
 kept(w: string, n: int) -> int {
     l = list.new()
-    h = Hooks { on_set: || { }, on_get: || { return 0 } }
+    h = Hooks { on_set: || {}, on_get: || { return 0 } }
     for i in 0..n {
         v = 0
         set = || {
@@ -221,7 +221,7 @@ kept(w: string, n: int) -> int {
         call(str_writer)
         string text = call(str_reader)
         check(string.equals(text, string.concat(w, string.from_int(x))) == 1,
-              "a stored writer and reader share their pass's string cell")
+            "a stored writer and reader share their pass's string cell")
         total = total + got + string.length(text)
         x = x + 1
     }
