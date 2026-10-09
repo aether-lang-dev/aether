@@ -13,7 +13,8 @@ produces a binary with a `main()`) and `--emit=lib` (produces `.so`/`.dylib`
 with ABI-stable `aether_<name>` exports for FFI from C / Python / Ruby / Java
 via ctypes/SWIG/Panama). `--emit=lib` is capability-empty by default,
 `std.fs` / `std.net` / `std.os` imports are rejected. The opt-in is
-`--with=fs[,net,os]`, an explicit per-build flag for projects that ARE
+`--with=fs[,net,os,extern]` (`extern` = the program's own C externs, which
+would otherwise get round the other three), an explicit per-build flag for projects that ARE
 the host and want full syscall access (e.g. implementing a systems tool
 in Aether + a thin C driver).
 

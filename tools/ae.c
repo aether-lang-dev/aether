@@ -216,6 +216,9 @@ static char* tc_lib_flags(void) {
 // by cmd_build's arg loop when the user passes `--with=fs` etc. Just
 // a string because the aetherc side owns parsing and validation.
 static char g_with_caps[128] = "";
+/* " --binimport-stub-dir=<dir>" for each binary-import stub directory this
+ * build generated (defined with the stub bookkeeping below). */
+static void ae_binimport_stub_flags(char* out, size_t cap);
 
 /* -D NAME build symbols, accumulated as the flags they will become on the
  * aetherc line. `when defined(NAME)` tests them, and a region that loses is
@@ -624,6 +627,11 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
     if (g_with_caps[0]) {
         snprintf(with_flag, sizeof(with_flag), " --with=%s", g_with_caps);
     }
+    /* The modules ae generated for binary imports bind another library's
+     * exports with externs; aetherc's --emit=lib extern gate trusts those
+     * directories, and only because ae names them here. */
+    char stub_flags[1600] = "";
+    ae_binimport_stub_flags(stub_flags, sizeof(stub_flags));
 
     /* Emit one `--lib <dir>` per entry rather than a single
      * `--lib "a:b:c"` separator-string. Each arg is therefore a
@@ -640,8 +648,8 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * and a program importing it follows (#2297). */
     const char* shared_rt_flag = (g_shared_runtime && g_emit_lib) ? " --shared-runtime" : "";
     const char* lib_actors_flag = g_binimport_actors ? " --lib-actors" : "";
-    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
-                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag,
+    int w = snprintf(cmd, cmd_size, "\"%s\"%s%s%s%s%s%s%s%s%s%s%s \"%s\" \"%s\"",
+                     tc.compiler, emit_flag, csrc_hdr_flag, csrc_json_flag, with_flag, stub_flags,
                      g_lib_package_flag, shared_rt_flag, lib_actors_flag, defines_flags(), lib_flags,
                      deps_flag, input, output);
     free(lib_flags);
@@ -5117,6 +5125,14 @@ static void ae_remove_tree(const char* path) {
     }
     rmdir(path);
 #endif
+}
+
+static void ae_binimport_stub_flags(char* out, size_t cap) {
+    size_t off = 0;
+    out[0] = '\0';
+    for (int i = 0; i < g_binimport_stubdir_count && off < cap; i++)
+        off += (size_t)snprintf(out + off, cap - off, " \"--binimport-stub-dir=%s\"",
+                                g_binimport_stubdirs[i]);
 }
 
 static void ae_remove_binimport_stubdirs(void) {
