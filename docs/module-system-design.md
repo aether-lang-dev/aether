@@ -304,6 +304,16 @@ stopped importing `low`. Now `ae build` and `ae check` apply the one rule: the
 stricter one, which matches what a reader of the file sees. The fix is always
 the import the help line names.
 
+A module does see itself. `selfq.a()` or `selfq.K` inside module `selfq`
+names its own definition, and its exports list still applies (`selfq.hidden()`
+for a private `hidden` is E0303). `ae check` of a module file gives the file
+the namespace a build gives the module, the last segment it is imported under
+(the directory of `<dir>/module.ae`, or `<name>` of `<name>.ae`), so the two
+agree here too; before #2631 the file checked on its own knew no namespace and
+`ae check` rejected a call every build accepted. A name the module does not
+define falls through to its imports, so a module that imports a namespace
+sharing its last segment (#1780) still reaches it for the rest.
+
 ## Every function of every module is checked
 
 `ae build` and `ae check` of a program type-check every function of every
@@ -326,7 +336,9 @@ unused(a: A) -> int {
 
 A selective import is no exception: `import mylib (used)` decides which names
 the importing file may write bare, not which of the module's functions are
-checked, so `unused` is checked there too.
+checked, so `unused` is checked there too. Merging the whole module is also
+what lets a selected function read a constant the import did not select, and a
+qualified `mylib.other()` reach a function it did not select (#2630).
 
 Checking is not emitting. The tree-shake still drops the functions nothing
 reaches, after they are checked, so a program emits the same functions it did

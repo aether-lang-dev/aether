@@ -576,6 +576,49 @@ int module_sees_namespace(const char* module_name, const char* ns) {
     return 0;
 }
 
+/* #2631: the last segment a module file is imported under, which is the
+ * namespace a build gives it: `<dir>/module.ae` is `<dir>`, any other
+ * `<name>.ae` (a package's own file, `contrib/jq/parser.ae`) is `<name>`. */
+const char* module_leaf_of_file(const char* path, char* buf, size_t cap) {
+    if (!buf || cap == 0) return "";
+    buf[0] = '\0';
+    if (!path) return buf;
+    const char* base = path;
+    for (const char* p = path; *p; p++) {
+        if (*p == '/' || *p == '\\') base = p + 1;
+    }
+    size_t blen = strlen(base);
+    if (blen < 4 || strcmp(base + blen - 3, ".ae") != 0) return buf;
+    if (strcmp(base, "module.ae") == 0) {
+        if (base == path) {
+            /* `ae check module.ae` inside the module's directory: the
+             * directory is named by the full path. */
+            char full[4096];
+#ifdef _WIN32
+            if (!_fullpath(full, path, sizeof(full))) return buf;
+#else
+            if (!realpath(path, full)) return buf;
+#endif
+            if (strcmp(full, path) == 0) return buf;
+            return module_leaf_of_file(full, buf, cap);
+        }
+        const char* end = base - 1;     /* the separator before module.ae */
+        const char* start = end;
+        while (start > path && start[-1] != '/' && start[-1] != '\\') start--;
+        size_t n = (size_t)(end - start);
+        if (n == 0 || n >= cap || (n == 1 && start[0] == '.') ||
+            (n == 2 && start[0] == '.' && start[1] == '.')) return buf;
+        memcpy(buf, start, n);
+        buf[n] = '\0';
+        return buf;
+    }
+    size_t n = blen - 3;
+    if (n >= cap) return buf;
+    memcpy(buf, base, n);
+    buf[n] = '\0';
+    return buf;
+}
+
 int module_is_exported(AetherModule* module, const char* symbol) {
     if (!module) return 0;
 
@@ -3322,7 +3365,7 @@ void module_merge_into_program(ASTNode* program) {
          * module's unselected functions unchecked, a selected function that
          * read an unselected constant undefined (`Undefined variable
          * 'clib_K'`), and the qualified `m.other()` a selective import
-         * keeps (#878) unresolvable. */
+         * keeps (#878) unresolvable (#2630). */
 
         // #870: re-open the qualified-call surface for any module this
         // imported module bare-imports, so its merged bodies' `ns.fn(...)`

@@ -19,6 +19,16 @@
 #   2. `ae check lib/top/module.ae` rejects the same call: one rule;
 #   3. the constant form is rejected too, naming the same import;
 #   4. control: with `import low` written, the program builds and prints 15.
+#
+# #2631, the other half of one rule: a module DOES see itself. lib/selfq
+# calls `selfq.a()` and reads `selfq.K`; a build merged them and accepted
+# it, while `ae check lib/selfq/module.ae` knew no namespace for the file
+# and rejected it (E0301). lib/selfpriv reaches its own private `hidden`
+# qualified, which both must reject as unexported (E0303).
+#
+#   5. `ae check` of lib/selfq passes, from the root and from inside the
+#      module's directory, and a program using it builds and prints `2 45`;
+#   6. lib/selfpriv fails the same way, E0303, in `ae check` and in a build.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -82,9 +92,45 @@ else
     echo "  [PASS] the same call builds once the module imports low itself"
 fi
 
+# --- 5. a module sees itself, checked alone as in a build (#2631) ----------
+if ! "$AE" check lib/selfq/module.ae >"$TMP/self.log" 2>&1; then
+    echo "  [FAIL] ae check lib/selfq/module.ae rejects the module's own selfq.a()/selfq.K:"
+    sed 's/^/        /' "$TMP/self.log" | head -12
+    fail=1
+elif ! (cd lib/selfq && "$AE" check module.ae) >"$TMP/self_in.log" 2>&1; then
+    echo "  [FAIL] ae check module.ae inside lib/selfq rejects selfq.a():"
+    sed 's/^/        /' "$TMP/self_in.log" | head -12
+    fail=1
+else
+    out="$("$AE" run main_self.ae 2>&1)"
+    if [ "$(printf '%s\n' "$out" | tail -1)" != "2 45" ]; then
+        echo "  [FAIL] main_self.ae did not print '2 45':"
+        printf '%s\n' "$out" | sed 's/^/        /' | head -8
+        fail=1
+    else
+        echo "  [PASS] ae check of a module resolves its own name, as a build does"
+    fi
+fi
+
+# --- 6. its own name does not lift the exports list -----------------------
+"$AE" check lib/selfpriv/module.ae >"$TMP/priv_check.log" 2>&1
+check_rc=$?
+"$AE" build main_selfpriv.ae -o "$TMP/priv" >"$TMP/priv_build.log" 2>&1
+build_rc=$?
+want="error\[E0303\]: 'hidden' is not exported from module 'selfpriv'"
+if [ "$check_rc" -eq 0 ] || [ "$build_rc" -eq 0 ] ||
+   ! grep -q "$want" "$TMP/priv_check.log" || ! grep -q "$want" "$TMP/priv_build.log"; then
+    echo "  [FAIL] selfpriv.hidden() is not rejected as unexported by both (check rc=$check_rc, build rc=$build_rc):"
+    sed 's/^/        check: /' "$TMP/priv_check.log" | head -6
+    sed 's/^/        build: /' "$TMP/priv_build.log" | head -6
+    fail=1
+else
+    echo "  [PASS] a private name stays private under the module's own name, in both"
+fi
+
 if [ "$fail" -eq 0 ]; then
-    echo "PASS: module_import_not_transitive (#2614)"
+    echo "PASS: module_import_not_transitive (#2614, #2631)"
     exit 0
 fi
-echo "FAIL: module_import_not_transitive (#2614)"
+echo "FAIL: module_import_not_transitive (#2614, #2631)"
 exit 1

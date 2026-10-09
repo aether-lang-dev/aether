@@ -521,6 +521,77 @@ static int is_user_explicit_namespace(const char* name) {
 // Forward decl — defined below alongside the global registry it gates.
 int is_imported_namespace(const char* name);
 
+/* #2631: when the program being checked is itself a module file (it has an
+ * `exports(...)` list, as `ae check lib/m/module.ae` sees it), the namespace
+ * a build gives that module: the last segment it is imported under. A build
+ * merges the module's functions as `<ns>_<name>` and its own `m.a()` calls
+ * resolve to them, as a module sees itself (module_sees_namespace); checked
+ * on its own, the file used to know no namespace at all, so `ae check`
+ * rejected a call `ae build` accepted. NULL for a program. */
+static char g_entry_self_ns_buf[256];
+static const char* g_entry_self_ns = NULL;
+
+/* The program's own (not merged) top-level definition named `name` that a
+ * build reaches as `<ns>.<name>`: a function, builder, constant or
+ * `@extern`, or NULL. */
+static ASTNode* entry_own_definition(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    if (!program || !name) return NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || !d->value || d->is_imported || d->origin_module) continue;
+        int reachable = d->type == AST_FUNCTION_DEFINITION ||
+                        d->type == AST_BUILDER_FUNCTION ||
+                        d->type == AST_CONST_DECLARATION ||
+                        (d->type == AST_EXTERN_FUNCTION && d->annotation &&
+                         strncmp(d->annotation, "c_symbol:", 9) == 0);
+        if (reachable && strcmp(d->value, name) == 0) return d;
+    }
+    return NULL;
+}
+
+/* Is `prefix.name` a reference to the checked module's own `name`? A name
+ * the module does not define falls through to the imports, so a module
+ * importing a namespace that shares its last segment (#1780) still reaches
+ * it for the rest; its own names come first, as in a build. */
+static int entry_self_reference(const char* prefix, const char* name) {
+    return g_entry_self_ns && prefix && strcmp(prefix, g_entry_self_ns) == 0 &&
+           entry_own_definition(name) != NULL;
+}
+
+/* Does the checked module's `exports(...)` list leave `name` out? Read the
+ * way a build reads it (module_exports_symbol): the bare name, or the
+ * `<leaf>_name` spelling a std module lists. */
+static int entry_export_blocked(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    if (!program || !name) return 0;
+    char prefixed[512];
+    snprintf(prefixed, sizeof(prefixed), "%s_%s",
+             g_entry_self_ns ? g_entry_self_ns : "", name);
+    int has_list = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* list = program->children[i];
+        if (!list || list->type != AST_EXPORTS_LIST) continue;
+        has_list = 1;
+        for (int k = 0; k < list->child_count; k++) {
+            ASTNode* n = list->children[k];
+            if (n && n->value &&
+                (strcmp(n->value, name) == 0 || strcmp(n->value, prefixed) == 0))
+                return 0;
+        }
+    }
+    return has_list;
+}
+
+/* The file scope a qualified own name resolves in: a local or parameter
+ * that happens to share the name is not the module's definition. */
+static Symbol* entry_self_symbol(SymbolTable* table, const char* name) {
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    return root ? lookup_symbol_local(root, name) : NULL;
+}
+
 // Gate for qualified-call resolution. A qualified call `mod.fn()` is
 // allowed if either:
 //   - The caller is inside a merged-module body (SymbolTable::merged_from,
@@ -548,6 +619,9 @@ int is_visible_namespace(const char* name, SymbolTable* table) {
     if (table && table->merged_from) {
         return module_sees_namespace(table->merged_from, name);
     }
+    /* #2631: a module file checked on its own sees itself, as its merged
+     * functions do in a build (module_sees_namespace); nothing more. */
+    if (g_entry_self_ns && name && strcmp(name, g_entry_self_ns) == 0) return 1;
     return is_user_explicit_namespace(name);
 }
 
@@ -585,6 +659,9 @@ static AetherModule* module_find_by_name_or_leaf(const char* name);
 // while missing from std.mem's. User modules register under the name they
 // are used by, which is why they were enforced all along.
 static int is_export_blocked(const char* namespace, const char* symbol) {
+    /* #2631: the checked module's own name, held to its own exports list
+     * as a build holds it (`selfq.hidden()` is E0303 in both). */
+    if (entry_self_reference(namespace, symbol)) return entry_export_blocked(symbol);
     if (!global_module_registry) return 0;
     AetherModule* mod = module_find_by_name_or_leaf(namespace);
     return (mod && mod->export_count > 0 && !module_exports_symbol(mod, symbol));
@@ -699,6 +776,13 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                     module_is_exported(mod, suffix)) {
                     sym = lookup_member_symbol(table, suffix);
                 }
+            }
+            /* #2631: the checked module file's own definition, which a
+             * build would have merged as `<prefix>_<suffix>`. The caller
+             * rewrites the call to the bare name it carries, as #1035. */
+            if (!sym && !(table && table->merged_from) &&
+                entry_self_reference(prefix, suffix)) {
+                sym = entry_self_symbol(table, suffix);
             }
             if (name_heap) free(name_copy);
             return sym;
@@ -3204,6 +3288,13 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 snprintf(qualified, sizeof(qualified), "%s_%s",
                          expr->children[0]->value, expr->value);
                 Symbol* sym = lookup_symbol(table, qualified);
+                /* #2631: the checked module file's own constant, which a
+                 * build merges as `<ns>_<name>`: the bare one it carries. */
+                if ((!sym || !sym->type) && !(table && table->merged_from) &&
+                    entry_self_reference(expr->children[0]->value, expr->value)) {
+                    sym = entry_self_symbol(table, expr->value);
+                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
+                }
                 if (sym && sym->type) {
                     // Rewrite node in-place for codegen
                     expr->type = AST_IDENTIFIER;
@@ -4496,6 +4587,21 @@ int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;
+
+    /* #2631: a module file checked on its own (it has an `exports(...)`
+     * list, the test `program_is_module` below makes too) knows the
+     * namespace a build gives it, so its own `m.a()` resolves as it does
+     * once merged. Set before any pass resolves a qualified name. */
+    g_entry_self_ns = NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        if (program->children[i] && program->children[i]->type == AST_EXPORTS_LIST) {
+            if (module_leaf_of_file(program->source_file, g_entry_self_ns_buf,
+                                    sizeof(g_entry_self_ns_buf))[0]) {
+                g_entry_self_ns = g_entry_self_ns_buf;
+            }
+            break;
+        }
+    }
 
     error_count = 0;
     warning_count = 0;
@@ -9813,6 +9919,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                  module_namespace_of(origin->name), expr->value);
                         sym = lookup_symbol(table, qualified);
                     }
+                }
+                /* #2631: the checked module file's own constant, which a
+                 * build merges as `<ns>_<name>`: the bare one it carries. */
+                if ((!sym || !sym->type) && !table->merged_from &&
+                    entry_self_reference(expr->children[0]->value, expr->value)) {
+                    sym = entry_self_symbol(table, expr->value);
+                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
                 }
                 if (sym && sym->type) {
                     // Rewrite node in-place

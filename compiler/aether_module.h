@@ -97,6 +97,10 @@ AetherModule* module_resolve_reexport(AetherModule* module, const char* symbol);
  * modules it imports, in any form; not a module some other module of the
  * program imports. */
 int module_sees_namespace(const char* module_name, const char* ns);
+/* #2631: the last segment a module file is imported under (its namespace in
+ * a build): `<dir>/module.ae` is `<dir>`, `<name>.ae` is `<name>`. Written
+ * into `buf` and returned; "" when the path names no `.ae` file. */
+const char* module_leaf_of_file(const char* path, char* buf, size_t cap);
 
 // Dependency graph
 typedef struct DependencyNode {

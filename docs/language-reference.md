@@ -2532,7 +2532,9 @@ A selective import decides which names your file may write bare; it does not
 narrow the module. The whole module is merged into the build and every one of
 its functions is type-checked, the ones you did not select and the ones
 nothing calls included, so an error anywhere in it is reported by your build
-(#2613). Functions nothing calls are still left out of the emitted C.
+(#2613). Functions nothing calls are still left out of the emitted C. That is
+also what lets a selected function read a constant you did not select, and a
+qualified `m.other()` reach a function you did not select (#2630).
 
 ### What a file can reach
 
@@ -2541,7 +2543,10 @@ in. A module that some other module of the program imports is loaded, but it
 is not visible to your code, and a library module is held to the same rule:
 a module calling `low.f()` must `import low` itself, even when another module
 it imports already does. `ae build` and `ae check` agree on this; the error is
-E0301, and its help line names the missing import (#2614).
+E0301, and its help line names the missing import (#2614). A module does see
+itself: `m.a()` and `m.K` inside module `m` name its own definitions, its
+private ones staying private (E0303), in a build and in `ae check` of the
+module's file alike (#2631).
 
 ### Module Public API, `exports (…)`
 
@@ -3333,7 +3338,7 @@ complement wrapping is the specified behaviour of `int`, not an artifact of the
 optimiser: an LCG, a hash, or a checksum written in Aether computes the same
 values on every target.
 
-Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`. The two run the same checks: every function of every module the file imports is type-checked, whether or not anything calls it (#2613), and each module may only use the modules it imports itself (#2614). `ae check lib/mylib/module.ae` checks one module on its own; building any program that imports it checks it just as strictly.
+Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`. The two run the same checks: every function of every module the file imports is type-checked, whether or not anything calls it (#2613), and each module may only use the modules it imports itself (#2614). `ae check lib/mylib/module.ae` checks one module on its own, under the namespace a build gives it (`mylib`, so its own `mylib.f()` resolves, #2631); building any program that imports it checks it just as strictly.
 
 ---
 

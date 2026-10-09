@@ -1,0 +1,5 @@
+import selfq
+
+main() {
+    println("${selfq.b()} ${selfq.c()}")
+}
