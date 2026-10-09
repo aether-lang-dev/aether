@@ -14,6 +14,413 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.799.0]
+
+### Fixed
+
+- **A string returned through a typed function pointer is the caller's, and
+  the caller frees it.** A call through a `fn(...) -> string` pointer took
+  its result as borrowed, but since 0.792 a `string` function returning a
+  field returns a copy of its own, so every call through the pointer leaked
+  that copy: ae3d's component copy (`setter(dst, getter(src))`) and JSON save
+  leaked one string per text field. The call now decides at run time: a
+  function used as a pointer that hands over owned strings marks the one it
+  returns, and the call takes a marked result as it is and copies any other.
+  A C function's string is never freed, however its pointer arrived (a cast
+  from a raw `ptr`, a raw `ptr` passed for a typed parameter, an extern's
+  result, a struct laid over C memory, an extern named as a value, a pointer
+  C passes to a callback), and an Aether function handed to C is the
+  function itself. An owned string argument to such a call is freed after
+  it, position by position, under the convention closures follow (#2586).
+
+- **A tuple a call hands back from a statement temporary is copied, and the
+  temporary goes with its statement.** `t, u = pair(make_item(w).name,
+  make_item(w).tag)`, where `pair` returns its parameters as they came, kept
+  its argument structs alive for good, as the string case did before #2619's
+  first half: each string position is now copied where the call is made, the
+  destructure takes it owned, and the structs are destroyed after the
+  statement. A tuple holding a pointer or an array still keeps its argument
+  alive (#2619).
+
+- **The Windows release archive no longer extracts files dated in the
+  future.** A zip entry's main timestamp is a DOS time with no zone, written
+  in the packer's zone (UTC on the runner) and read in the extractor's, so on
+  a machine west of UTC the installed files were hours newer than the clock
+  for an extractor that reads only that field, which can confuse any check of
+  modification times. The archive is now packed with its DOS times in UTC-12,
+  so they read at or before the real time everywhere; the exact UTC time
+  stays in the extended field beside it (#2621).
+
+- **A function written as several clauses hands over its strings like any
+  other.** Ownership was worked out from its first clause alone and its
+  clause bodies skipped the setup a single function's body gets. A caller of
+  `label(n) when n > 0 -> string { ... }` / `label(n) -> string { return "lit" }`
+  freed the literal (a crash), or leaked the fresh string when the literal
+  clause came first; a clause's string locals were never freed; a later
+  clause that stored a `string` argument had it freed under it by the
+  caller; and a clause set that returns nothing was defined `int` against a
+  `void` prototype, which gcc rejected. Every clause is now read: one owned
+  result makes every clause hand over an owned string, each clause body
+  frees its locals, and a parameter is kept when any clause keeps it (#2627).
+
+- **`t = x; return t` hands over the same string wherever the function sits.**
+  Whether a function returns an owned string is decided once and remembered,
+  but an alias of a local was judged by the tracker table of whichever
+  function was being emitted when the question was first asked. A function
+  first asked about while a caller defined before it was emitted was taken
+  as returning a borrowed string, and every call leaked the alias. The alias
+  is now judged against the function's own body (#2629).
+
+- **A tuple function that fills a position from its own recursive call no
+  longer leaks a string per level.** The position was classified while the
+  function was still being analysed, so the recursive call counted as
+  borrowed: the base case handed its parameter back, every caller kept its
+  argument alive, and the outermost caller never freed the result. A
+  position the function fills from its own call (destructured, or its
+  whole tuple returned) now counts as one it hands over, so the base case
+  returns a copy and callers free their arguments and the result (#2641).
+
+- **A list no longer adopts, and frees, a string literal bound through an
+  alias.** `g = x; list.add(xs, g)` with `x` only ever holding literals
+  stored the literal as the list's own, and `list.free` freed it (a crash):
+  the local behind the alias counted as owned because it had a tracker,
+  which every string local has. It now counts as owned only when its body
+  binds it from a fresh string, or it is a parameter the function keeps a
+  reference of its own to, however long the chain of aliases (#2642).
+
+- **`ae build` type-checks every function of every imported module, called
+  or not.** The tree-shake that keeps uncalled library functions out of the
+  emitted C ran before the typechecker, so a function of an imported module
+  that nothing called was never checked: aephysics' `body_apply_force` added
+  a `Vec3` to a `Vec3f` and built clean in every consumer until the first
+  one called it, while the same function uncalled in the main file failed.
+  The prune now marks before checking and sweeps after it, so a program
+  emits the same functions and only the checking covers more (50 to 90 ms,
+  10 to 20%, more front-end time on a program that pulls in the TLS stack,
+  within the noise of a whole build). A local function spelt like one of a
+  selectively imported module's mangled names (`m_other`) is now the E1001
+  collision it already was under a bare import (#2613).
+- **A selective import merges the whole module.** `import m (a)` merged
+  only `a` and the functions it called, so a selected function that read a
+  constant the import did not select failed with `Undefined variable 'm_K'`,
+  and a qualified `m.other()` to an unselected function failed with E0301
+  although the qualified surface stays whole under a selective import
+  (#878). The selection now decides only which names the file may write
+  bare (#2630).
+- **A module can only call the modules it imports itself.** Inside a merged
+  module function a qualified `ns.name` resolved against every module loaded
+  anywhere in the program, so `top` could call `low.f()` while only `mid`
+  imported `low`: `ae build` accepted it and `ae check` of `top` rejected it,
+  and `top` broke, at a line nobody touched, the day `mid` dropped the
+  import. `ae build` now applies the stricter rule `ae check` did, in a
+  module's functions, actors and constants: E0301 for a call (E0300 for a
+  constant), with a help line naming the missing `import`. std.bignum was
+  relying on it for std.string and now imports it (#2614).
+- **`ae check` of a module file resolves the module's own name.** A module
+  sees itself in a build, so `selfq.a()` inside module `selfq` built and
+  ran, but checked on its own the file knew no namespace and `ae check`
+  rejected the call (E0301). The file now gets the namespace a build gives
+  it, the last segment it is imported under, so its own functions and
+  constants resolve and its private ones stay private (E0303) in both
+  (#2631).
+- **A glob import no longer binds a name the importing file defines
+  itself.** `import std.string (*)` registered a bare alias for every name
+  of std.string, the file's own included, so a program with its own
+  `bytes(a, b, c)` failed to build (E0200 "Function 'string.bytes' expects
+  1 argument(s), got 3"), `ae check std/number/module.ae` failed the same
+  way, and a merged module's own `extern` was rewritten to the glob's
+  function of that name. The file's own function, builder, constant or
+  extern now wins, as a local item shadows a glob import in Rust; a
+  selective import of the same name stays the E1000 clash (#2632).
+- **A glob import inside a module binds the imported module's
+  extern-backed names in a build.** The merge took only a glob's Aether
+  functions, so a module with `import std.string (*)` calling `length("xy")`
+  (the extern `string_length`) failed every build that imported it with
+  E0301, while `ae check` of the module and a plain program accepted it. It
+  now takes the externs named `<ns>_<name>` too, keeping #2632's rule. The
+  same renamer also turned a module's call through a local of a function's
+  name (a closure bound to `helper`) into a call of the module's `helper`;
+  a local now shadows it, as it does in `ae check` and in a plain program,
+  and a closure's own parameters shadow only inside that closure (#2637,
+  #2655).
+
+- **A tuple return type takes pointer elements: `-> (*Foo, *Foo)` parses.**
+  The parser told a `-> (T1, T2) { ... }` return type from a parenthesised
+  `-> (expr)` body with a one-token check of its own (a type keyword or a
+  name, then a comma), so a first element spelled with more tokens (`*Foo`,
+  `mod.Name`, `fn(int) -> int`, `int?`) fell to the expression path and the
+  function broke at top level. The type parser decides now, so a caller gets
+  its pointers back typed instead of casting `ptr`s (#2626).
+- **A pointer to one type passed where a parameter takes a pointer to
+  another is a type error at the call.** `buffer_size(b: *Buffer)` given
+  `&p.ints`, an `*Ints`, passed `ae check` and failed in gcc with
+  "incompatible pointer type"; had the two structs shared a layout prefix,
+  nothing would have failed and the callee would have read the wrong struct.
+  It is E0200 naming both pointer types now, for `&local`, `&p.field`,
+  `&p.a.b` and typed locals, while a bare `ptr`, the same struct through a
+  module-qualified name and a `@c_struct` overlay pointer stay legal (#2624).
+- **A module-level `var` of a function pointer type takes a function of that
+  type.** `var g_free: fn(ptr, int) = noop_free` was refused with E0200,
+  because the function was read as a closure value whose missing result did
+  not match the annotation's `void`; `-> void` was a struct named `void` to
+  the checker, so neither spelling helped. A global whose function returns a
+  value passed the checker and then failed in gcc. A named function bound to
+  a typed function pointer is now its address (through the #2586 adapter for
+  a string result), `-> void` is the omitted return type, and module-level
+  vars are emitted after the function prototypes (#2623).
+- **Two locals of one name bound to different struct or pointer types in
+  sibling loop bodies or `if`/`else` arms are refused by the type checker.**
+  Such a local is one C variable, declared before the loop or the `if`, but
+  the checker left sibling bindings to codegen, whose check only compared
+  kinds, so `view = p as *Apple` in one `while` and `view = p as *Pear` in
+  the next reached gcc as an assignment to `Apple*`. It is now the E0200 an
+  int beside a string already was, and `ae check` reports it; a re-bind in
+  one block names `*Apple` and `*Pear` instead of calling both `ptr` (#2611).
+
+- **A closure stored in a typed function pointer is a type error wherever it
+  is stored.** A typed fn pointer (`fn(ptr) -> string`, a `cfn` name) is a
+  bare C function pointer and has no room for a closure's environment. Only
+  an argument was refused; a closure, or a local bound to one, in a struct
+  literal's field, a field or element store (through a pointer too), an
+  annotated local, a re-bind of one, a module-level `var` or a `-> Getter`
+  result passed `ae check` and failed in gcc against an `_AeClosure`. Each is
+  E0200 now, naming the field or variable and the two spellings that work: a
+  named function, which is stored as its address, or a bare `fn` slot called
+  with `call(...)` (#2628).
+
+- **A message field typed as a C function pointer takes a named function.**
+  `message Job { run: fn(int) -> int }` refused `Job { run: double_it }` with
+  "expected closure, got int", and a handler's `run(21)` called the field as
+  a bare `void*`, which gcc refused. The sender stores the function's
+  address, as a struct field does, and the handler's binding is called
+  through the field's signature, inside a closure in the arm too; a string
+  result is the caller's, and a closure there is refused (#2633).
+- **A call to a function returning a named function pointer type is that
+  pointer.** `g = mk()` for `mk() -> Getter` was "Type mismatch in variable
+  initialization": the early inference pass typed the call as what calling
+  the pointer would give. It binds to a local, a typed `let`, a field and a
+  parameter now, `f as ptr` gives back the pointer a typed fn pointer holds,
+  and messages spell such a type `fn(ptr) -> string` instead of "closure"
+  (#2634).
+- **A call through a local's fn-pointer field counts as a use of the
+  local.** `println(f.get_text(null))` as the only use of `f` warned W1001
+  "unused variable 'f'": the call names `f.get_text` and has no identifier
+  for the receiver. The usage walk reads the receiver from the call (#2635).
+- **A return type can be a function pointer type written out:
+  `-> fn(ptr) -> string`.** It broke at top level, read as an arrow body
+  calling `fn`; the type parser decides now, the inner `-> R` belongs to the
+  type, and `-> fn(int)` returns nothing. A fn pointer destructured from a
+  tuple result is called through its type as well, where it was called as a
+  bare `void*` (#2636, #2656).
+
+- **What the test suites start listens on loopback only.** Servers in the
+  tests and the swept examples took the std default of every interface, and
+  on Windows each new executable that listens there opens a firewall dialog
+  and leaves two inbound block rules: one overnight sweep left 56 dialogs
+  (about 3.4 GB) and 112 rules. Each now binds `127.0.0.1`, and
+  `tests/scripts/check_loopback_listeners.py`, run by `make check-tests`,
+  fails on a listener in a test, an example or a run doc block that does not
+  name loopback. An HTTP server bound to a host name (`"localhost"`) listened
+  on every interface, because the name was never resolved; it now binds the
+  address the name resolves to, and a name that does not resolve fails the
+  bind. tinyweb's WebSocket and SSE ports listen on the server's host rather
+  than every interface, and `std.net` offers `tcp_listen_on_raw` and
+  `tcp_server_port_raw` beside `tcp_listen_raw`. The std defaults are
+  unchanged (#2639).
+
+- **A module-level `const` of a function type holds the function.**
+  `const CB: fn(int) -> string = label` failed in gcc: the const was read as
+  a closure and emitted before the function prototypes and adapters, and
+  `CB(i)` called a C function named `CB`. A typed fn-pointer const now holds
+  the function's address, as a `var` does, is emitted after the prototypes,
+  and is called through its type, a module's (`cbmod.CB(21)`) too. An
+  unannotated `const CB = label` is a closure emitted after its adapter
+  (#2648).
+- **A module-level var or const can name an imported module's function.**
+  `var g_name: fn(string) -> string = strfns.lit` was refused "module
+  'strfns' has no export 'lit'", and later failed in gcc with `strfns_lit`
+  undeclared: the prune that drops a module's unreached functions never
+  looked at module-level initializers. They seed it now (#2650).
+- **A typed fn pointer's own fn-pointer parameter is spelled out in C.**
+  `meta(r: fn(fn(string) -> string, string) -> string, s)` called as
+  `meta(relay, w)` failed in gcc with incompatible pointer types: the inner
+  pointer was spelled `void*` in the declarator, struct fields and call
+  casts, while `relay` is defined with the real pointer type. All of them
+  share one spelling now (#2651).
+- **A tuple type can have an optional element.** `-> (string?, int)`, from
+  an Aether function or an extern, failed in gcc with "unknown type name
+  'ae_opt_string'": the tuple typedef came before the optional's. A tuple
+  typedef declares its elements' typedefs first, and a value returned in an
+  optional slot is wrapped as a `-> T?` return wraps it (#2652).
+- **A closure kept in a struct field is called directly.** `h.cb(2)` for a
+  `cb: fn` field was "Undefined function 'h.cb'"; it is now the same call as
+  `call(h.cb, 2)`, on a value or through a pointer (#2653).
+- **A second receive arm for a message the actor already receives is a type
+  error.** Two `Job(n) -> ...` arms in one actor compiled to two definitions
+  of the handler, which gcc refused. The later arm can never run, so the
+  checker refuses it and names the arm that already receives the message
+  (#2654).
+
+- **A function written as several clauses keeps every clause when it is
+  imported.** A clause set exported from a module merged only its first
+  clause, so `clauses.label(4)` for `label(0)` / `label(n: int)` returned
+  "" instead of "n4", and a set returning nothing failed in gcc. Every clause
+  of an imported set is merged, through a re-exporting module too, and what a
+  later clause calls stays in the build (#2643).
+- **Each clause of a clause set is a function of its own.** The clauses are
+  emitted as separate functions behind a dispatcher that tries each clause's
+  patterns and guard in order, so a clause gets everything a single
+  function's body gets: a closure that mutates a clause parameter mutates it
+  (it changed a copy), a clause storing into its struct parameter's field no
+  longer crashes, a fixed-size array parameter compiles, closures in two
+  clauses can capture same-named locals of different types, a guard can call
+  a function on its parameter (`when string.length(name) > 3` read an
+  undeclared name), and a clause that keeps a `string` parameter takes a
+  reference of its own, so its caller frees the temporary it passed (#2644).
+- **A builder written as clauses compiles.** Its definition lacked the
+  hidden builder parameter its prototype declared ("conflicting types"); each
+  clause is a builder function of its own now and the dispatcher passes the
+  config on (#2660).
+- **A clause set whose first clause has a wildcard pattern compiles.** The
+  wildcard's position was declared `void` (`f(_, 0)` / `f(a: int, b: int)`);
+  a position takes its type from the clauses that bind one (#2661).
+- **A closure in a later clause captures that clause's locals.** The scope
+  analyses looked a clause set's variables up in its first clause, so a
+  closure in another clause captured nothing ("'s' undeclared"); each clause
+  is a scope of its own (#2662).
+- **A function returning nothing with a literal pattern compiles.** Its
+  no-match exit was `return 0` in a `void` function (`note(0) { ... }`); it
+  returns nothing (#2663).
+- **An unannotated clause set whose first clause returns nothing and a later
+  one a value compiles.** Its return type is decided over every clause, the
+  same for its prototype and its definition (`int` there, a clause that
+  returns nothing giving `0`); the prototype read the first clause alone
+  (#2645).
+- **A clause set returning a tuple returns a zeroed tuple when no clause
+  matches**, with an owned empty string at each string position the caller
+  frees; the default was written `0` and gcc refused it (#2646).
+- **A clause's `requires` applies only to the calls that can reach that
+  clause.** The compile-time precondition check applied the last clause's
+  `requires n > 0` to `name_of(0)`, which a first clause without a
+  `requires` takes. A clause whose literal pattern or guard the call's
+  constant arguments rule out is passed over, and no clause after one the
+  call surely matches is checked (#2647).
+- **A call to a `@c_callback("sym")` function by its Aether name calls
+  `sym`.** The definition is the C function `sym` and a use of the name as a
+  value was emitted as `sym`, but a call kept the Aether name, so
+  `cb1(4)` failed in gcc with "implicit declaration of function 'cb1'", and
+  so did `mod.cb1(4)` from an importing module. A call goes to the bound
+  symbol wherever it is made, and a function written as several clauses
+  takes the symbol its first annotated clause binds, for its prototype, its
+  dispatcher and the load-time registry, where a later annotated clause left
+  the registry naming an undeclared symbol (#2664).
+- **`--emit=lib` exports a function written as several clauses once.** The
+  catalog (the JSON and the `aether_lib_meta` table) listed a clause set
+  once per clause, its alias stub was emitted once per clause, so the
+  library failed to build ("redefinition of 'aether_sign'"), and a set whose
+  first clause has a literal pattern (`fact(0)`) got no alias while the
+  catalog still named `aether_fact`, which the library did not define. A set
+  is one export with its set's signature (a parameter for each position, of
+  the type its clauses give it, and the set's return type), listed once in
+  the catalog and the header, and gets its `aether_<name>` alias whenever
+  that signature crosses the ABI (#2665).
+- **The `aether_<name>` stub of a `@c_callback("sym")` function calls
+  `sym`.** It called the Aether name, which no C function carries, so any
+  library exporting such a function failed to build with "implicit
+  declaration of function" (#2666).
+
+- **A call that hands back a temporary it was given yields a string its
+  caller owns.** `t = pass(k, string.concat(w, "!"))`, where `pass` returns
+  its `string` parameter as it came, kept the temporary when the call
+  returned it, and the local took it as borrowed, so nobody freed it: one
+  leak per call, through every consumer (a binding, a return, an argument,
+  an interpolation, a struct field, a list). The value is now the temporary
+  when that is what came back and a copy of anything else (a literal, a
+  local passed beside it), so each consumer adopts or frees it like any
+  fresh string. A view of a struct temporary passed on to another call is
+  copied once, not twice (#2649).
+- **A temporary a hand-back call does not return is freed whatever its
+  shape.** The identity guard released it with `string_release`, which skips
+  a plain buffer, so `pass_or(0, io.getenv("PATH"))` or a `path.join` result
+  leaked whenever the callee returned something else (#2657).
+- **Two string functions that call each other are classified alike.** The
+  one classified first could end borrowed while the other, classified after
+  it, handed over owned strings, which the first then returned as borrowed:
+  `ma` returning `mb(...)` and `mb` returning `ma(...)` leaked a string per
+  call. A return or binding of a call to a function whose classification is
+  still open counts as owned, as a self-recursive return does, and the
+  uniform-heap return copies a borrowed one (#2658).
+
+- **A closure in a loop body writes the body's variable.** `c = 0; f = || {
+  c = 5 }; f()` inside a `while`, a `for`, a branch or a `match` arm left `c`
+  at 0: the closure's assignment found only the function's top-level
+  declarations, so it made a fresh `c` of its own. It now writes the binding
+  visible from it, declared before it in any block on the way down to it,
+  shared through a cell: one across a `while`'s passes, made and released
+  with each pass of a `for` body or a branch, and kept alive by a closure
+  that outlives its pass. A binding in a sibling block is still another
+  variable (#2659).
+- **A `return` in a closure's body is the closure's.** A string cell one
+  closure writes and another returns (`read = || { return s }`) was taken
+  for a local the enclosing function returns, so the function freed it at
+  its own returns as a plain string: the C did not compile, a `const char**`
+  passed as a string, or, for a cell in a `for` body, a name out of scope
+  (#2667).
+
+- **A closure local bound to another holds a reference of its own.**
+  `get_last = get`, with `get` made in a loop body and `get_last` declared
+  before the loop, leaked an environment per pass: `get` stopped owning its
+  value at the copy and `get_last` never started. The copy now retains, so
+  each local releases its own at its scope exit or its next binding; a swap
+  through a third local, an alias kept in a list, and an alias made inside
+  a closure of a closure it captured are released alike (#2668).
+- **A closure local named like a struct's `fn` field is released.** A
+  local `set` beside `Hooks { set: ... }` or `h.set` in the same function
+  had the field's name taken for a use of itself, which kept its
+  environment for good: every closure stored from it leaked one (#2669).
+
+- **A function that only aliases a closure parameter keeps nothing of its
+  caller's.** `wrap(cb) { a = cb; call(a) }`: the alias takes a reference
+  of its own, but the caller counted it as a keep of its argument, so
+  neither a closure local nor a closure literal it passed was ever
+  released, one environment per call (#2670).
+- **A function returning an alias of a closure hands its caller that
+  reference.** `make() -> fn { b = || { ... }; a = b; return a }` returned
+  the alias's own reference, but its callers did not count the alias as a
+  closure handed over, so they never released what they got (#2671).
+
+- **Stopping an HTTP server waits for it, ends idle connections at once,
+  and a server can be started again in the same process.** On Windows
+  `http_server_stop` called `WSACleanup` on every stop, while Winsock is
+  started once per process: it ran under the server's own threads and left
+  the next server unable to create its socket. The background thread was
+  detached, so stop returned while the accept loop and its workers were
+  still running. The accept loop freed the keep-alive parking lot before
+  joining the workers, and a worker finishing a request could still hand a
+  connection to the freed lot, or add one after the lot had been emptied,
+  where nothing closed it
+  (#2680). And a worker waiting for a keep-alive client's next request, or
+  refused by the lot during the stop, waited out the idle timeout. Stop now
+  leaves Winsock up, wakes the workers that are waiting for a request
+  (one in the middle of a request finishes it, as a graceful shutdown
+  expects), starts no further request, closes the lot before the workers
+  are joined and frees it after, and joins the background thread, so the
+  server is done when stop returns and can be freed at once (#2672).
+
+- **An idle HTTP server on Windows no longer spins a core, and its
+  keep-alive connections are watched as soon as they are parked.** The
+  poll() fallback poller, which is what Windows runs (WSAPoll), returned at
+  once from a wait on an empty set, so the server's parking-lot thread
+  spun: an idle background server used 2.98 CPU seconds in 3 seconds, and
+  now uses none. It was also not safe for the lot's workers to register a
+  connection while the lot's thread waited (a registration could reallocate
+  the array the wait was reading), and a connection registered during a
+  wait was only watched from the next one, up to 200 ms later. The set is
+  now guarded, a wait polls a copy of it plus a wake-up socket of the
+  poller's own that a registration signals, an empty wait lasts its
+  timeout, and a result is reported only for the registration it was
+  polled for (#2679).
+
 ## [0.798.0]
 
 ### Fixed
