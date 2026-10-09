@@ -1,0 +1,14 @@
+// #2586: a typed fn pointer made from a C function returns C's string. It
+// is not the caller's to free: the program keeps the borrowed reading.
+extern fixed_name_ptr() -> ptr
+
+main() {
+    f = fixed_name_ptr() as fn(int) -> string
+    i = 0
+    while i < 3 {
+        println(f(1))
+        println(f(0))
+        i = i + 1
+    }
+    println("c_pointer done")
+}

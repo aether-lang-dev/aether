@@ -359,6 +359,7 @@ void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */
 ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
+ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
 
 /* Push function-exit defer-free statements for every hoisted
  * heap-string var that's NOT escaped. Closes the single-call
@@ -452,8 +453,13 @@ void emit_bare_fn_adapters(CodeGenerator* gen);
  * them) are emitted, so the closure functions see the prototype in scope. */
 void emit_bare_fn_adapter_decls(CodeGenerator* gen);
 void discover_bare_fn_adapters(CodeGenerator* gen);
+void reset_fn_values(void);                                        /* #2586 */
 void discover_fn_values(CodeGenerator* gen);                       /* #2586 */
-int fnptr_args_borrowed(void);
+int fnptr_arg_borrowed(int slot);
+int fnptr_string_results_owned(void);
+int typed_fnptr_call(CodeGenerator* gen, ASTNode* call);
+int param_may_hold_caller_string(const Type* t);
+void callee_memo_clear(CodeGenerator* gen);
 const char* fnval_string_adapter(CodeGenerator* gen, const char* name);
 void emit_fn_value_adapter_decls(CodeGenerator* gen);
 void emit_fn_value_adapters(CodeGenerator* gen);

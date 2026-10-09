@@ -1,0 +1,11 @@
+// #2586: an Aether string function handed to C stays the function itself,
+// so C reads its result as text.
+extern c_len_of(f: ptr) -> int
+
+label(n: int) -> string {
+    return "static label"
+}
+
+main() {
+    println("len=${c_len_of(label)}")
+}

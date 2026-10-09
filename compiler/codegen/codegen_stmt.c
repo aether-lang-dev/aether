@@ -1102,7 +1102,7 @@ ASTNode* find_function_definition_by_name(ASTNode* program,
 // into the program AST by module_merge_into_program — they stay in
 // their owning module's AST (see compiler/aether_module.c:1283-1284).
 // Same traversal pattern as codegen_diagnose_ownership at line 4142.
-static ASTNode* find_extern_declaration_by_name(ASTNode* program,
+ASTNode* find_extern_declaration_by_name(ASTNode* program,
                                                 const char* name) {
     if (!program || !name) return NULL;
     /* Pass 1 — direct extern declarations in the program AST (the
@@ -1211,6 +1211,12 @@ int is_seq_owning_expr(CodeGenerator* gen, ASTNode* expr) {
 
 int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
 
+/* Inside a memoised return classifier (function_def_returns_heap_string,
+ * function_def_returns_heap_at): a local is then judged from the classified
+ * body alone, never from the tracker table of whichever function is being
+ * emitted (#1311, #2629). */
+static int g_classifying = 0;
+
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return 0;
 
@@ -1278,7 +1284,7 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
      * walk_returns_for_heap_check and lets the uniform-heap return
      * shim see runtime ownership through `_heap_<name>`. */
     if (expr->type == AST_IDENTIFIER && expr->value &&
-        gen && is_heap_string_var(gen, expr->value)) {
+        gen && !g_classifying && is_heap_string_var(gen, expr->value)) {
         return 1;
     }
 
@@ -1567,7 +1573,8 @@ static int catch_scope_has(const CatchScope* cs, ASTNode* expr) {
 }
 
 static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
-                                         const char* var_name, CatchScope* cs);
+                                         const char* var_name, CatchScope* cs,
+                                         ASTNode* root, int depth);
 
 /* Catch bindings are NOT evidence here: the container-ownership caller
  * (codegen_expr.c) hands a heap-classified value to an owning container
@@ -1577,13 +1584,13 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
  * evidence (body_assigns_var_from_heap_or_catch). */
 int body_assigns_var_from_heap(CodeGenerator* gen, ASTNode* node,
                                const char* var_name) {
-    return body_assigns_var_from_heap_in(gen, node, var_name, NULL);
+    return body_assigns_var_from_heap_in(gen, node, var_name, NULL, node, 0);
 }
 
 static int body_assigns_var_from_heap_or_catch(CodeGenerator* gen, ASTNode* node,
                                                const char* var_name) {
     CatchScope cs = { {0}, 0 };
-    return body_assigns_var_from_heap_in(gen, node, var_name, &cs);
+    return body_assigns_var_from_heap_in(gen, node, var_name, &cs, node, 0);
 }
 
 /* Does some binding of `var_name` in the body leave it owning a heap value
@@ -1643,8 +1650,52 @@ static int string_bind_owns_arm(CodeGenerator* gen, ASTNode* e, int may) {
     return is_heap_string_expr(gen, e);
 }
 
+/* #2629: the function whose body is `root`, or NULL. */
+static ASTNode* fn_def_of_body(CodeGenerator* gen, ASTNode* root) {
+    for (int i = 0; gen && gen->program && root && i < gen->program->child_count; i++) {
+        ASTNode* c = gen->program->children[i];
+        if (!c || (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
+        for (int k = 0; k < c->child_count; k++)
+            if (c->children[k] == root) return c;
+    }
+    return NULL;
+}
+
+/* #2629: is the local `name`, which `root` binds another local to
+ * (`t = name`), heap evidence? Resolved against `root` itself: a local it
+ * binds from heap evidence, or a `string` parameter its function takes a
+ * reference of its own to (copy-on-keep). The tracker table
+ * (is_heap_string_var) is the function being emitted, which can be any
+ * function when a memoised classifier first asks (the invariant at
+ * body_tuple_destructure_binds_heap, #1311): `t = x; return t` in a
+ * function first classified at its caller's site was taken as borrowed, and
+ * every call leaked t. */
+static int alias_source_owns(CodeGenerator* gen, ASTNode* root, const char* name,
+                             CatchScope* cs, int depth) {
+    if (!root || !name || depth >= 8) return 0;
+    /* Asked for the body being emitted, outside a classifier (a container
+     * store of the local), its own tracker table answers as well. */
+    if (!g_classifying && gen && gen->current_function && is_heap_string_var(gen, name)) {
+        for (int k = 0; k < gen->current_function->child_count; k++)
+            if (gen->current_function->children[k] == root) return 1;
+    }
+    CatchScope fresh = { {0}, 0 };
+    if (body_assigns_var_from_heap_in(gen, root, name, cs ? &fresh : NULL, root, depth + 1))
+        return 1;
+    ASTNode* fn = fn_def_of_body(gen, root);
+    for (int i = 0; fn && i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
+            p->value && strcmp(p->value, name) == 0)
+            return p->node_type && p->node_type->kind == TYPE_STRING &&
+                   callee_string_param_captures(gen, fn->value, i);
+    }
+    return 0;
+}
+
 static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
-                                         const char* var_name, CatchScope* cs) {
+                                         const char* var_name, CatchScope* cs,
+                                         ASTNode* root, int depth) {
     if (!node || !var_name) return 0;
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
@@ -1653,17 +1704,22 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
     }
     if (node->type == AST_VARIABLE_DECLARATION && node->value &&
         strcmp(node->value, var_name) == 0 &&
-        node->child_count > 0 && node->children[0] &&
-        (is_heap_string_expr(gen, node->children[0]) ||
-         catch_scope_has(cs, node->children[0]) ||
-         string_bind_owns(gen, node->children[0], cs != NULL))) {
-        return 1;
+        node->child_count > 0 && node->children[0]) {
+        ASTNode* rhs = node->children[0];
+        int from_alias = rhs->type == AST_IDENTIFIER && rhs->value;
+        if ((from_alias ? strcmp(rhs->value, var_name) != 0 &&
+                              alias_source_owns(gen, root, rhs->value, cs, depth)
+                        : is_heap_string_expr(gen, rhs)) ||
+            catch_scope_has(cs, rhs) ||
+            string_bind_owns(gen, rhs, cs != NULL)) {
+            return 1;
+        }
     }
     if (cs && node->type == AST_CATCH_CLAUSE && node->value && cs->count < CATCH_SCOPE_MAX) {
         cs->names[cs->count++] = node->value;
         int found = 0;
         for (int i = 0; i < node->child_count && !found; i++) {
-            found = body_assigns_var_from_heap_in(gen, node->children[i], var_name, cs);
+            found = body_assigns_var_from_heap_in(gen, node->children[i], var_name, cs, root, depth);
         }
         cs->count--;
         return found;
@@ -1704,7 +1760,7 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
     }
     for (int i = 0; i < node->child_count; i++) {
         if (body_assigns_var_from_heap_in(gen, classifier_child(gen, node, i),
-                                          var_name, cs)) return 1;
+                                          var_name, cs, root, depth)) return 1;
     }
     return 0;
 }
@@ -1929,6 +1985,28 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
     if (pushed) cs->count--;
 }
 
+/* #2627: the clauses of a function written as several (`f(0) -> ...`,
+ * `f(n) -> ...`), when `fn_def` is one of them; NULL for a single
+ * definition. They are one C function (generate_combined_function), so
+ * what it hands over is the same for every clause: the classifiers below
+ * read them all and memoise the answer on each. */
+static const DefClauses* fn_clause_set(CodeGenerator* gen, ASTNode* fn_def) {
+    if (!gen || !gen->program || !fn_def || !fn_def->value) return NULL;
+    const DefClauses* dc = program_index_clauses(gen->program, fn_def->value);
+    if (!dc || dc->count < 2) return NULL;
+    for (int i = 0; i < dc->count; i++)
+        if (dc->nodes[i] == fn_def) return dc;
+    return NULL;
+}
+
+static ASTNode* fn_def_body(ASTNode* fn_def) {
+    for (int i = 0; fn_def && i < fn_def->child_count; i++) {
+        ASTNode* c = fn_def->children[i];
+        if (c && c->type == AST_BLOCK) return c;
+    }
+    return NULL;
+}
+
 int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     if (!fn_def ||
         (fn_def->type != AST_FUNCTION_DEFINITION &&
@@ -1951,23 +2029,34 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
         // — analyse afresh, but skip caching to preserve the original
         // annotation for downstream codegen.
     }
-    int memoise = (fn_def->annotation == NULL);
-    if (memoise) fn_def->annotation = strdup("heap_pending");
-
-    ASTNode* body = NULL;
-    for (int i = 0; i < fn_def->child_count; i++) {
-        ASTNode* c = fn_def->children[i];
-        if (c && c->type == AST_BLOCK) { body = c; break; }
+    /* One clause hands over an owned string: every clause does, its other
+     * returns taken through the uniform-heap shim (should_uniform_heap_return
+     * asks this of the clause being emitted). */
+    const DefClauses* dc = fn_clause_set(gen, fn_def);
+    int nclauses = dc ? dc->count : 1;
+    char memoised[64];
+    for (int c = 0; c < nclauses && c < 64; c++) {
+        ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+        memoised[c] = clause && clause->annotation == NULL;
+        if (memoised[c]) clause->annotation = strdup("heap_pending");
     }
     int any_heap = 0;
     int any_non_heap = 0;
-    if (body) walk_returns_for_heap_check(gen, body, fn_def->value, body,
-                                          &any_heap, &any_non_heap);
+    g_classifying++;
+    for (int c = 0; c < nclauses; c++) {
+        ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+        ASTNode* body = fn_def_body(clause);
+        if (body) walk_returns_for_heap_check(gen, body, clause->value, body,
+                                              &any_heap, &any_non_heap);
+    }
+    g_classifying--;
     int result = any_heap ? 1 : 0;
 
-    if (memoise) {
-        free(fn_def->annotation);
-        fn_def->annotation = strdup(result ? "heap_yes" : "heap_no");
+    for (int c = 0; c < nclauses && c < 64; c++) {
+        ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+        if (!memoised[c]) continue;
+        free(clause->annotation);
+        clause->annotation = strdup(result ? "heap_yes" : "heap_no");
     }
     return result;
 }
@@ -3760,7 +3849,9 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
                 *any_heap = 1;
                 return;
             }
-            if (callee && function_def_returns_heap_at(gen, callee, position)) {
+            if (child_is_tuple && tuple_call_pos_copied(gen, child, position)) {
+                *any_heap = 1;   /* #2619: copied where the call was made */
+            } else if (callee && function_def_returns_heap_at(gen, callee, position)) {
                 *any_heap = 1;
             } else if (ext_callee && ext_callee->node_type &&
                        ext_callee->node_type->kind == TYPE_TUPLE &&
@@ -3872,43 +3963,53 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
     /* Some unrelated annotation (e.g. "c_callback:...", "heap_yes"
      * for a single-value function that's somehow being asked at
      * position 0) — analyse without clobbering. */
-    int memoise = (fn_def->annotation == NULL);
-    if (memoise) fn_def->annotation = strdup("heap_pending");
+    /* Every clause of a function written as several (#2627), as for a
+     * string result. */
+    const DefClauses* dc = fn_clause_set(gen, fn_def);
+    int nclauses = dc ? dc->count : 1;
+    char memoised[64];
+    for (int c = 0; c < nclauses && c < 64; c++) {
+        ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+        memoised[c] = clause && clause->annotation == NULL;
+        if (memoised[c]) clause->annotation = strdup("heap_pending");
+    }
 
     int tuple_count = fn_def->node_type->tuple_count;
     int* per_pos = (int*)calloc((size_t)tuple_count, sizeof(int));
 
-    ASTNode* body = NULL;
-    for (int i = 0; i < fn_def->child_count; i++) {
-        ASTNode* c = fn_def->children[i];
-        if (c && c->type == AST_BLOCK) { body = c; break; }
-    }
-    if (body) {
-        for (int p = 0; p < tuple_count; p++) {
-            int found = 0, any_heap = 0, vetoed = 0;
-            walk_returns_for_heap_at(gen, body, p, body, fn_def->value,
-                                     &found, &any_heap, &vetoed);
-            /* Heap at `p` iff some return makes it heap (OR-fold) AND
-             * no whole-tuple-passthrough return yields an unwrappable
-             * non-heap value there (veto). The veto wins — see the
-             * walker comment. */
-            per_pos[p] = (found && any_heap && !vetoed) ? 1 : 0;
+    g_classifying++;
+    for (int p = 0; p < tuple_count; p++) {
+        int found = 0, any_heap = 0, vetoed = 0;
+        for (int c = 0; c < nclauses; c++) {
+            ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+            ASTNode* body = fn_def_body(clause);
+            if (body)
+                walk_returns_for_heap_at(gen, body, p, body, clause->value,
+                                         &found, &any_heap, &vetoed);
         }
+        /* Heap at `p` iff some return makes it heap (OR-fold) AND
+         * no whole-tuple-passthrough return yields an unwrappable
+         * non-heap value there (veto). The veto wins — see the
+         * walker comment. */
+        per_pos[p] = (found && any_heap && !vetoed) ? 1 : 0;
     }
+    g_classifying--;
 
     int result = per_pos[position];
 
-    if (memoise) {
-        /* Build "heap_positions:1,0,1\0" — at most 2*tuple_count + 16. */
-        size_t cap = (size_t)tuple_count * 2u + 32u;
+    /* Build "heap_positions:1,0,1\0" — at most 2*tuple_count + 16. */
+    size_t cap = (size_t)tuple_count * 2u + 32u;
+    for (int c = 0; c < nclauses && c < 64; c++) {
+        ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+        if (!memoised[c]) continue;
         char* buf = (char*)malloc(cap);
         size_t off = (size_t)snprintf(buf, cap, "heap_positions:");
         for (int p = 0; p < tuple_count; p++) {
             off += (size_t)snprintf(buf + off, cap - off, "%s%d",
                                     p ? "," : "", per_pos[p]);
         }
-        free(fn_def->annotation);
-        fn_def->annotation = buf;
+        free(clause->annotation);
+        clause->annotation = buf;
     }
     free(per_pos);
     return result;
@@ -4595,12 +4696,48 @@ static int keep_alias_is_local(CodeGenerator* gen, const char* name) {
  * the pointer. */
 static int g_escape_param_is_closure = 0;
 
+/* #2627: how many clauses `func_name` is written as (1 for a single
+ * definition). A function written as several is one C function, so an
+ * answer about one of its parameters is the union of every clause's: the
+ * walks below ask resolve_callee_param_clause of each, and a clause body
+ * takes no reference of its own (callee_string_param_captures). */
+static int callee_clause_count(CodeGenerator* gen, const char* func_name) {
+    if (!gen || !gen->program || !func_name) return 1;
+    const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
+    return dc && dc->count > 1 ? dc->count : 1;
+}
+
+/* Clause `clause`'s parameter `param_idx` is a literal pattern (`f(0, s)`):
+ * a value compared, never kept. */
+static int callee_param_is_pattern_literal(CodeGenerator* gen, const char* func_name,
+                                           int param_idx, int clause) {
+    const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
+    ASTNode* fn_def = dc && clause < dc->count ? dc->nodes[clause] : NULL;
+    return fn_def && param_idx >= 0 && param_idx < fn_def->child_count &&
+           fn_def->children[param_idx] &&
+           fn_def->children[param_idx]->type == AST_PATTERN_LITERAL;
+}
+
+static int resolve_callee_param_clause(CodeGenerator* gen, const char* func_name,
+                                       int param_idx, int clause, const char** out_pname,
+                                       ASTNode** out_body);
+
 static int resolve_callee_param_body(CodeGenerator* gen, const char* func_name,
                                      int param_idx, const char** out_pname,
                                      ASTNode** out_body) {
+    return resolve_callee_param_clause(gen, func_name, param_idx, 0, out_pname, out_body);
+}
+
+static int resolve_callee_param_clause(CodeGenerator* gen, const char* func_name,
+                                       int param_idx, int clause, const char** out_pname,
+                                       ASTNode** out_body) {
     if (!gen || !gen->program || !func_name || param_idx < 0) return 0;
     const char* fn = codegen_normalise_callee(func_name);
     ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
+    if (clause > 0) {
+        const DefClauses* dc = program_index_clauses(gen->program, fn);
+        fn_def = dc && clause < dc->count ? dc->nodes[clause] : NULL;
+    }
     if (!fn_def || param_idx >= fn_def->child_count) return 0;
     ASTNode* param = fn_def->children[param_idx];
     if (!param || !param->value ||
@@ -4623,12 +4760,23 @@ static int resolve_callee_param_body(CodeGenerator* gen, const char* func_name,
     return 1;
 }
 
+static int callee_param_escapes_in_clause(CodeGenerator* gen, const char* func_name,
+                                          int param_idx, int clause, int depth);
+
 int callee_param_escapes_via_body(CodeGenerator* gen, const char* func_name,
                                   int param_idx, int depth) {
     if (depth > 8) return 1;  /* recursion / mutual-recursion guard */
+    int n = callee_clause_count(gen, func_name);
+    for (int c = 0; c < n; c++)   /* #2627: any clause */
+        if (callee_param_escapes_in_clause(gen, func_name, param_idx, c, depth)) return 1;
+    return 0;
+}
+
+static int callee_param_escapes_in_clause(CodeGenerator* gen, const char* func_name,
+                                          int param_idx, int clause, int depth) {
     const char* pname; ASTNode* body;
     int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
-    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
+    if (!resolve_callee_param_clause(gen, func_name, param_idx, clause, &pname, &body)) {
         g_escape_param_is_closure = saved_cl;
         return 0;
     }
@@ -4730,11 +4878,16 @@ static void callee_memo_end(CodeGenerator* gen, ASTNode* fn, int idx, int query,
     if (m) m->state = r ? 3 : 2;
 }
 
-/* compute_closure_args_borrowed asks under a hypothesis it may drop. */
+/* compute_closure_args_borrowed and discover_fn_values ask under a
+ * hypothesis they may drop. */
 static void callee_memo_reset(CodeGenerator* gen) {
     if (gen->callee_memo)
         memset(gen->callee_memo, 0, sizeof(CalleeMemo) * (size_t)gen->callee_memo_cap);
     gen->callee_memo_count = 0;
+}
+
+void callee_memo_clear(CodeGenerator* gen) {
+    if (gen) callee_memo_reset(gen);
 }
 
 int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
@@ -4758,15 +4911,31 @@ static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name
     return r;
 }
 
+static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* func_name,
+                                              int param_idx, int clause, int return_is_keep,
+                                              int depth);
+
 static int callee_string_param_kept_at_walk(CodeGenerator* gen, const char* func_name,
                                             int param_idx, int return_is_keep, int depth) {
     /* Mutual recursion between callees: past the bound the parameter
      * counts as kept, which only ever keeps a caller's argument alive
      * longer (the walk through callee_keeps_string_arg restarts here). */
     if (depth > 8) return 1;
+    int n = callee_clause_count(gen, func_name);
+    for (int c = 0; c < n; c++) {   /* #2627: any clause */
+        if (n > 1 && callee_param_is_pattern_literal(gen, func_name, param_idx, c)) continue;
+        if (callee_string_param_kept_in_clause(gen, func_name, param_idx, c, return_is_keep, depth))
+            return 1;
+    }
+    return 0;
+}
+
+static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* func_name,
+                                              int param_idx, int clause, int return_is_keep,
+                                              int depth) {
     const char* pname; ASTNode* body;
     int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
-    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
+    if (!resolve_callee_param_clause(gen, func_name, param_idx, clause, &pname, &body)) {
         g_escape_param_is_closure = saved_cl;
         return 1;
     }
@@ -4835,6 +5004,9 @@ static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_
 static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* func_name,
                                                 int param_idx, int depth) {
     if (depth > 8) return 0;
+    /* #2627: a clause body binds its parameters as they came
+     * (generate_combined_function); its caller keeps what it passes. */
+    if (callee_clause_count(gen, func_name) > 1) return 0;
     ASTNode* param = callee_string_param_node(gen, func_name, param_idx);
     if (!param) return 0;
     const char* fn = codegen_normalise_callee(func_name);
@@ -4940,12 +5112,19 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* fn = codegen_normalise_callee(node->value);
         int is_call = strcmp(node->value, "call") == 0;
+        int via_fnptr = !is_call && typed_fnptr_call(gen, node);
         int first_arg = is_call ? 1 : 0;
         for (int i = first_arg; i < node->child_count; i++) {
             ASTNode* a = node->children[i];
             if (!a || a->type != AST_IDENTIFIER || !a->value || strcmp(a->value, pname) != 0) continue;
             if (is_call) {
                 if (!gen->closure_args_borrowed) return 1;
+                continue;
+            }
+            /* #2586: so is a call through a typed fn pointer, slot by slot,
+             * under its convention (discover_fn_values). */
+            if (via_fnptr) {
+                if (!fnptr_arg_borrowed(i)) return 1;
                 continue;
             }
             if (is_nonstoring_builtin(fn) || is_consuming_free(gen, fn)) continue;
@@ -4957,12 +5136,16 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
             if (callee_has_visible_body(gen, node->value)) {
                 if (callee_param_is_string(gen, node->value, i)) {
                     if (callee_string_param_captures_at(gen, node->value, i, depth + 1)) continue;
-                    const char* cp; ASTNode* cb;
-                    int saved_cl = g_escape_param_is_closure;
-                    int r = resolve_callee_param_body(gen, node->value, i, &cp, &cb)
-                            ? param_opaque_sink(gen, cb, cp, depth + 1) : 1;
-                    g_escape_param_is_closure = saved_cl;
-                    if (r) return 1;
+                    int nc = callee_clause_count(gen, node->value);
+                    for (int c = 0; c < nc; c++) {   /* #2627: any clause */
+                        if (nc > 1 && callee_param_is_pattern_literal(gen, node->value, i, c)) continue;
+                        const char* cp; ASTNode* cb;
+                        int saved_cl = g_escape_param_is_closure;
+                        int r = resolve_callee_param_clause(gen, node->value, i, c, &cp, &cb)
+                                ? param_opaque_sink(gen, cb, cp, depth + 1) : 1;
+                        g_escape_param_is_closure = saved_cl;
+                        if (r) return 1;
+                    }
                 } else if (callee_param_escapes_via_body(gen, node->value, i, depth + 1)) {
                     return 1;
                 }
@@ -4996,12 +5179,15 @@ static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, 
             if (is_consuming_free(gen, fn)) return 1;
             if (callee_has_visible_body(gen, node->value) &&
                 callee_param_is_string(gen, node->value, i)) {
-                const char* cp; ASTNode* cb;
-                int saved_cl = g_escape_param_is_closure;
-                int r = resolve_callee_param_body(gen, node->value, i, &cp, &cb) &&
-                        param_consumed(gen, cb, cp, depth + 1);
-                g_escape_param_is_closure = saved_cl;
-                if (r) return 1;
+                int nc = callee_clause_count(gen, node->value);
+                for (int c = 0; c < nc; c++) {   /* #2627: any clause */
+                    const char* cp; ASTNode* cb;
+                    int saved_cl = g_escape_param_is_closure;
+                    int r = resolve_callee_param_clause(gen, node->value, i, c, &cp, &cb) &&
+                            param_consumed(gen, cb, cp, depth + 1);
+                    g_escape_param_is_closure = saved_cl;
+                    if (r) return 1;
+                }
             }
         }
     }
@@ -5064,15 +5250,20 @@ static int returned_param_is_captured(CodeGenerator* gen, const char* name, cons
  * container/@retain/struct-field/closure owns (must NOT be freed). */
 int callee_param_store_escapes_via_body(CodeGenerator* gen, const char* func_name,
                                         int param_idx) {
-    const char* pname; ASTNode* body;
-    int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
-    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
+    int n = callee_clause_count(gen, func_name);
+    for (int c = 0; c < n; c++) {   /* #2627: any clause */
+        if (n > 1 && callee_param_is_pattern_literal(gen, func_name, param_idx, c)) continue;
+        const char* pname; ASTNode* body;
+        int saved_cl = g_escape_param_is_closure;   /* #2528: per walk */
+        if (!resolve_callee_param_clause(gen, func_name, param_idx, c, &pname, &body)) {
+            g_escape_param_is_closure = saved_cl;
+            return 1;  /* unresolved → conservatively assume it stores */
+        }
+        int r = param_escapes_in_subtree(gen, body, pname, 0, /*return_is_escape=*/0);
         g_escape_param_is_closure = saved_cl;
-        return 1;  /* unresolved → conservatively assume it stores */
+        if (r) return 1;
     }
-    int r = param_escapes_in_subtree(gen, body, pname, 0, /*return_is_escape=*/0);
-    g_escape_param_is_closure = saved_cl;
-    return r;
+    return 0;
 }
 
 int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int param_idx,
@@ -5106,7 +5297,7 @@ int closure_param_escapes_via_body(CodeGenerator* gen, ASTNode* closure, int par
 /* #2499: can a value of type `t` be a string the caller owns? A closure
  * call through an erased `fn` checks no argument types, so a string can
  * reach a `ptr` (or untyped-pointer) parameter as well as a `string` one. */
-static int param_may_hold_caller_string(const Type* t) {
+int param_may_hold_caller_string(const Type* t) {
     if (!t) return 0;   /* an untyped closure parameter is an int */
     return t->kind == TYPE_STRING || t->kind == TYPE_PTR ||
            t->kind == TYPE_UNKNOWN || t->kind == TYPE_WILDCARD ||
@@ -5692,6 +5883,20 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
         if (!g_capture_holds_own_ref) return 1;  /* closure capture may outlive the call */
         if (!trailing) return 0;
     }
+    /* #2586: an argument to a call through a typed fn pointer is borrowed
+     * at a slot no function used as a fn-pointer value keeps one at
+     * (discover_fn_values); passed at any other slot it escapes. */
+    if (node->type == AST_FUNCTION_CALL && typed_fnptr_call(gen, node)) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (a && a->type == AST_IDENTIFIER && a->value && strcmp(a->value, pname) == 0) {
+                if (!fnptr_arg_borrowed(i)) return 1;
+                continue;
+            }
+            if (param_escapes_in_subtree(gen, a, pname, depth, return_is_escape)) return 1;
+        }
+        return 0;
+    }
     /* #2499: an argument to a closure call is borrowed when every closure
      * in the program is known not to keep one (compute_closure_args_
      * borrowed), so passing the parameter on keeps nothing. */
@@ -5875,6 +6080,8 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
     /* #2499: under the closure-argument convention a closure call borrows
      * its arguments (the callee slot, 0, is invoked, not stored). */
     if (fn && strcmp(fn, "call") == 0 && gen->closure_args_borrowed) return 0;
+    /* #2586: and a call through a typed fn pointer at a borrowing slot. */
+    if (typed_fnptr_call(gen, call)) return fnptr_arg_borrowed(arg_idx) ? 0 : 1;
     if (fn && is_retain_extern_param(gen, fn, arg_idx)) return 1;
     if (callee_has_visible_body(gen, call->value)) {
         /* Visible body → the body-walk is authoritative (sees through
@@ -14372,13 +14579,17 @@ int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int id
     if (is_consuming_free(gen, codegen_normalise_callee(func_name))) return 1;
     if (!callee_has_visible_body(gen, func_name) || !callee_param_is_string(gen, func_name, idx))
         return 0;
-    const char* cp;
-    ASTNode* cb;
-    int saved_cl = g_escape_param_is_closure;
-    int r = resolve_callee_param_body(gen, func_name, idx, &cp, &cb) &&
-            param_consumed(gen, cb, cp, 1);
-    g_escape_param_is_closure = saved_cl;
-    return r;
+    int n = callee_clause_count(gen, func_name);
+    for (int c = 0; c < n; c++) {   /* #2627: any clause */
+        const char* cp;
+        ASTNode* cb;
+        int saved_cl = g_escape_param_is_closure;
+        int r = resolve_callee_param_clause(gen, func_name, idx, c, &cp, &cb) &&
+                param_consumed(gen, cb, cp, 1);
+        g_escape_param_is_closure = saved_cl;
+        if (r) return 1;
+    }
+    return 0;
 }
 
 /* An owned field read whose struct can be reached again to clear its

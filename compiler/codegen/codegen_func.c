@@ -1,4 +1,5 @@
 #include "codegen_internal.h"
+#include "../aether_module.h"
 
 // True when this function definition is annotated `@c_callback`.
 // The annotation (#235) marks a function as having a stable, externally-
@@ -430,17 +431,32 @@ static ASTNode* emit_bare_fn_adapter_signature(CodeGenerator* gen,
  * hands its result over owned: as it is when the function returns owned
  * strings, copied when it returns a literal or a borrow.
  *
- * The arguments follow the closure convention too: a call through such a
- * pointer frees an owned string argument after the call when no function
- * used as a value keeps one of its `string` parameters as it came (a named
- * function keeps one only through a reference of its own, unless it stores
- * it where nothing releases it). A pointer made from a raw `ptr` points at
- * C the compiler never saw: its function must return a string the caller
- * may free (docs/c-interop.md). */
+ * The arguments follow the closure convention too, slot by slot: a call
+ * through such a pointer frees an owned string argument after the call, and
+ * a parameter passed on through one is not kept by passing it, when no
+ * function used as a value keeps what it receives at that slot (a named
+ * function keeps a `string` parameter only through a reference of its own,
+ * unless it stores it where nothing releases it; a `ptr` one, which a
+ * string can reach, is kept by any escape).
+ *
+ * The convention holds only when every such pointer comes from Aether: one
+ * made from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`),
+ * returned by an extern, or held in a C struct points at C, whose string is
+ * C's (strerror's static buffer). A program with one keeps the borrowed
+ * reading for every typed fn pointer, as before: its results are not freed
+ * and its functions are not adapted. And a named function handed to C (an
+ * extern's argument, `as ptr`) stays the function itself: C reads its
+ * string as it is (fnval_raw_context). */
 static char** g_fnval_names = NULL;
 static int g_fnval_count = 0;
 static int g_fnval_cap = 0;
-static int g_fnptr_args_borrowed = 0;
+static unsigned long long g_fnptr_args_borrowed = 0;   /* bit k: slot k borrows */
+static int g_fnptr_results_owned = 0;
+
+static int fnptr_type_returns_string(Type* t) {
+    return t && t->kind == TYPE_FUNCTION && t->is_fnptr && t->return_type &&
+           t->return_type->kind == TYPE_STRING;
+}
 
 static ASTNode* fnval_definition(CodeGenerator* gen, const char* name) {
     ASTNode* fd = find_function_definition_by_name(gen->program, name);
@@ -461,36 +477,111 @@ static void discover_fn_values_walk(CodeGenerator* gen, ASTNode* n) {
     if (!n) return;
     if (n->type == AST_IDENTIFIER && n->value && fnval_definition(gen, n->value))
         fnval_add(n->value);
+    /* A string-returning fn pointer made from anything but a named Aether
+     * function points at C. */
+    if (n->type == AST_PTR_AS_FN_CAST && fnptr_type_returns_string(n->node_type)) {
+        ASTNode* src = n->child_count > 0 ? n->children[0] : NULL;
+        if (!(src && src->type == AST_IDENTIFIER && src->value && fnval_definition(gen, src->value)))
+            g_fnptr_results_owned = 0;
+    }
+    /* An extern returning one, or a C struct holding one. */
+    if (n->type == AST_EXTERN_FUNCTION && fnptr_type_returns_string(n->node_type))
+        g_fnptr_results_owned = 0;
+    if (n->type == AST_STRUCT_DEFINITION && n->value && aether_is_c_import_struct(n->value)) {
+        for (int i = 0; i < n->child_count; i++)
+            if (n->children[i] && fnptr_type_returns_string(n->children[i]->node_type))
+                g_fnptr_results_owned = 0;
+    }
     for (int i = 0; i < n->child_count; i++) discover_fn_values_walk(gen, n->children[i]);
 }
 
-void discover_fn_values(CodeGenerator* gen) {
+/* The borrowed reading, which the analyses that run before
+ * discover_fn_values (compute_closure_args_borrowed) see. */
+void reset_fn_values(void) {
     for (int i = 0; i < g_fnval_count; i++) free(g_fnval_names[i]);
     g_fnval_count = 0;
-    g_fnptr_args_borrowed = 1;
-    if (!gen || !gen->program) return;
-    discover_fn_values_walk(gen, gen->program);
-    for (int i = 0; i < g_fnval_count && g_fnptr_args_borrowed; i++) {
-        ASTNode* fd = fnval_definition(gen, g_fnval_names[i]);
-        for (int k = 0; fd && k < fd->child_count; k++) {
-            if (callee_param_is_string(gen, g_fnval_names[i], k) &&
-                callee_keeps_string_arg(gen, g_fnval_names[i], k, 0)) {
-                g_fnptr_args_borrowed = 0;
-                break;
-            }
-        }
-    }
+    g_fnptr_args_borrowed = 0;
+    g_fnptr_results_owned = 0;
 }
 
-int fnptr_args_borrowed(void) {
-    return g_fnptr_args_borrowed;
+void discover_fn_values(CodeGenerator* gen) {
+    reset_fn_values();
+    if (!gen || !gen->program) return;
+    g_fnptr_results_owned = 1;
+    discover_fn_values_walk(gen, gen->program);
+    /* A module's externs stay in its own tree (module_merge_into_program
+     * does not copy them), so an extern there returning a string fn
+     * pointer is looked for there. */
+    for (int i = 0; i < gen->program->child_count; i++) {
+        ASTNode* c = gen->program->children[i];
+        if (!c || c->type != AST_IMPORT_STATEMENT || !c->value) continue;
+        AetherModule* mod = module_find(c->value);
+        for (int j = 0; mod && mod->ast && j < mod->ast->child_count; j++) {
+            ASTNode* d = mod->ast->children[j];
+            if (d && d->type == AST_EXTERN_FUNCTION && fnptr_type_returns_string(d->node_type))
+                g_fnptr_results_owned = 0;
+        }
+    }
+    if (!g_fnptr_results_owned) return;
+    /* The walks assume the answer for calls between fn pointers (an
+     * argument passed on through one at a borrowing slot is not kept),
+     * so it is iterated to a fixed point: start from every slot borrowing,
+     * drop each slot some function keeps at under the current answer, and
+     * ask again until nothing drops. Then no function keeps at a slot left
+     * borrowing, by induction, as for closures
+     * (compute_closure_args_borrowed). */
+    unsigned long long mask = ~0ULL;
+    for (;;) {
+        g_fnptr_args_borrowed = mask;
+        callee_memo_clear(gen);
+        unsigned long long next = mask;
+        for (int i = 0; i < g_fnval_count; i++) {
+            const char* name = g_fnval_names[i];
+            ASTNode* fd = fnval_definition(gen, name);
+            /* Through the pointer, a string function is its adapter, which
+             * hands back a copy of a parameter returned as it came: a
+             * return keeps nothing there. */
+            int adapted = fnval_string_adapter(gen, name) != NULL;
+            int slot = 0;
+            for (int k = 0; fd && k < fd->child_count; k++) {
+                ASTNode* p = fd->children[k];
+                if (!p || (p->type != AST_PATTERN_VARIABLE &&
+                           p->type != AST_VARIABLE_DECLARATION)) continue;
+                if (slot >= 64) break;
+                unsigned long long bit = 1ULL << slot;
+                int kept;
+                if (callee_param_is_string(gen, name, k))
+                    kept = !callee_string_param_captures(gen, name, k) &&
+                           callee_string_param_kept(gen, name, k, !adapted);
+                else
+                    kept = param_may_hold_caller_string(p->node_type) &&
+                           callee_param_escapes_via_body(gen, name, k, 0);
+                if ((next & bit) && kept) next &= ~bit;
+                slot++;
+            }
+        }
+        if (next == mask) break;
+        mask = next;
+    }
+    g_fnptr_args_borrowed = mask;
+    callee_memo_clear(gen);
+}
+
+/* Does an argument at `slot` of a call through a typed fn pointer stay the
+ * caller's (discover_fn_values)? */
+int fnptr_arg_borrowed(int slot) {
+    return slot >= 0 && slot < 64 && ((g_fnptr_args_borrowed >> slot) & 1ULL);
+}
+
+int fnptr_string_results_owned(void) {
+    return g_fnptr_results_owned;
 }
 
 /* The adapter a bare `name` decays to, or NULL when it decays to the
  * function itself (it returns no string, or is not a function used as a
  * value). */
 const char* fnval_string_adapter(CodeGenerator* gen, const char* name) {
-    if (!name) return NULL;
+    if (!name || !g_fnptr_results_owned) return NULL;
     for (int i = 0; i < g_fnval_count; i++) {
         if (strcmp(g_fnval_names[i], name) != 0) continue;
         ASTNode* fd = fnval_definition(gen, name);
@@ -508,8 +599,13 @@ static ASTNode* fnval_signature(CodeGenerator* gen, const char* name) {
     for (int k = 0; k < fd->child_count; k++) {
         ASTNode* p = fd->children[k];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK) continue;
-        fprintf(gen->output, "%s%s _a%d", pc ? ", " : "",
-                p->node_type ? get_c_type(p->node_type) : "int", pc);
+        if (is_sized_array_param(p->node_type)) {   /* `int xs[2]`, not `int[2] xs` */
+            fprintf(gen->output, "%s%s _a%d[%d]", pc ? ", " : "",
+                    get_c_type(p->node_type->element_type), pc, p->node_type->array_size);
+        } else {
+            fprintf(gen->output, "%s%s _a%d", pc ? ", " : "",
+                    p->node_type ? get_c_type(p->node_type) : "int", pc);
+        }
         pc++;
     }
     if (pc == 0) fprintf(gen->output, "void");
@@ -530,8 +626,10 @@ void emit_fn_value_adapters(CodeGenerator* gen) {
         if (!fnval_string_adapter(gen, name)) continue;
         ASTNode* fd = fnval_signature(gen, name);
         if (!fd) continue;
+        /* A @c_callback function is defined under the symbol it binds. */
+        const char* sym = lookup_c_callback_symbol(gen, name);
         fprintf(gen->output, " {\n    return aether_uniform_heap_str((const char*)(%s(",
-                safe_c_name(name));
+                sym ? sym : safe_c_name(name));
         int pc = 0;
         for (int k = 0; k < fd->child_count; k++) {
             ASTNode* p = fd->children[k];
@@ -539,7 +637,15 @@ void emit_fn_value_adapters(CodeGenerator* gen) {
             fprintf(gen->output, "%s_a%d", pc ? ", " : "", pc);
             pc++;
         }
-        fprintf(gen->output, ")), %d);\n}\n", function_def_returns_heap_string(gen, fd) ? 1 : 0);
+        /* Passed through only when every clause hands over an owned
+         * string; otherwise copied, which costs a copy where a clause did
+         * hand one over, never a free of a literal. */
+        int all_heap = 1;
+        const DefClauses* dc = program_index_clauses(gen->program, name);
+        for (int c = 0; dc && c < dc->count && all_heap; c++)
+            all_heap = dc->nodes[c] && function_def_returns_heap_string(gen, dc->nodes[c]);
+        if (!dc) all_heap = function_def_returns_heap_string(gen, fd);
+        fprintf(gen->output, ")), %d);\n}\n", all_heap ? 1 : 0);
     }
 }
 
@@ -1284,6 +1390,18 @@ static int emit_mem_accessor_body(CodeGenerator* gen, ASTNode* func) {
     return 0;
 }
 
+/* The value a function returns when no pattern, guard or clause matches.
+ * One whose caller owns its string result gets a copy of "" its caller may
+ * free, not the literal (#2627). */
+static void emit_no_match_value(CodeGenerator* gen, ASTNode* func) {
+    if (func->node_type && func->node_type->kind == TYPE_STRING &&
+        function_def_returns_heap_string(gen, func)) {
+        fprintf(gen->output, "aether_uniform_heap_str(\"\", 0)");
+        return;
+    }
+    generate_default_return_value(gen, func->node_type);
+}
+
 void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return;
 
@@ -1652,7 +1770,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             print_indent(gen);
             fprintf(gen->output, "if (_pattern_%d != %s) return ",
                     pattern_idx, child->value);
-            generate_default_return_value(gen, func->node_type);
+            emit_no_match_value(gen, func);
             fprintf(gen->output, ";\n");
         }
         
@@ -1662,14 +1780,14 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
                 // Empty list check
                 print_indent(gen);
                 fprintf(gen->output, "if (_len_%d != 0) return ", list_idx);
-                generate_default_return_value(gen, func->node_type);
+                emit_no_match_value(gen, func);
                 fprintf(gen->output, ";\n");
             } else {
                 // Fixed-size list check
                 print_indent(gen);
                 fprintf(gen->output, "if (_len_%d != %d) return ",
                         list_idx, child->child_count);
-                generate_default_return_value(gen, func->node_type);
+                emit_no_match_value(gen, func);
                 fprintf(gen->output, ";\n");
                 
                 // Bind pattern variables to list elements
@@ -1690,7 +1808,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             // [H|T] pattern - check non-empty
             print_indent(gen);
             fprintf(gen->output, "if (_len_%d < 1) return ", list_idx);
-            generate_default_return_value(gen, func->node_type);
+            emit_no_match_value(gen, func);
             fprintf(gen->output, ";\n");
             
             // Bind head and tail
@@ -1729,7 +1847,7 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
             fprintf(gen->output, "if (!(");
             generate_expression(gen, child->children[0]);
             fprintf(gen->output, ")) return ");
-            generate_default_return_value(gen, func->node_type);
+            emit_no_match_value(gen, func);
             fprintf(gen->output, ";\n");
         }
     }
@@ -1922,6 +2040,68 @@ static void generate_expression_with_subst_inner(CodeGenerator* gen, ASTNode* ex
 
 // Generate a single clause's pattern match condition and body
 // Returns 1 if this clause has a pattern/guard that needs checking, 0 if it's a catch-all
+/* #2627: a clause is the current function while its guard and body are
+ * emitted (its returns classified with every clause, the uniform-heap shim,
+ * `ensures`), and starts from clean per-function sets: clauses are disjoint
+ * C blocks of one function. Called before its pattern variables are bound. */
+static void begin_clause(CodeGenerator* gen, ASTNode* func) {
+    gen->current_function = func;
+    clear_declared_vars(gen);
+    clear_fnptr_locals(gen);
+    clear_heap_string_vars(gen);
+    clear_captured_string_params(gen);
+    clear_seq_vars(gen);
+    clear_opt_str_vars(gen);
+    clear_escaped_string_vars(gen);
+    clear_try_clobbered_vars(gen);
+}
+
+/* #2627: a clause's body, with the setup generate_function_definition gives
+ * a single function's: its bound parameters declared, a defer scope of its
+ * own, `requires` checks, the hoisted trackers of its locals and their exit
+ * frees. Without them a clause's string locals were never freed. */
+static void emit_clause_body(CodeGenerator* gen, ASTNode* func) {
+    ASTNode* body = NULL;
+    for (int i = 0; i < func->child_count; i++) {
+        ASTNode* child = func->children[i];
+        if (!child) continue;
+        if (child->type == AST_BLOCK) {
+            if (!body) body = child;
+            continue;
+        }
+        if ((child->type == AST_PATTERN_VARIABLE || child->type == AST_VARIABLE_DECLARATION)
+            && child->value) {
+            if (is_sized_array_param(child->node_type))
+                mark_var_declared_typed(gen, child->value, child->node_type);
+            else
+                mark_var_declared(gen, child->value);
+            if (is_fnptr_type(child->node_type))
+                register_fnptr_local(gen, child->value, child->node_type);
+        }
+    }
+    gen->defer_count = 0;
+    gen->scope_depth = 0;
+    enter_scope(gen);
+    if (!gen->no_contracts) emit_contract_preconditions(gen, func);
+    if (body) {
+        gen->hoist_scope_body = body;
+        hoist_if_branch_vars(gen, body);
+        mark_try_clobbered_vars(gen, body);
+        hoist_heap_string_trackers(gen, body);
+        hoist_seq_trackers(gen, body);
+        hoist_opt_str_trackers(gen, body);
+        mark_escaped_heap_string_vars(gen, body);
+        mark_escaped_seq_vars(gen, body);
+        mark_escaped_opt_str_vars(gen, body);
+        push_heap_string_exit_free_defers(gen, body);
+        push_seq_exit_free_defers(gen, body);
+        push_opt_str_exit_free_defers(gen, body);
+        for (int i = 0; i < body->child_count; i++)
+            generate_statement(gen, body->children[i]);
+    }
+    exit_scope(gen);
+}
+
 static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_first) {
     int has_condition = 0;
     int param_idx = 0;
@@ -1960,6 +2140,7 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
             fprintf(gen->output, "} else {\n");
             indent(gen);
         }
+        begin_clause(gen, func);
 
         // Bind pattern variables to their corresponding _argN positions.
         int param_idx_bind = 0;
@@ -1984,13 +2165,7 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
         // generate_combined_function emits exactly one chain-closing `}`
         // at the end when any prior clause had conditions, which will
         // close our else block cleanly.
-        for (int i = 0; i < func->child_count; i++) {
-            ASTNode* child = func->children[i];
-            if (child->type == AST_BLOCK) {
-                generate_statement(gen, child);
-                break;
-            }
-        }
+        emit_clause_body(gen, func);
 
         if (!is_first) {
             // Indent-level bookkeeping: we called indent(gen) when opening
@@ -2025,6 +2200,7 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
     }
 
     // Generate condition
+    begin_clause(gen, func);
     print_indent(gen);
     if (is_first) {
         fprintf(gen->output, "if (");
@@ -2151,13 +2327,7 @@ static int generate_clause_condition(CodeGenerator* gen, ASTNode* func, int is_f
     }
 
     // Generate body
-    for (int i = 0; i < func->child_count; i++) {
-        ASTNode* child = func->children[i];
-        if (child->type == AST_BLOCK) {
-            generate_statement(gen, child);
-            break;
-        }
-    }
+    emit_clause_body(gen, func);
 
     unindent(gen);
     return 1;
@@ -2188,8 +2358,15 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
         fprintf(gen->output, "static AETHER_MAYBE_UNUSED ");
     }
 
-    if ((!ret_type || ret_type->kind == TYPE_VOID || ret_type->kind == TYPE_UNKNOWN) && has_return) {
+    /* As generate_function_definition decides, so the definition matches
+     * the prototype: unannotated with a value returned is int, without one
+     * void (#2627: a clause set that returns nothing was defined `int`). */
+    int ret_unannotated = (!ret_type || ret_type->kind == TYPE_VOID ||
+                           ret_type->kind == TYPE_UNKNOWN);
+    if (ret_unannotated && has_return) {
         fprintf(gen->output, "int");
+    } else if (ret_unannotated) {
+        fprintf(gen->output, "void");
     } else {
         generate_type(gen, ret_type);
     }
@@ -2222,13 +2399,13 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
 
     fprintf(gen->output, ") {\n");
     indent(gen);
-    clear_declared_vars(gen);
-    clear_fnptr_locals(gen);   /* #2130: a fresh C function */
-    clear_heap_string_vars(gen);
-    clear_captured_string_params(gen);
-    clear_seq_vars(gen);
-    clear_opt_str_vars(gen);
-    clear_try_clobbered_vars(gen);  /* Issue #501 follow-up — per-fn set */
+    /* #2627: what a single function sets for its body, around the clauses
+     * (each clause becomes the current function in turn, begin_clause). */
+    Type* prev_return_type = gen->current_func_return_type;
+    ASTNode* prev_current_function = gen->current_function;
+    const char* prev_closure_var_scope = gen->closure_var_scope;
+    gen->current_func_return_type = ret_type;
+    gen->closure_var_scope = first->value;
 
     // Generate each clause as an if/else-if branch
     int is_first = 1;
@@ -2257,11 +2434,14 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
         if (!ret_type || ret_type->kind == TYPE_VOID || ret_type->kind == TYPE_UNKNOWN) {
             fprintf(gen->output, "0");
         } else {
-            generate_default_return_value(gen, ret_type);
+            emit_no_match_value(gen, first);
         }
         fprintf(gen->output, ";\n");
     }
 
+    gen->current_func_return_type = prev_return_type;
+    gen->current_function = prev_current_function;
+    gen->closure_var_scope = prev_closure_var_scope;
     unindent(gen);
     print_line(gen, "}");
     print_line(gen, "");

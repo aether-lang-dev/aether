@@ -8537,6 +8537,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * bodies still come after (they call the user fns by their real C name,
      * so they must follow the user fn definitions). */
     discover_bare_fn_adapters(gen);
+    reset_fn_values();                    /* #2586: the closure walks see no fn values yet */
     compute_closure_args_borrowed(gen);   /* #2499: needs closures and adapters */
     discover_fn_values(gen);              /* #2586 */
     emit_bare_fn_adapter_decls(gen);

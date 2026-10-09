@@ -278,11 +278,16 @@ typedef struct ArgDrainWrap {
  * unprovable stays "escapes". False-escape = leak (safe); false-non-escape
  * = UAF (never introduced). */
 static int g_fnptr_drain = 0;   /* #2586: the call goes through a typed fn pointer */
+/* #2586: a named function emitted here goes to C (an extern's argument, an
+ * `as ptr` operand) and stays the function itself, its string read by C as
+ * it is; anywhere else it becomes an Aether typed fn pointer value, taken
+ * through its adapter (fnval_string_adapter). */
+static int g_fnval_raw_context = 0;
 
 static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode* closure,
                              int ai, int first_arg, const ArgDrainWrap* w) {
     if (!func_name) {
-        if (!closure && g_fnptr_drain) return fnptr_args_borrowed() ? 0 : -1;
+        if (!closure && g_fnptr_drain) return fnptr_arg_borrowed(ai - first_arg) ? 0 : -1;
         if (!closure) return gen->closure_args_borrowed ? 0 : -1;
         int pi = ai - first_arg;
         /* A closure keeps a `string` parameter only through a reference of
@@ -1389,7 +1394,7 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
                                       int discarded) {
     const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
     /* #2586: an owned string argument is freed after the call, under the
-     * fn-value convention (fnptr_args_borrowed). */
+     * fn-value convention (fnptr_arg_borrowed). */
     ArgDrainWrap ad;
     ad.ret_ct = ret_c;
     ad.ret_type = NULL;
@@ -1453,20 +1458,28 @@ static Type* fnptr_field_signature(CodeGenerator* gen, const char* recv, const c
     return NULL;
 }
 
-/* #2586: is `call` a call through a typed fn pointer (a local, a global or
- * a struct field) that returns a string? Its result is the caller's, under
- * the fn-value convention (discover_fn_values). */
-int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call) {
-    if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
-        !call->node_type || call->node_type->kind != TYPE_STRING) return 0;
-    /* Decided from the tree alone, as the analyses that ask (a function's
-     * returns judged from outside its body) run before its locals are
-     * registered: the checker stamps a call through a typed fn-pointer
-     * local or field. */
+/* #2586: is `call` a call through a typed fn pointer (a local, a
+ * parameter, a global or a struct field)? Its arguments are its children
+ * from 0 (a field call names its receiver in `value`). Decided from the
+ * tree alone, as the analyses that ask (a function's returns and
+ * parameters judged from outside its body) run before its locals are
+ * registered: the checker stamps a call through a typed fn-pointer local or
+ * field. */
+int typed_fnptr_call(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
     if (call->annotation && (strcmp(call->annotation, "fnptr_local_call") == 0 ||
                              strncmp(call->annotation, "fnfield_", 8) == 0)) return 1;
     Type* sig = lookup_fnptr_global(gen, call->value);
     return sig && sig->kind == TYPE_FUNCTION && sig->is_fnptr;
+}
+
+/* #2586: is `call` a call through a typed fn pointer that returns a string?
+ * Its result is the caller's, under the fn-value convention
+ * (discover_fn_values). */
+int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call) {
+    if (!fnptr_string_results_owned()) return 0;
+    if (!call || !call->node_type || call->node_type->kind != TYPE_STRING) return 0;
+    return typed_fnptr_call(gen, call);
 }
 
 /* Translate an Aether integer-literal text into a form C accepts.
@@ -5639,6 +5652,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         expr->value);
                 break;
             }
+            /* #2586: a named function used as an Aether typed fn pointer
+             * value (bare, or under `as fn(...)`) hands its string result
+             * over owned, through its adapter (fnval_string_adapter), a
+             * @c_callback one included. One that goes to C stays itself
+             * (g_fnval_raw_context), below. After the closure lowering. */
+            if (!g_fnval_raw_context) {
+                const char* adapter = bare_top_level_fn(gen, expr)
+                                      ? fnval_string_adapter(gen, expr->value) : NULL;
+                if (adapter) {
+                    fprintf(gen->output, "%s", adapter);
+                    break;
+                }
+            }
             // Identifier-as-value naming a @c_callback function: emit
             // the C symbol the annotation binds to (#235), so passing
             // an Aether function as a function pointer to a C extern
@@ -5649,18 +5675,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 const char* cb_sym = lookup_c_callback_symbol(gen, expr->value);
                 if (cb_sym) {
                     fprintf(gen->output, "%s", cb_sym);
-                    break;
-                }
-            }
-            /* #2586: a named function used as a typed fn pointer value
-             * (bare, or under `as fn(...)`) hands its string result over
-             * owned, through its adapter (fnval_string_adapter). After the
-             * closure lowering and the @c_callback symbol above. */
-            {
-                const char* adapter = bare_top_level_fn(gen, expr)
-                                      ? fnval_string_adapter(gen, expr->value) : NULL;
-                if (adapter) {
-                    fprintf(gen->output, "%s", adapter);
                     break;
                 }
             }
@@ -5942,10 +5956,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* #2304: `s as ptr` on a slice is its element pointer, as a
                  * slice passed to a `ptr` slot is; a C cast of the
                  * AetherSlice struct itself does not compile. */
-                if (expr->node_type->kind == TYPE_PTR)
+                if (expr->node_type->kind == TYPE_PTR) {
+                    int saved_raw = g_fnval_raw_context;
+                    g_fnval_raw_context = 1;   /* #2586 */
                     generate_expression_as_elem_ptr(gen, expr->children[0]);
-                else
+                    g_fnval_raw_context = saved_raw;
+                } else {
                     generate_expression(gen, expr->children[0]);
+                }
                 fprintf(gen->output, "))");
             } else if (expr->child_count > 0) {
                 generate_expression(gen, expr->children[0]);
@@ -7944,6 +7962,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             }
                         }
                     }
+                    /* #2586: an extern's arguments go to C. */
+                    int saved_fnval_raw = g_fnval_raw_context;
+                    g_fnval_raw_context = find_extern_declaration_by_name(
+                        gen->program, codegen_normalise_callee(func_name)) != NULL;
                     for (int i = 0; i < expr->child_count; i++) {
                         ASTNode* arg = expr->children[i];
                         // Skip trailing DSL blocks that are just inline syntax sugar
@@ -8242,6 +8264,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         }
                         arg_printed++;
                     }
+                    g_fnval_raw_context = saved_fnval_raw;
                     // Defer functions get (void*)0 as last arg when called without trailing block
                     if (is_builder_func_reg(gen, func_name)) {
                         if (arg_printed > 0) fprintf(gen->output, ", ");

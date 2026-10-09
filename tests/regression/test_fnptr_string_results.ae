@@ -9,6 +9,9 @@
 // result over owned (as it is when it returns owned strings, copied when it
 // returns a literal or a borrow), a call through the pointer frees it after
 // use, and an owned string argument to such a call is freed after the call.
+// A @c_callback function, a sized-array parameter and clauses that disagree
+// on what they hand over are covered too. The C side (a pointer from C, a
+// function handed to C) is tests/integration/fnptr_string_c_side.
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
@@ -117,11 +120,45 @@ round(fields: ptr, a: *Thing, b: *Thing) -> int {
     }
     // A function name passed for a typed fn-pointer parameter.
     total = total + length_through(loud_name, a as ptr)
+    total = total + length_through(tag_cb, a as ptr)
+    total = total + length_of_pick(pick_of, string.concat(a.name, "?"))
+    total = total + length_of_clause(clause_name, 5) + length_of_clause(clause_name, 0)
     return total
 }
 
 length_through(g: fn(ptr) -> string, p: ptr) -> int {
     return string.length(g(p))
+}
+
+// A @c_callback function, defined under the symbol it binds, used as a value.
+@c_callback
+tag_cb(p: ptr) -> string {
+    return "callback"
+}
+
+// A sized-array parameter, declared as an array in the adapter.
+pick_of(xs: int[2], w: string) -> string {
+    if xs[0] > 0 {
+        return w
+    }
+    return "none"
+}
+
+length_of_pick(g: fn(int[2], string) -> string, w: string) -> int {
+    arr = [1, 2]
+    return string.length(g(arr, w))
+}
+
+// Clauses that disagree: one hands over a fresh string, one a literal.
+clause_name(n: int) when n > 0 -> string {
+    return string.concat("p", string.from_int(n))
+}
+clause_name(n: int) -> string {
+    return "lit"
+}
+
+length_of_clause(g: fn(int) -> string, n: int) -> int {
+    return string.length(g(n))
 }
 
 list_field(fields: ptr, k: int) -> *Field {
@@ -139,7 +176,7 @@ main() {
     // Per field: b after the copy, read back, then a read directly. The
     // loud getter adds "!" to whatever it reads: "w#!" copied into b reads
     // back as "w#!!". The last field copies plain_name's "w#".
-    check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3, "a round adds up")
+    check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3 + 8 + 3 + 2 + 3, "a round adds up")
     check(b.name == "w#", "the copied field holds its own string")
     i = 0
     while i < 20 {

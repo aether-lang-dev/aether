@@ -1,0 +1,87 @@
+// Regression (#2629): whether a function hands over the string it returns
+// is decided once and remembered, so it must not depend on which function is
+// being emitted when it is first asked.
+//
+// `t = x; return t` counted as owned only when asked from inside the
+// function: the alias was judged by the tracker table of the function being
+// emitted. A caller emitted first saw a borrowed result, and every call leaked
+// t. The alias is now judged against the function's own body (a local it
+// binds from a fresh string, or a parameter it keeps a reference of its own
+// to).
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The callers come first, so each callee is first classified while one of
+// them is being emitted.
+use_alias(s: string) -> int {
+    g = keep_alias(s)
+    return string.length(g)
+}
+
+use_chain(s: string) -> int {
+    g = alias_chain(s)
+    return string.length(g)
+}
+
+// x is read after the alias, so t is a copy of its own.
+keep_alias(s: string) -> string {
+    x = string.concat(s, "?")
+    t = x
+    if string.length(x) > 100 {
+        return "big"
+    }
+    return t
+}
+
+// An alias of an alias.
+alias_chain(s: string) -> string {
+    x = string.concat(s, "!")
+    y = x
+    z = y
+    if string.length(x) > 100 {
+        return "big"
+    }
+    return z
+}
+
+round(base: string) -> int {
+    return use_alias(base) + use_chain(base)
+}
+
+main() {
+    println("=== test_alias_return_classification ===")
+    check(keep_alias("w") == "w?", "an alias of a local")
+    check(alias_chain("w") == "w!", "an alias of an alias")
+    check(round("w") == 2 + 2, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_alias_return_classification passed ===")
+}

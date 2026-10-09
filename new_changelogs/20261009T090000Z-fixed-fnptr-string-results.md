@@ -6,5 +6,8 @@
   leaked one string per text field. A named function used as such a pointer
   now goes through an adapter that hands its result over owned (copied when
   it returns a literal or a borrow), the caller frees what it gets, and an
-  owned string argument to such a call is freed after it, under the same
-  convention closures follow (#2586).
+  owned string argument to such a call is freed after it, position by
+  position, under the convention closures follow. A program that holds a
+  pointer C made (cast from a raw `ptr`, returned by an extern, held in a C
+  struct) keeps the borrowed reading, since that string is C's, and a named
+  function handed to C stays the function itself (#2586).
