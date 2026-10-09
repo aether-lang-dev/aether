@@ -386,6 +386,20 @@ app.pEngineName = name                   // borrowed: `name` must outlive every 
 - A string built directly in the store, as in `app.pEngineName = "viewer ${version}"`, belongs to nobody afterwards. Keep it in a local when you mean to free it.
 - A field of an Aether-defined struct is different: it owns its string, and the struct's destructor frees it.
 
+### A header's union: `extern union ... @c_import`
+
+A union a header defines is declared `extern union`, always with `@c_import`, since only the header can say how its members share storage. Its size, a pointer cast to it, and parameters and results of its pointer type are spelled `union Name` in the generated C, as a header without a typedef needs. Declared `extern struct`, the only form there used to be, it was spelled `struct Name`, a tag mismatch C compilers reject (#2561).
+
+```aether,fragment
+extern union VkClearColorValue @c_import {
+    float32: float[4]
+    int32: int[4]
+}
+
+cv = calloc(1, sizeof(VkClearColorValue)) as *VkClearColorValue
+cv.float32[3] = 1.0
+```
+
 ### Companion: `@extern("c_symbol")`
 
 `@extern` and `@c_callback` close the FFI loop in both directions. `@extern` binds an Aether-namespace name to a C symbol the linker provides; `@c_callback` emits an Aether function under a C symbol the linker can hand to any consumer. Both use the same `@`-prefixed annotation grammar.
@@ -893,6 +907,7 @@ shrink(ctx: ptr, p: ptr, new_len: int) {
 - `&(p as *T).field` lowers to `&((T*)p)->field` the address of a field on an `extern struct` / `*StructName` overlay.
 - `&local.field` lowers to `&local.field` the address of a field on an Aether-owned value struct.
 - `&local` and `&arr[i]` work the same way (address of a local, address of an array element).
+- `&f()` is an error: a call's result is not stored anywhere, so it has no address (it used to reach the C compiler as "lvalue required", #2591). Bind it to a local first, `def = default_body_def()` then `create_body(world, &def)`, and the pointer lives as long as the local. `&ref_get(r)` is the exception: it is the cell itself.
 - The result is typed as a pointer to the field's type (`*T`), assignable to a bare `ptr` parameter. Like the overlay casts, it is a raw view: the pointer is valid only while the underlying storage is.
 
 Without `&`, a `&struct->field` out-param forces raw `mem.long_to_ptr(base + OFFSET)` offset math, re-introducing the hand-maintained offset constant the typed overlay was meant to eliminate.

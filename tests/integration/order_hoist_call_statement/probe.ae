@@ -1,0 +1,52 @@
+// A call statement whose operands run in a temp first (the `_eo` wrapper,
+// because a later argument is a call) and whose arguments include a call
+// returning a fresh string (the `_ad` drain that frees it).
+import std.heap
+import std.string
+import std.list
+
+struct Clip {
+    name: string
+}
+
+struct Weather {
+    state: int
+    share: float
+}
+
+clip_name(c: *Clip) -> string { return c.name }
+
+count(names: ptr) -> int { return list.size(names) }
+
+keep(names: ptr, name: string, at: int) -> int {
+    list.add(names, name)
+    return at
+}
+
+name_of(fallback: string) -> string { return string.concat(fallback, "") }
+
+state_of(name: string) -> int { return string.length(name) }
+
+level() -> int { return 70 }
+
+set(w: *Weather, state: int, share: float) {
+    w.state = state
+    w.share = share
+}
+
+main() {
+    // #2585: a statement whose value is thrown away, wrapped: the drain's
+    // result was left as an unused value (clang -Wunused-value).
+    c = Clip { name: string.concat("walk", "_01") }
+    names = list.new()
+    keep(names, clip_name(&c), count(names))
+    println("${list.size(names)} clip ${c.name}")
+
+    // #2589: a void call statement, wrapped, whose hoisted argument drains a
+    // string: the hoisted value was cast to void (`'_eo0' declared void`).
+    w = heap.new(Weather)
+    set(w, state_of(name_of("clear")), level() as float / 100.0)
+    println("state ${w.state} share ${w.share}")
+    heap.free(w)
+    list.free(names)
+}

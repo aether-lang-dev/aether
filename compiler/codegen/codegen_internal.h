@@ -535,6 +535,9 @@ const char* lookup_c_callback_symbol(CodeGenerator* gen, const char* name);
  * universally-portable form. */
 void aether_register_c_import_struct(const char* name);
 int aether_is_c_import_struct(const char* name);
+void aether_register_c_import_union(const char* name);
+const char* aether_c_tag(const char* name);
+int aether_is_c_import_annotation(const char* annotation);
 
 /* #891 @c_struct typed overlay registry. A @c_struct lowers field access to
  * width-correct mem_get_* / set_* at explicit offsets (pure Aether, no C struct).

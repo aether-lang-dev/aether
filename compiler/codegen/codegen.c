@@ -77,6 +77,41 @@ int aether_is_c_import_struct(const char* name) {
     return 0;
 }
 
+/* #2561: the imported types the header defines as unions
+ * (`extern union Name @c_import`), registered beside the structs. */
+static char** g_c_import_union_names = NULL;
+static int g_c_import_union_count = 0;
+
+void aether_register_c_import_union(const char* name) {
+    aether_register_c_import_struct(name);
+    char** grown = (char**)realloc(g_c_import_union_names,
+                                   (size_t)(g_c_import_union_count + 1) * sizeof(char*));
+    char* copy = name ? strdup(name) : NULL;
+    if (!grown || !copy) {
+        fprintf(stderr, "aetherc: out of memory registering @c_import union\n");
+        exit(1);
+    }
+    g_c_import_union_names = grown;
+    g_c_import_union_names[g_c_import_union_count++] = copy;
+}
+
+/* The C tag an Aether struct type is spelled with where a tag is needed
+ * (`sizeof`, a pointer to an imported type): `union` for an imported union,
+ * `struct` for everything else. A union spelled `struct` is a tag mismatch
+ * clang rejects (#2561). */
+const char* aether_c_tag(const char* name) {
+    for (int i = 0; name && i < g_c_import_union_count; i++) {
+        if (strcmp(g_c_import_union_names[i], name) == 0) return "union";
+    }
+    return "struct";
+}
+
+/* An `extern struct` / `extern union` the header defines. */
+int aether_is_c_import_annotation(const char* annotation) {
+    return annotation && (strcmp(annotation, "extern_c_import") == 0 ||
+                          strcmp(annotation, "extern_c_import_union") == 0);
+}
+
 /* ---- #891 @c_struct typed overlay registry ---------------------------------
  * A @c_struct is a pure-Aether typed lens over a raw `ptr`: each field carries
  * an explicit byte offset and a type, and field access lowers to a
@@ -622,7 +657,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->builder_func_count = 0;
     gen->builder_func_capacity = 0;
     gen->in_trailing_block = 0;
-    gen->discard_call_value = 0;
+    gen->discard_call_node = NULL;
     gen->current_env_captures = NULL;
     gen->current_env_capture_count = 0;
     gen->current_alias_captures = NULL;
@@ -2700,7 +2735,7 @@ const char* get_c_type(Type* type) {
                      * access lowers to mem accessors at offsets. */
                     return "void*";
                 } else if (aether_is_c_import_struct(sname)) {
-                    return cg_internf("struct %s*", sname);
+                    return cg_internf("%s %s*", aether_c_tag(sname), sname);
                 }
                 return cg_internf("%s*", sname);
             }
@@ -2709,7 +2744,7 @@ const char* get_c_type(Type* type) {
         case TYPE_STRUCT: {
             const char* sname = type->struct_name ? type->struct_name : "unnamed";
             if (type->struct_name && aether_is_c_import_struct(type->struct_name)) {
-                return cg_internf("struct %s", sname);
+                return cg_internf("%s %s", aether_c_tag(sname), sname);
             }
             return cg_intern(sname);
         }
@@ -6308,6 +6343,51 @@ static void emit_sandbox_trust_wrappers(CodeGenerator* gen, ASTNode* program) {
 }
 
 
+/* #2590: a module-level `var` of a struct type set to a struct literal of
+ * constants, as an initializer list: `{ .a = 0, .b = 0 }`, which C takes for
+ * a file-scope static where the compound literal `(T){ ... }` is not a
+ * constant. A field holding another such literal nests the same way; fields
+ * left out, string trackers among them, start at zero. */
+static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
+    /* A header-defined struct's string field is C's `const char*`: a plain
+     * C literal, not the AetherString an Aether field holds. */
+    int c_imported = lit->value && aether_is_c_import_struct(lit->value);
+    ASTNode* sdef = (gen->program && lit->value)
+                    ? find_struct_definition_by_name(gen->program, lit->value) : NULL;
+    fprintf(gen->output, "{ ");
+    int emitted = 0;
+    for (int i = 0; i < lit->child_count; i++) {
+        ASTNode* fi = lit->children[i];
+        if (!fi || fi->type != AST_ASSIGNMENT || !fi->value || fi->child_count < 1) continue;
+        ASTNode* v = fi->children[0];
+        Type* ft = NULL;
+        for (int k = 0; sdef && k < sdef->child_count; k++) {
+            ASTNode* f = sdef->children[k];
+            if (f && f->type == AST_STRUCT_FIELD && f->value && strcmp(f->value, fi->value) == 0) {
+                ft = f->node_type;
+                break;
+            }
+        }
+        if (emitted++ > 0) fprintf(gen->output, ", ");
+        fprintf(gen->output, ".%s = ", fi->value);
+        if (v->type == AST_STRUCT_LITERAL) {
+            emit_static_struct_init(gen, v);
+        } else if (c_imported && v->type == AST_LITERAL && v->value &&
+                   v->node_type && v->node_type->kind == TYPE_STRING) {
+            emit_c_string_literal(gen, v->value);
+        } else if (v->type == AST_NULL_LITERAL && ft && ft->kind == TYPE_FUNCTION &&
+                   !ft->is_fnptr) {
+            /* A closure field: the zero closure, as `var f: fn = null` is
+             * (#2525); `NULL` is not an initializer for the struct. */
+            fprintf(gen->output, "{0}");
+        } else {
+            generate_expression(gen, v);
+        }
+    }
+    if (emitted == 0) fprintf(gen->output, "0");
+    fprintf(gen->output, " }");
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -7874,11 +7954,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
              * `typedef struct Name Name;` so it can't collide with the
              * header's.  See redis-porting-language-gaps.md "P0:
              * Header-Defined C Struct Interop". */
-            if (sd->annotation &&
-                strcmp(sd->annotation, "extern_c_import") == 0) {
+            if (aether_is_c_import_annotation(sd->annotation)) {
                 /* Record this name so later emit sites can produce
-                 * `struct Name*` instead of `Name*` when needed. */
-                aether_register_c_import_struct(sd->value);
+                 * `struct Name*` (`union Name*`) instead of `Name*` when
+                 * needed. */
+                if (strcmp(sd->annotation, "extern_c_import_union") == 0)
+                    aether_register_c_import_union(sd->value);
+                else
+                    aether_register_c_import_struct(sd->value);
                 continue;
             }
             fprintf(gen->output, "typedef struct %s %s;\n", sd->value, sd->value);
@@ -8231,6 +8314,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                      * zero closure (no body, no env); `NULL` is not an
                      * initializer for the struct. A function binds it later. */
                     fprintf(gen->output, "{0}");
+                } else if (cd->children[0]->type == AST_STRUCT_LITERAL) {
+                    /* #2590: a struct literal of constants (the type checker
+                     * admits no other here) as an initializer list. */
+                    emit_static_struct_init(gen, cd->children[0]);
                 } else {
                     generate_expression(gen, cd->children[0]);
                 }

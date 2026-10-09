@@ -1,0 +1,9 @@
+[[bin]]
+name = "probe"
+path = "probe.ae"
+
+[build]
+# Force-include the C header that owns `union onion` into every TU,
+# including the Aether-generated .gen.c. The header has no typedef, so the
+# only way this compiles is if aetherc spells the type `union onion`.
+cflags = "-include onion.h -I."

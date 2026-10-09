@@ -803,7 +803,7 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
                          * typedef; some headers (<time.h> `struct tm`)
                          * don't ship one either.  `struct Name*` is the
                          * portable form. */
-                        fprintf(gen->output, "struct %s*", sname);
+                        fprintf(gen->output, "%s %s*", aether_c_tag(sname), sname);
                     } else {
                         fprintf(gen->output, "%s*", sname);
                     }
@@ -872,7 +872,7 @@ void generate_extern_declaration(CodeGenerator* gen, ASTNode* ext) {
                             param->node_type->element_type->struct_name) {
                             const char* sname = param->node_type->element_type->struct_name;
                             if (aether_is_c_import_struct(sname)) {
-                                fprintf(gen->output, "struct %s*", sname);
+                                fprintf(gen->output, "%s %s*", aether_c_tag(sname), sname);
                             } else {
                                 fprintf(gen->output, "%s*", sname);
                             }
@@ -2236,8 +2236,7 @@ void generate_struct_definition(CodeGenerator* gen, ASTNode* struct_def) {
      * because the AST_STRUCT_DEFINITION node carries the declared
      * fields.  See redis-porting-language-gaps.md "P0: Header-Defined
      * C Struct Interop". */
-    if (struct_def->annotation &&
-        strcmp(struct_def->annotation, "extern_c_import") == 0) {
+    if (aether_is_c_import_annotation(struct_def->annotation)) {
         return;
     }
 
@@ -2600,7 +2599,7 @@ static int struct_owns_heap_strings_at(CodeGenerator* gen, ASTNode* struct_def, 
     /* A struct cannot hold itself by value; the bound only stops a
      * malformed program from recursing forever. */
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION || depth > 32) return 0;
-    if (struct_def->annotation && strcmp(struct_def->annotation, "extern_c_import") == 0) return 0;
+    if (aether_is_c_import_annotation(struct_def->annotation)) return 0;
     for (int i = 0; i < struct_def->child_count; i++) {
         int n = 0;
         Type* t = (gen && gen->program) ? field_value_struct_type(struct_def->children[i], &n) : NULL;
@@ -2642,7 +2641,7 @@ int struct_has_heap_string_field(ASTNode* struct_def) {
     if (!struct_def || struct_def->type != AST_STRUCT_DEFINITION) return 0;
     /* A header-defined struct's string fields borrow; nothing tracks them,
      * and no `<Name>_destroy` / `<Name>_heap_free` is emitted for it. */
-    if (struct_def->annotation && strcmp(struct_def->annotation, "extern_c_import") == 0) return 0;
+    if (aether_is_c_import_annotation(struct_def->annotation)) return 0;
     for (int i = 0; i < struct_def->child_count; i++) {
         ASTNode* field = struct_def->children[i];
         if (field && field->type == AST_STRUCT_FIELD &&

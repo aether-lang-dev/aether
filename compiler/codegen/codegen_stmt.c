@@ -5448,9 +5448,27 @@ static int closure_param_store_retains(CodeGenerator* gen, ASTNode* node, const 
  * back? Its callee returns the parameter as it is (no copy: the string
  * result is not uniform-heap) and stores it nowhere, so the call's value is
  * the argument itself, and the argument goes wherever that value goes. */
+/* Is the value of `call` known to be something other than a string: its own
+ * type, or its callee's result, is (a distinct type over string is a string
+ * here)? An unknown type is no answer. */
+static int call_result_known_not_string(CodeGenerator* gen, ASTNode* call) {
+    Type* t = call->node_type;
+    if (t && t->kind != TYPE_STRING && t->kind != TYPE_UNKNOWN) return 1;
+    const char* fn = codegen_normalise_callee(call->value);
+    ASTNode* def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
+    Type* rt = def ? def->node_type : NULL;
+    return rt && rt->kind != TYPE_STRING && rt->kind != TYPE_UNKNOWN;
+}
+
 static int handback_param(CodeGenerator* gen, ASTNode* call, int i, int depth) {
     if (!call || call->type != AST_FUNCTION_CALL || !call->value ||
         strcmp(call->value, "call") == 0) return 0;
+    /* Only a call whose value is a string can be its string argument. A
+     * callee that keeps the parameter in what it returns (a struct holding
+     * it, #2584) keeps it like any store. Told apart by the two questions
+     * below alone, such a call was taken for a hand-back, and the local it
+     * was bound to was typed as the string, so the C did not compile. */
+    if (call_result_known_not_string(gen, call)) return 0;
     if (!callee_has_visible_body(gen, call->value) ||
         !callee_param_is_string(gen, call->value, i)) return 0;
     /* Asked again while it is being computed (a callee reaching itself), the
@@ -5572,6 +5590,15 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
         for (int i = 0; i < node->child_count; i++) {
             ASTNode* c = node->children[i];
             if (handback_leaf_is(gen, c, pname, depth + 1)) continue;
+            /* The parameter inside what is returned (a field of a struct
+             * literal, an element of an array one) is kept, as in any
+             * struct field: the value returned holds the function's own
+             * reference, and the caller gets that value, not the parameter.
+             * Only a bare `return pname` hands the reference itself over.
+             * Missed, `cursor(t) -> Cursor { return Cursor { text: t } }`
+             * took no reference of its own, while its caller, seeing the
+             * argument kept, no longer freed it: nobody did (#2584). */
+            if (c && c->type != AST_IDENTIFIER && value_directly_carries_param(c, pname)) return 1;
             if (param_escapes_in_subtree(gen, c, pname, depth, return_is_escape)) return 1;
         }
         return 0;
@@ -10758,10 +10785,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                stmt->children[0]->value) {
                         // Message/struct constructor — use the constructor name as type.
                         // A header-defined struct is spelled `struct Name`, as
-                        // get_c_type spells it: the header need not typedef the tag.
-                        fprintf(gen->output, "%s%s%s %s", vq,
-                                (stmt->children[0]->type == AST_STRUCT_LITERAL &&
-                                 aether_is_c_import_struct(stmt->children[0]->value)) ? "struct " : "",
+                        // get_c_type spells it: the header need not typedef the tag
+                        // (a union `union Name`, #2561).
+                        int c_tagged = stmt->children[0]->type == AST_STRUCT_LITERAL &&
+                                       aether_is_c_import_struct(stmt->children[0]->value);
+                        fprintf(gen->output, "%s%s%s%s %s", vq,
+                                c_tagged ? aether_c_tag(stmt->children[0]->value) : "",
+                                c_tagged ? " " : "",
                                 stmt->children[0]->value, stmt->value);
                         /* Struct-field heap-string ownership (#465).
                          * Push a function-exit defer that calls the
@@ -12934,7 +12964,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * and cleared at the call entry, and reset here too so
                      * it can never leak past this statement. */
                     if (inner && inner->type == AST_FUNCTION_CALL) {
-                        gen->discard_call_value = 1;
+                        gen->discard_call_node = inner;
                     }
                     /* Transient capturing-closure argument: a closure passed
                      * to a parameter that neither stores nor returns it
@@ -12961,7 +12991,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (inner && call_returns_owned_closure(gen, inner)) {
                         /* #2507: a closure a call hands over, discarded:
                          * nothing else holds it. */
-                        gen->discard_call_value = 0;
+                        gen->discard_call_node = NULL;
                         fprintf(gen->output, "{ _AeClosure _ae_dc = ");
                         generate_expression(gen, inner);
                         fprintf(gen->output, "; _aether_closure_env_release(_ae_dc.env); }\n");
@@ -13002,7 +13032,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                             ei + 1 == inner->child_count ? "\n" : " ");
                                 }
                             }
-                            gen->discard_call_value = 0;
+                            gen->discard_call_node = NULL;
                             break;
                         }
                         /* A thrown-away string the statement owns (a
@@ -13016,7 +13046,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             is_heap_string_expr(gen, inner)) {
                             /* The value is used (freed), not discarded: an
                              * argument drain keeps the result. */
-                            gen->discard_call_value = 0;
+                            gen->discard_call_node = NULL;
                             fprintf(gen->output, "aether_heap_str_free((void*)(");
                             generate_expression(gen, inner);
                             fprintf(gen->output, "));\n");
@@ -13073,7 +13103,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         }
                         fprintf(gen->output, "\n");
                     }
-                    gen->discard_call_value = 0;
+                    gen->discard_call_node = NULL;
                 }
 
                 // Trailing blocks for non-defer: emit closure body as inline statements after the call

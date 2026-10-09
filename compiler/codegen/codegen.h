@@ -368,13 +368,15 @@ typedef struct {
     int builder_func_capacity;
     int in_trailing_block;  // >0 when generating code inside a trailing block
 
-    // Set to 1 immediately before generating a call whose result value is
-    // discarded (a call used as an expression statement). The call codegen
-    // captures and clears it at entry; when set, a VOID/discarded parent
-    // call still drains its heap-returning inline args (the arg-temp wrap
-    // emits a void-yielding `({ T t=...; call(...); free(t); })`). Cleared
-    // at the call-codegen entry so it never leaks into nested arg calls.
-    int discard_call_value;
+    // The call whose result value its expression statement throws away, set
+    // just before the statement emits it. A VOID/discarded parent call still
+    // drains its heap-returning inline args (the arg-temp wrap emits a
+    // void-yielding `({ T t=...; call(...); free(t); })`). It is that call
+    // node's alone: one emitted ahead of it, an argument or an operand the
+    // evaluation-order wrapper hoists, is a different node and keeps its
+    // value. A flag consumed by the first call emitted went to the hoisted
+    // operand instead (#2585, #2589).
+    ASTNode* discard_call_node;
 
     // When emitting a closure body, captures in this list are mutated and
     // therefore routed through _env->name on reassignment. Set per-closure

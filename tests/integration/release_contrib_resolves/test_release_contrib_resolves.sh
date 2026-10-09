@@ -33,9 +33,14 @@ fi
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR" || true' EXIT
 rel="$TMPDIR/release"
-mkdir -p "$rel/bin" "$rel/share/aether" "$rel/include/aether"
+mkdir -p "$rel/bin" "$rel/lib" "$rel/share/aether" "$rel/include/aether"
 
 cp "$ROOT/build/aetherc$EXE" "$ROOT/build/ae$EXE" "$rel/bin/"
+# The archive ships the prebuilt runtime (scripts/stage-release.sh). Left
+# out, each build below compiled the whole runtime from source: about four
+# minutes of every Windows CI job (#2596). (The stage script itself is not
+# run here: it fetches the SQLite and QuickJS amalgamations into the tree.)
+[ -f "$ROOT/build/libaether.a" ] && cp "$ROOT/build/libaether.a" "$rel/lib/"
 cp -r "$ROOT/runtime" "$ROOT/std" "$rel/share/aether/"
 [ -f "$ROOT/build/MANIFEST" ] && cp "$ROOT/build/MANIFEST" "$rel/share/aether/"
 cp "$ROOT/include"/*.h "$rel/include/aether/" 2>/dev/null || true

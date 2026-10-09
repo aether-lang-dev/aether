@@ -164,7 +164,36 @@ if [ "$first $warm $edited" != "42 42 63" ]; then
     fail=1
 fi
 
+# 7. so does an edit to a header that header includes (#2577). The manifest
+#    names api.h, which aetherc reads; impl.h reaches the build only through
+#    api.h's own #include, so the key never saw it and the third build below
+#    served the object built from the old impl.h.
+mkdir -p "$tmp/lib3/incmod"
+cat > "$tmp/lib3/incmod/api.h" <<'C'
+#ifndef INCMOD_API_H
+#define INCMOD_API_H
+#include "impl.h"
+#endif
+C
+printf 'static inline int inc_scale(int v) { return v * 2; }\n' > "$tmp/lib3/incmod/impl.h"
+cat > "$tmp/lib3/incmod/module.ae" <<'AE'
+@c_include("api.h")
+exports(scale)
+extern inc_scale(v: int) -> int @c_import
+scale(v: int) -> int { return inc_scale(v) }
+AE
+printf 'import incmod\nmain() { println("${incmod.scale(21)}") }\n' > "$tmp/proj/inc.ae"
+inc_run() { (cd "$tmp/proj" && AETHER_CACHE_DIR="$tmp/cache" "$AE" run --lib "$tmp/lib3" inc.ae 2>&1 | tail -1); }
+first="$(inc_run)"
+warm="$(inc_run)"
+printf 'static inline int inc_scale(int v) { return v * 3; }\n' > "$tmp/lib3/incmod/impl.h"
+edited="$(inc_run)"
+if [ "$first $warm $edited" != "42 42 63" ]; then
+    echo "  [FAIL] c_include_directive: an edit to a header the @c_include header includes was served from the cache (got '$first $warm $edited', want '42 42 63')"
+    fail=1
+fi
+
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] c_include_directive: a module's header reaches the TU (once), with its directory on the include path, a dropped import takes it with, and an edit to it rebuilds; $cross"
+    echo "  [PASS] c_include_directive: a module's header reaches the TU (once), with its directory on the include path, a dropped import takes it with, and an edit to it or to a header it includes rebuilds; $cross"
 fi
 exit $fail

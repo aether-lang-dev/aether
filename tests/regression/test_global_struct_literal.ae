@@ -1,0 +1,48 @@
+// Regression (#2590): a module-level `var` of a struct type takes a struct
+// literal whose fields are compile-time constants, nested literals included.
+// It was refused as not a compile-time constant; it is emitted as an
+// initializer list, which C takes for a file-scope static.
+
+extern exit(code: int)
+
+struct Pair {
+    a: int
+    b: int
+}
+
+struct Shape {
+    corner: Pair
+    scale: float
+    offset: int
+    label: string
+    on_hit: fn
+    handle: ptr
+}
+
+var g_pair: Pair = Pair { a: 0, b: 0 }
+var g_shape: Shape = Shape {
+    corner: Pair { a: 1, b: 2 },
+    scale: 0.5,
+    offset: -3,
+    label: "box",
+    on_hit: null,
+    handle: null
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    g_pair.a = 3
+    check(g_pair.a == 3 && g_pair.b == 0, "a struct global")
+    check(g_shape.corner.a == 1 && g_shape.corner.b == 2, "a nested literal")
+    check(g_shape.scale == 0.5 && g_shape.offset == -3, "a float and a negative field")
+    check(g_shape.label == "box" && g_shape.handle == null, "a string and a null pointer field")
+    g_shape.corner.b = g_shape.corner.b + 40
+    g_shape.label = "crate"
+    println("${g_pair.a} ${g_shape.corner.b} ${g_shape.label}")
+}

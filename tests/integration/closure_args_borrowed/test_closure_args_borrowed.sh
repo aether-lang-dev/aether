@@ -12,7 +12,11 @@
 # convention off for the program and the arguments are left alone. This
 # checks the emitted C both ways, that every program prints what it stored,
 # and that a struct literal returned with a parameter in it counts as
-# keeping it (it did not, and the caller freed the field).
+# keeping it. It did not, and the caller freed the field; then it counted as
+# a keep the function took no reference for, so the caller left its argument
+# alone and nobody freed it. Now the function takes a reference of its own
+# (copy-on-keep), the returned struct owns that, and the caller frees its
+# argument after the call (#2584).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -197,8 +201,8 @@ main() {
 }
 AE
 run struct_field "abc! zzzzzzzzzzzzzzzz!"
-if grep -q 'mkrec(_ad_[0-9]*); aether_heap_str_free' "$tmp/struct_field.c"; then
-    fail "an argument stored in a returned struct literal is freed" "$tmp/struct_field.c"
+if ! grep -q 's = aether_str_capture(s)' "$tmp/struct_field.c"; then
+    fail "a parameter kept in a returned struct literal takes no reference of its own" "$tmp/struct_field.c"
 fi
 
 echo "  [PASS] closure_args_borrowed: closure calls free owned arguments; string keepers copy, a ptr keeper turns it off"
