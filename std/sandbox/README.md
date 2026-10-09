@@ -60,6 +60,11 @@ Nested `enforce` blocks intersect: an operation is allowed only when every
 enclosing grant list allows it, so an inner block can narrow its parent's
 access but never widen it.
 
+The grants are frozen when the block starts: `enforce` checks against a
+private copy, and the block's parameter is `null`, not the list. Adding a
+grant to the list from inside the block, by code it was passed to, changes
+what the next `enforce` of that list allows, never the running block.
+
 ## Trusted names
 
 Inside `enforce` every check applies to whatever code makes it, including a
