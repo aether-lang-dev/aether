@@ -1039,7 +1039,9 @@ static bool cross_vendored_sqlite(const char* base, const char* ztriple,
 
         char veneer_obj[1300];
         snprintf(veneer_obj, sizeof(veneer_obj), "%s/aether_sqlite.o", objdir);
-        if (!cross_cmd_fmt(&cmd, &cmd_cap, "%s %s -I\"%s\" %s -c \"%s\" -o \"%s\"",
+        /* AETHER_SQLITE_VENDORED: the veneer is compiled against the pinned
+         * amalgamation, which has the whole API (aether_sqlite.c). */
+        if (!cross_cmd_fmt(&cmd, &cmd_cap, "%s %s -DAETHER_SQLITE_VENDORED=1 -I\"%s\" %s -c \"%s\" -o \"%s\"",
                            cc_cmd, flags, amal_dir, tc.include_flags, veneer, veneer_obj)) {
             fprintf(stderr, "Error: out of memory building the contrib.sqlite compile command.\n");
             break;
