@@ -44,9 +44,17 @@ echo "$OUT" | grep -q "hi world" || { echo "$OUT"; fail "function export gizmo.g
 echo "$OUT" | grep -q "intro"    || { echo "$OUT"; fail "builder DSL gizmo.section not callable across binary import"; }
 
 # 3. `ae build` to a standalone binary, then run it (rpath must let it
-#    find libgizmo.so).
-if ! AETHER_HOME="$ROOT" "$AE" build app.ae -o app >build_app.log 2>&1; then
+#    find libgizmo.so). The build runs with a temp directory of its own:
+#    the stub directory the binary import needs is gone once ae exits
+#    (#2620); every such build used to leave one behind.
+mkdir -p "$WORK/tmp"
+if ! TEMP="$WORK/tmp" TMP="$WORK/tmp" TMPDIR="$WORK/tmp" AETHER_HOME="$ROOT" \
+        "$AE" build app.ae -o app >build_app.log 2>&1; then
     echo "--- build app log:"; cat build_app.log; fail "ae build app.ae"
+fi
+if ls -d "$WORK/tmp"/ae-binimport-* >/dev/null 2>&1; then
+    ls -la "$WORK/tmp"
+    fail "ae build left its binary-import stub directory in the temp directory"
 fi
 OUT2="$(./app$EXE 2>&1)" || fail "built binary failed to run"
 echo "$OUT2" | grep -q "hi world" || { echo "$OUT2"; fail "built binary: greet missing"; }
