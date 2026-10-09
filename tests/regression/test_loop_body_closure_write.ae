@@ -1,0 +1,268 @@
+// Regression (#2659): a closure in a loop body (or a branch) that writes a
+// variable the body declared before it writes that variable, as it does one
+// declared outside the loop: the variable is a shared cell. The write-only
+// capture looked for the declaration among the function's top-level
+// statements alone, so `c = 0; f = || { c = 5 }` in a `while` gave the
+// closure a fresh `c` of its own and the loop's `c` stayed 0 (a closure that
+// also read `c` captured it already). A `while` body's local is one variable
+// for the function, so its cell is one across the iterations; a `for` body's
+// or a branch's is the body's own, so its cell is made and released with each
+// pass, and a closure that outlives the pass keeps the cell it captured. A
+// string the closure stores is the cell's, freed when replaced and with the
+// last reference. A closure returning such a cell's string returns its own
+// capture: the function around it no longer drains the cell at its own
+// returns as a local it hands back, which did not compile. The macOS leaks
+// gate runs this program.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// An int in a `while` body.
+while_int(n: int) -> int {
+    total = 0
+    k = 0
+    while k < n {
+        c = 0
+        f = || {
+            c = k + 5
+        }
+        f()
+        check(c == k + 5, "the while body's c takes the closure's write")
+        total = total + c
+        k = k + 1
+    }
+    return total
+}
+
+// A string in a `while` body, written twice per pass.
+while_string(w: string, n: int) -> int {
+    len = 0
+    k = 0
+    while k < n {
+        s = "none"
+        f = || {
+            s = string.concat(w, string.from_int(k))
+        }
+        f()
+        f()
+        check(string.starts_with(s, w) == 1, "the while body's s holds the closure's string")
+        len = len + string.length(s)
+        k = k + 1
+    }
+    return len
+}
+
+// An int in a `for ... in` body and in a C-style `for` body.
+for_ints(n: int) -> int {
+    total = 0
+    for i in 0..n {
+        d = 1
+        g = || {
+            d = i * 2
+        }
+        g()
+        check(d == i * 2, "the for-in body's d takes the closure's write")
+        total = total + d
+    }
+    for (j = 0; j < n; j = j + 1) {
+        e = 0
+        h = || {
+            e = j + 1
+        }
+        h()
+        check(e == j + 1, "the for body's e takes the closure's write")
+        total = total + e
+    }
+    return total
+}
+
+// A string in a `for` body: the cell goes with each pass.
+for_string(w: string, n: int) -> int {
+    len = 0
+    for i in 0..n {
+        t = "none"
+        g = || {
+            t = string.concat(w, "!")
+        }
+        g()
+        check(string.ends_with(t, "!") == 1, "the for body's t holds the closure's string")
+        len = len + string.length(t)
+    }
+    return len
+}
+
+// A branch body.
+in_branch(n: int) -> int {
+    r = 0
+    if n > 0 {
+        p = 0
+        q = || {
+            p = n * 3
+        }
+        q()
+        r = p
+    }
+    return r
+}
+
+// Nested loops: an outer body's variable and an inner body's, written by a
+// closure in the inner body.
+nested(n: int) -> int {
+    total = 0
+    a = 0
+    while a < n {
+        outer = 0
+        for b in 0..n {
+            inner = 0
+            f = || {
+                outer = a + 1
+                inner = b + 1
+            }
+            f()
+            check(outer == a + 1 && inner == b + 1, "the nested bodies' variables take the writes")
+            total = total + outer + inner
+        }
+        a = a + 1
+    }
+    return total
+}
+
+// A string cell one closure writes and another returns, at the function's
+// top level and in a `for` body: the `return` in the reader is the
+// reader's, so the function's own return does not drain the cell as if it
+// were a plain local of its own (that did not compile).
+returned_by_closure(w: string, n: int) -> int {
+    s = ""
+    put = || {
+        s = string.concat(s, w)
+    }
+    read = || {
+        return s
+    }
+    put()
+    put()
+    r = read()
+    total = string.length(r)
+    for i in 0..n {
+        t = ""
+        add = || {
+            t = string.concat(t, w)
+        }
+        get = || {
+            return t
+        }
+        add()
+        g = get()
+        total = total + string.length(g)
+    }
+    return total
+}
+
+// Closures kept past their pass, in a list and in a struct declared before
+// the loop, called after it: a writer and a reader of the same body local
+// share its cell, which outlives the pass that made it.
+struct Hooks {
+    on_set: fn
+    on_get: fn
+}
+
+kept(w: string, n: int) -> int {
+    l = list.new()
+    h = Hooks { on_set: || { }, on_get: || { return 0 } }
+    for i in 0..n {
+        v = 0
+        set = || {
+            v = i + 100
+        }
+        get = || {
+            return v
+        }
+        list.add(l, set)
+        list.add(l, get)
+        s = ""
+        put = || {
+            s = string.concat(w, string.from_int(i))
+        }
+        read = || {
+            return s
+        }
+        list.add(l, put)
+        list.add(l, read)
+        u = 0
+        bump = || {
+            u = i * 7
+        }
+        peek = || {
+            return u
+        }
+        h.on_set = bump
+        h.on_get = peek
+    }
+    total = 0
+    x = 0
+    while x < n {
+        fn writer = unbox_closure(list.get_raw(l, x * 4))
+        fn reader = unbox_closure(list.get_raw(l, x * 4 + 1))
+        call(writer)
+        int got = call(reader)
+        check(got == x + 100, "a stored writer and reader share their pass's cell")
+        fn str_writer = unbox_closure(list.get_raw(l, x * 4 + 2))
+        fn str_reader = unbox_closure(list.get_raw(l, x * 4 + 3))
+        call(str_writer)
+        string text = call(str_reader)
+        check(string.equals(text, string.concat(w, string.from_int(x))) == 1,
+              "a stored writer and reader share their pass's string cell")
+        total = total + got + string.length(text)
+        x = x + 1
+    }
+    list.free(l)
+    call(h.on_set)
+    int last = call(h.on_get)
+    check(last == (n - 1) * 7, "the last pass's closures, kept in a struct, share its cell")
+    return total + last
+}
+
+fn round(w: string) -> int {
+    n = 0
+    n = n + while_int(4)
+    n = n + while_string(w, 4)
+    n = n + for_ints(4)
+    n = n + for_string(w, 4)
+    n = n + in_branch(4)
+    n = n + nested(3)
+    n = n + kept(w, 4)
+    n = n + returned_by_closure(w, 4)
+    return n
+}
+
+main() {
+    w = string.concat("ab", string.from_int(1))
+    check(while_int(4) == 26, "while_int adds up")
+    check(while_string(w, 4) == 16, "while_string adds up")
+    check(for_ints(4) == 22, "for_ints adds up")
+    check(for_string(w, 4) == 16, "for_string adds up")
+    check(in_branch(4) == 12, "in_branch takes the write")
+    check(nested(3) == 36, "nested adds up")
+    check(kept(w, 4) == 443, "kept adds up")
+    check(returned_by_closure(w, 4) == 18, "returned_by_closure adds up")
+    total = round(w)
+    check(total == 26 + 16 + 22 + 16 + 12 + 36 + 443 + 18, "a round adds up")
+    if mem.heap_in_use_exact() {
+        round(w)
+        grown = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

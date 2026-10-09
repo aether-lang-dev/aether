@@ -536,7 +536,7 @@ Heap branches pass straight through (~2 ns hot-path cost). Literal branches mall
 Internally, the escape walker now distinguishes two channels:
 
 - **Container-escape** (call-arg, struct-field write, closure capture, `@retain` param): a recipient may have stored the pointer. The reassign-wrapper-free is suppressed; the function-exit defer-free is suppressed.
-- **Return-only-escape** (the variable appears in a `return <name>;` and nowhere else): no recipient stashes the pointer. The reassign-wrapper-free **fires** so intermediate accumulator buffers are reclaimed at each loop iteration; the function-exit defer-free is still suppressed (otherwise it would dangle the return value, which the caller now owns).
+- **Return-only-escape** (the variable appears in a `return <name>;` and nowhere else): no recipient stashes the pointer. The reassign-wrapper-free **fires** so intermediate accumulator buffers are reclaimed at each loop iteration; the function-exit defer-free is still suppressed (otherwise it would dangle the return value, which the caller now owns). A `return` in a closure's body is the closure's own: the variable it names is the closure's capture, held by its env or shared cell, and does not escape the enclosing function through it (#2659). Counted as the function's, the function drained the variable at its own returns as a local it hands back, and for a cell a closure writes (`const char**`, declared inside a `for` body) the C did not compile.
 
 The two-channel split closes the v0.149 "lucky-UAF return-escape" trade-off, the callee no longer frees the buffer the caller is about to read; ownership transfers cleanly through the uniform-heap helper.
 

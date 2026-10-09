@@ -2200,55 +2200,56 @@ static int subtree_contains(ASTNode* node, ASTNode* target) {
     return 0;
 }
 
-// The trailing-block closure argument of a call statement `s`, if `s` is a
-// call with one (`root = grid() { ... }`, `grid() { ... }`), else NULL.
-static ASTNode* trailing_block_of_statement(ASTNode* s) {
-    ASTNode* call = NULL;
-    if (s->type == AST_VARIABLE_DECLARATION && s->child_count > 0 &&
-        s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-        call = s->children[0];
-    } else if (s->type == AST_EXPRESSION_STATEMENT && s->child_count > 0 &&
-               s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-        call = s->children[0];
-    } else if (s->type == AST_FUNCTION_CALL) {
-        call = s;
-    }
-    if (!call) return NULL;
-    for (int ci = 0; ci < call->child_count; ci++) {
-        ASTNode* arg = call->children[ci];
-        if (arg && arg->type == AST_CLOSURE && arg->value &&
-            strcmp(arg->value, "trailing") == 0) {
-            return arg;
-        }
-    }
-    return NULL;
+static int declares_name(ASTNode* s, const char* var_name) {
+    return s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
+           s->value && strcmp(s->value, var_name) == 0;
 }
 
+static int visible_decl_line_on_path(ASTNode* s, const char* var_name, ASTNode* viewer);
+
 // The line of the first declaration of `var_name` that is VISIBLE from
-// `viewer` (a closure node) among the top-level statements of `block`, or
-// INT_MAX if there is none. A trailing block (`grid() { ... }`) inlines at its
-// call site as a C `{ ... }` block, so a declaration inside it is in scope for
-// a closure nested inside that same trailing block and for nothing else: the
-// walk descends only into the trailing block that contains `viewer`. A
-// declaration in a sibling trailing block, or in an if/for/while body, shares
-// the name by coincidence and is skipped. #2189: treating every trailing block
-// as transparent compiled a closure's own `ml = ...` as a capture of the `ml`
-// a sibling `describe` block had declared, and the generated C referenced a
-// name that had gone out of scope.
+// `viewer` (a closure node) in `block`, or INT_MAX if there is none: one of
+// its statements, or one in a block on the way from it down to `viewer` (a
+// `while`, `for` or `if` body, a `match` arm, a trailing block), which is the
+// closure's own enclosing scope. A block that does not hold `viewer` is a
+// sibling: a declaration in it, in another loop or branch body or in a
+// sibling trailing block (`grid() { ... }`, which inlines at its call site as
+// a C `{ ... }` block), shares the name by coincidence and is skipped. #2189:
+// treating every trailing block as transparent compiled a closure's own
+// `ml = ...` as a capture of the `ml` a sibling `describe` block had
+// declared, and the generated C referenced a name that had gone out of
+// scope. #2659: the blocks holding `viewer` were skipped as well, except a
+// trailing one, so `c = 0; f = || { c = 5 }` in a loop body or a branch gave
+// the closure a fresh `c` of its own and the loop's `c` never changed (a
+// closure that also read `c` captured it, through the read path).
 static int visible_decl_line(ASTNode* block, const char* var_name, ASTNode* viewer) {
     if (!block) return INT_MAX;
     for (int k = 0; k < block->child_count; k++) {
         ASTNode* s = block->children[k];
         if (!s) continue;
-        if ((s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
-            s->value && strcmp(s->value, var_name) == 0) {
-            return s->line;
-        }
-        ASTNode* trailing = trailing_block_of_statement(s);
-        if (trailing && subtree_contains(trailing, viewer)) {
-            int inner = visible_decl_line(last_block_child(trailing), var_name, viewer);
+        if (declares_name(s, var_name)) return s->line;
+        if (s != viewer && !is_hoisted_closure(s) && subtree_contains(s, viewer)) {
+            int inner = visible_decl_line_on_path(s, var_name, viewer);
             if (inner != INT_MAX) return inner;
         }
+    }
+    return INT_MAX;
+}
+
+// The part of statement `s` (which holds `viewer`) on the way down to it: the
+// block holding `viewer`, scanned as a scope, or a declaration that comes
+// before it among `s`'s own parts (a C-style `for`'s initialiser). Another
+// hoisted closure is a scope of its own, reached through its scope name.
+static int visible_decl_line_on_path(ASTNode* s, const char* var_name, ASTNode* viewer) {
+    for (int i = 0; i < s->child_count; i++) {
+        ASTNode* c = s->children[i];
+        if (!c || c == viewer || is_hoisted_closure(c)) continue;
+        if (c->type == AST_BLOCK) {
+            if (subtree_contains(c, viewer)) return visible_decl_line(c, var_name, viewer);
+            continue;
+        }
+        if (declares_name(c, var_name)) return c->line;
+        if (subtree_contains(c, viewer)) return visible_decl_line_on_path(c, var_name, viewer);
     }
     return INT_MAX;
 }

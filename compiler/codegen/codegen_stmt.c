@@ -6542,9 +6542,17 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
      * suppressed (otherwise the return value would dangle). See
      * `return_escaped_string_vars` in codegen.h for the contract. */
     if (node->type == AST_RETURN_STATEMENT) {
+        /* #2659: a `return` in a closure's body (a trailing block's is the
+         * function's) hands back the closure's value: the variable it names
+         * is the closure's capture, held by its env or shared cell, and does
+         * not leave the function walked here through it. Marked, the
+         * function's own returns drained it as a plain local: a cell the
+         * closure writes is `const char**`, and in a `for` body it is out of
+         * scope at the function's return, so the C did not compile. */
+        int own_return = g_escape_closure_depth == g_escape_trailing_depth;
         for (int i = 0; i < node->child_count; i++) {
             ASTNode* c = node->children[i];
-            if (c && c->type == AST_IDENTIFIER && c->value &&
+            if (own_return && c && c->type == AST_IDENTIFIER && c->value &&
                 is_heap_string_var(gen, c->value)) {
                 mark_return_escaped_string_var(gen, c->value);
             } else {

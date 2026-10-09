@@ -310,6 +310,22 @@ cell, zero-filled, at the hoisting scope, and released when that scope
 ends — so it is one cell across the iterations, exactly as the hoisted
 plain variable is one variable.
 
+A closure that assigns a name writes the binding of it that is visible from
+the closure and comes before it (#2659): a parameter, a declaration among the
+statements of the enclosing function or closure, or one in a block on the way
+down to the closure, the body of the loop, branch or `match` arm it sits in,
+or a trailing block. A binding in a sibling block (another loop or branch
+body, a sibling trailing block) is another variable, and the closure's
+assignment is then a fresh local of its own (#2189). Before, only the
+enclosing scope's top-level statements and trailing blocks counted, so
+`c = 0; f = || { c = 5 }` in a loop body gave the closure a fresh `c` and the
+loop's `c` never changed (a closure that also read `c` captured it already).
+A `while` body's variable is one for the function, so its cell is one across
+the passes, as above; a `for` body's or a branch's, used only inside it, is
+the body's own, so its cell is made at the declaration and released at the
+end of each pass, and a closure kept past the pass, in a list or a struct,
+holds the cell through its env.
+
 A builder block (`window(...) { ... }`, `vstack(4) { ... }`) is a scope
 like any other here. Its body is emitted inside C braces and now opens a
 matching defer scope, so a cell, or a heap string, declared in the block
