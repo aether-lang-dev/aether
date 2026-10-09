@@ -14,6 +14,12 @@ extern AETHER_TLS int current_core_id;
 // is taken without a wake-up.
 #define AETHER_ACTOR_THREAD_SPINS 10000
 
+#if AETHER_HAS_THREADS
+int aether_actor_thread_start(pthread_t* thread, void* actor) {
+    return pthread_create(thread, NULL, aether_actor_thread, actor);
+}
+#endif
+
 void* aether_actor_thread(void* arg) {
     ActorBase* actor = (ActorBase*)arg;
 

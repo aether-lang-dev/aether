@@ -44,6 +44,9 @@ else
     TO=""
 fi
 
+# Each test's wall time, for the report at the end of the sweep (#2673).
+. "$root/tests/scripts/sweep_clock.sh"
+
 # The last lines of a failed test's stdout and stderr, printed right under its
 # [FAIL] / [TIMEOUT] / [SIGNAL] line. The summary's FAILURE DETAILS repeats
 # them in full, but only if the sweep reaches the summary: a CI job that dies
@@ -62,8 +65,13 @@ print_tail() {
 for sh_test in $scripts; do
     name=$(echo "$sh_test" | sed "s|tests/||;s|/|_|g;s|\.sh$||")
     sh "$root/tests/scripts/sweep_resource_probe.sh" "$name" 2>/dev/null
+    sweep_clock; t_start=$sweep_ms
     $TO bash "$sh_test" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"
     sh_rc=$?
+    sweep_clock
+    if [ -n "$t_start" ] && [ -n "$sweep_ms" ]; then
+        printf '%s %s\n' $((sweep_ms - t_start)) "$name" > "$tmpdir/shtime_$name.txt"
+    fi
     if [ $sh_rc -eq 0 ]; then
         # A test that ran green but printed [SKIP-WIN] opted itself out on this
         # platform, and one whose output is a [SKIP] line and no PASS at all

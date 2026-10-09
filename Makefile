@@ -1453,6 +1453,7 @@ test-ae: compiler ae stdlib
 			echo ""; \
 		done; \
 	fi; \
+	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
 	rm -rf "$$tmpdir"; \
 	if [ "$$failed" -gt 0 ]; then exit 1; fi

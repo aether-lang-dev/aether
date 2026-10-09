@@ -8,6 +8,8 @@
 
 #ifdef _WIN32
     #include <windows.h>
+    #include <io.h>      // _setmode, _fileno
+    #include <fcntl.h>   // _O_BINARY
 #else
     #include <unistd.h>
 #endif
@@ -46,6 +48,38 @@ void aether_sleep_ms(int ms) {
     }
 #endif
 }
+
+#ifdef _WIN32
+/* The Windows services a program's generated C calls, so that C needs no
+ * <windows.h> (#2673). mingw-w64's winnt.h includes <x86intrin.h>, and with
+ * it every AVX-512 and AVX10 intrinsics header GCC ships: about 80,000
+ * lines in each program's translation unit, most of the time a build spent
+ * compiling it. */
+
+/* UTF-8 console code pages, so a program prints Unicode correctly, and
+ * stdout and stderr in binary mode, so "\n" is not written as "\r\n": a
+ * program's output, redirected to a file or piped on, is byte for byte what
+ * it printed. */
+void aether_console_init(void) {
+    SetConsoleOutputCP(65001);   // CP_UTF8
+    SetConsoleCP(65001);
+    _setmode(_fileno(stdout), _O_BINARY);
+    _setmode(_fileno(stderr), _O_BINARY);
+}
+
+/* The monotonic clock behind clock_ns() and actor timeouts. The generated
+ * helper this replaces converted the counter through a double, which loses
+ * nanoseconds once the counter is large; aether_now_ns splits the division
+ * exactly. */
+int64_t aether_clock_ns(void) {
+    return (int64_t)aether_now_ns();
+}
+
+/* Cooperative preemption's yield point (sched_yield in generated C). */
+void aether_thread_yield(void) {
+    SwitchToThread();
+}
+#endif
 
 // Global runtime configuration
 static AetherRuntimeInitConfig g_runtime_config = {0};

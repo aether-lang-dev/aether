@@ -579,6 +579,13 @@ Layer an extra exclusion list onto a sweep with
 `make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
 `.sh` sweeps).
 
+The sweep ends with its timings, just above the `Aether Tests:` line: the
+build and run time summed over the `.ae` tests, the shell tests' time, and
+the slowest of each (`AE_SWEEP_TIMING_TOP`, default 10). The sums add up
+wall time across the parallel jobs, so they measure work rather than the
+sweep's elapsed time, and a test or a toolchain step that got slower shows
+in the log of the run that made it slower (#2673).
+
 **Wine and the Windows lanes.** `.github/workflows/windows.yml` has two
 shapes of Windows coverage from a Linux runner. `windows-cross` cross-builds
 only. `windows-wine` ("Windows / runtime under Wine (x86_64)") goes one step

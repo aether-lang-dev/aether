@@ -5277,17 +5277,15 @@ static void begin_main_c_function(CodeGenerator* gen) {
 }
 
 static void emit_main_prologue(CodeGenerator* gen, int runs_scheduler, int needs_main_exit) {
-    // Set UTF-8 console codepage on Windows so programs can print Unicode correctly
+    // On Windows: UTF-8 console code pages so programs can print Unicode,
+    // and stdout/stderr in binary mode so printf does not translate every
+    // "\n" into "\r\n" on the way to a redirected file (Aether programs
+    // emit explicit "\n" terminators; the CRT translation made byte-exact
+    // output comparisons, and binary data piped through stdout,
+    // unreliable). The runtime does it, so the program's C needs no
+    // <windows.h> (#2673).
     print_line(gen, "#ifdef _WIN32");
-    print_line(gen, "SetConsoleOutputCP(65001);  // CP_UTF8");
-    print_line(gen, "SetConsoleCP(65001);");
-    // Force stdout/stderr to binary mode on Windows so printf does not
-    // translate every "\n" into "\r\n" on the way to a redirected file.
-    // Aether programs already emit explicit "\n" terminators; the CRT
-    // translation makes byte-exact output comparisons (and any binary
-    // data piped through stdout) unreliable.
-    print_line(gen, "_setmode(_fileno(stdout), _O_BINARY);");
-    print_line(gen, "_setmode(_fileno(stderr), _O_BINARY);");
+    print_line(gen, "aether_console_init();");
     print_line(gen, "#endif");
     // Initialize command-line arguments
     print_line(gen, "aether_args_init(argc, argv);");
@@ -6612,6 +6610,47 @@ static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
     }
 }
 
+/* windows.h squats on a handful of ordinary words as object-like macros, and
+ * an Aether program that names a constant after one of them emits C the
+ * preprocessor then mangles beyond recognition. contrib/tinyweb declares the
+ * HTTP verbs -- `const DELETE = 4` -- and winnt.h defines DELETE as
+ * 0x00010000L, so codegen produced
+ *
+ *     static const int 0x00010000L = (4);
+ *     error: expected identifier or '(' before numeric constant
+ *
+ * naming a line the author did not write. NOMINMAX in the prelude is the same
+ * problem already solved for min/max; these are the rest of the set that
+ * collides with plausible identifiers. Undef'd rather than renamed because the
+ * Aether name is legitimate -- DELETE is what the HTTP verb is called.
+ *
+ * Emitted after the last include, whichever header brought windows.h in: the
+ * program TU does not include it itself (#2673), a module's @c_include header
+ * still can, and an undef ahead of that include would undo nothing.
+ * Undefining a name nothing defined is harmless.
+ *
+ * Safe for the generated TU: it is program code, not a Win32 API consumer.
+ * Anything here that does call the API goes through the runtime, which is
+ * compiled separately with windows.h intact. */
+static void emit_windows_macro_undefs(CodeGenerator* gen) {
+    print_line(gen, "#ifdef _WIN32");
+    print_line(gen, "#undef DELETE");
+    print_line(gen, "#undef ERROR");
+    print_line(gen, "#undef IN");
+    print_line(gen, "#undef OUT");
+    print_line(gen, "#undef OPTIONAL");
+    print_line(gen, "#undef CONST");
+    print_line(gen, "#undef interface");
+    print_line(gen, "#undef small");
+    print_line(gen, "#undef near");
+    print_line(gen, "#undef far");
+    /* NEAR and FAR spell near and far, 16-bit pointer qualifiers that expand
+     * to nothing now (#2292). */
+    print_line(gen, "#undef NEAR");
+    print_line(gen, "#undef FAR");
+    print_line(gen, "#endif");
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -6716,53 +6755,27 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "extern void __aether_abort_call(void);");
     }
     print_line(gen, "#ifdef _WIN32");
-    /* The program TU calls a handful of kernel32 functions (console code
-     * pages, the performance counter, SwitchToThread) and nothing from USER
-     * or GDI, so it leaves those out. That drops winuser.h and wingdi.h: a
-     * third of the names windows.h puts in the TU, among them ACCEL, MSG
-     * and every CreateWindow / SendMessage / GetObject A-or-W macro, which
-     * a program's own function could otherwise be renamed into (#2292).
-     * The runtime compiles separately with whatever it needs. */
+    /* The program TU does not include <windows.h> (#2673): mingw-w64's
+     * winnt.h brings <x86intrin.h> and every AVX-512 and AVX10 header with
+     * it, some 80,000 lines that were most of the time a build spent
+     * compiling the program. The few Windows services it needs (console
+     * setup, the monotonic clock, the preemption yield, an actor's own
+     * thread) are runtime functions, and the actor runtime's headers give it
+     * the thread types alone (AETHER_THREAD_TYPES_ONLY). A header a module
+     * asks for with @c_include, emitted above, can still bring windows.h in,
+     * so these limit what it declares: nothing from USER or GDI. That drops
+     * winuser.h and wingdi.h, a third of the names windows.h puts in the TU,
+     * among them ACCEL, MSG and every CreateWindow / SendMessage / GetObject
+     * A-or-W macro, which a program's own function could otherwise be
+     * renamed into (#2292). The words it still defines as macros are
+     * undefined after the last include; see emit_windows_macro_undefs. */
+    print_line(gen, "#define AETHER_THREAD_TYPES_ONLY 1");
     print_line(gen, "#ifndef WIN32_LEAN_AND_MEAN");
     print_line(gen, "#define WIN32_LEAN_AND_MEAN");
     print_line(gen, "#endif");
     print_line(gen, "#define NOUSER");
     print_line(gen, "#define NOGDI");
     print_line(gen, "#define NOMINMAX");
-    print_line(gen, "#include <windows.h>");
-    print_line(gen, "#include <io.h>      // _setmode, _fileno");
-    print_line(gen, "#include <fcntl.h>   // _O_BINARY");
-    /* windows.h squats on a handful of ordinary words as object-like macros,
-     * and an Aether program that names a constant after one of them emits C
-     * the preprocessor then mangles beyond recognition. contrib/tinyweb
-     * declares the HTTP verbs -- `const DELETE = 4` -- and winnt.h defines
-     * DELETE as 0x00010000L, so codegen produced
-     *
-     *     static const int 0x00010000L = (4);
-     *     error: expected identifier or '(' before numeric constant
-     *
-     * naming a line the author did not write. NOMINMAX above is the same
-     * problem already solved for min/max; these are the rest of the set that
-     * collides with plausible identifiers. Undef'd rather than renamed because
-     * the Aether name is legitimate -- DELETE is what the HTTP verb is called.
-     *
-     * Safe for the generated TU: it is program code, not a Win32 API consumer.
-     * Anything here that does call the API goes through the runtime, which is
-     * compiled separately with windows.h intact. */
-    print_line(gen, "#undef DELETE");
-    print_line(gen, "#undef ERROR");
-    print_line(gen, "#undef IN");
-    print_line(gen, "#undef OUT");
-    print_line(gen, "#undef OPTIONAL");
-    print_line(gen, "#undef CONST");
-    print_line(gen, "#undef interface");
-    print_line(gen, "#undef small");
-    print_line(gen, "#undef near");
-    print_line(gen, "#undef far");
-    /* NEAR and FAR spell near and far, 16-bit pointer qualifiers that expand
-     * to nothing now (#2292). */
-    print_line(gen, "#undef NEAR");
-    print_line(gen, "#undef FAR");
     print_line(gen, "#elif defined(__EMSCRIPTEN__)");
     print_line(gen, "#include <emscripten.h>");
     print_line(gen, "#else");
@@ -6782,7 +6795,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (gen->preempt_loops) {
         print_line(gen, "static int _aether_reductions = 10000;");
         print_line(gen, "#ifdef _WIN32");
-        print_line(gen, "#define sched_yield() SwitchToThread()");
+        print_line(gen, "void aether_thread_yield(void);   /* SwitchToThread, in the runtime (#2673) */");
+        print_line(gen, "#define sched_yield() aether_thread_yield()");
         print_line(gen, "#elif defined(__EMSCRIPTEN__)");
         print_line(gen, "#define sched_yield() ((void)0)");
         print_line(gen, "#endif");
@@ -7310,13 +7324,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#pragma GCC diagnostic ignored \"-Wunused-function\"");
     print_line(gen, "#endif");
     /* clock_ns helper — always available (used by timeout checks + clock_ns() builtin) */
+    /* Windows: the runtime's monotonic clock, so the TU needs no
+     * <windows.h> (#2673). The performance-counter read this replaced went
+     * through a double, which drops nanoseconds once the counter is large. */
     print_line(gen, "#ifdef _WIN32");
-    print_line(gen, "static inline int64_t _aether_clock_ns(void) {");
-    print_line(gen, "    LARGE_INTEGER freq, now;");
-    print_line(gen, "    QueryPerformanceFrequency(&freq);");
-    print_line(gen, "    QueryPerformanceCounter(&now);");
-    print_line(gen, "    return (int64_t)((double)now.QuadPart / freq.QuadPart * 1000000000.0);");
-    print_line(gen, "}");
+    print_line(gen, "int64_t aether_clock_ns(void);");
+    print_line(gen, "static inline int64_t _aether_clock_ns(void) { return aether_clock_ns(); }");
     print_line(gen, "#elif defined(__EMSCRIPTEN__)");
     print_line(gen, "static inline int64_t _aether_clock_ns(void) {");
     print_line(gen, "    return (int64_t)(emscripten_get_now() * 1000000.0);");
@@ -7992,6 +8005,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // Opt-in Capsicum self-sandbox hook (runtime/sandbox/capsicum_autosandbox.c).
     // No-op unless AETHER_CAPSICUM=1 and the platform is FreeBSD.
     print_line(gen, "void aether_capsicum_autosandbox(void);");
+    // Windows console setup at the start of main (#2673).
+    print_line(gen, "#ifdef _WIN32");
+    print_line(gen, "void aether_console_init(void);");
+    print_line(gen, "#endif");
     print_line(gen, "");
 
     // Only include actor runtime if program uses actors (its own, or a
@@ -8065,6 +8082,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "static void _aether_release_closure_buf(void* p) { if (p) _aether_closure_env_release(((_AeClosure*)p)->env); }");
         print_line(gen, "static void _aether_release_string_buf(void* p) { if (p && *(const char**)p) aether_heap_str_free(*(const char**)p); }");
     }
+    /* Every include is above this line; the program's own declarations
+     * follow. */
+    emit_windows_macro_undefs(gen);
     print_line(gen, "");
 
     // Pre-scan: merge tuple return types across all returns in each

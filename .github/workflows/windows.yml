@@ -168,7 +168,8 @@ jobs:
   # .ae integration tests (includes REPL tests), examples.
   #
   # Once per CRT: MINGW64 links msvcrt.dll, UCRT64 links the UCRT, and their
-  # export sets differ (#1494).
+  # export sets differ (#1494). UCRT64 runs here, MINGW64 in ci.yml's
+  # `Windows / GCC (MSYS2)` (#2673).
   # ============================================================
   # ============================================================
   # RUNTIME LANE — cross-build on Linux, execute under Wine (#1876)
@@ -221,13 +222,14 @@ jobs:
     # behaves correctly.
     needs: windows-cross
 
+    # UCRT64 only: ci.yml's `Windows / GCC (MSYS2)` runs the same `make ci`
+    # on MINGW64 for every PR and push, with Mesa, Vulkan and SQLite besides,
+    # so a MINGW64 leg here ran the half-hour suite a second time for no
+    # coverage (#2673).
     strategy:
       fail-fast: false
       matrix:
         include:
-          - msystem: MINGW64
-            prefix: mingw-w64-x86_64
-            root: mingw64
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
@@ -342,5 +344,14 @@ jobs:
            /I runtime/scheduler /I runtime/memory /I runtime/config ^
            /FI runtime/utils/aether_thread.h /c _probe.c ^
            && echo "aether_thread.h OK" || exit 1
+
+        :: The view a program's generated C gets: the thread types without
+        :: windows.h (#2673).
+        cl /nologo /W3 /std:c11 /Zc:preprocessor ^
+           /I runtime /I runtime/utils /I runtime/actors ^
+           /I runtime/scheduler /I runtime/memory /I runtime/config ^
+           /D AETHER_THREAD_TYPES_ONLY ^
+           /FI runtime/utils/aether_thread.h /c _probe.c ^
+           && echo "aether_thread.h (types only) OK" || exit 1
 
         del _probe.c _probe.obj 2>nul

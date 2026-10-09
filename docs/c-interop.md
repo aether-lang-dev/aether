@@ -201,16 +201,17 @@ main() {
 Any struct of scalar/pointer fields works this way; the field ORDER in the
 tuple is the layout contract.
 
-> **On Windows, this exact binding collides with Win32.** `windows.h` defines
-> `LoadImage` as a macro selecting `LoadImageA`/`LoadImageW`, and declares them
-> with a signature that is nothing like raylib's. The generated C then fails with
-> `conflicting types for 'LoadImageA'`. That is why the block above is marked
-> `fragment` rather than compiled — it is correct, but only where Win32 is not in
-> scope. Binding a C function whose name Windows also claims (`LoadImage`,
-> `GetObject`, `CreateWindow`, and every other A/W macro pair) needs `#undef` in
-> the surrounding C, or the explicit symbol — `@extern("LoadImageA")` if you truly
-> want the Win32 one. Worth checking any short, generic C name against the A/W
-> macro list before assuming it binds cleanly everywhere.
+> **On Windows, a header can bring Win32's names in.** A program's generated C
+> does not include `windows.h` (#2673), so this binding is raylib's `LoadImage`
+> on every platform. A header that does include it, such as one a module names
+> with `@c_include`, puts Win32's own `LoadImage` in scope: a macro selecting
+> `LoadImageA`/`LoadImageW`, declared with a signature nothing like raylib's,
+> and the generated C then fails with `conflicting types for 'LoadImageA'`.
+> (The block above is marked `fragment` because it needs raylib, not because of
+> this.) Binding a C function whose name Windows also claims (`LoadImage`,
+> `GetObject`, `CreateWindow`, and every other A/W macro pair) next to such a
+> header needs `#undef` in the surrounding C, or the explicit symbol, such as
+> `@extern("LoadImageA")` if you truly want the Win32 one.
 
 ### Tuple parameters, by-value struct arguments
 

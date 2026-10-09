@@ -61,11 +61,18 @@ else
     cmd="$root/build/ae build $f ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
 fi
 
+# Build and run times for the report at the end of the sweep (#2673).
+. "$root/tests/scripts/sweep_clock.sh"
+sweep_clock; t_start=$sweep_ms
+
 $BTO sh -c "$cmd" 2>"$tmpdir/build_$name.err"
 brc=$?
+sweep_clock; t_built=$sweep_ms
+t_ran=$t_built
 if [ $brc -eq 0 ]; then
     $TO "$root/build/test_$name" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"
     rc=$?
+    sweep_clock; t_ran=$sweep_ms
     if [ $rc -eq 0 ]; then
         echo "  [PASS] $name"
         touch "$tmpdir/PASS_$name"
@@ -88,4 +95,8 @@ else
     printf compile > "$tmpdir/phase_$name.txt"
     touch "$tmpdir/FAIL_$name"
     head -5 "$tmpdir/build_$name.err" 2>/dev/null
+fi
+
+if [ -n "$t_start" ] && [ -n "$t_ran" ]; then
+    printf '%s %s %s\n' $((t_built - t_start)) $((t_ran - t_built)) "$name" > "$tmpdir/time_$name.txt"
 fi

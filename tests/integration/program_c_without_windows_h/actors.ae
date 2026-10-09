@@ -1,0 +1,23 @@
+// A program with actors: the actor runtime's headers carry thread types,
+// which came from windows.h on Windows until a program's C was given the
+// types alone (#2673).
+message Add { n: int }
+
+actor Counter {
+    state total = 0
+    receive {
+        Add(n) -> {
+            total = total + n
+            if total == 5 {
+                println("actors 5")
+            }
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Add { n: 2 }
+    c ! Add { n: 3 }
+    wait_for_idle()
+}
