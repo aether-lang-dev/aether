@@ -41,7 +41,9 @@ main() {
     neg = tinygo.call_int_int(handle, "Negate", 7)
     println("Negate(7) = ${neg}")
 
-    msg = tinygo.call_str_str(handle, "Greet", "world")
+    // Greet returns C.CString(...), so the owned call takes the result
+    // over and frees the C pointer; call_str_str would leak it.
+    msg = tinygo.call_str_str_owned(handle, "Greet", "world")
     println(msg)
 
     println("PrintN(5):")

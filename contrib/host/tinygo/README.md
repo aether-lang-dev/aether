@@ -65,7 +65,7 @@ func Add(a, b int32) int32 { return a + b }
 //export Greet
 func Greet(name *C.char) *C.char {
     msg := "hello, " + C.GoString(name)
-    return C.CString(msg)  // malloc'd by cgo, leaked unless freed (see notes)
+    return C.CString(msg)  // malloc'd by cgo: call it with call_str_str_owned
 }
 
 func main() {}  // c-shared still requires a main() — empty body is fine
@@ -101,7 +101,9 @@ main() {
     total = tinygo.call_int_int_int(handle, "Add", 2, 40)
     println("Add(2, 40) = ${total}")       // -> Add(2, 40) = 42
 
-    msg = tinygo.call_str_str(handle, "Greet", "world")
+    // Greet returns C.CString(...): the _owned call copies it and frees
+    // the C pointer, and msg is freed like any other Aether string.
+    msg = tinygo.call_str_str_owned(handle, "Greet", "world")
     println(msg)                           // -> hello, world
 
     tinygo.unload(handle)
@@ -128,6 +130,18 @@ one letter per type: `v` void, `i` int32, `l` int64, `d` double,
 [`aether_host_tinygo.c`](aether_host_tinygo.c) plus a matching
 `extern` and wrapper in [`module.ae`](module.ae).
 
+Every string-returning wrapper has an `_owned` twin for a function
+that returns `C.CString(...)`; see [Memory ownership](#memory-ownership):
+
+| Borrows the result | Takes it over and frees the C pointer |
+|---|---|
+| `call_str_str` | `call_str_str_owned` |
+| `call_s_v` | `call_s_v_owned` |
+| `call_s_s` | `call_s_s_owned` |
+| `call_s_i` | `call_s_i_owned` |
+| `call_s_s_s` | `call_s_s_s_owned` |
+| `call_s_s_s_s` | `call_s_s_s_s_owned` |
+
 For any other signature, `call_dynamic` dispatches through libffi
 when the bridge is built with `AETHER_HAS_LIBFFI` defined. Without
 libffi it returns 0 and `last_error()` says libffi is unavailable,
@@ -135,14 +149,38 @@ so the module itself needs nothing beyond `std.dl`.
 
 ## Memory ownership
 
-A string result is the pointer the Go function returned, and
-Aether only borrows it: nothing on this side frees it. cgo's
-`C.CString(...)` allocates it with `malloc` on the C heap, outside
-the Go collector, so it stays valid until something frees it and
-every call that returns one leaks it. For a long-running program,
-export a `Free(p *C.char)` that calls `C.free` from the Go side and
-call it with each result once you are done with it. Whether the
-bridge should take the result over itself is open in #2569.
+A string-returning wrapper gives back the pointer the Go function
+returned, and Aether only borrows it: nothing on this side frees it.
+The bridge cannot tell from a signature who owns the result, so the
+caller says so, per call site (#2569):
+
+- **`C.CString(...)` result: call the `_owned` twin.** cgo allocates
+  a `C.CString` with `malloc` on the C heap, outside the Go collector,
+  so through a borrowing wrapper every call leaks one string.
+  `call_str_str_owned` and the other `_owned` wrappers copy the result
+  into a string Aether owns, `free()` the C pointer, and Aether frees
+  the copy like any string it made. A nil result, or a symbol that
+  does not resolve, gives `""`.
+- **Static or long-lived result: call the plain wrapper.** A pointer
+  the library keeps (a constant, a buffer it reuses) must never reach
+  `free()`, so it is borrowed, and stays valid for as long as the
+  library keeps it.
+
+The `_owned` wrappers free with the C runtime the Aether program uses,
+so the library has to allocate with the same one. On Linux and macOS
+there is one. On Windows, MSVCRT and UCRT keep separate heaps, so
+build the library with a `gcc` of the same runtime as the one `ae`
+builds the program with: cgo uses the `gcc` on `PATH`, and `ae` uses
+`$AE_CC`, `$CC`, the `gcc` on `PATH`, or its own WinLibs UCRT copy,
+in that order.
+
+`call_dynamic` with return kind `'s'` writes the library's pointer to
+`result_out` as it is; for a `C.CString`, free it once you are done.
+
+The plain wrappers keep their behaviour. Whether a `C.CString` result
+should instead be taken over by default, with a borrowed form for the
+static case, is still open in #2569, since it would change what the
+existing call sites do.
 
 ## Limitations
 
@@ -164,19 +202,30 @@ bridge should take the result over itself is open in #2569.
 
 ## Testing
 
-The end-to-end test lives at
-[`tests/integration/host_tinygo/`](../../../tests/integration/host_tinygo/) —
-[`uses_tinygo.ae`](../../../tests/integration/host_tinygo/uses_tinygo.ae)
-is the driver (loads the c-shared `.so` at `$TINYGO_LIB`, built from
-`examples/greet.go`, and exercises one call per wrapper shape:
-`Answer = 42`, `Add(2, 40) = 42`, `Negate(7) = -7`, `hello, world`),
-and
-[`test_host_tinygo.sh`](../../../tests/integration/host_tinygo/test_host_tinygo.sh)
-is the runner. The runner **SKIPs** (never fails) when `go` is not on
-PATH, matching `contrib/host/go`'s pattern so CI stays green on machines
-without the toolchain. When `go` is present it builds a c-shared `.so`
-with `CGO_ENABLED=1 go build -buildmode=c-shared`, loads it via
-`contrib.host.tinygo`, and asserts each expected line.
+The end-to-end tests live at
+[`tests/integration/host_tinygo/`](../../../tests/integration/host_tinygo/),
+and both need the bridge archive (`make contrib`, or
+`MODULES=tinygo bash tests/scripts/contrib_build.sh`); without it they
+SKIP. The `contrib/host bridges (Linux)` CI job builds it and runs both.
+
+- [`test_host_tinygo.sh`](../../../tests/integration/host_tinygo/test_host_tinygo.sh)
+  builds `examples/greet.go` with
+  `CGO_ENABLED=1 go build -buildmode=c-shared` and runs
+  [`uses_tinygo.ae`](../../../tests/integration/host_tinygo/uses_tinygo.ae)
+  against it: `Answer = 42`, `Add(2, 40) = 42`, `Negate(7) = -7`, and
+  `hello, world` through `call_str_str_owned`, a real `C.CString`
+  freed by the bridge. It SKIPs when `go` is not on PATH, matching
+  `contrib/host/go`'s pattern.
+- [`test_host_tinygo_owned.sh`](../../../tests/integration/host_tinygo/test_host_tinygo_owned.sh)
+  needs no Go toolchain: it builds
+  [`fake_cshared.c`](../../../tests/integration/host_tinygo/fake_cshared.c),
+  a C library with the signatures cgo generates and `C.CString`'s
+  `malloc`'d results, with the C compiler, and runs
+  [`uses_owned.ae`](../../../tests/integration/host_tinygo/uses_owned.ae):
+  every `_owned` wrapper, the nil and unresolved-symbol results, a
+  static result through the borrowed wrappers (which must not free it),
+  and rounds of 100 owned calls of a 64 KiB result, with the heap
+  checked for growth from round to round (`mem.steady_growth`).
 
 ## See also
 

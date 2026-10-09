@@ -545,6 +545,21 @@ jobs:
     - name: Run contrib/host check
       run: make contrib-host-check
 
+    # contrib.host.tinygo's two tests need the bridge archive, which no other
+    # leg builds, so everywhere else they skip. Here it is built, and each
+    # test has to print its PASS line: test_host_tinygo.sh against a real cgo
+    # library (golang-go is installed above), test_host_tinygo_owned.sh
+    # against a C stand-in that checks the owned string wrappers free what
+    # they take over (#2569).
+    - name: contrib.host.tinygo end to end
+      run: |
+        MODULES=tinygo bash tests/scripts/contrib_build.sh
+        for t in test_host_tinygo test_host_tinygo_owned; do
+          out="$(sh tests/integration/host_tinygo/$t.sh)" || { echo "$out"; exit 1; }
+          echo "$out"
+          echo "$out" | grep -q '\[PASS\]' || { echo "$t did not run"; exit 1; }
+        done
+
     - name: Type-check every non-host contrib module
       run: make check-contrib-modules
 

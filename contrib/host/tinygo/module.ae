@@ -26,12 +26,13 @@
 // Calling-convention surface: a wrapper per C signature, named
 // call_<ret>_<args> (see the export list), and call_dynamic for any
 // other signature, through libffi when the bridge is built with
-// AETHER_HAS_LIBFFI. A string result is borrowed: see the README's
-// "Memory ownership".
+// AETHER_HAS_LIBFFI. A string result is borrowed, except from the
+// `_owned` twins, which take a C.CString result over and free it: see
+// the README's "Memory ownership".
 
 import std.dl
 
-exports (
+exports(
     load, unload, last_error,
     // Round-1 wrappers (kept for backward compat).
     call_int_void, call_int_int, call_int_int_int,
@@ -44,6 +45,9 @@ exports (
     call_i_i_i, call_i_l_l, call_i_s_s, call_i_s_i,
     call_d_d_d, call_s_s_s, call_v_i_i,
     call_i_i_i_i, call_i_s_i_i, call_s_s_s_s,
+    // Owned string results, for a Go function returning C.CString (#2569).
+    call_str_str_owned, call_s_v_owned, call_s_s_owned, call_s_i_owned,
+    call_s_s_s_owned, call_s_s_s_s_owned,
     // libffi-backed dynamic dispatch (escape hatch).
     call_dynamic
 )
@@ -95,9 +99,20 @@ extern tinygo_call_i_i_i_i(handle: ptr, sym: string, a: int, b: int, c: int) -> 
 extern tinygo_call_i_s_i_i(handle: ptr, sym: string, a: string, b: int, c: int) -> int
 extern tinygo_call_s_s_s_s(handle: ptr, sym: string, a: string, b: string, c: string) -> string
 
+// Owned twins of the string-returning wrappers (#2569). `@heap`: the C
+// side copies the library's C.CString result into a fresh string the
+// caller owns and frees the library's pointer, and the heap-string
+// tracker frees the copy when the caller is done with it.
+extern tinygo_call_str_str_owned(handle: ptr, sym: string, a: string) -> string @heap
+extern tinygo_call_s_v_owned(handle: ptr, sym: string) -> string @heap
+extern tinygo_call_s_s_owned(handle: ptr, sym: string, a: string) -> string @heap
+extern tinygo_call_s_i_owned(handle: ptr, sym: string, a: int) -> string @heap
+extern tinygo_call_s_s_s_owned(handle: ptr, sym: string, a: string, b: string) -> string @heap
+extern tinygo_call_s_s_s_s_owned(handle: ptr, sym: string, a: string, b: string, c: string) -> string @heap
+
 extern tinygo_call_dynamic(handle: ptr, sym: string,
-                           return_kind: int, arg_kinds: string,
-                           args: ptr, result_out: ptr) -> int
+    return_kind: int, arg_kinds: string,
+    args: ptr, result_out: ptr) -> int
 
 // Load a TinyGo c-shared library. Returns (handle, "") on success,
 // (null, error) on failure. Just a thin alias over std.dl.open with
@@ -141,8 +156,19 @@ call_void_int(handle: ptr, sym: string, a: int) {
 // Invoke `const char* fn(const char*)`, the c-shared signature of an
 // `//export` function taking and returning `*C.char`. The result is
 // borrowed: a `C.CString` stays valid until the Go side frees it.
+// For a function that returns `C.CString(...)`, call_str_str_owned
+// below takes the result over instead, so the call leaks nothing.
 call_str_str(handle: ptr, sym: string, a: string) -> string {
     return tinygo_call_str_str(handle, sym, a)
+}
+
+// call_str_str for a Go function that returns `C.CString(...)`: the
+// result is copied into a string this side owns and the C pointer is
+// freed. Never for a function returning a static or long-lived buffer,
+// which free() must not see. A nil result, or a symbol that does not
+// resolve, gives "" (last_error says which).
+call_str_str_owned(handle: ptr, sym: string, a: string) -> string {
+    return tinygo_call_str_str_owned(handle, sym, a)
 }
 
 // =================================================================
@@ -152,42 +178,53 @@ call_str_str(handle: ptr, sym: string, a: string) -> string {
 // =================================================================
 
 // 0-arg
-call_i_v(h: ptr, s: string) -> int    { return tinygo_call_i_v(h, s) }
-call_l_v(h: ptr, s: string) -> long   { return tinygo_call_l_v(h, s) }
-call_d_v(h: ptr, s: string) -> float  { return tinygo_call_d_v(h, s) }
+call_i_v(h: ptr, s: string) -> int { return tinygo_call_i_v(h, s) }
+call_l_v(h: ptr, s: string) -> long { return tinygo_call_l_v(h, s) }
+call_d_v(h: ptr, s: string) -> float { return tinygo_call_d_v(h, s) }
 call_s_v(h: ptr, s: string) -> string { return tinygo_call_s_v(h, s) }
-call_p_v(h: ptr, s: string) -> ptr    { return tinygo_call_p_v(h, s) }
-call_v_v(h: ptr, s: string)           { tinygo_call_v_v(h, s) }
+call_p_v(h: ptr, s: string) -> ptr { return tinygo_call_p_v(h, s) }
+call_v_v(h: ptr, s: string) { tinygo_call_v_v(h, s) }
 
 // 1-arg
-call_i_i(h: ptr, s: string, a: int)         -> int    { return tinygo_call_i_i(h, s, a) }
-call_i_l(h: ptr, s: string, a: long)        -> int    { return tinygo_call_i_l(h, s, a) }
-call_i_d(h: ptr, s: string, a: float)       -> int    { return tinygo_call_i_d(h, s, a) }
-call_i_s(h: ptr, s: string, a: string)      -> int    { return tinygo_call_i_s(h, s, a) }
-call_i_p(h: ptr, s: string, a: ptr)         -> int    { return tinygo_call_i_p(h, s, a) }
-call_l_l(h: ptr, s: string, a: long)        -> long   { return tinygo_call_l_l(h, s, a) }
-call_d_d(h: ptr, s: string, a: float)       -> float  { return tinygo_call_d_d(h, s, a) }
-call_s_s(h: ptr, s: string, a: string)      -> string { return tinygo_call_s_s(h, s, a) }
-call_s_i(h: ptr, s: string, a: int)         -> string { return tinygo_call_s_i(h, s, a) }
-call_p_s(h: ptr, s: string, a: string)      -> ptr    { return tinygo_call_p_s(h, s, a) }
-call_p_i(h: ptr, s: string, a: int)         -> ptr    { return tinygo_call_p_i(h, s, a) }
-call_v_i(h: ptr, s: string, a: int)                   { tinygo_call_v_i(h, s, a) }
-call_v_s(h: ptr, s: string, a: string)                { tinygo_call_v_s(h, s, a) }
-call_v_p(h: ptr, s: string, a: ptr)                   { tinygo_call_v_p(h, s, a) }
+call_i_i(h: ptr, s: string, a: int) -> int { return tinygo_call_i_i(h, s, a) }
+call_i_l(h: ptr, s: string, a: long) -> int { return tinygo_call_i_l(h, s, a) }
+call_i_d(h: ptr, s: string, a: float) -> int { return tinygo_call_i_d(h, s, a) }
+call_i_s(h: ptr, s: string, a: string) -> int { return tinygo_call_i_s(h, s, a) }
+call_i_p(h: ptr, s: string, a: ptr) -> int { return tinygo_call_i_p(h, s, a) }
+call_l_l(h: ptr, s: string, a: long) -> long { return tinygo_call_l_l(h, s, a) }
+call_d_d(h: ptr, s: string, a: float) -> float { return tinygo_call_d_d(h, s, a) }
+call_s_s(h: ptr, s: string, a: string) -> string { return tinygo_call_s_s(h, s, a) }
+call_s_i(h: ptr, s: string, a: int) -> string { return tinygo_call_s_i(h, s, a) }
+call_p_s(h: ptr, s: string, a: string) -> ptr { return tinygo_call_p_s(h, s, a) }
+call_p_i(h: ptr, s: string, a: int) -> ptr { return tinygo_call_p_i(h, s, a) }
+call_v_i(h: ptr, s: string, a: int) { tinygo_call_v_i(h, s, a) }
+call_v_s(h: ptr, s: string, a: string) { tinygo_call_v_s(h, s, a) }
+call_v_p(h: ptr, s: string, a: ptr) { tinygo_call_v_p(h, s, a) }
 
 // 2-arg
-call_i_i_i(h: ptr, s: string, a: int, b: int)               -> int    { return tinygo_call_i_i_i(h, s, a, b) }
-call_i_l_l(h: ptr, s: string, a: long, b: long)             -> int    { return tinygo_call_i_l_l(h, s, a, b) }
-call_i_s_s(h: ptr, s: string, a: string, b: string)         -> int    { return tinygo_call_i_s_s(h, s, a, b) }
-call_i_s_i(h: ptr, s: string, a: string, b: int)            -> int    { return tinygo_call_i_s_i(h, s, a, b) }
-call_d_d_d(h: ptr, s: string, a: float, b: float)           -> float  { return tinygo_call_d_d_d(h, s, a, b) }
-call_s_s_s(h: ptr, s: string, a: string, b: string)         -> string { return tinygo_call_s_s_s(h, s, a, b) }
-call_v_i_i(h: ptr, s: string, a: int, b: int)                         { tinygo_call_v_i_i(h, s, a, b) }
+call_i_i_i(h: ptr, s: string, a: int, b: int) -> int { return tinygo_call_i_i_i(h, s, a, b) }
+call_i_l_l(h: ptr, s: string, a: long, b: long) -> int { return tinygo_call_i_l_l(h, s, a, b) }
+call_i_s_s(h: ptr, s: string, a: string, b: string) -> int { return tinygo_call_i_s_s(h, s, a, b) }
+call_i_s_i(h: ptr, s: string, a: string, b: int) -> int { return tinygo_call_i_s_i(h, s, a, b) }
+call_d_d_d(h: ptr, s: string, a: float, b: float) -> float { return tinygo_call_d_d_d(h, s, a, b) }
+call_s_s_s(h: ptr, s: string, a: string, b: string) -> string { return tinygo_call_s_s_s(h, s, a, b) }
+call_v_i_i(h: ptr, s: string, a: int, b: int) { tinygo_call_v_i_i(h, s, a, b) }
 
 // 3-arg
-call_i_i_i_i(h: ptr, s: string, a: int, b: int, c: int)              -> int    { return tinygo_call_i_i_i_i(h, s, a, b, c) }
-call_i_s_i_i(h: ptr, s: string, a: string, b: int, c: int)           -> int    { return tinygo_call_i_s_i_i(h, s, a, b, c) }
-call_s_s_s_s(h: ptr, s: string, a: string, b: string, c: string)     -> string { return tinygo_call_s_s_s_s(h, s, a, b, c) }
+call_i_i_i_i(h: ptr, s: string, a: int, b: int, c: int) -> int { return tinygo_call_i_i_i_i(h, s, a, b, c) }
+call_i_s_i_i(h: ptr, s: string, a: string, b: int, c: int) -> int { return tinygo_call_i_s_i_i(h, s, a, b, c) }
+call_s_s_s_s(h: ptr, s: string, a: string, b: string, c: string) -> string { return tinygo_call_s_s_s_s(h, s, a, b, c) }
+
+// Owned twins (#2569), with call_str_str_owned above: the same calls
+// for a Go function that returns `C.CString(...)`. The result is copied
+// into a string this side owns and the C pointer is freed, so the call
+// leaks nothing. The plain wrappers borrow, for a result the library
+// keeps (a static or long-lived buffer).
+call_s_v_owned(h: ptr, s: string) -> string { return tinygo_call_s_v_owned(h, s) }
+call_s_s_owned(h: ptr, s: string, a: string) -> string { return tinygo_call_s_s_owned(h, s, a) }
+call_s_i_owned(h: ptr, s: string, a: int) -> string { return tinygo_call_s_i_owned(h, s, a) }
+call_s_s_s_owned(h: ptr, s: string, a: string, b: string) -> string { return tinygo_call_s_s_s_owned(h, s, a, b) }
+call_s_s_s_s_owned(h: ptr, s: string, a: string, b: string, c: string) -> string { return tinygo_call_s_s_s_s_owned(h, s, a, b, c) }
 
 // libffi-backed dynamic dispatch. `return_kind` and `arg_kinds`
 // use single-character codes:
@@ -202,6 +239,6 @@ call_s_s_s_s(h: ptr, s: string, a: string, b: string, c: string)     -> string {
 // Aether's char→int single-char literals use ASCII codes (e.g.
 // 'i' is 105).
 call_dynamic(handle: ptr, sym: string, return_kind: int,
-             arg_kinds: string, args: ptr, result_out: ptr) -> int {
+    arg_kinds: string, args: ptr, result_out: ptr) -> int {
     return tinygo_call_dynamic(handle, sym, return_kind, arg_kinds, args, result_out)
 }

@@ -17,10 +17,15 @@ func Add(a, b int32) int32 { return a + b }
 //export Negate
 func Negate(a int32) int32 { return -a }
 
+// Greet returns a C.CString, which cgo allocates with malloc on the C
+// heap. Call it through tinygo.call_str_str_owned, which copies the
+// result and frees this pointer; the borrowed call_str_str would leak
+// it (see the README's "Memory ownership").
+//
 //export Greet
 func Greet(name *C.char) *C.char {
 	greeting := "hello, " + C.GoString(name)
-	return C.CString(greeting) // leaks; see README "Memory ownership"
+	return C.CString(greeting)
 }
 
 //export PrintN

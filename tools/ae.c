@@ -5702,6 +5702,41 @@ static bool host_bridge_a_path(const char* lang, char* out, size_t outsz) {
     return false;
 }
 
+/* Whether the static archive at `path` names the symbol `sym`, defined or
+ * referenced: an object's string table holds each name NUL-terminated after
+ * the previous one's NUL (ELF and COFF as written, Mach-O with a leading
+ * underscore), so the name between two NULs is a symbol and the same letters
+ * inside a message string are not. Read here rather than asked of
+ * `nm -u ... 2>/dev/null | grep -q`: system() runs that through cmd.exe on
+ * Windows, which has neither /dev/null nor grep, so the probe failed there on
+ * every build and a bridge built with libffi linked without -lffi. */
+static bool archive_names_symbol(const char* path, const char* sym) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return false;
+    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
+    long n = ftell(f);
+    if (n <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
+    char* buf = (char*)malloc((size_t)n);
+    if (!buf) { fclose(f); return false; }
+    size_t got = fread(buf, 1, (size_t)n, f);
+    fclose(f);
+
+    size_t len = strlen(sym);
+    bool found = false;
+    for (size_t i = 0; !found && i + len + 2 <= got; i++) {
+        if (buf[i] != '\0') continue;
+        size_t at = i + 1;
+        if (buf[at] == '_' && at + 1 + len < got &&
+            memcmp(buf + at + 1, sym, len) == 0 && buf[at + 1 + len] == '\0') {
+            found = true;
+        } else if (memcmp(buf + at, sym, len) == 0 && buf[at + len] == '\0') {
+            found = true;
+        }
+    }
+    free(buf);
+    return found;
+}
+
 static void prepare_host_bridge_imports(const char* main_file) {
     FILE* f = fopen(main_file, "r");
     if (!f) return;
@@ -5775,23 +5810,15 @@ static void prepare_host_bridge_imports(const char* main_file) {
         //
         // The probe is by-symbol, not by-language: when libffi-dev
         // wasn't present at bridge-build time the AETHER_HAS_LIBFFI
-        // block is #ifdef-out, the .a has no undefined ffi_* symbols,
+        // block is #ifdef-out, the .a references no ffi_* symbol,
         // and we MUST NOT pass `-lffi` (the host's link would fail
-        // with "cannot find -lffi"). `nm -u` lists only undefined
-        // symbols; one popen per build, no measurable cost. Skip on
-        // platforms without nm — the link error is then the same
-        // diagnostic users had before this fix and the manual
-        // aether.toml workaround still applies.
+        // with "cannot find -lffi"). archive_names_symbol reads the
+        // archive itself; see there for why it no longer asks nm.
         const char* effective_alias = host_bridge_lang_alias(lang);
         const char* trans_flags = NULL;
-        if (strcmp(effective_alias, "tinygo") == 0) {
-            char nm_cmd[1300];
-            snprintf(nm_cmd, sizeof(nm_cmd),
-                     "nm -u \"%s\" 2>/dev/null | grep -q ffi_prep_cif",
-                     a_path);
-            if (system(nm_cmd) == 0) {
-                trans_flags = " -lffi";
-            }
+        if (strcmp(effective_alias, "tinygo") == 0 &&
+            archive_names_symbol(a_path, "ffi_prep_cif")) {
+            trans_flags = " -lffi";
         }
         if (trans_flags) {
             off = strlen(g_host_bridge_link);
