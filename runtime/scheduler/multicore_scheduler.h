@@ -113,6 +113,8 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     atomic_flag_clear_explicit(&lock->lock, memory_order_release);
 }
 
+struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
+
 /* A derived actor is a struct whose first bytes ARE an ActorBase: the
  * scheduler is handed a pointer to it and casts. Anything that mirrors this
  * layout by hand drifts the moment a field is added here, and the corruption
@@ -129,12 +131,8 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
     atomic_int migrate_to; \
     /* If set, scheduler threads must not process this actor */ \
     atomic_int main_thread_only; \
-    /* Lock-free same-core messaging (lazy, only for auto_process) */ \
+    /* Same-core batches from send_buffer_flush (lazy) */ \
     SPSCQueue* spsc_queue; \
-    /* 1 while the actor's own thread (auto_process) sleeps in its idle \
-     * park (#2592): a sender that has just queued a message for it and \
-     * reads 1 wakes it (scheduler_actor_thread_wake). */ \
-    atomic_int thread_parked; \
     /* Non-NULL only while an ask/reply is in flight */ \
     _Atomic(ActorReplySlot*) reply_slot; \
     /* Prevents concurrent step() calls during work-steal handoff. \
@@ -167,7 +165,15 @@ static inline void spinlock_unlock(OptimizedSpinlock* lock) {
      * then frees; 0 for one a caller passed to scheduler_register_actor, \
      * whose memory stays the caller's. Written before the actor is \
      * published, never after. */ \
-    int scheduler_owned;
+    int scheduler_owned; \
+    /* An auto_process actor's inbox (#2598): every sender puts its \
+     * messages here and only the actor's thread takes them. Made by the \
+     * first send, NULL until then. */ \
+    _Atomic(struct ActorInbox*) inbox; \
+    /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
+     * sender that has just put a message in the inbox and reads 1 wakes \
+     * the thread. */ \
+    atomic_int thread_parked;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
@@ -342,14 +348,20 @@ void scheduler_reader_offline(void);
 void scheduler_actor_thread_exit(ActorBase* actor);
 /* An auto_process actor's thread with nothing to do sleeps here (#2592),
  * after spinning a while, instead of spinning for good: until a message for
- * the actor, its release or the scheduler's stop wakes it, with a timed wait
- * behind those. While asleep the thread is not a reader, so it holds no
- * reclamation back. Returns 0 without sleeping for an actor on no core, 1
- * otherwise. */
+ * the actor, its release, the scheduler's stop or its teardown wakes it,
+ * with a timed wait behind those. While asleep the thread is not a reader,
+ * so it holds no reclamation back. Returns 0 without sleeping when there is
+ * nothing to sleep on: the actor is on no core, or no scheduler has been
+ * initialized yet. 1 otherwise. */
 int scheduler_actor_thread_park(ActorBase* actor);
-/* Wakes `actor`'s own thread if it is asleep in that park. Whatever puts a
- * message in an auto_process actor's SPSC queue calls it afterwards. */
-void scheduler_actor_thread_wake(ActorBase* actor);
+/* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
+ * sleeps (#2598, #2592). From any thread; the message is counted as sent by
+ * the caller. Every send to such an actor ends here. */
+void scheduler_actor_thread_deliver(ActorBase* actor, Message msg);
+/* The timed wait behind an actor thread's park, in milliseconds (32 by
+ * default). For tests: set long, a wake that never comes shows as a stall
+ * rather than as a 32 ms delay. */
+void scheduler_set_actor_park_ms(int ms);
 /* Called by the inline (main-thread-mode) send once the step it ran has
  * returned and it no longer touches the actor: an actor that released itself
  * in that step is released now (#2509). */

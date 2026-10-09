@@ -2,6 +2,7 @@
 #include "../utils/aether_thread.h"
 #include "aether_actor_thread.h"
 #include "aether_spsc_queue.h"
+#include "aether_actor_inbox.h"
 #include "../scheduler/multicore_scheduler.h"
 #include <stdlib.h>
 #include <string.h>
@@ -58,18 +59,17 @@ void* aether_actor_thread(void* arg) {
             continue;
         }
 
-        // Mailbox is empty — drain SPSC queue into it.  The scheduler thread
-        // (or other actor threads via scheduler_send_local) enqueue here;
-        // only this thread touches the mailbox, so no race on head/tail/count.
-        // No more than the empty mailbox holds; the rest stays queued for
-        // the next pass. It used to take up to 128 and keep what fit, so a
-        // burst of more than MAILBOX_SIZE messages lost the others (#2598).
-        Message spsc_msgs[MAILBOX_SIZE];
-        int spsc_count = actor->spsc_queue
-            ? spsc_dequeue_batch(actor->spsc_queue, spsc_msgs, MAILBOX_SIZE) : 0;
-        if (spsc_count > 0) {
+        // Mailbox is empty: move what waits in the inbox into it. Every send
+        // to this actor puts its message in the inbox; only this thread
+        // touches the mailbox. No more than the empty mailbox holds; the rest
+        // waits for the next pass. It used to take up to 128 from a queue of
+        // 63 into a mailbox of 32 and drop what did not fit (#2598).
+        ActorInbox* inbox = atomic_load_explicit(&actor->inbox, memory_order_acquire);
+        Message taken[MAILBOX_SIZE];
+        int taken_count = inbox ? actor_inbox_take(inbox, taken, MAILBOX_SIZE) : 0;
+        if (taken_count > 0) {
             idle = 0;
-            mailbox_send_batch(&actor->mailbox, spsc_msgs, spsc_count);
+            mailbox_send_batch(&actor->mailbox, taken, taken_count);
             continue;
         }
 

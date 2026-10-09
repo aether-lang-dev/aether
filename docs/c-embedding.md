@@ -291,6 +291,15 @@ The `ActorBase` contains:
 - `spsc_queue`: Lock-free same-core messaging (pointer, lazily allocated)
 - `reply_slot`: Non-NULL during ask/reply (`_Atomic` pointer)
 - `step_lock`: Prevents concurrent `step()` during work-steal handoff (`atomic_flag`)
+- `timeout_ns`, `last_activity_ns`: Receive timeout and when idling began
+- `dead`: Set once the actor panicked or was released; it is skipped after
+- `alloc_size`, `destroy_state`, `scheduler_owned`: How the scheduler frees it
+- `inbox`, `thread_parked`: For an actor with its own thread (`auto_process`),
+  where every sender puts its messages and whether the thread sleeps idle
+
+Embedding `ActorBase` as the first member, as above, keeps the layout right
+whatever fields it gains. The full list, in order, with a comment for each, is
+the `AETHER_ACTOR_BASE_FIELDS` macro in `runtime/scheduler/multicore_scheduler.h`.
 
 ## Message Handler Pattern
 

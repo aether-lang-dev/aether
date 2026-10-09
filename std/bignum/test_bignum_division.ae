@@ -104,7 +104,7 @@ main() {
     print("=== std.bignum division (Algorithm D) ===\n")
     fails = 0
 
-    // Hacker's Delight's hard cases; the first three need the add-back step.
+    // Hacker's Delight's hard cases: most need the add-back step.
     fails = fails + check("800000000000000000000003", "200000000000000000000001", "3", "200000000000000000000000")
     fails = fails + check("80000000000000000003", "20000000000000000001", "3", "20000000000000000000")
     fails = fails + check("7fff000080000000000000000000", "80000000000000000001", "fffe0000", "7fffffffffff00020000")

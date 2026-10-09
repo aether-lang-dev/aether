@@ -208,22 +208,18 @@ rejects timestamp macros outright.
 **Key Components:**
 
 1. **Actor Structure** (`runtime/scheduler/multicore_scheduler.h`)
+
+   The scheduler is handed a pointer to an actor and casts it to `ActorBase*`,
+   so every actor struct starts with `ActorBase`'s fields. They are declared
+   once, in the `AETHER_ACTOR_BASE_FIELDS` macro, and an actor struct expands
+   the macro first; a hand-copied list drifts the moment a field is added.
    ```c
    typedef struct {
-       atomic_int active;
-       int id;
-       Mailbox mailbox;
-       void (*step)(void*);
-       pthread_t thread;
-       int auto_process;
-       atomic_int assigned_core;
-       atomic_int migrate_to;           // Affinity hint: core to migrate to (-1 = none)
-       atomic_int main_thread_only;     // If set, scheduler threads skip this actor
-       SPSCQueue* spsc_queue;           // Lock-free same-core messaging (lazy alloc)
-       _Atomic(ActorReplySlot*) reply_slot;  // Non-NULL during ask/reply
-       atomic_flag step_lock;           // Prevents concurrent step() during work-steal
-   } ActorBase;
+       AETHER_ACTOR_BASE_FIELDS
+       int count;                       // the actor's own state follows
+   } CounterActor;
    ```
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `main_thread_only`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c

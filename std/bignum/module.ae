@@ -968,6 +968,19 @@ ul(a: ptr, i: int) -> long {
     return intarr_get_raw(a, i) & 0xFFFFFFFF
 }
 
+// D3's test that the quotient estimate is too large: qhat >= 2^32, or
+// qhat * vnext > rhat * 2^32 + next, all as unsigned 64-bit values. The
+// product is only formed once qhat < 2^32, so it cannot wrap.
+qhat_too_big(qhat: long, rhat: long, vnext: long, next: long) -> int {
+    if bits.ucmp64(qhat, 4294967296) >= 0 {
+        return 1
+    }
+    if bits.ucmp64(bits.wrapping_mul64(qhat, vnext), join(rhat, next)) > 0 {
+        return 1
+    }
+    return 0
+}
+
 // hi * 2^32 + lo for 32-bit limbs hi and lo, as the bit pattern a C
 // uint64_t would hold. `hi << 32` on a signed long overflows once hi has
 // its top bit set, which C leaves undefined; the wrapping multiply does not.
@@ -1030,14 +1043,11 @@ mag_divmod_bn(num: ptr, numlen: int, den: ptr, denlen: int) -> (ptr, ptr) {
         j = m - n
         while j >= 0 {
             // D3: estimate qhat from the top two limbs, then correct it with
-            // the next one (at most twice). qhat * vnext is only formed once
-            // qhat < b, so it fits 64 bits unsigned; compared as unsigned.
+            // the next one (at most twice).
             long top = join(ul(un, j + n), ul(un, j + n - 1))
             long qhat = bits.udiv64(top, vtop)
             long rhat = bits.urem64(top, vtop)
-            while bits.ucmp64(qhat, b) >= 0 ||
-                  bits.ucmp64(bits.wrapping_mul64(qhat, vnext),
-                              join(rhat, ul(un, j + n - 2))) > 0 {
+            while qhat_too_big(qhat, rhat, vnext, ul(un, j + n - 2)) == 1 {
                 qhat = qhat - 1
                 rhat = rhat + vtop
                 if rhat >= b {
@@ -1161,7 +1171,7 @@ mod(a: ptr, b: ptr) -> ptr {
 
 // ---- modular exponentiation / gcd / inverse / primality ----
 //
-// These build on multiply + mod (and the binary divide underneath). BC's
+// These build on multiply + mod (and Algorithm D underneath). BC's
 // ModPow uses Barrett / Montgomery reduction and its primality test uses
 // Montgomery-form Miller-Rabin; we use the textbook square-and-multiply +
 // extended-Euclid + plain Miller-Rabin instead — same results, no extern
@@ -1172,8 +1182,8 @@ mod(a: ptr, b: ptr) -> ptr {
 //
 // REDC-based modular exponentiation. For an ODD modulus m with n limbs,
 // R = 2^(32n). We work in Montgomery form (a*R mod m) and use CIOS
-// Montgomery multiplication so the square-and-multiply ladder never calls
-// the O(bits^2) binary divide. Converting to/from Montgomery form uses the
+// Montgomery multiplication so the square-and-multiply ladder never divides.
+// Converting to/from Montgomery form uses the
 // existing mod()/multiply() exactly once each at the boundary, so the final
 // integer result is identical to the schoolbook mod_pow — this is a pure
 // speed path, gated on `m` being odd; even moduli fall back below.

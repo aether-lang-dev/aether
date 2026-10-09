@@ -48,10 +48,6 @@ fn from_hex(s: string) -> ptr {
 
 main() {
     stride = 1
-    wf = os.os_getenv("WYCHEPROOF_FULL")
-    if wf != 0 {
-        if wf == "1" { stride = 1 }
-    }
     sv = os.os_getenv("WYCHEPROOF_STRIDE")
     if sv != 0 { stride = atoi(sv) }
     if stride < 1 { stride = 1 }

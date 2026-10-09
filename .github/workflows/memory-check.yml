@@ -68,7 +68,9 @@ jobs:
       # and 40 minutes here (#2593). The futex lock hands it out in turn.
       #
       # The status is kept for the next step: the run is not cut short by it,
-      # so the log is complete either way.
+      # so the logs are complete either way. Valgrind's report goes to a file
+      # of its own: interleaved with the runner's buffered output, its lines
+      # could start mid-line and escape the checks below.
       run: |
         set +e
         valgrind --leak-check=full \
@@ -78,6 +80,7 @@ jobs:
                  --verbose \
                  --error-exitcode=1 \
                  --suppressions=.valgrind-suppressions \
+                 --log-file=valgrind-report.txt \
                  ./build/test_runner 2>&1 | tee valgrind-output.txt
         echo "status=${PIPESTATUS[0]}" >> "$GITHUB_OUTPUT"
 
@@ -92,16 +95,16 @@ jobs:
         STATUS: ${{ steps.valgrind.outputs.status }}
       run: |
         sed 's/\x1b\[[0-9;]*m//g' valgrind-output.txt > valgrind-clean.txt
-        grep -E '^Summary: ' valgrind-clean.txt || echo "No test summary: the runner did not finish."
-        grep -E '^==[0-9]+== +(ERROR SUMMARY|definitely lost|indirectly lost|possibly lost):' valgrind-clean.txt | sort -u
+        grep -a -E '^Summary: ' valgrind-clean.txt || echo "No test summary: the runner did not finish."
+        grep -a -E '^==[0-9]+== +(ERROR SUMMARY|definitely lost|indirectly lost|possibly lost):' valgrind-report.txt | sort -u
         if [ "$STATUS" = "0" ]; then
           echo "SUCCESS: no memcheck errors, no leaks, no failed tests"
           exit 0
         fi
         echo "ERROR: the Valgrind run exited with status $STATUS"
-        grep -E '\[FAIL\]' valgrind-clean.txt | head -20 || true
+        grep -a -E '\[FAIL\]' valgrind-clean.txt | head -20 || true
         # Valgrind's own report of each error and leak, with its stack.
-        grep -E -A 14 '^==[0-9]+== (Conditional jump|Use of uninitialised|Invalid (read|write|free)|Mismatched free|Syscall param|Source and destination overlap|[0-9,]+ (\(.*\) )?bytes in [0-9,]+ blocks are (definitely|possibly|indirectly) lost)' valgrind-clean.txt | head -120 || true
+        grep -a -E -A 14 '^==[0-9]+== (Conditional jump|Use of uninitialised|Invalid (read|write|free)|Mismatched free|Syscall param|Source and destination overlap|[0-9,]+ (\(.*\) )?bytes in [0-9,]+ blocks are (definitely|possibly|indirectly) lost)' valgrind-report.txt | head -120 || true
         exit 1
 
     - name: Slowest tests under Valgrind
@@ -127,7 +130,9 @@ jobs:
       uses: actions/upload-artifact@v4
       with:
         name: valgrind-report
-        path: valgrind-output.txt
+        path: |
+          valgrind-output.txt
+          valgrind-report.txt
 
   sanitizer-test:
     name: AddressSanitizer & LeakSanitizer

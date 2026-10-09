@@ -71,29 +71,19 @@ Aether implements a lightweight actor model where actors are state machines that
 
 ### Actor Structure
 
-Each actor is a C struct. The first fields must match `ActorBase` layout:
+Each actor is a C struct whose first fields are `ActorBase`'s, since the
+scheduler casts a pointer to it to `ActorBase*`. The fields are declared once,
+in the `AETHER_ACTOR_BASE_FIELDS` macro (`runtime/scheduler/multicore_scheduler.h`),
+and an actor struct expands it first, so its layout cannot drift from the base:
 
 ```c
 typedef struct {
-    atomic_int active;
-    int id;
-    Mailbox mailbox;
-    void (*step)(void*);
-    pthread_t thread;
-    int auto_process;
-    atomic_int assigned_core;
-    atomic_int migrate_to;           // Affinity hint: core to migrate to (-1 = none)
-    atomic_int main_thread_only;     // If set, scheduler threads skip this actor
-    SPSCQueue* spsc_queue;           // Lock-free same-core messaging (lazy alloc)
-    _Atomic(ActorReplySlot*) reply_slot;  // Non-NULL during ask/reply
-    atomic_flag step_lock;           // Prevents concurrent step() during work-steal
-    uint64_t timeout_ns;             // Receive timeout in ns (0 = none)
-    uint64_t last_activity_ns;       // Timestamp when idle started (0 = not idle)
-    atomic_int dead;                 // 1 once step() unwound via panic; actor skipped after
-} ActorBase;
+    AETHER_ACTOR_BASE_FIELDS
+    int count;                       // the actor's own state follows
+} CounterActor;
 ```
 
-User-defined actors extend this layout with additional fields after `dead`.
+The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `main_thread_only`, `spsc_queue`, `reply_slot`, `step_lock`, `timeout_ns`, `last_activity_ns`, `dead`, `alloc_size`, `destroy_state`, `scheduler_owned`, `inbox`, `thread_parked`. The header comments each one.
 
 ## Message Passing
 

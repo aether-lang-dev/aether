@@ -83,14 +83,6 @@ static inline int spsc_enqueue_batch(SPSCQueue* q, const Message* msgs, int coun
     return count;
 }
 
-// Either side: 1 when nothing is queued. A consumer about to sleep on it
-// orders this read after its own "asleep" store (see
-// scheduler_actor_thread_park), or it can miss a message queued meanwhile.
-static inline int spsc_is_empty(SPSCQueue* q) {
-    return atomic_load_explicit(&q->head, memory_order_relaxed) ==
-           atomic_load_explicit(&q->tail, memory_order_acquire);
-}
-
 // Consumer: dequeue single message
 static inline int spsc_dequeue(SPSCQueue* q, Message* out_msg) {
     uint32_t head = atomic_load_explicit(&q->head, memory_order_relaxed);
