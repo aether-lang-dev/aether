@@ -243,6 +243,15 @@ int  run_cross_compile_obj(const char* c_file, const char* obj_file,
 int ae_resolve_dependencies(void);
 void ae_dep_override_append(const char* spec);
 
+/* contrib.sqlite from the pinned amalgamation the toolchain ships (#1372):
+ * compile the veneer and the (cached) amalgamation with `cc_cmd` for `tag` (a
+ * target triple, or "host") and append both objects, quoted, to `link_objs`.
+ * `objdir` NULL caches the veneer too. False, having said why, on failure. */
+bool ae_vendored_sqlite(const char* base, const char* tag,
+                        const char* cc_cmd, const char* flags,
+                        const char* objdir,
+                        char* link_objs, size_t link_sz);
+
 int  run_cross_build(const char* c_file, const char* out_file,
                      bool optimize, const char* extra_files,
                      const char* ztriple, bool emit_lib, bool emit_staticlib);

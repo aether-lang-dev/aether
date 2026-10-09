@@ -2583,7 +2583,14 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
 
     // When entering a function definition, collect its local names for shadowing checks.
     // Limit: 128 locals per function — excess names won't shadow module constants.
-    if (node->type == AST_FUNCTION_DEFINITION) {
+    /* A builder body is a function body: its parameters and locals shadow
+     * a same-named module function exactly as a plain function's do.
+     * Without AST_BUILDER_FUNCTION here a builder entered no scope, so
+     * `builder java_main(main_class: string)` beside a `main_class()` setter
+     * had every read of the parameter renamed to `<prefix>_main_class` -- the
+     * setter's ADDRESS interpolated, compared with 1, or passed as an int
+     * (aeb asks/builder-local-resolves-to-module-function.md). */
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
         const char* nested_locals[128];
         int nested_local_count = 0;
         collect_local_names(node, nested_locals, &nested_local_count, 128);
@@ -3003,7 +3010,8 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
         }
     }
 
-    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_CLOSURE) {
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
+        node->type == AST_CLOSURE) {
         const char* scope_locals[128];
         int scope_count = 0;
         collect_local_names(node, scope_locals, &scope_count, 128);
@@ -3081,7 +3089,8 @@ static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
         }
     }
 
-    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_CLOSURE) {
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
+        node->type == AST_CLOSURE) {
         const char* scope_locals[128];
         int scope_count = 0;
         collect_local_names(node, scope_locals, &scope_count, 128);

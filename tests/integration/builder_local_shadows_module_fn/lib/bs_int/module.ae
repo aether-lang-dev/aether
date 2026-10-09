@@ -1,0 +1,12 @@
+// Shape 3 (aeb fetch.git): a builder LOCAL named like a module function (a
+// setter), passed as an int argument. The local must win.
+exports(depth, show_depth, git)
+
+depth(_ctx: ptr, n: int) { println("SETTER depth(${n})") }
+show_depth(d: int) { println("depth=${d}") }
+
+builder git(url: string, want: int): int {
+    depth = want
+    show_depth(depth)
+    return 0
+}

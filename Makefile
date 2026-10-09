@@ -2389,8 +2389,8 @@ install: $(VERSION_HEADER) release-build ae stdlib
 	@# (compiler/aether_module.c:436-484). The matching .a archives are
 	@# still built+installed separately by `make install-contrib`, which
 	@# probes for system dependencies (sqlite3-dev, etc.); without that
-	@# step a link of `import contrib.sqlite` will fail loudly — fine,
-	@# the resolver-side pain Paul filed is the one that's silent.
+	@# step `ae build` compiles contrib.sqlite's veneer and the shipped
+	@# amalgamation itself, and the other C-backed modules @source theirs.
 	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
 	@# Trim source-tree noise from the contrib install: tests, benchmarks,

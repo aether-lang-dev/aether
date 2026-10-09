@@ -27,9 +27,16 @@
 //                    (NOT bytes.finish, which destroys the buffer) if the
 //                    pixels then need to be passed on as a string.
 //
-// A C-only dependency: link with
-//   [build] link_flags = "-laether_avcodec -lavcodec -lavformat -lavutil -lswscale"
-// Nothing is vendored in contrib/.
+// A C-only dependency: FFmpeg's development libraries must be installed.
+// The veneer, aether_avcodec.c, is compiled into every program that imports
+// the module (@source, #2125) and FFmpeg's libraries go on the link (@link,
+// #1549), so no aether.toml entry is needed -- a binary release ships the
+// veneer as source and builds no libaether_avcodec.a. Nothing of FFmpeg is
+// vendored in contrib/. On Windows `ae` links -static, and a static FFmpeg
+// also needs its own dependencies: add `pkg-config --static --libs libavcodec
+// libavformat libavutil libswscale libswresample` to [build] link_flags.
+@source("aether_avcodec.c")
+@link("-lavcodec -lavformat -lavutil -lswscale -lswresample")
 
 exports(
     avc_open_raw, avc_close_raw,

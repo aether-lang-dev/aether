@@ -225,6 +225,14 @@ extracted files, so an installed toolchain never fetches anything.
   builds reuse the object. A `CROSSBUILD_SYSROOT` that stages
   `libaether_sqlite.a` and `libsqlite3.a` for the target still takes
   precedence.
+- **No archives (a binary release, or a tree without `make contrib`).**
+  `ae build` finds no `libaether_sqlite.a` beside `libaether.a`, so it
+  compiles the veneer and the amalgamation that ship in
+  `share/aether/contrib/sqlite/` with the host compiler and links the objects
+  in place of `-laether_sqlite -lsqlite3`. Both objects are cached in the ae
+  cache, so only the first build prints `Compiling SQLite for host` and pays
+  for the amalgamation. Before this a release-only install failed with
+  `library 'aether_sqlite' not found`.
 - **System library (fallback).** When the amalgamation cannot be fetched
   (offline, no `curl`/`wget`) or `SQLITE_SYSTEM=1` is set, `make contrib`
   builds the veneer against the system `sqlite3.h` and `-lsqlite3` links the
@@ -239,8 +247,9 @@ To move to a newer SQLite, change the four pinned values in
 `amalgamation.lock` and run the fetch script. The `SQLITE_SHA3_256` that
 sqlite.org lists on its download page is kept beside the SHA-256 for audit.
 
-**Without the archives** (no `make contrib`): put the bridge in
-`extra_sources` and link the system library.
+**Against the system library instead** (a tree with no amalgamation and no
+`make contrib`): put the bridge in `extra_sources` and link the system
+library.
 
 ```toml
 [[bin]]
