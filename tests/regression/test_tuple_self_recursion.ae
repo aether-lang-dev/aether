@@ -1,0 +1,88 @@
+// Regression (#2641): a tuple function that fills a position from its own
+// recursive call hands over what it returns there.
+//
+// The position was classified while the function was still being analysed,
+// so the recursive call counted as borrowed and so did the position: the
+// base case handed its parameter back, every caller kept its argument alive,
+// and the outermost caller never freed the result, a string per level. A
+// position filled from the function's own call now counts as heap, as a
+// self-recursive `return f(...)` does for a string: the base case returns a
+// copy, and callers free their arguments and the result.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Through a destructure of its own call.
+count_x(n: int, acc: string) -> (string, int) {
+    if n == 0 {
+        return acc, 0
+    }
+    s, k = count_x(n - 1, string.concat(acc, "y"))
+    return s, k + 1
+}
+
+// The same, written as clauses.
+count_c(0, acc: string) -> (string, int) {
+    return acc, 0
+}
+count_c(n: int, acc: string) -> (string, int) {
+    s, k = count_c(n - 1, string.concat(acc, "z"))
+    return s, k + 1
+}
+
+// Its own tuple returned whole.
+pass_down(n: int, acc: string) -> (string, int) {
+    if n == 0 {
+        return acc, n
+    }
+    return pass_down(n - 1, string.concat(acc, "p"))
+}
+
+round(w: string) -> int {
+    a, i = count_x(2, w)
+    b, j = count_c(3, w)
+    c, k = pass_down(2, w)
+    return string.length(a) + i + string.length(b) + j + string.length(c) + k
+}
+
+main() {
+    println("=== test_tuple_self_recursion ===")
+    w = string.concat("w", string.from_int(1))
+    a, i = count_x(2, w)
+    check(a == "w1yy" && i == 2, "a destructure of its own call")
+    b, j = count_c(3, w)
+    check(b == "w1zzz" && j == 3, "the same as clauses")
+    c, k = pass_down(2, w)
+    check(c == "w1pp" && k == 0, "its own tuple returned whole")
+    check(round(w) == (4 + 2) + (5 + 3) + (4 + 0), "a round adds up")
+    n = 0
+    while n < 20 {
+        round(w)
+        n = n + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                r = 0
+                while r < 200 {
+                    round(w)
+                    r = r + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_tuple_self_recursion passed ===")
+}

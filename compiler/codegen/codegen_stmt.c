@@ -1529,6 +1529,23 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
 static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
                                          int position);
 
+/* The tuple function function_def_returns_heap_at is walking. A position
+ * it fills from its own recursive call (`s, k = f(n - 1, ...); return s, k`,
+ * or `return f(n - 1, ...)` whole) is what the function hands over there,
+ * whatever that turns out to be, so it counts as heap, as a self-recursive
+ * `return f(...)` does for a string (walk_returns_for_heap_check): the
+ * uniform-heap wrap then copies a parameter or literal its base case
+ * returns. Taken as borrowed, the base case handed its parameter back, so
+ * every caller kept its argument alive and never freed the result: a
+ * string per level leaked. Only the function itself: a function it calls
+ * back and forth with is still asked, and its answer may yet be no. */
+static const char* g_tuple_self = NULL;
+
+static int tuple_self_call(ASTNode* call) {
+    return g_tuple_self && call && call->type == AST_FUNCTION_CALL && call->value &&
+           strcmp(codegen_normalise_callee(call->value), g_tuple_self) == 0;
+}
+
 /* The `catch NAME` bindings in scope at a node, innermost last. A catch
  * binding may own a heap-built panic reason (#2333), so a value taken
  * from one is heap evidence for the return classifiers: the uniform-heap
@@ -1669,19 +1686,33 @@ static ASTNode* fn_def_of_body(CodeGenerator* gen, ASTNode* root) {
  * function when a memoised classifier first asks (the invariant at
  * body_tuple_destructure_binds_heap, #1311): `t = x; return t` in a
  * function first classified at its caller's site was taken as borrowed, and
- * every call leaked t. */
+ * every call leaked t. Nor does a tracker prove ownership: every string
+ * local has one, so a list adopted a literal bound through an alias and
+ * freed it. A chain of aliases is followed to its end; one that comes back
+ * to a name already followed adds nothing. Past ALIAS_CHAIN_MAX names the
+ * answer is the one each caller can afford: owned inside a classifier,
+ * whose shim reads the runtime flag, not owned for a container store, which
+ * then copies. */
+#define ALIAS_CHAIN_MAX 64
+/* The names being followed, with the body each belongs to: a walk of
+ * another body (a callee classified on the way) pushes above and pops. */
+static struct { ASTNode* root; const char* name; } g_alias_chain[ALIAS_CHAIN_MAX * 4];
+static int g_alias_chain_top = 0;
+
 static int alias_source_owns(CodeGenerator* gen, ASTNode* root, const char* name,
                              CatchScope* cs, int depth) {
-    if (!root || !name || depth >= 8) return 0;
-    /* Asked for the body being emitted, outside a classifier (a container
-     * store of the local), its own tracker table answers as well. */
-    if (!g_classifying && gen && gen->current_function && is_heap_string_var(gen, name)) {
-        for (int k = 0; k < gen->current_function->child_count; k++)
-            if (gen->current_function->children[k] == root) return 1;
-    }
+    if (!root || !name) return 0;
+    if (depth >= ALIAS_CHAIN_MAX || g_alias_chain_top >= ALIAS_CHAIN_MAX * 4)
+        return g_classifying ? 1 : 0;
+    for (int i = 0; i < g_alias_chain_top; i++)
+        if (g_alias_chain[i].root == root && strcmp(g_alias_chain[i].name, name) == 0) return 0;
+    g_alias_chain[g_alias_chain_top].root = root;
+    g_alias_chain[g_alias_chain_top].name = name;
+    g_alias_chain_top++;
     CatchScope fresh = { {0}, 0 };
-    if (body_assigns_var_from_heap_in(gen, root, name, cs ? &fresh : NULL, root, depth + 1))
-        return 1;
+    int owns = body_assigns_var_from_heap_in(gen, root, name, cs ? &fresh : NULL, root, depth + 1);
+    g_alias_chain_top--;
+    if (owns) return 1;
     ASTNode* fn = fn_def_of_body(gen, root);
     for (int i = 0; fn && i < fn->child_count; i++) {
         ASTNode* p = fn->children[i];
@@ -1739,6 +1770,7 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
             ASTNode* tgt = node->children[j];
             if (tgt && tgt->value && strcmp(tgt->value, var_name) == 0) {
                 if (gen && tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
+                if (tuple_self_call(rhs)) return 1;
                 if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value &&
                     gen && gen->program) {
                     const char* fn = codegen_normalise_callee(rhs->value);
@@ -1796,6 +1828,7 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
                 continue;
             }
             if (tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
+            if (tuple_self_call(rhs)) return 1;
             if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value) {
                 const char* fn = codegen_normalise_callee(rhs->value);
                 ASTNode* callee = find_function_definition_by_name(gen->program, fn);
@@ -1999,6 +2032,37 @@ static const DefClauses* fn_clause_set(CodeGenerator* gen, ASTNode* fn_def) {
     return NULL;
 }
 
+/* The functions a return classifier is analysing, for the ones whose
+ * annotation cannot take the "heap_pending" mark because it carries
+ * something else (a @c_callback symbol, the other classifier's memo).
+ * Asked again while open, the answer is no, as for a marked one; without
+ * it a tuple function reaching itself through a destructure recursed until
+ * the compiler's stack ran out. */
+#define CLASSIFY_OPEN_MAX 128
+static ASTNode* g_classify_open[CLASSIFY_OPEN_MAX];
+static int g_classify_open_count = 0;
+
+static int classify_open_has(ASTNode* fn) {
+    for (int i = 0; i < g_classify_open_count; i++)
+        if (g_classify_open[i] == fn) return 1;
+    return 0;
+}
+
+/* Open every clause of `fn_def` (one node for a single definition); returns
+ * how many were pushed, for classify_close. */
+static int classify_open(const DefClauses* dc, ASTNode* fn_def) {
+    int n = dc ? dc->count : 1, pushed = 0;
+    for (int c = 0; c < n && g_classify_open_count < CLASSIFY_OPEN_MAX; c++) {
+        g_classify_open[g_classify_open_count++] = dc ? dc->nodes[c] : fn_def;
+        pushed++;
+    }
+    return pushed;
+}
+
+static void classify_close(int pushed) {
+    g_classify_open_count -= pushed;
+}
+
 static ASTNode* fn_def_body(ASTNode* fn_def) {
     for (int i = 0; fn_def && i < fn_def->child_count; i++) {
         ASTNode* c = fn_def->children[i];
@@ -2029,6 +2093,10 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
         // — analyse afresh, but skip caching to preserve the original
         // annotation for downstream codegen.
     }
+    /* A tuple's positions are function_def_returns_heap_at's, which keeps
+     * its own memo in the same annotation: a "heap_yes" here hid it. */
+    if (fn_def->node_type && fn_def->node_type->kind == TYPE_TUPLE) return 0;
+    if (classify_open_has(fn_def)) return 0;
     /* One clause hands over an owned string: every clause does, its other
      * returns taken through the uniform-heap shim (should_uniform_heap_return
      * asks this of the clause being emitted). */
@@ -2042,6 +2110,7 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     }
     int any_heap = 0;
     int any_non_heap = 0;
+    int opened = classify_open(dc, fn_def);
     g_classifying++;
     for (int c = 0; c < nclauses; c++) {
         ASTNode* clause = dc ? dc->nodes[c] : fn_def;
@@ -2050,6 +2119,7 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
                                               &any_heap, &any_non_heap);
     }
     g_classifying--;
+    classify_close(opened);
     int result = any_heap ? 1 : 0;
 
     for (int c = 0; c < nclauses && c < 64; c++) {
@@ -3684,6 +3754,18 @@ static int should_uniform_heap_return(CodeGenerator* gen, ASTNode* stmt) {
  * Invariant: only call when the enclosing function is classifier-
  * classified heap-returning. For non-heap functions, the raw return
  * still works because the caller doesn't free. */
+/* #2586: is the function being emitted one used as a typed fn-pointer
+ * value, returning a single string? Its owned returns are then marked for a
+ * call through a pointer (aether_fnptr_give). Not a closure's body, nor a
+ * tuple position. */
+int emitting_marked_fn_value(CodeGenerator* gen) {
+    ASTNode* fn = gen ? gen->current_function : NULL;
+    return fn && (fn->type == AST_FUNCTION_DEFINITION) && !gen->in_string_closure &&
+           gen->current_func_return_type &&
+           gen->current_func_return_type->kind == TYPE_STRING &&
+           fn_value_name(fn->value);
+}
+
 static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return 0;
     /* Tuple returns flow through their own per-position channel
@@ -3691,11 +3773,14 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
      * Multi-value returns reach the caller's RHS site element by
      * element, not as a single pointer, so the uniform-heap shim
      * is the wrong shape there — the caller is responsible. */
+    int give = emitting_marked_fn_value(gen);
+    if (give) fprintf(gen->output, "aether_fnptr_give(");
     if (expr->type == AST_IF_EXPRESSION && string_take_is_view(gen, expr)) {
         /* #2461: the arm that runs is taken as a binding would take it (a
          * local moved out of this scope, a field read copied, a fresh
          * value adopted); the shim copies only what is still borrowed. */
         emit_string_take_owned(gen, expr, 0);
+        if (give) fprintf(gen->output, ")");
         return 1;
     }
     fprintf(gen->output, "aether_uniform_heap_str(");
@@ -3718,6 +3803,7 @@ static int emit_uniform_heap_return_expr(CodeGenerator* gen, ASTNode* expr) {
         fprintf(gen->output, "0");
     }
     fprintf(gen->output, ")");
+    if (give) fprintf(gen->output, ")");
     return 1;
 }
 
@@ -3851,6 +3937,8 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
             }
             if (child_is_tuple && tuple_call_pos_copied(gen, child, position)) {
                 *any_heap = 1;   /* #2619: copied where the call was made */
+            } else if (child_is_tuple && tuple_self_call(child)) {
+                *any_heap = 1;   /* its own position, whatever it is */
             } else if (callee && function_def_returns_heap_at(gen, callee, position)) {
                 *any_heap = 1;
             } else if (ext_callee && ext_callee->node_type &&
@@ -3960,9 +4048,9 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
         strcmp(fn_def->annotation, "heap_pending") == 0) {
         return 0;
     }
-    /* Some unrelated annotation (e.g. "c_callback:...", "heap_yes"
-     * for a single-value function that's somehow being asked at
-     * position 0) — analyse without clobbering. */
+    /* Some unrelated annotation (e.g. "c_callback:...") — analyse
+     * without clobbering, under the open guard. */
+    if (classify_open_has(fn_def)) return 0;
     /* Every clause of a function written as several (#2627), as for a
      * string result. */
     const DefClauses* dc = fn_clause_set(gen, fn_def);
@@ -3977,6 +4065,9 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
     int tuple_count = fn_def->node_type->tuple_count;
     int* per_pos = (int*)calloc((size_t)tuple_count, sizeof(int));
 
+    int opened = classify_open(dc, fn_def);
+    const char* saved_self = g_tuple_self;
+    g_tuple_self = fn_def->value;
     g_classifying++;
     for (int p = 0; p < tuple_count; p++) {
         int found = 0, any_heap = 0, vetoed = 0;
@@ -3994,6 +4085,8 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
         per_pos[p] = (found && any_heap && !vetoed) ? 1 : 0;
     }
     g_classifying--;
+    g_tuple_self = saved_self;
+    classify_close(opened);
 
     int result = per_pos[position];
 
@@ -5220,12 +5313,35 @@ int callee_keeps_string_arg(CodeGenerator* gen, const char* func_name, int param
     return r;
 }
 
+/* Does every return of `fn_def` hand over a copy of what it returns, never
+ * a parameter as it came? A string result classified heap does (the
+ * uniform-heap wrap). So does a tuple whose every string position is heap
+ * and that has no position a string can reach otherwise (a `ptr`): its
+ * returns wrap each string position. */
+static int returns_copy_of_params(CodeGenerator* gen, ASTNode* fn_def) {
+    if (!fn_def) return 0;
+    Type* rt = fn_def->node_type;
+    if (rt && rt->kind == TYPE_TUPLE) {
+        for (int p = 0; p < rt->tuple_count; p++) {
+            Type* t = rt->tuple_types ? rt->tuple_types[p] : NULL;
+            if (!t) return 0;
+            if (t->kind == TYPE_STRING) {
+                if (!function_def_returns_heap_at(gen, fn_def, p)) return 0;
+            } else if (param_may_hold_caller_string(t)) {
+                return 0;
+            }
+        }
+        return 1;
+    }
+    return function_def_returns_heap_string(gen, fn_def);
+}
+
 static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
                                         int param_idx, int depth) {
     if (callee_string_param_captures_at(gen, func_name, param_idx, depth)) return 0;
     const char* fn = codegen_normalise_callee(func_name);
     ASTNode* fn_def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
-    int copies = fn_def && function_def_returns_heap_string(gen, fn_def);
+    int copies = returns_copy_of_params(gen, fn_def);
     return callee_string_param_kept_at(gen, func_name, param_idx, !copies, depth);
 }
 
@@ -14421,6 +14537,7 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
     gen.program = program;
     /* The verdicts are codegen's, on the tree codegen reads. */
     erase_string_retype_casts(program);
+    discover_fn_values(&gen);   /* #2586 */
     /* Populate the extern registry so type-based escape analysis can
      * resolve `string.length`-style param kinds — without this every
      * call falls into the TYPE_UNKNOWN branch of call_arg_escapes,

@@ -7,17 +7,21 @@
 // emitted. A caller emitted first saw a borrowed result, and every call leaked
 // t. The alias is now judged against the function's own body (a local it
 // binds from a fresh string, or a parameter it keeps a reference of its own
-// to).
+// to), however long the chain of aliases, and a tracker alone no longer
+// counts as ownership.
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
 // (mem.steady_growth). Strings are built from parameters, because
 // string.concat of two literals folds to a literal.
 
+import std.list
 import std.mem
 import std.string
 
 extern exit(code: int)
+
+var g_t: string = ""
 
 fn check(cond: bool, msg: string) {
     if !cond {
@@ -35,6 +39,11 @@ use_alias(s: string) -> int {
 
 use_chain(s: string) -> int {
     g = alias_chain(s)
+    return string.length(g)
+}
+
+use_long_chain(s: string) -> int {
+    g = long_chain(s)
     return string.length(g)
 }
 
@@ -59,15 +68,54 @@ alias_chain(s: string) -> string {
     return z
 }
 
+// Eleven names, each bound to the one before.
+long_chain(a: string) -> string {
+    x0 = string.concat(a, "*")
+    x1 = x0
+    x2 = x1
+    x3 = x2
+    x4 = x3
+    x5 = x4
+    x6 = x5
+    x7 = x6
+    x8 = x7
+    x9 = x8
+    x10 = x9
+    return x10
+}
+
+// A module-level var bound to a local that only ever holds literals, then
+// stored in a list (#2642): a tracker is no proof of ownership, and the list
+// adopted the literal and freed it.
+fill(n: int) -> int {
+    xs = list.new()
+    x = "1"
+    if n > 5 {
+        x = "2"
+    }
+    g_t = x
+    list.add(xs, g_t)
+    k = list.size(xs)
+    list.free(xs)
+    return k
+}
+
 round(base: string) -> int {
-    return use_alias(base) + use_chain(base)
+    return use_alias(base) + use_chain(base) + use_long_chain(base)
 }
 
 main() {
     println("=== test_alias_return_classification ===")
     check(keep_alias("w") == "w?", "an alias of a local")
     check(alias_chain("w") == "w!", "an alias of an alias")
-    check(round("w") == 2 + 2, "a round adds up")
+    check(round("w") == 2 + 2 + 2, "a round adds up")
+    stored = 0
+    n = 0
+    while n < 10 {
+        stored = stored + fill(n)
+        n = n + 1
+    }
+    check(stored == 10, "a module var aliasing a literal goes into a list")
     i = 0
     while i < 20 {
         round("w")

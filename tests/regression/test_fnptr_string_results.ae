@@ -5,13 +5,15 @@
 // uniform-heap return), and a direct caller frees it. A call through a typed
 // fn pointer could not tell which function was behind it and took the result
 // as borrowed, so ae3d's component copy, `setter(dst, getter(src))`, leaked
-// one string per call. Now a named function used as such a value hands its
-// result over owned (as it is when it returns owned strings, copied when it
-// returns a literal or a borrow), a call through the pointer frees it after
-// use, and an owned string argument to such a call is freed after the call.
-// A @c_callback function, a sized-array parameter and clauses that disagree
-// on what they hand over are covered too. The C side (a pointer from C, a
-// function handed to C) is tests/integration/fnptr_string_c_side.
+// one string per call. Now a function used as such a value marks the owned
+// string it returns, a call through the pointer takes a marked result as it
+// is and copies anything else (a literal, a borrow, C's string), and an owned
+// string argument to such a call is freed after the call. A @c_callback
+// function, a sized-array parameter, clauses that disagree on what they hand
+// over, a clause set whose literal pattern precedes the stored argument, a
+// call inside an extern's argument and a tuple function that destructures
+// itself are covered too. The C side (pointers C made, a function handed to
+// C) is tests/integration/fnptr_string_c_side.
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
@@ -23,6 +25,7 @@ import std.mem
 import std.string
 
 extern exit(code: int)
+extern abs(x: int) -> int
 
 struct Thing {
     name: string
@@ -123,7 +126,47 @@ round(fields: ptr, a: *Thing, b: *Thing) -> int {
     total = total + length_through(tag_cb, a as ptr)
     total = total + length_of_pick(pick_of, string.concat(a.name, "?"))
     total = total + length_of_clause(clause_name, 5) + length_of_clause(clause_name, 0)
+    m = measure as fn(fn(string) -> string, string) -> int
+    total = total + abs(m(label_of, a.name))
     return total
+}
+
+// A string a named function returns, read through a typed pointer inside an
+// extern's argument.
+measure(f: fn(string) -> string, s: string) -> int {
+    return string.length(f(s))
+}
+
+label_of(s: string) -> string {
+    return "label"
+}
+
+// A clause set used as a typed pointer, whose first clause has a literal
+// pattern before the string a later clause stores: the argument's position
+// counts the literal.
+put_name(t: ptr, 0, s: string) -> int {
+    return 0
+}
+put_name(t: ptr, n: int, s: string) -> int {
+    thing = t as *Thing
+    thing.name = s
+    return n
+}
+
+// A tuple function that destructures its own result, reached from a
+// function used as a value: the classifiers recursed until the compiler's
+// stack ran out.
+count_x(n: int, acc: string) -> (string, int) {
+    if n == 0 {
+        return acc, 0
+    }
+    s, k = count_x(n - 1, string.concat(acc, "y"))
+    return s, k + 1
+}
+
+count_work(w: string) -> int {
+    c, k = count_x(2, w)
+    return string.length(c) + k
 }
 
 length_through(g: fn(ptr) -> string, p: ptr) -> int {
@@ -176,8 +219,15 @@ main() {
     // Per field: b after the copy, read back, then a read directly. The
     // loud getter adds "!" to whatever it reads: "w#!" copied into b reads
     // back as "w#!!". The last field copies plain_name's "w#".
-    check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3 + 8 + 3 + 2 + 3, "a round adds up")
+    check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3 + 8 + 3 + 2 + 3 + 5, "a round adds up")
     check(b.name == "w#", "the copied field holds its own string")
+    box = new_thing("q")
+    keep = put_name as fn(ptr, int, string) -> int
+    check(keep(box as ptr, 1, string.concat(a.name, "cd")) == 1, "the storing clause ran")
+    filler = string.concat(a.name, "zzzz")
+    check(box.name == "w#cd" && filler == "w#zzzz", "a stored argument outlives the call")
+    counter = count_work as fn(string) -> int
+    check(counter(a.name) == 6, "a tuple function that destructures itself")
     i = 0
     while i < 20 {
         round(fields, a, b)

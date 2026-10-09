@@ -453,16 +453,14 @@ void emit_bare_fn_adapters(CodeGenerator* gen);
  * them) are emitted, so the closure functions see the prototype in scope. */
 void emit_bare_fn_adapter_decls(CodeGenerator* gen);
 void discover_bare_fn_adapters(CodeGenerator* gen);
-void reset_fn_values(void);                                        /* #2586 */
 void discover_fn_values(CodeGenerator* gen);                       /* #2586 */
+void compute_fnptr_args_borrowed(CodeGenerator* gen);              /* #2586 */
+int fn_value_name(const char* name);
+int emitting_marked_fn_value(CodeGenerator* gen);
 int fnptr_arg_borrowed(int slot);
-int fnptr_string_results_owned(void);
 int typed_fnptr_call(CodeGenerator* gen, ASTNode* call);
 int param_may_hold_caller_string(const Type* t);
 void callee_memo_clear(CodeGenerator* gen);
-const char* fnval_string_adapter(CodeGenerator* gen, const char* name);
-void emit_fn_value_adapter_decls(CodeGenerator* gen);
-void emit_fn_value_adapters(CodeGenerator* gen);
 int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call);
 
 /* Function/struct generation (codegen_func.c) */

@@ -6446,6 +6446,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
        without changing the child count it is keyed on. */
     program_index_reset();
     erase_string_retype_casts(program);
+    /* #2586: the functions used as fn-pointer values, by name, before any
+     * pass classifies a function or emits a return of one. */
+    discover_fn_values(gen);
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
     // here means every per-fn codegen pass beyond this point can
@@ -7206,6 +7209,26 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "        _n = strlen(s);");
     print_line(gen, "    }");
     print_line(gen, "    return (const char*)string_new_with_length(_data, (int)_n);");
+    print_line(gen, "}");
+    /* #2586: ownership through a typed fn pointer, decided at run time. A
+     * function used as a fn-pointer value that hands over owned strings
+     * marks the one it returns (give, at its uniform-heap returns); a call
+     * through a typed pointer clears the mark after its argument
+     * temporaries and before the call (reset), and takes the result as owned
+     * when it is the marked pointer, copying anything else (take): a C
+     * function never marks, so C's string stays C's, and a string an Aether
+     * function returns borrowed (a literal, its own parameter) is copied
+     * before the call's temporaries are freed. g_aether_fnptr_owned is the
+     * runtime's (aether_panic.h), shared by every translation unit. */
+    print_line(gen, "static inline const char* aether_fnptr_give(const char* s) {");
+    print_line(gen, "    g_aether_fnptr_owned = (const void*)s;");
+    print_line(gen, "    return s;");
+    print_line(gen, "}");
+    print_line(gen, "static inline void aether_fnptr_reset(void) { g_aether_fnptr_owned = (const void*)0; }");
+    print_line(gen, "static inline const char* aether_fnptr_take(const char* r) {");
+    print_line(gen, "    int _owned = r && (const void*)r == g_aether_fnptr_owned;");
+    print_line(gen, "    g_aether_fnptr_owned = (const void*)0;");
+    print_line(gen, "    return aether_uniform_heap_str(r, _owned);");
     print_line(gen, "}");
     /* AetherString-aware heap-string release. A `_heap_<name>` slot
      * tracked by the codegen can hold two physically distinct shapes:
@@ -8557,11 +8580,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * bodies still come after (they call the user fns by their real C name,
      * so they must follow the user fn definitions). */
     discover_bare_fn_adapters(gen);
-    reset_fn_values();                    /* #2586: the closure walks see no fn values yet */
     compute_closure_args_borrowed(gen);   /* #2499: needs closures and adapters */
-    discover_fn_values(gen);              /* #2586 */
+    compute_fnptr_args_borrowed(gen);     /* #2586: after the closure answer */
     emit_bare_fn_adapter_decls(gen);
-    emit_fn_value_adapter_decls(gen);
     emit_module_global_vars(gen, program);   /* #2623: after the prototypes */
 
     if (gen->closure_count > 0) {
@@ -8570,7 +8591,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     }
 
     emit_bare_fn_adapters(gen);
-    emit_fn_value_adapters(gen);          /* #2586 */
 
     // Pre-pass: build request->reply type map from actor receive handlers.
     // This lets the ? operator know the reply message type at codegen time.
