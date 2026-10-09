@@ -1,0 +1,81 @@
+// Regression (#2653): a closure kept in a struct field is called directly,
+// `h.cb(2)`, as `call(h.cb, 2)` calls it.
+//
+// The parser collapses `h.cb(2)` to a call named `h.cb`, which a typed
+// fn-pointer field resolves (#749) but a bare `fn` field did not: it was
+// "Undefined function 'h.cb'". The call is now the explicit `call(h.cb, 2)`,
+// rebuilt from the dotted name, on a struct value and through a pointer,
+// for a result used, bound and thrown away; a capturing closure keeps its
+// environment, and a string result is handed over as `call` hands it over.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    cb: fn
+    name: fn
+}
+
+var seen = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+through(ph: *Holder, n: int) -> int {
+    return ph.cb(n)
+}
+
+round(h: Holder, w: string) -> int {
+    string s = h.name(w)
+    return h.cb(1) + string.length(s)
+}
+
+main() {
+    println("=== test_closure_field_call ===")
+    base = 10
+    h = Holder {
+        cb: | x: int | {
+            seen = seen + 1
+            return x + base
+        },
+        name: | s: string | { return string.concat(s, "!") }
+    }
+    check(h.cb(2) == call(h.cb, 2), "a direct call is the call(...) form")
+    check(h.cb(2) == 12, "a capturing closure in a field (got ${h.cb(2)})")
+    check(through(&h, 5) == 15, "a closure field called through a pointer")
+    string s = h.name("hey")
+    check(s == "hey!", "a string result")
+    before = seen
+    h.cb(0)
+    check(seen == before + 1, "a call whose result is thrown away still runs")
+    w = string.concat("w", string.from_int(1))
+    check(round(h, w) == 11 + 3, "a round adds up")
+
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 20 {
+            round(h, w)
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(h, w)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_closure_field_call passed ===")
+}

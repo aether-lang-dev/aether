@@ -2653,13 +2653,15 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
  * local it re-binds, or of the module-level `var` it assigns when no local
  * of the name is in scope. The global is found in the program, not the file
  * scope's table, where the early inference pass parks locals under their
- * own types. A `const` is no such slot: it is not a variable a call goes
- * through, and its static is emitted before any function is declared. */
+ * own types. A `const` annotated with a typed fn pointer is that slot too,
+ * holding the function's address as a `var` does (#2648); it is never
+ * re-bound, so only its annotation counts. */
 static ASTNode* global_var_decl(ASTNode* child);
 static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
-    if (stmt->type == AST_CONST_DECLARATION &&
-        !(stmt->annotation && strcmp(stmt->annotation, "global_var") == 0)) return NULL;
     Type* t = stmt->node_type;
+    if (stmt->type == AST_CONST_DECLARATION &&
+        !(stmt->annotation && strcmp(stmt->annotation, "global_var") == 0))
+        return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
     if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) return t;
     if (!stmt->type_inferred || !stmt->value) return NULL;
     for (SymbolTable* s = table; s && s->parent; s = s->parent) {
@@ -5746,9 +5748,60 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
     }
 }
 
+/* #2654: the message pattern a receive arm matches, as codegen finds it: a
+ * `Msg(...) -> body` arm, or the first pattern of a V1 block. */
+static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
+    if (!arm) return NULL;
+    if (arm->type == AST_RECEIVE_ARM && arm->child_count >= 2)
+        return arm->children[0] && arm->children[0]->type == AST_MESSAGE_PATTERN
+               ? arm->children[0] : NULL;
+    if (arm->type == AST_BLOCK) {
+        for (int k = 0; k < arm->child_count; k++)
+            if (arm->children[k] && arm->children[k]->type == AST_MESSAGE_PATTERN)
+                return arm->children[k];
+    }
+    return NULL;
+}
+
+/* #2654: a second receive arm for a message the actor already receives
+ * can never run. An arm matches by the message alone (a pattern binds
+ * fields and takes no guard), and a message is dispatched to one handler
+ * per message type; with two, the C had two definitions of that handler.
+ * Each arm after the first for a message is refused, naming both, in any
+ * of the actor's receive blocks. */
+static void reject_duplicate_receive_arms(ASTNode* actor) {
+    ASTNode* seen[256];
+    int seen_count = 0;
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* pattern = receive_arm_message_pattern(rs->children[j]);
+            if (!pattern || !pattern->value) continue;
+            ASTNode* first = NULL;
+            for (int s = 0; s < seen_count && !first; s++)
+                if (strcmp(seen[s]->value, pattern->value) == 0) first = seen[s];
+            if (first) {
+                char msg[320];
+                snprintf(msg, sizeof(msg),
+                         "this receive arm for '%s' can never run: the arm for '%s' at "
+                         "line %d already receives every '%s' message of actor '%s'. "
+                         "Handle both cases in that one arm",
+                         pattern->value, first->value, first->line, pattern->value,
+                         actor->value ? actor->value : "?");
+                type_error(msg, pattern->line, pattern->column);
+            } else if (seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
+                seen[seen_count++] = pattern;
+            }
+        }
+    }
+}
+
 int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return 0;
-    
+
+    reject_duplicate_receive_arms(actor);   /* #2654 */
+
     SymbolTable* actor_table = create_symbol_table(table);
     
     // Type check actor body
@@ -10666,13 +10719,11 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     return 1;
 }
 
-/* #749: resolve `<recv>.<field>` where `recv` is a local struct or
- * pointer-to-struct whose `field` is a function-pointer member. Returns
- * the field's TYPE_FUNCTION (is_fnptr) Type* (borrowed — do not free) or
- * NULL. *out_is_ptr is set to 1 when the receiver is a pointer-to-struct
- * (codegen then emits `->field` rather than `.field`). */
-static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
-                                        const char* field_name, int* out_is_ptr) {
+/* The declared type of `<recv>.<field>` where `recv` is a local struct or
+ * pointer-to-struct, borrowed, or NULL. *out_is_ptr is set to 1 when the
+ * receiver is a pointer-to-struct. */
+static Type* local_struct_field_type(SymbolTable* table, const char* recv_name,
+                                     const char* field_name, int* out_is_ptr) {
     Symbol* rs = lookup_symbol(table, recv_name);
     if (!rs || !rs->type) return NULL;
     Type* st = rs->type;
@@ -10692,15 +10743,25 @@ static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_nam
     for (int fi = 0; fi < ss->node->child_count; fi++) {
         ASTNode* f = ss->node->children[fi];
         if (f && f->value && strcmp(f->value, field_name) == 0) {
-            if (f->node_type && f->node_type->kind == TYPE_FUNCTION &&
-                f->node_type->is_fnptr) {
-                if (out_is_ptr) *out_is_ptr = is_ptr;
-                return f->node_type;
-            }
-            return NULL;
+            if (out_is_ptr) *out_is_ptr = is_ptr;
+            return f->node_type;
         }
     }
     return NULL;
+}
+
+/* #749: resolve `<recv>.<field>` where `recv` is a local struct or
+ * pointer-to-struct whose `field` is a function-pointer member. Returns
+ * the field's TYPE_FUNCTION (is_fnptr) Type* (borrowed, do not free) or
+ * NULL. *out_is_ptr is set to 1 when the receiver is a pointer-to-struct
+ * (codegen then emits `->field` rather than `.field`). */
+static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
+                                        const char* field_name, int* out_is_ptr) {
+    int is_ptr = 0;
+    Type* t = local_struct_field_type(table, recv_name, field_name, &is_ptr);
+    if (!t || t->kind != TYPE_FUNCTION || !t->is_fnptr) return NULL;
+    if (out_is_ptr) *out_is_ptr = is_ptr;
+    return t;
 }
 
 /* #928 UFCS support: the first declared parameter node of a user
@@ -11153,6 +11214,25 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 if (call->annotation) free(call->annotation);
                 call->annotation = strdup(is_ptr ? "fnfield_ptr" : "fnfield_val");
                 return 1;
+            }
+            /* #2653: a closure kept in a field, `h.cb(2)`, is `call(h.cb,
+             * 2)`, as a closure local's call is `call(name, ...)` (above):
+             * the collapsed callee is rebuilt as the member access and the
+             * call is checked as the explicit form is. It named no
+             * function, so it was "Undefined function 'h.cb'". */
+            Type* ft = local_struct_field_type(table, recv, dot + 1, NULL);
+            if (ft && ft->kind == TYPE_FUNCTION && !ft->is_fnptr) {
+                ASTNode* obj = create_ast_node(AST_IDENTIFIER, recv, call->line, call->column);
+                ASTNode* fn_ref = create_ast_node(AST_MEMBER_ACCESS, dot + 1,
+                                                  call->line, call->column);
+                add_child(fn_ref, obj);
+                add_child(call, fn_ref);
+                for (int i = call->child_count - 1; i > 0; i--)
+                    call->children[i] = call->children[i - 1];
+                call->children[0] = fn_ref;
+                free(call->value);
+                call->value = strdup("call");
+                return typecheck_function_call(call, table);
             }
         }
     }

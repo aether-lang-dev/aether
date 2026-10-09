@@ -2422,17 +2422,8 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
  * Local to this TU (the fn-ptr-parameter feature has a sibling exported
  * helper; keep this one file-static to avoid a cross-PR symbol clash). */
 static void emit_fnptr_struct_field(CodeGenerator* gen, Type* sig, const char* name) {
-    const char* ret_c = (sig && sig->return_type) ? get_c_type(sig->return_type) : "void";
-    fprintf(gen->output, "%s (*%s)(", ret_c, name ? name : "");
-    if (sig && sig->param_count > 0) {
-        for (int i = 0; i < sig->param_count; i++) {
-            if (i > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s", get_c_type(sig->param_types[i]));
-        }
-    } else {
-        fprintf(gen->output, "void");
-    }
-    fprintf(gen->output, ")");
+    /* #2651: the shared spelling, nested fn-pointer parameters included. */
+    fputs(fnptr_c_spelling(sig, name), gen->output);
 }
 
 static void generate_extern_struct_field(CodeGenerator* gen, ASTNode* field,

@@ -1416,13 +1416,9 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
-    fprintf(gen->output, "((%s(*)(", ret_c);
-    for (int pi = 0; pi < sig->param_count; pi++) {
-        if (pi > 0) fprintf(gen->output, ", ");
-        fprintf(gen->output, "%s", get_c_type(sig->param_types[pi]));
-    }
-    if (sig->param_count == 0) fprintf(gen->output, "void");
-    fprintf(gen->output, "))(%s))(", safe_value_name(local_name));
+    /* #2651: spelled as the declarators spell it (fnptr_c_spelling). */
+    fprintf(gen->output, "((%s)(%s))(", fnptr_c_spelling(sig, NULL),
+            safe_value_name(local_name));
     generate_fnptr_call_args(gen, sig, call);
     fprintf(gen->output, ")");
     if (narrow) fprintf(gen->output, "))");

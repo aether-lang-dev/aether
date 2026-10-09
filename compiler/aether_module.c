@@ -4111,7 +4111,8 @@ void module_merge_into_program(ASTNode* program) {
 //
 // Algorithm: classic mark-and-sweep over the call graph.
 //   1. Seed the reachable set from main + actor handlers + exports +
-//      every non-imported (user-written) function and builder.
+//      every non-imported (user-written) function and builder + the
+//      initializer of every module-level const and var (#2650).
 //   2. Walk each seed, collecting AST_FUNCTION_CALL targets and bare
 //      AST_IDENTIFIER references that name a top-level function.
 //   3. For each newly-discovered name, find its definition in the
@@ -4498,6 +4499,11 @@ void module_mark_unreachable(ASTNode* program) {
             case AST_MAIN_FUNCTION:
             case AST_ACTOR_DEFINITION:
             case AST_EXPORT_STATEMENT:
+            /* #2650: a module-level `var` or `const` is always emitted, so
+             * a function its initializer names (`var g: fn(string) ->
+             * string = strfns.lit`) is reached: swept, it was undeclared
+             * where the static was defined. */
+            case AST_CONST_DECLARATION:
                 prune_collect_calls(c, &reachable, &worklist);
                 break;
             case AST_FUNCTION_DEFINITION:

@@ -1,0 +1,56 @@
+// Regression (#2652): a tuple type with an optional element.
+//
+// `opt_first(a: int) -> (string?, int)` failed in gcc with "unknown type name
+// 'ae_opt_string'": the tuple typedefs were emitted before the optional
+// typedefs, and the tuple embeds the optional by value. A tuple's typedef
+// now declares the typedefs of its elements first (an optional, a nested
+// tuple), and a value returned in an optional slot is wrapped as a `-> T?`
+// return wraps it (`none` is the empty optional). The extern form, a C
+// function returning such a tuple, is tests/integration/tuple_optional_extern.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+opt_first(a: int) -> (string?, int) {
+    if a > 0 {
+        return "pos", a
+    }
+    return none, a
+}
+
+opt_count(s: string) -> (int?, string) {
+    if s == "" {
+        return none, "empty"
+    }
+    return 3, s
+}
+
+both(k: int) -> (string?, int?) {
+    if k > 0 {
+        return "k", k
+    }
+    return none, none
+}
+
+main() {
+    println("=== test_tuple_optional_element ===")
+    s, k = opt_first(3)
+    check(s != none && s! == "pos" && k == 3, "a present optional slot")
+    t, j = opt_first(-1)
+    check(t == none && j == -1, "an empty optional slot")
+    n, w = opt_count("abc")
+    check(n != none && n! == 3 && w == "abc", "an int optional slot")
+    m, e = opt_count("")
+    check(m == none && e == "empty", "an empty int optional slot")
+    a, b = both(2)
+    check(a! == "k" && b! == 2, "two optional slots")
+    c, d = both(0)
+    check(c == none && d == none, "two empty optional slots")
+    println("=== test_tuple_optional_element passed ===")
+}

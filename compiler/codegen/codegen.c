@@ -795,12 +795,32 @@ Type* lookup_fnptr_global(CodeGenerator* gen, const char* name) {
     for (int i = 0; i < gen->program->child_count; i++) {
         ASTNode* c = gen->program->children[i];
         if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-        if (!c || c->type != AST_CONST_DECLARATION || !c->value ||
-            !c->annotation || strcmp(c->annotation, "global_var") != 0) continue;
+        if (!c || c->type != AST_CONST_DECLARATION || !c->value) continue;
+        if (!(c->annotation && strcmp(c->annotation, "global_var") == 0) &&
+            !is_fnptr_const_decl(c)) continue;
         if (strcmp(c->value, name) != 0) continue;
         return is_fnptr_type(c->node_type) ? c->node_type : NULL;
     }
     return NULL;
+}
+
+/* #2648: a module-level `const` of a typed fn-pointer type. It holds a
+ * function's address, as a `var` of that type does (#2623): it is emitted
+ * with the module vars, after the function prototypes (before them the
+ * function was undeclared), and a call through it is a call through a
+ * typed pointer (lookup_fnptr_global). */
+int is_fnptr_const_decl(const ASTNode* cd) {
+    return fn_const_decl(cd) && cd->node_type->is_fnptr;
+}
+
+/* #2648: a module-level `const` whose value is a function: a typed fn
+ * pointer, or a closure (`const CB = label`, through its bare adapter).
+ * Either names a function or its adapter, so it is emitted after them. */
+int fn_const_decl(const ASTNode* cd) {
+    return cd && cd->type == AST_CONST_DECLARATION && cd->node_type &&
+           cd->node_type->kind == TYPE_FUNCTION &&
+           !(cd->annotation && (strcmp(cd->annotation, "global_var") == 0 ||
+                                strcmp(cd->annotation, "array_const") == 0));
 }
 
 CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, const char* header_path) {
@@ -4854,6 +4874,16 @@ void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
         if (strcmp(gen->tuple_type_names[i], name) == 0) return;
     }
 
+    /* #2652: an element the tuple embeds by value whose type is a typedef
+     * of its own (`ae_opt_string` for a `string?`, `_tuple_...` for a
+     * nested tuple) is declared first. The optional typedefs were emitted
+     * after every tuple's, so `-> (string?, int)` named an unknown type. */
+    for (int i = 0; i < type->tuple_count; i++) {
+        Type* et = type->tuple_types ? type->tuple_types[i] : NULL;
+        if (et && et->kind == TYPE_OPTIONAL) ensure_optional_typedef(gen, et);
+        else if (et && et->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, et);
+    }
+
     // Emit typedef
     fprintf(gen->output, "typedef struct { ");
     for (int i = 0; i < type->tuple_count; i++) {
@@ -4879,6 +4909,8 @@ void ensure_optional_typedef(CodeGenerator* gen, Type* type) {
     for (int i = 0; i < gen->opt_type_count; i++) {
         if (strcmp(gen->opt_type_names[i], name) == 0) return;
     }
+    /* #2652: an optional tuple embeds the tuple's typedef, declared first. */
+    if (type->element_type->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, type->element_type);
     const char* inner_c = get_c_type(type->element_type);
     const char* opt_name = name;
     fprintf(gen->output, "typedef struct { int has; %s val; } %s;\n", inner_c, opt_name);
@@ -4997,18 +5029,34 @@ void generate_type(CodeGenerator* gen, Type* type) {
  * The element type strings mirror the call-site cast in codegen_expr.c
  * so a fn-ptr param, its prototype, and a call through it all agree. */
 void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name) {
-    const char* ret_c = (sig && sig->return_type)
-                        ? get_c_type(sig->return_type) : "void";
-    fprintf(gen->output, "%s (*%s)(", ret_c, name ? name : "");
-    if (sig && sig->param_count > 0) {
-        for (int i = 0; i < sig->param_count; i++) {
-            if (i > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s", get_c_type(sig->param_types[i]));
+    fputs(fnptr_c_spelling(sig, name ? name : ""), gen->output);
+}
+
+/* #2651: the C spelling of a typed fn pointer, the one every declarator,
+ * struct field and call-site cast uses: `R (*name)(T1, T2)`, `R (*)(T1,
+ * T2)` for an empty name, and the cast's `R(*)(T1, T2)` for NULL. A
+ * parameter that is itself a typed fn pointer is spelled out the same way,
+ * as a definition with that parameter declares it, so a function passed for
+ * it has the very type the pointer names: spelled `void*`, `meta(relay, w)`
+ * passed `relay` to an incompatible pointer type. A fn-pointer result stays
+ * `void*`, which is how a function returning one is declared. */
+const char* fnptr_c_spelling(Type* sig, const char* name) {
+    char buf[1024];
+    size_t n = 0;
+    const char* ret_c = (sig && sig->return_type) ? get_c_type(sig->return_type) : "void";
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, name ? "%s (*%s)(" : "%s(*%s)(",
+                          ret_c, name ? name : "");
+    if (sig && sig->param_count > 0 && sig->param_types) {
+        for (int i = 0; i < sig->param_count && n < sizeof(buf); i++) {
+            Type* p = sig->param_types[i];
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i > 0 ? ", " : "",
+                                  is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
         }
-    } else {
-        fprintf(gen->output, "void");
+    } else if (n < sizeof(buf)) {
+        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "void");
     }
-    fprintf(gen->output, ")");
+    if (n < sizeof(buf)) snprintf(buf + n, sizeof(buf) - n, ")");
+    return cg_internf("%s", buf);
 }
 
 /* True for a parameter/local whose declared type is a typed C function
@@ -5586,9 +5634,11 @@ static void prefix_value(ASTNode* node) {
     node->value = renamed;
 }
 
-/* The entry constants renamed, by their source names. */
+/* The entry constants renamed, by their source names. `callable[i]` marks a
+ * typed fn-pointer constant, which a call names too (#2648). */
 typedef struct {
     const char** names;
+    char* callable;
     int count;
 } EntryConsts;
 
@@ -5630,6 +5680,14 @@ static void collect_bound_consts(const ASTNode* node, const ASTNode* self,
     }
 }
 
+/* #2648: does the callee `call` name the constant `name`, a module's dot
+ * written as the merged name's underscore (`cbmod.CB` for `cbmod_CB`)? */
+static int call_names_const(const char* call, const char* name) {
+    for (; *call && *name; call++, name++)
+        if (*call != *name && !(*call == '.' && *name == '_')) return 0;
+    return *call == *name;
+}
+
 /* Rename each reference to an entry constant that the enclosing top-level
  * declaration does not bind (`bound`). A name the declaration does bind (a
  * parameter or local named like the constant, anywhere in the function,
@@ -5661,6 +5719,19 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
             }
         }
     }
+    /* #2648: `CB(i)` through a typed fn-pointer constant names it as the
+     * call's own name, with no identifier for it; a module's, `cbmod.CB(21)`,
+     * in the dotted form of its merged name `cbmod_CB`. */
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        for (int i = 0; i < ec->count; i++) {
+            if (ec->callable[i] && !bound[i] && call_names_const(node->value, ec->names[i])) {
+                char* renamed = prefixed_name(AE_CONST_PREFIX, ec->names[i]);
+                free(node->value);
+                node->value = renamed;
+                break;
+            }
+        }
+    }
     for (int i = 0; i < node->child_count; i++) {
         rename_const_refs_in(node->children[i], ec, bound);
     }
@@ -5684,25 +5755,27 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
  * source language: the symbol catalog and export lists
  * (const_public_name). */
 static void rename_entry_constants(ASTNode* program) {
-    EntryConsts ec = { NULL, 0 };
+    EntryConsts ec = { NULL, NULL, 0 };
     for (int i = 0; i < program->child_count; i++) {
         if (entry_const_decl(program->children[i])) ec.count++;
     }
     if (ec.count == 0) return;
     ec.names = malloc(sizeof(char*) * (size_t)ec.count);
-    if (!ec.names) return;
+    ec.callable = calloc((size_t)ec.count, 1);
+    if (!ec.names || !ec.callable) { free(ec.names); free(ec.callable); return; }
     ec.count = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = entry_const_decl(program->children[i]);
         if (!cd) continue;
         if (!cd->source_name) cd->source_name = strdup(cd->value);
         if (!cd->source_name) continue;
+        ec.callable[ec.count] = (char)is_fnptr_const_decl(cd);
         ec.names[ec.count++] = cd->source_name;
     }
     /* References first, against the names as written; then the
      * declarations themselves. */
     char* bound = calloc((size_t)ec.count, 1);
-    if (!bound) { free(ec.names); return; }
+    if (!bound) { free(ec.names); free(ec.callable); return; }
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         memset(bound, 0, (size_t)ec.count);
@@ -5715,6 +5788,7 @@ static void rename_entry_constants(ASTNode* program) {
         if (cd) prefix_value(cd);
     }
     free(ec.names);
+    free(ec.callable);
 }
 
 /* The name a constant was declared with: what the symbol catalog records and
@@ -6394,15 +6468,28 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
  * `fn(ptr, int)` global holds the function's address, through its #2586
  * adapter when it returns a string (#2623). Before them, the name was
  * undeclared where the static was defined. Still before every function body
- * and closure, which read and write these statics. */
+ * and closure, which read and write these statics. A function-valued `const`
+ * is emitted here too, for the same reason (#2648). */
 static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = program->children[i];
         if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value ||
-            cd->child_count == 0 || !cd->annotation ||
-            strcmp(cd->annotation, "global_var") != 0) continue;
+            cd->child_count == 0) continue;
+        int is_var = cd->annotation && strcmp(cd->annotation, "global_var") == 0;
+        if (!is_var && !fn_const_decl(cd)) continue;
         codegen_note_diag_pos(cd);
         codegen_note_diag_func(NULL);
+        if (!is_var) {
+            /* #2648: a function-valued const, read-only: a typed fn
+             * pointer's `void*`, or a closure of a named function. */
+            if (is_fnptr_const_decl(cd))
+                fprintf(gen->output, "static void* const %s = ", cd->value);
+            else
+                fprintf(gen->output, "static const %s %s = ", get_c_type(cd->node_type), cd->value);
+            generate_expression(gen, cd->children[0]);
+            fprintf(gen->output, ";\n");
+            continue;
+        }
         const char* ctype = get_c_type(cd->node_type);
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
         if (cd->children[0]->type == AST_NULL_LITERAL &&
@@ -8367,6 +8454,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
                 register_module_global_var(gen, cd->value);
+            } else if (fn_const_decl(cd)) {
+                /* #2648: emitted with the module vars, after the function
+                 * prototypes and adapters (emit_module_global_vars). */
             } else {
                 /* Scoped C, not a #define: a macro has no scope, so a
                  * function parameter or local spelled like the const was

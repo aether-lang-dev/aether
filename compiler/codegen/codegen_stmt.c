@@ -4188,6 +4188,14 @@ static int call_targets_closure_literal(CodeGenerator* gen, ASTNode* call) {
 
 static void emit_tuple_return_position(CodeGenerator* gen, ASTNode* expr,
                                        int j) {
+    /* #2652: an optional slot wraps its value (or zeroes `none`), as a
+     * `-> T?` return does; the bare value was emitted into the struct. */
+    Type* rt0 = gen ? gen->current_func_return_type : NULL;
+    if (rt0 && rt0->kind == TYPE_TUPLE && j >= 0 && j < rt0->tuple_count &&
+        needs_optional_coerce(expr, rt0->tuple_types[j])) {
+        emit_optional_coerced(gen, expr, rt0->tuple_types[j]);
+        return;
+    }
     int pos_heap = 0;
     if (gen && gen->current_function && !gen->in_main_function) {
         Type* rt = gen->current_func_return_type;

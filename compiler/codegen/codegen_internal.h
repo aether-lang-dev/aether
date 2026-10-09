@@ -43,6 +43,7 @@ const char* safe_value_name(const char* name);
 const char* get_c_operator(const char* aether_op);
 void generate_type(CodeGenerator* gen, Type* type);
 void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name);
+const char* fnptr_c_spelling(Type* sig, const char* name);   /* #2651 */
 int is_fnptr_type(Type* t);
 int fn_is_inline_candidate(ASTNode* func);
 int is_var_declared(CodeGenerator* gen, const char* var_name);
@@ -410,6 +411,8 @@ int is_extern_func(CodeGenerator* gen, const char* func_name);
 void register_fnptr_local(CodeGenerator* gen, const char* name, Type* sig);
 Type* lookup_fnptr_local(CodeGenerator* gen, const char* name);
 Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
+int is_fnptr_const_decl(const ASTNode* cd);                        /* #2648 */
+int fn_const_decl(const ASTNode* cd);                              /* #2648 */
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the

@@ -111,6 +111,8 @@ doubler = |x: int| -> x * 2
 result = call(doubler, 21)    // 42
 ```
 
+A closure-typed local is called directly too, `doubler(21)`, and so is a closure kept in a struct field (`cb: fn`): `h.cb(21)` is the same call as `call(h.cb, 21)`, on a struct value or through a pointer to one.
+
 ## Closures as Function Parameters
 
 Functions declare closure parameters with the `fn` type:
