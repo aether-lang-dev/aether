@@ -10,7 +10,7 @@
 // typed `let`, a struct field and a parameter, and `mk() as ptr` is the
 // pointer it holds (a typed fn pointer is a `void*`, the way back from `p as
 // fn(...)`). A string returned through the pointer is the caller's (#2586):
-// the function hands over its adapter, and the leak window holds steady.
+// the call takes what the function marked, and the leak window holds steady.
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0

@@ -8,7 +8,7 @@
 // which gcc refused. The field now takes the address, the binding is a
 // fn-pointer local called through the field's signature (renamed, and
 // captured by a closure in the arm too), and a string result is the
-// caller's (#2586): the sender stores the function's adapter and the
+// caller's (#2586): the sender stores the function's address and the
 // handler frees what the call returns. Nothing is retained or released for
 // the pointer when the message is copied or done with.
 //

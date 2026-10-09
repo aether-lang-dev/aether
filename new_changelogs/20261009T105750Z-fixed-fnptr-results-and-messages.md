@@ -21,4 +21,4 @@
   calling `fn`; the type parser decides now, the inner `-> R` belongs to the
   type, and `-> fn(int)` returns nothing. A fn pointer destructured from a
   tuple result is called through its type as well, where it was called as a
-  bare `void*` (#2636).
+  bare `void*` (#2636, #2656).

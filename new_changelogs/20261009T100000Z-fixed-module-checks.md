@@ -51,4 +51,5 @@
   same renamer also turned a module's call through a local of a function's
   name (a closure bound to `helper`) into a call of the module's `helper`;
   a local now shadows it, as it does in `ae check` and in a plain program,
-  and a closure's own parameters shadow only inside that closure (#2637).
+  and a closure's own parameters shadow only inside that closure (#2637,
+  #2655).
