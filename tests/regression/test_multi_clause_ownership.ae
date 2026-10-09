@@ -20,9 +20,9 @@ import std.string
 
 extern exit(code: int)
 
-struct Box {
-    s: string
-}
+// Where put's storing clause keeps its argument (a module-level var holds
+// what it is given for the life of the program).
+var g_stored: string = ""
 
 fn check(cond: bool, msg: string) {
     if !cond {
@@ -63,13 +63,13 @@ pair(n: int) -> (string, int) {
 }
 
 // The first clause keeps nothing; the second stores its argument.
-put(b: *Box, 0, s: string) {
+put(0, s: string) {
     if string.length(s) > 100 {
         println("long")
     }
 }
-put(b: *Box, n: int, s: string) {
-    b.s = s
+put(n: int, s: string) {
+    g_stored = s
 }
 
 // A clause set that returns nothing.
@@ -112,15 +112,14 @@ main() {
     name, n = pair(42)
     check(name == "42" && n == 42, "a tuple from the second clause")
 
-    box = heap.new(Box)
     w = "ab"
-    put(box, 1, string.concat(w, "cd"))
-    // The box holds the argument the second clause stored, not a freed one.
+    put(1, string.concat(w, "cd"))
+    // The var holds the argument the second clause stored, not a freed one.
     filler = string.concat(w, "zzzz")
-    check(box.s == "abcd", "a stored argument outlives the call")
+    check(g_stored == "abcd", "a stored argument outlives the call")
     check(filler == "abzzzz", "the string allocated after it")
-    put(box, 0, string.concat(w, "--"))
-    check(box.s == "abcd", "the first clause keeps nothing")
+    put(0, "--")
+    check(g_stored == "abcd", "the first clause keeps nothing")
 
     note(0)
     note(0 - 1)

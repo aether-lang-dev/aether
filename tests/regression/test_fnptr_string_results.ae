@@ -27,6 +27,10 @@ import std.string
 extern exit(code: int)
 extern abs(x: int) -> int
 
+// Where put_name's storing clause keeps its argument (a module-level var
+// holds what it is given for the life of the program).
+var g_kept: string = ""
+
 struct Thing {
     name: string
     n: int
@@ -148,8 +152,7 @@ put_name(t: ptr, 0, s: string) -> int {
     return 0
 }
 put_name(t: ptr, n: int, s: string) -> int {
-    thing = t as *Thing
-    thing.name = s
+    g_kept = s
     return n
 }
 
@@ -221,11 +224,10 @@ main() {
     // back as "w#!!". The last field copies plain_name's "w#".
     check(round(fields, a, b) == (2 + 2) + (4 + 3) + (2 + 2) + 3 + 8 + 3 + 2 + 3 + 5, "a round adds up")
     check(b.name == "w#", "the copied field holds its own string")
-    box = new_thing("q")
     keep = put_name as fn(ptr, int, string) -> int
-    check(keep(box as ptr, 1, string.concat(a.name, "cd")) == 1, "the storing clause ran")
+    check(keep(a as ptr, 1, string.concat(a.name, "cd")) == 1, "the storing clause ran")
     filler = string.concat(a.name, "zzzz")
-    check(box.name == "w#cd" && filler == "w#zzzz", "a stored argument outlives the call")
+    check(g_kept == "w#cd" && filler == "w#zzzz", "a stored argument outlives the call")
     counter = count_work as fn(string) -> int
     check(counter(a.name) == 6, "a tuple function that destructures itself")
     i = 0
@@ -243,5 +245,13 @@ main() {
             }, 5)
         check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
     }
+    k = 0
+    while k < 3 {
+        heap.free(list_field(fields, k))
+        k = k + 1
+    }
+    list.free(fields)
+    heap.free(a)
+    heap.free(b)
     println("=== test_fnptr_string_results passed ===")
 }

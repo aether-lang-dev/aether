@@ -9167,8 +9167,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                expr->line, expr->column);
                     return 0;
                 }
-                expr->node_type = infer_unary_type(expr->children[0],
-                                                 get_token_type_from_string(expr->value));
+                /* Through set_node_type: inference typed this node first, and
+                 * a plain assignment orphaned that type (#1575), one per unary
+                 * expression in every function checked. */
+                set_node_type(expr, infer_unary_type(expr->children[0],
+                                                     get_token_type_from_string(expr->value)));
             }
             return 1;
         }
@@ -10214,7 +10217,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                     // Fallback to general inference
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 // Handle struct member access — look up field type from definition.
@@ -10271,7 +10274,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                     // Fallback to general inference
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 // Pointer-to-struct member access: `e.field` where e: *Foo
@@ -10325,7 +10328,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         }
                     }
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 free_type(base_type);
