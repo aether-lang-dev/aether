@@ -1,0 +1,12 @@
+import std.string(*)
+
+// The program's own `bytes`, three ints: `import std.string (*)` must not
+// put `string.bytes` (one string) in its place (#2632).
+bytes(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+main() {
+    s = "abc"
+    println("${bytes(1, 2, 3)} ${length(s)}")
+}

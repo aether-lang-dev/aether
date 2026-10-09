@@ -29,6 +29,7 @@ tests/integration/build_surfaces_import_error/
 tests/integration/builder_int_factory_void_ptr_cast/
 tests/integration/bytes_finish_return_no_leak/
 tests/integration/c_callback/
+tests/integration/c_callback_call_by_name/
 tests/integration/c_callback_multi_tu/
 tests/integration/c_callback_table/
 tests/integration/c_import_const/
@@ -42,6 +43,7 @@ tests/integration/c_static_inline/
 tests/integration/c_struct_verify/
 tests/integration/caller_info/
 tests/integration/circular_import_diag/
+tests/integration/clause_set_import/
 tests/integration/closure_actor_state_reject/
 tests/integration/closure_param_shadows_module_fn/
 tests/integration/closure_builder_ctx_inject_no_uaf/
@@ -68,6 +70,7 @@ tests/integration/dsl_receiver_scoping_nested/
 tests/integration/effect_tags/
 tests/integration/emit_csrc/
 tests/integration/emit_csrc_cross/
+tests/integration/emit_lib_clause_sets/
 tests/integration/emit_lib_const/
 tests/integration/emit_lib_deadline/
 tests/integration/emit_lib_keeps_main/
@@ -86,10 +89,12 @@ tests/integration/fault_cross_module/
 tests/integration/fn_param_shadows_consumer_fn/
 tests/integration/fn_typed_local_call/
 tests/integration/fn_value_rename/
+tests/integration/fnptr_string_c_side/
 tests/integration/fs_glob_recursive_dedupe/
 tests/integration/fs_read_binary_nul/
 tests/integration/fs_write_binary_nul/
 tests/integration/glob_import_cross_module/
+tests/integration/glob_import_own_name/
 tests/integration/heap_leak_cross_fn_recursion/
 tests/integration/heap_leak_interp_as_arg/
 tests/integration/heap_new_pod/
@@ -160,6 +165,7 @@ tests/integration/malloc_literal_struct_cast_warn/
 tests/integration/match_arm_unreachable/
 tests/integration/message_trace/
 tests/integration/module_extern_auto_unwrap/
+tests/integration/module_import_not_transitive/
 tests/integration/module_leaf_collision/
 tests/integration/std_leaf_collision/
 tests/integration/module_name_local_shadow/
@@ -212,6 +218,7 @@ tests/integration/sum_exhaustiveness/
 tests/integration/tcp_poll_fullduplex/
 tests/integration/transitive_module_import/
 tests/integration/ufcs_cross_module/
+tests/integration/uncalled_module_fn_checked/
 tests/integration/varargs_forward/
 tests/integration/wasi_panic_link/
 tests/integration/wasm_emit_lib_exports/

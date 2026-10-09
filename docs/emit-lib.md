@@ -172,6 +172,15 @@ implementation detail and may be hidden in a future version. See
 [Symbol visibility matrix](#symbol-visibility-matrix) below for the
 full picture across emit modes.
 
+A function written as several clauses (`fact(0) -> ...`, `fact(n: int) ->
+...`) is one export: one `aether_fact`, one catalog record and one header
+prototype, with the set's signature: a parameter for each position, of the
+type the clauses give it (a literal pattern such as `fact(0)` has its
+literal's type), and the set's return type (#2665). A `@c_callback("sym")`
+function is listed in the catalog under `sym`, and its `aether_<name>`
+stub calls `sym` (#2666); a clause set annotated `@c_callback` takes the
+symbol its first annotated clause binds.
+
 ## A program's `main()`: `aether_main` and `aether_main_exit`
 
 A library built from a `.ae` that defines `main()` keeps it. Under
@@ -1024,6 +1033,7 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_lists/` | List-of-ints, list-of-strings, empty list, out-of-range |
 | `emit_lib_primitives/` | `long`, `bool`, `float` across the boundary |
 | `emit_lib_unsupported/` | Unsupported param types warn + skip stub |
+| `emit_lib_clause_sets/` | Clause sets (guards, a literal first clause, `@c_callback`) and an `export`-wrapped function: each listed once in the catalog and the header with its set's signature, every catalog symbol exported, each callable from a C host (#2665, #2666) |
 | `emit_lib_banned/` | All five capability-heavy imports rejected |
 | `emit_lib_dual_build/` | Same source → exe AND lib via separate invocations |
 | `emit_lib_swig/` | SWIG Python round-trip (skips if `swig` missing) |

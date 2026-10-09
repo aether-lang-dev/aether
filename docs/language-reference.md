@@ -94,7 +94,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `longdouble` | C `long double` widest float (C interop) | `extern strtold(...) -> longdouble` |
 | `ptr` | Raw pointer (for C interop) | `null` |
 
-¹ `void` is **not** a reserved word, there is no `void` token; it is a plain identifier used by convention to spell the absence of a return value. A function that omits its `-> Type` annotation is the canonical void declaration (see [Functions](#functions)). It is never a value type and cannot be used for a variable or field.
+¹ `void` is **not** a reserved word, there is no `void` token; it is a plain identifier used by convention to spell the absence of a return value. A function that omits its `-> Type` annotation is the canonical void declaration (see [Functions](#functions)), and `-> void` is the same type as the omitted one: `f() -> void` and `f()` declare the same function, and `fn(ptr, int) -> void` and `fn(ptr, int)` are one function-pointer type. It is never a value type and cannot be used for a variable or field.
 
 #### `byte` unsigned 8-bit
 
@@ -476,7 +476,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error — *cannot re-bind 'x' as string: it was bound as int by its first assignment* — rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function is the same compile error — *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A name bound in sibling bodies and used only inside them is a separate variable per body. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` — a 64-bit integer, a `uint32`, a float — is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
 
 **A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
 
@@ -620,7 +620,7 @@ print_hello() {
 }
 ```
 
-There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration. The `main()` function is the entry point and is always void.
+There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration (`-> void`, the conventional spelling, means the same). The `main()` function is the entry point and is always void.
 
 **Builtin names cannot be redefined.** A call to a builtin (`isolate`, `consume`, `release`, `make`, `sizeof`, `typeof`, `sleep`, …) is lowered by name, so a user function spelled the same would compile and never run; the definition is refused instead: `'isolate' is a builtin function and cannot be redefined … rename it (e.g. 'isolate_')`. A user function whose name is a *C library* symbol (`read`, `time`, `index`, `remove`, …) is fine: it is emitted under a mangled C name in every position — direct calls, `f as fn(...)`, and as a bare `fn` value.
 
@@ -754,6 +754,51 @@ grade(score) when score >= 70 -> "C"
 grade(score) when score >= 60 -> "D"
 grade(score) when score < 60 -> "F"
 ```
+
+### How a Clause Set Runs
+
+The clauses are tried in order. A call runs the first clause whose literal
+patterns all equal its arguments and whose guard, if it has one, is true, and
+returns what that clause returns. Each guard is evaluated once, for the call
+that reaches its clause, and no clause after one that matches every call (no
+literal pattern, no guard) is ever tried. When no clause matches, a set that
+returns a value returns its type's zero value: `0`, `false`, an empty string,
+a tuple of zeros with an empty string at each string position, a struct of
+zeros.
+
+Each clause is a function of its own: whatever works in a single function's
+body works in a clause's. A closure in a clause can mutate the clause's
+parameters, a struct or fixed-size array parameter is the clause's own copy,
+two clauses may give one local name values of different types, and a clause's
+`requires` and `ensures` belong to that clause alone: they are checked when the
+call runs that clause, and the compile-time contract check applies a clause's
+`requires` only to the calls that can reach it.
+
+```aether,run
+name_of(0) -> string {
+    return "zero"
+}
+name_of(n: int) -> string
+requires n > 0
+{
+    return "n${n}"
+}
+
+main() {
+    println(name_of(0))   // the first clause: `requires n > 0` is not its
+    println(name_of(7))
+}
+```
+```output
+zero
+n7
+```
+
+The set's return type is decided over every clause: the first clause that
+declares one gives it; with none declared, the set returns `int` when any
+clause returns a value (a clause that returns nothing then gives `0`), and
+nothing otherwise. A clause set exported from a module is imported with all
+its clauses.
 
 ### Multi-Statement Arrow Bodies
 
@@ -1342,6 +1387,32 @@ safe_divide(a: int, b: int) -> (int, string) {
 
 Stating the return type at the signature is preferred when the function is part of a public API or when readers shouldn't have to scan the body to know the return shape. The two forms (`-> { ... }` with inference vs. `-> (T1, T2) { ... }` explicit) are interchangeable from the caller's perspective and produce the same C struct return.
 
+Each element takes any type a parameter or a single return takes, pointers included, so a caller keeps the pointer types instead of casting `ptr`s back:
+
+```aether,run
+struct Foo {
+    n: int
+}
+
+pair_ptr(a: *Foo, b: *Foo) -> (*Foo, *Foo) {
+    return b, a
+}
+
+main() {
+    x = Foo { n: 1 }
+    y = Foo { n: 2 }
+    p, q = pair_ptr(&x, &y)    // p and q are *Foo
+    p.n = 20                   // writes through to y
+    println("${q.n} ${y.n}")
+}
+```
+
+```output
+1 20
+```
+
+A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it.
+
 Error propagation across function boundaries works correctly:
 
 ```aether,fragment
@@ -1558,7 +1629,7 @@ let maybe: int? = 69        // a present value, implicitly wrapped
 let empty: int? = none      // the absent sentinel
 ```
 
-`T?` works for any element type, value types (`int?`, `float?`, `bool?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent".
+`T?` works for any element type, value types (`int?`, `float?`, `bool?`) and reference types (`string?`, `*Node?`) alike, with one uniform representation, so there is no ambiguity between "the value is a null pointer" and "the key was absent". An optional can also be an element of a tuple, `-> (string?, int)`, returned as `return "pos", n` or `return none, n`.
 
 ### `none` and equality
 
@@ -2109,6 +2180,8 @@ main() {
 
 The cast is a view, not an allocation, the operand pointer's lifetime is the caller's problem (the same contract as raw `extern` interaction). Reach for this only when the storage is C-allocated and Aether wants to manipulate fields. For Aether-owned data, use the normal struct-literal form (`Point { x: 1, y: 2 }`) so refcounting and lifetime tracking apply.
 
+A typed pointer is checked like any other type, at an assignment and at a call alike: `buffer_size(b: *Buffer)` given `&p.ints`, an `*Ints`, is a compile error (`Argument 1 'b' of 'buffer_size': expected *Buffer, got *Ints`), as `&local`, `&p.a.b` or a `*Ints` local would be. A bare `ptr` converts to and from every typed pointer, the way C's `void*` does, and so does a pointer to a `@c_struct` overlay, which is a `void*` in the generated C.
+
 **`as` accepts a primitive value cast, a struct overlay (`*StructName`), a function-pointer cast (`fn(...) -> R`), or a typed-array view (`T[]`).** A value cast like `n as int` (numeric to numeric, or between a distinct type and its base) compiles and runs. Non-numeric casts such as `buf as string` or `raw as ptr` parse but are rejected at type-check with `E0200`. For converting between primitive types, see the [Casting between types](#casting-between-types) table above, most conversions are either implicit (Aether's type system inserts the necessary cast in the generated C) or use a named helper (`string.from_int`, `string.from_long`, …).
 
 The `as` keyword is the same token used for `import x as y` aliasing; the two parses don't collide because import-aliasing is recognised only inside `import` statements. Full semantics (operand type rules, error cases, the shared-token interaction) are in [c-interop.md § Struct overlay on raw pointers](c-interop.md#struct-overlay-on-raw-pointers-structname-and-expr-as-structname).
@@ -2215,6 +2288,8 @@ message SetPosition {
 message Reset {}  // Empty message
 ```
 
+A field can be a typed C function pointer (`run: fn(int) -> int`). The sender stores a named function's address (`w ! Job { run: double_it }`), and the handler's binding is called through the field's signature (`run(21)`). A closure cannot go there; a message carries a closure in a bare `fn` field.
+
 ---
 
 ## Actors
@@ -2241,6 +2316,8 @@ actor Counter {
     }
 }
 ```
+
+An actor has one arm per message: an arm matches by the message alone, so a second arm for a message the actor already receives (in the same `receive` block or another) could never run, and the compiler refuses it, naming the first.
 
 ### Receive Timeouts
 
@@ -2493,13 +2570,32 @@ Import only specific symbols from a module:
 import std.math (sqrt, pow)
 
 main() {
-    x = math.sqrt(16.0)    // works
-    y = math.pow(2.0, 3.0) // works
-    // math.sin(1.0)       // error: not imported
+    x = sqrt(16.0)          // a selected name, written bare
+    y = math.pow(2.0, 3.0)  // the qualified form works too
+    z = math.sin(1.0)       // and reaches the rest of the module
+    println("${x} ${y} ${z}")
 }
 ```
 
-If `sqrt` internally calls a sibling helper that *isn't* in the import list, the helper is still pulled into the merged build so the imported function can resolve its calls. Only the names you actually listed are visible to your code; the transitive pull-in is bookkeeping the compiler does on your behalf.
+A selective import decides which names your file may write bare; it does not
+narrow the module. The whole module is merged into the build and every one of
+its functions is type-checked, the ones you did not select and the ones
+nothing calls included, so an error anywhere in it is reported by your build
+(#2613). Functions nothing calls are still left out of the emitted C. That is
+also what lets a selected function read a constant you did not select, and a
+qualified `m.other()` reach a function you did not select (#2630).
+
+### What a file can reach
+
+A qualified `ns.name` resolves against the imports of the file it is written
+in. A module that some other module of the program imports is loaded, but it
+is not visible to your code, and a library module is held to the same rule:
+a module calling `low.f()` must `import low` itself, even when another module
+it imports already does. `ae build` and `ae check` agree on this; the error is
+E0301, and its help line names the missing import (#2614). A module does see
+itself: `m.a()` and `m.K` inside module `m` name its own definitions, its
+private ones staying private (E0303), in a build and in `ae check` of the
+module's file alike (#2631).
 
 ### Module Public API, `exports (…)`
 
@@ -2581,7 +2677,33 @@ does `import std.fs (*)` and calls a glob-brought `clean(...)` resolves
 correctly whether it is the compilation entry point or is imported by
 another module. (The bare glob-brought names are rewritten to their
 canonical prefixed form when the module is merged into a consumer, the
-same way selective and qualified imports are.)
+same way selective and qualified imports are, extern-backed ones such as
+std.string's `length` included (#2637). A local or parameter of that name
+in the module is the local, not the import, as in any other file.)
+
+**A file's own names win over its globs.** A glob import binds only the
+names the importing file does not define itself. A function, builder,
+constant or extern the file declares under the same name stays the file's
+own, the way a local item shadows a glob import in Rust:
+
+```aether
+import std.string (*)
+
+// std.string has a `bytes` too; this file's calls reach its own.
+bytes(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+main() {
+    println("${bytes(1, 2, 3)} ${length("abc")}")    // 6 3
+}
+```
+
+The same holds in a module, whether it is checked on its own or merged into
+a program (#2632). A selective import is different: `import std.string
+(bytes)` beside a local `bytes` is the E1000 clash, because the import wrote
+the name out (see "Selective-import shadow rejection" in
+[module-system-design.md](module-system-design.md)).
 
 Use the glob form when you'd otherwise list 20+ symbols just to use
 the module without the namespace prefix. Bare `import std.math` (no
@@ -2844,6 +2966,40 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 ```
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+
+A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body) or `const` (`const CB: fn(int) -> string = label`, called `CB(1)`), and a function's result. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
+
+A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
+
+A typed function pointer's own parameter can be a typed function pointer, `fn(fn(string) -> string, string) -> string`, and a function with that parameter fits it.
+
+A function's result is written as any other typed function pointer, `-> fn(ptr) -> string` (the inner `-> string` is part of the type) or `-> Getter` for a `cfn Getter`, and a call to the function is that pointer: it binds to a local, a field or a parameter, and `f as ptr` gives back the pointer it holds.
+
+```aether,run
+extern free(p: ptr)
+
+noop_free(block: ptr, size: int) {
+    println("noop_free")
+}
+
+system_free(block: ptr, size: int) {
+    free(block)
+    println("system_free")
+}
+
+var g_free: fn(ptr, int) = noop_free    // noop_free's address
+
+main() {
+    g_free(null, 0)
+    g_free = system_free
+    g_free(null, 0)                     // free(null) does nothing
+}
+```
+
+```output
+noop_free
+system_free
+```
 
 ### Named C function-pointer types, `type Name = fn(T1, T2) -> R`
 
@@ -3263,7 +3419,7 @@ complement wrapping is the specified behaviour of `int`, not an artifact of the
 optimiser: an LCG, a hash, or a checksum written in Aether computes the same
 values on every target.
 
-Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`.
+Use `ae check file.ae` to see warnings without compiling. It skips codegen and linking, so iteration is much faster than `ae build`. The two run the same checks: every function of every module the file imports is type-checked, whether or not anything calls it (#2613), and each module may only use the modules it imports itself (#2614). `ae check lib/mylib/module.ae` checks one module on its own, under the namespace a build gives it (`mylib`, so its own `mylib.f()` resolves, #2631); building any program that imports it checks it just as strictly.
 
 ---
 

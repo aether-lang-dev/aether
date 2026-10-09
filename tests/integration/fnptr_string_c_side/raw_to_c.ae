@@ -1,0 +1,21 @@
+// #2586: an Aether string function handed to C is the function itself, so
+// C reads its result as text, whether it gets the name, a typed fn pointer
+// local holding it, or a typed parameter.
+extern c_len_of(f: ptr) -> int
+extern c_len_typed(f: fn(int) -> string) -> int
+
+label(n: int) -> string {
+    return "static label"
+}
+
+through_param(g: fn(int) -> string) -> int {
+    return c_len_typed(g)
+}
+
+main() {
+    println("len=${c_len_of(label)}")
+    g = label as fn(int) -> string
+    println("len=${c_len_of(g)}")
+    println("len=${c_len_typed(g)}")
+    println("len=${through_param(label)}")
+}

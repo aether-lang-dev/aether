@@ -1,0 +1,51 @@
+// Functions written as several clauses, exported (#2643).
+import std.string
+
+exports(label, store_at, Box, sign, twice)
+
+struct Box {
+    s: string
+}
+
+// A string clause set: the literal clause first, a fresh string after it.
+label(0) -> string {
+    return "zero"
+}
+label(n: int) -> string {
+    return string.concat("n", string.from_int(n))
+}
+
+// A clause set that returns nothing: the first clause keeps nothing, the
+// second stores its argument.
+store_at(b: *Box, 0, s: string) {
+    if string.length(s) > 100 {
+        println("long")
+    }
+}
+store_at(b: *Box, n: int, s: string) {
+    b.s = s
+}
+
+// Only a later clause calls the module's own helper, which nothing else
+// reaches.
+sign(n: int) when n < 0 -> int {
+    return 0 - 1
+}
+sign(0) -> int {
+    return 0
+}
+sign(n: int) -> int {
+    return one()
+}
+
+one() -> int {
+    return 1
+}
+
+// Unannotated, the first clause returning nothing (#2645 across a module).
+twice(0) {
+    println("twice zero")
+}
+twice(n) {
+    return n * 2
+}

@@ -62,9 +62,10 @@ SymbolTable* create_symbol_table(SymbolTable* parent) {
     table->hidden_names = NULL;
     table->seal_whitelist = NULL;
     table->is_sealed = 0;
-    // Inherit merged-body flag so nested scopes (loops, blocks, closures
-    // inside a merged function) keep the relaxed namespace visibility.
-    table->inside_merged_body = parent ? parent->inside_merged_body : 0;
+    // Inherit the merged-body origin so nested scopes (loops, blocks,
+    // closures inside a merged function) resolve qualified names against
+    // the same module's imports.
+    table->merged_from = parent ? parent->merged_from : NULL;
     // dsl_receiver does NOT inherit. It is a per-trailing-closure-scope
     // marker that typecheck_function_call stamps on the immediate
     // closure body. Nested closures inside that body get their own
@@ -520,32 +521,123 @@ static int is_user_explicit_namespace(const char* name) {
 // Forward decl — defined below alongside the global registry it gates.
 int is_imported_namespace(const char* name);
 
+/* #2631: when the program being checked is itself a module file (it has an
+ * `exports(...)` list, as `ae check lib/m/module.ae` sees it), the namespace
+ * a build gives that module: the last segment it is imported under. A build
+ * merges the module's functions as `<ns>_<name>` and its own `m.a()` calls
+ * resolve to them, as a module sees itself (module_sees_namespace); checked
+ * on its own, the file used to know no namespace at all, so `ae check`
+ * rejected a call `ae build` accepted. NULL for a program. */
+static char g_entry_self_ns_buf[256];
+static const char* g_entry_self_ns = NULL;
+
+/* The program's own (not merged) top-level definition named `name` that a
+ * build reaches as `<ns>.<name>`: a function, builder, constant or
+ * `@extern`, or NULL. */
+static ASTNode* entry_own_definition(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    if (!program || !name) return NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || !d->value || d->is_imported || d->origin_module) continue;
+        int reachable = d->type == AST_FUNCTION_DEFINITION ||
+                        d->type == AST_BUILDER_FUNCTION ||
+                        d->type == AST_CONST_DECLARATION ||
+                        (d->type == AST_EXTERN_FUNCTION && d->annotation &&
+                         strncmp(d->annotation, "c_symbol:", 9) == 0);
+        if (reachable && strcmp(d->value, name) == 0) return d;
+    }
+    return NULL;
+}
+
+/* #2632: does the file being compiled define `name` itself: a function,
+ * builder, constant or extern written in it, not one merged in from a
+ * module? Such a name shadows the same name a glob import would bind. */
+static int program_defines_own(ASTNode* program, const char* name) {
+    if (!program || !name) return 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || !d->value || d->is_imported || d->origin_module) continue;
+        if ((d->type == AST_FUNCTION_DEFINITION || d->type == AST_BUILDER_FUNCTION ||
+             d->type == AST_CONST_DECLARATION || d->type == AST_EXTERN_FUNCTION) &&
+            strcmp(d->value, name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* Is `prefix.name` a reference to the checked module's own `name`? A name
+ * the module does not define falls through to the imports, so a module
+ * importing a namespace that shares its last segment (#1780) still reaches
+ * it for the rest; its own names come first, as in a build. */
+static int entry_self_reference(const char* prefix, const char* name) {
+    return g_entry_self_ns && prefix && strcmp(prefix, g_entry_self_ns) == 0 &&
+           entry_own_definition(name) != NULL;
+}
+
+/* Does the checked module's `exports(...)` list leave `name` out? Read the
+ * way a build reads it (module_exports_symbol): the bare name, or the
+ * `<leaf>_name` spelling a std module lists. */
+static int entry_export_blocked(const char* name) {
+    ASTNode* program = aether_typecheck_program_node();
+    if (!program || !name) return 0;
+    char prefixed[512];
+    snprintf(prefixed, sizeof(prefixed), "%s_%s",
+             g_entry_self_ns ? g_entry_self_ns : "", name);
+    int has_list = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* list = program->children[i];
+        if (!list || list->type != AST_EXPORTS_LIST) continue;
+        has_list = 1;
+        for (int k = 0; k < list->child_count; k++) {
+            ASTNode* n = list->children[k];
+            if (n && n->value &&
+                (strcmp(n->value, name) == 0 || strcmp(n->value, prefixed) == 0))
+                return 0;
+        }
+    }
+    return has_list;
+}
+
+/* The file scope a qualified own name resolves in: a local or parameter
+ * that happens to share the name is not the module's definition. */
+static Symbol* entry_self_symbol(SymbolTable* table, const char* name) {
+    SymbolTable* root = table;
+    while (root && root->parent) root = root->parent;
+    return root ? lookup_symbol_local(root, name) : NULL;
+}
+
 // Gate for qualified-call resolution. A qualified call `mod.fn()` is
 // allowed if either:
-//   - The caller is inside a merged-module body (typechecker propagates
-//     SymbolTable::inside_merged_body from the cloned function decl);
-//     in that case ANY transitively-merged namespace is fair game,
-//     because cloned bodies need to call into their original module's
-//     transitive deps to compile.
-//   - The caller is user code (inside_merged_body == 0); in that case
-//     only namespaces the user explicitly imported are visible. This
-//     closes the encapsulation hole left after the round-1 BFS-merge
-//     fix for issue #243.
+//   - The caller is inside a merged-module body (SymbolTable::merged_from,
+//     propagated from the cloned declaration's origin_module): the
+//     namespace is that module's own or one it imports. A module reaches
+//     what it imported, not what some other module of the program did
+//     (#2614): `top` calling `low.f()` while only `mid` imports `low`
+//     built in every program and failed `ae check` of `top`, so `top`
+//     worked by the accident of what else was linked in, and broke with
+//     an error pointing at untouched code the day `mid` dropped `low`.
+//   - The caller is user code (merged_from NULL); in that case only
+//     namespaces the user explicitly imported are visible. This closes
+//     the encapsulation hole left after the round-1 BFS-merge fix for
+//     issue #243.
 //
 // `table` may be NULL during early symbol-table population; treat NULL
 // as user-context (the strict path) — early registration paths don't
 // resolve qualified user calls, so this is safe.
 int is_visible_namespace(const char* name, SymbolTable* table) {
-    /* Single channel: the SymbolTable's inside_merged_body flag.
-     * Both walkers (the typechecker — which creates per-function
-     * child tables — and the type-inference pass — which walks
-     * against the global symbol table directly) flip this flag
-     * transiently while inside a `is_imported` function body, then
-     * restore it on exit. Save/restore is the standard scope-
-     * stack pattern; no global mutable state required. */
-    if (table && table->inside_merged_body) {
-        return is_imported_namespace(name);
+    /* Single channel: the SymbolTable's merged_from. Both walkers (the
+     * typechecker, which creates per-function child tables, and the
+     * type-inference pass, which walks against the global symbol table
+     * directly) set it while inside a merged declaration, then restore
+     * it on exit. */
+    if (table && table->merged_from) {
+        return module_sees_namespace(table->merged_from, name);
     }
+    /* #2631: a module file checked on its own sees itself, as its merged
+     * functions do in a build (module_sees_namespace); nothing more. */
+    if (g_entry_self_ns && name && strcmp(name, g_entry_self_ns) == 0) return 1;
     return is_user_explicit_namespace(name);
 }
 
@@ -583,6 +675,9 @@ static AetherModule* module_find_by_name_or_leaf(const char* name);
 // while missing from std.mem's. User modules register under the name they
 // are used by, which is why they were enforced all along.
 static int is_export_blocked(const char* namespace, const char* symbol) {
+    /* #2631: the checked module's own name, held to its own exports list
+     * as a build holds it (`selfq.hidden()` is E0303 in both). */
+    if (entry_self_reference(namespace, symbol)) return entry_export_blocked(symbol);
     if (!global_module_registry) return 0;
     AetherModule* mod = module_find_by_name_or_leaf(namespace);
     return (mod && mod->export_count > 0 && !module_exports_symbol(mod, symbol));
@@ -653,10 +748,10 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         }
 
         // Check if prefix is a namespace visible from this scope.
-        // Issue #243: user code can only see namespaces it explicitly
-        // imported; merged-body code can see all transitively-merged
-        // namespaces. is_visible_namespace picks the right set based
-        // on the table's inside_merged_body flag.
+        // Issue #243, #2614: user code can only see namespaces it
+        // explicitly imported; merged-body code sees its own module and
+        // the modules that module imports. is_visible_namespace picks the
+        // right set based on the table's merged_from.
         // Convert string.new -> string_new
         if (is_visible_namespace(prefix, table)) {
             // Enforce export visibility
@@ -697,6 +792,13 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                     module_is_exported(mod, suffix)) {
                     sym = lookup_member_symbol(table, suffix);
                 }
+            }
+            /* #2631: the checked module file's own definition, which a
+             * build would have merged as `<prefix>_<suffix>`. The caller
+             * rewrites the call to the bare name it carries, as #1035. */
+            if (!sym && !(table && table->merged_from) &&
+                entry_self_reference(prefix, suffix)) {
+                sym = entry_self_symbol(table, suffix);
             }
             if (name_heap) free(name_copy);
             return sym;
@@ -825,6 +927,43 @@ static void type_error_hint(const char* message, const char* hint, int line, int
                       AETHER_ERR_TYPE_MISMATCH };
     aether_error_report(&e);
     error_count++;
+}
+
+/* type_error_hint under a chosen error code. */
+static void type_error_code_hint(const char* message, const char* hint,
+                                 int line, int column, AetherErrorCode code) {
+    AetherError e = { g_tc_file, NULL, line, column, message, hint, NULL, code };
+    aether_error_report(&e);
+    error_count++;
+}
+
+/* #2614: when `prefix` in `prefix.name` is a module the program loaded but
+ * the scope does not import, write the `help:` line naming the import and
+ * return 1. Such a module is loaded because some other module imports it,
+ * which is exactly why the call used to build: say so, since "check the
+ * spelling" sends the reader the wrong way. A local of that name is not a
+ * module reference, so it gets no hint. */
+static int missing_import_hint(const char* prefix, SymbolTable* table,
+                               char* out, size_t cap) {
+    if (!prefix || !global_module_registry || is_visible_namespace(prefix, table))
+        return 0;
+    Symbol* local = lookup_symbol(table, prefix);
+    if (local && !local->is_module_alias) return 0;
+    AetherModule* m = module_find_by_namespace(prefix);
+    if (!m || !m->name) return 0;
+    if (table && table->merged_from) {
+        snprintf(out, cap,
+                 "module '%s' does not import '%s': add `import %s` to it "
+                 "(another module of the program importing '%s' does not "
+                 "make it visible here)",
+                 table->merged_from, m->name, m->name, m->name);
+    } else {
+        snprintf(out, cap,
+                 "'%s' is not imported by this file: add `import %s` "
+                 "(another module of the program importing it does not make "
+                 "it visible here)", m->name, m->name);
+    }
+    return 1;
 }
 
 void type_warning(const char* message, int line, int column);
@@ -1138,6 +1277,27 @@ static const char* base_type_name(Type* t) {
  * tells `expected Tag, got string` apart from a plain mismatch. */
 static const char* type_name(Type* t) {
     if (t && t->distinct_name) return t->distinct_name;
+    /* A typed pointer as it is written, `*Apple`. As "ptr", a message about
+     * `*Apple` and `*Pear` named both the same (#2611, #2624). A `const *T`
+     * keeps its C spelling from base_type_name. */
+    if (t && t->kind == TYPE_PTR && !t->c_alias && t->element_type &&
+        t->element_type->kind != TYPE_UNKNOWN)
+        return aether_internf("*%s", type_name(t->element_type));
+    /* A typed C function pointer as it is written, `fn(ptr) -> string`. As
+     * "closure" it was named after the other representation, the one it
+     * cannot hold (#2634). */
+    if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) {
+        char buf[256];
+        size_t n = (size_t)snprintf(buf, sizeof(buf), "fn(");
+        for (int i = 0; i < t->param_count && t->param_types && n < sizeof(buf); i++)
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i ? ", " : "",
+                                  type_name(t->param_types[i]));
+        if (n < sizeof(buf))
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, ")");
+        if (n < sizeof(buf) && t->return_type && t->return_type->kind != TYPE_VOID)
+            snprintf(buf + n, sizeof(buf) - n, " -> %s", type_name(t->return_type));
+        return aether_internf("%s", buf);
+    }
     return base_type_name(t);
 }
 
@@ -1402,14 +1562,14 @@ static int has_ctx_first_param(ASTNode* func) {
  * `builder` function? "Same module" is matched by `source_file`: every node
  * keeps the .ae path it was parsed from.
  *
- * This scans the MODULE REGISTRY's un-pruned per-module ASTs rather than the
- * merged program AST. The program AST is not a reliable source here: it is
- * tree-shaken (module_prune_unreachable) before typecheck runs, so a builder
- * the entry file never calls has already been removed — exactly the misuse
- * case, where `mod.rspec() {...}` is written INSTEAD of `mod.bundle() {...}`
- * and so `bundle` is unreferenced and pruned. The registry holds each
- * module's full parsed AST (AetherModule.ast, file_path == the nodes'
- * source_file), so the builder is always visible there.
+ * This scans the MODULE REGISTRY's per-module ASTs rather than the merged
+ * program AST. The registry holds each module's full parsed AST
+ * (AetherModule.ast, file_path == the nodes' source_file), so the builder
+ * is visible there whatever the merge and the prune do with it; this was
+ * written when the prune ran before type checking and had already removed
+ * a builder the entry file never calls, exactly the misuse case, where
+ * `mod.rspec() {...}` is written INSTEAD of `mod.bundle() {...}`. (Since
+ * #2613 the prune drops unreached functions only after type checking.)
  *
  * This is the discriminator for the "setter called as node builder"
  * diagnostic below: a widget-style DSL module (panel/button, no builders)
@@ -1997,6 +2157,20 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
     type_error(emsg, arg->line, arg->column);
 }
 
+/* Is `value`, of type `value_type`, a closure headed for a typed C function
+ * pointer slot (`fn(int) -> int`, is_fnptr)? A closure literal, or a name
+ * bound to one. A named function is not: it lowers to its own address. */
+static int closure_for_fnptr(SymbolTable* table, ASTNode* value, Type* value_type,
+                             Type* slot_type) {
+    if (!value || !slot_type || slot_type->kind != TYPE_FUNCTION || !slot_type->is_fnptr)
+        return 0;
+    if (value->type == AST_CLOSURE) return 1;
+    if (value->type != AST_IDENTIFIER || !value->value ||
+        !value_type || value_type->kind != TYPE_FUNCTION || value_type->is_fnptr) return 0;
+    Symbol* sym = lookup_symbol(table, value->value);
+    return sym && !sym->is_function;
+}
+
 /* A closure passed where the parameter is a typed C function pointer
  * (`fn(int) -> int`, is_fnptr). The parameter is a bare pointer with no
  * environment, so the closure cannot fit it; the front end let it through
@@ -2007,14 +2181,7 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
 static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode* arg,
                                      Type* arg_type, Type* param_type, int index,
                                      const char* param_name) {
-    if (!param_type || param_type->kind != TYPE_FUNCTION || !param_type->is_fnptr) return;
-    int is_closure = arg->type == AST_CLOSURE;
-    if (!is_closure && arg->type == AST_IDENTIFIER && arg->value &&
-        arg_type && arg_type->kind == TYPE_FUNCTION && !arg_type->is_fnptr) {
-        Symbol* sym = lookup_symbol(table, arg->value);
-        is_closure = sym && !sym->is_function;
-    }
-    if (!is_closure) return;
+    if (!closure_for_fnptr(table, arg, arg_type, param_type)) return;
     char emsg[512];
     snprintf(emsg, sizeof(emsg),
              "Argument %d '%s' of '%s': a closure cannot be passed as a typed function "
@@ -2024,6 +2191,55 @@ static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode*
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_name ? param_name : "f");
     type_error(emsg, arg->line, arg->column);
+}
+
+/* #2628: the same closure stored in a typed C function pointer slot other
+ * than a parameter: a struct literal's field, a field or element store, a
+ * binding of a local or module-level `var`, a function's result. The slot's
+ * own type check let it through (types_equal does not look at is_fnptr, so
+ * a closure and a function pointer of one signature compare equal), and gcc
+ * refused the `_AeClosure` it was handed. `name` names the slot: the field
+ * as `Struct.field`, the variable, the array. Returns 1 when it reported. */
+typedef enum { FNPTR_SLOT_FIELD, FNPTR_SLOT_VARIABLE, FNPTR_SLOT_ELEMENT,
+               FNPTR_SLOT_RESULT } FnptrSlotKind;
+static int reject_closure_in_fnptr_slot(SymbolTable* table, ASTNode* value, Type* value_type,
+                                        Type* slot_type, FnptrSlotKind kind, const char* name,
+                                        int line, int column) {
+    if (!closure_for_fnptr(table, value, value_type, slot_type)) return 0;
+    const char* nm = name ? name : "?";
+    char emsg[512] = "";
+    switch (kind) {
+        case FNPTR_SLOT_FIELD:
+            snprintf(emsg, sizeof(emsg),
+                     "Field '%s': a closure cannot be stored in a typed function pointer; "
+                     "the field is a C function pointer with no environment. Declare it "
+                     "as a bare `fn` field and call it with `call(...)`, or store a named "
+                     "function.", nm);
+            break;
+        case FNPTR_SLOT_VARIABLE:
+            snprintf(emsg, sizeof(emsg),
+                     "Variable '%s': a closure cannot be bound to a typed function pointer; "
+                     "'%s' is a C function pointer with no environment. Declare it as a "
+                     "bare `fn` and call it with `call(%s, ...)`, or bind a named function.",
+                     nm, nm, nm);
+            break;
+        case FNPTR_SLOT_ELEMENT:
+            snprintf(emsg, sizeof(emsg),
+                     "Element of '%s': a closure cannot be stored in a typed function "
+                     "pointer; the element is a C function pointer with no environment. "
+                     "Keep closures in a bare `fn` slot and call them with `call(...)`, or "
+                     "store a named function.", nm);
+            break;
+        case FNPTR_SLOT_RESULT:
+            snprintf(emsg, sizeof(emsg),
+                     "Return value: a closure cannot be returned as a typed function "
+                     "pointer; the function's result is a C function pointer with no "
+                     "environment. Return a bare `fn` and call it with `call(...)`, or "
+                     "return a named function.");
+            break;
+    }
+    type_error(emsg, line, column);
+    return 1;
 }
 
 /* #2491: a struct value passed where the parameter takes a different struct
@@ -2047,6 +2263,32 @@ static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
              "Argument %d '%s' of '%s': expected %s, got %s",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_type->struct_name, arg_type->struct_name);
+    type_error(emsg, arg->line, arg->column);
+}
+
+/* #2624: a typed pointer passed where the parameter takes a pointer to
+ * another type: `buffer_size(b: *Buffer)` given `&p.ints`, an `*Ints`. The
+ * struct rule above compares values only, so the front end let it through
+ * and gcc reported "incompatible pointer type" against generated code; with
+ * two structs sharing a layout prefix nothing at all would have failed, and
+ * the callee would have read the wrong struct. Compared as an assignment
+ * compares them (#1877): a bare `ptr` on either side is the universal
+ * pointer, and so is a pointer to a @c_struct overlay, a `void*` in C. */
+static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                    Type* param_type, int index, const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_PTR ||
+        param_type->kind != TYPE_PTR) return;
+    Type* want = param_type->element_type;
+    Type* got = arg_type->element_type;
+    if (!want || !got || want->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN) return;
+    if ((want->kind == TYPE_STRUCT && is_c_struct_name(want->struct_name)) ||
+        (got->kind == TYPE_STRUCT && is_c_struct_name(got->struct_name))) return;
+    if (is_type_compatible(arg_type, param_type)) return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type), type_name(arg_type));
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -2403,6 +2645,41 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
         declared++;
     }
     return declared == target->param_count;
+}
+
+/* #2623: the typed C function pointer (`fn(ptr, int)`, is_fnptr) that the
+ * binding `stmt` writes, or NULL when it writes anything else. That is the
+ * declaration's own annotation; for a bare `name = value`, the type of the
+ * local it re-binds, or of the module-level `var` it assigns when no local
+ * of the name is in scope. The global is found in the program, not the file
+ * scope's table, where the early inference pass parks locals under their
+ * own types. A `const` annotated with a typed fn pointer is that slot too,
+ * holding the function's address as a `var` does (#2648); it is never
+ * re-bound, so only its annotation counts. */
+static ASTNode* global_var_decl(ASTNode* child);
+static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
+    Type* t = stmt->node_type;
+    if (stmt->type == AST_CONST_DECLARATION &&
+        !(stmt->annotation && strcmp(stmt->annotation, "global_var") == 0))
+        return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
+    if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) return t;
+    if (!stmt->type_inferred || !stmt->value) return NULL;
+    for (SymbolTable* s = table; s && s->parent; s = s->parent) {
+        Symbol* local = lookup_symbol_local(s, stmt->value);
+        if (local) {
+            t = local->type;
+            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
+        }
+    }
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, stmt->value) == 0) {
+            t = g->node_type;
+            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
+        }
+    }
+    return NULL;
 }
 
 int is_assignable(Type* from, Type* to) {
@@ -3100,6 +3377,13 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 snprintf(qualified, sizeof(qualified), "%s_%s",
                          expr->children[0]->value, expr->value);
                 Symbol* sym = lookup_symbol(table, qualified);
+                /* #2631: the checked module file's own constant, which a
+                 * build merges as `<ns>_<name>`: the bare one it carries. */
+                if ((!sym || !sym->type) && !(table && table->merged_from) &&
+                    entry_self_reference(expr->children[0]->value, expr->value)) {
+                    sym = entry_self_symbol(table, expr->value);
+                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
+                }
                 if (sym && sym->type) {
                     // Rewrite node in-place for codegen
                     expr->type = AST_IDENTIFIER;
@@ -3621,6 +3905,23 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
     if (node->type == AST_FUNCTION_CALL && node->value) {
         for (int i = 0; i < var_count; i++) {
             if (strcmp(vars[i].name, node->value) == 0) {
+                vars[i].used = 1;
+            }
+        }
+    }
+
+    // A call through a local's fn-pointer field, `f.get_text(p)`, uses `f`
+    // too. The parser collapsed the callee to the dotted name `f.get_text`
+    // and dropped the receiver, so there is no identifier for it; the
+    // checker tagged the call (#749), and the receiver is the name before
+    // the dot (#2635).
+    if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
+        strncmp(node->annotation, "fnfield_", 8) == 0) {
+        const char* dot = strchr(node->value, '.');
+        size_t rlen = dot ? (size_t)(dot - node->value) : 0;
+        for (int i = 0; i < var_count && rlen > 0; i++) {
+            if (strlen(vars[i].name) == rlen &&
+                strncmp(vars[i].name, node->value, rlen) == 0) {
                 vars[i].used = 1;
             }
         }
@@ -4243,7 +4544,11 @@ static void resolve_const_initializer_types(ASTNode* program, SymbolTable* table
                 continue;
             Symbol* s = lookup_symbol_local(table, c->value);
             if (!s || (s->type && s->type->kind != TYPE_UNKNOWN)) continue;
+            /* #2614: a merged constant names the modules its own module
+             * imports, as the second pass checks it. */
+            table->merged_from = c->origin_module;
             Type* t = const_initializer_type(c->children[0], table);
+            table->merged_from = NULL;
             if (!t || t->kind == TYPE_UNKNOWN) {
                 if (t) free_type(t);
                 continue;
@@ -4384,10 +4689,28 @@ static void order_const_declarations(ASTNode* program) {
     strmap_free(&co.index);
 }
 
+static void tc_clauses_reset(void);
+
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;
+    tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
+
+    /* #2631: a module file checked on its own (it has an `exports(...)`
+     * list, the test `program_is_module` below makes too) knows the
+     * namespace a build gives it, so its own `m.a()` resolves as it does
+     * once merged. Set before any pass resolves a qualified name. */
+    g_entry_self_ns = NULL;
+    for (int i = 0; i < program->child_count; i++) {
+        if (program->children[i] && program->children[i]->type == AST_EXPORTS_LIST) {
+            if (module_leaf_of_file(program->source_file, g_entry_self_ns_buf,
+                                    sizeof(g_entry_self_ns_buf))[0]) {
+                g_entry_self_ns = g_entry_self_ns_buf;
+            }
+            break;
+        }
+    }
 
     error_count = 0;
     warning_count = 0;
@@ -5065,6 +5388,14 @@ int typecheck_program(ASTNode* program) {
             if (is_glob) {
                 short_name = glob_names[k];
                 local_name = short_name;
+                /* #2632: a name the file defines itself is not bound by a
+                 * glob import, as a local item shadows a glob import in
+                 * Rust. Registering it rewrote the file's own `bytes(n, s,
+                 * l)` calls to `string.bytes` (and re-synced its symbol to
+                 * that one), so std.number failed `ae check` and a program
+                 * with its own `bytes` failed to build. A selective import
+                 * names the clash explicitly and stays an error (E1000). */
+                if (program_defines_own(program, local_name)) continue;
             } else {
                 ASTNode* sel = child->children[k];
                 if (!sel || sel->type != AST_IDENTIFIER) continue;
@@ -5180,7 +5511,12 @@ int typecheck_program(ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         g_tc_file = top ? top->source_file : NULL;
+        /* #2614: a merged declaration (a module's function, actor or
+         * constant) resolves qualified names against its own module's
+         * imports, whatever kind of node it is. */
+        global_table->merged_from = top ? top->origin_module : NULL;
         typecheck_node(top, global_table);
+        global_table->merged_from = NULL;
         warn_erased_result_closures();   /* #2484 */
     }
     g_tc_file = NULL;
@@ -5362,6 +5698,29 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
         typecheck_expression(value_expr, table);
         Type* actual = infer_type(value_expr, table);
 
+        /* #2633: a typed fn-pointer field takes a named function's address,
+         * as a struct field does (#1240). The name infers its result, so the
+         * test below compared `int` with `fn(int) -> int` and refused the one
+         * value the field can hold. Stamped with the field's type, so codegen
+         * spells the function instead of a closure of it. A closure has no
+         * room for its environment here either (#2628). */
+        if (value_expr && declared->kind == TYPE_FUNCTION && declared->is_fnptr) {
+            char slot[256];
+            snprintf(slot, sizeof(slot), "%s.%s", msg_name, field_init->value);
+            if (reject_closure_in_fnptr_slot(table, value_expr, actual, declared,
+                                             FNPTR_SLOT_FIELD, slot,
+                                             value_expr->line, value_expr->column)) {
+                free_type(actual);
+                free_type(declared);
+                continue;
+            }
+            if (fn_name_matches_signature(table, value_expr, declared)) {
+                set_node_type(value_expr, clone_type(declared));
+                free_type(actual);
+                actual = clone_type(declared);
+            }
+        }
+
         /* Cons-cell context: when the declared field type is
          * `*StringSeq` and the RHS is an array literal, accept the
          * assignment and stamp the literal's node_type to *StringSeq.
@@ -5392,9 +5751,60 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
     }
 }
 
+/* #2654: the message pattern a receive arm matches, as codegen finds it: a
+ * `Msg(...) -> body` arm, or the first pattern of a V1 block. */
+static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
+    if (!arm) return NULL;
+    if (arm->type == AST_RECEIVE_ARM && arm->child_count >= 2)
+        return arm->children[0] && arm->children[0]->type == AST_MESSAGE_PATTERN
+               ? arm->children[0] : NULL;
+    if (arm->type == AST_BLOCK) {
+        for (int k = 0; k < arm->child_count; k++)
+            if (arm->children[k] && arm->children[k]->type == AST_MESSAGE_PATTERN)
+                return arm->children[k];
+    }
+    return NULL;
+}
+
+/* #2654: a second receive arm for a message the actor already receives
+ * can never run. An arm matches by the message alone (a pattern binds
+ * fields and takes no guard), and a message is dispatched to one handler
+ * per message type; with two, the C had two definitions of that handler.
+ * Each arm after the first for a message is refused, naming both, in any
+ * of the actor's receive blocks. */
+static void reject_duplicate_receive_arms(ASTNode* actor) {
+    ASTNode* seen[256];
+    int seen_count = 0;
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (!rs || rs->type != AST_RECEIVE_STATEMENT) continue;
+        for (int j = 0; j < rs->child_count; j++) {
+            ASTNode* pattern = receive_arm_message_pattern(rs->children[j]);
+            if (!pattern || !pattern->value) continue;
+            ASTNode* first = NULL;
+            for (int s = 0; s < seen_count && !first; s++)
+                if (strcmp(seen[s]->value, pattern->value) == 0) first = seen[s];
+            if (first) {
+                char msg[320];
+                snprintf(msg, sizeof(msg),
+                         "this receive arm for '%s' can never run: the arm for '%s' at "
+                         "line %d already receives every '%s' message of actor '%s'. "
+                         "Handle both cases in that one arm",
+                         pattern->value, first->value, first->line, pattern->value,
+                         actor->value ? actor->value : "?");
+                type_error(msg, pattern->line, pattern->column);
+            } else if (seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
+                seen[seen_count++] = pattern;
+            }
+        }
+    }
+}
+
 int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return 0;
-    
+
+    reject_duplicate_receive_arms(actor);   /* #2654 */
+
     SymbolTable* actor_table = create_symbol_table(table);
     
     // Type check actor body
@@ -6549,14 +6959,12 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
 
     SymbolTable* func_table = create_symbol_table(table);
 
-    // Issue #243 sealed scopes: cloned function bodies from
-    // module_merge_into_program's BFS transitive-merge pass need
-    // relaxed qualified-call resolution so they can reach into other
-    // transitively-merged namespaces. The flag propagates from
-    // parent in create_symbol_table, so nested scopes inside this
-    // body inherit it; on function exit we just free func_table.
-    if (func->is_imported) {
-        func_table->inside_merged_body = 1;
+    // Issue #243 sealed scopes, #2614: a function cloned in from a module
+    // resolves qualified calls against that module's imports. The origin
+    // propagates from parent in create_symbol_table, so nested scopes
+    // inside this body inherit it; on function exit we just free func_table.
+    if (func->origin_module) {
+        func_table->merged_from = func->origin_module;
     }
 
     // Add parameters to function's symbol table
@@ -6690,6 +7098,29 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     add_symbol(table, name, joined ? joined : clone_type(t), 0, 0, 0);
     Symbol* s = lookup_symbol_local(table, name);
     if (s) s->branch_hoisted = 1;
+}
+
+/* #2611: is a binding of type `here`, in a sibling branch or loop body of a
+ * local hoisted as `hoisted`, of the same kind but another C type: a struct
+ * or sum of another name, or a pointer to another type? Codegen's sibling
+ * check refuses a binding of another kind and passes one of the same kind,
+ * leaving the nominal rules to this checker, which handed the binding back
+ * to codegen unjudged. So `view = block as *Pear` in one loop beside
+ * `view = block as *Apple` in another reached the C compiler as an
+ * assignment to the `Apple*` both share. A bare `ptr`, and a pointer to a
+ * @c_struct overlay (a `void*` in C), take any pointer. */
+static int sibling_binding_other_type(Type* here, Type* hoisted) {
+    if (!here || !hoisted || here->kind != hoisted->kind) return 0;
+    if (here->kind == TYPE_STRUCT || here->kind == TYPE_SUM)
+        return here->struct_name && hoisted->struct_name &&
+               strcmp(here->struct_name, hoisted->struct_name) != 0;
+    if (here->kind != TYPE_PTR) return 0;
+    Type* a = here->element_type;
+    Type* b = hoisted->element_type;
+    if (!a || !b || a->kind == TYPE_UNKNOWN || b->kind == TYPE_UNKNOWN) return 0;
+    if ((a->kind == TYPE_STRUCT && is_c_struct_name(a->struct_name)) ||
+        (b->kind == TYPE_STRUCT && is_c_struct_name(b->struct_name))) return 0;
+    return !is_type_compatible(here, hoisted);
 }
 
 /* Function (or main) entry: hoist_if_branch_vars's names. */
@@ -7128,10 +7559,44 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     typecheck_expression(init, table);
                 }
-                if (function_value_annotate(init, table)) {
+                /* #2623: a named function bound to a typed C function
+                 * pointer is its address, as it is passed to a parameter of
+                 * that type or stored in a field of one (#1240). Read as a
+                 * closure value instead, a function returning nothing was
+                 * typed `fn(ptr, int)` with no result slot where the
+                 * annotation has `void`, so the slot refused the one function
+                 * it was declared for; one returning a value passed, and was
+                 * emitted as an _AeClosure into the `void*`. Marked as an
+                 * address so codegen spells the definition's C name. */
+                Type* fnptr_slot = fnptr_binding_slot(stmt, table);
+                int fn_address = fnptr_slot &&
+                                 fn_name_matches_signature(table, init, fnptr_slot);
+                if (fn_address) {
+                    set_node_type(init, clone_type(fnptr_slot));
+                    if (init->annotation) free(init->annotation);
+                    init->annotation = strdup("fn_addr");
+                } else if (function_value_annotate(init, table)) {
                     /* A function is a value here, not a call. */
                 }
-                Type* init_type = infer_type(init, table);
+                Type* init_type = fn_address ? clone_type(fnptr_slot)
+                                             : infer_type(init, table);
+                /* #2628: a closure has an environment the slot has nowhere
+                 * to put. Refused before the generic checks below, which
+                 * pass a closure of the slot's signature and call another
+                 * one a plain mismatch. */
+                if (!fn_address &&
+                    reject_closure_in_fnptr_slot(table, init, init_type, fnptr_slot,
+                                                 FNPTR_SLOT_VARIABLE, stmt->value,
+                                                 init->line, init->column)) {
+                    /* A declaration still declares its name, with its
+                     * annotation, so a call through it is not reported
+                     * again as an undefined function. */
+                    if (fnptr_slot == stmt->node_type && stmt->value &&
+                        !lookup_symbol_local(table, stmt->value))
+                        add_symbol(table, stmt->value, clone_type(fnptr_slot), 0, 0, 0);
+                    free_type(init_type);
+                    return 0;
+                }
 
                 /* `const` is substitution-at-each-use: the compiler
                  * inlines the RHS expression at every reference. That
@@ -7228,11 +7693,39 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     /* #2186: a local hoisted out of a branch or loop body,
                      * bound again inside another one, is judged by
                      * codegen's sibling check, which joins every binding
-                     * of the name first. Keep the join here for reads. */
+                     * of the name first. Keep the join here for reads.
+                     * The nominal rule is this checker's (#2611): see
+                     * sibling_binding_other_type. */
                     if (bound && bound->branch_hoisted && bound_in != table) {
-                        if (bound->type && init_type) {
+                        /* declare_hoisted_local typed the local before the
+                         * block was checked, from what the early inference
+                         * pass knew, and that pass leaves a binding such as
+                         * an `as *T` view unknown. Codegen types the C
+                         * declaration from the first binding once it is
+                         * checked; so does the first binding checked here,
+                         * joined over the body as declare_hoisted_local
+                         * joins (#2611). */
+                        if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
+                            init_type->kind != TYPE_UNKNOWN && init_type->kind != TYPE_VOID) {
+                            Type* joined = hoist_join_type(g_tc_fn_body, stmt->value, init_type);
+                            free_type(bound->type);
+                            bound->type = joined ? joined : clone_type(init_type);
+                        } else if (bound->type && init_type) {
                             Type* joined = numeric_join_type(bound->type, init_type);
                             if (joined) { free_type(bound->type); bound->type = joined; }
+                        }
+                        if (sibling_binding_other_type(init_type, bound->type)) {
+                            char rmsg[512];
+                            snprintf(rmsg, sizeof(rmsg),
+                                "cannot bind '%s' as %s: it is bound as %s in another branch "
+                                "or loop body of this function, and a local first bound inside "
+                                "a branch or loop body is one variable for the whole function. "
+                                "Use a new name for the %s value",
+                                stmt->value, type_name(init_type), type_name(bound->type),
+                                type_name(init_type));
+                            type_error(rmsg, stmt->line, stmt->column);
+                            free_type(init_type);
+                            return 0;
                         }
                         bound = NULL;
                     }
@@ -8635,6 +9128,19 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
                 slice_coerce_slot(&stmt->children[0], g_tc_return_type, 0);
+            /* #2628: a closure returned as a typed fn pointer (`-> Getter`
+             * for a `cfn Getter`). A closure's own `return` is not this
+             * one: g_tc_return_type is cleared inside its body. */
+            if (stmt->child_count == 1 && stmt->children[0] && g_tc_return_type &&
+                g_tc_return_type->kind == TYPE_FUNCTION && g_tc_return_type->is_fnptr) {
+                ASTNode* rv = stmt->children[0];
+                Type* rvt = infer_type(rv, table);
+                int refused = reject_closure_in_fnptr_slot(table, rv, rvt, g_tc_return_type,
+                                                           FNPTR_SLOT_RESULT, NULL,
+                                                           rv->line, rv->column);
+                free_type(rvt);
+                if (refused) return 0;
+            }
             /* A multi-value return into a tuple type coerces each value
              * against its own position: `return null, "e"` from a
              * `-> (long[], string)` function is the empty slice and a
@@ -8717,8 +9223,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                expr->line, expr->column);
                     return 0;
                 }
-                expr->node_type = infer_unary_type(expr->children[0],
-                                                 get_token_type_from_string(expr->value));
+                /* Through set_node_type: inference typed this node first, and
+                 * a plain assignment orphaned that type (#1575), one per unary
+                 * expression in every function checked. */
+                set_node_type(expr, infer_unary_type(expr->children[0],
+                                                     get_token_type_from_string(expr->value)));
             }
             return 1;
         }
@@ -8994,6 +9503,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                              expr->value);
                 } else {
                     snprintf(error_msg, sizeof(error_msg), "Undefined variable '%s'", expr->value ? expr->value : "?");
+                    /* #2614: `low` of a `low.CONST` this scope cannot see. */
+                    char hint[512];
+                    if (missing_import_hint(expr->value, table, hint, sizeof(hint))) {
+                        type_error_code_hint(error_msg, hint, expr->line, expr->column,
+                                             AETHER_ERR_UNDEFINED_VAR);
+                        return 0;
+                    }
                 }
                 type_error(error_msg, expr->line, expr->column);
                 return 0;
@@ -9197,7 +9713,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     bs_cast = is_integer_scalar(expr->node_type->kind);
                 else if (expr->node_type->kind == TYPE_BITSTRUCT && operand->kind != TYPE_BITSTRUCT)
                     bs_cast = is_integer_scalar(operand->kind);
-                if (!same && !numeric && !bs_cast) {
+                /* #2634: a typed fn pointer is a C pointer (its storage is a
+                 * `void*`), so `f as ptr` is the pointer it holds, the way
+                 * back from `p as fn(...)`. A closure is not one: it carries
+                 * an environment. */
+                int fnptr_to_ptr = operand->kind == TYPE_FUNCTION && operand->is_fnptr &&
+                                   expr->node_type->kind == TYPE_PTR &&
+                                   !expr->node_type->element_type;
+                if (!same && !numeric && !bs_cast && !fnptr_to_ptr) {
                     char msg[220];
                     snprintf(msg, sizeof(msg),
                         "cannot cast %s to %s with `as`: a value cast converts "
@@ -9497,6 +10020,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             ? sdef_sym->node : NULL;
             int sdef_is_extern = sdef && sdef->annotation &&
                                  strncmp(sdef->annotation, "extern", 6) == 0;
+            int fields_ok = 1;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
                 if (field_init && field_init->type == AST_ASSIGNMENT && field_init->child_count > 0) {
@@ -9510,15 +10034,29 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 strcmp(fd->value, field_init->value) == 0) {
                                 slice_coerce_slot(&field_init->children[0], fd->node_type,
                                                   sdef_is_extern);
+                                /* #2628: a closure in a typed fn-pointer field. */
+                                ASTNode* fv = field_init->children[0];
+                                if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
+                                    fd->node_type->is_fnptr) {
+                                    Type* fvt = infer_type(fv, table);
+                                    char slot[256];
+                                    snprintf(slot, sizeof(slot), "%s.%s",
+                                             sdef->value ? sdef->value : "?", fd->value);
+                                    if (reject_closure_in_fnptr_slot(table, fv, fvt, fd->node_type,
+                                                                     FNPTR_SLOT_FIELD, slot,
+                                                                     fv->line, fv->column))
+                                        fields_ok = 0;
+                                    free_type(fvt);
+                                }
                                 break;
                             }
                         }
                     }
                 }
             }
-        }
             // Struct literal type is already set during type inference
-            return 1;
+            return fields_ok;
+        }
             
         case AST_MEMBER_ACCESS: {
             /* #2146: a lane read. This walk always runs, so it is where the
@@ -9628,6 +10166,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         sym = lookup_symbol(table, qualified);
                     }
                 }
+                /* #2631: the checked module file's own constant, which a
+                 * build merges as `<ns>_<name>`: the bare one it carries. */
+                if ((!sym || !sym->type) && !table->merged_from &&
+                    entry_self_reference(expr->children[0]->value, expr->value)) {
+                    sym = entry_self_symbol(table, expr->value);
+                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
+                }
                 if (sym && sym->type) {
                     // Rewrite node in-place
                     expr->type = AST_IDENTIFIER;
@@ -9728,7 +10273,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                     // Fallback to general inference
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 // Handle struct member access — look up field type from definition.
@@ -9785,7 +10330,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     }
                     // Fallback to general inference
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 // Pointer-to-struct member access: `e.field` where e: *Foo
@@ -9839,7 +10384,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         }
                     }
                     if (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN) {
-                        expr->node_type = infer_type(expr, table);
+                        set_node_type(expr, infer_type(expr, table));
                     }
                 }
                 free_type(base_type);
@@ -10054,6 +10599,35 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(right_type);
             return 0;
         }
+        /* #2628: a closure stored in a typed fn-pointer field (`f.cb = |p|
+         * ...`, through a pointer too) or element. Checked first: the test
+         * below passes a closure of the slot's signature and calls any
+         * other one a plain mismatch. */
+        if (left_type && left_type->kind == TYPE_FUNCTION && left_type->is_fnptr) {
+            FnptrSlotKind kind = FNPTR_SLOT_VARIABLE;
+            char slot[256];
+            snprintf(slot, sizeof(slot), "%s", left->value ? left->value : "?");
+            if (left->type == AST_MEMBER_ACCESS && left->child_count > 0) {
+                kind = FNPTR_SLOT_FIELD;
+                Type* ot = infer_type(left->children[0], table);
+                Type* st = ot && ot->kind == TYPE_PTR ? ot->element_type : ot;
+                if (st && st->kind == TYPE_STRUCT && st->struct_name)
+                    snprintf(slot, sizeof(slot), "%s.%s", st->struct_name,
+                             left->value ? left->value : "?");
+                free_type(ot);
+            } else if (left->type == AST_ARRAY_ACCESS && left->child_count > 0) {
+                kind = FNPTR_SLOT_ELEMENT;
+                ASTNode* arr = left->children[0];
+                snprintf(slot, sizeof(slot), "%s",
+                         arr && arr->type == AST_IDENTIFIER && arr->value ? arr->value : "array");
+            }
+            if (reject_closure_in_fnptr_slot(table, right, right_type, left_type, kind, slot,
+                                             right->line, right->column)) {
+                free_type(left_type);
+                free_type(right_type);
+                return 0;
+            }
+        }
         if (!is_assignable(right_type, left_type)) {
             /* #1240: `table.callback = my_fn` where the field is declared
              * `fn(T...) -> R`. A bare function name infers its RETURN type
@@ -10148,13 +10722,11 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     return 1;
 }
 
-/* #749: resolve `<recv>.<field>` where `recv` is a local struct or
- * pointer-to-struct whose `field` is a function-pointer member. Returns
- * the field's TYPE_FUNCTION (is_fnptr) Type* (borrowed — do not free) or
- * NULL. *out_is_ptr is set to 1 when the receiver is a pointer-to-struct
- * (codegen then emits `->field` rather than `.field`). */
-static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
-                                        const char* field_name, int* out_is_ptr) {
+/* The declared type of `<recv>.<field>` where `recv` is a local struct or
+ * pointer-to-struct, borrowed, or NULL. *out_is_ptr is set to 1 when the
+ * receiver is a pointer-to-struct. */
+static Type* local_struct_field_type(SymbolTable* table, const char* recv_name,
+                                     const char* field_name, int* out_is_ptr) {
     Symbol* rs = lookup_symbol(table, recv_name);
     if (!rs || !rs->type) return NULL;
     Type* st = rs->type;
@@ -10174,15 +10746,25 @@ static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_nam
     for (int fi = 0; fi < ss->node->child_count; fi++) {
         ASTNode* f = ss->node->children[fi];
         if (f && f->value && strcmp(f->value, field_name) == 0) {
-            if (f->node_type && f->node_type->kind == TYPE_FUNCTION &&
-                f->node_type->is_fnptr) {
-                if (out_is_ptr) *out_is_ptr = is_ptr;
-                return f->node_type;
-            }
-            return NULL;
+            if (out_is_ptr) *out_is_ptr = is_ptr;
+            return f->node_type;
         }
     }
     return NULL;
+}
+
+/* #749: resolve `<recv>.<field>` where `recv` is a local struct or
+ * pointer-to-struct whose `field` is a function-pointer member. Returns
+ * the field's TYPE_FUNCTION (is_fnptr) Type* (borrowed, do not free) or
+ * NULL. *out_is_ptr is set to 1 when the receiver is a pointer-to-struct
+ * (codegen then emits `->field` rather than `.field`). */
+static Type* resolve_fnptr_struct_field(SymbolTable* table, const char* recv_name,
+                                        const char* field_name, int* out_is_ptr) {
+    int is_ptr = 0;
+    Type* t = local_struct_field_type(table, recv_name, field_name, &is_ptr);
+    if (!t || t->kind != TYPE_FUNCTION || !t->is_fnptr) return NULL;
+    if (out_is_ptr) *out_is_ptr = is_ptr;
+    return t;
 }
 
 /* #928 UFCS support: the first declared parameter node of a user
@@ -10379,17 +10961,191 @@ static int tc_has_return_value(ASTNode* node) {
  * Returns 1 when `call` names a user-defined function that lowers to void.
  * Externs are excluded: their declared type is the only truth available, and
  * an `extern f() -> int` may well front a real int-returning C function. */
+/* #2645, #2647: a function written as several clauses (`f(0) -> ...`,
+ * `f(n) -> ...`) is one symbol, whose node is its last clause. What a call
+ * of it yields, and which `requires` can apply to a call, are questions
+ * about every clause. The clauses of each name, in program order, are
+ * indexed once per program (as codegen's program index is, #2007); the
+ * type checker frees no top-level node while it runs. */
+typedef struct {
+    ASTNode** nodes;
+    int count;
+    int cap;
+} TcClauses;
+
+static StrMap g_tc_clauses;
+static ASTNode* g_tc_clauses_program = NULL;
+static int g_tc_clauses_child_count = -1;
+
+static void tc_clauses_reset(void) {
+    for (int i = 0; i < strmap_count(&g_tc_clauses); i++) {
+        TcClauses* tc = strmap_value_at(&g_tc_clauses, i);
+        if (tc) { free(tc->nodes); free(tc); }
+    }
+    strmap_free(&g_tc_clauses);
+    g_tc_clauses_program = NULL;
+    g_tc_clauses_child_count = -1;
+}
+
+/* The clauses of the set `fn` is one of, or NULL for a single definition. */
+static const TcClauses* tc_clauses_of(ASTNode* fn) {
+    ASTNode* program = g_typecheck_program;
+    if (!program || !fn || !fn->value) return NULL;
+    if (g_tc_clauses_program != program || g_tc_clauses_child_count != program->child_count) {
+        tc_clauses_reset();
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (!c || !c->value ||
+                (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
+            TcClauses* tc = strmap_get(&g_tc_clauses, c->value);
+            if (!tc) {
+                tc = calloc(1, sizeof(TcClauses));
+                if (!tc) continue;
+                strmap_put(&g_tc_clauses, c->value, tc);
+            }
+            if (tc->count == tc->cap) {
+                int cap = tc->cap ? tc->cap * 2 : 2;
+                ASTNode** nn = realloc(tc->nodes, sizeof(ASTNode*) * (size_t)cap);
+                if (!nn) continue;
+                tc->nodes = nn;
+                tc->cap = cap;
+            }
+            tc->nodes[tc->count++] = c;
+        }
+        g_tc_clauses_program = program;
+        g_tc_clauses_child_count = program->child_count;
+    }
+    const TcClauses* tc = strmap_get(&g_tc_clauses, fn->value);
+    if (!tc || tc->count < 2) return NULL;
+    for (int i = 0; i < tc->count; i++)
+        if (tc->nodes[i] == fn) return tc;
+    return NULL;
+}
+
 static int fn_yields_no_value(ASTNode* fn) {
     if (!fn) return 0;
     if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION)
         return 0;
-    /* An annotated return type is authoritative, whatever the body does. */
-    Type* rt = fn->node_type;
-    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 0;
-    /* Unannotated: void exactly when no `return <value>` reaches codegen.
-     * has_return_value is the same predicate codegen uses to decide, so the
-     * two cannot disagree. */
-    return !tc_has_return_value(fn);
+    /* A clause set yields what codegen's fn_result_type decides over every
+     * clause (#2645): a value when any clause declares a type or returns
+     * one. */
+    const TcClauses* set = tc_clauses_of(fn);
+    int n = set ? set->count : 1;
+    for (int c = 0; c < n; c++) {
+        ASTNode* clause = set ? set->nodes[c] : fn;
+        /* An annotated return type is authoritative, whatever the body does. */
+        Type* rt = clause->node_type;
+        if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 0;
+        /* Unannotated: void exactly when no `return <value>` reaches codegen.
+         * has_return_value is the same predicate codegen uses to decide, so
+         * the two cannot disagree. */
+        if (tc_has_return_value(clause)) return 0;
+    }
+    return 1;
+}
+
+/* Report the first `requires` of `fn` that the bindings in `env` decide
+ * false at `call` (the call-site tier of contract folding). Returns 1 when
+ * it reported one. */
+static int fold_call_requires(ASTNode* call, ASTNode* fn, ContractEnv* env) {
+    for (int ci = 0; ci < fn->child_count; ci++) {
+        ASTNode* cl = fn->children[ci];
+        if (!cl || cl->type != AST_REQUIRES_CLAUSE || cl->child_count == 0)
+            continue;
+        if (contract_eval_predicate(cl->children[0], env) != CONTRACT_FALSE)
+            continue;
+        char ptxt[512];
+        ContractStr ps = { ptxt, sizeof(ptxt), 0 };
+        contract_sprint_expr(&ps, cl->children[0]);
+        contract_str_terminate(&ps);
+        char emsg[768];
+        snprintf(emsg, sizeof(emsg),
+                 "precondition violation at compile time: %s in %s, this "
+                 "call's constant arguments can never satisfy it (the same "
+                 "check would panic at run time)",
+                 ptxt, call->value ? call->value : "?");
+        type_error(emsg, call->line, call->column);
+        return 1;   /* one violation per call site is enough */
+    }
+    return 0;
+}
+
+/* Does the argument `arg` match the literal pattern `pat`: TRUE or FALSE
+ * when both are known at compile time, UNKNOWN otherwise. */
+static ContractTri literal_pattern_matches(ASTNode* pat, ASTNode* arg) {
+    if (!pat || !arg || !pat->value || !pat->node_type) return CONTRACT_UNKNOWN;
+    if (pat->node_type->kind == TYPE_INT) {
+        int64_t v;
+        if (!contract_eval_int64(arg, g_enum_program, &v)) return CONTRACT_UNKNOWN;
+        return v == strtoll(pat->value, NULL, 0) ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    if (pat->node_type->kind == TYPE_BOOL) {
+        ContractEnv none = {{0}, {0}, 0, g_enum_program};
+        ContractTri t = contract_eval_predicate(arg, &none);
+        if (t == CONTRACT_UNKNOWN) return CONTRACT_UNKNOWN;
+        return (t == CONTRACT_TRUE) == (strcmp(pat->value, "true") == 0)
+                   ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    if (pat->node_type->kind == TYPE_STRING && arg->type == AST_LITERAL && arg->value &&
+        arg->node_type && arg->node_type->kind == TYPE_STRING) {
+        return strcmp(arg->value, pat->value) == 0 ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    return CONTRACT_UNKNOWN;
+}
+
+/* #2647: a `requires` belongs to its clause: its dispatcher checks it when
+ * it picks that clause, so the call-site fold applies a clause's contract
+ * only to a call that can reach the clause. In order, a clause whose
+ * literal pattern or guard this call's constant arguments rule out is
+ * passed over, its contract with it; one they cannot rule out has its
+ * contract folded under its own parameters (positions counting its literal
+ * patterns); one they surely match (every literal pattern equal, the guard
+ * true or absent) ends the walk, since no later clause is reached. The
+ * last clause's contract was folded for every call, so `name_of(0)`, which
+ * a first clause with no `requires` takes, failed on the second clause's
+ * `requires n > 0`. Returns 0 when `fn` is a single definition. */
+static int fold_clause_set_requires(ASTNode* call, ASTNode* fn) {
+    const TcClauses* set = tc_clauses_of(fn);
+    if (!set) return 0;
+    for (int k = 0; k < set->count; k++) {
+        ASTNode* clause = set->nodes[k];
+        ContractEnv env = {{0}, {0}, 0, g_enum_program};
+        int expected = count_function_params(clause);
+        int offset = (has_ctx_first_param(clause) && call->child_count == expected - 1) ? -1 : 0;
+        int can_match = 1, surely = 1, pos = 0;
+        for (int i = 0; i < clause->child_count; i++) {
+            ASTNode* p = clause->children[i];
+            if (!p) continue;
+            int is_var = p->type == AST_VARIABLE_DECLARATION || p->type == AST_PATTERN_VARIABLE;
+            if (!is_var && p->type != AST_PATTERN_LITERAL && p->type != AST_PATTERN_STRUCT &&
+                p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS) continue;
+            int slot = pos++ + offset;
+            ASTNode* arg = (slot >= 0 && slot < call->child_count) ? call->children[slot] : NULL;
+            if (is_var) {
+                if (arg && p->value && env.count < CONTRACT_ENV_MAX_PARAMS) {
+                    env.names[env.count] = p->value;
+                    env.args[env.count] = arg;
+                    env.count++;
+                }
+            } else if (p->type == AST_PATTERN_LITERAL && p->value && strcmp(p->value, "_") != 0) {
+                ContractTri m = literal_pattern_matches(p, arg);
+                if (m == CONTRACT_FALSE) can_match = 0;
+                if (m != CONTRACT_TRUE) surely = 0;
+            } else if (p->type != AST_PATTERN_LITERAL) {
+                surely = 0;   /* a struct or list pattern is not folded */
+            }
+        }
+        for (int i = 0; can_match && i < clause->child_count; i++) {
+            ASTNode* g = clause->children[i];
+            if (!g || g->type != AST_GUARD_CLAUSE || g->child_count == 0) continue;
+            ContractTri t = contract_eval_predicate(g->children[0], &env);
+            if (t == CONTRACT_FALSE) can_match = 0;
+            if (t != CONTRACT_TRUE) surely = 0;
+        }
+        if (!can_match) continue;
+        if (fold_call_requires(call, clause, &env) || surely) break;
+    }
+    return 1;
 }
 
 static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
@@ -10545,6 +11301,9 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
     if (symbol && !symbol->is_function && symbol->type &&
         symbol->type->kind == TYPE_FUNCTION && symbol->type->is_fnptr &&
         call->value) {
+        /* #2586: codegen's ownership analyses tell such a call from a
+         * direct one without its function's locals registered. */
+        if (!call->annotation) call->annotation = strdup("fnptr_local_call");
         for (int i = 0; i < call->child_count; i++) {
             typecheck_expression(call->children[i], table);
         }
@@ -10633,6 +11392,25 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                 call->annotation = strdup(is_ptr ? "fnfield_ptr" : "fnfield_val");
                 return 1;
             }
+            /* #2653: a closure kept in a field, `h.cb(2)`, is `call(h.cb,
+             * 2)`, as a closure local's call is `call(name, ...)` (above):
+             * the collapsed callee is rebuilt as the member access and the
+             * call is checked as the explicit form is. It named no
+             * function, so it was "Undefined function 'h.cb'". */
+            Type* ft = local_struct_field_type(table, recv, dot + 1, NULL);
+            if (ft && ft->kind == TYPE_FUNCTION && !ft->is_fnptr) {
+                ASTNode* obj = create_ast_node(AST_IDENTIFIER, recv, call->line, call->column);
+                ASTNode* fn_ref = create_ast_node(AST_MEMBER_ACCESS, dot + 1,
+                                                  call->line, call->column);
+                add_child(fn_ref, obj);
+                add_child(call, fn_ref);
+                for (int i = call->child_count - 1; i > 0; i--)
+                    call->children[i] = call->children[i - 1];
+                call->children[0] = fn_ref;
+                free(call->value);
+                call->value = strdup("call");
+                return typecheck_function_call(call, table);
+            }
         }
     }
 
@@ -10656,6 +11434,15 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
             char* tmp = strdup(call->value);
             char* dot = strchr(tmp, '.');
             *dot = '\0';
+            char hint[512];
+            if (missing_import_hint(tmp, table, hint, sizeof(hint))) {
+                snprintf(error_msg, sizeof(error_msg),
+                         "Undefined function '%s'", call->value);
+                free(tmp);
+                type_error_code_hint(error_msg, hint, call->line, call->column,
+                                     AETHER_ERR_UNDEFINED_FUNC);
+                return 0;
+            }
             if (is_export_blocked(tmp, dot + 1)) {
                 snprintf(error_msg, sizeof(error_msg),
                          "'%s' is not exported from module '%s'", dot + 1, tmp);
@@ -11233,6 +12020,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||
@@ -11366,26 +12154,12 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
          * correctness findings with it would conflate the two.
          *
          * Escape hatch for intentionally-unreachable calls: route the value
-         * through a runtime variable — only constant arguments bind. */
-        for (int ci = 0; ci < symbol->node->child_count; ci++) {
-            ASTNode* cl = symbol->node->children[ci];
-            if (!cl || cl->type != AST_REQUIRES_CLAUSE || cl->child_count == 0)
-                continue;
-            if (contract_eval_predicate(cl->children[0], &cf_env) != CONTRACT_FALSE)
-                continue;
-            char ptxt[512];
-            ContractStr ps = { ptxt, sizeof(ptxt), 0 };
-            contract_sprint_expr(&ps, cl->children[0]);
-            contract_str_terminate(&ps);
-            char emsg[768];
-            snprintf(emsg, sizeof(emsg),
-                     "precondition violation at compile time: %s in %s, this "
-                     "call's constant arguments can never satisfy it (the same "
-                     "check would panic at run time)",
-                     ptxt, call->value ? call->value : "?");
-            type_error(emsg, call->line, call->column);
-            break;   /* one violation per call site is enough */
-        }
+         * through a runtime variable: only constant arguments bind.
+         *
+         * A function written as several clauses folds each clause's own
+         * contract, for the calls that can reach it (#2647). */
+        if (!fold_clause_set_requires(call, symbol->node))
+            fold_call_requires(call, symbol->node, &cf_env);
     }
 
     // Validate argument types for extern functions (which always have typed params)

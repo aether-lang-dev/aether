@@ -43,6 +43,7 @@ const char* safe_value_name(const char* name);
 const char* get_c_operator(const char* aether_op);
 void generate_type(CodeGenerator* gen, Type* type);
 void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name);
+const char* fnptr_c_spelling(Type* sig, const char* name);   /* #2651 */
 int is_fnptr_type(Type* t);
 int fn_is_inline_candidate(ASTNode* func);
 int is_var_declared(CodeGenerator* gen, const char* var_name);
@@ -209,8 +210,11 @@ void compute_closure_args_borrowed(CodeGenerator* gen);
 /* #2499: must closure literal `closure` take its own reference to its
  * `string` parameter `param_idx` on entry? Defined in codegen_stmt.c. */
 int closure_string_param_kept(CodeGenerator* gen, ASTNode* closure, int param_idx);
-int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
-                             int return_is_keep);
+/* Does some clause of `func_name` keep the caller's own `string` argument
+ * past the call, taking no reference of its own (#2644)? A return counts
+ * only when `return_is_keep`. */
+int callee_string_param_kept_as_given(CodeGenerator* gen, const char* func_name, int param_idx,
+                                      int return_is_keep);
 
 /* True when `func_name` resolves to a user function with a visible body
  * block; only then may the body-walk override the conservative
@@ -247,6 +251,7 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
 
 /* Message field helpers (codegen_expr.c) — shared with codegen_stmt.c */
 MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name);
+Type* message_field_type(ASTNode* program, const char* msg, const char* field);
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs);
 void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
 
@@ -311,11 +316,13 @@ ASTNode* closure_container_store_value(CodeGenerator* gen, ASTNode* call);   /* 
  * (moved or copied, never adopted and left escaped), or NULL. */
 ASTNode* string_container_store_value(CodeGenerator* gen, ASTNode* call);
 int container_store_slot(CodeGenerator* gen, ASTNode* call);
-/* Copy-on-keep for named functions: does `func_name` take its own reference
- * to `string` parameter `param_idx` on entry (it keeps it past the call)?
- * The caller then borrows. callee_keeps_string_arg is the one caller-side
- * rule for a `string` argument (does the caller's pointer live on?). */
-int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx);
+/* Copy-on-keep for named functions: does the definition `fn_def` (a single
+ * one, or one clause of a set, #2644) take its own reference to `string`
+ * parameter `param_idx` on entry (it keeps it past the call)? The caller
+ * then borrows. callee_keeps_string_arg is the one caller-side rule for a
+ * `string` argument (does the caller's pointer live on?), asked of every
+ * clause. */
+int fn_def_string_param_captures(CodeGenerator* gen, ASTNode* fn_def, int param_idx);
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Release the parameter table box_trackers_are_initialised builds. */
 void zb_params_free(CodeGenerator* gen);
@@ -332,6 +339,8 @@ ASTNode* message_field_init_expr(ASTNode* message, const char* name);
  * the definition; the callers' ownership decisions and the bare-fn adapter
  * read the same verdict. */
 int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def);
+/* The same for tuple position `position` (#420). */
+int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def, int position);
 /* #2019: declare the shared heap cell for a promoted capture and queue its
  * scope-exit release. The initial value is `init_expr` when given, else the
  * C text `init_text`. The cell is reference-counted, so the release is
@@ -359,6 +368,7 @@ void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
    duplicated: the builtin fast-paths need it to know when a program has
    defined a function of its own with a builtin's name. */
 ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
+ASTNode* find_extern_declaration_by_name(ASTNode* program, const char* name);
 
 /* Push function-exit defer-free statements for every hoisted
  * heap-string var that's NOT escaped. Closes the single-call
@@ -374,6 +384,8 @@ void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
 int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
 int  call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call);
+int  call_returns_tuple_view_of_temp(CodeGenerator* gen, ASTNode* call);
+int  tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j);
 void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);
@@ -406,6 +418,8 @@ int is_extern_func(CodeGenerator* gen, const char* func_name);
 void register_fnptr_local(CodeGenerator* gen, const char* name, Type* sig);
 Type* lookup_fnptr_local(CodeGenerator* gen, const char* name);
 Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
+int is_fnptr_const_decl(const ASTNode* cd);                        /* #2648 */
+int fn_const_decl(const ASTNode* cd);                              /* #2648 */
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the
@@ -450,6 +464,18 @@ void emit_bare_fn_adapters(CodeGenerator* gen);
  * them) are emitted, so the closure functions see the prototype in scope. */
 void emit_bare_fn_adapter_decls(CodeGenerator* gen);
 void discover_bare_fn_adapters(CodeGenerator* gen);
+void discover_fn_values(CodeGenerator* gen);                       /* #2586 */
+void compute_fnptr_args_borrowed(CodeGenerator* gen);              /* #2586 */
+int fn_value_name(const char* name);
+int emitting_marked_fn_value(CodeGenerator* gen);
+int fnptr_arg_borrowed(int slot);
+int typed_fnptr_call(CodeGenerator* gen, ASTNode* call);
+int param_may_hold_caller_string(const Type* t);
+void callee_memo_clear(CodeGenerator* gen);
+int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call);
+int call_hands_back_temp(CodeGenerator* gen, ASTNode* call);       /* #2649 */
+int hands_back_temp_memo_begin(CodeGenerator* gen, ASTNode* call, int* out, int* mark);
+void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
@@ -648,6 +674,7 @@ typedef struct {
     StrMap defs;               /* name -> DefClauses* */
     StrMap externs;            /* name -> ASTNode* (own or imported AST_EXTERN_FUNCTION) */
     StrMap c_callbacks;        /* name -> const char* C symbol */
+    StrMap clause_scopes;      /* `__clause_<ptr>` -> its clause (#2644, fn_scope_name) */
 } ProgramIndex;
 
 ProgramIndex* program_index(ASTNode* program);
@@ -657,5 +684,31 @@ const DefClauses* program_index_clauses(ASTNode* program, const char* name);
 void mark_function_generated(CodeGenerator* gen, const char* func_name);
 int count_function_clauses(ASTNode* program, const char* func_name);
 ASTNode** collect_function_clauses(ASTNode* program, const char* func_name, int* out_count);
+
+/* #2644: a function written as several clauses is a set of real functions:
+ * each clause a static C function of its own (clause_c_name), emitted with
+ * a single function's whole setup, and the set's name a dispatcher that
+ * tests each clause's patterns and guard in order and returns what the
+ * matching clause returns (generate_combined_function). */
+/* The clauses of the set `fn_def` is one of, or NULL for a single definition. */
+const DefClauses* fn_def_clause_set(ASTNode* program, ASTNode* fn_def);
+/* The scope name of `fn`'s variables for the closure analyses: its name, or
+ * `__clause_<ptr>` for a clause of a set. */
+const char* fn_scope_name(ASTNode* program, ASTNode* fn);
+ASTNode* find_clause_by_scope_name(ASTNode* program, const char* scope);
+/* #2664: the @c_callback definition binding `fn`'s symbol (a set's first
+ * annotated clause), or NULL. */
+ASTNode* fn_c_callback_def(CodeGenerator* gen, ASTNode* fn);
+const char* clause_c_name(ASTNode* program, ASTNode* clause);
+/* #2645: the type `fn` returns in C (NULL for void), decided over every
+ * clause of a set, and its spelling. */
+Type* fn_result_type(CodeGenerator* gen, ASTNode* fn);
+void emit_fn_result_c_type(CodeGenerator* gen, ASTNode* fn);
+/* The parameters of a definition in C signature order (variables, literal,
+ * struct and list patterns), and the type a position has across a set. */
+int fn_param_count(ASTNode* fn);
+ASTNode* fn_param_at(ASTNode* fn, int pos);
+Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos);
+const char* fn_list_param_elem_ctype(CodeGenerator* gen, ASTNode* fn, int pos);
 
 #endif

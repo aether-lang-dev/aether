@@ -644,9 +644,14 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                          * return slot, NOT the full function type.
                          * Without this carve-out, `result = fp(...)`
                          * would stamp `result` as having type
-                         * `fn(int, int) -> int` instead of `int`. */
+                         * `fn(int, int) -> int` instead of `int`.
+                         * A function's symbol type is its result, so a
+                         * function returning a fn pointer (`mk() ->
+                         * Getter`) is no such local: its call is the fn
+                         * pointer, not what calling that would give
+                         * (#2634). */
                         if (func_sym->type->kind == TYPE_FUNCTION &&
-                            func_sym->type->is_fnptr &&
+                            func_sym->type->is_fnptr && !func_sym->is_function &&
                             func_sym->type->return_type) {
                             free_type(node->node_type);
                             node->node_type = clone_type(func_sym->type->return_type);
@@ -1192,15 +1197,15 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
     unsigned prev_walk_id = ctx->walk_id;
     ctx->walk_id = new_walk_id();
 
-    /* Issue #243 sealed scopes: relax qualified-call visibility
-     * while walking the body of a cloned merged-module function so
-     * internal calls into transitively-merged namespaces (e.g.
-     * `json.parse` inside a merged http.client function) resolve
-     * correctly. Save/restore the SymbolTable flag — same channel
-     * the typechecker uses, just transient over this walk. */
-    int saved_inside_merged = ctx->symbols ? ctx->symbols->inside_merged_body : 0;
-    if (node->is_imported && ctx->symbols) {
-        ctx->symbols->inside_merged_body = 1;
+    /* Issue #243 sealed scopes, #2614: while walking the body of a
+     * cloned merged-module function, qualified calls resolve against
+     * the imports of the module it was written in (e.g. `json.parse`
+     * inside a merged http.client function). Save/restore the
+     * SymbolTable origin, the same channel the typechecker uses, just
+     * transient over this walk. */
+    const char* saved_merged_from = ctx->symbols ? ctx->symbols->merged_from : NULL;
+    if (node->origin_module && ctx->symbols) {
+        ctx->symbols->merged_from = node->origin_module;
     }
 
     // Add parameters to symbol table so identifiers in function body can look them up
@@ -1268,7 +1273,7 @@ void collect_function_constraints(ASTNode* node, InferenceContext* ctx) {
         }
     }
 
-    if (ctx->symbols) ctx->symbols->inside_merged_body = saved_inside_merged;
+    if (ctx->symbols) ctx->symbols->merged_from = saved_merged_from;
     ctx->walk_id = prev_walk_id;
 }
 

@@ -1,0 +1,146 @@
+// Regression (#2627): a function written as several clauses is one function,
+// and hands over its strings like one.
+//
+// Its ownership was read from the first clause alone and its clause bodies
+// skipped a single body's setup. So a caller freed the literal another clause
+// returned (a crash), or leaked the fresh string when the literal clause came
+// first; a clause's string locals were never freed; a later clause that
+// stored its `string` argument had it freed under it by the caller; the empty
+// string returned when no clause matches was a literal an owning caller
+// freed; and a clause set returning nothing was defined `int` against a
+// `void` prototype.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+// Where put's storing clause keeps its argument (a module-level var holds
+// what it is given for the life of the program).
+var g_stored: string = ""
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The fresh clause first, the literal one second.
+heap_first(n: int) when n > 0 -> string {
+    return string.concat("p", string.from_int(n))
+}
+heap_first(n: int) -> string {
+    return "lit"
+}
+
+// The literal clause first: the fresh one still hands over its string.
+lit_first(0) -> string {
+    return "zero"
+}
+lit_first(n: int) -> string {
+    s = string.concat("n", string.from_int(n))
+    t = string.concat(s, "!")
+    return t
+}
+
+// No clause matches a negative n: the default is the caller's too.
+only_positive(n: int) when n > 0 -> string {
+    return string.concat("+", string.from_int(n))
+}
+
+// Two positions, each owned when any clause hands one over.
+pair(0) -> (string, int) {
+    return "none", 0
+}
+pair(n: int) -> (string, int) {
+    return string.from_int(n), n
+}
+
+// The first clause keeps nothing; the second stores its argument.
+put(0, s: string) {
+    if string.length(s) > 100 {
+        println("long")
+    }
+}
+put(n: int, s: string) {
+    g_stored = s
+}
+
+// A clause set that returns nothing.
+note(0) {
+    println("note zero")
+}
+note(n: int) {
+    if n < 0 {
+        println("note negative")
+    }
+}
+
+// Temporaries passed to a clause set that keeps nothing are freed.
+measure(0, s: string) -> int {
+    return 0
+}
+measure(n: int, s: string) -> int {
+    return string.length(s) + n
+}
+
+round(base: string) -> int {
+    total = 0
+    total = total + string.length(heap_first(5)) + string.length(heap_first(0))
+    total = total + string.length(lit_first(0)) + string.length(lit_first(7))
+    total = total + string.length(only_positive(3)) + string.length(only_positive(0 - 1))
+    a, x = pair(0)
+    b, y = pair(42)
+    total = total + string.length(a) + string.length(b) + x + y
+    total = total + measure(0, string.concat(base, "!")) + measure(1, string.concat(base, "?"))
+    return total
+}
+
+main() {
+    println("=== test_multi_clause_ownership ===")
+    check(heap_first(5) == "p5", "the fresh clause")
+    check(heap_first(0) == "lit", "the literal clause, freed by nobody")
+    check(lit_first(0) == "zero", "a literal clause first")
+    check(lit_first(7) == "n7!", "the fresh clause after it")
+    check(only_positive(0 - 1) == "", "the default when no clause matches")
+    name, n = pair(42)
+    check(name == "42" && n == 42, "a tuple from the second clause")
+
+    w = "ab"
+    put(1, string.concat(w, "cd"))
+    // The var holds the argument the second clause stored, not a freed one.
+    filler = string.concat(w, "zzzz")
+    check(g_stored == "abcd", "a stored argument outlives the call")
+    check(filler == "abzzzz", "the string allocated after it")
+    put(0, "--")
+    check(g_stored == "abcd", "the first clause keeps nothing")
+
+    note(0)
+    note(0 - 1)
+
+    // heap_first 2 + 3, lit_first 4 + 3, only_positive 2 + 0,
+    // pair 4 + 2 + 0 + 42, measure 0 + 3.
+    check(round("w") == 5 + 7 + 2 + 48 + 3, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_multi_clause_ownership passed ===")
+}

@@ -246,6 +246,27 @@ typedef struct HttpServer {
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
 
+    // The connections whose worker is waiting for a request to begin, with
+    // nothing of it read: http_server_stop shuts each one down, so a worker
+    // blocked waiting for a client's next request (up to the idle timeout)
+    // returns at once and the pool, and a background server's thread, can
+    // be joined. Only those: a worker in the middle of a request finishes
+    // it, which is what a graceful shutdown waits for. A worker lists its
+    // descriptor for the one receive and takes it out before doing anything
+    // else with the connection, so stop never shuts down a number the system
+    // has since handed out again.
+    pthread_mutex_t live_lock;
+    int* live_fds;
+    int live_count;
+    int live_cap;
+
+    // Set by http_server_stop, cleared by a start: from then on a worker
+    // starts no further request on its connection and closes it rather than
+    // parking it or waiting for the client (#2672). Not is_running, which a
+    // host that serves connections itself (http_server_drain_connection)
+    // without starting the server never sets.
+    _Atomic int stopping;
+
     // Per-request observation hook chain (#260 Tier 3 F1 / F2).
     // Hooks fire once per completed request with timing.
     struct HttpRequestHookNode* request_hook_chain;
@@ -294,6 +315,16 @@ typedef struct HttpServer {
     // intercept a process-directed signal meant for the host application.
     // std-http-server-background-sigurg-poisons-harness.md
     int background;
+    // The background server's thread, which http_server_stop joins so the
+    // accept loop and its workers are done before stop returns: left
+    // detached, they were still in Winsock calls when the program went on
+    // to exit (an access violation on Windows). background_tid is set by
+    // the thread itself, so a stop called from a handler does not join
+    // the thread it runs on.
+    pthread_t background_thread;
+    int background_joinable;
+    int background_tid_set;
+    aether_tid_t background_tid;
     // Multi-accept: one accept thread per core with SO_REUSEPORT (opt-in)
     int multi_accept;               // 0 = single accept (default), 1 = SO_REUSEPORT multi-accept
     int accept_thread_count;
@@ -330,7 +361,9 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port);
 // Set the bind host before server_start. Default is "0.0.0.0" (all
 // interfaces). Pass "127.0.0.1" to bind loopback only — useful in
 // tests because macOS / Windows firewalls don't prompt on loopback
-// binds. No-op if `host` is NULL or empty.
+// binds. A host name binds the IPv4 address it resolves to, and one
+// that does not resolve fails the bind (#2639). No-op if `host` is NULL
+// or empty.
 void http_server_set_host(HttpServer* server, const char* host);
 int http_server_start_raw(HttpServer* server);
 int http_server_start_background_raw(HttpServer* server);

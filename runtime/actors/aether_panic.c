@@ -61,6 +61,7 @@ static AETHER_TLS_SHARED AetherJmpStack tls_stack = { .depth = 0 };
 
 AETHER_TLS_SHARED int g_aether_in_actor_step = 0;
 AETHER_TLS_SHARED int g_aether_current_actor_id = -1;
+AETHER_TLS_SHARED const void* g_aether_fnptr_owned = NULL;   /* #2586 */
 
 static AetherDeathHook death_hook = NULL;
 

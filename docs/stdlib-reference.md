@@ -59,7 +59,7 @@ header comment is the authoritative description.
 | `std.msgpack` | MessagePack serialisation and deserialisation. | 39 | [guide](../std/msgpack/README.md) · [source](../std/msgpack/module.ae) |
 | `std.mutation` | Text-based mutation-testing driver for `std.spec` suites. | 1 | [guide](../std/mutation/README.md) · [source](../std/mutation/module.ae) |
 | `std.nanoid` | NanoID: 21-character URL-safe identifier. | 2 | [guide](../std/nanoid/README.md) · [source](../std/nanoid/module.ae) |
-| `std.net` | TCP sockets and the HTTP client and server externs. | 67 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
+| `std.net` | TCP sockets and the HTTP client and server externs. | 69 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 17 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
 | `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 85 | [full section](#os-stdos) |
@@ -2226,7 +2226,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 
 **Server Lifecycle:**
 - `http.server_create(port)` - Create server (never fails)
-- `http.server_set_host(server, host)` - Set bind address before `server_start`. Default is `"0.0.0.0"`. Pass `"127.0.0.1"` to bind loopback only, useful in tests because macOS / Windows firewalls don't prompt on loopback binds.
+- `http.server_set_host(server, host)` - Set bind address before `server_start`. Default is `"0.0.0.0"`. Pass `"127.0.0.1"` to bind loopback only, useful in tests because macOS / Windows firewalls don't prompt on loopback binds. A host name binds the IPv4 address it resolves to; one that does not resolve fails the bind.
 - `http.server_bind(server, host, port)` → `string` - Bind to address, return error string
 - `http.server_start(server)` → `string` - Start serving (blocking), return error string
 - `http.server_stop(server)` - Stop server

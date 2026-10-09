@@ -277,9 +277,12 @@ typedef struct ArgDrainWrap {
  * Soundness: we only ADD a drain where non-escape is proven; anything
  * unprovable stays "escapes". False-escape = leak (safe); false-non-escape
  * = UAF (never introduced). */
+static int g_fnptr_drain = 0;   /* #2586: the call goes through a typed fn pointer */
+
 static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode* closure,
                              int ai, int first_arg, const ArgDrainWrap* w) {
     if (!func_name) {
+        if (!closure && g_fnptr_drain) return fnptr_arg_borrowed(ai - first_arg) ? 0 : -1;
         if (!closure) return gen->closure_args_borrowed ? 0 : -1;
         int pi = ai - first_arg;
         /* A closure keeps a `string` parameter only through a reference of
@@ -342,19 +345,71 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
     return 0;
 }
 
+/* #2649: the call generate_expression is taking as an owned string
+ * (call_hands_back_temp), and the number of the C flag its wrap sets
+ * (arg_drain_close). */
+static const ASTNode* g_handback_wrapping = NULL;
+static int g_handback_flag = 0;
+
+/* #2649: does the named call `call` hand back a fresh heap string it was
+ * given? An argument temporary the identity guard keeps when the call
+ * returns it (arg_drain_verdict 1), passed to a callee whose `string` result
+ * is not owned (function_def_returns_heap_string: it returns the parameter
+ * as it came). Such a call's value is the temporary on one path and a
+ * borrowed string on another, and nothing owned the temporary: a local bound
+ * to the call borrowed it, and it leaked once per call. Its value is now
+ * taken as owned where it is made (generate_expression): the temporary when
+ * it is what came back, a copy of anything else. is_heap_string_expr counts
+ * it as a fresh heap string, so every consumer adopts or frees it, and a
+ * local or parameter passed beside the temporary is never what comes out
+ * (handback_leaf_node). Decided from the tree and the callee's body alone,
+ * as the memoised classifiers that ask require, and remembered per call
+ * (hands_back_temp_memo_begin), so the analyses and the emission get the
+ * same answer. A call through a typed fn pointer is taken by its own
+ * convention (#2586). */
+static int call_hands_back_temp_walk(CodeGenerator* gen, ASTNode* call) {
+    if (!callee_has_visible_body(gen, call->value) ||
+        !callee_returns_string(gen, call->value)) return 0;
+    ASTNode* def = find_function_definition_by_name(gen->program,
+                                                    codegen_normalise_callee(call->value));
+    if (!def || function_def_returns_heap_string(gen, def)) return 0;
+    ArgDrainWrap w;
+    memset(&w, 0, sizeof(w));
+    w.have_value = 1;
+    for (int ai = 0; ai < call->child_count; ai++) {
+        ASTNode* arg = call->children[ai];
+        /* The arguments arg_drain_select hoists as heap strings. */
+        if (!arg || (arg->type != AST_FUNCTION_CALL && arg->type != AST_STRING_INTERP &&
+                     arg->type != AST_OR_ELSE)) continue;
+        if (arg_drain_verdict(gen, call->value, NULL, ai, 0, &w) == 1 &&
+            is_heap_string_expr(gen, arg)) return 1;
+    }
+    return 0;
+}
+
+int call_hands_back_temp(CodeGenerator* gen, ASTNode* call) {
+    if (!gen || !gen->program || !call || call->type != AST_FUNCTION_CALL || !call->value ||
+        strcmp(call->value, "call") == 0 || !call->node_type ||
+        call->node_type->kind != TYPE_STRING || typed_fnptr_call(gen, call)) return 0;
+    int r = 0, mark = 0;
+    int known = hands_back_temp_memo_begin(gen, call, &r, &mark);
+    if (known != 0) return known == 1 ? r : 0;
+    r = call_hands_back_temp_walk(gen, call);
+    hands_back_temp_memo_end(gen, call, r, mark);
+    return r;
+}
+
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
- * 0 no (a void function), -1 not known (no single visible definition). The
- * rule generate_function emits the signature by: the declared type, else
- * `int` when the body returns a value, else void. */
+ * 0 no (a void function), -1 not known (no visible definition). The rule
+ * the signature is emitted by (fn_result_type): the declared type, else
+ * `int` when the body returns a value, else void, decided over every clause
+ * of a set (#2645). */
 static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
     if (!callee_has_visible_body(gen, func_name)) return -1;
     const char* fn = codegen_normalise_callee(func_name);
     const DefClauses* dc = program_index_clauses(gen->program, fn);
-    if (!dc || dc->count != 1 || !dc->nodes[0]) return -1;
-    ASTNode* fdef = dc->nodes[0];
-    Type* rt = fdef->node_type;
-    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 1;
-    return has_return_value(fdef) ? 1 : 0;
+    if (!dc || dc->count < 1 || !dc->nodes[0]) return -1;
+    return fn_result_type(gen, dc->nodes[0]) ? 1 : 0;
 }
 
 /* #2507: may the owned closure at child `ai` of call `expr` be released once
@@ -492,6 +547,22 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
 static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
     fprintf(gen->output, "; ");
+    /* #2649: a call taken as owned (call_hands_back_temp) owns what it
+     * returns: an argument temporary it handed back, or else a copy, made
+     * before the temporaries go. The flag tells generate_expression's take
+     * not to copy it again. */
+    if (g_handback_wrapping == expr && w->have_value && !w->discarded) {
+        int n = 0;
+        for (int h = 0; h < w->count; h++) {
+            const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
+            if (w->closure[h] || !w->identity[h] || !nm) continue;
+            fprintf(gen->output, "%s(const char*)_ad_r != %s", n++ ? " && " : "if (", nm);
+        }
+        if (n) {
+            fprintf(gen->output, ") _ad_r = aether_uniform_heap_str((const char*)_ad_r, 0); "
+                    "_ae_hb%d = 1; ", g_handback_flag);
+        }
+    }
     for (int h = 0; h < w->count; h++) {
         /* Look up the temp name we registered. Names are stable across
          * the wrap's scope. */
@@ -501,11 +572,13 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
             fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
         } else if (w->identity[h] && !w->discarded) {
             /* Return-escape-only param: free the fresh temp ONLY if the
-             * call did not return it (string_release is magic-guarded; the
-             * temp is always a magic string-op result here, never a
-             * literal). */
+             * call did not return it. The temp is a fresh heap string of
+             * either shape, never a literal, so it is freed as the other
+             * temps are: string_release, used here before, skips a plain
+             * buffer (an `@heap` extern's strdup, `path.join`'s malloc), and
+             * every such temp the call did not hand back leaked (#2649). */
             fprintf(gen->output,
-                    "if ((const char*)_ad_r != %s) string_release(%s); ", nm, nm);
+                    "if ((const char*)_ad_r != %s) aether_heap_str_free(%s); ", nm, nm);
         } else {
             fprintf(gen->output, "aether_heap_str_free(%s); ", nm);
         }
@@ -1381,22 +1454,46 @@ static int fnptr_returns_bool(Type* sig) {
     return sig && sig->return_type && sig->return_type->kind == TYPE_BOOL;
 }
 
+/* #2586: open and close the take of a string a call through a typed fn
+ * pointer returns (aether_fnptr_take in the prelude). The mark is cleared
+ * after the argument temporaries the drain evaluated and right before the
+ * call, so only the callee can leave it. */
+static int emit_fnptr_take_open(CodeGenerator* gen, ASTNode* call) {
+    if (!fnptr_call_returns_string(gen, call)) return 0;
+    fprintf(gen->output, "aether_fnptr_take((aether_fnptr_reset(), ");
+    return 1;
+}
+
+static void emit_fnptr_take_close(CodeGenerator* gen, int took) {
+    if (took) fprintf(gen->output, "))");
+}
+
 static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
                                       const char* local_name, ASTNode* call,
                                       int discarded) {
     const char* ret_c = sig->return_type ? get_c_type(sig->return_type) : "void";
+    /* #2586: an owned string argument is freed after the call, under the
+     * fn-value convention (fnptr_arg_borrowed). */
+    ArgDrainWrap ad;
+    ad.ret_ct = ret_c;
+    ad.ret_type = NULL;
+    ad.have_value = strcmp(ret_c, "void") != 0;
+    ad.discarded = discarded;
+    g_fnptr_drain = 1;
+    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad);
+    g_fnptr_drain = 0;
+    arg_drain_open(gen, call, &ad);
+    int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
-    fprintf(gen->output, "((%s(*)(", ret_c);
-    for (int pi = 0; pi < sig->param_count; pi++) {
-        if (pi > 0) fprintf(gen->output, ", ");
-        fprintf(gen->output, "%s", get_c_type(sig->param_types[pi]));
-    }
-    if (sig->param_count == 0) fprintf(gen->output, "void");
-    fprintf(gen->output, "))(%s))(", safe_value_name(local_name));
+    /* #2651: spelled as the declarators spell it (fnptr_c_spelling). */
+    fprintf(gen->output, "((%s)(%s))(", fnptr_c_spelling(sig, NULL),
+            safe_value_name(local_name));
     generate_fnptr_call_args(gen, sig, call);
     fprintf(gen->output, ")");
     if (narrow) fprintf(gen->output, "))");
+    emit_fnptr_take_close(gen, took);
+    arg_drain_close(gen, call, &ad);
 }
 
 /* The declaration of `name` inside `n`: a parameter, a local or a closure
@@ -1436,6 +1533,30 @@ static Type* fnptr_field_signature(CodeGenerator* gen, const char* recv, const c
         }
     }
     return NULL;
+}
+
+/* #2586: is `call` a call through a typed fn pointer (a local, a
+ * parameter, a global or a struct field)? Its arguments are its children
+ * from 0 (a field call names its receiver in `value`). Decided from the
+ * tree alone, as the analyses that ask (a function's returns and
+ * parameters judged from outside its body) run before its locals are
+ * registered: the checker stamps a call through a typed fn-pointer local or
+ * field. */
+int typed_fnptr_call(CodeGenerator* gen, ASTNode* call) {
+    if (!call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
+    if (call->annotation && (strcmp(call->annotation, "fnptr_local_call") == 0 ||
+                             strncmp(call->annotation, "fnfield_", 8) == 0)) return 1;
+    Type* sig = lookup_fnptr_global(gen, call->value);
+    return sig && sig->kind == TYPE_FUNCTION && sig->is_fnptr;
+}
+
+/* #2586: is `call` a call through a typed fn pointer that returns a string?
+ * Its result is the caller's: the call takes it (emit_fnptr_take_open), as
+ * it is when the callee marked it owned, copied otherwise. The emitters
+ * below wrap exactly the calls this says, so the analyses and the C agree. */
+int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call) {
+    if (!call || !call->node_type || call->node_type->kind != TYPE_STRING) return 0;
+    return typed_fnptr_call(gen, call);
 }
 
 /* Translate an Aether integer-literal text into a form C accepts.
@@ -1854,7 +1975,7 @@ static ASTNode* receive_arm_binding(ASTNode* arm, const char* name) {
 }
 
 /* The declared type of field `field` of message `msg`, or NULL. */
-static Type* message_field_type(ASTNode* program, const char* msg, const char* field) {
+Type* message_field_type(ASTNode* program, const char* msg, const char* field) {
     if (!program || !msg || !field) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* def = program->children[i];
@@ -1969,6 +2090,21 @@ static void register_fnptr_decls_in(CodeGenerator* gen, ASTNode* n) {
                  is_fnptr_type(n->children[0]->node_type)) sig = n->children[0]->node_type;
         if (sig) register_fnptr_local(gen, n->value, sig);
     }
+    /* #2633: a receive arm's binding of a typed fn-pointer message field,
+     * typed by the message definition (the handler registers it the same
+     * way, codegen_actor.c). */
+    if (n->type == AST_MESSAGE_PATTERN && n->value) {
+        for (int k = 0; k < n->child_count; k++) {
+            ASTNode* pf = n->children[k];
+            if (!pf || pf->type != AST_PATTERN_FIELD || !pf->value) continue;
+            const char* bound = pf->value;
+            if (pf->child_count > 0 && pf->children[0] &&
+                pf->children[0]->type == AST_PATTERN_VARIABLE && pf->children[0]->value)
+                bound = pf->children[0]->value;
+            Type* fsig = message_field_type(gen->program, n->value, pf->value);
+            if (is_fnptr_type(fsig)) register_fnptr_local(gen, bound, fsig);
+        }
+    }
     for (int i = 0; i < n->child_count; i++) register_fnptr_decls_in(gen, n->children[i]);
 }
 
@@ -1976,6 +2112,7 @@ static ASTNode* find_scope_node_by_name(ASTNode* program, const char* scope) {
     if (!program || !scope) return NULL;
     if (strncmp(scope, "__closure_", 10) == 0) return find_closure_by_name(program, scope);
     if (strncmp(scope, "__recv_arm_", 11) == 0) return find_receive_arm_by_name(program, scope);
+    if (strncmp(scope, "__clause_", 9) == 0) return find_clause_by_scope_name(program, scope);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
@@ -2001,29 +2138,48 @@ static void restore_fnptr_scope_for_closure(CodeGenerator* gen, const char* pare
     }
 }
 
-static const char* find_enclosing_scope_name(ASTNode* node, const char* scope,
+static const char* find_enclosing_scope_name_in(ASTNode* program, ASTNode* node,
+                                                const char* scope, ASTNode* scope_fn,
+                                                ASTNode* target);
+
+/* `program` is the root the walk starts from. */
+static const char* find_enclosing_scope_name(ASTNode* program, const char* scope,
                                              ASTNode* target) {
+    return find_enclosing_scope_name_in(program, program, scope, NULL, target);
+}
+
+/* `scope_fn`, when set, is the function definition whose scope the walk is
+ * in: its name is made (fn_scope_name, a clause's its own, #2644) only for
+ * the scope the target turns out to be in. */
+static const char* find_enclosing_scope_name_in(ASTNode* program, ASTNode* node,
+                                                const char* scope, ASTNode* scope_fn,
+                                                ASTNode* target) {
     if (!node) return NULL;
     char here[64];   /* `__recv_arm_<ptr>` / `__closure_<ptr>`: bounded */
     const char* child_scope = scope;
+    ASTNode* child_fn = scope_fn;
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
-        child_scope = node->value ? node->value : scope;
+        if (node->value) child_fn = node;
     } else if (node->type == AST_MAIN_FUNCTION) {
         child_scope = "main";
+        child_fn = NULL;
     } else if (is_receive_arm_scope(node)) {
         snprintf(here, sizeof(here), "__recv_arm_%p", (void*)node);
         child_scope = here;
+        child_fn = NULL;
     } else if (is_hoisted_closure(node)) {
         closure_scope_name(node, here, sizeof(here));
         child_scope = here;
+        child_fn = NULL;
     }
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* c = node->children[i];
         if (c == target) {
+            if (child_fn) return fn_scope_name(program, child_fn);
             /* Interned: `here` dies with this frame. */
             return child_scope ? cg_intern(child_scope) : NULL;
         }
-        const char* found = find_enclosing_scope_name(c, child_scope, target);
+        const char* found = find_enclosing_scope_name_in(program, c, child_scope, child_fn, target);
         if (found) return found;
     }
     return NULL;
@@ -2044,55 +2200,56 @@ static int subtree_contains(ASTNode* node, ASTNode* target) {
     return 0;
 }
 
-// The trailing-block closure argument of a call statement `s`, if `s` is a
-// call with one (`root = grid() { ... }`, `grid() { ... }`), else NULL.
-static ASTNode* trailing_block_of_statement(ASTNode* s) {
-    ASTNode* call = NULL;
-    if (s->type == AST_VARIABLE_DECLARATION && s->child_count > 0 &&
-        s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-        call = s->children[0];
-    } else if (s->type == AST_EXPRESSION_STATEMENT && s->child_count > 0 &&
-               s->children[0] && s->children[0]->type == AST_FUNCTION_CALL) {
-        call = s->children[0];
-    } else if (s->type == AST_FUNCTION_CALL) {
-        call = s;
-    }
-    if (!call) return NULL;
-    for (int ci = 0; ci < call->child_count; ci++) {
-        ASTNode* arg = call->children[ci];
-        if (arg && arg->type == AST_CLOSURE && arg->value &&
-            strcmp(arg->value, "trailing") == 0) {
-            return arg;
-        }
-    }
-    return NULL;
+static int declares_name(ASTNode* s, const char* var_name) {
+    return s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
+           s->value && strcmp(s->value, var_name) == 0;
 }
 
+static int visible_decl_line_on_path(ASTNode* s, const char* var_name, ASTNode* viewer);
+
 // The line of the first declaration of `var_name` that is VISIBLE from
-// `viewer` (a closure node) among the top-level statements of `block`, or
-// INT_MAX if there is none. A trailing block (`grid() { ... }`) inlines at its
-// call site as a C `{ ... }` block, so a declaration inside it is in scope for
-// a closure nested inside that same trailing block and for nothing else: the
-// walk descends only into the trailing block that contains `viewer`. A
-// declaration in a sibling trailing block, or in an if/for/while body, shares
-// the name by coincidence and is skipped. #2189: treating every trailing block
-// as transparent compiled a closure's own `ml = ...` as a capture of the `ml`
-// a sibling `describe` block had declared, and the generated C referenced a
-// name that had gone out of scope.
+// `viewer` (a closure node) in `block`, or INT_MAX if there is none: one of
+// its statements, or one in a block on the way from it down to `viewer` (a
+// `while`, `for` or `if` body, a `match` arm, a trailing block), which is the
+// closure's own enclosing scope. A block that does not hold `viewer` is a
+// sibling: a declaration in it, in another loop or branch body or in a
+// sibling trailing block (`grid() { ... }`, which inlines at its call site as
+// a C `{ ... }` block), shares the name by coincidence and is skipped. #2189:
+// treating every trailing block as transparent compiled a closure's own
+// `ml = ...` as a capture of the `ml` a sibling `describe` block had
+// declared, and the generated C referenced a name that had gone out of
+// scope. #2659: the blocks holding `viewer` were skipped as well, except a
+// trailing one, so `c = 0; f = || { c = 5 }` in a loop body or a branch gave
+// the closure a fresh `c` of its own and the loop's `c` never changed (a
+// closure that also read `c` captured it, through the read path).
 static int visible_decl_line(ASTNode* block, const char* var_name, ASTNode* viewer) {
     if (!block) return INT_MAX;
     for (int k = 0; k < block->child_count; k++) {
         ASTNode* s = block->children[k];
         if (!s) continue;
-        if ((s->type == AST_VARIABLE_DECLARATION || s->type == AST_CONST_DECLARATION) &&
-            s->value && strcmp(s->value, var_name) == 0) {
-            return s->line;
-        }
-        ASTNode* trailing = trailing_block_of_statement(s);
-        if (trailing && subtree_contains(trailing, viewer)) {
-            int inner = visible_decl_line(last_block_child(trailing), var_name, viewer);
+        if (declares_name(s, var_name)) return s->line;
+        if (s != viewer && !is_hoisted_closure(s) && subtree_contains(s, viewer)) {
+            int inner = visible_decl_line_on_path(s, var_name, viewer);
             if (inner != INT_MAX) return inner;
         }
+    }
+    return INT_MAX;
+}
+
+// The part of statement `s` (which holds `viewer`) on the way down to it: the
+// block holding `viewer`, scanned as a scope, or a declaration that comes
+// before it among `s`'s own parts (a C-style `for`'s initialiser). Another
+// hoisted closure is a scope of its own, reached through its scope name.
+static int visible_decl_line_on_path(ASTNode* s, const char* var_name, ASTNode* viewer) {
+    for (int i = 0; i < s->child_count; i++) {
+        ASTNode* c = s->children[i];
+        if (!c || c == viewer || is_hoisted_closure(c)) continue;
+        if (c->type == AST_BLOCK) {
+            if (subtree_contains(c, viewer)) return visible_decl_line(c, var_name, viewer);
+            continue;
+        }
+        if (declares_name(c, var_name)) return c->line;
+        if (subtree_contains(c, viewer)) return visible_decl_line_on_path(c, var_name, viewer);
     }
     return INT_MAX;
 }
@@ -2131,10 +2288,12 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
         if (!body || body->type != AST_BLOCK) return INT_MAX;
         return visible_decl_line(body, var_name, viewer);
     }
+    /* A clause of a set is a scope of its own (#2644). */
+    ASTNode* clause = find_clause_by_scope_name(program, func_name);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
-        int matches =
+        int matches = clause ? top == clause :
             (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) ||
             ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
              top->value && strcmp(top->value, func_name) == 0);
@@ -2216,11 +2375,15 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
         if (!body) return 0;
         return subtree_declares(body, var_name);
     }
+    /* A clause of a set is a scope of its own (#2644). */
+    ASTNode* clause = find_clause_by_scope_name(program, func_name);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
         int matches = 0;
-        if (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
+        if (clause) {
+            matches = top == clause;
+        } else if (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
             matches = 1;
         } else if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
                    top->value && strcmp(top->value, func_name) == 0) {
@@ -2460,7 +2623,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
     if (!node) return;
     // Entering a function body switches the enclosing function for descendants.
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
-        const char* new_enc = node->value ? node->value : enclosing_func;
+        /* A clause of a set is a scope of its own (#2644). */
+        const char* new_enc = node->value ? fn_scope_name(gen->program, node) : enclosing_func;
         for (int i = 0; i < node->child_count; i++) {
             discover_closures_scoped(gen, node->children[i], new_enc);
         }
@@ -2680,7 +2844,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                     if (!body || body->type != AST_BLOCK) continue;
                     ASTNode* ret_expr = find_first_return_expr(body);
                     if (ret_expr && ret_expr->type == AST_IDENTIFIER && ret_expr->value)
-                        cid_to_bind = closure_var_id(gen, target_fn->value, ret_expr->value);
+                        cid_to_bind = closure_var_id(gen, fn_scope_name(gen->program, target_fn),
+                                                    ret_expr->value);
                     break;
                 }
             }
@@ -2768,7 +2933,7 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
         Type* inner = node->node_type;
         for (int i = 0; i < node->child_count; i++) {
             propagate_call_return_types_in(gen, node->children[i], inner,
-                                           node->value ? node->value : scope);
+                                           node->value ? fn_scope_name(gen->program, node) : scope);
         }
         return;
     }
@@ -3224,12 +3389,14 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
         return decl_type_in_scope(receive_arm_body(arm), var_name);
     }
     // Parent-function-first lookup, through the program index (#2007).
+    // A clause of a set is its own scope (#2644): two clauses may bind
+    // one name to values of different types.
     if (parent_func) {
-        ASTNode* top = NULL;
-        if (strcmp(parent_func, "main") == 0) {
+        ASTNode* top = find_clause_by_scope_name(gen->program, parent_func);
+        if (!top && strcmp(parent_func, "main") == 0) {
             ProgramIndex* ix = program_index(gen->program);
             top = ix ? ix->main_fn : NULL;
-        } else {
+        } else if (!top) {
             top = find_function_definition_by_name(gen->program, parent_func);
         }
         if (top) {
@@ -4245,6 +4412,13 @@ ASTNode* message_field_init_expr(ASTNode* message, const char* name) {
  * the extern table, the source or the intern table (#2539: a 256-byte copy
  * cut a longer one, so the call named a function nothing defined). */
 const char* call_c_name(CodeGenerator* gen, const char* func_name) {
+    /* #2664: a @c_callback function is the C symbol its annotation binds
+     * (#235), whatever it is called by: its own name, or `mod.f` from a
+     * module importing it (the post-merge `<ns>_f`). A use of the name as a
+     * value was emitted so already; a call was emitted by the Aether name,
+     * which no definition carries when the annotation names a symbol. */
+    const char* cb_sym = lookup_c_callback_symbol(gen, codegen_normalise_callee(func_name));
+    if (cb_sym) return cb_sym;
     // Don't mangle extern functions: they refer to real C symbols.
     // For @extern("c_symbol") aether_name(...), translate the
     // Aether-side name to its bound C symbol. See #234.
@@ -4981,16 +5155,66 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
 
+    /* #2649: a call that hands back an argument temporary yields an owned
+     * string (call_hands_back_temp, which is_heap_string_expr counts as a
+     * fresh one): the temporary, which its wrap keeps and flags, or a copy
+     * of whatever else came back, so what the call yields never depends on
+     * which path the callee took. A copy is also what #2619 would make of a
+     * view of a struct temporary, so that wrap is not added on top. A
+     * discarded call frees its temporaries itself, and a call an enclosing
+     * wrap hoisted was taken where the hoist evaluated it. */
+    if (expr->type == AST_FUNCTION_CALL && g_handback_wrapping != expr &&
+        gen->discard_call_node != expr && !arg_drain_lookup(expr) &&
+        call_hands_back_temp(gen, expr)) {
+        static int hb_seq = 0;
+        int id = hb_seq++;
+        const ASTNode* saved = g_handback_wrapping;
+        const ASTNode* saved_view = g_view_copy_wrapping;
+        int saved_flag = g_handback_flag;
+        g_handback_wrapping = expr;
+        g_view_copy_wrapping = expr;
+        g_handback_flag = id;
+        fprintf(gen->output, "({ int _ae_hb%d = 0; const char* _ae_hv%d = (const char*)(", id, id);
+        generate_expression(gen, expr);
+        fprintf(gen->output, "); aether_uniform_heap_str(_ae_hv%d, _ae_hb%d); })", id, id);
+        g_handback_wrapping = saved;
+        g_view_copy_wrapping = saved_view;
+        g_handback_flag = saved_flag;
+        return;
+    }
+
     /* #2619: a string a call may hand back from a struct temporary is
      * copied here, so it outlives the temporary (call_returns_view_of_temp,
-     * which is_heap_string_expr counts as a fresh heap string). */
+     * which is_heap_string_expr counts as a fresh heap string). Once: a call
+     * an enclosing wrap hoisted was copied where the hoist evaluated it, and
+     * copied again where it is passed, the second copy leaked. */
     if (expr->type == AST_FUNCTION_CALL && g_view_copy_wrapping != expr &&
-        call_returns_view_of_temp(gen, expr)) {
+        !arg_drain_lookup(expr) && call_returns_view_of_temp(gen, expr)) {
         const ASTNode* saved = g_view_copy_wrapping;
         g_view_copy_wrapping = expr;
         fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
         generate_expression(gen, expr);
         fprintf(gen->output, "), 0)");
+        g_view_copy_wrapping = saved;
+        return;
+    }
+    /* #2619: the same for each string position of a tuple. */
+    if (expr->type == AST_FUNCTION_CALL && g_view_copy_wrapping != expr &&
+        call_returns_tuple_view_of_temp(gen, expr)) {
+        static int vt_seq = 0;
+        int id = vt_seq++;
+        const ASTNode* saved = g_view_copy_wrapping;
+        g_view_copy_wrapping = expr;
+        Type* tt = expr->node_type;
+        fprintf(gen->output, "({ %s _ae_vt%d = ", get_c_type(tt), id);
+        generate_expression(gen, expr);
+        fprintf(gen->output, "; ");
+        for (int j = 0; j < tt->tuple_count; j++) {
+            if (!tt->tuple_types[j] || tt->tuple_types[j]->kind != TYPE_STRING) continue;
+            fprintf(gen->output, "_ae_vt%d._%d = aether_uniform_heap_str((const char*)(_ae_vt%d._%d), %d); ",
+                    id, j, id, j, tuple_call_returns_heap_at(gen, expr, j) ? 1 : 0);
+        }
+        fprintf(gen->output, "_ae_vt%d; })", id);
         g_view_copy_wrapping = saved;
         return;
     }
@@ -6442,6 +6666,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     const char* recv_c = safe_value_name(recv);
                     const char* field_c = safe_value_name(dot + 1);
                     Type* field_sig = fnptr_field_signature(gen, recv, dot + 1);
+                    /* #2586: owned string arguments freed after the call. */
+                    ArgDrainWrap fad;
+                    fad.ret_ct = field_sig && field_sig->return_type
+                                 ? get_c_type(field_sig->return_type) : NULL;
+                    fad.ret_type = NULL;
+                    fad.have_value = fad.ret_ct && strcmp(fad.ret_ct, "void") != 0;
+                    fad.discarded = gen->discard_call_node == expr;
+                    g_fnptr_drain = 1;
+                    arg_drain_select(gen, expr, 0, NULL, NULL,
+                                     !fad.have_value || fad.discarded, &fad);
+                    g_fnptr_drain = 0;
+                    arg_drain_open(gen, expr, &fad);
+                    int took = emit_fnptr_take_open(gen, expr);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
                     if (narrow) fprintf(gen->output, "((_Bool)(unsigned char)(");
                     fprintf(gen->output, "(%s%s%s)(",
@@ -6449,6 +6686,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_fnptr_call_args(gen, field_sig, expr);
                     fprintf(gen->output, ")");
                     if (narrow) fprintf(gen->output, "))");
+                    emit_fnptr_take_close(gen, took);
+                    arg_drain_close(gen, expr, &fad);
                     break;
                 }
             }

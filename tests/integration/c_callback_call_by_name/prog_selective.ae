@@ -1,0 +1,6 @@
+// A selectively imported @c_callback function called by its bare name.
+import cbmod(triple, label)
+
+main() {
+    println("${triple(5)} ${label(6)}")
+}

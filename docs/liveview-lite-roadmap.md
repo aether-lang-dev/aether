@@ -567,7 +567,7 @@ main() {
     list.add(handlers, entry)
 
     // Bind and run tinyweb's own WebSocket accept loop (blocking).
-    ws_tcp, err = tcp.listen(8126)
+    ws_tcp, err = tcp.listen_on("127.0.0.1", 8126)
     if err != "" {
         println("ERROR: bind 8126 failed: ${err}")
         return

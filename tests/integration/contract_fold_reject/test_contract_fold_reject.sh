@@ -39,6 +39,7 @@ check_rejected reject_requires_false   'requires. predicate is always false'
 check_rejected reject_stale_const      'requires. predicate is always false'
 check_rejected reject_enum_member      'precondition violation at compile time: n > 0'
 check_rejected reject_int64_precision  'precondition violation at compile time: x == 9007199254740993'
+check_rejected reject_clause_requires  'precondition violation at compile time: n > 0 in name_of'
 
 # Runtime half: a violation folding cannot decide must still panic at run
 # time. (This is the pre-existing behaviour; asserting it here pins that the
@@ -59,7 +60,24 @@ if [ -x "$AE" ]; then
         echo "  [FAIL] contract_fold_reject: runtime panic lost its message"
         sed 's/^/    /' "$TMPDIR/rt.log" | head -6; exit 1
     fi
+    # A clause's own contract still runs when its dispatcher picks it (#2647).
+    cat > "$TMPDIR/rt_clause.ae" <<'EOF2'
+name_of(0) -> string { return "zero" }
+name_of(n: int) -> string requires n > 0 { return "n" }
+main() {
+    k = 0 - 3
+    println(name_of(0))
+    println(name_of(k))
+}
+EOF2
+    if "$AE" run "$TMPDIR/rt_clause.ae" >"$TMPDIR/rt_clause.log" 2>&1; then
+        echo "  [FAIL] contract_fold_reject: a clause's runtime violation did not panic"; exit 1
+    fi
+    if ! grep -q "precondition_violation: n > 0 in name_of" "$TMPDIR/rt_clause.log"; then
+        echo "  [FAIL] contract_fold_reject: a clause's runtime panic lost its message"
+        sed 's/^/    /' "$TMPDIR/rt_clause.log" | head -6; exit 1
+    fi
 fi
 
-echo "  [PASS] contract_fold_reject: const-arg call / multi-param / requires-false / stale-const / enum / int64-precision all rejected; runtime check intact"
+echo "  [PASS] contract_fold_reject: const-arg call / multi-param / requires-false / stale-const / enum / int64-precision / clause contract all rejected; runtime checks intact"
 exit 0

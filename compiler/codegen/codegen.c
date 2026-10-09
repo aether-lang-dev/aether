@@ -442,10 +442,10 @@ int contains_send_expression(ASTNode* node) {
     return 0;
 }
 
-// Tree-shake of merged-but-unused stdlib functions runs in
-// module_prune_unreachable() before typecheck — see aether_module.c.
-// Codegen no longer needs a separate pass; by this point the AST only
-// contains functions the user actually reaches.
+// Tree-shake of merged-but-unused stdlib functions runs around typecheck
+// (module_mark_unreachable before it, module_sweep_unreachable after it,
+// #2613); see aether_module.c. Codegen no longer needs a separate pass;
+// by this point the AST only contains functions the user actually reaches.
 
 static int is_inlineable_scalar(int type_kind) {
     switch (type_kind) {
@@ -795,12 +795,32 @@ Type* lookup_fnptr_global(CodeGenerator* gen, const char* name) {
     for (int i = 0; i < gen->program->child_count; i++) {
         ASTNode* c = gen->program->children[i];
         if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-        if (!c || c->type != AST_CONST_DECLARATION || !c->value ||
-            !c->annotation || strcmp(c->annotation, "global_var") != 0) continue;
+        if (!c || c->type != AST_CONST_DECLARATION || !c->value) continue;
+        if (!(c->annotation && strcmp(c->annotation, "global_var") == 0) &&
+            !is_fnptr_const_decl(c)) continue;
         if (strcmp(c->value, name) != 0) continue;
         return is_fnptr_type(c->node_type) ? c->node_type : NULL;
     }
     return NULL;
+}
+
+/* #2648: a module-level `const` of a typed fn-pointer type. It holds a
+ * function's address, as a `var` of that type does (#2623): it is emitted
+ * with the module vars, after the function prototypes (before them the
+ * function was undeclared), and a call through it is a call through a
+ * typed pointer (lookup_fnptr_global). */
+int is_fnptr_const_decl(const ASTNode* cd) {
+    return fn_const_decl(cd) && cd->node_type->is_fnptr;
+}
+
+/* #2648: a module-level `const` whose value is a function: a typed fn
+ * pointer, or a closure (`const CB = label`, through its bare adapter).
+ * Either names a function or its adapter, so it is emitted after them. */
+int fn_const_decl(const ASTNode* cd) {
+    return cd && cd->type == AST_CONST_DECLARATION && cd->node_type &&
+           cd->node_type->kind == TYPE_FUNCTION &&
+           !(cd->annotation && (strcmp(cd->annotation, "global_var") == 0 ||
+                                strcmp(cd->annotation, "array_const") == 0));
 }
 
 CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, const char* header_path) {
@@ -1470,7 +1490,10 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
                 dc->capacity = cap;
             }
             dc->nodes[dc->count++] = c;
-            if (is_c_callback(c)) strmap_put(&ix->c_callbacks, c->value, (void*)c_callback_symbol(c));
+            /* The first annotated clause binds a set's symbol (#2664,
+             * fn_c_callback_def). */
+            if (is_c_callback(c) && !strmap_has(&ix->c_callbacks, c->value))
+                strmap_put(&ix->c_callbacks, c->value, (void*)c_callback_symbol(c));
         } else if (c->type == AST_MAIN_FUNCTION) {
             if (!ix->main_fn) ix->main_fn = c;
         } else if (c->type == AST_EXTERN_FUNCTION) {
@@ -1485,6 +1508,16 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             for (int j = 0; j < mod_ast->child_count; j++) {
                 program_index_add_extern(ix, mod_ast->children[j]);
             }
+        }
+    }
+    /* #2644: each clause of a set is a scope of its own, named by its node
+     * (fn_scope_name); the closure analyses resolve the name per lookup. */
+    for (int i = 0; i < strmap_count(&ix->defs); i++) {
+        DefClauses* dc = strmap_value_at(&ix->defs, i);
+        for (int k = 0; dc && dc->count > 1 && k < dc->count; k++) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "__clause_%p", (void*)dc->nodes[k]);
+            strmap_put(&ix->clause_scopes, nm, dc->nodes[k]);
         }
     }
 }
@@ -1507,6 +1540,7 @@ void program_index_reset(void) {
     strmap_free(&ix->defs);
     strmap_free(&ix->externs);
     strmap_free(&ix->c_callbacks);
+    strmap_free(&ix->clause_scopes);
     ix->program = NULL;
     ix->child_count = 0;
     ix->main_fn = NULL;
@@ -1516,6 +1550,44 @@ const DefClauses* program_index_clauses(ASTNode* program, const char* name) {
     ProgramIndex* ix = program_index(program);
     if (!ix || !name) return NULL;
     return strmap_get(&ix->defs, name);
+}
+
+/* #2644: the clauses of the set `fn_def` is one of (`f(0) -> ...`, `f(n) ->
+ * ...`), or NULL for a single definition. */
+const DefClauses* fn_def_clause_set(ASTNode* program, ASTNode* fn_def) {
+    if (!program || !fn_def || !fn_def->value) return NULL;
+    const DefClauses* dc = program_index_clauses(program, fn_def->value);
+    if (!dc || dc->count < 2) return NULL;
+    for (int i = 0; i < dc->count; i++)
+        if (dc->nodes[i] == fn_def) return dc;
+    return NULL;
+}
+
+/* #2644: each clause of a set is a C function of its own, so it is a scope
+ * of its own for the closure analyses (codegen_expr.c), which name a scope
+ * by a string: a single definition by its name, a clause by its node, as a
+ * hoisted closure is. Two clauses may bind one name to values of different
+ * types, and a closure in one mutates its own clause's parameter. */
+const char* fn_scope_name(ASTNode* program, ASTNode* fn) {
+    if (!fn || !fn->value) return NULL;
+    if (!fn_def_clause_set(program, fn)) return cg_intern(fn->value);
+    return cg_internf("__clause_%p", (void*)fn);
+}
+
+/* The clause whose fn_scope_name is `scope`, or NULL. */
+ASTNode* find_clause_by_scope_name(ASTNode* program, const char* scope) {
+    if (!program || !scope || strncmp(scope, "__clause_", 9) != 0) return NULL;
+    ProgramIndex* ix = program_index(program);
+    return ix ? strmap_get(&ix->clause_scopes, scope) : NULL;
+}
+
+/* The static C function clause `clause` of its set is emitted as: its
+ * position in the set and the set's C name (generate_combined_function). */
+const char* clause_c_name(ASTNode* program, ASTNode* clause) {
+    const DefClauses* dc = fn_def_clause_set(program, clause);
+    int k = 0;
+    while (dc && k < dc->count && dc->nodes[k] != clause) k++;
+    return cg_internf("_aether_clause%d_%s", k, safe_c_name(clause->value));
 }
 
 // Helper: count how many function clauses exist with the same name
@@ -2941,6 +3013,88 @@ static int abi_is_struct_value(Type* t) {
     return t && !t->c_alias && t->kind == TYPE_STRUCT && t->struct_name;
 }
 
+/* #2665: is `fn` the definition a --emit=lib export is made from? A
+ * function written as several clauses is one export, made from its first
+ * clause; every other definition is one of its own (an `export`-wrapped
+ * function is outside the program index, and single). */
+static int lib_fn_is_export_head(ASTNode* program, ASTNode* fn) {
+    ASTNode* first = find_function_definition_by_name(program, fn->value);
+    return !first || first == fn;
+}
+
+/* #2665: the public C signature of the export `fn`. A function written as
+ * several clauses has its set's: a parameter per position, of the type its
+ * clauses give the position (fn_param_type_at), and the set's result
+ * (fn_result_type). The gate read the first clause's own parameters, so a
+ * literal pattern there (`fact(0)`) cost the set its alias while the
+ * catalog, which read every clause, still named it. */
+#define LIB_SIG_MAX 32
+typedef struct {
+    int count;
+    Type* ptypes[LIB_SIG_MAX];
+    const char* types[LIB_SIG_MAX];   /* the ABI spelling */
+    const char* names[LIB_SIG_MAX];
+    const char* casts[LIB_SIG_MAX];   /* the real `Struct*` a typed pointer is cast to, or NULL */
+    Type* result;                     /* NULL: returns nothing */
+} LibSig;
+
+/* The name position `pos` of `fn` goes by: the first clause's that binds
+ * one there, unless an earlier position took it, else `argN`. Names of the
+ * positions before `pos` are in `sig`. */
+static const char* lib_param_name(CodeGenerator* gen, ASTNode* fn, int pos, const LibSig* sig) {
+    const DefClauses* dc = fn_def_clause_set(gen->program, fn);
+    int n = dc ? dc->count : 1;
+    for (int c = 0; c < n; c++) {
+        ASTNode* p = fn_param_at(dc ? dc->nodes[c] : fn, pos);
+        if (!p || !p->value ||
+            (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION)) continue;
+        int taken = 0;
+        for (int k = 0; k < pos && !taken; k++) taken = strcmp(sig->names[k], p->value) == 0;
+        if (!taken) return p->value;
+    }
+    return cg_internf("arg%d", pos);
+}
+
+/* Fills `sig` for `fn`. Returns 1 when the export has an alias: every
+ * position takes one value of a type the ABI represents (a list pattern
+ * takes a pointer and a length) and the result is no tuple; otherwise 0,
+ * with `*why` "param" or "tuple". */
+static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const char** why) {
+    const DefClauses* dc = fn_def_clause_set(gen->program, fn);
+    int nclauses = dc ? dc->count : 1;
+    sig->count = 0;
+    sig->result = fn_result_type(gen, fn);
+    int npos = fn_param_count(fn);
+    /* Every position's name first: the catalog's records name a parameter
+     * whether or not the export has an alias. */
+    for (int pos = 0; pos < npos && pos < LIB_SIG_MAX; pos++)
+        sig->names[pos] = lib_param_name(gen, fn, pos, sig);
+    for (int pos = 0; pos < npos; pos++) {
+        int list = 0;
+        for (int c = 0; c < nclauses && !list; c++) {
+            ASTNode* p = fn_param_at(dc ? dc->nodes[c] : fn, pos);
+            list = p && (p->type == AST_PATTERN_LIST || p->type == AST_PATTERN_CONS);
+        }
+        Type* t = fn_param_type_at(gen, fn, pos);
+        const char* abi = get_abi_type(t);
+        if (list || !abi || strcmp(abi, "void") == 0 || pos >= LIB_SIG_MAX) {
+            *why = "param";
+            return 0;
+        }
+        sig->ptypes[pos] = t;
+        sig->types[pos] = abi;
+        /* Typed struct pointer: ABI is AetherValue*, real is Struct*. */
+        sig->casts[pos] = (t->kind == TYPE_PTR && t->element_type &&
+                           t->element_type->kind == TYPE_STRUCT) ? get_c_type(t) : NULL;
+        sig->count++;
+    }
+    if (sig->result && sig->result->kind == TYPE_TUPLE) {
+        *why = "tuple";
+        return 0;
+    }
+    return 1;
+}
+
 /* ---- #2297: a package built as one library (--lib-package) ----
  *
  * The functions of the package's modules arrive merged under the
@@ -3121,45 +3275,23 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char* pub_name = NULL;
         const char* pub_module = NULL;
         if (!lib_fn_identity(fn, &alias, &pub_name, &pub_module)) continue;
+        /* A function written as several clauses is one export, its
+         * dispatcher's, with its set's signature (#2644, #2665). */
+        if (!lib_fn_is_export_head(program, fn)) continue;
 
-        // Check that every param type is ABI-representable.
-        // The last non-guard, non-block child is the body; everything before
-        // is parameters (plus optional guard clauses).
-        int ok = 1;
-        const char* param_types[32];
-        const char* param_names[32];
-        /* When a parameter's real type is a TYPED pointer (`*Struct`), the ABI
-         * type stays the opaque `AetherValue*` (a C consumer cannot know the
-         * struct), but the real function takes `Struct*` — so the wrapper must
-         * CAST at the call, or GCC 14+ rejects the incompatible pointer. NULL
-         * here means "pass through unchanged". */
-        const char* param_casts[32];
-        int param_count = 0;
-        for (int p = 0; p < fn->child_count; p++) {
-            ASTNode* c = fn->children[p];
-            if (c->type == AST_GUARD_CLAUSE) continue;
-            if (c->type == AST_BLOCK) continue;
-            if (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) {
-                const char* t = get_abi_type(c->node_type);
-                if (!t || strcmp(t, "void") == 0 || param_count >= 32) { ok = 0; break; }
-                param_types[param_count] = t;
-                param_names[param_count] = c->value ? c->value : "_unnamed";
-                /* Typed struct pointer: ABI is AetherValue*, real is Struct* —
-                 * record the real C type so the call can cast to it. */
-                param_casts[param_count] = NULL;
-                if (c->node_type && c->node_type->kind == TYPE_PTR &&
-                    c->node_type->element_type &&
-                    c->node_type->element_type->kind == TYPE_STRUCT) {
-                    param_casts[param_count] = get_c_type(c->node_type);
-                }
-                param_count++;
-            } else {
-                // Pattern literals, struct patterns, list patterns — not ABI-safe.
-                ok = 0;
-                break;
-            }
-        }
-        if (!ok) {
+        // Check that every param type is ABI-representable. When a
+        // parameter's real type is a TYPED pointer (`*Struct`), the ABI type
+        // stays the opaque `AetherValue*` (a C consumer cannot know the
+        // struct), but the real function takes `Struct*`, so the wrapper
+        // casts at the call, or GCC 14+ rejects the incompatible pointer.
+        LibSig sig;
+        const char* why = NULL;
+        int ok = lib_fn_signature(gen, fn, &sig, &why);
+        const char** param_types = sig.types;
+        const char** param_names = sig.names;
+        const char** param_casts = sig.casts;
+        int param_count = sig.count;
+        if (!ok && strcmp(why, "param") == 0) {
             char msg[256];
             snprintf(msg, sizeof(msg),
                      "function '%s' has a parameter type that isn't representable in the --emit=lib ABI; skipping alias stub",
@@ -3180,10 +3312,11 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // (`int32_t aether_helper(...)` calling a `_tuple_int_int`
         // returner). Skip the alias entirely with the same warning the
         // parameter-side check uses. Closes #277.
-        const char* ret_abi = get_abi_type(fn->node_type);
-        int returns_value = has_return_value(fn);
-        int return_is_tuple = (fn->node_type && fn->node_type->kind == TYPE_TUPLE);
-        if (return_is_tuple) {
+        /* As the definition decides it, over every clause of a set (#2645). */
+        Type* result = sig.result;
+        const char* ret_abi = get_abi_type(result);
+        int returns_value = result != NULL;
+        if (!ok) {
             char msg[256];
             snprintf(msg, sizeof(msg),
                      "function '%s' returns a tuple; --emit=lib alias stub skipped (tuples aren't part of the public ABI)",
@@ -3207,13 +3340,9 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
          * consumer does not have: keep the export (an Aether importer
          * declares both) but leave the prototype out of the --emit=csrc
          * header, saying why. */
-        int sig_has_struct_value = abi_is_struct_value(fn->node_type);
-        for (int p = 0; p < fn->child_count && !sig_has_struct_value; p++) {
-            ASTNode* c = fn->children[p];
-            if (c && (c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) &&
-                abi_is_struct_value(c->node_type))
-                sig_has_struct_value = 1;
-        }
+        int sig_has_struct_value = abi_is_struct_value(result);
+        for (int k = 0; k < param_count && !sig_has_struct_value; k++)
+            sig_has_struct_value = abi_is_struct_value(sig.ptypes[k]);
 
         // #996 --emit=csrc: mirror the public prototype into the header.
         if (gen->csrc_header_file && sig_has_struct_value) {
@@ -3245,7 +3374,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             }
         }
         fprintf(gen->output, ") {\n    ");
-        int ret_is_string = (fn->node_type && fn->node_type->kind == TYPE_STRING);
+        int ret_is_string = (result && result->kind == TYPE_STRING);
         if (strcmp(ret_abi, "void") != 0) fprintf(gen->output, "return ");
         /* Unwrap a magic AetherString return to its C `char*` payload so
          * C callers (dlsym'd function pointers, etc.) read the bytes, not
@@ -3254,11 +3383,15 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         /* #2297: a typed struct pointer returns as the opaque AetherValue*;
          * cast, as the parameter side does, or GCC 14+ rejects the
          * incompatible pointer under -Werror. */
-        int ret_is_typed_ptr = (fn->node_type && fn->node_type->kind == TYPE_PTR &&
-                                fn->node_type->element_type &&
-                                fn->node_type->element_type->kind == TYPE_STRUCT);
+        int ret_is_typed_ptr = (result && result->kind == TYPE_PTR &&
+                                result->element_type &&
+                                result->element_type->kind == TYPE_STRUCT);
         if (ret_is_typed_ptr) fprintf(gen->output, "(AetherValue*)");
-        fprintf(gen->output, "%s(", fn->value);
+        /* The function as its definition spells it: a @c_callback one is
+         * the symbol its annotation binds (#2666), and a name a libc
+         * symbol takes is renamed (safe_c_name). */
+        ASTNode* cb_def = fn_c_callback_def(gen, fn);
+        fprintf(gen->output, "%s(", cb_def ? c_callback_symbol(cb_def) : safe_c_name(fn->value));
         for (int k = 0; k < param_count; k++) {
             if (k > 0) fprintf(gen->output, ", ");
             /* Cast the opaque AetherValue* back to the real `Struct*` the
@@ -3435,37 +3568,32 @@ static const char* cg_type_source(const Type* t) {
  * C-literal catalog and the JSON catalog. Each type_to_string result (a
  * pointer into a shared static buffer) is copied into the text immediately,
  * so a later type_to_string call can't clobber an earlier field. */
-static char* fn_signature_string(ASTNode* fn) {
+static char* fn_signature_string(CodeGenerator* gen, ASTNode* fn) {
     CgText b = {NULL, 0, 0};
     cg_text_put(&b, "(");
-    int first = 1;
-    for (int i = 0; i < fn->child_count; i++) {
-        ASTNode* c = fn->children[i];
-        if (!c) continue;
-        if (c->type != AST_PATTERN_VARIABLE && c->type != AST_VARIABLE_DECLARATION) continue;
-        if (!first) cg_text_put(&b, ", ");
-        first = 0;
-        cg_text_put(&b, c->node_type ? type_to_string(c->node_type) : "unknown");
+    /* A parameter per position, a function written as several clauses
+     * with its set's types and result (#2665). */
+    int npos = fn_param_count(fn);
+    for (int pos = 0; pos < npos; pos++) {
+        Type* t = fn_param_type_at(gen, fn, pos);
+        if (pos > 0) cg_text_put(&b, ", ");
+        cg_text_put(&b, t ? type_to_string(t) : "unknown");
     }
     cg_text_put(&b, ") -> ");
-    /* No-return-type and TYPE_UNKNOWN both mean "void" at the
-     * source-level surface (Aether's `foo() { ... }` with no
-     * `-> T` is a void function). Render as "void" rather than
-     * leaking the internal "UNKNOWN" tag through the diagnostic. */
-    const char* rt = (!fn->node_type ||
-                      fn->node_type->kind == TYPE_UNKNOWN ||
-                      fn->node_type->kind == TYPE_VOID)
-                         ? "void" : type_to_string(fn->node_type);
-    cg_text_put(&b, rt);
+    /* A function that returns nothing renders as "void" rather than
+     * leaking the internal "UNKNOWN" tag through the diagnostic; one with
+     * no `-> T` that returns a value is `int` (fn_result_type). */
+    Type* result = fn_result_type(gen, fn);
+    cg_text_put(&b, result ? type_to_string(result) : "void");
     return b.s;
 }
 
-static void emit_lib_metadata_signature_for(FILE* out, ASTNode* fn) {
+static void emit_lib_metadata_signature_for(CodeGenerator* gen, FILE* out, ASTNode* fn) {
     /* Format: `(type1, type2, ...) -> retType`, the same shape that
      * docs/stdlib-reference.md uses. The signature is descriptive, not
      * parseable; consumers use it for display and switch on c_symbol for
      * actual dispatch. */
-    char* s = fn_signature_string(fn);
+    char* s = fn_signature_string(gen, fn);
     fputs(s, out);
     free(s);
 }
@@ -3786,27 +3914,27 @@ static void lib_struct_collect(ASTNode* program, const char* name,
 
 /* `(name: T, ...) -> R` in Aether source, or NULL when a type has no
  * spelling. Malloc'd; the caller frees. */
-static char* fn_source_signature_string(ASTNode* fn) {
+static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
     CgText b = {NULL, 0, 0};
     cg_text_put(&b, "(");
-    int first = 1;
-    for (int i = 0; i < fn->child_count; i++) {
-        ASTNode* c = fn->children[i];
-        if (!c) continue;
-        if (c->type == AST_BLOCK) break;
-        if (c->type != AST_PATTERN_VARIABLE && c->type != AST_VARIABLE_DECLARATION) continue;
-        const char* ts = cg_type_source(c->node_type);
+    /* The export's signature (lib_fn_signature): its set's, for a function
+     * written as several clauses (#2665). */
+    LibSig sig;
+    const char* why = NULL;
+    lib_fn_signature(gen, fn, &sig, &why);
+    int npos = fn_param_count(fn);
+    for (int pos = 0; pos < npos; pos++) {
+        const char* ts = cg_type_source(fn_param_type_at(gen, fn, pos));
         if (!ts) { free(b.s); return NULL; }
-        if (!first) cg_text_put(&b, ", ");
-        cg_text_put(&b, c->value ? c->value : "_");
+        if (pos > 0) cg_text_put(&b, ", ");
+        cg_text_put(&b, pos < LIB_SIG_MAX ? sig.names[pos] : cg_internf("arg%d", pos));
         cg_text_put(&b, ": ");
         cg_text_put(&b, ts);
-        first = 0;
     }
+    Type* result = fn_result_type(gen, fn);
     const char* rt = "void";
-    if (fn->node_type && fn->node_type->kind != TYPE_UNKNOWN &&
-        fn->node_type->kind != TYPE_VOID) {
-        rt = cg_type_source(fn->node_type);
+    if (result) {
+        rt = cg_type_source(result);
         if (!rt) { free(b.s); return NULL; }
     }
     cg_text_put(&b, ") -> ");
@@ -3841,28 +3969,17 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             const char* md = NULL;
             if (!lib_fn_identity(fn, &alias_probe, &nm, &md)) continue;
         }
-        /* @c_callback functions are always eligible — the user opted
-         * the bare Aether name into the C ABI directly. Plain
-         * functions must satisfy the same param/return gates as
-         * emit_lib_alias_stubs (otherwise the catalog would advertise
-         * a c_symbol that doesn't actually exist in the artifact). */
-        if (!c_callback_symbol(fn)) {
-            int param_ok = 1;
-            for (int p = 0; p < fn->child_count && param_ok; p++) {
-                ASTNode* c = fn->children[p];
-                if (!c) continue;
-                if (c->type == AST_GUARD_CLAUSE) continue;
-                if (c->type == AST_BLOCK) break;
-                if (c->type == AST_VARIABLE_DECLARATION ||
-                    c->type == AST_PATTERN_VARIABLE) {
-                    const char* t = get_abi_type(c->node_type);
-                    if (!t || strcmp(t, "void") == 0) param_ok = 0;
-                } else {
-                    param_ok = 0;
-                }
-            }
-            if (!param_ok) continue;
-            if (fn->node_type && fn->node_type->kind == TYPE_TUPLE) continue;
+        /* A function written as several clauses is one export, listed
+         * once (#2665). @c_callback functions are always eligible: the
+         * user opted the bare Aether name into the C ABI directly. Plain
+         * functions pass the gate emit_lib_alias_stubs applies, the same
+         * function (otherwise the catalog would advertise a c_symbol that
+         * doesn't actually exist in the artifact). */
+        if (!lib_fn_is_export_head(program, fn)) continue;
+        if (!fn_c_callback_def(gen, fn)) {
+            LibSig sig;
+            const char* why = NULL;
+            if (!lib_fn_signature(gen, fn, &sig, &why)) continue;
         }
         fns[fn_count++] = fn;
     }
@@ -3953,14 +4070,10 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     }
     for (int i = 0; i < fn_count; i++) {
         ASTNode* fn = fns[i];
-        for (int p = 0; p < fn->child_count; p++) {
-            ASTNode* c = fn->children[p];
-            if (!c) continue;
-            if (c->type == AST_BLOCK) break;
-            if (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION)
-                lib_struct_collect_type(program, c->node_type, st_all, &st_all_count, st_cap);
-        }
-        lib_struct_collect_type(program, fn->node_type, st_all, &st_all_count, st_cap);
+        for (int pos = 0; pos < fn_param_count(fn); pos++)
+            lib_struct_collect_type(program, fn_param_type_at(gen, fn, pos),
+                                    st_all, &st_all_count, st_cap);
+        lib_struct_collect_type(program, fn_result_type(gen, fn), st_all, &st_all_count, st_cap);
     }
     ASTNode** structs = (ASTNode**)malloc(sizeof(ASTNode*) * st_cap);
     int struct_count = 0;
@@ -3988,20 +4101,16 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     char** src_sigs = (char**)calloc((size_t)(fn_count > 0 ? fn_count : 1), sizeof(char*));
     int src_sig_needed = struct_count > 0;
     for (int i = 0; i < fn_count; i++) {
-        src_sigs[i] = fn_source_signature_string(fns[i]);
+        src_sigs[i] = fn_source_signature_string(gen, fns[i]);
         if (!src_sig_needed && src_sigs[i]) {
             ASTNode* fn = fns[i];
-            Type* rt = fn->node_type;
+            Type* rt = fn_result_type(gen, fn);
             if (rt && ((rt->kind == TYPE_PTR && rt->element_type) || rt->kind == TYPE_STRUCT ||
                        rt->kind == TYPE_FUNCTION)) src_sig_needed = 1;
-            for (int p = 0; p < fn->child_count && !src_sig_needed; p++) {
-                ASTNode* c = fn->children[p];
-                if (!c) continue;
-                if (c->type == AST_BLOCK) break;
-                if ((c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
-                    c->node_type &&
-                    ((c->node_type->kind == TYPE_PTR && c->node_type->element_type) ||
-                     c->node_type->kind == TYPE_STRUCT || c->node_type->kind == TYPE_FUNCTION))
+            for (int pos = 0; pos < fn_param_count(fn) && !src_sig_needed; pos++) {
+                Type* t = fn_param_type_at(gen, fn, pos);
+                if (t && ((t->kind == TYPE_PTR && t->element_type) ||
+                          t->kind == TYPE_STRUCT || t->kind == TYPE_FUNCTION))
                     src_sig_needed = 1;
             }
         }
@@ -4071,13 +4180,15 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
          * Consumers `dlsym(handle, c_symbol)` should always return
          * a callable pointer regardless of which path the function
          * took. */
-        const char* cb_sym = c_callback_symbol(fn);
+        /* A clause set's symbol is its first annotated clause's (#2664). */
+        ASTNode* cb_def = fn_c_callback_def(gen, fn);
+        const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
         const char* c_sym = cb_sym ? cb_sym : pkg_alias;
         emit_lib_metadata_c_string_literal(gen->output, c_sym);
         fprintf(gen->output, ", \"");
         /* Signature directly into the C-string literal — characters
          * are all safe ASCII (parens, comma, arrow, alphanumerics). */
-        emit_lib_metadata_signature_for(gen->output, fn);
+        emit_lib_metadata_signature_for(gen, gen->output, fn);
         fprintf(gen->output, "\", ");
         emit_lib_metadata_c_string_literal(gen->output,
             fn->source_file ? fn->source_file : "");
@@ -4169,6 +4280,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             clo_count++;
             continue;
         }
+        /* A function written as several clauses is one export: its
+         * builder and parameter records once, from its first clause, with
+         * its set's parameter types (#2665); every clause still encloses
+         * its own closure literals (3). */
+        if (!lib_fn_is_export_head(program, fn)) continue;
         if (fn->type == AST_BUILDER_FUNCTION ||
             is_builder_func_reg(gen, fn->value) || fn_takes_builder_context(fn)) {
             lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
@@ -4182,18 +4298,17 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rec_mod[clo_count]  = "";
             clo_count++;
         }
-        for (int p = 0; p < fn->child_count; p++) {
-            ASTNode* c = fn->children[p];
-            if (!c) continue;
-            if (c->type == AST_GUARD_CLAUSE) continue;
-            if (c->type == AST_BLOCK) break;
-            if ((c->type == AST_VARIABLE_DECLARATION || c->type == AST_PATTERN_VARIABLE) &&
-                c->node_type && c->node_type->kind == TYPE_FUNCTION) {
+        LibSig psig;
+        const char* pwhy = NULL;
+        lib_fn_signature(gen, fn, &psig, &pwhy);
+        for (int p = 0; p < fn_param_count(fn); p++) {
+            Type* pt = fn_param_type_at(gen, fn, p);
+            if (pt && pt->kind == TYPE_FUNCTION) {
                 lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
-                rec_name[clo_count] = c->value ? c->value : "";
+                rec_name[clo_count] = p < LIB_SIG_MAX ? psig.names[p] : cg_internf("arg%d", p);
                 rec_role[clo_count] = "param";
                 rec_encl[clo_count] = fn->value;
-                rec_sig[clo_count]  = strdup(type_to_string(c->node_type));
+                rec_sig[clo_count]  = strdup(type_to_string(pt));
                 rec_src[clo_count]  = fn->source_file ? fn->source_file : "";
                 rec_line[clo_count] = fn->line;
                 rec_fn[clo_count]   = NULL;
@@ -4208,7 +4323,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (!pf) continue;
         ASTNode* owner = NULL;
         for (int i = 0; i < cfn_count; i++) {
-            if (cfns[i]->value && strcmp(cfns[i]->value, pf) == 0) { owner = cfns[i]; break; }
+            /* A clause of a set is its closures' scope (#2644). */
+            if (cfns[i]->value && strcmp(fn_scope_name(gen->program, cfns[i]), pf) == 0) {
+                owner = cfns[i];
+                break;
+            }
         }
         if (!owner) continue;   /* parent is main / synthetic / non-exported */
         ASTNode* cnode = gen->closures[ci].closure_node;
@@ -4274,7 +4393,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                     if (cfns[i]->value && strcmp(cfns[i]->value, rec_encl[r]) == 0) { bf = cfns[i]; break; }
                 }
                 fputc('"', gen->output);
-                if (bf) emit_lib_metadata_signature_for(gen->output, bf);
+                if (bf) emit_lib_metadata_signature_for(gen, gen->output, bf);
                 fputc('"', gen->output);
             } else {
                 fputs("\"\"", gen->output);
@@ -4516,13 +4635,14 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         fputs("  \"functions\": [", j);
         for (int i = 0; i < fn_count; i++) {
             ASTNode* fn = fns[i];
-            const char* cb_sym = c_callback_symbol(fn);
+            ASTNode* cb_def = fn_c_callback_def(gen, fn);
+            const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
             const char* pkg_alias = "";
             const char* pub_name = fn->value;
             const char* pub_module = "";
             lib_fn_identity(fn, &pkg_alias, &pub_name, &pub_module);
             const char* c_sym = cb_sym ? cb_sym : pkg_alias;
-            char* sig = fn_signature_string(fn);
+            char* sig = fn_signature_string(gen, fn);
             fputs(i == 0 ? "\n" : ",\n", j);
             fputs("    { \"aether_name\": ", j);  emit_json_string(j, pub_name);
             if (module_lib_package()) {
@@ -4545,12 +4665,12 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             char* built_sig = NULL;
             const char* sig = rec_sig[r];
             if (!sig && strcmp(rec_role[r], "builder") == 0 && rec_fn[r]) {
-                built_sig = fn_signature_string(rec_fn[r]); sig = built_sig;
+                built_sig = fn_signature_string(gen, rec_fn[r]); sig = built_sig;
             }
             if (!sig && strcmp(rec_role[r], "builder") == 0) {
                 for (int i = 0; i < cfn_count; i++) {
                     if (cfns[i]->value && strcmp(cfns[i]->value, rec_encl[r]) == 0) {
-                        built_sig = fn_signature_string(cfns[i]); sig = built_sig; break;
+                        built_sig = fn_signature_string(gen, cfns[i]); sig = built_sig; break;
                     }
                 }
             }
@@ -4854,6 +4974,16 @@ void ensure_tuple_typedef(CodeGenerator* gen, Type* type) {
         if (strcmp(gen->tuple_type_names[i], name) == 0) return;
     }
 
+    /* #2652: an element the tuple embeds by value whose type is a typedef
+     * of its own (`ae_opt_string` for a `string?`, `_tuple_...` for a
+     * nested tuple) is declared first. The optional typedefs were emitted
+     * after every tuple's, so `-> (string?, int)` named an unknown type. */
+    for (int i = 0; i < type->tuple_count; i++) {
+        Type* et = type->tuple_types ? type->tuple_types[i] : NULL;
+        if (et && et->kind == TYPE_OPTIONAL) ensure_optional_typedef(gen, et);
+        else if (et && et->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, et);
+    }
+
     // Emit typedef
     fprintf(gen->output, "typedef struct { ");
     for (int i = 0; i < type->tuple_count; i++) {
@@ -4879,6 +5009,8 @@ void ensure_optional_typedef(CodeGenerator* gen, Type* type) {
     for (int i = 0; i < gen->opt_type_count; i++) {
         if (strcmp(gen->opt_type_names[i], name) == 0) return;
     }
+    /* #2652: an optional tuple embeds the tuple's typedef, declared first. */
+    if (type->element_type->kind == TYPE_TUPLE) ensure_tuple_typedef(gen, type->element_type);
     const char* inner_c = get_c_type(type->element_type);
     const char* opt_name = name;
     fprintf(gen->output, "typedef struct { int has; %s val; } %s;\n", inner_c, opt_name);
@@ -4997,18 +5129,34 @@ void generate_type(CodeGenerator* gen, Type* type) {
  * The element type strings mirror the call-site cast in codegen_expr.c
  * so a fn-ptr param, its prototype, and a call through it all agree. */
 void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name) {
-    const char* ret_c = (sig && sig->return_type)
-                        ? get_c_type(sig->return_type) : "void";
-    fprintf(gen->output, "%s (*%s)(", ret_c, name ? name : "");
-    if (sig && sig->param_count > 0) {
-        for (int i = 0; i < sig->param_count; i++) {
-            if (i > 0) fprintf(gen->output, ", ");
-            fprintf(gen->output, "%s", get_c_type(sig->param_types[i]));
+    fputs(fnptr_c_spelling(sig, name ? name : ""), gen->output);
+}
+
+/* #2651: the C spelling of a typed fn pointer, the one every declarator,
+ * struct field and call-site cast uses: `R (*name)(T1, T2)`, `R (*)(T1,
+ * T2)` for an empty name, and the cast's `R(*)(T1, T2)` for NULL. A
+ * parameter that is itself a typed fn pointer is spelled out the same way,
+ * as a definition with that parameter declares it, so a function passed for
+ * it has the very type the pointer names: spelled `void*`, `meta(relay, w)`
+ * passed `relay` to an incompatible pointer type. A fn-pointer result stays
+ * `void*`, which is how a function returning one is declared. */
+const char* fnptr_c_spelling(Type* sig, const char* name) {
+    char buf[1024];
+    size_t n = 0;
+    const char* ret_c = (sig && sig->return_type) ? get_c_type(sig->return_type) : "void";
+    n += (size_t)snprintf(buf + n, sizeof(buf) - n, name ? "%s (*%s)(" : "%s(*%s)(",
+                          ret_c, name ? name : "");
+    if (sig && sig->param_count > 0 && sig->param_types) {
+        for (int i = 0; i < sig->param_count && n < sizeof(buf); i++) {
+            Type* p = sig->param_types[i];
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i > 0 ? ", " : "",
+                                  is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
         }
-    } else {
-        fprintf(gen->output, "void");
+    } else if (n < sizeof(buf)) {
+        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "void");
     }
-    fprintf(gen->output, ")");
+    if (n < sizeof(buf)) snprintf(buf + n, sizeof(buf) - n, ")");
+    return cg_internf("%s", buf);
 }
 
 /* True for a parameter/local whose declared type is a typed C function
@@ -5278,9 +5426,12 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
         ASTNode* fn = program->children[i];
         if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
         if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value) continue;
+        /* One export per clause set, under its set's symbol (#2665). */
+        if (!lib_fn_is_export_head(program, fn)) continue;
         const char* pub_name = NULL;
         const char* pub_module = NULL;
-        const char* sym = c_callback_symbol(fn);
+        ASTNode* cb_def = fn_c_callback_def(gen, fn);
+        const char* sym = cb_def ? c_callback_symbol(cb_def) : NULL;
         if (!sym) {
             if (!lib_fn_identity(fn, &sym, &pub_name, &pub_module)) continue;
         }
@@ -5586,9 +5737,11 @@ static void prefix_value(ASTNode* node) {
     node->value = renamed;
 }
 
-/* The entry constants renamed, by their source names. */
+/* The entry constants renamed, by their source names. `callable[i]` marks a
+ * typed fn-pointer constant, which a call names too (#2648). */
 typedef struct {
     const char** names;
+    char* callable;
     int count;
 } EntryConsts;
 
@@ -5630,6 +5783,14 @@ static void collect_bound_consts(const ASTNode* node, const ASTNode* self,
     }
 }
 
+/* #2648: does the callee `call` name the constant `name`, a module's dot
+ * written as the merged name's underscore (`cbmod.CB` for `cbmod_CB`)? */
+static int call_names_const(const char* call, const char* name) {
+    for (; *call && *name; call++, name++)
+        if (*call != *name && !(*call == '.' && *name == '_')) return 0;
+    return *call == *name;
+}
+
 /* Rename each reference to an entry constant that the enclosing top-level
  * declaration does not bind (`bound`). A name the declaration does bind (a
  * parameter or local named like the constant, anywhere in the function,
@@ -5661,6 +5822,19 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
             }
         }
     }
+    /* #2648: `CB(i)` through a typed fn-pointer constant names it as the
+     * call's own name, with no identifier for it; a module's, `cbmod.CB(21)`,
+     * in the dotted form of its merged name `cbmod_CB`. */
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        for (int i = 0; i < ec->count; i++) {
+            if (ec->callable[i] && !bound[i] && call_names_const(node->value, ec->names[i])) {
+                char* renamed = prefixed_name(AE_CONST_PREFIX, ec->names[i]);
+                free(node->value);
+                node->value = renamed;
+                break;
+            }
+        }
+    }
     for (int i = 0; i < node->child_count; i++) {
         rename_const_refs_in(node->children[i], ec, bound);
     }
@@ -5684,25 +5858,27 @@ static void rename_const_refs_in(ASTNode* node, const EntryConsts* ec, const cha
  * source language: the symbol catalog and export lists
  * (const_public_name). */
 static void rename_entry_constants(ASTNode* program) {
-    EntryConsts ec = { NULL, 0 };
+    EntryConsts ec = { NULL, NULL, 0 };
     for (int i = 0; i < program->child_count; i++) {
         if (entry_const_decl(program->children[i])) ec.count++;
     }
     if (ec.count == 0) return;
     ec.names = malloc(sizeof(char*) * (size_t)ec.count);
-    if (!ec.names) return;
+    ec.callable = calloc((size_t)ec.count, 1);
+    if (!ec.names || !ec.callable) { free(ec.names); free(ec.callable); return; }
     ec.count = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* cd = entry_const_decl(program->children[i]);
         if (!cd) continue;
         if (!cd->source_name) cd->source_name = strdup(cd->value);
         if (!cd->source_name) continue;
+        ec.callable[ec.count] = (char)is_fnptr_const_decl(cd);
         ec.names[ec.count++] = cd->source_name;
     }
     /* References first, against the names as written; then the
      * declarations themselves. */
     char* bound = calloc((size_t)ec.count, 1);
-    if (!bound) { free(ec.names); return; }
+    if (!bound) { free(ec.names); free(ec.callable); return; }
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         memset(bound, 0, (size_t)ec.count);
@@ -5715,6 +5891,7 @@ static void rename_entry_constants(ASTNode* program) {
         if (cd) prefix_value(cd);
     }
     free(ec.names);
+    free(ec.callable);
 }
 
 /* The name a constant was declared with: what the symbol catalog records and
@@ -6388,6 +6565,53 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
     fprintf(gen->output, " }");
 }
 
+/* #701: each mutable module-level `var` as a file-scope static (the name was
+ * registered with the constants). Emitted after the function prototypes and
+ * the adapter declarations, because an initializer may name a function: a
+ * `fn(ptr, int)` global holds the function's address, through its #2586
+ * adapter when it returns a string (#2623). Before them, the name was
+ * undeclared where the static was defined. Still before every function body
+ * and closure, which read and write these statics. A function-valued `const`
+ * is emitted here too, for the same reason (#2648). */
+static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* cd = program->children[i];
+        if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value ||
+            cd->child_count == 0) continue;
+        int is_var = cd->annotation && strcmp(cd->annotation, "global_var") == 0;
+        if (!is_var && !fn_const_decl(cd)) continue;
+        codegen_note_diag_pos(cd);
+        codegen_note_diag_func(NULL);
+        if (!is_var) {
+            /* #2648: a function-valued const, read-only: a typed fn
+             * pointer's `void*`, or a closure of a named function. */
+            if (is_fnptr_const_decl(cd))
+                fprintf(gen->output, "static void* const %s = ", cd->value);
+            else
+                fprintf(gen->output, "static const %s %s = ", get_c_type(cd->node_type), cd->value);
+            generate_expression(gen, cd->children[0]);
+            fprintf(gen->output, ";\n");
+            continue;
+        }
+        const char* ctype = get_c_type(cd->node_type);
+        fprintf(gen->output, "static %s %s = ", ctype, cd->value);
+        if (cd->children[0]->type == AST_NULL_LITERAL &&
+            strcmp(ctype, "_AeClosure") == 0) {
+            /* #2525: a `var name: fn = null` global starts as the
+             * zero closure (no body, no env); `NULL` is not an
+             * initializer for the struct. A function binds it later. */
+            fprintf(gen->output, "{0}");
+        } else if (cd->children[0]->type == AST_STRUCT_LITERAL) {
+            /* #2590: a struct literal of constants (the type checker
+             * admits no other here) as an initializer list. */
+            emit_static_struct_init(gen, cd->children[0]);
+        } else {
+            generate_expression(gen, cd->children[0]);
+        }
+        fprintf(gen->output, ";\n");
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -6412,6 +6636,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
        without changing the child count it is keyed on. */
     program_index_reset();
     erase_string_retype_casts(program);
+    /* #2586: the functions used as fn-pointer values, by name, before any
+     * pass classifies a function or emits a return of one. */
+    discover_fn_values(gen);
     // Note: `gen->program` is the source of truth for the
     // structural-escape-analysis lookup (issue #405). Setting it
     // here means every per-fn codegen pass beyond this point can
@@ -7172,6 +7399,26 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "        _n = strlen(s);");
     print_line(gen, "    }");
     print_line(gen, "    return (const char*)string_new_with_length(_data, (int)_n);");
+    print_line(gen, "}");
+    /* #2586: ownership through a typed fn pointer, decided at run time. A
+     * function used as a fn-pointer value that hands over owned strings
+     * marks the one it returns (give, at its uniform-heap returns); a call
+     * through a typed pointer clears the mark after its argument
+     * temporaries and before the call (reset), and takes the result as owned
+     * when it is the marked pointer, copying anything else (take): a C
+     * function never marks, so C's string stays C's, and a string an Aether
+     * function returns borrowed (a literal, its own parameter) is copied
+     * before the call's temporaries are freed. g_aether_fnptr_owned is the
+     * runtime's (aether_panic.h), shared by every translation unit. */
+    print_line(gen, "static inline const char* aether_fnptr_give(const char* s) {");
+    print_line(gen, "    g_aether_fnptr_owned = (const void*)s;");
+    print_line(gen, "    return s;");
+    print_line(gen, "}");
+    print_line(gen, "static inline void aether_fnptr_reset(void) { g_aether_fnptr_owned = (const void*)0; }");
+    print_line(gen, "static inline const char* aether_fnptr_take(const char* r) {");
+    print_line(gen, "    int _owned = r && (const void*)r == g_aether_fnptr_owned;");
+    print_line(gen, "    g_aether_fnptr_owned = (const void*)0;");
+    print_line(gen, "    return aether_uniform_heap_str(r, _owned);");
     print_line(gen, "}");
     /* AetherString-aware heap-string release. A `_heap_<name>` slot
      * tracked by the codegen can hold two physically distinct shapes:
@@ -8307,23 +8554,12 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // can read and write it as a plain C identifier. Record the
                 // name so a bare `name = expr` inside a function body lowers
                 // to a write to this static rather than a shadowing local.
+                // The definition itself is emitted by emit_module_global_vars,
+                // after the function prototypes.
                 register_module_global_var(gen, cd->value);
-                const char* ctype = get_c_type(cd->node_type);
-                fprintf(gen->output, "static %s %s = ", ctype, cd->value);
-                if (cd->children[0]->type == AST_NULL_LITERAL &&
-                    strcmp(ctype, "_AeClosure") == 0) {
-                    /* #2525: a `var name: fn = null` global starts as the
-                     * zero closure (no body, no env); `NULL` is not an
-                     * initializer for the struct. A function binds it later. */
-                    fprintf(gen->output, "{0}");
-                } else if (cd->children[0]->type == AST_STRUCT_LITERAL) {
-                    /* #2590: a struct literal of constants (the type checker
-                     * admits no other here) as an initializer list. */
-                    emit_static_struct_init(gen, cd->children[0]);
-                } else {
-                    generate_expression(gen, cd->children[0]);
-                }
-                fprintf(gen->output, ";\n");
+            } else if (fn_const_decl(cd)) {
+                /* #2648: emitted with the module vars, after the function
+                 * prototypes and adapters (emit_module_global_vars). */
             } else {
                 /* Scoped C, not a #define: a macro has no scope, so a
                  * function parameter or local spelled like the const was
@@ -8387,54 +8623,39 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // non-static declaration". `@c_callback` (#235) opts the function
         // out of `static` so it stays externally addressable; the forward
         // declaration follows suit. Trailing-underscore private helpers
-        // (#279) match the same `static` rule.
-        if (fn_has_internal_linkage(child)) {
+        // (#279) match the same `static` rule. A clause set is @c_callback
+        // when one of its clauses is (#2664), as its dispatcher is.
+        ASTNode* cb_def = fn_c_callback_def(gen, child);
+        if (!cb_def && fn_has_internal_linkage(child)) {
             fprintf(gen->output, fn_is_inline_candidate(child) ? "static inline AETHER_MAYBE_UNUSED "
                                                                : "static AETHER_MAYBE_UNUSED ");
         }
 
-        // Determine return type. Mirrors generate_function_definition's
-        // logic so the forward declaration and body always agree:
-        //   - unannotated + has return-with-value → int (legacy default)
-        //   - unannotated + no return-with-value  → void (issue #354)
-        Type* ret_type = child->node_type;
-        int func_has_return = has_return_value(child);
-        int ret_unannotated = (!ret_type
-                               || ret_type->kind == TYPE_VOID
-                               || ret_type->kind == TYPE_UNKNOWN);
-        if (ret_unannotated && func_has_return) {
-            fprintf(gen->output, "int");
-        } else if (ret_unannotated) {
-            fprintf(gen->output, "void");
-        } else {
-            generate_type(gen, ret_type);
-        }
-        const char* cb_sym = c_callback_symbol(child);
+        // The return type and the parameters exactly as the definition
+        // spells them (emit_function), so the two always agree: decided
+        // once over every clause of a set, whose prototype is its
+        // dispatcher's (#2645; the first clause alone declared a set whose
+        // first clause returns nothing `void` against an `int` definition).
+        emit_fn_result_c_type(gen, child);
+        const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
         fprintf(gen->output, " %s(", cb_sym ? cb_sym : safe_c_name(child->value));
 
         // Generate parameter types
-        int param_count = 0;
-        for (int j = 0; j < child->child_count; j++) {
-            ASTNode* param = child->children[j];
-            if (param->type == AST_GUARD_CLAUSE || param->type == AST_BLOCK) continue;
-
+        int param_count = fn_param_count(child);
+        for (int j = 0; j < param_count; j++) {
+            if (j > 0) fprintf(gen->output, ", ");
+            ASTNode* param = fn_param_at(child, j);
             if (param->type == AST_PATTERN_LIST || param->type == AST_PATTERN_CONS) {
-                if (param_count > 0) fprintf(gen->output, ", ");
-                fprintf(gen->output, "int*, int");
-                param_count++;
-            } else if (param->type == AST_PATTERN_LITERAL ||
-                       param->type == AST_PATTERN_VARIABLE ||
-                       param->type == AST_PATTERN_STRUCT ||
-                       param->type == AST_VARIABLE_DECLARATION) {
-                if (param_count > 0) fprintf(gen->output, ", ");
-                /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
-                 * so the prototype matches the definition. */
-                if (is_fnptr_type(param->node_type)) {
-                    emit_fnptr_decl(gen, param->node_type, NULL);
-                } else {
-                    generate_type(gen, param->node_type);
-                }
-                param_count++;
+                fprintf(gen->output, "%s*, int", fn_list_param_elem_ctype(gen, child, j));
+                continue;
+            }
+            Type* pt = fn_param_type_at(gen, child, j);
+            /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
+             * so the prototype matches the definition. */
+            if (is_fnptr_type(pt)) {
+                emit_fnptr_decl(gen, pt, NULL);
+            } else {
+                generate_type(gen, pt);
             }
         }
         // Builder functions get hidden void* _builder as last parameter
@@ -8538,7 +8759,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * so they must follow the user fn definitions). */
     discover_bare_fn_adapters(gen);
     compute_closure_args_borrowed(gen);   /* #2499: needs closures and adapters */
+    compute_fnptr_args_borrowed(gen);     /* #2586: after the closure answer */
     emit_bare_fn_adapter_decls(gen);
+    emit_module_global_vars(gen, program);   /* #2623: after the prototypes */
 
     if (gen->closure_count > 0) {
         print_line(gen, "// Closure declarations");
@@ -8878,7 +9101,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* f = program->children[i];
             if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
-            if (f && f->type == AST_FUNCTION_DEFINITION && c_callback_symbol(f)) n_cb++;
+            /* Once per symbol: a clause set's first annotated clause. */
+            if (f && f->type == AST_FUNCTION_DEFINITION && fn_c_callback_def(gen, f) == f) n_cb++;
         }
         if (n_cb > 0) {
             /* The reference is weak on ELF and Mach-O: a library linked with
@@ -8902,7 +9126,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             for (int i = 0; i < program->child_count; i++) {
                 ASTNode* f = program->children[i];
                 if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
-                if (!f || f->type != AST_FUNCTION_DEFINITION) continue;
+                if (!f || f->type != AST_FUNCTION_DEFINITION || fn_c_callback_def(gen, f) != f) continue;
                 const char* sym = c_callback_symbol(f);
                 if (!sym) continue;
                 fprintf(gen->output, "    aether_callback_register(\"%s\", (void*)%s);\n", sym, sym);

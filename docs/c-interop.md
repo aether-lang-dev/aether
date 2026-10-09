@@ -335,6 +335,8 @@ on_sigint(sig: int) {
 
 …the linker resolves `aether_signal_handler`; calls in Aether code still use `on_sigint`. Useful when integrating with a C library whose API documents a specific symbol name.
 
+A call by the Aether name, in the defining file or from a module that imports it (`signals.on_sigint(2)`, or a bare `on_sigint(2)` after `import signals (on_sigint)`), calls the bound symbol, as the name used as a value does (#2664). A function written as several clauses gets one symbol, for the whole set: the one its first annotated clause binds.
+
 ### When to use it
 
 `@c_callback` is the right shape any time a C function takes a function pointer parameter:
@@ -770,6 +772,8 @@ The `@aether` annotation is a sibling to the `: ptr` escape hatch above. Both op
 
 A call through a typed function pointer (`f = p as fn(uint32, string) -> int`, a `cb: fn(string) -> int` parameter, or a `fn(...)`-typed struct field) unwraps a `string` argument the same way: `f(7, name)` emits `f(7, aether_string_data(name))`. A `ptr` parameter in the pointer's type passes the value as it is, for a callee that wants the header.
 
+A `string` a typed function pointer returns is the caller's, and the caller frees it once done (#2586). A pointer may point at an Aether function or at C, so the call decides at run time: an Aether function that hands over owned strings marks the one it returns, and the call takes a marked result as it is and copies any other (a literal or borrowed string an Aether function returned, or a C function's string). C's string is never freed, however its pointer arrived: cast from a raw `ptr` (`dl.symbol_raw(h, "strerror") as fn(int) -> string`), a raw `ptr` passed for a typed parameter, an extern's result, a field of a struct laid over C memory or filled by C, an extern named as a value, or a pointer C passes to an Aether callback. An Aether function handed to C (by name, `as ptr`, through a typed local or parameter) is the function itself, so C reads its string as text. An owned `string` argument to such a call is freed after the call at each argument position where no Aether function used as a pointer keeps what it receives (see [memory-management.md](memory-management.md#closure-arguments-are-borrowed)); a C function behind the pointer takes it borrowed, as an extern's `string` parameter does.
+
 The regression range was v0.97.0 → v0.98.0 (the blanket auto-unwrap landed in v0.98.0); the `@aether` annotation restores the v0.97.0 behaviour for Aether-to-Aether crossings without re-breaking the v0.98.0 fix for naive C externs.
 
 **Length-clamp hazard for binary content.** Once the auto-unwrap has fired, a C shim that receives a `string`-typed parameter has only payload bytes, no header, no stored length. A common defensive pattern is fatal here:
@@ -872,7 +876,8 @@ main() {
 - The cast itself is a view, **it does not allocate, refcount, or auto-free**. The operand pointer's lifetime is the caller's problem (the same contract as raw `extern` interaction). If the underlying memory is freed while a struct view still references it, you have a use-after-free; Aether does not track this.
 - Two views of the same memory alias each other (writes through one are visible through the other). This is the whole point.
 - A `ptr`-typed field of a struct view can itself be re-cast: `head.next as *ListHead` reaches the next list element.
-- `*StructName` is accepted in any type position: variable annotations, function parameters, function return types, struct fields, extern declarations.
+- `*StructName` is accepted in any type position: variable annotations, function parameters, function return types, tuple elements (`-> (*Node, *Node)`), struct fields, extern declarations.
+- Two typed pointers are compatible only when they point at the same type, at an assignment and at a call alike: an `*Ints` (a local, `&ints`, `&p.ints`) passed to a `*Buffer` parameter is a typecheck error naming both, where it used to reach the C compiler as "incompatible pointer type". A bare `ptr`, and a pointer to a `@c_struct` overlay (a `void*` in C), convert to and from any typed pointer.
 
 **When to reach for it**
 
@@ -908,7 +913,7 @@ shrink(ctx: ptr, p: ptr, new_len: int) {
 - `&local.field` lowers to `&local.field` the address of a field on an Aether-owned value struct.
 - `&local` and `&arr[i]` work the same way (address of a local, address of an array element).
 - `&f()` is an error: a call's result is not stored anywhere, so it has no address (it used to reach the C compiler as "lvalue required", #2591). Bind it to a local first, `def = default_body_def()` then `create_body(world, &def)`, and the pointer lives as long as the local. `&ref_get(r)` is the exception: it is the cell itself.
-- The result is typed as a pointer to the field's type (`*T`), assignable to a bare `ptr` parameter. Like the overlay casts, it is a raw view: the pointer is valid only while the underlying storage is.
+- The result is typed as a pointer to the field's type (`*T`), assignable to a bare `ptr` parameter or a `*T` one, and refused by a parameter that points at another type. Like the overlay casts, it is a raw view: the pointer is valid only while the underlying storage is.
 
 Without `&`, a `&struct->field` out-param forces raw `mem.long_to_ptr(base + OFFSET)` offset math, re-introducing the hand-maintained offset constant the typed overlay was meant to eliminate.
 

@@ -1,0 +1,98 @@
+// Regression (#2651): a typed fn pointer whose own parameter is a typed fn
+// pointer is spelled out in C, so a function passed for it fits.
+//
+// `meta(r: fn(fn(string) -> string, string) -> string, s)` called as
+// `meta(relay, w)` failed in gcc with "incompatible pointer type": the
+// parameter was declared `const char* (*r)(void*, const char*)`, its inner
+// fn pointer spelled `void*`, while `relay` is defined with the real
+// `const char* (*)(const char*)`. Every C spelling of a typed fn pointer
+// (a parameter's declarator, a struct field, a `cfn` name, the cast at a
+// call through a local) now spells a fn-pointer parameter out the same way.
+// The strings the inner calls return go through the caller's take (#2586),
+// and the leak window holds steady.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+cfn Inner(s: string) -> string
+cfn Outer(f: Inner, s: string) -> string
+
+struct Ops {
+    run: fn(fn(string) -> string, string) -> string
+    named: Outer
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+greet(s: string) -> string {
+    return string.concat("hi ", s)
+}
+
+lit(s: string) -> string {
+    return "lit"
+}
+
+relay(f: fn(string) -> string, s: string) -> string {
+    return f(s)
+}
+
+twice(f: Inner, s: string) -> string {
+    return f(f(s))
+}
+
+meta(r: fn(fn(string) -> string, string) -> string, s: string) -> string {
+    return r(greet, s)
+}
+
+meta_lit(r: fn(fn(string) -> string, string) -> string, s: string) -> string {
+    return r(lit, s)
+}
+
+round(w: string) -> int {
+    o = Ops { run: relay, named: twice }
+    let local: Outer = twice
+    total = string.length(meta(relay, w)) + string.length(meta_lit(relay, w))
+    total = total + string.length(o.run(greet, w)) + string.length(o.named(greet, w))
+    return total + string.length(local(lit, w))
+}
+
+main() {
+    println("=== test_fnptr_nested_signature ===")
+    w = string.concat("w", string.from_int(1))
+    check(meta(relay, w) == "hi w1", "a function passed for a nested fn-pointer parameter")
+    check(meta_lit(relay, w) == "lit", "a literal through the nested pointer")
+    check(meta(twice, w) == "hi hi w1", "another function of the same nested signature")
+    o = Ops { run: relay, named: twice }
+    check(o.run(greet, w) == "hi w1", "a struct field with a nested signature")
+    check(o.named(greet, w) == "hi hi w1", "a cfn field naming another cfn")
+    check(round(w) == 5 + 3 + 5 + 8 + 3, "a round adds up")
+
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 20 {
+            round(w)
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round(w)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_fnptr_nested_signature passed ===")
+}

@@ -389,13 +389,18 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * ASTNode grew to 112 with `value_len` (#2520): the byte count of a
      * string literal that holds a NUL. That is parse state, so the codec
      * writes such a value by its byte count and carries value_len, and
-     * AEA_FORMAT_VERSION went to 2. */
+     * AEA_FORMAT_VERSION went to 2.
+     *
+     * ASTNode grew to 120 with `origin_module` (#2614): the module a merged
+     * definition was cloned from. It is set only by the merge (NULL after a
+     * parse), so like `source_name` the codec does not carry it and neither
+     * the wire format nor AEA_FORMAT_VERSION changed. */
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
      * as well. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
-        ASSERT_EQ(112, (int)sizeof(ASTNode));
+        ASSERT_EQ(120, (int)sizeof(ASTNode));
         ASSERT_EQ(136, (int)sizeof(Type));
     }
 }

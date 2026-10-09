@@ -41,6 +41,7 @@ import std.intarr
 import std.bits
 import std.strbuilder
 import std.bytes
+import std.string
 
 exports(
     from_bytes, from_bytes_unsigned, to_bytes, to_bytes_unsigned,

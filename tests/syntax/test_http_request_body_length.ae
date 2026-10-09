@@ -61,6 +61,9 @@ main() {
     println("  PASS 2: null req returns 0")
 
     raw = http.server_create(PORT)
+    // Loopback only: the default host is every interface, and on Windows
+    // each new executable listening there opens a firewall prompt (#2639).
+    http.server_set_host(raw, "127.0.0.1")
     http.server_post(raw, "/echo", handle_post, 0)
     spawn(Helper())
     a = spawn(Srv())

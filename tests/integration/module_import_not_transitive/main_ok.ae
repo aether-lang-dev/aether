@@ -1,0 +1,5 @@
+import topok
+
+main() {
+    println("${topok.top_value()}")
+}

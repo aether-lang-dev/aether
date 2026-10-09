@@ -1,0 +1,11 @@
+exports(d)
+
+hidden() -> int {
+    return 5
+}
+
+// Its own name does not lift the exports list: `hidden` is private, and a
+// qualified reach for it is E0303 in `ae check` and in a build alike.
+d() -> int {
+    return selfpriv.hidden()
+}

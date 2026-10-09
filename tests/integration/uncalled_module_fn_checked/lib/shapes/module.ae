@@ -1,0 +1,17 @@
+exports(area, broken_scale)
+
+struct Box { w: float }
+struct Counter { n: int }
+
+area(w: float) -> float {
+    return w * w
+}
+
+// #2613: no program in this test calls this, and it stores a struct in an
+// int field. It used to build clean in every program that imported the
+// module, because only the functions a program called were type-checked.
+broken_scale(b: Box) -> int {
+    c = Counter { n: 2 }
+    c.n = b
+    return c.n
+}

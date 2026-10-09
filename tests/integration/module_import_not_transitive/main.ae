@@ -1,0 +1,5 @@
+import top
+
+main() {
+    println("${top.top_value()}")
+}

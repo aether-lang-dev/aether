@@ -1,0 +1,89 @@
+// Regression (#2648): a module-level const of a function type holds the
+// function, as a `var` of that type does (#2623).
+//
+// `const CB: fn(int) -> string = label` failed in gcc: the const was read as
+// a closure of `label` and emitted, with every other constant, before the
+// function prototypes and the bare-fn adapters, so `_aether_bare_adapter_label`
+// was undeclared, and a call `CB(i)` was emitted as a call to a C function
+// named `CB`. A typed fn-pointer const now holds the function's address, is
+// emitted after the prototypes, and a call through it is a call through a
+// typed pointer, whose string result is the caller's (#2586). An unannotated
+// `const CB2 = label` stays a closure, emitted after the adapters, and is
+// called with `call(...)`.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+var noted = 0
+
+label(n: int) -> string {
+    return string.concat("label", string.from_int(n))
+}
+
+lit(n: int) -> string {
+    return "lit"
+}
+
+note(n: int) {
+    noted = noted + n
+}
+
+const CB: fn(int) -> string = label
+const LIT: fn(int) -> string = lit
+const NOTE: fn(int) = note
+const CB2 = label
+
+through(f: fn(int) -> string, n: int) -> int {
+    return string.length(f(n))
+}
+
+round() -> int {
+    total = string.length(CB(7)) + string.length(LIT(1)) + through(CB, 12) + through(LIT, 0)
+    NOTE(1)
+    return total
+}
+
+main() {
+    println("=== test_fnptr_const ===")
+    check(CB(3) == "label3", "a call through a typed fn-pointer const")
+    check(LIT(3) == "lit", "a literal string through a typed fn-pointer const")
+    NOTE(2)
+    check(noted == 2, "a void fn-pointer const")
+    check(through(CB, 4) == 6, "a fn-pointer const passed for a typed parameter")
+    g = CB
+    check(g(5) == "label5", "a fn-pointer const bound to a local")
+    string r = call(CB2, 6)
+    check(r == "label6", "an unannotated const holds a closure of the function")
+    check(round() == 6 + 3 + 7 + 3, "a round adds up")
+
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 20 {
+            round()
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round()
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_fnptr_const passed ===")
+}

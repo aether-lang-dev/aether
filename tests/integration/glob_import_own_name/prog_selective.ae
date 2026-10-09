@@ -1,0 +1,11 @@
+import std.string(bytes)
+
+// Selected by name and defined here too: still the E1000 clash, because
+// the import wrote the name out (#2632 changes only the glob form).
+bytes(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+main() {
+    println("${bytes(1, 2, 3)}")
+}

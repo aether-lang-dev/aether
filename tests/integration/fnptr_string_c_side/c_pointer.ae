@@ -1,0 +1,102 @@
+// #2586: a string a typed fn pointer returns is the caller's only when an
+// Aether function handed it over. Whatever way a C function's pointer
+// arrives, its string stays C's: the call copies it and frees the copy. An
+// Aether function and a C function go through the same typed parameter
+// here, so the decision is made at each call.
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern fixed_name_ptr() -> ptr
+extern c_ops() -> ptr
+extern c_ops_typed() -> *Ops
+extern c_fill_ops(out: ptr)
+extern c_call_with_name(cb: ptr) -> int
+extern c_label(n: int) -> string
+
+struct Ops {
+    name: fn(int) -> string
+    k: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// An Aether function handing over a fresh string, and one a literal.
+fresh_name(n: int) -> string {
+    return string.concat("aether-", string.from_int(n))
+}
+
+literal_name(n: int) -> string {
+    return "aether-literal"
+}
+
+apply(f: fn(int) -> string, n: int) -> string {
+    return f(n)
+}
+
+length_through(f: fn(int) -> string, n: int) -> int {
+    return string.length(f(n))
+}
+
+// C calls this with a pointer it made.
+use_name(get: fn(int) -> string) -> int {
+    return string.length(get(1))
+}
+
+round(raw: ptr, overlay: *Ops, typed: *Ops, filled: *Ops) -> int {
+    total = 0
+    // A pointer cast from a raw `ptr`.
+    cast = raw as fn(int) -> string
+    total = total + string.length(cast(1)) + string.length(cast(0))
+    // A raw `ptr` passed for a typed parameter.
+    total = total + length_through(raw, 1)
+    // An extern named as a value.
+    total = total + length_through(c_label, 1)
+    // A struct laid over C memory, one an extern returns, one C filled.
+    total = total + string.length(overlay.name(1))
+    g = typed.name
+    total = total + string.length(g(1))
+    total = total + string.length(filled.name(0))
+    // C calling Aether with a pointer it made.
+    total = total + c_call_with_name(use_name)
+    // Aether functions through the same parameters.
+    total = total + length_through(fresh_name, 7) + length_through(literal_name, 1)
+    total = total + string.length(apply(fresh_name, 8)) + string.length(apply(c_label, 0))
+    return total
+}
+
+main() {
+    raw = fixed_name_ptr()
+    overlay = c_ops() as *Ops
+    typed = c_ops_typed()
+    filled = heap.new(Ops)
+    c_fill_ops(filled as ptr)
+    check(apply(raw, 1) == "positive", "a raw pointer's string")
+    check(apply(c_label, 0) == "label-neg", "an extern's string")
+    check(overlay.name(0) == "other", "an overlaid struct's pointer")
+    check(apply(fresh_name, 3) == "aether-3", "an Aether function's fresh string")
+    check(apply(literal_name, 3) == "aether-literal", "an Aether function's literal")
+    // 8 + 5, 8, 9, 8, 8, 5, 8, then 8 + 14, 8 + 9.
+    expected = (8 + 5) + 8 + 9 + 8 + 8 + 5 + 8 + (8 + 14) + (8 + 9)
+    i = 0
+    while i < 3 {
+        check(round(raw, overlay, typed, filled) == expected, "a round adds up")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 100 {
+                    round(raw, overlay, typed, filled)
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("c_pointer done")
+}

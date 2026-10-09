@@ -1,0 +1,8 @@
+import mathy(*)
+
+// The program's own extern shadows the glob's `abs`.
+extern abs(x: int) -> int
+
+main() {
+    println("${abs(-5)} ${twice(4)}")
+}

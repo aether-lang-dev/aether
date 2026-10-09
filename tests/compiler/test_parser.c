@@ -92,6 +92,33 @@ TEST(parser_cfn_type_def_struct_pointer_and_export) {
     free_ast_node(ast);
 }
 
+/* #2636: a function's return type can be a C function pointer type written
+ * out. Its own `-> R` is part of the type; without one it returns nothing.
+ * Each function keeps its body, and the next one still parses. */
+TEST(parser_written_out_fnptr_return_type) {
+    ASTNode* ast = parse_source(
+        "get() -> fn(ptr) -> string { return name_of }\n"
+        "put() -> fn(int) { return show }\n"
+        "main() { }");
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(3, ast->child_count);
+    ASTNode* get = ast->children[0];
+    ASSERT_EQ(AST_FUNCTION_DEFINITION, get->type);
+    ASSERT_STREQ("get", get->value);
+    ASSERT_EQ(TYPE_FUNCTION, get->node_type->kind);
+    ASSERT_EQ(1, get->node_type->is_fnptr);
+    ASSERT_EQ(1, get->node_type->param_count);
+    ASSERT_EQ(TYPE_PTR, get->node_type->param_types[0]->kind);
+    ASSERT_EQ(TYPE_STRING, get->node_type->return_type->kind);
+    ASSERT_EQ(AST_BLOCK, get->children[get->child_count - 1]->type);
+    ASTNode* put = ast->children[1];
+    ASSERT_EQ(AST_FUNCTION_DEFINITION, put->type);
+    ASSERT_EQ(1, put->node_type->is_fnptr);
+    ASSERT_EQ(TYPE_VOID, put->node_type->return_type->kind);
+    ASSERT_EQ(AST_MAIN_FUNCTION, ast->children[2]->type);
+    free_ast_node(ast);
+}
+
 /* `cfn` stays a contextual identifier: only `cfn <name> (` is the declaration. */
 TEST(parser_cfn_is_still_a_plain_identifier_elsewhere) {
     ASTNode* ast = parse_source("main() { cfn = 3\n println(\"${cfn}\") }");

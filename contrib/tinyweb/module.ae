@@ -1026,11 +1026,14 @@ tw_start(srv: ptr) -> string {
         http.server_get(raw, "${base}/(.*)", http.serve_static, dir)
     }
 
-    // Start WebSocket server on separate port if configured
+    // Start WebSocket server on separate port if configured. It listens on
+    // the server's host like the HTTP port does: tcp.listen took every
+    // interface whatever host was configured (#2639). std.tcp's listen_on
+    // takes an IPv4 address, "127.0.0.1" or "0.0.0.0", not a name.
     ws_port, _ = map.get(srv, "ws_port")
     ws_handlers, _ = map.get(srv, "ws_handlers")
     if ws_port > 0 && list.size(ws_handlers) > 0 {
-        ws_tcp, ws_err = tcp.listen(ws_port)
+        ws_tcp, ws_err = tcp.listen_on(host, ws_port)
         if ws_err == "" {
             map_put(srv, "ws_tcp_server", ws_tcp)
             println("WebSocket server listening on port ${ws_port}")
@@ -1039,11 +1042,12 @@ tw_start(srv: ptr) -> string {
         }
     }
 
-    // Start SSE server on separate port if configured
+    // Start SSE server on separate port if configured, on the server's host
+    // as the WebSocket port above.
     sse_port, _ = map.get(srv, "sse_port")
     sse_handlers, _ = map.get(srv, "sse_handlers")
     if sse_port > 0 && list.size(sse_handlers) > 0 {
-        sse_tcp, sse_err = tcp.listen(sse_port)
+        sse_tcp, sse_err = tcp.listen_on(host, sse_port)
         if sse_err == "" {
             map_put(srv, "sse_tcp_server", sse_tcp)
             println("SSE server listening on port ${sse_port}")

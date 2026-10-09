@@ -924,6 +924,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_http.c \
            tests/runtime/test_runtime_net.c \
            tests/runtime/test_runtime_udp.c \
+           tests/runtime/test_io_poller.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
            tests/runtime/test_runtime_schema.c \
@@ -2757,7 +2758,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback"
 	@echo "  make check-contrib-modules - Type-check every non-host contrib module"
 	@echo "  make check-changelog  - Validate changelog fragments, catch a release-fold"
 	@echo "  make add-changelog    - Write a new_changelogs/ fragment (SECTION=, SLUG=)"
@@ -3119,6 +3120,10 @@ check-docs: compiler ae stdlib
 # Also the std module census (#1584): every module.ae under std/ has a
 # co-located std/<mod>/test_*.ae, or a central test that imports it, or a
 # waiver in check_module_specs.py; its own unit tests run first.
+# And every listener the suites start (tests, std and contrib tests, the
+# examples, run doc blocks) binds loopback (#2639): on Windows each new
+# executable listening on every interface opens a firewall prompt; its own
+# unit tests run first too.
 # Test directories the default sweep leaves out because they cannot run
 # without a toolchain this repository does not provision (#2132 §3): a test
 # that can only "pass" by skipping is not a gate. They carry a
@@ -3148,7 +3153,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list)"
+	@echo "  test suite (verdicts, prune list, loopback listeners)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3158,7 +3163,9 @@ check-tests:
 	    $$py tests/scripts/check_test_verdicts.py && \
 	    $$py tests/scripts/check_sweep_prune.py && \
 	    $$py tests/scripts/test_check_module_specs.py && \
-	    $$py tests/scripts/check_module_specs.py; \
+	    $$py tests/scripts/check_module_specs.py && \
+	    $$py tests/scripts/test_check_loopback_listeners.py && \
+	    $$py tests/scripts/check_loopback_listeners.py; \
 	else \
 	    echo "  [SKIP] test suite checks — no working Python found"; \
 	    echo "         (checked on the Linux/macOS legs, which run the same target)"; \

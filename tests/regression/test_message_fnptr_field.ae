@@ -1,0 +1,99 @@
+// Regression (#2633): a message field typed as a C function pointer takes a
+// named function's address, and the handler calls through it.
+//
+// `message Job { run: fn(int) -> int }` refused `Job { run: double_it }`
+// with E0200 "expected closure, got int": the function name was read as its
+// result, where a struct field of that type takes its address (#1240). And
+// the handler bound `run` as a bare `void*` that `run(21)` called directly,
+// which gcc refused. The field now takes the address, the binding is a
+// fn-pointer local called through the field's signature (renamed, and
+// captured by a closure in the arm too), and a string result is the
+// caller's (#2586): the sender stores the function's address and the
+// handler frees what the call returns. Nothing is retained or released for
+// the pointer when the message is copied or done with.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same rounds grows by exactly 0
+// (mem.steady_growth).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+const PER_ROUND = 50
+
+var total = 0
+var chars = 0
+
+message Job {
+    run: fn(int) -> int
+    label: fn(ptr) -> string
+    n: int
+}
+
+message Renamed {
+    run: fn(int) -> int
+    n: int
+}
+
+double_it(x: int) -> int { return x * 2 }
+triple_it(x: int) -> int { return x * 3 }
+
+// A fresh string each call, so a result nobody frees would show.
+name_of(p: ptr) -> string { return string.concat("na", "me") }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+add(n: int, c: int) {
+    total = total + n
+    chars = chars + c
+}
+
+actor Worker {
+    receive {
+        Job(run, label, n) -> {
+            twice = | x: int | { return run(run(x)) }
+            add(run(n) + twice(1), string.length(label(null)))
+        }
+        Renamed(run: f, n: k) -> {
+            add(f(k), 0)
+        }
+    }
+}
+
+fn one_round(w: ptr) {
+    i = 0
+    while i < PER_ROUND {
+        w ! Job { run: double_it, label: name_of, n: 21 }
+        w ! Renamed { run: triple_it, n: 5 }
+        i = i + 1
+    }
+    wait_for_idle()
+}
+
+main() {
+    println("=== test_message_fnptr_field ===")
+    w = spawn(Worker())
+    // A Job adds run(21) and run(run(1)): 42 + 4. A Renamed adds 15.
+    w ! Job { run: double_it, label: name_of, n: 21 }
+    wait_for_idle()
+    check(total == 46, "a handler called through the message's fn pointers (got ${total})")
+    check(chars == 4, "a string result came through the field (got ${chars})")
+    w ! Renamed { run: triple_it, n: 5 }
+    wait_for_idle()
+    check(total == 61, "a renamed binding called through its field (got ${total})")
+
+    if mem.heap_in_use_exact() {
+        one_round(w)
+        one_round(w)
+        grown = mem.steady_growth(|| { one_round(w) }, 5)
+        check(grown == 0, "a window of rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_message_fnptr_field passed ===")
+}

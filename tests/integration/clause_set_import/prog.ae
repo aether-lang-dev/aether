@@ -1,0 +1,48 @@
+// An imported clause set keeps every clause (#2643).
+import std.string
+import std.mem
+import clauses
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+round(k: int) -> int {
+    return string.length(clauses.label(k)) + string.length(clauses.label(0))
+}
+
+main() {
+    w = string.concat("ab", string.from_int(1))
+    check(clauses.label(0) == "zero", "the first clause")
+    check(clauses.label(4) == "n4", "the second clause")
+    bx = clauses.Box { s: "" }
+    box = &bx
+    clauses.store_at(box, 0, string.concat(w, "--"))
+    check(box.s == "", "the void set's first clause keeps nothing")
+    clauses.store_at(box, 1, string.concat(w, "cd"))
+    filler = string.concat(w, "zzzz")
+    check(box.s == "ab1cd", "the void set's second clause stores its argument")
+    check(filler == "ab1zzzz", "the string allocated after it")
+    check(clauses.sign(0 - 5) == 0 - 1, "a guarded clause")
+    check(clauses.sign(0) == 0, "a literal clause after it")
+    check(clauses.sign(9) == 1, "a later clause calling the module's own helper")
+    clauses.twice(0)
+    check(clauses.twice(4) == 8, "a set whose first clause returns nothing")
+    check(round(5) == 6, "a round adds up")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                n = 0
+                while n < 100 {
+                    round(n)
+                    n = n + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("imported clause sets ok")
+}

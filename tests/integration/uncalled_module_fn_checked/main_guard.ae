@@ -1,0 +1,16 @@
+import std.sandbox
+import std.os
+import guard
+
+main() {
+    env_err = os.setenv("AE_TRUST_SECRET", "s3cret")
+    if env_err != "" {
+        println("cannot set the test variable: ${env_err}")
+    }
+    w = sandbox.new("nothing") {}
+    sandbox.enforce(w, guard) callback {
+        println("peek: ${guard.peek()}")
+    }
+    sandbox.free(w)
+    println("run: ${guard.run_guarded()}")
+}

@@ -1,0 +1,17 @@
+exports(a, b, c, K)
+
+const K = 40
+
+a() -> int {
+    return 1
+}
+
+// Qualified with the module's own name (#2631): a module sees itself, in
+// `ae check` of this file as in every build that merges it.
+b() -> int {
+    return selfq.a() + 1
+}
+
+c() -> int {
+    return selfq.K + 5
+}

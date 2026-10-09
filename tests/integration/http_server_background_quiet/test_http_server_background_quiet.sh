@@ -20,4 +20,9 @@ if echo "$OUT" | grep -qE "Server running at|Press Ctrl\+C"; then
     fail "background server printed the interactive banner (should be quiet)"
 fi
 
-echo "  [PASS] http_server_background_quiet: background server is silent, serves, stops cleanly"
+# #2672: stop joins the server's thread and leaves Winsock up, so a server
+# can be stopped, freed and started again in one process, five times.
+OUT2="$(AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/restart.ae" 2>&1)"     || { echo "$OUT2"; fail "restarting a background server errored"; }
+echo "$OUT2" | grep -q "RESTART-OK" || { echo "$OUT2"; fail "a background server could not be started again after a stop"; }
+
+echo "  [PASS] http_server_background_quiet: background server is silent, serves, stops cleanly, and starts again"

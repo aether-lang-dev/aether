@@ -205,6 +205,15 @@ void aether_fire_death_hook(int actor_id, const char* reason);
 extern AETHER_TLS_SHARED int g_aether_in_actor_step;
 extern AETHER_TLS_SHARED int g_aether_current_actor_id;
 
+// TLS (#2586): the string an Aether function that hands over owned strings
+// returned last, when it is used as a typed fn-pointer value. A call through
+// a typed fn pointer clears it, and takes its result as owned only when the
+// callee left that very pointer here (aether_fnptr_take in the generated
+// prelude): no C function sets it, so a string C returns is copied, never
+// freed. Shared across translation units, as a library's function may be
+// called through a pointer from the program.
+extern AETHER_TLS_SHARED const void* g_aether_fnptr_owned;
+
 #ifdef __cplusplus
 }
 #endif

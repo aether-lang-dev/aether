@@ -11,7 +11,7 @@ import std.tcp
 main() {
     println("=== TinyWeb SSE + Chunked Example ===\n")
 
-    server = tinyweb.web_server_full("localhost", 8080, 0, 8082) {
+    server = tinyweb.web_server_full("127.0.0.1", 8080, 0, 8082) {
 
         tinyweb.end_point(tinyweb.GET, "/") |req: ptr, res: ptr, ctx: ptr| {
             tinyweb.response_set_header(res, "Content-Type", "text/html")

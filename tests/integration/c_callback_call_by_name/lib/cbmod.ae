@@ -1,0 +1,28 @@
+// @c_callback functions exported from a module (#2664).
+import std.string
+
+exports(triple, label, nine_times, pick)
+
+@c_callback("cbmod_triple_sym")
+triple(n: int) -> int {
+    return n * 3
+}
+
+@c_callback("cbmod_label_sym")
+label(n: int) -> string {
+    return string.concat("M", string.from_int(n))
+}
+
+// The module calls its own callback by name.
+nine_times(n: int) -> int {
+    return triple(triple(n))
+}
+
+// A clause set whose later clause carries the annotation.
+pick(0) -> int {
+    return 100
+}
+@c_callback("cbmod_pick_sym")
+pick(n: int) -> int {
+    return n + 1
+}

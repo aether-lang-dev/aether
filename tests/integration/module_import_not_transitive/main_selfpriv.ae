@@ -1,0 +1,5 @@
+import selfpriv
+
+main() {
+    println("${selfpriv.d()}")
+}

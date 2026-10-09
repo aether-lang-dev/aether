@@ -94,6 +94,9 @@ main() {
     fw = spec.init()
 
     raw = http.server_create(8080)
+    // Loopback only: the default host is every interface, and on Windows
+    // each new executable listening there opens a firewall prompt (#2639).
+    http.server_set_host(raw, "127.0.0.1")
     http.server_get(raw, "/hello", handle_hello, 0)
     http.server_get(raw, "/json", handle_json, 0)
     http.server_get(raw, "/health", handle_health, 0)

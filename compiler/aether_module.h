@@ -92,6 +92,15 @@ int module_exports_symbol(AetherModule* module, const char* name);
  * it from elsewhere), return the module that actually defines it (resolved
  * transitively). NULL when `module` itself is the definer. */
 AetherModule* module_resolve_reexport(AetherModule* module, const char* symbol);
+/* #2614: may code written in the module registered as `module_name` qualify
+ * a name with namespace `ns`? Its own namespace and the namespaces of the
+ * modules it imports, in any form; not a module some other module of the
+ * program imports. */
+int module_sees_namespace(const char* module_name, const char* ns);
+/* #2631: the last segment a module file is imported under (its namespace in
+ * a build): `<dir>/module.ae` is `<dir>`, `<name>.ae` is `<name>`. Written
+ * into `buf` and returned; "" when the path names no `.ae` file. */
+const char* module_leaf_of_file(const char* path, char* buf, size_t cap);
 
 // Dependency graph
 typedef struct DependencyNode {
@@ -214,11 +223,17 @@ void module_merge_into_program(ASTNode* program);
 // function/builder. Closure: every function-call target named anywhere
 // in those roots' bodies, recursively through merged code.
 //
-// Run AFTER module_merge_into_program (so the closure can see merged
-// helpers) and BEFORE typecheck_program (so the typechecker doesn't
-// burn time walking dead bodies). Reduces both aetherc typecheck time
-// and the size of the C output gcc has to compile, on programs that
-// only use a slice of large stdlib modules.
+// Two halves (#2613). module_mark_unreachable runs AFTER
+// module_merge_into_program (so the closure can see merged helpers) and
+// BEFORE typecheck_program, and only records what the program does not
+// reach. module_sweep_unreachable runs AFTER typecheck_program and drops
+// exactly those. So every function of every module in the build is
+// type-checked, called or not, and the C output gcc compiles still holds
+// only the slice of large stdlib modules the program uses.
+// module_prune_unreachable is both at once, for callers with nothing to
+// check in between.
+void module_mark_unreachable(ASTNode* program);
+void module_sweep_unreachable(ASTNode* program);
 void module_prune_unreachable(ASTNode* program);
 
 #endif // AETHER_MODULE_H

@@ -1,0 +1,76 @@
+// #2672: a background std.http.server can be stopped, freed and started
+// again in one process, and stopping it waits for its thread.
+//
+// http_server_stop called WSACleanup on Windows while Winsock had been
+// started once for the process, so the next server could not create its
+// socket, and it ran while the detached server thread was still returning
+// from accept (an intermittent access violation). Stop now leaves Winsock up,
+// shuts down the connections its workers serve (a keep-alive client's idle
+// wait would otherwise hold them for the idle timeout) and joins the
+// server's thread, so the server is done when stop returns and can be freed
+// at once. The driving shell test greps for RESTART-OK.
+
+import std.http
+import std.http.client
+import std.string
+
+extern http_server_start_background_raw(server: ptr) -> int
+extern http_server_port(server: ptr) -> int
+extern http_server_free(server: ptr)
+extern sleep(ms: int)
+extern exit(code: int)
+
+serve_once(round: int) -> int {
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create in round ${round}")
+        return 0
+    }
+    http.server_set_host(s, "127.0.0.1")
+    if http_server_start_background_raw(s) < 0 {
+        println("FAIL: start_background in round ${round}")
+        http_server_free(s)
+        return 0
+    }
+    p = 0
+    tries = 0
+    while p <= 0 && tries < 50 {
+        sleep(20)
+        p = http_server_port(s)
+        tries = tries + 1
+    }
+    if p <= 0 {
+        println("FAIL: port unresolved in round ${round}")
+        http_server_free(s)
+        return 0
+    }
+    req = client.request("GET", "http://127.0.0.1:${p}/")
+    client.set_timeout(req, 3s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: probe in round ${round}: ${err}")
+        http_server_free(s)
+        return 0
+    }
+    client.response_free(resp)
+    // Stop joins the server's thread; freeing right after is safe.
+    http.server_stop(s)
+    http_server_free(s)
+    return 1
+}
+
+main() {
+    served = 0
+    round = 0
+    while round < 5 {
+        served = served + serve_once(round)
+        round = round + 1
+    }
+    if served != 5 {
+        println("FAIL: ${served} of 5 rounds served")
+        exit(1)
+    }
+    println("RESTART-OK")
+    exit(0)
+}
