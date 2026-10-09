@@ -1,0 +1,25 @@
+// A module whose C-style `for` loops leave clauses empty. An imported
+// function is cloned into the program, and the clone closed the empty slots,
+// so `for (;;)` read its body as its init (#2684).
+
+exports(count_to, first_root_over)
+
+// No init, no condition, no step: the body alone ends the loop.
+count_to(limit: int) -> int {
+    k = 0
+    for (;;) {
+        k = k + 1
+        if k >= limit {
+            return k
+        }
+    }
+}
+
+// A condition, and no init or step.
+first_root_over(n: int) -> int {
+    j = 1
+    for (; j * j <= n;) {
+        j = j + 1
+    }
+    return j
+}

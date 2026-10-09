@@ -1,0 +1,38 @@
+// Regression (#2684): a C-style `for` with empty clauses, in the program and
+// in an imported module. The optimizer and the module merge dropped the empty
+// slots of the loop node, which is read by position (init, condition, step,
+// body), so `for (;;) { ... }` emitted its body as the init and did not
+// compile, here or in the module.
+
+import forloops
+
+extern exit(code: int)
+
+var bad = 0
+
+check(label: string, got: int, want: int) {
+    if got != want {
+        println("FAIL ${label}: got ${got}, want ${want}")
+        bad = bad + 1
+    }
+}
+
+local_count(limit: int) -> int {
+    k = 0
+    for (;;) {
+        k = k + 1
+        if k >= limit {
+            return k
+        }
+    }
+}
+
+main() {
+    check("for (;;) here", local_count(4), 4)
+    check("for (;;) in a module", forloops.count_to(6), 6)
+    check("for (; cond; ) in a module", forloops.first_root_over(30), 6)
+    if bad != 0 {
+        exit(1)
+    }
+    println("for loops with empty clauses: ok")
+}

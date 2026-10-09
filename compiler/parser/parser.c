@@ -4596,12 +4596,22 @@ ASTNode* parse_spawn_actor_statement(Parser* parser) {
  * parse_statement. */
 static void parse_when_region_stmts(Parser* parser, ASTNode* block);
 
+/* Consumes the `}` that closes `block`, recording where it is: control that
+ * falls off the end of a function body leaves there (#2684). */
+static int block_closes(Parser* parser, ASTNode* block) {
+    Token* close = peek_token(parser);
+    if (!match_token(parser, TOKEN_RIGHT_BRACE)) return 0;
+    block->end_line = close->line;
+    block->end_column = close->column;
+    return 1;
+}
+
 ASTNode* parse_block(Parser* parser) {
     expect_token(parser, TOKEN_LEFT_BRACE);
-    
+
     ASTNode* block = create_ast_node(AST_BLOCK, NULL, 0, 0);
-    
-    while (!match_token(parser, TOKEN_RIGHT_BRACE)) {
+
+    while (!block_closes(parser, block)) {
         /* CRITICAL: the depth guard returns without consuming a token, so the
          * force-advance below would otherwise emit one error per remaining
          * token. The file is already known unparseable at this point. */
@@ -5431,6 +5441,24 @@ static int starts_return_type_then_body(Parser* parser) {
     return typed;
 }
 
+/* Whether the last statement of an arrow body `-> { ... }` is the value the
+ * body returns: an expression, a `match`, or a declaration (which returns
+ * what it binds). A control statement has no value to give: wrapped in a
+ * `return`, `if c { return 1 }` or a loop or a `switch` emitted C that did
+ * not compile. Left as it is, such a body is checked like a block body, and
+ * one that returns a value on some path must on every path (#2684). */
+static int arrow_tail_is_value(ASTNode* last) {
+    switch (last->type) {
+        case AST_RETURN_STATEMENT: case AST_IF_STATEMENT: case AST_WHILE_LOOP:
+        case AST_FOR_LOOP: case AST_SWITCH_STATEMENT: case AST_TRY_STATEMENT:
+        case AST_DEFER_STATEMENT: case AST_PANIC_STATEMENT: case AST_BREAK_STATEMENT:
+        case AST_CONTINUE_STATEMENT: case AST_WHEN_STATEMENT: case AST_BLOCK:
+            return 0;
+        default:
+            return 1;
+    }
+}
+
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -5761,18 +5789,18 @@ ASTNode* parse_function_definition(Parser* parser) {
             // Parse as a block, but treat the last expression as implicit return
             ASTNode* body = parse_block(parser);
             if (body && body->child_count > 0) {
-                // Check if the last statement is already a return
+                // Return the last statement when it has a value to return
                 ASTNode* last = body->children[body->child_count - 1];
-                if (last->type != AST_RETURN_STATEMENT) {
-                    // Wrap last statement/expression as implicit return.
-                    // A trailing expression goes in bare, out of its
-                    // expression statement: that is the node an explicit
-                    // `return expr` holds, and the passes that read a
-                    // return's value (whether it hands over an owned
-                    // string, which local escapes through it) do not look
-                    // inside a statement. Wrapped, `msg = "n=${n}"` then
-                    // `msg` freed msg at scope exit and returned the freed
-                    // pointer, which -O0 and -O2 printed as different
+                if (arrow_tail_is_value(last)) {
+                    // Wrap the trailing expression as the implicit return
+                    // (a trailing statement is not one, #2694). It goes in
+                    // bare, out of its expression statement: that is the
+                    // node an explicit `return expr` holds, and the passes
+                    // that read a return's value (whether it hands over an
+                    // owned string, which local escapes through it) do not
+                    // look inside a statement. Wrapped, `msg = "n=${n}"`
+                    // then `msg` freed msg at scope exit and returned the
+                    // freed pointer, which -O0 and -O2 printed as different
                     // garbage (#2685).
                     ASTNode* value = last;
                     if (last->type == AST_EXPRESSION_STATEMENT &&
@@ -5808,7 +5836,11 @@ ASTNode* parse_function_definition(Parser* parser) {
             add_child(func, body);
         }
     }
-    
+
+    /* #2684: with no result type written, the result is what inference
+     * finds in the body's `return`s, not something the signature claims. */
+    func->type_inferred = !func->node_type || func->node_type->kind == TYPE_UNKNOWN;
+
     return func;
 }
 
