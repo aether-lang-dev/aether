@@ -346,7 +346,8 @@ extern http_server_port(server: ptr) -> int
 // Set the bind address before server_start. Default is "0.0.0.0"
 // (all interfaces). Pass "127.0.0.1" to bind loopback only — useful
 // for tests because macOS / Windows firewalls don't prompt on
-// loopback binds.
+// loopback binds. A host name binds the IPv4 address it resolves to,
+// and one that does not resolve fails the bind (#2639).
 extern http_server_set_host(server: ptr, host: string)
 extern http_server_start_raw(server: ptr) -> int
 extern http_server_start_background_raw(server: ptr) -> int

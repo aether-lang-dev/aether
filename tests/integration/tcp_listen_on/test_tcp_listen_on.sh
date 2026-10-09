@@ -64,7 +64,7 @@ main() {
     _ = tcp.close(sock)
     waited = 0
     while worker.pending() > 0 && waited < 5000 { _ = worker.drain(0); sleep(1); waited = waited + 1 }
-    bad, berr = tcp.listen_on("not-an-address", 0)
+    bad, berr = tcp.listen_on("not-an-address", 0)   // loopback-ok: refused before any bind
     println("bad ${bad == null} ${berr}")
     println("nullport ${tcp.server_port(null)} nullpoll ${tcp.server_poll(null, 1)}")
     _ = tcp.server_close(srv)

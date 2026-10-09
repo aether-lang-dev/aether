@@ -10,7 +10,9 @@ import std.http.client
 import std.string
 
 extern exit(code: int)
-extern tcp_listen_raw(port: int) -> ptr
+// Loopback only: tcp_listen_raw listens on every interface, and on Windows
+// each new executable listening there opens a firewall prompt (#2639).
+extern tcp_listen_on_raw(address: string, port: int) -> ptr
 extern tcp_accept_raw(server: ptr) -> ptr
 extern tcp_receive_raw(sock: ptr, max_bytes: int) -> string @heap
 extern tcp_send_raw(sock: ptr, data: string) -> int
@@ -54,7 +56,7 @@ actor RawChunkedSrv {
 }
 
 main() {
-    lst = tcp_listen_raw(PORT)
+    lst = tcp_listen_on_raw("127.0.0.1", PORT)
     if lst == null { println("FAIL: chunked listen failed"); exit(1) }
 
     spawn(SchedHelper())

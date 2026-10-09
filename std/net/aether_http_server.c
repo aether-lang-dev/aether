@@ -1512,28 +1512,47 @@ void http_server_set_host(HttpServer* server, const char* host) {
     server->host = copy;
 }
 
+/* The IPv4 address a listener on `host` binds: "0.0.0.0" every interface,
+ * a dotted address that one, and a name ("localhost") the address it
+ * resolves to. A name used to go to inet_pton alone, which left the address
+ * zeroed, and zero is INADDR_ANY: asking for "localhost" listened on every
+ * interface (#2639). Returns 0, or -1 for a name that does not resolve. */
+static int http_server_bind_addr(const char* host, struct in_addr* out) {
+    if (strcmp(host, "0.0.0.0") == 0) {
+        out->s_addr = INADDR_ANY;
+        return 0;
+    }
+    if (inet_pton(AF_INET, host, out) == 1) return 0;
+    struct addrinfo hints, *res = NULL;
+    memset(&hints, 0, sizeof(hints));
+    hints.ai_family   = AF_INET;
+    hints.ai_socktype = SOCK_STREAM;
+    if (getaddrinfo(host, NULL, &hints, &res) != 0 || !res) return -1;
+    *out = ((struct sockaddr_in*)res->ai_addr)->sin_addr;
+    freeaddrinfo(res);
+    return 0;
+}
+
 int http_server_bind_raw(HttpServer* server, const char* host, int port) {
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (http_server_bind_addr(host, &addr.sin_addr) != 0) {
+        fprintf(stderr, "Failed to bind socket: cannot resolve host %s\n", host);
+        return -1;
+    }
+
     server->socket_fd = socket(AF_INET, SOCK_STREAM, 0);
     if (server->socket_fd < 0) {
         fprintf(stderr, "Failed to create socket\n");
         return -1;
     }
-    
+
     // Set socket options
     int opt = 1;
     setsockopt(server->socket_fd, SOL_SOCKET, SO_REUSEADDR, (const char*)&opt, sizeof(opt));
-    
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    
-    if (strcmp(host, "0.0.0.0") == 0) {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        inet_pton(AF_INET, host, &addr.sin_addr);
-    }
-    
+
     if (bind(server->socket_fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         fprintf(stderr, "Failed to bind socket to %s:%d\n", host, port);
         close(server->socket_fd);
@@ -5342,6 +5361,12 @@ typedef struct {
 
 // Create a SO_REUSEPORT listen socket bound to the same port
 static int create_reuseport_socket(const char* host, int port, int backlog) {
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family = AF_INET;
+    addr.sin_port = htons(port);
+    if (http_server_bind_addr(host, &addr.sin_addr) != 0) return -1;
+
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) return -1;
 
@@ -5350,16 +5375,6 @@ static int create_reuseport_socket(const char* host, int port, int backlog) {
 #ifdef SO_REUSEPORT
     setsockopt(fd, SOL_SOCKET, SO_REUSEPORT, &opt, sizeof(opt));
 #endif
-
-    struct sockaddr_in addr;
-    memset(&addr, 0, sizeof(addr));
-    addr.sin_family = AF_INET;
-    addr.sin_port = htons(port);
-    if (strcmp(host, "0.0.0.0") == 0) {
-        addr.sin_addr.s_addr = INADDR_ANY;
-    } else {
-        inet_pton(AF_INET, host, &addr.sin_addr);
-    }
 
     if (bind(fd, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
         close(fd);

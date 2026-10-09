@@ -15,6 +15,9 @@ handle(req: ptr, res: ptr, ud: ptr) {
 
 main() {
     s = http.http_server_create(18407)
+    // Loopback only: the default host is every interface, and on Windows
+    // each new executable listening there opens a firewall prompt (#2639).
+    http.http_server_set_host(s, "127.0.0.1")
     http.http_server_post(s, "/upload", handle, 0)
     _ = http_server_start_raw(s)
 }

@@ -18,7 +18,7 @@ main() {
     fails = 0
 
     // A null handle errors through every wrapper, never crashes.
-    _, berr = udp.bind("not an address", 0)
+    _, berr = udp.bind("not an address", 0)   // loopback-ok: refused before any bind
     fails = fails + ck(berr != "", "bind of a bad host errors")
     fails = fails + ck(udp.local_port(null) == -1, "local_port(null) is -1")
     fails = fails + ck(udp.fd(null) == -1, "fd(null) is -1")

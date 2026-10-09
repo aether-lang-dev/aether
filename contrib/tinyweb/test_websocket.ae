@@ -152,7 +152,9 @@ main() {
             }))
     list.add(handlers, entry)
 
-    ws_tcp, err = tcp.listen(PORT)
+    // Loopback only: tcp.listen takes every interface, and on Windows each
+    // new executable listening there opens a firewall prompt (#2639).
+    ws_tcp, err = tcp.listen_on("127.0.0.1", PORT)
     have_port = 0
     if err == "" { have_port = 1 }
     port_reason = "cannot bind port ${PORT}: ${err}"

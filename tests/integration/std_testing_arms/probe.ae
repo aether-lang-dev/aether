@@ -247,6 +247,10 @@ run_http_section(fw: ptr) {
         // single-exit.
         spec.fail("server_create returned 0 — port ${PORT} busy?")
     } else {
+        // Loopback only: the default host is every interface, and on
+        // Windows each new executable listening there opens a firewall
+        // prompt (#2639).
+        http.server_set_host(srv, "127.0.0.1")
         http.server_get(srv, "/info", handle_info, 0)
         http.server_get(srv, "/add/2/3", handle_add, 0)
         http.server_get(srv, "/missing", handle_missing, 0)

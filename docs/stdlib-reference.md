@@ -2226,7 +2226,7 @@ All wrappers auto-free the underlying response and return an error string for tr
 
 **Server Lifecycle:**
 - `http.server_create(port)` - Create server (never fails)
-- `http.server_set_host(server, host)` - Set bind address before `server_start`. Default is `"0.0.0.0"`. Pass `"127.0.0.1"` to bind loopback only, useful in tests because macOS / Windows firewalls don't prompt on loopback binds.
+- `http.server_set_host(server, host)` - Set bind address before `server_start`. Default is `"0.0.0.0"`. Pass `"127.0.0.1"` to bind loopback only, useful in tests because macOS / Windows firewalls don't prompt on loopback binds. A host name binds the IPv4 address it resolves to; one that does not resolve fails the bind.
 - `http.server_bind(server, host, port)` → `string` - Bind to address, return error string
 - `http.server_start(server)` → `string` - Start serving (blocking), return error string
 - `http.server_stop(server)` - Stop server

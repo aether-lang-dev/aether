@@ -4,6 +4,7 @@
 #include "test_harness.h"
 #include "../../std/udp/aether_udp.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_sandbox.h"
 #include <string.h>
 
 TEST_CATEGORY(udp_null_handles, TEST_CATEGORY_NETWORK) {
@@ -33,7 +34,7 @@ TEST_CATEGORY(udp_null_handles, TEST_CATEGORY_NETWORK) {
 TEST_CATEGORY(udp_bind_rejects_bad_input, TEST_CATEGORY_NETWORK) {
     ASSERT_NULL(udp_bind_raw("127.0.0.1", -1));
     ASSERT_NULL(udp_bind_raw("127.0.0.1", 65536));
-    ASSERT_NULL(udp_bind_raw("not an address", 0));
+    ASSERT_NULL(udp_bind_raw("not an address", 0));  /* loopback-ok: refused before any bind */
     ASSERT_NULL(udp_resolve_raw("", 5));
     ASSERT_NULL(udp_resolve_raw(NULL, 5));
     ASSERT_NULL(udp_resolve_raw("127.0.0.1", 70000));
@@ -48,11 +49,27 @@ TEST_CATEGORY(udp_bind_ephemeral_port_is_read_back, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(0, udp_close(s));
 }
 
-TEST_CATEGORY(udp_empty_host_binds_every_interface, TEST_CATEGORY_NETWORK) {
-    UdpSocket* s = udp_bind_raw("", 0);
-    ASSERT_NOT_NULL(s);
-    ASSERT_TRUE(udp_local_port_raw(s) > 0);
-    udp_close(s);
+/* What udp_bind_raw asked the sandbox to allow, and a checker that records
+ * it and refuses the bind, so nothing is bound. */
+static char udp_asked_host[64];
+
+static int udp_record_and_refuse(const char* category, const char* resource) {
+    if (!category || strcmp(category, "udp") != 0) return 1;
+    snprintf(udp_asked_host, sizeof(udp_asked_host), "%s", resource ? resource : "(null)");
+    return 0;
+}
+
+/* An empty host means every IPv4 interface. Read from the address the bind
+ * asks the sandbox for instead of binding it: a socket on every interface
+ * opens a Windows firewall prompt for each new test binary (#2639). */
+TEST_CATEGORY(udp_empty_host_means_every_interface, TEST_CATEGORY_NETWORK) {
+    aether_sandbox_check_fn saved = _aether_sandbox_checker;
+    udp_asked_host[0] = '\0';
+    _aether_sandbox_checker = udp_record_and_refuse;
+    UdpSocket* s = udp_bind_raw("", 0);  /* loopback-ok: refused before any bind */
+    _aether_sandbox_checker = saved;
+    ASSERT_NULL(s);
+    ASSERT_STREQ("0.0.0.0", udp_asked_host);
 }
 
 TEST_CATEGORY(udp_recv_on_idle_socket_would_block, TEST_CATEGORY_NETWORK) {

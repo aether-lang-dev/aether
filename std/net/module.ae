@@ -9,7 +9,7 @@
 exports(
     tcp_connect_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
-    tcp_listen_raw, tcp_accept_raw, tcp_server_close,
+    tcp_listen_raw, tcp_listen_on_raw, tcp_server_port_raw, tcp_accept_raw, tcp_server_close,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     http_get_raw, http_post_raw, http_put_raw, http_delete_raw,
     http_response_free, http_response_status_code,
@@ -47,7 +47,13 @@ extern tcp_receive_n_raw(sock: ptr, max_bytes: int) -> (string @heap, int, strin
 extern tcp_close(sock: ptr) -> int
 
 // TCP Server - raw externs
+// tcp_listen_raw takes every interface. tcp_listen_on_raw takes ONE address
+// (#2136): "127.0.0.1" for a listener the network cannot reach, which is
+// also the one that opens no firewall prompt on Windows (#2639).
 extern tcp_listen_raw(port: int) -> ptr
+extern tcp_listen_on_raw(address: string, port: int) -> ptr
+// The port a server is bound to: the one the OS chose for a listen on port 0.
+extern tcp_server_port_raw(server: ptr) -> int
 extern tcp_accept_raw(server: ptr) -> ptr
 extern tcp_server_close(server: ptr) -> int
 

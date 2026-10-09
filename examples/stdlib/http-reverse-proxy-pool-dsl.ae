@@ -43,6 +43,11 @@ main() {
         println("server_create failed")
         return
     }
+    // Loopback only, which is what the URLs above reach. The default host
+    // is every interface: pass "0.0.0.0" here to serve the network. The
+    // example sweep runs this, and on Windows each new executable that
+    // listens on every interface opens a firewall prompt (#2639).
+    http.server_set_host(server, "127.0.0.1")
     http.server_set_keepalive(server, 1, 0, 30000ms)
 
     // ---- Pool, as a config block --------------------------------

@@ -4,6 +4,14 @@
 #include <stdio.h>
 #include <locale.h>
 #include <time.h>
+#ifdef _WIN32
+#include <winsock2.h>   /* getsockname; ahead of anything that pulls in windows.h */
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#endif
 #include "../../std/net/aether_http_server.h"
 #if !defined(_WIN32)
 #include "../../std/net/aether_http_internal.h"
@@ -16,6 +24,31 @@ TEST(http_server_create) {
     ASSERT_NOT_NULL(server);
     ASSERT_EQ(8080, server->port);
     ASSERT_EQ(0, server->is_running);
+    http_server_free(server);
+}
+
+/* A host name binds the IPv4 address it resolves to (#2639). It used to go
+ * to inet_pton alone, which failed and left the address zeroed, INADDR_ANY:
+ * a server asked to listen on "localhost" listened on every interface. */
+TEST(http_server_bind_resolves_a_host_name) {
+    HttpServer* server = http_server_create(0);
+    ASSERT_NOT_NULL(server);
+    /* loopback-ok: "localhost" resolves to loopback, which is what this asserts */
+    ASSERT_EQ(0, http_server_bind_raw(server, "localhost", 0));
+    struct sockaddr_in got;
+    socklen_t len = sizeof(got);
+    memset(&got, 0, sizeof(got));
+    ASSERT_EQ(0, getsockname(server->socket_fd, (struct sockaddr*)&got, &len));
+    ASSERT_EQ(127, (int)(ntohl(got.sin_addr.s_addr) >> 24));
+    http_server_free(server);
+}
+
+TEST(http_server_bind_refuses_a_name_that_does_not_resolve) {
+    HttpServer* server = http_server_create(0);
+    ASSERT_NOT_NULL(server);
+    /* loopback-ok: refused before any bind */
+    ASSERT_EQ(-1, http_server_bind_raw(server, "no-such-host.invalid", 0));
+    ASSERT_EQ(-1, server->socket_fd);
     http_server_free(server);
 }
 

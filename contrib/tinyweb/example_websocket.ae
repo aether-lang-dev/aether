@@ -11,7 +11,7 @@ import std.tcp
 main() {
     println("=== TinyWeb WebSocket Example ===\n")
 
-    server = tinyweb.web_server_with_ws("localhost", 8080, 8081) {
+    server = tinyweb.web_server_with_ws("127.0.0.1", 8080, 8081) {
 
         tinyweb.path("/foo") {
             tinyweb.end_point(tinyweb.GET, "/bar") |req: ptr, res: ptr, ctx: ptr| {

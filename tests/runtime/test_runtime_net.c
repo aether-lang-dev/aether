@@ -46,7 +46,7 @@ TEST_CATEGORY(socket_connect_invalid_host, TEST_CATEGORY_NETWORK) {
 }
 
 TEST_CATEGORY(server_create_invalid_port, TEST_CATEGORY_NETWORK) {
-    TcpServer* server = tcp_listen_raw(-1);
+    TcpServer* server = tcp_listen_raw(-1);  /* loopback-ok: port -1 is refused before any bind */
     ASSERT_NULL(server);
 }
 

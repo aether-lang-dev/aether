@@ -1,0 +1,37 @@
+// #2639: std.net could only listen with tcp_listen_raw, which takes every
+// interface, so a program on std.net had no loopback-only listener (and on
+// Windows each new executable listening on every interface opens a firewall
+// prompt). It now offers std.tcp's tcp_listen_on_raw and tcp_server_port_raw:
+// listen on 127.0.0.1 port 0, read the port back, connect to it, and check
+// that a host which is not an address is refused.
+
+import std.net
+
+extern exit(code: int)
+
+main() {
+    srv = net.tcp_listen_on_raw("127.0.0.1", 0)
+    if srv == null {
+        println("FAIL: tcp_listen_on_raw(127.0.0.1, 0) returned null")
+        exit(1)
+    }
+    port = net.tcp_server_port_raw(srv)
+    if port <= 0 || port > 65535 {
+        println("FAIL: tcp_server_port_raw returned ${port}")
+        exit(1)
+    }
+    conn = net.tcp_connect_raw("127.0.0.1", port)
+    if conn == null {
+        println("FAIL: connect to the loopback listener on ${port}")
+        exit(1)
+    }
+    _ = net.tcp_close(conn)
+    _ = net.tcp_server_close(srv)
+
+    bad = net.tcp_listen_on_raw("not-an-address", 0)   // loopback-ok: refused before any bind
+    if bad != null {
+        println("FAIL: tcp_listen_on_raw accepted a host that is not an address")
+        exit(1)
+    }
+    println("PASS")
+}
