@@ -170,21 +170,8 @@ extern void* list_get_raw(void*, int);
  * parameter stores its own copy). This reads the bytes of either. */
 extern const char* aether_string_data(const void*);
 
-static int pattern_match(const char* pat, const char* resource) {
-    if (pat && strncmp(pat, "::ffff:", 7) == 0) pat += 7;
-    if (resource && strncmp(resource, "::ffff:", 7) == 0) resource += 7;
-    int plen = strlen(pat);
-    int rlen = strlen(resource);
-    if (plen == 1 && pat[0] == '*') return 1;
-    if (plen > 1 && pat[plen-1] == '*') {
-        if (strncmp(pat, resource, plen-1) == 0) return 1;
-    }
-    if (plen > 1 && pat[0] == '*') {
-        int slen = plen - 1;
-        if (rlen >= slen && strcmp(resource + rlen - slen, pat + 1) == 0) return 1;
-    }
-    return strcmp(pat, resource) == 0;
-}
+// The shared grant matcher (runtime/aether_sandbox_match.h).
+#include "aether_sandbox_match.h"
 
 static int perms_allow(void* perms, const char* category, const char* resource) {
     if (!perms) return 1;
@@ -195,7 +182,7 @@ static int perms_allow(void* perms, const char* category, const char* resource) 
         const char* pat = aether_string_data(list_get_raw(perms, i + 1));
         if (!cat || !pat) continue;
         if (cat[0] == '*' && pat[0] == '*') return 1;
-        if (strcmp(cat, category) == 0 && pattern_match(pat, resource)) return 1;
+        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;
     }
     return 0;
 }

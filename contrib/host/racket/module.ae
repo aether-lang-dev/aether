@@ -29,16 +29,18 @@
 // returned as the output string (prefixed "error: "). The call is named
 // `evaluate` (not `eval`) because the statically-linked libracketcs.a exports
 // its own `racket_eval`.
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (racket_run_sandboxed, racket_run_sandboxed_with_map,
          racket_run, racket_evaluate,
          racket_set, racket_get, racket_init, racket_finalize)
 
-extern racket_run_sandboxed(perms: ptr, code: string) -> int
+extern racket_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Racket script reads/writes the Aether-owned
 // shared map live via aether-map-get / aether-map-put, so keys it discovers
 // at runtime come back too. Enumerate with map.keys(map).
-extern racket_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern racket_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern racket_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
 // string ("" on failure). State persists across calls. The string is a

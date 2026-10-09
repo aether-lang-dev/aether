@@ -37,16 +37,18 @@
 // contrib.host.rhombus` via the host-bridge alias). The rhombus_* externs run
 // the Rhombus #lang on that same VM; rhombus_set/get/init/finalize alias the
 // racket k-v map and lifecycle (one VM underneath).
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (rhombus_run_sandboxed, rhombus_run_sandboxed_with_map,
          rhombus_run, rhombus_evaluate,
          rhombus_set, rhombus_get, rhombus_init, rhombus_finalize)
 
-extern rhombus_run_sandboxed(perms: ptr, code: string) -> int
+extern rhombus_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 // First-class shared map: the Rhombus script reads/writes the Aether-owned
 // shared map live via aether-map-get / aether-map-put. Enumerate with
 // map.keys(map).
-extern rhombus_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern rhombus_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern rhombus_run(code: string) -> int
 // Evaluate `code` in the persistent VM; returns its captured stdout as a
 // string ("" on failure). State persists across calls. The string is a

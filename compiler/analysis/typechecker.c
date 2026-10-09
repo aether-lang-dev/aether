@@ -6651,6 +6651,23 @@ static void resolve_distinct_types(ASTNode* program) {
     }
     if (ndefs == 0) return;
     distinct_rewrite_ast(program, defs, ndefs);
+
+    /* Bare C externs stay in the module registry rather than being cloned
+     * into the merged program. Import registration uses those declarations
+     * for both the return type and parameter checks, so resolve their named
+     * types too. Otherwise an imported extern taking Grants still has the
+     * parser's TYPE_STRUCT placeholder while its caller has distinct ptr. */
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (!c || c->type != AST_IMPORT_STATEMENT || !c->value) continue;
+        AetherModule* mod = module_find(c->value);
+        if (!mod || !mod->ast) continue;
+        for (int j = 0; j < mod->ast->child_count; j++) {
+            ASTNode* decl = mod->ast->children[j];
+            if (decl && decl->type == AST_EXTERN_FUNCTION)
+                distinct_rewrite_ast(decl, defs, ndefs);
+        }
+    }
 }
 
 // #2200 named C function-pointer types. `cfn Name(a: T1, b: T2) -> R` parses

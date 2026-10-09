@@ -32,6 +32,8 @@
 //       grant_exec("/usr/local/go/bin/go")
 //   }
 //   go.run_script_sandboxed(worker, "/tmp/hello.go")
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     go_run_sandboxed, go_run_script_sandboxed,
@@ -40,17 +42,17 @@ exports (
 )
 
 // Run a pre-built Go binary under the sandbox. Returns child exit code.
-extern go_run_sandboxed(perms: ptr, binary_path: string) -> int
+extern go_run_sandboxed(perms: sandbox.Grants, binary_path: string) -> int
 
 // Run a Go source file via `go run`. The bridge shells out to `go`,
 // so the toolchain itself operates under the sandbox — grant list
 // must include fs_read for $GOROOT / $GOPATH and exec for `go`.
-extern go_run_script_sandboxed(perms: ptr, script_path: string) -> int
+extern go_run_script_sandboxed(perms: sandbox.Grants, script_path: string) -> int
 
 // Run without sandbox (full access).
 extern go_run(binary_path: string) -> int
 extern go_run_script(script_path: string) -> int
 
 // Shared-map variants for typed input/output exchange.
-extern go_run_sandboxed_with_map(perms: ptr, binary_path: string, map_token: int) -> int
-extern go_run_script_sandboxed_with_map(perms: ptr, script_path: string, map_token: int) -> int
+extern go_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: int) -> int
+extern go_run_script_sandboxed_with_map(perms: sandbox.Grants, script_path: string, map_token: int) -> int

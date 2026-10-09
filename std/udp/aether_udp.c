@@ -151,7 +151,8 @@ static int udp_addr_bytes(const struct UdpAddr* a, const unsigned char** bytes) 
 
 UdpSocket* udp_bind_raw(const char* host, int port) {
     const char* checked = (host && host[0]) ? host : "0.0.0.0";
-    if (!aether_sandbox_check("udp", checked)) return NULL;
+    char udp_res[300];
+    if (!aether_sandbox_check("udp", aether_net_resource(udp_res, sizeof udp_res, checked, port))) return NULL;
     aether_net_init();
 
     struct UdpAddr local;
@@ -253,7 +254,8 @@ UdpAddr* udp_addr_new(void) {
 
 UdpAddr* udp_resolve_raw(const char* host, int port) {
     if (!host || !host[0]) return NULL;
-    if (!aether_sandbox_check("udp", host)) return NULL;
+    char udp_res[300];
+    if (!aether_sandbox_check("udp", aether_net_resource(udp_res, sizeof udp_res, host, port))) return NULL;
     aether_net_init();
     UdpAddr* a = udp_addr_new();
     if (!a) return NULL;

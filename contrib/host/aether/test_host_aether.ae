@@ -28,12 +28,14 @@ import contrib.host.aether
 import std.fs
 import std.mem
 import std.os
+import std.sandbox
 import std.spec
 import std.string
 
 // Capture from a binary that is not there; the "" result dies with this call.
 fn capture_missing(path: string) -> int {
-    out = aether.aether_host_capture_sandboxed(null, path)
+    // This ownership probe deliberately runs without a grant list/preload.
+    out = aether.aether_host_capture_sandboxed(null as sandbox.Grants, path)
     return string.length(out)
 }
 
@@ -124,7 +126,7 @@ main() {
                     _n = capture_missing(missing)
                 }
                 after = mem.heap_in_use()
-                spec.assert_true(mid - before == 0 || after -mid == 0,
+                spec.assert_true(mid - before == 0 || after - mid == 0,
                     "100 captures grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
         }

@@ -8006,6 +8006,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "extern aether_sandbox_check_fn _aether_sandbox_checker;");
         print_line(gen, "extern int list_size(void*);");
         print_line(gen, "extern void* list_get_raw(void*, int);");
+        print_line(gen, "#include \"aether_sandbox_match.h\"");
         print_line(gen, "static int _aether_perms_allow(void* ctx, const char* category, const char* resource) {");
         print_line(gen, "    if (!ctx) return 1;");
         print_line(gen, "    int n = list_size(ctx);");
@@ -8020,19 +8021,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         print_line(gen, "        const char* cat = aether_string_data(cat_v);");
         print_line(gen, "        const char* pat = aether_string_data(pat_v);");
         print_line(gen, "        if (cat[0] == '*' && pat[0] == '*') return 1;");
-        print_line(gen, "        if (strcmp(cat, category) == 0) {");
-        print_line(gen, "            int plen = strlen(pat);");
-        print_line(gen, "            int rlen = strlen(resource);");
-        print_line(gen, "            if (plen == 1 && pat[0] == '*') return 1;");
-        print_line(gen, "            if (plen > 1 && pat[plen-1] == '*') {");
-        print_line(gen, "                if (strncmp(pat, resource, plen-1) == 0) return 1;");
-        print_line(gen, "            }");
-        print_line(gen, "            if (plen > 1 && pat[0] == '*') {");
-        print_line(gen, "                int slen = plen - 1;");
-        print_line(gen, "                if (rlen >= slen && strcmp(resource + rlen - slen, pat + 1) == 0) return 1;");
-        print_line(gen, "            }");
-        print_line(gen, "            if (strcmp(pat, resource) == 0) return 1;");
-        print_line(gen, "        }");
+        /* The shared matcher (runtime/aether_sandbox_match.h): globs, ports
+         * for tcp/udp, IPv4-mapped addresses. */
+        print_line(gen, "        if (strcmp(cat, category) == 0 && aether_grant_match(category, pat, resource)) return 1;");
         print_line(gen, "    }");
         print_line(gen, "    return 0;");
         print_line(gen, "}");

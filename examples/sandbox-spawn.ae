@@ -21,7 +21,7 @@ main() {
         grant_fs_read("/etc/ssl/*")
         grant_fs_read("/tmp/*")
         grant_fs_write("/tmp/safe/*")
-        grant_tcp("104.18.*")
+        grant_tcp("104.18.*", 443)
     }
 
     println("\nSpawning sandboxed Python...\n")

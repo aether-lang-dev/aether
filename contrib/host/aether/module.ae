@@ -20,6 +20,8 @@
 //   }
 //   aether.run_sandboxed(worker, "rules/pricing.ae")
 //   aether.run_sandboxed_with_map(worker, "rules/pricing.ae", shared_map_token)
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     aether_host_compile,
@@ -38,20 +40,20 @@ extern aether_host_compile(script_path: string, out_path: string) -> int
 // Uses aether_spawn_sandboxed() — grants are serialized to POSIX
 // shared memory, LD_PRELOAD is set automatically.
 // Returns: child exit code (0 = success).
-extern aether_host_run_sandboxed(perms: ptr, binary_path: string) -> int
+extern aether_host_run_sandboxed(perms: sandbox.Grants, binary_path: string) -> int
 
 // Run an Aether script (compile + run) in a sandboxed subprocess.
 // Convenience wrapper: compiles to a temp binary, runs it sandboxed.
 // Returns: child exit code (0 = success).
-extern aether_host_run_script_sandboxed(perms: ptr, script_path: string) -> int
+extern aether_host_run_script_sandboxed(perms: sandbox.Grants, script_path: string) -> int
 
 // Run with shared map: the child can read inputs and write outputs
 // via aether_map_get/aether_map_put.  The map is serialized to
 // shared memory before launch and read back after the child exits.
 // Returns: child exit code (0 = success).
-extern aether_host_run_sandboxed_with_map(perms: ptr, binary_path: string, map_token: int) -> int
+extern aether_host_run_sandboxed_with_map(perms: sandbox.Grants, binary_path: string, map_token: int) -> int
 extern aether_host_run_script_sandboxed_with_map(
-    perms: ptr, script_path: string, map_token: int) -> int
+    perms: sandbox.Grants, script_path: string, map_token: int) -> int
 
 // Run without sandbox (full access).  Still a subprocess — useful for
 // testing or trusted scripts that need unrestricted access.
@@ -61,5 +63,5 @@ extern aether_host_run_script(script_path: string) -> int
 // Capture stdout from a sandboxed run as a string.
 // Returns: child's stdout output, or "" on error. Either way a fresh
 // string the caller owns.
-extern aether_host_capture_sandboxed(perms: ptr, binary_path: string) -> string @heap
-extern aether_host_capture_script_sandboxed(perms: ptr, script_path: string) -> string @heap
+extern aether_host_capture_sandboxed(perms: sandbox.Grants, binary_path: string) -> string @heap
+extern aether_host_capture_script_sandboxed(perms: sandbox.Grants, script_path: string) -> string @heap

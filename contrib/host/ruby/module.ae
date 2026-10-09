@@ -12,14 +12,16 @@
 //       grant_fs_read("/etc/*")
 //   }
 //   ruby.run_sandboxed(worker, "puts ENV['HOME']")
+import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
+
 
 exports (
     ruby_run_sandboxed, ruby_run_sandboxed_with_map,
     ruby_run, ruby_init_host, ruby_finalize_host
 )
 
-extern ruby_run_sandboxed(perms: ptr, code: string) -> int
-extern ruby_run_sandboxed_with_map(perms: ptr, code: string, map_token: int) -> int
+extern ruby_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+extern ruby_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: int) -> int
 extern ruby_run(code: string) -> int
 extern ruby_init_host() -> int
 extern ruby_finalize_host()

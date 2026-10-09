@@ -111,8 +111,9 @@ static void net_set_socket_timeouts(int fd, int timeout_sec) {
 }
 
 TcpSocket* tcp_connect_raw(const char* host, int port) {
-    // Sandbox check: is TCP connect to this host allowed?
-    if (!aether_sandbox_check("tcp", host)) return NULL;
+    // Sandbox check: is TCP connect to this host and port allowed?
+    char tcp_res[300];
+    if (!aether_sandbox_check("tcp", aether_net_resource(tcp_res, sizeof tcp_res, host, port))) return NULL;
 
     aether_net_init();
 

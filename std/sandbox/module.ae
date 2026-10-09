@@ -3,7 +3,7 @@
 //
 //   worker = sandbox.new("db-worker") {
 //       grant_fs_read("/etc/app/*")
-//       grant_tcp("db.internal")
+//       grant_tcp("db.internal", 5432)
 //       grant_env("DATABASE_URL")
 //   }
 //   sandbox.enforce(worker) callback {
@@ -38,6 +38,7 @@
 // std.capsicum adds kernel enforcement. See docs/containment-sandbox.md.
 
 import std.list
+import std.string
 
 // Grants are stored as plain C strings, which is what the runtime's checker
 // and the host modules read (strcmp, no Aether string header), and as
@@ -55,25 +56,50 @@ extern aether_string_raw_ptr(s: ptr) -> ptr
 @extern("strdup") strdup_raw(s: ptr) -> ptr
 
 exports(
-    new, enforce, free,
+    Grants, new, enforce, free,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
     grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native
 )
 
-fn add_grant(perms: ptr, category: string, pattern: string) {
+// A grant list. Opaque: made by new(), filled by the grant_* calls in its
+// trailing block, used by enforce() and the contrib/host run_sandboxed
+// calls, released by free(). It is not a std.list a caller can edit; code
+// that has one can only pass it on.
+type Grants = distinct ptr
+
+fn add_grant(perms: Grants, category: string, pattern: string) {
+    p = perms as ptr
     // null is what an enforce block receives (see enforce): a grant written
     // there has no list to go into, and grants nothing.
-    if perms == null { return }
-    list.add(perms, strdup(category))
-    list.add(perms, aether_sandbox_grant_pattern(category, pattern))
+    if p == null { return }
+    list.add(p, strdup(category))
+    list.add(p, aether_sandbox_grant_pattern(category, pattern))
+}
+
+// A tcp/udp grant pattern: the host alone (any port) when port is 0, else
+// "host:port", with an IPv6 address in brackets ("[::1]:8080") so its own
+// colons are not read as the port's. The checks name resources the same
+// way (aether_net_resource in runtime/aether_sandbox_match.h).
+fn net_pattern(host: string, port: int) -> string {
+    // Checked here rather than with a `where` on the grant_* parameter: a
+    // contract on a builder setter's parameter currently stops the trailing
+    // block from passing its implicit context.
+    if port < 0 || port > 65535 {
+        panic("sandbox: a port is 0 (any) or 1..65535, got ${port}")
+    }
+    if port == 0 { return host }
+    if string.contains(host, ":") == 1 {
+        if string.starts_with(host, "[") == 0 { return "[${host}]:${port}" }
+    }
+    return "${host}:${port}"
 }
 
 // A new, empty grant list named `name` (the name is for the reader and for
 // denial logs; it does not change what is allowed). Give it grants in the
 // trailing block; with none it denies everything. Release with free().
-new(name: string) -> ptr {
+new(name: string) -> Grants {
     _ = name
-    return list.new()
+    return list.new() as Grants
 }
 
 // Run `code` with `perms` in force: every sandbox-checked operation inside
@@ -100,9 +126,9 @@ new(name: string) -> ptr {
 // grant_* call made with it from inside the block, by code it was passed to)
 // does not widen what the running block may do. For the same reason the block
 // is not given the list: its parameter is null.
-enforce(perms: ptr, code: fn) {
-    frozen = freeze(perms)
-    defer free(frozen)
+enforce(perms: Grants, code: fn) {
+    frozen = freeze(perms as ptr)
+    defer free_list(frozen)
     sandbox_push(frozen)
     sandbox_install()
     call(code, null)
@@ -130,7 +156,11 @@ fn freeze(perms: ptr) -> ptr {
 }
 
 // Release a grant list made by new(), and the grant strings it owns.
-free(perms: ptr) {
+free(perms: Grants) {
+    free_list(perms as ptr)
+}
+
+fn free_list(perms: ptr) {
     if perms == null { return }
     n = list.size(perms)
     i = 0
@@ -144,38 +174,43 @@ free(perms: ptr) {
 // ---- Grants: call these in new()'s trailing block ----
 
 // Everything: the equivalent of no sandbox.
-grant_all(_ctx: ptr) { add_grant(_ctx, "*", "*") }
+grant_all(_ctx: Grants) { add_grant(_ctx, "*", "*") }
 
 // Opening files for reading whose resolved path matches `path`.
-grant_fs_read(_ctx: ptr, path: string) { add_grant(_ctx, "fs_read", path) }
+grant_fs_read(_ctx: Grants, path: string) { add_grant(_ctx, "fs_read", path) }
 
 // Opening, creating or writing files whose resolved path matches `path`.
-grant_fs_write(_ctx: ptr, path: string) { add_grant(_ctx, "fs_write", path) }
+grant_fs_write(_ctx: Grants, path: string) { add_grant(_ctx, "fs_write", path) }
 
 // Reading and writing under `path`, plus directory operations on it (such
 // as os.chdir, which std checks under its own "fs" category).
-grant_fs(_ctx: ptr, path: string) {
+grant_fs(_ctx: Grants, path: string) {
     add_grant(_ctx, "fs_read", path)
     add_grant(_ctx, "fs_write", path)
     add_grant(_ctx, "fs", path)
 }
 
 // Running commands whose command line matches `cmd` ("echo *").
-grant_exec(_ctx: ptr, cmd: string) { add_grant(_ctx, "exec", cmd) }
+grant_exec(_ctx: Grants, cmd: string) { add_grant(_ctx, "exec", cmd) }
 
 // Reading the environment variables whose names match `name`.
-grant_env(_ctx: ptr, name: string) { add_grant(_ctx, "env", name) }
+grant_env(_ctx: Grants, name: string) { add_grant(_ctx, "env", name) }
 
-// Outbound TCP to hosts matching `host` ("db.internal", "*.corp"). The
-// LD_PRELOAD layer sees only the resolved address, so grant the IP too for
-// code that connects outside std.net. Ports are not checked.
-grant_tcp(_ctx: ptr, host: string) { add_grant(_ctx, "tcp", host) }
+// Outbound TCP to hosts matching `host` ("db.internal", "*.corp") on `port`,
+// or on any port when `port` is 0. The LD_PRELOAD layer sees only the
+// resolved address, so grant the IP too for code that connects outside
+// std.net.
+grant_tcp(_ctx: Grants, host: string, port: int) {
+    add_grant(_ctx, "tcp", net_pattern(host, port))
+}
 
 // Listening for and accepting inbound TCP connections, on any port.
-grant_tcp_listen(_ctx: ptr) { add_grant(_ctx, "tcp_listen", "*") }
+grant_tcp_listen(_ctx: Grants) { add_grant(_ctx, "tcp_listen", "*") }
 
-// UDP to and from hosts matching `host`.
-grant_udp(_ctx: ptr, host: string) { add_grant(_ctx, "udp", host) }
+// UDP to and from hosts matching `host` on `port`, or any port when 0.
+grant_udp(_ctx: Grants, host: string, port: int) {
+    add_grant(_ctx, "udp", net_pattern(host, port))
+}
 
 // Loading native code (dlopen) from paths matching `path`.
-grant_native(_ctx: ptr, path: string) { add_grant(_ctx, "native", path) }
+grant_native(_ctx: Grants, path: string) { add_grant(_ctx, "native", path) }

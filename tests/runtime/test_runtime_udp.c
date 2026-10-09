@@ -69,7 +69,8 @@ TEST_CATEGORY(udp_empty_host_means_every_interface, TEST_CATEGORY_NETWORK) {
     UdpSocket* s = udp_bind_raw("", 0);  /* loopback-ok: refused before any bind */
     _aether_sandbox_checker = saved;
     ASSERT_NULL(s);
-    ASSERT_STREQ("0.0.0.0", udp_asked_host);
+    /* The resource is host:port (aether_net_resource): port 0 here. */
+    ASSERT_STREQ("0.0.0.0:0", udp_asked_host);
 }
 
 TEST_CATEGORY(udp_recv_on_idle_socket_would_block, TEST_CATEGORY_NETWORK) {

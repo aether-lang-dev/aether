@@ -55,37 +55,9 @@ static void* (*real_dlopen)(const char*, int) = NULL;
 // dangling symlink, a loop) is refused rather than matched as written.
 #include "aether_sandbox_path.h"
 
-// Pattern matching (same logic as Aether's in-process checker)
-static int pattern_match(const char* pat, const char* resource) {
-    // Normalize IPv4-mapped IPv6 addresses so a grant for "10.0.0.1"
-    // matches a TCP resource reported as "::ffff:10.0.0.1" (and
-    // vice versa). Safe for non-TCP categories because "::ffff:"
-    // doesn't appear in filesystem paths, env var names, or exec
-    // command strings.
-    if (pat && strncmp(pat, "::ffff:", 7) == 0) pat += 7;
-    if (resource && strncmp(resource, "::ffff:", 7) == 0) resource += 7;
-    int plen = strlen(pat);
-    int rlen = strlen(resource);
-
-    // Wildcard: "*"
-    if (plen == 1 && pat[0] == '*') return 1;
-
-    // Prefix glob: "/etc/*"
-    if (plen > 1 && pat[plen-1] == '*') {
-        if (strncmp(pat, resource, plen-1) == 0) return 1;
-    }
-
-    // Suffix glob: "*.example.com"
-    if (plen > 1 && pat[0] == '*') {
-        int slen = plen - 1;
-        if (rlen >= slen && strcmp(resource + rlen - slen, pat + 1) == 0) return 1;
-    }
-
-    // Exact match
-    if (strcmp(pat, resource) == 0) return 1;
-
-    return 0;
-}
+// Pattern matching: the shared matcher (aether_sandbox_match.h), the same one
+// the in-process checker and the host bridges use.
+#include "aether_sandbox_match.h"
 
 // Check the in-process Aether sandbox checker first (embedded mode),
 // then fall back to file-based grants (LD_PRELOAD mode)
@@ -137,7 +109,7 @@ static int check_grant(const char* category, const char* resource) {
     for (int i = 0; i < grant_count; i++) {
         if (grants[i].cat[0] == '*' && grants[i].pat[0] == '*') return 1;
         if (strcmp(grants[i].cat, category) == 0) {
-            if (pattern_match(grants[i].pat, match_target)) return 1;
+            if (aether_grant_match(category, grants[i].pat, match_target)) return 1;
         }
     }
     log_deny(category, match_target);
@@ -287,8 +259,9 @@ int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
         struct sockaddr_in* sin = (struct sockaddr_in*)addr;
         char ip[INET_ADDRSTRLEN];
         inet_ntop(AF_INET, &sin->sin_addr, ip, sizeof(ip));
-        // Check by IP (hostname was already resolved by the time connect is called)
-        if (!check_grant("tcp", ip)) {
+        // Check by IP and port (the hostname was resolved before connect).
+        char res[INET_ADDRSTRLEN + 16];
+        if (!check_grant("tcp", aether_net_resource(res, sizeof res, ip, ntohs(sin->sin_port)))) {
             errno = EACCES;
             return -1;
         }
@@ -296,7 +269,8 @@ int connect(int sockfd, const struct sockaddr* addr, socklen_t addrlen) {
         struct sockaddr_in6* sin6 = (struct sockaddr_in6*)addr;
         char ip6[INET6_ADDRSTRLEN];
         inet_ntop(AF_INET6, &sin6->sin6_addr, ip6, sizeof(ip6));
-        if (!check_grant("tcp", ip6)) {
+        char res6[INET6_ADDRSTRLEN + 16];
+        if (!check_grant("tcp", aether_net_resource(res6, sizeof res6, ip6, ntohs(sin6->sin6_port)))) {
             errno = EACCES;
             return -1;
         }
