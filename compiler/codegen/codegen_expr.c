@@ -5025,6 +5025,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         g_view_copy_wrapping = saved;
         return;
     }
+    /* #2619: the same for each string position of a tuple. */
+    if (expr->type == AST_FUNCTION_CALL && g_view_copy_wrapping != expr &&
+        call_returns_tuple_view_of_temp(gen, expr)) {
+        static int vt_seq = 0;
+        int id = vt_seq++;
+        const ASTNode* saved = g_view_copy_wrapping;
+        g_view_copy_wrapping = expr;
+        Type* tt = expr->node_type;
+        fprintf(gen->output, "({ %s _ae_vt%d = ", get_c_type(tt), id);
+        generate_expression(gen, expr);
+        fprintf(gen->output, "; ");
+        for (int j = 0; j < tt->tuple_count; j++) {
+            if (!tt->tuple_types[j] || tt->tuple_types[j]->kind != TYPE_STRING) continue;
+            fprintf(gen->output, "_ae_vt%d._%d = aether_uniform_heap_str((const char*)(_ae_vt%d._%d), %d); ",
+                    id, j, id, j, tuple_call_returns_heap_at(gen, expr, j) ? 1 : 0);
+        }
+        fprintf(gen->output, "_ae_vt%d; })", id);
+        g_view_copy_wrapping = saved;
+        return;
+    }
 
     /* #1286: a `T*` from C, read as a `T[]`, becomes an unbounded view. */
     if (g_slice_view_wrapping != expr && expr_is_c_view_of_slice(gen, expr) &&

@@ -374,6 +374,8 @@ void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
 void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
 int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
 int  call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call);
+int  call_returns_tuple_view_of_temp(CodeGenerator* gen, ASTNode* call);
+int  tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j);
 void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);

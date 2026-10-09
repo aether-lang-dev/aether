@@ -334,6 +334,7 @@ static int string_take_join(int a, int b) {
 static int is_cell_string_element(CodeGenerator* gen, ASTNode* e);
 static ASTNode* handback_leaf_node(CodeGenerator* gen, ASTNode* expr, int depth);
 static ASTNode* handback_take_leaf(CodeGenerator* gen, ASTNode* e);
+static int tuple_call_pos_copied(CodeGenerator* gen, ASTNode* call, int j);   /* #2619 */
 
 static int is_env_capture_name(CodeGenerator* gen, const char* name);
 
@@ -1681,6 +1682,7 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
         for (int j = 0; j < vc; j++) {
             ASTNode* tgt = node->children[j];
             if (tgt && tgt->value && strcmp(tgt->value, var_name) == 0) {
+                if (gen && tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
                 if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value &&
                     gen && gen->program) {
                     const char* fn = codegen_normalise_callee(rhs->value);
@@ -1737,6 +1739,7 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
             if (!v || !v->value || strcmp(v->value, var_name) != 0) {
                 continue;
             }
+            if (tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
             if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value) {
                 const char* fn = codegen_normalise_callee(rhs->value);
                 ASTNode* callee = find_function_definition_by_name(gen->program, fn);
@@ -3930,6 +3933,7 @@ static int or_fallible_slot_is_heap(CodeGenerator* gen, ASTNode* fallible,
     Type* tup = fallible->node_type;
     if (!tup || tup->kind != TYPE_TUPLE || tup->tuple_count < 2) return 0;
     if (position < 0 || position >= tup->tuple_count) return 0;
+    if (tuple_call_pos_copied(gen, fallible, position)) return 1;   /* #2619 */
     const char* fn = codegen_normalise_callee(fallible->value);
     ASTNode* callee = find_function_definition_by_name(gen->program, fn);
     if (!callee) return 0;
@@ -8929,6 +8933,57 @@ int call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call) {
     return r;
 }
 
+/* #2619: the tuple counterpart of call_returns_view_of_temp: a call
+ * returning a tuple whose positions are strings, scalars or structs, that
+ * may hand back an argument holding a struct another call returned. Each
+ * string position is copied where the call is made (generate_expression),
+ * so a destructure or an `or` takes it owned and the struct goes with its
+ * statement. A tuple holding a pointer or an array may still point into the
+ * argument, so its argument is kept alive instead. */
+int call_returns_tuple_view_of_temp(CodeGenerator* gen, ASTNode* call) {
+    if (g_view_check || !call || call->type != AST_FUNCTION_CALL || !call->node_type ||
+        call->node_type->kind != TYPE_TUPLE) return 0;
+    Type* t = call->node_type;
+    int strings = 0;
+    for (int i = 0; i < t->tuple_count; i++) {
+        Type* et = t->tuple_types[i];
+        if (!et) return 0;
+        if (et->kind == TYPE_PTR || et->kind == TYPE_ARRAY || et->kind == TYPE_TUPLE) return 0;
+        if (et->kind == TYPE_STRING) strings++;
+    }
+    if (!strings) return 0;
+    int any = 0;
+    for (int i = 0; i < call->child_count && !any; i++)
+        any = holds_struct_call(gen, call->children[i]);
+    if (!any) return 0;
+    g_view_check = 1;
+    int r = call_may_hand_back_args(gen, call);
+    g_view_check = 0;
+    return r;
+}
+
+/* Is string position `j` of tuple call `call` heap as its callee returns
+ * it: every return of a user function wraps it, or an extern declares it
+ * `@heap`? */
+int tuple_call_returns_heap_at(CodeGenerator* gen, ASTNode* call, int j) {
+    if (!gen || !gen->program || !call || call->type != AST_FUNCTION_CALL || !call->value) return 0;
+    const char* fn = codegen_normalise_callee(call->value);
+    ASTNode* callee = find_function_definition_by_name(gen->program, fn);
+    if (callee) return function_def_returns_heap_at(gen, callee, j);
+    ASTNode* ext = find_extern_declaration_by_name(gen->program, fn);
+    return ext && ext->node_type && ext->node_type->kind == TYPE_TUPLE &&
+           ext->node_type->tuple_heap_flags && j < ext->node_type->tuple_count &&
+           ext->node_type->tuple_heap_flags[j];
+}
+
+/* #2619: is string position `j` of `call` one the call yields copied? */
+static int tuple_call_pos_copied(CodeGenerator* gen, ASTNode* call, int j) {
+    return call && call->node_type && call->node_type->kind == TYPE_TUPLE &&
+           j >= 0 && j < call->node_type->tuple_count && call->node_type->tuple_types[j] &&
+           call->node_type->tuple_types[j]->kind == TYPE_STRING &&
+           call_returns_tuple_view_of_temp(gen, call);
+}
+
 /* #2582: does a body keep its struct parameter `pname` as a whole value?
  * Any use of the bare name counts but these: the object of an access
  * (`p.name`, `p.items[0].tag`, `p.n = 1`) whose value owns no strings, and
@@ -9029,7 +9084,8 @@ static void collect_value_struct_temps(CodeGenerator* gen, ASTNode* e, int kept,
                 }
                 return;
             case AST_FUNCTION_CALL: {
-                int raw = call_may_hand_back_args(gen, e) && !call_returns_view_of_temp(gen, e);
+                int raw = call_may_hand_back_args(gen, e) && !call_returns_view_of_temp(gen, e) &&
+                          !call_returns_tuple_view_of_temp(gen, e);
                 for (int i = 0; i < e->child_count; i++)
                     collect_value_struct_temps(gen, e->children[i], raw ? TEMP_RAW : TEMP_FREE,
                                                nodes, count, cap);
@@ -10016,7 +10072,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                      rhs_type->tuple_types[j] &&
                                      rhs_type->tuple_types[j]->kind == TYPE_STRING);
                 int pos_is_heap = 0;
-                if (pos_is_string) {
+                if (pos_is_string && tuple_call_pos_copied(gen, rhs, j)) {
+                    pos_is_heap = 1;   /* #2619: copied where the call was made */
+                } else if (pos_is_string) {
                     if (callee_def) {
                         pos_is_heap = function_def_returns_heap_at(gen, callee_def, j);
                     } else if (rhs_type && rhs_type->tuple_heap_flags) {

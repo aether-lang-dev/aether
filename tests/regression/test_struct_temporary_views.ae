@@ -5,8 +5,9 @@
 // statement keeps must not point into one:
 // - a `string` function that returns its parameter as it came
 //   (`first(make_item(w).name, 1)`), directly or through a struct
-//   parameter's field, hands back a view of the argument: the view is copied
-//   where it is made, so the argument can go with its statement (#2619);
+//   parameter's field, or in a tuple, hands back a view of the argument: the
+//   view is copied where it is made, so the argument can go with its
+//   statement (#2619);
 // - a struct parameter kept as a whole value, or an element of one
 //   (`b.items[0]`), takes references of its own on entry;
 // - a closure returning a struct it captured hands back a copy, since its
@@ -73,6 +74,10 @@ pick(a: string, b: string) -> string {
         return a
     }
     return b
+}
+
+pair(a: string, b: string) -> (string, string) {
+    return a, b
 }
 
 outer(p: Item) -> string {
@@ -148,12 +153,13 @@ in_conditions(c: Item) -> int {
 // Values handed back as views, and a store into a global: read after churn.
 views(w: string) {
     b = first(make_item(w).name, 1)
+    t, u = pair(make_item(w).name, make_item(w).tag)
     d = "init"
     d = pick(make_item(w).tag, "y")
     s = outer(make_item(w))
     store_global(make_item(w))
     churn()
-    check(b == "w#" && d == "w%" && s == "w#", "a view handed back")
+    check(b == "w#" && t == "w#" && u == "w%" && d == "w%" && s == "w#", "a view handed back")
     check(gitem.tag == "w%", "a struct stored into a global")
 }
 
@@ -161,7 +167,8 @@ round(w: string) -> int {
     b = first(make_item(w).name, 1)
     d = pick(make_item(w).tag, "y")
     s = outer(make_item(w))
-    check(b == "w#" && d == "w%" && s == "w#", "a view handed back, in the window")
+    t, u = pair(make_item(w).name, make_item(w).tag)
+    check(b == "w#" && d == "w%" && s == "w#" && t == "w#" && u == "w%", "a view handed back, in the window")
     e = first_of(make_bag(w))
     h = handed(make_item(w))
     g = | volatile: Item | {
