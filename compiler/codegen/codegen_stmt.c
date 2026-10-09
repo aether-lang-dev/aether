@@ -1689,6 +1689,59 @@ static ASTNode* fn_def_of_body(CodeGenerator* gen, ASTNode* root) {
     return NULL;
 }
 
+/* #2670, #2671: is `name` a plain closure local of `owner`, the function or
+ * closure whose body a walk reads: not a cell (a name promoted in its scope),
+ * a module-level `var` or an actor's state, each of which takes a closure
+ * its own way? Answered in the function being emitted from the scope in
+ * force; for another top-level function (its callers ask when they judge
+ * what it keeps or hands back), from the names promoted in that function's
+ * scope, which are what its own emission will find in force, so caller and
+ * callee agree. Anything else (a closure literal, a function nested in an
+ * actor) is not answered: the caller keeps its old, conservative rule. */
+static int closure_local_is_plain(CodeGenerator* gen, ASTNode* owner, const char* name) {
+    if (!name) return 0;
+    if (owner == gen->current_function) {
+        return !is_promoted_capture(gen, name) && !is_module_global_var(gen, name) &&
+               !is_actor_state_var(gen, name);
+    }
+    if (!owner || owner->type != AST_FUNCTION_DEFINITION || !owner->value || !gen->program ||
+        find_function_definition_by_name(gen->program, owner->value) != owner) return 0;
+    char** promoted = NULL;
+    int count = 0;
+    get_promoted_names_for_func(gen, owner->value, &promoted, &count);
+    for (int i = 0; i < count; i++) {
+        if (promoted[i] && strcmp(promoted[i], name) == 0) return 0;
+    }
+    return !is_module_global_var(gen, name);
+}
+
+/* #2668: does `decl` (`a = b`, both closures), a statement of `owner`'s
+ * body, give the local `a` a reference of its own to the env of `b`, a
+ * closure local or parameter? The binding retains (emit_closure_alias_take),
+ * so `a` owns what it holds, released by its scope or by its next binding,
+ * and `b` keeps releasing its own. Before, `b` stopped owning its value at
+ * such a binding and `a` never started: `get_last = get` in a loop body
+ * leaked one env per pass. Not for a cell, a global or an actor's state,
+ * which take their values their own way (closure_local_is_plain). */
+static int closure_alias_binding_in(CodeGenerator* gen, ASTNode* owner, ASTNode* decl) {
+    if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
+        decl->child_count < 1) return 0;
+    ASTNode* rhs = decl->children[0];
+    if (!rhs || rhs->type != AST_IDENTIFIER || !rhs->value ||
+        strcmp(rhs->value, decl->value) == 0) return 0;
+    Type* t = rhs->node_type;
+    if (!t || t->kind != TYPE_FUNCTION || t->is_fnptr) return 0;
+    Type* vt = decl->node_type;
+    if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return 0;
+    return closure_local_is_plain(gen, owner, decl->value);
+}
+
+/* The same, for a statement of the function being emitted: what its emission
+ * does. */
+static int closure_alias_binding(CodeGenerator* gen, ASTNode* decl) {
+    return closure_alias_binding_in(gen, gen->current_function, decl);
+}
+
 /* #2629: is the local `name`, which `root` binds another local to
  * (`t = name`), heap evidence? Resolved against `root` itself: a local it
  * binds from heap evidence, or a `string` parameter its function takes a
@@ -5829,7 +5882,13 @@ static int closure_param_store_retains(CodeGenerator* gen, ASTNode* node, const 
         lhs = node->children[0]; rhs = node->children[1];
         if (!lhs || lhs->type != AST_MEMBER_ACCESS) return 0;
     } else if (node->type == AST_VARIABLE_DECLARATION && node->value && node->child_count > 0) {
-        if (!is_module_global_var(gen, node->value) && !is_actor_state_var(gen, node->value)) return 0;
+        /* #2670: so does a plain closure local of the walked function bound
+         * to it (`a = cb`), which takes a reference of its own
+         * (closure_alias_binding_in), as the env scan of a caller's local
+         * passed here judges it. */
+        ASTNode* owner = fn_def_of_body(gen, g_keep_body);
+        if (!is_module_global_var(gen, node->value) && !is_actor_state_var(gen, node->value) &&
+            !(owner && closure_alias_binding_in(gen, owner, node))) return 0;
         rhs = node->children[0];
     } else if (node->type == AST_FIELD_INIT && node->child_count > 0) {
         rhs = node->children[0];
@@ -6969,36 +7028,16 @@ static int closure_ask_binding(ASTNode* rhs) {
            rhs->node_type->kind == TYPE_FUNCTION && !rhs->node_type->is_fnptr;
 }
 
-/* #2668: does `decl` (`a = b`, both closures) give the local `a` a reference
- * of its own to the env of `b`, a closure local or parameter? The binding
- * retains (emit_closure_alias_take), so `a` owns what it holds, released by
- * its scope or by its next binding, and `b` keeps releasing its own. Before,
- * `b` stopped owning its value at such a binding and `a` never started:
- * `get_last = get` in a loop body leaked one env per pass. Not for a cell,
- * a global or an actor's state, which take their values their own way. */
-static int closure_alias_binding(CodeGenerator* gen, ASTNode* decl) {
-    if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
-        decl->child_count < 1) return 0;
-    ASTNode* rhs = decl->children[0];
-    if (!rhs || rhs->type != AST_IDENTIFIER || !rhs->value ||
-        strcmp(rhs->value, decl->value) == 0) return 0;
-    Type* t = rhs->node_type;
-    if (!t || t->kind != TYPE_FUNCTION || t->is_fnptr) return 0;
-    Type* vt = decl->node_type;
-    if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return 0;
-    return !is_promoted_capture(gen, decl->value) && !is_module_global_var(gen, decl->value) &&
-           !is_actor_state_var(gen, decl->value);
-}
-
 /* `decl` binds s->name to its first child. */
 static int env_scan_fresh_binding(CodeGenerator* gen, EnvScan* s, ASTNode* decl) {
     ASTNode* rhs = decl->child_count > 0 ? decl->children[0] : NULL;
     if (!rhs || env_scan_mentions(rhs, s->name)) return 0;
     if (env_scan_is_real_closure(rhs)) return 1;
     if (closure_view_binding(rhs) || closure_ask_binding(rhs)) return 1;
-    /* #2668: an alias of another closure retains, judged in the function
-     * being emitted, whose locals the cell, global and state tests know. */
-    if (s->owner == gen->current_function && closure_alias_binding(gen, decl)) return 1;
+    /* #2668: an alias of another closure retains; #2671: judged in the
+     * scanned function's own scope, so a caller asking what a function hands
+     * back finds the reference its alias took. */
+    if (closure_alias_binding_in(gen, s->owner, decl)) return 1;
     if (rhs->type != AST_FUNCTION_CALL || !rhs->value) return 0;
     for (int i = 0; i < rhs->child_count; i++) {
         /* A builder's trailing block re-emits the call with its config. */
@@ -7446,13 +7485,13 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 /* #2525: so does a struct field, a message field, a global
                  * or an actor's state (emit_closure_take retains a view). */
                 if (parent && env_scan_store_retains(gen, parent, node)) return;
-                /* #2668: so does another closure local bound to it, in the
-                 * function being emitted; a binding in a nested closure's
-                 * body gets its reference from the hand-off retain below
-                 * (#2519). */
-                if (parent && !nested && !s->param_mode && s->owner == gen->current_function &&
-                    parent->child_count > 0 && parent->children[0] == node &&
-                    closure_alias_binding(gen, parent)) return;
+                /* #2668: so does another closure local bound to it, judged
+                 * in the scanned function's own scope; #2670: a parameter a
+                 * callee only aliases is no keep of the caller's closure. A
+                 * binding in a nested closure's body gets its reference from
+                 * the hand-off retain below (#2519). */
+                if (parent && !nested && parent->child_count > 0 && parent->children[0] == node &&
+                    closure_alias_binding_in(gen, s->owner, parent)) return;
                 if (parent && parent->type == AST_FUNCTION_CALL && parent->value) {
                     if (strcmp(parent->value, "call") == 0) {
                         if (parent->children[0] == node) return;   /* invoked */

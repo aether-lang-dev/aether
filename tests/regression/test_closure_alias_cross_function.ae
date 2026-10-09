@@ -1,0 +1,135 @@
+// Regression (#2670, #2671): a closure local bound to another closure takes
+// a reference of its own (#2668), and the functions that ask what another
+// function does with a closure now see it the way that function's own
+// emission does.
+//
+// #2670: a callee that only aliases a closure parameter into a local of its
+// own (`a = cb`) keeps nothing of the caller's: the alias holds and releases
+// its own reference. The caller counted the alias as a keep, so neither a
+// local it passed nor a closure literal it passed was ever released.
+//
+// #2671: a function that returns such an alias (`a = b; return a`) hands
+// its caller the alias's reference. The caller did not count the alias as a
+// closure the function hands over, so it never released what it got.
+//
+// Each shape is checked for its value and, where the heap count is exact,
+// for a window that does not grow. The macOS leaks gate runs this program.
+
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// #2670: aliases its parameter and calls it.
+wrap(cb: fn) -> int {
+    a = cb
+    int r = call(a)
+    return r
+}
+
+// #2670: aliases its parameter and stores the alias in a list.
+keep_in(l: ptr, cb: fn) {
+    a = cb
+    list.add(l, a)
+}
+
+// #2670 and #2671: aliases its parameter and returns the alias.
+pass_on(cb: fn) -> fn {
+    a = cb
+    return a
+}
+
+// #2671: returns an alias of a closure it made.
+make_alias(n: int) -> fn {
+    z = n
+    b = || { return z * 2 }
+    a = b
+    return a
+}
+
+// A local passed to a callee that aliases it.
+local_arg(n: int) -> int {
+    m = n
+    f = || { return m * 3 }
+    return wrap(f)
+}
+
+// A closure literal passed to a callee that aliases it.
+literal_arg(n: int) -> int {
+    m = n
+    return wrap(|| { return m + 4 })
+}
+
+// Aliases kept in a list by the callee, called after the loop.
+stored_by_callee(n: int) -> int {
+    l = list.new()
+    for i in 0..n {
+        v = i
+        get = || { return v * 10 }
+        keep_in(l, get)
+    }
+    keep_in(l, || { return 1 })
+    total = 0
+    x = 0
+    while x <= n {
+        fn g = unbox_closure(list.get_raw(l, x))
+        int r = call(g)
+        total = total + r
+        x = x + 1
+    }
+    list.free(l)
+    return total
+}
+
+// A closure handed through a callee that returns its alias.
+passed_through(n: int) -> int {
+    m = n
+    f = || { return m + 1 }
+    g = pass_on(f)
+    h = pass_on(|| { return m + 2 })
+    int a = call(g)
+    int b = call(h)
+    int c = call(f)
+    return a * 100 + b * 10 + c
+}
+
+// The alias a function returns, called by its caller.
+returned_alias(n: int) -> int {
+    f = make_alias(n)
+    int r = call(f)
+    return r
+}
+
+fn round() -> int {
+    t = 0
+    t = t + local_arg(2)
+    t = t + literal_arg(3)
+    t = t + stored_by_callee(3)
+    t = t + passed_through(1)
+    t = t + returned_alias(4)
+    return t
+}
+
+main() {
+    check(local_arg(2) == 6, "local_arg calls the alias")
+    check(literal_arg(3) == 7, "literal_arg calls the alias")
+    check(stored_by_callee(3) == 31, "the list holds every alias")
+    check(passed_through(1) == 232, "passed_through calls both aliases and the local")
+    check(returned_alias(4) == 8, "returned_alias calls the returned alias")
+    check(round() == 6 + 7 + 31 + 232 + 8, "a round adds up")
+    if mem.heap_in_use_exact() {
+        round()
+        grown = mem.steady_growth(|| {
+                round()
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

@@ -232,7 +232,8 @@ lifetime"; shape by shape:
   releases it the same way, and the local it copied keeps releasing its own
   (#2668; before, the source stopped owning at the copy and the copy never
   started, which leaked an env per pass of a loop that kept its closure in
-  an outer local). A return, an argument to an extern parameter not marked
+  an outer local). A parameter a callee only aliases (`a = cb`) is no keep,
+  so the caller releases what it passed (#2670). A return, an argument to an extern parameter not marked
   `@noescape` or to a function that keeps it, or a binding to anything
   else leaves the env to the value's holder. A field's name is not a use
   of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
@@ -246,7 +247,8 @@ lifetime"; shape by shape:
 
 - **Returned to a caller.** A function whose every `return` hands back a
   closure nothing else holds (a closure literal, a local whose only
-  escape is the return, or another such function's result) gives its
+  escape is the return, a local bound to another closure, which took a
+  reference of its own, #2671, or another such function's result) gives its
   reference to the caller, and a local bound to its result is freed like
   a local bound to a literal (#2494). Passed to a call whose parameter
   keeps nothing, anywhere in an expression (`x = take(make_counter())`),
