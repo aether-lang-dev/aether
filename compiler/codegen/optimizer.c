@@ -528,7 +528,7 @@ static int is_constant_condition(ASTNode* node, int* is_truthy) {
 // os_platform_raw), so the canonical names match across the toolchain:
 // os ∈ {"windows","darwin","linux","freebsd","openbsd","netbsd",
 // "dragonfly","solaris","wasm","unknown"}; arch ∈ {"x86_64","aarch64",
-// "x86","arm","riscv64","ppc64","wasm","unknown"}. The target is the host
+// "x86","arm","riscv64","loongarch64","ppc64","wasm","unknown"}. The target is the host
 // (aetherc emits C compiled by the host toolchain; there is no cross-target
 // flag today), exactly as os.platform() and select() already assume.
 // ---------------------------------------------------------------------------
@@ -568,6 +568,8 @@ static const char* target_arch_string(void) {
     return "arm";
 #elif defined(__riscv) && (__riscv_xlen == 64)
     return "riscv64";
+#elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
+    return "loongarch64";
 #elif defined(__powerpc64__) || defined(__ppc64__)
     return "ppc64";
 #elif defined(__EMSCRIPTEN__) || defined(__wasi__) || defined(__wasm__)

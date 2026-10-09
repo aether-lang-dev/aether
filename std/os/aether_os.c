@@ -609,6 +609,8 @@ char* os_arch_raw(void) {
     return strdup("arm");
 #elif defined(__riscv) && (__riscv_xlen == 64)
     return strdup("riscv64");
+#elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
+    return strdup("loongarch64");
 #elif defined(__powerpc64__) && (defined(__LITTLE_ENDIAN__) || defined(_LITTLE_ENDIAN))
     return strdup("ppc64le");
 #elif defined(__s390x__)

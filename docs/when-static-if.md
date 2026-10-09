@@ -100,7 +100,7 @@ still reports the host, not `"wasm"`, exactly as `os.platform()` and
 | Constant | Canonical values |
 |---|---|
 | `target.os` | `"windows"`, `"darwin"` (macOS), `"linux"`, `"freebsd"`, `"openbsd"`, `"netbsd"`, `"dragonfly"`, `"solaris"`, `"wasm"`, `"unknown"` |
-| `target.arch` | `"x86_64"`, `"aarch64"`, `"x86"`, `"arm"`, `"riscv64"`, `"ppc64"`, `"wasm"`, `"unknown"` |
+| `target.arch` | `"x86_64"`, `"aarch64"`, `"x86"`, `"arm"`, `"riscv64"`, `"loongarch64"`, `"ppc64"`, `"wasm"`, `"unknown"` |
 
 Note macOS is `"darwin"` (matching `os.platform()` and Go/Rust's
 convention), not `"macos"`. `target.os` / `target.arch` are only meaningful
