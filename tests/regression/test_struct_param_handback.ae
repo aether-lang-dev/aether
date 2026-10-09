@@ -82,13 +82,13 @@ or_break(w: string) -> int {
 in_switch(k: int, w: string) -> int {
     switch k {
         case 1:
-            n = string.length(make_item(w).name)
-            return n
+        n = string.length(make_item(w).name)
+        return n
         case 2:
-            return string.length(make_item(w).tag) + 10
+        return string.length(make_item(w).tag) + 10
         default:
-            m = string.length(make_item(w).name) + 100
-            return m
+        m = string.length(make_item(w).name) + 100
+        return m
     }
 }
 

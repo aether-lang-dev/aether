@@ -38,7 +38,7 @@ main() {
         fails = fails + check("probe of a reaped token reports it gone", os.kill(at, 0) == -1)
         _gs, gto, gerr = os.wait_pid_timeout(at, 1)
         fails = fails + check("bounded wait on a reaped token reports no such process",
-                              gto == 0 && gerr == "no such process")
+            gto == 0 && gerr == "no such process")
     }
 
     bt, be = os.spawn_proc("false", null, null)
