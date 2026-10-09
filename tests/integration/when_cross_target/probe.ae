@@ -32,7 +32,15 @@ main() {
             when target.arch == "wasm" {
                 println("TARGET_ARCH=wasm")
             } else {
-                println("TARGET_ARCH=other")
+                when target.arch == "riscv64" {
+                    println("TARGET_ARCH=riscv64")
+                } else {
+                    when target.arch == "loongarch64" {
+                        println("TARGET_ARCH=loongarch64")
+                    } else {
+                        println("TARGET_ARCH=other")
+                    }
+                }
             }
         }
     }

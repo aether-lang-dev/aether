@@ -48,6 +48,9 @@ check aarch64-linux-musl linux aarch64
 check x86_64-freebsd freebsd x86_64
 check wasm32-wasi wasm wasm
 check arm64-linux-musl linux aarch64
+check riscv64-linux-musl linux riscv64
+check loongarch64-linux-musl linux loongarch64
+check loong64-linux-musl linux loongarch64
 
 # A name the compiler does not know is an error, not a silent else.
 if "$AETHERC" --target-os=lunix "$SCRIPT_DIR/probe.ae" "$tmp/x.c" > "$tmp/bad.log" 2>&1; then
