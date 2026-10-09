@@ -1,0 +1,42 @@
+// Regression: a fixed-size array declared from another array copies its
+// elements (#2516, found with #2618).
+//
+// `int[3] b = a` was emitted as `int b[3] = a;`, which C rejects ("invalid
+// initializer"), so the program did not build, while the same binding of a
+// declared array (`b = a`) copied. The declaration now starts the array
+// empty and copies the elements in; a `string[N]` array that owns its
+// elements takes each one as a whole-array store does, so a later store into
+// the source frees nothing the copy still holds.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+copy_ints() -> int {
+    a = [1, 2, 3]
+    int[3] b = a
+    a[0] = 9
+    check(b[0] == 1 && b[2] == 3 && a[0] == 9, "an int array declared from another")
+    return b[0] + b[1] + b[2]
+}
+
+copy_strings(w: string) -> int {
+    a = [string.concat(w, "1"), "lit"]
+    string[2] b = a
+    a[0] = string.concat(w, "2")
+    check(b[0] == "w1" && b[1] == "lit" && a[0] == "w2", "a string array declared from another")
+    return string.length(b[0]) + string.length(b[1])
+}
+
+main() {
+    check(copy_ints() == 6, "int sum")
+    check(copy_strings("w") == 5, "string lengths")
+    println("PASS: an array declared from another copies its elements")
+}

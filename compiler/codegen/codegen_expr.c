@@ -3435,6 +3435,19 @@ static Type* capture_sized_array_type(CodeGenerator* gen, const char* name,
     return (t && type_is_sized_array(t) && t->array_size > 0) ? t : NULL;
 }
 
+/* #2618: a closure that copies a string array whose elements are owned
+ * (one that owns them, or a parameter viewing its caller's) takes a
+ * reference to each element it copied, given back by the env's destructor,
+ * so the closure can outlive the array and its elements. */
+static void capture_string_array_take(CodeGenerator* gen, ASTNode* closure, const char* name,
+                                      Type* t) {
+    if (!t || !t->element_type || t->element_type->kind != TYPE_STRING ||
+        !closure_captures_string_view_array(gen, closure, name)) return;
+    fprintf(gen->output,
+            " for (int _ae_k = 0; _ae_k < %d; _ae_k++) _e->%s[_ae_k] = _aether_str_elem_dup(_e->%s[_ae_k]);",
+            t->array_size, name, name);
+}
+
 // Resolve a closure's C return type from its body. Extracted so the
 // pre-pass (forward declarations) and main pass (bodies) agree on the
 // same signature. A closure with no return-value statements is void.
@@ -3713,6 +3726,16 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             int promoted = capture_is_promoted(gen, captures[i], parent_func);
             if (capture_is_closure_value(gen, captures[i], parent_func)) {
                 fprintf(gen->output, "    _aether_closure_env_release(_e->%s.env);\n", captures[i]);
+                continue;
+            }
+            /* #2618: the env's copy of a string array whose elements are
+             * owned holds a reference to each (capture_string_array_take). */
+            Type* sarr = capture_sized_array_type(gen, captures[i], parent_func);
+            if (sarr && !promoted &&
+                closure_captures_string_view_array(gen, gen->closures[ci].closure_node, captures[i])) {
+                fprintf(gen->output,
+                        "    for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_str_cell_free_val(_e->%s[_ae_k]);\n",
+                        sarr->array_size, captures[i]);
                 continue;
             }
             const char* owning = capture_owning_struct(gen, captures[i], parent_func);
@@ -4122,7 +4145,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     /* #2516: an array parameter's own copy. */
                     if (is_sized_array_param(p->node_type)) {
                         print_indent(gen);
-                        emit_sized_array_param_copy(gen, p->node_type, p->value);
+                        emit_sized_array_param_copy(gen, p->node_type, p->value, body);
                     }
                     continue;
                 }
@@ -4275,8 +4298,11 @@ void emit_closure_definitions(CodeGenerator* gen) {
                             captures[i], ctype, captures[i]);
                 } else if (capture_sized_array_type(gen, captures[i], parent_func)) {
                     /* #2464: an array does not assign; copy its bytes. */
-                    fprintf(gen->output, "    memcpy(_e->%s, %s, sizeof(_e->%s));\n",
+                    fprintf(gen->output, "    memcpy(_e->%s, %s, sizeof(_e->%s));",
                             captures[i], captures[i], captures[i]);
+                    capture_string_array_take(gen, gen->closures[ci].closure_node, captures[i],
+                                              capture_sized_array_type(gen, captures[i], parent_func));
+                    fprintf(gen->output, "\n");
                 } else {
                     fprintf(gen->output, "    _e->%s = %s;\n", captures[i], captures[i]);
                 }
@@ -5138,6 +5164,15 @@ const char* stmt_struct_temp_of(const ASTNode* expr) {
         if (g_stmt_temp_nodes[i] == expr) return g_stmt_temp_names[i];
     }
     return NULL;
+}
+
+/* #2369: is `call` a call of C's malloc, under any Aether name bound to it
+ * (`extern malloc(n)`, `@extern("malloc") m(n)`)? */
+static int call_is_c_malloc(CodeGenerator* gen, ASTNode* call) {
+    if (!call->value || call->child_count != 1 || !call->children[0] ||
+        !is_extern_func(gen, call->value)) return 0;
+    const char* sym = lookup_extern_c_name(gen, call->value);
+    return sym && strcmp(sym, "malloc") == 0;
 }
 
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
@@ -6599,6 +6634,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             if (expr != gen->trailing_stmt_call && emit_trailing_call_expression(gen, expr)) {
                 break;
             }
+            /* #2369: memory Aether code allocates with malloc starts zeroed,
+             * as a heap.new box does. A struct built in it, however the
+             * pointer later reaches its type (`malloc(n) as *T`, or a `ptr`
+             * bound first and cast after), then has its `_heap_<field>`
+             * trackers initialised, and a field store reads them to free the
+             * value it replaces; malloc left them garbage (#1873). */
+            if (call_is_c_malloc(gen, expr)) {
+                fprintf(gen->output, "calloc(1, (size_t)(");
+                generate_expression(gen, expr->children[0]);
+                fprintf(gen->output, "))");
+                break;
+            }
             /* heap.free(p) — counterpart to heap.new(T) (issue #564, #790).
              * A POD box owns no heap fields, so a plain free(p) reclaims it.
              * A box whose struct has string fields (#790) routes through the
@@ -7156,6 +7203,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 arg->value, arg->value, arg->value, arg->value, arg->value);
                         } else if (field_read_can_hand_off(arg)) {
                             emit_string_field_free(gen, arg, "string_release");
+                        } else if (string_element_free_kind(gen, arg)) {
+                            emit_string_element_free(gen, arg);   /* #2618 */
                         } else {
                             fprintf(gen->output, "string_release(");
                             generate_expression(gen, arg);
@@ -7244,6 +7293,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          field_read_can_hand_off(expr->children[0])) {
                     emit_string_field_free(gen, expr->children[0],
                                            consuming_free_symbol(gen, func_name_norm));
+                }
+                // #2618: and for an element of an array that owns its
+                // elements, which the array would free again.
+                else if ((cfree_sym_is(gen, func_name_norm, "string_free") ||
+                          cfree_sym_is(gen, func_name_norm, "string_release")) &&
+                         expr->child_count == 1 &&
+                         string_element_free_kind(gen, expr->children[0])) {
+                    emit_string_element_free(gen, expr->children[0]);
                 }
                 // string.seq_free(seq) — explicit refcount-decrement on a
                 // *StringSeq. For a tracked seq local, clear the ownership
@@ -7890,11 +7947,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * owner then freed. A field read goes to the
                              * owning add, which takes the container's own
                              * reference (retains a refcounted string, copies
-                             * a plain one). An `if` is taken as a binding
-                             * takes it (emit_string_take): what the take
-                             * owns is adopted, what it borrows is added
-                             * through the owning entry. */
-                            if (val && is_owned_string_field_read(val)) {
+                             * a plain one), and so does an element of an
+                             * array that owns its elements (#2618). An `if`
+                             * is taken as a binding takes it
+                             * (emit_string_take): what the take owns is
+                             * adopted, what it borrows is added through the
+                             * owning entry. */
+                            if (val && (is_owned_string_field_read(val) ||
+                                        is_owned_string_element(gen, val))) {
                                 if (is_list_shape) {
                                     fprintf(gen->output, is_wrapper
                                             ? "_aether_list_add_owned("
@@ -9241,8 +9301,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 captures[i], ctype, captures[i]);
                     } else if (capture_sized_array_type(gen, captures[i], cl_parent_func)) {
                         /* #2464: an array does not assign; copy its bytes. */
-                        fprintf(gen->output, "memcpy(_e->%s, %s, sizeof(_e->%s)); ",
+                        fprintf(gen->output, "memcpy(_e->%s, %s, sizeof(_e->%s));",
                                 captures[i], captures[i], captures[i]);
+                        capture_string_array_take(gen, expr, captures[i],
+                                                  capture_sized_array_type(gen, captures[i], cl_parent_func));
+                        fprintf(gen->output, " ");
                     } else {
                         fprintf(gen->output, "_e->%s = %s; ", captures[i], captures[i]);
                     }

@@ -286,7 +286,7 @@ if id_count > 8 {
 
 This is the stack-buffer-with-heap-fallback idiom (`T buf[N]; T* p = buf; if (n > N) p = malloc(...)`). Only a *named array* decays; an array *literal* initializer (`x = [1, 2, 3]`) still binds a real array. To keep the array type, annotate the binding explicitly (`x: byte[128] = ...`).
 
-**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`); an array keeps the length of its first binding, so binding one of another length is a type error. An element of a `const` array cannot be written: copy the table into an array of your own first.
+**A fixed-size array is a value.** A parameter typed `int[3]` is the callee's own copy of the caller's elements, so a write to it, by the callee or by a closure in it, stays in the callee, and `xs.len` is the declared length; the argument must be an array of exactly that length (a slice parameter, `int[]`, takes any length). Binding an array to a variable that already holds one of the same length copies its elements (`a = b`), and so does declaring one from another (`int[3] b = a`); an array keeps the length of its first binding, so binding one of another length is a type error. An element of a `const` array cannot be written: copy the table into an array of your own first.
 
 ```aether,run
 sum3(xs: int[3]) -> int {

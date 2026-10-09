@@ -702,6 +702,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->callee_memo_count = 0;
     gen->zb_params = NULL;
     gen->zb_params_state = 0;
+    gen->str_arrays = NULL;
     gen->return_escaped_struct_vars = NULL;
     gen->return_escaped_struct_var_count = 0;
     // *StringSeq ownership tracking — MUST be zero-initialised here:
@@ -843,6 +844,7 @@ void code_generator_release(CodeGenerator* gen) {
         free(gen->callee_memo);
         gen->callee_memo = NULL;
         zb_params_free(gen);
+        str_arrays_free(gen);   /* #2618 */
         /* The emitted-typedef registries: one strdup'd name per distinct
          * tuple / optional / sum shape in the program (#1667). */
         for (int i = 0; i < gen->tuple_type_count; i++) {
@@ -1794,6 +1796,25 @@ static int try_emit_struct_array_destroy(CodeGenerator* gen, ASTNode* deferred) 
     return 1;
 }
 
+/* #2618: a local or parameter `string[N]` that owns its elements.
+ * Annotation: "str_array_release:<varname>:<N>". At scope exit each counted
+ * string it holds is given back; a literal it holds is not its own. */
+static int try_emit_str_array_release(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "str_array_release:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strrchr(rest, ':');
+    if (!sep || sep == rest || !sep[1]) return 0;
+    const char* var_buf = cg_intern_n(rest, (size_t)(sep - rest));
+    print_indent(gen);
+    fprintf(gen->output,
+            "/* deferred */ for (int _ae_k = 0; _ae_k < %d; _ae_k++) { _aether_str_cell_free_val(%s[_ae_k]); %s[_ae_k] = NULL; }\n",
+            atoi(sep + 1), var_buf, var_buf);
+    return 1;
+}
+
 /* Closure-local env carrier (#2480). Annotation:
  *   "closure_env_free:<closure id or -1>:<own flag 0|1>:<varname>"
  * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
@@ -1902,6 +1923,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_opt_str_exit_free(gen, deferred) &&
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
+        !try_emit_str_array_release(gen, deferred) &&      /* #2618 */
         !try_emit_closure_env_free(gen, deferred)) {
         print_indent(gen);
         fprintf(gen->output, "/* deferred%s */ ",
@@ -2176,6 +2198,18 @@ const char* try_volatile_qual_for(CodeGenerator* gen, const char* name) {
     if (gen->try_frame_depth > 0) return "";
     if (!is_try_clobbered_var(gen, name)) return "";
     return "volatile ";
+}
+
+// The qualifier belongs to the variable, which for a pointer means after
+// the `*`: `volatile const char* s` qualifies the characters and leaves the
+// pointer itself free to sit in a register the longjmp restores, so a
+// string stored before a panic was lost to the catch (#2618). An array of
+// pointers is qualified the same way, element by element.
+const char* volatile_decl_type(const char* vq, const char* c_type) {
+    if (!vq || !vq[0] || !c_type) return c_type ? c_type : "";
+    size_t n = strlen(c_type);
+    if (n > 0 && c_type[n - 1] == '*') return cg_internf("%s volatile", c_type);
+    return cg_internf("volatile %s", c_type);
 }
 
 // ============================================================================
@@ -7584,9 +7618,26 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) { _aether_str_cell_free_val(*(const char**)cell); free(h); }");
     print_line(gen, "}");
-    print_line(gen, "static inline void _aether_str_cell_set(const char** cell, const char* v) {");
-    print_line(gen, "    if (*cell != v) _aether_str_cell_free_val(*cell);");
+    /* #2618: a counted string stored carries a reference of its own (a take
+     * never hands over a borrowed one; a literal is never freed), so the
+     * value replaced is given back even when it is the same pointer:
+     * `arr[0] = s` with `s` holding its own reference to the element's
+     * string leaked one when the release was skipped. The slot is `volatile`
+     * in an array a `try` writes, which a plain `const char**` would not
+     * accept. */
+    print_line(gen, "static inline void _aether_str_cell_set(const char* volatile* cell, const char* v) {");
+    print_line(gen, "    const char* _old = *cell;");
     print_line(gen, "    *cell = v;");
+    print_line(gen, "    _aether_str_cell_free_val(_old);");
+    print_line(gen, "}");
+    /* #2618: an element a string array takes from another array (a
+     * parameter's from its caller's, a whole-array copy, a closure's
+     * capture): a counted string is shared, anything else copied, since a
+     * plain buffer is its owner's to free. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED const char* _aether_str_elem_dup(const char* s) {");
+    print_line(gen, "    if (!s) return s;");
+    print_line(gen, "    if (aether_str_is_counted(s)) { string_retain(s); return s; }");
+    print_line(gen, "    return aether_uniform_heap_str(s, 0);");
     print_line(gen, "}");
     /* The value a string cell takes (emit_string_take_owned): what the take
      * left borrowed is copied, as for a return, and an owned PLAIN buffer

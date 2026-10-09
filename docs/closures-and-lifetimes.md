@@ -312,7 +312,11 @@ nested closures read it as they read the array. A string array's cell
 owns its elements, as a string cell owns its one: a store frees the
 element it replaces and takes a buffer of its own, and the last release
 frees every element. An actor's state array is not a capture: a closure
-in a handler that writes one is refused, as for any state field.
+in a handler that writes one is refused, as for any state field. A string
+array a closure only reads is copied into its environment, which takes a
+reference to each element when the array owns its elements or is a
+parameter (#2618, see memory-management.md), so the closure can outlive
+the array.
 
 A cell first assigned inside a loop body or an if-arm is hoisted ahead of
 that loop or branch like any other such variable (#2024): declared as the

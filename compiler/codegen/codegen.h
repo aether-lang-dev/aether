@@ -544,6 +544,11 @@ typedef struct {
     void* zb_params;
     int zb_params_state;
 
+    // #2618: the program's `string[N]` locals and parameters, which of them
+    // own their elements, and which element reads are views (StrArrs,
+    // private to codegen_stmt.c). Built once, the first time it is asked.
+    void* str_arrays;
+
     // #752: struct locals that escape via a return (directly or as a
     // tuple element). Such a struct's heap-string fields belong to the
     // caller once returned, so the function-exit <Struct>_destroy defer
@@ -742,8 +747,13 @@ void mark_try_clobbered_vars(CodeGenerator* gen, ASTNode* body);
 // Return "volatile " when `name` is a try-clobbered local in this
 // function AND we're emitting at an outer scope of any try body
 // (i.e. gen->try_frame_depth == 0).  Empty string otherwise.
-// Safe to concatenate verbatim before a C type at every
-// AST_VARIABLE_DECLARATION emission site.  Issue #501 follow-up.
+// Safe to concatenate verbatim before a C type that is not a pointer.
+// Issue #501 follow-up.
 const char* try_volatile_qual_for(CodeGenerator* gen, const char* name);
+
+// The C type `c_type` qualified by `vq` (try_volatile_qual_for's answer)
+// as a declaration of the variable spells it: after the `*` of a pointer
+// (`const char* volatile`), before anything else. #2618.
+const char* volatile_decl_type(const char* vq, const char* c_type);
 
 #endif
