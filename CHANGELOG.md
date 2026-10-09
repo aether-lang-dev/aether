@@ -14,6 +14,128 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.800.0]
+
+### Added
+
+- **`contrib.host.tinygo` can take a `C.CString` result over instead of
+  leaking it.** Every string-returning wrapper (`call_str_str`, `call_s_v`,
+  `call_s_s`, `call_s_i`, `call_s_s_s`, `call_s_s_s_s`) has an `_owned` twin
+  that copies the result into a string Aether owns and frees the library's
+  pointer, for a Go function returning `C.CString(...)`, which cgo allocates
+  with `malloc` and nothing freed: every call through the borrowing wrappers
+  leaked one string, the module's own example included. The plain wrappers
+  still borrow, for a static or long-lived result. The example and the README
+  use the owned form, and a new test runs every `_owned` wrapper against a C
+  stand-in for a c-shared library, with no Go toolchain needed, checking that
+  owned calls leave the heap where it was; CI's contrib/host job now builds
+  the bridge and runs it with the Go end-to-end test (#2569).
+
+- **The `.ae` test corpus now also runs at -O0, and must agree with -O2.**
+  `ae run` compiles at `-O0` while the sweep only ever compiled at `-O2`, so a
+  bug that shows only at `-O0` passed every run. `make test-ae-opt-diff` builds
+  every program `make test-ae` builds at both levels (the two read one list,
+  `tests/scripts/ae_sweep_list.sh`), runs both from the same path, and compares
+  stdout and exit code; the programs whose output varies from run to run
+  (clocks, pids, thread interleaving) have their stdout excused in a commented
+  carveout file and their exit codes still compared. CI runs it on the
+  Linux / GCC leg after `make ci`. Its first run found an arrow body that
+  returned a freed string (fixed separately) and
+  `tests/integration/test_http_client_v2.ae` printing strings it had borrowed
+  from a response after freeing the response (#2488).
+
+### Fixed
+
+- **An arrow body that ends in a local string returns it instead of freeing
+  it first.** In `f(n) -> { msg = "count=${n}"; msg }` the trailing `msg` is
+  the implicit return, but the parser wrapped the statement holding it rather
+  than the expression, and the passes that decide whether a return hands over
+  an owned string, and which local escapes through it, did not look inside a
+  statement. So `msg` was freed at scope exit and the freed pointer returned,
+  which printed as garbage, different at `-O0` and `-O2`. The implicit return
+  now holds the expression, exactly as `return msg` does, and the caller frees
+  the string (#2685; found by the -O0 against -O2 sweep of #2488).
+
+- **`import contrib.host.tinygo` links on Windows when the bridge was built
+  with libffi.** `ae` adds `-lffi` for a bridge whose archive references
+  libffi, and found out by running `nm -u <archive> 2>/dev/null | grep -q
+  ffi_prep_cif` through `system()`. On Windows that is cmd.exe, which has
+  neither `/dev/null` nor `grep`, so the probe failed on every build and the
+  link stopped at `undefined reference to ffi_prep_cif`. `ae` now reads the
+  archive itself and looks for the symbol in its string tables, on every
+  platform, with no external tool (#2686).
+
+- **A store into a struct field frees the value it replaces through any
+  pointer.** Only a pointer the compiler could trace back to `heap.new`
+  released the old string; through a list element, a call returning one, a
+  cast of a `ptr` parameter or a parameter of a function C may call, every
+  replaced string leaked, and so did a replaced struct field's strings and
+  a replaced closure field's environment. The store reads the field's
+  `_heap_<field>` tracker wherever the pointer came from: a call of C's
+  `malloc` from Aether is now a zeroing allocation (`calloc`), as `heap.new`
+  is, whether its pointer is cast to a struct at once or later, so the
+  tracker of a box Aether allocated is never garbage. A field freed by hand
+  before the store (`string.free(p.name)`, or `p.name = set_owned(p.name,
+  v)` with a `set_owned` that frees its first argument) is given up at the
+  free and not freed twice (#2369).
+
+- **A local `string[N]` array owns its elements.** A fresh string stored
+  into one leaked, and a view stored into one (`arr[0] =
+  make_item(w).tag`) dangled once the statement's temporary was gone. An
+  array some store into which is not a literal now owns its elements as a
+  string array cell does: a store takes the value and frees the one it
+  replaces, `arr = [arr[1], arr[0]]` takes both before storing either, the
+  scope exit frees what is left, and `string.free(arr[i])` empties the
+  element. An element of such an array, of a `string[N]` parameter, field
+  or state field is copied where it is kept: bound to a local, returned
+  (directly, in an `if` or `match` arm, as a tuple position), handed back
+  by a call, or copied into a closure's environment. A `string[N]`
+  parameter that stores into itself takes its own reference to each of its
+  caller's elements. A table of literals stays a plain C array. Also fixed
+  on the way: a struct a call returns, stored from as `o.f =
+  make_item(w).tag`, leaked; a pointer local or array a `try` body writes
+  was declared `volatile const char*`, which left the pointer itself
+  unprotected across the panic; and an array declared from another
+  (`int[3] b = a`) did not compile (#2618).
+
+- **A program that calls a string function through a typed fn pointer links
+  against the shared runtime on Windows again.** Since 0.799.0 the generated
+  helpers that decide whether such a call's result is owned (#2586) read and
+  wrote the runtime's thread-local ownership mark directly, and Windows
+  cannot import a thread-local from a DLL: the link failed with an undefined
+  reference to `g_aether_fnptr_owned`, or ld crashed on larger programs.
+  ae3d, which links its programs and the scripts they load to one runtime
+  DLL, could not link most of its suites. The mark is now private to the
+  runtime and reached through `aether_fnptr_mark` and `aether_fnptr_claim`,
+  as the runtime's other thread-locals are (#2687).
+
+### Performance
+
+- **A program's cold build on Windows takes about a third less time: its C
+  no longer includes `windows.h`.** mingw-w64's `winnt.h` includes `<x86intrin.h>`,
+  and with it every AVX-512 and AVX10 header GCC ships, so every program's
+  translation unit carried about 80,000 lines of headers (91,735 for a
+  1,027-line program), most of the time a build spent compiling it. The few
+  Windows services the generated C used (console setup, the monotonic clock,
+  the preemption yield, starting an actor's thread) are now runtime
+  functions, and a program gets the thread types the actor runtime's
+  structs carry without the Win32 calls behind them. Measured on Windows 11
+  with GCC 16.2: the same programs preprocess to about 9,500 lines, the
+  front end goes from 380 ms to 73 to 88 ms, and a cold `ae build` from 830
+  to 950 ms to 500 to 610 ms. Actor programs on x86 Linux and macOS lose
+  about 35,000 lines as well: the runtime's profiling header included
+  `<x86intrin.h>` for a counter read that only `AETHER_PROFILE` builds use.
+  The Windows clock also stops going through a `double`, which dropped
+  nanoseconds once the counter was large (#2673).
+- **The CI's Windows checks take less time and fewer runners (#2673).** The
+  MINGW64 suite ran twice on every PR, in ci.yml and in windows.yml; it now
+  runs once, in ci.yml, beside UCRT64 in windows.yml. The contrib series,
+  which was the last ten minutes of ci.yml's Windows job after its
+  half-hour `make ci`, runs as a job of its own beside it. And the sweep
+  ends with its timings: build and run time summed over the tests and the
+  slowest of each kind, so the next per-test regression shows in the log of
+  the run that caused it.
+
 ## [0.799.0]
 
 ### Fixed
