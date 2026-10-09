@@ -749,6 +749,15 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * param `ptr` instead compiles and then prints garbage. */
                     type = create_type(TYPE_PTR);
                     type->c_alias = strdup("va_list");
+                } else if (strcmp(token->value, "void") == 0) {
+                    /* `-> void`, the conventional spelling of "returns no
+                     * value", is the type an omitted `-> R` gives. It fell
+                     * through to the struct-name case below and became a
+                     * struct called `void`, which the C spelling hid but the
+                     * type checker did not: `fn(ptr, int) -> void` and
+                     * `fn(ptr, int)` were two types, and a function written
+                     * `-> void` matched neither's slot (#2623). */
+                    type = create_type(TYPE_VOID);
                 } else if (strcmp(token->value, "longdouble") == 0) {
                     /* #749: `long double` — the widest C floating type.
                      * An identifier-spelled primitive (no keyword token);
@@ -5390,6 +5399,35 @@ ASTNode* parse_extern_declaration(Parser* parser) {
     return extern_func;
 }
 
+/* True when the `(` at the cursor opens a return type, `-> (T1, T2) { ... }`,
+ * rather than a parenthesised arrow-body expression `-> (a + b)`.
+ *
+ * This used to be a shape check of its own: a type keyword or a name, then a
+ * comma. Any first element spelled with more than one token (`*Foo`,
+ * `mod.Name`, `fn(int) -> int`, `int?`) failed it, so `-> (*Foo, *Foo) {` fell
+ * to the `-> expr` path and broke at top level (#2626), although parse_type
+ * reads that tuple, as an extern return does. The type parser is the one
+ * authority on what a type is, so it decides: parse the group as a type with
+ * errors suppressed, rewind, and call it a typed return when it parsed and
+ * the body or a contract clause follows. An expression in parentheses does
+ * not parse as a type (a one-element `(a)` is refused too), and a tuple
+ * literal is no arrow body the checker accepts. */
+static int paren_starts_tuple_return_type(Parser* parser) {
+    int saved_pos = parser->current_token;
+    int saved_suppress = parser->suppress_errors;
+    parser->suppress_errors = 1;
+    Type* t = parse_type(parser);
+    Token* after = peek_token(parser);
+    int typed = t && after &&
+                (after->type == TOKEN_LEFT_BRACE ||
+                 after->type == TOKEN_REQUIRES ||
+                 after->type == TOKEN_ENSURES);
+    if (t) free_type(t);
+    parser->current_token = saved_pos;
+    parser->suppress_errors = saved_suppress;
+    return typed;
+}
+
 ASTNode* parse_function_definition(Parser* parser) {
     // Erlang-style pattern matching functions!
     // Syntax: 
@@ -5651,58 +5689,11 @@ ASTNode* parse_function_definition(Parser* parser) {
                     }
                     break;
                 }
-                case TOKEN_LEFT_PAREN: {
-                    // `-> (T1, T2, ...) { ... }` — parenthesised tuple
-                    // return type. Mirrors the form already accepted on
-                    // `extern f(...) -> (T1, T2)`. Disambiguate from a
-                    // parenthesised arrow-body expression `-> (a + b)` by
-                    // requiring a type keyword (or identifier-as-typename)
-                    // followed by a comma — only the tuple-type form has
-                    // that shape.
-                    // peek (offset 0) = `(`, so the first inside-paren
-                    // token is offset 1, and the comma after it is offset 2.
-                    Token* inner = peek_ahead(parser, 1);
-                    /* An array or slice suffix on the first element
-                     * (`(int[], string)`, `(byte[16], int)`, `(Vec[], int)`)
-                     * sits between it and the comma. After a type keyword
-                     * any `[...]` is a type; after an identifier only the
-                     * empty `[]` is, since `(a[1], b)` is an index
-                     * expression. */
-                    int comma_at = 2;
-                    Token* lb = peek_ahead(parser, 2);
-                    if (inner && lb && lb->type == TOKEN_LEFT_BRACKET) {
-                        Token* rb = peek_ahead(parser, 3);
-                        if (rb && rb->type == TOKEN_RIGHT_BRACKET) {
-                            comma_at = 4;
-                        } else if (inner->type != TOKEN_IDENTIFIER && rb &&
-                                   rb->type == TOKEN_NUMBER) {
-                            Token* rb2 = peek_ahead(parser, 4);
-                            if (rb2 && rb2->type == TOKEN_RIGHT_BRACKET) comma_at = 5;
-                        }
-                    }
-                    Token* after_inner = peek_ahead(parser, comma_at);
-                    if (inner && after_inner && after_inner->type == TOKEN_COMMA) {
-                        switch (inner->type) {
-                            case TOKEN_INT:
-                            case TOKEN_INT64:
-                            case TOKEN_UINT64:
-                            case TOKEN_DURATION:
-                            case TOKEN_FLOAT:
-                            case TOKEN_BOOL:
-                            case TOKEN_BYTE:
-                            case TOKEN_STRING:
-                            case TOKEN_MESSAGE:
-                            case TOKEN_PTR:
-                            case TOKEN_ACTOR_REF:
-                            case TOKEN_IDENTIFIER:
-                                is_typed_return = 1;
-                                break;
-                            default:
-                                break;
-                        }
-                    }
+                case TOKEN_LEFT_PAREN:
+                    // `-> (T1, T2, ...) { ... }`, a parenthesised tuple
+                    // return type, as `extern f(...) -> (T1, T2)` takes.
+                    is_typed_return = paren_starts_tuple_return_type(parser);
                     break;
-                }
                 default:
                     break;
             }

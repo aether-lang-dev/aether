@@ -94,7 +94,7 @@ Aether is not, and has no plans to be, a pure FP language (no Hindley-Milner inf
 | `longdouble` | C `long double` widest float (C interop) | `extern strtold(...) -> longdouble` |
 | `ptr` | Raw pointer (for C interop) | `null` |
 
-¹ `void` is **not** a reserved word, there is no `void` token; it is a plain identifier used by convention to spell the absence of a return value. A function that omits its `-> Type` annotation is the canonical void declaration (see [Functions](#functions)). It is never a value type and cannot be used for a variable or field.
+¹ `void` is **not** a reserved word, there is no `void` token; it is a plain identifier used by convention to spell the absence of a return value. A function that omits its `-> Type` annotation is the canonical void declaration (see [Functions](#functions)), and `-> void` is the same type as the omitted one: `f() -> void` and `f()` declare the same function, and `fn(ptr, int) -> void` and `fn(ptr, int)` are one function-pointer type. It is never a value type and cannot be used for a variable or field.
 
 #### `byte` unsigned 8-bit
 
@@ -476,7 +476,7 @@ Variables are inferred from their initialization or usage context.
 
 **Keywords are not names.** A statement keyword used as a variable (`when = 0.0`, `message = "hi"`) is refused at the keyword: `'when' is a reserved keyword and cannot be used as an identifier; rename it`.
 
-**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error — *cannot re-bind 'x' as string: it was bound as int by its first assignment* — rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function is the same compile error — *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A name bound in sibling bodies and used only inside them is a separate variable per body. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` — a 64-bit integer, a `uint32`, a float — is the narrowing error described there.
+**A local has one type: the one its first binding gave it.** A later bare assignment is an assignment, not a new variable, so `x = 5` then `x = "s"` (or `x = true`, `x = null`) is a compile error, *cannot re-bind 'x' as string: it was bound as int by its first assignment*, rather than a C error about `const char*`. Use a new name for the other value. A name first bound inside a branch or loop body and **used after it** is one variable for the whole function: it takes the numeric join of every binding (`if a { n = 1 } else { n = 4000000000 }` makes `n` a `long`; `f = 1.5` in one branch and `f = 2` in the other keeps `f` a `float`), and a binding of another kind anywhere in the function, or of another struct or pointer type, is the same compile error: *cannot bind 'v' as int: it is bound as string in another branch or loop body of this function*. A local of a `while` body is declared before the loop, and a name both arms of an `if`/`else` bind is declared before the `if`, so each is one variable whether or not it is used after them: `view = p as *Apple` in one `while` and `view = p as *Pear` in the next is that error, where a bare `ptr` or `null` binding would fit either. A name bound in the bodies of separate `if`s or `for` loops and used only inside them is a separate variable per body, except a `string` local, which is always one variable for the whole function, as its heap tracker is. The conversions the [table below](#casting-between-types) permits still apply at a re-bind, and the local keeps its first type: after `f = 1.5`, `f = 2` stores `2.0` and `f` stays a `float`; after `int x = 0`, `x = 2.5` stores `2`. A `string` accepts `null` (it is a nullable `const char*`), and a value that would not fit an *inferred* `int` (a 64-bit integer, a `uint32`, a float) is the narrowing error described there.
 
 **A statement ends at its line.** `foo` on a line of its own is an expression statement; `bar = 2` on the next line is a separate binding, not the declaration `foo bar = 2`. The binding name of a typed declaration (`Pair p`, `size_t n = ...`, `uint32[4] xs`) is written on the type's line.
 
@@ -620,7 +620,7 @@ print_hello() {
 }
 ```
 
-There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration. The `main()` function is the entry point and is always void.
+There is no `void` keyword in the return-type position, a missing return-type annotation IS the void declaration (`-> void`, the conventional spelling, means the same). The `main()` function is the entry point and is always void.
 
 **Builtin names cannot be redefined.** A call to a builtin (`isolate`, `consume`, `release`, `make`, `sizeof`, `typeof`, `sleep`, …) is lowered by name, so a user function spelled the same would compile and never run; the definition is refused instead: `'isolate' is a builtin function and cannot be redefined … rename it (e.g. 'isolate_')`. A user function whose name is a *C library* symbol (`read`, `time`, `index`, `remove`, …) is fine: it is emitted under a mangled C name in every position — direct calls, `f as fn(...)`, and as a bare `fn` value.
 
@@ -1341,6 +1341,32 @@ safe_divide(a: int, b: int) -> (int, string) {
 ```
 
 Stating the return type at the signature is preferred when the function is part of a public API or when readers shouldn't have to scan the body to know the return shape. The two forms (`-> { ... }` with inference vs. `-> (T1, T2) { ... }` explicit) are interchangeable from the caller's perspective and produce the same C struct return.
+
+Each element takes any type a parameter or a single return takes, pointers included, so a caller keeps the pointer types instead of casting `ptr`s back:
+
+```aether,run
+struct Foo {
+    n: int
+}
+
+pair_ptr(a: *Foo, b: *Foo) -> (*Foo, *Foo) {
+    return b, a
+}
+
+main() {
+    x = Foo { n: 1 }
+    y = Foo { n: 2 }
+    p, q = pair_ptr(&x, &y)    // p and q are *Foo
+    p.n = 20                   // writes through to y
+    println("${q.n} ${y.n}")
+}
+```
+
+```output
+1 20
+```
+
+A parenthesised arrow body is still an expression: `sum(a: int, b: int) -> (a + b)` returns `a + b`. The group is a return type when it parses as one and the `{` body (or a `requires` / `ensures` clause) follows it.
 
 Error propagation across function boundaries works correctly:
 
@@ -2109,6 +2135,8 @@ main() {
 
 The cast is a view, not an allocation, the operand pointer's lifetime is the caller's problem (the same contract as raw `extern` interaction). Reach for this only when the storage is C-allocated and Aether wants to manipulate fields. For Aether-owned data, use the normal struct-literal form (`Point { x: 1, y: 2 }`) so refcounting and lifetime tracking apply.
 
+A typed pointer is checked like any other type, at an assignment and at a call alike: `buffer_size(b: *Buffer)` given `&p.ints`, an `*Ints`, is a compile error (`Argument 1 'b' of 'buffer_size': expected *Buffer, got *Ints`), as `&local`, `&p.a.b` or a `*Ints` local would be. A bare `ptr` converts to and from every typed pointer, the way C's `void*` does, and so does a pointer to a `@c_struct` overlay, which is a `void*` in the generated C.
+
 **`as` accepts a primitive value cast, a struct overlay (`*StructName`), a function-pointer cast (`fn(...) -> R`), or a typed-array view (`T[]`).** A value cast like `n as int` (numeric to numeric, or between a distinct type and its base) compiles and runs. Non-numeric casts such as `buf as string` or `raw as ptr` parse but are rejected at type-check with `E0200`. For converting between primitive types, see the [Casting between types](#casting-between-types) table above, most conversions are either implicit (Aether's type system inserts the necessary cast in the generated C) or use a named helper (`string.from_int`, `string.from_long`, …).
 
 The `as` keyword is the same token used for `import x as y` aliasing; the two parses don't collide because import-aliasing is recognised only inside `import` statements. Full semantics (operand type rules, error cases, the shared-token interaction) are in [c-interop.md § Struct overlay on raw pointers](c-interop.md#struct-overlay-on-raw-pointers-structname-and-expr-as-structname).
@@ -2844,6 +2872,34 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 ```
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
+
+A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct field of that type, a `let` local of it, and a module-level `var` (its initializer, and an assignment to it in a function body). The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
+
+```aether,run
+extern free(p: ptr)
+
+noop_free(block: ptr, size: int) {
+    println("noop_free")
+}
+
+system_free(block: ptr, size: int) {
+    free(block)
+    println("system_free")
+}
+
+var g_free: fn(ptr, int) = noop_free    // noop_free's address
+
+main() {
+    g_free(null, 0)
+    g_free = system_free
+    g_free(null, 0)                     // free(null) does nothing
+}
+```
+
+```output
+noop_free
+system_free
+```
 
 ### Named C function-pointer types, `type Name = fn(T1, T2) -> R`
 

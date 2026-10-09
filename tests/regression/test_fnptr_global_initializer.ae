@@ -1,0 +1,93 @@
+// Issue #2623: a module-level `var` of a typed function pointer type takes a
+// named function of that type as its initializer, and holds its address.
+//
+// `var g_free: fn(ptr, int) = noop_free` was refused with E0200 "Type
+// mismatch in variable initialization": the initializer was read as a
+// closure value, whose type has no result slot for a function returning
+// nothing, while the annotation has `void`. `fn(ptr, int) -> void` failed the
+// same way, as did a function written `-> void`, which was a struct named
+// `void` to the type checker. A global whose function returns a value got
+// past the checker and then failed in gcc: the closure was emitted into the
+// `void*`, and the static was defined before the function was declared. Now
+// a named function bound to a typed function pointer is its address, as it is
+// for a parameter or a field of that type, `void` is the type an omitted
+// return gives, and the global is emitted after the prototypes.
+
+import std.string
+
+extern exit(code: int)
+
+var g_calls: int = 0
+var g_last: int = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+noop_free(block: ptr, size: int) {
+    g_calls = g_calls + 1
+    g_last = 1
+}
+
+system_free(block: ptr, size: int) {
+    g_calls = g_calls + 1
+    g_last = 2
+}
+
+spelled_void(block: ptr, size: int) -> void {
+    g_calls = g_calls + 1
+    g_last = 3
+}
+
+some_alloc(count: int, size: int) -> ptr {
+    g_last = count * size
+    return null
+}
+
+greet(p: ptr) -> string {
+    return string.concat("hi", "!")
+}
+
+// A user function named like a libc one is defined under another C name;
+// the global must hold this one.
+time(x: int) -> int {
+    return x + 1
+}
+
+var g_free: fn(ptr, int) = noop_free
+var g_free_void: fn(ptr, int) -> void = noop_free
+var g_spelled: fn(ptr, int) = spelled_void
+var g_alloc: fn(int, int) -> ptr = some_alloc
+var g_text: fn(ptr) -> string = greet
+var g_time: fn(int) -> int = time
+
+main() {
+    g_free(null, 0)
+    check(g_calls == 1 && g_last == 1, "the initializer is noop_free")
+    g_free_void(null, 0)
+    check(g_calls == 2 && g_last == 1, "`-> void` spells the same slot")
+    g_spelled(null, 0)
+    check(g_calls == 3 && g_last == 3, "a function written `-> void` fits `fn(ptr, int)`")
+
+    // Re-bound inside a function, then copied to a local.
+    g_free = system_free
+    f = g_free
+    f(null, 0)
+    check(g_calls == 4 && g_last == 2, "the global re-bound to system_free")
+    f = noop_free
+    f(null, 0)
+    check(g_calls == 5 && g_last == 1, "the local re-bound to noop_free")
+
+    p = g_alloc(6, 7)
+    check(p == null && g_last == 42, "a value-returning function pointer global")
+
+    s = g_text(null)
+    check(s == "hi!", "a string-returning function pointer global")
+
+    check(g_time(41) == 42, "the global holds the user's time(), not libc's")
+
+    println("ok")
+}

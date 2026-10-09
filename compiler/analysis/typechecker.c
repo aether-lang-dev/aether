@@ -1138,6 +1138,12 @@ static const char* base_type_name(Type* t) {
  * tells `expected Tag, got string` apart from a plain mismatch. */
 static const char* type_name(Type* t) {
     if (t && t->distinct_name) return t->distinct_name;
+    /* A typed pointer as it is written, `*Apple`. As "ptr", a message about
+     * `*Apple` and `*Pear` named both the same (#2611, #2624). A `const *T`
+     * keeps its C spelling from base_type_name. */
+    if (t && t->kind == TYPE_PTR && !t->c_alias && t->element_type &&
+        t->element_type->kind != TYPE_UNKNOWN)
+        return aether_internf("*%s", type_name(t->element_type));
     return base_type_name(t);
 }
 
@@ -2050,6 +2056,32 @@ static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     type_error(emsg, arg->line, arg->column);
 }
 
+/* #2624: a typed pointer passed where the parameter takes a pointer to
+ * another type: `buffer_size(b: *Buffer)` given `&p.ints`, an `*Ints`. The
+ * struct rule above compares values only, so the front end let it through
+ * and gcc reported "incompatible pointer type" against generated code; with
+ * two structs sharing a layout prefix nothing at all would have failed, and
+ * the callee would have read the wrong struct. Compared as an assignment
+ * compares them (#1877): a bare `ptr` on either side is the universal
+ * pointer, and so is a pointer to a @c_struct overlay, a `void*` in C. */
+static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                    Type* param_type, int index, const char* param_name) {
+    if (!arg_type || !param_type || arg_type->kind != TYPE_PTR ||
+        param_type->kind != TYPE_PTR) return;
+    Type* want = param_type->element_type;
+    Type* got = arg_type->element_type;
+    if (!want || !got || want->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN) return;
+    if ((want->kind == TYPE_STRUCT && is_c_struct_name(want->struct_name)) ||
+        (got->kind == TYPE_STRUCT && is_c_struct_name(got->struct_name))) return;
+    if (is_type_compatible(arg_type, param_type)) return;
+    char emsg[512];
+    snprintf(emsg, sizeof(emsg),
+             "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             type_name(param_type), type_name(arg_type));
+    type_error(emsg, arg->line, arg->column);
+}
+
 /* #2516: a fixed-size array parameter (`xs: int[3]`) takes an array of
  * that element type and length: the callee copies that many elements and
  * its `xs.len` is the declared length. A longer or shorter array, a slice
@@ -2403,6 +2435,39 @@ static int fn_name_matches_signature(SymbolTable* table, ASTNode* rhs, Type* tar
         declared++;
     }
     return declared == target->param_count;
+}
+
+/* #2623: the typed C function pointer (`fn(ptr, int)`, is_fnptr) that the
+ * binding `stmt` writes, or NULL when it writes anything else. That is the
+ * declaration's own annotation; for a bare `name = value`, the type of the
+ * local it re-binds, or of the module-level `var` it assigns when no local
+ * of the name is in scope. The global is found in the program, not the file
+ * scope's table, where the early inference pass parks locals under their
+ * own types. A `const` is no such slot: it is not a variable a call goes
+ * through, and its static is emitted before any function is declared. */
+static ASTNode* global_var_decl(ASTNode* child);
+static Type* fnptr_binding_slot(ASTNode* stmt, SymbolTable* table) {
+    if (stmt->type == AST_CONST_DECLARATION &&
+        !(stmt->annotation && strcmp(stmt->annotation, "global_var") == 0)) return NULL;
+    Type* t = stmt->node_type;
+    if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) return t;
+    if (!stmt->type_inferred || !stmt->value) return NULL;
+    for (SymbolTable* s = table; s && s->parent; s = s->parent) {
+        Symbol* local = lookup_symbol_local(s, stmt->value);
+        if (local) {
+            t = local->type;
+            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
+        }
+    }
+    ASTNode* program = aether_typecheck_program_node();
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* g = global_var_decl(program->children[i]);
+        if (g && strcmp(g->value, stmt->value) == 0) {
+            t = g->node_type;
+            return t && t->kind == TYPE_FUNCTION && t->is_fnptr ? t : NULL;
+        }
+    }
+    return NULL;
 }
 
 int is_assignable(Type* from, Type* to) {
@@ -6692,6 +6757,29 @@ static void declare_hoisted_local(SymbolTable* table, const char* name, Type* t)
     if (s) s->branch_hoisted = 1;
 }
 
+/* #2611: is a binding of type `here`, in a sibling branch or loop body of a
+ * local hoisted as `hoisted`, of the same kind but another C type: a struct
+ * or sum of another name, or a pointer to another type? Codegen's sibling
+ * check refuses a binding of another kind and passes one of the same kind,
+ * leaving the nominal rules to this checker, which handed the binding back
+ * to codegen unjudged. So `view = block as *Pear` in one loop beside
+ * `view = block as *Apple` in another reached the C compiler as an
+ * assignment to the `Apple*` both share. A bare `ptr`, and a pointer to a
+ * @c_struct overlay (a `void*` in C), take any pointer. */
+static int sibling_binding_other_type(Type* here, Type* hoisted) {
+    if (!here || !hoisted || here->kind != hoisted->kind) return 0;
+    if (here->kind == TYPE_STRUCT || here->kind == TYPE_SUM)
+        return here->struct_name && hoisted->struct_name &&
+               strcmp(here->struct_name, hoisted->struct_name) != 0;
+    if (here->kind != TYPE_PTR) return 0;
+    Type* a = here->element_type;
+    Type* b = hoisted->element_type;
+    if (!a || !b || a->kind == TYPE_UNKNOWN || b->kind == TYPE_UNKNOWN) return 0;
+    if ((a->kind == TYPE_STRUCT && is_c_struct_name(a->struct_name)) ||
+        (b->kind == TYPE_STRUCT && is_c_struct_name(b->struct_name))) return 0;
+    return !is_type_compatible(here, hoisted);
+}
+
 /* Function (or main) entry: hoist_if_branch_vars's names. */
 static void declare_if_branch_hoists(ASTNode* body, SymbolTable* table) {
     const char* names[HOIST_MAX_NAMES];
@@ -7128,10 +7216,27 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 } else {
                     typecheck_expression(init, table);
                 }
-                if (function_value_annotate(init, table)) {
+                /* #2623: a named function bound to a typed C function
+                 * pointer is its address, as it is passed to a parameter of
+                 * that type or stored in a field of one (#1240). Read as a
+                 * closure value instead, a function returning nothing was
+                 * typed `fn(ptr, int)` with no result slot where the
+                 * annotation has `void`, so the slot refused the one function
+                 * it was declared for; one returning a value passed, and was
+                 * emitted as an _AeClosure into the `void*`. Marked as an
+                 * address so codegen spells the definition's C name. */
+                Type* fnptr_slot = fnptr_binding_slot(stmt, table);
+                int fn_address = fnptr_slot &&
+                                 fn_name_matches_signature(table, init, fnptr_slot);
+                if (fn_address) {
+                    set_node_type(init, clone_type(fnptr_slot));
+                    if (init->annotation) free(init->annotation);
+                    init->annotation = strdup("fn_addr");
+                } else if (function_value_annotate(init, table)) {
                     /* A function is a value here, not a call. */
                 }
-                Type* init_type = infer_type(init, table);
+                Type* init_type = fn_address ? clone_type(fnptr_slot)
+                                             : infer_type(init, table);
 
                 /* `const` is substitution-at-each-use: the compiler
                  * inlines the RHS expression at every reference. That
@@ -7228,11 +7333,39 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     /* #2186: a local hoisted out of a branch or loop body,
                      * bound again inside another one, is judged by
                      * codegen's sibling check, which joins every binding
-                     * of the name first. Keep the join here for reads. */
+                     * of the name first. Keep the join here for reads.
+                     * The nominal rule is this checker's (#2611): see
+                     * sibling_binding_other_type. */
                     if (bound && bound->branch_hoisted && bound_in != table) {
-                        if (bound->type && init_type) {
+                        /* declare_hoisted_local typed the local before the
+                         * block was checked, from what the early inference
+                         * pass knew, and that pass leaves a binding such as
+                         * an `as *T` view unknown. Codegen types the C
+                         * declaration from the first binding once it is
+                         * checked; so does the first binding checked here,
+                         * joined over the body as declare_hoisted_local
+                         * joins (#2611). */
+                        if (bound->type && bound->type->kind == TYPE_UNKNOWN && init_type &&
+                            init_type->kind != TYPE_UNKNOWN && init_type->kind != TYPE_VOID) {
+                            Type* joined = hoist_join_type(g_tc_fn_body, stmt->value, init_type);
+                            free_type(bound->type);
+                            bound->type = joined ? joined : clone_type(init_type);
+                        } else if (bound->type && init_type) {
                             Type* joined = numeric_join_type(bound->type, init_type);
                             if (joined) { free_type(bound->type); bound->type = joined; }
+                        }
+                        if (sibling_binding_other_type(init_type, bound->type)) {
+                            char rmsg[512];
+                            snprintf(rmsg, sizeof(rmsg),
+                                "cannot bind '%s' as %s: it is bound as %s in another branch "
+                                "or loop body of this function, and a local first bound inside "
+                                "a branch or loop body is one variable for the whole function. "
+                                "Use a new name for the %s value",
+                                stmt->value, type_name(init_type), type_name(bound->type),
+                                type_name(init_type));
+                            type_error(rmsg, stmt->line, stmt->column);
+                            free_type(init_type);
+                            return 0;
                         }
                         bound = NULL;
                     }
@@ -11236,6 +11369,7 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_closure_for_fnptr(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||

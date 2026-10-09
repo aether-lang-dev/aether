@@ -6388,6 +6388,40 @@ static void emit_static_struct_init(CodeGenerator* gen, ASTNode* lit) {
     fprintf(gen->output, " }");
 }
 
+/* #701: each mutable module-level `var` as a file-scope static (the name was
+ * registered with the constants). Emitted after the function prototypes and
+ * the adapter declarations, because an initializer may name a function: a
+ * `fn(ptr, int)` global holds the function's address, through its #2586
+ * adapter when it returns a string (#2623). Before them, the name was
+ * undeclared where the static was defined. Still before every function body
+ * and closure, which read and write these statics. */
+static void emit_module_global_vars(CodeGenerator* gen, ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* cd = program->children[i];
+        if (!cd || cd->type != AST_CONST_DECLARATION || !cd->value ||
+            cd->child_count == 0 || !cd->annotation ||
+            strcmp(cd->annotation, "global_var") != 0) continue;
+        codegen_note_diag_pos(cd);
+        codegen_note_diag_func(NULL);
+        const char* ctype = get_c_type(cd->node_type);
+        fprintf(gen->output, "static %s %s = ", ctype, cd->value);
+        if (cd->children[0]->type == AST_NULL_LITERAL &&
+            strcmp(ctype, "_AeClosure") == 0) {
+            /* #2525: a `var name: fn = null` global starts as the
+             * zero closure (no body, no env); `NULL` is not an
+             * initializer for the struct. A function binds it later. */
+            fprintf(gen->output, "{0}");
+        } else if (cd->children[0]->type == AST_STRUCT_LITERAL) {
+            /* #2590: a struct literal of constants (the type checker
+             * admits no other here) as an initializer list. */
+            emit_static_struct_init(gen, cd->children[0]);
+        } else {
+            generate_expression(gen, cd->children[0]);
+        }
+        fprintf(gen->output, ";\n");
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -8307,23 +8341,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // can read and write it as a plain C identifier. Record the
                 // name so a bare `name = expr` inside a function body lowers
                 // to a write to this static rather than a shadowing local.
+                // The definition itself is emitted by emit_module_global_vars,
+                // after the function prototypes.
                 register_module_global_var(gen, cd->value);
-                const char* ctype = get_c_type(cd->node_type);
-                fprintf(gen->output, "static %s %s = ", ctype, cd->value);
-                if (cd->children[0]->type == AST_NULL_LITERAL &&
-                    strcmp(ctype, "_AeClosure") == 0) {
-                    /* #2525: a `var name: fn = null` global starts as the
-                     * zero closure (no body, no env); `NULL` is not an
-                     * initializer for the struct. A function binds it later. */
-                    fprintf(gen->output, "{0}");
-                } else if (cd->children[0]->type == AST_STRUCT_LITERAL) {
-                    /* #2590: a struct literal of constants (the type checker
-                     * admits no other here) as an initializer list. */
-                    emit_static_struct_init(gen, cd->children[0]);
-                } else {
-                    generate_expression(gen, cd->children[0]);
-                }
-                fprintf(gen->output, ";\n");
             } else {
                 /* Scoped C, not a #define: a macro has no scope, so a
                  * function parameter or local spelled like the const was
@@ -8542,6 +8562,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     discover_fn_values(gen);              /* #2586 */
     emit_bare_fn_adapter_decls(gen);
     emit_fn_value_adapter_decls(gen);
+    emit_module_global_vars(gen, program);   /* #2623: after the prototypes */
 
     if (gen->closure_count > 0) {
         print_line(gen, "// Closure declarations");

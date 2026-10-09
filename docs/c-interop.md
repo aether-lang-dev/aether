@@ -874,7 +874,8 @@ main() {
 - The cast itself is a view, **it does not allocate, refcount, or auto-free**. The operand pointer's lifetime is the caller's problem (the same contract as raw `extern` interaction). If the underlying memory is freed while a struct view still references it, you have a use-after-free; Aether does not track this.
 - Two views of the same memory alias each other (writes through one are visible through the other). This is the whole point.
 - A `ptr`-typed field of a struct view can itself be re-cast: `head.next as *ListHead` reaches the next list element.
-- `*StructName` is accepted in any type position: variable annotations, function parameters, function return types, struct fields, extern declarations.
+- `*StructName` is accepted in any type position: variable annotations, function parameters, function return types, tuple elements (`-> (*Node, *Node)`), struct fields, extern declarations.
+- Two typed pointers are compatible only when they point at the same type, at an assignment and at a call alike: an `*Ints` (a local, `&ints`, `&p.ints`) passed to a `*Buffer` parameter is a typecheck error naming both, where it used to reach the C compiler as "incompatible pointer type". A bare `ptr`, and a pointer to a `@c_struct` overlay (a `void*` in C), convert to and from any typed pointer.
 
 **When to reach for it**
 
@@ -910,7 +911,7 @@ shrink(ctx: ptr, p: ptr, new_len: int) {
 - `&local.field` lowers to `&local.field` the address of a field on an Aether-owned value struct.
 - `&local` and `&arr[i]` work the same way (address of a local, address of an array element).
 - `&f()` is an error: a call's result is not stored anywhere, so it has no address (it used to reach the C compiler as "lvalue required", #2591). Bind it to a local first, `def = default_body_def()` then `create_body(world, &def)`, and the pointer lives as long as the local. `&ref_get(r)` is the exception: it is the cell itself.
-- The result is typed as a pointer to the field's type (`*T`), assignable to a bare `ptr` parameter. Like the overlay casts, it is a raw view: the pointer is valid only while the underlying storage is.
+- The result is typed as a pointer to the field's type (`*T`), assignable to a bare `ptr` parameter or a `*T` one, and refused by a parameter that points at another type. Like the overlay casts, it is a raw view: the pointer is valid only while the underlying storage is.
 
 Without `&`, a `&struct->field` out-param forces raw `mem.long_to_ptr(base + OFFSET)` offset math, re-introducing the hand-maintained offset constant the typed overlay was meant to eliminate.
 

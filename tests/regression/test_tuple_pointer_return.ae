@@ -1,0 +1,87 @@
+// Issue #2626: a tuple return type takes any type a parameter or a single
+// return does, pointers included.
+//
+// `pair_ptr(a: *Foo, b: *Foo) -> (*Foo, *Foo) { ... }` was a parse error at
+// top level ("Expected actor, struct, function, or main"): the parser told a
+// `-> (T1, T2) { ... }` return type from a parenthesised `-> (expr)` body by
+// a one-token check (a type keyword or a name, then a comma), so a first
+// element spelled with more tokens fell to the expression path. The type
+// parser decides now, so `*Foo` takes any position, the caller keeps the
+// pointer types (no `ptr` and casts back), and the fields read and write
+// through them. An arrow body in parentheses still parses as an expression.
+
+extern exit(code: int)
+
+struct Foo {
+    n: int
+}
+
+struct Pair {
+    left: Foo
+    right: Foo
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The issue's shape: both positions are pointers.
+pair_ptr(a: *Foo, b: *Foo) -> (*Foo, *Foo) {
+    return b, a
+}
+
+// A pointer first, then a value; and a value first, then a pointer.
+first_and_count(a: *Foo, k: int) -> (*Foo, int) {
+    return a, k + a.n
+}
+
+count_and_first(a: *Foo, k: int) -> (int, *Foo) {
+    return k * a.n, a
+}
+
+// Pointers to the fields of a struct the caller owns.
+halves(p: *Pair) -> (*Foo, *Foo) {
+    return &p.left, &p.right
+}
+
+// A contract clause after the tuple type.
+ordered(a: *Foo, b: *Foo) -> (*Foo, *Foo) requires a != null {
+    if a.n <= b.n {
+        return a, b
+    }
+    return b, a
+}
+
+// A parenthesised arrow body is still an expression, not a return type.
+sum_arrow(a: int, b: int) -> (a + b)
+
+main() {
+    x = Foo { n: 1 }
+    y = Foo { n: 2 }
+
+    p, q = pair_ptr(&x, &y)
+    check(p.n == 2 && q.n == 1, "pair_ptr swaps the two pointers")
+    p.n = 20
+    check(y.n == 20, "a write through the returned pointer reaches the caller's struct")
+
+    f, k = first_and_count(&x, 5)
+    check(f.n == 1 && k == 6, "(*Foo, int)")
+    m, g = count_and_first(&y, 3)
+    check(m == 60 && g.n == 20, "(int, *Foo)")
+
+    pair = Pair { left: Foo { n: 7 }, right: Foo { n: 8 } }
+    l, r = halves(&pair)
+    l.n = l.n + 100
+    r.n = r.n + 200
+    check(pair.left.n == 107 && pair.right.n == 208, "pointers to fields write through")
+
+    lo, hi = ordered(&y, &x)
+    check(lo.n == 1 && hi.n == 20, "a tuple of pointers with a requires clause")
+
+    check(sum_arrow(2, 3) == 5, "a parenthesised arrow body")
+
+    println("ok")
+}
