@@ -529,11 +529,36 @@ static int is_constant_condition(ASTNode* node, int* is_truthy) {
 // os ∈ {"windows","darwin","linux","freebsd","openbsd","netbsd",
 // "dragonfly","solaris","wasm","unknown"}; arch ∈ {"x86_64","aarch64",
 // "x86","arm","riscv64","ppc64","wasm","unknown"}. The target is the host
-// (aetherc emits C compiled by the host toolchain; there is no cross-target
-// flag today), exactly as os.platform() and select() already assume.
+// unless --target-os / --target-arch say otherwise: `ae build --target=<triple>`
+// passes them (tools/ae_cross.c cross_target_os_arch), so a cross build picks
+// the arm for the machine it is building for.
 // ---------------------------------------------------------------------------
 
+/* Set by when_set_target for a cross build; NULL means the host. */
+static const char* g_when_target_os = NULL;
+static const char* g_when_target_arch = NULL;
+
+static int name_in(const char* s, const char* const* names) {
+    for (int i = 0; names[i]; i++) {
+        if (strcmp(s, names[i]) == 0) return 1;
+    }
+    return 0;
+}
+
+int when_set_target(const char* os, const char* arch) {
+    static const char* const oses[] = { "windows", "darwin", "linux", "freebsd", "openbsd",
+                                        "netbsd", "dragonfly", "solaris", "wasm", NULL };
+    static const char* const arches[] = { "x86_64", "aarch64", "x86", "arm", "riscv64",
+                                          "loongarch64", "ppc64", "wasm", NULL };
+    if (os && !name_in(os, oses)) return 0;
+    if (arch && !name_in(arch, arches)) return 0;
+    if (os) g_when_target_os = os;
+    if (arch) g_when_target_arch = arch;
+    return 1;
+}
+
 static const char* target_os_string(void) {
+    if (g_when_target_os) return g_when_target_os;
 #if defined(_WIN32) || defined(_WIN64)
     return "windows";
 #elif defined(__APPLE__)
@@ -558,6 +583,7 @@ static const char* target_os_string(void) {
 }
 
 static const char* target_arch_string(void) {
+    if (g_when_target_arch) return g_when_target_arch;
 #if defined(__x86_64__) || defined(_M_X64) || defined(__amd64__)
     return "x86_64";
 #elif defined(__aarch64__) || defined(_M_ARM64) || defined(__arm64__)

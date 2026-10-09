@@ -1,0 +1,39 @@
+// Prints the compile-time target.os and target.arch, one `when` arm each.
+// test_when_cross_target.sh builds it for several --target triples with
+// --emit=csrc and checks which arms survived into the C.
+main() {
+    when target.os == "linux" {
+        println("TARGET_OS=linux")
+    } else {
+        when target.os == "darwin" {
+            println("TARGET_OS=darwin")
+        } else {
+            when target.os == "windows" {
+                println("TARGET_OS=windows")
+            } else {
+                when target.os == "freebsd" {
+                    println("TARGET_OS=freebsd")
+                } else {
+                    when target.os == "wasm" {
+                        println("TARGET_OS=wasm")
+                    } else {
+                        println("TARGET_OS=other")
+                    }
+                }
+            }
+        }
+    }
+    when target.arch == "x86_64" {
+        println("TARGET_ARCH=x86_64")
+    } else {
+        when target.arch == "aarch64" {
+            println("TARGET_ARCH=aarch64")
+        } else {
+            when target.arch == "wasm" {
+                println("TARGET_ARCH=wasm")
+            } else {
+                println("TARGET_ARCH=other")
+            }
+        }
+    }
+}
