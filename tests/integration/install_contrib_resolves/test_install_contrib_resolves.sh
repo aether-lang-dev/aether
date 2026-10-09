@@ -39,9 +39,12 @@ cd "$ROOT"
 sourced_c_files() {
     # Every .ae, not just module.ae: contrib.jq @sources aether_jq.c from
     # value.ae, a sibling of its facade (#2208). @source resolves against
-    # the @source'ing file's own directory.
-    for aef in $(find contrib -name '*.ae' | sort); do
-        moddir="$(dirname "$aef")"
+    # the @source'ing file's own directory. Only the files that say @source
+    # at all are read line by line: one grep picks them out, where a dirname
+    # and a sed for each of the 121 .ae files, run twice, took about 20
+    # seconds of this test on Windows (#2596).
+    for aef in $(find contrib -name '*.ae' -exec grep -l '@source' {} + | sort); do
+        moddir="${aef%/*}"
         sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$aef" | while IFS= read -r rel; do
             case "$rel" in *.c) ;; *) continue ;; esac
             ( cd "$moddir/$(dirname "$rel")" 2>/dev/null && printf '%s/%s\n' "$(pwd)" "$(basename "$rel")" ) \

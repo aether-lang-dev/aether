@@ -35,5 +35,6 @@
   a JDK 22 or SWIG still skips where that tool is missing.
   `manifest_srcs_long_path` had built from the short root on every platform:
   `ae` takes its root from its own path, which `AETHER_HOME` does not
-  override, and a cached binary was served anyway. It now runs `ae` from the
-  long path with a fresh cache, and checks the root it built from.
+  override, and a cached binary was served anyway. Its check now runs `ae`
+  from the long path with a fresh cache, checks the root it built from, and
+  lives in `message_trace`, whose traced build it shares (#2596).

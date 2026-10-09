@@ -73,6 +73,30 @@ else
     echo "aea_artifacts: $pass passed, $fail failed"; exit 1
 fi
 
+# The script hands an aetherc many modules at once (#2596). Each artifact
+# must be the one an aetherc of its own writes: checked on the module that
+# records build-symbol queries, the module after it, and the last module,
+# where state left over from an earlier parse in the same process would show.
+mod_list="$(cd "$SHARE" && find std -name '*.ae' ! -name 'test_*' ! -name 'example*.ae' | LC_ALL=C sort)"
+after_fixture="$(printf '%s\n' "$mod_list" | awk 'f { print; exit } $0 == "std/aeafixture/module.ae" { f = 1 }')"
+last_mod="$(printf '%s\n' "$mod_list" | tail -1)"
+batch_ok=1
+for rel in std/aeafixture/module.ae $after_fixture $last_mod; do
+    case "$rel" in
+        */module.ae) stem="${rel%/module.ae}" ;;
+        *)           stem="${rel%.ae}" ;;
+    esac
+    rm -f "$T/single.aea"
+    (cd "$SHARE" && "$PFX/bin/aetherc$EXE" --emit=aea "$rel" "$T/single.aea") >/dev/null 2>&1
+    if ! same "$T/single.aea" "$MODS/$stem.aea"; then
+        batch_ok=0
+        echo "    $rel: the batch wrote another artifact than a process of its own"
+    fi
+done
+if [ "$batch_ok" = 1 ] && [ -n "$after_fixture" ] && [ -n "$last_mod" ]; then
+    ok "an artifact from a batch is the one a process of its own writes"
+else bad "batched artifacts differ from single ones"; fi
+
 # The installed compiler, run the way `ae` runs it: nothing in the working
 # directory or the environment points at another std tree.
 aec() { (cd "$T/work" && env -u AETHER_HOME -u AETHER_NO_AEA "$PFX/bin/aetherc$EXE" "$@"); }

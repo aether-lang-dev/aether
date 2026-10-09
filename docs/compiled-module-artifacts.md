@@ -67,7 +67,10 @@ one is installed, replaced or removed.
 `aetherc --emit=aea <std/x/module.ae> <out.aea>`, run from the directory that
 installs as `share/aether/`, writes one artifact. It refuses a module that
 does not parse cleanly (errors or warnings), because an importer of the
-artifact would not see those diagnostics.
+artifact would not see those diagnostics. Further `<module.ae> <out.aea>`
+pairs write more artifacts from the same process, in order, stopping at the
+first module it refuses; `scripts/build_module_artifacts.sh` hands it the
+std tree that way, since a process start costs far more than a parse.
 
 ## What an artifact holds
 

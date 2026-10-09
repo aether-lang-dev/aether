@@ -2071,8 +2071,9 @@ void print_help(const char* program_name) {
     printf("  --emit=<exe|lib|both|csrc>       Output artifact (exe default; lib → .so/.dylib; csrc → portable .c + catalog .h + .catalog.json)\n");
     printf("  --emit=ast|inspect|effects       Analysis to stdout, no codegen: AST JSON / declaration\n");
     printf("                                   summary / derived per-function effect+purity JSON (#889)\n");
-    printf("  --emit=aea <mod.ae> <out.aea>    Write a module's compiled artifact: its parse, reused by\n");
-    printf("                                   importers of the installed module (#1746)\n");
+    printf("  --emit=aea <mod.ae> <out.aea>... Write a module's compiled artifact: its parse, reused by\n");
+    printf("                                   importers of the installed module (#1746); any number of\n");
+    printf("                                   pairs, in one process\n");
     printf("  --shared-runtime                 With --emit=lib: record that the library links the\n");
     printf("                                   shared runtime, so importers link it too (#2297)\n");
     printf("  --lib-actors                     An imported binary library runs actors: main() runs\n");
@@ -2440,12 +2441,27 @@ int main(int argc, char *argv[]) {
     // --emit=aea <module.ae> <out.aea>: the input path, as written, is the
     // module's install-relative path (std/x/module.ae), so run it from the
     // directory that installs as share/aether/.
+    //
+    // Any number of pairs, written in order, stopping at the first module
+    // that has no artifact (#2596). One artifact is one parse and takes a
+    // few milliseconds, where a process start took a fifth of a second on
+    // Windows: the std tree's 157 artifacts took 37 s one process each and
+    // take 1.3 s in one. Each parse is self-contained: the lexer state, the
+    // diagnostic source and the recorded build-symbol queries are reset per
+    // module, and the error and warning checks count only that module's
+    // (tests/integration/aea_artifacts compares a batch's artifacts with
+    // ones written alone).
     if (emit_aea_mode) {
-        if (argc - arg_offset < 2) {
-            fprintf(stderr, "Usage: aetherc --emit=aea <std/x/module.ae> <out.aea>\n");
+        int nargs = argc - arg_offset;
+        if (nargs < 2 || nargs % 2 != 0) {
+            fprintf(stderr, "Usage: aetherc --emit=aea <std/x/module.ae> <out.aea> [<module.ae> <out.aea>]...\n");
             return 1;
         }
-        return emit_aea(argv[arg_offset], argv[arg_offset + 1]);
+        for (int i = arg_offset; i < argc; i += 2) {
+            int rc = emit_aea(argv[i], argv[i + 1]);
+            if (rc != 0) return rc;
+        }
+        return 0;
     }
 
     // --dump-ast only needs the input file

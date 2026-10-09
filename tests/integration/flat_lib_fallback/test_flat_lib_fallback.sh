@@ -22,7 +22,12 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 prefix="$tmpdir/inst"
 
-if ! "$ROOT/install.sh" "$prefix" < /dev/null > "$tmpdir/install.log" 2>&1; then
+# The sweep has built the tree: install its binaries without rebuilding them,
+# as install_contrib_resolves does. Otherwise install.sh ran `make` four
+# times over the shared tree (relinking build/ae beside parallel drivers,
+# #2142), built the language server this test never runs and fetched git
+# tags from the network, every run (#2596).
+if ! AETHER_INSTALL_NO_BUILD=1 "$ROOT/install.sh" "$prefix" < /dev/null > "$tmpdir/install.log" 2>&1; then
     echo "  [SKIP] flat_lib_fallback: install.sh failed (cannot set up fixture)"
     sed 's/^/        /' "$tmpdir/install.log" | head -8
     exit 0
