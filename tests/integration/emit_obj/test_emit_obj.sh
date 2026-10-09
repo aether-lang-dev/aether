@@ -56,8 +56,13 @@ if [ ! -f "$LIB" ]; then
     echo "  [SKIP] emit_obj: libaether.a not built"
     exit 0
 fi
+#
+# -laether_main goes with -laether: on Windows it names the object's entry
+# point archive beside libaether.a (docs/emit-lib.md), which consume.c, with a
+# main() of its own, never needs, and whose -L this spelling loses there (the
+# `sh -c` below eats the backslashes of a Windows path).
 DEPS=$("$AE" cflags --libs 2>/dev/null | tr ' ' '\n' \
-       | grep -v '^-laether$' | tr '\n' ' ')
+       | grep -v -e '^-laether$' -e '^-laether_main$' | tr '\n' ' ')
 if ! sh -c "${CC:-cc} -o \"$TMPDIR/consume\" \"$SCRIPT_DIR/consume.c\" \"$TMPDIR/lib.o\" \"$LIB\" $DEPS -lpthread -lm" \
         >"$TMPDIR/link.log" 2>&1; then
     echo "  [FAIL] emit_obj: C consumer failed to link against the object"

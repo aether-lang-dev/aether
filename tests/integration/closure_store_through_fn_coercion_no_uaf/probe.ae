@@ -1,0 +1,97 @@
+// Regression: a capturing closure handed to a function that stores it
+// through the `fn -> ptr` coercion is kept, not freed after the call
+// (aether-ui asks/aether-closure-drain-through-fn-store.md).
+//
+// `e.cb = h` with a `ptr` field and an `fn` parameter boxes the closure
+// (`_aether_box_closure(h)`), a call. The escape walk that decides whether
+// a call site may drain a transient closure's env looked straight through
+// that call: a nested call "does not directly carry" the parameter, and the
+// coercion has no body to ask, so the store read as no escape, and the env
+// was freed when the setter returned. The handler, invoked later, read
+// freed memory (garbage or a segfault on glibc, silent on macOS).
+//
+// A closure local stored the same way was freed at the storing function's
+// scope end, the same use after free (case 4).
+//
+// Every shape below stores the closure through the coercion and invokes it
+// after the setter returned; each must print its captured values.
+
+struct Holder { cb: ptr }
+
+// (1) aether-ui's vg setter: a struct field through a cast pointer.
+set_cb(p: ptr, h: fn) {
+    e = p as *Holder
+    e.cb = h
+}
+
+// (2) The same store, one level further down: the setter forwards.
+forward_cb(p: ptr, h: fn) {
+    set_cb(p, h)
+}
+
+// (3) A field of a struct reached through another struct.
+struct Outer { inner: ptr }
+set_cb_nested(o: ptr, h: fn) {
+    w = o as *Outer
+    e = w.inner as *Holder
+    e.cb = h
+}
+
+// (4) A closure local of the storing function, released at its scope end.
+install_local(p: ptr, tag: string) {
+    e = p as *Holder
+    label = "fourth ${tag}"
+    cl = | x: int | { println("${label} ${x}") }
+    e.cb = cl
+}
+
+// (5) aether-ui's workaround, `kept = h; e.cb = kept`: since #2670/#2671 the
+//     alias takes a reference of its own and releases it at the setter's
+//     end, so the store has to keep one of its own too.
+set_cb_alias(p: ptr, h: fn) {
+    kept = h
+    e = p as *Holder
+    e.cb = kept
+}
+
+inner_call(cb: fn, x: int) { cb(x) }
+
+fire(p: ptr, x: int) {
+    e = p as *Holder
+    inner_call(e.cb, x)
+}
+
+main() {
+    a = heap.new(Holder)
+    b = heap.new(Holder)
+    c = heap.new(Holder)
+    oc = heap.new(Outer)
+    ow = oc as *Outer
+    ow.inner = c
+    label = "first"
+    base = 40
+    set_cb(a) callback | x: int | {
+        println("${label} ${base + x}")
+    }
+    other = "second"
+    forward_cb(b) callback | x: int | {
+        println("${other} ${base + x}")
+    }
+    third = "third"
+    set_cb_nested(oc) callback | x: int | {
+        println("${third} ${base * x}")
+    }
+    fire(a, 2)
+    fire(b, 3)
+    fire(c, 2)
+    d = heap.new(Holder)
+    install_local(d, "local")
+    fire(d, 4)
+    f = heap.new(Holder)
+    fifth = "fifth"
+    set_cb_alias(f) callback | x: int | {
+        println("${fifth} ${base - x}")
+    }
+    fire(f, 1)
+    return 0
+}

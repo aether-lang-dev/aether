@@ -218,8 +218,10 @@ build_vendored_sqlite() {
 probe_sqlite() {
     # The vendored amalgamation's header, so the veneer compiles against the
     # same SQLite it links -- ahead of any system sqlite3.h.
+    # AETHER_SQLITE_VENDORED tells the veneer the full API is there (macOS's
+    # system library lacks sqlite3_enable_load_extension).
     if [ -n "$SQLITE_VENDORED" ]; then
-        echo "-I$SQLITE_AMAL_DIR"
+        echo "-I$SQLITE_AMAL_DIR -DAETHER_SQLITE_VENDORED=1"
         return 0
     fi
     # Cross mode: sqlite3 is Tier 3 (absent from the FreeBSD base and from

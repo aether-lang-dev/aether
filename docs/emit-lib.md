@@ -258,6 +258,28 @@ no entry point — as does wasm (emscripten runs a module's `main` on load,
 which would turn a library into a program) and a compiler without weak
 definitions. `-DAETHER_NO_LIB_MAIN` leaves it out anywhere else.
 
+**On Windows (MinGW) the entry is an archive member instead.** A COFF weak
+definition is a weak external, and GNU ld (2.46 at least) still searched the
+archives for `main`: it pulled `libmingw32.a`'s `crtexewin.o`, a strong
+`main()` that calls `WinMain`, and the link failed with `undefined reference
+to 'WinMain'`. So the object carries no `main()` there, and the same three
+lines are the one member of `libaether_main.a`, installed beside
+`libaether.a`. `ae cflags --libs` names it first (`-L<lib> -laether_main
+-laether ...`), and an archive member is linked only when the link still
+needs the symbol it defines, so:
+
+- `cc app.o $(ae cflags --libs)` links the program's own entry, as elsewhere;
+- a host with its own `main()` keeps it (the member is never pulled), with
+  nothing to change: the same command line works on every platform;
+- a GUI host that enters through `WinMain` names the C runtime's entry first,
+  `cc app.o host.c -lmingw32 $(ae cflags --libs)`, so that `main()` is
+  resolved (to the one that calls `WinMain`) before `libaether_main.a` is
+  searched. Without that it starts in the program's `main()`.
+
+A link line written by hand rather than from `ae cflags --libs` adds
+`-laether_main` before `-laether` itself. The shared runtime (`aether.dll`)
+and every DLL `ae` links export no `main`.
+
 **Calling them more than once.**
 
 - `aether_main` while the program is already running (no `aether_main_exit`

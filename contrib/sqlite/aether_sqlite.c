@@ -431,3 +431,120 @@ const char* sqlite_errmsg_raw(void* db) {
     const char* m = sqlite3_errmsg((sqlite3*)db);
     return m ? m : "";
 }
+
+/* =================================================================
+ * v3: what a host that hands SQL to someone else needs (sae's
+ * asks/sqlite-authorizer.md): the authorizer, limits and extension
+ * loading to hold a connection to its one file, and the typed
+ * column / parameter surface to return rows with their own types.
+ * ================================================================= */
+
+/* The authorizer SQLite calls before compiling each operation. Its
+ * string arguments are SQLite's own `const char*` (NULL when an
+ * action has no such argument), read by an Aether `string` parameter
+ * as they are. A NULL callback removes the authorizer. Returns
+ * sqlite3_set_authorizer's rc. */
+typedef int (*sqlite_authorizer_cb)(void*, int, const char*, const char*,
+                                    const char*, const char*);
+
+int sqlite_set_authorizer_raw(void* db, sqlite_authorizer_cb cb, void* ud) {
+    if (!db) return SQLITE_MISUSE;
+    return sqlite3_set_authorizer((sqlite3*)db, cb, ud);
+}
+
+int sqlite_clear_authorizer_raw(void* db) {
+    if (!db) return SQLITE_MISUSE;
+    return sqlite3_set_authorizer((sqlite3*)db, NULL, NULL);
+}
+
+/* sqlite3_limit: sets limit `id` to `val` (a negative val only reads it)
+ * and returns the previous value; -1 for a NULL db. */
+int sqlite_limit_raw(void* db, int id, int val) {
+    if (!db) return -1;
+    return sqlite3_limit((sqlite3*)db, id, val);
+}
+
+/* sqlite3_enable_load_extension is SQLite's switch for both the C API
+ * and the SQL load_extension() function. The pinned amalgamation has it
+ * (contrib_build.sh and ae's cross build define AETHER_SQLITE_VENDORED
+ * when they compile this against it), as do the Linux, BSD and MSYS2
+ * system libraries; macOS's system libsqlite3 is built without extension
+ * loading and has no such symbol, so naming it there would fail every
+ * link of contrib.sqlite. There the connection's own setting
+ * (SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION, the C API's half) is what can
+ * be switched, and the SQL function, which only the missing call turns
+ * on, stays off. Apple's library refuses even that setting (it has no
+ * extension loading to configure), so "off" is reported as done whatever
+ * it says: nothing can be loaded either way. */
+#if defined(SQLITE_OMIT_LOAD_EXTENSION) || (defined(__APPLE__) && !defined(AETHER_SQLITE_VENDORED))
+#define AETHER_SQLITE_LOAD_EXT_VIA_DBCONFIG 1
+#endif
+int sqlite_enable_load_extension_raw(void* db, int on) {
+    if (!db) return SQLITE_MISUSE;
+#ifdef AETHER_SQLITE_LOAD_EXT_VIA_DBCONFIG
+    int rc = sqlite3_db_config((sqlite3*)db, SQLITE_DBCONFIG_ENABLE_LOAD_EXTENSION,
+                               on ? 1 : 0, (int*)0);
+    return on ? rc : SQLITE_OK;
+#else
+    return sqlite3_enable_load_extension((sqlite3*)db, on ? 1 : 0);
+#endif
+}
+
+int sqlite_column_count_raw(void* stmt) {
+    if (!stmt) return 0;
+    return sqlite3_column_count((sqlite3_stmt*)stmt);
+}
+
+/* The column's name as the statement reports it ("" out of range).
+ * Valid until the statement is finalized or re-prepared. */
+const char* sqlite_column_name_raw(void* stmt, int col) {
+    if (!stmt) return "";
+    const char* n = sqlite3_column_name((sqlite3_stmt*)stmt, col);
+    return n ? n : "";
+}
+
+/* SQLITE_INTEGER 1, SQLITE_FLOAT 2, SQLITE_TEXT 3, SQLITE_BLOB 4,
+ * SQLITE_NULL 5, of the current row's value; SQLITE_NULL for a NULL
+ * statement. */
+int sqlite_column_type_raw(void* stmt, int col) {
+    if (!stmt) return SQLITE_NULL;
+    return sqlite3_column_type((sqlite3_stmt*)stmt, col);
+}
+
+double sqlite_column_double_raw(void* stmt, int col) {
+    if (!stmt) return 0.0;
+    return sqlite3_column_double((sqlite3_stmt*)stmt, col);
+}
+
+int64_t sqlite_column_int64_raw(void* stmt, int col) {
+    if (!stmt) return 0;
+    return (int64_t)sqlite3_column_int64((sqlite3_stmt*)stmt, col);
+}
+
+int sqlite_bind_double_raw(void* stmt, int idx, double v) {
+    if (!stmt) return SQLITE_MISUSE;
+    return sqlite3_bind_double((sqlite3_stmt*)stmt, idx, v);
+}
+
+int sqlite_bind_int64_raw(void* stmt, int idx, int64_t v) {
+    if (!stmt) return SQLITE_MISUSE;
+    return sqlite3_bind_int64((sqlite3_stmt*)stmt, idx, (sqlite3_int64)v);
+}
+
+int sqlite_bind_parameter_count_raw(void* stmt) {
+    if (!stmt) return 0;
+    return sqlite3_bind_parameter_count((sqlite3_stmt*)stmt);
+}
+
+/* The 1-based index of a named parameter, spelt with its prefix as in
+ * the SQL ("$id", ":id", "@id"); 0 when there is none of that name. */
+int sqlite_bind_parameter_index_raw(void* stmt, const char* name) {
+    const char* n = sq_str(name);
+    if (!stmt || !n) return 0;
+    return sqlite3_bind_parameter_index((sqlite3_stmt*)stmt, n);
+}
+
+int64_t sqlite_last_insert_rowid_raw(void* db) {
+    if (!db) return 0;
+    return (int64_t)sqlite3_last_insert_rowid((sqlite3*)db);
+}

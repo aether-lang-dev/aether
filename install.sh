@@ -386,6 +386,11 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         mkdir -p "$LIB_DIR/shared"
         cp build/shared/* "$LIB_DIR/shared/"
     fi
+    # Windows: the --emit=obj entry point (runtime/windows/aether_lib_main.c),
+    # which `ae cflags --libs` names from beside libaether.a.
+    if [ -f build/libaether_main.a ]; then
+        cp build/libaether_main.a "$LIB_DIR/libaether_main.a"
+    fi
     # Windows: the application manifest object (UTF-8 process code page,
     # #2077). `ae build`/`ae run` link it from beside libaether.a.
     if [ -f build/aether_manifest.o ]; then

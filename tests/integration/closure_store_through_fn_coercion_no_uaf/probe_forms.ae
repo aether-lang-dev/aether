@@ -1,0 +1,52 @@
+// The neighbouring holders, each stored directly and through an alias
+// (`kept = h`, #2670/#2671): a `fn` field, a global, a list, a map. Each
+// takes a reference of its own (#2525, #2518), so every handler must run
+// with its captures after its setter returned. The `ptr` field shape is
+// probe.ae's.
+
+import std.list
+import std.map
+struct FHolder { cb: fn }
+var gfn: fn = null
+inner_call(cb: fn, x: int) { cb(x) }
+to_list(l: ptr, h: fn) { list.add(l, h) }
+to_list_alias(l: ptr, h: fn) { kept = h
+    list.add(l, kept) }
+to_map(m: ptr, h: fn) { map.put(m, "k", h) }
+to_map_alias(m: ptr, h: fn) { kept = h
+    map.put(m, "k2", kept) }
+to_field(p: ptr, h: fn) { e = p as *FHolder
+    e.cb = h }
+to_field_alias(p: ptr, h: fn) { kept = h
+    e = p as *FHolder
+    e.cb = kept }
+to_global(h: fn) { gfn = h }
+to_global_alias(h: fn) { kept = h
+    gfn = kept }
+main() {
+    a = "A"
+    l = list.new()
+    m = map.new()
+    to_list(l) callback | x: int | { println("list ${a} ${x}") }
+    to_list_alias(l) callback | x: int | { println("list-alias ${a} ${x}") }
+    to_map(m) callback | x: int | { println("map ${a} ${x}") }
+    to_map_alias(m) callback | x: int | { println("map-alias ${a} ${x}") }
+    fh = heap.new(FHolder)
+    to_field(fh) callback | x: int | { println("field ${a} ${x}") }
+    e = fh as *FHolder
+    inner_call(e.cb, 1)
+    to_field_alias(fh) callback | x: int | { println("field-alias ${a} ${x}") }
+    inner_call(e.cb, 2)
+    to_global() callback | x: int | { println("global ${a} ${x}") }
+    inner_call(gfn, 3)
+    to_global_alias() callback | x: int | { println("global-alias ${a} ${x}") }
+    inner_call(gfn, 4)
+    v0, _e0 = list.get(l, 0)
+    inner_call(v0, 5)
+    v1, _e1 = list.get(l, 1)
+    inner_call(v1, 6)
+    w0, _e2 = map.get(m, "k")
+    inner_call(w0, 7)
+    w1, _e3 = map.get(m, "k2")
+    inner_call(w1, 8)
+}

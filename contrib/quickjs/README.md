@@ -47,6 +47,38 @@ main() {
 - **Errors** come back as `(value, error)`: the error is the exception's
   text with its stack, e.g. `TypeError: cannot read property 'x' of null`.
 
+## Bytes
+
+A `Uint8Array` (or `Uint8ClampedArray`) is how a script hands the host
+pixels or a file, and how the host hands one back, without a string in
+between (`arg_string` stringifies a typed array as `"1,2,3"`) or a handle
+per element.
+
+- `quickjs.bytes_of(q, h) -> (ptr, int)`: the array's bytes, its own window
+  of its buffer (`a.subarray(4)` starts at `a[4]`), as a pointer into the
+  engine's memory and a count; `(null, -1)` when `h` is not one, or its
+  buffer is detached. No copy: read or copy the bytes before JavaScript runs
+  again (a script can resize or detach the buffer), and never free them.
+- `quickjs.arg_bytes(q, args, i) -> (ptr, int)`: the same for a host
+  function's argument `i`, valid while the host function runs.
+- `quickjs.new_uint8array(q, data, n) -> int`: a new `Uint8Array` holding a
+  copy of the `n` bytes at `data` (a raw pointer, `bytes.data(b)` for a
+  `std.bytes` buffer), so the host's buffer can be freed at once.
+
+```aether
+sum = quickjs.function(q, "sum", 1, |q: ptr, this_h: int, args: int| {
+    p, n = quickjs.arg_bytes(q, args, 0)
+    if n < 0 { return quickjs.throw_error(q, "TypeError", "sum: a Uint8Array") }
+    t = 0
+    i = 0
+    while i < n {
+        t = t + mem.get_byte(p, i)
+        i = i + 1
+    }
+    return quickjs.new_int(q, t)
+})
+```
+
 ## Limits
 
 - `quickjs.set_time_limit(q, ms)`: each entry into JavaScript (an eval, a
