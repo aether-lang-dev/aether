@@ -11,15 +11,6 @@
 #   - out.c compiles+links against `ae cflags` into a working .so that EXPORTS
 #     the catalog symbols (proving the emitted source is genuinely usable)
 
-# Skip on Windows — compiles the emitted .c with the POSIX toolchain here; the
-# emit itself is platform-independent.
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_csrc on Windows (compiles emitted .c via POSIX toolchain)"
-        exit 0
-        ;;
-esac
-
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -62,8 +53,11 @@ JSON="$OUT.catalog.json"
 # Strict well-formedness + content when a JSON parser is available; otherwise
 # fall back to structural grep so the test still guards on toolchains without
 # python3. The strict path also proves the escaping is valid JSON.
-if command -v python3 >/dev/null 2>&1; then
-    python3 - "$JSON" <<'PYEOF' || { echo "  [FAIL] catalog.json failed strict validation"; cat "$JSON"; exit 1; }
+# find_python.sh, not `command -v python3`: Windows has no python3.exe from the
+# official installer, so the strict path never ran there.
+PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
+if [ -n "$PY" ]; then
+    $PY - "$JSON" <<'PYEOF' || { echo "  [FAIL] catalog.json failed strict validation"; cat "$JSON"; exit 1; }
 import json, sys
 d = json.load(open(sys.argv[1]))
 for k in ("schema_version", "aether_version", "primary_source",
@@ -92,7 +86,21 @@ CFLAGS="$("$AE" cflags 2>/dev/null)"
 if ! $CC -fPIC -shared "$OUT.c" $CFLAGS -o "$TMPDIR/lib.so" >"$TMPDIR/cc.log" 2>&1; then
     echo "  [FAIL] emitted .c did not compile against ae cflags:"; cat "$TMPDIR/cc.log" | head -15; exit 1
 fi
-if command -v nm >/dev/null 2>&1; then
+IS_WINDOWS=0
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) IS_WINDOWS=1 ;;
+esac
+if [ "$IS_WINDOWS" = 1 ]; then
+    # A DLL's exports are its export table. nm reads the symbol table, which
+    # lists every global the image was linked from, exported or not, so on
+    # Windows it would pass for a DLL that exports nothing.
+    exports="$(objdump -p "$TMPDIR/lib.so" 2>/dev/null | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p' || true)"
+    if ! printf '%s\n' "$exports" | grep -Eq '[[:space:]]aether_add$'; then
+        echo "  [FAIL] built DLL does not export aether_add"
+        printf '%s\n' "$exports" | grep -i aether_ | head
+        exit 1
+    fi
+elif command -v nm >/dev/null 2>&1; then
     # Portable symbol dump. `nm -D` is GNU-only — macOS/BSD nm REJECTS it, and a
     # failing command substitution under `set -e` aborts the whole script (with
     # no output), so each `$(...)` must be `|| true`-guarded or it never reaches

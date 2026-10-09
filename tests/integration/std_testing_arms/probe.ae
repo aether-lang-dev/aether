@@ -2,11 +2,12 @@
 // aeocha. Two sections, each tightly scoped per the
 // porter's "don't balloon test surface" guidance:
 //
-//   1. Process matchers — happy path against /bin/echo and
-//      /bin/sh -c, including the regex stdout matcher (std.regex)
-//      and the stderr matchers backed by os.run_full's separate
-//      stdout/stderr capture. POSIX-only; skip on Windows where
-//      os.run_capture uses POSIX-fallback shims.
+//   1. Process matchers: happy path against `echo` and `sh -c`,
+//      including the regex stdout matcher (std.regex) and the stderr
+//      matchers backed by os.run_full's separate stdout/stderr capture.
+//      Both programs are named bare and found on PATH, which os.run_capture
+//      searches on every platform, so the same section runs on Windows
+//      (MSYS2's sh and echo) as on POSIX.
 //
 //   2. HTTP matchers — happy path against a plain in-process
 //      std.http server with three hand-rolled routes (/info,
@@ -127,26 +128,26 @@ handle_forbidden(req: ptr, res: ptr, ud: ptr) {
 // as a macro, so a local with that name fails to compile.
 run_process_section(fw: ptr) {
     spec.describe(fw, "process matchers") {
-        // /bin/echo "hello world" — note os.run_capture synthesises
+        // echo "hello world": note os.run_capture synthesises
         // argv[0] from the prog string, so the list holds only the
         // remaining args (same convention as
         // tests/regression/test_run_capture_status.ae).
         spec.it(fw, "captures basic echo stdout + exit") callback {
             argv = list.new()
             list.add(argv, "hello world")
-            out, exit_code, err = os.run_capture("/bin/echo", argv, null)
+            out, exit_code, err = os.run_capture("echo", argv, null)
             testing.expect_no_spawn_error(err, "spawn ok")
             testing.expect_exit(exit_code, 0, "echo exited cleanly")
             testing.expect_stdout_contains(out, "hello world", "stdout has greeting")
         }
 
-        // Multi-line stdout via /bin/sh -c. The middle line is
+        // Multi-line stdout via sh -c. The middle line is
         // "Revision: 3" — exactly the porter's awk pattern.
         spec.it(fw, "parses Revision-style key/value lines") callback {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "echo Path: /home; echo Revision: 3; echo Last: now")
-            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            out, exit_code, _ = os.run_capture("sh", argv, null)
             testing.expect_exit(exit_code, 0, "sh ran")
             testing.expect_stdout_line_count(out, 3, "three lines")
             testing.expect_stdout_line_field(out, "Revision:", 1, "3", "head rev")
@@ -161,7 +162,7 @@ run_process_section(fw: ptr) {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "printf 'URL:         http://demo\\nRevision:    3\\nAuthor:      alice\\n'")
-            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            out, exit_code, _ = os.run_capture("sh", argv, null)
             testing.expect_exit(exit_code, 0, "sh column ran")
             testing.expect_stdout_line_field(out, "Revision:", 1, "3", "column-aligned head rev")
             testing.expect_stdout_line_field(out, "URL:", 1, "http://demo", "column-aligned url")
@@ -173,7 +174,7 @@ run_process_section(fw: ptr) {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "printf 'Log: first commit message\\nDate: now\\n'")
-            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            out, exit_code, _ = os.run_capture("sh", argv, null)
             testing.expect_exit(exit_code, 0, "sh log ran")
             testing.expect_stdout_line_after(out, "Log:", "first commit message",
                 "_after captures multi-token value")
@@ -186,7 +187,7 @@ run_process_section(fw: ptr) {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "echo Path: /home; echo Revision: 3; echo Last: now")
-            out, exit_code, _ = os.run_capture("/bin/sh", argv, null)
+            out, exit_code, _ = os.run_capture("sh", argv, null)
             testing.expect_exit(exit_code, 0, "sh regex-fixture ran")
             testing.expect_stdout_matches_regex(out, "^Revision: [0-9]+$",
                 "regex whole-line revision shape")
@@ -195,14 +196,14 @@ run_process_section(fw: ptr) {
         }
 
         // Child stderr matchers via os.run_full's separate-stream
-        // capture. /bin/sh writes one line to stdout and one to stderr;
+        // capture. sh writes one line to stdout and one to stderr;
         // run_full gives them back independently. stdin_data "" — the
         // child reads nothing.
         spec.it(fw, "captures child stderr separately from stdout") callback {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "echo to-out; echo to-err 1>&2")
-            out, err, exit_code, spawn_err = os.run_full("/bin/sh", argv, null, "")
+            out, err, exit_code, spawn_err = os.run_full("sh", argv, null, "")
             testing.expect_no_spawn_error(spawn_err, "run_full spawned")
             testing.expect_exit(exit_code, 0, "run_full child exited cleanly")
             testing.expect_stdout_contains(out, "to-out", "stdout stream captured")
@@ -214,7 +215,7 @@ run_process_section(fw: ptr) {
             argv = list.new()
             list.add(argv, "-c")
             list.add(argv, "echo only-stdout")
-            out, err, exit_code, spawn_err = os.run_full("/bin/sh", argv, null, "")
+            out, err, exit_code, spawn_err = os.run_full("sh", argv, null, "")
             testing.expect_no_spawn_error(spawn_err, "run_full(quiet) spawned")
             testing.expect_stderr_empty(err, "no stderr on clean run")
         }
@@ -318,15 +319,6 @@ run_http_section(fw: ptr) {
 }
 
 main() {
-    // Skip on Windows — both sections depend on POSIX-shaped paths
-    // (/bin/echo, /bin/sh) that don't exist under MSYS2 / mingw-w64.
-    // os.run_capture itself works on Windows; only the test fixture
-    // is POSIX-shaped. Pattern matches
-    // tests/regression/test_run_capture_status.ae.
-    if os_getenv("OS") == "Windows_NT" {
-        println("  SKIP aeocha_expect_matchers: /bin/echo and /bin/sh are POSIX-shaped")
-        return
-    }
     fw = spec.init()
     run_process_section(fw)
     run_http_section(fw)

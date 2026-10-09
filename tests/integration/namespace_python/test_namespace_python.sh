@@ -5,18 +5,17 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_namespace_python on Windows"; exit 0 ;;
-esac
-
-if ! command -v python3 >/dev/null 2>&1; then
-    echo "  [SKIP] test_namespace_python (python3 not installed)"
+# find_python.sh, not `command -v python3`: Windows has no python3.exe from
+# the official installer, and a Store alias of that name is not Python.
+PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
+if [ -z "$PY" ]; then
+    echo "  [SKIP] test_namespace_python (no working Python 3)"
     exit 0
 fi
 
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
 
@@ -37,7 +36,7 @@ else
     done
     if [ -z "$LIB_PATH" ]; then
         echo "  [FAIL] no namespace lib"; fail=$((fail + 1))
-    elif python3 "$TMPDIR/check.py" "$LIB_PATH" >"$TMPDIR/run.out" 2>&1; then
+    elif $PY "$TMPDIR/check.py" "$LIB_PATH" >"$TMPDIR/run.out" 2>&1; then
         echo "  [PASS] generated Python SDK round-trips"; pass=$((pass + 1))
         # Confirm Aether-side console output reaches the host's stdout.
         # Aether script prints `[ae] ...` lines from its function bodies;

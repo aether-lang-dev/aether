@@ -13,18 +13,20 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <signal.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+
+#include "raw_socket.h"
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);       /* Windows has none: send() just fails */
+#endif
+    if (raw_socket_start() != 0) { perror("socket start"); return 1; }
 
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) { perror("socket"); return 1; }
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) { perror("socket"); return 1; }
     int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
 
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -40,15 +42,15 @@ int main(void) {
     printf("%d\n", ntohs(bound.sin_port));
     fflush(stdout);
 
-    int cs = accept(ls, NULL, NULL);
-    if (cs < 0) { perror("accept"); return 1; }
-    close(ls);                      /* no second connection is possible */
+    raw_sock cs = accept(ls, NULL, NULL);
+    if (cs == RAW_SOCK_INVALID) { perror("accept"); return 1; }
+    raw_socket_close(ls);           /* no second connection is possible */
 
     char buf[8192];
     size_t have = 0;
     int served = 0;
     for (;;) {
-        ssize_t n = read(cs, buf + have, sizeof(buf) - have - 1);
+        ssize_t n = recv(cs, buf + have, sizeof(buf) - have - 1, 0);
         if (n <= 0) break;
         have += (size_t)n;
         buf[have] = '\0';
@@ -65,12 +67,12 @@ int main(void) {
                                 "Content-Type: text/plain\r\n"
                                 "Content-Length: %d\r\n"
                                 "\r\n%s", blen, body);
-            if (write(cs, resp, (size_t)rlen) != rlen) { close(cs); return 0; }
+            if (send(cs, resp, (size_t)rlen, 0) != rlen) { raw_socket_close(cs); return 0; }
             memmove(buf, buf + used, have - used);
             have -= used;
             buf[have] = '\0';
         }
     }
-    close(cs);
+    raw_socket_close(cs);
     return 0;
 }

@@ -30,6 +30,8 @@ export AETHER_HOME="$ROOT"
 
 cat > "$tmp/mathlib.ae" <<'AE'
 add_them(a: int, b: int) -> int { return a + b + 40 }
+
+@c_callback mathlib_triple(x: int) -> int { return x * 3 }
 AE
 
 # 1. the build links a DLL (a dev-tree `ae` puts an unnamed output under
@@ -69,6 +71,12 @@ int main(int argc, char** argv) {
     fn_t f = (fn_t)GetProcAddress(h, "aether_add_them");
     if (!f) { printf("GetProcAddress failed\n"); return 3; }
     printf("%d\n", f(1, 1));
+    /* A @c_callback is bound by name. Its definition is emitted weak, which
+     * PE cannot export, so the DLL has to carry it strong (#2547). */
+    typedef int (*fn1_t)(int);
+    fn1_t g = (fn1_t)GetProcAddress(h, "mathlib_triple");
+    if (!g) { printf("GetProcAddress(mathlib_triple) failed\n"); return 4; }
+    printf("%d\n", g(14));
     return 0;
 }
 C
@@ -77,9 +85,9 @@ if ! gcc "$tmp/host.c" -o "$tmp/host.exe" > "$tmp/host.log" 2>&1; then
     head -5 "$tmp/host.log" | sed 's/^/        /'
     exit 1
 fi
-got="$("$tmp/host.exe" "$dll" 2>&1)"
-if [ "$got" != "42" ]; then
-    echo "  [FAIL] emit_lib_windows_dll: host call through the DLL (got '$got', want 42)"
+got="$("$tmp/host.exe" "$dll" 2>&1 | tr -d '\r' | tr '\n' ' ')"
+if [ "$got" != "42 42 " ]; then
+    echo "  [FAIL] emit_lib_windows_dll: host calls through the DLL, the catalog export and the @c_callback (got '$got', want '42 42 ')"
     fail=1
 fi
 
@@ -105,6 +113,6 @@ elif command -v objdump >/dev/null 2>&1 && ! objdump -p "$tmp/ns/libgreet.dll" |
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] emit_lib_windows_dll: ae build --emit=lib links libmathlib.dll, exports aether_add_them, a C host loads and calls it; --namespace builds libgreet.dll"
+    echo "  [PASS] emit_lib_windows_dll: ae build --emit=lib links libmathlib.dll, exports aether_add_them and the @c_callback mathlib_triple, a C host loads and calls both; --namespace builds libgreet.dll"
 fi
 exit $fail

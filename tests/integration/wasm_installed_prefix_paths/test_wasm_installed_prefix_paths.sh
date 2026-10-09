@@ -21,18 +21,13 @@
 #
 # emcc is NOT required. A stub on PATH answers --version and then checks that
 # every .c it was handed exists, which is precisely the property at issue —
-# the generated C was always fine, only the source list was wrong.
+# the generated C was always fine, only the source list was wrong. The stub is
+# emcc_stub.c, compiled here, so that ae can start it on Windows too.
 
 set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
-
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] wasm_installed_prefix_paths on Windows (POSIX install layout)"
-        exit 0 ;;
-esac
 
 command -v make >/dev/null 2>&1 || { echo "  [SKIP] no make on PATH"; exit 0; }
 
@@ -43,19 +38,8 @@ trap 'rm -rf "$TMP" || true' EXIT
 fail() { echo "  FAIL: $1"; exit 1; }
 
 # A stub emcc that verifies its inputs instead of compiling them.
-cat > "$TMP/bin/emcc" <<'STUB'
-#!/bin/sh
-case "$1" in --version) echo "emcc (stub) 0.0"; exit 0 ;; esac
-missing=0; total=0
-for a in "$@"; do
-  case "$a" in
-    *.c) total=$((total+1)); [ -f "$a" ] || { missing=$((missing+1)); echo "MISSING: $a"; } ;;
-  esac
-done
-echo "SOURCES: $total MISSING: $missing"
-exit 1
-STUB
-chmod +x "$TMP/bin/emcc"
+cc "$SCRIPT_DIR/emcc_stub.c" -o "$TMP/bin/emcc" 2>"$TMP/stub.log" \
+    || { cat "$TMP/stub.log"; fail "could not compile emcc_stub.c"; }
 
 # Install to a throwaway prefix. This is the only way to exercise the
 # installed-tree path resolution.
@@ -75,8 +59,8 @@ echo "$out" | grep -q 'SOURCES:' \
     || { echo "$out" | tail -10 | sed 's/^/    /';
          fail "the wasm build never reached emcc — cannot judge the source list"; }
 
-if echo "$out" | grep -q 'MISSING: /'; then
-    echo "$out" | grep 'MISSING: /' | head -4 | sed 's/^/    /'
+if echo "$out" | grep -q '^MISSING: '; then
+    echo "$out" | grep '^MISSING: ' | head -4 | sed 's/^/    /'
     fail "wasm source paths do not resolve on an installed tree (missing share/aether)"
 fi
 

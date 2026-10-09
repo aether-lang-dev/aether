@@ -16,6 +16,13 @@
 #   4. Mount of a .so missing the
 #      aether_script_handle entrypoint  — fails with KIND_INVALID
 #
+# Windows has no -rdynamic, so a script cannot bind its runtime calls to the
+# host executable: there both are built with `ae build --shared-runtime` and
+# share aether.dll, and two more cases check that a mismatch on either side
+# is refused with KIND_IO and the flag that fixes it:
+#   5. a script built on its own static runtime
+#   6. a host built on its own static runtime
+#
 # DESIGN — same defensive shape the proxy_pool tests landed in:
 #   - No `set -e` (transient curl flakes shouldn't kill the script
 #     silently; explicit `fail` calls do the right thing).
@@ -32,11 +39,9 @@ if ! command -v curl >/dev/null 2>&1; then
     exit 0
 fi
 
+WINDOWS=0
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*)
-        echo "  [SKIP] script_gateway: Windows DLL hosting is a follow-up (KIND_UNAVAILABLE)"
-        exit 0
-        ;;
+    MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;;
 esac
 
 TMPDIR="$(mktemp -d)"
@@ -58,58 +63,76 @@ BAD_URL="http://127.0.0.1:$BAD_PORT"
 fail() { echo "  [FAIL] $1"; exit 1; }
 
 # Pick the right shared-library extension per platform; aetherc
-# --emit=lib -fPIC -shared produces .dylib on macOS, .so elsewhere.
+# --emit=lib -fPIC -shared produces .dylib on macOS, .dll on Windows and
+# .so elsewhere.
 case "$(uname -s)" in
     Darwin) SO_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*) SO_EXT=".dll" ;;
     *)      SO_EXT=".so"    ;;
 esac
-
-# --- Build script.so via aetherc --emit=lib ---
 SO_PATH="$TMPDIR/script$SO_EXT"
-if ! AETHER_HOME="$ROOT" "$AETHERC" --emit=lib --with=net \
-        "$SCRIPT_DIR/script.ae" "$TMPDIR/script.c" \
-        2>"$TMPDIR/aetherc.err"; then
-    echo "  [FAIL] aetherc --emit=lib script.ae:"
-    head -30 "$TMPDIR/aetherc.err"
-    exit 1
-fi
-# Compile the emitted C to a shared library, linking against the
-# stdlib archive we already built. -fPIC + -shared produces a
-# dlopen()-able artifact; -ldl is harmless on macOS (no-op libdl
-# stub) and required on older Linux glibc (< 2.34).
-# Leave runtime symbols (http_response_set_*, string_concat, etc.)
-# unresolved in the .so — they're satisfied at dlopen time from
-# the host process's libaether.a. macOS ld defaults to
-# -undefined,error; we need dynamic_lookup. On Linux/glibc
-# unresolved-by-default-on-shared is fine, but be defensive.
-case "$(uname -s)" in
-    Darwin) SHARED_LDFLAGS="-Wl,-undefined,dynamic_lookup" ;;
-    *)      SHARED_LDFLAGS="" ;;
-esac
-if ! gcc -fPIC -shared -O2 \
-        -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
-        -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/utils" \
-        -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \
-        -I"$ROOT/std" -I"$ROOT/std/string" -I"$ROOT/std/io" \
-        -I"$ROOT/std/math" -I"$ROOT/std/net" -I"$ROOT/std/collections" \
-        -I"$ROOT/std/json" \
-        "$TMPDIR/script.c" \
-        $SHARED_LDFLAGS \
-        -o "$SO_PATH" 2>"$TMPDIR/gcc.err"; then
-    echo "  [FAIL] gcc -shared:"
-    head -30 "$TMPDIR/gcc.err"
-    exit 1
-fi
-if ! [ -f "$SO_PATH" ]; then
-    fail "$SO_PATH not produced"
-fi
 
-# --- Build host.ae as a normal executable ---
-if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/host.ae" \
-        -o "$TMPDIR/host" >"$TMPDIR/host.build.log" 2>&1; then
-    echo "  [FAIL] ae build host.ae:"
-    head -30 "$TMPDIR/host.build.log"
-    exit 1
+if [ "$WINDOWS" = "1" ]; then
+    # --- Windows: script.dll and the host, both on the shared runtime ---
+    if ! AETHER_HOME="$ROOT" "$AE" build --emit=lib --shared-runtime --with=net \
+            "$SCRIPT_DIR/script.ae" -o "$SO_PATH" >"$TMPDIR/script.build.log" 2>&1; then
+        echo "  [FAIL] ae build --emit=lib --shared-runtime script.ae:"
+        head -30 "$TMPDIR/script.build.log"
+        exit 1
+    fi
+    if ! AETHER_HOME="$ROOT" "$AE" build --shared-runtime "$SCRIPT_DIR/host.ae" \
+            -o "$TMPDIR/host" >"$TMPDIR/host.build.log" 2>&1; then
+        echo "  [FAIL] ae build --shared-runtime host.ae:"
+        head -30 "$TMPDIR/host.build.log"
+        exit 1
+    fi
+else
+    # --- Build script.so via aetherc --emit=lib ---
+    if ! AETHER_HOME="$ROOT" "$AETHERC" --emit=lib --with=net \
+            "$SCRIPT_DIR/script.ae" "$TMPDIR/script.c" \
+            2>"$TMPDIR/aetherc.err"; then
+        echo "  [FAIL] aetherc --emit=lib script.ae:"
+        head -30 "$TMPDIR/aetherc.err"
+        exit 1
+    fi
+    # Compile the emitted C to a shared library, linking against the
+    # stdlib archive we already built. -fPIC + -shared produces a
+    # dlopen()-able artifact; -ldl is harmless on macOS (no-op libdl
+    # stub) and required on older Linux glibc (< 2.34).
+    # Leave runtime symbols (http_response_set_*, string_concat, etc.)
+    # unresolved in the .so: they're satisfied at dlopen time from
+    # the host process's libaether.a. macOS ld defaults to
+    # -undefined,error; we need dynamic_lookup. On Linux/glibc
+    # unresolved-by-default-on-shared is fine, but be defensive.
+    case "$(uname -s)" in
+        Darwin) SHARED_LDFLAGS="-Wl,-undefined,dynamic_lookup" ;;
+        *)      SHARED_LDFLAGS="" ;;
+    esac
+    if ! gcc -fPIC -shared -O2 \
+            -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
+            -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/utils" \
+            -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \
+            -I"$ROOT/std" -I"$ROOT/std/string" -I"$ROOT/std/io" \
+            -I"$ROOT/std/math" -I"$ROOT/std/net" -I"$ROOT/std/collections" \
+            -I"$ROOT/std/json" \
+            "$TMPDIR/script.c" \
+            $SHARED_LDFLAGS \
+            -o "$SO_PATH" 2>"$TMPDIR/gcc.err"; then
+        echo "  [FAIL] gcc -shared:"
+        head -30 "$TMPDIR/gcc.err"
+        exit 1
+    fi
+    if ! [ -f "$SO_PATH" ]; then
+        fail "$SO_PATH not produced"
+    fi
+
+    # --- Build host.ae as a normal executable ---
+    if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/host.ae" \
+            -o "$TMPDIR/host" >"$TMPDIR/host.build.log" 2>&1; then
+        echo "  [FAIL] ae build host.ae:"
+        head -30 "$TMPDIR/host.build.log"
+        exit 1
+    fi
 fi
 
 # --- Test 1: happy path — script.so dispatches /gateway/* ---
@@ -205,4 +228,44 @@ if ! grep -q "kind=6" "$TMPDIR/host_empty.log"; then
     exit 1
 fi
 
-echo "  [PASS] http_script_gateway: 4/4 — happy path, static fallback, missing .so, no entrypoint"
+if [ "$WINDOWS" = "1" ]; then
+    # --- Test 5: a script on its own static runtime: KIND_IO ---
+    STATIC_SO="$TMPDIR/static_script$SO_EXT"
+    if ! AETHER_HOME="$ROOT" "$AE" build --emit=lib --with=net \
+            "$SCRIPT_DIR/script.ae" -o "$STATIC_SO" >"$TMPDIR/static_script.build.log" 2>&1; then
+        echo "  [FAIL] ae build --emit=lib script.ae (static runtime):"
+        head -30 "$TMPDIR/static_script.build.log"
+        exit 1
+    fi
+    "$TMPDIR/host" "$BAD_PORT" "$STATIC_SO" >"$TMPDIR/host_static_script.log" 2>&1
+    RC=$?
+    [ "$RC" != "0" ] || fail "static-runtime script: host exited 0 (expected non-zero)"
+    if ! grep -q "kind=5" "$TMPDIR/host_static_script.log" ||
+       ! grep -q -- "--shared-runtime" "$TMPDIR/host_static_script.log"; then
+        echo "  [FAIL] static-runtime script: expected kind=5 (KIND_IO) naming --shared-runtime:"
+        head -10 "$TMPDIR/host_static_script.log"
+        exit 1
+    fi
+
+    # --- Test 6: a host on its own static runtime: KIND_IO, even for a
+    # script that is itself on the shared runtime ---
+    mkdir -p "$TMPDIR/static_host"
+    if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/host.ae" \
+            -o "$TMPDIR/static_host/host" >"$TMPDIR/static_host.build.log" 2>&1; then
+        echo "  [FAIL] ae build host.ae (static runtime):"
+        head -30 "$TMPDIR/static_host.build.log"
+        exit 1
+    fi
+    "$TMPDIR/static_host/host" "$BAD_PORT" "$SO_PATH" >"$TMPDIR/static_host.log" 2>&1
+    RC=$?
+    [ "$RC" != "0" ] || fail "static-runtime host: host exited 0 (expected non-zero)"
+    if ! grep -q "kind=5" "$TMPDIR/static_host.log" ||
+       ! grep -q -- "--shared-runtime" "$TMPDIR/static_host.log"; then
+        echo "  [FAIL] static-runtime host: expected kind=5 (KIND_IO) naming --shared-runtime:"
+        head -10 "$TMPDIR/static_host.log"
+        exit 1
+    fi
+    echo "  [PASS] http_script_gateway: 6/6 (happy path, static fallback, missing .dll, no entrypoint, static script, static host)"
+else
+    echo "  [PASS] http_script_gateway: 4/4 (happy path, static fallback, missing .so, no entrypoint)"
+fi

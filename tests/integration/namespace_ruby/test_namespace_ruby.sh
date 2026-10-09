@@ -9,11 +9,6 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_namespace_ruby on Windows"; exit 0 ;;
-esac
-
 if ! command -v ruby >/dev/null 2>&1; then
     echo "  [SKIP] test_namespace_ruby (ruby not installed)"
     exit 0
@@ -21,6 +16,7 @@ fi
 
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
 

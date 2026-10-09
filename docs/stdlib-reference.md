@@ -1415,6 +1415,15 @@ main() {
 
 Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directly on the connection thread.
 
+On Windows the script is a DLL loaded with `LoadLibrary`. A POSIX host links with `-rdynamic`, so a script's runtime calls bind to the host's own runtime; Windows has no equivalent, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
+
+```sh
+ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
+ae build --shared-runtime host.ae -o host
+```
+
+A host or script on its own static runtime is refused at mount with `KIND_IO` and a message naming `--shared-runtime`.
+
 ### API
 
 - `script_gateway.mount(server, path_prefix, so_path)` → `(int, int, string)` Mount the shared library at `so_path` as the request handler for every URL whose path starts with `path_prefix`. Returns `(1, KIND_OK, "")` on successful mount; `(0, KIND_*, msg)` on failure. The dlopen handle is intentionally long-lived (process-lifetime); hot-reload is a separate feature.
@@ -1426,8 +1435,8 @@ Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directl
 | `KIND_OK` | 0 | mount succeeded |
 | `KIND_NOT_FOUND` | 1 | `so_path` is missing or unreadable |
 | `KIND_INVALID` | 6 | null arg, or `.so` missing the `aether_script_handle` entrypoint |
-| `KIND_IO` | 5 | `dlopen` failure (incompatible ABI, etc.) |
-| `KIND_UNAVAILABLE` | 99 | platform stub (Windows DLL hosting is a follow-up) |
+| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); on Windows also a host or script not built with `--shared-runtime` |
+| `KIND_UNAVAILABLE` | 99 | a platform with no dynamic loader; no supported platform returns it |
 
 ### Sandbox
 

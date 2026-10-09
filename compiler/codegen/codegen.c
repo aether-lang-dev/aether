@@ -6579,7 +6579,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
        one translation unit, the duplicate definitions dedupe at link instead of
        colliding with "multiple definition". No-op where weak is unsupported —
        there a single-TU build still links, and the multi-TU case was already
-       impossible on that toolchain. */
+       impossible on that toolchain. PE cannot export a weak definition, so a
+       Windows DLL `ae` links (one TU) is compiled with -DAETHER_WEAK_DEF=
+       (empty: strong) for its @c_callbacks to be found by name (#2547). */
     print_line(gen, "#ifndef AETHER_WEAK_DEF");
     print_line(gen, "#  if defined(__GNUC__) || defined(__clang__)");
     print_line(gen, "#    define AETHER_WEAK_DEF __attribute__((weak))");

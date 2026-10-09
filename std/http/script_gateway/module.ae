@@ -51,6 +51,23 @@
 // Now `GET /greet/anything` runs `aether_script_handle` from
 // greeting.so directly on the connection thread.
 //
+// ### Windows
+//
+// The library is a DLL, loaded with LoadLibrary. A POSIX host links with
+// -rdynamic, so a script's runtime calls bind to the host's own runtime when
+// it is loaded; Windows has no equivalent, so there the host and every
+// script are built on the shared runtime (aether.dll) and run on it
+// together:
+//
+// ```sh
+// ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
+// ae build --shared-runtime host.ae -o host
+// ```
+//
+// A host or a script on its own static runtime is refused at mount with
+// KIND_IO and a message naming `--shared-runtime`, rather than run on two
+// runtimes that each keep their own caps, config and panic frames.
+//
 // ### Lifetime
 //
 // The dlopen handle is intentionally long-lived (process-lifetime).
@@ -76,8 +93,8 @@ exports(
 const KIND_OK = 0
 const KIND_NOT_FOUND = 1 // .so file missing
 const KIND_INVALID = 6 // bad args / missing entrypoint
-const KIND_IO = 5 // dlopen / mount failure
-const KIND_UNAVAILABLE = 99 // platform stub (Windows pending follow-up)
+const KIND_IO = 5 // dlopen / LoadLibrary / mount failure
+const KIND_UNAVAILABLE = 99 // a platform with no dynamic loader; none supported returns it
 
 // Raw extern: returns the canonical (value, kind, message) tuple.
 // `value` is 1 on successful mount or 0 on failure.
@@ -91,10 +108,11 @@ extern script_gateway_mount_so_raw(server: ptr, path_prefix: string, so_path: st
 // Returns (1, KIND_OK, "") on successful mount; (0, KIND_*, msg)
 // on failure. Common failure modes:
 //
-//   KIND_NOT_FOUND     — `so_path` is missing or unreadable
-//   KIND_INVALID       — null arg, or .so missing the entrypoint
-//   KIND_IO            — dlopen failure (incompatible ABI, etc.)
-//   KIND_UNAVAILABLE   — Windows host (DLL hosting is a follow-up)
+//   KIND_NOT_FOUND:    `so_path` is missing or unreadable
+//   KIND_INVALID:      null arg, or .so missing the entrypoint
+//   KIND_IO:           dlopen failure (incompatible ABI, etc.), or on
+//                      Windows a host or script not built with
+//                      --shared-runtime
 mount(server: ptr, path_prefix: string, so_path: string) -> {
     return script_gateway_mount_so_raw(server, path_prefix, so_path)
 }

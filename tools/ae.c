@@ -4164,8 +4164,15 @@ void build_gcc_cmd(char* cmd, size_t size,
          * share one link (#1590), but PE cannot export a weak definition
          * (--export-all-symbols skips it; an explicit dllexport is "symbol
          * wrong type"), so no Windows DLL ever exported its catalog. A DLL
-         * `ae` links is one TU: make the definition strong. */
-        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
+         * `ae` links is one TU: make the definition strong.
+         *
+         * #2547: the same holds for every @c_callback definition, emitted
+         * weak (AETHER_WEAK_DEF) so two TUs carrying one module can share a
+         * link. A C host binds a @c_callback by name, which is the point of
+         * the annotation, yet GetProcAddress found none in a Windows DLL:
+         * std.http.script_gateway could not reach a script's
+         * aether_script_handle. Strong here too, for the same one-TU reason. */
+        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
         opt = ae_strdup_printf("-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
                                harden_cflags(optimize), harden_ldflags(), user_cflags,
