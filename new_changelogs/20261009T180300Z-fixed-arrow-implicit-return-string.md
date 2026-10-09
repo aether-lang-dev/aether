@@ -6,4 +6,4 @@
   statement. So `msg` was freed at scope exit and the freed pointer returned,
   which printed as garbage, different at `-O0` and `-O2`. The implicit return
   now holds the expression, exactly as `return msg` does, and the caller frees
-  the string (#2488).
+  the string (#2685; found by the -O0 against -O2 sweep of #2488).

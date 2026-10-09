@@ -5,4 +5,4 @@
   neither `/dev/null` nor `grep`, so the probe failed on every build and the
   link stopped at `undefined reference to ffi_prep_cif`. `ae` now reads the
   archive itself and looks for the symbol in its string tables, on every
-  platform, with no external tool (#2569).
+  platform, with no external tool (#2686).

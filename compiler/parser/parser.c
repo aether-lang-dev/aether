@@ -5773,7 +5773,7 @@ ASTNode* parse_function_definition(Parser* parser) {
                     // inside a statement. Wrapped, `msg = "n=${n}"` then
                     // `msg` freed msg at scope exit and returned the freed
                     // pointer, which -O0 and -O2 printed as different
-                    // garbage (#2488).
+                    // garbage (#2685).
                     ASTNode* value = last;
                     if (last->type == AST_EXPRESSION_STATEMENT &&
                         last->child_count == 1 && last->children[0]) {

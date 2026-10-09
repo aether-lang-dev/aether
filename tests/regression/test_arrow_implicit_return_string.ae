@@ -1,5 +1,6 @@
-// Regression (#2488): an arrow body's trailing expression returns a string
-// the way an explicit `return` does.
+// Regression (#2685, found by the -O0 against -O2 sweep of #2488): an arrow
+// body's trailing expression returns a string the way an explicit `return`
+// does.
 //
 // `f(n) -> { msg = "count=${n}"; msg }` freed msg at scope exit and returned
 // the freed pointer: the parser wrapped the trailing expression's statement in
