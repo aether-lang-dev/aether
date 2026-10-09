@@ -10,3 +10,5 @@
   that had drifted (only some normalised IPv4-mapped IPv6 addresses).
   **Breaking:** `grant_tcp` / `grant_udp` need a port argument, and
   `perms: ptr` parameters become `sandbox.Grants`.
+  Imported C extern signatures resolve distinct parameter and return types,
+  so host bridges accept the same `Grants` returned by `sandbox.new`.
