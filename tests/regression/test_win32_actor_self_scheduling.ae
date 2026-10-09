@@ -40,9 +40,15 @@ actor Animator {
         }
         AnimStop() -> {
             running = false
-            print("PASS: animator stopped after ")
-            print(ticks)
-            println(" ticks")
+            // How many ticks fit in main's sleep depends on scheduling (4 to
+            // 6 seen), so print what is certain: it ticked, then stopped.
+            // The count made the output differ between runs, which the -O0
+            // against -O2 sweep reported as a difference (#2488).
+            if ticks > 0 {
+                println("PASS: animator ticked, then stopped")
+            } else {
+                println("FAIL: animator stopped without ticking")
+            }
         }
     }
 }
