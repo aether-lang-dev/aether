@@ -6558,8 +6558,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "))");
                         generate_expression(gen, expr->children[1]);
                     } else if (assign_box_struct) {
+                        /* The box is a holder like a `fn` field (#2525): it
+                         * keeps a reference of its own to the env, taken
+                         * as emit_closure_take takes one (a fresh literal's
+                         * is adopted, a view of a local or a parameter is
+                         * retained). The escape walk counts this store as
+                         * the holder's keep (closure_param_store_retains,
+                         * #2528), so a caller drains its own reference
+                         * after the call; boxed without one, that drain
+                         * freed the env the field still pointed at (aether-
+                         * ui asks/aether-closure-drain-through-fn-store.md). */
                         fprintf(gen->output, "_aether_box_closure(");
-                        generate_expression(gen, expr->children[1]);
+                        emit_closure_take(gen, expr->children[1]);
                         fprintf(gen->output, ")");
                     } else if (assign_box_bare_fn) {
                         /* Register an env-ignoring adapter for this

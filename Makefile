@@ -479,6 +479,18 @@ ifdef IS_WINDOWS
   endif
 endif
 
+# Windows: the C entry point of an --emit=obj object
+# (runtime/windows/aether_lib_main.c). Elsewhere the object carries a weak
+# main(); a COFF weak definition does not reliably keep libmingw32's WinMain
+# entry out of the link, so on Windows the entry is this one-member archive,
+# which `ae cflags --libs` names ahead of -laether: linked only when the
+# program has no main() of its own. Kept out of libaether.a because the shared
+# runtime DLL is linked from that whole archive and must define no main.
+LIB_MAIN_ARCHIVE :=
+ifdef IS_WINDOWS
+  LIB_MAIN_ARCHIVE := $(BUILD_DIR)/libaether_main.a
+endif
+
 # Optional OpenSSL detection (enables HTTPS client). Probes pkg-config;
 # falls back silently if OpenSSL isn't installed — the HTTP client still
 # works for `http://` URLs and returns a clean error for `https://`.
@@ -850,8 +862,8 @@ else ifneq ($(findstring CYGWIN,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
 endif
 
-COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
-COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
+COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
+COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/aether_callbacks.c
 STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
@@ -1964,7 +1976,7 @@ endif
 endif
 
 # Precompiled stdlib archive — runtime + std for user programs.
-stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(BUILD_TARGET_STAMP) $(SHARED_RT)
+stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT)
 
 ifneq ($(SHARED_RT),)
 $(SHARED_RT): $(BUILD_DIR)/libaether.a
@@ -1976,6 +1988,13 @@ $(SHARED_RT): $(BUILD_DIR)/libaether.a
 shared-runtime: $(SHARED_RT)
 .PHONY: shared-runtime
 endif
+
+$(BUILD_DIR)/libaether_main.a: runtime/windows/aether_lib_main.c $(BUILD_FLAGS_STAMP)
+	@mkdir -p $(OBJ_DIR)/runtime/windows
+	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c runtime/windows/aether_lib_main.c -o $(OBJ_DIR)/runtime/windows/aether_lib_main.o
+	@rm -f $@.tmp
+	@ar rcs $@.tmp $(OBJ_DIR)/runtime/windows/aether_lib_main.o
+	@mv $@.tmp $@
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
 	@echo "Compiling the Windows application manifest..."

@@ -577,6 +577,15 @@ typedef struct ASTNode {
                                // than written down, which is the same
                                // distinction: only an inferred parameter may
                                // be widened by a later call site (#1972).
+                               // And on a FUNCTION DEFINITION (or builder)
+                               // written with no result type: its result is
+                               // what inference finds in its `return`s, so it
+                               // claims one only where it returns a value
+                               // (#2684).
+    int end_line;              // AST_BLOCK parsed from source: the line and
+    int end_column;            // column of its closing `}`, where control
+                               // leaves the block by falling off its end
+                               // (#2684). 0 on a block the compiler made.
 
     /* Allocated slots in `children`. Only add_child maintains this;
      * code that replaces the array wholesale resets it to 0, which

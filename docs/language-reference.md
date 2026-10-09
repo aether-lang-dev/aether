@@ -641,6 +641,36 @@ main() {
 
 `os.argv0()` returns argv[0] as a string (empty if uninitialised). `os.aether_argv_raw()` exposes the original `char**` for C-interop callers that need to forward it unchanged. Shorter ergonomic spellings exist: `os.args_count()` and `os.args_get(i)` (the latter returns an owned copy, `""` when out of range). See [Standard Library Reference § `std.os`](stdlib-reference.md) for the full surface.
 
+### Returning on every path [E0700]
+
+A function whose result is not void returns a value on every path through its body. A path that reaches the closing brace instead is a compile error, reported at that brace with the statement that lets control through. In a `{ ... }` body the last expression is not returned; only an [arrow body](#multi-statement-arrow-bodies) returns its last expression:
+
+```aether,fails
+label(n: int) -> string {
+    msg = "n=${n}"
+    msg
+}
+// error[E0700]: missing return: control can reach the end of 'label', whose result is string
+// help: `msg` on line 3 is not returned: only an arrow body, `-> { ... }`, returns its
+// last expression; write `return msg`
+
+sign(n: int) -> int {
+    if n > 0 { return 1 }
+    if n < 0 { return -1 }
+}
+// error[E0700]: missing return: control can reach the end of 'sign', whose result is int
+// help: the `if` on line 11 has no `else`, so control goes on past it when its
+// condition is false: return a value after it
+
+main() {
+    println(label(sign(2)))
+}
+```
+
+Control cannot get past a `return`, a `panic(...)` or an `exit(...)`, nor out of a loop whose condition is always true (`while true`, a `for (;;)`, a `const` that is true) unless a `break` leaves it. An `if` lets it through when it has no `else` or when a branch does; a `match` when an arm does or when it may run no arm, which it cannot when it has a `_` arm or covers its type: every member of an enum, every variant of a sum (both checked anyway), `none` and `some(v)` for an optional, `true` and `false` for a bool, `[]` and `[h|t]` for a list; a `switch` when it has no `default`, when a case does, or when a `break` in a case leaves it; a `try` when its body or its `catch` does. A call's trailing block runs inline, so a `return` in it returns from the function it is written in. A condition the compiler decides (`if true`, `if DEBUG` over a `const`) takes only the branch it selects.
+
+The rule is the same whether the result type is written or inferred: a function with no written type that returns a value on one path (so its result is inferred from that `return`) returns one on every path. One that returns nothing anywhere is void and may end anywhere. So is a clause of a [clause set](#how-a-clause-set-runs) with no written type that returns nothing: its caller gets the set's default value. Each clause of a set, and each closure that returns a value, is checked as a function of its own; `main()` and actor `receive` handlers have no result. Before this check such a function compiled, and the generated C fell off the end of a non-void function: undefined behaviour, which on Windows printed a string result as `(null)`.
+
 ### Default arguments
 
 Parameters can carry a default expression:
@@ -828,6 +858,8 @@ clamp(x, lo, hi) -> {
 ```
 
 This allows complex logic in arrow-style functions without switching to block syntax.
+
+The last statement is the result only when it has a value: an expression, a `match`, or a declaration (`-> { x = a + b }` returns `a + b`). An `if`, a loop, a `switch`, a `try`, a `defer` or a `panic` there is a statement like any other, so a body ending in one has to `return` on every path its own way: `-> { if x > 0 { return 1 } }` is a [missing return](#returning-on-every-path-e0700) when `x` is not positive.
 
 ### Multi-parameter Guards
 
@@ -3352,6 +3384,21 @@ Rules:
 
 ---
 
+## Compiler Errors
+
+An error stops the build and prints its code, `error[E0301]: ...`, with the source line and a `help:` line. The codes:
+
+| Code | Kind |
+|------|------|
+| `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
+| `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`) |
+| `E0300` | Undefined variable |
+| `E0301` | Undefined function, or a function of a module the calling module does not import |
+| `E0303` | A name the module does not export |
+| `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
+| `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
+| `E0700` | Missing return: control can reach the end of a function whose result is not void ([Returning on every path](#returning-on-every-path-e0700)) |
+
 ## Compiler Warnings
 
 The compiler emits structured warnings for common issues:
@@ -3756,7 +3803,7 @@ Aether uses static typing with full type inference, explicit annotations are nev
 
 - **Local variables**: Inferred from their initializer (`x = 42` → `int`)
 - **Function parameters**: Inferred from call sites across the whole program, including through deep call chains (`main → f → g → h`)
-- **Return types**: Inferred from `return` statements and arrow-body expressions
+- **Return types**: Inferred from `return` statements and arrow-body expressions; a function that returns a value on one path must return one on every path, as one with a written type must ([E0700](#returning-on-every-path-e0700))
 - **Constraint solving**: Iterative constraint propagation handles complex interdependencies
 
 ### Type annotations are optional

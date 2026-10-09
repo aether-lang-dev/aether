@@ -54,6 +54,7 @@ main() {
     if a == "i386" { arch_known = 1 }
     if a == "arm" { arch_known = 1 }
     if a == "riscv64" { arch_known = 1 }
+    if a == "loongarch64" { arch_known = 1 }
     if a == "ppc64le" { arch_known = 1 }
     if a == "s390x" { arch_known = 1 }
     if a == "wasm32" { arch_known = 1 }

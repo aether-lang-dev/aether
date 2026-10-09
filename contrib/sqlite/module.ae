@@ -30,8 +30,33 @@
 //   sqlite.changes(db)              -> int
 //   sqlite.errmsg(db)               -> string
 //
-// Constants exported below so callers don't redeclare them:
-//   SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101.
+// v3 surface (additive — holding a connection to its one file, typed rows):
+//   sqlite.set_authorizer(db, cb, ud)   -> err     // cb: fn(ptr, int, string, string, string, string) -> int
+//   sqlite.clear_authorizer(db)         -> err
+//   sqlite.limit(db, id, val)           -> int     // previous value; val < 0 only reads
+//   sqlite.enable_load_extension(db, on) -> err
+//   sqlite.column_count(stmt)           -> int
+//   sqlite.column_name(stmt, col)       -> string
+//   sqlite.column_type(stmt, col)       -> int     // SQLITE_INTEGER .. SQLITE_NULL
+//   sqlite.column_double(stmt, col)     -> float
+//   sqlite.column_int64(stmt, col)      -> long
+//   sqlite.bind_double(stmt, idx, v)    -> err
+//   sqlite.bind_int64(stmt, idx, v: long) -> err
+//   sqlite.bind_parameter_count(stmt)   -> int
+//   sqlite.bind_parameter_index(stmt, name) -> int  // "$id" / ":id" / "@id"; 0 if none
+//   sqlite.last_insert_rowid(db)        -> long
+//
+// Constants exported below so callers don't redeclare them (SQLite's own
+// numbers, from sqlite3.h):
+//   SQLITE_OK = 0, SQLITE_ROW = 100, SQLITE_DONE = 101;
+//   the authorizer's answers SQLITE_DENY = 1, SQLITE_IGNORE = 2 (SQLITE_OK
+//   allows) and its action codes SQLITE_CREATE_INDEX = 1 .. SQLITE_RECURSIVE
+//   = 33 (SQLITE_PRAGMA 19, SQLITE_ATTACH 24, SQLITE_DETACH 25,
+//   SQLITE_FUNCTION 31, ...);
+//   the limits SQLITE_LIMIT_LENGTH = 0 .. SQLITE_LIMIT_WORKER_THREADS = 11
+//   (SQLITE_LIMIT_ATTACHED is 7; 6 is SQLITE_LIMIT_FUNCTION_ARG);
+//   the column types SQLITE_INTEGER = 1, SQLITE_FLOAT = 2, SQLITE_TEXT = 3,
+//   SQLITE_BLOB = 4, SQLITE_NULL = 5.
 //
 // Streaming row iteration (cursor-style) is still out of scope —
 // tracked as v3 in sqlite-improvement-plan.md. The v2 primitives
@@ -65,7 +90,7 @@
 // for libm the way the shared one does, so its math functions name -lm.
 @link("-laether_sqlite -lsqlite3 -lm")
 
-exports (
+exports(
     SQLITE_OK, SQLITE_ROW, SQLITE_DONE,
     sqlite_open_raw, sqlite_close_raw, sqlite_exec_raw, sqlite_query_raw,
     sqlite_rs_row_count, sqlite_rs_col_count, sqlite_rs_col_name,
@@ -86,7 +111,36 @@ exports (
     bind_int, bind_text, bind_blob, bind_i64, bind_null,
     step, next_row,
     column_int, column_i64, column_text, column_blob,
-    reset, finalize, changes, errmsg
+    reset, finalize, changes, errmsg,
+    SQLITE_DENY, SQLITE_IGNORE,
+    SQLITE_COPY, SQLITE_CREATE_INDEX, SQLITE_CREATE_TABLE,
+    SQLITE_CREATE_TEMP_INDEX, SQLITE_CREATE_TEMP_TABLE,
+    SQLITE_CREATE_TEMP_TRIGGER, SQLITE_CREATE_TEMP_VIEW,
+    SQLITE_CREATE_TRIGGER, SQLITE_CREATE_VIEW, SQLITE_DELETE,
+    SQLITE_DROP_INDEX, SQLITE_DROP_TABLE, SQLITE_DROP_TEMP_INDEX,
+    SQLITE_DROP_TEMP_TABLE, SQLITE_DROP_TEMP_TRIGGER, SQLITE_DROP_TEMP_VIEW,
+    SQLITE_DROP_TRIGGER, SQLITE_DROP_VIEW, SQLITE_INSERT, SQLITE_PRAGMA,
+    SQLITE_READ, SQLITE_SELECT, SQLITE_TRANSACTION, SQLITE_UPDATE,
+    SQLITE_ATTACH, SQLITE_DETACH, SQLITE_ALTER_TABLE, SQLITE_REINDEX,
+    SQLITE_ANALYZE, SQLITE_CREATE_VTABLE, SQLITE_DROP_VTABLE,
+    SQLITE_FUNCTION, SQLITE_SAVEPOINT, SQLITE_RECURSIVE,
+    SQLITE_LIMIT_LENGTH, SQLITE_LIMIT_SQL_LENGTH, SQLITE_LIMIT_COLUMN,
+    SQLITE_LIMIT_EXPR_DEPTH, SQLITE_LIMIT_COMPOUND_SELECT,
+    SQLITE_LIMIT_VDBE_OP, SQLITE_LIMIT_FUNCTION_ARG, SQLITE_LIMIT_ATTACHED,
+    SQLITE_LIMIT_LIKE_PATTERN_LENGTH, SQLITE_LIMIT_VARIABLE_NUMBER,
+    SQLITE_LIMIT_TRIGGER_DEPTH, SQLITE_LIMIT_WORKER_THREADS,
+    SQLITE_INTEGER, SQLITE_FLOAT, SQLITE_TEXT, SQLITE_BLOB, SQLITE_NULL,
+    sqlite_set_authorizer_raw, sqlite_clear_authorizer_raw,
+    sqlite_limit_raw, sqlite_enable_load_extension_raw,
+    sqlite_column_count_raw, sqlite_column_name_raw, sqlite_column_type_raw,
+    sqlite_column_double_raw, sqlite_column_int64_raw,
+    sqlite_bind_double_raw, sqlite_bind_int64_raw,
+    sqlite_bind_parameter_count_raw, sqlite_bind_parameter_index_raw,
+    sqlite_last_insert_rowid_raw,
+    set_authorizer, clear_authorizer, limit, enable_load_extension,
+    column_count, column_name, column_type, column_double, column_int64,
+    bind_double, bind_int64, bind_parameter_count, bind_parameter_index,
+    last_insert_rowid
 )
 
 // ---- Raw externs ----
@@ -165,8 +219,8 @@ free(rs: ptr) { sqlite_rs_free(rs) }
 // SQLite result codes the Aether wrappers surface to callers.
 // Step returns one of these; tests typically branch on
 // `rc == SQLITE_ROW` to loop through results.
-const SQLITE_OK   = 0
-const SQLITE_ROW  = 100
+const SQLITE_OK = 0
+const SQLITE_ROW = 100
 const SQLITE_DONE = 101
 
 // ---- Raw externs ----
@@ -324,7 +378,7 @@ column_blob(stmt: ptr, col: int) -> {
     ok = sqlite_try_column_blob(stmt, col)
     if ok == 0 { return "", 0, "column_blob failed" }
     raw = sqlite_get_blob_bytes()
-    n   = sqlite_get_blob_length()
+    n = sqlite_get_blob_length()
     owned = string_new_with_length(raw, n)
     sqlite_release_blob()
     return owned, n, ""
@@ -360,4 +414,196 @@ changes(db: ptr) -> int {
 // detail when bind/step return non-SQLITE_OK rcs.
 errmsg(db: ptr) -> string {
     return sqlite_errmsg_raw(db)
+}
+
+// =================================================================
+// v3: holding a connection to its one file, and typed rows
+// (sae asks/sqlite-authorizer.md)
+// =================================================================
+
+// The authorizer's answers. SQLITE_OK (above) allows the operation.
+const SQLITE_DENY = 1 // refuse the statement with "not authorized"
+const SQLITE_IGNORE = 2 // compile it, reading the column as NULL
+
+// The authorizer's action codes: what the statement is about to do. Its
+// four string arguments depend on the action (sqlite3.h, "Authorizer
+// Action Codes"): a table and column name for SQLITE_READ, the pragma's
+// name and argument for SQLITE_PRAGMA, the file name for SQLITE_ATTACH,
+// the function's name in the second slot for SQLITE_FUNCTION. A slot an
+// action does not use arrives as a null string: test it with
+// string.length, not by comparing.
+const SQLITE_COPY = 0
+const SQLITE_CREATE_INDEX = 1
+const SQLITE_CREATE_TABLE = 2
+const SQLITE_CREATE_TEMP_INDEX = 3
+const SQLITE_CREATE_TEMP_TABLE = 4
+const SQLITE_CREATE_TEMP_TRIGGER = 5
+const SQLITE_CREATE_TEMP_VIEW = 6
+const SQLITE_CREATE_TRIGGER = 7
+const SQLITE_CREATE_VIEW = 8
+const SQLITE_DELETE = 9
+const SQLITE_DROP_INDEX = 10
+const SQLITE_DROP_TABLE = 11
+const SQLITE_DROP_TEMP_INDEX = 12
+const SQLITE_DROP_TEMP_TABLE = 13
+const SQLITE_DROP_TEMP_TRIGGER = 14
+const SQLITE_DROP_TEMP_VIEW = 15
+const SQLITE_DROP_TRIGGER = 16
+const SQLITE_DROP_VIEW = 17
+const SQLITE_INSERT = 18
+const SQLITE_PRAGMA = 19
+const SQLITE_READ = 20
+const SQLITE_SELECT = 21
+const SQLITE_TRANSACTION = 22
+const SQLITE_UPDATE = 23
+const SQLITE_ATTACH = 24
+const SQLITE_DETACH = 25
+const SQLITE_ALTER_TABLE = 26
+const SQLITE_REINDEX = 27
+const SQLITE_ANALYZE = 28
+const SQLITE_CREATE_VTABLE = 29
+const SQLITE_DROP_VTABLE = 30
+const SQLITE_FUNCTION = 31
+const SQLITE_SAVEPOINT = 32
+const SQLITE_RECURSIVE = 33
+
+// sqlite3_limit's categories. Counted from 0 in sqlite3.h, so nobody
+// counts here: SQLITE_LIMIT_ATTACHED is 7 (6 is FUNCTION_ARG).
+const SQLITE_LIMIT_LENGTH = 0
+const SQLITE_LIMIT_SQL_LENGTH = 1
+const SQLITE_LIMIT_COLUMN = 2
+const SQLITE_LIMIT_EXPR_DEPTH = 3
+const SQLITE_LIMIT_COMPOUND_SELECT = 4
+const SQLITE_LIMIT_VDBE_OP = 5
+const SQLITE_LIMIT_FUNCTION_ARG = 6
+const SQLITE_LIMIT_ATTACHED = 7
+const SQLITE_LIMIT_LIKE_PATTERN_LENGTH = 8
+const SQLITE_LIMIT_VARIABLE_NUMBER = 9
+const SQLITE_LIMIT_TRIGGER_DEPTH = 10
+const SQLITE_LIMIT_WORKER_THREADS = 11
+
+// A column value's storage class (column_type).
+const SQLITE_INTEGER = 1
+const SQLITE_FLOAT = 2
+const SQLITE_TEXT = 3
+const SQLITE_BLOB = 4
+const SQLITE_NULL = 5
+
+// ---- Raw externs ----
+extern sqlite_set_authorizer_raw(db: ptr, cb: fn(ptr, int, string, string, string, string) -> int, ud: ptr) -> int
+extern sqlite_clear_authorizer_raw(db: ptr) -> int
+extern sqlite_limit_raw(db: ptr, id: int, val: int) -> int
+extern sqlite_enable_load_extension_raw(db: ptr, on: int) -> int
+extern sqlite_column_count_raw(stmt: ptr) -> int
+extern sqlite_column_name_raw(stmt: ptr, col: int) -> string
+extern sqlite_column_type_raw(stmt: ptr, col: int) -> int
+extern sqlite_column_double_raw(stmt: ptr, col: int) -> float
+extern sqlite_column_int64_raw(stmt: ptr, col: int) -> long
+extern sqlite_bind_double_raw(stmt: ptr, idx: int, v: float) -> int
+extern sqlite_bind_int64_raw(stmt: ptr, idx: int, v: long) -> int
+extern sqlite_bind_parameter_count_raw(stmt: ptr) -> int
+extern sqlite_bind_parameter_index_raw(stmt: ptr, name: string) -> int
+extern sqlite_last_insert_rowid_raw(db: ptr) -> long
+
+// ---- Go-style wrappers ----
+
+// Install `cb` as the connection's authorizer: SQLite calls it while it
+// compiles each statement, once per operation, as
+//   cb(ud, action, arg1, arg2, database, trigger_or_view) -> int
+// and the answer is SQLITE_OK (allow), SQLITE_DENY (the statement fails
+// with "not authorized") or SQLITE_IGNORE. `cb` is a plain top-level
+// function cast to the type (`authorize as fn(ptr, int, string, string,
+// string, string) -> int`): SQLite holds the C function pointer, so it
+// cannot be a capturing closure; pass state through `ud`. It runs on the
+// thread that prepares the statement. Replaces any earlier authorizer.
+// Returns "" or the reason it was refused.
+set_authorizer(db: ptr, cb: fn(ptr, int, string, string, string, string) -> int, ud: ptr) -> string {
+    rc = sqlite_set_authorizer_raw(db, cb, ud)
+    if rc != SQLITE_OK { return "set_authorizer failed" }
+    return ""
+}
+
+// Remove the connection's authorizer: every operation is allowed again.
+clear_authorizer(db: ptr) -> string {
+    rc = sqlite_clear_authorizer_raw(db)
+    if rc != SQLITE_OK { return "clear_authorizer failed" }
+    return ""
+}
+
+// Set the connection's limit `id` (a SQLITE_LIMIT_* constant) to `val`,
+// clamped by SQLite to its compile-time ceiling; a negative `val` changes
+// nothing. Returns the previous value (-1 for a null db).
+//   sqlite.limit(db, sqlite.SQLITE_LIMIT_ATTACHED, 0)   // no ATTACH at all
+limit(db: ptr, id: int, val: int) -> int {
+    return sqlite_limit_raw(db, id, val)
+}
+
+// Allow (on != 0) or forbid (0) loading extensions on this connection:
+// the C API and the SQL load_extension() function both. Off is SQLite's
+// default; turning it off explicitly states it. On macOS against the
+// system library (built without extension loading) only the C API's
+// setting exists, and the SQL function cannot be turned on at all.
+enable_load_extension(db: ptr, on: int) -> string {
+    rc = sqlite_enable_load_extension_raw(db, on)
+    if rc != SQLITE_OK { return "enable_load_extension failed" }
+    return ""
+}
+
+// The number of columns a prepared statement's rows have (0 for a
+// statement that returns none).
+column_count(stmt: ptr) -> int {
+    return sqlite_column_count_raw(stmt)
+}
+
+// A result column's name: the AS alias, else SQLite's own choice. ""
+// out of range. Read it before the statement is finalized.
+column_name(stmt: ptr, col: int) -> string {
+    return sqlite_column_name_raw(stmt, col)
+}
+
+// The storage class of the current row's value in `col`: SQLITE_INTEGER,
+// SQLITE_FLOAT, SQLITE_TEXT, SQLITE_BLOB or SQLITE_NULL. Read it before
+// any other column_* call on that column, which may convert the value.
+column_type(stmt: ptr, col: int) -> int {
+    return sqlite_column_type_raw(stmt, col)
+}
+
+column_double(stmt: ptr, col: int) -> float {
+    return sqlite_column_double_raw(stmt, col)
+}
+
+// The whole 64-bit value in one call (column_i64's (hi, lo) pair stays,
+// for a C compiler whose int is narrower).
+column_int64(stmt: ptr, col: int) -> long {
+    return sqlite_column_int64_raw(stmt, col)
+}
+
+bind_double(stmt: ptr, idx: int, v: float) -> string {
+    rc = sqlite_bind_double_raw(stmt, idx, v)
+    if rc != SQLITE_OK { return "bind_double failed" }
+    return ""
+}
+
+bind_int64(stmt: ptr, idx: int, v: long) -> string {
+    rc = sqlite_bind_int64_raw(stmt, idx, v)
+    if rc != SQLITE_OK { return "bind_int64 failed" }
+    return ""
+}
+
+// The largest parameter index the statement uses (named parameters are
+// numbered too), so 0 means it takes none.
+bind_parameter_count(stmt: ptr) -> int {
+    return sqlite_bind_parameter_count_raw(stmt)
+}
+
+// The index of a named parameter, spelt with its prefix as in the SQL
+// ("$id", ":id", "@id"), for the bind_* calls; 0 when there is none.
+bind_parameter_index(stmt: ptr, name: string) -> int {
+    return sqlite_bind_parameter_index_raw(stmt, name)
+}
+
+// The rowid of the most recent successful INSERT on this connection (0
+// if none yet).
+last_insert_rowid(db: ptr) -> long {
+    return sqlite_last_insert_rowid_raw(db)
 }

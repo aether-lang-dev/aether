@@ -359,7 +359,7 @@ TEST_CATEGORY(aea_decode_rejects_damage, TEST_CATEGORY_COMPILER) {
 TEST_CATEGORY(aea_decode_rejects_a_well_hashed_but_malformed_payload, TEST_CATEGORY_COMPILER) {
     /* A payload whose hash matches but whose grammar does not: the decoder
      * must fail cleanly rather than trust the hash. */
-    static const char body[] = "N 1 1 1 0 0 0 0 ~ 0 ~ ~ 5\n";
+    static const char body[] = "N 1 1 1 0 0 0 0 0 0 ~ 0 ~ ~ 5\n";
     char header[512];
     AeaConsumer c = consumer_for(RICH_SOURCE);
     int hn = snprintf(header, sizeof(header),
@@ -394,13 +394,18 @@ TEST_CATEGORY(aea_codec_covers_every_ast_field, TEST_CATEGORY_COMPILER) {
      * ASTNode grew to 120 with `origin_module` (#2614): the module a merged
      * definition was cloned from. It is set only by the merge (NULL after a
      * parse), so like `source_name` the codec does not carry it and neither
-     * the wire format nor AEA_FORMAT_VERSION changed. */
+     * the wire format nor AEA_FORMAT_VERSION changed.
+     *
+     * ASTNode grew to 128 with `end_line` / `end_column` (#2684): where a
+     * block's closing brace is, which the missing-return check reports. That
+     * is parse state, so the codec carries both and AEA_FORMAT_VERSION went
+     * to 3. */
     /* Type grew to 136 with `closure_literal` (#2460), a type-checker
      * back-pointer like compound_node: NULL after a parse and refused by
      * encode_type, so the wire format and AEA_FORMAT_VERSION are unchanged
      * as well. */
     if (sizeof(void*) == 8 && sizeof(int) == 4) {
-        ASSERT_EQ(120, (int)sizeof(ASTNode));
+        ASSERT_EQ(128, (int)sizeof(ASTNode));
         ASSERT_EQ(136, (int)sizeof(Type));
     }
 }
@@ -448,10 +453,10 @@ static const char* decode_payload(const char* body, size_t n) {
 
 TEST_CATEGORY(aea_decode_rejects_a_value_len_that_disagrees, TEST_CATEGORY_COMPILER) {
     /* value_len is 0 or the byte count of a value holding a NUL. */
-    static const char good[] = "N 1 1 1 0 0 0 0 3:a\0b 3 ~ ~ 0\n";
-    static const char count_without_nul[] = "N 1 1 1 0 0 0 0 2:ab 2 ~ ~ 0\n";
-    static const char nul_without_count[] = "N 1 1 1 0 0 0 0 3:a\0b 0 ~ ~ 0\n";
-    static const char wrong_count[] = "N 1 1 1 0 0 0 0 3:a\0b 2 ~ ~ 0\n";
+    static const char good[] = "N 1 1 1 0 0 0 0 0 0 3:a\0b 3 ~ ~ 0\n";
+    static const char count_without_nul[] = "N 1 1 1 0 0 0 0 0 0 2:ab 2 ~ ~ 0\n";
+    static const char nul_without_count[] = "N 1 1 1 0 0 0 0 0 0 3:a\0b 0 ~ ~ 0\n";
+    static const char wrong_count[] = "N 1 1 1 0 0 0 0 0 0 3:a\0b 2 ~ ~ 0\n";
     ASSERT_STREQ("decoded", decode_payload(good, sizeof(good) - 1));
     ASSERT_STREQ("artifact payload is malformed",
                  decode_payload(count_without_nul, sizeof(count_without_nul) - 1));

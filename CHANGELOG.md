@@ -14,6 +14,113 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.801.0]
+
+### Added
+
+- **`--target=riscv64-linux-musl` and `loongarch64-linux-musl`.** Two more
+  self-contained zig cross targets (`loong64-linux-musl` is accepted too):
+  static binaries for RISC-V 64 (rv64gc) and LoongArch 64, needing no
+  sysroot. Run under `qemu-riscv64` / `qemu-loongarch64`, all 380 regression
+  tests behave as the native build does, apart from differences shared with
+  `x86_64-linux-musl` (musl and the container) and tests that spawn their own
+  binary, which user emulation cannot exec. LoongArch needs QEMU 8.1 or newer;
+  7.2 stops on an illegal instruction even for plain C. `os.arch()` and
+  `target.arch` now name `loongarch64` instead of `unknown`.
+
+- **contrib.quickjs reads and makes typed arrays.** `bytes_of(q, h)` and
+  `arg_bytes(q, args, i)` give a `Uint8Array`'s (or `Uint8ClampedArray`'s)
+  bytes, its own window of its buffer, as `(pointer, count)` with no copy,
+  `(null, -1)` for anything else or a detached buffer; `new_uint8array(q,
+  data, n)` hands a script a copy of the host's bytes. A 128x128 raster was
+  65 536 handle allocations through `get_index`, and sae mirrored the
+  runtime's private struct to reach the engine instead (sae
+  asks/quickjs-typed-array-bytes.md).
+
+- **contrib.sqlite: the authorizer, limits, extension control and typed
+  rows.** `set_authorizer` / `clear_authorizer` (SQLite's authorizer, with
+  the action codes and `SQLITE_DENY` / `SQLITE_IGNORE` exported), `limit`
+  with the `SQLITE_LIMIT_*` constants (`SQLITE_LIMIT_ATTACHED` is 7),
+  `enable_load_extension`, `column_count` / `column_name` / `column_type`
+  (`SQLITE_INTEGER` .. `SQLITE_NULL`), `column_double`, `column_int64 ->
+  long`, `bind_double`, `bind_int64(stmt, idx, v: long)`,
+  `bind_parameter_count`, `bind_parameter_index` and `last_insert_rowid ->
+  long`: what a host running someone else's SQL needs to hold a connection
+  to its one file, and to return rows with their types. sae declared the
+  thirteen SQLite calls itself until now (sae asks/sqlite-authorizer.md).
+
+### Changed
+
+- **A capability-empty `--emit=lib` build rejects the program's own
+  `extern`s.** The `--with=fs,net,os` gates stopped `import std.os`, but a
+  library could still declare `extern system(cmd: string) -> int` (or
+  `@extern("fopen") …`, or put either in a local module) and call it, so the
+  gates were decorative against anyone writing one line of C binding. Such an
+  extern is now an error that names it, unless the build passes the new
+  `--with=extern`. `--with=all` / `first-party` include it. Externs declared by
+  `std.*` and `contrib.*` modules are unaffected; those modules sit behind the
+  other gates. `ae inspect` reports `extern` among the capabilities a file
+  needs, and a `--emit=csrc` catalog lists it when granted. The same applies to
+  `--emit=csrc` and `--emit=obj`, which are library builds too. **Breaking** for
+  a library that declares its own externs: build it with `--with=extern`
+  (downstream: check `ae build --emit=lib` invocations in servirtium-vcr, aeb,
+  aether-ui and any binding that ships its own C shim).
+
+### Fixed
+
+- **A capturing closure stored into a `ptr` field outlives the call that
+  stored it.** `e.cb = h` with a `ptr` field boxes the closure, and the box
+  took no reference of its own to the closure's environment, while the
+  escape walk counted the store as the holder's keep (#2528) and the caller
+  released its own reference straight after the call. The environment was
+  freed while the field still pointed at it: a handler invoked later read
+  freed memory (a segfault on glibc, garbage or a crash on macOS). 0.796's
+  alias rule (#2670/#2671) made aether-ui's workaround (`kept = h; e.cb =
+  kept`) fail the same way, so every vg click handler with captures
+  crashed. The box now takes a reference, as a `fn` field does (#2525): a
+  fresh closure's is adopted, a parameter's, local's or alias's is retained.
+  The same store of a closure local freed at the storing function's end was
+  the same bug (aether-ui asks/aether-closure-drain-through-fn-store.md).
+
+- **An `--emit=obj` object links into a program on Windows with no C `main()`
+  of its own.** The object's weak `main()` (#2511) is a COFF weak external,
+  and GNU ld up to 2.46 still searched the archives for `main`: it pulled
+  `libmingw32.a`'s `crtexewin.o`, whose `main()` calls `WinMain`, and
+  `cc app.o $(ae cflags --libs)` failed with `undefined reference to
+  'WinMain'` (GitHub's runners, on binutils 2.47 and a newer mingw-w64 crt,
+  happened to link it, so CI stayed green). On Windows
+  the object now carries no `main()`; the entry is the one member of the new
+  `libaether_main.a` beside `libaether.a`, which `ae cflags --libs` names
+  first (`-laether_main -laether`). An archive member is linked only when the
+  program still needs `main`, so a host's own `main()` wins as before with
+  the same command line. A host entering through `WinMain` names
+  `-lmingw32` ahead of it (docs/emit-lib.md). The shared runtime and every
+  DLL `ae` links still define no `main`.
+
+- **A function whose result is not void must return a value on every path.**
+  `f(n: int) -> string { msg = "n=${n}"; msg }` and `g(n: int) -> int { if
+  n > 0 { return 1 } }` compiled, and the C fell off the end of a non-void
+  function, undefined behaviour that printed `f`'s string as "(null)" on
+  Windows. Control that can reach the end of a function, clause or closure
+  that returns a value is now error E0700, reported at the closing brace with
+  the statement that lets it through: an `if` with no `else`, a loop that can
+  end, a `match` with no `_` arm that does not cover its type, a `switch`
+  with no `default`, a `catch` that ends, or a last expression a `{ }` body
+  does not return. A function with no written type that returns a value on
+  one path is held to the same rule. An arrow body ending in an `if`, a loop
+  or a `switch` no longer wraps it in a `return` (that emitted C that did not
+  compile), and a C-style `for` with an empty clause, `for (;;)`, compiles:
+  the optimizer and the module merge closed the empty slots, so the body was
+  read as the init (#2684).
+
+- **`when target.os` / `target.arch` choose the arm for a cross build's
+  target.** They always reported the machine running `aetherc`, so
+  `ae build --target=x86_64-windows` on Linux took the `target.os == "linux"`
+  arm, and every cross build saw the host's architecture. `ae build --target`
+  now passes the target to `aetherc` (new `--target-os` / `--target-arch`
+  flags, which reject unknown names), so the arm matches what `os.platform()`
+  reports at run time on that machine.
+
 ## [0.800.0]
 
 ### Added

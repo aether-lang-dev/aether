@@ -36,7 +36,11 @@
 #      c.program; aeb asks/c-program-aether-source-main-entry.md) -- links a
 #      working program with no C main() of its own, exit code and all; and a
 #      host that brings its own main() still gets its own (strong beats weak);
-#      a shared library ae links (native and cross) exports no main at all
+#      a shared library ae links (native and cross) exports no main at all.
+#      On Windows the object carries no main() and the entry is
+#      libaether_main.a, which `ae cflags --libs` names (a COFF weak main left
+#      `main` to archive search, and libmingw32's WinMain entry won the link:
+#      "undefined reference to `WinMain'"); 9c checks that layout there.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -74,7 +78,9 @@ exports() {  # exports <lib> <symbol>
 
 cd "$SCRIPT_DIR"
 LIB="$TMP/libapp$LIB_EXT"
-if ! AETHER_HOME="" "$AE" build --emit=lib app.ae -o "$LIB" >"$TMP/build.log" 2>&1; then
+# app.ae reads argv through its own extern (aether_args_count), which a
+# capability-empty library may not declare: --with=extern opts in.
+if ! AETHER_HOME="" "$AE" build --emit=lib --with=extern app.ae -o "$LIB" >"$TMP/build.log" 2>&1; then
     bad "ae build --emit=lib app.ae"; cat "$TMP/build.log"
     echo "emit_lib_keeps_main: $pass passed, $fail failed"; exit 1
 fi
@@ -192,7 +198,7 @@ fi
 
 # 8. the --emit=csrc header (checked before the slow cross builds)
 mkdir -p "$TMP/csrc"
-if AETHER_HOME="" "$AE" build --emit=csrc app.ae -o "$TMP/csrc/app" >"$TMP/csrc.log" 2>&1 \
+if AETHER_HOME="" "$AE" build --emit=csrc --with=extern app.ae -o "$TMP/csrc/app" >"$TMP/csrc.log" 2>&1 \
    && AETHER_HOME="" "$AE" build --emit=csrc nomain.ae -o "$TMP/csrc/nomain" >>"$TMP/csrc.log" 2>&1; then
     if grep -q '^int aether_main(int argc, char\*\* argv);' "$TMP/csrc/app.h" \
        && grep -q '^void aether_main_exit(void);' "$TMP/csrc/app.h" \
@@ -206,7 +212,7 @@ else
 fi
 
 # 9. the weak main(): a linked object needs no hand-written C entry
-if AETHER_HOME="" "$AE" build --emit=obj app.ae -o "$TMP/app.o" >"$TMP/obj.log" 2>&1; then
+if AETHER_HOME="" "$AE" build --emit=obj --with=extern app.ae -o "$TMP/app.o" >"$TMP/obj.log" 2>&1; then
     LIBS="$("$AE" cflags --libs 2>/dev/null)"
     if $CC "$TMP/app.o" $LIBS -o "$TMP/objprog" >"$TMP/objlink.log" 2>&1; then
         "$TMP/objprog" one two >"$TMP/objprog.out" 2>&1; orc=$?
@@ -235,20 +241,33 @@ HC
         "$TMP/hostprog" >"$TMP/hostprog.out" 2>&1; hrc=$?
         if [ "$hrc" -eq 0 ] && [ "$(head -1 "$TMP/hostprog.out")" = "hostmain: first" ] \
            && grep -q '^hostmain: last, rc 42' "$TMP/hostprog.out"; then
-            ok "a host's own main() beats the object's weak one"
+            ok "a host's own main() wins over the object's entry"
         else
             bad "host main() did not win (exit $hrc)"; cat "$TMP/hostprog.out"
         fi
     else
         bad "cc app.o hostmain.c: link failed (duplicate main?)"; tail -5 "$TMP/hostlink.log"
     fi
+    # 9c. Windows: the object leaves main() to libaether_main.a, named by
+    #     `ae cflags --libs`, so no linker's handling of COFF weak externals
+    #     decides which entry a program gets.
+    case "$(uname -s 2>/dev/null)" in
+        MINGW*|MSYS*|CYGWIN*|Windows_NT)
+            if nm "$TMP/app.o" 2>/dev/null | grep -E "[[:space:]][TtWw][[:space:]]+main\$" >/dev/null; then
+                bad "windows: the object defines main() (it belongs to libaether_main.a)"
+            elif ! printf '%s\n' "$LIBS" | grep -q -- "-laether_main -laether"; then
+                bad "windows: ae cflags --libs does not name -laether_main before -laether: $LIBS"
+            else
+                ok "windows: the object leaves main() to libaether_main.a, named by ae cflags --libs"
+            fi ;;
+    esac
 else
-    bad "ae build --emit=obj app.ae"; cat "$TMP/obj.log"
+    bad "ae build --emit=obj --with=extern app.ae"; cat "$TMP/obj.log"
 fi
 
 # 7. cross
 if command -v zig >/dev/null 2>&1; then
-    if AETHER_HOME="" "$AE" build --target=aarch64-linux --emit=lib app.ae -o "$TMP/libapp_arm.so" >"$TMP/x.log" 2>&1 \
+    if AETHER_HOME="" "$AE" build --target=aarch64-linux --emit=lib --with=extern app.ae -o "$TMP/libapp_arm.so" >"$TMP/x.log" 2>&1 \
        && exports "$TMP/libapp_arm.so" aether_main && exports "$TMP/libapp_arm.so" aether_main_exit \
        && ! exports "$TMP/libapp_arm.so" main; then
         ok "cross aarch64-linux: the ELF .so exports both, and no main"

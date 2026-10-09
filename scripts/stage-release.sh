@@ -46,6 +46,8 @@ mkdir -p "$out/bin" "$out/lib" "$out/include/aether" "$out/share/aether"
 cp "$bin/aetherc$exe" "$bin/ae$exe" "$out/bin/"
 chmod 755 "$out/bin/"*
 [ -f "$bin/libaether.a" ] && cp "$bin/libaether.a" "$out/lib/"
+# Windows: the --emit=obj entry point, beside the archive (aether_lib_main.c).
+[ -f "$bin/libaether_main.a" ] && cp "$bin/libaether_main.a" "$out/lib/"
 # The shared runtime (#2297): lib/shared/, beside the archive.
 if [ -d "$bin/shared" ]; then
     mkdir -p "$out/lib/shared"

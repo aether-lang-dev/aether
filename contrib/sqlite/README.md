@@ -108,7 +108,82 @@ main() {
   `step` / `errmsg` / explicit rc compare remain available for callers that want to distinguish DONE from ROW with their own control flow.
 - `finalize(stmt)` MUST be called before `close(db)`, otherwise close fails with "unable to close due to unfinalized statements".
 
-## Still out of scope (v3 candidates)
+## v3 — holding a connection to its file, and typed rows
+
+For a host that runs SQL someone else wrote (sae gives each installed app
+databases by name and must keep every connection to its one file), and for
+returning rows with their own types. All additive; the constants are
+SQLite's own numbers, exported so nobody counts them.
+
+```aether
+import contrib.sqlite
+import std.string
+
+// Refuse what reaches past the database's own file. SQLite calls this while
+// it compiles each statement; a slot an action does not use is a null
+// string, so test it with string.length.
+authorize(ud: ptr, action: int, a1: string, a2: string, a3: string, a4: string) -> int {
+    if action == sqlite.SQLITE_ATTACH || action == sqlite.SQLITE_DETACH { return sqlite.SQLITE_DENY }
+    if action == sqlite.SQLITE_FUNCTION && string.length(a2) > 0 {
+        if string.to_lower(a2) == "load_extension" { return sqlite.SQLITE_DENY }
+    }
+    return sqlite.SQLITE_OK
+}
+
+main() {
+    db, _ = sqlite.open("app.db")
+    sqlite.limit(db, sqlite.SQLITE_LIMIT_ATTACHED, 0)
+    sqlite.enable_load_extension(db, 0)
+    sqlite.set_authorizer(db, authorize as fn(ptr, int, string, string, string, string) -> int, null)
+
+    st, _ = sqlite.prepare(db, "SELECT id, ratio FROM t WHERE owner = $owner")
+    sqlite.bind_text(st, sqlite.bind_parameter_index(st, "$owner"), "ada")
+    while sqlite.next_row(st, db) == 1 {
+        i = 0
+        while i < sqlite.column_count(st) {
+            match sqlite.column_type(st, i) {
+                1 -> { println("${sqlite.column_name(st, i)} = ${sqlite.column_int64(st, i)}") }
+                2 -> { println("${sqlite.column_name(st, i)} = ${sqlite.column_double(st, i)}") }
+                _ -> { println("${sqlite.column_name(st, i)} = ${sqlite.column_text(st, i)}") }
+            }
+            i = i + 1
+        }
+    }
+    sqlite.finalize(st)
+    sqlite.close(db)
+}
+```
+
+- `set_authorizer(db, cb, ud) -> err` installs SQLite's authorizer:
+  `cb(ud, action, arg1, arg2, database, trigger_or_view) -> int` answers
+  `SQLITE_OK`, `SQLITE_DENY` (the statement fails "not authorized") or
+  `SQLITE_IGNORE`. `cb` is a top-level function cast to
+  `fn(ptr, int, string, string, string, string) -> int` (SQLite keeps the C
+  function pointer, so not a capturing closure; pass state through `ud`).
+  `clear_authorizer(db)` removes it. The action codes are exported:
+  `SQLITE_COPY` 0 through `SQLITE_RECURSIVE` 33 (`SQLITE_PRAGMA` 19,
+  `SQLITE_ATTACH` 24, `SQLITE_DETACH` 25, `SQLITE_FUNCTION` 31, ...).
+- `limit(db, id, val) -> int` is `sqlite3_limit`: the previous value, and a
+  negative `val` only reads. `SQLITE_LIMIT_LENGTH` 0 through
+  `SQLITE_LIMIT_WORKER_THREADS` 11; `SQLITE_LIMIT_ATTACHED` is 7 (6 is
+  `SQLITE_LIMIT_FUNCTION_ARG`).
+- `enable_load_extension(db, on) -> err` switches extension loading, the C
+  API and the SQL `load_extension()` both. macOS's system libsqlite3 is
+  built without extension loading and has no such call; built against it,
+  only the C API's setting exists and turning it off always succeeds.
+- `column_count(stmt)`, `column_name(stmt, col)`, `column_type(stmt, col)`
+  (`SQLITE_INTEGER` 1, `SQLITE_FLOAT` 2, `SQLITE_TEXT` 3, `SQLITE_BLOB` 4,
+  `SQLITE_NULL` 5; read it before another `column_*` call converts the
+  value), `column_double(stmt, col) -> float`,
+  `column_int64(stmt, col) -> long`.
+- `bind_double(stmt, idx, v: float)`, `bind_int64(stmt, idx, v: long)`.
+  The `(hi, lo)` pair (`bind_i64` / `column_i64`) stays for a compiler whose
+  `int` is narrower.
+- `bind_parameter_count(stmt)`, `bind_parameter_index(stmt, "$id")` (the
+  name with its prefix, `$` `:` or `@`; 0 when there is none).
+- `last_insert_rowid(db) -> long`.
+
+## Still out of scope (v4 candidates)
 
 - **`for_each_row(stmt) { … }` block-passing DSL sugar.** Needs Aether language-level support for closure-passing. The minor shape — `sqlite.next_row(stmt, db) -> int` — has shipped and removes the doubled-`step()` foot-gun, but a true block form is still future work.
 - **Transactions as first-class.** `sqlite.exec(db, "BEGIN")` / `"COMMIT"` / `"ROLLBACK"` is idiomatic SQLite C API too.

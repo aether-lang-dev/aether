@@ -543,3 +543,57 @@ int qjs_new_promise(void *qp) {
     JS_SetPropertyStr(q->ctx, o, "reject", funcs[1]);
     return put_(q, o);
 }
+
+/* ---- bytes ---------------------------------------------------------------- */
+
+/* The bytes of the Uint8Array / Uint8ClampedArray v (a view's own window of
+ * its buffer), their count in *n; NULL when v is not one, or its buffer is
+ * detached or the view out of bounds. Other typed arrays are refused: their
+ * byte order and element width are not what a byte reader expects. Leaves
+ * no exception pending. An empty array is a valid answer with no bytes,
+ * returned as a non-NULL pointer so it is told apart from "not one". */
+static const uint8_t *u8_(AeQjs *q, JSValueConst v, size_t *n) {
+    *n = 0;
+    int t = JS_GetTypedArrayType(v);
+    if (t != JS_TYPED_ARRAY_UINT8 && t != JS_TYPED_ARRAY_UINT8C) return NULL;
+    size_t len = 0;
+    uint8_t *b = JS_GetUint8Array(q->ctx, &len, v);
+    if (!b) {
+        if (JS_HasException(q->ctx)) {
+            JS_FreeValue(q->ctx, JS_GetException(q->ctx));
+            return NULL;
+        }
+        static const uint8_t empty_ = 0;
+        return &empty_;   /* no buffer storage behind an empty view */
+    }
+    if (len > (size_t)0x7fffffff) return NULL;
+    *n = len;
+    return b;
+}
+
+/* The byte count of the Uint8Array at h, or -1 when it is not one. */
+int qjs_u8_length(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!valid_(q, h)) return -1;
+    size_t n;
+    return u8_(q, q->vals[h], &n) ? (int)n : -1;
+}
+
+/* A pointer to those bytes, inside the engine's buffer: valid until JS next
+ * runs (which can resize or detach it) or h's value is collected; NULL when
+ * h is not one. */
+const void *qjs_u8_data(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!valid_(q, h)) return NULL;
+    size_t n;
+    return u8_(q, q->vals[h], &n);
+}
+
+/* A new Uint8Array holding a copy of the n bytes at data; -1 (with
+ * qjs_error) for a negative n, a NULL data with n > 0, or no memory. */
+int qjs_new_uint8array(void *qp, const void *data, int n) {
+    AeQjs *q = (AeQjs *)qp;
+    if (n < 0 || (n > 0 && !data)) { set_err_(q, "RangeError: invalid byte count or data"); return -1; }
+    static const uint8_t none_ = 0;
+    return result_(q, JS_NewUint8ArrayCopy(q->ctx, n > 0 ? (const uint8_t *)data : &none_, (size_t)n));
+}

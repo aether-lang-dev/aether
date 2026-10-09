@@ -89,6 +89,19 @@ static const char* emit_main_target = NULL;
 static bool with_fs = false;
 static bool with_net = false;
 static bool with_os = false;
+// --with=extern: the program's own `extern` declarations (a raw C function
+// such as system() or fopen() named directly) are allowed under --emit=lib.
+// Without it they are rejected: an extern reaches any C symbol, so it would
+// make every other gate decorative. Externs declared by std.* / contrib.*
+// modules are not affected; those modules sit behind the gates above.
+static bool with_extern = false;
+// --binimport-stub-dir=<dir> (repeatable, set by `ae`, never by source): the
+// directories holding the modules ae generated for binary imports. Those
+// stubs bind another Aether library's exports with externs, so the extern
+// gate treats a module under one of them like a toolchain module.
+#define AETHERC_STUB_DIRS_MAX 8
+static const char* binimport_stub_dirs[AETHERC_STUB_DIRS_MAX];
+static int binimport_stub_dir_count = 0;
 
 // --emit-namespace-manifest: walk a manifest.ae's AST, extract the
 // namespace/input/event/bindings calls, and write a JSON description
@@ -260,6 +273,68 @@ static char* derive_header_path(const char* output_path) {
         strcat(header_path, ".h");
     }
     return header_path;
+}
+
+static int in_binimport_stub_dir(const char* file);
+
+// 1 when `name` is a toolchain module (std.* or contrib.*), whose externs
+// the capability gates already govern.
+static int is_toolchain_module(const char* name) {
+    return name && (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0);
+}
+
+// 1 when a node came from a toolchain module's source file. Some std modules
+// are already merged into the program by the time the gate runs, and each
+// merged node is stamped with the file it came from.
+static int from_toolchain_source(const ASTNode* n) {
+    if (!n || !n->source_file || !global_module_registry) return 0;
+    for (int i = 0; i < global_module_registry->module_count; i++) {
+        const AetherModule* m = global_module_registry->modules[i];
+        if (m && m->file_path && strcmp(m->file_path, n->source_file) == 0)
+            return is_toolchain_module(m->name) || in_binimport_stub_dir(m->file_path);
+    }
+    return 0;
+}
+
+// 1 when a module's file is under a binary-import stub directory ae named.
+static int in_binimport_stub_dir(const char* file) {
+    if (!file) return 0;
+    for (int i = 0; i < binimport_stub_dir_count; i++) {
+        size_t n = strlen(binimport_stub_dirs[i]);
+        if (n && strncmp(file, binimport_stub_dirs[i], n) == 0 && (file[n] == '/' || file[n] == '\\'))
+            return 1;
+    }
+    return 0;
+}
+
+// The first `extern` declared at the top level of `node`'s children that is
+// not from a toolchain module, or NULL.
+static const ASTNode* first_extern_in(const ASTNode* node) {
+    if (!node) return NULL;
+    for (int i = 0; i < node->child_count; i++) {
+        const ASTNode* c = node->children[i];
+        if (c && c->type == AST_EXTERN_FUNCTION && !from_toolchain_source(c)) return c;
+    }
+    return NULL;
+}
+
+// The first `extern` in the program's own code: the entry file, or a module
+// it imports that is not a toolchain module (std.* / contrib.*, which the
+// capability gates already govern). The modules are checked in the
+// registry, before they are merged into the program. NULL when none; *where
+// is set to the file it was found in.
+static const ASTNode* first_user_extern(const ASTNode* program, const char* input_path,
+                                        const char** where) {
+    const ASTNode* e = first_extern_in(program);
+    if (e) { *where = e->source_file ? e->source_file : input_path; return e; }
+    for (int i = 0; global_module_registry && i < global_module_registry->module_count; i++) {
+        const AetherModule* m = global_module_registry->modules[i];
+        if (!m || !m->name) continue;
+        if (is_toolchain_module(m->name) || in_binimport_stub_dir(m->file_path)) continue;
+        e = first_extern_in(m->ast);
+        if (e) { *where = m->file_path ? m->file_path : m->name; return e; }
+    }
+    return NULL;
 }
 
 // Print a summary line if any errors were recorded.
@@ -1037,13 +1112,16 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
 
     // Capability posture: what the gated imports require, and whether the
     // current --with flags would grant it.
-    if (need_fs || need_net || need_os) {
+    int need_extern = n_extern > 0;
+    if (need_fs || need_net || need_os || need_extern) {
         fprintf(out, "  capabilities required (gated imports):");
         if (need_fs)  fprintf(out, " fs%s",  with_fs  ? "(granted)" : "");
         if (need_net) fprintf(out, " net%s", with_net ? "(granted)" : "");
         if (need_os)  fprintf(out, " os%s",  with_os  ? "(granted)" : "");
+        if (need_extern) fprintf(out, " extern%s", with_extern ? "(granted)" : "");
         fputc('\n', out);
-        if ((need_fs && !with_fs) || (need_net && !with_net) || (need_os && !with_os))
+        if ((need_fs && !with_fs) || (need_net && !with_net) || (need_os && !with_os) ||
+            (need_extern && !with_extern))
             fprintf(out, "             (pass --with=<cap,...> to grant under --emit=lib)\n");
     } else {
         fprintf(out, "  capabilities required: none (capability-empty)\n");
@@ -1529,6 +1607,35 @@ int compile_source(const char* input_path, const char* output_path) {
         }
     }
 
+    // Step 2.8: --emit=lib extern gate. The import gate above is decorative
+    // if the program can name a C function itself: `extern system(cmd:
+    // string) -> int` reaches the same authority `import std.os` would. So
+    // without --with=extern, an extern declared in the program's own sources
+    // (the entry file or its local modules) is rejected. Externs declared by
+    // std.* and contrib.* modules stay allowed: those modules are gated by
+    // the capability groups above. A module's origin is its registry name.
+    if (emit_lib && !with_extern) {
+        const char* where = input_path;
+        const ASTNode* ext = first_user_extern(program, input_path, &where);
+        if (ext) {
+            fprintf(stderr,
+                "%s:%d: Error: --emit=lib rejects 'extern %s' without --with=extern.\n"
+                "\n"
+                "       An extern names a C function directly, so it reaches whatever\n"
+                "       that function can do (system(), fopen(), connect()) and gets\n"
+                "       round the capability gates (--with=fs,net,os). Use the stdlib\n"
+                "       module for the job, or pass --with=extern if the binary that\n"
+                "       links this library is the one that owns that authority.\n",
+                where, ext->line, ext->value ? ext->value : "?");
+            module_registry_shutdown();
+            free_ast_node(program);
+            free_tokens(tokens, token_count);
+            free_parser(parser);
+            free(source);
+            return 0;
+        }
+    }
+
     // Step 3: Type Checking
     if (verbose_mode) printf("Step 3: Type checking...\n");
     if (!typecheck_program(program)) {
@@ -1738,6 +1845,7 @@ int compile_source(const char* input_path, const char* output_path) {
         if (with_fs)  cp += snprintf(csrc_cap_buf + cp, sizeof(csrc_cap_buf) - cp, "%sfs",  cp ? "," : "");
         if (with_net) cp += snprintf(csrc_cap_buf + cp, sizeof(csrc_cap_buf) - cp, "%snet", cp ? "," : "");
         if (with_os)  cp += snprintf(csrc_cap_buf + cp, sizeof(csrc_cap_buf) - cp, "%sos",  cp ? "," : "");
+        if (with_extern) cp += snprintf(csrc_cap_buf + cp, sizeof(csrc_cap_buf) - cp, "%sextern", cp ? "," : "");
         codegen->csrc_capabilities = csrc_cap_buf;
     }
     codegen->emit_main_target = emit_main_target;  // NULL when not requested
@@ -2230,6 +2338,23 @@ int main(int argc, char *argv[]) {
             // capability provenance) so binding generators can consume it.
             csrc_catalog_path = argv[arg_offset] + 20;
             arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--binimport-stub-dir=", 21) == 0) {
+            if (binimport_stub_dir_count < AETHERC_STUB_DIRS_MAX)
+                binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
+            arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--target-os=", 12) == 0 ||
+                   strncmp(argv[arg_offset], "--target-arch=", 14) == 0) {
+            // The cross-build target for `when target.os / target.arch`
+            // (ae build --target passes both). Unknown names are an error:
+            // a typo would otherwise make every `when` silently pick else.
+            int is_os = argv[arg_offset][9] == 'o';
+            const char* v = argv[arg_offset] + (is_os ? 12 : 14);
+            if (!when_set_target(is_os ? v : NULL, is_os ? NULL : v)) {
+                fprintf(stderr, "error: unknown %s '%s'\n",
+                        is_os ? "--target-os" : "--target-arch", v);
+                return 1;
+            }
+            arg_offset++;
         } else if (strncmp(argv[arg_offset], "--emit-deps=", 12) == 0) {
             // #1882: record the resolver's dependency manifest for this build
             // (files parsed + paths probed-and-absent) and write it here after
@@ -2390,6 +2515,8 @@ int main(int argc, char *argv[]) {
                     with_net = true;
                 } else if (len == 2 && strncmp(start, "os", 2) == 0) {
                     with_os = true;
+                } else if (len == 6 && strncmp(start, "extern", 6) == 0) {
+                    with_extern = true;
                 } else if ((len == 11 && strncmp(start, "first-party", 11) == 0) ||
                            (len == 3  && strncmp(start, "all", 3) == 0)) {
                     // "I am the host, every capability is granted."
@@ -2400,10 +2527,11 @@ int main(int argc, char *argv[]) {
                     with_fs = true;
                     with_net = true;
                     with_os = true;
+                    with_extern = true;
                 } else {
                     fprintf(stderr,
                         "Error: --with= got unknown capability '%.*s'. "
-                        "Known: fs, net, os, first-party (alias: all).\n",
+                        "Known: fs, net, os, extern, first-party (alias: all).\n",
                         (int)len, start);
                     return 1;
                 }

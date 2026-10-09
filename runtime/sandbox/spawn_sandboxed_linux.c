@@ -133,68 +133,125 @@ static int is_fork_granted(void* grant_list) {
 // Install a seccomp-bpf filter that traps clone/clone3/fork/vfork with
 // EPERM. Must run AFTER prctl(PR_SET_NO_NEW_PRIVS, 1) (required for
 // unprivileged seccomp) and BEFORE execve. Returns 0 on success, -1 on
-// failure (the caller fail-closes).
+// failure, and on an architecture this filter does not know (the caller
+// fail-closes: the child exits 126 rather than running unfenced).
 //
-// The filter is multi-arch-aware: it checks seccomp_data.arch and only
-// applies the trap on x86_64; other architectures fall through to
-// SECCOMP_RET_ALLOW so this never breaks ARM/RISC-V/etc. (where the
-// LD_PRELOAD-level libc wrappers remain the only fence — a known and
-// documented gap). The x86_64 fence is the value-add: that's the only
-// arch where the issue reporter's repro lives (gcc/clone3).
+// A seccomp filter sees the syscall's ABI (seccomp_data.arch) and its number
+// in that ABI, and a process can enter the kernel through more than one ABI.
+// So the filter dispatches on arch:
+//   - the native ABI traps its own numbers;
+//   - on x86_64, i386 (int 0x80, a static 32-bit binary) traps the i386
+//     numbers, and x32 calls (native arch, number | 0x40000000) are caught
+//     by masking that bit off before comparing;
+//   - on aarch64, 32-bit ARM (compat) traps the ARM numbers;
+//   - any other arch kills the process: an ABI we did not list is one we
+//     cannot fence, and the old behaviour (allow it) let a static i386
+//     binary fork freely inside an x86_64 sandbox.
 //
-// Syscall numbers below are **x86_64 ABI literals**, intentionally not
-// the symbolic SYS_* names. Two reasons:
-//   1. We're filtering syscalls *of the x86_64 ABI* (the arch check
-//      above gates this), so the architecturally correct numbers are
-//      x86_64's regardless of what arch we're compiling on.
-//   2. The portable SYS_* macros would resolve to the *build host's*
-//      ABI numbers — broken when cross-compiling for an arch that uses
-//      different numbers, AND on architectures like RISC-V that simply
-//      have no SYS_fork / SYS_vfork (only clone/clone3) the code
-//      doesn't even compile.
-// x86_64 ABI: clone=56, fork=57, vfork=58, clone3=435. These are stable
-// kernel ABI and will not change.
+// Syscall numbers are ABI literals, not SYS_* macros: those resolve to the
+// build host's ABI, and the generic table (arm64, riscv64, loongarch64) has
+// no fork/vfork at all. tests/integration/sandbox_clone_fence checks every
+// literal below against the kernel headers zig ships for that architecture.
+//   x86_64:  clone 56, fork 57, vfork 58, clone3 435
+//   i386 and 32-bit ARM: clone 120, fork 2, vfork 190, clone3 435
+//   generic (aarch64, riscv64, loongarch64): clone 220, clone3 435
+#ifndef AUDIT_ARCH_AARCH64
+#define AUDIT_ARCH_AARCH64     0xC00000B7u
+#endif
+#ifndef AUDIT_ARCH_ARM
+#define AUDIT_ARCH_ARM         0x40000028u
+#endif
+#ifndef AUDIT_ARCH_RISCV64
+#define AUDIT_ARCH_RISCV64     0xC00000F3u
+#endif
+#ifndef AUDIT_ARCH_LOONGARCH64
+#define AUDIT_ARCH_LOONGARCH64 0xC0000102u
+#endif
+#ifndef SECCOMP_RET_KILL_PROCESS
+#define SECCOMP_RET_KILL_PROCESS SECCOMP_RET_KILL
+#endif
+
+#define FENCE_MAX 48
+#define X32_SYSCALL_BIT 0x40000000u
+
+// One arch's block: load the number (masked when `mask`), deny on a match,
+// otherwise allow.
+static int fence_block(struct sock_filter* f, int n, const uint32_t* nums, int count,
+                       uint32_t mask) {
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                                          (uint32_t)offsetof(struct seccomp_data, nr));
+    if (mask) f[n++] = (struct sock_filter)BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask);
+    for (int i = 0; i < count; i++)
+        f[n++] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, nums[i],
+                                              (uint8_t)(count - i), 0);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW);
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K,
+                                          SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA));
+    return n;
+}
+
 static int install_clone_fence_seccomp(void) {
-    // SECCOMP_RET_ERRNO returns an errno in the low 16 bits.
-    #define DENY_EPERM (SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA))
-    #define ALLOW      SECCOMP_RET_ALLOW
+    static const uint32_t x86_64_nums[]  = { 56, 57, 58, 435 };
+    static const uint32_t legacy32_nums[] = { 120, 2, 190, 435 };   /* i386, ARM */
+    static const uint32_t generic_nums[] = { 220, 435 };
+    (void)x86_64_nums; (void)legacy32_nums; (void)generic_nums;
 
-    #define NR_X86_64_CLONE   56
-    #define NR_X86_64_FORK    57
-    #define NR_X86_64_VFORK   58
-    #define NR_X86_64_CLONE3  435
+#if defined(__x86_64__) && !defined(__ILP32__)
+    uint32_t native = AUDIT_ARCH_X86_64, compat = AUDIT_ARCH_I386;
+    const uint32_t* nnums = x86_64_nums; int ncount = 4; uint32_t nmask = ~X32_SYSCALL_BIT;
+    const uint32_t* cnums = legacy32_nums; int ccount = 4;
+#elif defined(__aarch64__)
+    uint32_t native = AUDIT_ARCH_AARCH64, compat = AUDIT_ARCH_ARM;
+    const uint32_t* nnums = generic_nums; int ncount = 2; uint32_t nmask = 0;
+    const uint32_t* cnums = legacy32_nums; int ccount = 4;
+#elif defined(__riscv) && __riscv_xlen == 64
+    uint32_t native = AUDIT_ARCH_RISCV64, compat = 0;
+    const uint32_t* nnums = generic_nums; int ncount = 2; uint32_t nmask = 0;
+    const uint32_t* cnums = NULL; int ccount = 0;
+#elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
+    uint32_t native = AUDIT_ARCH_LOONGARCH64, compat = 0;
+    const uint32_t* nnums = generic_nums; int ncount = 2; uint32_t nmask = 0;
+    const uint32_t* cnums = NULL; int ccount = 0;
+#else
+    /* No fence for this architecture: refuse, rather than run the child with
+     * only the libc-level fence while the caller asked for containment. */
+    return -1;
+#endif
 
-    struct sock_filter filter[] = {
-        // Load arch from seccomp_data; if not x86_64, allow.
-        BPF_STMT(BPF_LD  | BPF_W | BPF_ABS,
-                 (uint32_t)offsetof(struct seccomp_data, arch)),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, AUDIT_ARCH_X86_64, 1, 0),
-        BPF_STMT(BPF_RET | BPF_K, ALLOW),
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv) || defined(__loongarch__)
+    /* Assemble: [0] LD arch, [1] JEQ native, [2] JEQ compat (if any),
+     * then KILL, then the native block, then the compat block. */
+    struct sock_filter nb[FENCE_MAX], cb[FENCE_MAX];
+    int nn = fence_block(nb, 0, nnums, ncount, nmask);
+    int cn = cnums ? fence_block(cb, 0, cnums, ccount, 0) : 0;
 
-        // Load syscall number.
-        BPF_STMT(BPF_LD  | BPF_W | BPF_ABS,
-                 (uint32_t)offsetof(struct seccomp_data, nr)),
+    struct sock_filter f[FENCE_MAX * 2 + 4];
+    int n = 0;
+    int head = compat ? 4 : 3;            /* LD, JEQ, [JEQ], KILL */
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_LD | BPF_W | BPF_ABS,
+                                          (uint32_t)offsetof(struct seccomp_data, arch));
+    /* jt is relative to the next instruction. */
+    f[n] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native,
+                                        (uint8_t)(head - (n + 1)), 0);
+    n++;
+    if (compat) {
+        f[n] = (struct sock_filter)BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, compat,
+                                            (uint8_t)(head + nn - (n + 1)), 0);
+        n++;
+    }
+    f[n++] = (struct sock_filter)BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_KILL_PROCESS);
+    memcpy(f + n, nb, (size_t)nn * sizeof(nb[0]));
+    n += nn;
+    if (cn) {
+        memcpy(f + n, cb, (size_t)cn * sizeof(cb[0]));
+        n += cn;
+    }
 
-        // Four traps, fall-through allows everything else.
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NR_X86_64_CLONE,  4, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NR_X86_64_CLONE3, 3, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NR_X86_64_FORK,   2, 0),
-        BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, NR_X86_64_VFORK,  1, 0),
-        BPF_STMT(BPF_RET | BPF_K, ALLOW),
-        BPF_STMT(BPF_RET | BPF_K, DENY_EPERM),
-    };
-
-    struct sock_fprog prog = {
-        .len = (unsigned short)(sizeof(filter) / sizeof(filter[0])),
-        .filter = filter,
-    };
-
+    struct sock_fprog prog = { .len = (unsigned short)n, .filter = f };
     if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0) return -1;
     if (prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) return -1;
     return 0;
-
-    #undef DENY_EPERM
-    #undef ALLOW
+#endif
 }
 
 // Spawn a sandboxed child process

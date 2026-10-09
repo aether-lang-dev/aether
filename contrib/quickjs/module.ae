@@ -49,7 +49,8 @@ exports(
     parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
     get, set, get_index, set_index, length, keys,
     arg, arg_int, arg_float, arg_string, arg_bool, arg_count,
-    new_promise
+    new_promise,
+    bytes_of, arg_bytes, new_uint8array
 )
 
 extern qjs_new(memory_kb: int, stack_kb: int) -> ptr
@@ -89,6 +90,9 @@ extern qjs_set_index(q: ptr, obj: int, i: int, v: int) -> int
 extern qjs_length(q: ptr, obj: int) -> int
 extern qjs_keys(q: ptr, obj: int) -> int
 extern qjs_new_promise(q: ptr) -> int
+extern qjs_u8_length(q: ptr, h: int) -> int
+extern qjs_u8_data(q: ptr, h: int) -> ptr
+extern qjs_new_uint8array(q: ptr, data: ptr, n: int) -> int
 
 // ---- runtimes ----
 
@@ -276,6 +280,40 @@ arg_bool(q: ptr, args: int, i: int) -> int {
     qjs_release(q, h)
     return b
 }
+
+// ---- bytes ----
+
+// The bytes of a Uint8Array or Uint8ClampedArray (a view's own window of
+// its buffer, so `a.subarray(4)` starts at a[4]): (a pointer into the
+// engine's buffer, the byte count), or (null, -1) when h is not one, or its
+// buffer is detached. Other typed arrays are not bytes and give (null, -1).
+// The pointer is the engine's own memory, with no copy: read it or copy it
+// before JS runs again (a script can resize or detach the buffer), and never
+// free it. An empty array gives a non-null pointer and 0.
+bytes_of(q: ptr, h: int) -> (ptr, int) {
+    n = qjs_u8_length(q, h)
+    if n < 0 { return null, -1 }
+    return qjs_u8_data(q, h), n
+}
+
+// bytes_of of a host function's argument i, as one call: (pointer, count) or
+// (null, -1). The pointer stays valid while the host function runs (the
+// arguments array holds the value) and JS does not.
+arg_bytes(q: ptr, args: int, i: int) -> (ptr, int) {
+    h = qjs_get_index(q, args, i)
+    if h < 0 { return null, -1 }
+    n = qjs_u8_length(q, h)
+    d = qjs_u8_data(q, h)
+    qjs_release(q, h)
+    if n < 0 { return null, -1 }
+    return d, n
+}
+
+// A new Uint8Array holding a copy of the n bytes at data (a raw pointer:
+// `bytes.data(b)` for a std.bytes buffer, not the handle). The engine owns
+// the copy, so data can be freed at once. A handle, or -1 (last_error says
+// why) for a negative n or a null data with n > 0.
+new_uint8array(q: ptr, data: ptr, n: int) -> int { return qjs_new_uint8array(q, data, n) }
 
 // ---- promises ----
 

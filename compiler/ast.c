@@ -631,6 +631,8 @@ ASTNode* create_ast_node(ASTNodeType type, const char* value, int line, int colu
     node->bit_hi = 0;
     node->source_file = NULL;
     node->type_inferred = 0;
+    node->end_line = 0;
+    node->end_column = 0;
     node->warned = 0;
     node->source_name = NULL;
     node->value_len = 0;
@@ -653,9 +655,9 @@ void ast_set_literal_bytes(ASTNode* node, const char* bytes, int len) {
     node->value_len = memchr(bytes, '\0', (size_t)len) ? len : 0;
 }
 
-void add_child(ASTNode* parent, ASTNode* child) {
-    if (!parent || !child) return;
-    
+/* Appends `child`, which may be NULL: an empty slot a node reads by position
+ * (the missing init, condition or step of `for (;;)`). */
+static void append_child(ASTNode* parent, ASTNode* child) {
     if (parent->child_count >= parent->child_capacity) {
         /* Reallocating to exactly count+1 on every append made building a
          * node with n children O(n^2); this is the compiler's hottest
@@ -679,6 +681,11 @@ void add_child(ASTNode* parent, ASTNode* child) {
     parent->child_count++;
 }
 
+void add_child(ASTNode* parent, ASTNode* child) {
+    if (!parent || !child) return;
+    append_child(parent, child);
+}
+
 ASTNode* clone_ast_node(ASTNode* node) {
     if (!node) return NULL;
 
@@ -691,12 +698,15 @@ ASTNode* clone_ast_node(ASTNode* node) {
     clone->bit_hi = node->bit_hi;
     clone->source_file = node->source_file ? strdup(node->source_file) : NULL;
     clone->type_inferred = node->type_inferred;
+    clone->end_line = node->end_line;
+    clone->end_column = node->end_column;
     clone->source_name = node->source_name ? strdup(node->source_name) : NULL;
     clone->origin_module = node->origin_module ? strdup(node->origin_module) : NULL;
     if (node->value_len > 0) ast_set_literal_bytes(clone, node->value, node->value_len);   /* #2520 */
 
+    /* Slot for slot: an empty one stays where it is, as the parser left it. */
     for (int i = 0; i < node->child_count; i++) {
-        add_child(clone, clone_ast_node(node->children[i]));
+        append_child(clone, clone_ast_node(node->children[i]));
     }
 
     return clone;

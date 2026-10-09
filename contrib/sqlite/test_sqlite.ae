@@ -31,6 +31,27 @@ fn exec_pair(db: ptr, bad: string, good: string) -> int {
     return string.length(e) + string.length(o)
 }
 
+// The v3 authorizer: refuse what reaches past the connection's own file
+// (ATTACH, DETACH, the load_extension() function), allow the rest, and
+// count the calls so a spec can tell it was consulted at all.
+var auth_calls = 0
+var auth_denied = 0
+
+authorize(ud: ptr, action: int, a1: string, a2: string, a3: string, a4: string) -> int {
+    auth_calls = auth_calls + 1
+    if action == sqlite.SQLITE_ATTACH || action == sqlite.SQLITE_DETACH {
+        auth_denied = auth_denied + 1
+        return sqlite.SQLITE_DENY
+    }
+    if action == sqlite.SQLITE_FUNCTION && string.length(a2) > 0 {
+        if string.to_lower(a2) == "load_extension" {
+            auth_denied = auth_denied + 1
+            return sqlite.SQLITE_DENY
+        }
+    }
+    return sqlite.SQLITE_OK
+}
+
 main() {
     fw = spec.init()
 
@@ -116,7 +137,7 @@ main() {
                     _n = exec_pair(db, bad, good)
                 }
                 after = mem.heap_in_use()
-                spec.assert_true(mid - before == 0 || after -mid == 0,
+                spec.assert_true(mid - before == 0 || after - mid == 0,
                     "500 exec pairs grew the heap by ${mid - before}, then ${after - mid} bytes")
             }
         }
@@ -243,6 +264,107 @@ main() {
             spec.assert_str_eq(berr, "", "column_blob succeeds")
             spec.assert_eq(n, 5, "all 5 bytes come back — the NUL did not truncate")
             _f2 = sqlite.finalize(sst)
+        }
+
+        // v3 (sae asks/sqlite-authorizer.md). Each spec opens a connection
+        // of its own, so a limit or an authorizer it installs cannot reach
+        // the shared one above.
+        spec.it_when(have_sqlite, "set_authorizer refuses what the callback denies, and only that", reason) callback {
+            adb, aerr = sqlite.open(":memory:")
+            spec.assert_str_eq(aerr, "", "open a second connection")
+            spec.assert_str_eq(sqlite.exec(adb, "CREATE TABLE a (v INTEGER)"), "", "a table before the authorizer")
+            spec.assert_str_eq(sqlite.set_authorizer(adb,
+                    authorize as fn(ptr, int, string, string, string, string) -> int, null), "",
+                "set_authorizer succeeds")
+            before = auth_calls
+            spec.assert_str_eq(sqlite.exec(adb, "INSERT INTO a VALUES (1)"), "",
+                "an ordinary INSERT is allowed")
+            spec.assert_true(auth_calls > before, "the authorizer was consulted")
+            att = sqlite.exec(adb, "ATTACH DATABASE ':memory:' AS other")
+            spec.assert_true(string.contains(att, "not authorized") == 1, "ATTACH is refused: ${att}")
+            _st, lerr = sqlite.prepare(adb, "SELECT load_extension('nothing')")
+            spec.assert_not_eq(string.length(lerr), 0, "load_extension() does not compile: ${lerr}")
+            spec.assert_true(auth_denied >= 1, "the denials were the callback's")
+            spec.assert_str_eq(sqlite.clear_authorizer(adb), "", "clear_authorizer succeeds")
+            spec.assert_str_eq(sqlite.exec(adb, "ATTACH DATABASE ':memory:' AS other"), "",
+                "with the authorizer gone, ATTACH works again")
+            spec.assert_str_eq(sqlite.exec(adb, "DETACH DATABASE other"), "", "and DETACH")
+            spec.assert_str_eq(sqlite.close(adb), "", "close")
+        }
+
+        spec.it_when(have_sqlite, "limit(SQLITE_LIMIT_ATTACHED, 0) leaves no ATTACH; limit reads back", reason) callback {
+            ldb, lerr = sqlite.open(":memory:")
+            spec.assert_str_eq(lerr, "", "open a connection")
+            prev = sqlite.limit(ldb, sqlite.SQLITE_LIMIT_ATTACHED, 0)
+            spec.assert_true(prev > 0, "the default allows some attached databases (${prev})")
+            spec.assert_eq(sqlite.limit(ldb, sqlite.SQLITE_LIMIT_ATTACHED, -1), 0, "a negative value reads the new limit back")
+            att = sqlite.exec(ldb, "ATTACH DATABASE ':memory:' AS other")
+            spec.assert_not_eq(string.length(att), 0, "ATTACH fails with the limit at 0: ${att}")
+            // 6 is FUNCTION_ARG, not ATTACHED: the constants keep them apart.
+            spec.assert_eq(sqlite.SQLITE_LIMIT_ATTACHED, 7, "SQLITE_LIMIT_ATTACHED is 7")
+            fa = sqlite.limit(ldb, sqlite.SQLITE_LIMIT_FUNCTION_ARG, -1)
+            spec.assert_true(fa > 0, "FUNCTION_ARG is a limit of its own (${fa})")
+            spec.assert_eq(sqlite.limit(null, sqlite.SQLITE_LIMIT_ATTACHED, 0), -1, "a null db reads -1")
+            spec.assert_str_eq(sqlite.close(ldb), "", "close")
+        }
+
+        spec.it_when(have_sqlite, "enable_load_extension(db, 0) leaves load_extension() failing", reason) callback {
+            edb, eerr = sqlite.open(":memory:")
+            spec.assert_str_eq(eerr, "", "open a connection")
+            spec.assert_str_eq(sqlite.enable_load_extension(edb, 0), "", "turning it off succeeds")
+            rs, qerr = sqlite.query(edb, "SELECT load_extension('nothing')")
+            spec.assert_null(rs, "no result set")
+            spec.assert_not_eq(string.length(qerr), 0, "the call fails")
+            spec.assert_not_eq(string.length(sqlite.enable_load_extension(null, 0)), 0, "a null db is refused")
+            spec.assert_str_eq(sqlite.close(edb), "", "close")
+        }
+
+        spec.it_when(have_sqlite, "typed rows: column_count/name/type, doubles, 64-bit values, named parameters, last_insert_rowid", reason) callback {
+            tdb, terr = sqlite.open(":memory:")
+            spec.assert_str_eq(terr, "", "open a connection")
+            spec.assert_str_eq(sqlite.exec(tdb,
+                    "CREATE TABLE m (id INTEGER PRIMARY KEY, big INTEGER, ratio REAL, label TEXT, raw BLOB, gone TEXT)"),
+                "", "CREATE TABLE m")
+            ist, ierr = sqlite.prepare(tdb,
+                "INSERT INTO m (big, ratio, label, raw, gone) VALUES ($big, :ratio, @label, ?4, NULL)")
+            spec.assert_str_eq(ierr, "", "prepare with named parameters")
+            spec.assert_eq(sqlite.bind_parameter_count(ist), 4, "four parameters")
+            spec.assert_eq(sqlite.bind_parameter_index(ist, "$big"), 1, "$big is 1")
+            spec.assert_eq(sqlite.bind_parameter_index(ist, ":ratio"), 2, ":ratio is 2")
+            spec.assert_eq(sqlite.bind_parameter_index(ist, "@label"), 3, "@label is 3")
+            spec.assert_eq(sqlite.bind_parameter_index(ist, "$nope"), 0, "an unknown name is 0")
+            // Beyond 32 bits, and negative: both halves and the sign in one value.
+            spec.assert_str_eq(sqlite.bind_int64(ist, 1, -47244640263), "", "bind_int64")
+            spec.assert_str_eq(sqlite.bind_double(ist, 2, 0.15625), "", "bind_double")
+            spec.assert_str_eq(sqlite.bind_text(ist, 3, "x"), "", "bind_text")
+            spec.assert_str_eq(sqlite.bind_blob(ist, 4, "ab", 2), "", "bind_blob")
+            spec.assert_eq(sqlite.next_row(ist, tdb), 0, "the insert runs")
+            first = sqlite.last_insert_rowid(tdb)
+            spec.assert_true(first == 1, "last_insert_rowid is the new row's id")
+            _r = sqlite.reset(ist)
+            spec.assert_str_eq(sqlite.bind_int64(ist, 1, 9007199254740993), "", "a second, larger value")
+            spec.assert_eq(sqlite.next_row(ist, tdb), 0, "the second insert runs")
+            spec.assert_true(sqlite.last_insert_rowid(tdb) == 2, "and its id")
+            _f = sqlite.finalize(ist)
+
+            sst, serr = sqlite.prepare(tdb, "SELECT id, big, ratio, label AS name, raw, gone FROM m ORDER BY id")
+            spec.assert_str_eq(serr, "", "prepare select")
+            spec.assert_eq(sqlite.column_count(sst), 6, "six columns")
+            spec.assert_str_eq(sqlite.column_name(sst, 1), "big", "a column's name")
+            spec.assert_str_eq(sqlite.column_name(sst, 3), "name", "an alias is the name")
+            spec.assert_str_eq(sqlite.column_name(sst, 9), "", "out of range is empty")
+            spec.assert_eq(sqlite.next_row(sst, tdb), 1, "the first row")
+            spec.assert_eq(sqlite.column_type(sst, 1), sqlite.SQLITE_INTEGER, "INTEGER")
+            spec.assert_eq(sqlite.column_type(sst, 2), sqlite.SQLITE_FLOAT, "FLOAT")
+            spec.assert_eq(sqlite.column_type(sst, 3), sqlite.SQLITE_TEXT, "TEXT")
+            spec.assert_eq(sqlite.column_type(sst, 4), sqlite.SQLITE_BLOB, "BLOB")
+            spec.assert_eq(sqlite.column_type(sst, 5), sqlite.SQLITE_NULL, "NULL")
+            spec.assert_true(sqlite.column_int64(sst, 1) == -47244640263, "column_int64 returns the negative 64-bit value")
+            spec.assert_true(sqlite.column_double(sst, 2) == 0.15625, "column_double returns the double")
+            spec.assert_eq(sqlite.next_row(sst, tdb), 1, "the second row")
+            spec.assert_true(sqlite.column_int64(sst, 1) == 9007199254740993, "a value past 2^53 survives exactly")
+            _f2 = sqlite.finalize(sst)
+            spec.assert_str_eq(sqlite.close(tdb), "", "close")
         }
 
         spec.it_when(have_sqlite, "prepare rejects malformed SQL", reason) callback {

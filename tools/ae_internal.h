@@ -215,6 +215,7 @@ void cache_depfile_path(const char* ae_file, char* out, size_t outsz);
 /* ae_cross.c — cross-compilation via the zig cc backend (#1105), plus the
  * Xcode/xcrun backend for Apple targets that zig cannot serve. */
 const char* cross_target_to_zig(const char* t);
+int cross_target_os_arch(const char* t, const char** os, const char** arch);
 bool cross_target_is_apple(const char* triple);
 const char* cross_apple_sdk(const char* triple);
 bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz);

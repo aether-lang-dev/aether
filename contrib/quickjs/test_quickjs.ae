@@ -9,10 +9,28 @@
 // DEPENDENCY: the amalgamation (scripts/fetch-quickjs-amalgamation.sh).
 
 import contrib.quickjs
+import std.bytes
+import std.mem
 import std.spec
 import std.string
 
 extern exit(code: int)
+
+// What the `sum_bytes` host function last saw: arg_bytes's count, and the
+// sum of the bytes it read through the pointer.
+var seen_n_: int = 0
+var seen_sum_: int = 0
+
+// The sum of n bytes at p.
+sum_at(p: ptr, n: int) -> int {
+    t = 0
+    i = 0
+    while i < n {
+        t = t + mem.get_byte(p, i)
+        i = i + 1
+    }
+    return t
+}
 
 // The promise a host function handed a script, for a later case to settle.
 var pending_: int = 0
@@ -205,6 +223,105 @@ main() {
             quickjs.release(q, args)
             quickjs.release(q, resolve)
             quickjs.release(q, pending_)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: bytes") {
+        spec.it("bytes_of reads a Uint8Array's own window of its buffer") callback {
+            h, err = quickjs.eval(q, "new Uint8Array([9, 1, 2, 250]).subarray(1)", "b.js")
+            spec.assert_str_eq(err, "", "no error")
+            p, n = quickjs.bytes_of(q, h)
+            spec.assert_eq(n, 3, "three bytes: the view, not the buffer")
+            spec.assert_not_null(p, "a pointer")
+            spec.assert_eq(mem.get_byte(p, 0), 1, "starts at the view's offset")
+            spec.assert_eq(mem.get_byte(p, 2), 250, "bytes are unsigned")
+            quickjs.release(q, h)
+            c, cerr = quickjs.eval(q, "Uint8ClampedArray.of(7, 300)", "c.js")
+            spec.assert_str_eq(cerr, "", "no error")
+            cp, cn = quickjs.bytes_of(q, c)
+            spec.assert_eq(cn, 2, "a Uint8ClampedArray is bytes too")
+            spec.assert_eq(mem.get_byte(cp, 1), 255, "clamped as JS stored it")
+            quickjs.release(q, c)
+            e, eerr = quickjs.eval(q, "new Uint8Array(0)", "e.js")
+            spec.assert_str_eq(eerr, "", "no error")
+            ep, en = quickjs.bytes_of(q, e)
+            spec.assert_eq(en, 0, "an empty array has no bytes")
+            spec.assert_not_null(ep, "and is still one (not null, -1)")
+            quickjs.release(q, e)
+        }
+        spec.it("bytes_of refuses what is not bytes, leaving no exception behind") callback {
+            for_each = "[new Uint16Array(2), [1, 2], 'ab', new ArrayBuffer(4), 5]"
+            arr, err = quickjs.eval(q, for_each, "n.js")
+            spec.assert_str_eq(err, "", "no error")
+            i = 0
+            while i < 5 {
+                v, _e = quickjs.get_index(q, arr, i)
+                p, n = quickjs.bytes_of(q, v)
+                spec.assert_eq(n, -1, "element ${i} is not a Uint8Array")
+                spec.assert_null(p, "and has no pointer")
+                quickjs.release(q, v)
+                i = i + 1
+            }
+            quickjs.release(q, arr)
+            d, derr = quickjs.eval(q, "globalThis.det = new Uint8Array(new ArrayBuffer(8)); det.buffer.transfer(); det", "d.js")
+            spec.assert_str_eq(derr, "", "a view of a detached buffer")
+            _dp, dn = quickjs.bytes_of(q, d)
+            spec.assert_eq(dn, -1, "a detached buffer has no bytes")
+            quickjs.release(q, d)
+            spec.assert_str_eq(eval_string(q, "1 + 1"), "2", "no exception was left pending")
+            _np, nn = quickjs.bytes_of(q, 0)
+            spec.assert_eq(nn, -1, "handle 0 (undefined) is not one")
+        }
+        spec.it("arg_bytes reads a host function's Uint8Array argument in one call") callback {
+            f = quickjs.function(q, "sum_bytes", 1, | q: ptr, this_h: int, args: int | {
+                    p, n = quickjs.arg_bytes(q, args, 0)
+                    seen_n_ = n
+                    if n < 0 { return quickjs.throw_error(q, "TypeError", "not bytes") }
+                    seen_sum_ = sum_at(p, n)
+                    return quickjs.new_int(q, seen_sum_)
+                })
+            quickjs.set_global(q, "sum_bytes", f)
+            quickjs.release(q, f)
+            s = eval_string(q, "const big = new Uint8Array(65536); for (let i = 0; i < big.length; i++) big[i] = i & 255; sum_bytes(big)")
+            spec.assert_eq(seen_n_, 65536, "all 65536 bytes, one call")
+            spec.assert_str_eq(s, "8355840", "and the sum the script would compute")
+            t = eval_string(q, "try { sum_bytes('nope') } catch (e) { e.message }")
+            spec.assert_eq(seen_n_, -1, "a string is not bytes")
+            spec.assert_str_eq(t, "not bytes", "the host function can say so")
+            // A refusal leaves no exception pending: a host function that
+            // then fails without throwing is reported as exactly that, not
+            // as an error the engine raised while being asked.
+            g = quickjs.function(q, "peek_bytes", 1, | q: ptr, this_h: int, args: int | {
+                    _p, _n = quickjs.arg_bytes(q, args, 0)
+                    return -1
+                })
+            quickjs.set_global(q, "peek_bytes", g)
+            quickjs.release(q, g)
+            u = eval_string(q, "const gone = new Uint8Array(new ArrayBuffer(8)); gone.buffer.transfer(); try { peek_bytes(gone) } catch (e) { e.message }")
+            spec.assert_str_eq(u, "host function failed without throwing", "nothing stale surfaces: ${u}")
+        }
+        spec.it("new_uint8array hands a script a copy of the host's bytes") callback {
+            b = bytes.new(4)
+            _s0 = bytes.set(b, 0, 0)
+            _s1 = bytes.set(b, 1, 128)
+            _s2 = bytes.set(b, 2, 255)
+            _s3 = bytes.set(b, 3, 7)
+            h = quickjs.new_uint8array(q, bytes.data(b), bytes.length(b))
+            bytes.free(b)
+            spec.assert_true(h > 0, "a handle")
+            quickjs.set_global(q, "fromHost", h)
+            spec.assert_str_eq(eval_string(q, "fromHost instanceof Uint8Array && fromHost.join(',')"), "0,128,255,7",
+                "a Uint8Array with the bytes, after the host's buffer was freed")
+            p, n = quickjs.bytes_of(q, h)
+            spec.assert_eq(n, 4, "and reads back")
+            spec.assert_eq(mem.get_byte(p, 2), 255, "byte for byte")
+            quickjs.release(q, h)
+            z = quickjs.new_uint8array(q, null, 0)
+            spec.assert_str_eq(quickjs.type_of(q, z), "object", "an empty one from nothing")
+            quickjs.release(q, z)
+            spec.assert_eq(quickjs.new_uint8array(q, null, 3), -1, "null data with a count is refused")
+            spec.assert_eq(quickjs.new_uint8array(q, null, -1), -1, "so is a negative count")
+            _g = eval_string(q, "delete globalThis.fromHost; delete globalThis.det; delete globalThis.sum_bytes; delete globalThis.peek_bytes")
         }
     }
 
