@@ -1283,6 +1283,21 @@ static const char* type_name(Type* t) {
     if (t && t->kind == TYPE_PTR && !t->c_alias && t->element_type &&
         t->element_type->kind != TYPE_UNKNOWN)
         return aether_internf("*%s", type_name(t->element_type));
+    /* A typed C function pointer as it is written, `fn(ptr) -> string`. As
+     * "closure" it was named after the other representation, the one it
+     * cannot hold (#2634). */
+    if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) {
+        char buf[256];
+        size_t n = (size_t)snprintf(buf, sizeof(buf), "fn(");
+        for (int i = 0; i < t->param_count && t->param_types && n < sizeof(buf); i++)
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i ? ", " : "",
+                                  type_name(t->param_types[i]));
+        if (n < sizeof(buf))
+            n += (size_t)snprintf(buf + n, sizeof(buf) - n, ")");
+        if (n < sizeof(buf) && t->return_type && t->return_type->kind != TYPE_VOID)
+            snprintf(buf + n, sizeof(buf) - n, " -> %s", type_name(t->return_type));
+        return aether_internf("%s", buf);
+    }
     return base_type_name(t);
 }
 
@@ -3893,6 +3908,23 @@ static void collect_references(ASTNode* node, TrackedVar* vars, int var_count) {
         }
     }
 
+    // A call through a local's fn-pointer field, `f.get_text(p)`, uses `f`
+    // too. The parser collapsed the callee to the dotted name `f.get_text`
+    // and dropped the receiver, so there is no identifier for it; the
+    // checker tagged the call (#749), and the receiver is the name before
+    // the dot (#2635).
+    if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
+        strncmp(node->annotation, "fnfield_", 8) == 0) {
+        const char* dot = strchr(node->value, '.');
+        size_t rlen = dot ? (size_t)(dot - node->value) : 0;
+        for (int i = 0; i < var_count && rlen > 0; i++) {
+            if (strlen(vars[i].name) == rlen &&
+                strncmp(vars[i].name, node->value, rlen) == 0) {
+                vars[i].used = 1;
+            }
+        }
+    }
+
     // Match statements with list patterns implicitly reference <expr>_len variables
     // (the codegen generates: int _match_len = <expr>_len;)
     if (node->type == AST_MATCH_STATEMENT && node->child_count > 0) {
@@ -5660,6 +5692,29 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
         ASTNode* value_expr = field_init->children[0];
         typecheck_expression(value_expr, table);
         Type* actual = infer_type(value_expr, table);
+
+        /* #2633: a typed fn-pointer field takes a named function's address,
+         * as a struct field does (#1240). The name infers its result, so the
+         * test below compared `int` with `fn(int) -> int` and refused the one
+         * value the field can hold. Stamped with the field's type, so codegen
+         * spells the function instead of a closure of it. A closure has no
+         * room for its environment here either (#2628). */
+        if (value_expr && declared->kind == TYPE_FUNCTION && declared->is_fnptr) {
+            char slot[256];
+            snprintf(slot, sizeof(slot), "%s.%s", msg_name, field_init->value);
+            if (reject_closure_in_fnptr_slot(table, value_expr, actual, declared,
+                                             FNPTR_SLOT_FIELD, slot,
+                                             value_expr->line, value_expr->column)) {
+                free_type(actual);
+                free_type(declared);
+                continue;
+            }
+            if (fn_name_matches_signature(table, value_expr, declared)) {
+                set_node_type(value_expr, clone_type(declared));
+                free_type(actual);
+                actual = clone_type(declared);
+            }
+        }
 
         /* Cons-cell context: when the declared field type is
          * `*StringSeq` and the RHS is an array literal, accept the
@@ -9599,7 +9654,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     bs_cast = is_integer_scalar(expr->node_type->kind);
                 else if (expr->node_type->kind == TYPE_BITSTRUCT && operand->kind != TYPE_BITSTRUCT)
                     bs_cast = is_integer_scalar(operand->kind);
-                if (!same && !numeric && !bs_cast) {
+                /* #2634: a typed fn pointer is a C pointer (its storage is a
+                 * `void*`), so `f as ptr` is the pointer it holds, the way
+                 * back from `p as fn(...)`. A closure is not one: it carries
+                 * an environment. */
+                int fnptr_to_ptr = operand->kind == TYPE_FUNCTION && operand->is_fnptr &&
+                                   expr->node_type->kind == TYPE_PTR &&
+                                   !expr->node_type->element_type;
+                if (!same && !numeric && !bs_cast && !fnptr_to_ptr) {
                     char msg[220];
                     snprintf(msg, sizeof(msg),
                         "cannot cast %s to %s with `as`: a value cast converts "

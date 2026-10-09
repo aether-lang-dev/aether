@@ -247,6 +247,7 @@ void emit_closure_env_drained_call(CodeGenerator* gen, ASTNode* call,
 
 /* Message field helpers (codegen_expr.c) — shared with codegen_stmt.c */
 MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name);
+Type* message_field_type(ASTNode* program, const char* msg, const char* field);
 void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode* rhs);
 void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef* msg_def);
 

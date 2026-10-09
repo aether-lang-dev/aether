@@ -2243,6 +2243,8 @@ message SetPosition {
 message Reset {}  // Empty message
 ```
 
+A field can be a typed C function pointer (`run: fn(int) -> int`). The sender stores a named function's address (`w ! Job { run: double_it }`), and the handler's binding is called through the field's signature (`run(21)`). A closure cannot go there; a message carries a closure in a bare `fn` field.
+
 ---
 
 ## Actors
@@ -2918,9 +2920,11 @@ reduce(f: fn(int, int) -> int, x: int, y: int) -> int {
 
 Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler as fn(ptr, ptr) -> void, p, q)` or a C function pointer obtained from an extern. A `string` argument reaches the callee as its bytes: the call wraps it in `aether_string_data(arg)`, as a call to an extern does, so a heap string (interpolated, concatenated) arrives as its characters and not as its `AetherString` header. This holds for every typed-pointer call: a `fn(...)` parameter, a cast local (`f = p as fn(uint32, string) -> int; f(7, name)`) and a function-pointer struct field. A closure cannot go there — it carries an environment and a C function pointer has none — and the compiler says so at the call (`a closure cannot be passed as a typed function pointer`); a callback that may be a closure takes a bare `fn` parameter and is invoked with `call(cb, …)`. This is the parameter form of the same typed-fn-pointer machinery used by `as fn(...)` locals and function-pointer struct fields; the prototype matches the C signature exactly (needed for callback APIs like `qsort`, `dictScan`, signal handlers, libcurl/sqlite hooks).
 
-A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct field of that type, a `let` local of it, and a module-level `var` (its initializer, and an assignment to it in a function body). The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
+A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct or message field of that type, a `let` local of it, a module-level `var` (its initializer, and an assignment to it in a function body), and a function's result. The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
 
 A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
+
+A function's result is written as any other typed function pointer, `-> fn(ptr) -> string` (the inner `-> string` is part of the type) or `-> Getter` for a `cfn Getter`, and a call to the function is that pointer: it binds to a local, a field or a parameter, and `f as ptr` gives back the pointer it holds.
 
 ```aether,run
 extern free(p: ptr)

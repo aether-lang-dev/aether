@@ -679,6 +679,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                 // subsequent hoist pass doesn't attempt
                                 // a duplicate declaration.
                                 mark_var_declared(gen, var_name);
+                                /* #2633: a typed fn-pointer field binds a
+                                 * fn-pointer local, so `run(21)` is a call
+                                 * through the field's signature; emitted
+                                 * bare, it called a `void*`. */
+                                Type* fsig = message_field_type(gen->program, pattern->value,
+                                                                field->value);
+                                if (is_fnptr_type(fsig)) register_fnptr_local(gen, var_name, fsig);
                             }
                         }
 

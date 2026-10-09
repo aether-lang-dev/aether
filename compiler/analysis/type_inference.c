@@ -644,9 +644,14 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                          * return slot, NOT the full function type.
                          * Without this carve-out, `result = fp(...)`
                          * would stamp `result` as having type
-                         * `fn(int, int) -> int` instead of `int`. */
+                         * `fn(int, int) -> int` instead of `int`.
+                         * A function's symbol type is its result, so a
+                         * function returning a fn pointer (`mk() ->
+                         * Getter`) is no such local: its call is the fn
+                         * pointer, not what calling that would give
+                         * (#2634). */
                         if (func_sym->type->kind == TYPE_FUNCTION &&
-                            func_sym->type->is_fnptr &&
+                            func_sym->type->is_fnptr && !func_sym->is_function &&
                             func_sym->type->return_type) {
                             free_type(node->node_type);
                             node->node_type = clone_type(func_sym->type->return_type);

@@ -5399,8 +5399,9 @@ ASTNode* parse_extern_declaration(Parser* parser) {
     return extern_func;
 }
 
-/* True when the `(` at the cursor opens a return type, `-> (T1, T2) { ... }`,
- * rather than a parenthesised arrow-body expression `-> (a + b)`.
+/* True when the tokens at the cursor are a return type followed by the body,
+ * `-> (T1, T2) { ... }` or `-> fn(ptr) -> string { ... }`, rather than an
+ * arrow-body expression, `-> (a + b)` or `-> fn(x)`.
  *
  * This used to be a shape check of its own: a type keyword or a name, then a
  * comma. Any first element spelled with more than one token (`*Foo`,
@@ -5411,8 +5412,10 @@ ASTNode* parse_extern_declaration(Parser* parser) {
  * errors suppressed, rewind, and call it a typed return when it parsed and
  * the body or a contract clause follows. An expression in parentheses does
  * not parse as a type (a one-element `(a)` is refused too), and a tuple
- * literal is no arrow body the checker accepts. */
-static int paren_starts_tuple_return_type(Parser* parser) {
+ * literal is no arrow body the checker accepts. A written-out function
+ * pointer type is decided the same way (#2636): its own `-> R` is part of
+ * the type, and a call `fn(x)` as an arrow body has no `{` after it. */
+static int starts_return_type_then_body(Parser* parser) {
     int saved_pos = parser->current_token;
     int saved_suppress = parser->suppress_errors;
     parser->suppress_errors = 1;
@@ -5599,6 +5602,16 @@ ASTNode* parse_function_definition(Parser* parser) {
                         is_typed_return = 1;
                         break;
                     }
+                    // #2636: a C function pointer return type written out,
+                    // `-> fn(ptr) -> string { ... }`. The bare-name branch
+                    // below sees `(` after `fn`, not `{`, and sent it to the
+                    // `-> expr` path, which read `fn(ptr)` as a call.
+                    if (peek->value && strcmp(peek->value, "fn") == 0 &&
+                        peek_ahead(parser, 1) &&
+                        peek_ahead(parser, 1)->type == TOKEN_LEFT_PAREN) {
+                        is_typed_return = starts_return_type_then_body(parser);
+                        break;
+                    }
                     // A parametric return type `-> Name[T] { ... }` (e.g.
                     // `bit_set[Color]`, `Isolated[T]`). The bare-name branch
                     // below only looks one token ahead for `{`, so a `[...]`
@@ -5692,7 +5705,7 @@ ASTNode* parse_function_definition(Parser* parser) {
                 case TOKEN_LEFT_PAREN:
                     // `-> (T1, T2, ...) { ... }`, a parenthesised tuple
                     // return type, as `extern f(...) -> (T1, T2)` takes.
-                    is_typed_return = paren_starts_tuple_return_type(parser);
+                    is_typed_return = starts_return_type_then_body(parser);
                     break;
                 default:
                     break;

@@ -10424,6 +10424,15 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     continue;
                 }
 
+                /* A fn-pointer slot binds a fn-pointer local, so `f(a, b)`
+                 * is a call through the slot's signature, as for a local
+                 * declared with one; emitted bare, it called a `void*`
+                 * (found with #2636). A closure in the function already
+                 * found it through register_fnptr_decls_in. */
+                if (rhs_type && rhs_type->kind == TYPE_TUPLE && j < rhs_type->tuple_count &&
+                    is_fnptr_type(rhs_type->tuple_types[j]))
+                    register_fnptr_local(gen, var->value, rhs_type->tuple_types[j]);
+
                 // Prefer tuple element type over var's node_type (may be UNKNOWN)
                 const char* var_type;
                 if (rhs_type && rhs_type->kind == TYPE_TUPLE && j < rhs_type->tuple_count &&

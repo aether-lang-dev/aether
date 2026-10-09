@@ -11,8 +11,9 @@
 # a function's `-> Getter` result passed `ae check`, and gcc reported
 # "incompatible types ... using type '_AeClosure'" against the generated C.
 # Now each is E0200 naming the slot, for a closure literal and for a name
-# bound to one. A named function in those slots is its address and keeps
-# working, and a bare `fn` field or variable keeps taking closures.
+# bound to one, and so is a message's fn-pointer field once it takes a named
+# function (#2633). A named function in those slots is its address and
+# keeps working, and a bare `fn` field or variable keeps taking closures.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -210,6 +211,29 @@ main() {
 AE
 expect_error element.ae "Element of 'xs': a closure cannot be stored in a typed function pointer" \
     "a closure stored in a fn-pointer array element was not refused"
+
+# A message field of a fn-pointer type is the same slot (#2633).
+cat > "$tmp/message.ae" <<'AE'
+message Job {
+    run: fn(int) -> int
+}
+
+actor Worker {
+    receive {
+        Job(run) -> {
+            println(run(21))
+        }
+    }
+}
+
+main() {
+    w = spawn(Worker())
+    w ! Job { run: |x: int| { return x + 1 } }
+    wait_for_idle()
+}
+AE
+expect_error message.ae "Field 'Job.run': $FIELD" \
+    "a closure in a message's fn-pointer field was not refused"
 
 # What stays legal, built and run: a named function in every typed slot
 # (its address), and closures in a bare `fn` field and variable.

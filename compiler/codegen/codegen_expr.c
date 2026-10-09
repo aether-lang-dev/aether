@@ -1909,7 +1909,7 @@ static ASTNode* receive_arm_binding(ASTNode* arm, const char* name) {
 }
 
 /* The declared type of field `field` of message `msg`, or NULL. */
-static Type* message_field_type(ASTNode* program, const char* msg, const char* field) {
+Type* message_field_type(ASTNode* program, const char* msg, const char* field) {
     if (!program || !msg || !field) return NULL;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* def = program->children[i];
@@ -2023,6 +2023,21 @@ static void register_fnptr_decls_in(CodeGenerator* gen, ASTNode* n) {
                  n->children[0]->type == AST_PTR_AS_FN_CAST &&
                  is_fnptr_type(n->children[0]->node_type)) sig = n->children[0]->node_type;
         if (sig) register_fnptr_local(gen, n->value, sig);
+    }
+    /* #2633: a receive arm's binding of a typed fn-pointer message field,
+     * typed by the message definition (the handler registers it the same
+     * way, codegen_actor.c). */
+    if (n->type == AST_MESSAGE_PATTERN && n->value) {
+        for (int k = 0; k < n->child_count; k++) {
+            ASTNode* pf = n->children[k];
+            if (!pf || pf->type != AST_PATTERN_FIELD || !pf->value) continue;
+            const char* bound = pf->value;
+            if (pf->child_count > 0 && pf->children[0] &&
+                pf->children[0]->type == AST_PATTERN_VARIABLE && pf->children[0]->value)
+                bound = pf->children[0]->value;
+            Type* fsig = message_field_type(gen->program, n->value, pf->value);
+            if (is_fnptr_type(fsig)) register_fnptr_local(gen, bound, fsig);
+        }
     }
     for (int i = 0; i < n->child_count; i++) register_fnptr_decls_in(gen, n->children[i]);
 }

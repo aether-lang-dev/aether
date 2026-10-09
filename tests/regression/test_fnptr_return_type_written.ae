@@ -1,0 +1,81 @@
+// Regression (#2636): a function's return type can be a C function pointer
+// type written out, `-> fn(ptr) -> string`.
+//
+// The return-type check before the body looked one token past a name for
+// `{`, so after `fn` it found `(` and took `fn(ptr) -> string { ... }` for an
+// arrow body calling `fn`, and the file broke at top level ("Expected actor,
+// struct, function, or main"). A `cfn` name parsed, the written-out type did
+// not. The type parser decides now, as for a tuple return type (#2626): the
+// inner `-> R` is part of the type, a signature without one returns nothing
+// (`-> fn(int)`), a contract clause may follow, and a bare `-> fn` still
+// returns a closure. A fn pointer destructured from a tuple result is
+// called through its type too; it was called as a bare `void*`, which gcc
+// refused, unless a closure called it.
+
+import std.string
+
+extern exit(code: int)
+
+struct Thing {
+    name: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+var shown = 0
+
+name_of(p: ptr) -> string {
+    return (p as *Thing).name
+}
+
+show(x: int) {
+    shown = shown + x
+}
+
+add(a: int, b: int) -> int { return a + b }
+
+getter() -> fn(ptr) -> string {
+    return name_of
+}
+
+shower() -> fn(int) {
+    return show
+}
+
+// A contract clause after the written-out type.
+adder(k: int) -> fn(int, int) -> int requires k > 0 {
+    return add
+}
+
+// The written-out type inside a tuple return.
+pair() -> (fn(int, int) -> int, int) {
+    return add, 7
+}
+
+// A bare `fn` is a closure, as before.
+counter(base: int) -> fn {
+    return | x: int | { return x + base }
+}
+
+main() {
+    println("=== test_fnptr_return_type_written ===")
+    t = Thing { name: string.concat("ab", string.from_int(7)) }
+    g = getter()
+    check(g((&t) as ptr) == "ab7", "a written-out fn(ptr) -> string result")
+    s = shower()
+    s(5)
+    s(6)
+    check(shown == 11, "a written-out fn(int) result returns nothing (got ${shown})")
+    a = adder(1)
+    check(a(2, 3) == 5, "a written-out result with a contract clause")
+    f, n = pair()
+    check(f(n, 1) == 8, "a written-out fn pointer inside a tuple return")
+    c = counter(40)
+    check(call(c, 2) == 42, "a bare fn result is still a closure")
+    println("=== test_fnptr_return_type_written passed ===")
+}
