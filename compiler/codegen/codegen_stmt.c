@@ -335,6 +335,29 @@ static int is_cell_string_element(CodeGenerator* gen, ASTNode* e);
 static ASTNode* handback_leaf_node(CodeGenerator* gen, ASTNode* expr, int depth);
 static ASTNode* handback_take_leaf(CodeGenerator* gen, ASTNode* e);
 
+static int is_env_capture_name(CodeGenerator* gen, const char* name);
+
+/* Is `name` a capture the closure being emitted only reads, bound at its
+ * entry from the env (`const char* s = _env->s;`)? */
+static int is_alias_capture_name(CodeGenerator* gen, const char* name) {
+    for (int i = 0; name && i < gen->current_alias_capture_count; i++) {
+        if (gen->current_alias_captures[i] &&
+            strcmp(gen->current_alias_captures[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
+/* A string a closure reaches through its environment or a shared cell: the
+ * env or the cell holds it and frees it with itself, so an owning slot
+ * (a struct field, above all) takes a copy (emit_string_take), not the
+ * pointer (#2574). */
+static int is_captured_string(CodeGenerator* gen, ASTNode* e) {
+    return e && e->type == AST_IDENTIFIER && e->value && e->node_type &&
+           e->node_type->kind == TYPE_STRING &&
+           (is_promoted_capture(gen, e->value) || is_env_capture_name(gen, e->value) ||
+            is_alias_capture_name(gen, e->value));
+}
+
 int string_take_kind(CodeGenerator* gen, ASTNode* e) {
     if (!e) return STR_TAKE_BORROW;
     if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
@@ -353,6 +376,7 @@ int string_take_kind(CodeGenerator* gen, ASTNode* e) {
         return k < 0 ? STR_TAKE_BORROW : k;
     }
     if (is_owned_string_field_read(e) || is_cell_string_element(gen, e)) return STR_TAKE_OWNED;
+    if (is_captured_string(gen, e)) return STR_TAKE_OWNED;
     if (e->type == AST_IDENTIFIER) {
         return (e->value && is_heap_string_var(gen, e->value))
                ? STR_TAKE_RUNTIME : STR_TAKE_BORROW;
@@ -371,6 +395,7 @@ int string_take_kind(CodeGenerator* gen, ASTNode* e) {
 int string_take_is_view(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     if (is_owned_string_field_read(e) || is_cell_string_element(gen, e)) return 1;
+    if (is_captured_string(gen, e)) return 1;
     if (handback_take_leaf(gen, e)) return 1;
     return e->type == AST_IF_EXPRESSION &&
            string_take_kind(gen, e) != STR_TAKE_BORROW;
@@ -415,9 +440,11 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
         return;
     }
     if (e && e->type == AST_IDENTIFIER && e->value &&
-        (is_promoted_capture(gen, e->value) || is_env_capture_name(gen, e->value))) {
-        /* A closure's shared cell frees the string it holds whatever the
-         * tracker says, so its value cannot be moved out: copy it. */
+        (is_promoted_capture(gen, e->value) || is_env_capture_name(gen, e->value) ||
+         is_alias_capture_name(gen, e->value))) {
+        /* A closure's shared cell, or its env, frees the string it holds
+         * whatever the tracker says, so its value cannot be moved out:
+         * copy it. */
         fprintf(gen->output, "(%s = 1, aether_uniform_heap_str((const char*)(", own);
         generate_expression(gen, e);
         fprintf(gen->output, "), 0))");
@@ -5947,6 +5974,10 @@ static void escape_inspect_call_args(CodeGenerator* gen, ASTNode* call,
  * block holding one, #2575); a closure's body is emitted in its own context,
  * where the local is a capture. */
 static int g_escape_closure_depth = 0;
+/* Of those, how many are trailing blocks: emitted inline in the caller's
+ * context, where a store moves the local itself (and a builder's block may
+ * be emitted twice), so no store in one is exempt. */
+static int g_escape_trailing_depth = 0;
 static const ASTNode* g_escape_block_stmt = NULL;
 
 static void escape_walk(CodeGenerator* gen, ASTNode* node,
@@ -5965,10 +5996,13 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
          * { ... uses V ... }`, the closure may run later, after V has
          * been reassigned, with V already freed. Walk the closure body
          * unconditionally. */
+        int trailing = node->value && strcmp(node->value, "trailing") == 0;
         g_escape_closure_depth++;
+        g_escape_trailing_depth += trailing;
         for (int i = 0; i < node->child_count; i++) {
             escape_walk(gen, node->children[i], NULL);
         }
+        g_escape_trailing_depth -= trailing;
         g_escape_closure_depth--;
         return;
     }
@@ -6095,10 +6129,16 @@ static void escape_walk(CodeGenerator* gen, ASTNode* node,
              * on one path leaked on every other (std.jsonpath's `save_err =
              * p.err`, restored into p.err only when a speculative parse
              * failed, leaked its copy on every success). */
-            int takes = node == g_escape_block_stmt && g_escape_closure_depth == 0 &&
+            /* In the function's own blocks the store moves the local into
+             * the field. In a closure's body (emitted as a function of its
+             * own) the local is a capture the env or a cell holds, and the
+             * store copies it (is_captured_string, #2574), so it keeps
+             * nothing of the local either. */
+            int takes = node == g_escape_block_stmt && g_escape_trailing_depth == 0 &&
                         rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
-                        !is_promoted_capture(gen, rhs->value) &&
-                        !is_env_capture_name(gen, rhs->value) &&
+                        (g_escape_closure_depth > 0 ||
+                         (!is_promoted_capture(gen, rhs->value) &&
+                          !is_env_capture_name(gen, rhs->value))) &&
                         field_store_takes_local(gen, lhs);
             if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
                 is_heap_string_var(gen, rhs->value) &&

@@ -32,6 +32,11 @@
   strings on every message, and `kept = r`, `r` a handler local, shared
   `r`'s strings, which the handler's exit freed. And `kept.name = s`
   compiled to C naming an undeclared `kept` (#2581); it is `self->kept`.
+- **A string field stored inside a closure takes a copy (#2574).** The
+  store borrowed the closure environment's reference, so the function that
+  made the closure could never free its own: every call leaked the string.
+  A captured string is copied into a struct field (or any owning slot), and
+  the local is freed when its function returns.
 - **The runtime free under another name is a free (#2587).**
   `@extern("string_free") drop_raw(s: string)`, as `std.jsonpath` declares
   it, was not recognised as one, so a local handed to it was freed again at

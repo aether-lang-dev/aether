@@ -3721,6 +3721,8 @@ void emit_closure_definitions(CodeGenerator* gen) {
         }
 
         // Emit capture aliases.
+        const char** alias_caps = NULL;
+        int alias_cap_count = 0;
         for (int i = 0; i < cap_count; i++) {
             int is_env_backed = 0;
             for (int j = 0; j < env_capture_count; j++) {
@@ -3750,7 +3752,14 @@ void emit_closure_definitions(CodeGenerator* gen) {
             } else {
                 fprintf(gen->output, "    %s %s = _env->%s;\n",
                         ctype, captures[i], captures[i]);
+                alias_caps = aether_xrealloc(alias_caps, sizeof(char*) * (size_t)(alias_cap_count + 1));
+                alias_caps[alias_cap_count++] = captures[i];
             }
+        }
+        if (!body) {
+            free(alias_caps);
+            alias_caps = NULL;
+            alias_cap_count = 0;
         }
 
         if (body) {
@@ -3829,6 +3838,10 @@ void emit_closure_definitions(CodeGenerator* gen) {
             int prev_env_count = gen->current_env_capture_count;
             gen->current_env_captures = env_captures;
             gen->current_env_capture_count = env_capture_count;
+            const char** prev_alias = gen->current_alias_captures;
+            int prev_alias_count = gen->current_alias_capture_count;
+            gen->current_alias_captures = alias_caps;
+            gen->current_alias_capture_count = alias_cap_count;
             // Publish promoted names visible to this closure body so
             // reads/writes dereference through the pointer alias we just
             // emitted above.
@@ -3993,6 +4006,9 @@ void emit_closure_definitions(CodeGenerator* gen) {
             exit_scope(gen);
             gen->current_env_captures = prev_env;
             gen->current_env_capture_count = prev_env_count;
+            gen->current_alias_captures = prev_alias;
+            gen->current_alias_capture_count = prev_alias_count;
+            free(alias_caps);
             gen->current_promoted_captures = prev_promoted;
             gen->current_promoted_capture_count = prev_promoted_count;
             free(body_promoted);

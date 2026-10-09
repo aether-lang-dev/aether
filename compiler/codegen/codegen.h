@@ -382,6 +382,10 @@ typedef struct {
     // currently emitting a closure body.
     char** current_env_captures;
     int current_env_capture_count;
+    // The captures the closure being emitted only reads, bound at entry as
+    // `T name = _env->name;`: the env keeps the value, the name borrows it.
+    const char** current_alias_captures;
+    int current_alias_capture_count;
 
     // Route 1 heap-promotion: variables in this list are heap-allocated
     // cells (`int* name`) in the current function scope. Reads emit

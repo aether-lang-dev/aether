@@ -622,6 +622,8 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->discard_call_value = 0;
     gen->current_env_captures = NULL;
     gen->current_env_capture_count = 0;
+    gen->current_alias_captures = NULL;
+    gen->current_alias_capture_count = 0;
     gen->current_promoted_captures = NULL;
     gen->current_promoted_capture_count = 0;
     gen->promoted_funcs = NULL;

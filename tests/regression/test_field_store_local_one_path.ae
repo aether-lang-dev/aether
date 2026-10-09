@@ -43,13 +43,24 @@ attempt_(c: *Cursor, word: string, fail: int) -> int {
 }
 
 // A store inside a closure is emitted in the closure, where the local is a
-// capture: it does not take the local, which stays escaped (the outer
-// reference is the closure-capture leak #2574, so this case is
-// checked by value, outside the heap window).
+// capture the closure's environment holds: the field takes a copy of its
+// own, and the function frees its local at exit (#2574). The field used to
+// borrow the environment's reference, so the local was kept alive for ever.
 fill_in_closure_(c: *Cursor, word: string) {
     s = string.concat(word, "!")
     set = || { c.err = s }
     set()
+}
+
+closure_round(word: string) -> int {
+    held = heap.new(Cursor)
+    fill_in_closure_(held, word)
+    fill_in_closure_(held, word)
+    churn = string.concat(word, "~")
+    check(held.err == "w!" && churn == "w~", "a field stored in a closure keeps its string")
+    n = string.length(held.err)
+    heap.free(held)
+    return n
 }
 
 round(word: string) -> int {
@@ -69,14 +80,11 @@ round(word: string) -> int {
 main() {
     println("=== test_field_store_local_one_path ===")
     check(round("w") == 206, "two of four attempts succeed and c.err is w?")
-    held = heap.new(Cursor)
-    fill_in_closure_(held, "z")
-    churn = string.concat(string.copy("y"), "!")
-    check(held.err == "z!" && churn == "y!", "a field stored in a closure keeps its string")
-    heap.free(held)
+    check(closure_round("w") == 2, "a closure's store")
     i = 0
     while i < 20 {
         round("w")
+        closure_round("w")
         i = i + 1
     }
     if mem.heap_in_use_exact() {
@@ -84,6 +92,7 @@ main() {
                 k = 0
                 while k < 200 {
                     round("w")
+                    closure_round("w")
                     k = k + 1
                 }
             }, 5)
