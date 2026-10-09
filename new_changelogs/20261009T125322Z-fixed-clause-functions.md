@@ -13,9 +13,21 @@
   clauses can capture same-named locals of different types, a guard can call
   a function on its parameter (`when string.length(name) > 3` read an
   undeclared name), and a clause that keeps a `string` parameter takes a
-  reference of its own, so its caller frees the temporary it passed. A
-  clause set whose first clause has a wildcard pattern, and a builder
-  written as clauses, compile (#2644).
+  reference of its own, so its caller frees the temporary it passed (#2644).
+- **A builder written as clauses compiles.** Its definition lacked the
+  hidden builder parameter its prototype declared ("conflicting types"); each
+  clause is a builder function of its own now and the dispatcher passes the
+  config on (#2660).
+- **A clause set whose first clause has a wildcard pattern compiles.** The
+  wildcard's position was declared `void` (`f(_, 0)` / `f(a: int, b: int)`);
+  a position takes its type from the clauses that bind one (#2661).
+- **A closure in a later clause captures that clause's locals.** The scope
+  analyses looked a clause set's variables up in its first clause, so a
+  closure in another clause captured nothing ("'s' undeclared"); each clause
+  is a scope of its own (#2662).
+- **A function returning nothing with a literal pattern compiles.** Its
+  no-match exit was `return 0` in a `void` function (`note(0) { ... }`); it
+  returns nothing (#2663).
 - **An unannotated clause set whose first clause returns nothing and a later
   one a value compiles.** Its return type is decided over every clause, the
   same for its prototype and its definition (`int` there, a clause that
@@ -30,3 +42,12 @@
   `requires` takes. A clause whose literal pattern or guard the call's
   constant arguments rule out is passed over, and no clause after one the
   call surely matches is checked (#2647).
+- **A call to a `@c_callback("sym")` function by its Aether name calls
+  `sym`.** The definition is the C function `sym` and a use of the name as a
+  value was emitted as `sym`, but a call kept the Aether name, so
+  `cb1(4)` failed in gcc with "implicit declaration of function 'cb1'", and
+  so did `mod.cb1(4)` from an importing module. A call goes to the bound
+  symbol wherever it is made, and a function written as several clauses
+  takes the symbol its first annotated clause binds, for its prototype, its
+  dispatcher and the load-time registry, where a later annotated clause left
+  the registry naming an undeclared symbol (#2664).

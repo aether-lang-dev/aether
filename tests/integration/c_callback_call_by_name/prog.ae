@@ -1,0 +1,9 @@
+// Qualified calls to a module's @c_callback functions call their symbols.
+import cbmod
+
+extern aether_callback_lookup(name: string) -> ptr
+
+main() {
+    f = aether_callback_lookup("cbmod_pick_sym") as fn(int) -> int
+    println("${cbmod.triple(4)} ${cbmod.nine_times(2)} ${cbmod.label(5)} ${cbmod.pick(0)} ${cbmod.pick(4)} ${f(0)}")
+}

@@ -335,6 +335,8 @@ on_sigint(sig: int) {
 
 …the linker resolves `aether_signal_handler`; calls in Aether code still use `on_sigint`. Useful when integrating with a C library whose API documents a specific symbol name.
 
+A call by the Aether name, in the defining file or from a module that imports it (`signals.on_sigint(2)`, or a bare `on_sigint(2)` after `import signals (on_sigint)`), calls the bound symbol, as the name used as a value does (#2664). A function written as several clauses gets one symbol, for the whole set: the one its first annotated clause binds.
+
 ### When to use it
 
 `@c_callback` is the right shape any time a C function takes a function pointer parameter:

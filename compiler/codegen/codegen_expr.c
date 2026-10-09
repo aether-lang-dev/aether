@@ -4411,6 +4411,13 @@ ASTNode* message_field_init_expr(ASTNode* message, const char* name) {
  * the extern table, the source or the intern table (#2539: a 256-byte copy
  * cut a longer one, so the call named a function nothing defined). */
 const char* call_c_name(CodeGenerator* gen, const char* func_name) {
+    /* #2664: a @c_callback function is the C symbol its annotation binds
+     * (#235), whatever it is called by: its own name, or `mod.f` from a
+     * module importing it (the post-merge `<ns>_f`). A use of the name as a
+     * value was emitted so already; a call was emitted by the Aether name,
+     * which no definition carries when the annotation names a symbol. */
+    const char* cb_sym = lookup_c_callback_symbol(gen, codegen_normalise_callee(func_name));
+    if (cb_sym) return cb_sym;
     // Don't mangle extern functions: they refer to real C symbols.
     // For @extern("c_symbol") aether_name(...), translate the
     // Aether-side name to its bound C symbol. See #234.

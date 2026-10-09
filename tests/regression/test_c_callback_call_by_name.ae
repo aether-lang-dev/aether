@@ -1,0 +1,111 @@
+// Regression (#2664): a call to a `@c_callback("sym")` function by its
+// Aether name calls the symbol the annotation binds.
+//
+// The definition is the C function `sym` (#235), and a use of the name as a
+// value was emitted as `sym`, but a call was emitted with the Aether name,
+// which no C function carries: `triple(4)` failed in gcc with "implicit
+// declaration of function 'triple'". A call now goes to the bound symbol
+// wherever it is made, as the value does. A function written as several
+// clauses takes the symbol its first annotated clause binds, for its
+// dispatcher. A string result is owned as any function's is: the call is
+// classified by the definition, under the Aether name.
+//
+// The program's @c_callback functions are registered by symbol at load
+// (#2297), so aether_callback_lookup reads back what each symbol is. The
+// leak check runs where the heap count is exact (mem.heap_in_use_exact).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern aether_callback_register(name: string, f: ptr)
+extern aether_callback_lookup(name: string) -> ptr
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+@c_callback("ae2664_triple")
+triple(n: int) -> int {
+    return n * 3
+}
+
+// A string result, owned by the caller.
+@c_callback("ae2664_label")
+label(n: int) -> string {
+    return string.concat("L", string.from_int(n))
+}
+
+// A clause set: the annotated first clause binds the set's symbol.
+@c_callback("ae2664_pick")
+pick(0) -> int {
+    return 100
+}
+pick(n: int) -> int {
+    return n + 1
+}
+
+// A clause set annotated on every clause.
+@c_callback("ae2664_sign")
+sign(n: int) when n < 0 -> int {
+    return 0 - 1
+}
+@c_callback("ae2664_sign")
+sign(n: int) -> int {
+    return 1
+}
+
+// Calls made inside another function, and through each other.
+nine_times(n: int) -> int {
+    return triple(triple(n))
+}
+
+round(k: int) -> int {
+    a = label(k)
+    b = label(k + 10)
+    return string.length(a) + string.length(b) + pick(k) + sign(k)
+}
+
+main() {
+    println("=== test_c_callback_call_by_name ===")
+    check(triple(4) == 12, "a direct call by the Aether name")
+    check(nine_times(2) == 18, "calls from another function")
+    check(label(7) == "L7", "a string result")
+    check(pick(0) == 100 && pick(4) == 5, "a clause set's calls")
+    check(sign(0 - 3) == 0 - 1 && sign(3) == 1, "a clause set annotated on every clause")
+
+    // The symbols are the functions.
+    t = aether_callback_lookup("ae2664_triple")
+    check(t != null, "the symbol is registered")
+    tf = t as fn(int) -> int
+    check(tf(5) == 15, "the registered symbol is the function")
+    p = aether_callback_lookup("ae2664_pick")
+    pf = p as fn(int) -> int
+    check(pf(0) == 100 && pf(2) == 3, "a clause set's symbol is its dispatcher")
+
+    // Passed to C as a value, the name is still the symbol.
+    aether_callback_register("ae2664_passed", triple)
+    check(aether_callback_lookup("ae2664_passed") == t, "the value passed to C is the symbol")
+
+    // a: 2 + 3 (L5, L15), pick 6, sign 1.
+    check(round(5) == 12, "a round adds up")
+    i = 0
+    while i < 20 {
+        round(i)
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                n = 0
+                while n < 100 {
+                    round(n)
+                    n = n + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_c_callback_call_by_name passed ===")
+}

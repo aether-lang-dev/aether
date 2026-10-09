@@ -84,6 +84,18 @@ const char* c_callback_symbol(ASTNode* func) {
     return (tag && tag[0]) ? tag : (func->value ? func->value : NULL);
 }
 
+/* #2664: the @c_callback definition behind the function `fn`: `fn` itself
+ * when annotated, or, for a function written as several clauses, the first
+ * annotated clause, which binds the symbol of the whole set (its
+ * dispatcher's); NULL when none is. */
+ASTNode* fn_c_callback_def(CodeGenerator* gen, ASTNode* fn) {
+    const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
+    if (!dc) return is_c_callback(fn) ? fn : NULL;
+    for (int c = 0; c < dc->count; c++)
+        if (is_c_callback(dc->nodes[c])) return dc->nodes[c];
+    return NULL;
+}
+
 // Look up a top-level @c_callback function by its current AST value
 // (post-merge: the prefixed `<ns>_<name>` form for imported callbacks;
 // the bare name for in-file ones) and return the C symbol it's bound
@@ -649,7 +661,9 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
         fprintf(gen->output, " {\n    (void)_env;\n    ");
         if (rt) fprintf(gen->output, "return ");
         if (owned_string) fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
-        fprintf(gen->output, "%s(", safe_c_name(fname));
+        /* A @c_callback function is its bound symbol (#2664). */
+        ASTNode* cb_def = fn_c_callback_def(gen, fdef);
+        fprintf(gen->output, "%s(", cb_def ? c_callback_symbol(cb_def) : safe_c_name(fname));
         /* #2499: a closure call borrows its arguments. A `string` the
          * function keeps is its own reference, taken by its body (each
          * clause's, #2644) on entry (fn_def_string_param_captures), so the
@@ -2213,15 +2227,17 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
 
     // Imported clause sets get the same `static` storage class as a single
     // function, and a @c_callback one the same weak external symbol (see
-    // emit_function); the prototype agrees (generate_program).
-    if (fn_has_internal_linkage(first)) {
+    // emit_function), the symbol its first annotated clause binds (#2664);
+    // the prototype agrees (generate_program).
+    ASTNode* cb_def = fn_c_callback_def(gen, first);
+    if (!cb_def && fn_has_internal_linkage(first)) {
         fprintf(gen->output, fn_is_inline_candidate(first) ? "static inline AETHER_MAYBE_UNUSED "
                                                            : "static AETHER_MAYBE_UNUSED ");
-    } else if (is_c_callback(first)) {
+    } else if (cb_def) {
         fprintf(gen->output, "AETHER_WEAK_DEF ");
     }
     emit_fn_result_c_type(gen, first);
-    const char* cb_sym = c_callback_symbol(first);
+    const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
     fprintf(gen->output, " %s(", cb_sym ? cb_sym : safe_c_name(first->value));
     int npos = fn_param_count(first);
     for (int p = 0; p < npos; p++) {

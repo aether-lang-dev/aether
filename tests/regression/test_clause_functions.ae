@@ -18,9 +18,12 @@
 // returning a tuple was `0`. #2647: the compile-time precondition check
 // applied a later clause's `requires` to a call an earlier clause takes.
 // And with the clauses emitted as functions of their own, a set whose first
-// clause has a wildcard (its parameter was declared `void`) and a builder
-// written as clauses (its definition lacked the hidden builder parameter
-// the prototype declared) compile.
+// clause has a wildcard (its parameter was declared `void`, #2661) and a
+// builder written as clauses (its definition lacked the hidden builder
+// parameter the prototype declared, #2660) compile, a closure in a later
+// clause captures that clause's locals (#2662), and a function returning
+// nothing with a literal pattern no longer returns a value when a call does
+// not match it (#2663).
 //
 // The leak check runs where the heap count is exact (mem.heap_in_use_exact):
 // after a warm-up, some window of the same work grows by exactly 0
@@ -145,6 +148,12 @@ builder tally(want: int) with new_bag -> int {
     return items(_builder) + want
 }
 
+// A function returning nothing, written as one clause with a literal
+// pattern: a call it does not match returns at once.
+note(0) {
+    println("note zero")
+}
+
 // Unannotated: the first clause returns nothing, the second a value.
 twice(0) {
     println("twice zero")
@@ -236,6 +245,8 @@ main() {
 
     twice(0)
     check(twice(3) == 6, "a set whose first clause returns nothing")
+    note(0)
+    note(3)
 
     check(diff(9, 0) == 0, "a wildcard in the first clause")
     check(diff(9, 4) == 5, "a guard over two parameters")

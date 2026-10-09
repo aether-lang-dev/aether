@@ -1490,7 +1490,10 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
                 dc->capacity = cap;
             }
             dc->nodes[dc->count++] = c;
-            if (is_c_callback(c)) strmap_put(&ix->c_callbacks, c->value, (void*)c_callback_symbol(c));
+            /* The first annotated clause binds a set's symbol (#2664,
+             * fn_c_callback_def). */
+            if (is_c_callback(c) && !strmap_has(&ix->c_callbacks, c->value))
+                strmap_put(&ix->c_callbacks, c->value, (void*)c_callback_symbol(c));
         } else if (c->type == AST_MAIN_FUNCTION) {
             if (!ix->main_fn) ix->main_fn = c;
         } else if (c->type == AST_EXTERN_FUNCTION) {
@@ -8578,8 +8581,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // non-static declaration". `@c_callback` (#235) opts the function
         // out of `static` so it stays externally addressable; the forward
         // declaration follows suit. Trailing-underscore private helpers
-        // (#279) match the same `static` rule.
-        if (fn_has_internal_linkage(child)) {
+        // (#279) match the same `static` rule. A clause set is @c_callback
+        // when one of its clauses is (#2664), as its dispatcher is.
+        ASTNode* cb_def = fn_c_callback_def(gen, child);
+        if (!cb_def && fn_has_internal_linkage(child)) {
             fprintf(gen->output, fn_is_inline_candidate(child) ? "static inline AETHER_MAYBE_UNUSED "
                                                                : "static AETHER_MAYBE_UNUSED ");
         }
@@ -8590,7 +8595,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         // dispatcher's (#2645; the first clause alone declared a set whose
         // first clause returns nothing `void` against an `int` definition).
         emit_fn_result_c_type(gen, child);
-        const char* cb_sym = c_callback_symbol(child);
+        const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
         fprintf(gen->output, " %s(", cb_sym ? cb_sym : safe_c_name(child->value));
 
         // Generate parameter types
@@ -9054,7 +9059,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* f = program->children[i];
             if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
-            if (f && f->type == AST_FUNCTION_DEFINITION && c_callback_symbol(f)) n_cb++;
+            /* Once per symbol: a clause set's first annotated clause. */
+            if (f && f->type == AST_FUNCTION_DEFINITION && fn_c_callback_def(gen, f) == f) n_cb++;
         }
         if (n_cb > 0) {
             /* The reference is weak on ELF and Mach-O: a library linked with
@@ -9078,7 +9084,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
             for (int i = 0; i < program->child_count; i++) {
                 ASTNode* f = program->children[i];
                 if (f && f->type == AST_EXPORT_STATEMENT && f->child_count > 0) f = f->children[0];
-                if (!f || f->type != AST_FUNCTION_DEFINITION) continue;
+                if (!f || f->type != AST_FUNCTION_DEFINITION || fn_c_callback_def(gen, f) != f) continue;
                 const char* sym = c_callback_symbol(f);
                 if (!sym) continue;
                 fprintf(gen->output, "    aether_callback_register(\"%s\", (void*)%s);\n", sym, sym);

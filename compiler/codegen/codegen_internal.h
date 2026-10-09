@@ -696,6 +696,9 @@ const DefClauses* fn_def_clause_set(ASTNode* program, ASTNode* fn_def);
  * `__clause_<ptr>` for a clause of a set. */
 const char* fn_scope_name(ASTNode* program, ASTNode* fn);
 ASTNode* find_clause_by_scope_name(ASTNode* program, const char* scope);
+/* #2664: the @c_callback definition binding `fn`'s symbol (a set's first
+ * annotated clause), or NULL. */
+ASTNode* fn_c_callback_def(CodeGenerator* gen, ASTNode* fn);
 const char* clause_c_name(ASTNode* program, ASTNode* clause);
 /* #2645: the type `fn` returns in C (NULL for void), decided over every
  * clause of a set, and its spelling. */
