@@ -1,0 +1,225 @@
+// Regression (#2668, #2669): the env of a closure bound to a local is
+// released once nothing that holds it without a reference of its own is left.
+//
+// #2668: a closure local bound to another (`get_last = get`, `tmp = a`) takes
+// a reference of its own, released by its scope or by its next binding, and
+// the local it aliases keeps releasing its own. Before, the source stopped
+// owning its value at such a binding and the alias never started: a closure
+// made in a loop body and kept in a local declared before the loop leaked
+// one env per pass, and so did every other alias.
+//
+// #2669: a closure local named like a struct's `fn` field used in the same
+// function (`Hooks { set: ... }`, `h.set`) is released like any other. The
+// field's name was taken for a mention of the local, which then kept its env
+// for good, so each closure stored from it leaked one.
+//
+// Each shape is checked for its value and, where the heap count is exact,
+// for a window that does not grow. The macOS leaks gate runs this program.
+
+import std.list
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// #2668: a read-only capture kept in an outer local, pass after pass.
+outer_ro(n: int) -> int {
+    get_last = || { return 0 }
+    for i in 0..n {
+        v = i
+        get = || {
+            return v + 1
+        }
+        get_last = get
+    }
+    return get_last()
+}
+
+// #2668: a capture the closure writes (a cell per pass), kept the same way.
+outer_rw(n: int) -> int {
+    set_last = || { return 0 }
+    for i in 0..n {
+        v = 0
+        put = || {
+            v = v + i * 2
+            return v
+        }
+        set_last = put
+    }
+    return set_last()
+}
+
+// #2668: a `while` body's closure kept in an outer local.
+outer_while(n: int) -> int {
+    last = || { return 0 }
+    k = 0
+    while k < n {
+        w = k * 10
+        f = || {
+            return w
+        }
+        last = f
+        k = k + 1
+    }
+    return last()
+}
+
+// #2668: three locals trading two closures.
+swap(n: int) -> int {
+    x = n
+    a = || { return x + 1 }
+    b = || { return x + 2 }
+    tmp = a
+    a = b
+    b = tmp
+    int ra = call(a)
+    int rb = call(b)
+    int rt = call(tmp)
+    return ra * 100 + rb * 10 + rt
+}
+
+// #2668: the aliased local rebound afterwards; the alias keeps the first.
+rebind_source(n: int) -> int {
+    k = n
+    b = || { return k }
+    a = b
+    b = || { return 0 }
+    int ra = call(a)
+    int rb = call(b)
+    return ra + rb
+}
+
+// #2668: an alias made inside a closure's body of a closure it captured.
+nested_alias(n: int) -> int {
+    q = n
+    b = || { return q + 5 }
+    g = || {
+        a = b
+        int v = call(a)
+        return v
+    }
+    int r = call(g)
+    return r
+}
+
+// #2668: an alias stored into a list and kept in an outer local.
+alias_in_list(n: int) -> int {
+    l = list.new()
+    last = || { return 0 }
+    for i in 0..n {
+        v = i
+        get = || { return v + 1 }
+        keep = get
+        list.add(l, keep)
+        last = keep
+    }
+    total = 0
+    x = 0
+    while x < n {
+        fn g = unbox_closure(list.get_raw(l, x))
+        int r = call(g)
+        total = total + r
+        x = x + 1
+    }
+    list.free(l)
+    int lr = call(last)
+    return total + lr
+}
+
+struct Hooks {
+    set: fn
+    get: fn
+}
+
+// #2669: a local named like the fields of a struct literal and a field read.
+collide(n: int) -> int {
+    l = list.new()
+    h = Hooks { set: || { return 100 }, get: || { return 0 } }
+    for i in 0..n {
+        set = || {
+            return i * 3
+        }
+        list.add(l, set)
+    }
+    total = 0
+    x = 0
+    while x < n {
+        fn f = unbox_closure(list.get_raw(l, x))
+        int r = call(f)
+        total = total + r
+        x = x + 1
+    }
+    list.free(l)
+    int hv = call(h.set)
+    return total + hv
+}
+
+// #2669: only a field read names the local.
+field_read_only(h: Hooks, n: int) -> int {
+    total = 0
+    for i in 0..n {
+        get = || {
+            return i + 1
+        }
+        int r = call(get)
+        total = total + r
+    }
+    int hv = call(h.get)
+    return total + hv
+}
+
+// #2669: a local stored into the field of the same name.
+same_name_store(n: int) -> int {
+    h = Hooks { set: || { return 0 }, get: || { return 0 } }
+    k = n
+    set = || { return k * 2 }
+    h.set = set
+    int r = call(h.set)
+    int s = call(set)
+    return r + s
+}
+
+fn round(h: Hooks) -> int {
+    t = 0
+    t = t + outer_ro(3)
+    t = t + outer_rw(4)
+    t = t + outer_while(3)
+    t = t + swap(1)
+    t = t + rebind_source(7)
+    t = t + nested_alias(1)
+    t = t + alias_in_list(4)
+    t = t + collide(4)
+    t = t + field_read_only(h, 3)
+    t = t + same_name_store(5)
+    return t
+}
+
+main() {
+    h = Hooks { set: || { return 1 }, get: || { return 2 } }
+    check(outer_ro(3) == 3, "outer_ro returns the last pass's closure")
+    check(outer_rw(4) == 6, "outer_rw returns the last pass's closure")
+    check(outer_while(3) == 20, "outer_while returns the last pass's closure")
+    check(swap(1) == 322, "swap trades the closures")
+    check(rebind_source(7) == 7, "the alias keeps the first closure")
+    check(nested_alias(1) == 6, "the nested alias calls the captured closure")
+    check(alias_in_list(4) == 14, "the aliases in the list and the outer local are called")
+    check(collide(4) == 118, "collide calls every stored closure and the field")
+    check(field_read_only(h, 3) == 8, "field_read_only adds up")
+    check(same_name_store(5) == 20, "same_name_store calls the field and the local")
+    total = round(h)
+    check(total == 3 + 6 + 20 + 322 + 7 + 6 + 14 + 118 + 8 + 20, "a round adds up")
+    if mem.heap_in_use_exact() {
+        round(h)
+        grown = mem.steady_growth(|| {
+                round(h)
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

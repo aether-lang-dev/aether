@@ -6875,12 +6875,23 @@ static int env_scan_is_real_closure(ASTNode* n) {
            !(n->value && strcmp(n->value, "trailing") == 0);
 }
 
+/* #2669: is `node`'s value the name of a field or a struct, not of a
+ * variable: a field read `h.set` (or `h?.set`), a struct literal's field
+ * `set: v`, a message field init, the struct literal itself? Taken for the
+ * local `set`, it kept that local's env for good, and every closure stored
+ * from the local leaked one. */
+static int env_scan_names_field(ASTNode* node) {
+    return node->type == AST_MEMBER_ACCESS || node->type == AST_OPTIONAL_CHAIN ||
+           node->type == AST_FIELD_INIT || node->type == AST_STRUCT_LITERAL ||
+           (node->type == AST_ASSIGNMENT && node->child_count == 1);
+}
+
 /* Does `node` use `name` at all? Unlike subtree_mentions_param this counts an
  * invocation `name(...)` too, which is how a closure body captures a closure. */
 static int env_scan_mentions(ASTNode* node, const char* name) {
     if (!node) return 0;
     if (node->value && node->type != AST_LITERAL && node->type != AST_CLOSURE &&
-        strcmp(node->value, name) == 0) return 1;
+        !env_scan_names_field(node) && strcmp(node->value, name) == 0) return 1;
     for (int i = 0; i < node->child_count; i++) {
         if (env_scan_mentions(node->children[i], name)) return 1;
     }
@@ -6958,10 +6969,36 @@ static int closure_ask_binding(ASTNode* rhs) {
            rhs->node_type->kind == TYPE_FUNCTION && !rhs->node_type->is_fnptr;
 }
 
-static int env_scan_fresh_binding(CodeGenerator* gen, EnvScan* s, ASTNode* rhs) {
+/* #2668: does `decl` (`a = b`, both closures) give the local `a` a reference
+ * of its own to the env of `b`, a closure local or parameter? The binding
+ * retains (emit_closure_alias_take), so `a` owns what it holds, released by
+ * its scope or by its next binding, and `b` keeps releasing its own. Before,
+ * `b` stopped owning its value at such a binding and `a` never started:
+ * `get_last = get` in a loop body leaked one env per pass. Not for a cell,
+ * a global or an actor's state, which take their values their own way. */
+static int closure_alias_binding(CodeGenerator* gen, ASTNode* decl) {
+    if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
+        decl->child_count < 1) return 0;
+    ASTNode* rhs = decl->children[0];
+    if (!rhs || rhs->type != AST_IDENTIFIER || !rhs->value ||
+        strcmp(rhs->value, decl->value) == 0) return 0;
+    Type* t = rhs->node_type;
+    if (!t || t->kind != TYPE_FUNCTION || t->is_fnptr) return 0;
+    Type* vt = decl->node_type;
+    if (vt && vt->kind != TYPE_UNKNOWN && !(vt->kind == TYPE_FUNCTION && !vt->is_fnptr)) return 0;
+    return !is_promoted_capture(gen, decl->value) && !is_module_global_var(gen, decl->value) &&
+           !is_actor_state_var(gen, decl->value);
+}
+
+/* `decl` binds s->name to its first child. */
+static int env_scan_fresh_binding(CodeGenerator* gen, EnvScan* s, ASTNode* decl) {
+    ASTNode* rhs = decl->child_count > 0 ? decl->children[0] : NULL;
     if (!rhs || env_scan_mentions(rhs, s->name)) return 0;
     if (env_scan_is_real_closure(rhs)) return 1;
     if (closure_view_binding(rhs) || closure_ask_binding(rhs)) return 1;
+    /* #2668: an alias of another closure retains, judged in the function
+     * being emitted, whose locals the cell, global and state tests know. */
+    if (s->owner == gen->current_function && closure_alias_binding(gen, decl)) return 1;
     if (rhs->type != AST_FUNCTION_CALL || !rhs->value) return 0;
     for (int i = 0; i < rhs->child_count; i++) {
         /* A builder's trailing block re-emits the call with its config. */
@@ -7383,7 +7420,7 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                     s->escapes = 1;
                     return;
                 }
-                if (!env_scan_fresh_binding(gen, s, rhs)) {
+                if (!env_scan_fresh_binding(gen, s, node)) {
                     env_scan_escape(s, nested, NULL);
                     env_scan_walk(gen, s, rhs, node, nested);
                     return;
@@ -7409,6 +7446,13 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
                 /* #2525: so does a struct field, a message field, a global
                  * or an actor's state (emit_closure_take retains a view). */
                 if (parent && env_scan_store_retains(gen, parent, node)) return;
+                /* #2668: so does another closure local bound to it, in the
+                 * function being emitted; a binding in a nested closure's
+                 * body gets its reference from the hand-off retain below
+                 * (#2519). */
+                if (parent && !nested && !s->param_mode && s->owner == gen->current_function &&
+                    parent->child_count > 0 && parent->children[0] == node &&
+                    closure_alias_binding(gen, parent)) return;
                 if (parent && parent->type == AST_FUNCTION_CALL && parent->value) {
                     if (strcmp(parent->value, "call") == 0) {
                         if (parent->children[0] == node) return;   /* invoked */
@@ -7456,8 +7500,9 @@ static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,
         case AST_LITERAL:
             return;
         default:
-            /* A parameter, pattern, field or other binding spelled the same. */
-            if (named) {
+            /* A parameter, pattern or other binding spelled the same. A
+             * field's name is not the local's (env_scan_names_field). */
+            if (named && !env_scan_names_field(node)) {
                 s->escapes = 1;
                 return;
             }
@@ -7571,7 +7616,8 @@ static void claim_closure_local_env(CodeGenerator* gen, const char* name,
     if (binding->type != AST_VARIABLE_DECLARATION || binding->child_count < 1) return;
     ASTNode* rhs = binding->children[0];
     if (!rhs || (!env_scan_is_real_closure(rhs) && rhs->type != AST_FUNCTION_CALL &&
-                 !closure_view_binding(rhs) && !closure_ask_binding(rhs))) return;
+                 !closure_view_binding(rhs) && !closure_ask_binding(rhs) &&
+                 !closure_alias_binding(gen, binding))) return;
     /* Only an `_AeClosure` local has an env to release; a closure coerced
      * into a `ptr` slot is a box with an owner of its own. */
     Type* vt = binding->node_type;
@@ -9846,6 +9892,20 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e) {
     fprintf(gen->output, ")");
 }
 
+/* #2668: the value of a closure alias binding (closure_alias_binding), a
+ * reference of the bound local's own: retained here, unless the hand-off
+ * retain of #2519 gives it one right before the statement (a capture handed
+ * on inside a closure's body), so the local holds exactly one. */
+static void emit_closure_alias_take(CodeGenerator* gen, ASTNode* rhs) {
+    for (int i = 0; i < g_env_own_clear_count; i++) {
+        if (g_env_own_clears[i].retain == rhs) {
+            generate_expression(gen, rhs);
+            return;
+        }
+    }
+    emit_closure_take(gen, rhs);
+}
+
 /* A promoted struct returned by name hands its owned strings to the caller
  * with the returned copy (#752). The cell is still released at the scope
  * exit, and a closure env may hold it longer: it must not free them too. */
@@ -11596,7 +11656,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                (env_scan_is_real_closure(stmt->children[0]) ||
                                 call_returns_owned_closure(gen, stmt->children[0]) ||
                                 closure_view_binding(stmt->children[0]) ||
-                                closure_ask_binding(stmt->children[0])) &&
+                                closure_ask_binding(stmt->children[0]) ||
+                                closure_alias_binding(gen, stmt)) &&
                                closure_env_carrier_index(gen, stmt->value) >= 0) {
                         /* #2480: a local whose env this scope frees holds one
                          * env at a time. Rebinding it (a loop body's closure,
@@ -11619,13 +11680,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     stmt->value);
                         }
                         fprintf(gen->output, "%s = ", stmt->value);
-                        emit_closure_take(gen, stmt->children[0]);   /* #2525: a view is retained */
+                        if (closure_alias_binding(gen, stmt)) {
+                            emit_closure_alias_take(gen, stmt->children[0]);   /* #2668 */
+                        } else {
+                            emit_closure_take(gen, stmt->children[0]);   /* #2525: a view is retained */
+                        }
                         if (flagged) fprintf(gen->output, "; _envown_%s = 1", stmt->value);
                         if (ccid >= 0) {
                             fprintf(gen->output, "; _closure_env_%d_free(_ae_old_env); }\n", ccid);
                         } else {
                             fprintf(gen->output, "; _aether_closure_env_release(_ae_old_env); }\n");
                         }
+                    } else if (closure_alias_binding(gen, stmt)) {
+                        /* #2668: the closure it aliases counted this binding
+                         * as one that takes a reference of its own, so it
+                         * does here too, where the local frees nothing (one
+                         * that escapes keeps what it was given). */
+                        fprintf(gen->output, "%s = ", stmt->value);
+                        emit_closure_alias_take(gen, stmt->children[0]);
+                        fprintf(gen->output, ";\n");
                     } else {
                         // Plain non-string assignment.
                         /* Struct-reassignment heap cleanup (#465).
@@ -12012,6 +12085,10 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                  * own, released by this scope, so `h` may
                                  * be destroyed first. */
                                 emit_closure_take(gen, stmt->children[0]);
+                            } else if (closure_alias_binding(gen, stmt)) {
+                                /* #2668: `a = b` likewise, and `b` keeps
+                                 * releasing its own. */
+                                emit_closure_alias_take(gen, stmt->children[0]);
                             } else {
                                 generate_expression(gen, stmt->children[0]);
                             }
@@ -12141,10 +12218,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         claim_closure_local_env(gen, stmt->value, stmt, 1);
                     } else if (stmt->child_count > 0 &&
                                (closure_view_binding(stmt->children[0]) ||
-                                closure_ask_binding(stmt->children[0])) &&
+                                closure_ask_binding(stmt->children[0]) ||
+                                closure_alias_binding(gen, stmt)) &&
                                stmt->value) {
                         /* #2525: a retained field or element read, likewise;
-                         * #2528: a reply's closure too. */
+                         * #2528: a reply's closure too; #2668: an alias. */
                         claim_closure_local_env(gen, stmt->value, stmt, 1);
                     }
                     // Suppress unused-variable warning for arrays used with list

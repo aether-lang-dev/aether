@@ -226,10 +226,17 @@ lifetime"; shape by shape:
   parameter is only called or passed on the same way, or capturing it in
   a closure, or storing it where the holder takes a reference of its own
   (a list, a map, a struct field, a message field, a global, actor state,
-  #2480). Rebinding the local to a new closure frees the env it replaces.
-  A return, an alias, an argument to an extern parameter not marked
+  another closure local, #2480, #2668). Rebinding the local to a new closure
+  frees the env it replaces. A local bound to another closure local or a
+  parameter (`last = get`) retains it, so it owns its own reference and
+  releases it the same way, and the local it copied keeps releasing its own
+  (#2668; before, the source stopped owning at the copy and the copy never
+  started, which leaked an env per pass of a loop that kept its closure in
+  an outer local). A return, an argument to an extern parameter not marked
   `@noescape` or to a function that keeps it, or a binding to anything
-  but a fresh closure leaves the env to the value's holder.
+  else leaves the env to the value's holder. A field's name is not a use
+  of a local spelled the same (`Hooks { set: f }`, `h.set` beside a local
+  `set`, #2669).
 
 - **Captured by another closure.** An env is reference-counted (#2494):
   the value's owner holds one reference and every env that captured the
@@ -246,10 +253,11 @@ lifetime"; shape by shape:
   it is freed after that call (#2506, #2507); thrown away, it is freed at
   once.
 
-- **Handed on, then rebound.** A local whose value is handed on (stored,
-  returned, aliased) stops owning it right before the statement that does
-  it; `_envown_<name>` records it, and the closures the local is bound to
-  afterwards are still freed (#2506). The statement may be a condition, a
+- **Handed on, then rebound.** A local whose value is handed on (returned,
+  or stored where nothing takes a reference of its own) stops owning it
+  right before the statement that does it; `_envown_<name>` records it, and
+  the closures the local is bound to afterwards are still freed (#2506).
+  The statement may be a condition, a
   loop whose body does not rebind the local, a statement with a trailing
   block, or a `defer`, whose deferred statement is the point (#2507).
 
