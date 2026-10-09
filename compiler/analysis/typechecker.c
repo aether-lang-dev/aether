@@ -2142,6 +2142,20 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
     type_error(emsg, arg->line, arg->column);
 }
 
+/* Is `value`, of type `value_type`, a closure headed for a typed C function
+ * pointer slot (`fn(int) -> int`, is_fnptr)? A closure literal, or a name
+ * bound to one. A named function is not: it lowers to its own address. */
+static int closure_for_fnptr(SymbolTable* table, ASTNode* value, Type* value_type,
+                             Type* slot_type) {
+    if (!value || !slot_type || slot_type->kind != TYPE_FUNCTION || !slot_type->is_fnptr)
+        return 0;
+    if (value->type == AST_CLOSURE) return 1;
+    if (value->type != AST_IDENTIFIER || !value->value ||
+        !value_type || value_type->kind != TYPE_FUNCTION || value_type->is_fnptr) return 0;
+    Symbol* sym = lookup_symbol(table, value->value);
+    return sym && !sym->is_function;
+}
+
 /* A closure passed where the parameter is a typed C function pointer
  * (`fn(int) -> int`, is_fnptr). The parameter is a bare pointer with no
  * environment, so the closure cannot fit it; the front end let it through
@@ -2152,14 +2166,7 @@ static void reject_tuple_argument(SymbolTable* table, ASTNode* call, ASTNode* ar
 static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode* arg,
                                      Type* arg_type, Type* param_type, int index,
                                      const char* param_name) {
-    if (!param_type || param_type->kind != TYPE_FUNCTION || !param_type->is_fnptr) return;
-    int is_closure = arg->type == AST_CLOSURE;
-    if (!is_closure && arg->type == AST_IDENTIFIER && arg->value &&
-        arg_type && arg_type->kind == TYPE_FUNCTION && !arg_type->is_fnptr) {
-        Symbol* sym = lookup_symbol(table, arg->value);
-        is_closure = sym && !sym->is_function;
-    }
-    if (!is_closure) return;
+    if (!closure_for_fnptr(table, arg, arg_type, param_type)) return;
     char emsg[512];
     snprintf(emsg, sizeof(emsg),
              "Argument %d '%s' of '%s': a closure cannot be passed as a typed function "
@@ -2169,6 +2176,55 @@ static void reject_closure_for_fnptr(SymbolTable* table, ASTNode* call, ASTNode*
              index, param_name ? param_name : "?", call->value ? call->value : "?",
              param_name ? param_name : "f");
     type_error(emsg, arg->line, arg->column);
+}
+
+/* #2628: the same closure stored in a typed C function pointer slot other
+ * than a parameter: a struct literal's field, a field or element store, a
+ * binding of a local or module-level `var`, a function's result. The slot's
+ * own type check let it through (types_equal does not look at is_fnptr, so
+ * a closure and a function pointer of one signature compare equal), and gcc
+ * refused the `_AeClosure` it was handed. `name` names the slot: the field
+ * as `Struct.field`, the variable, the array. Returns 1 when it reported. */
+typedef enum { FNPTR_SLOT_FIELD, FNPTR_SLOT_VARIABLE, FNPTR_SLOT_ELEMENT,
+               FNPTR_SLOT_RESULT } FnptrSlotKind;
+static int reject_closure_in_fnptr_slot(SymbolTable* table, ASTNode* value, Type* value_type,
+                                        Type* slot_type, FnptrSlotKind kind, const char* name,
+                                        int line, int column) {
+    if (!closure_for_fnptr(table, value, value_type, slot_type)) return 0;
+    const char* nm = name ? name : "?";
+    char emsg[512] = "";
+    switch (kind) {
+        case FNPTR_SLOT_FIELD:
+            snprintf(emsg, sizeof(emsg),
+                     "Field '%s': a closure cannot be stored in a typed function pointer; "
+                     "the field is a C function pointer with no environment. Declare it "
+                     "as a bare `fn` field and call it with `call(...)`, or store a named "
+                     "function.", nm);
+            break;
+        case FNPTR_SLOT_VARIABLE:
+            snprintf(emsg, sizeof(emsg),
+                     "Variable '%s': a closure cannot be bound to a typed function pointer; "
+                     "'%s' is a C function pointer with no environment. Declare it as a "
+                     "bare `fn` and call it with `call(%s, ...)`, or bind a named function.",
+                     nm, nm, nm);
+            break;
+        case FNPTR_SLOT_ELEMENT:
+            snprintf(emsg, sizeof(emsg),
+                     "Element of '%s': a closure cannot be stored in a typed function "
+                     "pointer; the element is a C function pointer with no environment. "
+                     "Keep closures in a bare `fn` slot and call them with `call(...)`, or "
+                     "store a named function.", nm);
+            break;
+        case FNPTR_SLOT_RESULT:
+            snprintf(emsg, sizeof(emsg),
+                     "Return value: a closure cannot be returned as a typed function "
+                     "pointer; the function's result is a C function pointer with no "
+                     "environment. Return a bare `fn` and call it with `call(...)`, or "
+                     "return a named function.");
+            break;
+    }
+    type_error(emsg, line, column);
+    return 1;
 }
 
 /* #2491: a struct value passed where the parameter takes a different struct
@@ -7413,6 +7469,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 Type* init_type = fn_address ? clone_type(fnptr_slot)
                                              : infer_type(init, table);
+                /* #2628: a closure has an environment the slot has nowhere
+                 * to put. Refused before the generic checks below, which
+                 * pass a closure of the slot's signature and call another
+                 * one a plain mismatch. */
+                if (!fn_address &&
+                    reject_closure_in_fnptr_slot(table, init, init_type, fnptr_slot,
+                                                 FNPTR_SLOT_VARIABLE, stmt->value,
+                                                 init->line, init->column)) {
+                    /* A declaration still declares its name, with its
+                     * annotation, so a call through it is not reported
+                     * again as an undefined function. */
+                    if (fnptr_slot == stmt->node_type && stmt->value &&
+                        !lookup_symbol_local(table, stmt->value))
+                        add_symbol(table, stmt->value, clone_type(fnptr_slot), 0, 0, 0);
+                    free_type(init_type);
+                    return 0;
+                }
 
                 /* `const` is substitution-at-each-use: the compiler
                  * inlines the RHS expression at every reference. That
@@ -8944,6 +9017,19 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             /* #1286: `return arr` from a `-> T[]` function returns a slice. */
             if (stmt->child_count == 1 && g_tc_return_type)
                 slice_coerce_slot(&stmt->children[0], g_tc_return_type, 0);
+            /* #2628: a closure returned as a typed fn pointer (`-> Getter`
+             * for a `cfn Getter`). A closure's own `return` is not this
+             * one: g_tc_return_type is cleared inside its body. */
+            if (stmt->child_count == 1 && stmt->children[0] && g_tc_return_type &&
+                g_tc_return_type->kind == TYPE_FUNCTION && g_tc_return_type->is_fnptr) {
+                ASTNode* rv = stmt->children[0];
+                Type* rvt = infer_type(rv, table);
+                int refused = reject_closure_in_fnptr_slot(table, rv, rvt, g_tc_return_type,
+                                                           FNPTR_SLOT_RESULT, NULL,
+                                                           rv->line, rv->column);
+                free_type(rvt);
+                if (refused) return 0;
+            }
             /* A multi-value return into a tuple type coerces each value
              * against its own position: `return null, "e"` from a
              * `-> (long[], string)` function is the empty slice and a
@@ -9813,6 +9899,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             ? sdef_sym->node : NULL;
             int sdef_is_extern = sdef && sdef->annotation &&
                                  strncmp(sdef->annotation, "extern", 6) == 0;
+            int fields_ok = 1;
             for (int i = 0; i < expr->child_count; i++) {
                 ASTNode* field_init = expr->children[i];
                 if (field_init && field_init->type == AST_ASSIGNMENT && field_init->child_count > 0) {
@@ -9826,15 +9913,29 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 strcmp(fd->value, field_init->value) == 0) {
                                 slice_coerce_slot(&field_init->children[0], fd->node_type,
                                                   sdef_is_extern);
+                                /* #2628: a closure in a typed fn-pointer field. */
+                                ASTNode* fv = field_init->children[0];
+                                if (fv && fd->node_type && fd->node_type->kind == TYPE_FUNCTION &&
+                                    fd->node_type->is_fnptr) {
+                                    Type* fvt = infer_type(fv, table);
+                                    char slot[256];
+                                    snprintf(slot, sizeof(slot), "%s.%s",
+                                             sdef->value ? sdef->value : "?", fd->value);
+                                    if (reject_closure_in_fnptr_slot(table, fv, fvt, fd->node_type,
+                                                                     FNPTR_SLOT_FIELD, slot,
+                                                                     fv->line, fv->column))
+                                        fields_ok = 0;
+                                    free_type(fvt);
+                                }
                                 break;
                             }
                         }
                     }
                 }
             }
-        }
             // Struct literal type is already set during type inference
-            return 1;
+            return fields_ok;
+        }
             
         case AST_MEMBER_ACCESS: {
             /* #2146: a lane read. This walk always runs, so it is where the
@@ -10376,6 +10477,35 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             free_type(left_type);
             free_type(right_type);
             return 0;
+        }
+        /* #2628: a closure stored in a typed fn-pointer field (`f.cb = |p|
+         * ...`, through a pointer too) or element. Checked first: the test
+         * below passes a closure of the slot's signature and calls any
+         * other one a plain mismatch. */
+        if (left_type && left_type->kind == TYPE_FUNCTION && left_type->is_fnptr) {
+            FnptrSlotKind kind = FNPTR_SLOT_VARIABLE;
+            char slot[256];
+            snprintf(slot, sizeof(slot), "%s", left->value ? left->value : "?");
+            if (left->type == AST_MEMBER_ACCESS && left->child_count > 0) {
+                kind = FNPTR_SLOT_FIELD;
+                Type* ot = infer_type(left->children[0], table);
+                Type* st = ot && ot->kind == TYPE_PTR ? ot->element_type : ot;
+                if (st && st->kind == TYPE_STRUCT && st->struct_name)
+                    snprintf(slot, sizeof(slot), "%s.%s", st->struct_name,
+                             left->value ? left->value : "?");
+                free_type(ot);
+            } else if (left->type == AST_ARRAY_ACCESS && left->child_count > 0) {
+                kind = FNPTR_SLOT_ELEMENT;
+                ASTNode* arr = left->children[0];
+                snprintf(slot, sizeof(slot), "%s",
+                         arr && arr->type == AST_IDENTIFIER && arr->value ? arr->value : "array");
+            }
+            if (reject_closure_in_fnptr_slot(table, right, right_type, left_type, kind, slot,
+                                             right->line, right->column)) {
+                free_type(left_type);
+                free_type(right_type);
+                return 0;
+            }
         }
         if (!is_assignable(right_type, left_type)) {
             /* #1240: `table.callback = my_fn` where the field is declared

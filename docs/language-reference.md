@@ -2918,6 +2918,8 @@ Pass an Aether function's address with the `as fn(...)` cast, `walk(my_handler a
 
 A named Aether function bound to a typed function pointer is its address there too, without the cast: an argument to such a parameter, a struct field of that type, a `let` local of it, and a module-level `var` (its initializer, and an assignment to it in a function body). The signature is checked: the parameter types must match, and so must the result, where `fn(ptr, int)` and `fn(ptr, int) -> void` are the same type.
 
+A closure cannot be stored in any of those slots, as it cannot be passed to the parameter: a closure literal, or a local bound to one, given to a struct field, an array element, a local, a module-level `var` or a function result of a typed function pointer type is a type error naming the field or variable. Store a named function there, or declare the slot a bare `fn` and call it with `call(...)`.
+
 ```aether,run
 extern free(p: ptr)
 
