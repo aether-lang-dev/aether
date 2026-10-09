@@ -1488,11 +1488,23 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
              * stores itself, unless it returns the struct (#752). A closure
              * field is retained instead (#2525): the copy stays callable
              * and holds a reference of its own. */
+            /* #2582: one the body keeps as a whole value (returns,
+             * aliases, stores, captures) takes references of its own
+             * instead, so what it hands over is its own, and its caller can
+             * destroy the argument after the statement. */
             const char* owning = struct_owning_strings(gen, child->node_type);
             if (owning && child->type == AST_PATTERN_VARIABLE) {
                 const char* lv = is_promoted ? cg_internf("(*%s)", child->value)
                                              : child->value;
-                emit_struct_disown(gen, owning, lv, 1);
+                ASTNode* fbody = NULL;
+                for (int b = func->child_count - 1; b >= 0 && !fbody; b--) {
+                    if (func->children[b] && func->children[b]->type == AST_BLOCK)
+                        fbody = func->children[b];
+                }
+                if (struct_param_kept(gen, fbody, child->value))
+                    emit_struct_capture(gen, owning, lv);
+                else
+                    emit_struct_disown(gen, owning, lv, 1);
                 if (!is_promoted) {
                     push_struct_destroy_defer(gen, child->value, child->node_type,
                                               child->line, child->column);

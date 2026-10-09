@@ -17,15 +17,7 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 PORT=18407
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] http_server_chunked_request on Windows (raw socket probe)"
-        exit 0
-        ;;
-esac
-
 [ -x "$AE" ] || { echo "  [SKIP] http_server_chunked_request: ae not built"; exit 0; }
-command -v nc >/dev/null 2>&1 || { echo "  [SKIP] http_server_chunked_request: nc not available"; exit 0; }
 
 TMPDIR="$(mktemp -d)"
 SRV_PID=""
@@ -33,11 +25,20 @@ cleanup() { [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$TMPDIR"; 
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
+# The probe is tests/lib/raw_exchange.c rather than nc, which neither Windows
+# nor every Linux runner has. It needs Winsock linked on Windows.
+RAW_SOCKET_LIBS=""
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) RAW_SOCKET_LIBS="-lws2_32" ;;
+esac
+cc -I"$ROOT/tests/lib" "$ROOT/tests/lib/raw_exchange.c" -o "$TMPDIR/raw_exchange" $RAW_SOCKET_LIBS 2>"$TMPDIR/cc.log" \
+    || { cat "$TMPDIR/cc.log"; fail "could not compile raw_exchange.c"; }
+
 AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/server.ae" > "$TMPDIR/srv.log" 2>&1 &
 SRV_PID=$!
 
 send() {                          # send <payload-file> <out-file>
-    nc 127.0.0.1 "$PORT" < "$1" > "$2" 2>/dev/null
+    "$TMPDIR/raw_exchange" "$PORT" "$1" "$2" 2>/dev/null
 }
 
 printf 'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n' > "$TMPDIR/chunked.req"
@@ -82,9 +83,14 @@ grep -q "len=7 body=\[SECOND!\]" "$TMPDIR/pipelined.out" \
 # provoked. That made this case pass on an idle machine and fail on a busy one,
 # blaming the server for a race in the client. This writes until the socket
 # refuses more, stops writing, and only then reads, which is the exchange the
-# assertion is actually about.
-if command -v python3 >/dev/null 2>&1; then
-    python3 - "$PORT" > "$TMPDIR/flood.out" 2>/dev/null <<'FLOOD'
+# assertion is actually about. It also holds the server to closing in stages
+# (conn_linger): a server that closes with the flood unread resets the
+# connection, and a Windows client discards on a reset the 413 it has not yet
+# read. find_python.sh, not `command -v python3`: Windows has no python3.exe
+# from the official installer.
+PY="$(sh "$ROOT/tests/scripts/find_python.sh" 2>/dev/null)" || PY=""
+if [ -n "$PY" ]; then
+    $PY - "$PORT" > "$TMPDIR/flood.out" 2>/dev/null <<'FLOOD'
 import socket, sys
 s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=10)
 s.sendall(b"POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n")
@@ -112,7 +118,7 @@ FLOOD
     grep -q "^HTTP/1.1 413" "$TMPDIR/flood.out" \
         || { head -3 "$TMPDIR/flood.out"; fail "an endless chunked body was not refused"; }
 else
-    echo "  [SKIP] endless-chunked-body case: python3 not on PATH"
+    echo "  [SKIP] endless-chunked-body case: no working Python 3"
 fi
 
 # Framing that has no single answer is refused rather than guessed at. Two

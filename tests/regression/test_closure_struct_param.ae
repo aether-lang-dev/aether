@@ -1,0 +1,85 @@
+// Regression (#2606): a closure's struct parameter borrows the caller's
+// strings, as a function's does. Its trackers were left set on entry, so
+// the closure treated the caller's strings as its own: returning the
+// parameter handed them back still owned, and `cb(make_item("w")).name` freed
+// them twice (once with the call's result, once with its argument, both
+// statement temporaries); a field store into the parameter freed the
+// caller's string. Now the parameter is disowned on entry, and the closure
+// frees at its exit only what it stored itself.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+round(w: string) -> int {
+    // The issue's shape: the closure hands its parameter back, and both the
+    // call's result and its argument are temporaries of the statement.
+    same = | i: Item | { return i }
+    check(string.length(same(make_item(w)).name) == 2, "a closure handed back a struct argument a call returned")
+
+    // A field store into the parameter replaces the closure's copy only.
+    rename = | i: Item | {
+        i.name = string.concat(i.tag, "!")
+        return string.length(i.name)
+    }
+    a = make_item(w)
+    total = rename(a)
+    check(a.name == "w#" && a.tag == "w%", "a field store into a closure's struct parameter left the caller's struct alone")
+
+    // A parameter a nested closure writes lives in a cell of its own.
+    relabel = | i: Item | {
+        set = || { i.tag = string.concat(i.name, "?") }
+        set()
+        return string.length(i.tag)
+    }
+    total = total + relabel(a)
+    check(a.tag == "w%", "a promoted struct parameter left the caller's struct alone")
+
+    // Returned into a local, the parameter is the argument's own strings.
+    b = same(a)
+    check(b.name == "w#" && b.tag == "w%", "a returned struct parameter reads as its argument")
+    return total
+}
+
+main() {
+    println("=== test_closure_struct_param ===")
+    check(round("w") == 3 + 3, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_closure_struct_param passed ===")
+}

@@ -10,9 +10,31 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <dlfcn.h>
 
 #include "aether_host.h"
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows. It is also linked, for aether_event_register, so
+ * the load returns the module already mapped and both see one registry. */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
+#include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 typedef const AetherNamespaceManifest* (*describe_fn)(void);
 typedef const char* (*say_hi_fn)(const char*);
@@ -28,13 +50,13 @@ static void on_greeted(int64_t id) { g_last_id = id; }
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <lib>\n", argv[0]); return 2; }
 
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen: %s", dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading %s: %s", argv[1], lib_error());
 
-    describe_fn describe = (describe_fn)dlsym(h, "aether_describe");
-    say_hi_fn say_hi    = (say_hi_fn)dlsym(h, "aether_say_hi");
-    if (!describe) FAIL("aether_describe missing: %s", dlerror());
-    if (!say_hi)   FAIL("aether_say_hi missing: %s", dlerror());
+    describe_fn describe = (describe_fn)lib_sym(h, "aether_describe");
+    say_hi_fn say_hi    = (say_hi_fn)lib_sym(h, "aether_say_hi");
+    if (!describe) FAIL("aether_describe missing: %s", lib_error());
+    if (!say_hi)   FAIL("aether_say_hi missing: %s", lib_error());
 
     /* aether_describe matches what manifest.ae declared. */
     const AetherNamespaceManifest* m = describe();
@@ -60,7 +82,7 @@ int main(int argc, char** argv) {
     if (!r || strcmp(r, "alice") != 0) FAIL("say_hi returned %s", r ? r : "(null)");
     if (g_last_id != 42) FAIL("Greeted handler last_id = %lld, expected 42", (long long)g_last_id);
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: namespace_basic — describe, downcall, notify\n");
     return 0;
 }

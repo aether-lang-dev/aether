@@ -401,13 +401,15 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # std/ trees walked below, so it shipped in no install at all and
     # runtime/libaether_caps.c could not find it when cross-compiling (#1420).
     cp include/*.h "$INCLUDE_DIR/" 2>/dev/null || true
-    (cd runtime && find . -name '*.h' -print) | while read -r h; do
-        mkdir -p "$INCLUDE_DIR/runtime/$(dirname "$h")"
-        cp "runtime/$h" "$INCLUDE_DIR/runtime/$h" 2>/dev/null || true
-    done
-    (cd std && find . -name '*.h' -print) | while read -r h; do
-        mkdir -p "$INCLUDE_DIR/std/$(dirname "$h")"
-        cp "std/$h" "$INCLUDE_DIR/std/$h" 2>/dev/null || true
+    # One tar per tree carries every header to the same relative path,
+    # making the directories that hold one. It replaced a loop of mkdir,
+    # dirname and cp for each of the 120 headers, three process starts
+    # apiece, which took 14 to 30 seconds on Windows; the tar takes under
+    # one (#2596).
+    for tree in runtime std; do
+        mkdir -p "$INCLUDE_DIR/$tree"
+        (cd "$tree" && find . -name '*.h' -print | tar cf - -T -) |
+            (cd "$INCLUDE_DIR/$tree" && tar xf -)
     done
 
     # Runtime + stdlib source (sources are the fallback the compiler

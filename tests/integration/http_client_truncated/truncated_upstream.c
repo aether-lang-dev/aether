@@ -7,22 +7,21 @@
  * error, because a response with nothing declaring its length is complete
  * exactly when the peer closes.
  */
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <unistd.h>
+
+#include "raw_socket.h"
 
 #define PART "0123456789"
 
 int main(int argc, char** argv) {
     int truncate_body = (argc > 1 && strcmp(argv[1], "short") == 0);
 
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) return 1;
+    if (raw_socket_start() != 0) return 1;
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) return 1;
     int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
 
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -37,8 +36,8 @@ int main(int argc, char** argv) {
     printf("%d\n", ntohs(a.sin_port));
     fflush(stdout);
 
-    int cs = accept(ls, NULL, NULL);
-    if (cs < 0) return 1;
+    raw_sock cs = accept(ls, NULL, NULL);
+    if (cs == RAW_SOCK_INVALID) return 1;
     char req[4096];
     if (recv(cs, req, sizeof(req), 0) <= 0) return 1;
 
@@ -53,7 +52,7 @@ int main(int argc, char** argv) {
         send(cs, PART, strlen(PART), 0);
     }
 
-    close(cs);
-    close(ls);
+    raw_socket_close(cs);
+    raw_socket_close(ls);
     return 0;
 }

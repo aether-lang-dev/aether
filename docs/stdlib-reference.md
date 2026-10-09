@@ -1415,6 +1415,15 @@ main() {
 
 Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directly on the connection thread.
 
+On Windows the script is a DLL loaded with `LoadLibrary`. A POSIX host links with `-rdynamic`, so a script's runtime calls bind to the host's own runtime; Windows has no equivalent, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
+
+```sh
+ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
+ae build --shared-runtime host.ae -o host
+```
+
+A host or script on its own static runtime is refused at mount with `KIND_IO` and a message naming `--shared-runtime`.
+
 ### API
 
 - `script_gateway.mount(server, path_prefix, so_path)` → `(int, int, string)` Mount the shared library at `so_path` as the request handler for every URL whose path starts with `path_prefix`. Returns `(1, KIND_OK, "")` on successful mount; `(0, KIND_*, msg)` on failure. The dlopen handle is intentionally long-lived (process-lifetime); hot-reload is a separate feature.
@@ -1426,8 +1435,8 @@ Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directl
 | `KIND_OK` | 0 | mount succeeded |
 | `KIND_NOT_FOUND` | 1 | `so_path` is missing or unreadable |
 | `KIND_INVALID` | 6 | null arg, or `.so` missing the `aether_script_handle` entrypoint |
-| `KIND_IO` | 5 | `dlopen` failure (incompatible ABI, etc.) |
-| `KIND_UNAVAILABLE` | 99 | platform stub (Windows DLL hosting is a follow-up) |
+| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); on Windows also a host or script not built with `--shared-runtime` |
+| `KIND_UNAVAILABLE` | 99 | a platform with no dynamic loader; no supported platform returns it |
 
 ### Sandbox
 
@@ -3033,7 +3042,7 @@ spawned child exited 5
 - `os.run_capture(prog, argv, env)` → `(string, int, string)` - Run to completion: stdout, exit status, error
 - `os.run_full(prog, argv, env, stdin_data)` → `(string, string, int, string)` - Feed `stdin_data` to the child's stdin (binary-safe) and capture stdout and stderr separately: stdout, stderr, exit status, error. No pipe can fill and deadlock, whatever the sizes. `""` gives the child an already-closed stdin
 - `os_run(prog, argv, env)` → `int` - Run to completion with this process's stdio; the exit status, or -1 when it could not start
-- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table index on Windows, so pass it back to the calls below rather than treating it as a pid
+- `os.spawn_proc(prog, argv, env)` → `(int, string)` - Start without waiting. The first value is a reap token: the pid on POSIX, a handle-table key on Windows, so pass it back to the calls below rather than treating it as a pid. On Windows a token is never a pid: once reaped, `os.kill` and `os.wait_pid_timeout` report it gone rather than reaching whatever process has that number
 - `os.wait(token)` → `(int, string)` - Wait for one child: exit status, error
 - `os.wait_any(tokens)` → `(int, int, string)` - Wait for whichever of a list finishes first: its token, exit status, error. Box each token into the list with `mem.long_to_ptr(token)`
 - `os.wait_any_timeout(tokens, secs)` → `(int, int, int, string)` - The same with a deadline: token, status, `timed_out`, error. On a timeout the children keep running; `secs <= 0` waits indefinitely

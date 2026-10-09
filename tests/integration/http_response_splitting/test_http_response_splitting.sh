@@ -14,19 +14,8 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 PORT=18401
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] http_response_splitting on Windows (raw socket probe)"
-        exit 0
-        ;;
-esac
-
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] http_response_splitting: ae not built"
-    exit 0
-fi
-if ! command -v nc >/dev/null 2>&1; then
-    echo "  [SKIP] http_response_splitting: nc not available"
     exit 0
 fi
 
@@ -36,13 +25,22 @@ cleanup() { [ -n "$SRV_PID" ] && kill "$SRV_PID" 2>/dev/null; rm -rf "$TMPDIR"; 
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
+# The probe is tests/lib/raw_exchange.c rather than nc, which neither Windows
+# nor every Linux runner has. It needs Winsock linked on Windows.
+RAW_SOCKET_LIBS=""
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) RAW_SOCKET_LIBS="-lws2_32" ;;
+esac
+cc -I"$ROOT/tests/lib" "$ROOT/tests/lib/raw_exchange.c" -o "$TMPDIR/raw_exchange" $RAW_SOCKET_LIBS 2>"$TMPDIR/cc.log" \
+    || { cat "$TMPDIR/cc.log"; fail "could not compile raw_exchange.c"; }
+
 AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/server.ae" > "$TMPDIR/srv.log" 2>&1 &
 SRV_PID=$!
 
+printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' > "$TMPDIR/req.txt"
 i=0
 while [ "$i" -lt 100 ]; do
-    printf 'GET / HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' \
-        | nc 127.0.0.1 "$PORT" > "$TMPDIR/resp.txt" 2>/dev/null
+    "$TMPDIR/raw_exchange" "$PORT" "$TMPDIR/req.txt" "$TMPDIR/resp.txt" 2>/dev/null
     grep -q "^HTTP/1.1" "$TMPDIR/resp.txt" 2>/dev/null && break
     sleep 0.1
     i=$((i + 1))

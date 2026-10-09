@@ -1,0 +1,128 @@
+// Regression (#2602, #2610): a struct literal that takes a heap string
+// local into a field.
+//
+// #2602: the literal moved the local's string into the field and cleared the
+// local's flag even when the local was used again. A later
+// `string.free(local)` then took the untracked branch and freed the string
+// the struct owned, and the struct freed it again (a segfault). Now a local
+// used again is copied, as an alias of it is; one used only by the literal
+// is still moved.
+//
+// #2610: the literal recorded at most 16 moved locals. The 17th kept its
+// flag, so its string was freed by its scope exit and by the struct.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    text: string
+    n: int
+}
+
+struct Wide {
+    f0: string
+    f1: string
+    f2: string
+    f3: string
+    f4: string
+    f5: string
+    f6: string
+    f7: string
+    f8: string
+    f9: string
+    f10: string
+    f11: string
+    f12: string
+    f13: string
+    f14: string
+    f15: string
+    f16: string
+    f17: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The issue's shape: the local is freed after the struct took it.
+freed_after(w: string) -> int {
+    text = string.concat(w, "ord")
+    h = Holder { text: text, n: 1 }
+    string.free(text)
+    check(h.text == "word", "the struct's string outlived string.free of the local")
+    return string.length(h.text)
+}
+
+// Read after the literal: both still hold the text.
+read_after(w: string) -> int {
+    text = string.concat(w, "ide")
+    h = Holder { text: text, n: 2 }
+    check(text == "wide" && h.text == "wide", "the local and the field both read the text")
+    return h.n
+}
+
+// Used only by the literal: moved, freed once by the struct.
+moved(w: string) -> int {
+    text = string.concat(w, "ave")
+    h = Holder { text: text, n: 3 }
+    return string.length(h.text)
+}
+
+wide(w: string) -> int {
+    f0 = string.concat(w, "0")
+    f1 = string.concat(w, "1")
+    f2 = string.concat(w, "2")
+    f3 = string.concat(w, "3")
+    f4 = string.concat(w, "4")
+    f5 = string.concat(w, "5")
+    f6 = string.concat(w, "6")
+    f7 = string.concat(w, "7")
+    f8 = string.concat(w, "8")
+    f9 = string.concat(w, "9")
+    f10 = string.concat(w, "10")
+    f11 = string.concat(w, "11")
+    f12 = string.concat(w, "12")
+    f13 = string.concat(w, "13")
+    f14 = string.concat(w, "14")
+    f15 = string.concat(w, "15")
+    f16 = string.concat(w, "16")
+    f17 = string.concat(w, "17")
+    s = Wide { f0: f0, f1: f1, f2: f2, f3: f3, f4: f4, f5: f5, f6: f6, f7: f7, f8: f8, f9: f9, f10: f10, f11: f11, f12: f12, f13: f13, f14: f14, f15: f15, f16: f16, f17: f17 }
+    check(s.f0 == "w0" && s.f16 == "w16" && s.f17 == "w17", "every field of a wide literal holds its local")
+    return string.length(s.f17)
+}
+
+round(w: string) -> int {
+    return freed_after(w) + read_after(w) + moved(w) + wide(w)
+}
+
+main() {
+    println("=== test_struct_literal_takes_local ===")
+    check(round("w") == 4 + 2 + 4 + 3, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_struct_literal_takes_local passed ===")
+}

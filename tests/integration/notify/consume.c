@@ -14,7 +14,29 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdint.h>
+
+/* The library is loaded by path on every platform: dlopen on POSIX,
+ * LoadLibrary on Windows. It is also linked, for aether_event_register, so
+ * the load returns the module already mapped and both see one registry. */
+#ifdef _WIN32
+#include <windows.h>
+static void* lib_open(const char* path) { return (void*)LoadLibraryA(path); }
+static void* lib_sym(void* h, const char* name) {
+    return (void*)GetProcAddress((HMODULE)h, name);
+}
+static void lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static const char* lib_error(void) {
+    static char buf[32];
+    snprintf(buf, sizeof(buf), "error %lu", (unsigned long)GetLastError());
+    return buf;
+}
+#else
 #include <dlfcn.h>
+static void* lib_open(const char* path) { return dlopen(path, RTLD_NOW); }
+static void* lib_sym(void* h, const char* name) { return dlsym(h, name); }
+static void lib_close(void* h) { dlclose(h); }
+static const char* lib_error(void) { return dlerror(); }
+#endif
 
 #include "aether_host.h"
 
@@ -38,13 +60,13 @@ static void handler_one_replacement(int64_t id) { g_one_seen_replacement = id; }
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <lib>\n", argv[0]); return 2; }
 
-    void* h = dlopen(argv[1], RTLD_NOW);
-    if (!h) FAIL("dlopen: %s", dlerror());
+    void* h = lib_open(argv[1]);
+    if (!h) FAIL("loading %s: %s", argv[1], lib_error());
 
-    emit_fn emit_one     = (emit_fn)dlsym(h, "aether_emit_one");
-    emit_fn emit_two     = (emit_fn)dlsym(h, "aether_emit_two");
-    emit_fn emit_unknown = (emit_fn)dlsym(h, "aether_emit_unknown");
-    if (!emit_one || !emit_two || !emit_unknown) FAIL("dlsym: %s", dlerror());
+    emit_fn emit_one     = (emit_fn)lib_sym(h, "aether_emit_one");
+    emit_fn emit_two     = (emit_fn)lib_sym(h, "aether_emit_two");
+    emit_fn emit_unknown = (emit_fn)lib_sym(h, "aether_emit_unknown");
+    if (!emit_one || !emit_two || !emit_unknown) FAIL("symbol lookup: %s", lib_error());
 
     /* Register two of three. Leave NoListener unhandled. */
     if (aether_event_register("OneEvent", handler_one) != 0) FAIL("register OneEvent");
@@ -95,7 +117,7 @@ int main(int argc, char** argv) {
     if (aether_event_register(NULL, handler_one) != -1) FAIL("register NULL name");
     if (aether_event_register("X", NULL) != -1)         FAIL("register NULL handler");
 
-    dlclose(h);
+    lib_close(h);
     printf("OK: notify() claim-check round-trip\n");
     return 0;
 }

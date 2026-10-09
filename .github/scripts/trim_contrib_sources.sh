@@ -41,13 +41,27 @@ trap 'rm -f "$keep"' EXIT
 # Scanning module.ae alone deleted that .c and left an installed jq that
 # could not build (#2208). @source resolves against the file's OWN
 # directory, so keep dirname per matching .ae, not per module.
-find "$dir" -type f -name '*.ae' | while IFS= read -r aef; do
+#
+# Process starts are what this costs on Windows (#2596), so they are kept to
+# the few that matter: one grep picks out the .ae files that say @source at
+# all, where every .ae file had its own dirname, sed and pipe, and the
+# candidates below are matched in the shell.
+find "$dir" -type f -name '*.ae' -exec grep -l '@source' {} + | while IFS= read -r aef; do
     aedir="$(dirname "$aef")"
     sed -n 's/^[[:space:]]*@source("\([^"]*\)").*/\1/p' "$aef" | while IFS= read -r rel; do
         physical "$aedir/$rel" >> "$keep" || true
     done
 done
 
+# A candidate's physical path is the tree's own physical path and the rest
+# as `find` lists it: find does not descend through a symlinked directory,
+# so nothing below "$dir" needs resolving. That and the keep list, read
+# once, replace a subshell, a dirname, a basename and a grep per file.
+dir="${dir%/}"
+dir_phys="$(cd "$dir" && pwd -P)"
+nl='
+'
+keep_list="$nl$(cat "$keep")$nl"
 find "$dir" -type f \( -name '*.c' -o -name '*.m' \) | while IFS= read -r f; do
     if [ "$keep_host" = 1 ]; then
         case "$f" in */contrib/host/*/aether_host_*.c) continue ;; esac
@@ -62,8 +76,9 @@ find "$dir" -type f \( -name '*.c' -o -name '*.m' \) | while IFS= read -r f; do
         # contrib.quickjs could not build.
         */contrib/quickjs/amalgamation/*.c) continue ;;
     esac
-    abs="$(physical "$f")" || abs="$f"
-    if ! grep -qxF -- "$abs" "$keep"; then
-        rm -f "$f"
-    fi
+    abs="$dir_phys${f#"$dir"}"
+    case "$keep_list" in
+        *"$nl$abs$nl"*) ;;
+        *) rm -f "$f" ;;
+    esac
 done

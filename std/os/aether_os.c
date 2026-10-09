@@ -155,6 +155,7 @@ int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
 #include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
+#include <limits.h>
 #include <time.h>
 #ifndef _WIN32
 #include <unistd.h>
@@ -2841,14 +2842,24 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
  *
  * The Aether "token" ABI is int, but a HANDLE is a pointer — and a raw
  * dwProcessId can be recycled after exit, so reaping by PID could race onto
- * a different process. We therefore hand out a small monotonically-growing
- * int token and keep the live HANDLE in a table keyed by that token. The
- * token is never recycled within a run, so a stale token cleanly misses. */
+ * a different process. We therefore hand out a monotonically-growing int
+ * token and keep the live HANDLE in a table keyed by that token. The token
+ * is never recycled within a run.
+ *
+ * os.kill and os.wait_pid_timeout also take a real pid, so a token must not
+ * be mistaken for one (#2609). Tokens start at WINPROC_TOKEN_BASE, above any
+ * pid Windows hands out (pids come from a handle table, well under 2^26), and
+ * a number in that range that the table does not hold is a reaped token:
+ * "no such process", never opened as a pid. Counted from 1, a reaped token
+ * reached whatever process held that pid now, on an elevated CI runner
+ * another test's or the runner's own. */
+
+#define WINPROC_TOKEN_BASE (1 << 30)
 
 typedef struct { int token; HANDLE h; } WinProc;
 static WinProc  g_winprocs[4096];
 static int      g_winproc_count = 0;
-static int      g_winproc_next_token = 1;
+static int      g_winproc_next_token = WINPROC_TOKEN_BASE;
 static CRITICAL_SECTION g_winproc_cs;
 static int      g_winproc_cs_init = 0;
 
@@ -2868,7 +2879,10 @@ static int winproc_register(HANDLE h) {
         winproc_unlock();
         return -1;
     }
-    int tok = g_winproc_next_token++;
+    int tok = g_winproc_next_token;
+    /* A billion spawns later the range starts over; the table holds 4096
+     * live tokens, so the one handed out again is long reaped. */
+    g_winproc_next_token = tok == INT_MAX ? WINPROC_TOKEN_BASE : tok + 1;
     g_winprocs[g_winproc_count].token = tok;
     g_winprocs[g_winproc_count].h = h;
     g_winproc_count++;
@@ -3193,10 +3207,11 @@ int os_kill_raw(int pid, int sig) {
 
     /* Resolve a spawn token through the process table first, so kill() takes
      * the same identity os_spawn_raw / os_wait_* hand out on every platform
-     * (issue #1278). A token is a small table index, NOT an OS pid, so
+     * (issue #1278). A token is a table key, NOT an OS pid, so
      * OpenProcess((DWORD)token) would hit an unrelated process. When the int
-     * is not a live token we fall back to treating it as a real pid, which
-     * keeps kill() working for pids obtained by other means. The table HANDLE
+     * is not a live token and is below the token range we fall back to
+     * treating it as a real pid, which keeps kill() working for pids
+     * obtained by other means; in the range it is a reaped token (#2609). The table HANDLE
      * is borrowed (do NOT CloseHandle it here — the owning wait reaps it). */
     HANDLE tok_h = winproc_find(pid);
     if (tok_h) {
@@ -3206,6 +3221,7 @@ int os_kill_raw(int pid, int sig) {
         }
         return TerminateProcess(tok_h, (UINT)(128 + sig)) ? 0 : -1;
     }
+    if (pid >= WINPROC_TOKEN_BASE) return -1;   /* a reaped token (#2609) */
 
     if (sig == 0) {
         /* Existence probe: open + a zero-timeout wait. WAIT_TIMEOUT means
@@ -3248,6 +3264,8 @@ _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
         out._0 = (int)code;
         return out;
     }
+    /* A reaped token (#2609): not a pid. */
+    if (pid >= WINPROC_TOKEN_BASE) { out._2 = "no such process"; return out; }
 
     HANDLE h = OpenProcess(SYNCHRONIZE | PROCESS_QUERY_INFORMATION, FALSE, (DWORD)pid);
     if (!h) { out._2 = "no such process"; return out; }

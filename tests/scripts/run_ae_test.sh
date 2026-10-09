@@ -36,12 +36,17 @@ root="$3"
 # Portable per-test timeout: GNU coreutils `timeout` on Linux/MSYS2,
 # `gtimeout` on macOS (coreutils via brew); empty when neither exists
 # (macOS without coreutils) so the test still runs, just unbounded.
+# The build gets a bound of its own (#2608): it ran unbounded, so a build that
+# hung held its sweep slot, and the sweep, for as long as the job lasted.
 if command -v timeout >/dev/null 2>&1; then
     TO="timeout ${AE_TEST_TIMEOUT:-120}"
+    BTO="timeout ${AE_TEST_BUILD_TIMEOUT:-600}"
 elif command -v gtimeout >/dev/null 2>&1; then
     TO="gtimeout ${AE_TEST_TIMEOUT:-120}"
+    BTO="gtimeout ${AE_TEST_BUILD_TIMEOUT:-600}"
 else
     TO=""
+    BTO=""
 fi
 
 name=$(echo "$f" | sed "s|tests/||;s|/|_|g;s|\.ae$||")
@@ -56,7 +61,9 @@ else
     cmd="$root/build/ae build $f ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
 fi
 
-if eval "$cmd" 2>"$tmpdir/build_$name.err"; then
+$BTO sh -c "$cmd" 2>"$tmpdir/build_$name.err"
+brc=$?
+if [ $brc -eq 0 ]; then
     $TO "$root/build/test_$name" >"$tmpdir/run_$name.out" 2>"$tmpdir/run_$name.err"
     rc=$?
     if [ $rc -eq 0 ]; then
@@ -72,6 +79,10 @@ if eval "$cmd" 2>"$tmpdir/build_$name.err"; then
         printf %s "$rc" > "$tmpdir/rc_$name.txt"
         touch "$tmpdir/FAIL_$name"
     fi
+elif [ $brc -eq 124 ]; then
+    echo "  [TIMEOUT] $name (build exceeded ${AE_TEST_BUILD_TIMEOUT:-600}s)"
+    printf timeout > "$tmpdir/phase_$name.txt"
+    touch "$tmpdir/FAIL_$name"
 else
     echo "  [FAIL] $name (compile error)"
     printf compile > "$tmpdir/phase_$name.txt"

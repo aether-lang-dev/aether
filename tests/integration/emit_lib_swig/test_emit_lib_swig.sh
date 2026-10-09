@@ -25,16 +25,18 @@ if ! command -v python3-config >/dev/null 2>&1; then
 fi
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] test_emit_lib_swig on Windows (POSIX shell build)"
-        exit 0
-        ;;
-esac
-
-case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     *)      LIB_EXT=".so" ;;
 esac
+
+# The extension module is named the way this Python imports one: .pyd on
+# Windows, and on macOS .so, not the .dylib a plain shared library gets.
+PY_EXT="$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("EXT_SUFFIX") or "")' 2>/dev/null)"
+if [ -z "$PY_EXT" ]; then
+    echo "  [SKIP] test_emit_lib_swig (python3 reports no extension-module suffix)"
+    exit 0
+fi
 
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
@@ -82,7 +84,7 @@ fi
 # 3. Compile the wrapper into a Python extension module linked against our lib.
 PY_INCLUDE="$(python3-config --includes)"
 PY_LDFLAGS="$(python3-config --ldflags)"
-if ! gcc -fPIC -shared $PY_INCLUDE aether_lib_wrap.c "$LIB_PATH" $PY_LDFLAGS -o _aether_lib${LIB_EXT} 2>"$TMPDIR/gcc.log"; then
+if ! gcc -fPIC -shared $PY_INCLUDE aether_lib_wrap.c "$LIB_PATH" $PY_LDFLAGS -o "_aether_lib${PY_EXT}" 2>"$TMPDIR/gcc.log"; then
     echo "  [FAIL] gcc could not build the Python extension"
     cat "$TMPDIR/gcc.log"
     fail=$((fail + 1))
@@ -93,7 +95,9 @@ fi
 
 # 4. Run the Python script that imports the module and asserts round-trip.
 cp "$SCRIPT_DIR/roundtrip.py" "$TMPDIR/"
-# Set LD_LIBRARY_PATH so the Python extension's dependency on libaether_sample resolves.
+# Set LD_LIBRARY_PATH so the Python extension's dependency on libaether_sample
+# resolves. Windows needs nothing: Python loads an extension with its own
+# directory on the DLL search path, and the library sits beside it.
 LIB_DIR="$(dirname "$LIB_PATH")"
 if LD_LIBRARY_PATH="$LIB_DIR:$LD_LIBRARY_PATH" python3 roundtrip.py >"$TMPDIR/run.out" 2>&1; then
     echo "  [PASS] SWIG Python bindings round-trip Aether lib"

@@ -160,6 +160,7 @@ void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
+int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
 void string_take_new_flag(char* buf, size_t n);
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
                       const char* target);
@@ -370,6 +371,10 @@ ASTNode* find_function_definition_by_name(ASTNode* program, const char* name);
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body);
 int  is_captured_string_param(CodeGenerator* gen, const char* var_name);
 void stmt_struct_temps_set(ASTNode** nodes, const char** names, int count);
+void stmt_struct_temps_get(ASTNode*** nodes, const char*** names, int* count);
+int  struct_param_kept(CodeGenerator* gen, ASTNode* body, const char* pname);
+int  call_returns_view_of_temp(CodeGenerator* gen, ASTNode* call);
+void emit_struct_capture(CodeGenerator* gen, const char* struct_name, const char* lvalue);
 void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
                                ASTNode*** nodes, int* count, int* cap);
 void mark_captured_string_param(CodeGenerator* gen, const char* var_name);

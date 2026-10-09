@@ -1,0 +1,186 @@
+// Regression (#2582): a struct parameter handed back, and statement
+// temporaries a statement leaves early.
+//
+// A function's struct parameter borrowed its caller's strings, so returning
+// it (directly, through an alias, in an `if` arm, after an early return, in a
+// tuple, inside a struct) gave the caller a view of its argument. With the
+// argument a temporary that the statement destroys, that view would dangle.
+// A parameter the body keeps as a whole value now takes references of its own
+// on entry, so what it hands back is its own; one only read still borrows.
+//
+// A temporary of a statement is destroyed on every way out of it: after the
+// statement, and on a `return` or `break` from inside its `or` handler. One
+// declared in a switch case is destroyed in that case, never by another.
+//
+// Also (#2612): a struct returned on one path is destroyed on the others
+// (#752 held its destroy back on every later exit), and a returned `if` over
+// structs moves or copies the one it picks rather than returning one its exit
+// frees.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Holder {
+    item: Item
+    count: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+make_holder(w: string) -> Holder {
+    return Holder { item: make_item(w), count: 2 }
+}
+
+// A fallible call whose argument is a temporary of the statement.
+checked(i: Item, k: int) -> int! {
+    if k == 2 {
+        return 0, "two"
+    }
+    return string.length(i.name), ""
+}
+
+// An `or` handler that returns from inside the statement.
+or_return(w: string, k: int) -> int {
+    n = checked(make_item(w), k) or { return -1 }
+    return n
+}
+
+// An `or` handler that leaves the loop from inside the statement.
+or_break(w: string) -> int {
+    k = 0
+    total = 0
+    while k < 5 {
+        n = checked(make_item(w), k) or { break }
+        total = total + n
+        k = k + 1
+    }
+    return total
+}
+
+// Temporaries in switch cases, and a later case's return.
+in_switch(k: int, w: string) -> int {
+    switch k {
+        case 1:
+        n = string.length(make_item(w).name)
+        return n
+        case 2:
+        return string.length(make_item(w).tag) + 10
+        default:
+        m = string.length(make_item(w).name) + 100
+        return m
+    }
+}
+
+// Every shape that hands a struct parameter back.
+direct(p: Item) -> Item {
+    return p
+}
+
+aliased(p: Item) -> Item {
+    out = p
+    return out
+}
+
+either(p: Item, k: int) -> Item {
+    return if k > 0 { p } else { make_item("q") }
+}
+
+early(p: Item, k: int) -> Item {
+    if k > 0 {
+        return p
+    }
+    return make_item("e")
+}
+
+// A local returned on one path only: the other path destroys it.
+local_early(w: string, k: int) -> Item {
+    x = make_item(w)
+    if k > 0 {
+        return x
+    }
+    return make_item("e")
+}
+
+paired(p: Item) -> (Item, int) {
+    return p, 1
+}
+
+wrapped(p: Item) -> Holder {
+    return Holder { item: p, count: 1 }
+}
+
+inner_of(h: Holder) -> Item {
+    return h.item
+}
+
+// A parameter that is only read is not copied, and stays readable.
+only_read(p: Item) -> int {
+    return string.length(p.name) + string.length(p.tag)
+}
+
+round(w: string) -> int {
+    check(or_return(w, 1) == 2, "an or handler not taken")
+    check(or_return(w, 2) == -1, "an or handler returning mid-statement")
+    check(or_break(w) == 4, "an or handler breaking mid-statement")
+    check(in_switch(1, w) == 2 && in_switch(2, w) == 12 && in_switch(3, w) == 102, "switch cases")
+    a = direct(make_item(w))
+    b = aliased(make_item(w))
+    c = either(make_item(w), 1)
+    d = either(make_item(w), 0)
+    e = early(make_item(w), 1)
+    e2 = early(make_item(w), 0)
+    x1 = local_early(w, 1)
+    x2 = local_early(w, 0)
+    f, g = paired(make_item(w))
+    l = wrapped(make_item(w))
+    m = inner_of(make_holder(w))
+    check(a.name == "w#" && b.tag == "w%" && c.name == "w#" && d.name == "q#", "returned parameters")
+    check(e.tag == "w%" && e2.name == "e#" && f.name == "w#" && g == 1, "early and tuple returns")
+    check(x1.name == "w#" && x2.tag == "e%", "a local returned on one path")
+    check(l.item.tag == "w%" && l.count == 1 && m.name == "w#", "a parameter in a returned struct")
+    n = only_read(make_item(w))
+    check(n == 4, "a parameter only read")
+    return n
+}
+
+main() {
+    println("=== test_struct_param_handback ===")
+    check(round("w") == 4, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_struct_param_handback passed ===")
+}

@@ -1,0 +1,200 @@
+// Regression (#2582, #2616, #2617): what a statement keeps of a struct a call
+// returns, when the struct is a temporary of the statement.
+//
+// A temporary is destroyed once its statement is done, so a value the
+// statement keeps must not point into one:
+// - a `string` function that returns its parameter as it came
+//   (`first(make_item(w).name, 1)`), directly or through a struct
+//   parameter's field, hands back a view of the argument: the view is copied
+//   where it is made, so the argument can go with its statement (#2619);
+// - a struct parameter kept as a whole value, or an element of one
+//   (`b.items[0]`), takes references of its own on entry;
+// - a closure returning a struct it captured hands back a copy, since its
+//   environment frees the captured one (#2617);
+// - a struct stored into a module-level var is taken, not shared (#2616).
+// Temporaries in an `if` or `while` condition, a `match` subject and a
+// `match` arm are destroyed too, and in an `or` handler that continues.
+//
+// churn() allocates and frees strings after each value is made, so a value
+// pointing into freed memory reads as another string. The leak check runs
+// where the heap count is exact (mem.heap_in_use_exact): after a warm-up,
+// some window of the same work grows by exactly 0 (mem.steady_growth). It
+// leaves out the global store, since a global never frees what it held.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    tag: string
+}
+
+struct Bag {
+    items: Item[2]
+    n: int
+}
+
+var gitem = Item { name: "g0", tag: "t0" }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+make_item(w: string) -> Item {
+    return Item { name: string.concat(w, "#"), tag: string.concat(w, "%") }
+}
+
+make_bag(w: string) -> Bag {
+    return Bag { items: [make_item(w), make_item("x")], n: 2 }
+}
+
+churn() {
+    i = 0
+    while i < 20 {
+        z = make_item("zzzzzzzz")
+        i = i + 1
+    }
+}
+
+first(xs: string, n: int) -> string {
+    if n > 0 {
+        return xs
+    }
+    return "none"
+}
+
+pick(a: string, b: string) -> string {
+    if string.length(a) > 0 {
+        return a
+    }
+    return b
+}
+
+outer(p: Item) -> string {
+    return pick(p.name, "x")
+}
+
+first_of(b: Bag) -> Item {
+    return b.items[0]
+}
+
+handed(p: Item) -> Item {
+    f = || { return p }
+    return f()
+}
+
+store_global(p: Item) {
+    gitem = p
+}
+
+normalize(c: Item) -> Item {
+    if string.length(c.tag) == 0 {
+        c.tag = "default"
+    }
+    return c
+}
+
+checked(i: Item, k: int) -> int! {
+    if k == 2 {
+        return 0, "two"
+    }
+    return string.length(i.name), ""
+}
+
+with_continue(w: string) -> int {
+    k = 0
+    total = 0
+    while k < 4 {
+        k = k + 1
+        n = checked(make_item(w), k) or { continue }
+        total = total + n
+    }
+    return total
+}
+
+by_match(c: Item, k: int) -> int {
+    return match k {
+        1 -> string.length(normalize(c).name)
+        _ -> 0
+    }
+}
+
+subject(c: Item) -> int {
+    n = 0
+    match normalize(c).tag {
+        "w%" -> { n = 1 }
+        _ -> { n = 2 }
+    }
+    return n
+}
+
+in_conditions(c: Item) -> int {
+    hits = 0
+    if normalize(c).tag == "w%" {
+        hits = hits + 1
+    }
+    k = 0
+    while normalize(c).name == "w#" && k < 3 {
+        k = k + 1
+    }
+    return hits + k
+}
+
+// Values handed back as views, and a store into a global: read after churn.
+views(w: string) {
+    b = first(make_item(w).name, 1)
+    d = "init"
+    d = pick(make_item(w).tag, "y")
+    s = outer(make_item(w))
+    store_global(make_item(w))
+    churn()
+    check(b == "w#" && d == "w%" && s == "w#", "a view handed back")
+    check(gitem.tag == "w%", "a struct stored into a global")
+}
+
+round(w: string) -> int {
+    b = first(make_item(w).name, 1)
+    d = pick(make_item(w).tag, "y")
+    s = outer(make_item(w))
+    check(b == "w#" && d == "w%" && s == "w#", "a view handed back, in the window")
+    e = first_of(make_bag(w))
+    h = handed(make_item(w))
+    g = | volatile: Item | {
+        y = volatile
+        return y
+    }
+    v = g(make_item(w))
+    churn()
+    check(e.name == "w#" && h.tag == "w%" && v.name == "w#", "a struct handed back")
+    c = make_item(w)
+    n = with_continue(w) + by_match(c, 1) + subject(c) + in_conditions(c)
+    check(n == 6 + 2 + 1 + 4, "temporaries in loops, matches and conditions")
+    return n
+}
+
+main() {
+    println("=== test_struct_temporary_views ===")
+    views("w")
+    check(round("w") == 13, "a round adds up")
+    i = 0
+    while i < 20 {
+        round("w")
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                k = 0
+                while k < 200 {
+                    round("w")
+                    k = k + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 200 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_struct_temporary_views passed ===")
+}

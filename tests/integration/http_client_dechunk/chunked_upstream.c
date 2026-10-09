@@ -16,18 +16,20 @@
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
-#include <unistd.h>
 #include <signal.h>
-#include <arpa/inet.h>
-#include <sys/socket.h>
+
+#include "raw_socket.h"
 
 int main(void) {
-    signal(SIGPIPE, SIG_IGN);
+#ifdef SIGPIPE
+    signal(SIGPIPE, SIG_IGN);       /* Windows has none: send() just fails */
+#endif
+    if (raw_socket_start() != 0) { perror("socket start"); return 1; }
 
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) { perror("socket"); return 1; }
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) { perror("socket"); return 1; }
     int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
 
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -54,17 +56,12 @@ int main(void) {
         "\r\n";
 
     for (;;) {
-        int cs = accept(ls, NULL, NULL);
-        if (cs < 0) continue;
+        raw_sock cs = accept(ls, NULL, NULL);
+        if (cs == RAW_SOCK_INVALID) continue;
         char buf[4096];
-        (void)read(cs, buf, sizeof(buf));   /* drain request; content ignored */
-        size_t n = strlen(RESP), off = 0;
-        while (off < n) {
-            ssize_t w = write(cs, RESP + off, n - off);
-            if (w <= 0) break;
-            off += (size_t)w;
-        }
-        close(cs);
+        (void)recv(cs, buf, sizeof(buf), 0);   /* drain request; content ignored */
+        (void)raw_send_all(cs, RESP, strlen(RESP));
+        raw_socket_close(cs);
     }
     return 0;
 }

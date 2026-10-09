@@ -10,13 +10,6 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] http_request_header_iter on Windows (background server + raw sockets)"
-        exit 0
-        ;;
-esac
-
 fail() { echo "  [FAIL] $1"; exit 1; }
 
 OUT="$(AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/iter.ae" 2>&1)" \

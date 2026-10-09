@@ -84,6 +84,15 @@ done
 } > sum.c
 extras="$extras --extra sum.c"
 
+# $extras is expanded unquoted below, to split it into words, and nothing in
+# it is meant as a pattern. Pathname expansion stays off: these paths are
+# past 260 characters, so cygpath writes them in the long-path form
+# //?/C:/..., and the shell globbed each one, whose `?` made it list the
+# network root // (about three seconds a path on Windows, so about 80 s
+# before each build started, #2596). No match was ever found, so the words
+# are the same either way.
+set -f
+
 # shellcheck disable=SC2086
 if ! env PATH="$TMP/cc:$PATH" "$AE" build main.ae $extras -o ./app >"$TMP/build.log" 2>&1; then
     echo "  [FAIL] win_batch_compiler_long_cmdline: build through the .cmd compiler failed"

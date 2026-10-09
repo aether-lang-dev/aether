@@ -354,6 +354,10 @@ typedef struct HttpConn {
      * was "only re-applied when it changes"; this is the guard that makes that
      * true. -1 rather than 0 because 0 is a valid "block indefinitely". */
     int   applied_recv_timeout_ms;
+    /* Set when the server refused a request it had not finished reading, so
+     * the client may still be sending: conn_close then closes in stages
+     * (conn_linger) rather than resetting the refusal away. */
+    int   linger_on_close;
 } HttpConn;
 
 /* The parking lot holds HttpConn by pointer and needs exactly two things from
@@ -641,6 +645,54 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
     return force_close;
 }
 
+static int64_t conn_now_ms(void);
+
+/* The longest a refused connection keeps reading after its answer is out,
+ * and the longest it waits for the next bytes before deciding the client has
+ * stopped sending. See conn_linger. */
+#define HTTP_LINGER_MAX_MS  2000
+#define HTTP_LINGER_IDLE_MS 500
+
+/* Close in stages, as RFC 9112 9.6 asks of a server that stops reading a
+ * request part-way. A refusal (413, 414, 431, a framing 400) goes out while
+ * the client may still be writing the rest of that request. Closing with
+ * those bytes unread makes the kernel answer them with a reset, and a reset
+ * can destroy the refusal before the client reads it: Windows discards what
+ * the client had received but not yet read, so an upload refused with 413
+ * reached a Windows client as "connection reset" and no status at all.
+ *
+ * Half-closing sends the answer with a FIN behind it; then reading and
+ * discarding until the client closes, stops sending for HTTP_LINGER_IDLE_MS,
+ * or HTTP_LINGER_MAX_MS has passed, leaves nothing unread for the kernel to
+ * reset over while the client is still catching up. Bounded both ways so a
+ * client that never stops costs a worker two seconds, not the idle timeout. */
+static void conn_linger(int fd) {
+#ifdef _WIN32
+    shutdown(fd, SD_SEND);
+#else
+    shutdown(fd, SHUT_WR);
+#endif
+    int64_t deadline = conn_now_ms() + HTTP_LINGER_MAX_MS;
+    char scratch[4096];
+    for (;;) {
+        int64_t left = deadline - conn_now_ms();
+        if (left <= 0) break;
+        int wait_ms = left < HTTP_LINGER_IDLE_MS ? (int)left : HTTP_LINGER_IDLE_MS;
+#if !defined(_WIN32)
+        struct pollfd pfd = { .fd = fd, .events = POLLIN, .revents = 0 };
+        if (poll(&pfd, 1, wait_ms) <= 0) break;
+#else
+        fd_set rfds;
+        FD_ZERO(&rfds);
+        FD_SET(fd, &rfds);
+        struct timeval tv = { .tv_sec = wait_ms / 1000,
+                              .tv_usec = (wait_ms % 1000) * 1000 };
+        if (select(fd + 1, &rfds, NULL, NULL, &tv) <= 0) break;
+#endif
+        if (recv(fd, scratch, (int)sizeof(scratch), 0) <= 0) break;
+    }
+}
+
 static void conn_close(HttpConn* c) {
     if (c->pure_tls) {
         pt_server_close(c->pure_tls);
@@ -657,6 +709,7 @@ static void conn_close(HttpConn* c) {
     }
 #endif
     if (c->fd >= 0) {
+        if (c->linger_on_close) conn_linger(c->fd);
         close(c->fd);
         c->fd = -1;
     }
@@ -4091,6 +4144,7 @@ static void conn_send_headers_too_large(HttpConn* conn) {
         "\r\n"
         "header line is too long\n";
     conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
 }
 
 static void conn_send_uri_too_long(HttpConn* conn) {
@@ -4102,6 +4156,7 @@ static void conn_send_uri_too_long(HttpConn* conn) {
         "\r\n"
         "request line is too long\r\n";
     conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
 }
 
 static void conn_send_payload_too_large(HttpConn* conn) {
@@ -4113,6 +4168,7 @@ static void conn_send_payload_too_large(HttpConn* conn) {
         "\r\n"
         "request body exceeds server limit\n";
     conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
 }
 
 /* Refuse a message whose framing this server will not guess at, and say so
@@ -4128,6 +4184,7 @@ static void conn_send_bad_framing(HttpConn* conn) {
         "\r\n"
         "request framing is ambiguous or unsupported\r\n";
     conn_send(conn, msg, (int)(sizeof(msg) - 1));
+    conn->linger_on_close = 1;
 }
 
 static int handle_one_request(HttpServer* server, HttpConn* conn,

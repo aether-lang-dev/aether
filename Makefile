@@ -2902,6 +2902,11 @@ docker-ci-windows: docker-build-ci
 	@echo "Running Windows cross-compilation tests in Docker..."
 	docker run --rm -v $(PWD):/aether -w /aether aether-ci make ci-windows
 
+# Each stage of `ci` outside the .ae sweep (whose tests and builds have bounds
+# of their own) runs under a time bound, so a hang fails the stage by name
+# instead of running until the job is lost (#2608). See run_stage.sh.
+CI_STAGE = sh tests/scripts/run_stage.sh
+
 ci: clean
 	@echo "==================================="
 	@echo "  Aether CI — Full Test Suite"
@@ -2922,32 +2927,32 @@ ci: clean
 	@$(MAKE) -j$(NPROC) stdlib
 	@echo ""
 	@echo "[4/11] Running C unit tests..."
-	@$(MAKE) -j$(NPROC) test
-	@$(MAKE) check-standalone
-	@$(MAKE) check-docs
-	@$(MAKE) check-tests
+	@$(CI_STAGE) 1200 "C unit tests" $(MAKE) -j$(NPROC) test
+	@$(CI_STAGE) 900 check-standalone $(MAKE) check-standalone
+	@$(CI_STAGE) 900 check-docs $(MAKE) check-docs
+	@$(CI_STAGE) 900 check-tests $(MAKE) check-tests
 	@echo ""
 	@echo "[5/11] Running .ae integration tests..."
 	@$(MAKE) test-ae
 	@echo ""
 	@echo "[6/11] Building examples..."
-	@$(MAKE) examples
+	@$(CI_STAGE) 900 examples $(MAKE) examples
 	@echo ""
 	@echo "[7/11] Install smoke test..."
-	@$(MAKE) test-install
+	@$(CI_STAGE) 900 test-install $(MAKE) test-install
 	@echo ""
 	@echo "[8/11] ae test smoke check..."
-	@AETHER_HOME="" ./$(BUILD_DIR)/ae test examples/basics/hello.ae 2>&1 | tail -1
+	@out=$$(AETHER_HOME="" $(CI_STAGE) 300 "ae test smoke" ./$(BUILD_DIR)/ae test examples/basics/hello.ae 2>&1) || { echo "$$out"; exit 1; }; echo "$$out" | tail -1
 	@echo "  [PASS] ae test runs correctly"
 	@echo ""
 	@echo "[9/11] Differential test (lowering paths agree)..."
-	@$(MAKE) test-differential
+	@$(CI_STAGE) 600 test-differential $(MAKE) test-differential
 	@echo ""
 	@echo "[10/11] Release archive smoke test..."
-	@$(MAKE) test-release-archive
+	@$(CI_STAGE) 900 test-release-archive $(MAKE) test-release-archive
 	@echo ""
 	@echo "[11/11] Archive export check without zlib (#2207)..."
-	@$(MAKE) check-archive-exports-nozlib
+	@$(CI_STAGE) 900 check-archive-exports-nozlib $(MAKE) check-archive-exports-nozlib
 	@echo ""
 	@echo "==================================="
 	@echo "  CI PASSED — all checks green"

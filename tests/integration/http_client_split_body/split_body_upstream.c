@@ -6,21 +6,19 @@
  * a small response every write lands in one segment, which is why the other
  * client tests cannot see this: the split has to be forced.
  */
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <time.h>
-#include <unistd.h>
+
+#include "raw_socket.h"
 
 #define BODY "0123456789abcdefghijklmnopqrstuvwxyz"
 
 int main(void) {
-    int ls = socket(AF_INET, SOCK_STREAM, 0);
-    if (ls < 0) return 1;
+    if (raw_socket_start() != 0) return 1;
+    raw_sock ls = socket(AF_INET, SOCK_STREAM, 0);
+    if (ls == RAW_SOCK_INVALID) return 1;
     int one = 1;
-    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, &one, sizeof(one));
+    setsockopt(ls, SOL_SOCKET, SO_REUSEADDR, (const char*)&one, sizeof(one));
 
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
@@ -35,8 +33,8 @@ int main(void) {
     printf("%d\n", ntohs(a.sin_port));
     fflush(stdout);
 
-    int cs = accept(ls, NULL, NULL);
-    if (cs < 0) return 1;
+    raw_sock cs = accept(ls, NULL, NULL);
+    if (cs == RAW_SOCK_INVALID) return 1;
 
     char req[4096];
     ssize_t n = recv(cs, req, sizeof(req), 0);
@@ -52,12 +50,11 @@ int main(void) {
 
     /* Long enough that a client which stops at the headers has certainly
      * returned before the body is sent. */
-    struct timespec gap = { 0, 250L * 1000L * 1000L };
-    nanosleep(&gap, NULL);
+    raw_sleep_ms(250);
 
     if (send(cs, BODY, strlen(BODY), 0) != (ssize_t)strlen(BODY)) return 1;
 
-    close(cs);
-    close(ls);
+    raw_socket_close(cs);
+    raw_socket_close(ls);
     return 0;
 }

@@ -10,11 +10,11 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
+# The upstream is raw sockets through tests/lib/raw_socket.h, which needs
+# Winsock linked on Windows and nothing extra elsewhere.
+RAW_SOCKET_LIBS=""
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT)
-        echo "  [SKIP] http_client_bad_status on Windows (raw POSIX sockets)"
-        exit 0
-        ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) RAW_SOCKET_LIBS="-lws2_32" ;;
 esac
 
 [ -x "$AE" ] || { echo "  [SKIP] http_client_bad_status: ae not built"; exit 0; }
@@ -25,7 +25,7 @@ cleanup() { [ -n "$UP_PID" ] && kill "$UP_PID" 2>/dev/null; rm -rf "$TMPDIR"; }
 trap cleanup EXIT
 fail() { echo "  [FAIL] $1"; exit 1; }
 
-cc "$SCRIPT_DIR/bad_status_upstream.c" -o "$TMPDIR/upstream" 2>"$TMPDIR/cc.log" \
+cc -I"$ROOT/tests/lib" "$SCRIPT_DIR/bad_status_upstream.c" -o "$TMPDIR/upstream" $RAW_SOCKET_LIBS 2>"$TMPDIR/cc.log" \
     || { cat "$TMPDIR/cc.log"; fail "could not compile bad_status_upstream.c"; }
 "$TMPDIR/upstream" huge_status > "$TMPDIR/port.txt" 2>/dev/null &
 UP_PID=$!

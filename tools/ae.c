@@ -4164,8 +4164,15 @@ void build_gcc_cmd(char* cmd, size_t size,
          * share one link (#1590), but PE cannot export a weak definition
          * (--export-all-symbols skips it; an explicit dllexport is "symbol
          * wrong type"), so no Windows DLL ever exported its catalog. A DLL
-         * `ae` links is one TU: make the definition strong. */
-        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_NO_LIB_MAIN " : "";
+         * `ae` links is one TU: make the definition strong.
+         *
+         * #2547: the same holds for every @c_callback definition, emitted
+         * weak (AETHER_WEAK_DEF) so two TUs carrying one module can share a
+         * link. A C host binds a @c_callback by name, which is the point of
+         * the annotation, yet GetProcAddress found none in a Windows DLL:
+         * std.http.script_gateway could not reach a script's
+         * aether_script_handle. Strong here too, for the same one-TU reason. */
+        ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
         opt = ae_strdup_printf("-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
                                harden_cflags(optimize), harden_ldflags(), user_cflags,
@@ -5069,6 +5076,62 @@ static char* ae_abspath(const char* path) {
 // artifact is at `so_path`, make it resolvable, and record the .so + rpath on
 // the link line. `stubdir` is the shared temp dir (created lazily on first use,
 // so an all-source build makes none). Returns 0 on success, -1 on a hard error.
+/* The stub directories this run made, removed when ae exits (#2620): each is
+ * read by the compile ae runs next and by nothing after. Left behind, every
+ * build that imported a binary package added one to the temp directory for
+ * good (889 on one Windows CI machine). */
+#define AE_BINIMPORT_STUBDIRS_MAX 8
+static char g_binimport_stubdirs[AE_BINIMPORT_STUBDIRS_MAX][256];
+static int g_binimport_stubdir_count = 0;
+
+static void ae_remove_tree(const char* path) {
+#ifdef _WIN32
+    char* pattern = ae_path_printf("%s/*", path);
+    WIN32_FIND_DATAA fd;
+    HANDLE h = FindFirstFileA(pattern, &fd);
+    free(pattern);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (strcmp(fd.cFileName, ".") == 0 || strcmp(fd.cFileName, "..") == 0) continue;
+            char* child = ae_path_printf("%s/%s", path, fd.cFileName);
+            if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ae_remove_tree(child);
+            else DeleteFileA(child);
+            free(child);
+        } while (FindNextFileA(h, &fd));
+        FindClose(h);
+    }
+    RemoveDirectoryA(path);
+#else
+    DIR* d = opendir(path);
+    if (d) {
+        struct dirent* e;
+        while ((e = readdir(d)) != NULL) {
+            if (strcmp(e->d_name, ".") == 0 || strcmp(e->d_name, "..") == 0) continue;
+            char* child = ae_path_printf("%s/%s", path, e->d_name);
+            struct stat st;
+            if (lstat(child, &st) == 0 && S_ISDIR(st.st_mode)) ae_remove_tree(child);
+            else unlink(child);
+            free(child);
+        }
+        closedir(d);
+    }
+    rmdir(path);
+#endif
+}
+
+static void ae_remove_binimport_stubdirs(void) {
+    for (int i = 0; i < g_binimport_stubdir_count; i++)
+        ae_remove_tree(g_binimport_stubdirs[i]);
+    g_binimport_stubdir_count = 0;
+}
+
+static void ae_note_binimport_stubdir(const char* stubdir) {
+    if (g_binimport_stubdir_count == 0) atexit(ae_remove_binimport_stubdirs);
+    if (g_binimport_stubdir_count < AE_BINIMPORT_STUBDIRS_MAX)
+        snprintf(g_binimport_stubdirs[g_binimport_stubdir_count++],
+                 sizeof(g_binimport_stubdirs[0]), "%s", stubdir);
+}
+
 static int ae_emit_binimport_stub(const char* mod, const char* so_path,
                                   char* stubdir, size_t stubdir_cap) {
     if (!stubdir[0]) {
@@ -5084,9 +5147,10 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
         }
         if (!stubdir[0]) return -1;
 #else
-        snprintf(stubdir, stubdir_cap, "/tmp/ae-binimport-XXXXXX");
+        snprintf(stubdir, stubdir_cap, "%s/ae-binimport-XXXXXX", get_temp_dir());
         if (!mkdtemp(stubdir)) { stubdir[0] = '\0'; return -1; }
 #endif
+        ae_note_binimport_stubdir(stubdir);
     }
     /* A dotted module of a package library (#2297) is the stub
      * `<stubdir>/a/b/c/module.ae`, where `import a.b.c` resolves; a bare

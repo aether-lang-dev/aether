@@ -4,25 +4,16 @@
 # the process and HTTP halves end-to-end against real subprocesses
 # and a plain in-process std.http fixture server.
 #
-# Skips on Windows — os.run_capture is POSIX-only there, and the
-# test depends on /bin/echo and /bin/sh.
+# Runs on Windows too: os.run_capture and os.run_full have Windows
+# implementations, and the probe names `echo` and `sh` bare so they are
+# found on PATH (MSYS2's there) rather than at POSIX-only /bin paths.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 
-if [ "$OS" = "Windows_NT" ]; then
-    echo "  [SKIP] std_testing_arms: Windows (os.run_capture is POSIX-only)"
-    exit 0
-fi
-
 if [ ! -x "$AE" ]; then
     echo "  [SKIP] std_testing_arms: build/ae missing (run make)"
-    exit 0
-fi
-
-if [ ! -x /bin/echo ] || [ ! -x /bin/sh ]; then
-    echo "  [SKIP] std_testing_arms: /bin/echo or /bin/sh not present"
     exit 0
 fi
 

@@ -26,6 +26,21 @@ main() {
     ac, aerr = os.wait(at)
     fails = fails + check("true exits 0", ac == 0 && aerr == "")
 
+    // ---- a reaped token is gone, never a pid (#2609) ----
+    // On Windows a token is a table key, and os.kill / os.wait_pid_timeout
+    // also take a real pid. Tokens counted from 1 once reaped were opened as
+    // that pid: whatever process had the number now. They now lie above any
+    // pid. (On POSIX the token is the pid, which the system may hand out
+    // again once reaped, so it is not signalled here.)
+    if os.platform() == "windows" {
+        fails = fails + check("a token is above every pid", at >= 1073741824)
+        fails = fails + check("kill of a reaped token reports it gone", os.kill(at, 9) == -1)
+        fails = fails + check("probe of a reaped token reports it gone", os.kill(at, 0) == -1)
+        _gs, gto, gerr = os.wait_pid_timeout(at, 1)
+        fails = fails + check("bounded wait on a reaped token reports no such process",
+            gto == 0 && gerr == "no such process")
+    }
+
     bt, be = os.spawn_proc("false", null, null)
     fails = fails + check("spawn false succeeds", be == "")
     bc, berr = os.wait(bt)

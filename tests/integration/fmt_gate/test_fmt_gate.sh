@@ -22,6 +22,8 @@
 # on an idle machine). So tier 2 runs `ae` twice for the whole sample, and
 # tier 3 compiles each file twice; the third compile, which tells an
 # emission fault from a formatter one, runs only when the two differ.
+# Tier 3 is six processes a file (copy, compile, format, compile, compare,
+# remove), down from thirteen (#2596).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -105,14 +107,17 @@ fmt_gate_dump_diff() {
     rm -f "${1}.hex" "${2}.hex"
 }
 
-# Checksum of a generated-C file with #line directives stripped.
-# awk writes a temp then cksum reads by redirect: no pipe reading a
-# freshly-written file, and callers can recompute for the settle
-# recheck above.
-fmt_gate_ir_sum() {
-    awk '!/^#line/' "$1" > "$1.strip"
-    cksum < "$1.strip"
-    rm -f "$1.strip"
+# Whether two generated-C files are the same once #line directives are
+# stripped: line for line, and as many lines. One awk reads both files by
+# name (no pipe reading a freshly-written file) and callers can ask again
+# for the settle recheck below. It replaced a checksum of each file (awk to
+# a temp, cksum, rm, under a command substitution), eight processes a pair
+# and over a third of the gate's time on Windows (#2596); the comparison is
+# the same, and exact rather than by checksum.
+fmt_gate_ir_same() {
+    awk 'FNR == NR { if (!/^#line/) a[++n] = $0; next }
+         !/^#line/ { if (++m > n || $0 != a[m]) { differ = 1; exit } }
+         END { exit (differ || m != n) }' "$1" "$2"
 }
 
 cd "$ROOT" || exit 1
@@ -141,25 +146,36 @@ fi
 find examples tests -name '*.ae' -type f 2>/dev/null | LC_ALL=C sort | \
     awk 'NR % 12 == 1' > "$TMPDIR/sample.txt"
 
-# Tier 2: idempotence. fmt writes in place, so it runs on numbered copies
-# (copy N is line N of the sample); once formatted, a copy is canonical
+# Tier 2: idempotence. fmt writes in place, so it runs on copies, under the
+# same relative paths in $TMPDIR/idem; once formatted, a copy is canonical
 # exactly when fmt(fmt(x)) == fmt(x), which `ae fmt --check` answers for
-# all of them in one run.
+# all of them in one run. One tar copies the whole sample, where a `cp` per
+# file was a process start each (#2596). Both runs name every file (one per
+# argument, so a path keeps its spaces) rather than walking the copy, which
+# would pass over a file under a hidden directory such as
+# custom_lib_dir/.mylib; and what --check lists is then the sample's path.
 mkdir "$TMPDIR/idem"
-TOTAL=0
-while IFS= read -r f; do
-    TOTAL=$((TOTAL + 1))
-    cp "$f" "$TMPDIR/idem/$TOTAL.ae"
-done < "$TMPDIR/sample.txt"
-"$AE" fmt "$TMPDIR/idem" >/dev/null 2>"$TMPDIR/idem_fmt.txt"
-"$AE" fmt --check "$TMPDIR/idem" >"$TMPDIR/idem_check.txt" 2>&1
+TOTAL=$(awk 'END { print NR }' "$TMPDIR/sample.txt")
+if ! tar cf - -T "$TMPDIR/sample.txt" | (cd "$TMPDIR/idem" && tar xf -) ||
+   [ "$(find "$TMPDIR/idem" -type f | wc -l | tr -d ' ')" != "$TOTAL" ]; then
+    echo "  [FAIL] fmt_gate: could not copy the $TOTAL sampled files for the idempotence tier"
+    exit 1
+fi
+saved_ifs=$IFS
+IFS='
+'
+set -f
+# shellcheck disable=SC2046
+set -- $(cat "$TMPDIR/sample.txt")
+set +f
+IFS=$saved_ifs
+(cd "$TMPDIR/idem" && "$AE" fmt "$@") >/dev/null 2>"$TMPDIR/idem_fmt.txt"
+(cd "$TMPDIR/idem" && "$AE" fmt --check "$@") >"$TMPDIR/idem_check.txt" 2>&1
 rc=$?
 if [ $rc -ne 0 ]; then
     if [ $rc -eq 1 ]; then
         echo "  [FAIL] fmt_gate: fmt is not idempotent on:"
-        sed 's|.*/\([0-9]*\)\.ae$|\1|' "$TMPDIR/idem_check.txt" | while read -r n; do
-            echo "    $(sed -n "${n}p" "$TMPDIR/sample.txt")"
-        done
+        sed 's/^/    /' "$TMPDIR/idem_check.txt"
     else
         echo "  [FAIL] fmt_gate: ae fmt could not reformat its own output"
         sed 's/^/    /' "$TMPDIR/idem_check.txt" "$TMPDIR/idem_fmt.txt" | head -10
@@ -182,7 +198,9 @@ while IFS= read -r f; do
     # fail cross-module fixtures for the wrong reason. Deliberate-reject
     # fixtures don't compile; skip them for this tier (they still passed
     # tiers 1+2).
-    sibling="$(dirname "$f")/._fmt_gate_tmp_$$.ae"
+    # (Every sampled path has a directory part: it comes from `find examples
+    # tests`. Cut with an expansion, not a `dirname` process per file.)
+    sibling="${f%/*}/._fmt_gate_tmp_$$.ae"
     SIBLING="$sibling"   # so a kill between here and the rm below still cleans up
     cp "$f" "$sibling"
     if "$AETHERC" "$sibling" "$base.orig.c" >/dev/null 2>&1; then
@@ -192,9 +210,8 @@ while IFS= read -r f; do
             echo "  [FAIL] fmt_gate: $f compiles but its formatted copy does not"
             exit 1
         fi
-        sum_o=$(fmt_gate_ir_sum "$base.orig.c")
-        sum_f=$(fmt_gate_ir_sum "$base.fmt.c")
-        if [ "$sum_o" != "$sum_f" ]; then
+        ir_same=1
+        if ! fmt_gate_ir_same "$base.orig.c" "$base.fmt.c"; then
             # Recheck after a settle: on the Windows CI runners a
             # checksum pipeline reading a JUST-written file can see a
             # stale/short read through the MSYS2 layer while a later
@@ -202,10 +219,9 @@ while IFS= read -r f; do
             # "differing" files byte-identical). A real emission
             # difference still differs on the second read.
             sleep 1
-            sum_o=$(fmt_gate_ir_sum "$base.orig.c")
-            sum_f=$(fmt_gate_ir_sum "$base.fmt.c")
+            fmt_gate_ir_same "$base.orig.c" "$base.fmt.c" || ir_same=0
         fi
-        if [ "$sum_o" != "$sum_f" ]; then
+        if [ "$ir_same" = 0 ]; then
             # Which invariant broke: compile the UNFORMATTED file a second
             # time. If two compiles of identical input already differ, it
             # is an emission-determinism failure, not a formatter one, and
@@ -213,11 +229,11 @@ while IFS= read -r f; do
             # this attribution shows which invariant actually broke).
             cp "$f" "$sibling"
             if "$AETHERC" "$sibling" "$base.orig2.c" >/dev/null 2>&1 &&
-               [ "$(fmt_gate_ir_sum "$base.orig2.c")" != "$sum_o" ]; then
+               ! fmt_gate_ir_same "$base.orig.c" "$base.orig2.c"; then
                 echo "  [FAIL] fmt_gate: two compiles of UNFORMATTED $f differ (emission nondeterminism, not a formatter fault)"
                 echo "    sizes: $(wc -c < "$base.orig.c") vs $(wc -c < "$base.orig2.c") bytes"
                 fmt_gate_dump_diff "$base.orig.c" "$base.orig2.c"
-            elif cmp -s "$f" "$TMPDIR/idem/$n.ae" 2>/dev/null; then
+            elif cmp -s "$f" "$TMPDIR/idem/$f" 2>/dev/null; then
                 echo "  [FAIL] fmt_gate: formatting left $f byte-identical yet its C differs (emission instability)"
                 fmt_gate_dump_diff "$base.orig.c" "$base.fmt.c"
             else
