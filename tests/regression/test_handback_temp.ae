@@ -1,0 +1,196 @@
+// Regression (#2649): a call that hands back a fresh temporary it was given
+// (`t = pass1(k, string.concat(w, "!"))`, where pass1 returns its `string`
+// parameter as it came) yields a string its caller owns: the temporary when
+// that is what came back, a copy of anything else (a literal, a local passed
+// beside it). Before, the argument drain kept the temporary when the call
+// returned it, while every consumer of the call's value took it as borrowed,
+// so nobody freed it: one leak per call. A temporary the call does not hand
+// back is freed whatever its shape; a plain buffer was skipped, and leaked
+// too. Each consumer below is checked for
+// its value, and a round of them for a heap that does not grow. The macOS
+// leaks gate runs this program.
+
+import std.list
+import std.mem
+import std.path
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pass1(n: int, s: string) -> string {
+    return s
+}
+
+passg(n: int, s: string) when n > 0 -> string {
+    return s
+}
+
+// Two levels: the parameter comes back through another call.
+pass2(n: int, s: string) -> string {
+    return pass1(n, s)
+}
+
+// A literal on the other path: the call's value is then a copy of it.
+pass_or(n: int, s: string) -> string {
+    if n < 0 {
+        return "neg"
+    }
+    return s
+}
+
+// Either parameter may come back: a temporary beside a local.
+pick(n: int, a: string, b: string) -> string {
+    if n % 2 == 0 {
+        return a
+    }
+    return b
+}
+
+// Returned from a caller another return of which is a fresh string.
+heap_caller(n: int, w: string) -> string {
+    if n > 100 {
+        return string.concat(w, "?")
+    }
+    return pass1(n, string.concat(w, "!"))
+}
+
+// Returned from a caller another return of which is its parameter as it
+// came: such a caller was taken to return borrowed strings.
+borrowed_caller(n: int, w: string, s: string) -> string {
+    if n > 100 {
+        return s
+    }
+    return pass1(n, string.concat(w, "!"))
+}
+
+// A mutual recursion handing a fresh temporary down at each level. Each
+// function is classified while the other is open, so both must end alike:
+// one classified borrowed returned the other's owned strings as borrowed.
+ma(n: int, s: string) -> string {
+    if n <= 0 {
+        return s
+    }
+    return mb(n - 1, string.concat(s, "a"))
+}
+
+mb(n: int, s: string) -> string {
+    if n <= 0 {
+        return s
+    }
+    return ma(n - 1, string.concat(s, "b"))
+}
+
+// The same with each result bound before it is returned.
+ba(n: int, s: string) -> string {
+    if n <= 0 {
+        return s
+    }
+    t = bb(n - 1, string.concat(s, "a"))
+    return t
+}
+
+bb(n: int, s: string) -> string {
+    if n <= 0 {
+        return s
+    }
+    u = ba(n - 1, string.concat(s, "b"))
+    return u
+}
+
+measure(s: string) -> int {
+    return string.length(s)
+}
+
+struct Box {
+    name: string
+}
+
+fn round(w: string) -> int {
+    want = string.concat(w, "!")
+    joined = string.concat(w, "/x")
+    deep = string.concat(w, "-aba")
+    done = 0
+    k = 1
+    while k < 6 {
+        // Bound: a declaration, then a reassignment.
+        t = pass1(k, string.concat(w, "!"))
+        check(string.equals(t, want) == 1, "pass1 hands the temporary back")
+        t = passg(k, string.concat(w, "!"))
+        check(string.equals(t, want) == 1, "passg hands the temporary back")
+        u = pass2(k, string.concat(w, "!"))
+        check(string.equals(u, want) == 1, "pass2 hands it back through pass1")
+        neg = pass_or(0 - k, string.concat(w, "!"))
+        check(string.equals(neg, "neg") == 1, "pass_or yields its literal")
+        pos = pass_or(k, string.concat(w, "!"))
+        check(string.equals(pos, want) == 1, "pass_or hands the temporary back")
+        // A temporary that is a plain buffer (path.join mallocs one), freed
+        // when it does not come back and owned when it does.
+        pj = pass_or(0 - k, path.join(w, "x"))
+        check(string.equals(pj, "neg") == 1, "pass_or yields its literal, not the path")
+        pk = pass_or(k, path.join(w, "x"))
+        check(string.equals(pk, joined) == 1, "pass_or hands the path back")
+        local = string.concat("loc", string.from_int(k))
+        p = pick(k, string.concat(w, "!"), local)
+        if k % 2 == 0 {
+            check(string.equals(p, want) == 1, "pick hands the temporary back")
+        } else {
+            check(string.equals(p, local) == 1, "pick hands the local back")
+        }
+        check(string.starts_with(local, "loc") == 1, "the local outlives pick")
+        // Returned from the caller.
+        h = heap_caller(k, w)
+        check(string.equals(h, want) == 1, "heap_caller returns the temporary")
+        b = borrowed_caller(k, w, w)
+        check(string.equals(b, want) == 1, "borrowed_caller returns the temporary")
+        m = ma(3, string.concat(w, "-"))
+        check(string.equals(m, deep) == 1, "ma hands the deepest temporary back")
+        bm = ba(3, string.concat(w, "-"))
+        check(string.equals(bm, deep) == 1, "ba hands the deepest temporary back")
+        // Passed on to another call.
+        check(string.length(pass1(k, string.concat(w, "!"))) == string.length(want),
+              "string.length reads the temporary")
+        check(measure(passg(k, string.concat(w, "!"))) == string.length(want),
+              "measure reads the temporary")
+        // Interpolated.
+        s = "[${pass1(k, string.concat(w, "!"))}]"
+        check(string.length(s) == string.length(want) + 2, "the interpolation reads the temporary")
+        // Discarded as a statement.
+        pass1(k, string.concat(w, "!"))
+        // Stored into a struct field and a list.
+        bx = Box { name: pass1(k, string.concat(w, "!")) }
+        check(string.equals(bx.name, want) == 1, "the field holds the temporary")
+        bx.name = passg(k, string.concat(w, "?"))
+        check(string.ends_with(bx.name, "?") == 1, "the field takes another temporary")
+        l = list.new()
+        list.add(l, pass1(k, string.concat(w, "!")))
+        list.add(l, pass_or(0 - k, string.concat(w, "!")))
+        got, _ = list.get(l, 0)
+        check(string.equals(got, want) == 1, "the list holds the temporary")
+        lit, _ = list.get(l, 1)
+        check(string.equals(lit, "neg") == 1, "the list holds the literal's copy")
+        list.free(l)
+        done = done + 1
+        k = k + 1
+    }
+    return done
+}
+
+main() {
+    w = string.concat("ab", string.from_int(1))
+    check(round(w) == 5, "a round runs five times")
+    if mem.heap_in_use_exact() {
+        round(w)
+        grown = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every run")
+    }
+    println("OK")
+}

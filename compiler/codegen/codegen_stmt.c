@@ -1217,6 +1217,12 @@ int or_fallible_value_slot_is_heap(CodeGenerator* gen, ASTNode* fallible);
  * emitted (#1311, #2629). */
 static int g_classifying = 0;
 
+/* How many answers a cycle break has given: a memoised question asked again
+ * while it is being computed (a classifier's "heap_pending", an open callee
+ * memo) gets an answer it may not end with. call_hands_back_temp remembers
+ * an answer only if none was given while it was computed (#2649). */
+static int g_pending_answers = 0;
+
 int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return 0;
 
@@ -1228,6 +1234,10 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
     /* #2586: a string a call through a typed fn pointer returns is the
      * caller's (the fn-value convention, discover_fn_values). */
     if (expr->type == AST_FUNCTION_CALL && fnptr_call_returns_string(gen, expr)) return 1;
+
+    /* #2649: so is a string a call that hands back an argument temporary
+     * yields: the temporary or a copy, taken where it is made. */
+    if (expr->type == AST_FUNCTION_CALL && call_hands_back_temp(gen, expr)) return 1;
 
     // String interpolation (non-printf mode) allocates via _aether_interp.
     if (expr->type == AST_STRING_INTERP) {
@@ -1592,6 +1602,7 @@ static int catch_scope_has(const CatchScope* cs, ASTNode* expr) {
 static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
                                          const char* var_name, CatchScope* cs,
                                          ASTNode* root, int depth);
+static int call_to_open_classification(CodeGenerator* gen, ASTNode* e);
 
 /* Catch bindings are NOT evidence here: the container-ownership caller
  * (codegen_expr.c) hands a heap-classified value to an owning container
@@ -1738,6 +1749,9 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
         node->child_count > 0 && node->children[0]) {
         ASTNode* rhs = node->children[0];
         int from_alias = rhs->type == AST_IDENTIFIER && rhs->value;
+        /* #2649: bound from a call whose classification is open, in a
+         * return classifier (as a return of it counts). */
+        if (cs && call_to_open_classification(gen, rhs)) return 1;
         if ((from_alias ? strcmp(rhs->value, var_name) != 0 &&
                               alias_source_owns(gen, root, rhs->value, cs, depth)
                         : is_heap_string_expr(gen, rhs)) ||
@@ -1883,10 +1897,28 @@ static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char
  * triggered from a caller's destructure site. `fn_name` is the analysed
  * function's. */
 static int returned_param_is_captured(CodeGenerator* gen, const char* name, const char* fn_name);
+static int classify_open_has(ASTNode* fn);
+
+/* #2649: is `e` a call to a `string` function whose classification is open
+ * further up, one this function's answer is part of (`ma` returning
+ * `mb(...)` while `mb`, being classified, asks about `ma`)? As a
+ * self-recursive `return f(...)` does (walk_returns_for_heap_check), it
+ * counts as heap. Answered no (the cycle break), the function classified
+ * first could end borrowed while the other, classified after it, handed
+ * over owned strings that the first returned as borrowed, and a call
+ * handing a temporary back to the first (call_hands_back_temp) copied them
+ * and leaked each. Counted as heap, the cycle is classified alike; the
+ * uniform-heap shim copies a borrowed return, so the cost is a copy. */
+static int call_to_open_classification(CodeGenerator* gen, ASTNode* e) {
+    if (!gen || !gen->program || !e || e->type != AST_FUNCTION_CALL || !e->value) return 0;
+    ASTNode* def = find_function_definition_by_name(gen->program, codegen_normalise_callee(e->value));
+    return def && def->node_type && def->node_type->kind == TYPE_STRING && classify_open_has(def);
+}
 
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
                                ASTNode* fn_body_root, const char* fn_name) {
     if (!expr) return 0;
+    if (call_to_open_classification(gen, expr)) return 1;
     if (expr->type == AST_IDENTIFIER) {
         return expr->value && fn_body_root &&
                (body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
@@ -2088,7 +2120,7 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     if (fn_def->annotation) {
         if (strcmp(fn_def->annotation, "heap_yes") == 0)     return 1;
         if (strcmp(fn_def->annotation, "heap_no") == 0)      return 0;
-        if (strcmp(fn_def->annotation, "heap_pending") == 0) return 0;
+        if (strcmp(fn_def->annotation, "heap_pending") == 0) { g_pending_answers++; return 0; }
         // Some other annotation (e.g. "c_callback:..."). Don't clobber
         // — analyse afresh, but skip caching to preserve the original
         // annotation for downstream codegen.
@@ -2096,7 +2128,7 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     /* A tuple's positions are function_def_returns_heap_at's, which keeps
      * its own memo in the same annotation: a "heap_yes" here hid it. */
     if (fn_def->node_type && fn_def->node_type->kind == TYPE_TUPLE) return 0;
-    if (classify_open_has(fn_def)) return 0;
+    if (classify_open_has(fn_def)) { g_pending_answers++; return 0; }
     /* One clause hands over an owned string: every clause does, its other
      * returns taken through the uniform-heap shim (should_uniform_heap_return
      * asks this of the clause being emitted). */
@@ -4046,11 +4078,12 @@ static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
      * shape as the single-value analyzer's "heap_pending" sentinel. */
     if (fn_def->annotation &&
         strcmp(fn_def->annotation, "heap_pending") == 0) {
+        g_pending_answers++;
         return 0;
     }
     /* Some unrelated annotation (e.g. "c_callback:...") — analyse
      * without clobbering, under the open guard. */
-    if (classify_open_has(fn_def)) return 0;
+    if (classify_open_has(fn_def)) { g_pending_answers++; return 0; }
     /* Every clause of a function written as several (#2627), as for a
      * string result. */
     const DefClauses* dc = fn_clause_set(gen, fn_def);
@@ -4911,7 +4944,8 @@ static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name
  * the one that only ever keeps a caller's argument alive longer.
  * Unremembered, every walk re-walked every callee at every call site, a
  * cost that multiplied with nesting. */
-enum { CALLEE_Q_HANDBACK, CALLEE_Q_KEEPS, CALLEE_Q_CAPTURES, CALLEE_Q_KEPT, CALLEE_Q_KEPT_RET };
+enum { CALLEE_Q_HANDBACK, CALLEE_Q_KEEPS, CALLEE_Q_CAPTURES, CALLEE_Q_KEPT, CALLEE_Q_KEPT_RET,
+       CALL_Q_HANDS_BACK_TEMP };
 
 typedef struct {
     ASTNode* fn;
@@ -4968,7 +5002,7 @@ static int callee_memo_begin(CodeGenerator* gen, ASTNode* fn, int idx, int query
                              int pending, int* out) {
     CalleeMemo* m = callee_memo_entry(gen, fn, idx * 8 + query);
     if (!m) return -1;
-    if (m->state == 1) { *out = pending; return 1; }
+    if (m->state == 1) { *out = pending; g_pending_answers++; return 1; }
     if (m->state) { *out = m->state == 3; return 1; }
     m->state = 1;
     return 0;
@@ -4989,6 +5023,26 @@ static void callee_memo_reset(CodeGenerator* gen) {
 
 void callee_memo_clear(CodeGenerator* gen) {
     if (gen) callee_memo_reset(gen);
+}
+
+/* #2649: call_hands_back_temp (codegen_expr.c) is a question about one call
+ * node, answered from the callee answers above, so it is remembered with
+ * them (a hypothesis that drops theirs drops it). Asked again while it is
+ * being computed (the call reached again through the callee bodies its
+ * answer walks), the answer is no: the call is then taken as it was before.
+ * An answer computed while a cycle break answered something is not kept:
+ * taken from a callee classification still open (as `heap_no`), it would
+ * have the call's value copied once that callee ends up handing over owned
+ * strings, and the copied one leak. Asked again later, it is computed
+ * afresh, from answers that are final. `*mark` is for the end. */
+int hands_back_temp_memo_begin(CodeGenerator* gen, ASTNode* call, int* out, int* mark) {
+    *mark = g_pending_answers;
+    return callee_memo_begin(gen, call, 0, CALL_Q_HANDS_BACK_TEMP, 0, out);
+}
+
+void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark) {
+    CalleeMemo* m = callee_memo_entry(gen, call, CALL_Q_HANDS_BACK_TEMP);
+    if (m) m->state = g_pending_answers != mark ? 0 : r ? 3 : 2;
 }
 
 int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
@@ -5822,6 +5876,10 @@ static ASTNode* handback_leaf_node(CodeGenerator* gen, ASTNode* expr, int depth)
     if (!expr || depth > 8) return NULL;
     if (expr->type == AST_IDENTIFIER) return expr->value ? expr : NULL;
     if (expr->type != AST_FUNCTION_CALL) return NULL;
+    /* #2649: a call handed an argument temporary yields an owned string,
+     * never the variable's pointer (a copy is made of it), so it is no
+     * chain. */
+    if (call_hands_back_temp(gen, expr)) return NULL;
     ASTNode* leaf = NULL;
     int at = -1;
     for (int i = 0; i < expr->child_count; i++) {
@@ -5858,6 +5916,17 @@ static ASTNode* handback_take_leaf(CodeGenerator* gen, ASTNode* e) {
     return leaf;
 }
 
+/* Does the named `call` keep its `string` argument `i` past the call? As
+ * callee_keeps_string_arg says, except at a call taken as owned
+ * (call_hands_back_temp, #2649): an argument it only hands back
+ * (handback_param) comes out of it copied, so the pointer passed stays its
+ * owner's. Shared by the escape walk and the keep walk, as
+ * callee_keeps_string_arg is. */
+static int call_keeps_string_arg(CodeGenerator* gen, ASTNode* call, int i, int depth) {
+    if (call_hands_back_temp(gen, call) && handback_param(gen, call, i, depth)) return 0;
+    return callee_keeps_string_arg(gen, call->value, i, depth);
+}
+
 /* In a keep walk: is passing the parameter as argument `i` of the named
  * call `node` a keep? */
 static int call_position_keeps_param(CodeGenerator* gen, ASTNode* node, int i, int depth) {
@@ -5881,9 +5950,9 @@ static int call_position_keeps_param(CodeGenerator* gen, ASTNode* node, int i, i
          * parameter's kind first made every `fn` or `ptr` parameter passed
          * on a keep, and the env of a callback handed to such a wrapper was
          * never drained. A `string` argument is kept only as
-         * callee_keeps_string_arg says. */
+         * call_keeps_string_arg says. */
         if (callee_param_is_string(gen, node->value, i))
-            return callee_keeps_string_arg(gen, node->value, i, depth + 1);
+            return call_keeps_string_arg(gen, node, i, depth + 1);
         return callee_param_escapes_via_body(gen, node->value, i, depth + 1);
     }
     if (call_arg_escapes(lookup_callee_param_kind(gen, node->value, i))) return 1;
@@ -6219,7 +6288,7 @@ static int call_arg_position_escapes(CodeGenerator* gen, ASTNode* call,
          * Counting every return made the caller keep a local passed to
          * `_query_key_escape(key)` for ever (the leak in url.parse_query). */
         if (callee_param_is_string(gen, call->value, arg_idx)) {
-            return callee_keeps_string_arg(gen, call->value, arg_idx, 0);
+            return call_keeps_string_arg(gen, call, arg_idx, 0);
         }
         if (is_heap_string_expr(gen, call)) {
             return callee_param_store_escapes_via_body(gen, call->value, arg_idx);

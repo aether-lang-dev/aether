@@ -466,6 +466,9 @@ int typed_fnptr_call(CodeGenerator* gen, ASTNode* call);
 int param_may_hold_caller_string(const Type* t);
 void callee_memo_clear(CodeGenerator* gen);
 int fnptr_call_returns_string(CodeGenerator* gen, ASTNode* call);
+int call_hands_back_temp(CodeGenerator* gen, ASTNode* call);       /* #2649 */
+int hands_back_temp_memo_begin(CodeGenerator* gen, ASTNode* call, int* out, int* mark);
+void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark);
 
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);

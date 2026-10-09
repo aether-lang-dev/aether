@@ -169,6 +169,8 @@ round(w: string) -> int {
     s = outer(make_item(w))
     t, u = pair(make_item(w).name, make_item(w).tag)
     check(b == "w#" && d == "w%" && s == "w#" && t == "w#" && u == "w%", "a view handed back, in the window")
+    // Passed on to another call, the view is copied once (#2649).
+    check(string.length(first(make_item(w).name, 1)) == 2, "a view handed back into a call")
     e = first_of(make_bag(w))
     h = handed(make_item(w))
     g = | volatile: Item | {

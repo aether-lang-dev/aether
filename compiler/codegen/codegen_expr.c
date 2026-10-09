@@ -345,6 +345,60 @@ static int arg_drain_verdict(CodeGenerator* gen, const char* func_name, ASTNode*
     return 0;
 }
 
+/* #2649: the call generate_expression is taking as an owned string
+ * (call_hands_back_temp), and the number of the C flag its wrap sets
+ * (arg_drain_close). */
+static const ASTNode* g_handback_wrapping = NULL;
+static int g_handback_flag = 0;
+
+/* #2649: does the named call `call` hand back a fresh heap string it was
+ * given? An argument temporary the identity guard keeps when the call
+ * returns it (arg_drain_verdict 1), passed to a callee whose `string` result
+ * is not owned (function_def_returns_heap_string: it returns the parameter
+ * as it came). Such a call's value is the temporary on one path and a
+ * borrowed string on another, and nothing owned the temporary: a local bound
+ * to the call borrowed it, and it leaked once per call. Its value is now
+ * taken as owned where it is made (generate_expression): the temporary when
+ * it is what came back, a copy of anything else. is_heap_string_expr counts
+ * it as a fresh heap string, so every consumer adopts or frees it, and a
+ * local or parameter passed beside the temporary is never what comes out
+ * (handback_leaf_node). Decided from the tree and the callee's body alone,
+ * as the memoised classifiers that ask require, and remembered per call
+ * (hands_back_temp_memo_begin), so the analyses and the emission get the
+ * same answer. A call through a typed fn pointer is taken by its own
+ * convention (#2586). */
+static int call_hands_back_temp_walk(CodeGenerator* gen, ASTNode* call) {
+    if (!callee_has_visible_body(gen, call->value) ||
+        !callee_returns_string(gen, call->value)) return 0;
+    ASTNode* def = find_function_definition_by_name(gen->program,
+                                                    codegen_normalise_callee(call->value));
+    if (!def || function_def_returns_heap_string(gen, def)) return 0;
+    ArgDrainWrap w;
+    memset(&w, 0, sizeof(w));
+    w.have_value = 1;
+    for (int ai = 0; ai < call->child_count; ai++) {
+        ASTNode* arg = call->children[ai];
+        /* The arguments arg_drain_select hoists as heap strings. */
+        if (!arg || (arg->type != AST_FUNCTION_CALL && arg->type != AST_STRING_INTERP &&
+                     arg->type != AST_OR_ELSE)) continue;
+        if (arg_drain_verdict(gen, call->value, NULL, ai, 0, &w) == 1 &&
+            is_heap_string_expr(gen, arg)) return 1;
+    }
+    return 0;
+}
+
+int call_hands_back_temp(CodeGenerator* gen, ASTNode* call) {
+    if (!gen || !gen->program || !call || call->type != AST_FUNCTION_CALL || !call->value ||
+        strcmp(call->value, "call") == 0 || !call->node_type ||
+        call->node_type->kind != TYPE_STRING || typed_fnptr_call(gen, call)) return 0;
+    int r = 0, mark = 0;
+    int known = hands_back_temp_memo_begin(gen, call, &r, &mark);
+    if (known != 0) return known == 1 ? r : 0;
+    r = call_hands_back_temp_walk(gen, call);
+    hands_back_temp_memo_end(gen, call, r, mark);
+    return r;
+}
+
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
  * 0 no (a void function), -1 not known (no single visible definition). The
  * rule generate_function emits the signature by: the declared type, else
@@ -495,6 +549,22 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
 static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
     fprintf(gen->output, "; ");
+    /* #2649: a call taken as owned (call_hands_back_temp) owns what it
+     * returns: an argument temporary it handed back, or else a copy, made
+     * before the temporaries go. The flag tells generate_expression's take
+     * not to copy it again. */
+    if (g_handback_wrapping == expr && w->have_value && !w->discarded) {
+        int n = 0;
+        for (int h = 0; h < w->count; h++) {
+            const char* nm = arg_drain_lookup(expr->children[w->idx[h]]);
+            if (w->closure[h] || !w->identity[h] || !nm) continue;
+            fprintf(gen->output, "%s(const char*)_ad_r != %s", n++ ? " && " : "if (", nm);
+        }
+        if (n) {
+            fprintf(gen->output, ") _ad_r = aether_uniform_heap_str((const char*)_ad_r, 0); "
+                    "_ae_hb%d = 1; ", g_handback_flag);
+        }
+    }
     for (int h = 0; h < w->count; h++) {
         /* Look up the temp name we registered. Names are stable across
          * the wrap's scope. */
@@ -504,11 +574,13 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
             fprintf(gen->output, "_aether_closure_env_release(%s.env); ", nm);
         } else if (w->identity[h] && !w->discarded) {
             /* Return-escape-only param: free the fresh temp ONLY if the
-             * call did not return it (string_release is magic-guarded; the
-             * temp is always a magic string-op result here, never a
-             * literal). */
+             * call did not return it. The temp is a fresh heap string of
+             * either shape, never a literal, so it is freed as the other
+             * temps are: string_release, used here before, skips a plain
+             * buffer (an `@heap` extern's strdup, `path.join`'s malloc), and
+             * every such temp the call did not hand back leaked (#2649). */
             fprintf(gen->output,
-                    "if ((const char*)_ad_r != %s) string_release(%s); ", nm, nm);
+                    "if ((const char*)_ad_r != %s) aether_heap_str_free(%s); ", nm, nm);
         } else {
             fprintf(gen->output, "aether_heap_str_free(%s); ", nm);
         }
@@ -5047,11 +5119,41 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
 
+    /* #2649: a call that hands back an argument temporary yields an owned
+     * string (call_hands_back_temp, which is_heap_string_expr counts as a
+     * fresh one): the temporary, which its wrap keeps and flags, or a copy
+     * of whatever else came back, so what the call yields never depends on
+     * which path the callee took. A copy is also what #2619 would make of a
+     * view of a struct temporary, so that wrap is not added on top. A
+     * discarded call frees its temporaries itself, and a call an enclosing
+     * wrap hoisted was taken where the hoist evaluated it. */
+    if (expr->type == AST_FUNCTION_CALL && g_handback_wrapping != expr &&
+        gen->discard_call_node != expr && !arg_drain_lookup(expr) &&
+        call_hands_back_temp(gen, expr)) {
+        static int hb_seq = 0;
+        int id = hb_seq++;
+        const ASTNode* saved = g_handback_wrapping;
+        const ASTNode* saved_view = g_view_copy_wrapping;
+        int saved_flag = g_handback_flag;
+        g_handback_wrapping = expr;
+        g_view_copy_wrapping = expr;
+        g_handback_flag = id;
+        fprintf(gen->output, "({ int _ae_hb%d = 0; const char* _ae_hv%d = (const char*)(", id, id);
+        generate_expression(gen, expr);
+        fprintf(gen->output, "); aether_uniform_heap_str(_ae_hv%d, _ae_hb%d); })", id, id);
+        g_handback_wrapping = saved;
+        g_view_copy_wrapping = saved_view;
+        g_handback_flag = saved_flag;
+        return;
+    }
+
     /* #2619: a string a call may hand back from a struct temporary is
      * copied here, so it outlives the temporary (call_returns_view_of_temp,
-     * which is_heap_string_expr counts as a fresh heap string). */
+     * which is_heap_string_expr counts as a fresh heap string). Once: a call
+     * an enclosing wrap hoisted was copied where the hoist evaluated it, and
+     * copied again where it is passed, the second copy leaked. */
     if (expr->type == AST_FUNCTION_CALL && g_view_copy_wrapping != expr &&
-        call_returns_view_of_temp(gen, expr)) {
+        !arg_drain_lookup(expr) && call_returns_view_of_temp(gen, expr)) {
         const ASTNode* saved = g_view_copy_wrapping;
         g_view_copy_wrapping = expr;
         fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
