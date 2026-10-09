@@ -1,0 +1,11 @@
+exports(abs, twice)
+
+// Spelt like libc's abs on purpose: a file that declares its own
+// `extern abs` keeps it, whatever `import mathy (*)` would bind.
+abs(x: int) -> int {
+    return 99
+}
+
+twice(x: int) -> int {
+    return x * 2
+}

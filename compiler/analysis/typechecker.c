@@ -551,6 +551,22 @@ static ASTNode* entry_own_definition(const char* name) {
     return NULL;
 }
 
+/* #2632: does the file being compiled define `name` itself: a function,
+ * builder, constant or extern written in it, not one merged in from a
+ * module? Such a name shadows the same name a glob import would bind. */
+static int program_defines_own(ASTNode* program, const char* name) {
+    if (!program || !name) return 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* d = program->children[i];
+        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+        if (!d || !d->value || d->is_imported || d->origin_module) continue;
+        if ((d->type == AST_FUNCTION_DEFINITION || d->type == AST_BUILDER_FUNCTION ||
+             d->type == AST_CONST_DECLARATION || d->type == AST_EXTERN_FUNCTION) &&
+            strcmp(d->value, name) == 0) return 1;
+    }
+    return 0;
+}
+
 /* Is `prefix.name` a reference to the checked module's own `name`? A name
  * the module does not define falls through to the imports, so a module
  * importing a namespace that shares its last segment (#1780) still reaches
@@ -5279,6 +5295,14 @@ int typecheck_program(ASTNode* program) {
             if (is_glob) {
                 short_name = glob_names[k];
                 local_name = short_name;
+                /* #2632: a name the file defines itself is not bound by a
+                 * glob import, as a local item shadows a glob import in
+                 * Rust. Registering it rewrote the file's own `bytes(n, s,
+                 * l)` calls to `string.bytes` (and re-synced its symbol to
+                 * that one), so std.number failed `ae check` and a program
+                 * with its own `bytes` failed to build. A selective import
+                 * names the clash explicitly and stays an error (E1000). */
+                if (program_defines_own(program, local_name)) continue;
             } else {
                 ASTNode* sel = child->children[k];
                 if (!sel || sel->type != AST_IDENTIFIER) continue;

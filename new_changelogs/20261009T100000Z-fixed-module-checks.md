@@ -33,3 +33,12 @@
   it, the last segment it is imported under, so its own functions and
   constants resolve and its private ones stay private (E0303) in both
   (#2631).
+- **A glob import no longer binds a name the importing file defines
+  itself.** `import std.string (*)` registered a bare alias for every name
+  of std.string, the file's own included, so a program with its own
+  `bytes(a, b, c)` failed to build (E0200 "Function 'string.bytes' expects
+  1 argument(s), got 3"), `ae check std/number/module.ae` failed the same
+  way, and a merged module's own `extern` was rewritten to the glob's
+  function of that name. The file's own function, builder, constant or
+  extern now wins, as a local item shadows a glob import in Rust; a
+  selective import of the same name stays the E1000 clash (#2632).

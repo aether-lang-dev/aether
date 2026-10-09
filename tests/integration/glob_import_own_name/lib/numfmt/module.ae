@@ -1,0 +1,16 @@
+import std.string(*)
+import mathy(*)
+
+exports(bytes, describe)
+
+extern abs(x: int) -> int
+
+// Its own `bytes` (three arguments) and its own `extern abs` shadow the
+// `string.bytes` and `mathy.abs` its glob imports would bind (#2632).
+bytes(n: int, unit: string, sep: string) -> string {
+    return "${n}${sep}${unit}"
+}
+
+describe(n: int) -> string {
+    return "${bytes(abs(n), "B", " ")} ${twice(n)}"
+}

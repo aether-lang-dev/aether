@@ -1,0 +1,5 @@
+import numfmt
+
+main() {
+    println(numfmt.describe(-7))
+}

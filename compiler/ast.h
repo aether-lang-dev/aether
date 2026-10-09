@@ -602,12 +602,14 @@ typedef struct ASTNode {
      * is a C string. ast_literal_length reads either. */
     int value_len;
 
-    /* #2614: on a function, builder, actor or constant cloned in by
-     * module_merge_into_program, the registered name of the module it was
+    /* #2614: on a function, builder, actor, constant or `@extern` cloned in
+     * by module_merge_into_program, the registered name of the module it was
      * written in; NULL on the program's own code. A qualified `ns.name` in
      * such a body resolves against that module's imports, not the program's,
      * so a module that calls another module it never imported is rejected
-     * in every program, exactly as `ae check` of the module rejects it. */
+     * in every program, exactly as `ae check` of the module rejects it. It
+     * is also what tells the program's own definitions, which shadow a glob
+     * import, from merged ones (#2632). */
     char* origin_module;
 } ASTNode;
 

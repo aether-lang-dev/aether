@@ -2630,6 +2630,30 @@ another module. (The bare glob-brought names are rewritten to their
 canonical prefixed form when the module is merged into a consumer, the
 same way selective and qualified imports are.)
 
+**A file's own names win over its globs.** A glob import binds only the
+names the importing file does not define itself. A function, builder,
+constant or extern the file declares under the same name stays the file's
+own, the way a local item shadows a glob import in Rust:
+
+```aether
+import std.string (*)
+
+// std.string has a `bytes` too; this file's calls reach its own.
+bytes(a: int, b: int, c: int) -> int {
+    return a + b + c
+}
+
+main() {
+    println("${bytes(1, 2, 3)} ${length("abc")}")    // 6 3
+}
+```
+
+The same holds in a module, whether it is checked on its own or merged into
+a program (#2632). A selective import is different: `import std.string
+(bytes)` beside a local `bytes` is the E1000 clash, because the import wrote
+the name out (see "Selective-import shadow rejection" in
+[module-system-design.md](module-system-design.md)).
+
 Use the glob form when you'd otherwise list 20+ symbols just to use
 the module without the namespace prefix. Bare `import std.math` (no
 parens) loads the module but does **not** register short aliases,

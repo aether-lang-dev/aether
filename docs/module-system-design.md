@@ -240,6 +240,8 @@ error[E1000]: module 'mod' (mod/module.ae) defines local function
 
 The same check applies to entry-point `main.ae` files when the shadow lives there directly (not inside a module). Both `AST_FUNCTION_DEFINITION` and `export <fn>` shapes are caught.
 
+A glob import is not rejected this way, because it does not name the clash: `import std.string (*)` beside a local `length` binds every std.string name except `length`, and the file's own `length` is the one its bare calls reach, in a program and in a module, built or checked on its own (#2632).
+
 ## Qualified surface survives a selective import after merge
 
 The two `import std.X` forms each light up a different call syntax: a bare

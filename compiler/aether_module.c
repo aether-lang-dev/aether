@@ -2279,6 +2279,21 @@ static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
     return 0;
 }
 
+/* #2632: does the module define `name` itself (a function, builder,
+ * constant or extern of its own)? Such a name shadows the same name one of
+ * its glob imports would bind. */
+static int module_defines_own_name(ASTNode* mod_ast, const char* name) {
+    if (!mod_ast || !name) return 0;
+    for (int i = 0; i < mod_ast->child_count; i++) {
+        ASTNode* decl = unwrap_export(mod_ast->children[i]);
+        if (!decl || !decl->value || strcmp(decl->value, name) != 0) continue;
+        if (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION ||
+            decl->type == AST_CONST_DECLARATION || decl->type == AST_EXTERN_FUNCTION)
+            return 1;
+    }
+    return 0;
+}
+
 /* Reject user-function-vs-imported-export symbol collisions.
  *
  * A module export `ns.name` mangles to the flat C symbol `ns_name`.
@@ -3160,15 +3175,23 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
             // a bare `clean(...)` in M's merged body is rewritten to the
             // prefixed `fs_clean(...)` the transitive pass pulls in — exactly
             // what the selective and qualified forms already get.
+            //
+            // #2632: a name M defines itself is not taken from the glob, as
+            // the typechecker does not bind it for a program either: M's own
+            // definition wins. Its functions and constants were renamed to
+            // `<M>_<name>` before this runs; this keeps M's own externs, which
+            // keep their bare name, from being rewritten to the glob's.
             for (int k = 0; k < sub_func_count &&
                             sel_func_count < AETHER_MODULE_MAX_DECLS; k++) {
-                if (sub_func_names[k] && sub_func_names[k][0] != '_') {
+                if (sub_func_names[k] && sub_func_names[k][0] != '_' &&
+                    !module_defines_own_name(mod_ast, sub_func_names[k])) {
                     sel_func_names[sel_func_count++] = sub_func_names[k];
                 }
             }
             for (int k = 0; k < sub_const_count &&
                             sel_const_count < AETHER_MODULE_MAX_DECLS; k++) {
-                if (sub_const_names[k] && sub_const_names[k][0] != '_') {
+                if (sub_const_names[k] && sub_const_names[k][0] != '_' &&
+                    !module_defines_own_name(mod_ast, sub_const_names[k])) {
                     sel_const_names[sel_const_count++] = sub_const_names[k];
                 }
             }
@@ -3445,6 +3468,8 @@ void module_merge_into_program(ASTNode* program) {
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
                 clone->value = strdup(prefixed);
+                /* Merged, not the program's own (#2632 reads the mark). */
+                stamp_origin(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
                 /* Constants and module-level `var`s (#701) merge whatever the

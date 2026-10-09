@@ -91,6 +91,7 @@ tests/integration/fs_glob_recursive_dedupe/
 tests/integration/fs_read_binary_nul/
 tests/integration/fs_write_binary_nul/
 tests/integration/glob_import_cross_module/
+tests/integration/glob_import_own_name/
 tests/integration/heap_leak_cross_fn_recursion/
 tests/integration/heap_leak_interp_as_arg/
 tests/integration/heap_new_pod/
