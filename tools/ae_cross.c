@@ -247,6 +247,35 @@ static bool cross_apple_sdk_path(const char* sdk, char* out, size_t osz) {
 /* The `xcrun --sdk` name for an Apple triple. Device and simulator are
  * different SDKs with different libSystem stubs, so this cannot be derived
  * from the architecture alone. */
+/* The compile-time `target.os` / `target.arch` a cross build must see (#2573
+ * follow-up): `when target.arch == "riscv64"` is about the machine the program
+ * runs on, not the one compiling it. Derived from the normalised zig triple,
+ * so every alias spelling maps the same way, in the vocabulary the compiler's
+ * own host defaults use (compiler/codegen/optimizer.c target_*_string):
+ * os darwin|linux|freebsd|windows|wasm, arch x86_64|aarch64|riscv64|
+ * loongarch64|wasm. iOS is darwin and Android is linux, matching the
+ * __APPLE__ / __linux__ macros their compilers define. Returns 0 for native
+ * or an unknown target (the compiler then keeps its host defaults). */
+int cross_target_os_arch(const char* t, const char** os, const char** arch) {
+    if (!t || !os || !arch) return 0;
+    if (!strcmp(t, "wasm")) { *os = "wasm"; *arch = "wasm"; return 1; }
+    const char* z = cross_target_to_zig(t);
+    if (!z) return 0;
+    if (!strncmp(z, "aarch64", 7))          *arch = "aarch64";
+    else if (!strncmp(z, "x86_64", 6))      *arch = "x86_64";
+    else if (!strncmp(z, "riscv64", 7))     *arch = "riscv64";
+    else if (!strncmp(z, "loongarch64", 11)) *arch = "loongarch64";
+    else if (!strncmp(z, "wasm", 4))        *arch = "wasm";
+    else return 0;
+    if (strstr(z, "macos") || strstr(z, "ios") || strstr(z, "apple")) *os = "darwin";
+    else if (strstr(z, "linux"))   *os = "linux";
+    else if (strstr(z, "freebsd")) *os = "freebsd";
+    else if (strstr(z, "windows")) *os = "windows";
+    else if (strstr(z, "wasi") || strstr(z, "wasm")) *os = "wasm";
+    else return 0;
+    return 1;
+}
+
 const char* cross_apple_sdk(const char* triple) {
     if (!cross_target_is_apple(triple)) return NULL;
     /* Catalyst is checked first: its triple carries "-ios" like the device

@@ -219,6 +219,10 @@ static char g_with_caps[128] = "";
 /* " --binimport-stub-dir=<dir>" for each binary-import stub directory this
  * build generated (defined with the stub bookkeeping below). */
 static void ae_binimport_stub_flags(char* out, size_t cap);
+/* The --target of the current build, for the compile-time `target.os` /
+ * `target.arch` aetherc reports to `when` (cross_target_os_arch). NULL for a
+ * native build. Set by cmd_build before build_aetherc_cmd runs. */
+static const char* g_build_target = NULL;
 
 /* -D NAME build symbols, accumulated as the flags they will become on the
  * aetherc line. `when defined(NAME)` tests them, and a region that loses is
@@ -623,7 +627,7 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
     // --with= is forwarded verbatim to aetherc, which owns parsing and
     // the reject messages. Only attached when non-empty so exe builds
     // don't see a spurious flag.
-    char with_flag[160] = "";
+    char with_flag[256] = "";
     if (g_with_caps[0]) {
         snprintf(with_flag, sizeof(with_flag), " --with=%s", g_with_caps);
     }
@@ -632,6 +636,15 @@ void build_aetherc_cmd(char* cmd, size_t cmd_size, const char* input, const char
      * directories, and only because ae names them here. */
     char stub_flags[1600] = "";
     ae_binimport_stub_flags(stub_flags, sizeof(stub_flags));
+    /* A cross build tells aetherc what it is building for, so a `when
+     * target.os / target.arch` arm is chosen for the target, not the host. */
+    const char* t_os = NULL;
+    const char* t_arch = NULL;
+    if (cross_target_os_arch(g_build_target, &t_os, &t_arch)) {
+        size_t wl = strlen(with_flag);
+        snprintf(with_flag + wl, sizeof(with_flag) - wl,
+                 " --target-os=%s --target-arch=%s", t_os, t_arch);
+    }
 
     /* Emit one `--lib <dir>` per entry rather than a single
      * `--lib "a:b:c"` separator-string. Each arg is therefore a
@@ -8317,6 +8330,7 @@ static int cmd_build(int argc, char** argv) {
     // Validate target. Beyond native/wasm, a cross triple routes the
     // build through the zig cc backend (#1105).
     const char* ztriple = cross_target_to_zig(target);
+    g_build_target = target;
     if (target && strcmp(target, "wasm") != 0 && strcmp(target, "native") != 0 && !ztriple) {
         fprintf(stderr, "Error: Unknown target '%s'.\n", target);
         fprintf(stderr, "Valid targets: native, wasm (Emscripten), or a cross triple "

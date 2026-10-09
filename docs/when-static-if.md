@@ -88,14 +88,20 @@ the condition at compile time, it stops.
 constants describing the build target. They are sourced from the **same C
 preprocessor macros** the runtime's `os.platform()` uses (see
 `os_platform_raw` in `std/os/aether_os.c`), so the canonical names match
-across the toolchain. Note the "target" here is the host that built
-`aetherc`: `target_os_string` / `target_arch_string` in
-`compiler/codegen/optimizer.c` return values baked from the C preprocessor
-macros active when the compiler was compiled. `ae build --target wasm` does
-cross-compile the generated C to WebAssembly via `emcc`, but it does not
-change these constants: under `--target wasm` a `when target.os == ...`
-still reports the host, not `"wasm"`, exactly as `os.platform()` and
-`select()` also key off the host.
+across the toolchain.
+
+For a native build they describe the machine `aetherc` runs on
+(`target_os_string` / `target_arch_string` in
+`compiler/codegen/optimizer.c`). For a cross build they describe the machine
+being built **for**: `ae build --target=<triple>` passes `--target-os` and
+`--target-arch` to `aetherc` (derived in `tools/ae_cross.c`,
+`cross_target_os_arch`), so `--target=x86_64-windows` on a Linux machine takes
+the `target.os == "windows"` arm, and `--target wasm` / `wasm32-wasi` report
+`"wasm"`. That matches `os.platform()`, which is compiled into the target
+binary and so reports the target at run time. iOS reports `"darwin"` and
+Android `"linux"`, as their compilers' `__APPLE__` / `__linux__` macros do.
+`aetherc` rejects a `--target-os` / `--target-arch` it does not know, rather
+than letting every `when` fall through to `else`.
 
 | Constant | Canonical values |
 |---|---|

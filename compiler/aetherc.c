@@ -2342,6 +2342,19 @@ int main(int argc, char *argv[]) {
             if (binimport_stub_dir_count < AETHERC_STUB_DIRS_MAX)
                 binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
             arg_offset++;
+        } else if (strncmp(argv[arg_offset], "--target-os=", 12) == 0 ||
+                   strncmp(argv[arg_offset], "--target-arch=", 14) == 0) {
+            // The cross-build target for `when target.os / target.arch`
+            // (ae build --target passes both). Unknown names are an error:
+            // a typo would otherwise make every `when` silently pick else.
+            int is_os = argv[arg_offset][9] == 'o';
+            const char* v = argv[arg_offset] + (is_os ? 12 : 14);
+            if (!when_set_target(is_os ? v : NULL, is_os ? NULL : v)) {
+                fprintf(stderr, "error: unknown %s '%s'\n",
+                        is_os ? "--target-os" : "--target-arch", v);
+                return 1;
+            }
+            arg_offset++;
         } else if (strncmp(argv[arg_offset], "--emit-deps=", 12) == 0) {
             // #1882: record the resolver's dependency manifest for this build
             // (files parsed + paths probed-and-absent) and write it here after
