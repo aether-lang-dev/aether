@@ -3,6 +3,8 @@
 // Also tests: self-scheduling actor with external stop (StopAnimation pattern)
 // If this compiles and runs with actors + sleep, the Windows compat shims work.
 
+extern exit(code: int)
+
 message Tick { n: int }
 message AnimStart {}
 message AnimStep {}
@@ -48,6 +50,7 @@ actor Animator {
                 println("PASS: animator ticked, then stopped")
             } else {
                 println("FAIL: animator stopped without ticking")
+                exit(1)
             }
         }
     }
