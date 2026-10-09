@@ -246,16 +246,26 @@ typedef struct HttpServer {
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
 
-    // The connections workers are serving right now: http_server_stop shuts
-    // each one down, so a worker blocked waiting for a keep-alive client's
-    // next request (up to the idle timeout) returns at once and the pool,
-    // and a background server's thread, can be joined. A worker takes its
-    // descriptor out before it closes or parks the connection, so stop
-    // never shuts down a number the system has since handed out again.
+    // The connections whose worker is waiting for a request to begin, with
+    // nothing of it read: http_server_stop shuts each one down, so a worker
+    // blocked waiting for a client's next request (up to the idle timeout)
+    // returns at once and the pool, and a background server's thread, can
+    // be joined. Only those: a worker in the middle of a request finishes
+    // it, which is what a graceful shutdown waits for. A worker lists its
+    // descriptor for the one receive and takes it out before doing anything
+    // else with the connection, so stop never shuts down a number the system
+    // has since handed out again.
     pthread_mutex_t live_lock;
     int* live_fds;
     int live_count;
     int live_cap;
+
+    // Set by http_server_stop, cleared by a start: from then on a worker
+    // starts no further request on its connection and closes it rather than
+    // parking it or waiting for the client (#2672). Not is_running, which a
+    // host that serves connections itself (http_server_drain_connection)
+    // without starting the server never sets.
+    _Atomic int stopping;
 
     // Per-request observation hook chain (#260 Tier 3 F1 / F2).
     // Hooks fire once per completed request with timing.

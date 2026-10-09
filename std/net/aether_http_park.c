@@ -251,7 +251,10 @@ int http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
     if (fd < 0) return -1;
 
     pthread_mutex_lock(&lot->lock);
-    if (lot->count >= lot->capacity) {
+    /* Checked again under the lock, which http_park_close sets it under: a
+     * connection added after the close emptied the lot would be held by a
+     * lot nobody watches or empties any more. */
+    if (atomic_load(&lot->shutdown) || lot->count >= lot->capacity) {
         pthread_mutex_unlock(&lot->lock);
         return -1;
     }
@@ -279,10 +282,15 @@ int http_park_count(HttpParkLot* lot) {
     return n;
 }
 
-void http_park_destroy(HttpParkLot* lot) {
+void http_park_close(HttpParkLot* lot) {
     if (!lot) return;
+    pthread_mutex_lock(&lot->lock);
     atomic_store(&lot->shutdown, 1);
-    if (lot->thread_started) pthread_join(lot->thread, NULL);
+    pthread_mutex_unlock(&lot->lock);
+    if (lot->thread_started) {
+        pthread_join(lot->thread, NULL);
+        lot->thread_started = 0;
+    }
 
     pthread_mutex_lock(&lot->lock);
     while (lot->count > 0) {
@@ -292,6 +300,11 @@ void http_park_destroy(HttpParkLot* lot) {
         pthread_mutex_lock(&lot->lock);
     }
     pthread_mutex_unlock(&lot->lock);
+}
+
+void http_park_destroy(HttpParkLot* lot) {
+    if (!lot) return;
+    http_park_close(lot);
 
     pthread_mutex_destroy(&lot->lock);
     if (lot->poller_ready) aether_io_poller_destroy(&lot->poller);
@@ -312,6 +325,7 @@ int  http_park_add(HttpParkLot* lot, HttpConn* conn, int idle_ms) {
     (void)lot; (void)conn; (void)idle_ms; return -1;
 }
 int  http_park_count(HttpParkLot* lot) { (void)lot; return 0; }
+void http_park_close(HttpParkLot* lot) { (void)lot; }
 void http_park_destroy(HttpParkLot* lot) { (void)lot; }
 
 #endif /* AETHER_HAS_THREADS && AETHER_HAS_NETWORKING */

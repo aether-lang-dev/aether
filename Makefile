@@ -924,6 +924,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_http.c \
            tests/runtime/test_runtime_net.c \
            tests/runtime/test_runtime_udp.c \
+           tests/runtime/test_io_poller.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
            tests/runtime/test_runtime_schema.c \

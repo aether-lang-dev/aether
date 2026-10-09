@@ -943,6 +943,7 @@ HttpServer* http_server_create(int port) {
     server->live_fds = NULL;
     server->live_count = 0;
     server->live_cap = 0;
+    atomic_init(&server->stopping, 0);
     server->request_hook_chain = NULL;
     server->sse_routes = NULL;
     server->ws_routes = NULL;
@@ -4028,6 +4029,56 @@ static int finish_response(HttpServer* server, HttpConn* conn,
  * so a broken connection is still closed rather than parked. */
 #define HTTP_REQUEST_IDLE 2
 
+/* The connections whose worker is waiting for a request to begin
+ * (live_fds in HttpServer), listed for that one receive. */
+static void conn_live_add(HttpServer* server, int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&server->live_lock);
+    if (server->live_count == server->live_cap) {
+        int cap = server->live_cap ? server->live_cap * 2 : 16;
+        int* grown = (int*)realloc(server->live_fds, sizeof(int) * (size_t)cap);
+        if (!grown) {
+            /* Not listed: a stop waits out this connection's idle timeout,
+             * as every stop did before. */
+            pthread_mutex_unlock(&server->live_lock);
+            return;
+        }
+        server->live_fds = grown;
+        server->live_cap = cap;
+    }
+    server->live_fds[server->live_count++] = fd;
+    pthread_mutex_unlock(&server->live_lock);
+}
+
+static void conn_live_remove(HttpServer* server, int fd) {
+    if (fd < 0) return;
+    pthread_mutex_lock(&server->live_lock);
+    for (int i = 0; i < server->live_count; i++) {
+        if (server->live_fds[i] == fd) {
+            server->live_fds[i] = server->live_fds[--server->live_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&server->live_lock);
+}
+
+/* conn_recv for the first bytes of a request, when nothing of it has been
+ * read: the wait for a client's next request, which can last the idle
+ * timeout. Listed for the wait so http_server_stop can end it (#2672), and
+ * not started at all once the server is stopping, which reads as the client
+ * having closed. The flag is read after the listing, and stop sets it before
+ * it shuts the listed connections down, so a stop either finds this wait
+ * listed or is seen here. */
+static int conn_recv_request_start(HttpServer* server, HttpConn* conn,
+                                   void* buf, int len) {
+    int fd = conn->fd;
+    conn_live_add(server, fd);
+    int n = 0;
+    if (!atomic_load(&server->stopping)) n = conn_recv(conn, buf, len);
+    conn_live_remove(server, fd);
+    return n;
+}
+
 /* Did the last recv fail because the socket's receive timeout fired, rather
  * than because the peer went away? */
 static int conn_recv_timed_out(void) {
@@ -4235,8 +4286,11 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * pre-fetch a little here so the probe has bytes to inspect. */
         while ((conn->write_pos - conn->read_pos) < 24) {
             if (conn->write_pos + 1 >= conn->buf_cap) break;
-            int n = conn_recv(conn, conn->buf + conn->write_pos,
-                              conn->buf_cap - conn->write_pos - 1);
+            int n = conn->write_pos == conn->read_pos
+                ? conn_recv_request_start(server, conn, conn->buf + conn->write_pos,
+                                          conn->buf_cap - conn->write_pos - 1)
+                : conn_recv(conn, conn->buf + conn->write_pos,
+                            conn->buf_cap - conn->write_pos - 1);
             if (n <= 0) return 0;  /* EOF / timeout / error */
             conn->write_pos += n;
         }
@@ -4272,8 +4326,11 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
             /* Header section exceeded buffer capacity; bail. */
             return 0;
         }
-        int n = conn_recv(conn, conn->buf + conn->write_pos,
-                          conn->buf_cap - conn->write_pos - 1);
+        int n = conn->write_pos == conn->read_pos
+            ? conn_recv_request_start(server, conn, conn->buf + conn->write_pos,
+                                      conn->buf_cap - conn->write_pos - 1)
+            : conn_recv(conn, conn->buf + conn->write_pos,
+                        conn->buf_cap - conn->write_pos - 1);
         if (n <= 0) {
             /* Nothing yet, and nothing of this request read so far: the
              * connection is idle rather than broken, and the caller can park
@@ -5131,46 +5188,8 @@ static int conn_next_request_imminent(HttpConn* conn) {
 
 /* Run requests on a connection the caller owns until it closes or parks.
  * Frees the connection unless the lot took it. */
-/* The connections workers are serving (live_fds in HttpServer): one is
- * listed while a worker holds it, and taken out before the worker closes or
- * parks it. */
-static void conn_live_add(HttpServer* server, int fd) {
-    if (fd < 0) return;
-    pthread_mutex_lock(&server->live_lock);
-    if (server->live_count == server->live_cap) {
-        int cap = server->live_cap ? server->live_cap * 2 : 16;
-        int* grown = (int*)realloc(server->live_fds, sizeof(int) * (size_t)cap);
-        if (!grown) {
-            /* Not listed: a stop waits out this connection's idle timeout,
-             * as every stop did before. */
-            pthread_mutex_unlock(&server->live_lock);
-            return;
-        }
-        server->live_fds = grown;
-        server->live_cap = cap;
-    }
-    server->live_fds[server->live_count++] = fd;
-    pthread_mutex_unlock(&server->live_lock);
-}
-
-static void conn_live_remove(HttpServer* server, int fd) {
-    if (fd < 0) return;
-    pthread_mutex_lock(&server->live_lock);
-    for (int i = 0; i < server->live_count; i++) {
-        if (server->live_fds[i] == fd) {
-            server->live_fds[i] = server->live_fds[--server->live_count];
-            break;
-        }
-    }
-    pthread_mutex_unlock(&server->live_lock);
-}
-
 static void conn_serve(HttpServer* server, HttpConn* conn) {
     atomic_fetch_add(&server->inflight_connections, 1);
-    /* By the number added: a takeover (a tunnel, a WebSocket) hands the
-     * descriptor on and leaves conn->fd at -1. */
-    int live_fd = conn->fd;
-    conn_live_add(server, live_fd);
     HttpParkLot* lot = (HttpParkLot*)server->park_lot;
     /* With a lot to park into, a worker waits only briefly for the next
      * request before handing the connection over; the lot then holds it for
@@ -5185,7 +5204,6 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
 #ifdef AETHER_HAS_NGHTTP2
     if (conn->is_h2) {
         handle_h2_connection(server, conn, NULL);
-        conn_live_remove(server, live_fd);
         conn_close(conn);
         free(conn);
         atomic_fetch_sub(&server->inflight_connections, 1);
@@ -5205,18 +5223,18 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
              * timeout. When there is no lot, or it declines (at capacity,
              * shutting down), keep waiting on this worker until the real idle
              * timeout, which is the pre-parking behaviour. */
-            if (!lot) break;
+            /* A stopping server keeps no idle connection (#2672): the lot
+             * refuses it, and waiting here would hold up the stop. */
+            if (!lot || atomic_load(&server->stopping)) break;
             int idle_ms = server->keep_alive_idle_ms > 0
                 ? server->keep_alive_idle_ms : 30000;
             if (idle_since_ms == 0) idle_since_ms = conn_now_ms();
             int64_t waited = conn_now_ms() - idle_since_ms;
             if (waited >= idle_ms) break;   /* silent past the deadline: close */
-            conn_live_remove(server, live_fd);   /* the lot's from here */
             if (http_park_add(lot, conn, (int)(idle_ms - waited)) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
                 return;
             }
-            conn_live_add(server, live_fd);
             continue;   /* lot declined: wait again on this worker */
         }
 
@@ -5245,19 +5263,16 @@ static void conn_serve(HttpServer* server, HttpConn* conn) {
          * mid-burst is the case keep-alive exists for and a handoff there is
          * pure cost; it waits not at all when every worker is busy, because
          * then the wait is time another connection spends queued. */
-        if (lot && !conn_next_request_imminent(conn)) {
+        if (lot && !atomic_load(&server->stopping) && !conn_next_request_imminent(conn)) {
             int idle_ms = server->keep_alive_idle_ms > 0
                 ? server->keep_alive_idle_ms : 30000;
-            conn_live_remove(server, live_fd);   /* the lot's from here */
             if (http_park_add(lot, conn, idle_ms) == 0) {
                 atomic_fetch_sub(&server->inflight_connections, 1);
                 return;
             }
-            conn_live_add(server, live_fd);
         }
     }
 
-    conn_live_remove(server, live_fd);
     conn_close(conn);
     free(conn);
     atomic_fetch_sub(&server->inflight_connections, 1);
@@ -5562,6 +5577,7 @@ static void* accept_thread_fn(void* arg) {
 
 int http_server_start_raw(HttpServer* server) {
     server->is_running = 1;
+    atomic_store(&server->stopping, 0);
 
 #if !defined(_WIN32)
     /* A peer that goes away between a server deciding to answer and the answer
@@ -5770,18 +5786,22 @@ int http_server_start_raw(HttpServer* server) {
         }
 
 #if AETHER_HAS_THREADS
-        /* Stop parking before the pool: the lot resubmits into it, and a
-         * connection woken into a destroyed pool would be closed twice. */
         /* The driver holds connections of its own, so it stops before the
          * lot: its threads are what close them. */
         if (server->evloop) {
             http_evloop_stop((HttpEvLoop*)server->evloop);
             server->evloop = NULL;
         }
-        http_park_destroy((HttpParkLot*)server->park_lot);
-        server->park_lot = NULL;
+        /* Close the lot before the pool: it resubmits into the pool, and a
+         * connection woken into a destroyed pool would be closed twice. Free
+         * it after: the pool's workers hold it, and one finishing a request
+         * may still be handing it a connection, which a closed lot refuses
+         * and a freed one is a use after free (#2672). */
+        http_park_close((HttpParkLot*)server->park_lot);
         http_pool_destroy(pool);
         server->conn_pool = NULL;
+        http_park_destroy((HttpParkLot*)server->park_lot);
+        server->park_lot = NULL;
 #endif
 
         /* on_stop lifecycle hook fires after the accept loop exits
@@ -5854,6 +5874,7 @@ void http_server_stop(HttpServer* server) {
     if (!server) return;
 
     server->is_running = 0;
+    atomic_store(&server->stopping, 1);
 
 #if !defined(_WIN32)
     // Destroy pollers to unblock poll/epoll_wait/kevent in accept threads
@@ -5886,9 +5907,10 @@ void http_server_stop(HttpServer* server) {
         server->socket_fd = -1;
     }
 
-    /* Wake every worker blocked on a connection it is serving: the read of a
-     * keep-alive client's next request waits up to the idle timeout, and the
-     * pool (and the join below) would wait with it. */
+    /* Wake every worker waiting for a client's next request: that read
+     * waits up to the idle timeout, and the pool (and the join below) would
+     * wait with it. A worker in the middle of a request is not listed and
+     * finishes it. */
     pthread_mutex_lock(&server->live_lock);
     for (int i = 0; i < server->live_count; i++) {
 #ifdef _WIN32

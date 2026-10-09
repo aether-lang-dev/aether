@@ -41,4 +41,11 @@ int http_park_count(HttpParkLot* lot);
 /* Stop the poller thread and close every parked connection. Safe on NULL. */
 void http_park_destroy(HttpParkLot* lot);
 
+/* Stop the lot without freeing it: from here it refuses every connection,
+ * its thread is joined and the connections it holds are closed. A worker
+ * that still holds the lot can offer it one and gets a refusal, so the
+ * server closes the lot, joins its workers, then destroys it (#2672).
+ * Destroying an open lot closes it first. */
+void http_park_close(HttpParkLot* lot);
+
 #endif // AETHER_HTTP_PARK_H

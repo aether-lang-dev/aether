@@ -763,20 +763,30 @@ atomic `inflight_connections` counter accurate across both
 thread-pool and actor-dispatch modes. Typically wired into a
 SIGTERM handler.
 
+What a stop does to the connections it has (`http_server_stop`, which
+the graceful form starts with): a request already being handled
+finishes and its response is sent; no further request is started on
+any connection; a keep-alive connection waiting for its client's next
+request, or parked, is closed at once rather than after its idle
+timeout.
+
 ---
 
 ## Embedded / background servers
 
 `http_server_start_background_raw(server)` runs the accept loop on a
-detached thread and returns immediately, so a host can keep serving
+thread of its own and returns immediately, so a host can keep serving
 while doing other work (and stop it later with `http_server_stop`).
-This is the *embedded* mode and behaves like a library, not a CLI:
+Stop waits for that thread: when it returns, the accept loop, its
+workers and the parking lot are done, so the server can be freed at
+once, and another started in the same process. This is the *embedded*
+mode and behaves like a library, not a CLI:
 
 - **No banner.** It does not print `Server running at …` /
   `Press Ctrl+C to stop` an embedded server is controlled by
   `http_server_stop`, not a terminal. (Foreground `server_start` still
   prints the banner.)
-- **Quiet signals.** Its detached accept/worker threads block async
+- **Quiet signals.** Its accept/worker threads block async
   signals (`pthread_sigmask` SIGURG, SIGINT, SIGTERM, SIGPIPE, …), so
   the server's threads never intercept a process-directed signal meant
   for the host application; the synchronous fault signals
