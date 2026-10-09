@@ -28,7 +28,7 @@ main() {
     _ = net.tcp_close(conn)
     _ = net.tcp_server_close(srv)
 
-    bad = net.tcp_listen_on_raw("not-an-address", 0)   // loopback-ok: refused before any bind
+    bad = net.tcp_listen_on_raw("not-an-address", 0) // loopback-ok: refused before any bind
     if bad != null {
         println("FAIL: tcp_listen_on_raw accepted a host that is not an address")
         exit(1)

@@ -155,9 +155,9 @@ fn round(w: string) -> int {
         check(string.equals(bm, deep) == 1, "ba hands the deepest temporary back")
         // Passed on to another call.
         check(string.length(pass1(k, string.concat(w, "!"))) == string.length(want),
-              "string.length reads the temporary")
+            "string.length reads the temporary")
         check(measure(passg(k, string.concat(w, "!"))) == string.length(want),
-              "measure reads the temporary")
+            "measure reads the temporary")
         // Interpolated.
         s = "[${pass1(k, string.concat(w, "!"))}]"
         check(string.length(s) == string.length(want) + 2, "the interpolation reads the temporary")
