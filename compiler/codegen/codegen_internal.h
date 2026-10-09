@@ -160,6 +160,7 @@ void emit_string_field_handoff(CodeGenerator* gen, ASTNode* e);
 void emit_string_field_free(CodeGenerator* gen, ASTNode* e, const char* runtime_free);
 int string_take_kind(CodeGenerator* gen, ASTNode* e);
 int string_take_is_view(CodeGenerator* gen, ASTNode* e);
+int alias_source_must_copy(CodeGenerator* gen, const char* src_name);
 void string_take_new_flag(char* buf, size_t n);
 void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* own,
                       const char* target);

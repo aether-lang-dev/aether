@@ -269,8 +269,8 @@ static int count_var_identifier_uses(ASTNode* node, const char* var_name) {
 // assume it may be read later and prefer the copy. Worst case we copy
 // when a move would have sufficed (a harmless extra allocation); we
 // never wrongly move. With no function context, default to the safe
-// copy.
-static int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
+// copy. A struct literal's field takes a local by the same rule (#2602).
+int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
     if (!gen || !gen->current_function || !src_name) return 1;
     return count_var_identifier_uses(gen->current_function, src_name) > 1;
 }

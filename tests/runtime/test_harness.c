@@ -1,8 +1,12 @@
 #include "test_harness.h"
 #include <string.h>
+#include <stdatomic.h>
+#include "../../runtime/utils/aether_thread.h"
 
 #ifdef _WIN32
 #include <windows.h>
+#else
+#include <unistd.h>
 #endif
 
 #define MAX_TESTS 1000
@@ -65,8 +69,73 @@ static long get_time_ms(void) {
 #endif
 }
 
+/* A test that hangs is ended by this watchdog, which names it (#2608). The
+ * harness prints a test's name only once it finishes, so a hung one showed
+ * the test before it, or nothing at all: on the Windows runner the job ran
+ * on until the runner was lost, and no log was kept. AE_C_TEST_TIMEOUT sets
+ * the limit in seconds (0 turns the watchdog off); the slowest test takes
+ * about a second. */
+static _Atomic(const char*) watch_name = NULL;
+static atomic_long watch_start_ms = 0;     /* 0: no test is running */
+static atomic_int watch_stop = 0;
+static long watch_limit_ms = 0;
+static pthread_t watch_thread;
+static int watch_running = 0;
+
+static void watch_nap(void) {
+#ifdef _WIN32
+    Sleep(100);
+#else
+    usleep(100 * 1000);
+#endif
+}
+
+static void* test_watchdog(void* arg) {
+    (void)arg;
+    while (!atomic_load(&watch_stop)) {
+        watch_nap();
+        long start = atomic_load(&watch_start_ms);
+        if (start != 0 && get_time_ms() - start > watch_limit_ms) {
+            const char* name = atomic_load(&watch_name);
+            fflush(stdout);
+            fprintf(stderr, "\n  [TIMEOUT] %s ran past %ld s and is ended: it is hung "
+                            "(AE_C_TEST_TIMEOUT sets the limit)\n",
+                    name ? name : "(unnamed test)", watch_limit_ms / 1000);
+            fflush(stderr);
+            _exit(124);
+        }
+    }
+    return NULL;
+}
+
+static void watchdog_start(void) {
+    const char* env = getenv("AE_C_TEST_TIMEOUT");
+    long secs = env && *env ? strtol(env, NULL, 10) : 120;
+    if (secs <= 0 || watch_running) return;
+    watch_limit_ms = secs * 1000;
+    atomic_store(&watch_stop, 0);
+    watch_running = pthread_create(&watch_thread, NULL, test_watchdog, NULL) == 0;
+}
+
+static void watchdog_stop(void) {
+    if (!watch_running) return;
+    atomic_store(&watch_stop, 1);
+    pthread_join(watch_thread, NULL);
+    watch_running = 0;
+}
+
+static void watch_begin(const char* name, long start) {
+    atomic_store(&watch_name, name);
+    atomic_store(&watch_start_ms, start);
+}
+
+static void watch_end(void) {
+    atomic_store(&watch_start_ms, 0);
+}
+
 void run_all_tests(void) {
     long total_start = get_time_ms();
+    watchdog_start();
     
     printf("%s=== Aether Test Suite ===%s\n\n", COLOR_CYAN, COLOR_RESET);
     printf("Running %d test(s) across %d categories...\n\n", test_count, 8);
@@ -92,6 +161,7 @@ void run_all_tests(void) {
             
             // Time the test
             long start = get_time_ms();
+            watch_begin(tests[i].name, start);
             
             // Set up jump point for test failures
             if (setjmp(test_failure_jmp) == 0) {
@@ -114,10 +184,12 @@ void run_all_tests(void) {
                 tests[i].duration_ms = duration;
                 printf("  %s[FAIL]%s %s (%ldms)\n", COLOR_RED, COLOR_RESET, tests[i].name, duration);
             }
+            watch_end();
             fflush(stdout);
         }
         printf("\n");
     }
+    watchdog_stop();
     
     long total_duration = get_time_ms() - total_start;
     
@@ -190,6 +262,7 @@ void run_tests_by_category(TestCategory category) {
     fflush(stdout);
     
     long total_start = get_time_ms();
+    watchdog_start();
     
     for (int i = 0; i < test_count; i++) {
         if (tests[i].category != category) continue;
@@ -199,6 +272,7 @@ void run_tests_by_category(TestCategory category) {
         
         // Time the test
         long start = get_time_ms();
+        watch_begin(tests[i].name, start);
         
         // Set up jump point for test failures
         if (setjmp(test_failure_jmp) == 0) {
@@ -221,8 +295,10 @@ void run_tests_by_category(TestCategory category) {
             tests[i].duration_ms = duration;
             printf("  %s✗%s %s (%ldms)\n", COLOR_RED, COLOR_RESET, tests[i].name, duration);
         }
+        watch_end();
         fflush(stdout);
     }
+    watchdog_stop();
     
     long total_duration = get_time_ms() - total_start;
     

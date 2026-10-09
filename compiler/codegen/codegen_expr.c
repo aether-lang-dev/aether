@@ -3997,6 +3997,29 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     mark_captured_string_param(gen, p->value);
                 }
             }
+            /* #2606: a struct parameter borrows the caller's strings, as a
+             * function's does (codegen_func.c): its trackers are cleared on
+             * entry, so the closure frees, at its exit, only the strings it
+             * stores itself, and a parameter it returns hands back no
+             * strings the caller's argument still owns. Left set, a struct
+             * argument that a call returned was freed by the caller's
+             * statement temporaries twice. A closure field is retained. */
+            for (int i = 0; i < closure->child_count; i++) {
+                ASTNode* p = closure->children[i];
+                if (!p || p->type != AST_CLOSURE_PARAM || !p->value) continue;
+                const char* owning = struct_owning_strings(gen, p->node_type);
+                if (!owning) continue;
+                if (closure_param_is_promoted(gen, closure, p->value)) {
+                    emit_struct_disown(gen, owning, cg_internf("(*%s)", p->value), 1);
+                    continue;
+                }
+                emit_struct_disown(gen, owning, safe_value_name(p->value), 1);
+                /* The destroy is spelled with the raw name, as a struct
+                 * local's is, so a renamed parameter is not destroyed. */
+                if (strcmp(safe_value_name(p->value), p->value) == 0)
+                    push_struct_destroy_defer(gen, p->value, p->node_type,
+                                              p->line, p->column);
+            }
             hoist_heap_string_trackers(gen, body);
             mark_escaped_heap_string_vars(gen, body);
             push_heap_string_exit_free_defers(gen, body);
@@ -8418,7 +8441,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * the adopted variable names and, after the literal, clear their
              * `_heap_<v>` flags inside a statement-expression so the exit
              * free's `if (_heap_<v>)` guard skips them. */
-            const char* moved_vars[16];
+            /* One per field at most. A fixed 16 dropped the 17th, whose
+             * flag then stayed set: its string was freed twice. */
+            const char** moved_vars = (const char**)aether_xrealloc(NULL,
+                sizeof(const char*) * (size_t)(expr->child_count > 0 ? expr->child_count : 1));
             int moved_count = 0;
             int any_moved = 0;
             /* A header-defined struct (`extern struct ... @c_import`) has no
@@ -8427,12 +8453,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * `(struct Name){...}` because the header need not typedef the
              * tag. */
             int c_imported = aether_is_c_import_struct(expr->value);
+            /* #2602: a local still used after the literal is copied, as an
+             * alias of it is (alias_source_must_copy): moved, its flag was
+             * cleared while it still pointed at the field's buffer, and a
+             * later `string.free(local)` took the untracked branch and freed
+             * the struct's string, which the struct freed again. */
             for (int i = 0; !c_imported && i < expr->child_count; i++) {
                 ASTNode* fi = expr->children[i];
                 if (fi && fi->type == AST_ASSIGNMENT && fi->child_count > 0 &&
                     fi->children[0]->type == AST_IDENTIFIER &&
                     fi->children[0]->value &&
-                    is_heap_string_var(gen, fi->children[0]->value)) {
+                    is_heap_string_var(gen, fi->children[0]->value) &&
+                    !alias_source_must_copy(gen, fi->children[0]->value)) {
                     any_moved = 1; break;
                 }
             }
@@ -8505,7 +8537,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 }
                             }
                         }
+                        int fv_copy = !c_imported && fv && fv->type == AST_IDENTIFIER &&
+                                      fv->value && is_heap_string_var(gen, fv->value) &&
+                                      alias_source_must_copy(gen, fv->value);
                         if (take_own && take_own[i][0]) emit_string_take(gen, fv, take_own[i], NULL);
+                        else if (fv_copy) {
+                            fprintf(gen->output, "aether_uniform_heap_str((const char*)(");
+                            generate_expression(gen, fv);
+                            fprintf(gen->output, "), 0)");
+                        }
                         else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
                         else if (fv_closure) emit_closure_take(gen, fv);
                         else if (fv_owned_array) emit_owned_array_literal(gen, fv, fv_owned_array);
@@ -8529,10 +8569,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         is_heap_string_expr(gen, field_init->children[0])) {
                         ASTNode* src = field_init->children[0];
                         if (src->type == AST_IDENTIFIER && src->value &&
-                            is_heap_string_var(gen, src->value)) {
+                            is_heap_string_var(gen, src->value) &&
+                            !alias_source_must_copy(gen, src->value)) {
                             fprintf(gen->output, ", ._heap_%s = _heap_%s",
                                     field_init->value, src->value);
-                            if (moved_count < 16) moved_vars[moved_count++] = src->value;
+                            moved_vars[moved_count++] = src->value;
                         } else {
                             fprintf(gen->output, ", ._heap_%s = 1", field_init->value);
                         }
@@ -8562,6 +8603,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, " _ae_slit; })");
             }
             free(take_own);
+            free(moved_vars);
             break;
         }
 

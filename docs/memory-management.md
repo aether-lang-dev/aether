@@ -275,6 +275,14 @@ box; a field last assigned a literal is borrowed and is never freed. This lets
 a handler/server context own its config strings for its lifetime without
 dropping back to a raw `malloc(...) as *T`.
 
+A struct literal's `string` field takes a heap-tracked local the way an alias
+of it does: when the literal is the local's last use, the string moves into
+the field and the local's tracker is cleared; when the local is used again
+(read, or freed with `string.free`), the field gets a copy and the local keeps
+its own (#2602). Before, the literal always moved the string, so
+`h = Holder { text: text }` followed by `string.free(text)` freed the string
+`h` owned.
+
 ### `@scoped` bindings, checked non-escape
 
 A `let`/`var` declaration can be annotated `@scoped` to declare that its value
@@ -558,6 +566,7 @@ A statement that throws away a string it owns frees it at once: a bare call that
 A call through an `fn` value (`call(f, mk(a))`, or `f(mk(a))` on an `fn` parameter) has no body for the compiler to read, so it cannot ask, as it does for a named function, whether the parameter keeps the argument. Closures follow a calling convention instead (#2499): **a closure borrows its arguments**, so the caller frees an owned argument after the call, through the same `_ad_N` wrap.
 
 - A closure that keeps a `string` parameter past the call (stores it in a list, map or struct field, assigns it to a captured variable, passes it to a call that keeps it) takes a reference of its own when it is entered: a refcounted string is retained, a plain buffer copied. Capturing the parameter in a nested closure, or returning it from a string closure, already takes one (the env's capture, the uniform-heap return), so those need nothing more. Assigning it to a local is a keep only when that local keeps it; a local dropped at the call's end keeps nothing, and the reference would have nobody to give it back. A named function that keeps a `string` parameter takes its own reference the same way, in its own prologue, whether it is called by name or as a closure value (see the container section above).
+- A closure's struct parameter borrows the caller's strings, as a named function's does: its `_heap_<field>` trackers are cleared on entry, so the closure frees at its exit only the strings it stored into the parameter itself, and returning the parameter hands back strings the caller's argument still owns, not a second owner of them (#2606).
 - A `ptr` parameter cannot be copied: nothing knows what it points at. So the convention holds for a program only if no closure it can call keeps a `ptr` parameter (stores it, captures it, returns it), checked over every closure literal and every function used as a closure value. One such closure anywhere turns it off, and closure-call arguments are then left alone (a leak, never a free under a closure that kept the pointer).
 - A closure whose body the compiler did not see could keep anything, so the convention is also off when one can be called: in a library build (`--emit=lib`); when an extern returns a closure, or returns or takes a struct with a closure field; when a C-laid-out struct has a closure field; when a `@c_callback` function takes a closure; when a `ptr` becomes a closure (`unbox_closure`, or a `ptr` passed to an `fn` parameter); and when a raw pointer is viewed as a struct with a closure field.
 
