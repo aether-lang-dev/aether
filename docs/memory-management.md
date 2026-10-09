@@ -542,7 +542,7 @@ The two-channel split closes the v0.149 "lucky-UAF return-escape" trade-off, the
 
 #### Pass-through caveat
 
-A function like `identity(s: string) -> string { return s }` where `s` is a parameter is classified non-heap (parameters are not tracked locals). The caller does not free. If the caller passes a heap value, the result is a borrow, the caller is responsible for the original allocation, not the return value. To force a heap copy across a pass-through boundary, use `return string.concat(s, "")` (or `string.concat("", s)`).
+A function like `identity(s: string) -> string { return s }` where `s` is a parameter is classified non-heap (parameters are not tracked locals). The caller does not free. If the caller passes a heap value, the result is a borrow, the caller is responsible for the original allocation, not the return value. A fresh temporary passed to it is the exception: the call keeps it when it comes back, and the call's value is then the caller's, the temporary or a copy of whatever else came back (#2649, "Through a `string` parameter"). To force a heap copy across a pass-through boundary, use `return string.concat(s, "")` (or `string.concat("", s)`).
 
 #### Recursive heap-returning functions
 
