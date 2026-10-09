@@ -119,11 +119,15 @@ actor Helper {
     }
 }
 
+// `total` is a plain module var, which two actors on different scheduler
+// threads would update at once (a lost update); the Worker's messages are
+// done before the Helper gets its own.
 main() {
     w = spawn(Worker())
     h = spawn(Helper())
     w ! Job { n: 1 }
     w ! Other { n: 2 }
+    wait_for_idle()
     h ! Job { n: 3 }
     wait_for_idle()
     println("${total}")
