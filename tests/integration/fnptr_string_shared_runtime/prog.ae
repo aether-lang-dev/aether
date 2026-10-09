@@ -1,0 +1,15 @@
+// A string function called through a typed fn pointer, in a program linked
+// against the shared runtime (#2687). Prints 7, the length of "label12".
+import std.string
+
+label(n: int) -> string {
+    return string.concat("label", string.from_int(n))
+}
+
+through(f: fn(int) -> string, n: int) -> int {
+    return string.length(f(n))
+}
+
+main() {
+    println("${through(label, 12)}")
+}

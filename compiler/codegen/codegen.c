@@ -7421,17 +7421,17 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * when it is the marked pointer, copying anything else (take): a C
      * function never marks, so C's string stays C's, and a string an Aether
      * function returns borrowed (a literal, its own parameter) is copied
-     * before the call's temporaries are freed. g_aether_fnptr_owned is the
-     * runtime's (aether_panic.h), shared by every translation unit. */
+     * before the call's temporaries are freed. The mark is the runtime's,
+     * shared by every translation unit and reached only through calls
+     * (aether_panic.h): on Windows a program linked against the shared
+     * runtime cannot import a thread-local from the DLL (#2687). */
     print_line(gen, "static inline const char* aether_fnptr_give(const char* s) {");
-    print_line(gen, "    g_aether_fnptr_owned = (const void*)s;");
+    print_line(gen, "    aether_fnptr_mark((const void*)s);");
     print_line(gen, "    return s;");
     print_line(gen, "}");
-    print_line(gen, "static inline void aether_fnptr_reset(void) { g_aether_fnptr_owned = (const void*)0; }");
+    print_line(gen, "static inline void aether_fnptr_reset(void) { aether_fnptr_mark((const void*)0); }");
     print_line(gen, "static inline const char* aether_fnptr_take(const char* r) {");
-    print_line(gen, "    int _owned = r && (const void*)r == g_aether_fnptr_owned;");
-    print_line(gen, "    g_aether_fnptr_owned = (const void*)0;");
-    print_line(gen, "    return aether_uniform_heap_str(r, _owned);");
+    print_line(gen, "    return aether_uniform_heap_str(r, aether_fnptr_claim((const void*)r));");
     print_line(gen, "}");
     /* AetherString-aware heap-string release. A `_heap_<name>` slot
      * tracked by the codegen can hold two physically distinct shapes:
