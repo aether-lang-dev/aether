@@ -1,0 +1,282 @@
+// Regression (#2644, #2645, #2646, #2647): a function written as several
+// clauses is a set of real functions. Each clause is a C function of its
+// own, with everything a single function's body gets, and the set's name is
+// a dispatcher that tests each clause's patterns and guard in order and
+// returns what the matching clause returns.
+//
+// #2644: the clause bodies were inlined into one C function and missed parts
+// of a single body's setup. A closure that mutated a clause parameter
+// changed a copy (the parameter was not promoted to a cell); a clause
+// storing into its struct parameter's field freed the caller's string; a
+// fixed-size array parameter emitted invalid C; closures in two clauses
+// capturing same-named locals of different types shared one scope and
+// failed in gcc; a guard calling a function on a parameter read an
+// undeclared name; and a clause that kept its `string` parameter took no
+// reference of its own, so its caller could not free the temporary it
+// passed. #2645: an unannotated set whose first clause returns nothing was
+// declared void and defined int. #2646: the no-match default of a set
+// returning a tuple was `0`. #2647: the compile-time precondition check
+// applied a later clause's `requires` to a call an earlier clause takes.
+// And with the clauses emitted as functions of their own, a set whose first
+// clause has a wildcard (its parameter was declared `void`) and a builder
+// written as clauses (its definition lacked the hidden builder parameter
+// the prototype declared) compile.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows by exactly 0
+// (mem.steady_growth). Strings are built from parameters, because
+// string.concat of two literals folds to a literal.
+
+import std.list
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Rec {
+    name: string
+    n: int
+}
+
+struct Bag {
+    items: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// A closure that mutates a clause parameter mutates the parameter.
+count_up(0) -> int {
+    return 0
+}
+count_up(n: int) -> int {
+    bump = || { n = n + 1 }
+    bump()
+    bump()
+    return n
+}
+
+// A clause storing a fresh string into its struct parameter's field changes
+// its own copy and frees what it stored; the caller's string stays.
+rename(0, r: Rec) -> int {
+    return 0
+}
+rename(k: int, r: Rec) -> int {
+    r.name = string.concat(r.name, "!")
+    return string.length(r.name) + k
+}
+
+// A fixed-size array parameter is the clause's own copy.
+first(xs: int[3], 0) -> int {
+    return 0
+}
+first(xs: int[3], k: int) -> int {
+    xs[0] = 99
+    return xs[0] + k
+}
+
+// Two clauses' closures capture same-named locals of different types.
+show(0) -> string {
+    v = 41
+    f = || { return v + 1 }
+    return string.from_int(f())
+}
+show(n: int) -> string {
+    v = string.concat("s", string.from_int(n))
+    g = || { return string.length(v) }
+    return string.concat(v, string.from_int(g()))
+}
+
+// A string literal pattern, then a guard calling a function on its
+// parameter; some inputs match no clause.
+greet("bob") -> string {
+    return "hi bob"
+}
+greet(name: string) when string.length(name) > 3 -> string {
+    return string.concat("hello ", name)
+}
+
+// The second clause keeps its argument in a list, through a reference of its
+// own: the caller frees the temporary it passed.
+keep(l: ptr, 0, s: string) -> int {
+    return string.length(s)
+}
+keep(l: ptr, n: int, s: string) -> int {
+    list.add(l, s)
+    return n
+}
+
+// A wildcard in the first clause: the position's type is the other clauses'.
+// The guard reads two parameters.
+diff(_, 0) -> int {
+    return 0
+}
+diff(a: int, b: int) when a > b -> int {
+    return a - b
+}
+diff(a: int, b: int) -> int {
+    return a + b
+}
+
+new_bag() -> ptr {
+    b = heap.new(Bag)
+    return b as ptr
+}
+
+add(_ctx: ptr) {
+    b = _ctx as *Bag
+    b.items = b.items + 1
+}
+
+items(b: ptr) -> int {
+    bb = b as *Bag
+    return bb.items
+}
+
+// A builder written as clauses gets its config like a single builder.
+builder tally(0) with new_bag -> int {
+    return 100
+}
+builder tally(want: int) with new_bag -> int {
+    return items(_builder) + want
+}
+
+// Unannotated: the first clause returns nothing, the second a value.
+twice(0) {
+    println("twice zero")
+}
+twice(n) {
+    return n * 2
+}
+
+// A guarded set returning a tuple, with no catch-all.
+pick(n: int) when n > 5 -> (string, int) {
+    return string.concat("p", string.from_int(n)), n
+}
+pick(n: int) when n > 0 -> (string, int) {
+    return "small", n
+}
+
+// The second clause's `requires` is its own: `name_of(0)` reaches the first.
+name_of(0) -> string
+ensures string.length(result) > 0
+{
+    return "zero"
+}
+name_of(n: int) -> string
+requires n > 0
+ensures string.length(result) > 1
+{
+    return string.concat("n", string.from_int(n))
+}
+
+round(w: string) -> int {
+    total = count_up(0) + count_up(5)
+    r = Rec { name: string.concat(w, "c"), n: 1 }
+    total = total + rename(1, r) + rename(0, r) + string.length(r.name)
+    arr = [1, 2, 3]
+    total = total + first(arr, 0) + first(arr, 1) + arr[0]
+    total = total + string.length(show(0)) + string.length(show(12))
+    s1 = greet("bob")
+    s2 = greet(string.concat(w, "xyz"))
+    s3 = greet("al")
+    total = total + string.length(s1) + string.length(s2) + string.length(s3)
+    l = list.new()
+    total = total + keep(l, 0, string.concat(w, "-")) + keep(l, 1, string.concat(w, "+"))
+    v, _ = list.get(l, 0)
+    total = total + string.length(v)
+    list.free(l)
+    total = total + twice(4)
+    total = total + diff(9, 0) + diff(9, 4) + diff(2, 4)
+    a, x = pick(0 - 1)
+    b, y = pick(3)
+    c, z = pick(9)
+    total = total + string.length(a) + x + string.length(b) + y + string.length(c) + z
+    total = total + string.length(name_of(0)) + string.length(name_of(7))
+    return total
+}
+
+main() {
+    println("=== test_clause_functions ===")
+    check(count_up(0) == 0, "count_up(0)")
+    check(count_up(5) == 7, "a closure mutating a clause parameter mutates it")
+
+    w = string.concat("ab", string.from_int(1))
+    r = Rec { name: string.concat(w, "c"), n: 1 }
+    check(rename(1, r) == 6, "a clause storing into its struct parameter")
+    check(rename(1, r) == 6, "again, with the caller's string intact")
+    filler = string.concat(w, "zzzzz")
+    check(r.name == "ab1c", "the caller's struct keeps its own string")
+    check(filler == "ab1zzzzz", "the string allocated after it")
+
+    arr = [1, 2, 3]
+    check(first(arr, 0) == 0, "a fixed-size array clause, literal")
+    check(first(arr, 1) == 100, "a fixed-size array clause writes its own copy")
+    check(arr[0] == 1, "the caller's array is unchanged")
+
+    check(show(0) == "42", "a closure over an int local")
+    check(show(12) == "s123", "a closure over a string local of the same name")
+
+    check(greet("bob") == "hi bob", "a string literal pattern")
+    check(greet(string.concat(w, "xyz")) == "hello ab1xyz", "a guard calling a function on its parameter")
+    check(greet("al") == "", "no clause matches")
+
+    l = list.new()
+    check(keep(l, 1, string.concat(w, "+")) == 1, "a clause keeping its argument")
+    filler2 = string.concat(w, "yyyy")
+    v, _ = list.get(l, 0)
+    check(v == "ab1+", "the kept argument outlives the temporary passed")
+    check(filler2 == "ab1yyyy", "the string allocated after it")
+    check(keep(l, 0, string.concat(w, "-")) == 4, "the clause keeping nothing")
+    list.free(l)
+
+    twice(0)
+    check(twice(3) == 6, "a set whose first clause returns nothing")
+
+    check(diff(9, 0) == 0, "a wildcard in the first clause")
+    check(diff(9, 4) == 5, "a guard over two parameters")
+    check(diff(2, 4) == 6, "the catch-all after it")
+    t0 = tally(0) {
+        add()
+    }
+    t5 = tally(5) {
+        add()
+        add()
+    }
+    check(t0 == 100 && t5 == 7, "a builder written as clauses")
+
+    s, k = pick(0 - 1)
+    check(s == "" && k == 0, "no clause matches: a zeroed tuple")
+    a, b = pick(3)
+    check(a == "small" && b == 3, "the second clause's tuple")
+    c, d = pick(9)
+    check(c == "p9" && d == 9, "the first clause's tuple")
+
+    check(name_of(0) == "zero", "a call the first clause takes, under its own contract")
+    check(name_of(7) == "n7", "a call the second clause takes")
+
+    // count_up 0 + 7; rename 6 + 0 + 4; first 0 + 100 + 1; show 2 + 4;
+    // greet 6 + 12 + 0; keep 4 + 1 + 4; twice 8; diff 0 + 5 + 6;
+    // pick 0 + 0 + 5 + 3 + 2 + 9; name_of 4 + 2.
+    check(round(w) == 195, "a round adds up")
+    i = 0
+    while i < 20 {
+        round(w)
+        i = i + 1
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                n = 0
+                while n < 100 {
+                    round(w)
+                    n = n + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_clause_functions passed ===")
+}

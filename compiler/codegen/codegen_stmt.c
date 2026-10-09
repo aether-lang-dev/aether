@@ -1536,8 +1536,8 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr) {
  * Skips nested function / closure scopes (their assignments are in
  * a different lexical frame). Stops at the first heap-source
  * assignment to `var_name`. */
-static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
-                                         int position);
+int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
+                                  int position);
 
 /* The tuple function function_def_returns_heap_at is walking. A position
  * it fills from its own recursive call (`s, k = f(n - 1, ...); return s, k`,
@@ -1730,7 +1730,7 @@ static int alias_source_owns(CodeGenerator* gen, ASTNode* root, const char* name
         if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
             p->value && strcmp(p->value, name) == 0)
             return p->node_type && p->node_type->kind == TYPE_STRING &&
-                   callee_string_param_captures(gen, fn->value, i);
+                   fn_def_string_param_captures(gen, fn, i);
     }
     return 0;
 }
@@ -1811,8 +1811,8 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
     return 0;
 }
 
-static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
-                                         int position);
+int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
+                                  int position);
 
 /* Does the analysed body bind `var_name` at a heap-classified tuple
  * position of some destructure (`..., x, ... = g(...)`)?
@@ -1896,7 +1896,7 @@ static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char
  * identifiers, which is the wrong function whenever classification is
  * triggered from a caller's destructure site. `fn_name` is the analysed
  * function's. */
-static int returned_param_is_captured(CodeGenerator* gen, const char* name, const char* fn_name);
+static int returned_param_is_captured(CodeGenerator* gen, const char* name, ASTNode* fn_def);
 static int classify_open_has(ASTNode* fn);
 
 /* #2649: is `e` a call to a `string` function whose classification is open
@@ -1915,18 +1915,31 @@ static int call_to_open_classification(CodeGenerator* gen, ASTNode* e) {
     return def && def->node_type && def->node_type->kind == TYPE_STRING && classify_open_has(def);
 }
 
+/* The definition named `fn_name` whose body is `body_root`: the clause of a
+ * set it is (#2644), whose own parameters and cells the body sees, or the
+ * single definition. */
+static ASTNode* def_of_body(CodeGenerator* gen, const char* fn_name, ASTNode* body_root) {
+    const DefClauses* dc = (gen && gen->program && fn_name)
+                               ? program_index_clauses(gen->program, fn_name) : NULL;
+    for (int c = 0; dc && c < dc->count; c++)
+        for (int k = 0; k < dc->nodes[c]->child_count; k++)
+            if (dc->nodes[c]->children[k] == body_root) return dc->nodes[c];
+    return (dc && dc->count > 0) ? dc->nodes[0] : NULL;
+}
+
 static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
                                ASTNode* fn_body_root, const char* fn_name) {
     if (!expr) return 0;
     if (call_to_open_classification(gen, expr)) return 1;
     if (expr->type == AST_IDENTIFIER) {
-        return expr->value && fn_body_root &&
-               (body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
-                body_tuple_destructure_binds_heap(gen, fn_body_root,
-                                                  expr->value) ||
-                returns_promoted_string(gen, expr, fn_name) ||
-                /* A kept parameter is this function's own reference. */
-                returned_param_is_captured(gen, expr->value, fn_name));
+        if (!expr->value || !fn_body_root) return 0;
+        ASTNode* fn_def = def_of_body(gen, fn_name, fn_body_root);
+        return body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
+               body_tuple_destructure_binds_heap(gen, fn_body_root, expr->value) ||
+               returns_promoted_string(gen, expr,
+                                       fn_def ? fn_scope_name(gen->program, fn_def) : fn_name) ||
+               /* A kept parameter is this function's own reference. */
+               returned_param_is_captured(gen, expr->value, fn_def);
     }
     /* #2461: a field read is taken as a copy at the return site (the
      * struct, often this function's own local, frees its buffer at scope
@@ -2052,16 +2065,13 @@ static void walk_returns_for_heap_check_in(CodeGenerator* gen, ASTNode* node,
 
 /* #2627: the clauses of a function written as several (`f(0) -> ...`,
  * `f(n) -> ...`), when `fn_def` is one of them; NULL for a single
- * definition. They are one C function (generate_combined_function), so
- * what it hands over is the same for every clause: the classifiers below
- * read them all and memoise the answer on each. */
+ * definition. Their dispatcher hands over what the matching clause's
+ * function returns (generate_combined_function), so what the set hands
+ * over is the same for every clause: the classifiers below read them all
+ * and memoise the answer on each, and each clause function returns as its
+ * set does. */
 static const DefClauses* fn_clause_set(CodeGenerator* gen, ASTNode* fn_def) {
-    if (!gen || !gen->program || !fn_def || !fn_def->value) return NULL;
-    const DefClauses* dc = program_index_clauses(gen->program, fn_def->value);
-    if (!dc || dc->count < 2) return NULL;
-    for (int i = 0; i < dc->count; i++)
-        if (dc->nodes[i] == fn_def) return dc;
-    return NULL;
+    return gen ? fn_def_clause_set(gen->program, fn_def) : NULL;
 }
 
 /* The functions a return classifier is analysing, for the ones whose
@@ -4057,8 +4067,8 @@ static int parse_heap_positions_annotation(const char* ann, int position) {
     return -1;  /* position out of range */
 }
 
-static int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
-                                         int position) {
+int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
+                                  int position) {
     if (!fn_def ||
         (fn_def->type != AST_FUNCTION_DEFINITION &&
          fn_def->type != AST_BUILDER_FUNCTION)) {
@@ -4785,7 +4795,7 @@ static int param_escapes_in_subtree(CodeGenerator* gen, ASTNode* node,
                                      const char* pname, int depth,
                                      int return_is_escape);
 /* #2499: set while a copy-on-keep query (closure_string_param_kept,
- * callee_string_param_kept) asks whether a `string` parameter's REFERENCE
+ * callee_keeps_given_string) asks whether a `string` parameter's REFERENCE
  * outlives the call. A capture by a nested closure takes its own reference,
  * and an alias into a local keeps it only if that local does, so neither
  * is a keep by itself there. */
@@ -4831,10 +4841,12 @@ static int keep_alias_is_local(CodeGenerator* gen, const char* name) {
 static int g_escape_param_is_closure = 0;
 
 /* #2627: how many clauses `func_name` is written as (1 for a single
- * definition). A function written as several is one C function, so an
+ * definition). A caller cannot tell which clause a call reaches, so an
  * answer about one of its parameters is the union of every clause's: the
- * walks below ask resolve_callee_param_clause of each, and a clause body
- * takes no reference of its own (callee_string_param_captures). */
+ * walks below ask resolve_callee_param_clause of each, and each clause
+ * function takes a reference of its own to a `string` it keeps
+ * (def_string_param_captures_at, #2644), which its callers ask clause by
+ * clause (callee_keeps_given_string). */
 static int callee_clause_count(CodeGenerator* gen, const char* func_name) {
     if (!gen || !gen->program || !func_name) return 1;
     const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
@@ -4927,15 +4939,6 @@ static int callee_param_escapes_in_clause(CodeGenerator* gen, const char* func_n
     return r;
 }
 
-/* #2499 copy-on-keep, for a named function called through its closure
- * adapter (emit_bare_fn_adapters): does it keep its `string` parameter
- * `param_idx` past the call, so the adapter must hand it a reference of its
- * own? The same question closure_string_param_kept asks of a closure
- * literal: a capture or an alias into a local that keeps nothing is no
- * keep. A return counts only when `return_is_keep`. */
-static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
-                                       int return_is_keep, int depth);
-
 /* The ownership answers about a callee's `string` parameter are properties
  * of the callee's body alone, so each is computed once per program and
  * remembered (gen->callee_memo). Computed afresh (the depth bound restarts
@@ -4944,8 +4947,7 @@ static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name
  * the one that only ever keeps a caller's argument alive longer.
  * Unremembered, every walk re-walked every callee at every call site, a
  * cost that multiplied with nesting. */
-enum { CALLEE_Q_HANDBACK, CALLEE_Q_KEEPS, CALLEE_Q_CAPTURES, CALLEE_Q_KEPT, CALLEE_Q_KEPT_RET,
-       CALL_Q_HANDS_BACK_TEMP };
+enum { CALLEE_Q_HANDBACK, CALLEE_Q_KEEPS, CALLEE_Q_CAPTURES, CALL_Q_HANDS_BACK_TEMP };
 
 typedef struct {
     ASTNode* fn;
@@ -5045,46 +5047,11 @@ void hands_back_temp_memo_end(CodeGenerator* gen, ASTNode* call, int r, int mark
     if (m) m->state = g_pending_answers != mark ? 0 : r ? 3 : 2;
 }
 
-int callee_string_param_kept(CodeGenerator* gen, const char* func_name, int param_idx,
-                             int return_is_keep) {
-    return callee_string_param_kept_at(gen, func_name, param_idx, return_is_keep, 0);
-}
-
-static int callee_string_param_kept_at_walk(CodeGenerator* gen, const char* func_name,
-                                            int param_idx, int return_is_keep, int depth);
-
-static int callee_string_param_kept_at(CodeGenerator* gen, const char* func_name, int param_idx,
-                                       int return_is_keep, int depth) {
-    int query = return_is_keep ? CALLEE_Q_KEPT_RET : CALLEE_Q_KEPT;
-    ASTNode* fn = callee_memo_fn(gen, func_name);
-    int r;
-    int known = fn ? callee_memo_begin(gen, fn, param_idx, query, 1, &r) : -1;
-    if (known == 1) return r;
-    r = callee_string_param_kept_at_walk(gen, func_name, param_idx, return_is_keep,
-                                         known == 0 ? 0 : depth);
-    if (known == 0) callee_memo_end(gen, fn, param_idx, query, r);
-    return r;
-}
-
-static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* func_name,
-                                              int param_idx, int clause, int return_is_keep,
-                                              int depth);
-
-static int callee_string_param_kept_at_walk(CodeGenerator* gen, const char* func_name,
-                                            int param_idx, int return_is_keep, int depth) {
-    /* Mutual recursion between callees: past the bound the parameter
-     * counts as kept, which only ever keeps a caller's argument alive
-     * longer (the walk through callee_keeps_string_arg restarts here). */
-    if (depth > 8) return 1;
-    int n = callee_clause_count(gen, func_name);
-    for (int c = 0; c < n; c++) {   /* #2627: any clause */
-        if (n > 1 && callee_param_is_pattern_literal(gen, func_name, param_idx, c)) continue;
-        if (callee_string_param_kept_in_clause(gen, func_name, param_idx, c, return_is_keep, depth))
-            return 1;
-    }
-    return 0;
-}
-
+/* #2499 copy-on-keep, clause by clause: does clause `clause` of `func_name`
+ * keep its `string` parameter `param_idx` past the call? The same question
+ * closure_string_param_kept asks of a closure literal: a capture or an
+ * alias into a local that keeps nothing is no keep. A return counts only
+ * when `return_is_keep`. Unresolvable: kept. */
 static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* func_name,
                                               int param_idx, int clause, int return_is_keep,
                                               int depth) {
@@ -5108,16 +5075,27 @@ static int callee_string_param_kept_in_clause(CodeGenerator* gen, const char* fu
     return kept;
 }
 
-/* The `string` parameter `param_idx` of `func_name`, or NULL. */
-static ASTNode* callee_string_param_node(CodeGenerator* gen, const char* func_name, int param_idx) {
-    if (!gen || !gen->program || !func_name || param_idx < 0) return NULL;
-    const char* fn = codegen_normalise_callee(func_name);
-    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
-    if (!fn_def || param_idx >= fn_def->child_count) return NULL;
+/* Parameter `param_idx` of the definition `fn_def` when it binds a
+ * `string`, or NULL. */
+static ASTNode* def_string_param(ASTNode* fn_def, int param_idx) {
+    if (!fn_def || param_idx < 0 || param_idx >= fn_def->child_count) return NULL;
     ASTNode* param = fn_def->children[param_idx];
     if (!param || !param->value || !param->node_type || param->node_type->kind != TYPE_STRING ||
         (param->type != AST_VARIABLE_DECLARATION && param->type != AST_PATTERN_VARIABLE)) return NULL;
     return param;
+}
+
+/* The `string` parameter `param_idx` of `func_name`, or NULL: of the first
+ * clause that binds one there, for a set (#2644: a literal pattern in the
+ * first clause hid the string the others take). */
+static ASTNode* callee_string_param_node(CodeGenerator* gen, const char* func_name, int param_idx) {
+    if (!gen || !gen->program || !func_name || param_idx < 0) return NULL;
+    const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
+    for (int c = 0; dc && c < dc->count; c++) {
+        ASTNode* param = def_string_param(dc->nodes[c], param_idx);
+        if (param) return param;
+    }
+    return NULL;
 }
 
 int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_idx) {
@@ -5138,50 +5116,48 @@ int callee_param_is_string(CodeGenerator* gen, const char* func_name, int param_
  * (emit_promoted_param_cell). `depth` bounds the walk through nested
  * callees, as every body walk here is bounded; past the bound the answer
  * is "does not capture", which only ever keeps a caller's argument alive
- * longer. */
+ * longer. A question about one definition: each clause of a set is a
+ * function of its own and decides for itself (#2644). */
 static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 static int param_consumed(CodeGenerator* gen, ASTNode* node, const char* pname, int depth);
 
-static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* func_name,
-                                                int param_idx, int depth);
+static int def_string_param_captures_walk(CodeGenerator* gen, ASTNode* fn_def,
+                                          int param_idx, int depth);
 
-static int callee_string_param_captures_at(CodeGenerator* gen, const char* func_name,
-                                           int param_idx, int depth) {
-    ASTNode* fn = callee_memo_fn(gen, func_name);
+static int def_string_param_captures_at(CodeGenerator* gen, ASTNode* fn_def,
+                                        int param_idx, int depth) {
+    if (!def_string_param(fn_def, param_idx)) return 0;
     int r;
-    int known = fn ? callee_memo_begin(gen, fn, param_idx, CALLEE_Q_CAPTURES, 0, &r) : -1;
+    int known = callee_memo_begin(gen, fn_def, param_idx, CALLEE_Q_CAPTURES, 0, &r);
     if (known == 1) return r;
-    r = callee_string_param_captures_at_walk(gen, func_name, param_idx, known == 0 ? 0 : depth);
-    if (known == 0) callee_memo_end(gen, fn, param_idx, CALLEE_Q_CAPTURES, r);
+    r = def_string_param_captures_walk(gen, fn_def, param_idx, known == 0 ? 0 : depth);
+    if (known == 0) callee_memo_end(gen, fn_def, param_idx, CALLEE_Q_CAPTURES, r);
     return r;
 }
 
-static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* func_name,
-                                                int param_idx, int depth) {
+static int def_string_param_captures_walk(CodeGenerator* gen, ASTNode* fn_def,
+                                          int param_idx, int depth) {
     if (depth > 8) return 0;
-    /* #2627: a clause body binds its parameters as they came
-     * (generate_combined_function); its caller keeps what it passes. */
-    if (callee_clause_count(gen, func_name) > 1) return 0;
-    ASTNode* param = callee_string_param_node(gen, func_name, param_idx);
+    ASTNode* param = def_string_param(fn_def, param_idx);
     if (!param) return 0;
-    const char* fn = codegen_normalise_callee(func_name);
-    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn);
     char** promoted = NULL;
     int promoted_count = 0;
-    get_promoted_names_for_func(gen, fn_def->value, &promoted, &promoted_count);
+    get_promoted_names_for_func(gen, fn_scope_name(gen->program, fn_def), &promoted, &promoted_count);
     for (int k = 0; k < promoted_count; k++) {
         if (promoted[k] && strcmp(promoted[k], param->value) == 0) return 0;
     }
-    const char* pname; ASTNode* body;
-    int saved_cl = g_escape_param_is_closure;
-    if (!resolve_callee_param_body(gen, func_name, param_idx, &pname, &body)) {
-        g_escape_param_is_closure = saved_cl;
-        return 0;
+    ASTNode* body = NULL;
+    for (int i = fn_def->child_count - 1; i >= 0 && !body; i--) {
+        if (fn_def->children[i] && fn_def->children[i]->type == AST_BLOCK) body = fn_def->children[i];
     }
+    if (!body) return 0;
+    const char* pname = param->value;
+    int saved_cl = g_escape_param_is_closure;
     int saved_flag = g_capture_holds_own_ref;
     ASTNode* saved_body = g_keep_body;
     ASTNode* saved_closure = g_keep_closure;
     ASTNode* saved_fn = g_keep_fn;
+    g_escape_param_is_closure = 0;   /* a `string`, not a closure (#2528) */
     g_capture_holds_own_ref = 1;
     g_keep_body = body;
     g_keep_closure = NULL;
@@ -5210,10 +5186,46 @@ static int callee_string_param_captures_at_walk(CodeGenerator* gen, const char* 
     return captures;
 }
 
-int callee_string_param_captures(CodeGenerator* gen, const char* func_name, int param_idx) {
-    return callee_string_param_captures_at(gen, func_name, param_idx, 0);
+int fn_def_string_param_captures(CodeGenerator* gen, ASTNode* fn_def, int param_idx) {
+    return def_string_param_captures_at(gen, fn_def, param_idx, 0);
 }
 
+/* Clause `clause` of `func_name` (the single definition for 0), or NULL. */
+static ASTNode* callee_clause_def(CodeGenerator* gen, const char* func_name, int clause) {
+    if (!gen || !gen->program || !func_name) return NULL;
+    const DefClauses* dc = program_index_clauses(gen->program, codegen_normalise_callee(func_name));
+    return dc && clause >= 0 && clause < dc->count ? dc->nodes[clause] : NULL;
+}
+
+/* #2644: does some clause of `func_name` keep the caller's own `string`
+ * argument at `param_idx` past the call: keep it (a return counting when
+ * `return_is_keep`) without taking a reference of its own? A clause whose
+ * pattern there is a literal only compares it. Each clause function takes
+ * its own reference when it keeps a parameter (copy-on-keep), and the
+ * caller cannot tell which clause a call reaches, so its argument lives on
+ * when any clause keeps it as it came. For a single definition this is the
+ * plain rule: kept, and not by a reference of its own. */
+static int callee_keeps_given_string(CodeGenerator* gen, const char* func_name, int param_idx,
+                                     int return_is_keep, int depth) {
+    /* Mutual recursion between callees: past the bound the parameter
+     * counts as kept, which only ever keeps a caller's argument alive
+     * longer (the walk through callee_keeps_string_arg restarts here). */
+    if (depth > 8) return 1;
+    int n = callee_clause_count(gen, func_name);
+    for (int c = 0; c < n; c++) {
+        if (n > 1 && callee_param_is_pattern_literal(gen, func_name, param_idx, c)) continue;
+        if (def_string_param_captures_at(gen, callee_clause_def(gen, func_name, c), param_idx, depth))
+            continue;
+        if (callee_string_param_kept_in_clause(gen, func_name, param_idx, c, return_is_keep, depth))
+            return 1;
+    }
+    return 0;
+}
+
+int callee_string_param_kept_as_given(CodeGenerator* gen, const char* func_name, int param_idx,
+                                      int return_is_keep) {
+    return callee_keeps_given_string(gen, func_name, param_idx, return_is_keep, 0);
+}
 /* Is `pname` passed, as a bare argument anywhere under `node`, to a sink
  * the compiler cannot release behind: an extern parameter that keeps it
  * (`ptr`, unknown, `@retain`), a callee without a visible body, or a
@@ -5290,10 +5302,13 @@ static int param_opaque_sink(CodeGenerator* gen, ASTNode* node, const char* pnam
             if (is_retain_extern_param(gen, fn, i)) return 1;
             if (callee_has_visible_body(gen, node->value)) {
                 if (callee_param_is_string(gen, node->value, i)) {
-                    if (callee_string_param_captures_at(gen, node->value, i, depth + 1)) continue;
                     int nc = callee_clause_count(gen, node->value);
                     for (int c = 0; c < nc; c++) {   /* #2627: any clause */
                         if (nc > 1 && callee_param_is_pattern_literal(gen, node->value, i, c)) continue;
+                        /* One that takes a reference of its own sinks none
+                         * of ours (#2644: each clause decides). */
+                        if (def_string_param_captures_at(gen, callee_clause_def(gen, node->value, c),
+                                                         i, depth + 1)) continue;
                         const char* cp; ASTNode* cb;
                         int saved_cl = g_escape_param_is_closure;
                         int r = resolve_callee_param_clause(gen, node->value, i, c, &cp, &cb)
@@ -5400,23 +5415,21 @@ static int returns_copy_of_params(CodeGenerator* gen, ASTNode* fn_def) {
 
 static int callee_keeps_string_arg_walk(CodeGenerator* gen, const char* func_name,
                                         int param_idx, int depth) {
-    if (callee_string_param_captures_at(gen, func_name, param_idx, depth)) return 0;
     const char* fn = codegen_normalise_callee(func_name);
     ASTNode* fn_def = gen->program ? find_function_definition_by_name(gen->program, fn) : NULL;
     int copies = returns_copy_of_params(gen, fn_def);
-    return callee_string_param_kept_at(gen, func_name, param_idx, !copies, depth);
+    return callee_keeps_given_string(gen, func_name, param_idx, !copies, depth);
 }
 
-/* `return <param>` in `fn_name`: owned when the parameter is the function's
- * own reference (callee_string_param_captures). */
-static int returned_param_is_captured(CodeGenerator* gen, const char* name, const char* fn_name) {
-    if (!gen || !gen->program || !name || !fn_name) return 0;
-    ASTNode* fn_def = find_function_definition_by_name(gen->program, fn_name);
-    for (int i = 0; fn_def && i < fn_def->child_count; i++) {
+/* `return <param>` in `fn_def`: owned when the parameter is the function's
+ * own reference (fn_def_string_param_captures; a clause's own, #2644). */
+static int returned_param_is_captured(CodeGenerator* gen, const char* name, ASTNode* fn_def) {
+    if (!gen || !name || !fn_def) return 0;
+    for (int i = 0; i < fn_def->child_count; i++) {
         ASTNode* c = fn_def->children[i];
         if (c && (c->type == AST_PATTERN_VARIABLE || c->type == AST_VARIABLE_DECLARATION) &&
             c->value && strcmp(c->value, name) == 0) {
-            return callee_string_param_captures_at(gen, fn_name, i, 0);
+            return def_string_param_captures_at(gen, fn_def, i, 0);
         }
     }
     return 0;
@@ -5862,7 +5875,7 @@ static int handback_param(CodeGenerator* gen, ASTNode* call, int i, int depth) {
     if (known == 1) return r;
     int d = known == 0 ? 0 : depth;
     r = callee_keeps_string_arg(gen, call->value, i, d) &&
-        !callee_string_param_kept_at(gen, call->value, i, 0, d);
+        !callee_keeps_given_string(gen, call->value, i, 0, d);
     if (known == 0) callee_memo_end(gen, fn, i, CALLEE_Q_HANDBACK, r);
     return r;
 }
@@ -11888,22 +11901,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             }
                             // For function calls, look up the function's return type
                             else if (init->type == AST_FUNCTION_CALL && init->value) {
-                                for (int fi = 0; fi < gen->program->child_count; fi++) {
-                                    ASTNode* fn = gen->program->children[fi];
-                                    if (fn && (fn->type == AST_FUNCTION_DEFINITION || fn->type == AST_BUILDER_FUNCTION)
-                                        && fn->value && strcmp(fn->value, init->value) == 0) {
-                                        if (fn->node_type && fn->node_type->kind != TYPE_VOID
-                                            && fn->node_type->kind != TYPE_UNKNOWN) {
-                                            var_type = fn->node_type;
-                                        } else if (has_return_value(fn)) {
-                                            // Same heuristic as generate_function_definition:
-                                            // function has return-with-value but type is void → int
-                                            static Type int_type = { .kind = TYPE_INT };
-                                            var_type = &int_type;
-                                        }
-                                        break;
-                                    }
-                                }
+                                /* As its definition declares it, over every
+                                 * clause of a set (#2645). */
+                                ASTNode* fn = find_function_definition_by_name(gen->program, init->value);
+                                Type* rt = fn ? fn_result_type(gen, fn) : NULL;
+                                if (rt) var_type = rt;
                             }
                         }
 
@@ -13972,16 +13974,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         inner->node_type->kind != TYPE_UNKNOWN) {
                         returns_void = 0;
                     }
-                    // Also check if function has return statements
+                    // Also check what its definition returns (over every
+                    // clause of a set, #2645)
                     if (inner->value) {
-                        for (int fi = 0; fi < gen->program->child_count; fi++) {
-                            ASTNode* fdef = gen->program->children[fi];
-                            if (fdef && (fdef->type == AST_FUNCTION_DEFINITION || fdef->type == AST_BUILDER_FUNCTION) &&
-                                fdef->value && strcmp(fdef->value, inner->value) == 0) {
-                                if (has_return_value(fdef)) returns_void = 0;
-                                break;
-                            }
-                        }
+                        ASTNode* fdef = find_function_definition_by_name(gen->program, inner->value);
+                        if (fdef && fn_result_type(gen, fdef)) returns_void = 0;
                     }
 
                     if (!returns_void) {

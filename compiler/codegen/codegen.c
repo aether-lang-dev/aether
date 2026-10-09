@@ -1507,6 +1507,16 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             }
         }
     }
+    /* #2644: each clause of a set is a scope of its own, named by its node
+     * (fn_scope_name); the closure analyses resolve the name per lookup. */
+    for (int i = 0; i < strmap_count(&ix->defs); i++) {
+        DefClauses* dc = strmap_value_at(&ix->defs, i);
+        for (int k = 0; dc && dc->count > 1 && k < dc->count; k++) {
+            char nm[64];
+            snprintf(nm, sizeof(nm), "__clause_%p", (void*)dc->nodes[k]);
+            strmap_put(&ix->clause_scopes, nm, dc->nodes[k]);
+        }
+    }
 }
 
 ProgramIndex* program_index(ASTNode* program) {
@@ -1527,6 +1537,7 @@ void program_index_reset(void) {
     strmap_free(&ix->defs);
     strmap_free(&ix->externs);
     strmap_free(&ix->c_callbacks);
+    strmap_free(&ix->clause_scopes);
     ix->program = NULL;
     ix->child_count = 0;
     ix->main_fn = NULL;
@@ -1536,6 +1547,44 @@ const DefClauses* program_index_clauses(ASTNode* program, const char* name) {
     ProgramIndex* ix = program_index(program);
     if (!ix || !name) return NULL;
     return strmap_get(&ix->defs, name);
+}
+
+/* #2644: the clauses of the set `fn_def` is one of (`f(0) -> ...`, `f(n) ->
+ * ...`), or NULL for a single definition. */
+const DefClauses* fn_def_clause_set(ASTNode* program, ASTNode* fn_def) {
+    if (!program || !fn_def || !fn_def->value) return NULL;
+    const DefClauses* dc = program_index_clauses(program, fn_def->value);
+    if (!dc || dc->count < 2) return NULL;
+    for (int i = 0; i < dc->count; i++)
+        if (dc->nodes[i] == fn_def) return dc;
+    return NULL;
+}
+
+/* #2644: each clause of a set is a C function of its own, so it is a scope
+ * of its own for the closure analyses (codegen_expr.c), which name a scope
+ * by a string: a single definition by its name, a clause by its node, as a
+ * hoisted closure is. Two clauses may bind one name to values of different
+ * types, and a closure in one mutates its own clause's parameter. */
+const char* fn_scope_name(ASTNode* program, ASTNode* fn) {
+    if (!fn || !fn->value) return NULL;
+    if (!fn_def_clause_set(program, fn)) return cg_intern(fn->value);
+    return cg_internf("__clause_%p", (void*)fn);
+}
+
+/* The clause whose fn_scope_name is `scope`, or NULL. */
+ASTNode* find_clause_by_scope_name(ASTNode* program, const char* scope) {
+    if (!program || !scope || strncmp(scope, "__clause_", 9) != 0) return NULL;
+    ProgramIndex* ix = program_index(program);
+    return ix ? strmap_get(&ix->clause_scopes, scope) : NULL;
+}
+
+/* The static C function clause `clause` of its set is emitted as: its
+ * position in the set and the set's C name (generate_combined_function). */
+const char* clause_c_name(ASTNode* program, ASTNode* clause) {
+    const DefClauses* dc = fn_def_clause_set(program, clause);
+    int k = 0;
+    while (dc && k < dc->count && dc->nodes[k] != clause) k++;
+    return cg_internf("_aether_clause%d_%s", k, safe_c_name(clause->value));
 }
 
 // Helper: count how many function clauses exist with the same name
@@ -3141,6 +3190,9 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char* pub_name = NULL;
         const char* pub_module = NULL;
         if (!lib_fn_identity(fn, &alias, &pub_name, &pub_module)) continue;
+        /* A function written as several clauses is one symbol, its
+         * dispatcher's (#2644): one alias, from its first clause. */
+        if (find_function_definition_by_name(program, fn->value) != fn) continue;
 
         // Check that every param type is ABI-representable.
         // The last non-guard, non-block child is the body; everything before
@@ -3200,9 +3252,11 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         // (`int32_t aether_helper(...)` calling a `_tuple_int_int`
         // returner). Skip the alias entirely with the same warning the
         // parameter-side check uses. Closes #277.
-        const char* ret_abi = get_abi_type(fn->node_type);
-        int returns_value = has_return_value(fn);
-        int return_is_tuple = (fn->node_type && fn->node_type->kind == TYPE_TUPLE);
+        /* As the definition decides it, over every clause of a set (#2645). */
+        Type* result = fn_result_type(gen, fn);
+        const char* ret_abi = get_abi_type(result);
+        int returns_value = result != NULL;
+        int return_is_tuple = (result && result->kind == TYPE_TUPLE);
         if (return_is_tuple) {
             char msg[256];
             snprintf(msg, sizeof(msg),
@@ -4228,7 +4282,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (!pf) continue;
         ASTNode* owner = NULL;
         for (int i = 0; i < cfn_count; i++) {
-            if (cfns[i]->value && strcmp(cfns[i]->value, pf) == 0) { owner = cfns[i]; break; }
+            /* A clause of a set is its closures' scope (#2644). */
+            if (cfns[i]->value && strcmp(fn_scope_name(gen->program, cfns[i]), pf) == 0) {
+                owner = cfns[i];
+                break;
+            }
         }
         if (!owner) continue;   /* parent is main / synthetic / non-exported */
         ASTNode* cnode = gen->closures[ci].closure_node;
@@ -8526,48 +8584,31 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                                                                : "static AETHER_MAYBE_UNUSED ");
         }
 
-        // Determine return type. Mirrors generate_function_definition's
-        // logic so the forward declaration and body always agree:
-        //   - unannotated + has return-with-value → int (legacy default)
-        //   - unannotated + no return-with-value  → void (issue #354)
-        Type* ret_type = child->node_type;
-        int func_has_return = has_return_value(child);
-        int ret_unannotated = (!ret_type
-                               || ret_type->kind == TYPE_VOID
-                               || ret_type->kind == TYPE_UNKNOWN);
-        if (ret_unannotated && func_has_return) {
-            fprintf(gen->output, "int");
-        } else if (ret_unannotated) {
-            fprintf(gen->output, "void");
-        } else {
-            generate_type(gen, ret_type);
-        }
+        // The return type and the parameters exactly as the definition
+        // spells them (emit_function), so the two always agree: decided
+        // once over every clause of a set, whose prototype is its
+        // dispatcher's (#2645; the first clause alone declared a set whose
+        // first clause returns nothing `void` against an `int` definition).
+        emit_fn_result_c_type(gen, child);
         const char* cb_sym = c_callback_symbol(child);
         fprintf(gen->output, " %s(", cb_sym ? cb_sym : safe_c_name(child->value));
 
         // Generate parameter types
-        int param_count = 0;
-        for (int j = 0; j < child->child_count; j++) {
-            ASTNode* param = child->children[j];
-            if (param->type == AST_GUARD_CLAUSE || param->type == AST_BLOCK) continue;
-
+        int param_count = fn_param_count(child);
+        for (int j = 0; j < param_count; j++) {
+            if (j > 0) fprintf(gen->output, ", ");
+            ASTNode* param = fn_param_at(child, j);
             if (param->type == AST_PATTERN_LIST || param->type == AST_PATTERN_CONS) {
-                if (param_count > 0) fprintf(gen->output, ", ");
-                fprintf(gen->output, "int*, int");
-                param_count++;
-            } else if (param->type == AST_PATTERN_LITERAL ||
-                       param->type == AST_PATTERN_VARIABLE ||
-                       param->type == AST_PATTERN_STRUCT ||
-                       param->type == AST_VARIABLE_DECLARATION) {
-                if (param_count > 0) fprintf(gen->output, ", ");
-                /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
-                 * so the prototype matches the definition. */
-                if (is_fnptr_type(param->node_type)) {
-                    emit_fnptr_decl(gen, param->node_type, NULL);
-                } else {
-                    generate_type(gen, param->node_type);
-                }
-                param_count++;
+                fprintf(gen->output, "%s*, int", fn_list_param_elem_ctype(gen, child, j));
+                continue;
+            }
+            Type* pt = fn_param_type_at(gen, child, j);
+            /* #750: fn-ptr param → abstract declarator `R (*)(T1,T2)`
+             * so the prototype matches the definition. */
+            if (is_fnptr_type(pt)) {
+                emit_fnptr_decl(gen, pt, NULL);
+            } else {
+                generate_type(gen, pt);
             }
         }
         // Builder functions get hidden void* _builder as last parameter

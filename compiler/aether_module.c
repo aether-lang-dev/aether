@@ -2629,6 +2629,54 @@ static int program_has_function(ASTNode* program, const char* prefixed_name) {
     return 0;
 }
 
+/* #2643: the definitions one module's merge pass has cloned so far. A
+ * function written as several clauses (`f(0) -> ...`, `f(n) -> ...`) is
+ * several definitions of one name, so a name the same pass merged a moment
+ * ago is a further clause to merge, not a duplicate: only a definition the
+ * program held before the pass (its own, an earlier import of the module,
+ * a revisit) makes the module's one a duplicate. program_has_function alone
+ * skipped every clause after the first, and an imported clause set kept
+ * only its first clause. */
+typedef struct {
+    ASTNode** nodes;
+    int count;
+    int cap;
+} MergePass;
+
+static void merge_pass_add(MergePass* pass, ASTNode* clone) {
+    if (pass->count == pass->cap) {
+        int cap = pass->cap ? pass->cap * 2 : 16;
+        ASTNode** nn = realloc(pass->nodes, sizeof(ASTNode*) * (size_t)cap);
+        if (!nn) return;   /* OOM: a later clause is then taken as a duplicate */
+        pass->nodes = nn;
+        pass->cap = cap;
+    }
+    pass->nodes[pass->count++] = clone;
+}
+
+static int merge_pass_has(const MergePass* pass, const ASTNode* node) {
+    for (int i = 0; i < pass->count; i++)
+        if (pass->nodes[i] == node) return 1;
+    return 0;
+}
+
+/* Is a function of the given prefixed name in the program, other than one
+ * this pass merged? */
+static int program_has_function_before(ASTNode* program, const char* prefixed_name,
+                                       const MergePass* pass) {
+    if (!program || !prefixed_name) return 0;
+    for (int m = 0; m < program->child_count; m++) {
+        ASTNode* existing = program->children[m];
+        if (existing && (existing->type == AST_FUNCTION_DEFINITION ||
+            existing->type == AST_BUILDER_FUNCTION) &&
+            existing->value && strcmp(existing->value, prefixed_name) == 0 &&
+            !merge_pass_has(pass, existing)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // Is a constant with the given prefixed name already a top-level child of
 // `program`? Mirrors program_has_function for the const-clone path — needed
 // because the merge loop can now revisit a synthetic import (aether#1009), and
@@ -3430,6 +3478,7 @@ void module_merge_into_program(ASTNode* program) {
         // selectively.
         inject_synthetic_bare_imports_from(program, mod_ast, &insert_idx);
 
+        MergePass pass = {0};
         for (int j = 0; j < mod_ast->child_count; j++) {
             ASTNode* decl = unwrap_export(mod_ast->children[j]);
 
@@ -3444,8 +3493,9 @@ void module_merge_into_program(ASTNode* program) {
                 // makes qualified calls resolve directly to the extern.
                 if (module_has_extern_named(mod_ast, prefixed)) continue;
 
-                // Skip if already merged (e.g. from a prior non-selective import)
-                if (program_has_function(program, prefixed)) continue;
+                // Skip if already merged (e.g. from a prior non-selective
+                // import); every clause of a set is merged (#2643).
+                if (program_has_function_before(program, prefixed, &pass)) continue;
 
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
@@ -3468,6 +3518,7 @@ void module_merge_into_program(ASTNode* program) {
                 apply_inherited_selective_imports(clone, mod_ast);
 
                 insert_child_at(program, clone, insert_idx++);
+                merge_pass_add(&pass, clone);
             } else if (decl->type == AST_EXTERN_FUNCTION && decl->value &&
                        decl->annotation &&
                        strncmp(decl->annotation, "c_symbol:", 9) == 0) {
@@ -3707,6 +3758,7 @@ void module_merge_into_program(ASTNode* program) {
             }
             // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
         }
+        free(pass.nodes);
     }
 
     // Transitive cross-module merge (#243). When user code does
@@ -3843,6 +3895,7 @@ void module_merge_into_program(ASTNode* program) {
                 insert_child_at(program, synth_import, insert_idx++);
             }
 
+            MergePass pass = {0};
             for (int j = 0; j < mod_ast->child_count; j++) {
                 ASTNode* decl = unwrap_export(mod_ast->children[j]);
                 if (!decl || !decl->value) continue;
@@ -3853,7 +3906,8 @@ void module_merge_into_program(ASTNode* program) {
                     snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
 
                     if (module_has_extern_named(mod_ast, prefixed)) continue;
-                    if (program_has_function(program, prefixed)) continue;
+                    /* Every clause of a set (#2643). */
+                    if (program_has_function_before(program, prefixed, &pass)) continue;
 
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
@@ -3866,6 +3920,7 @@ void module_merge_into_program(ASTNode* program) {
                     apply_inherited_selective_imports(clone, mod_ast);
 
                     insert_child_at(program, clone, insert_idx++);
+                    merge_pass_add(&pass, clone);
                 } else if (decl->type == AST_CONST_DECLARATION) {
                     char prefixed[256];
                     snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
@@ -3931,6 +3986,7 @@ void module_merge_into_program(ASTNode* program) {
                     insert_child_at(program, clone, insert_idx++);
                 }
             }
+            free(pass.nodes);
         }
     }
 
@@ -4068,6 +4124,8 @@ void module_merge_into_program(ASTNode* program) {
                                              oc_names, oc_count, NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
                     insert_child_at(program, clone, insert_idx++);
+                    /* Every clause of a set written as several (#2643). */
+                    continue;
                 } else if (decl->type == AST_CONST_DECLARATION) {
                     // The block-level guard above checks functions only; a
                     // const needs its own dedup or a revisit re-clones it.
@@ -4191,16 +4249,19 @@ static void namestack_push(NameStack* s, const char* name) {
 
 /* #2007: what the worklist drain asks of the program, indexed once.
  *
- * For each name popped it needs (a) the first definition with that name,
- * and (b) every imported definition whose prefixed form ends in `_<name>`
- * -- the glob-import / selective-import case where user code calls the
- * merged `mathlist_cube` as `cube`. Both were linear scans of the top
- * level per popped name, which made the drain quadratic. The index maps a
- * key to the first definition spelt exactly so, and to the list of
- * imported definitions for which the key is a `_`-delimited suffix; an
- * imported `a_b_c` is filed under `b_c` and `c`. */
+ * For each name popped it needs (a) the definitions with that name (every
+ * clause of a function written as several, #2643: the calls of a later
+ * clause reach what it calls), and (b) every imported definition whose
+ * prefixed form ends in `_<name>` -- the glob-import / selective-import
+ * case where user code calls the merged `mathlist_cube` as `cube`. Both
+ * were linear scans of the top level per popped name, which made the drain
+ * quadratic. The index maps a key to the definitions spelt exactly so, and
+ * to the list of imported definitions for which the key is a `_`-delimited
+ * suffix; an imported `a_b_c` is filed under `b_c` and `c`. */
 typedef struct {
-    ASTNode* first_def;
+    ASTNode** defs;
+    int def_count;
+    int def_cap;
     ASTNode** suffix_defs;
     int suffix_count;
     int suffix_cap;
@@ -4221,7 +4282,15 @@ static void prune_index_build(StrMap* ix, ASTNode* program) {
         if (!c || !c->value) continue;
         if (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION) continue;
         PruneEntry* e = prune_index_entry(ix, c->value);
-        if (e && !e->first_def) e->first_def = c;
+        if (e && e->def_count >= e->def_cap) {
+            int new_cap = e->def_cap ? e->def_cap * 2 : 2;
+            ASTNode** nd = realloc(e->defs, sizeof(ASTNode*) * (size_t)new_cap);
+            if (nd) {
+                e->defs = nd;
+                e->def_cap = new_cap;
+            }
+        }
+        if (e && e->def_count < e->def_cap) e->defs[e->def_count++] = c;
         if (!c->is_imported) continue;
         for (const char* p = strchr(c->value, '_'); p; p = strchr(p + 1, '_')) {
             if (!p[1]) break;
@@ -4242,7 +4311,7 @@ static void prune_index_build(StrMap* ix, ASTNode* program) {
 static void prune_index_free(StrMap* ix) {
     for (int k = 0; k < strmap_count(ix); k++) {
         PruneEntry* e = strmap_value_at(ix, k);
-        if (e) { free(e->suffix_defs); free(e); }
+        if (e) { free(e->defs); free(e->suffix_defs); free(e); }
     }
     strmap_free(ix);
 }
@@ -4536,7 +4605,8 @@ void module_mark_unreachable(ASTNode* program) {
     while (worklist.count > 0) {
         char* name = worklist.names[--worklist.count];
         PruneEntry* e = strmap_get(&index, name);
-        if (e && e->first_def) prune_collect_calls(e->first_def, &reachable, &worklist);
+        for (int k = 0; e && k < e->def_count; k++)
+            prune_collect_calls(e->defs[k], &reachable, &worklist);
         for (int k = 0; e && k < e->suffix_count; k++) {
             ASTNode* c = e->suffix_defs[k];
             if (nameset_add(&reachable, c->value)) {

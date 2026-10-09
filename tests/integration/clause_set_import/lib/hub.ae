@@ -1,0 +1,4 @@
+// A facade re-exporting a clause set of another module (#924).
+import clauses
+
+exports(label)

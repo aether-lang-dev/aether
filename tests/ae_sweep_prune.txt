@@ -42,6 +42,7 @@ tests/integration/c_static_inline/
 tests/integration/c_struct_verify/
 tests/integration/caller_info/
 tests/integration/circular_import_diag/
+tests/integration/clause_set_import/
 tests/integration/closure_actor_state_reject/
 tests/integration/closure_param_shadows_module_fn/
 tests/integration/closure_builder_ctx_inject_no_uaf/

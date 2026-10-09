@@ -755,6 +755,51 @@ grade(score) when score >= 60 -> "D"
 grade(score) when score < 60 -> "F"
 ```
 
+### How a Clause Set Runs
+
+The clauses are tried in order. A call runs the first clause whose literal
+patterns all equal its arguments and whose guard, if it has one, is true, and
+returns what that clause returns. Each guard is evaluated once, for the call
+that reaches its clause, and no clause after one that matches every call (no
+literal pattern, no guard) is ever tried. When no clause matches, a set that
+returns a value returns its type's zero value: `0`, `false`, an empty string,
+a tuple of zeros with an empty string at each string position, a struct of
+zeros.
+
+Each clause is a function of its own: whatever works in a single function's
+body works in a clause's. A closure in a clause can mutate the clause's
+parameters, a struct or fixed-size array parameter is the clause's own copy,
+two clauses may give one local name values of different types, and a clause's
+`requires` and `ensures` belong to that clause alone: they are checked when the
+call runs that clause, and the compile-time contract check applies a clause's
+`requires` only to the calls that can reach it.
+
+```aether,run
+name_of(0) -> string {
+    return "zero"
+}
+name_of(n: int) -> string
+requires n > 0
+{
+    return "n${n}"
+}
+
+main() {
+    println(name_of(0))   // the first clause: `requires n > 0` is not its
+    println(name_of(7))
+}
+```
+```output
+zero
+n7
+```
+
+The set's return type is decided over every clause: the first clause that
+declares one gives it; with none declared, the set returns `int` when any
+clause returns a value (a clause that returns nothing then gives `0`), and
+nothing otherwise. A clause set exported from a module is imported with all
+its clauses.
+
 ### Multi-Statement Arrow Bodies
 
 Arrow functions can have block bodies with `-> { ... }`. The last expression is the implicit return value:

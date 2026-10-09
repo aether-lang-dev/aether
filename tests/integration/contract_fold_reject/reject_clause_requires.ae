@@ -1,0 +1,17 @@
+// #2647: a clause's `requires` folds for the calls that reach that clause.
+// -3 matches no earlier literal pattern and fails the guard before it, so
+// the last clause takes it, under its own contract.
+name_of(0) -> string {
+    return "zero"
+}
+name_of(n: int) when n > 100 -> string {
+    return "big"
+}
+name_of(n: int) -> string
+requires n > 0
+{
+    return "n"
+}
+main() {
+    println(name_of(0 - 3))
+}

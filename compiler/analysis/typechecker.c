@@ -4689,10 +4689,13 @@ static void order_const_declarations(ASTNode* program) {
     strmap_free(&co.index);
 }
 
+static void tc_clauses_reset(void);
+
 int typecheck_program(ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;
+    tc_clauses_reset();   /* #2647: a program's clause sets, indexed afresh */
 
     /* #2631: a module file checked on its own (it has an `exports(...)`
      * list, the test `program_is_module` below makes too) knows the
@@ -10958,17 +10961,191 @@ static int tc_has_return_value(ASTNode* node) {
  * Returns 1 when `call` names a user-defined function that lowers to void.
  * Externs are excluded: their declared type is the only truth available, and
  * an `extern f() -> int` may well front a real int-returning C function. */
+/* #2645, #2647: a function written as several clauses (`f(0) -> ...`,
+ * `f(n) -> ...`) is one symbol, whose node is its last clause. What a call
+ * of it yields, and which `requires` can apply to a call, are questions
+ * about every clause. The clauses of each name, in program order, are
+ * indexed once per program (as codegen's program index is, #2007); the
+ * type checker frees no top-level node while it runs. */
+typedef struct {
+    ASTNode** nodes;
+    int count;
+    int cap;
+} TcClauses;
+
+static StrMap g_tc_clauses;
+static ASTNode* g_tc_clauses_program = NULL;
+static int g_tc_clauses_child_count = -1;
+
+static void tc_clauses_reset(void) {
+    for (int i = 0; i < strmap_count(&g_tc_clauses); i++) {
+        TcClauses* tc = strmap_value_at(&g_tc_clauses, i);
+        if (tc) { free(tc->nodes); free(tc); }
+    }
+    strmap_free(&g_tc_clauses);
+    g_tc_clauses_program = NULL;
+    g_tc_clauses_child_count = -1;
+}
+
+/* The clauses of the set `fn` is one of, or NULL for a single definition. */
+static const TcClauses* tc_clauses_of(ASTNode* fn) {
+    ASTNode* program = g_typecheck_program;
+    if (!program || !fn || !fn->value) return NULL;
+    if (g_tc_clauses_program != program || g_tc_clauses_child_count != program->child_count) {
+        tc_clauses_reset();
+        for (int i = 0; i < program->child_count; i++) {
+            ASTNode* c = program->children[i];
+            if (!c || !c->value ||
+                (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
+            TcClauses* tc = strmap_get(&g_tc_clauses, c->value);
+            if (!tc) {
+                tc = calloc(1, sizeof(TcClauses));
+                if (!tc) continue;
+                strmap_put(&g_tc_clauses, c->value, tc);
+            }
+            if (tc->count == tc->cap) {
+                int cap = tc->cap ? tc->cap * 2 : 2;
+                ASTNode** nn = realloc(tc->nodes, sizeof(ASTNode*) * (size_t)cap);
+                if (!nn) continue;
+                tc->nodes = nn;
+                tc->cap = cap;
+            }
+            tc->nodes[tc->count++] = c;
+        }
+        g_tc_clauses_program = program;
+        g_tc_clauses_child_count = program->child_count;
+    }
+    const TcClauses* tc = strmap_get(&g_tc_clauses, fn->value);
+    if (!tc || tc->count < 2) return NULL;
+    for (int i = 0; i < tc->count; i++)
+        if (tc->nodes[i] == fn) return tc;
+    return NULL;
+}
+
 static int fn_yields_no_value(ASTNode* fn) {
     if (!fn) return 0;
     if (fn->type != AST_FUNCTION_DEFINITION && fn->type != AST_BUILDER_FUNCTION)
         return 0;
-    /* An annotated return type is authoritative, whatever the body does. */
-    Type* rt = fn->node_type;
-    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 0;
-    /* Unannotated: void exactly when no `return <value>` reaches codegen.
-     * has_return_value is the same predicate codegen uses to decide, so the
-     * two cannot disagree. */
-    return !tc_has_return_value(fn);
+    /* A clause set yields what codegen's fn_result_type decides over every
+     * clause (#2645): a value when any clause declares a type or returns
+     * one. */
+    const TcClauses* set = tc_clauses_of(fn);
+    int n = set ? set->count : 1;
+    for (int c = 0; c < n; c++) {
+        ASTNode* clause = set ? set->nodes[c] : fn;
+        /* An annotated return type is authoritative, whatever the body does. */
+        Type* rt = clause->node_type;
+        if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 0;
+        /* Unannotated: void exactly when no `return <value>` reaches codegen.
+         * has_return_value is the same predicate codegen uses to decide, so
+         * the two cannot disagree. */
+        if (tc_has_return_value(clause)) return 0;
+    }
+    return 1;
+}
+
+/* Report the first `requires` of `fn` that the bindings in `env` decide
+ * false at `call` (the call-site tier of contract folding). Returns 1 when
+ * it reported one. */
+static int fold_call_requires(ASTNode* call, ASTNode* fn, ContractEnv* env) {
+    for (int ci = 0; ci < fn->child_count; ci++) {
+        ASTNode* cl = fn->children[ci];
+        if (!cl || cl->type != AST_REQUIRES_CLAUSE || cl->child_count == 0)
+            continue;
+        if (contract_eval_predicate(cl->children[0], env) != CONTRACT_FALSE)
+            continue;
+        char ptxt[512];
+        ContractStr ps = { ptxt, sizeof(ptxt), 0 };
+        contract_sprint_expr(&ps, cl->children[0]);
+        contract_str_terminate(&ps);
+        char emsg[768];
+        snprintf(emsg, sizeof(emsg),
+                 "precondition violation at compile time: %s in %s, this "
+                 "call's constant arguments can never satisfy it (the same "
+                 "check would panic at run time)",
+                 ptxt, call->value ? call->value : "?");
+        type_error(emsg, call->line, call->column);
+        return 1;   /* one violation per call site is enough */
+    }
+    return 0;
+}
+
+/* Does the argument `arg` match the literal pattern `pat`: TRUE or FALSE
+ * when both are known at compile time, UNKNOWN otherwise. */
+static ContractTri literal_pattern_matches(ASTNode* pat, ASTNode* arg) {
+    if (!pat || !arg || !pat->value || !pat->node_type) return CONTRACT_UNKNOWN;
+    if (pat->node_type->kind == TYPE_INT) {
+        int64_t v;
+        if (!contract_eval_int64(arg, g_enum_program, &v)) return CONTRACT_UNKNOWN;
+        return v == strtoll(pat->value, NULL, 0) ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    if (pat->node_type->kind == TYPE_BOOL) {
+        ContractEnv none = {{0}, {0}, 0, g_enum_program};
+        ContractTri t = contract_eval_predicate(arg, &none);
+        if (t == CONTRACT_UNKNOWN) return CONTRACT_UNKNOWN;
+        return (t == CONTRACT_TRUE) == (strcmp(pat->value, "true") == 0)
+                   ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    if (pat->node_type->kind == TYPE_STRING && arg->type == AST_LITERAL && arg->value &&
+        arg->node_type && arg->node_type->kind == TYPE_STRING) {
+        return strcmp(arg->value, pat->value) == 0 ? CONTRACT_TRUE : CONTRACT_FALSE;
+    }
+    return CONTRACT_UNKNOWN;
+}
+
+/* #2647: a `requires` belongs to its clause: its dispatcher checks it when
+ * it picks that clause, so the call-site fold applies a clause's contract
+ * only to a call that can reach the clause. In order, a clause whose
+ * literal pattern or guard this call's constant arguments rule out is
+ * passed over, its contract with it; one they cannot rule out has its
+ * contract folded under its own parameters (positions counting its literal
+ * patterns); one they surely match (every literal pattern equal, the guard
+ * true or absent) ends the walk, since no later clause is reached. The
+ * last clause's contract was folded for every call, so `name_of(0)`, which
+ * a first clause with no `requires` takes, failed on the second clause's
+ * `requires n > 0`. Returns 0 when `fn` is a single definition. */
+static int fold_clause_set_requires(ASTNode* call, ASTNode* fn) {
+    const TcClauses* set = tc_clauses_of(fn);
+    if (!set) return 0;
+    for (int k = 0; k < set->count; k++) {
+        ASTNode* clause = set->nodes[k];
+        ContractEnv env = {{0}, {0}, 0, g_enum_program};
+        int expected = count_function_params(clause);
+        int offset = (has_ctx_first_param(clause) && call->child_count == expected - 1) ? -1 : 0;
+        int can_match = 1, surely = 1, pos = 0;
+        for (int i = 0; i < clause->child_count; i++) {
+            ASTNode* p = clause->children[i];
+            if (!p) continue;
+            int is_var = p->type == AST_VARIABLE_DECLARATION || p->type == AST_PATTERN_VARIABLE;
+            if (!is_var && p->type != AST_PATTERN_LITERAL && p->type != AST_PATTERN_STRUCT &&
+                p->type != AST_PATTERN_LIST && p->type != AST_PATTERN_CONS) continue;
+            int slot = pos++ + offset;
+            ASTNode* arg = (slot >= 0 && slot < call->child_count) ? call->children[slot] : NULL;
+            if (is_var) {
+                if (arg && p->value && env.count < CONTRACT_ENV_MAX_PARAMS) {
+                    env.names[env.count] = p->value;
+                    env.args[env.count] = arg;
+                    env.count++;
+                }
+            } else if (p->type == AST_PATTERN_LITERAL && p->value && strcmp(p->value, "_") != 0) {
+                ContractTri m = literal_pattern_matches(p, arg);
+                if (m == CONTRACT_FALSE) can_match = 0;
+                if (m != CONTRACT_TRUE) surely = 0;
+            } else if (p->type != AST_PATTERN_LITERAL) {
+                surely = 0;   /* a struct or list pattern is not folded */
+            }
+        }
+        for (int i = 0; can_match && i < clause->child_count; i++) {
+            ASTNode* g = clause->children[i];
+            if (!g || g->type != AST_GUARD_CLAUSE || g->child_count == 0) continue;
+            ContractTri t = contract_eval_predicate(g->children[0], &env);
+            if (t == CONTRACT_FALSE) can_match = 0;
+            if (t != CONTRACT_TRUE) surely = 0;
+        }
+        if (!can_match) continue;
+        if (fold_call_requires(call, clause, &env) || surely) break;
+    }
+    return 1;
 }
 
 static int call_yields_no_value(ASTNode* call, SymbolTable* table) {
@@ -11977,26 +12154,12 @@ int typecheck_function_call(ASTNode* call, SymbolTable* table) {
          * correctness findings with it would conflate the two.
          *
          * Escape hatch for intentionally-unreachable calls: route the value
-         * through a runtime variable — only constant arguments bind. */
-        for (int ci = 0; ci < symbol->node->child_count; ci++) {
-            ASTNode* cl = symbol->node->children[ci];
-            if (!cl || cl->type != AST_REQUIRES_CLAUSE || cl->child_count == 0)
-                continue;
-            if (contract_eval_predicate(cl->children[0], &cf_env) != CONTRACT_FALSE)
-                continue;
-            char ptxt[512];
-            ContractStr ps = { ptxt, sizeof(ptxt), 0 };
-            contract_sprint_expr(&ps, cl->children[0]);
-            contract_str_terminate(&ps);
-            char emsg[768];
-            snprintf(emsg, sizeof(emsg),
-                     "precondition violation at compile time: %s in %s, this "
-                     "call's constant arguments can never satisfy it (the same "
-                     "check would panic at run time)",
-                     ptxt, call->value ? call->value : "?");
-            type_error(emsg, call->line, call->column);
-            break;   /* one violation per call site is enough */
-        }
+         * through a runtime variable: only constant arguments bind.
+         *
+         * A function written as several clauses folds each clause's own
+         * contract, for the calls that can reach it (#2647). */
+        if (!fold_clause_set_requires(call, symbol->node))
+            fold_call_requires(call, symbol->node, &cf_env);
     }
 
     // Validate argument types for extern functions (which always have typed params)

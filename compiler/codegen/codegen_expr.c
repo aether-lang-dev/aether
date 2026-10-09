@@ -400,18 +400,16 @@ int call_hands_back_temp(CodeGenerator* gen, ASTNode* call) {
 }
 
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
- * 0 no (a void function), -1 not known (no single visible definition). The
- * rule generate_function emits the signature by: the declared type, else
- * `int` when the body returns a value, else void. */
+ * 0 no (a void function), -1 not known (no visible definition). The rule
+ * the signature is emitted by (fn_result_type): the declared type, else
+ * `int` when the body returns a value, else void, decided over every clause
+ * of a set (#2645). */
 static int callee_result_shape(CodeGenerator* gen, const char* func_name) {
     if (!callee_has_visible_body(gen, func_name)) return -1;
     const char* fn = codegen_normalise_callee(func_name);
     const DefClauses* dc = program_index_clauses(gen->program, fn);
-    if (!dc || dc->count != 1 || !dc->nodes[0]) return -1;
-    ASTNode* fdef = dc->nodes[0];
-    Type* rt = fdef->node_type;
-    if (rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) return 1;
-    return has_return_value(fdef) ? 1 : 0;
+    if (!dc || dc->count < 1 || !dc->nodes[0]) return -1;
+    return fn_result_type(gen, dc->nodes[0]) ? 1 : 0;
 }
 
 /* #2507: may the owned closure at child `ai` of call `expr` be released once
@@ -2114,6 +2112,7 @@ static ASTNode* find_scope_node_by_name(ASTNode* program, const char* scope) {
     if (!program || !scope) return NULL;
     if (strncmp(scope, "__closure_", 10) == 0) return find_closure_by_name(program, scope);
     if (strncmp(scope, "__recv_arm_", 11) == 0) return find_receive_arm_by_name(program, scope);
+    if (strncmp(scope, "__clause_", 9) == 0) return find_clause_by_scope_name(program, scope);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
@@ -2139,29 +2138,48 @@ static void restore_fnptr_scope_for_closure(CodeGenerator* gen, const char* pare
     }
 }
 
-static const char* find_enclosing_scope_name(ASTNode* node, const char* scope,
+static const char* find_enclosing_scope_name_in(ASTNode* program, ASTNode* node,
+                                                const char* scope, ASTNode* scope_fn,
+                                                ASTNode* target);
+
+/* `program` is the root the walk starts from. */
+static const char* find_enclosing_scope_name(ASTNode* program, const char* scope,
                                              ASTNode* target) {
+    return find_enclosing_scope_name_in(program, program, scope, NULL, target);
+}
+
+/* `scope_fn`, when set, is the function definition whose scope the walk is
+ * in: its name is made (fn_scope_name, a clause's its own, #2644) only for
+ * the scope the target turns out to be in. */
+static const char* find_enclosing_scope_name_in(ASTNode* program, ASTNode* node,
+                                                const char* scope, ASTNode* scope_fn,
+                                                ASTNode* target) {
     if (!node) return NULL;
     char here[64];   /* `__recv_arm_<ptr>` / `__closure_<ptr>`: bounded */
     const char* child_scope = scope;
+    ASTNode* child_fn = scope_fn;
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
-        child_scope = node->value ? node->value : scope;
+        if (node->value) child_fn = node;
     } else if (node->type == AST_MAIN_FUNCTION) {
         child_scope = "main";
+        child_fn = NULL;
     } else if (is_receive_arm_scope(node)) {
         snprintf(here, sizeof(here), "__recv_arm_%p", (void*)node);
         child_scope = here;
+        child_fn = NULL;
     } else if (is_hoisted_closure(node)) {
         closure_scope_name(node, here, sizeof(here));
         child_scope = here;
+        child_fn = NULL;
     }
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* c = node->children[i];
         if (c == target) {
+            if (child_fn) return fn_scope_name(program, child_fn);
             /* Interned: `here` dies with this frame. */
             return child_scope ? cg_intern(child_scope) : NULL;
         }
-        const char* found = find_enclosing_scope_name(c, child_scope, target);
+        const char* found = find_enclosing_scope_name_in(program, c, child_scope, child_fn, target);
         if (found) return found;
     }
     return NULL;
@@ -2269,10 +2287,12 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
         if (!body || body->type != AST_BLOCK) return INT_MAX;
         return visible_decl_line(body, var_name, viewer);
     }
+    /* A clause of a set is a scope of its own (#2644). */
+    ASTNode* clause = find_clause_by_scope_name(program, func_name);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
-        int matches =
+        int matches = clause ? top == clause :
             (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) ||
             ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
              top->value && strcmp(top->value, func_name) == 0);
@@ -2354,11 +2374,15 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
         if (!body) return 0;
         return subtree_declares(body, var_name);
     }
+    /* A clause of a set is a scope of its own (#2644). */
+    ASTNode* clause = find_clause_by_scope_name(program, func_name);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
         if (!top) continue;
         int matches = 0;
-        if (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
+        if (clause) {
+            matches = top == clause;
+        } else if (strcmp(func_name, "main") == 0 && top->type == AST_MAIN_FUNCTION) {
             matches = 1;
         } else if ((top->type == AST_FUNCTION_DEFINITION || top->type == AST_BUILDER_FUNCTION) &&
                    top->value && strcmp(top->value, func_name) == 0) {
@@ -2598,7 +2622,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
     if (!node) return;
     // Entering a function body switches the enclosing function for descendants.
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
-        const char* new_enc = node->value ? node->value : enclosing_func;
+        /* A clause of a set is a scope of its own (#2644). */
+        const char* new_enc = node->value ? fn_scope_name(gen->program, node) : enclosing_func;
         for (int i = 0; i < node->child_count; i++) {
             discover_closures_scoped(gen, node->children[i], new_enc);
         }
@@ -2818,7 +2843,8 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
                     if (!body || body->type != AST_BLOCK) continue;
                     ASTNode* ret_expr = find_first_return_expr(body);
                     if (ret_expr && ret_expr->type == AST_IDENTIFIER && ret_expr->value)
-                        cid_to_bind = closure_var_id(gen, target_fn->value, ret_expr->value);
+                        cid_to_bind = closure_var_id(gen, fn_scope_name(gen->program, target_fn),
+                                                    ret_expr->value);
                     break;
                 }
             }
@@ -2906,7 +2932,7 @@ static void propagate_call_return_types_in(CodeGenerator* gen, ASTNode* node,
         Type* inner = node->node_type;
         for (int i = 0; i < node->child_count; i++) {
             propagate_call_return_types_in(gen, node->children[i], inner,
-                                           node->value ? node->value : scope);
+                                           node->value ? fn_scope_name(gen->program, node) : scope);
         }
         return;
     }
@@ -3362,12 +3388,14 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
         return decl_type_in_scope(receive_arm_body(arm), var_name);
     }
     // Parent-function-first lookup, through the program index (#2007).
+    // A clause of a set is its own scope (#2644): two clauses may bind
+    // one name to values of different types.
     if (parent_func) {
-        ASTNode* top = NULL;
-        if (strcmp(parent_func, "main") == 0) {
+        ASTNode* top = find_clause_by_scope_name(gen->program, parent_func);
+        if (!top && strcmp(parent_func, "main") == 0) {
             ProgramIndex* ix = program_index(gen->program);
             top = ix ? ix->main_fn : NULL;
-        } else {
+        } else if (!top) {
             top = find_function_definition_by_name(gen->program, parent_func);
         }
         if (top) {

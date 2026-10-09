@@ -1,0 +1,6 @@
+// A clause set reached through a re-exporting facade keeps every clause.
+import hub
+
+main() {
+    println("${hub.label(0)} ${hub.label(7)}")
+}
