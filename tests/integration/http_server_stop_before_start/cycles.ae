@@ -1,0 +1,30 @@
+// http_server_stop_before_start: open, start in the background, stop at once,
+// with no request in between, many times. A stop that lands before the
+// server thread reaches its accept loop used to be overwritten by the
+// thread's own `is_running = 1`; since 0.799 http_server_stop joins that
+// thread, so the lost stop hung the program. The driving shell test kills it
+// if it does not finish, and checks the time a stop takes.
+import std.http
+
+extern http_server_start_background_raw(server: ptr) -> int
+extern exit(code: int)
+
+main() {
+    i = 0
+    while i < 50 {
+        s = http.server_create(0)
+        if s == 0 {
+            println("FAIL: server_create")
+            exit(1)
+        }
+        http.server_set_host(s, "127.0.0.1")
+        if http_server_start_background_raw(s) < 0 {
+            println("FAIL: start_background")
+            exit(1)
+        }
+        http.server_stop(s)
+        http.server_free(s)
+        i = i + 1
+    }
+    println("CYCLES-OK 50")
+}

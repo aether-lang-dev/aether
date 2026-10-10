@@ -331,6 +331,12 @@ typedef struct HttpServer {
     pthread_t* accept_threads;      // Array of accept thread handles
     int* accept_listen_fds;         // Per-thread listen sockets (SO_REUSEPORT)
     AetherIoPoller* accept_pollers; // Per-thread I/O pollers
+    // The poll-loop server's wake pipe (POSIX): http_server_stop writes a
+    // byte to wake_fds[1] so the accept loop's poll() returns at once. Linux
+    // wakes a poll() on a socket that is shut down, but macOS and the BSDs
+    // do not, and each stop waited out the loop's one-second timeout.
+    // -1 where there is none (Windows, WASI, or pipe() failed).
+    int wake_fds[2];
 } HttpServer;
 
 // ============================================================================
