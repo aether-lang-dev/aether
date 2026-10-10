@@ -1,0 +1,15 @@
+// The program's globals are named like the module's locals and its global.
+import gm
+
+var count = 5
+var total = 9
+var hits = 100
+
+main() {
+    b = gm.bump()
+    c = gm.bump_in_closure()
+    gm.hit()
+    gm.hit()
+    println("bump=${b} closure=${c} module_hits=${gm.hits_seen()}")
+    println("count=${count} total=${total} hits=${hits}")
+}

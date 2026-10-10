@@ -1,0 +1,31 @@
+// A module whose locals and own global share names with the importing
+// program's top-level `var`s (see the driving test).
+exports(bump, bump_in_closure, hit, hits_seen)
+
+var hits = 0
+
+// `count` is this function's local.
+bump() -> int {
+    count = 7
+    count = count + 1
+    return count
+}
+
+// `total` is a local captured by a closure.
+bump_in_closure() -> int {
+    total = 1
+    f = || {
+        total = total + 2
+    }
+    f()
+    return total
+}
+
+// `hits` is this module's own global.
+hit() {
+    hits = hits + 1
+}
+
+hits_seen() -> int {
+    return hits
+}

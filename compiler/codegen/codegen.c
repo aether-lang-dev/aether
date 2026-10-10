@@ -569,7 +569,9 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->heap_box_vars = NULL;
     gen->heap_box_var_count = 0;
     gen->module_global_vars = NULL;
+    gen->module_global_var_is_program = NULL;
     gen->module_global_var_count = 0;
+    gen->current_origin_module = NULL;
     gen->generating_lvalue = 0;  // Not generating lvalue by default
     gen->interp_as_printf = 0;  // Default: interp generates _aether_interp() not printf()
     gen->in_condition = 0;  // Not in condition by default
@@ -954,6 +956,7 @@ void code_generator_release(CodeGenerator* gen) {
                 free(gen->module_global_vars[i]);
             }
             free(gen->module_global_vars);
+            free(gen->module_global_var_is_program);
         }
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
@@ -1011,6 +1014,15 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
     if (!name) return 0;
     for (int i = 0; i < gen->module_global_var_count; i++) {
         if (strcmp(gen->module_global_vars[i], name) == 0) {
+            /* The program's own globals are not a module's: in a function
+             * merged from a module a bare `ok` is that function's local,
+             * which C's scoping then shadows the program's `ok` with. Read
+             * as the global, a module's `ok = file_delete_raw(path)` became
+             * a store to the program's `var ok` (aether-ui
+             * asks/aether-program-global-leaks-into-module-scope.md). */
+            if (gen->module_global_var_is_program &&
+                gen->module_global_var_is_program[i] && gen->current_origin_module)
+                return 0;
             return 1;
         }
     }
@@ -1029,12 +1041,19 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 }
 
 // #701: record a module-level `var` global name (deduped).
-void register_module_global_var(CodeGenerator* gen, const char* name) {
-    if (!name || is_module_global_var(gen, name)) return;
+void register_module_global_var(CodeGenerator* gen, const char* name, int is_program) {
+    if (!name) return;
+    for (int i = 0; i < gen->module_global_var_count; i++)
+        if (strcmp(gen->module_global_vars[i], name) == 0) return;
     char** grown = realloc(gen->module_global_vars,
                            sizeof(char*) * (gen->module_global_var_count + 1));
     if (!grown) return;
     gen->module_global_vars = grown;
+    unsigned char* flags = realloc(gen->module_global_var_is_program,
+                                   (size_t)gen->module_global_var_count + 1);
+    if (!flags) return;
+    gen->module_global_var_is_program = flags;
+    flags[gen->module_global_var_count] = is_program ? 1 : 0;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
 }
 
@@ -5542,6 +5561,7 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
      * for them. */
     ASTNode* prev_current_function = gen->current_function;
     gen->current_function = main;
+    gen->current_origin_module = NULL;
     const char* prev_closure_var_scope = gen->closure_var_scope;
     gen->closure_var_scope = "main";   /* #2513 */
 
@@ -8627,7 +8647,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // to a write to this static rather than a shadowing local.
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
-                register_module_global_var(gen, cd->value);
+                register_module_global_var(gen, cd->value, cd->origin_module == NULL);
             } else if (fn_const_decl(cd)) {
                 /* #2648: emitted with the module vars, after the function
                  * prototypes and adapters (emit_module_global_vars). */

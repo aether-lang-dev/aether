@@ -305,12 +305,71 @@ void add_symbol(SymbolTable* table, const char* name, Type* type, int is_actor, 
     symtab_link(table, symbol);
 }
 
+static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from);
+
+/* The program's own top-level `var`s (no origin_module), named once per
+ * typecheck_program before anything is looked up. A module's code never
+ * sees them: from a merged body (merged_from set) lookup_symbol_in does not
+ * resolve one, so a module's bare `n = ...` binds its own local instead of
+ * type-checking against, or writing, the program's `n`. Only a file-scope
+ * entry no walk added is hidden: the inference pass pushes a function's
+ * locals onto the same flat table, stamped with its walk id
+ * (aether-ui asks/aether-program-global-leaks-into-module-scope.md). */
+static const char** g_program_globals = NULL;
+static int g_program_global_count = 0;
+
+static int is_program_global_name(const char* name) {
+    for (int i = 0; i < g_program_global_count; i++)
+        if (strcmp(g_program_globals[i], name) == 0) return 1;
+    return 0;
+}
+
+static void note_program_globals(ASTNode* program) {
+    for (int i = 0; i < g_program_global_count; i++) free((char*)g_program_globals[i]);
+    free(g_program_globals);
+    g_program_globals = NULL;
+    g_program_global_count = 0;
+    if (!program) return;
+    int n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0) n++;
+    }
+    if (n == 0) return;
+    g_program_globals = malloc(sizeof(char*) * (size_t)n);
+    if (!g_program_globals) return;
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
+            c->annotation && strcmp(c->annotation, "global_var") == 0)
+            if ((g_program_globals[g_program_global_count] = strdup(c->value)))
+                g_program_global_count++;
+    }
+}
+
 Symbol* lookup_symbol(SymbolTable* table, const char* name) {
+    if (!table || !name) return NULL;
+    return lookup_symbol_in(table, name, table->merged_from);
+}
+
+/* `merged_from` is the scope the lookup STARTED in: a merged body's, even
+ * when the walk reaches a file scope whose own merged_from says otherwise. */
+static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char* merged_from) {
     if (!table || !name) return NULL;
 
     // Local bindings always win — `hide` and `seal except` only block
     // resolution that would walk OUT of this scope into a parent.
     Symbol* symbol = lookup_symbol_local(table, name);
+    /* The program's own top-level `var`s are the program's: a module's code
+     * (a merged body, table->merged_from) never resolves to one. A module's
+     * own globals are merged under `<ns>_name`, so a bare name there that
+     * finds a file-scope var found the program's. It did, and a module
+     * function's `ok = file_delete_raw(path)` wrote a program's `var ok`
+     * (aether-ui asks/aether-program-global-leaks-into-module-scope.md). */
+    if (symbol && merged_from && !table->parent && symbol->walk_id == 0 &&
+        !symbol->is_function && !symbol->is_actor && is_program_global_name(name))
+        return NULL;
     if (symbol) return symbol;
 
     // Issue #333 DSL block receiver fallback: when this scope is the
@@ -355,7 +414,7 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
     }
 
     if (table->parent) {
-        return lookup_symbol(table->parent, name);
+        return lookup_symbol_in(table->parent, name, merged_from);
     }
 
     return NULL;
@@ -4693,6 +4752,7 @@ static void order_const_declarations(ASTNode* program) {
 static void tc_clauses_reset(void);
 
 int typecheck_program(ASTNode* program) {
+    note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
     g_typecheck_program = program;
     g_tc_ptr_to_closure = 0;

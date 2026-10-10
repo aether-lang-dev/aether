@@ -1,0 +1,9 @@
+// std.fs's delete binds a local `ok`; the program's `var ok` must keep 42.
+import std.fs
+
+var ok = 42
+
+main() {
+    _e = fs.delete("/nonexistent/aether-program-global-probe")
+    println("ok=${ok}")
+}
