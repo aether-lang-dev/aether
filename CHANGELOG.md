@@ -14,6 +14,64 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.803.0]
+
+### Fixed
+
+- **Every C-backed contrib module builds from a binary release.** A release
+  ships contrib's C as source and builds no `libaether_<x>.a` archives, so on
+  a release-only install `import contrib.sqlite` failed to link
+  (`library 'aether_sqlite' not found`), and contrib.tinyweb,
+  contrib.i18n.collate and contrib.avcodec failed on their missing C. With
+  no `libaether_sqlite.a` beside `libaether.a`, `ae build` now compiles the
+  veneer and the pinned amalgamation the release ships, caches both objects
+  and links them in place of `-laether_sqlite -lsqlite3`, as the cross build
+  already did; tinyweb (`ws_handshake.c`), i18n.collate (`aether_i18n.c`,
+  `ducet_data.c`) and avcodec (`aether_avcodec.c`, plus FFmpeg's libraries
+  by `@link`) name their C with `@source`, so it ships and compiles in.
+  On FreeBSD a native build now searches `/usr/local/include` and
+  `/usr/local/lib` (or `$LOCALBASE`) as it does Homebrew's on macOS, so a
+  module's C can reach a package's headers (FFmpeg's, for avcodec).
+  `tests/integration/release_contrib_c_modules` builds and runs each from a
+  tree `scripts/stage-release.sh` staged.
+
+- **A builder's parameters and locals shadow its module's functions.** In a
+  `builder` body a parameter or local named like a function of the same
+  module resolved to the function, where a plain function's resolves to the
+  local: `builder java_main(main_class: string)` beside a `main_class()`
+  setter interpolated the setter's address (E0200), a local `with_path`
+  compared the `with_path()` setter's address with 1, and a local `depth`
+  passed the `depth()` setter's address as an int (aeb's java, bldr and
+  fetch modules). The module-merge rename now enters a builder's scope as it
+  does a function's. `asks/REPLY-builder-local-resolves-to-module-function.md`.
+
+- **A std.http server stopped before its thread starts stops, at once.**
+  `http_server_start_background_raw` returned as soon as it spawned the
+  server thread, whose first act was `is_running = 1`: a stop issued in
+  between was overwritten, the accept loop then ran for good, and since
+  0.799 (#2672) `http_server_stop` joins that thread, so open, start in the
+  background, stop with no request in between hung the program (found by
+  servirtium-vcr's "close is idempotent" check). The start now marks the
+  server running before it spawns the thread, and the thread runs nothing
+  if a stop came first. The poll loop also watches a wake pipe of the
+  server's own that a stop writes to: macOS and the BSDs do not wake a
+  `poll()` on a socket that is shut down, so each stop there waited out the
+  loop's one-second timeout. `tests/integration/http_server_stop_before_start`
+  runs 50 open/start/stop cycles under a watchdog.
+
+- **A program's top-level `var` no longer leaks into its imported modules.**
+  A module function's bare `ok = ...` binds its own local, but the checker
+  and codegen resolved it to the importing program's `var ok`: since 0.801
+  (#2613 checks every function of every module) `var n = 0` beside
+  `import std.fs` failed to type-check inside std.fs (`n = fs_pwrite_raw`,
+  E0200), and where the types agreed the module silently wrote the
+  program's variable (`var ok = 42` then `fs.delete(...)` left `ok == 0`,
+  as on 0.791 and earlier). Lookups from a merged module body now skip the
+  program's own globals in the checker, the inference pass and codegen; a
+  module's own globals and locals, and the program's, stay apart.
+  `tests/integration/program_global_not_in_module_scope`;
+  `asks/REPLY-aether-program-global-leaks-into-module-scope.md`.
+
 ## [0.802.0]
 
 ### Changed
