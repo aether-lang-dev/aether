@@ -4001,16 +4001,27 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
  * same reason, and only when there is a link: on `cc -c` clang reports an
  * unused -L, and that warning breaks exact-output tests. Native builds only;
  * a cross build never comes through build_gcc_cmd. */
+/* FreeBSD is the same case: its cc searches neither /usr/local/include nor
+ * /usr/local/lib, where every package installs, so a module whose @source C
+ * needs a package's header (contrib.avcodec: <libavcodec/avcodec.h> from the
+ * ffmpeg package) failed with "file not found" from a binary release, which
+ * builds no archive to carry it. LOCALBASE (the ports variable) wins, else
+ * /usr/local. */
 static const char* macos_homebrew_flags(int linking) {
-#if defined(__APPLE__)
+#if defined(__APPLE__) || defined(__FreeBSD__)
     static char flags[2][1200];
     static int computed = 0;
     if (!computed) {
         computed = 1;
         flags[0][0] = flags[1][0] = '\0';
-        const char* prefix = getenv("HOMEBREW_PREFIX");
         char inc[1100], lib[1100];
+#if defined(__APPLE__)
+        const char* prefix = getenv("HOMEBREW_PREFIX");
         if (!prefix || !*prefix) prefix = "/opt/homebrew";
+#else
+        const char* prefix = getenv("LOCALBASE");
+        if (!prefix || !*prefix) prefix = "/usr/local";
+#endif
         snprintf(inc, sizeof(inc), "%s/include", prefix);
         snprintf(lib, sizeof(lib), "%s/lib", prefix);
         if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
@@ -4026,6 +4037,109 @@ static const char* macos_homebrew_flags(int linking) {
     (void)linking;
     return "";
 #endif
+}
+
+/* Is `tok` one of the space-separated tokens of `list`? */
+static bool link_list_has(const char* list, const char* tok) {
+    size_t n = strlen(tok);
+    for (const char* p = list; p && *p; ) {
+        while (*p == ' ') p++;
+        const char* e = p;
+        while (*e && *e != ' ') e++;
+        if ((size_t)(e - p) == n && strncmp(p, tok, n) == 0) return true;
+        p = e;
+    }
+    return false;
+}
+
+/* contrib.sqlite on a toolchain with no libaether_sqlite.a.
+ *
+ * The module's @link asks for `-laether_sqlite -lsqlite3`, the veneer and
+ * SQLite archives `make contrib` builds beside libaether.a. A binary release
+ * builds no contrib archives -- it ships contrib/sqlite's veneer and the
+ * pinned amalgamation as source (#1372, #2208) -- so a release-only install
+ * failed every `import contrib.sqlite` with "library 'aether_sqlite' not
+ * found", while the contribs that ship C with @source (contrib.jq,
+ * contrib.quickjs, ...) compile it into the program. Do the same here: when
+ * no archive is there, compile the veneer and the amalgamation (both cached,
+ * the amalgamation being a ~260k-line TU) as the cross build already does,
+ * and link the objects in place of the two -l flags. A toolchain that has the
+ * archive keeps it, and so does one with no amalgamation to compile (the
+ * system-library route `make contrib` falls back to).
+ *
+ * Returns `ae_link` itself when nothing changes, else a string that lives
+ * until the next call; NULL when a compile failed (said). */
+static const char* vendored_sqlite_link(const char* cc, const char* ae_link,
+                                        const char* user_cflags) {
+    static char* rewritten = NULL;
+    if (g_emit_obj || g_emit_csrc) return ae_link;          /* no link */
+    if (!link_list_has(ae_link, "-laether_sqlite")) return ae_link;
+    if (tc.has_lib) {
+        char lib_dir[1024];
+        snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
+        char* bs = strrchr(lib_dir, '\\');
+        char* fs = strrchr(lib_dir, '/');
+        char* slash = (!bs) ? fs : (!fs) ? bs : (bs > fs ? bs : fs);
+        if (slash) *slash = '\0';
+        char a[1200];
+        snprintf(a, sizeof(a), "%s/contrib/libaether_sqlite.a", lib_dir);
+        if (path_exists(a)) return ae_link;
+        snprintf(a, sizeof(a), "%s/libaether_sqlite.a", lib_dir);
+        if (path_exists(a)) return ae_link;
+    }
+    char amal[1200];
+    snprintf(amal, sizeof(amal), "%s/contrib/sqlite/amalgamation/sqlite3.c", tc.src_root);
+    if (!path_exists(amal)) return ae_link;
+
+#ifdef _WIN32
+    const char* pic = "";
+#else
+    const char* pic = " -fPIC";
+#endif
+    char* flags = ae_strdup_printf("-O2%s%s%s", pic, user_cflags[0] ? " " : "", user_cflags);
+    if (!flags) {
+        fprintf(stderr, "Error: out of memory building the contrib.sqlite compile command.\n");
+        return NULL;
+    }
+    char objs[3400] = "";
+    bool ok = ae_vendored_sqlite(tc.src_root, "host", cc, flags, NULL, objs, sizeof(objs));
+    free(flags);
+    if (!ok) return NULL;
+
+    /* The objects take -laether_sqlite's place; -lsqlite3 goes, the
+     * amalgamation object being SQLite itself. */
+    size_t cap = strlen(ae_link) + strlen(objs) + 2;
+    char* out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory building the link command.\n");
+        return NULL;
+    }
+    size_t o = 0;
+    for (const char* p = ae_link; *p; ) {
+        while (*p == ' ') p++;
+        if (!*p) break;
+        const char* e = p;
+        while (*e && *e != ' ') e++;
+        size_t n = (size_t)(e - p);
+        const char* put = p;
+        size_t put_n = n;
+        if (n == 15 && strncmp(p, "-laether_sqlite", 15) == 0) {
+            put = objs[0] == ' ' ? objs + 1 : objs;
+            put_n = strlen(put);
+        } else if (n == 9 && strncmp(p, "-lsqlite3", 9) == 0) {
+            put_n = 0;
+        }
+        if (put_n) {
+            if (o) out[o++] = ' ';
+            memcpy(out + o, put, put_n);
+            o += put_n;
+        }
+        p = e;
+    }
+    out[o] = '\0';
+    free(rewritten);
+    rewritten = out;
+    return rewritten;
 }
 
 void build_gcc_cmd(char* cmd, size_t size,
@@ -4209,6 +4323,10 @@ void build_gcc_cmd(char* cmd, size_t size,
     /* See AETHER_WIN_SYSTEM_LIBS: one list, shared with `ae cflags --libs`
      * so the two cannot drift apart again. */
     const char* win_link_libs = AETHER_WIN_SYSTEM_LIBS;
+    /* contrib.sqlite with no archive here: compile it (see
+     * vendored_sqlite_link). */
+    ae_link = vendored_sqlite_link(s_gcc_cmd, ae_link, user_cflags);
+    if (!ae_link) { free(opt); set_failing_cmd(cmd, size); return; }
     char lib_dir[1024];
     if (tc.has_lib) {
         strncpy(lib_dir, tc.lib, sizeof(lib_dir) - 1);
@@ -4315,6 +4433,10 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
+    /* contrib.sqlite with no archive here: compile it (see
+     * vendored_sqlite_link). */
+    ae_link = vendored_sqlite_link(cc, ae_link, user_cflags);
+    if (!ae_link) { set_failing_cmd(cmd, size); return; }
     char* opt;   /* the flags, with user cflags of any length (#2534) */
     // --emit=lib adds -fPIC -shared so the output is loadable via dlopen.
     // --emit=both (exe + lib from one source) is not supported by this

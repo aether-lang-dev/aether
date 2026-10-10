@@ -55,14 +55,11 @@ contrib/i18n/
 
 ## Building a consumer
 
-The module is backed by three C files; pass them with `--extra`:
-
-```sh
-ae build yourprog.ae \
-  --extra contrib/i18n/aether_i18n.c \
-  --extra std/unicode/utf8proc/utf8proc.c \
-  --extra contrib/i18n/ducet/ducet_data.c
-```
+`ae build yourprog.ae` is all it takes. The module is backed by
+`aether_i18n.c` and the generated `ducet/ducet_data.c`, which its `@source`
+lines compile into the program (a binary release ships them as source), and
+by utf8proc, which is in the runtime. Naming them with `--extra` as well, as
+older instructions did, still works: a file named both ways compiles once.
 
 Or, for the bundled test: `make contrib-i18n-check`.
 

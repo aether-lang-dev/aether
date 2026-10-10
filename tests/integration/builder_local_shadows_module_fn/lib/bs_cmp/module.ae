@@ -1,0 +1,18 @@
+// Shape 2 (aeb bldr.install_launcher): a builder LOCAL named like a module
+// function (a setter), assigned and then compared. The local must win.
+exports(with_path, install_launcher)
+
+with_path(_ctx: ptr) { println("SETTER with_path") }
+
+builder install_launcher(name: string, on: int): int {
+    with_path = 0
+    if on == 1 {
+        with_path = 1
+    }
+    if with_path == 1 {
+        println("${name}: BINDIR on PATH")
+    } else {
+        println("${name}: PATH untouched")
+    }
+    return 0
+}

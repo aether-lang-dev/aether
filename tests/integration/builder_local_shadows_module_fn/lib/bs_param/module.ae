@@ -1,0 +1,12 @@
+// Shape 1 (aeb java.java_main): a builder PARAMETER named like a module
+// function (a setter), passed on and interpolated. The parameter must win.
+exports(main_class, show, java_main)
+
+main_class(_ctx: ptr, v: string) { println("SETTER main_class(${v})") }
+show(s: string) { println("show [${s}]") }
+
+builder java_main(main_class: string): int {
+    show(main_class)
+    println("run java ${main_class}")
+    return 0
+}

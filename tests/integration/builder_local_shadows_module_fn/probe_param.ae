@@ -1,0 +1,3 @@
+import std.map
+import bs_param
+main() { bs_param.java_main("com.example.Main") {} }

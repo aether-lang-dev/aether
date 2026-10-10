@@ -214,8 +214,11 @@ const WS_OPCODE_PONG   = 10
 // WebSocket handshake helpers
 //
 // The WebSocket upgrade requires SHA-1 + Base64. These are provided as
-// extern C functions that must be linked (see ws_handshake.c).
+// extern C functions in ws_handshake.c, which @source compiles into every
+// program that imports the module (#2125): a binary release ships it as
+// source and builds no libaether_tinyweb.a, so nothing else would link it.
 // ---------------------------------------------------------------------------
+@source("ws_handshake.c")
 // Each returns a fresh string the caller owns.
 extern ws_generate_accept_key(client_key: string) -> string @heap
 extern ws_base64_encode(data: ptr, len: int) -> string @heap

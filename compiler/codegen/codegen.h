@@ -84,6 +84,13 @@ typedef struct {
     // `name = expr` inside a function whose name is in this set is a
     // WRITE to the global, not a new local declaration.
     char** module_global_vars;
+    // Parallel to module_global_vars: 1 for the program's own top-level
+    // `var`s (no origin_module), which a module's code never sees.
+    unsigned char* module_global_var_is_program;
+    // The module the function being emitted was merged from (its
+    // origin_module), NULL for the program's own code. Set on entry to each
+    // top-level function and main; closures inherit their function's.
+    const char* current_origin_module;
     int module_global_var_count;
     int generating_lvalue;  // Track if we're generating an assignment target (lvalue)
     int in_condition;  // Track if we're in a condition (if/while) to avoid double parens

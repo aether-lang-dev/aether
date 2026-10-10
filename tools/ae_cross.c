@@ -978,45 +978,65 @@ static void cross_compiler_version(const char* cc_cmd, char* out, size_t osz) {
     pclose(p);
 }
 
-static bool cross_copy_file(const char* src, const char* dst) {
-    FILE* in = fopen(src, "rb");
-    if (!in) return false;
-    FILE* out = fopen(dst, "wb");
-    if (!out) { fclose(in); return false; }
-    unsigned char buf[65536];
-    size_t n;
-    bool ok = true;
-    while ((n = fread(buf, 1, sizeof(buf), in)) > 0) {
-        if (fwrite(buf, 1, n, out) != n) { ok = false; break; }
+/* Compile `src` to a cache slot `<cache>/<stem>-<tag>-<key>.o` unless the
+ * slot is there already, and put the slot's path in `obj`. A compile goes to
+ * `<slot>.tmp.<pid>` and is published atomically; when publishing is not
+ * possible (a read-only cache) `obj` is the fresh file instead. Returns false,
+ * having said why, when the compile fails. */
+static bool vendored_cached_obj(const char* stem, const char* tag, const char* key,
+                                const char* compile_fmt_prefix, const char* src,
+                                char** cmd, size_t* cmd_cap,
+                                char* obj, size_t obj_sz) {
+    char slot[1400];
+    snprintf(slot, sizeof(slot), "%s/%s-%s-%s.o", s_cache_dir, stem, tag, key);
+    if (path_exists(slot)) {
+        cache_touch(slot);
+        snprintf(obj, obj_sz, "%s", slot);
+        return true;
     }
-    if (ferror(in)) ok = false;
-    fclose(in);
-    if (fclose(out) != 0) ok = false;
-    if (!ok) remove(dst);
-    return ok;
+    char tmp[1500];
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", slot, (int)getpid());
+    if (!cross_cmd_fmt(cmd, cmd_cap, "%s -c \"%s\" -o \"%s\"", compile_fmt_prefix, src, tmp)) {
+        fprintf(stderr, "Error: out of memory building the %s compile command.\n", stem);
+        return false;
+    }
+    if (run_cmd_show_warnings(*cmd) != 0) return false;
+    if (cache_publish(tmp, slot) == 0) {
+        cache_enforce_limit(slot, 0);
+        snprintf(obj, obj_sz, "%s", slot);
+    } else {
+        snprintf(obj, obj_sz, "%s", tmp);
+    }
+    return true;
 }
 
-/* Compile the veneer and (cached) amalgamation for `ztriple` and append both
- * objects, quoted, to `link_objs`. Returns false, having said why, when the
- * amalgamation is missing or a compile fails. */
-static bool cross_vendored_sqlite(const char* base, const char* ztriple,
-                                  const char* cc_cmd, const char* flags,
-                                  const char* objdir,
-                                  char* link_objs, size_t link_sz) {
-    char amal_dir[1200], amal_c[1300], amal_h[1300], lock[1200], veneer[1200];
+/* Compile contrib.sqlite's veneer and the (cached) amalgamation for `tag` --
+ * a target triple, or "host" for a native build -- and append both objects,
+ * quoted, to `link_objs`. With an `objdir` the veneer is compiled there per
+ * build, as the cross build always did; without one (a native build, which
+ * has no per-build object directory) the veneer is cached beside the
+ * amalgamation, keyed on its source, the string header it includes and the
+ * include flags too. Returns false, having said why, when the amalgamation
+ * is missing or a compile fails. */
+bool ae_vendored_sqlite(const char* base, const char* tag,
+                        const char* cc_cmd, const char* flags,
+                        const char* objdir,
+                        char* link_objs, size_t link_sz) {
+    char amal_dir[1200], amal_c[1300], amal_h[1300], lock[1200], veneer[1200], str_h[1200];
     snprintf(amal_dir, sizeof(amal_dir), "%s/contrib/sqlite/amalgamation", base);
     snprintf(amal_c, sizeof(amal_c), "%s/sqlite3.c", amal_dir);
     snprintf(amal_h, sizeof(amal_h), "%s/sqlite3.h", amal_dir);
     snprintf(lock, sizeof(lock), "%s/contrib/sqlite/amalgamation.lock", base);
     snprintf(veneer, sizeof(veneer), "%s/contrib/sqlite/aether_sqlite.c", base);
+    snprintf(str_h, sizeof(str_h), "%s/std/string/aether_string.h", base);
     if (!path_exists(amal_c) || !path_exists(amal_h) || !path_exists(veneer)) {
         fprintf(stderr,
             "Error: contrib.sqlite needs SQLite built for %s, and neither source is here.\n"
             "  The pinned amalgamation is not in %s. In a source tree, fetch it with:\n"
             "    scripts/fetch-sqlite-amalgamation.sh\n"
-            "  or stage libaether_sqlite.a + libsqlite3.a for the target in a\n"
-            "  CROSSBUILD_SYSROOT (aether-crossbuild).\n",
-            ztriple, amal_dir);
+            "  or build libaether_sqlite.a + libsqlite3.a (`make contrib`; for a\n"
+            "  cross target, stage them in a CROSSBUILD_SYSROOT, aether-crossbuild).\n",
+            tag, amal_dir);
         return false;
     }
 
@@ -1029,7 +1049,7 @@ static bool cross_vendored_sqlite(const char* base, const char* ztriple,
     ae_sha256_init(&ctx);
     cross_sha256_update_file(&ctx, amal_c);
     cross_sha256_update_file(&ctx, amal_h);
-    cross_sha256_update_str(&ctx, ztriple);
+    cross_sha256_update_str(&ctx, tag);
     cross_sha256_update_str(&ctx, cc_cmd);
     cross_sha256_update_str(&ctx, cc_version);
     cross_sha256_update_str(&ctx, flags);
@@ -1040,61 +1060,65 @@ static bool cross_vendored_sqlite(const char* base, const char* ztriple,
     for (int i = 0; i < 8; i++) snprintf(key + i * 2, 3, "%02x", digest[i]);
 
     init_cache_dir();
-    char slot[1400];
-    snprintf(slot, sizeof(slot), "%s/sqlite3-%s-%s.o", s_cache_dir, ztriple, key);
-
     char* cmd = NULL;
-    size_t cmd_cap = 0;
+    char* prefix = NULL;
+    size_t cmd_cap = 0, prefix_cap = 0;
     bool ok = false;
-    const char* amal_obj = slot;
-    char fresh[1300];
+    char amal_obj[1600], veneer_obj[1600];
     do {
-        if (!path_exists(slot)) {
-            fprintf(stderr, "Compiling SQLite for %s (cached for later builds)...\n", ztriple);
-            snprintf(fresh, sizeof(fresh), "%s/sqlite3.o", objdir);
-            if (!cross_cmd_fmt(&cmd, &cmd_cap, "%s %s -w %s -I\"%s\" -c \"%s\" -o \"%s\"",
-                               cc_cmd, flags, sqlite_cflags, amal_dir, amal_c, fresh)) {
-                fprintf(stderr, "Error: out of memory building the SQLite compile command.\n");
-                break;
-            }
-            if (run_cmd_show_warnings(cmd) != 0) {
-                fprintf(stderr, "Error: compiling the SQLite amalgamation for %s failed.\n", ztriple);
-                break;
-            }
-            /* Publish atomically; when that is not possible (a read-only
-             * cache) the build still links the fresh object. */
-            char tmp[1500];
-            snprintf(tmp, sizeof(tmp), "%s.tmp.%d", slot, (int)getpid());
-            if (cross_copy_file(fresh, tmp) && cache_publish(tmp, slot) == 0) {
-                cache_enforce_limit(slot, 0);
-            } else {
-                remove(tmp);
-                amal_obj = fresh;
-            }
+        char slot[1400];
+        snprintf(slot, sizeof(slot), "%s/sqlite3-%s-%s.o", s_cache_dir, tag, key);
+        if (!path_exists(slot))
+            fprintf(stderr, "Compiling SQLite for %s (cached for later builds)...\n", tag);
+        if (!cross_cmd_fmt(&prefix, &prefix_cap, "%s %s -w %s -I\"%s\"",
+                           cc_cmd, flags, sqlite_cflags, amal_dir)) {
+            fprintf(stderr, "Error: out of memory building the SQLite compile command.\n");
+            break;
+        }
+        if (!vendored_cached_obj("sqlite3", tag, key, prefix, amal_c, &cmd, &cmd_cap,
+                                 amal_obj, sizeof(amal_obj))) {
+            fprintf(stderr, "Error: compiling the SQLite amalgamation for %s failed.\n", tag);
+            break;
         }
 
-        char veneer_obj[1300];
-        snprintf(veneer_obj, sizeof(veneer_obj), "%s/aether_sqlite.o", objdir);
         /* AETHER_SQLITE_VENDORED: the veneer is compiled against the pinned
          * amalgamation, which has the whole API (aether_sqlite.c). */
-        if (!cross_cmd_fmt(&cmd, &cmd_cap, "%s %s -DAETHER_SQLITE_VENDORED=1 -I\"%s\" %s -c \"%s\" -o \"%s\"",
-                           cc_cmd, flags, amal_dir, tc.include_flags, veneer, veneer_obj)) {
+        if (!cross_cmd_fmt(&prefix, &prefix_cap, "%s %s -DAETHER_SQLITE_VENDORED=1 -I\"%s\" %s",
+                           cc_cmd, flags, amal_dir, tc.include_flags)) {
             fprintf(stderr, "Error: out of memory building the contrib.sqlite compile command.\n");
             break;
         }
-        if (run_cmd_show_warnings(cmd) != 0) {
-            fprintf(stderr, "Error: compiling contrib.sqlite for %s failed.\n", ztriple);
+        bool vok;
+        if (objdir) {
+            snprintf(veneer_obj, sizeof(veneer_obj), "%s/aether_sqlite.o", objdir);
+            vok = cross_cmd_fmt(&cmd, &cmd_cap, "%s -c \"%s\" -o \"%s\"", prefix, veneer, veneer_obj)
+                  && run_cmd_show_warnings(cmd) == 0;
+        } else {
+            ae_sha256_init(&ctx);
+            cross_sha256_update_str(&ctx, key);
+            cross_sha256_update_file(&ctx, veneer);
+            cross_sha256_update_file(&ctx, str_h);
+            cross_sha256_update_str(&ctx, prefix);
+            ae_sha256_final(&ctx, digest);
+            char vkey[17];
+            for (int i = 0; i < 8; i++) snprintf(vkey + i * 2, 3, "%02x", digest[i]);
+            vok = vendored_cached_obj("aether_sqlite", tag, vkey, prefix, veneer, &cmd, &cmd_cap,
+                                      veneer_obj, sizeof(veneer_obj));
+        }
+        if (!vok) {
+            fprintf(stderr, "Error: compiling contrib.sqlite for %s failed.\n", tag);
             break;
         }
         size_t used = strlen(link_objs);
         int w = snprintf(link_objs + used, link_sz - used, " \"%s\" \"%s\"", veneer_obj, amal_obj);
         if (w < 0 || (size_t)w >= link_sz - used) {
-            fprintf(stderr, "Error: the cross link line has no room for contrib.sqlite.\n");
+            fprintf(stderr, "Error: the link line has no room for contrib.sqlite.\n");
             break;
         }
         ok = true;
     } while (0);
     free(cmd);
+    free(prefix);
     free(sqlite_cflags);
     return ok;
 }
@@ -1445,7 +1469,7 @@ int run_cross_build(const char* c_file, const char* out_file,
         }
     }
     /* contrib.sqlite with no staged archives: compile it from the pinned
-     * amalgamation (#1372, see cross_vendored_sqlite). A sysroot that staged
+     * amalgamation (#1372, see ae_vendored_sqlite). A sysroot that staged
      * libaether_sqlite.a keeps precedence, as pcre2's does below. */
     bool vendored_sqlite = false;
     if (!strstr(crossbuild_libs, "libaether_sqlite.a")) {
@@ -1549,7 +1573,7 @@ int run_cross_build(const char* c_file, const char* out_file,
             snprintf(sqlite_flags, sizeof(sqlite_flags), "%s%s %s %s",
                      sysroot_flag, lib_pic, opt, user_cflags);
             char sqlite_objs[3000] = "";
-            if (!cross_vendored_sqlite(base, ztriple, cc_cmd, sqlite_flags, objdir,
+            if (!ae_vendored_sqlite(base, ztriple, cc_cmd, sqlite_flags, objdir,
                                        sqlite_objs, sizeof(sqlite_objs)))
                 break;
             size_t cl = strlen(crossbuild_libs);

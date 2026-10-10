@@ -1,0 +1,3 @@
+import std.map
+import bs_int
+main() { bs_int.git("https://example.invalid/r.git", 7) {} }

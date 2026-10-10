@@ -944,6 +944,18 @@ HttpServer* http_server_create(int port) {
     server->live_count = 0;
     server->live_cap = 0;
     atomic_init(&server->stopping, 0);
+    server->wake_fds[0] = server->wake_fds[1] = -1;
+#if !defined(_WIN32) && !defined(__wasi__)
+    if (pipe(server->wake_fds) == 0) {
+        for (int i = 0; i < 2; i++) {
+            int fl = fcntl(server->wake_fds[i], F_GETFL, 0);
+            if (fl >= 0) fcntl(server->wake_fds[i], F_SETFL, fl | O_NONBLOCK);
+            fcntl(server->wake_fds[i], F_SETFD, FD_CLOEXEC);
+        }
+    } else {
+        server->wake_fds[0] = server->wake_fds[1] = -1;
+    }
+#endif
     server->request_hook_chain = NULL;
     server->sse_routes = NULL;
     server->ws_routes = NULL;
@@ -5575,9 +5587,21 @@ static void* accept_thread_fn(void* arg) {
 }
 #endif
 
+static int http_server_run(HttpServer* server);
+
 int http_server_start_raw(HttpServer* server) {
     server->is_running = 1;
     atomic_store(&server->stopping, 0);
+    return http_server_run(server);
+}
+
+/* The server's body, with is_running already set by whoever started it:
+ * http_server_start_raw on the calling thread, or
+ * http_server_start_background_raw before it spawns the thread. Never here,
+ * on the server's own thread: a stop issued between the spawn and this
+ * thread's first line was then overwritten by its `is_running = 1`, the loop
+ * ran forever, and http_server_stop, which joins the thread (#2672), hung. */
+static int http_server_run(HttpServer* server) {
 
 #if !defined(_WIN32)
     /* A peer that goes away between a server deciding to answer and the answer
@@ -5759,9 +5783,21 @@ int http_server_start_raw(HttpServer* server) {
         // Fallback: poll + thread pool (non-Linux or no actor handler)
         while (server->is_running) {
 #if !defined(_WIN32)
-            struct pollfd pfd = { .fd = server->socket_fd, .events = POLLIN };
-            int ready = poll(&pfd, 1, 1000);
+            /* The wake pipe beside the socket: a stop writes to it, which
+             * wakes this poll() everywhere (shutting the socket down wakes it
+             * on Linux only). A byte left by an earlier stop is drained and
+             * the loop re-reads is_running. */
+            struct pollfd pfd[2] = {
+                { .fd = server->socket_fd, .events = POLLIN },
+                { .fd = server->wake_fds[0], .events = POLLIN },
+            };
+            int ready = poll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
             if (ready <= 0) continue;
+            if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLIN)) {
+                char drain[64];
+                while (read(server->wake_fds[0], drain, sizeof(drain)) > 0) { }
+            }
+            if (!(pfd[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
 #endif
 
             struct sockaddr_in client_addr;
@@ -5842,7 +5878,9 @@ static void* http_server_background_main(void* arg) {
     sigdelset(&block, SIGILL);
     pthread_sigmask(SIG_BLOCK, &block, NULL);
 #endif
-    http_server_start_raw(server);
+    /* is_running was set before this thread was spawned; a stop that came
+     * first has already cleared it and set stopping, and must win. */
+    if (!atomic_load(&server->stopping)) http_server_run(server);
     return NULL;
 }
 
@@ -5861,8 +5899,14 @@ int http_server_start_background_raw(HttpServer* server) {
      * suppresses the interactive "Press Ctrl+C to stop" banner. */
     server->background = 1;
     server->background_tid_set = 0;
+    /* Running from here, not from the thread's first line: a stop issued as
+     * soon as this returns must find a running server to stop, and nothing
+     * the thread does later may undo it (see http_server_run). */
+    server->is_running = 1;
+    atomic_store(&server->stopping, 0);
     if (pthread_create(&server->background_thread, NULL, http_server_background_main, server) != 0) {
         server->background = 0;
+        server->is_running = 0;
         return -1;
     }
     server->background_joinable = 1;   /* joined by http_server_stop */
@@ -5875,6 +5919,15 @@ void http_server_stop(HttpServer* server) {
 
     server->is_running = 0;
     atomic_store(&server->stopping, 1);
+
+#if !defined(_WIN32) && !defined(__wasi__)
+    /* Wake the poll loop now rather than at its next one-second timeout. */
+    if (server->wake_fds[1] >= 0) {
+        char b = 1;
+        ssize_t w = write(server->wake_fds[1], &b, 1);
+        (void)w;   /* full pipe: a wake is already pending */
+    }
+#endif
 
 #if !defined(_WIN32)
     // Destroy pollers to unblock poll/epoll_wait/kevent in accept threads
@@ -6020,6 +6073,10 @@ void http_server_free(HttpServer* server) {
 
     free(server->live_fds);
     pthread_mutex_destroy(&server->live_lock);
+#if !defined(_WIN32) && !defined(__wasi__)
+    if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
+    if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);
+#endif
     free(server);
 }
 

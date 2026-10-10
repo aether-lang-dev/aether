@@ -1,0 +1,10 @@
+// std.fs's pwrite binds a 64-bit local `n`; the program's 32-bit `var n`
+// must not be what it type-checks against.
+import std.fs
+
+var n = 0
+
+main() {
+    n = n + 1
+    println("n=${n}")
+}

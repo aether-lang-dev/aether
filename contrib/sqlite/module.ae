@@ -75,9 +75,12 @@
 //     and `ae build --target=<triple>` compiles it for the target. When it
 //     cannot be fetched, `make contrib` builds against the system
 //     libsqlite3 instead. README.md "Build" has the details.
-//   - Without `make contrib`, drop `contrib/sqlite/aether_sqlite.c` into
-//     your project's aether.toml [[bin]] `extra_sources` (or pass
-//     `--extra`) and add `[build] link_flags = "-lsqlite3"`.
+//   - Without `make contrib` (a binary release builds no contrib archives),
+//     `ae build` compiles the veneer and the amalgamation shipped beside
+//     this file itself, caches both objects, and links them in place of
+//     -laether_sqlite -lsqlite3. With no amalgamation either, put
+//     `contrib/sqlite/aether_sqlite.c` in aether.toml [[bin]]
+//     `extra_sources` and add `[build] link_flags = "-lsqlite3"`.
 
 // Native link deps (#1259): the whole-program `// aether-link:` header
 // unions this into the emitted C when contrib.sqlite is in the import

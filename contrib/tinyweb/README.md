@@ -144,5 +144,6 @@ leaf — its block, if any, is a request-time handler, not more DSL.
 - `test_spec.ae` — DSL registration unit tests
 - `test_integration.ae` — HTTP round-trip integration tests
 - `test_websocket.ae` — WebSocket codec round-trip (handshake, client-frame
-  unmasking, and extended-length server framing). Needs the C extern:
-  `ae run test_websocket.ae --extra ws_handshake.c`
+  unmasking, and extended-length server framing). Its C extern,
+  `ws_handshake.c`, is compiled in by the module's `@source`, so
+  `ae run test_websocket.ae` needs no `--extra`

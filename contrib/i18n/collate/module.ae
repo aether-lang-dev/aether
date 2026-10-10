@@ -16,14 +16,15 @@
 // currently selects DUCET order for every locale. That already matches the
 // large majority of real-world ordering expectations.
 //
-// C backing (compiled in; pass with --extra when building a consumer):
-//   contrib/i18n/aether_i18n.c
-//   std/unicode/utf8proc/utf8proc.c
-//   contrib/i18n/ducet/ducet_data.c
-// e.g.  ae run yourprog.ae \
-//         --extra contrib/i18n/aether_i18n.c \
-//         --extra std/unicode/utf8proc/utf8proc.c \
-//         --extra contrib/i18n/ducet/ducet_data.c
+// C backing: contrib/i18n/aether_i18n.c and the generated DUCET table
+// contrib/i18n/ducet/ducet_data.c, which the @source lines below compile into
+// every program that imports the module (#2125) -- a binary release ships
+// them as source and builds no archive -- and utf8proc, which is in the
+// runtime (std.unicode). Passing them with --extra as well is harmless: a
+// file named both ways compiles once.
+
+@source("../aether_i18n.c")
+@source("../ducet/ducet_data.c")
 
 import std.string
 import std.list

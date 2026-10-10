@@ -1520,6 +1520,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
     // A clause is its own node, classified with its set (#2627).
     ASTNode* prev_current_function = gen->current_function;
     gen->current_function = func;
+    gen->current_origin_module = func->origin_module;
     /* #2513: the function's variables, as discover_closures_scoped named
      * its scope (a clause its own, #2644). */
     const char* scope = fn_scope_name(gen->program, func);
@@ -2070,6 +2071,7 @@ static void emit_guard_binding(CodeGenerator* gen, Type* t, const char* name, co
  * are plain copies of the parameters, borrowed, with no cells. */
 static void begin_dispatch_scope(CodeGenerator* gen, ASTNode* clause) {
     gen->current_function = clause;
+    gen->current_origin_module = clause->origin_module;
     clear_declared_vars(gen);
     clear_fnptr_locals(gen);
     clear_heap_string_vars(gen);
