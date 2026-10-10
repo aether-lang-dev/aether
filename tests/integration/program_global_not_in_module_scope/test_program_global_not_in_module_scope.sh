@@ -40,11 +40,13 @@ check() {
         fails=$((fails + 1))
         return
     fi
-    tr -d '\r' < "$TMP/$1.log" | grep -v -e '^Type checking' -e '^warning' -e '^ *-->' -e '^ *[0-9]* |' -e '^ *|' -e '^$' > "$TMP/$1.out"
-    printf '%s\n' "$2" > "$TMP/$1.want"
-    if ! diff "$TMP/$1.want" "$TMP/$1.out" > "$TMP/$1.diff"; then
+    got="$(tr -d '\r' < "$TMP/$1.log" | grep -v -e '^Type checking' -e '^warning' -e '^ *-->' -e '^ *[0-9]* |' -e '^ *|' -e '^$')"
+    # Compared as strings, not with diff(1): the Windows CI runners' MSYS2
+    # has no diffutils, so `diff: command not found` read as a mismatch.
+    if [ "$got" != "$2" ]; then
         echo "  [FAIL] $NAME: $1 printed the wrong values (a module wrote the program's global?)"
-        sed 's/^/        /' "$TMP/$1.diff"
+        printf '%s\n' "$2" | sed 's/^/        want: /'
+        printf '%s\n' "$got" | sed 's/^/        got:  /'
         fails=$((fails + 1))
     fi
 }
