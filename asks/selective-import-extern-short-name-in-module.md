@@ -13,7 +13,7 @@ externs). This ask is for the inconsistency underneath.
 | where the import is written | 0.778.0 | 0.791.0 | 0.801.0 |
 |---|---|---|---|
 | the program file (`main` lives there) | OK | OK | OK |
-| a module (`lib/mm/module.ae`), selective `(server_create)` | E0301 | E0301 | E0301 |
+| a module (`lib/mm/module.ae`), selective `(server_create)` | E0301 | E0301 | E0301 (0.803.0 too) |
 | a module, glob `(*)` | E0301 | E0301 | OK (#2637) |
 | a module, `import std.http` + `http.server_create(...)` | OK | OK | OK |
 | a module, selective `(http_server_create)` | OK | OK | OK |

@@ -39,7 +39,7 @@ main() {
 | release | result |
 |---|---|
 | 0.778.0, 0.791.0 | builds, prints `eq` |
-| 0.793.0 … 0.801.0 (and 0.799.0 on FreeBSD 15) | `error: assigning to 'Box' (aka 'struct Box') from incompatible type 'void'` from the C compiler |
+| 0.793.0 … 0.803.0 (and 0.799.0 on FreeBSD 15) | `error: assigning to 'Box' (aka 'struct Box') from incompatible type 'void'` from the C compiler |
 
 Variants on 0.801.0:
 
