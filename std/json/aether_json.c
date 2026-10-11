@@ -1197,6 +1197,10 @@ static JsonValue* parse_array(Parser* s, int depth) {
 
     JsonValue* arr = jv_new_in(s->arena, JSON_ARRAY);
     if (!arr) { err_set(line0, col0, "out of memory"); return NULL; }
+    // A container knows its document's arena, so what is set into it later
+    // is allocated there and freed with the document (#2719). Only the root
+    // is JV_FLAG_ROOT: only the root's free destroys the arena.
+    arr->arena = s->arena;
 
     skip_whitespace(s);
     if (p_peek(s) == ']') { p_advance(s); return arr; }
@@ -1228,6 +1232,7 @@ static JsonValue* parse_object(Parser* s, int depth) {
 
     JsonValue* obj = jv_new_in(s->arena, JSON_OBJECT);
     if (!obj) { err_set(line0, col0, "out of memory"); return NULL; }
+    obj->arena = s->arena;
 
     skip_whitespace(s);
     if (p_peek(s) == '}') { p_advance(s); return obj; }
@@ -1605,6 +1610,9 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
             break;
         }
     }
+    // A container copied into an arena allocates from it from then on, as a
+    // parsed document's do (#2719).
+    if (out->type == JSON_ARRAY || out->type == JSON_OBJECT) out->arena = dst_arena;
     return out;
 }
 
@@ -1638,7 +1646,7 @@ static void heap_free_tree(JsonValue* v);
 
 static void heap_free_tree(JsonValue* v) {
     if (!v) return;
-    if (v->arena) {
+    if (v->arena && (v->flags & JV_FLAG_ROOT)) {
         // Shouldn't reach here — heap tree means no arena. Defensive
         // cleanup: destroy the arena, and only free the struct itself
         // if it was heap-allocated. Snapshot the flag before
@@ -1698,7 +1706,9 @@ static void heap_free_tree(JsonValue* v) {
  *    corrupted the heap. */
 static void free_donated_value(JsonValue* value) {
     if (!value) return;
-    if (value->arena) {
+    // An arena is destroyed through its root only: an inner container knows
+    // its document's arena too, and is the document's to free.
+    if (value->arena && (value->flags & JV_FLAG_ROOT)) {
         int heap_struct = (value->flags & JV_FLAG_HEAP_STRUCT) != 0;
         arena_destroy(value->arena);
         if (heap_struct) aether_caps_free(value, sizeof(JsonValue));
@@ -1845,7 +1855,9 @@ JsonValue* json_create_object(void) {
 
 void json_free(JsonValue* v) {
     if (!v) return;
-    if (v->arena) {
+    // A root owns its arena; an inner container of a document knows the
+    // document's arena (#2719) and frees nothing of it.
+    if (v->arena && (v->flags & JV_FLAG_ROOT)) {
         // Snapshot the "is heap struct" bit BEFORE arena_destroy, because
         // for parsed roots `v` itself lives inside the arena — reading
         // `v->flags` after the arena is freed would be use-after-free.

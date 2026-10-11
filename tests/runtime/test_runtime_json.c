@@ -134,3 +134,31 @@ TEST_CATEGORY(json_array_operations, TEST_CATEGORY_STDLIB) {
 
     json_free(arr);
 }
+
+// A value set into a container inside a parsed document is allocated in
+// the document's arena and freed with it (#2719): an object in an array,
+// an object in an object, an array in an object. Freeing an inner node is
+// a no-op, as it was. Under the ASan runner a leaked arena fails this.
+TEST_CATEGORY(json_set_into_parsed_inner_containers, TEST_CATEGORY_STDLIB) {
+    JsonValue* root = json_parse_raw(
+        "{\"objects\": [{\"fields\": {\"velocity\": 36.0}}], \"meta\": {\"tags\": [1]}}");
+    ASSERT_NOT_NULL(root);
+    JsonValue* item = json_array_get_raw(json_object_get_raw(root, "objects"), 0);
+    JsonValue* fields = json_object_get_raw(item, "fields");
+    ASSERT_EQ(1, json_object_set_raw(fields, "speed", json_create_number(10)));
+    ASSERT_EQ(1, json_object_set_raw(item, "kind", json_create_string("Mover")));
+    JsonValue* tags = json_object_get_raw(json_object_get_raw(root, "meta"), "tags");
+    ASSERT_EQ(1, json_array_add_raw(tags, json_create_number(2)));
+
+    // The writes are where they were made.
+    ASSERT_EQ(10, json_get_int(json_object_get_raw(
+        json_object_get_raw(json_array_get_raw(json_object_get_raw(root, "objects"), 0), "fields"), "speed")));
+    ASSERT_EQ(2, json_array_size(tags));
+    char* text = json_stringify_raw(root);
+    ASSERT_NOT_NULL(strstr(text, "\"speed\":10"));
+    ASSERT_NOT_NULL(strstr(text, "\"kind\":\"Mover\""));
+    free(text);
+
+    json_free(fields);   // borrowed: frees nothing
+    json_free(root);
+}
