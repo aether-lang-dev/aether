@@ -7495,6 +7495,68 @@ static Type* closure_array_return(ASTNode* node, ASTNode** at) {
     return NULL;
 }
 
+/* #2896: does symbol `s` name a type: a struct (a C import's included), a
+ * sum, an enum, a bitstruct, a message or an actor of the program? */
+static int symbol_names_type(Symbol* s) {
+    if (!s || s->is_function) return 0;
+    if (s->node) {
+        switch (s->node->type) {
+            case AST_STRUCT_DEFINITION: case AST_SUM_TYPE_DEF: case AST_ENUM_DEFINITION:
+            case AST_BITSTRUCT_DEFINITION: case AST_MESSAGE_DEFINITION:
+            case AST_ACTOR_DEFINITION: case AST_C_STRUCT_DEF: case AST_CFN_TYPE_DEF:
+            case AST_DISTINCT_TYPE_DEF:
+                return 1;
+            default:
+                break;
+        }
+    }
+    return s->type && (s->type->kind == TYPE_STRUCT || s->type->kind == TYPE_SUM ||
+                       s->type->kind == TYPE_ENUM || s->type->kind == TYPE_BITSTRUCT ||
+                       s->type->kind == TYPE_MESSAGE);
+}
+
+/* #2896: the first type name held by value in `t` (itself, an array's or
+ * an optional's element, a tuple's, a function type's parameter or result)
+ * that names no type of the program, or NULL. Such a name reached C as is
+ * (`and eat` declared `eat` of a type `and`: "unknown type name 'and'").
+ * Distinct and cfn names are resolved before checking. A name behind a
+ * pointer may be an opaque C type, and a qualified one (`mod.T`) is the
+ * module checks' to resolve; both are left alone. */
+static const char* type_unknown_name(Type* t, SymbolTable* table, int depth) {
+    if (!t || depth > 32 || t->kind == TYPE_PTR) return NULL;
+    if (t->kind == TYPE_STRUCT && t->struct_name && !strchr(t->struct_name, '.') &&
+        !symbol_names_type(lookup_symbol(table, t->struct_name)) &&
+        !c_struct_def_node(t->struct_name))
+        return t->struct_name;
+    const char* u = type_unknown_name(t->element_type, table, depth + 1);
+    for (int i = 0; !u && t->tuple_types && i < t->tuple_count; i++)
+        u = type_unknown_name(t->tuple_types[i], table, depth + 1);
+    for (int i = 0; !u && t->param_types && i < t->param_count; i++)
+        u = type_unknown_name(t->param_types[i], table, depth + 1);
+    return u ? u : type_unknown_name(t->return_type, table, depth + 1);
+}
+
+/* Refuse `what` (a local, a parameter, a field, named `name`) of type `t`
+ * when `t` holds a name of no type (#2896). `and` and `not`, the operator
+ * words of other languages, read as such a name before an identifier
+ * (`while i < 2 and eat(i)` declares `eat` of a type `and`), so the help
+ * names the operator Aether spells. Returns 1 when refused. */
+static int refuse_unknown_type(const char* what, const char* name, Type* t, SymbolTable* table,
+                               int line, int column) {
+    const char* u = type_unknown_name(t, table, 0);
+    if (!u) return 0;
+    char msg[512];
+    snprintf(msg, sizeof(msg), "Unknown type '%s': %s '%s' is declared of a type the program "
+             "does not define", u, what, name ? name : "?");
+    const char* hint = strcmp(u, "and") == 0
+        ? "Aether's logical AND is `&&` (`a && b`), and OR is `||`"
+        : strcmp(u, "not") == 0
+        ? "Aether's logical NOT is `!` (`!a`)"
+        : "declare the struct, enum or sum, or check the spelling";
+    type_error_code_hint(msg, hint, line, column, AETHER_ERR_UNDEFINED_TYPE);
+    return 1;
+}
+
 int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
 
@@ -7528,6 +7590,8 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
                 char who[192];
                 snprintf(who, sizeof(who), "parameter '%s'", param->value);
                 refuse_fn_type_array_result(who, param->node_type, param->line, param->column);
+                refuse_unknown_type("the parameter", param->value, param->node_type, table,
+                                    param->line, param->column);   /* #2896 */
             }
         }
     }
@@ -7642,6 +7706,10 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             char who[192];
             snprintf(who, sizeof(who), "struct field '%s'", field->value ? field->value : "?");
             refuse_fn_type_array_result(who, field->node_type, field->line, field->column);
+            /* #2896: a field of a type that names nothing. */
+            if (refuse_unknown_type("the field", field->value, field->node_type, table,
+                                    field->line, field->column))
+                return 0;
         }
 
         /* #2822: an optional field compiles (#2820), but one whose value
@@ -8768,6 +8836,10 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 char who[192];
                 snprintf(who, sizeof(who), "'%s'", stmt->value);
                 refuse_fn_type_array_result(who, stmt->node_type, stmt->line, stmt->column);
+                /* #2896: a type name that names nothing reached C. */
+                if (refuse_unknown_type("the local", stmt->value, stmt->node_type, table,
+                                        stmt->line, stmt->column))
+                    return 0;
             }
             if (stmt->child_count > 0) {
                 // Has initializer

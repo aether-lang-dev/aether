@@ -2842,6 +2842,8 @@ shifted = 1 << 4        // 16
 | `\|\|` | Logical OR | `a \|\| b` |
 | `!` | Logical NOT | `!a` |
 
+The words `and` and `not` are no operators (`or` is the handler of a `T!` result): before a name, `x and y` reads as a declaration of `y` of a type `and`, which the program does not define, so it is an error naming the operator to write (E0302).
+
 ### Assignment Operators
 
 | Operator | Description | Example |
@@ -3728,6 +3730,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0201` | A fixed-size array as a result, alone or in a tuple: of a function, a closure, an extern or a function type ([What a `return` gives](#what-a-return-gives-e0200)) |
 | `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
+| `E0302` | A type name that names no type of the program, as a local's, a parameter's or a field's type (`Shape s` with no `Shape`; `x and y`, where AND is `&&`) |
 | `E0303` | A name the module does not export |
 | `E0304` | A name hidden in this scope by `hide` or `seal except` ([hide and seal](hide-and-seal.md)) |
 | `E0600` | An actor rule, such as a closure in a handler writing the actor's state |
