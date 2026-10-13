@@ -1877,6 +1877,24 @@ static int try_emit_closure_array_release(CodeGenerator* gen, ASTNode* deferred)
     return 1;
 }
 
+/* #2869: a tuple local that owns strings or closures. Annotation:
+ * "tuple_release:<varname>:<kinds>", one digit per position. */
+static int try_emit_tuple_release(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "tuple_release:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* rest = deferred->annotation + plen;
+    const char* sep = strrchr(rest, ':');
+    if (!sep || sep == rest || !sep[1]) return 0;
+    const char* var_buf = cg_intern_n(rest, (size_t)(sep - rest));
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */");
+    emit_tuple_local_release(gen, var_buf, sep + 1);
+    fprintf(gen->output, "\n");
+    return 1;
+}
+
 /* Closure-local env carrier (#2480). Annotation:
  *   "closure_env_free:<closure id or -1>:<own flag 0|1>:<varname>"
  * Pushed by claim_closure_local_env (codegen_stmt.c) for a local bound only
@@ -2011,6 +2029,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_struct_array_destroy(gen, deferred) &&   /* #2528 */
         !try_emit_str_array_release(gen, deferred) &&      /* #2618 */
         !try_emit_closure_array_release(gen, deferred) &&
+        !try_emit_tuple_release(gen, deferred) &&   /* #2869 */
         !try_emit_closure_env_free(gen, deferred)) {
         print_indent(gen);
         fprintf(gen->output, "/* deferred%s */ ",

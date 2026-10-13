@@ -1,0 +1,134 @@
+// Regression (#2869): a tuple local bound to a call that hands over heap
+// strings did not own them: a destructure from the local took them as
+// borrowed and nothing freed them, and a returned local was taken as
+// borrowed by its caller. The local now owns them, as a struct local owns
+// its string fields: it gives them back at its scope exit and when it is
+// bound again, a destructure from it takes copies, and `return t` hands
+// them on. Each shape runs in a round, and the rounds must not grow the
+// heap.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pair(w: string) -> (string, int) {
+    return string.concat(w, "!"), 1
+}
+
+opair(w: string) -> (string?, int) {
+    return string.concat(w, "?"), 2
+}
+
+two(w: string) -> (string, string) {
+    return string.concat(w, "1"), string.concat(w, "2")
+}
+
+once(w: string) -> int {
+    t = pair(w)
+    a, n = t
+    return string.length(a) + n
+}
+
+twice(w: string) -> int {
+    t = pair(w)
+    a, n = t
+    b, m = t
+    return string.length(a) + string.length(b) + n + m
+}
+
+// The destructured string outlives a rebinding of the local.
+rebound(w: string) -> int {
+    t = pair(w)
+    a, _ = t
+    t = pair("long-one")
+    b, _ = t
+    return string.length(a) + string.length(b)
+}
+
+// Handed on: the caller owns the string.
+passed(w: string) -> (string, int) {
+    t = pair(w)
+    return t
+}
+
+optional(w: string) -> int {
+    t = opair(w)
+    a, n = t
+    if a != none { return string.length(a!) + n }
+    return 0
+}
+
+// First bound in the arms of an if.
+arms(w: string, first: bool) -> int {
+    if first {
+        t = two(w)
+    } else {
+        t = two("other")
+    }
+    a, b = t
+    return string.length(a) + string.length(b)
+}
+
+looped(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 3 {
+        t = two(w)
+        _, b = t
+        total = total + string.length(b)
+        i = i + 1
+    }
+    return total
+}
+
+// Strings the size of the copies, which reuse a freed buffer.
+churn(w: string) -> int {
+    a = string.concat(w, "@")
+    b = string.concat(w, "$")
+    return string.length(a) + string.length(b)
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        total = total + once(w) + twice(w) + rebound(w) + optional(w)
+        x, k = passed(w)
+        total = total + string.length(x) + k
+        total = total + arms(w, true) + arms(w, false) + looped(w)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    w = string.concat("w", "v")
+    check(once(w) == 4, "a destructure from the local")
+    check(twice(w) == 8, "two destructures from the local")
+    check(rebound(w) == 12, "a destructure kept past a rebinding")
+    x, k = passed(w)
+    churn(w)
+    check(x == "wv!" && k == 1, "a returned local (${x})")
+    check(optional(w) == 5, "a string? position")
+    check(arms(w, true) == 6 && arms(w, false) == 12, "a local first bound in an if's arms")
+    check(looped(w) == 9, "a local bound in a loop")
+    mt = pair(w)
+    ma, mn = mt
+    check(ma == "wv!" && mn == 1, "a local of main (${ma})")
+    check(round(w) == 20 * (4 + 8 + 12 + 5 + 4 + 6 + 12 + 9), "the rounds")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(grown == 0, "the heap grew by ${grown} bytes")
+    }
+    println("ok")
+}

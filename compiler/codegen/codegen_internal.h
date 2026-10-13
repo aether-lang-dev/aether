@@ -173,6 +173,9 @@ int is_heap_string_expr(CodeGenerator* gen, ASTNode* expr);
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
 int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
+/* #2869: give back what a tuple local owns, `kinds` one digit per position
+ * (1 a heap string, 2 a `string?`, 3 a closure). */
+void emit_tuple_local_release(CodeGenerator* gen, const char* name, const char* kinds);
 int opt_string_arg_freed_after_call(CodeGenerator* gen, const char* func_name, int ai);
 
 /* Does evaluating the expression have a side effect (a call, a send, a

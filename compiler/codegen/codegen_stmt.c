@@ -2333,6 +2333,13 @@ static int catch_scope_has(const CatchScope* cs, ASTNode* expr) {
     return 0;
 }
 
+/* #2869: what a tuple local owns at a position (tuple_local_kind_at). */
+enum { TL_NONE = 0, TL_HEAP = 1, TL_OPT = 2, TL_CLOSURE = 3 };
+#define TUPLE_LOCAL_MAX 32
+static int tuple_local_kind_at(CodeGenerator* gen, ASTNode* root, const char* name, int j);
+static void push_tuple_local_release_defer(CodeGenerator* gen, const char* name, Type* tt);
+static const char* tuple_local_owned_kinds(CodeGenerator* gen, const char* name, Type* tt);
+
 static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
                                          const char* var_name, CatchScope* cs,
                                          ASTNode* root, int depth);
@@ -2619,6 +2626,9 @@ static int body_assigns_var_from_heap_in(CodeGenerator* gen, ASTNode* node,
             if (tgt && tgt->value && strcmp(tgt->value, var_name) == 0) {
                 if (gen && tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
                 if (tuple_self_call(rhs)) return 1;
+                /* #2869: a copy of a string a tuple local owns. */
+                if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
+                    tuple_local_kind_at(gen, root, rhs->value, j) == TL_HEAP) return 1;
                 if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value &&
                     gen && gen->program) {
                     const char* fn = codegen_normalise_callee(rhs->value);
@@ -2660,7 +2670,7 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
  * #1311: a std tuple fn first classified at a user helper's site lost
  * its heap error slot and leaked the tracked-empty on every call. */
 static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
-                                             const char* var_name) {
+                                             const char* var_name, ASTNode* root) {
     if (!node || !var_name || !gen || !gen->program) return 0;
     if (node->type == AST_FUNCTION_DEFINITION ||
         node->type == AST_BUILDER_FUNCTION ||
@@ -2677,6 +2687,9 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
             }
             if (tuple_call_pos_copied(gen, rhs, j)) return 1;   /* #2619 */
             if (tuple_self_call(rhs)) return 1;
+            /* #2869: a copy of a string a tuple local owns. */
+            if (rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
+                tuple_local_kind_at(gen, root, rhs->value, j) == TL_HEAP) return 1;
             if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value) {
                 const char* fn = codegen_normalise_callee(rhs->value);
                 ASTNode* callee = find_function_definition_by_name(gen->program, fn);
@@ -2698,7 +2711,7 @@ static int body_tuple_destructure_binds_heap(CodeGenerator* gen, ASTNode* node,
     }
     for (int i = 0; i < node->child_count; i++) {
         if (body_tuple_destructure_binds_heap(gen, classifier_child(gen, node, i),
-                                              var_name)) {
+                                              var_name, root)) {
             return 1;
         }
     }
@@ -2808,7 +2821,7 @@ static int return_expr_is_heap(CodeGenerator* gen, ASTNode* expr,
         if (!expr->value || !fn_body_root) return 0;
         ASTNode* fn_def = def_of_body(gen, fn_name, fn_body_root);
         return body_assigns_var_from_heap_or_catch(gen, fn_body_root, expr->value) ||
-               body_tuple_destructure_binds_heap(gen, fn_body_root, expr->value) ||
+               body_tuple_destructure_binds_heap(gen, fn_body_root, expr->value, fn_body_root) ||
                returns_promoted_string(gen, expr,
                                        fn_def ? fn_scope_name(gen->program, fn_def) : fn_name) ||
                /* A kept parameter is this function's own reference. */
@@ -5241,6 +5254,10 @@ static void walk_returns_for_heap_at_in(CodeGenerator* gen, ASTNode* node,
                  * veto either — it is a legitimate non-heap success value,
                  * not an unfreeable passthrough. Leave found set, any_heap
                  * unchanged, no veto. */
+            } else if (child_is_tuple && child->type == AST_IDENTIFIER && child->value &&
+                       tuple_local_kind_at(gen, fn_body_root, child->value, position) == TL_HEAP) {
+                /* #2869: a tuple local hands on the strings it owns. */
+                *any_heap = 1;
             } else if (!child_is_tuple && position == g_tuple_err_pos) {
                 /* The auto-wrap's error slot, the `""` success sentinel:
                  * no evidence, and no veto, since emit_return_value wraps
@@ -10788,8 +10805,9 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
     fprintf(gen->output, "%s %s%s;\n", volatile_decl_type(vq, c_type), name,
             hoisted_zero_init(var_type, c_type));
     /* A struct that owns strings, released where it is declared (as in
-     * hoist_if_branch_vars). */
+     * hoist_if_branch_vars), and a tuple local that owns them (#2869). */
     push_struct_destroy_defer(gen, name, var_type, 0, 0);
+    push_tuple_local_release_defer(gen, name, var_type);
 }
 
 /* Declare, before an if/else or a switch with a default, the names every arm
@@ -10896,6 +10914,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
              * this, the final loop-iteration's heap fields
              * never get reclaimed at function exit. */
             push_struct_destroy_defer(gen, child->value, var_type, child->line, child->column);
+            push_tuple_local_release_defer(gen, child->value, var_type);   /* #2869 */
         } else {
             emit_hoisted_local_decl(gen, var_type, child->value);
             /* #2480: the hoisted local is the loop's one C variable, so the
@@ -11432,6 +11451,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
          * (the local is declared already), so nothing else destroyed it,
          * and the strings it held at the end leaked. */
         push_struct_destroy_defer(gen, name, var_type, first_decl->line, first_decl->column);
+        push_tuple_local_release_defer(gen, name, var_type);   /* #2869 */
         mark_var_declared_typed(gen, name, var_type);
         claim_closure_local_env(gen, name, first_decl, 0);   /* #2480 */
         if (joined) free_type(joined);
@@ -12883,6 +12903,17 @@ static TuplePosOwn tuple_pos_own(CodeGenerator* gen, ASTNode* rhs, ASTNode* call
     TuplePosOwn po = { 0, 0, 0, 0, 0 };
     /* Defaults to 0 for any case the analyzer can't classify. */
     po.is_string = pt && pt->kind == TYPE_STRING;
+    po.is_closure = pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr;
+    /* #2869: a tuple local of the function being emitted, which a
+     * destructure takes copies of what it owns from. */
+    if (rhs && rhs->type == AST_IDENTIFIER && rhs->value) {
+        const char* kinds = tuple_local_owned_kinds(gen, rhs->value, rhs_type);
+        int k = kinds && j < (int)strlen(kinds) ? kinds[j] - '0' : TL_NONE;
+        po.is_heap = k == TL_HEAP;
+        po.opt_owned = k == TL_OPT;
+        po.closure_owned = k == TL_CLOSURE;
+        return po;
+    }
     if (po.is_string && tuple_call_pos_copied(gen, rhs, j)) {
         po.is_heap = 1;   /* #2619: copied where the call was made */
     } else if (po.is_string) {
@@ -12908,7 +12939,6 @@ static TuplePosOwn tuple_pos_own(CodeGenerator* gen, ASTNode* rhs, ASTNode* call
      * (claim_closure_local_env), a cell gives back once it has taken its
      * own, and `_` gives back at once. Nothing released it, and every call
      * leaked the env. */
-    po.is_closure = pt && pt->kind == TYPE_FUNCTION && !pt->is_fnptr;
     po.closure_owned = po.is_closure && tuple_call_returns_owned_closure_at(gen, rhs, j);
     return po;
 }
@@ -12953,6 +12983,187 @@ static void emit_tuple_call_discard(CodeGenerator* gen, ASTNode* call) {
             fprintf(gen->output, " _aether_closure_env_release(%s._%d.env);", td, j);
     }
     fprintf(gen->output, " }");
+}
+
+/* #2869: a tuple local owns what the calls it is bound from hand over at
+ * a position (tuple_pos_own), as a struct local owns its string fields: it
+ * gives them back at its scope exit and when it is bound again, a
+ * destructure from it takes copies of them, and `return t` hands them on.
+ * It owns position j when every binding of it hands over the same kind
+ * there, and only when each mention of it is one of those: a binding to a
+ * call, the source of a destructure, or a returned value, none inside a
+ * closure. Anything else (an alias, an argument, a capture, a parameter, a
+ * global, a state) leaves it owning nothing, as before. Taken as borrowed
+ * from it, the strings a destructure read from the local were never freed:
+ * `t = pair(w); a, n = t` leaked pair's string. */
+typedef struct {
+    CodeGenerator* gen;
+    const char* name;
+    int count;
+    int ok;
+    int bindings;
+    char kinds[TUPLE_LOCAL_MAX];
+} TupleLocalScan;
+
+static int tuple_local_first_binding_count(ASTNode* node, const char* name) {
+    if (!node) return 0;
+    if (node->type == AST_VARIABLE_DECLARATION && node->value && strcmp(node->value, name) == 0 &&
+        node->child_count > 0 && node->children[0] && node->children[0]->node_type &&
+        node->children[0]->node_type->kind == TYPE_TUPLE)
+        return node->children[0]->node_type->tuple_count;
+    for (int i = 0; i < node->child_count; i++) {
+        int n = tuple_local_first_binding_count(node->children[i], name);
+        if (n) return n;
+    }
+    return 0;
+}
+
+static void tuple_local_scan(TupleLocalScan* sc, ASTNode* node, int in_closure) {
+    if (!node || !sc->ok) return;
+    if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) return;
+    if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0))
+        in_closure = 1;
+    if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_CONST_DECLARATION) &&
+        node->value && strcmp(node->value, sc->name) == 0) {
+        ASTNode* call = node->child_count > 0 ? node->children[0] : NULL;
+        if (in_closure || node->type != AST_VARIABLE_DECLARATION || !call ||
+            call->type != AST_FUNCTION_CALL || !call->node_type ||
+            call->node_type->kind != TYPE_TUPLE || call->node_type->tuple_count != sc->count) {
+            sc->ok = 0;
+            return;
+        }
+        ASTNode* def = tuple_call_def(sc->gen, call);
+        for (int j = 0; j < sc->count; j++) {
+            TuplePosOwn po = tuple_pos_own(sc->gen, call, def, j);
+            char k = po.is_heap ? TL_HEAP : po.opt_owned ? TL_OPT : po.closure_owned ? TL_CLOSURE
+                                                                                        : TL_NONE;
+            if (sc->bindings == 0) sc->kinds[j] = k;
+            else if (sc->kinds[j] != k) sc->kinds[j] = TL_NONE;
+        }
+        sc->bindings++;
+        tuple_local_scan(sc, call, in_closure);
+        return;
+    }
+    if (node->type == AST_TUPLE_DESTRUCTURE && node->child_count >= 2) {
+        int vc = node->child_count - 1;
+        for (int i = 0; i < vc; i++) {
+            ASTNode* t = node->children[i];
+            if (t && t->value && strcmp(t->value, sc->name) == 0) { sc->ok = 0; return; }
+        }
+        ASTNode* rhs = node->children[vc];
+        if (rhs && rhs->type == AST_IDENTIFIER && rhs->value && strcmp(rhs->value, sc->name) == 0) {
+            if (in_closure) sc->ok = 0;
+            return;
+        }
+        tuple_local_scan(sc, rhs, in_closure);
+        return;
+    }
+    if (node->type == AST_RETURN_STATEMENT && node->child_count == 1 && node->children[0] &&
+        node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
+        strcmp(node->children[0]->value, sc->name) == 0) {
+        if (in_closure) sc->ok = 0;
+        return;
+    }
+    if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, sc->name) == 0) {
+        sc->ok = 0;
+        return;
+    }
+    for (int i = 0; i < node->child_count && sc->ok; i++)
+        tuple_local_scan(sc, node->children[i], in_closure);
+}
+
+/* The kind the tuple local `name` of the function whose body is `root`
+ * owns at position `j` (TL_NONE when it owns nothing there). Answered from
+ * the body alone, as the return classifiers require (#1311). */
+static int tuple_local_kind_at(CodeGenerator* gen, ASTNode* root, const char* name, int j) {
+    if (!gen || !root || !name || j < 0 || is_module_global_var(gen, name) ||
+        is_actor_state_var(gen, name)) return TL_NONE;
+    ASTNode* fn = fn_def_of_body(gen, root);
+    for (int i = 0; !fn && gen->program && i < gen->program->child_count; i++) {
+        ASTNode* m = gen->program->children[i];
+        for (int k = 0; m && m->type == AST_MAIN_FUNCTION && k < m->child_count; k++)
+            if (m->children[k] == root) fn = m;
+    }
+    if (!fn) return TL_NONE;
+    for (int i = 0; i < fn->child_count; i++) {
+        ASTNode* p = fn->children[i];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
+            p->value && strcmp(p->value, name) == 0) return TL_NONE;
+    }
+    char** promoted = NULL;
+    int promoted_count = 0;
+    get_promoted_names_for_func(gen, fn->type == AST_MAIN_FUNCTION ? "main"
+                                                                   : fn_scope_name(gen->program, fn),
+                                &promoted, &promoted_count);
+    for (int i = 0; i < promoted_count; i++)
+        if (promoted[i] && strcmp(promoted[i], name) == 0) return TL_NONE;
+    /* The count of positions comes from the first binding. */
+    TupleLocalScan sc;
+    memset(&sc, 0, sizeof(sc));
+    sc.gen = gen;
+    sc.name = name;
+    sc.ok = 1;
+    sc.count = tuple_local_first_binding_count(root, name);
+    if (sc.count <= 0 || sc.count > TUPLE_LOCAL_MAX || j >= sc.count) return TL_NONE;
+    tuple_local_scan(&sc, root, 0);
+    return sc.ok && sc.bindings > 0 ? sc.kinds[j] : TL_NONE;
+}
+
+/* The kinds the tuple local `name` of the function being emitted owns, one
+ * digit per position ("1020": a heap string, nothing, a `string?`,
+ * nothing), or NULL when it owns nothing. */
+static const char* tuple_local_owned_kinds(CodeGenerator* gen, const char* name, Type* tt) {
+    if (!gen->current_function || gen->current_function->type == AST_CLOSURE ||
+        !gen->hoist_scope_body || !tt ||
+        tt->kind != TYPE_TUPLE || tt->tuple_count <= 0 || tt->tuple_count > TUPLE_LOCAL_MAX)
+        return NULL;
+    char digits[TUPLE_LOCAL_MAX + 1];
+    int any = 0;
+    for (int j = 0; j < tt->tuple_count; j++) {
+        int k = tuple_local_kind_at(gen, gen->hoist_scope_body, name, j);
+        digits[j] = (char)('0' + k);
+        any |= k != TL_NONE;
+    }
+    digits[tt->tuple_count] = '\0';
+    return any ? cg_intern_n(digits, (size_t)tt->tuple_count) : NULL;
+}
+
+/* Give back what the tuple local `name` owns (`kinds` as above), leaving the
+ * positions empty so a second release frees nothing. */
+void emit_tuple_local_release(CodeGenerator* gen, const char* name, const char* kinds) {
+    for (int j = 0; kinds && kinds[j]; j++) {
+        if (kinds[j] == '0' + TL_HEAP)
+            fprintf(gen->output, " aether_heap_str_free((void*)%s._%d); %s._%d = NULL;",
+                    name, j, name, j);
+        else if (kinds[j] == '0' + TL_OPT)
+            fprintf(gen->output,
+                    " if (%s._%d.has) aether_heap_str_free((void*)%s._%d.val); %s._%d.has = 0;",
+                    name, j, name, j, name, j);
+        else if (kinds[j] == '0' + TL_CLOSURE)
+            fprintf(gen->output, " _aether_closure_env_release(%s._%d.env); %s._%d.env = (void*)0;",
+                    name, j, name, j);
+    }
+}
+
+/* Its scope exit gives back what it owns (codegen.c, the carrier
+ * "tuple_release:<name>:<kinds>"). */
+static void push_tuple_local_release_defer(CodeGenerator* gen, const char* name, Type* tt) {
+    const char* kinds = tuple_local_owned_kinds(gen, name, tt);
+    if (!kinds) return;
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, 0, 0);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("tuple_release:%s:%s", name, kinds);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
+/* `return t` of a tuple local that owns strings hands them on: the local is
+ * emptied once the value is taken, so its exit gives back nothing. */
+static void disown_returned_tuple_local(CodeGenerator* gen, ASTNode* v) {
+    if (!v || v->type != AST_IDENTIFIER || !v->value ||
+        !tuple_local_owned_kinds(gen, v->value, v->node_type)) return;
+    print_line(gen, "%s = (%s){0};", v->value, get_c_type(v->node_type));
 }
 
 /* #2751: `return g(...)` passing a whole tuple on, from a function or
@@ -13927,6 +14138,23 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             fprintf(gen->output, "%s _tup%d = ", tuple_type_name, tmp_id);
             generate_expression(gen, rhs);
             fprintf(gen->output, ";\n");
+            /* #2869: from a tuple local, copies of what it owns: the local
+             * keeps its own, given back at its scope exit, and the targets
+             * own theirs (tuple_pos_own says so). */
+            {
+                const char* tkinds = rhs && rhs->type == AST_IDENTIFIER && rhs->value
+                    ? tuple_local_owned_kinds(gen, rhs->value, rhs_type) : NULL;
+                for (int j = 0; tkinds && tkinds[j]; j++) {
+                    if (tkinds[j] == '0' + TL_HEAP)
+                        print_line(gen, "_tup%d._%d = aether_uniform_heap_str(_tup%d._%d, 0);",
+                                   tmp_id, j, tmp_id, j);
+                    else if (tkinds[j] == '0' + TL_OPT)
+                        print_line(gen, "if (_tup%d._%d.has) _tup%d._%d.val = aether_uniform_heap_str(_tup%d._%d.val, 0);",
+                                   tmp_id, j, tmp_id, j, tmp_id, j);
+                    else if (tkinds[j] == '0' + TL_CLOSURE)
+                        print_line(gen, "_aether_closure_env_retain(_tup%d._%d.env);", tmp_id, j);
+                }
+            }
 
             /* Per-position heap-ness lookup for the destructure
              * (issue #420). For each tuple position `j`, decide
@@ -15362,10 +15590,22 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->child_count > 0 && stmt->children[0]) {
                             vtype = stmt->children[0]->node_type;
                         }
+                        const char* tkinds = stmt->child_count > 0 && stmt->children[0]
+                            ? tuple_local_owned_kinds(gen, stmt->value, stmt->children[0]->node_type)
+                            : NULL;
                         if (stmt->child_count > 0 &&
                             emit_struct_replace_assign(gen, stmt->value, vtype,
                                                        stmt->children[0])) {
                             /* emitted */
+                        } else if (tkinds) {
+                            /* #2869: the new value first (it may read the
+                             * old), then what the local held is given back. */
+                            fprintf(gen->output, "{ %s _ae_tn = ",
+                                    get_c_type(stmt->children[0]->node_type));
+                            generate_expression(gen, stmt->children[0]);
+                            fprintf(gen->output, ";");
+                            emit_tuple_local_release(gen, stmt->value, tkinds);
+                            fprintf(gen->output, " %s = _ae_tn; }\n", stmt->value);
                         } else if (stmt->child_count > 0) {
                             fprintf(gen->output, "%s = ", stmt->value);
                             generate_expression(gen, stmt->children[0]);
@@ -15640,6 +15880,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->children[0]->type == AST_FUNCTION_CALL) {
                             push_struct_destroy_defer(gen, stmt->value, var_type,
                                                       stmt->line, stmt->column);
+                            push_tuple_local_release_defer(gen, stmt->value, var_type);   /* #2869 */
                         }
                         /* #2497: `o2 = o`, `x = o.inner`, `e = arr[i]`: the
                          * local used to alias a struct its owner frees, while
@@ -17175,6 +17416,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 emit_return_escape_drains_for_unreturned(gen, stmt->children[0]);
                 mark_returned_struct_escaped(gen, stmt->children[0]);
                 disown_returned_promoted_struct(gen, stmt->children[0]);
+                disown_returned_tuple_local(gen, stmt->children[0]);   /* #2869 */
                 emit_contract_postconditions(gen, gen->current_function);
                 /* Drain function-level defers BEFORE returning so
                  * cleanup happens between the postcondition check
@@ -17380,6 +17622,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * by the caller). */
                     mark_returned_struct_escaped(gen, stmt->children[0]);
                     disown_returned_promoted_struct(gen, stmt->children[0]);
+                    disown_returned_tuple_local(gen, stmt->children[0]);   /* #2869 */
                     /* #1140: a single-value `return v` is a SUCCESS exit — in a
                      * `T!` function it is wrapped as `{._0 = v, ._1 = ""}`, and
                      * in an ordinary function there is no error channel at all.
