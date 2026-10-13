@@ -765,6 +765,22 @@ With no result type written, the checks use the type the first `return` gives; f
 
 Some values a binding lets through are refused here, because C cannot convert them: a closure becomes a `ptr` only through `box_closure(f)` and a `ptr` a closure only through `unbox_closure(p)`, a pointer is no value of an optional (return `none` for no value), a slice is no `*T`, and `[]`, the empty slice, is returned only as an array, a slice or a pointer. A bool is not a float, a pointer or an enum, and an enum is not a string, a pointer or a float.
 
+A fixed-size array is no result (E0201): a function, a closure or an extern cannot return a `T[N]`, alone or at a position of a tuple, written (`-> int[2]`, `-> (int[2], int)`) or inferred (`return arr`), and a function type with such a result (`fn() -> int[2]`) cannot be written for a parameter, a field or a local. C returns no array; return a struct that holds it (`struct Pair { v: int[2] }`), which is a value with the array in it, or a slice of storage that outlives the call. (Returning the array itself is #2894.)
+
+```aether,fails
+pair() -> int[2] {
+    return [1, 2]
+}
+// error[E0201]: 'pair' returns int[2], a fixed-size array: a function cannot return
+// one, alone or in a tuple (#2886)
+// help: wrap it in a struct and return the struct: struct Pair { v: int[2] }
+
+main() {
+    a = pair()
+    println("${a[0]}")
+}
+```
+
 ### Default arguments
 
 Parameters can carry a default expression:
@@ -3709,6 +3725,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 |------|------|
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`, a `match` arm or `switch` case that can never equal the value it compares, an arm that gives no value to a `match` whose value is used: [Match Expressions](#match-expressions)) |
+| `E0201` | A fixed-size array as a result, alone or in a tuple: of a function, a closure, an extern or a function type ([What a `return` gives](#what-a-return-gives-e0200)) |
 | `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0303` | A name the module does not export |

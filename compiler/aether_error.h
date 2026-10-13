@@ -8,6 +8,7 @@ typedef enum {
     AETHER_ERR_NONE = 0,
     AETHER_ERR_SYNTAX = 100,
     AETHER_ERR_TYPE_MISMATCH = 200,
+    AETHER_ERR_ARRAY_RESULT = 201,       // a function's result is a fixed-size array, alone or in a tuple (#2886)
     AETHER_ERR_UNDEFINED_VAR = 300,
     AETHER_ERR_UNDEFINED_FUNC = 301,
     AETHER_ERR_UNDEFINED_TYPE = 302,

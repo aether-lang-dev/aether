@@ -5044,6 +5044,12 @@ static void order_const_declarations(ASTNode* program) {
 
 static void tc_clauses_reset(void);
 
+/* #2886: results no function can give (defined with typecheck_function_definition). */
+static Type* result_array_type(Type* t);
+static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
+                                int column);
+static void refuse_fn_type_array_result(const char* subject, Type* t, int line, int column);
+
 int typecheck_program(ASTNode* program) {
     note_program_globals(program);
     if (!program || program->type != AST_PROGRAM) return 0;
@@ -5968,9 +5974,30 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
                 return typecheck_node(node->children[0], table);
             }
             return 1;
-        case AST_EXTERN_FUNCTION:
-            // Extern functions have no body to check - just a declaration
+        case AST_EXTERN_FUNCTION: {
+            // Extern functions have no body to check - just a declaration.
+            // #2886: a C function returns no array either, nor does a
+            // function type given to or returned by one.
+            Type* arr = result_array_type(node->node_type);
+            if (arr) {
+                char who[256];
+                snprintf(who, sizeof(who), "extern '%s' returns", node->value ? node->value : "?");
+                refuse_array_result(who, node->node_type, arr, node->line, node->column);
+            } else {
+                char who[256];
+                snprintf(who, sizeof(who), "the result of extern '%s'", node->value ? node->value : "?");
+                refuse_fn_type_array_result(who, node->node_type, node->line, node->column);
+            }
+            for (int i = 0; i < node->child_count; i++) {
+                ASTNode* p = node->children[i];
+                if (!p || !p->value) continue;
+                char who[256];
+                snprintf(who, sizeof(who), "parameter '%s' of extern '%s'", p->value,
+                         node->value ? node->value : "?");
+                refuse_fn_type_array_result(who, p->node_type, p->line, p->column);
+            }
             return 1;
+        }
         case AST_C_STRUCT_DEF:
             // #891 @c_struct overlay: a declaration of (field, type, offset)
             // tuples — no body, no statements to check. The name set is
@@ -7366,8 +7393,120 @@ static void resolve_purity_queries(ASTNode* node, ASTNode* program,
         resolve_purity_queries(node->children[i], program, globals, nglobals);
 }
 
+/* #2886: a result no function can give. C returns no array, and the code
+ * generator does not wrap one (making it a value a function returns is
+ * #2894), so a fixed-size array result, alone or at a position of a tuple
+ * result, compiled to C that did not build (`int[2] pair(void);`). The
+ * offending array type of result type `t`, or NULL. A slice (`T[]`) is a
+ * value and may be returned. */
+static Type* result_array_type(Type* t) {
+    if (!t) return NULL;
+    if (type_is_sized_array(t)) return t;
+    if (t->kind == TYPE_TUPLE) {
+        for (int i = 0; t->tuple_types && i < t->tuple_count; i++) {
+            Type* a = result_array_type(t->tuple_types[i]);
+            if (a) return a;
+        }
+    }
+    return NULL;
+}
+
+/* A function type written inside `t` (`t` itself, a parameter's or the
+ * result's of one, an element's) whose result is such an array: the
+ * function type, or NULL. */
+static Type* fn_type_with_array_result(Type* t, int depth) {
+    if (!t || depth > 16) return NULL;
+    if (t->kind == TYPE_FUNCTION) {
+        if (result_array_type(t->return_type)) return t;
+        for (int i = 0; t->param_types && i < t->param_count; i++) {
+            Type* f = fn_type_with_array_result(t->param_types[i], depth + 1);
+            if (f) return f;
+        }
+        return fn_type_with_array_result(t->return_type, depth + 1);
+    }
+    for (int i = 0; t->tuple_types && i < t->tuple_count; i++) {
+        Type* f = fn_type_with_array_result(t->tuple_types[i], depth + 1);
+        if (f) return f;
+    }
+    return fn_type_with_array_result(t->element_type, depth + 1);
+}
+
+/* `arr` as it is written in Aether (`Doc[2]`, `[Dir]int`), for the help. */
+static void array_type_spelling(Type* arr, char* out, size_t cap) {
+    Type* el = arr->element_type;
+    const char* e = el && el->kind == TYPE_STRUCT && el->struct_name ? el->struct_name
+                                                                      : type_to_string(el);
+    if (arr->index_enum_name) snprintf(out, cap, "[%s]%s", arr->index_enum_name, e);
+    else snprintf(out, cap, "%s[%d]", e, arr->array_size);
+}
+
+/* Refuse result type `result` (holding the array `arr`) of what `subject`
+ * names: "'pair' returns", "extern 'pair_c' returns", "this closure
+ * returns", "parameter 'g' holds the function type || -> int[2], which
+ * returns". */
+static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
+                                int column) {
+    char spelled[128], msg[512], hint[256];
+    array_type_spelling(arr, spelled, sizeof(spelled));
+    if (result == arr) {
+        snprintf(msg, sizeof(msg),
+                 "%s %s, a fixed-size array: a function cannot return one, alone or in a "
+                 "tuple (#2886)", subject, spelled);
+    } else {
+        snprintf(msg, sizeof(msg),
+                 "%s %s, which holds the fixed-size array %s: a function cannot return one, "
+                 "alone or in a tuple (#2886)", subject, type_to_string(result), spelled);
+    }
+    snprintf(hint, sizeof(hint),
+             "wrap it in a struct and return the struct: struct Pair { v: %s }", spelled);
+    type_error_code_hint(msg, hint, line, column, AETHER_ERR_ARRAY_RESULT);
+}
+
+/* Refuse a written type `t` of what `subject` names (a parameter, a field, a
+ * local) when it holds a function type whose result is such an array. */
+static void refuse_fn_type_array_result(const char* subject, Type* t, int line, int column) {
+    Type* f = fn_type_with_array_result(t, 0);
+    if (!f) return;
+    char who[256];
+    snprintf(who, sizeof(who), "%s holds the function type %s, which returns",
+             subject, type_to_string(f));
+    refuse_array_result(who, f->return_type, result_array_type(f->return_type), line, column);
+}
+
+/* The first `return` of a closure's own body whose value would make the
+ * closure return such an array (alone, or at a position of a tuple): the
+ * array type, the statement in *at. Not a nested closure's. */
+static Type* closure_array_return(ASTNode* node, ASTNode** at) {
+    if (!node || ast_is_own_function(node)) return NULL;
+    if (node->type == AST_RETURN_STATEMENT) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* v = node->children[i];
+            Type* a = v ? result_array_type(v->node_type) : NULL;
+            if (a) {
+                *at = node;
+                return a;
+            }
+        }
+    }
+    for (int i = 0; i < node->child_count; i++) {
+        Type* a = closure_array_return(node->children[i], at);
+        if (a) return a;
+    }
+    return NULL;
+}
+
 int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
     if (!func || (func->type != AST_FUNCTION_DEFINITION && func->type != AST_BUILDER_FUNCTION)) return 0;
+
+    /* #2886: written (`-> int[2]`) or inferred (`return arr`). */
+    {
+        Type* arr = result_array_type(func->node_type);
+        if (arr) {
+            char who[256];
+            snprintf(who, sizeof(who), "'%s' returns", func->value ? func->value : "function");
+            refuse_array_result(who, func->node_type, arr, func->line, func->column);
+        }
+    }
 
     SymbolTable* func_table = create_symbol_table(table);
 
@@ -7385,6 +7524,11 @@ int typecheck_function_definition(ASTNode* func, SymbolTable* table) {
         if (param->type == AST_VARIABLE_DECLARATION || param->type == AST_PATTERN_VARIABLE) {
             Type* param_type = param->node_type ? clone_type(param->node_type) : create_type(TYPE_UNKNOWN);
             add_symbol(func_table, param->value, param_type, 0, 0, 0);
+            if (param->value) {
+                char who[192];
+                snprintf(who, sizeof(who), "parameter '%s'", param->value);
+                refuse_fn_type_array_result(who, param->node_type, param->line, param->column);
+            }
         }
     }
 
@@ -7493,6 +7637,13 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
             return 0;
         }
         
+        /* #2886: a field of a function type that returns a fixed-size array. */
+        {
+            char who[192];
+            snprintf(who, sizeof(who), "struct field '%s'", field->value ? field->value : "?");
+            refuse_fn_type_array_result(who, field->node_type, field->line, field->column);
+        }
+
         /* #2822: an optional field compiles (#2820), but one whose value
          * owns memory has none of a `string` field's ownership (destroy,
          * replace, dup, a take on store), so a string stored there would
@@ -8610,6 +8761,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                          stmt->value);
                 type_error(error_msg, stmt->line, stmt->column);
                 return 0;
+            }
+            /* #2886: a local written as a function type that returns a
+             * fixed-size array. */
+            if (stmt->type == AST_VARIABLE_DECLARATION && stmt->value) {
+                char who[192];
+                snprintf(who, sizeof(who), "'%s'", stmt->value);
+                refuse_fn_type_array_result(who, stmt->node_type, stmt->line, stmt->column);
             }
             if (stmt->child_count > 0) {
                 // Has initializer
@@ -11248,6 +11406,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     Type* ptype = child->node_type ? clone_type(child->node_type)
                                                    : create_type(TYPE_INT); // default to int
                     add_symbol(closure_scope, child->value, ptype, 0, 0, 0);
+                    char who[192];
+                    snprintf(who, sizeof(who), "closure parameter '%s'", child->value);
+                    refuse_fn_type_array_result(who, child->node_type, child->line, child->column);
                 }
             }
 
@@ -11297,6 +11458,28 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             }
             g_tc_return_type = enclosing_ret;
             g_tc_return_owner = enclosing_owner;
+
+            /* #2886: what a closure of its own returns (a call's trailing
+             * block returns from its enclosing function, checked there). */
+            if (ast_is_own_function(expr)) {
+                for (int i = 0; i < expr->child_count; i++) {
+                    ASTNode* body = expr->children[i];
+                    if (!body || body->type != AST_BLOCK) continue;
+                    ASTNode* at = NULL;
+                    Type* arr = closure_array_return(body, &at);
+                    if (arr && at) {
+                        ASTNode* v = NULL;
+                        for (int k = 0; k < at->child_count && !v; k++)
+                            if (at->children[k] && result_array_type(at->children[k]->node_type))
+                                v = at->children[k];
+                        Type* result = at->child_count == 1 ? at->children[0]->node_type : NULL;
+                        refuse_array_result(result ? "this closure returns"
+                                                   : "this closure returns, among its values,",
+                                            result ? result : arr, arr,
+                                            v ? v->line : at->line, v ? v->column : at->column);
+                    }
+                }
+            }
 
             free_symbol_table(closure_scope);
 

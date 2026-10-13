@@ -51,6 +51,8 @@ static const char* get_common_suggestion(AetherErrorCode code) {
             return "check for missing parentheses, braces, or keywords";
         case AETHER_ERR_TYPE_MISMATCH:
             return "ensure types are compatible or add explicit type conversion";
+        case AETHER_ERR_ARRAY_RESULT:
+            return "wrap the array in a struct and return the struct";
         case AETHER_ERR_UNDEFINED_VAR:
             return "check spelling or declare the variable before use";
         case AETHER_ERR_UNDEFINED_FUNC:
