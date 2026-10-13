@@ -2732,6 +2732,7 @@ static int returns_promoted_string(CodeGenerator* gen, ASTNode* expr, const char
  * function's. */
 static int returned_param_is_captured(CodeGenerator* gen, const char* name, ASTNode* fn_def);
 static int classify_open_has(ASTNode* fn);
+static void note_open_dependency(ASTNode* fn);
 
 /* #2649: is `e` a call to a `string` function whose classification is open
  * further up, one this function's answer is part of (`ma` returning
@@ -2746,7 +2747,10 @@ static int classify_open_has(ASTNode* fn);
 static int call_to_open_classification(CodeGenerator* gen, ASTNode* e) {
     if (!gen || !gen->program || !e || e->type != AST_FUNCTION_CALL || !e->value) return 0;
     ASTNode* def = find_function_definition_by_name(gen->program, codegen_normalise_callee(e->value));
-    return def && def->node_type && def->node_type->kind == TYPE_STRING && classify_open_has(def);
+    if (!def || !def->node_type || def->node_type->kind != TYPE_STRING || !classify_open_has(def))
+        return 0;
+    note_open_dependency(def);   /* an answer resting on it (#2875) */
+    return 1;
 }
 
 /* The definition named `fn_name` whose body is `body_root`: the clause of a
@@ -3008,6 +3012,11 @@ static const DefClauses* fn_clause_set(CodeGenerator* gen, ASTNode* fn_def) {
  * the compiler's stack ran out. */
 #define CLASSIFY_OPEN_MAX 128
 static ASTNode* g_classify_open[CLASSIFY_OPEN_MAX];
+/* For an open tuple function, what its positions are assumed to be while
+ * it is being classified (function_def_returns_heap_at), one int per
+ * position and, after them, whether the assumption was read; NULL for a
+ * string function. */
+static int* g_classify_assume[CLASSIFY_OPEN_MAX];
 static int g_classify_open_count = 0;
 
 static int classify_open_has(ASTNode* fn) {
@@ -3016,11 +3025,18 @@ static int classify_open_has(ASTNode* fn) {
     return 0;
 }
 
+static int classify_open_index(ASTNode* fn) {
+    for (int i = 0; i < g_classify_open_count; i++)
+        if (g_classify_open[i] == fn) return i;
+    return -1;
+}
+
 /* Open every clause of `fn_def` (one node for a single definition); returns
  * how many were pushed, for classify_close. */
 static int classify_open(const DefClauses* dc, ASTNode* fn_def) {
     int n = dc ? dc->count : 1, pushed = 0;
     for (int c = 0; c < n && g_classify_open_count < CLASSIFY_OPEN_MAX; c++) {
+        g_classify_assume[g_classify_open_count] = NULL;
         g_classify_open[g_classify_open_count++] = dc ? dc->nodes[c] : fn_def;
         pushed++;
     }
@@ -3032,20 +3048,18 @@ static void classify_close(int pushed) {
 }
 
 /* A return classifier asked about a function it is still classifying
- * answers no (a cycle break), the answer that frees nothing. An answer
- * computed from one about a function opened further out is provisional: its
- * no may turn into yes once that function's own answer is in. Remembered as
- * final, it left a pair of mutually recursive functions disagreeing (the one
- * asked second taken as handing over a borrowed error it owned, which every
- * caller then leaked: std.message's parse_pattern_err and parse_block). So
- * such an answer is kept only while the function it rested on is being
- * classified, and asked again after that it is computed afresh. The answer of
- * the function a cycle started from is final: every answer inside it rested
- * on its own no, the least one, and it adds what its own returns make. A
- * yes is final whatever it rested on, since a final answer only adds
- * evidence. g_pending_low is the outermost open index a cycle break or a
- * provisional answer has been read from, within the classification being
- * computed. */
+ * answers from an assumption: a string function's is no (a cycle break), a
+ * tuple function's is what its positions are assumed to be, all heap to
+ * begin with (function_def_returns_heap_at solves a cycle of tuple
+ * functions as a fixed point from there). An answer computed from one about
+ * a function opened further out rests on that assumption, so it is
+ * provisional: it is kept only while that function is being classified, and
+ * asked again after that it is computed afresh. Remembered as final, it left
+ * a pair of mutually recursive functions disagreeing (the one asked second
+ * taken as handing over a borrowed error it owned, which every caller then
+ * leaked: std.message's parse_pattern_err and parse_block, #2870).
+ * g_pending_low is the outermost open index an assumption or a provisional
+ * answer has been read from, within the classification being computed. */
 #define CLASSIFY_LOW_NONE CLASSIFY_OPEN_MAX
 static int g_pending_low = CLASSIFY_LOW_NONE;
 
@@ -3057,18 +3071,21 @@ static ProvisionalMemo* g_provisional = NULL;
 static int g_provisional_count = 0;
 static int g_provisional_cap = 0;
 
-/* A cycle break answering for `fn`, which is open. */
-static void note_pending(ASTNode* fn) {
-    g_pending_answers++;
-    int at = 0;
-    for (int i = 0; i < g_classify_open_count; i++) {
-        if (g_classify_open[i] == fn) { at = i; break; }
-    }
+/* An answer about `fn`, which is open, read from its assumption. */
+static void note_open_dependency(ASTNode* fn) {
+    int at = classify_open_index(fn);
+    if (at < 0) at = 0;
     if (at < g_pending_low) g_pending_low = at;
 }
 
-/* A memoised no read for `clause`: provisional, it carries what it rested on
- * to the reader. */
+/* A cycle break answering for `fn`, which is open. */
+static void note_pending(ASTNode* fn) {
+    g_pending_answers++;
+    note_open_dependency(fn);
+}
+
+/* A memoised answer read for `clause`: provisional, it carries what it
+ * rested on to the reader. */
 static void provisional_note_read(ASTNode* clause) {
     for (int i = 0; i < g_provisional_count; i++) {
         if (g_provisional[i].clause == clause && g_provisional[i].low < g_pending_low)
@@ -3135,7 +3152,10 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     //                    caller does not free.
     //   "heap_pending" — currently being analysed (cycle break).
     if (fn_def->annotation) {
-        if (strcmp(fn_def->annotation, "heap_yes") == 0)     return 1;
+        if (strcmp(fn_def->annotation, "heap_yes") == 0) {
+            provisional_note_read(fn_def);
+            return 1;
+        }
         if (strcmp(fn_def->annotation, "heap_no") == 0) {
             provisional_note_read(fn_def);
             return 0;
@@ -3185,7 +3205,7 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
         if (!memoised[c]) continue;
         free(clause->annotation);
         clause->annotation = strdup(result ? "heap_yes" : "heap_no");
-        if (!result && low < base) provisional_add(clause, low);
+        if (low < base) provisional_add(clause, low);
     }
     return result;
 }
@@ -5364,19 +5384,22 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
     /* Memo hit on a pre-parsed positions string. */
     int cached = parse_heap_positions_annotation(fn_def->annotation, position);
     if (cached >= 0) {
-        if (!cached) provisional_note_read(fn_def);
+        provisional_note_read(fn_def);
         return cached;
     }
-    /* Currently analysing (cycle break) — conservative no-heap. Same
-     * shape as the single-value analyzer's "heap_pending" sentinel. */
-    if (fn_def->annotation &&
-        strcmp(fn_def->annotation, "heap_pending") == 0) {
+    /* Being classified: what it is assumed to be (heap until shown
+     * otherwise, below). Open with an annotation that cannot take the
+     * "heap_pending" mark (e.g. "c_callback:..."), it is found on the open
+     * stack. */
+    if ((fn_def->annotation && strcmp(fn_def->annotation, "heap_pending") == 0) ||
+        classify_open_has(fn_def)) {
         note_pending(fn_def);
-        return 0;
+        int at = classify_open_index(fn_def);
+        int* assume = at >= 0 ? g_classify_assume[at] : NULL;
+        if (!assume) return 0;
+        assume[fn_def->node_type->tuple_count] = 1;   /* read */
+        return assume[position];
     }
-    /* Some unrelated annotation (e.g. "c_callback:...") — analyse
-     * without clobbering, under the open guard. */
-    if (classify_open_has(fn_def)) { note_pending(fn_def); return 0; }
     /* Every clause of a function written as several (#2627), as for a
      * string result. */
     const DefClauses* dc = fn_clause_set(gen, fn_def);
@@ -5390,42 +5413,70 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
 
     int tuple_count = fn_def->node_type->tuple_count;
     int* per_pos = (int*)calloc((size_t)tuple_count, sizeof(int));
+    /* #2875: functions that reach each other are solved together, as a
+     * fixed point. While this one is open, a question about it is answered
+     * from `assume`, every string position heap to begin with; once its
+     * positions are computed, if an answer was read and a position came out
+     * no, the walk runs again with that position assumed no, until what it
+     * computes is what it assumed. A position only ever goes from yes to no
+     * (a no the walk reads gives it less evidence and more vetoes), so this
+     * ends within one pass per position. The answers inside it that rested
+     * on the assumption are dropped before each pass. Answered no from the
+     * start (a cycle break), a function that returns the other's call as it
+     * is (`return pb(n - 1, w)`) vetoed the position the other built its
+     * error at, both came out borrowed, and every caller leaked the error. */
+    int* assume = (int*)calloc((size_t)tuple_count + 1, sizeof(int));
+    for (int p = 0; p < tuple_count; p++) {
+        Type* pt = fn_def->node_type->tuple_types ? fn_def->node_type->tuple_types[p] : NULL;
+        assume[p] = pt && pt->kind == TYPE_STRING;
+    }
 
     int base = g_classify_open_count;
     int saved_low = g_pending_low;
-    g_pending_low = CLASSIFY_LOW_NONE;
+    int low = CLASSIFY_LOW_NONE;
     int opened = classify_open(dc, fn_def);
+    for (int i = base; i < base + opened; i++) g_classify_assume[i] = assume;
     const char* saved_self = g_tuple_self;
     int saved_err_pos = g_tuple_err_pos;
     g_tuple_self = fn_def->value;
     g_tuple_err_pos = fn_def->node_type->is_result ? tuple_count - 1 : -1;
     g_classifying++;
-    for (int p = 0; p < tuple_count; p++) {
-        int found = 0, any_heap = 0, vetoed = 0;
-        for (int c = 0; c < nclauses; c++) {
-            ASTNode* clause = dc ? dc->nodes[c] : fn_def;
-            ASTNode* body = fn_def_body(clause);
-            if (body)
-                walk_returns_for_heap_at(gen, body, p, body, clause->value,
-                                         &found, &any_heap, &vetoed);
+    for (;;) {
+        assume[tuple_count] = 0;
+        g_pending_low = CLASSIFY_LOW_NONE;
+        for (int p = 0; p < tuple_count; p++) {
+            int found = 0, any_heap = 0, vetoed = 0;
+            for (int c = 0; c < nclauses; c++) {
+                ASTNode* clause = dc ? dc->nodes[c] : fn_def;
+                ASTNode* body = fn_def_body(clause);
+                if (body)
+                    walk_returns_for_heap_at(gen, body, p, body, clause->value,
+                                             &found, &any_heap, &vetoed);
+            }
+            /* Heap at `p` iff some return makes it heap (OR-fold) AND
+             * no whole-tuple-passthrough return yields an unwrappable
+             * non-heap value there (veto). The veto wins: see the
+             * walker comment. */
+            per_pos[p] = (found && any_heap && !vetoed) ? 1 : 0;
         }
-        /* Heap at `p` iff some return makes it heap (OR-fold) AND
-         * no whole-tuple-passthrough return yields an unwrappable
-         * non-heap value there (veto). The veto wins — see the
-         * walker comment. */
-        per_pos[p] = (found && any_heap && !vetoed) ? 1 : 0;
+        if (g_pending_low < low) low = g_pending_low;
+        provisional_drop_from(base);
+        int changed = 0;
+        for (int p = 0; p < tuple_count; p++) {
+            per_pos[p] = per_pos[p] && assume[p];
+            if (assume[tuple_count] && per_pos[p] != assume[p]) changed = 1;
+        }
+        if (!changed) break;
+        for (int p = 0; p < tuple_count; p++) assume[p] = per_pos[p];
     }
     g_classifying--;
     g_tuple_self = saved_self;
     g_tuple_err_pos = saved_err_pos;
     classify_close(opened);
+    free(assume);
 
     int result = per_pos[position];
-    int low = g_pending_low;
     g_pending_low = saved_low < low ? saved_low : low;
-    provisional_drop_from(base);
-    int any_no = 0;
-    for (int p = 0; p < tuple_count; p++) any_no |= !per_pos[p];
 
     /* Build "heap_positions:1,0,1\0" — at most 2*tuple_count + 16. */
     size_t cap = (size_t)tuple_count * 2u + 32u;
@@ -5440,7 +5491,7 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
         }
         free(clause->annotation);
         clause->annotation = buf;
-        if (any_no && low < base) provisional_add(clause, low);
+        if (low < base) provisional_add(clause, low);
     }
     free(per_pos);
     return result;

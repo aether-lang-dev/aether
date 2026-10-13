@@ -1,0 +1,119 @@
+// Regression (#2875): tuple functions that reach each other, one of them
+// returning the other's call as it is (`return pb(n - 1, w)`). The return
+// classifier answered "not heap" for the function still being classified
+// (a cycle break), so the pass-through return vetoed the position the
+// other function built its error at, both came out borrowed, and every
+// caller leaked the error. The cycle is now solved as a fixed point,
+// starting from heap: the error position is heap for every function in it,
+// in either definition order. Each shape runs in a round, and the rounds
+// must not grow the heap.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The one that passes the other's call through is defined second.
+pb(n: int, w: string) -> (int, string) {
+    if n == 1 { return 7, "" }
+    a, e = pa(n - 1, w)
+    if e != "" { return 0, e }
+    return a + 1, ""
+}
+
+pa(n: int, w: string) -> (int, string) {
+    if n <= 0 { return 0, string.concat("bad-", w) }
+    return pb(n - 1, w)
+}
+
+// And first.
+qa(n: int, w: string) -> (int, string) {
+    if n <= 0 { return 0, string.concat("qbad-", w) }
+    return qb(n - 1, w)
+}
+
+qb(n: int, w: string) -> (int, string) {
+    if n == 1 { return 5, "" }
+    a, e = qa(n - 1, w)
+    if e != "" { return 0, e }
+    return a + 1, ""
+}
+
+// Three functions, two of them passing a call through.
+ra(n: int, w: string) -> (int, string) {
+    if n <= 0 { return 0, string.concat("rbad-", w) }
+    return rb(n - 1, w)
+}
+
+rb(n: int, w: string) -> (int, string) {
+    return rc(n, w)
+}
+
+rc(n: int, w: string) -> (int, string) {
+    if n == 1 { return 3, "lit" }
+    a, e = ra(n - 1, w)
+    if e != "" { return 0, e }
+    return a + 1, ""
+}
+
+taken(a: int, e: string) -> int {
+    return a + string.length(e)
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        a, e = pa(0, w)
+        total = total + taken(a, e)
+        b, f = pa(1, w)
+        total = total + taken(b, f)
+        c, g = pb(0, w)
+        total = total + taken(c, g)
+        d, h = qa(0, w)
+        total = total + taken(d, h)
+        x, y = qb(2, w)
+        total = total + taken(x, y)
+        r1, s1 = ra(0, w)
+        total = total + taken(r1, s1)
+        r2, s2 = rc(1, w)
+        total = total + taken(r2, s2)
+        r3, s3 = rb(2, w)
+        total = total + taken(r3, s3)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    w = string.concat("w", "v")
+    a, e = pa(0, w)
+    check(a == 0 && e == "bad-wv", "pa's own error (${e})")
+    b, f = pa(1, w)
+    check(b == 0 && f == "bad-wv", "pa's error through pb (${f})")
+    c, g = pb(0, w)
+    check(c == 0 && g == "bad-wv", "pb's error from pa (${g})")
+    d, h = qa(0, w)
+    check(d == 0 && h == "qbad-wv", "qa's own error (${h})")
+    x, y = qb(2, w)
+    check(x == 0 && y == "qbad-wv", "qb's error from qa (${y})")
+    r2, s2 = rc(1, w)
+    check(r2 == 3 && s2 == "lit", "rc's literal error (${s2})")
+    r3, s3 = rb(2, w)
+    check(r3 == 0 && s3 == "rbad-wv", "rb's error from ra (${s3})")
+    check(round(w) == 20 * (6 + 6 + 6 + 7 + 7 + 7 + 6 + 7), "the rounds")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(grown == 0, "the heap grew by ${grown} bytes")
+    }
+    println("ok")
+}
