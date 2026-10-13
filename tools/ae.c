@@ -1992,18 +1992,19 @@ void discover_toolchain(void) {
 
     // Strategy 4: CWD dev mode — ./build/aetherc
     if (path_exists("build/aetherc" EXE_EXT)) {
-        /* The root is the working directory, which getcwd gives whole or
-         * not at all into a buffer the root's size (#2862). */
-        char cwd[sizeof(tc.root)];
-        if (getcwd(cwd, sizeof(cwd))) {
-            tc_set_root("%s", cwd);
-        } else if (errno == ERANGE) {
-            fprintf(stderr, "Error: the working directory is longer than %zu bytes, the most a "
-                            "toolchain root holds.\n", sizeof(tc.root) - 1);
-            exit(1);
-        } else {
-            strcpy(tc.root, ".");
-        }
+        /* The root is the working directory, read whole. One longer than
+         * tc.root holds is named relative to itself, ".": the directory
+         * build/aetherc was just found in, exact while the process runs
+         * there. ae leaves its working directory only for an aether.toml
+         * walk-up (manifest_walk_up), which reads the working directory
+         * into 1024 bytes and so is not taken from one that long. Refused
+         * (as 4bf49161 made it, #2862), a checkout that deep could not
+         * build at all; cut, the root named another directory. A cwd that
+         * cannot be read at all is "." too, as it always was. */
+        char* cwd = ae_getcwd_whole();
+        if (cwd && strlen(cwd) < sizeof(tc.root)) tc_set_root("%s", cwd);
+        else strcpy(tc.root, ".");
+        free(cwd);
         snprintf(tc.compiler, sizeof(tc.compiler), "%s/build/aetherc" EXE_EXT, tc.root);
         tc.dev_mode = true;
         goto found_root;

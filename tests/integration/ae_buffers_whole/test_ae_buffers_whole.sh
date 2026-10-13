@@ -21,6 +21,10 @@
 #    1023 bytes, it named another directory, and the build went on with
 #    whatever toolchain the next strategy found. On Linux, where such a
 #    path exists for the tool to find.
+# 4. A working directory longer than a toolchain root holds still works as
+#    one (a checkout found there by its build/aetherc): it is the root as
+#    ".", where 4bf49161 refused it. On Linux, with the tree's directories
+#    linked into an 1100-byte directory.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -81,6 +85,28 @@ if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
         if ! printf '%s' "$out" | grep -q "the toolchain root .* bytes long; it can be at most 1023"; then
             echo "  [FAIL] ae_buffers_whole: an AETHER_HOME of ${#home} bytes was not refused"
             printf '%s\n' "$out" | head -5 | cut -c1-200 | sed 's/^/        /'
+            fail=1
+        fi
+    fi
+fi
+
+# --- 4. a working directory longer than a toolchain root ---
+if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
+    cwd_deep="$TMP/cwd"
+    seg="cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+    while [ ${#cwd_deep} -lt 1100 ]; do cwd_deep="$cwd_deep/$seg"; done
+    if mkdir -p "$cwd_deep" 2>/dev/null; then
+        for d in build runtime std compiler contrib include; do
+            [ -e "$ROOT/$d" ] && ln -s "$ROOT/$d" "$cwd_deep/$d"
+        done
+        mkdir -p "$TMP/solo_cwd"
+        cp "$AE" "$TMP/solo_cwd/ae"
+        printf 'main() {\n    println("x")\n}\n' > "$cwd_deep/x.ae"
+        out="$(cd "$cwd_deep" && env -u AETHER_HOME "$TMP/solo_cwd/ae" check x.ae 2>&1)"
+        rc=$?
+        if [ $rc -ne 0 ] || ! printf '%s' "$out" | grep -q "OK: no errors"; then
+            echo "  [FAIL] ae_buffers_whole: ae does not work in a ${#cwd_deep}-byte working directory"
+            printf '%s\n' "$out" | head -3 | cut -c1-200 | sed 's/^/        /'
             fail=1
         fi
     fi
