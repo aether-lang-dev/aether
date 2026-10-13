@@ -9,11 +9,14 @@
 // which the code generator routes straight to the runtime's adopting
 // entries, left it there. Once the container was freed, a panic caught
 // later in the same `try` drained the entry and freed the string again: a
-// double free (heap corruption, 0xC0000374, once the block was reused). The
-// adopting entries (list_add_string_adopted, list_set_string_adopted,
-// map_put_string_adopted) now take the string out of the journal
-// themselves. Each shape runs 100 times through a caught panic, then once
-// more counting the heap: no growth.
+// double free (heap corruption, 0xC0000374, once the block was reused).
+// Every adoption the generated code writes now goes through a prelude
+// helper that takes the string out of the journal once the container has
+// it, and only then: an adoption that fails (an index out of range, a null
+// list or map) stores nothing, the string stays its first owner's, and the
+// caught panic frees it (forgotten before the call, it leaked). Each shape
+// runs 100 times through a caught panic, then once more counting the heap:
+// no growth.
 import std.list
 import std.map
 import std.mem
@@ -51,6 +54,11 @@ add_wrapped(l: ptr, v: string) {
 
 set_at(l: ptr, v: string) {
     list_set(l, 0, v)
+}
+
+// An index past the end: the list adopts nothing.
+set_past(l: ptr, v: string) {
+    list_set(l, 5, v)
 }
 
 // A builder whose setter puts its string parameter into the config, and
@@ -106,6 +114,18 @@ once(which: int) -> int {
                 set_opt("k", "v7")
             }
         }
+        // Adoptions that fail, then the panic.
+        if which == 8 {
+            l = list_new()
+            set_past(l, "v8")
+            list_free(l)
+        }
+        if which == 9 {
+            put_raw(null, "k", "v9")
+        }
+        if which == 10 {
+            add_raw(null, "v10")
+        }
         later_panic(1)
     } catch e {
         r = 1
@@ -141,5 +161,8 @@ main() {
     shape(5, "list.add")
     shape(6, "list.set")
     shape(7, "a builder setter's map_put_raw")
+    shape(8, "a list.set past the end")
+    shape(9, "a map_put_raw into a null map")
+    shape(10, "a list_add_raw into a null list")
     println("ok")
 }

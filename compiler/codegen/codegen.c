@@ -8405,17 +8405,23 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * `list.set`. Only the first two forgot before (#2810), so a string a
      * function journaled and then put raw was freed again by a panic caught
      * after the container let it go. */
+    /* Only an adoption that took place: a failed one (an index out of
+     * range, a null list or map) stores nothing and returns 0, and the
+     * string stays its first owner's, which a caught panic still frees. */
     print_line(gen, "static inline int _aether_adopt_list_add(void* list, void* item) {");
+    print_line(gen, "    if (!list_add_string_adopted(list, item)) return 0;");
     print_line(gen, "    aether_unwind_forget(item);");
-    print_line(gen, "    return list_add_string_adopted(list, item);");
+    print_line(gen, "    return 1;");
     print_line(gen, "}");
     print_line(gen, "static inline int _aether_adopt_list_set(void* list, int index, void* item) {");
+    print_line(gen, "    if (!list_set_string_adopted(list, index, item)) return 0;");
     print_line(gen, "    aether_unwind_forget(item);");
-    print_line(gen, "    return list_set_string_adopted(list, index, item);");
+    print_line(gen, "    return 1;");
     print_line(gen, "}");
     print_line(gen, "static inline int _aether_adopt_map_put(void* map, const char* key, void* value) {");
+    print_line(gen, "    if (!map_put_string_adopted(map, key, value)) return 0;");
     print_line(gen, "    aether_unwind_forget(value);");
-    print_line(gen, "    return map_put_string_adopted(map, key, value);");
+    print_line(gen, "    return 1;");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
     print_line(gen, "    return _aether_adopt_list_add(list, item) ? \"\" : \"list.add failed\";");
