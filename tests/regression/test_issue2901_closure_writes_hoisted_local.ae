@@ -1,0 +1,80 @@
+// Regression (#2901): a closure that writes a local first bound in an if's
+// branches (or in a while body) declared a C local of its own, so the
+// write never reached the variable: `if k > 0 { n = 1 } else { n = 2 }`,
+// then `rebind = || { n = 7 }; rebind()`, left n at 1. The write path asked
+// whether the name was bound in the closure's own scope, and a binding in a
+// branch or a loop body did not count, though codegen declares the variable
+// in that scope (analysis/hoist.h: every arm binds it, a while body binds
+// it, or one arm of a top-level if binds it and the code after reads it).
+// Such a name is now the scope's, so the closure writes it through its cell,
+// as it does a name bound before it in the scope itself.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+both_arms(k: int) -> int {
+    if k > 0 { n = 1 } else { n = 2 }
+    rebind = || { n = 7 }
+    rebind()
+    return n
+}
+
+one_arm(k: int) -> int {
+    if k > 0 { n = 1 }
+    rebind = || { n = 9 }
+    rebind()
+    return n
+}
+
+strings(k: int) -> int {
+    if k > 0 { s = "a" } else { s = "bb" }
+    rebind = || { s = string.concat("xyz", "w") }
+    rebind()
+    return string.length(s)
+}
+
+arrays(k: int) -> int {
+    if k > 0 { a = [1, 2] } else { a = [3, 4] }
+    rebind = || { a = [7, 8] }
+    rebind()
+    return a[0] * 10 + a[1]
+}
+
+loop_body(k: int) -> int {
+    i = 0
+    while i < k {
+        m = i
+        i = i + 1
+    }
+    rebind = || { m = 50 }
+    rebind()
+    return m
+}
+
+in_switch(k: int) -> int {
+    switch k {
+        case 1: r = 10
+        default: r = 20
+    }
+    rebind = || { r = 30 }
+    rebind()
+    return r
+}
+
+main() {
+    check(both_arms(1) == 7 && both_arms(-1) == 7, "a name both arms bind")
+    check(one_arm(1) == 9, "a name one arm binds and the code after reads")
+    check(strings(1) == 4, "a string both arms bind")
+    check(arrays(1) == 78, "an array both arms bind")
+    check(loop_body(3) == 50, "a name a while body binds")
+    check(in_switch(1) == 30 && in_switch(2) == 30, "a name every case binds")
+    println("ok")
+}

@@ -1,4 +1,5 @@
 #include "../analysis/quote.h"
+#include "../analysis/hoist.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
 #include "../aether_defines.h"
@@ -2773,6 +2774,35 @@ static int declares_name(ASTNode* s, const char* var_name) {
 
 static int visible_decl_line_on_path(ASTNode* s, const char* var_name, ASTNode* viewer);
 
+typedef struct { const char* name; ASTNode* decl; } HoistNameHunt;
+
+static void hoist_name_hunt(ASTNode* decl, void* user) {
+    HoistNameHunt* h = (HoistNameHunt*)user;
+    if (!h->decl && decl && decl->value && strcmp(decl->value, h->name) == 0) h->decl = decl;
+}
+
+/* #2901: the binding of `var_name` that statement `s` declares in the
+ * block it stands in, because codegen hoists the name out of `s`
+ * (analysis/hoist.h): every arm of an if/else, a switch with a default or
+ * a covering match binds it (hoist_common_decl_names), or a while body
+ * binds it (hoist_loop_decls). NULL for none. The C variable is then the
+ * block's, so a closure after that binding that writes the name writes
+ * it, as it does a name the block binds itself. */
+static ASTNode* stmt_hoisted_decl(ASTNode* s, const char* var_name) {
+    if (!s || !var_name) return NULL;
+    if (s->type == AST_WHILE_LOOP) {
+        HoistNameHunt h = { var_name, NULL };
+        if (s->child_count > 1) hoist_loop_decls(s->children[1], hoist_name_hunt, &h);
+        return h.decl;
+    }
+    const char* names[HOIST_MAX_NAMES];
+    int n = hoist_common_decl_names(s, names, HOIST_MAX_NAMES);
+    for (int i = 0; i < n; i++)
+        if (names[i] && strcmp(names[i], var_name) == 0)
+            return hoist_common_first_decl(s, var_name);
+    return NULL;
+}
+
 // The line of the first declaration of `var_name` that is VISIBLE from
 // `viewer` (a closure node) in `block`, or INT_MAX if there is none: one of
 // its statements, or one in a block on the way from it down to `viewer` (a
@@ -2794,6 +2824,12 @@ static int visible_decl_line(ASTNode* block, const char* var_name, ASTNode* view
         ASTNode* s = block->children[k];
         if (!s) continue;
         if (declares_name(s, var_name)) return s->line;
+        /* #2901: a name hoisted out of a statement that does not hold the
+         * closure is the block's too, from its binding on. */
+        if (s != viewer && !subtree_contains(s, viewer)) {
+            ASTNode* hd = stmt_hoisted_decl(s, var_name);
+            if (hd) return hd->line;
+        }
         if (s != viewer && !is_hoisted_closure(s) && subtree_contains(s, viewer)) {
             int inner = visible_decl_line_on_path(s, var_name, viewer);
             if (inner != INT_MAX) return inner;
@@ -2878,7 +2914,20 @@ static int enclosing_decl_line(ASTNode* program, const char* func_name,
         for (int j = 0; j < top->child_count; j++) {
             ASTNode* body = top->children[j];
             if (body && body->type == AST_BLOCK) {
-                return visible_decl_line(body, var_name, viewer);
+                int line = visible_decl_line(body, var_name, viewer);
+                if (line != INT_MAX) return line;
+                /* #2901: a name first bound in one arm of a top-level if,
+                 * switch or match and read after it is declared at the top
+                 * of the function (hoist_if_branch_vars): visible from its
+                 * first binding on. */
+                const char* names[HOIST_MAX_NAMES];
+                int n = hoist_if_branch_candidates(body, names, HOIST_MAX_NAMES);
+                for (int c = 0; c < n; c++) {
+                    if (!names[c] || strcmp(names[c], var_name) != 0) continue;
+                    ASTNode* first = hoist_if_branch_first_decl(body, var_name);
+                    if (first && !subtree_contains(first, viewer)) return first->line;
+                }
+                return INT_MAX;
             }
         }
         return INT_MAX;
