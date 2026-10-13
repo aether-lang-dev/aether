@@ -296,8 +296,7 @@ static ASTNode* find_user_function_by_name(CodeGenerator* gen, const char* name)
  *
  * The mirror is conservative: we register any bare-fn identifier
  * appearing as a call argument where the callee has a `fn`-typed
- * param, as the RHS of an `=` assignment to a `ptr`-typed
- * struct field, or in an `_aether_box_closure(...)` wrap position
+ * param, or in an `_aether_box_closure(...)` wrap position
  * (which the call-site arg coercion also handles). False positives
  * are harmless — they just emit an unused adapter the C compiler
  * inlines / discards. */
@@ -345,21 +344,9 @@ static void discover_bare_fn_adapters_walk(CodeGenerator* gen, ASTNode* node) {
         find_user_function_by_name(gen, node->value)) {
         register_bare_fn_adapter(gen, node->value);
     }
-    /* AST_BINARY_EXPRESSION with op="=": register bare-fn RHS into a
-     * ptr-typed LHS struct field. Conservative: also register for any
-     * RHS that's a bare named function regardless of LHS — false
-     * positives just emit unused adapters. */
-    if (node->type == AST_BINARY_EXPRESSION && node->value &&
-        strcmp(node->value, "=") == 0 && node->child_count == 2) {
-        ASTNode* lhs = node->children[0];
-        ASTNode* rhs = node->children[1];
-        if (lhs && rhs && rhs->type == AST_IDENTIFIER && rhs->value &&
-            lhs->node_type && lhs->node_type->kind == TYPE_PTR) {
-            if (find_user_function_by_name(gen, rhs->value)) {
-                register_bare_fn_adapter(gen, rhs->value);
-            }
-        }
-    }
+    /* A bare function stored into a `ptr` slot (a field store, a struct
+     * literal's or a message's field, a global) is its code address, not a
+     * box, so it needs no adapter there (#2890, emit_closure_into_ptr). */
     for (int i = 0; i < node->child_count; i++) {
         discover_bare_fn_adapters_walk(gen, node->children[i]);
     }

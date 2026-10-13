@@ -14797,11 +14797,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; (void)%s; }\n", own);
                         break;
                     }
-                    if (gt && gt->kind == TYPE_PTR && grhs && closure_boxes_into_ptr(gen, grhs)) {
+                    if (gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
+                        grhs->node_type->kind == TYPE_FUNCTION) {
                         /* #2890: a `ptr` global takes a closure boxed, as a
-                         * `ptr` field and a `ptr` parameter do. */
+                         * `ptr` field and a `ptr` parameter do, and a bare
+                         * function as its code address. */
                         fprintf(gen->output, "%s = ", stmt->value);
-                        emit_closure_into_ptr(gen, grhs);
+                        if (!emit_closure_into_ptr(gen, grhs)) generate_expression(gen, grhs);
                         fprintf(gen->output, ";\n");
                         break;
                     }

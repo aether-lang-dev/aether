@@ -224,36 +224,36 @@ static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
  * global, a message field) is boxed, as one given to a `ptr` parameter
  * is: the slot holds `_aether_box_closure(...)`, which unbox_closure gives
  * back. The box is a holder like a `fn` field (#2525) and keeps a
- * reference of its own to the env, taken as emit_closure_take takes one;
- * a bare function goes in through its env-ignoring adapter. Emits the
- * boxed value and returns 1 when `v` is such a closure, else emits nothing
- * and returns 0. Every `ptr` store goes through here, so none of them
- * hands C an `_AeClosure` where it expects a `void*`. */
-int closure_boxes_into_ptr(CodeGenerator* gen, ASTNode* v) {
+ * reference of its own to the env, taken as emit_closure_take takes one.
+ * A bare top-level function (a `@c_callback` one among them) is no
+ * closure: in a `ptr` slot it stays the raw code address C calls through
+ * (`qsort(buf, n, sz, s.cmp)`), as docs/memory-management.md states and
+ * unbox_closure's panic says; box_closure or an `fn` parameter boxes one.
+ * Emits the boxed closure or the function's address and returns 1 when
+ * `v` is either (fn_value_into_ptr), else emits nothing and returns
+ * 0, and the caller emits the value as it is. Every `ptr` store goes
+ * through here, so none of them hands C an `_AeClosure` where it expects a
+ * `void*`, nor a box where it expects code. */
+int fn_value_into_ptr(CodeGenerator* gen, ASTNode* v) {
     Type* t = v ? v->node_type : NULL;
     return (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) || bare_top_level_fn(gen, v) != NULL;
 }
 
 int emit_closure_into_ptr(CodeGenerator* gen, ASTNode* v) {
-    if (!v) return 0;
-    Type* t = v->node_type;
-    if (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) {
-        fprintf(gen->output, "_aether_box_closure(");
-        emit_closure_take(gen, v);
-        fprintf(gen->output, ")");
-        return 1;
-    }
+    if (!fn_value_into_ptr(gen, v)) return 0;
     if (bare_top_level_fn(gen, v)) {
-        /* Register an env-ignoring adapter for this bare fn so the wrap
-         * embeds the adapter address (not the bare fn's address) into
-         * .fn. See ASK 3 in aether/new_aevg_asks.md. */
-        register_bare_fn_adapter(gen, v->value);
-        fprintf(gen->output,
-                "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
-                v->value);
+        /* The address the function is called at: its `@c_callback`
+         * symbol, else its C name, as `f as fn(...)` spells it. An
+         * identifier marked as a function value would be wrapped in a
+         * closure struct by generate_expression. */
+        const char* cb = lookup_c_callback_symbol(gen, v->value);
+        fprintf(gen->output, "%s", cb ? cb : safe_c_name(v->value));
         return 1;
     }
-    return 0;
+    fprintf(gen->output, "_aether_box_closure(");
+    emit_closure_take(gen, v);
+    fprintf(gen->output, ")");
+    return 1;
 }
 
 /* #1240: is `macc` a field of a C-owned struct (`extern struct`, with or
@@ -5481,7 +5481,7 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         return;
     }
     /* #2890: a `ptr` field takes a closure boxed, as a `ptr` parameter
-     * does. */
+     * does, and a bare function as its code address. */
     if (fdef && fdef->type_kind == TYPE_PTR && emit_closure_into_ptr(gen, rhs)) return;
     generate_expression(gen, rhs);
 }
@@ -8237,11 +8237,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * parser lands `h.cb = c` as
                      * AST_BINARY_EXPRESSION (op="="). When the LHS
                      * is a `ptr`-typed value and the RHS is a `fn`-
-                     * shaped value (is_fnptr=0) or a bare named
-                     * function, wrap the RHS in
+                     * shaped value (is_fnptr=0), wrap the RHS in
                      * _aether_box_closure(...) so the closure
                      * round-trips through the field with the env
-                     * slot intact. */
+                     * slot intact. A bare named function is stored as
+                     * its code address (#2890, emit_closure_into_ptr). */
                     int assign_box = 0;
                     /* #1240: a C-owned struct's field is the exception to all
                      * the boxing below. C calls through it directly, so it gets
@@ -8256,7 +8256,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         bare_top_level_fn(gen, expr->children[1]) != NULL &&
                         member_field_is_c_owned(gen, expr->children[0]);
                     if (is_assignment && lhs_is_ptr && !assign_c_fnptr_field)
-                        assign_box = closure_boxes_into_ptr(gen, expr->children[1]);
+                        assign_box = fn_value_into_ptr(gen, expr->children[1]);
                     if (assign_c_fnptr_field) {
                         fprintf(gen->output, "(__typeof__(");
                         generate_expression(gen, expr->children[0]);
@@ -10706,12 +10706,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                          fv->node_type->kind == TYPE_FUNCTION &&
                                          !fv->node_type->is_fnptr;
                         /* #2890: a `ptr` field takes a closure boxed, as
-                         * `h.p = f` and a `ptr` parameter do. */
+                         * `h.p = f` does, and a bare function as its address. */
                         Type* fv_decl = c_imported ? NULL
                                         : struct_literal_field_type(gen, expr->value,
                                                                     field_init->value);
                         int fv_boxed = fv_decl && fv_decl->kind == TYPE_PTR &&
-                                       closure_boxes_into_ptr(gen, fv);
+                                       fn_value_into_ptr(gen, fv);
                         /* #2528: a `string[N]` / `fn[N]` field owns every
                          * element: a literal's elements are copied or
                          * taken. */
@@ -10877,7 +10877,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     if (is_actor_ref || fk == TYPE_INT64 || fk == TYPE_PTR || fk == TYPE_ACTOR_REF)
                                         fprintf(gen->output, "(intptr_t)");
                                     /* #2890: a closure into a `ptr` field is
-                                     * boxed, as in a message built whole. */
+                                     * boxed, a bare function its address. */
                                     if (!(fk == TYPE_PTR && emit_closure_into_ptr(gen, val)))
                                         generate_expression(gen, val);
                                     break;

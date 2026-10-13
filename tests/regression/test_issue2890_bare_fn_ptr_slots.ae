@@ -1,0 +1,99 @@
+// Regression (#2890 review): a bare top-level function stored into a `ptr`
+// slot is its code address, which C calls through. The first #2890 fix
+// boxed it like a closure in every `ptr` slot it touched, so qsort received
+// a box where it reads a comparator and crashed, and in a struct literal's
+// or a message's `ptr` field it named an adapter that was never emitted.
+// A bare function (a `@c_callback` one too) now stays a raw code pointer in
+// a struct literal's field, a field store, a module variable and a message
+// field, as docs/memory-management.md states; only a closure is boxed.
+
+import std.mem
+
+extern exit(code: int)
+extern malloc(sz: long) -> ptr
+extern free(p: ptr)
+extern qsort(base: ptr, n: long, sz: long, cmp: ptr)
+
+var gcmp: ptr = null
+
+struct Sorter {
+    cmp: ptr
+    tag: int
+}
+
+message SortWith {
+    cmp: ptr
+}
+
+message SortTagged {
+    cmp: ptr
+    tag: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+int_cmp(a: ptr, b: ptr) -> int {
+    return mem.get_int(a, 0) - mem.get_int(b, 0)
+}
+
+// Named only in a struct literal's and a message's `ptr` field, so nothing
+// else declares an adapter for it (it needs none).
+by_mod(a: ptr, b: ptr) -> int {
+    return mem.get_int(a, 0) % 7 - mem.get_int(b, 0) % 7
+}
+
+@c_callback
+int_cmp_desc(a: ptr, b: ptr) -> int {
+    return mem.get_int(b, 0) - mem.get_int(a, 0)
+}
+
+// Sorts 30, 10, 20 with `cmp` and returns the result as one number.
+sorted(cmp: ptr) -> int {
+    buf = malloc(12)
+    mem.set_int(buf, 0, 30)
+    mem.set_int(buf, 4, 10)
+    mem.set_int(buf, 8, 20)
+    qsort(buf, 3, 4, cmp)
+    r = mem.get_int(buf, 0) * 10000 + mem.get_int(buf, 4) * 100 + mem.get_int(buf, 8)
+    free(buf)
+    return r
+}
+
+actor Sorts {
+    state total = 0
+
+    receive {
+        SortWith(cmp) -> {
+            total = total + sorted(cmp)
+        }
+        SortTagged(cmp, tag) -> {
+            total = total + sorted(cmp) * tag
+            check(total == 301020 + 302010 * 2, "comparators in message fields (${total})")
+        }
+    }
+}
+
+main() {
+    s = Sorter { cmp: int_cmp, tag: 1 }
+    check(sorted(s.cmp) == 102030, "a bare function in a struct literal's ptr field")
+    s.cmp = int_cmp_desc
+    check(sorted(s.cmp) == 302010, "a c_callback function stored into a ptr field")
+    m = Sorter { cmp: by_mod, tag: 3 }
+    check(sorted(m.cmp) == 301020, "a bare function named only in a ptr field")
+    d = Sorter { cmp: int_cmp_desc, tag: 2 }
+    check(sorted(d.cmp) == 302010, "a c_callback function in a struct literal's ptr field")
+    gcmp = int_cmp
+    check(sorted(gcmp) == 102030, "a bare function into a ptr global")
+    gcmp = int_cmp_desc
+    check(sorted(gcmp) == 302010, "a c_callback function into a ptr global")
+    k = spawn(Sorts())
+    k ! SortWith { cmp: by_mod }
+    k ! SortTagged { cmp: int_cmp_desc, tag: 2 }
+    wait_for_idle()
+    println("ok")
+}
