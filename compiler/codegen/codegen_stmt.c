@@ -772,28 +772,74 @@ static int is_element_of(ASTNode* e, const char* name) {
            strcmp(e->children[0]->value, name) == 0;
 }
 
+/* Is `lit` an array literal of closure literals, each a fresh closure only
+ * the array will hold? */
+static int closure_array_literal(ASTNode* lit) {
+    if (!lit || lit->type != AST_ARRAY_LITERAL || lit->child_count < 1) return 0;
+    for (int i = 0; i < lit->child_count; i++) {
+        ASTNode* c = lit->children[i];
+        if (!c || c->type != AST_CLOSURE || (c->value && strcmp(c->value, "trailing") == 0)) return 0;
+    }
+    return 1;
+}
+
+/* May the user function `call` passes the element `arg` to keep a copy of
+ * it without a reference of its own (env_scan_param_keeps, the walk that
+ * answers it for a closure local)? */
+static int closure_element_arg_kept(CodeGenerator* gen, ASTNode* call, ASTNode* arg);
+
 /* Is every mention of the closure array `name` under `node` one that leaves
  * its elements its own: an element called (`call(name[i], ...)`), or the
  * whole array given to a struct literal's field, which takes a reference
- * of its own to each closure (_aether_closure_elems_take)? Anything else
- * (a binding, an element store, an element or the array passed on, a
- * mention inside a closure, which copies the array) is not answered, and
- * the array keeps the old rule: it releases nothing. */
-static int closure_array_uses_keep_own(ASTNode* node, const char* name, ASTNode* decl,
-                                       int in_closure) {
+ * of its own to each closure (_aether_closure_elems_take)? So are, as for
+ * a closure local (#2876): another binding of the array to fresh closures,
+ * a store that releases the ones it replaces (the rebinding of a loop
+ * body's array, hoisted out of the loop, or of one each branch binds); an
+ * element passed to a user function that keeps no copy without a reference
+ * of its own; an element a named function returns, which its return
+ * retains for the caller (emit_return_value). Anything else (an element
+ * store, an element or the array passed on otherwise, a mention inside a
+ * closure, which copies the array) is not answered, and the array keeps the
+ * old rule: it releases nothing. */
+static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, const char* name,
+                                       ASTNode* decl, int in_closure) {
     if (!node || node == decl) return 1;
     if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0))
         in_closure = 1;
     if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_CONST_DECLARATION) &&
-        node->value && strcmp(node->value, name) == 0) return 0;
+        node->value && strcmp(node->value, name) == 0) {
+        if (in_closure || node->type != AST_VARIABLE_DECLARATION || node->child_count < 1 ||
+            !closure_array_literal(node->children[0])) return 0;
+        return closure_array_uses_keep_own(gen, node->children[0], name, decl, in_closure);
+    }
     if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, "call") == 0 &&
         node->child_count >= 1 && is_element_of(node->children[0], name)) {
         if (in_closure) return 0;
         ASTNode* idx = node->children[0]->child_count >= 2 ? node->children[0]->children[1] : NULL;
-        if (!closure_array_uses_keep_own(idx, name, decl, in_closure)) return 0;
+        if (!closure_array_uses_keep_own(gen, idx, name, decl, in_closure)) return 0;
         for (int i = 1; i < node->child_count; i++)
-            if (!closure_array_uses_keep_own(node->children[i], name, decl, in_closure)) return 0;
+            if (!closure_array_uses_keep_own(gen, node->children[i], name, decl, in_closure)) return 0;
         return 1;
+    }
+    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, "call") != 0) {
+        for (int i = 0; i < node->child_count; i++) {
+            ASTNode* a = node->children[i];
+            if (is_element_of(a, name)) {
+                if (in_closure || closure_element_arg_kept(gen, node, a)) return 0;
+                a = a->child_count >= 2 ? a->children[1] : NULL;
+            }
+            if (!closure_array_uses_keep_own(gen, a, name, decl, in_closure)) return 0;
+        }
+        return 1;
+    }
+    if (node->type == AST_RETURN_STATEMENT && node->child_count == 1 &&
+        is_element_of(node->children[0], name)) {
+        Type* rt = gen->current_func_return_type;
+        if (in_closure || !rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr ||
+            !gen->current_function || gen->current_function->type == AST_CLOSURE) return 0;
+        ASTNode* e = node->children[0];
+        return closure_array_uses_keep_own(gen, e->child_count >= 2 ? e->children[1] : NULL,
+                                           name, decl, in_closure);
     }
     if (node->type == AST_STRUCT_LITERAL) {
         for (int i = 0; i < node->child_count; i++) {
@@ -804,36 +850,37 @@ static int closure_array_uses_keep_own(ASTNode* node, const char* name, ASTNode*
                 if (in_closure) return 0;
                 continue;
             }
-            if (!closure_array_uses_keep_own(f, name, decl, in_closure)) return 0;
+            if (!closure_array_uses_keep_own(gen, f, name, decl, in_closure)) return 0;
         }
         return 1;
     }
     if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) return 0;
     for (int i = 0; i < node->child_count; i++)
-        if (!closure_array_uses_keep_own(node->children[i], name, decl, in_closure)) return 0;
+        if (!closure_array_uses_keep_own(gen, node->children[i], name, decl, in_closure)) return 0;
     return 1;
 }
 
-/* Does the declaration `decl` (`fs = [|| ..., || ...]`, an `fn[N]` local)
- * leave the local the only owner of the closures its literal makes, through
- * to its scope's end? Then its scope exit releases each one's environment,
- * as a closure local's does (claim_closure_local_env). Nothing did, so every
- * capturing closure in such an array leaked its environment. */
+/* Does the binding `decl` (`fs = [|| ..., || ...]`, an `fn[N]` local) leave
+ * the local the only owner of the closures it holds, through to its scope's
+ * end? Then its scope exit releases each one's environment, as a closure
+ * local's does: claim_closure_local_env pushes the release where the C
+ * declaration is emitted (the binding, or the hoist out of a loop or a
+ * branch), and each rebinding releases the closures it replaces. Its size
+ * N, or 0. A literal that reads the array would capture the closures the
+ * rebinding replaces. */
 static int closure_array_owns(CodeGenerator* gen, ASTNode* decl) {
     if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
-        decl->child_count < 1 || !decl->children[0] ||
-        decl->children[0]->type != AST_ARRAY_LITERAL || !gen->hoist_scope_body) return 0;
+        decl->child_count < 1 || !closure_array_literal(decl->children[0]) ||
+        !gen->hoist_scope_body) return 0;
     Type* t = decl->node_type && decl->node_type->kind == TYPE_ARRAY ? decl->node_type
                                                                     : decl->children[0]->node_type;
     if (!t || t->kind != TYPE_ARRAY || t->array_size <= 0 || !t->element_type ||
         t->element_type->kind != TYPE_FUNCTION || t->element_type->is_fnptr) return 0;
-    ASTNode* lit = decl->children[0];
-    for (int i = 0; i < lit->child_count; i++) {
-        ASTNode* c = lit->children[i];
-        if (!c || c->type != AST_CLOSURE || (c->value && strcmp(c->value, "trailing") == 0)) return 0;
-    }
-    if (is_promoted_capture(gen, decl->value) || is_module_global_var(gen, decl->value)) return 0;
-    return closure_array_uses_keep_own(gen->hoist_scope_body, decl->value, decl, 0);
+    if (is_promoted_capture(gen, decl->value) || is_module_global_var(gen, decl->value) ||
+        is_actor_state_var(gen, decl->value)) return 0;
+    if (!closure_array_uses_keep_own(gen, decl->children[0], decl->value, NULL, 0) ||
+        !closure_array_uses_keep_own(gen, gen->hoist_scope_body, decl->value, decl, 0)) return 0;
+    return t->array_size;
 }
 
 static void push_closure_array_release_defer(CodeGenerator* gen, const char* name, int n,
@@ -844,6 +891,21 @@ static void push_closure_array_release_defer(CodeGenerator* gen, const char* nam
     carrier->annotation = heap_strf("closure_array_release:%s:%d", name, n);
     codegen_own_node(gen, carrier);
     push_defer(gen, carrier);
+}
+
+/* #2876: index on the defer stack of the release of the `fn[N]` local
+ * `name`'s closures (push_closure_array_release_defer), or -1. */
+static int closure_array_carrier_index(CodeGenerator* gen, const char* name) {
+    const char* prefix = "closure_array_release:";
+    size_t plen = strlen(prefix);
+    size_t nlen = strlen(name);
+    for (int i = gen->defer_count - 1; i >= 0; i--) {
+        ASTNode* d = gen->defer_stack[i];
+        if (!d || !d->annotation || strncmp(d->annotation, prefix, plen) != 0) continue;
+        if (strncmp(d->annotation + plen, name, nlen) == 0 && d->annotation[plen + nlen] == ':')
+            return i;
+    }
+    return -1;
 }
 
 /* Does `closure` copy the `string[N]` array `name` into its environment
@@ -8704,6 +8766,19 @@ static int env_scan_param_keeps(CodeGenerator* gen, EnvScan* s, ASTNode* call, A
     return 0;
 }
 
+/* #2876: an element of an `fn[N]` local passed to a user function, judged
+ * as the argument of a closure local is (closure_array_uses_keep_own). */
+static int closure_element_arg_kept(CodeGenerator* gen, ASTNode* call, ASTNode* arg) {
+    EnvScan s;
+    memset(&s, 0, sizeof(s));
+    s.name = "";
+    s.root = gen->hoist_scope_body;
+    s.owner = gen->current_function;
+    s.tree_only = 1;
+    s.cid = -2;
+    return env_scan_param_keeps(gen, &s, call, arg);
+}
+
 /* Functions whose return contract is being decided: a call back into one
  * on the way is not proven to return an owned closure. */
 static ASTNode* g_owned_ret_active[ENV_SCAN_MAX_DEPTH + 2];
@@ -9754,11 +9829,23 @@ static void emit_env_own_clears(CodeGenerator* gen, ASTNode* stmt) {
  * when the walk proves no copy without a reference outlives the scope; a
  * rebinding then releases the env it replaces (see the reassignment path).
  * A closure that captured the local holds its own reference (#2494), so it
- * may outlive the scope, and the local may be rebound under it. */
+ * may outlive the scope, and the local may be rebound under it.
+ * An `fn[N]` local that owns the closures it holds (closure_array_owns) is
+ * claimed the same way (#2876): its release of every element is pushed
+ * here, so a loop body's array, declared by the loop's hoist, releases the
+ * last iteration's closures at the hoist's scope exit (a `break` and a
+ * `return` out of the loop reach it too), and each rebinding releases the
+ * closures it replaces (the #2289 store of a literal into a declared array). */
 static void claim_closure_local_env(CodeGenerator* gen, const char* name,
                                     ASTNode* binding, int at_binding) {
     if (!gen || !name || !binding || gen->scope_depth <= 0 || !gen->hoist_scope_body) return;
     if (binding->type != AST_VARIABLE_DECLARATION) return;
+    int array_n = closure_array_owns(gen, binding);
+    if (array_n > 0) {
+        if (closure_array_carrier_index(gen, name) < 0)
+            push_closure_array_release_defer(gen, name, array_n, binding->line, binding->column);
+        return;
+    }
     /* #2756: a slot of a tuple destructure, given the closure at its
      * position of a call that hands it over (the walk below decides, as
      * for any binding). */
@@ -10747,8 +10834,11 @@ static int rebind_is_number(TypeKind k) {
            k == TYPE_FLOAT || k == TYPE_FLOAT32 || k == TYPE_LONGDOUBLE;
 }
 
+/* The C declaration of a local hoisted out of the loop or the branches that
+ * bind it, zeroed, with the scope-exit release of what it owns; `line` and
+ * `column` place that release. */
 static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
-                                     const char* name) {
+                                     const char* name, int line, int column) {
     /* #2690: volatile where a `try` body writes it, as at its binding. */
     const char* vq = try_volatile_qual_for(gen, name);
     if (var_type && var_type->kind == TYPE_ARRAY && var_type->array_size > 0) {
@@ -10758,15 +10848,17 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
          * it is declared. */
         if (str_arr_type(var_type) && string_array_owns(gen, gen->hoist_scope_body, name) &&
             !is_promoted_capture(gen, name))
-            push_str_array_release_defer(gen, name, var_type->array_size, 0, 0);
+            push_str_array_release_defer(gen, name, var_type->array_size, line, column);
         return;
     }
     const char* c_type = get_c_type(var_type);
     fprintf(gen->output, "%s %s%s;\n", volatile_decl_type(vq, c_type), name,
             hoisted_zero_init(var_type, c_type));
-    /* A struct that owns strings, released where it is declared (as in
-     * hoist_if_branch_vars). */
-    push_struct_destroy_defer(gen, name, var_type, 0, 0);
+    /* A struct that owns strings is released where it is declared, as at
+     * its binding: each binding replaces the zeroed value (the local is
+     * declared already), so nothing else destroyed it, and the strings it
+     * held at the end leaked. */
+    push_struct_destroy_defer(gen, name, var_type, line, column);
 }
 
 /* Declare, before an if/else or a switch with a default, the names every arm
@@ -10804,7 +10896,7 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
             continue;
         }
         mark_var_declared_typed(gen, n, var_type);
-        emit_hoisted_local_decl(gen, var_type, n);
+        emit_hoisted_local_decl(gen, var_type, n, 0, 0);
         claim_closure_local_env(gen, n, decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
@@ -10874,7 +10966,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
              * never get reclaimed at function exit. */
             push_struct_destroy_defer(gen, child->value, var_type, child->line, child->column);
         } else {
-            emit_hoisted_local_decl(gen, var_type, child->value);
+            emit_hoisted_local_decl(gen, var_type, child->value, 0, 0);
             /* #2480: the hoisted local is the loop's one C variable, so the
              * env free is queued here, outside the loop; each iteration's
              * rebinding frees the env it replaces. */
@@ -11400,15 +11492,11 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
             if (joined) free_type(joined);
             continue;
         }
-        /* #2690: volatile where a `try` body writes it, as at its binding. */
-        fprintf(gen->output, "%s %s%s;\n",
-                volatile_decl_type(try_volatile_qual_for(gen, name), c_type), name,
-                hoisted_zero_init(var_type, c_type));
-        /* A struct that owns strings is released where it is declared, as
-         * at its binding: each branch's binding replaces the zeroed value
-         * (the local is declared already), so nothing else destroyed it,
-         * and the strings it held at the end leaked. */
-        push_struct_destroy_defer(gen, name, var_type, first_decl->line, first_decl->column);
+        /* Declared as a loop's hoist declares it (#2877): a fixed-size
+         * array as `E name[N]`, which its C type `E[N]` cannot spell before
+         * the name, so every array a branch bound and the code after it
+         * read failed in C. */
+        emit_hoisted_local_decl(gen, var_type, name, first_decl->line, first_decl->column);
         mark_var_declared_typed(gen, name, var_type);
         claim_closure_local_env(gen, name, first_decl, 0);   /* #2480 */
         if (joined) free_type(joined);
@@ -14928,6 +15016,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             emit_owned_str_array_store(gen, stmt, hoisted);   /* #2618 */
                             break;
                         }
+                        /* #2876: an `fn[N]` local whose closures this
+                         * scope releases (claim_closure_local_env) holds
+                         * one set at a time: rebinding it (a loop body's
+                         * array, hoisted out of the loop) releases the
+                         * closures it replaces once the new ones are
+                         * stored, as a closure local's rebinding releases
+                         * the env it replaces; the scope exit releases the
+                         * last set. */
+                        int release_old = closure_array_carrier_index(gen, stmt->value) >= 0;
+                        if (release_old) {
+                            fprintf(gen->output,
+                                    "{ void* _ae_old_envs[%d]; for (int _ae_k = 0; _ae_k < %d; _ae_k++) _ae_old_envs[_ae_k] = %s[_ae_k].env;\n",
+                                    hoisted->array_size, hoisted->array_size, stmt->value);
+                            print_indent(gen);
+                        }
                         /* #2478: the literal is evaluated before it is
                          * stored, in source order: an element that reads
                          * the array sees it from before the stores. */
@@ -14943,6 +15046,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "memset((void*)&%s[%d], 0, sizeof(%s[0]) * %d);\n",
                                     stmt->value, lit->child_count, stmt->value,
                                     hoisted->array_size - lit->child_count);
+                        }
+                        if (release_old) {
+                            print_indent(gen);
+                            fprintf(gen->output,
+                                    "for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_closure_env_release(_ae_old_envs[_ae_k]); }\n",
+                                    hoisted->array_size);
                         }
                         break;
                     }
@@ -15853,12 +15962,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     // one used when patterns only check size ([], [_], wildcard).
                     if (is_array_init || (stmt->node_type && stmt->node_type->kind == TYPE_ARRAY)) {
                         print_line(gen, "(void)%s;", stmt->value);
-                        if (closure_array_owns(gen, stmt)) {
-                            Type* at = stmt->node_type && stmt->node_type->kind == TYPE_ARRAY
-                                       ? stmt->node_type : stmt->children[0]->node_type;
-                            push_closure_array_release_defer(gen, stmt->value, at->array_size,
-                                                             stmt->line, stmt->column);
-                        }
+                        /* An `fn[N]` local that owns its closures (#2876). */
+                        claim_closure_local_env(gen, stmt->value, stmt, 1);
                     }
 
                     // Handle trailing blocks on function calls used as initializers

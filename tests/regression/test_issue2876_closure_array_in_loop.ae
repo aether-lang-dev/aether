@@ -1,0 +1,308 @@
+// Regression (#2876): an `fn[N]` local built from closure literals in a loop
+// body leaked its closures' environments on every iteration. The loop's
+// hoist declares the array before the loop, so the release its binding
+// pushes (#2868) was never pushed, and each iteration's literal was stored
+// over the closures of the last one. The hoist now claims the array as it
+// claims a closure local: the hoist's scope exit releases the last set (a
+// `break` and a `return` reach it), and each rebinding releases the set it
+// replaces. As for a closure local, an element passed to a function that
+// keeps a reference of its own, or returned (the return retains it), leaves
+// the array its own (#2876), and an array bound in each branch of an `if`
+// and read after it compiles (#2877).
+//
+// Each shape is checked for its value and, where the heap count is exact,
+// for steady growth over 100 calls.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var kept: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The issue's shape.
+in_while(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        t = t + call(fs[0]) + call(fs[1])
+        k = k + 1
+    }
+    return t
+}
+
+// The loop counter captured in a promoted cell.
+in_cell(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| {
+                k = k + 1
+                return k
+            }, || { return k - 1 }]
+        t = t + call(fs[0]) + call(fs[1])
+    }
+    return t
+}
+
+// Nested loops: the array in the inner body, and one in the outer body
+// used in the inner one.
+nested(n: int) -> int {
+    t = 0
+    i = 0
+    while i < n {
+        fs = [|| { return i + 1 }, || { return i - 1 }]
+        j = 0
+        while j < 3 {
+            gs = [|| { return i + j }, || { return i - j }]
+            t = t + call(fs[0]) + call(gs[1])
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+// A labeled break out of the outer loop from the inner one.
+labeled(n: int) -> int {
+    t = 0
+    i = 0
+    outer: while i < n {
+        fs = [|| { return i + 1 }, || { return i - 1 }]
+        j = 0
+        while j < 3 {
+            gs = [|| { return j }, || { return i * j }]
+            t = t + call(fs[0]) + call(gs[1])
+            if i == 4 && j == 1 { break outer }
+            j = j + 1
+        }
+        i = i + 1
+    }
+    return t
+}
+
+// The array in an `if` inside the loop body.
+if_in_loop(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        if k % 2 == 0 {
+            fs = [|| { return k + 1 }, || { return k - 1 }]
+            t = t + call(fs[0]) + call(fs[1])
+        }
+        k = k + 1
+    }
+    return t
+}
+
+// break, continue and return after the array is made.
+broken(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        t = t + call(fs[0]) + call(fs[1])
+        if k == 3 { break }
+        k = k + 1
+    }
+    return t
+}
+
+continued(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        k = k + 1
+        if k % 2 == 0 { continue }
+        t = t + call(fs[0]) + call(fs[1])
+    }
+    return t
+}
+
+returned_early(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        t = t + call(fs[0]) + call(fs[1])
+        if k == 3 { return t }
+        k = k + 1
+    }
+    return t
+}
+
+// A loop in a closure's body.
+in_closure(n: int) -> int {
+    f = | m: int | {
+        t = 0
+        k = 0
+        while k < m {
+            fs = [|| { return k + 1 }, || { return k - 1 }]
+            t = t + call(fs[0]) + call(fs[1])
+            k = k + 1
+        }
+        return t
+    }
+    int r = call(f, n)
+    return r
+}
+
+// Rebound in one scope, no loop.
+rebound(n: int) -> int {
+    fs = [|| { return n + 1 }, || { return n - 1 }]
+    int a = call(fs[0])
+    fs = [|| { return n * 2 }, || { return n * 3 }]
+    int b = call(fs[1])
+    return a + b
+}
+
+only_calls(f: fn) -> int {
+    int v = call(f)
+    return v
+}
+
+keep(f: fn) {
+    kept = f
+}
+
+// An element passed to a function that only calls it.
+called_by(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        t = t + only_calls(fs[0]) + only_calls(fs[1])
+        k = k + 1
+    }
+    return t
+}
+
+// An element passed to a function that stores it: the global keeps it
+// after the array is gone.
+stored(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 100 }, || { return k - 1 }]
+        keep(fs[0])
+        t = t + call(fs[1])
+        k = k + 1
+    }
+    int v = call(kept)
+    return t + v
+}
+
+// An element returned from inside the loop: the caller holds it after the
+// array is gone.
+pick(n: int) -> fn {
+    k = 0
+    while k < n {
+        fs = [|| { return k + 7 }, || { return k - 1 }]
+        if k == 2 { return fs[0] }
+        k = k + 1
+    }
+    return || { return 0 }
+}
+
+returned(n: int) -> int {
+    f = pick(n)
+    int v = call(f)
+    return v
+}
+
+// An array bound in each branch and read after the `if` (#2877).
+branches(n: int) -> int {
+    if n > 0 {
+        fs = [|| { return n + 1 }, || { return n - 1 }]
+    } else {
+        fs = [|| { return n + 2 }, || { return n - 2 }]
+    }
+    return call(fs[0]) + call(fs[1])
+}
+
+plain_branches(n: int) -> int {
+    if n > 0 {
+        a = [1, 2]
+        s = ["ab", "c"]
+    } else {
+        a = [3, 4]
+        s = ["d", "efg"]
+    }
+    return a[0] + a[1] + string.length(s[0]) + string.length(s[1])
+}
+
+// One round of a shape: 100 calls.
+round(shape: int) {
+    i = 0
+    while i < 100 {
+        if shape == 0 { in_while(10) }
+        if shape == 1 { in_cell(10) }
+        if shape == 2 { nested(10) }
+        if shape == 3 { labeled(10) }
+        if shape == 4 { if_in_loop(10) }
+        if shape == 5 {
+            broken(10)
+            continued(10)
+            returned_early(10)
+        }
+        if shape == 6 { in_closure(10) }
+        if shape == 7 { rebound(10) }
+        if shape == 8 { called_by(10) }
+        if shape == 9 { stored(10) }
+        if shape == 10 { returned(10) }
+        if shape == 11 {
+            branches(10)
+            branches(-10)
+            plain_branches(10)
+            plain_branches(-10)
+        }
+        i = i + 1
+    }
+}
+
+fn steady(what: string, g: long) {
+    check(g == 0, "${what}: the heap grew by ${g} bytes over 100 calls")
+}
+
+main() {
+    check(in_while(10) == 90, "an array in a while body")
+    check(in_cell(10) == 100, "an array capturing a promoted loop counter")
+    check(nested(10) == 270, "arrays in nested loops")
+    check(labeled(10) == 62, "a labeled break out of nested loops")
+    check(if_in_loop(10) == 40, "an array in an if in a loop body")
+    check(broken(10) == 12, "a break after the array is made")
+    check(continued(10) == 40, "a continue after the array is made")
+    check(returned_early(10) == 12, "a return after the array is made")
+    check(in_closure(10) == 90, "an array in a loop in a closure's body")
+    check(rebound(10) == 41, "an array rebound in its scope")
+    check(called_by(10) == 90, "elements passed to a function that calls them")
+    check(stored(10) == 144, "an element kept by the function it is passed to")
+    check(returned(10) == 9, "an element returned from the loop")
+    check(branches(10) == 20 && branches(-10) == -20, "an array bound in each branch")
+    check(plain_branches(10) == 6 && plain_branches(-10) == 11,
+        "int and string arrays bound in each branch")
+    if mem.heap_in_use_exact() {
+        steady("while", mem.steady_growth(|| { round(0) }, 5))
+        steady("promoted counter", mem.steady_growth(|| { round(1) }, 5))
+        steady("nested loops", mem.steady_growth(|| { round(2) }, 5))
+        steady("labeled break", mem.steady_growth(|| { round(3) }, 5))
+        steady("if in a loop", mem.steady_growth(|| { round(4) }, 5))
+        steady("break, continue, return", mem.steady_growth(|| { round(5) }, 5))
+        steady("loop in a closure", mem.steady_growth(|| { round(6) }, 5))
+        steady("rebound", mem.steady_growth(|| { round(7) }, 5))
+        steady("passed to a caller", mem.steady_growth(|| { round(8) }, 5))
+        steady("passed to a keeper", mem.steady_growth(|| { round(9) }, 5))
+        steady("returned", mem.steady_growth(|| { round(10) }, 5))
+        steady("branches", mem.steady_growth(|| { round(11) }, 5))
+    }
+    println("ok")
+}
