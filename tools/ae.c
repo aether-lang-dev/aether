@@ -535,51 +535,64 @@ static char g_emit_deps_path[1200] = "";
 static char g_build_package[256] = "";
 static char g_lib_package_flag[300] = "";
 
-/* #2297: the shared runtime's directory and the link argument naming it:
- * the import library on Windows, the shared object (with an rpath to its
- * directory) elsewhere. By full path, never -laether: the static archive's
- * directory is first on -L and a -laether would find libaether.a there.
- * Returns 0 when the toolchain has no shared runtime. */
-static int ae_shared_runtime(char* dir, size_t dcap, char* link_arg, size_t lcap) {
+static char* ae_path_printf(const char* fmt, ...);
+
+/* #2297: the shared runtime's library: the import library on Windows, the
+ * shared object elsewhere. */
+static const char* ae_shared_runtime_file_name(void) {
+#if defined(_WIN32)
+    return "libaether.dll.a";
+#elif defined(__APPLE__)
+    return "libaether.dylib";
+#else
+    return "libaether.so";
+#endif
+}
+
+/* #2297: the shared runtime's directory, `<lib dir>/shared`, into `dir`
+ * (which holds a tc.lib path and 8 bytes more). Returns 0 when the
+ * toolchain has no shared runtime there. */
+static int ae_shared_runtime(char* dir, size_t dcap) {
     if (!tc.has_lib) return 0;
-    char lib_dir[1024];
+    char lib_dir[sizeof(tc.lib)];
     snprintf(lib_dir, sizeof(lib_dir), "%s", tc.lib);
     char* slash = strrchr(lib_dir, '/');
     char* bslash = strrchr(lib_dir, '\\');
     if (bslash && (!slash || bslash > slash)) slash = bslash;
     if (slash) *slash = '\0';
     snprintf(dir, dcap, "%s/shared", lib_dir);
-    char file[1200];
-#if defined(_WIN32)
-    snprintf(file, sizeof(file), "%s/libaether.dll.a", dir);
-    if (!path_exists(file)) return 0;
-    snprintf(link_arg, lcap, "\"%s\"", file);
-#elif defined(__APPLE__)
-    snprintf(file, sizeof(file), "%s/libaether.dylib", dir);
-    if (!path_exists(file)) return 0;
-    snprintf(link_arg, lcap, "\"%s\" -Wl,-rpath,%s", file, dir);
-#else
-    snprintf(file, sizeof(file), "%s/libaether.so", dir);
-    if (!path_exists(file)) return 0;
-    snprintf(link_arg, lcap, "\"%s\" -Wl,-rpath,%s", file, dir);
-#endif
-    return 1;
+    char* file = ae_path_printf("%s/%s", dir, ae_shared_runtime_file_name());
+    int found = path_exists(file);
+    free(file);
+    return found;
 }
 
 /* The -laether a link line carries: the static archive, or the shared
- * runtime under --shared-runtime. NULL (with the reason printed) when the
- * shared runtime was asked for and this toolchain has none. */
+ * runtime under --shared-runtime: its library by full path and, off
+ * Windows, its directory as the rpath. By full path, never -laether: the
+ * static archive's directory is first on -L and a -laether would find
+ * libaether.a there. Built whole, whatever the length of the install path
+ * (#2862: a fixed 1400 bytes cut a long one into a broken link argument).
+ * NULL (with the reason printed) when the shared runtime was asked for and
+ * this toolchain has none. */
 static const char* ae_runtime_link_arg(void) {
     if (!g_shared_runtime) return "-laether";
-    static char arg[1400];
-    char dir[1100];
-    if (!ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
+    static char* arg = NULL;
+    /* <lib dir> + "/shared": the directory the shared runtime is looked for in. */
+    char dir[sizeof(tc.lib) + 8] = "";
+    if (!ae_shared_runtime(dir, sizeof(dir))) {
         fprintf(stderr,
             "Error: --shared-runtime: this toolchain has no shared runtime (looked in %s).\n"
             "       Build it with `make shared-runtime`, or install a release that ships it.\n",
             dir[0] ? dir : "<lib>/shared");
         return NULL;
     }
+    free(arg);
+#if defined(_WIN32)
+    arg = ae_path_printf("\"%s/%s\"", dir, ae_shared_runtime_file_name());
+#else
+    arg = ae_path_printf("\"%s/%s\" -Wl,-rpath,%s", dir, ae_shared_runtime_file_name(), dir);
+#endif
     return arg;
 }
 
@@ -1220,7 +1233,10 @@ static const char* exe_ext_for(const char* target) {
  * both land as a negative rc. That, and only that, is worth a note here.
  *
  * Returns a string to append to the failure line, "" for an ordinary
- * non-zero exit. */
+ * non-zero exit. `buf` holds AE_EXIT_NOTE_MAX bytes, the longest note
+ * whole (#2862: the Windows one, 100 bytes, was cut to the 95 of a
+ * 96-byte buffer). */
+#define AE_EXIT_NOTE_MAX 128
 static const char* exit_status_note(char* buf, size_t size, int rc) {
     buf[0] = '\0';
     if (rc == AE_SPAWN_FAILED) {
@@ -1762,6 +1778,49 @@ static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_siz
     return 1;
 }
 
+/* Set the toolchain root to printf output, whole, or end the run (#2862).
+ * tc.root holds 1023 bytes; cut, the root named another directory, and
+ * every path built from it (the compiler's, the library's, the sources')
+ * pointed elsewhere. */
+static void tc_set_root(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char* root = n < 0 ? NULL : (char*)malloc((size_t)n + 1);
+    if (!root) {
+        fprintf(stderr, "Error: out of memory building the toolchain root\n");
+        exit(1);
+    }
+    va_start(ap, fmt);
+    vsnprintf(root, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    if ((size_t)n >= sizeof(tc.root)) {
+        fprintf(stderr, "Error: the toolchain root %s is %d bytes long; it can be at most %zu.\n",
+                root, n, sizeof(tc.root) - 1);
+        exit(1);
+    }
+    memcpy(tc.root, root, (size_t)n + 1);
+    free(root);
+}
+
+/* Does `home` hold the directory `<home><share>` or the file `<home><lib>`
+ * (either NULL to skip it)? */
+static bool ae_home_has(const char* home, const char* share, const char* lib) {
+    bool found = false;
+    if (share) {
+        char* p = ae_path_printf("%s%s", home, share);
+        found = dir_exists(p);
+        free(p);
+    }
+    if (!found && lib) {
+        char* p = ae_path_printf("%s%s", home, lib);
+        found = path_exists(p);
+        free(p);
+    }
+    return found;
+}
+
 void discover_toolchain(void) {
     char exe_dir[1024] = {0};
     bool found_exe_dir = get_exe_dir(exe_dir, sizeof(exe_dir));
@@ -1805,88 +1864,80 @@ void discover_toolchain(void) {
     }
 
     // Strategy 2: $AETHER_HOME
+    /* The directory it names, without trailing blanks, and every path
+     * probed below it, whole; a root taken from it is set whole or refused
+     * (tc_set_root). Copied into 1024 bytes, a longer one was cut: it named
+     * another directory, and the compiler path built from it pointed
+     * elsewhere (#2862). Kept for the run, as the static copy was. */
     const char* home = getenv("AETHER_HOME");
-    static char home_clean[1024];
     if (home) {
-        strncpy(home_clean, home, sizeof(home_clean) - 1);
-        home_clean[sizeof(home_clean) - 1] = '\0';
-        size_t len = strlen(home_clean);
-        while (len > 0 && (home_clean[len-1] == '\r' || home_clean[len-1] == '\n' || home_clean[len-1] == ' '))
-            home_clean[--len] = '\0';
-        home = home_clean;
+        size_t len = strlen(home);
+        while (len > 0 && (home[len-1] == '\r' || home[len-1] == '\n' || home[len-1] == ' '))
+            len--;
+        home = ae_path_printf("%.*s", (int)len, home);
     }
     if (home && home[0] && dir_exists(home)) {
         // Prefer ~/.aether/current/ if a version symlink exists (ae version use)
-        char current_compiler[1024];
-        snprintf(current_compiler, sizeof(current_compiler), "%s/current/bin/aetherc" EXE_EXT, home);
+        char* current_compiler = ae_path_printf("%s/current/bin/aetherc" EXE_EXT, home);
         if (path_exists(current_compiler)) {
             // Verify the installation has lib or share/aether — if neither,
             // the version was installed with a buggy ae that only extracted bin/.
-            char share_probe[1024], lib_probe[1024];
-            snprintf(share_probe, sizeof(share_probe), "%s/current/share/aether", home);
-            snprintf(lib_probe, sizeof(lib_probe), "%s/current/lib/aether/libaether.a", home);
-            if (dir_exists(share_probe) || path_exists(lib_probe)) {
-                snprintf(tc.root, sizeof(tc.root), "%s/current", home);
-                strncpy(tc.compiler, current_compiler, sizeof(tc.compiler) - 1);
+            if (ae_home_has(home, "/current/share/aether", "/current/lib/aether/libaether.a")) {
+                tc_set_root("%s/current", home);
+                snprintf(tc.compiler, sizeof(tc.compiler), "%s", current_compiler);
+                free(current_compiler);
                 if (tc.verbose) fprintf(stderr, "[toolchain] compiler=%s (via current symlink)\n", tc.compiler);
                 goto found_root;
             }
             // Check if the direct ~/.aether/ layout will work before warning —
             // install.sh puts files directly in AETHER_HOME, not under current/.
-            char direct_share[1024], direct_lib[1024];
-            snprintf(direct_share, sizeof(direct_share), "%s/share/aether", home);
-            snprintf(direct_lib, sizeof(direct_lib), "%s/lib/aether/libaether.a", home);
-            if (!dir_exists(direct_share) && !path_exists(direct_lib)) {
+            if (!ae_home_has(home, "/share/aether", "/lib/aether/libaether.a")) {
                 fprintf(stderr, "Warning: %s/current has bin/aetherc but no lib/ or share/, installation is incomplete.\n", home);
                 fprintf(stderr, "Fix with: ae version install <version> or ./install.sh\n");
             }
             // Fall through to try other strategies
         }
-        snprintf(current_compiler, sizeof(current_compiler), "%s/current/aetherc" EXE_EXT, home);
+        free(current_compiler);
+        current_compiler = ae_path_printf("%s/current/aetherc" EXE_EXT, home);
         if (path_exists(current_compiler)) {
             // Flat layout: aetherc at root of current/ with no bin/ subdirectory.
             // This is a broken install (old ae version install bug). Check if
             // share/aether/ exists — if not, warn and skip so we fall through
             // to a working toolchain.
-            char share_check[1024];
-            snprintf(share_check, sizeof(share_check), "%s/current/share/aether", home);
-            if (dir_exists(share_check)) {
-                snprintf(tc.root, sizeof(tc.root), "%s/current", home);
-                strncpy(tc.compiler, current_compiler, sizeof(tc.compiler) - 1);
+            if (ae_home_has(home, "/current/share/aether", NULL)) {
+                tc_set_root("%s/current", home);
+                snprintf(tc.compiler, sizeof(tc.compiler), "%s", current_compiler);
+                free(current_compiler);
                 if (tc.verbose) fprintf(stderr, "[toolchain] compiler=%s (via current symlink, flat layout)\n", tc.compiler);
                 goto found_root;
             }
             // Also check for lib
-            char lib_check[1024];
-            snprintf(lib_check, sizeof(lib_check), "%s/current/lib/aether/libaether.a", home);
-            if (path_exists(lib_check)) {
-                snprintf(tc.root, sizeof(tc.root), "%s/current", home);
-                strncpy(tc.compiler, current_compiler, sizeof(tc.compiler) - 1);
+            if (ae_home_has(home, NULL, "/current/lib/aether/libaether.a")) {
+                tc_set_root("%s/current", home);
+                snprintf(tc.compiler, sizeof(tc.compiler), "%s", current_compiler);
+                free(current_compiler);
                 goto found_root;
             }
             // Check if the direct ~/.aether/ layout will work before warning
-            char direct_share2[1024], direct_lib2[1024];
-            snprintf(direct_share2, sizeof(direct_share2), "%s/share/aether", home);
-            snprintf(direct_lib2, sizeof(direct_lib2), "%s/lib/aether/libaether.a", home);
-            if (!dir_exists(direct_share2) && !path_exists(direct_lib2)) {
+            if (!ae_home_has(home, "/share/aether", "/lib/aether/libaether.a")) {
                 fprintf(stderr, "Warning: %s/current has aetherc but no lib/ or share/, installation is incomplete.\n", home);
                 fprintf(stderr, "Fix with: ae version install <version> or ./install.sh\n");
             }
             // Fall through to try other strategies
         }
-        strncpy(tc.root, home, sizeof(tc.root) - 1);
-        snprintf(tc.compiler, sizeof(tc.compiler), "%s/bin/aetherc" EXE_EXT, tc.root);
-        if (tc.verbose) fprintf(stderr, "[toolchain] compiler=%s exists=%d\n", tc.compiler, path_exists(tc.compiler));
-        if (path_exists(tc.compiler)) {
-            // Verify AETHER_HOME has sources or lib — otherwise build will fail
-            char share_check[1024], lib_check[1024];
-            snprintf(share_check, sizeof(share_check), "%s/share/aether", home);
-            snprintf(lib_check, sizeof(lib_check), "%s/lib/aether/libaether.a", home);
-            if (dir_exists(share_check) || path_exists(lib_check)) {
-                goto found_root;
-            }
-            // AETHER_HOME is incomplete — fall through to other strategies
+        free(current_compiler);
+        char* home_compiler = ae_path_printf("%s/bin/aetherc" EXE_EXT, home);
+        if (tc.verbose) fprintf(stderr, "[toolchain] compiler=%s exists=%d\n", home_compiler, path_exists(home_compiler));
+        // Verify AETHER_HOME has sources or lib, without which the build fails
+        int home_complete = path_exists(home_compiler) &&
+                            ae_home_has(home, "/share/aether", "/lib/aether/libaether.a");
+        free(home_compiler);
+        if (home_complete) {
+            tc_set_root("%s", home);
+            snprintf(tc.compiler, sizeof(tc.compiler), "%s/bin/aetherc" EXE_EXT, tc.root);
+            goto found_root;
         }
+        // AETHER_HOME is incomplete: fall through to other strategies
     }
 
     // Strategy 3: Relative to ae binary — installed layout ($PREFIX/bin/ae)
@@ -1925,9 +1976,15 @@ void discover_toolchain(void) {
 
     // Strategy 4: CWD dev mode — ./build/aetherc
     if (path_exists("build/aetherc" EXE_EXT)) {
-        char cwd[1024];
+        /* The root is the working directory, which getcwd gives whole or
+         * not at all into a buffer the root's size (#2862). */
+        char cwd[sizeof(tc.root)];
         if (getcwd(cwd, sizeof(cwd))) {
-            strncpy(tc.root, cwd, sizeof(tc.root) - 1);
+            tc_set_root("%s", cwd);
+        } else if (errno == ERANGE) {
+            fprintf(stderr, "Error: the working directory is longer than %zu bytes, the most a "
+                            "toolchain root holds.\n", sizeof(tc.root) - 1);
+            exit(1);
         } else {
             strcpy(tc.root, ".");
         }
@@ -2436,8 +2493,9 @@ static int dep_append_module_roots(const char* root, const char* name) {
         toml_free_document(pdoc);
         return -1;
     }
-    char buf[2048];
-    snprintf(buf, sizeof(buf), "%s", mods);
+    /* The list, and each module's paths below, whole (#2862): a fixed
+     * buffer cut a long one, and the check then probed another file. */
+    char* buf = ae_path_printf("%s", mods);
     int n = 0;
     for (char* tok = strtok(buf, " \t,"); tok; tok = strtok(NULL, " \t,")) {
         /* `modules = "."` is the explicit opt-in root export: it joins the
@@ -2454,21 +2512,22 @@ static int dep_append_module_roots(const char* root, const char* name) {
             n++;
             continue;
         }
-        char full[3072];
-        snprintf(full, sizeof(full), "%s/%s", root, tok);
+        char* full = ae_path_printf("%s/%s", root, tok);
         /* A module is either a DIRECTORY holding module.ae or a single .ae
          * FILE -- `--lib D` resolves both `D/<name>/module.ae` and
          * `D/<name>.ae`, so a declaration must accept both or single-file
          * modules become undeclarable. The selaenium package that prompted
          * this issue is exactly that shape: `aether/webdriver.ae`, no
          * directory. Checking only for a directory rejected it. */
-        char as_file[3072];
-        snprintf(as_file, sizeof(as_file), "%s.ae", full);
-        if (!dir_exists(full) && !path_exists(as_file)) {
+        char* as_file = ae_path_printf("%s.ae", full);
+        int declared = dir_exists(full) || path_exists(as_file);
+        free(as_file);
+        if (!declared) {
             fprintf(stderr,
                 "Warning: dependency '%s' declares module '%s', but neither\n"
                 "         %s/ nor %s.ae exists in the installed package.\n",
                 name, tok, tok, tok);
+            free(full);
             continue;
         }
         /* `modules` names IMPORTABLE MODULES, not search paths. `--lib D`
@@ -2481,10 +2540,12 @@ static int dep_append_module_roots(const char* root, const char* name) {
          * Parents repeat (`frontend` and `engine` share the root), and
          * tc_lib_dir_append_one already drops duplicates. */
         char* slash = strrchr(full, '/');
-        if (slash && slash > full) *slash = '\0'; else snprintf(full, sizeof(full), "%s", root);
-        tc_lib_dir_append_one(full);
+        if (slash && slash > full) *slash = '\0';
+        tc_lib_dir_append_one(slash && slash > full ? full : root);
+        free(full);
         n++;
     }
+    free(buf);
     toml_free_document(pdoc);
     return n;
 }
@@ -5891,13 +5952,13 @@ static void ae_stage_windows_dlls(const char* out_file) {
         free(src);
     }
     if (g_shared_runtime) {
-        char dir[1100], arg[1400];
-        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg))) {
-            char src[1200];
-            snprintf(src, sizeof(src), "%s/aether.dll", dir);
+        char dir[sizeof(tc.lib) + 8];
+        if (ae_shared_runtime(dir, sizeof(dir))) {
+            char* src = ae_path_printf("%s/aether.dll", dir);
             char* dst = ae_path_printf("%s/aether.dll", out_dir);
             if (!paths_same(src, dst)) copy_file(src, dst);
             free(dst);
+            free(src);
         }
     }
     free(out_dir);
@@ -5941,8 +6002,8 @@ static void ae_windows_dll_path_for_run(void) {
 #ifdef _WIN32
     char* dirs = ae_path_printf("%s", g_binimport_dirs ? g_binimport_dirs : "");
     if (g_shared_runtime) {
-        char dir[1100], arg[1400];
-        if (ae_shared_runtime(dir, sizeof(dir), arg, sizeof(arg)))
+        char dir[sizeof(tc.lib) + 8];
+        if (ae_shared_runtime(dir, sizeof(dir)))
             ae_path_appendf(&dirs, "%s%s", dirs[0] ? ";" : "", dir);
     }
     if (!dirs[0]) { free(dirs); return; }
@@ -5960,18 +6021,46 @@ static void ae_windows_dll_path_for_run(void) {
  * A package `<pkg>` lives in `<root>/<pkg as path>/`, where root is `.`,
  * `src` or a --lib / dependency dir, the places a dotted import resolves
  * from. Its modules are that directory if it holds a module.ae, and every
- * directory below it that does (`ae3d/core/module.ae` is `ae3d.core`). */
-#define AE_PKG_MAX_MODULES 512
+ * directory below it that does (`ae3d/core/module.ae` is `ae3d.core`).
+ *
+ * The names are heap strings in a list that grows (#2862): a module's name
+ * was built in a 256-byte buffer, and a longer one was cut and then
+ * imported under the cut name; past 512 modules the rest were dropped. */
+typedef struct {
+    char** names;
+    int count;
+    int cap;
+} AePkgModules;
 
-static void ae_pkg_collect(const char* dir, const char* modname,
-                           char (*mods)[256], int* n) {
+static void ae_pkg_add(AePkgModules* mods, const char* modname) {
+    for (int i = 0; i < mods->count; i++)
+        if (strcmp(mods->names[i], modname) == 0) return;
+    if (mods->count == mods->cap) {
+        int cap = mods->cap ? mods->cap * 2 : 32;
+        char** grown = realloc(mods->names, sizeof(char*) * (size_t)cap);
+        if (!grown) {
+            fprintf(stderr, "Error: out of memory listing the package's modules\n");
+            exit(1);
+        }
+        mods->names = grown;
+        mods->cap = cap;
+    }
+    mods->names[mods->count++] = ae_path_printf("%s", modname);
+}
+
+static void ae_pkg_free(AePkgModules* mods) {
+    for (int i = 0; i < mods->count; i++) free(mods->names[i]);
+    free(mods->names);
+}
+
+static int ae_pkg_name_cmp(const void* a, const void* b) {
+    return strcmp(*(char* const*)a, *(char* const*)b);
+}
+
+static void ae_pkg_collect(const char* dir, const char* modname, AePkgModules* mods) {
     /* Paths below a --lib dir are built whole (#2543). */
     char* probe = ae_path_printf("%s/module.ae", dir);
-    if (path_exists(probe) && *n < AE_PKG_MAX_MODULES) {
-        int dup = 0;
-        for (int i = 0; i < *n; i++) if (strcmp(mods[i], modname) == 0) { dup = 1; break; }
-        if (!dup) snprintf(mods[(*n)++], 256, "%s", modname);
-    }
+    if (path_exists(probe)) ae_pkg_add(mods, modname);
     free(probe);
 #ifdef _WIN32
     char* pattern = ae_path_printf("%s\\*", dir);
@@ -5983,10 +6072,10 @@ static void ae_pkg_collect(const char* dir, const char* modname,
         const char* name = fd.cFileName;
         if (name[0] == '.') continue;
         if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
-        char childmod[256];
         char* child = ae_path_printf("%s/%s", dir, name);
-        snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
-        ae_pkg_collect(child, childmod, mods, n);
+        char* childmod = ae_path_printf("%s.%s", modname, name);
+        ae_pkg_collect(child, childmod, mods);
+        free(childmod);
         free(child);
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -5997,12 +6086,12 @@ static void ae_pkg_collect(const char* dir, const char* modname,
     while ((ent = readdir(d)) != NULL) {
         const char* name = ent->d_name;
         if (name[0] == '.') continue;
-        char childmod[256];
         char* child = ae_path_printf("%s/%s", dir, name);
         struct stat st;
         if (stat(child, &st) != 0 || !S_ISDIR(st.st_mode)) { free(child); continue; }
-        snprintf(childmod, sizeof(childmod), "%s.%s", modname, name);
-        ae_pkg_collect(child, childmod, mods, n);
+        char* childmod = ae_path_printf("%s.%s", modname, name);
+        ae_pkg_collect(child, childmod, mods);
+        free(childmod);
         free(child);
     }
     closedir(d);
@@ -6016,9 +6105,7 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     char rel[256];
     snprintf(rel, sizeof(rel), "%s", pkg);
     for (char* p = rel; *p; p++) if (*p == '.') *p = '/';
-    char (*mods)[256] = malloc((size_t)AE_PKG_MAX_MODULES * 256);
-    if (!mods) return -1;
-    int n = 0;
+    AePkgModules mods = {0};
     const char* roots[2 + AETHER_LIB_DIRS_MAX];
     int nr = 0;
     roots[nr++] = ".";
@@ -6029,15 +6116,15 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     for (int r = 0; r < nr && !found_root; r++) {
         char* dir = ae_path_printf("%s/%s", roots[r], rel);
         if (dir_exists(dir)) {
-            ae_pkg_collect(dir, pkg, mods, &n);
-            if (n > 0) found_root = roots[r];
+            ae_pkg_collect(dir, pkg, &mods);
+            if (mods.count > 0) found_root = roots[r];
         }
         free(dir);
     }
-    if (n == 0) {
+    if (mods.count == 0) {
         fprintf(stderr, "Error: package '%s' has no modules: no %s/ directory holding a "
                         "module.ae under ., src or the --lib directories.\n", pkg, rel);
-        free(mods);
+        ae_pkg_free(&mods);
         return -1;
     }
     /* The entry lives in a temp dir, so the root it was found under must be
@@ -6049,28 +6136,35 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
         tc_lib_dir_append_one(abs_root);
         free(abs_root);
     }
-    qsort(mods, (size_t)n, 256, (int (*)(const void*, const void*))strcmp);
+    qsort(mods.names, (size_t)mods.count, sizeof(char*), ae_pkg_name_cmp);
 
-    char dir[900];
-    snprintf(dir, sizeof(dir), "%s/ae-package-%d", get_temp_dir(), (int)getpid());
-    mkdir_p(dir);
     char stem[256];
     snprintf(stem, sizeof(stem), "%s", pkg);
     for (char* p = stem; *p; p++) if (*p == '.') *p = '_';
-    snprintf(out, outcap, "%s/%s.ae", dir, stem);
+    char* dir = ae_path_printf("%s/ae-package-%d", get_temp_dir(), (int)getpid());
+    mkdir_p(dir);
+    int fits = ae_sprintf(out, outcap, "%s/%s.ae", dir, stem) == 0;
+    if (!fits) {
+        fprintf(stderr, "Error: the package entry's path %s/%s.ae is longer than %zu bytes\n",
+                dir, stem, outcap - 1);
+        free(dir);
+        ae_pkg_free(&mods);
+        return -1;
+    }
+    free(dir);
     FILE* f = fopen(out, "w");
     if (!f) {
         fprintf(stderr, "Error: cannot write the package entry %s\n", out);
-        free(mods);
+        ae_pkg_free(&mods);
         return -1;
     }
     fprintf(f, "// Synthesized by `ae build --emit=lib --package %s`: the package's\n", pkg);
-    fprintf(f, "// %d modules, built as one library.\n", n);
-    for (int i = 0; i < n; i++) fprintf(f, "import %s\n", mods[i]);
+    fprintf(f, "// %d modules, built as one library.\n", mods.count);
+    for (int i = 0; i < mods.count; i++) fprintf(f, "import %s\n", mods.names[i]);
     fprintf(f, "\nmain() {}\n");
     fclose(f);
-    if (tc.verbose) fprintf(stderr, "ae: package %s: %d modules from %s\n", pkg, n, found_root);
-    free(mods);
+    if (tc.verbose) fprintf(stderr, "ae: package %s: %d modules from %s\n", pkg, mods.count, found_root);
+    ae_pkg_free(&mods);
     return 0;
 }
 
@@ -6747,7 +6841,7 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
-        char note[96];
+        char note[AE_EXIT_NOTE_MAX];
         exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
@@ -6793,7 +6887,7 @@ static int cmd_run(int argc, char** argv) {
     compile_log_path(glog, sizeof(glog));
     int gcc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, glog);
     if (gcc_ret != 0) {
-        char note[96];
+        char note[AE_EXIT_NOTE_MAX];
         exit_status_note(note, sizeof(note), gcc_ret);
         if (!tc.verbose) dump_captured_stdout(glog);
         remove(glog);
@@ -7143,7 +7237,20 @@ static int parse_manifest_json(const char* json, CapturedManifest* m) {
     return 0;
 }
 
-/* Parse the function list `name|return|p1:t1,p2:t2,...` (one per line). */
+/* Field `what` of function `fn`'s entry, copied into `dst` whole: 0, or -1
+ * with the reason printed when it does not fit (#2862). Cut, a name bound
+ * a symbol the library does not export. */
+static int fn_list_field(char* dst, size_t cap, const char* src, const char* what,
+                         const char* fn) {
+    if (ae_sprintf(dst, cap, "%s", src) == 0) return 0;
+    fprintf(stderr, "Warning: --list-functions: the %s of function '%s' is longer than %zu bytes\n",
+            what, fn, cap - 1);
+    return -1;
+}
+
+/* Parse the function list `name|return|p1:t1,p2:t2,...` (one per line).
+ * The number of entries, or -1 (the reason printed) for an entry whose name
+ * or a type does not fit. Each line is read whole. */
 static int parse_function_list(const char* text, CapturedFunction* fns,
                                int max_fns) {
     int count = 0;
@@ -7153,50 +7260,41 @@ static int parse_function_list(const char* text, CapturedFunction* fns,
         if (!eol) break;
         size_t line_len = eol - p;
         if (line_len == 0) { p = eol + 1; continue; }
-
-        char line[1024];
-        if (line_len >= sizeof(line)) line_len = sizeof(line) - 1;
-        memcpy(line, p, line_len);
-        line[line_len] = '\0';
+        char* line = ae_path_printf("%.*s", (int)line_len, p);
+        p = eol + 1;
 
         char* bar1 = strchr(line, '|');
-        if (!bar1) { p = eol + 1; continue; }
+        if (!bar1) { free(line); continue; }
         *bar1 = '\0';
         char* bar2 = strchr(bar1 + 1, '|');
-        if (!bar2) { p = eol + 1; continue; }
+        if (!bar2) { free(line); continue; }
         *bar2 = '\0';
 
         CapturedFunction* f = &fns[count];
         memset(f, 0, sizeof(*f));
-        strncpy(f->name, line, sizeof(f->name) - 1);
-        strncpy(f->ret, bar1 + 1, sizeof(f->ret) - 1);
+        int ok = fn_list_field(f->name, sizeof(f->name), line, "name", line) == 0 &&
+                 fn_list_field(f->ret, sizeof(f->ret), bar1 + 1, "return type", line) == 0;
 
         /* params: comma-separated name:type */
-        char* param_start = bar2 + 1;
-        while (*param_start && f->param_count < 16) {
-            char* comma = strchr(param_start, ',');
-            char piece[256];
-            size_t plen = comma ? (size_t)(comma - param_start) : strlen(param_start);
-            if (plen >= sizeof(piece)) plen = sizeof(piece) - 1;
-            memcpy(piece, param_start, plen);
-            piece[plen] = '\0';
-
+        char* piece = bar2 + 1;
+        while (ok && *piece && f->param_count < 16) {
+            char* comma = strchr(piece, ',');
+            if (comma) *comma = '\0';
             char* colon = strchr(piece, ':');
             if (colon) {
                 *colon = '\0';
-                strncpy(f->params[f->param_count].name, piece,
-                        sizeof(f->params[0].name) - 1);
-                strncpy(f->params[f->param_count].type, colon + 1,
-                        sizeof(f->params[0].type) - 1);
+                ok = fn_list_field(f->params[f->param_count].name, sizeof(f->params[0].name),
+                                   piece, "parameter name", line) == 0 &&
+                     fn_list_field(f->params[f->param_count].type, sizeof(f->params[0].type),
+                                   colon + 1, "parameter type", line) == 0;
                 f->param_count++;
             }
-
             if (!comma) break;
-            param_start = comma + 1;
+            piece = comma + 1;
         }
-
+        free(line);
+        if (!ok) return -1;
         count++;
-        p = eol + 1;
     }
     return count;
 }
@@ -8250,6 +8348,10 @@ static void emit_namespace_bindings(const char* manifest_path,
 
     CapturedFunction fns[64];
     int fn_count = parse_function_list(fn_list, fns, 64);
+    if (fn_count < 0) {
+        fprintf(stderr, "Warning: skipping SDK generation\n");
+        return;
+    }
 
     /* Determine where to write SDKs. Place them next to the .so so
      * users can `cp libfoo.so foo_module.py /target/` together. */
@@ -8364,8 +8466,13 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
         fprintf(stderr, "Error: opendir(%s) failed\n", dir);
         return 1;
     }
-    char  siblings[64][512];
-    int   sibling_count = 0;
+    /* The scripts' paths, and the import lines seen below, are heap strings
+     * in lists that grow, and each line is read whole (#2862): a path cut at
+     * 512 bytes named another file, an import line cut at 128 was never
+     * found again and was imported twice, and past 64 scripts the rest were
+     * dropped. */
+    char** siblings = NULL;
+    int    sibling_count = 0;
     struct dirent* ent;
     while ((ent = readdir(d)) != NULL) {
         const char* name = ent->d_name;
@@ -8373,8 +8480,13 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
         if (n < 4) continue;
         if (strcmp(name + n - 3, ".ae") != 0) continue;
         if (strcmp(name, "manifest.ae") == 0) continue;
-        if (sibling_count >= 64) break;
-        snprintf(siblings[sibling_count++], 512, "%s/%s", dir, name);
+        char** grown = realloc(siblings, sizeof(char*) * (size_t)(sibling_count + 1));
+        if (!grown) {
+            fprintf(stderr, "Error: out of memory listing the namespace's scripts\n");
+            exit(1);
+        }
+        siblings = grown;
+        siblings[sibling_count++] = ae_path_printf("%s/%s", dir, name);
     }
     closedir(d);
 
@@ -8386,10 +8498,9 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     /* sort with qsort+strcmp for determinism */
     for (int i = 1; i < sibling_count; i++) {
         for (int j = i; j > 0 && strcmp(siblings[j], siblings[j-1]) < 0; j--) {
-            char tmp[512];
-            strncpy(tmp, siblings[j], sizeof(tmp));
-            strncpy(siblings[j], siblings[j-1], sizeof(siblings[j]));
-            strncpy(siblings[j-1], tmp, sizeof(siblings[j-1]));
+            char* tmp = siblings[j];
+            siblings[j] = siblings[j-1];
+            siblings[j-1] = tmp;
         }
     }
 
@@ -8400,23 +8511,25 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     char concat_path[1056];  // tmpdir[1024] + "/_namespace.ae" + NUL
     snprintf(concat_path, sizeof(concat_path), "%s/_namespace.ae", tmpdir);
     FILE* concat = fopen(concat_path, "w");
-    if (!concat) { perror("fopen concat"); return 1; }
+    int failed = !concat;
+    if (!concat) perror("fopen concat");
 
     /* Track imports we've already emitted to avoid duplicates. */
-    char seen_imports[64][128];
-    int  seen_count = 0;
-    int  has_main = 0;
+    char** seen_imports = NULL;
+    int    seen_count = 0;
+    int    has_main = 0;
+    char*  line = NULL;
+    size_t line_cap = 0;
 
-    for (int i = 0; i < sibling_count; i++) {
+    for (int i = 0; i < sibling_count && !failed; i++) {
         FILE* in = fopen(siblings[i], "r");
         if (!in) {
             fprintf(stderr, "Error: cannot read sibling %s\n", siblings[i]);
-            fclose(concat);
-            return 1;
+            failed = 1;
+            break;
         }
         fprintf(concat, "// === from %s ===\n", siblings[i]);
-        char line[2048];
-        while (fgets(line, sizeof(line), in)) {
+        while (ae_read_line(in, &line, &line_cap) > 0) {
             /* Detect duplicate import lines. */
             const char* p = line;
             while (*p == ' ' || *p == '\t') p++;
@@ -8426,11 +8539,13 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
                     if (strcmp(seen_imports[s], p) == 0) { dup = 1; break; }
                 }
                 if (dup) continue;
-                if (seen_count < 64) {
-                    strncpy(seen_imports[seen_count], p, sizeof(seen_imports[0]) - 1);
-                    seen_imports[seen_count][sizeof(seen_imports[0]) - 1] = '\0';
-                    seen_count++;
+                char** grown = realloc(seen_imports, sizeof(char*) * (size_t)(seen_count + 1));
+                if (!grown) {
+                    fprintf(stderr, "Error: out of memory concatenating the namespace\n");
+                    exit(1);
                 }
+                seen_imports = grown;
+                seen_imports[seen_count++] = ae_path_printf("%s", p);
             }
             /* Skip duplicate main()s — keep only the first. `fn main()` is
              * the same declaration spelled with `fn`. */
@@ -8442,7 +8557,7 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
                      * scripts shouldn't normally have main(). */
                     int depth = 0;
                     int seen_open = 0;
-                    while (fgets(line, sizeof(line), in)) {
+                    while (ae_read_line(in, &line, &line_cap) > 0) {
                         for (char* q = line; *q; q++) {
                             if (*q == '{') { depth++; seen_open = 1; }
                             else if (*q == '}') { depth--; if (seen_open && depth <= 0) goto done_main; }
@@ -8457,6 +8572,15 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
         }
         fputs("\n", concat);
         fclose(in);
+    }
+    free(line);
+    for (int s = 0; s < seen_count; s++) free(seen_imports[s]);
+    free(seen_imports);
+    for (int i = 0; i < sibling_count; i++) free(siblings[i]);
+    free(siblings);
+    if (failed) {
+        if (concat) fclose(concat);
+        return 1;
     }
 
     /* If no script declared main(), emit a synthetic one so --emit=lib
@@ -8877,7 +9001,12 @@ static int cmd_build(int argc, char** argv) {
             g_shared_runtime = true;
         } else if (strcmp(argv[i], "--package") == 0 && i + 1 < argc) {
             // #2297: build every module of a package into one library.
-            snprintf(g_build_package, sizeof(g_build_package), "%s", argv[++i]);
+            // Whole or refused (#2862): cut, it named another package.
+            if (ae_sprintf(g_build_package, sizeof(g_build_package), "%s", argv[++i]) != 0) {
+                fprintf(stderr, "Error: --package: the package name is longer than %zu bytes\n",
+                        sizeof(g_build_package) - 1);
+                return 1;
+            }
         } else if (strcmp(argv[i], "--namespace") == 0 && i + 1 < argc) {
             // Handled in a dedicated function defined above.
             return cmd_build_namespace(argc, argv);
@@ -9004,17 +9133,20 @@ static int cmd_build(int argc, char** argv) {
 
     // Resolve directory argument (e.g. "." or "myproject/") to src/main.ae
     if (file && dir_exists(file)) {
-        static char resolved_build_file[1040];  // file path + "/src/main.ae" + NUL
-        snprintf(resolved_build_file, sizeof(resolved_build_file), "%s/src/main.ae", file);
+        /* Whole, whatever the directory's length (#2862): cut, the probe
+         * looked for another file. Kept for the rest of the run, as the
+         * static buffer was: `file` names it from here on. */
+        char* resolved_build_file = ae_path_printf("%s/src/main.ae", file);
         if (path_exists(resolved_build_file)) {
             file = resolved_build_file;
         } else {
-            char toml_path[1040];  // file path + "/aether.toml" + NUL
-            snprintf(toml_path, sizeof(toml_path), "%s/aether.toml", file);
+            char* toml_path = ae_path_printf("%s/aether.toml", file);
             if (path_exists(toml_path))
                 fprintf(stderr, "Error: No src/main.ae found in %s\n", file);
             else
                 fprintf(stderr, "Error: '%s' is not an Aether project directory\n", file);
+            free(toml_path);
+            free(resolved_build_file);
             return 1;
         }
     }
@@ -9483,7 +9615,7 @@ static int cmd_build(int argc, char** argv) {
     compile_log_path(clog, sizeof(clog));
     int aetherc_ret = tc.verbose ? run_cmd(cmd) : run_cmd_capture_stdout(cmd, clog);
     if (aetherc_ret != 0) {
-        char note[96];
+        char note[AE_EXIT_NOTE_MAX];
         exit_status_note(note, sizeof(note), aetherc_ret);
         if (!tc.verbose) dump_captured_stdout(clog);
         remove(clog);
@@ -9729,11 +9861,14 @@ static int cmd_build(int argc, char** argv) {
     }
     if (is_wasm) {
         // .wasm file is co-located with .js
-        char wasm_file[2048];
-        strncpy(wasm_file, exe_file, sizeof(wasm_file) - 1);
-        char* js_ext = strrchr(wasm_file, '.');
-        if (js_ext) strcpy(js_ext, ".wasm");
+        /* The .js path with its extension swapped, whole (#2862): copied
+         * into a buffer the size of the .js path's, `.wasm` (two bytes
+         * longer) ran past its end. */
+        const char* js_ext = strrchr(exe_file, '.');
+        int stem_len = js_ext ? (int)(js_ext - exe_file) : (int)strlen(exe_file);
+        char* wasm_file = ae_path_printf("%.*s%s", stem_len, exe_file, js_ext ? ".wasm" : "");
         printf("       %s\n", wasm_file);
+        free(wasm_file);
         printf("Run with: node %s\n", exe_file);
     }
     return 0;
@@ -10926,39 +11061,52 @@ static int cmd_examples(int argc, char** argv) {
         examples_dir = argv[0];
     }
 
+    /* Each path whole, or reported and counted as a failure (#2862): read
+     * 511 bytes at a time, a longer path came back as two files, neither of
+     * which exists. The rows hold what the steps below take. */
     char files[512][512];
     int file_count = 0;
+    int unlisted = 0;
 
-    char find_cmd[1024];
 #ifdef _WIN32
-    snprintf(find_cmd, sizeof(find_cmd), "dir /b /s \"%s\\*.ae\" 2>nul", examples_dir);
+    char* find_cmd = ae_path_printf("dir /b /s \"%s\\*.ae\" 2>nul", examples_dir);
 #else
-    snprintf(find_cmd, sizeof(find_cmd), "find \"%s\" -name '*.ae' -type f 2>/dev/null | sort", examples_dir);
+    char* find_cmd = ae_path_printf("find \"%s\" -name '*.ae' -type f 2>/dev/null | sort", examples_dir);
 #endif
     FILE* pipe = popen(find_cmd, "r");
+    free(find_cmd);
     if (pipe) {
-        char line[512];
-        while (fgets(line, sizeof(line), pipe) && file_count < 512) {
+        char* line = NULL;
+        size_t line_cap = 0;
+        while (ae_read_line(pipe, &line, &line_cap) > 0) {
             line[strcspn(line, "\n\r")] = '\0';
-            if (strlen(line) > 0) {
-                strncpy(files[file_count], line, sizeof(files[0]) - 1);
-                files[file_count][sizeof(files[0]) - 1] = '\0';
+            if (!line[0]) continue;
+            if (file_count == (int)(sizeof(files) / sizeof(files[0]))) {
+                fprintf(stderr, "Error: %s: not built, past the first %d examples\n",
+                        line, file_count);
+                unlisted++;
+            } else if (ae_sprintf(files[file_count], sizeof(files[0]), "%s", line) != 0) {
+                fprintf(stderr, "Error: %s: not built, the path is longer than %zu bytes\n",
+                        line, sizeof(files[0]) - 1);
+                unlisted++;
+            } else {
                 file_count++;
             }
         }
+        free(line);
         pclose(pipe);
     }
 
     if (file_count == 0) {
         printf("No .ae files found in %s/\n", examples_dir);
-        return 0;
+        return unlisted > 0 ? 1 : 0;
     }
 
     printf("Building %d example(s)...\n\n", file_count);
 
     mkdirs("build/examples");
 
-    int pass = 0, fail = 0, skipped = 0;
+    int pass = 0, fail = unlisted, skipped = 0;
 
     for (int i = 0; i < file_count; i++) {
         const char* src = files[i];
@@ -11055,7 +11203,7 @@ static int cmd_examples(int argc, char** argv) {
         remove(c_file);
     }
 
-    printf("\n%d passed, %d failed, %d total\n", pass, fail, file_count - skipped);
+    printf("\n%d passed, %d failed, %d total\n", pass, fail, file_count + unlisted - skipped);
     printf("Binaries in build/examples/\n");
     return (fail > 0) ? 1 : 0;
 }
@@ -11861,9 +12009,9 @@ int main(int argc, char** argv) {
             discover_toolchain();
             if (!getenv("AETHERC") && tc.compiler[0]) {
 #ifdef _WIN32
-                char env_buf[1100];
-                snprintf(env_buf, sizeof(env_buf), "AETHERC=%s", tc.compiler);
-                _putenv(env_buf);
+                /* Whole (#2862): the compiler's path is up to 2047 bytes,
+                 * and 1100 cut a long one. The CRT keeps the string. */
+                _putenv(ae_path_printf("AETHERC=%s", tc.compiler));
 #else
                 setenv("AETHERC", tc.compiler, 0);
 #endif
