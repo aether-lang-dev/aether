@@ -1,0 +1,105 @@
+// Regression (#2873): a builder call with a trailing block whose result is
+// stored into a module global or an actor's state ran the builder with a
+// null config, its block dropped: each statement form ran the block itself,
+// and the global and state stores did not. The block and the arguments now
+// run ahead of whatever statement stores the call's value, a global and a
+// state like a local or a field. Each shape runs in a round, and the rounds
+// must not grow the heap.
+
+import std.map
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+message Set {}
+message Get {}
+
+var gs: string = ""
+var gn = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+builder label(text: string): string {
+    suffix = ""
+    if _builder != null && map_has(_builder, "suffix") == 1 { suffix, _ = map.get(_builder, "suffix") }
+    out = string.concat(text, suffix)
+    if _builder != null { map_free(_builder) }
+    return out
+}
+
+builder count(base: int): int {
+    extra = 0
+    if _builder != null && map_has(_builder, "extra") == 1 { extra = 5 }
+    if _builder != null { map_free(_builder) }
+    return base + extra
+}
+
+actor A {
+    state s = ""
+    state k = 0
+    receive {
+        Set() -> {
+            s = label("st") {
+                set_opt("suffix", "!")
+            }
+            k = count(2) {
+                set_opt("extra", "y")
+            }
+        }
+        Get() -> {
+            reply string.length(s) * 10 + k
+        }
+    }
+}
+
+// A module var keeps every string stored into it (the one it replaces is
+// not freed), so the rounds store the int global and a local string.
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        s = label(w) {
+            set_opt("suffix", "?")
+        }
+        gn = count(i) {
+            set_opt("extra", "y")
+        }
+        total = total + string.length(s) + gn
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    gs = label("g") {
+        set_opt("suffix", "!")
+    }
+    check(gs == "g!", "a builder's string stored into a global (${gs})")
+    gn = count(1) {
+        set_opt("extra", "y")
+    }
+    check(gn == 6, "a builder's int stored into a global (${gn})")
+    a = spawn(A())
+    a ! Set {}
+    int got = a ? Get {}
+    check(got == 37, "a builder's results stored into an actor's state (${got})")
+    w = string.concat("w", "v")
+    check(round(w) == 20 * (3 + 5) + 190, "the rounds")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(w)
+            }, 5)
+        check(grown == 0, "the heap grew by ${grown} bytes")
+    }
+    println("ok")
+}
