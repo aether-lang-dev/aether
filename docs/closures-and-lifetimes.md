@@ -547,7 +547,17 @@ for the full pattern.
 A closure that only *reads* a state field compiles: it captures the
 field's value when the closure is made, read through `self` as the arm
 reads it, as it captures a local (#2890). A closure kept past the handler
-holds that value, not the field's later ones.
+holds that value, not the field's later ones. The copy must hold what it
+reads, because the next store into the state releases what the field
+held, so only these kinds are copied: scalars, enums and bitsets; `ptr`
+and actor references (handles, copied as a local's are); a string or a
+closure (retained); a struct (duplicated when it owns strings, closures or
+arrays); and a fixed-size array of scalars, handles, plain structs or
+strings (its strings retained). Reading an `fn[N]`, an array of structs
+that own strings or closures, or any other kind (an optional, a tuple, a
+slice) is refused at compile time, naming the field: read what the
+closure needs into arm locals first (`f = fs[0]`, `name = items[0].name`)
+and use those.
 
 **Proper fix:** thread `self` through the closure's env so state
 writes compile to `self->field = ...`. Medium-sized codegen change;

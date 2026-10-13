@@ -1,0 +1,115 @@
+// Regression (#2890 review): a closure made in a receive arm copies the
+// state fields it reads when it is made, and the copy must hold what it
+// reads, since the next store into the state releases what the field held.
+// These are the kinds it copies safely: a string (retained), a closure
+// (retained), a struct owning strings (duplicated), a plain struct, an
+// int[N], a string[N] (its elements retained) and an array of plain
+// structs. Each closure here is kept in a global, the state is stored
+// over several times, and the closure is run after: it must read the
+// values it was made with. Reading an fn[N] or an array of structs that
+// own strings is refused (tests/integration/closure_actor_state_read_reject);
+// reading their elements into arm locals first is the way, checked last.
+
+import std.string
+
+extern exit(code: int)
+
+struct Named {
+    name: string
+    n: int
+}
+
+struct Pt {
+    x: int
+    y: int
+}
+
+struct Item {
+    name: string
+    n: int
+}
+
+message Make {}
+
+message Change {
+    w: string
+}
+
+message Run {}
+
+var kept: fn = null
+var kept_locals: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+actor Box {
+    state label = "start"
+    state names = ["a", "b"]
+    state nums = [1, 2]
+    state cb = || { return 1 }
+    state rec = Named { name: "r", n: 1 }
+    state pt = Pt { x: 1, y: 2 }
+    state pts = [Pt { x: 1, y: 2 }, Pt { x: 3, y: 4 }]
+    state fs = [|| { return 10 }, || { return 20 }]
+    state items = [Item { name: "one", n: 1 }, Item { name: "three", n: 3 }]
+
+    receive {
+        Make() -> {
+            kept = || {
+                int a = string.length(label)
+                int b = string.length(names[0]) * 10 + string.length(names[1])
+                int c = nums[0] * 10 + nums[1]
+                int d = call(cb)
+                int e = string.length(rec.name) + rec.n
+                int f = pt.x * 10 + pt.y + pts[1].x * 100
+                return a + b * 100 + c * 10000 + d * 1000000 + e * 100000000 + f
+            }
+            // An fn[N] and an array of owning structs are read into arm
+            // locals first: each local holds a reference of its own.
+            f0 = fs[0]
+            first = items[0].name
+            kept_locals = || {
+                int v = call(f0)
+                return v * 100 + string.length(first)
+            }
+        }
+        Change(w) -> {
+            label = string.concat(w, "!!")
+            names[0] = string.concat(w, "x")
+            names = [string.concat(w, "yy"), string.concat(w, "zzz")]
+            nums = [7, 8]
+            n = string.length(w)
+            cb = || { return n * 3 }
+            rec = Named { name: string.concat(w, "q"), n: 9 }
+            pt = Pt { x: 5, y: 6 }
+            pts = [Pt { x: 7, y: 8 }, Pt { x: 9, y: 9 }]
+            fs = [|| { return n }, || { return n + 1 }]
+            items = [Item { name: string.concat(w, "i"), n: 5 }, Item { name: w, n: 6 }]
+        }
+        Run() -> {
+            int v = call(kept)
+            // label 8, names 8 and 9, nums 7 8, cb 18, rec 7 + 9, pt 5 6,
+            // pts[1].x 9: the values of the first Change.
+            check(v == 8 + 89 * 100 + 78 * 10000 + 18 * 1000000 + 16 * 100000000 + 956,
+                "a kept closure reads the state it was made with (${v})")
+            int u = call(kept_locals)
+            check(u == 607, "fn[N] and struct array elements read into locals (${u})")
+        }
+    }
+}
+
+main() {
+    b = spawn(Box())
+    b ! Change { w: "abcdef" }
+    b ! Make {}
+    b ! Change { w: "xy" }
+    b ! Change { w: "pqr" }
+    b ! Run {}
+    wait_for_idle()
+    println("ok")
+}

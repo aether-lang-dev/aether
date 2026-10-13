@@ -1,0 +1,28 @@
+// #2890: a closure made in a receive arm that reads an `fn[N]` state field
+// is refused: its copy of the array would hold none of the closures'
+// references, and the next store into the state frees them.
+
+message Make {}
+message Run {}
+
+var kept: fn = null
+
+actor Box {
+    state fs = [|| { return 1 }, || { return 2 }]
+
+    receive {
+        Make() -> {
+            kept = || { return call(fs[0]) + call(fs[1]) }
+        }
+        Run() -> {
+            println("${call(kept)}")
+        }
+    }
+}
+
+main() {
+    b = spawn(Box())
+    b ! Make {}
+    b ! Run {}
+    wait_for_idle()
+}

@@ -3884,12 +3884,72 @@ static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node) {
     return NULL;
 }
 
+/* #2890: why a closure made in a receive arm cannot read the state field
+ * `sd` declares, or NULL when it can. The closure copies the field when it
+ * is made (capture_source), and the copy must hold everything it reads,
+ * since the next store into the state releases what the field held:
+ *   - a scalar, an enum or a bitset is its value;
+ *   - a `ptr` or an actor reference is a handle no slot owns, copied as a
+ *     local's is;
+ *   - a string is retained (aether_str_capture), a closure too (#2494);
+ *   - a struct is copied, by `<Name>_dup` when it owns strings, closures
+ *     or arrays (#2504), so the copy holds its own;
+ *   - a fixed-size array is copied element by element: elements that are
+ *     scalars, handles or structs owning nothing are values, and string
+ *     elements are taken when the copy takes references to them
+ *     (closure_captures_string_view_array, #2618).
+ * Anything else is refused: the copy of an `fn[N]` and of an array of
+ * structs that own strings or closures holds none of the elements'
+ * references, so a later store into the state frees what the closure
+ * reads; an optional, a tuple, a sum or a slice is not judged here. */
+static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* closure,
+                                                  ASTNode* sd) {
+    Type* t = sd ? sd->node_type : NULL;
+    if (!t) return "its type is not known here";
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+        case TYPE_UINT16: case TYPE_UINT8: case TYPE_DURATION: case TYPE_FLOAT:
+        case TYPE_LONGDOUBLE: case TYPE_FLOAT32: case TYPE_BOOL: case TYPE_BYTE:
+        case TYPE_ENUM: case TYPE_BITSET: case TYPE_BITSTRUCT:
+        case TYPE_PTR: case TYPE_ACTOR_REF: case TYPE_STRING: case TYPE_FUNCTION:
+        case TYPE_STRUCT:
+            return NULL;
+        case TYPE_ARRAY: {
+            Type* e = t->element_type;
+            if (t->array_size <= 0 || !e) return "a slice is not judged here";
+            switch (e->kind) {
+                case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+                case TYPE_UINT16: case TYPE_UINT8: case TYPE_DURATION: case TYPE_FLOAT:
+                case TYPE_LONGDOUBLE: case TYPE_FLOAT32: case TYPE_BOOL: case TYPE_BYTE:
+                case TYPE_ENUM: case TYPE_BITSET: case TYPE_BITSTRUCT:
+                case TYPE_PTR: case TYPE_ACTOR_REF:
+                    return NULL;
+                case TYPE_STRING:
+                    return closure_captures_string_view_array(gen, closure, sd->value)
+                           ? NULL : "the closure's copy would not hold its strings";
+                case TYPE_FUNCTION:
+                    if (e->is_fnptr) return NULL;
+                    return "the closure's copy would not hold its closures";
+                case TYPE_STRUCT:
+                    if (!struct_owning_strings(gen, e)) return NULL;
+                    return "the closure's copy would not hold what its structs own";
+                default:
+                    return "an array of these is not judged here";
+            }
+        }
+        default:
+            return "a value of this kind is not judged here";
+    }
+}
+
 // L4 validation: a closure inside an actor handler that writes to an
 // actor state field is currently miscompiled (the closure has no access
 // to `self`, so `state_field = ...` emits a stale-local write). Until
 // threading self through the closure env is implemented, reject the
 // pattern at compile time with a clear error. Returns 0 on failure
 // (errors were reported via aether_error_report), 1 otherwise.
+// #2890: a closure that reads a state field it cannot copy safely
+// (arm_closure_state_read_refusal) is refused the same way.
 int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
     int ok = 1;
     for (int ci = 0; ci < gen->closure_count; ci++) {
@@ -3907,6 +3967,7 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
         // annotation marking them as state vars. Actors typically list
         // state decls as top-level children of AST_ACTOR_DEFINITION.
         const char* state_names[64];
+        ASTNode* state_decls[64];
         int state_count = 0;
         for (int j = 0; j < actor->child_count && state_count < 64; j++) {
             ASTNode* c = actor->children[j];
@@ -3914,6 +3975,7 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
             if (c->type == AST_STATE_DECLARATION ||
                 (c->type == AST_VARIABLE_DECLARATION && c->annotation &&
                  strcmp(c->annotation, "state") == 0)) {
+                state_decls[state_count] = c;
                 state_names[state_count++] = c->value;
             }
         }
@@ -3937,7 +3999,35 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
              * array is no capture the closure could share in a cell (#2474):
              * it lives in the actor, which the closure cannot reach. */
             if (!is_assigned_to(body, state_names[n]) &&
-                !is_written_through(body, state_names[n])) continue;
+                !is_written_through(body, state_names[n])) {
+                /* #2890: a field the closure only reads is copied into it;
+                 * a copy that would not hold what it reads is refused. */
+                int captured = 0;
+                for (int k = 0; k < gen->closures[ci].capture_count && !captured; k++)
+                    captured = gen->closures[ci].captures[k] &&
+                               strcmp(gen->closures[ci].captures[k], state_names[n]) == 0;
+                const char* why = captured
+                    ? arm_closure_state_read_refusal(gen, closure, state_decls[n]) : NULL;
+                if (!why) continue;
+                char rmsg[512];
+                snprintf(rmsg, sizeof(rmsg),
+                    "closure inside actor '%s' handler reads state field '%s' (%s): "
+                    "not supported, the closure copies the field when it is made and %s, "
+                    "so a later store into the state would free what it reads",
+                    actor->value ? actor->value : "actor", state_names[n],
+                    state_decls[n]->node_type ? type_to_string(state_decls[n]->node_type)
+                                              : "unknown",
+                    why);
+                char rsug[256];
+                snprintf(rsug, sizeof(rsug),
+                    "read what the closure needs out of '%s' into arm locals first "
+                    "(an element `f = %s[0]`, a field `name = %s[0].name`) and use those",
+                    state_names[n], state_names[n], state_names[n]);
+                aether_error_full(rmsg, closure->line, closure->column, rsug,
+                                  "in actor handler", AETHER_ERR_ACTOR_ERROR);
+                ok = 0;
+                continue;
+            }
             // Report error. Location: closure node.
             char msg[512];
             const char* actor_name = actor->value ? actor->value : "actor";

@@ -1,0 +1,35 @@
+// #2890: a closure made in a receive arm that reads a state array of
+// structs owning strings is refused: its copy of the array would hold none
+// of the strings, and the next store into the state frees them.
+
+import std.string
+
+struct Item {
+    name: string
+    n: int
+}
+
+message Make {}
+message Run {}
+
+var kept: fn = null
+
+actor Box {
+    state items = [Item { name: "a", n: 1 }, Item { name: "bb", n: 2 }]
+
+    receive {
+        Make() -> {
+            kept = || { return string.length(items[1].name) }
+        }
+        Run() -> {
+            println("${call(kept)}")
+        }
+    }
+}
+
+main() {
+    b = spawn(Box())
+    b ! Make {}
+    b ! Run {}
+    wait_for_idle()
+}
