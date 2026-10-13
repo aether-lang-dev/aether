@@ -61,13 +61,16 @@ main() {
     }
 
     // ---- wait_any returns children in COMPLETION order, not spawn order ----
+    // The order is made, not timed (#2892): the slow child does not exit on
+    // its own, so the fast one is the only child that can have finished
+    // when the first wait_any returns; the test then ends the slow one, and
+    // only it is left for the second. A one-second margin between two
+    // sleeps failed under load, both children done before wait_any looked.
     argv_slow = list.new()
-    _ = list.add(argv_slow, "2")
-    argv_fast = list.new()
-    _ = list.add(argv_fast, "1")
+    _ = list.add(argv_slow, "30")
 
     slow, _ = os.spawn_proc("sleep", argv_slow, null) // spawned first, finishes last
-    fast, _ = os.spawn_proc("sleep", argv_fast, null) // spawned second, finishes first
+    fast, _ = os.spawn_proc("true", null, null)       // spawned second, finishes first
 
     toks = list.new()
     _ = list.add(toks, mem.long_to_ptr(slow as long))
@@ -77,21 +80,22 @@ main() {
     fails = fails + check("wait_any returns the faster child first", first_tok == fast)
     fails = fails + check("first child exit 0", first_code == 0 && first_err == "")
 
-    second_tok, second_code, _ = os.wait_any(toks)
+    _ks = os.kill(slow, 9)
+    second_tok, second_code, second_err = os.wait_any(toks)
     fails = fails + check("wait_any then returns the slower child", second_tok == slow)
-    fails = fails + check("second child exit 0", second_code == 0)
+    fails = fails + check("second child reaps 137 (128+SIGKILL)", second_code == 137 && second_err == "")
 
     // ---- wait_any_timeout: per-call deadline, not a batch deadline (#1278) ----
-    // One "hung" child (sleep 30) and one short (sleep 1). A 3s wait_any_timeout
-    // must return the short one (timed_out == 0), and a *second* call — with
-    // only the hung child left — must report timed_out == 1 without killing it.
+    // One "hung" child (sleep 30) and one short (`true`, which exits at once,
+    // so the 3s deadline is not a race with it either, #2892). A 3s
+    // wait_any_timeout must return the short one (timed_out == 0), and a
+    // *second* call, with only the hung child left, must report
+    // timed_out == 1 without killing it.
     argv_hung = list.new()
     _ = list.add(argv_hung, "30")
-    argv_short = list.new()
-    _ = list.add(argv_short, "1")
 
     hung, _ = os.spawn_proc("sleep", argv_hung, null)
-    short, _ = os.spawn_proc("sleep", argv_short, null)
+    short, _ = os.spawn_proc("true", null, null)
 
     ttoks = list.new()
     _ = list.add(ttoks, mem.long_to_ptr(hung as long))
