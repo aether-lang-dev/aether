@@ -967,7 +967,8 @@ typedef struct OrderFnEffects {
 } OrderFnEffects;
 
 /* The definition a call runs, when it is a function of this program, or
- * the declaration of the extern it is. */
+ * the declaration of the extern it is. For a clause set it is the first
+ * clause, whose entry stands for the whole set (order_fn_clause). */
 static ASTNode* order_callee_def(CodeGenerator* gen, ASTNode* call) {
     if (!call->value || !gen->program) return NULL;
     const char* fn = codegen_normalise_callee(call->value);
@@ -1036,14 +1037,43 @@ static int order_access_through_memory(const ASTNode* node) {
     return 0;
 }
 
+/* The position of `fn`'s parameter `name` among its parameters, which is
+ * the position of the argument a call hands it: a literal or a list pattern
+ * takes a position too (`wr(0, b: *Box)` has `b` second), and a guard or a
+ * contract between them takes none. */
 static int order_param_index(ASTNode* fn, const char* name) {
-    for (int i = 0, k = 0; name && i < fn->child_count; i++) {
-        ASTNode* p = fn->children[i];
-        if (!p || p->type != AST_PATTERN_VARIABLE) continue;
-        if (p->value && strcmp(p->value, name) == 0) return k < 32 ? k : -1;
-        k++;
+    for (int k = 0; name && k < 32; k++) {
+        ASTNode* p = fn_param_at(fn, k);
+        if (!p) return -1;
+        if ((p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION) &&
+            p->value && strcmp(p->value, name) == 0) return k;
     }
     return -1;
+}
+
+/* What a call of entry `fn` runs (#2857). `fn` is the definition
+ * order_callee_def finds for a name: the first clause of a clause set, and a
+ * call of the set may run any clause, so its effects are every clause's.
+ * Clause `k` of the set `fn` is, or `fn` itself for a single definition. */
+static int order_fn_clause_count(CodeGenerator* gen, ASTNode* fn) {
+    const DefClauses* dc = fn_def_clause_set(gen->program, fn);
+    return dc ? dc->count : 1;
+}
+
+static ASTNode* order_fn_clause(CodeGenerator* gen, ASTNode* fn, int k) {
+    const DefClauses* dc = fn_def_clause_set(gen->program, fn);
+    return dc ? (k < dc->count ? dc->nodes[k] : NULL) : (k == 0 ? fn : NULL);
+}
+
+/* A child of a clause that a call of it evaluates: its body, its guard
+ * (which the set's dispatcher tests), a `requires` or an `ensures` check
+ * (unless --no-contracts drops them). Its parameter patterns only compare
+ * and bind what the call was handed. */
+static int order_clause_part_runs(CodeGenerator* gen, const ASTNode* c) {
+    if (!c) return 0;
+    if (c->type == AST_BLOCK || c->type == AST_GUARD_CLAUSE) return 1;
+    return (c->type == AST_REQUIRES_CLAUSE || c->type == AST_ENSURES_CLAUSE) &&
+           !gen->no_contracts;
 }
 
 static int order_fn_effects(CodeGenerator* gen, ASTNode* fn);
@@ -1167,14 +1197,31 @@ static void order_collect_callees(CodeGenerator* gen, ASTNode* node, int idx) {
         order_collect_callees(gen, node->children[i], idx);
 }
 
-/* Read entry `i`'s body once more with what its callees are known to do;
- * 1 when that adds an effect. */
+/* The edges of entry `i`: the calls in every part of every clause a call
+ * of it runs. */
+static void order_fn_collect_callees(CodeGenerator* gen, int i) {
+    ASTNode* fn = gen->order_fn_effects[i].fn;
+    int n = order_fn_clause_count(gen, fn);
+    for (int k = 0; k < n; k++) {
+        ASTNode* cl = order_fn_clause(gen, fn, k);
+        for (int c = 0; cl && c < cl->child_count; c++)
+            if (order_clause_part_runs(gen, cl->children[c]))
+                order_collect_callees(gen, cl->children[c], i);
+    }
+}
+
+/* Read entry `i`'s clauses once more with what their callees are known to
+ * do; 1 when that adds an effect. Each clause is read against its own
+ * parameters: a set's clauses may name them differently. */
 static int order_fn_rescan(CodeGenerator* gen, int i) {
     OrderFnEffects e = gen->order_fn_effects[i];
-    ASTNode* f = e.fn;
-    for (int c = 0; c < f->child_count; c++)
-        if (f->children[c] && f->children[c]->type == AST_BLOCK)
-            order_scan_body(gen, f, f->children[c], &e);
+    int n = order_fn_clause_count(gen, e.fn);
+    for (int k = 0; k < n; k++) {
+        ASTNode* cl = order_fn_clause(gen, e.fn, k);
+        for (int c = 0; cl && c < cl->child_count; c++)
+            if (order_clause_part_runs(gen, cl->children[c]))
+                order_scan_body(gen, cl, cl->children[c], &e);
+    }
     OrderFnEffects* cur = &gen->order_fn_effects[i];
     if (e.opaque == cur->opaque && e.writes_shared == cur->writes_shared &&
         e.writes_through == cur->writes_through && e.writes_memory == cur->writes_memory &&
@@ -1222,10 +1269,7 @@ static int order_fn_effects(CodeGenerator* gen, ASTNode* fn) {
         ve->scc_index = ve->scc_low = counter++; \
         ve->scc_on_stack = 1; \
         ORDER_PUSH(stack, nstack, capstack, (v)); \
-        ASTNode* vf = ve->fn; \
-        for (int c_ = 0; c_ < vf->child_count; c_++) \
-            if (vf->children[c_] && vf->children[c_]->type == AST_BLOCK) \
-                order_collect_callees(gen, vf->children[c_], (v)); \
+        order_fn_collect_callees(gen, (v)); \
         ORDER_PUSH(frames, nframes, capframes, (v)); \
         ORDER_PUSH(frames, nframes, capframes, 0); } while (0)
     ORDER_VISIT(root);

@@ -1,0 +1,78 @@
+// Regression (#2857): what a call of a clause set can change is what any of
+// its clauses changes. The evaluation-order rule (#2478, #2813) read a
+// set's effects off its first clause alone, so a write through a pointer in
+// a later clause went unseen: `show(q.n, wr(p, 3))` read `q.n` after
+// `wr(p, 3)` wrote it, and printed 5002 for 1002. The set's entry in the
+// call graph now reads every clause: each body, each guard (the set's
+// dispatcher tests it on the call), and each against its own parameters,
+// counted by position, so a literal pattern ahead of the pointer
+// (`wr_at(0, b)`) does not shift which argument is written through.
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Box {
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+poke2(b: *Box) -> int {
+    b.n = 5
+    return 2
+}
+
+touch(b: *Box) -> int {
+    b.n = 7
+    return 1
+}
+
+show(a: int, b: int) -> int {
+    return a * 1000 + b
+}
+
+// The write is in the second clause.
+wr(b: *Box, 0) -> 1
+wr(b: *Box, k: int) -> poke2(b)
+
+// The same with the literal pattern first: `b` is the second argument.
+wr_at(0, b: *Box) -> 1
+wr_at(k: int, b: *Box) -> poke2(b)
+
+// The write is in a guard the dispatcher tests.
+gd(b: *Box, 0) -> 0
+gd(b: *Box, k: int) when touch(b) > 0 -> 3
+gd(b: *Box, k: int) -> 4
+
+// The write is two clauses down a recursion through the set.
+down(b: *Box, 0) -> poke2(b)
+down(b: *Box, k: int) -> down(b, k - 1)
+
+// The set writes in its last clause, reached through another function.
+via(b: *Box, k: int) -> int {
+    return wr(b, k)
+}
+
+main() {
+    p = malloc(sizeof(Box)) as *Box
+    q = p
+
+    p.n = 1
+    check(show(q.n, wr(p, 3)) == 1002, "a write in a later clause")
+    p.n = 1
+    check(show(wr(p, 3), q.n) == 2005, "a write in a later clause, read after")
+    p.n = 1
+    check(show(q.n, wr_at(3, p)) == 1002, "a write in a later clause, the pointer second")
+    p.n = 1
+    check(show(q.n, gd(p, 3)) == 1003, "a write in a guard")
+    p.n = 1
+    check(show(q.n, down(p, 3)) == 1002, "a write down a recursion through the set")
+    p.n = 1
+    check(show(q.n, via(p, 3)) == 1002, "a write in a set reached through another function")
+    println("ok")
+}

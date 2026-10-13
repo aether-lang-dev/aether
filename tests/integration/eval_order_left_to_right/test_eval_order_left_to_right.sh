@@ -137,11 +137,28 @@ if [ "$got" != "$want" ]; then
 fi
 
 # No operand here writes what another reads: `sq` writes nothing, and the
-# reads are of plain locals no call can reach. The C stays as it was.
+# reads are of plain locals no call can reach. The C stays as it was. Nor
+# does any clause of `fib` or `rd` (#2857: a set's effects are all its
+# clauses', guards included), so reading `q.n` beside them needs no
+# temporary either.
 cat > "$tmp/plain.ae" <<'AE'
+extern malloc(size: int) -> ptr
+
+struct Box {
+    n: int
+}
+
 sq(n: int) -> int { return n * n }
 
 pick(a: int, b: int, c: int) -> int { return a + b + c }
+
+fib(0) -> 0
+fib(1) -> 1
+fib(n) when n > 1 -> fib(n - 1) + fib(n - 2)
+
+rd(b: *Box, 0) -> b.n
+rd(b: *Box, k: int) when k > b.n -> b.n + k
+rd(b: *Box, k: int) -> rd(b, k - 1)
 
 main() {
     a = 3
@@ -149,7 +166,12 @@ main() {
     z = sq(a) + sq(b)
     w = pick(sq(a), b, sq(sq(b)))
     k = a++
-    println(z + w + k)
+    p = malloc(sizeof(Box)) as *Box
+    q = p
+    p.n = 1
+    f = pick(fib(a), b, fib(sq(b)))
+    r = pick(q.n, rd(p, 3), q.n)
+    println(z + w + k + f + r)
 }
 AE
 if ! "$AETHERC" "$tmp/plain.ae" "$tmp/plain.c" >/dev/null 2>&1; then
