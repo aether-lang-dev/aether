@@ -14315,7 +14315,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     break;
                 }
                 if (!is_var_declared(gen, stmt->value)) {
-                    fprintf(gen->output, "%s %s", get_c_type(stmt->node_type), stmt->value);
+                    /* #2902: volatile where a `try` body writes it, as
+                     * every other local is (#2618, #2690); a `string?`
+                     * is declared by hoist_opt_str_trackers. */
+                    fprintf(gen->output, "%s %s",
+                            volatile_decl_type(try_volatile_qual_for(gen, stmt->value),
+                                               get_c_type(stmt->node_type)),
+                            stmt->value);
                     mark_var_declared(gen, stmt->value);
                 } else {
                     fprintf(gen->output, "%s", stmt->value);
@@ -14337,7 +14343,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 stmt->node_type && stmt->node_type->kind == TYPE_SUM) {
                 print_indent(gen);
                 if (!is_var_declared(gen, stmt->value)) {
-                    fprintf(gen->output, "%s %s", get_c_type(stmt->node_type), stmt->value);
+                    /* #2902: volatile where a `try` body writes it. */
+                    fprintf(gen->output, "%s %s",
+                            volatile_decl_type(try_volatile_qual_for(gen, stmt->value),
+                                               get_c_type(stmt->node_type)),
+                            stmt->value);
                     mark_var_declared(gen, stmt->value);
                 } else {
                     fprintf(gen->output, "%s", stmt->value);

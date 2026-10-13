@@ -1,7 +1,8 @@
 #!/bin/sh
 # #2690 follow-up, #2739: the C of programs whose `try` bodies write
 # parameters, pattern bindings, catch bindings and struct values compiles
-# without a qualifier warning.
+# without a qualifier warning, and so does a try-written optional or sum
+# local, now declared volatile (#2902).
 #
 # A value a `try` body writes is declared volatile, so that it holds after a
 # panic what was stored before it. The release and replace of a struct
@@ -46,7 +47,7 @@ fail() {
 INC="-I$ROOT -I$ROOT/runtime -I$ROOT/runtime/utils -I$ROOT/runtime/actors -I$ROOT/runtime/config -I$ROOT/runtime/scheduler -I$ROOT/runtime/memory -I$ROOT/std -I$ROOT/std/collections -I$ROOT/std/string"
 
 for name in test_try_written_param test_try_written_struct_local test_catch_binding_nested_try \
-            test_try_written_array_argument; do
+            test_try_written_array_argument test_issue2902_try_written_optional; do
     src="$ROOT/tests/regression/$name.ae"
     [ -f "$src" ] || fail "$src is missing"
     if ! "$AETHERC" "$src" "$tmp/$name.c" >"$tmp/aetherc.log" 2>&1; then

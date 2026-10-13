@@ -1,0 +1,122 @@
+// Regression (#2902): an optional local a `try` body writes holds, after the
+// catch, what the body stored before the panic. #2618 and #2690 declare
+// every variable a `try` body writes volatile, so the longjmp of the panic
+// cannot leave it in a register with the value from before the `try`, but
+// the declaration of an optional local (`int?`, `long?`, a struct or `fn?`
+// one; `string?` has a declaration of its own) and of a sum local did not
+// take the qualifier. At -O1 and -O2 the code after the catch read `none`
+// (an `int?` gave -1 for 50), on both C paths.
+
+extern exit(code: int)
+
+struct P {
+    a: int
+    b: long
+}
+
+struct Circle { r: int }
+struct Rect { w: int h: int }
+type Shape = Circle | Rect
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+boom(x: int) {
+    if x >= 0 {
+        panic("boom")
+    }
+}
+
+opt_int(n: int) -> int {
+    int? o = none
+    try {
+        o = n * 5
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    return o ?? -1
+}
+
+opt_long(n: int) -> long {
+    long? o = none
+    try {
+        o = n * 7
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    return o ?? -1
+}
+
+opt_struct(n: int) -> int {
+    P? o = none
+    try {
+        o = P { a: n, b: 2 }
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    match o {
+        some(p) -> { return p.a }
+        none -> { return -1 }
+    }
+}
+
+opt_fn(n: int) -> int {
+    fn? o = none
+    try {
+        o = || { return n * 3 }
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    match o {
+        some(f) -> {
+            int v = call(f)
+            return v
+        }
+        none -> { return -1 }
+    }
+}
+
+// The value is also read in the catch.
+opt_in_catch(n: int) -> int {
+    int? o = none
+    r = 0
+    try {
+        o = n + 1
+        boom(n)
+    } catch e {
+        r = o ?? -1
+    }
+    return r
+}
+
+sum_local(n: int) -> int {
+    let s: Shape = Circle { r: 1 }
+    try {
+        s = Rect { w: n, h: 2 }
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    match s {
+        Circle -> { return 0 - s.r }
+        Rect -> { return s.w * s.h }
+    }
+}
+
+main() {
+    check(opt_int(10) == 50, "an int? stored in a try body (${opt_int(10)})")
+    check(opt_long(10) == 70, "a long? stored in a try body")
+    check(opt_struct(10) == 10, "a struct optional stored in a try body")
+    check(opt_fn(10) == 30, "an fn? stored in a try body")
+    check(opt_in_catch(10) == 11, "an int? read in the catch")
+    check(sum_local(10) == 20, "a sum stored in a try body")
+    println("ok")
+}
