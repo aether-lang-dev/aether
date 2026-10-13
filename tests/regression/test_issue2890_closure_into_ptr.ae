@@ -1,0 +1,82 @@
+// Regression (#2890): a closure stored straight into a `ptr` slot (a module
+// variable, a field of a struct literal, a message field) emitted C that
+// did not compile: the slot was given the `_AeClosure` itself, where a
+// `ptr` parameter and a `ptr` field store (`h.p = f`) box it. Each of these
+// stores now boxes it the same way, so unbox_closure gives it back; a bare
+// function goes in through its adapter. After `gptr = f` the function
+// reads `gptr` back as the `ptr` it is.
+
+extern exit(code: int)
+
+var gptr: ptr = null
+
+struct Holder {
+    p: ptr
+}
+
+message Hold {
+    p: ptr
+}
+
+message HoldTagged {
+    p: ptr
+    tag: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+run_ptr(p: ptr) -> int {
+    fn f = unbox_closure(p)
+    int v = call(f)
+    return v
+}
+
+seven() -> int {
+    return 7
+}
+
+actor Runner {
+    state got = 0
+
+    receive {
+        Hold(p) -> {
+            got = got + run_ptr(p)
+        }
+        HoldTagged(p, tag) -> {
+            got = got + run_ptr(p) * tag
+            check(got == 908, "closures in ptr message fields (${got})")
+        }
+    }
+}
+
+main() {
+    n = 7
+    f = || { return n + 1 }
+    fs = [|| { return n + 2 }, || { return n + 3 }]
+    gptr = f
+    check(run_ptr(gptr) == 8, "a closure local into a ptr global")
+    gptr = fs[1]
+    check(run_ptr(gptr) == 10, "an fn[N] element into a ptr global")
+    gptr = seven
+    check(run_ptr(gptr) == 7, "a bare function into a ptr global")
+    h = Holder { p: f }
+    check(run_ptr(h.p) == 8, "a closure local into a ptr field")
+    h2 = Holder { p: fs[0] }
+    check(run_ptr(h2.p) == 9, "an fn[N] element into a ptr field")
+    h3 = Holder { p: || { return n * 2 } }
+    check(run_ptr(h3.p) == 14, "a closure literal into a ptr field")
+    h4 = Holder { p: seven }
+    check(run_ptr(h4.p) == 7, "a bare function into a ptr field")
+    h.p = fs[1]
+    check(run_ptr(h.p) == 10, "a ptr field store")
+    r = spawn(Runner())
+    r ! Hold { p: f }
+    r ! HoldTagged { p: fs[0], tag: 100 }
+    wait_for_idle()
+    println("ok")
+}

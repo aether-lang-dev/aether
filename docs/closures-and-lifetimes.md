@@ -544,6 +544,11 @@ a suggestion to use the arm-local workaround. Regression pinned by
 write back. See `tests/syntax/README_closure_actor_state_limitation.md`
 for the full pattern.
 
+A closure that only *reads* a state field compiles: it captures the
+field's value when the closure is made, read through `self` as the arm
+reads it, as it captures a local (#2890). A closure kept past the handler
+holds that value, not the field's later ones.
+
 **Proper fix:** thread `self` through the closure's env so state
 writes compile to `self->field = ...`. Medium-sized codegen change;
 until it lands, the compile-time rejection prevents silent wrong

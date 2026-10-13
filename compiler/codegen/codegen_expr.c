@@ -220,6 +220,42 @@ static ASTNode* bare_top_level_fn(CodeGenerator* gen, ASTNode* node) {
     return find_function_definition_by_name(gen->program, node->value);
 }
 
+/* #2890: a closure stored into a `ptr` slot (a struct field, a module
+ * global, a message field) is boxed, as one given to a `ptr` parameter
+ * is: the slot holds `_aether_box_closure(...)`, which unbox_closure gives
+ * back. The box is a holder like a `fn` field (#2525) and keeps a
+ * reference of its own to the env, taken as emit_closure_take takes one;
+ * a bare function goes in through its env-ignoring adapter. Emits the
+ * boxed value and returns 1 when `v` is such a closure, else emits nothing
+ * and returns 0. Every `ptr` store goes through here, so none of them
+ * hands C an `_AeClosure` where it expects a `void*`. */
+int closure_boxes_into_ptr(CodeGenerator* gen, ASTNode* v) {
+    Type* t = v ? v->node_type : NULL;
+    return (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) || bare_top_level_fn(gen, v) != NULL;
+}
+
+int emit_closure_into_ptr(CodeGenerator* gen, ASTNode* v) {
+    if (!v) return 0;
+    Type* t = v->node_type;
+    if (t && t->kind == TYPE_FUNCTION && !t->is_fnptr) {
+        fprintf(gen->output, "_aether_box_closure(");
+        emit_closure_take(gen, v);
+        fprintf(gen->output, ")");
+        return 1;
+    }
+    if (bare_top_level_fn(gen, v)) {
+        /* Register an env-ignoring adapter for this bare fn so the wrap
+         * embeds the adapter address (not the bare fn's address) into
+         * .fn. See ASK 3 in aether/new_aevg_asks.md. */
+        register_bare_fn_adapter(gen, v->value);
+        fprintf(gen->output,
+                "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
+                v->value);
+        return 1;
+    }
+    return 0;
+}
+
 /* #1240: is `macc` a field of a C-owned struct (`extern struct`, with or
  * without @c_import / @packed)?
  *
@@ -2881,6 +2917,23 @@ static int subtree_declares(ASTNode* node, const char* var_name) {
 // local). Used to distinguish captures (names from an enclosing scope) from
 // fresh locals that happen to share a name. Scans nested blocks (for loops,
 // if/else bodies) but does not descend into inner closures.
+static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node);
+
+/* #2890: the `state` declaration of `name` in the actor whose receive arm
+ * is `arm`, or NULL. A closure made in the arm reads it as a capture: the
+ * env takes the state's value when the closure is made (capture_source
+ * spells it `self->name` there), as it takes a local's. Writing it is
+ * refused (validate_closure_state_mutations, L4). */
+static ASTNode* receive_arm_state_decl(ASTNode* program, ASTNode* arm, const char* name) {
+    ASTNode* actor = find_enclosing_actor(program, arm);
+    for (int i = 0; actor && name && i < actor->child_count; i++) {
+        ASTNode* c = actor->children[i];
+        if (c && c->type == AST_STATE_DECLARATION && c->value && strcmp(c->value, name) == 0)
+            return c;
+    }
+    return NULL;
+}
+
 static int is_declared_in_function(ASTNode* program, const char* func_name, const char* var_name) {
     if (!program || !func_name || !var_name) return 0;
     if (strncmp(func_name, "__closure_", 10) == 0) {
@@ -2905,6 +2958,9 @@ static int is_declared_in_function(ASTNode* program, const char* func_name, cons
          * the arm did not capture `n` from `Ping(n)` and its body read an
          * undeclared `n`. */
         if (receive_arm_binding(arm, var_name)) return 1;
+        /* #2890: so is the actor's state: a closure that read it captured
+         * nothing, and its body read an undeclared name. */
+        if (receive_arm_state_decl(program, arm, var_name)) return 1;
         ASTNode* body = receive_arm_body(arm);
         if (!body) return 0;
         return subtree_declares(body, var_name);
@@ -4024,6 +4080,10 @@ static Type* lookup_var_type(CodeGenerator* gen, const char* var_name, const cha
             ASTNode* pattern = receive_arm_pattern(arm);
             return message_field_type(gen->program, pattern->value, pf->value);
         }
+        /* #2890: a state field has its declared type; a store into it in
+         * the arm is no local of another one. */
+        ASTNode* sd = receive_arm_state_decl(gen->program, arm, var_name);
+        if (sd && sd->node_type && sd->node_type->kind != TYPE_UNKNOWN) return sd->node_type;
         return decl_type_in_scope(receive_arm_body(arm), var_name);
     }
     // Parent-function-first lookup, through the program index (#2007).
@@ -4105,10 +4165,20 @@ static Type* capture_sized_array_type(CodeGenerator* gen, const char* name,
 /* #2464: a closure's copy of the array `name` it captures, element by
  * element. An array a `try` body writes is volatile (#2618), which memcpy's
  * plain source pointer would not accept (#2691); each element is read as
- * the array's type says it must be. */
-static void emit_capture_array_copy(CodeGenerator* gen, const char* name, Type* t) {
+ * the array's type says it must be. `src` spells the array where the
+ * closure is made (capture_source). */
+static void emit_capture_array_copy(CodeGenerator* gen, const char* name, const char* src,
+                                    Type* t) {
     fprintf(gen->output, "for (int _ae_k = 0; _ae_k < %d; _ae_k++) _e->%s[_ae_k] = %s[_ae_k];",
-            t->array_size, name, name);
+            t->array_size, name, src);
+}
+
+/* #2890: the capture `name` as the code that makes the closure reads it: a
+ * state field of the actor whose handler makes it is `self->name` there,
+ * as the arm's own reads spell it; anything else is its name. */
+static const char* capture_source(CodeGenerator* gen, const char* name) {
+    if (!is_actor_state_var(gen, name)) return name;
+    return cg_internf("%s->%s", gen->state_self_alias ? gen->state_self_alias : "self", name);
 }
 
 /* #2618: a closure that copies a string array whose elements are owned
@@ -5037,7 +5107,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     /* #2464: an array does not assign; copy its elements. */
                     fprintf(gen->output, "    ");
                     Type* sat = capture_sized_array_type(gen, captures[i], parent_func);
-                    emit_capture_array_copy(gen, captures[i], sat);
+                    emit_capture_array_copy(gen, captures[i], captures[i], sat);
                     capture_string_array_take(gen, gen->closures[ci].closure_node, captures[i], sat);
                     fprintf(gen->output, "\n");
                 } else {
@@ -5410,6 +5480,9 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         emit_closure_take(gen, rhs);
         return;
     }
+    /* #2890: a `ptr` field takes a closure boxed, as a `ptr` parameter
+     * does. */
+    if (fdef && fdef->type_kind == TYPE_PTR && emit_closure_into_ptr(gen, rhs)) return;
     generate_expression(gen, rhs);
 }
 
@@ -8169,8 +8242,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * _aether_box_closure(...) so the closure
                      * round-trips through the field with the env
                      * slot intact. */
-                    int assign_box_struct = 0;
-                    int assign_box_bare_fn = 0;
+                    int assign_box = 0;
                     /* #1240: a C-owned struct's field is the exception to all
                      * the boxing below. C calls through it directly, so it gets
                      * the function's real address, cast to whatever type the
@@ -8183,19 +8255,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         is_assignment &&
                         bare_top_level_fn(gen, expr->children[1]) != NULL &&
                         member_field_is_c_owned(gen, expr->children[0]);
-                    if (is_assignment && lhs_is_ptr && !assign_c_fnptr_field) {
-                        if (rtype && rtype->kind == TYPE_FUNCTION && !rtype->is_fnptr) {
-                            assign_box_struct = 1;
-                        } else if (bare_top_level_fn(gen, expr->children[1])) {
-                            assign_box_bare_fn = 1;
-                        }
-                    }
+                    if (is_assignment && lhs_is_ptr && !assign_c_fnptr_field)
+                        assign_box = closure_boxes_into_ptr(gen, expr->children[1]);
                     if (assign_c_fnptr_field) {
                         fprintf(gen->output, "(__typeof__(");
                         generate_expression(gen, expr->children[0]);
                         fprintf(gen->output, "))");
                         generate_expression(gen, expr->children[1]);
-                    } else if (assign_box_struct) {
+                    } else if (assign_box) {
                         /* The box is a holder like a `fn` field (#2525): it
                          * keeps a reference of its own to the env, taken
                          * as emit_closure_take takes one (a fresh literal's
@@ -8206,20 +8273,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * after the call; boxed without one, that drain
                          * freed the env the field still pointed at (aether-
                          * ui asks/aether-closure-drain-through-fn-store.md). */
-                        fprintf(gen->output, "_aether_box_closure(");
-                        emit_closure_take(gen, expr->children[1]);
-                        fprintf(gen->output, ")");
-                    } else if (assign_box_bare_fn) {
-                        /* Register an env-ignoring adapter for this
-                         * bare fn so the wrap embeds the adapter
-                         * address (not the bare fn's address) into
-                         * .fn. See ASK 3 in aether/new_aevg_asks.md. */
-                        const char* bn = expr->children[1] && expr->children[1]->value
-                                         ? expr->children[1]->value : NULL;
-                        if (bn) register_bare_fn_adapter(gen, bn);
-                        fprintf(gen->output,
-                                "_aether_box_closure((_AeClosure){ .fn = (void(*)(void))_aether_bare_adapter_%s, .env = NULL })",
-                                bn ? bn : "unknown");
+                        emit_closure_into_ptr(gen, expr->children[1]);
                     } else if (is_assignment && ltype && ltype->kind == TYPE_OPTIONAL &&
                                expr->children[0]->type == AST_MEMBER_ACCESS) {
                         /* #2820: a store into an optional field takes the
@@ -10651,6 +10705,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int fv_closure = !c_imported && fv && fv->node_type &&
                                          fv->node_type->kind == TYPE_FUNCTION &&
                                          !fv->node_type->is_fnptr;
+                        /* #2890: a `ptr` field takes a closure boxed, as
+                         * `h.p = f` and a `ptr` parameter do. */
+                        Type* fv_decl = c_imported ? NULL
+                                        : struct_literal_field_type(gen, expr->value,
+                                                                    field_init->value);
+                        int fv_boxed = fv_decl && fv_decl->kind == TYPE_PTR &&
+                                       closure_boxes_into_ptr(gen, fv);
                         /* #2528: a `string[N]` / `fn[N]` field owns every
                          * element: a literal's elements are copied or
                          * taken. */
@@ -10682,6 +10743,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "), 0)");
                         }
                         else if (fv_struct && struct_take_shape(fv)) emit_struct_take(gen, fv, fv_struct, NULL);
+                        else if (fv_boxed) emit_closure_into_ptr(gen, fv);
                         else if (fv_closure) emit_closure_take(gen, fv);
                         else if (fv_owned_array) emit_owned_array_literal(gen, fv, fv_owned_array);
                         else generate_expression(gen, fv);
@@ -10814,7 +10876,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     int is_actor_ref = val->node_type && val->node_type->kind == TYPE_ACTOR_REF;
                                     if (is_actor_ref || fk == TYPE_INT64 || fk == TYPE_PTR || fk == TYPE_ACTOR_REF)
                                         fprintf(gen->output, "(intptr_t)");
-                                    generate_expression(gen, val);
+                                    /* #2890: a closure into a `ptr` field is
+                                     * boxed, as in a message built whole. */
+                                    if (!(fk == TYPE_PTR && emit_closure_into_ptr(gen, val)))
+                                        generate_expression(gen, val);
                                     break;
                                 }
                             }
@@ -11138,33 +11203,34 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "\n#if AETHER_GCC_COMPAT\n");
                 fprintf(gen->output, "({ _closure_env_%d* _e = malloc(sizeof(_closure_env_%d)); _e->_dtor = _closure_env_%d_free; atomic_init(&_e->_refs, 1); ", id, id, id);
                 for (int i = 0; i < cap_count; i++) {
+                    const char* src = capture_source(gen, captures[i]);   /* #2890 */
                     if (capture_is_closure_value(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the captured env (#2494) */
                         fprintf(gen->output, "_e->%s = %s; _aether_closure_env_retain(%s.env); ",
-                                captures[i], captures[i], captures[i]);
+                                captures[i], src, src);
                     } else if (capture_owning_struct(gen, captures[i], cl_parent_func)) {
                         /* env owns a copy of the struct's strings (#2504) */
                         fprintf(gen->output, "_e->%s = %s_dup(%s); ", captures[i],
-                                capture_owning_struct(gen, captures[i], cl_parent_func), captures[i]);
+                                capture_owning_struct(gen, captures[i], cl_parent_func), src);
                     } else if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the shared cell (#2019) */
                         const char* cell = promoted_cell_pointer(lookup_var_c_type(gen, captures[i], cl_parent_func),
                                                                  NULL);
                         fprintf(gen->output, "_e->%s = (%s)_aether_cell_retain(%s); ",
-                                captures[i], cell, captures[i]);
+                                captures[i], cell, src);
                     } else if (capture_is_retained_string(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference — see aether_str_capture preamble */
                         const char* ctype = lookup_var_c_type(gen, captures[i], cl_parent_func);
                         fprintf(gen->output, "_e->%s = (%s)aether_str_capture(%s); ",
-                                captures[i], ctype, captures[i]);
+                                captures[i], ctype, src);
                     } else if (capture_sized_array_type(gen, captures[i], cl_parent_func)) {
                         /* #2464: an array does not assign; copy its elements. */
                         Type* sat = capture_sized_array_type(gen, captures[i], cl_parent_func);
-                        emit_capture_array_copy(gen, captures[i], sat);
+                        emit_capture_array_copy(gen, captures[i], src, sat);
                         capture_string_array_take(gen, expr, captures[i], sat);
                         fprintf(gen->output, " ");
                     } else {
-                        fprintf(gen->output, "_e->%s = %s; ", captures[i], captures[i]);
+                        fprintf(gen->output, "_e->%s = %s; ", captures[i], src);
                     }
                 }
                 fprintf(gen->output, "(_AeClosure){ .fn = (void(*)(void))_closure_fn_%d, .env = _e }; })", id);
@@ -11182,7 +11248,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         id, id);
                 for (int i = 0; i < cap_count; i++) {
                     if (i > 0) fprintf(gen->output, ", ");
-                    fprintf(gen->output, "%s", captures[i]);
+                    fprintf(gen->output, "%s", capture_source(gen, captures[i]));
                 }
                 fprintf(gen->output, ") }");
                 fprintf(gen->output, "\n#endif\n");

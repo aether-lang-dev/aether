@@ -14797,6 +14797,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, "; (void)%s; }\n", own);
                         break;
                     }
+                    if (gt && gt->kind == TYPE_PTR && grhs && closure_boxes_into_ptr(gen, grhs)) {
+                        /* #2890: a `ptr` global takes a closure boxed, as a
+                         * `ptr` field and a `ptr` parameter do. */
+                        fprintf(gen->output, "%s = ", stmt->value);
+                        emit_closure_into_ptr(gen, grhs);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         stmt->children[0]->node_type &&
                         stmt->children[0]->node_type->kind == TYPE_FUNCTION &&

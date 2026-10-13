@@ -643,6 +643,10 @@ int struct_field_owned_array(ASTNode* field, int* len);
  * its own: a fresh closure (a literal, a call handing one over) is adopted,
  * anything else (a local, a field, an element, a parameter) is retained. */
 void emit_closure_take(CodeGenerator* gen, ASTNode* e);
+/* #2890: is `v` a closure (or a bare function) a `ptr` slot takes boxed?
+ * Store it there boxed and taken; 0, emitting nothing, when it is not. */
+int closure_boxes_into_ptr(CodeGenerator* gen, ASTNode* v);
+int emit_closure_into_ptr(CodeGenerator* gen, ASTNode* v);
 /* #2528: an array literal whose elements the holder owns: `kind` 1 copies
  * each string (a fresh one is adopted), 2 takes each closure. */
 void emit_owned_array_literal(CodeGenerator* gen, ASTNode* lit, int kind);

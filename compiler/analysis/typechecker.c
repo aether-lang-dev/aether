@@ -9185,6 +9185,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         slice_coerce_slot(&stmt->children[0], gv->node_type, 0);
                         if (stmt->node_type) free_type(stmt->node_type);
                         stmt->node_type = clone_type(gv->node_type);
+                    } else if (gv && gv->node_type && gv->node_type->kind == TYPE_PTR &&
+                               init_type && init_type->kind == TYPE_FUNCTION) {
+                        /* #2890: so does a closure into a `ptr` global,
+                         * which holds it boxed (as a `ptr` field does): the
+                         * function reads the global back as the `ptr` it
+                         * is, not as the closure, which made every later
+                         * read box it again. */
+                        if (stmt->node_type) free_type(stmt->node_type);
+                        stmt->node_type = clone_type(gv->node_type);
                     }
                 }
                 // #1044 enum-indexed array `[E]T`: the index type must be a real

@@ -1,0 +1,75 @@
+// Regression (#2890): a closure made in a receive arm that reads the
+// actor's state did not compile. A state field the closure only read was
+// not captured, so its body named an undeclared variable, and one the arm
+// also wrote was captured from a local that does not exist (`'n'
+// undeclared`). The closure now captures the state's value when it is
+// made, read through `self` as the arm reads it, as it captures a local;
+// writing state from a closure is still refused (L4).
+
+import std.string
+
+extern exit(code: int)
+
+message Go {
+    k: int
+}
+
+message Rename {
+    w: string
+}
+
+message Make {
+    k: int
+}
+
+message Check {}
+
+var kept: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+actor Counter {
+    state n = 5
+    state label = "cnt"
+    state total = 0
+
+    receive {
+        Go(k) -> {
+            f = || { return n * 10 + k }
+            g = || { return string.length(label) }
+            total = total + call(f) + call(g)
+            n = n + 1
+        }
+        Rename(w) -> {
+            label = string.concat(w, "!")
+        }
+        Make(k) -> {
+            // Kept past the handler: it holds the values it was made with.
+            kept = || { return string.length(label) * 100 + n * 10 + k }
+            n = n + 1
+        }
+        Check() -> {
+            check(total == 119, "closures reading state in a handler (${total})")
+            int v = call(kept)
+            check(v == 477, "a kept closure holds the state it was made with (${v})")
+            check(n == 8, "the state moved on (${n})")
+        }
+    }
+}
+
+main() {
+    c = spawn(Counter())
+    c ! Go { k: 1 }
+    c ! Go { k: 2 }
+    c ! Rename { w: "abc" }
+    c ! Make { k: 7 }
+    c ! Rename { w: "xy" }
+    c ! Check {}
+    wait_for_idle()
+    println("ok")
+}
