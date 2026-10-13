@@ -1,0 +1,257 @@
+// Regression (#2878): three uses of an `fn[N]` local kept it from
+// releasing its closures, so they leaked every call: an element handed back
+// by the function it is passed to (`g = keep(fs[0])`), the whole array
+// captured by a closure, and a closure of the array's own literal that
+// reads the array (it captures the set the binding replaces). Each other
+// holder now takes a reference of its own: an element, or a call handing
+// one back, is judged where it stands as a closure local is, so a binding,
+// a global or a field that retains it leaves the array its own (#2763,
+// #2525), and a closure that copies the array takes a reference to each
+// closure in it, given back by its environment's destructor. The array then
+// releases its own at its scope's end and when it is bound again.
+//
+// Each shape is checked for its value, read by the other holder after the
+// array has released its closures, and, where the heap count is exact, for
+// steady growth over 100 calls.
+
+import std.mem
+
+extern exit(code: int)
+
+var keeper: fn = null
+
+struct Box {
+    f: fn
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+hand_back(f: fn) -> fn {
+    return f
+}
+
+// An element handed back by its callee, in a loop.
+handed_back(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        g = hand_back(fs[0])
+        int v = call(g)
+        t = t + v
+        k = k + 1
+    }
+    return t
+}
+
+// The holder outlives the array: returned after the loop, through two
+// calls that hand it back.
+handed_back_out(n: int) -> fn {
+    k = 0
+    g = || { return 0 }
+    while k < n {
+        fs = [|| { return k + 100 }, || { return k - 1 }]
+        g = hand_back(hand_back(fs[0]))
+        k = k + 1
+    }
+    return g
+}
+
+handed_back_once(n: int) -> int {
+    fs = [|| { return n * 2 }, || { return n * 3 }]
+    g = hand_back(fs[1])
+    int a = call(g)
+    int b = call(fs[0])
+    return a + b
+}
+
+// Handed back into a global, read after the array is gone.
+handed_back_global(n: int) -> int {
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        keeper = hand_back(fs[0])
+        k = k + 1
+    }
+    int v = call(keeper)
+    return v
+}
+
+// Handed back into a struct field, and handed back and called.
+handed_back_field(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        b = Box { f: hand_back(fs[0]) }
+        int v = call(b.f)
+        int w = call(hand_back(fs[1]))
+        t = t + v + w
+        k = k + 1
+    }
+    return t
+}
+
+// An element stored into a global, read after the array is gone.
+element_global(n: int) -> int {
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        keeper = fs[1]
+        k = k + 1
+    }
+    int v = call(keeper)
+    return v
+}
+
+// The whole array captured by a closure, in a loop.
+captured(n: int) -> int {
+    t = 0
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k - 1 }]
+        g = || {
+            int a = call(fs[0])
+            int b = call(fs[1])
+            return a + b
+        }
+        int v = call(g)
+        t = t + v
+        k = k + 1
+    }
+    return t
+}
+
+// The capturing closure outlives the array: kept in a global.
+captured_kept(n: int) -> int {
+    k = 0
+    while k < n {
+        fs = [|| { return k + 1 }, || { return k * 10 }]
+        keeper = || {
+            int a = call(fs[0])
+            int b = call(fs[1])
+            return a + b
+        }
+        k = k + 1
+    }
+    return k
+}
+
+// The capturing closure outlives the array: returned.
+captured_out(n: int) -> fn {
+    fs = [|| { return n + 1 }, || { return n + 2 }]
+    int x = call(fs[0])
+    return || {
+        int a = call(fs[1])
+        return a + x
+    }
+}
+
+// A closure of the array's literal reads the array: it runs the set the
+// binding replaces.
+self_ref(n: int) -> int {
+    t = 0
+    k = 0
+    fs = [|| { return 1 }, || { return 2 }]
+    while k < n {
+        fs = [|| { return k }, || {
+                int v = call(fs[0])
+                return v + 100
+            }]
+        t = t + call(fs[1])
+        k = k + 1
+    }
+    return t
+}
+
+// The element that reads the replaced set outlives the array: returned.
+self_ref_out(n: int) -> fn {
+    k = 0
+    fs = [|| { return 1 }, || { return 2 }]
+    while k < n {
+        fs = [|| { return k * 3 }, || {
+                int v = call(fs[0])
+                return v + 1000
+            }]
+        k = k + 1
+    }
+    return fs[1]
+}
+
+handed_back_out_value(n: int) -> int {
+    f = handed_back_out(n)
+    int v = call(f)
+    return v
+}
+
+captured_kept_value(n: int) -> int {
+    captured_kept(n)
+    int v = call(keeper)
+    return v
+}
+
+captured_out_value(n: int) -> int {
+    f = captured_out(n)
+    int v = call(f)
+    return v
+}
+
+self_ref_out_value(n: int) -> int {
+    f = self_ref_out(n)
+    int v = call(f)
+    return v
+}
+
+// One round of a shape: 100 calls.
+round(shape: int) {
+    i = 0
+    while i < 100 {
+        if shape == 0 {
+            handed_back(10)
+            handed_back_out_value(10)
+            handed_back_once(10)
+            handed_back_global(10)
+            handed_back_field(10)
+            element_global(10)
+        }
+        if shape == 1 {
+            captured(10)
+            captured_kept_value(10)
+            captured_out_value(10)
+        }
+        if shape == 2 {
+            self_ref(10)
+            self_ref_out_value(10)
+        }
+        i = i + 1
+    }
+}
+
+fn steady(what: string, g: long) {
+    check(g == 0, "${what}: the heap grew by ${g} bytes over 100 calls")
+}
+
+main() {
+    check(handed_back(10) == 55, "an element handed back by its callee")
+    check(handed_back_out_value(10) == 109, "an element handed back, returned after the loop")
+    check(handed_back_once(10) == 50, "an element handed back, no loop")
+    check(handed_back_global(10) == 10, "an element handed back into a global")
+    check(handed_back_field(10) == 90, "an element handed back into a field and called")
+    check(element_global(10) == 8, "an element stored into a global")
+    check(captured(10) == 90, "the array captured by a closure")
+    check(captured_kept_value(10) == 100, "the capturing closure kept in a global")
+    check(captured_out_value(10) == 23, "the capturing closure returned")
+    check(self_ref(10) == 1037, "a closure of the literal reading the array")
+    check(self_ref_out_value(10) == 1024, "that closure returned after the loop")
+    if mem.heap_in_use_exact() {
+        steady("handed back", mem.steady_growth(|| { round(0) }, 5))
+        steady("captured", mem.steady_growth(|| { round(1) }, 5))
+        steady("read by its literal", mem.steady_growth(|| { round(2) }, 5))
+    }
+    println("ok")
+}

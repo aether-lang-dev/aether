@@ -783,26 +783,45 @@ static int closure_array_literal(ASTNode* lit) {
     return 1;
 }
 
-/* May the user function `call` passes the element `arg` to keep a copy of
- * it without a reference of its own (env_scan_param_keeps, the walk that
- * answers it for a closure local)? */
-static int closure_element_arg_kept(CodeGenerator* gen, ASTNode* call, ASTNode* arg);
+/* May `v`, a closure read from an `fn[N]` local (an element, or a call
+ * handing one back), be kept without a reference of its own where it stands
+ * in `parent`? Judged as a closure local's mention is (env_scan_mention_kept). */
+static int closure_array_value_kept(CodeGenerator* gen, ASTNode* v, ASTNode* parent,
+                                    int in_closure, int element);
+static ASTNode* closure_handback_end_in(CodeGenerator* gen, ASTNode* owner, ASTNode* e,
+                                        int depth);
+static ASTNode* closure_handback_next(CodeGenerator* gen, ASTNode* owner, ASTNode* call);
 
-/* Is every mention of the closure array `name` under `node` one that leaves
- * its elements its own: an element called (`call(name[i], ...)`), or the
- * whole array given to a struct literal's field, which takes a reference
- * of its own to each closure (_aether_closure_elems_take)? So are, as for
- * a closure local (#2876): another binding of the array to fresh closures,
- * a store that releases the ones it replaces (the rebinding of a loop
- * body's array, hoisted out of the loop, or of one each branch binds); an
- * element passed to a user function that keeps no copy without a reference
- * of its own; an element a named function returns, which its return
- * retains for the caller (emit_return_value). Anything else (an element
- * store, an element or the array passed on otherwise, a mention inside a
- * closure, which copies the array) is not answered, and the array keeps the
- * old rule: it releases nothing. */
-static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, const char* name,
-                                       ASTNode* decl, int in_closure) {
+/* Is every mention of the closure array `name` under `node` (whose parent
+ * is `parent`) one that leaves its elements its own? The whole array given
+ * to a struct literal's field is, since the struct takes a reference of its
+ * own to each closure (_aether_closure_elems_take). So is another binding
+ * of the array to fresh closures, a store that releases the ones it
+ * replaces (the rebinding of a loop body's array, hoisted out of the loop,
+ * or of one each branch binds, #2876).
+ *
+ * An element is a closure value, judged where it stands as a closure
+ * local's value is (closure_array_value_kept): called, passed to a user
+ * function that keeps no copy without a reference of its own, or taken by a
+ * holder that retains it (a struct field, a global, a container, a closure
+ * local the call hands it back to: `g = keep(name[i])`, #2878); and
+ * returned by a named function, whose return retains an element for the
+ * caller (emit_return_value). A call handing an element back (`keep` returns
+ * its parameter as it is, #2763) is that element.
+ *
+ * #2878: a closure that captures the array, the closure of the array's own
+ * literal that reads it among them, copies it and takes a reference to each
+ * closure in it (capture_array_take), given back by its env's destructor,
+ * so the array may release its own. What the closure's body does with its
+ * copy must leave no copy without a reference either, since the env's
+ * references go with it: its mentions are judged the same way, with no
+ * return (a closure body's does not retain) and no binding (the hand-off
+ * retain of #2519 is the closure local's alone).
+ *
+ * Anything else (an element store, the array passed on) is not answered,
+ * and the array keeps the old rule: it releases nothing. */
+static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, ASTNode* parent,
+                                       const char* name, ASTNode* decl, int in_closure) {
     if (!node || node == decl) return 1;
     if (node->type == AST_CLOSURE && !(node->value && strcmp(node->value, "trailing") == 0))
         in_closure = 1;
@@ -810,36 +829,26 @@ static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, const 
         node->value && strcmp(node->value, name) == 0) {
         if (in_closure || node->type != AST_VARIABLE_DECLARATION || node->child_count < 1 ||
             !closure_array_literal(node->children[0])) return 0;
-        return closure_array_uses_keep_own(gen, node->children[0], name, decl, in_closure);
+        return closure_array_uses_keep_own(gen, node->children[0], node, name, decl, in_closure);
     }
-    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, "call") == 0 &&
-        node->child_count >= 1 && is_element_of(node->children[0], name)) {
-        if (in_closure) return 0;
-        ASTNode* idx = node->children[0]->child_count >= 2 ? node->children[0]->children[1] : NULL;
-        if (!closure_array_uses_keep_own(gen, idx, name, decl, in_closure)) return 0;
-        for (int i = 1; i < node->child_count; i++)
-            if (!closure_array_uses_keep_own(gen, node->children[i], name, decl, in_closure)) return 0;
-        return 1;
-    }
-    if (node->type == AST_FUNCTION_CALL && node->value && strcmp(node->value, "call") != 0) {
-        for (int i = 0; i < node->child_count; i++) {
-            ASTNode* a = node->children[i];
-            if (is_element_of(a, name)) {
-                if (in_closure || closure_element_arg_kept(gen, node, a)) return 0;
-                a = a->child_count >= 2 ? a->children[1] : NULL;
+    ASTNode* end = node->type == AST_FUNCTION_CALL && !in_closure
+                   ? closure_handback_end_in(gen, gen->current_function, node, 0) : node;
+    if (end && is_element_of(end, name)) {
+        if (closure_array_value_kept(gen, node, parent, in_closure, end == node)) return 0;
+        /* Each call handing the element back is walked but for the argument
+         * it hands back, and the element for its index. */
+        ASTNode* e = node;
+        while (e && e != end && e->type == AST_FUNCTION_CALL) {
+            ASTNode* next = closure_handback_next(gen, gen->current_function, e);
+            for (int i = 0; i < e->child_count; i++) {
+                if (e->children[i] != next &&
+                    !closure_array_uses_keep_own(gen, e->children[i], e, name, decl, in_closure))
+                    return 0;
             }
-            if (!closure_array_uses_keep_own(gen, a, name, decl, in_closure)) return 0;
+            e = next;
         }
-        return 1;
-    }
-    if (node->type == AST_RETURN_STATEMENT && node->child_count == 1 &&
-        is_element_of(node->children[0], name)) {
-        Type* rt = gen->current_func_return_type;
-        if (in_closure || !rt || rt->kind != TYPE_FUNCTION || rt->is_fnptr ||
-            !gen->current_function || gen->current_function->type == AST_CLOSURE) return 0;
-        ASTNode* e = node->children[0];
-        return closure_array_uses_keep_own(gen, e->child_count >= 2 ? e->children[1] : NULL,
-                                           name, decl, in_closure);
+        return closure_array_uses_keep_own(gen, end->child_count >= 2 ? end->children[1] : NULL,
+                                           end, name, decl, in_closure);
     }
     if (node->type == AST_STRUCT_LITERAL) {
         for (int i = 0; i < node->child_count; i++) {
@@ -850,13 +859,14 @@ static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, const 
                 if (in_closure) return 0;
                 continue;
             }
-            if (!closure_array_uses_keep_own(gen, f, name, decl, in_closure)) return 0;
+            if (!closure_array_uses_keep_own(gen, f, node, name, decl, in_closure)) return 0;
         }
         return 1;
     }
     if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0) return 0;
     for (int i = 0; i < node->child_count; i++)
-        if (!closure_array_uses_keep_own(gen, node->children[i], name, decl, in_closure)) return 0;
+        if (!closure_array_uses_keep_own(gen, node->children[i], node, name, decl, in_closure))
+            return 0;
     return 1;
 }
 
@@ -866,8 +876,9 @@ static int closure_array_uses_keep_own(CodeGenerator* gen, ASTNode* node, const 
  * local's does: claim_closure_local_env pushes the release where the C
  * declaration is emitted (the binding, or the hoist out of a loop or a
  * branch), and each rebinding releases the closures it replaces. Its size
- * N, or 0. A literal that reads the array would capture the closures the
- * rebinding replaces. */
+ * N, or 0. A closure of the literal that reads the array captures the
+ * closures the rebinding replaces, with a reference of its own to each
+ * (#2878), so its body is judged as any capture's is. */
 static int closure_array_owns(CodeGenerator* gen, ASTNode* decl) {
     if (!decl || decl->type != AST_VARIABLE_DECLARATION || !decl->value ||
         decl->child_count < 1 || !closure_array_literal(decl->children[0]) ||
@@ -878,8 +889,8 @@ static int closure_array_owns(CodeGenerator* gen, ASTNode* decl) {
         t->element_type->kind != TYPE_FUNCTION || t->element_type->is_fnptr) return 0;
     if (is_promoted_capture(gen, decl->value) || is_module_global_var(gen, decl->value) ||
         is_actor_state_var(gen, decl->value)) return 0;
-    if (!closure_array_uses_keep_own(gen, decl->children[0], decl->value, NULL, 0) ||
-        !closure_array_uses_keep_own(gen, gen->hoist_scope_body, decl->value, decl, 0)) return 0;
+    if (!closure_array_uses_keep_own(gen, decl->children[0], decl, decl->value, NULL, 0) ||
+        !closure_array_uses_keep_own(gen, gen->hoist_scope_body, NULL, decl->value, decl, 0)) return 0;
     return t->array_size;
 }
 
@@ -8766,19 +8777,6 @@ static int env_scan_param_keeps(CodeGenerator* gen, EnvScan* s, ASTNode* call, A
     return 0;
 }
 
-/* #2876: an element of an `fn[N]` local passed to a user function, judged
- * as the argument of a closure local is (closure_array_uses_keep_own). */
-static int closure_element_arg_kept(CodeGenerator* gen, ASTNode* call, ASTNode* arg) {
-    EnvScan s;
-    memset(&s, 0, sizeof(s));
-    s.name = "";
-    s.root = gen->hoist_scope_body;
-    s.owner = gen->current_function;
-    s.tree_only = 1;
-    s.cid = -2;
-    return env_scan_param_keeps(gen, &s, call, arg);
-}
-
 /* Functions whose return contract is being decided: a call back into one
  * on the way is not proven to return an owned closure. */
 static ASTNode* g_owned_ret_active[ENV_SCAN_MAX_DEPTH + 2];
@@ -9506,6 +9504,33 @@ static int env_scan_mention_kept(CodeGenerator* gen, EnvScan* s, ASTNode* node,
         return 0;
     }
     return 1;
+}
+
+/* #2876, #2878: may `v`, a closure read from an `fn[N]` local (`element`:
+ * an element itself, else a call handing one back), be kept without a
+ * reference of its own where it stands in `parent`, inside a closure that
+ * copied the array when `in_closure`? As a closure local's mention may
+ * (env_scan_mention_kept): called, passed to a user function that keeps
+ * nothing, or taken by a holder that retains it, it is not. A named
+ * function returning a closure returns an element retained
+ * (emit_return_value), though not a call's result; a closure body's return
+ * retains nothing. */
+static int closure_array_value_kept(CodeGenerator* gen, ASTNode* v, ASTNode* parent,
+                                    int in_closure, int element) {
+    if (parent && parent->type == AST_RETURN_STATEMENT) {
+        Type* rt = gen->current_func_return_type;
+        return !(element && !in_closure && parent->child_count == 1 && rt &&
+                 rt->kind == TYPE_FUNCTION && !rt->is_fnptr && gen->current_function &&
+                 gen->current_function->type != AST_CLOSURE);
+    }
+    EnvScan s;
+    memset(&s, 0, sizeof(s));
+    s.name = "";
+    s.root = gen->hoist_scope_body;
+    s.owner = gen->current_function;
+    s.tree_only = 1;
+    s.cid = -2;
+    return env_scan_mention_kept(gen, &s, v, parent, in_closure);
 }
 
 static void env_scan_walk(CodeGenerator* gen, EnvScan* s, ASTNode* node,

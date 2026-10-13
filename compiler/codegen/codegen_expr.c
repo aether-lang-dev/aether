@@ -4111,12 +4111,30 @@ static void emit_capture_array_copy(CodeGenerator* gen, const char* name, Type* 
             t->array_size, name, name);
 }
 
+/* #2878: is `t`, the type of a captured array, an `fn[N]`, whose copy
+ * holds closures? */
+static int capture_array_holds_closures(Type* t) {
+    return t && t->element_type && t->element_type->kind == TYPE_FUNCTION &&
+           !t->element_type->is_fnptr;
+}
+
 /* #2618: a closure that copies a string array whose elements are owned
  * (one that owns them, or a parameter viewing its caller's) takes a
  * reference to each element it copied, given back by the env's destructor,
- * so the closure can outlive the array and its elements. */
-static void capture_string_array_take(CodeGenerator* gen, ASTNode* closure, const char* name,
-                                      Type* t) {
+ * so the closure can outlive the array and its elements.
+ * #2878: a closure that copies an `fn[N]` takes a reference to each
+ * closure in it, as it does to a closure value it captures (#2494), given
+ * back by the env's destructor: the copy is a holder of its own, so the
+ * array may release its closures (at its scope's end, or when it is bound
+ * again) while the closure still runs them. */
+static void capture_array_take(CodeGenerator* gen, ASTNode* closure, const char* name,
+                               Type* t) {
+    if (capture_array_holds_closures(t)) {
+        fprintf(gen->output,
+                " for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_closure_env_retain(_e->%s[_ae_k].env);",
+                t->array_size, name);
+        return;
+    }
     if (!t || !t->element_type || t->element_type->kind != TYPE_STRING ||
         !closure_captures_string_view_array(gen, closure, name)) return;
     fprintf(gen->output,
@@ -4411,8 +4429,15 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
                 continue;
             }
             /* #2618: the env's copy of a string array whose elements are
-             * owned holds a reference to each (capture_string_array_take). */
+             * owned holds a reference to each (capture_array_take); #2878:
+             * so does its copy of an `fn[N]`, to each closure. */
             Type* sarr = capture_sized_array_type(gen, captures[i], parent_func);
+            if (sarr && !promoted && capture_array_holds_closures(sarr)) {
+                fprintf(gen->output,
+                        "    for (int _ae_k = 0; _ae_k < %d; _ae_k++) _aether_closure_env_release(_e->%s[_ae_k].env);\n",
+                        sarr->array_size, captures[i]);
+                continue;
+            }
             if (sarr && !promoted &&
                 closure_captures_string_view_array(gen, gen->closures[ci].closure_node, captures[i])) {
                 fprintf(gen->output,
@@ -5036,7 +5061,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     fprintf(gen->output, "    ");
                     Type* sat = capture_sized_array_type(gen, captures[i], parent_func);
                     emit_capture_array_copy(gen, captures[i], sat);
-                    capture_string_array_take(gen, gen->closures[ci].closure_node, captures[i], sat);
+                    capture_array_take(gen, gen->closures[ci].closure_node, captures[i], sat);
                     fprintf(gen->output, "\n");
                 } else {
                     fprintf(gen->output, "    _e->%s = %s;\n", captures[i], captures[i]);
@@ -11160,7 +11185,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         /* #2464: an array does not assign; copy its elements. */
                         Type* sat = capture_sized_array_type(gen, captures[i], cl_parent_func);
                         emit_capture_array_copy(gen, captures[i], sat);
-                        capture_string_array_take(gen, expr, captures[i], sat);
+                        capture_array_take(gen, expr, captures[i], sat);
                         fprintf(gen->output, " ");
                     } else {
                         fprintf(gen->output, "_e->%s = %s; ", captures[i], captures[i]);
