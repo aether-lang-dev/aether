@@ -8395,17 +8395,33 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * -Wunused-value: `list.add(l, string.copy(p))` warned in ordinary user
      * code. A function call discards its result silently, so the conversion
      * lives in these helpers instead. */
-    /* #2810: the container owns an adopted string from here, so the panic
-     * journal must not hold it any more: a panic after the adoption drained
-     * the entry the string's first owner tracked, freeing what the
-     * container then freed again (aether_unwind.h: forget on adoption). */
-    print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
+    /* #2810, #2872: the container owns an adopted string from here, so the
+     * panic journal must not hold it any more: a panic after the adoption
+     * drained the entry the string's first owner tracked, freeing what the
+     * container then freed again (aether_unwind.h: forget on adoption).
+     * Generated code adopts through these, never through the runtime's
+     * adopting entries directly (which are for it alone): the `list.add` /
+     * `map.put` shape as much as a raw `list_add_raw`, `map_put_raw` or
+     * `list.set`. Only the first two forgot before (#2810), so a string a
+     * function journaled and then put raw was freed again by a panic caught
+     * after the container let it go. */
+    print_line(gen, "static inline int _aether_adopt_list_add(void* list, void* item) {");
     print_line(gen, "    aether_unwind_forget(item);");
-    print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
+    print_line(gen, "    return list_add_string_adopted(list, item);");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_adopt_list_set(void* list, int index, void* item) {");
+    print_line(gen, "    aether_unwind_forget(item);");
+    print_line(gen, "    return list_set_string_adopted(list, index, item);");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_adopt_map_put(void* map, const char* key, void* value) {");
+    print_line(gen, "    aether_unwind_forget(value);");
+    print_line(gen, "    return map_put_string_adopted(map, key, value);");
+    print_line(gen, "}");
+    print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
+    print_line(gen, "    return _aether_adopt_list_add(list, item) ? \"\" : \"list.add failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
-    print_line(gen, "    aether_unwind_forget(value);");
-    print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
+    print_line(gen, "    return _aether_adopt_map_put(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     /* #2497: the owning entries, for a value the container must hold its
      * own reference to (a struct field it only views: a refcounted string

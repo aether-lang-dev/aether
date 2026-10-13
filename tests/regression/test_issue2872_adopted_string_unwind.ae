@@ -1,0 +1,145 @@
+// Regression (#2872): a string a container adopts leaves the panic journal,
+// whichever call adopts it.
+//
+// A function that keeps its `string` parameter copies it on entry and
+// journals the copy, so a panic caught while the function runs frees it
+// (#1301). Handed to a container, the string is the container's: the
+// adopting helpers behind `map.put` and `list.add` took it out of the
+// journal (#2810), but a raw `map_put_raw`, `list_add_raw` or `list.set`,
+// which the code generator routes straight to the runtime's adopting
+// entries, left it there. Once the container was freed, a panic caught
+// later in the same `try` drained the entry and freed the string again: a
+// double free (heap corruption, 0xC0000374, once the block was reused). The
+// adopting entries (list_add_string_adopted, list_set_string_adopted,
+// map_put_string_adopted) now take the string out of the journal
+// themselves. Each shape runs 100 times through a caught panic, then once
+// more counting the heap: no growth.
+import std.list
+import std.map
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+later_panic(n: int) {
+    if n > 0 {
+        panic("later")
+    }
+}
+
+put_raw(m: ptr, k: string, v: string) {
+    map_put_raw(m, k, v)
+}
+
+put_wrapped(m: ptr, k: string, v: string) {
+    map.put(m, k, v)
+}
+
+add_raw(l: ptr, v: string) {
+    list_add_raw(l, v)
+}
+
+add_wrapped(l: ptr, v: string) {
+    list.add(l, v)
+}
+
+set_at(l: ptr, v: string) {
+    list_set(l, 0, v)
+}
+
+// A builder whose setter puts its string parameter into the config, and
+// whose body frees the config before the caller's later panic.
+builder conf(label: string) {
+    if _builder != null {
+        map_free(_builder)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put_raw(_ctx, key, value)
+}
+
+once(which: int) -> int {
+    r = 0
+    try {
+        if which == 1 {
+            m = map_new()
+            put_raw(m, "k", "v1")
+            map_free(m)
+        }
+        if which == 2 {
+            // The replace path: a second put of the key.
+            m = map_new()
+            put_raw(m, "k", "v2a")
+            put_raw(m, "k", "v2b")
+            map_free(m)
+        }
+        if which == 3 {
+            m = map_new()
+            put_wrapped(m, "k", "v3")
+            map_free(m)
+        }
+        if which == 4 {
+            l = list_new()
+            add_raw(l, "v4")
+            list_free(l)
+        }
+        if which == 5 {
+            l = list_new()
+            add_wrapped(l, "v5")
+            list_free(l)
+        }
+        if which == 6 {
+            l = list_new()
+            list_add_raw(l, null)
+            set_at(l, "v6")
+            list_free(l)
+        }
+        if which == 7 {
+            conf("c") {
+                set_opt("k", "v7")
+            }
+        }
+        later_panic(1)
+    } catch e {
+        r = 1
+    }
+    return r
+}
+
+rounds(which: int) -> int {
+    caught = 0
+    i = 0
+    while i < 100 {
+        caught = caught + once(which)
+        i = i + 1
+    }
+    return caught
+}
+
+shape(which: int, what: string) {
+    check(rounds(which) == 100, "${what}: not every panic was caught")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                rounds(which)
+            }, 5)
+        check(g == 0, "${what}: the heap grew by ${g} bytes")
+    }
+}
+
+main() {
+    shape(1, "map_put_raw")
+    shape(2, "map_put_raw over a key")
+    shape(3, "map.put")
+    shape(4, "list_add_raw")
+    shape(5, "list.add")
+    shape(6, "list.set")
+    shape(7, "a builder setter's map_put_raw")
+    println("ok")
+}

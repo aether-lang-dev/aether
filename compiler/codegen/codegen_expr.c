@@ -9647,13 +9647,13 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                      * user's own build. */
                                     fprintf(gen->output, is_wrapper
                                             ? "_aether_list_add_adopted("
-                                            : "list_add_string_adopted(");
+                                            : "_aether_adopt_list_add(");
                                     generate_expression(gen, expr->children[0]);
                                     fprintf(gen->output, ", (void*)");
                                     generate_expression(gen, val);
                                     fprintf(gen->output, ")");
                                 } else if (is_set_shape) {
-                                    fprintf(gen->output, "list_set_string_adopted(");
+                                    fprintf(gen->output, "_aether_adopt_list_set(");
                                     generate_expression(gen, expr->children[0]);
                                     fprintf(gen->output, ", ");
                                     generate_expression(gen, expr->children[1]);
@@ -9663,7 +9663,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 } else {
                                     fprintf(gen->output, is_wrapper
                                             ? "_aether_map_put_adopted("
-                                            : "map_put_string_adopted(");
+                                            : "_aether_adopt_map_put(");
                                     generate_expression(gen, expr->children[0]);
                                     /* The key goes as it is, an AetherString
                                      * with its length or a plain char*: the
@@ -9751,17 +9751,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 seq_next(gen, &s);
                                 if (is_list_shape) {
                                     fprintf(gen->output, "%s ? %s(%s, %s) : %s(%s, %s)", own,
-                                            is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
+                                            is_wrapper ? "_aether_list_add_adopted" : "_aether_adopt_list_add",
                                             cc, cv,
                                             is_wrapper ? "_aether_list_add_owned" : "list_add_string_owned",
                                             cc, cv);
                                 } else if (is_set_shape) {
-                                    fprintf(gen->output, "%s ? list_set_string_adopted(%s, %s, %s) : "
+                                    fprintf(gen->output, "%s ? _aether_adopt_list_set(%s, %s, %s) : "
                                             "list_set_string_owned(%s, %s, %s)",
                                             own, cc, ck, cv, cc, ck, cv);
                                 } else {
                                     fprintf(gen->output, "%s ? %s(%s, %s, %s) : %s(%s, %s, %s)", own,
-                                            is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
+                                            is_wrapper ? "_aether_map_put_adopted" : "_aether_adopt_map_put",
                                             cc, ck, cv,
                                             is_wrapper ? "_aether_map_put_owned" : "map_put_string_owned",
                                             cc, ck, cv);
