@@ -49,11 +49,15 @@ dir=$(dirname "$f")
 base=$(basename "$f")
 
 # A test with a lib/ beside it is built from inside its own directory so the
-# compiler resolves that lib/ as the module root.
+# compiler resolves that lib/ as the module root. AE_SWEEP_KEEP_C=1 keeps
+# the C each build compiled, as build/test_<name>.c (ae's AE_KEEP_C), for
+# the whole-sweep strict C11 check (test_msvc_compat.sh, #2885); only these
+# builds, not the shell tests'.
+keep="AE_KEEP_C=${AE_SWEEP_KEEP_C:-0}"
 if [ -d "$dir/lib" ]; then
-    cmd="cd $dir && $root/build/ae build $base ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
+    cmd="cd $dir && $keep $root/build/ae build $base ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
 else
-    cmd="$root/build/ae build $f ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
+    cmd="$keep $root/build/ae build $f ${AE_BUILD_FLAGS:-} -o $root/build/test_$name"
 fi
 
 # Build and run times for the report at the end of the sweep (#2673).

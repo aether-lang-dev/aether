@@ -164,8 +164,10 @@ jobs:
         path: .ci-cache
         key: audio-obj-${{ matrix.os }}-${{ matrix.cc }}-h${{ matrix.harden }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
+    # AE_SWEEP_KEEP_C=1 on the Linux / GCC leg keeps the C each .ae build of
+    # the sweep compiled (build/test_<name>.c), for the strict C11 step below.
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} make ${{ matrix.target || 'ci' }}
+      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
 
     # The .ae corpus at -O0 (what `ae run` compiles at) against -O2 (what the
     # sweep in `make ci` compiles at), diffing stdout and exit code (#2488).
@@ -183,10 +185,12 @@ jobs:
     # same programs with cl.exe. The script runs on the aetherc `make ci`
     # built, so nothing is rebuilt; it also builds and runs the #2765
     # programs with AETHER_GCC_COMPAT forced to 0, hence the longer limit.
+    # MSVC_COMPAT_SWEEP=1 checks the C of every sweep program too (#2885),
+    # a syntax pass over the C the sweep above kept (AE_SWEEP_KEEP_C=1).
     - name: Generated C without GCC extensions (strict C11)
       if: matrix.name == 'Linux / GCC'
-      timeout-minutes: 10
-      run: MSVC_COMPAT_CC=gcc bash tests/compiler/test_msvc_compat.sh
+      timeout-minutes: 15
+      run: MSVC_COMPAT_CC=gcc MSVC_COMPAT_SWEEP=1 NPROC=$(nproc) bash tests/compiler/test_msvc_compat.sh
 
     # The hardened leg must produce a hardened toolchain, and a program built
     # by it must carry the mitigations too. Before this, `make HARDEN=1` after
