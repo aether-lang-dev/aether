@@ -1,0 +1,86 @@
+// Regression (#2889): closures a `try` body binds to a local before a panic
+// are what the local holds once the panic is caught. Without statement
+// expressions (AETHER_GCC_COMPAT 0: MSVC, emscripten, a C11 compiler), a
+// capturing closure literal was a call of `_aether_make_closure_N`, which
+// returned the closure struct through a hidden slot; a local the `try` body
+// writes is volatile, and gcc 16 at -O1 and -O2 inlined the call into that
+// slot and dropped the store, so after the catch the local still held the
+// closures from before the `try`. The literal is now a compound literal
+// around the env the constructor returns, as on the GCC path.
+//
+// tests/integration/closure_rebound_in_try_nogcc builds this program on
+// that path at -O2; the .ae sweep runs it on the one the C compiler picks.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+boom(x: int) {
+    if x >= 0 {
+        panic("boom")
+    }
+}
+
+// The array is read in the catch.
+read_in_catch(n: int) -> int {
+    fs = [|| { return 1 }, || { return 2 }]
+    r = 0
+    try {
+        fs = [|| { return n + 10 }, || { return n + 20 }]
+        boom(n)
+    } catch e {
+        int a = call(fs[0])
+        int b = call(fs[1])
+        r = a * 100 + b
+    }
+    return r
+}
+
+// The array is read after the catch, each pass of a loop.
+in_loop(n: int) -> int {
+    t = 0
+    i = 0
+    fs = [|| { return 0 }, || { return 0 }]
+    while i < 3 {
+        try {
+            fs = [|| { return i + n }, || { return i * n }]
+            boom(i)
+        } catch e {
+            t = t + 1
+        }
+        int a = call(fs[0])
+        int b = call(fs[1])
+        t = t + a + b
+        i = i + 1
+    }
+    return t
+}
+
+// An element rebound, and a closure local.
+element_and_local(n: int) -> int {
+    fs = [|| { return 1 }, || { return 2 }]
+    f = || { return 3 }
+    try {
+        fs[1] = || { return n * 4 }
+        f = || { return n * 5 }
+        boom(n)
+    } catch e {
+        n = n + 0
+    }
+    int a = call(fs[1])
+    int b = call(f)
+    return a * 1000 + b
+}
+
+main() {
+    check(read_in_catch(10) == 2030, "the array read in the catch (${read_in_catch(10)})")
+    check(in_loop(10) == 66, "the array read after the catch in a loop (${in_loop(10)})")
+    check(element_and_local(10) == 40050,
+        "an element and a closure local (${element_and_local(10)})")
+    println("ok")
+}

@@ -4458,8 +4458,8 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
  * ';'". The declarations
  * have no such dependency, so they stay early (other emitted code
  * references them) while the bodies move after the messages. (#1626) */
-/* The parameter list of `_aether_make_closure_<id>`, the non-GCC
- * constructor of closure `ci`'s value (one argument per capture): shared by
+/* The parameter list of `_aether_make_env_<id>`, the non-GCC constructor
+ * of closure `ci`'s environment (one argument per capture): shared by
  * its prototype (emit_closure_declarations) and its definition
  * (emit_closure_definitions), which must agree. A promoted capture arrives
  * as the cell pointer, `ctype*`, which is also what the env field is. A
@@ -4506,7 +4506,7 @@ void emit_closure_declarations(CodeGenerator* gen) {
          * capturing closure made in a function did not compile on that
          * path (an implicit declaration, then conflicting types). */
         if (gen->closures[ci].capture_count > 0) {
-            fprintf(gen->output, "#if !AETHER_GCC_COMPAT\nstatic _AeClosure _aether_make_closure_%d(",
+            fprintf(gen->output, "#if !AETHER_GCC_COMPAT\nstatic void* _aether_make_env_%d(",
                     gen->closures[ci].id);
             emit_make_closure_params(gen, ci);
             fprintf(gen->output, ");\n#endif\n");
@@ -5002,10 +5002,12 @@ void emit_closure_definitions(CodeGenerator* gen) {
 
         fprintf(gen->output, "}\n\n");
 
-        // Emit MSVC-compatible closure constructor function (avoids statement expressions)
+        /* The env constructor for compilers without statement expressions
+         * (MSVC, AETHER_GCC_COMPAT=0): it builds and returns the env, and
+         * the closure literal wraps it in a compound literal (#2889). */
         if (cap_count > 0) {
             fprintf(gen->output, "#if !AETHER_GCC_COMPAT\n");
-            fprintf(gen->output, "static _AeClosure _aether_make_closure_%d(", id);
+            fprintf(gen->output, "static void* _aether_make_env_%d(", id);
             emit_make_closure_params(gen, ci);
             fprintf(gen->output, ") {\n");
             fprintf(gen->output, "    _closure_env_%d* _e = malloc(sizeof(_closure_env_%d));\n", id, id);
@@ -5042,8 +5044,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                     fprintf(gen->output, "    _e->%s = %s;\n", captures[i], captures[i]);
                 }
             }
-            fprintf(gen->output, "    _AeClosure _c = { (void(*)(void))_closure_fn_%d, _e };\n", id);
-            fprintf(gen->output, "    return _c;\n");
+            fprintf(gen->output, "    return _e;\n");
             fprintf(gen->output, "}\n");
             fprintf(gen->output, "#endif\n\n");
         }
@@ -11168,13 +11169,22 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 fprintf(gen->output, "(_AeClosure){ .fn = (void(*)(void))_closure_fn_%d, .env = _e }; })", id);
                 fprintf(gen->output, "\n#else\n");
-                // MSVC: use _aether_make_closure helper (emitted in preamble)
-                fprintf(gen->output, "_aether_make_closure_%d(", id);
+                /* Without statement expressions the env is built by
+                 * `_aether_make_env_<id>`, and the value is a compound
+                 * literal around it, as above. A constructor returning the
+                 * `_AeClosure` itself made the closure a call returning a
+                 * struct through a hidden slot, and a volatile local a `try`
+                 * body writes, used as that slot, lost the store: gcc 16 at
+                 * -O1 inlined the call and dropped it, so after the catch
+                 * the local still held what it held before the `try`
+                 * (#2889). */
+                fprintf(gen->output, "(_AeClosure){ .fn = (void(*)(void))_closure_fn_%d, .env = _aether_make_env_%d(",
+                        id, id);
                 for (int i = 0; i < cap_count; i++) {
                     if (i > 0) fprintf(gen->output, ", ");
                     fprintf(gen->output, "%s", captures[i]);
                 }
-                fprintf(gen->output, ")");
+                fprintf(gen->output, ") }");
                 fprintf(gen->output, "\n#endif\n");
             }
             break;

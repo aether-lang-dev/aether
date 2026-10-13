@@ -266,10 +266,10 @@ TEST(codegen_closure_does_not_capture_sibling_trailing_block_local) {
         "}\n");
     ASSERT_NOT_NULL(buf);
     /* First block's callback reads the outer name: captured. */
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(ml)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_0(ml)") != NULL);
     /* Second block's callback binds its own: only `root` crosses into it. */
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root)") != NULL);
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_1(root, ml)") == NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_1(root)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_1(root, ml)") == NULL);
     free(buf);
 }
 
@@ -286,7 +286,7 @@ TEST(codegen_closure_captures_same_trailing_block_local_it_mutates) {
         "    }\n"
         "}\n");
     ASSERT_NOT_NULL(buf);
-    ASSERT_TRUE(strstr(buf, "_aether_make_closure_0(hits)") != NULL);
+    ASSERT_TRUE(strstr(buf, "_aether_make_env_0(hits)") != NULL);
     free(buf);
 }
 

@@ -626,7 +626,7 @@ The box is `{fn, env}` followed by a tag word. The `{fn, env}` prefix is the lay
 
 ### Closure environment lifetime
 
-A closure that captures variables carries them in a heap-allocated environment struct (`_aether_box_closure` / `_aether_make_closure_N`). When such a closure *escapes*, stored in a list/map/struct, returned, or otherwise outliving the creating frame, the environment is reachable through the owner and reclaimed with it.
+A closure that captures variables carries them in a heap-allocated environment struct (`_aether_box_closure` / `_aether_make_env_N`). When such a closure *escapes*, stored in a list/map/struct, returned, or otherwise outliving the creating frame, the environment is reachable through the owner and reclaimed with it.
 
 A **transient** capturing closure, created inline and passed to a function that only calls it and neither stores nor returns it (the callback shape `run(cb) { cb() }`), is dead once that call returns, so its environment is freed right after the call. The codegen emits the call in an env-draining form:
 
