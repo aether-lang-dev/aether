@@ -54,6 +54,7 @@ abi() {
 AE
 
 long_name="long_$(printf 'abcdefghi_%.0s' $(seq 1 14))end"
+long_param="p_$(printf 'abcdefghi_%.0s' $(seq 1 13))end"
 {
     i=0
     while [ $i -lt 70 ]; do
@@ -68,7 +69,10 @@ long_name="long_$(printf 'abcdefghi_%.0s' $(seq 1 14))end"
         i=$((i + 1))
     done
     printf ') -> int {\n    return p0 + p19\n}\n\n'
-    printf '%s(n: int) -> int {\n    return n\n}\n' "$long_name"
+    printf '%s(n: int) -> int {\n    return n\n}\n\n' "$long_name"
+    # A 135-byte parameter name: 4bf49161 skipped the whole SDK for one
+    # past 127 bytes; it is bound whole.
+    printf 'long_param(%s: int) -> int {\n    return %s\n}\n' "$long_param" "$long_param"
 } > "$ns/funcs.ae"
 
 if ! ( cd "$ns" && AETHER_HOME="" "$AE" build --namespace . ) > "$TMP/build.log" 2>&1; then
@@ -118,6 +122,11 @@ fi
 camel="$(printf '%s' "$long_name" | awk -F_ '{ s = $1; for (i = 2; i <= NF; i++) s = s toupper(substr($i, 1, 1)) substr($i, 2); print s }')"
 if ! grep -qF "def $long_name(self, n):" "$py" || ! grep -qF "public int $camel(int n)" "$java"; then
     echo "  [FAIL] ae_namespace_sdk_whole: the ${#long_name}-byte name is not bound whole"
+    fail=1
+fi
+if ! grep -qF "def long_param(self, $long_param):" "$py" ||
+   ! grep -qF "public int longParam(int $long_param)" "$java"; then
+    echo "  [FAIL] ae_namespace_sdk_whole: the ${#long_param}-byte parameter name is not bound whole"
     fail=1
 fi
 
@@ -204,5 +213,5 @@ if [ "$(uname -s 2>/dev/null)" = "Linux" ]; then
 fi
 
 if [ "$fail" -ne 0 ]; then exit 1; fi
-echo "  [PASS] ae_namespace_sdk_whole: 70 functions, 20 parameters, a ${#long_name}-byte function name and 140-byte manifest names are bound whole; 70 inputs are refused"
+echo "  [PASS] ae_namespace_sdk_whole: 70 functions, 20 parameters, a ${#long_name}-byte function name, a ${#long_param}-byte parameter name and 140-byte manifest names are bound whole; 70 inputs are refused"
 exit 0
