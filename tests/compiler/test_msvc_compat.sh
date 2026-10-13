@@ -14,6 +14,9 @@
 #                            0, so the MSVC paths are compiled anywhere. cl:
 #                            the real thing, where cl.exe is on PATH. Default:
 #                            gcc, and cl as well when cl.exe is found.
+#   MSVC_COMPAT_SWEEP=1      with gcc, also check the C of every program the
+#                            .ae sweep builds (#2885), reading the C a
+#                            `make test-ae` run with AE_SWEEP_KEEP_C=1 kept.
 #
 # Under cl a program has to compile, and the warnings that mean a C type error
 # (C4013 an undeclared function, C4024 and C4133 an argument of the wrong type,
@@ -336,6 +339,46 @@ if [ -n "$use_gcc" ] && [ -f "$AE" ]; then
     done
 elif [ -n "$use_gcc" ]; then
     echo "  [SKIP] running the programs without GCC extensions: $AE not built"
+fi
+
+# Every program the .ae sweep builds (#2885), with MSVC_COMPAT_SWEEP=1: its C
+# on this path is strict C11, with no GNU statement expression and no
+# __auto_type (tests/scripts/strict_c11_sweep_one.sh, as strict_c11 above).
+# The programs above are the forms #2765 lowered; a form added later only
+# showed when someone surveyed the sweep by hand, and four optional ones
+# had gone unseen. The C is the one the sweep kept: CI runs `make ci` with
+# AE_SWEEP_KEEP_C=1 before this, so the check is a syntax pass over C
+# already written, no build. A program whose C was not kept is generated
+# here.
+if [ -n "$use_gcc" ] && [ "${MSVC_COMPAT_SWEEP:-0}" = 1 ]; then
+    SWEEP_TMP="$TMP/sweep"
+    mkdir -p "$SWEEP_TMP"
+    # The include directories a build compiles with (`ae cflags`), less its
+    # link flags, after the runtime's.
+    SWEEP_FLAGS="$INC $STRICT_POSIX"
+    if [ -f "$AE" ]; then
+        SWEEP_FLAGS="$SWEEP_FLAGS $("$AE" cflags 2>/dev/null | tr ' ' '\n' | grep -v '^-[lL]' | grep -v '^-pthread$' | tr '\n' ' ')"
+    fi
+    sh tests/scripts/ae_sweep_list.sh > "$SWEEP_TMP/list.txt"
+    # Absolute: a test with a lib/ beside it is generated from its directory.
+    AETHERC_ABS="$(cd "$(dirname "$AETHERC")" && pwd)/$(basename "$AETHERC")"
+    xargs -P "${NPROC:-4}" -I{} sh tests/scripts/strict_c11_sweep_one.sh "{}" "$SWEEP_TMP" \
+        "$(pwd)" "$AETHERC_ABS" "$SWEEP_FLAGS" < "$SWEEP_TMP/list.txt"
+    total=$(wc -l < "$SWEEP_TMP/list.txt" | tr -d ' ')
+    gen=$(find "$SWEEP_TMP" -name 'gen_*' | wc -l | tr -d ' ')
+    nogen=$(find "$SWEEP_TMP" -name 'nogen_*' | wc -l | tr -d ' ')
+    bad=$(find "$SWEEP_TMP" -name 'bad_*' | wc -l | tr -d ' ')
+    echo "  sweep: $total programs, $((total - gen - nogen)) from the C the sweep kept, $gen generated here, $nogen with no C"
+    if [ "$bad" -gt 0 ]; then
+        for b in "$SWEEP_TMP"/bad_*; do
+            n="${b#"$SWEEP_TMP"/bad_}"
+            echo "    $(cat "$b")"
+            grep -B1 -A2 "braced-groups\|fatal error" "$SWEEP_TMP/$n.log" 2>/dev/null | head -8 | sed 's/^/      /'
+        done
+        echo "  [FAIL] $bad of the sweep's programs have GCC extensions on the non-GCC path"
+        exit 1
+    fi
+    echo "  [PASS] The C of every sweep program compiles as strict C11 without GCC extensions"
 fi
 
 echo ""

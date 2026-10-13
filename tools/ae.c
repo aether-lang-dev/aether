@@ -9657,7 +9657,12 @@ static int cmd_build(int argc, char** argv) {
     }
 
     // Clean up intermediate C file — ae build produces a binary, not C source
-    remove(c_file);
+    /* AE_KEEP_C=1 keeps it, beside the output as <output>.c, for a look at
+     * the C a build compiled: CI's strict C11 check of the whole sweep
+     * reads the C the sweep kept, rather than generating it again
+     * (tests/compiler/test_msvc_compat.sh, #2885). */
+    const char* keep_c = getenv("AE_KEEP_C");
+    if (!keep_c || strcmp(keep_c, "1") != 0) remove(c_file);
 
     /* #2297: Windows has no rpath: the DLLs this output loads (binary
      * imports, the shared runtime) go next to it. */
