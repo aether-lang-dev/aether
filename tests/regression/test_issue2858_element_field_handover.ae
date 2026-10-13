@@ -1,0 +1,185 @@
+// Regression (#2858): a string field of a struct that is an element of an
+// array (`arr[0].name`), handed to a function that frees its parameter or
+// keeps it, gives its reference up at the call, as a field of a struct
+// variable does (#2566, #2843).
+//
+// The hand-over reached the struct again only through a variable, a
+// pointer or a statement temporary, and stopped at an element: `eat`
+// freed `arr[0].name` and the array's scope exit (#2528) freed it a second
+// time (heap corruption, 0xC0000374, on 0.806.0), and a function keeping it
+// kept what the element's struct then freed. An element of a fixed-size
+// array is now a part of its holder as a field is, on every road the
+// hand-over takes: at the call, ahead of a construct later in the
+// arguments, ahead of an operand that writes the index, `string.free` on
+// the field, an element of a struct's array field, of one reached through
+// a pointer, of a statement temporary, and of a slice. Each shape runs 100
+// times: its result, the kept string after churn reuses freed buffers, and
+// no heap growth.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Doc {
+    name: string
+    n: int
+}
+
+struct Row {
+    docs: Doc[2]
+}
+
+var kept: string = ""
+var holding = 0
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+num(fail: bool) -> int! {
+    if fail { return 0, "boom" }
+    return 7
+}
+
+eat(s: string, k: int) -> int {
+    string.free(s)
+    return k
+}
+
+keep2(s: string, k: int) -> int {
+    if holding == 1 { string.free(kept) }
+    kept = s
+    holding = 1
+    return k
+}
+
+make_row(w: string) -> Row {
+    return Row { docs: [Doc { name: string.concat(w, "#0"), n: 0 }, Doc { name: string.concat(w, "#1"), n: 1 }] }
+}
+
+at_call(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#0"), n: 0 }, Doc { name: string.concat(w, "#1"), n: 1 }]
+    return eat(arr[0].name, 3)
+}
+
+ahead_of_or(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#0"), n: 0 }, Doc { name: string.concat(w, "#1"), n: 1 }]
+    return eat(arr[0].name, num(false) or { 3 })
+}
+
+kept_at_call(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#k0"), n: 0 }, Doc { name: string.concat(w, "#k1"), n: 1 }]
+    return keep2(arr[1].name, 4)
+}
+
+// The index is written by a later operand, so the field is read ahead.
+ahead_of_index_write(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#0"), n: 0 }, Doc { name: string.concat(w, "#1"), n: 1 }]
+    i = 0
+    k = eat(arr[i].name, i++)
+    return k + i + arr[1].n
+}
+
+freed_in_place(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#0"), n: 0 }, Doc { name: string.concat(w, "#1"), n: 1 }]
+    string.free(arr[0].name)
+    return 5
+}
+
+field_array(w: string) -> int {
+    r = make_row(w)
+    return eat(r.docs[1].name, 6)
+}
+
+field_array_kept(w: string) -> int {
+    r = make_row(w)
+    return keep2(r.docs[0].name, 7)
+}
+
+through_pointer(w: string) -> int {
+    p = heap.new(Row)
+    p.docs[0].name = string.concat(w, "#p0")
+    p.docs[1].name = string.concat(w, "#p1")
+    k = eat(p.docs[1].name, 8)
+    heap.free(p)
+    return k
+}
+
+of_temporary(w: string) -> int {
+    return eat(make_row(w).docs[1].name, 9)
+}
+
+of_temporary_kept(w: string) -> int {
+    return keep2(make_row(w).docs[0].name, 10)
+}
+
+eat_first(docs: Doc[]) -> int {
+    return eat(docs[0].name, 11)
+}
+
+of_slice(w: string) -> int {
+    Doc[2] arr = [Doc { name: string.concat(w, "#s0"), n: 0 }, Doc { name: string.concat(w, "#s1"), n: 1 }]
+    return eat_first(arr)
+}
+
+rounds(w: string, which: int) -> int {
+    total = 0
+    i = 0
+    while i < 100 {
+        if which == 1 { total = total + at_call(w) }
+        if which == 2 { total = total + ahead_of_or(w) }
+        if which == 3 { total = total + kept_at_call(w) }
+        if which == 4 { total = total + ahead_of_index_write(w) }
+        if which == 5 { total = total + freed_in_place(w) }
+        if which == 6 { total = total + field_array(w) }
+        if which == 7 { total = total + field_array_kept(w) }
+        if which == 8 { total = total + through_pointer(w) }
+        if which == 9 { total = total + of_temporary(w) }
+        if which == 10 { total = total + of_temporary_kept(w) }
+        if which == 11 { total = total + of_slice(w) }
+        i = i + 1
+    }
+    return total
+}
+
+// Strings the size of the kept ones, which reuse a freed buffer.
+churn(w: string) -> int {
+    a = string.concat(w, "@@@")
+    b = string.concat(w, "$$$")
+    return string.length(a) + string.length(b)
+}
+
+shape(w: string, which: int, want: int, want_kept: string, what: string) {
+    check(rounds(w, which) == want, what)
+    churn(w)
+    if want_kept != "" {
+        check(kept == want_kept, "${what}: kept ${kept}")
+    }
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                rounds(w, which)
+            }, 5)
+        check(g == 0, "${what}: the heap grew by ${g} bytes")
+    }
+}
+
+main() {
+    w = string.concat("w", "v")
+    shape(w, 1, 300, "", "an element's field freed by the call")
+    shape(w, 2, 700, "", "an element's field read ahead of an or")
+    shape(w, 3, 400, "wv#k1", "an element's field kept by the call")
+    shape(w, 4, 200, "", "an element's field read ahead of a write to its index")
+    shape(w, 5, 500, "", "string.free on an element's field")
+    shape(w, 6, 600, "", "an element of a struct's array field")
+    shape(w, 7, 700, "wv#0", "an element of a struct's array field, kept")
+    shape(w, 8, 800, "", "an element of an array field through a pointer")
+    shape(w, 9, 900, "", "an element of a statement temporary's array field")
+    shape(w, 10, 1000, "wv#0", "an element of a statement temporary's array field, kept")
+    shape(w, 11, 1100, "", "an element of a slice")
+    if holding == 1 { string.free(kept) }
+    println("ok")
+}

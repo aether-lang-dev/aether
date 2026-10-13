@@ -18743,22 +18743,67 @@ int callee_consumes_string_arg(CodeGenerator* gen, const char* func_name, int id
     return 0;
 }
 
+/* The holder of `obj`, a struct held by value, when `obj` is a part of it
+ * held by value too: a field of a struct value, or an element of a
+ * fixed-size array (#2858), which the array holds as a struct holds its
+ * fields. NULL when `obj` is a whole value of its own (a variable, a call's
+ * result) or is reached through a pointer or a slice, whose memory is not
+ * its holder's. */
+static ASTNode* value_path_holder(ASTNode* obj) {
+    if (!obj || obj->child_count < 1 || !obj->children[0]) return NULL;
+    ASTNode* h = obj->children[0];
+    if (!h->node_type) return NULL;
+    if (obj->type == AST_MEMBER_ACCESS && obj->child_count == 1 && h->node_type->kind != TYPE_PTR)
+        return h;
+    if (obj->type == AST_ARRAY_ACCESS && obj->child_count >= 2 && type_is_sized_array(h->node_type))
+        return h;
+    return NULL;
+}
+
+/* The whole value the value path `obj` is a part of: `obj` itself, or the
+ * variable, the call or the pointer read its holders lead out to. */
+static ASTNode* value_path_root(ASTNode* obj) {
+    for (ASTNode* h = value_path_holder(obj); h; h = value_path_holder(obj)) obj = h;
+    return obj;
+}
+
+/* The C of the steps from `root` out to `obj`, a part of it: `.field` for
+ * a field, `[index]` for an element. */
+static void emit_value_path_steps(CodeGenerator* gen, ASTNode* obj, ASTNode* root) {
+    if (obj == root) return;
+    emit_value_path_steps(gen, obj->children[0], root);
+    if (obj->type == AST_MEMBER_ACCESS) {
+        fprintf(gen->output, ".%s", obj->value);
+        return;
+    }
+    fprintf(gen->output, "[");
+    generate_expression(gen, obj->children[1]);
+    fprintf(gen->output, "]");
+}
+
 /* An owned field read whose struct can be reached again to clear its
- * tracker: through a pointer, or a struct value that is a variable or a
- * field of one reached through a variable or a pointer (an lvalue; a call's
- * struct result has no address). */
+ * tracker: through a pointer or a slice, or a struct value that is a
+ * variable or a part of one held by value (a field, an element of a
+ * fixed-size array), an lvalue. A call's struct result has no address,
+ * unless the statement keeps it in a temporary. An element was not
+ * reached (#2858): `eat(arr[0].name, 3)` freed the string and the array's
+ * scope exit freed it again, and a function keeping it kept what the
+ * element's struct then freed. */
 int field_read_can_hand_off(ASTNode* e) {
     if (!is_owned_string_field_read(e)) return 0;
-    ASTNode* obj = e->children[0];
-    while (obj && obj->node_type && obj->node_type->kind != TYPE_PTR) {
-        if (obj->type == AST_IDENTIFIER) return 1;
-        /* A call's struct result the statement keeps in a temporary
-         * (collect_stmt_struct_temps) and destroys: reached through it. */
-        if (obj->type == AST_FUNCTION_CALL) return stmt_struct_temp_of(obj) != NULL;
-        if (obj->type != AST_MEMBER_ACCESS || obj->child_count != 1) return 0;
-        obj = obj->children[0];
-    }
-    return obj && obj->node_type != NULL;
+    ASTNode* root = value_path_root(e->children[0]);
+    if (!root || !root->node_type) return 0;
+    /* A pointer to the struct, whatever yields it. */
+    if (root->node_type->kind == TYPE_PTR) return 1;
+    if (root->type == AST_IDENTIFIER) return 1;
+    /* A call's struct result the statement keeps in a temporary
+     * (collect_stmt_struct_temps) and destroys: reached through it. */
+    if (root->type == AST_FUNCTION_CALL) return stmt_struct_temp_of(root) != NULL;
+    /* A field or an element of memory a pointer or a slice reaches:
+     * addressable wherever the pointer or the slice came from. */
+    ASTNode* h = root->child_count >= 1 ? root->children[0] : NULL;
+    return (root->type == AST_MEMBER_ACCESS || root->type == AST_ARRAY_ACCESS) &&
+           h && h->node_type && (h->node_type->kind == TYPE_PTR || type_is_slice(h->node_type));
 }
 
 /* `_ae_fo`, the address of the struct whose field is read, as a temporary
@@ -18777,10 +18822,7 @@ static const char* emit_field_owner(CodeGenerator* gen, ASTNode* obj, TempSeq* s
     }
     const char* pt = cg_internf("%s%s*", get_c_type(obj->node_type),
                                 lvalue_may_be_volatile(gen, obj) ? " volatile" : "");
-    ASTNode* root = obj;
-    while (root->type == AST_MEMBER_ACCESS && root->child_count == 1 &&
-           root->children[0]->node_type && root->children[0]->node_type->kind != TYPE_PTR)
-        root = root->children[0];
+    ASTNode* root = value_path_root(obj);
     const char* temp = root->type == AST_FUNCTION_CALL ? stmt_struct_temp_of(root) : NULL;
     if (!temp) {
         fo = seq_let(gen, s, pt, "_ae_fo");
@@ -18795,14 +18837,7 @@ static const char* emit_field_owner(CodeGenerator* gen, ASTNode* obj, TempSeq* s
     seq_next(gen, s);
     fo = seq_let(gen, s, pt, "_ae_fo");
     fprintf(gen->output, "&%s", temp);
-    /* The member names from the root out to `obj`. */
-    int depth = 0;
-    for (ASTNode* n = obj; n != root; n = n->children[0]) depth++;
-    for (int d = depth; d > 0; d--) {
-        ASTNode* n = obj;
-        for (int k = 1; k < d; k++) n = n->children[0];
-        fprintf(gen->output, ".%s", n->value);
-    }
+    emit_value_path_steps(gen, obj, root);
     seq_next(gen, s);
     return fo;
 }
@@ -18823,10 +18858,7 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
     }
     hoist_declare(gen, cg_internf("%s%s*", get_c_type(obj->node_type),
                                   lvalue_may_be_volatile(gen, obj) ? " volatile" : ""), fo);
-    ASTNode* root = obj;
-    while (root->type == AST_MEMBER_ACCESS && root->child_count == 1 &&
-           root->children[0]->node_type && root->children[0]->node_type->kind != TYPE_PTR)
-        root = root->children[0];
+    ASTNode* root = value_path_root(obj);
     const char* temp = root->type == AST_FUNCTION_CALL ? stmt_struct_temp_of(root) : NULL;
     print_indent(gen);
     if (!temp) {
@@ -18840,13 +18872,7 @@ static const char* emit_field_owner_stmt(CodeGenerator* gen, ASTNode* obj) {
     fprintf(gen->output, ");\n");
     print_indent(gen);
     fprintf(gen->output, "%s = &%s", fo, temp);
-    int depth = 0;
-    for (ASTNode* n = obj; n != root; n = n->children[0]) depth++;
-    for (int d = depth; d > 0; d--) {
-        ASTNode* n = obj;
-        for (int k = 1; k < d; k++) n = n->children[0];
-        fprintf(gen->output, ".%s", n->value);
-    }
+    emit_value_path_steps(gen, obj, root);
     fprintf(gen->output, ";\n");
     return fo;
 }
