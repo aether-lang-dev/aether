@@ -10747,8 +10747,11 @@ static int rebind_is_number(TypeKind k) {
            k == TYPE_FLOAT || k == TYPE_FLOAT32 || k == TYPE_LONGDOUBLE;
 }
 
+/* The C declaration of a local hoisted out of the loop or the branches that
+ * bind it, zeroed, with the scope-exit release of what it owns; `line` and
+ * `column` place that release. */
 static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
-                                     const char* name) {
+                                     const char* name, int line, int column) {
     /* #2690: volatile where a `try` body writes it, as at its binding. */
     const char* vq = try_volatile_qual_for(gen, name);
     if (var_type && var_type->kind == TYPE_ARRAY && var_type->array_size > 0) {
@@ -10758,15 +10761,17 @@ static void emit_hoisted_local_decl(CodeGenerator* gen, Type* var_type,
          * it is declared. */
         if (str_arr_type(var_type) && string_array_owns(gen, gen->hoist_scope_body, name) &&
             !is_promoted_capture(gen, name))
-            push_str_array_release_defer(gen, name, var_type->array_size, 0, 0);
+            push_str_array_release_defer(gen, name, var_type->array_size, line, column);
         return;
     }
     const char* c_type = get_c_type(var_type);
     fprintf(gen->output, "%s %s%s;\n", volatile_decl_type(vq, c_type), name,
             hoisted_zero_init(var_type, c_type));
-    /* A struct that owns strings, released where it is declared (as in
-     * hoist_if_branch_vars). */
-    push_struct_destroy_defer(gen, name, var_type, 0, 0);
+    /* A struct that owns strings is released where it is declared, as at
+     * its binding: each binding replaces the zeroed value (the local is
+     * declared already), so nothing else destroyed it, and the strings it
+     * held at the end leaked. */
+    push_struct_destroy_defer(gen, name, var_type, line, column);
 }
 
 /* Declare, before an if/else or a switch with a default, the names every arm
@@ -10804,7 +10809,7 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
             continue;
         }
         mark_var_declared_typed(gen, n, var_type);
-        emit_hoisted_local_decl(gen, var_type, n);
+        emit_hoisted_local_decl(gen, var_type, n, 0, 0);
         claim_closure_local_env(gen, n, decl, 0);   /* #2480 */
         if (joined) free_type(joined);
     }
@@ -10874,7 +10879,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
              * never get reclaimed at function exit. */
             push_struct_destroy_defer(gen, child->value, var_type, child->line, child->column);
         } else {
-            emit_hoisted_local_decl(gen, var_type, child->value);
+            emit_hoisted_local_decl(gen, var_type, child->value, 0, 0);
             /* #2480: the hoisted local is the loop's one C variable, so the
              * env free is queued here, outside the loop; each iteration's
              * rebinding frees the env it replaces. */
@@ -11400,15 +11405,11 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
             if (joined) free_type(joined);
             continue;
         }
-        /* #2690: volatile where a `try` body writes it, as at its binding. */
-        fprintf(gen->output, "%s %s%s;\n",
-                volatile_decl_type(try_volatile_qual_for(gen, name), c_type), name,
-                hoisted_zero_init(var_type, c_type));
-        /* A struct that owns strings is released where it is declared, as
-         * at its binding: each branch's binding replaces the zeroed value
-         * (the local is declared already), so nothing else destroyed it,
-         * and the strings it held at the end leaked. */
-        push_struct_destroy_defer(gen, name, var_type, first_decl->line, first_decl->column);
+        /* Declared as a loop's hoist declares it (#2877): a fixed-size
+         * array as `E name[N]`, which its C type `E[N]` cannot spell before
+         * the name, so every array a branch bound and the code after it
+         * read failed in C. */
+        emit_hoisted_local_decl(gen, var_type, name, first_decl->line, first_decl->column);
         mark_var_declared_typed(gen, name, var_type);
         claim_closure_local_env(gen, name, first_decl, 0);   /* #2480 */
         if (joined) free_type(joined);

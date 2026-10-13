@@ -1,0 +1,76 @@
+// Regression (#2877): a fixed-size array bound in the branches of an `if`
+// and read after it did not compile. The branch hoist declared the name
+// with its C type before it, and an array's C type is `E[N]`, so it wrote
+// `int[2] a = {0};`. It now declares the name as a loop's hoist does,
+// `int a[2] = {0};`. Each element type is checked for its values: int,
+// string, closure and struct.
+
+import std.string
+
+extern exit(code: int)
+
+struct Item {
+    name: string
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+ints(n: int) -> int {
+    if n > 0 {
+        a = [1, 2]
+    } else {
+        a = [3, 4]
+    }
+    return a[0] * 10 + a[1]
+}
+
+strings(n: int) -> int {
+    if n > 0 {
+        s = ["ab", "c"]
+    } else if n == 0 {
+        s = ["", "defg"]
+    } else {
+        s = ["d", "efg"]
+    }
+    return string.length(s[0]) * 10 + string.length(s[1])
+}
+
+closures(n: int) -> int {
+    if n > 0 {
+        fs = [|| { return n + 1 }, || { return n - 1 }]
+    } else {
+        fs = [|| { return n + 2 }, || { return n - 2 }]
+    }
+    int a = call(fs[0])
+    int b = call(fs[1])
+    return a * 100 + b
+}
+
+items(n: int) -> int {
+    if n > 0 {
+        its = [Item { name: "one", n: 1 }, Item { name: "three", n: 3 }]
+    } else {
+        its = [Item { name: "zz", n: 7 }, Item { name: "y", n: 9 }]
+    }
+    ns = its[0].n * 1000 + its[1].n * 100
+    return ns + string.length(its[0].name) * 10 + string.length(its[1].name)
+}
+
+main() {
+    check(ints(1) == 12, "int[2] from the then branch")
+    check(ints(-1) == 34, "int[2] from the else branch")
+    check(strings(1) == 21, "string[2] from the then branch")
+    check(strings(0) == 4, "string[2] from the else-if branch")
+    check(strings(-1) == 13, "string[2] from the else branch")
+    check(closures(5) == 604, "fn[2] from the then branch")
+    check(closures(-5) == -307, "fn[2] from the else branch")
+    check(items(1) == 1335, "Item[2] from the then branch")
+    check(items(-1) == 7921, "Item[2] from the else branch")
+    println("ok")
+}
