@@ -473,6 +473,20 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "");
 }
 
+/* #2904: is a state field of type `t` a C aggregate (a closure, a struct,
+ * an optional, a tuple, a sum), whose zero value `0` does not spell? An
+ * unknown type is taken as scalar, as it always was. */
+static int state_zero_is_aggregate(Type* t) {
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_FUNCTION: return !t->is_fnptr;
+        case TYPE_STRUCT: case TYPE_OPTIONAL: case TYPE_TUPLE: case TYPE_SUM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
 void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     if (!actor || actor->type != AST_ACTOR_DEFINITION) return;
     
@@ -1254,6 +1268,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                  * runs ahead of it, in plain C. */
                 generate_value_statement(gen, cg_internf("actor->%s", child->value),
                                          child->children[0]);
+            } else if (state_zero_is_aggregate(child->node_type)) {
+                /* #2904: a closure, a struct, an optional, a tuple or a sum
+                 * has no `0` to take; its zero value is all bytes zero. */
+                print_line(gen, "memset(&actor->%s, 0, sizeof(actor->%s));",
+                           child->value, child->value);
             } else {
                 print_line(gen, "actor->%s = 0;", child->value);
             }

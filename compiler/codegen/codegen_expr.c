@@ -10792,7 +10792,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             int any_take = 0;
             for (int i = 0; !c_imported && i < expr->child_count; i++) {
                 ASTNode* fi = expr->children[i];
+                /* #2904: a `ptr` field takes no string: it has no tracker. */
+                Type* fit = fi && fi->value
+                            ? struct_literal_field_type(gen, expr->value, fi->value) : NULL;
                 if (fi && fi->type == AST_ASSIGNMENT && fi->value && fi->child_count > 0 &&
+                    !(fit && fit->kind != TYPE_STRING) &&
                     string_take_is_view(gen, fi->children[0])) {
                     if (!take_own) take_own = calloc((size_t)expr->child_count, sizeof(*take_own));
                     if (!take_own) break;
@@ -10925,8 +10929,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * record the variable as moved-from so its flag is cleared
                      * (the deferred free becomes a no-op). For non-variable
                      * heap sources (an interp/concat temp), the value is freshly
-                     * owned, so a constant 1 is correct. */
+                     * owned, so a constant 1 is correct.
+                     * #2904: only a `string` field has a tracker. A string
+                     * stored into a `ptr` field is a pointer the struct does
+                     * not own, as any `ptr` holds, so the source keeps it. */
+                    Type* tracked_ft = c_imported ? NULL
+                                       : struct_literal_field_type(gen, expr->value,
+                                                                   field_init->value);
                     if (!c_imported && field_init->child_count > 0 &&
+                        !(tracked_ft && tracked_ft->kind != TYPE_STRING) &&
                         is_heap_string_expr(gen, field_init->children[0])) {
                         ASTNode* src = field_init->children[0];
                         if (src->type == AST_IDENTIFIER && src->value &&

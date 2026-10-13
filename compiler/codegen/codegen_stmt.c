@@ -5731,6 +5731,12 @@ static ASTNode* actor_state_decl(CodeGenerator* gen, const char* name) {
     return NULL;
 }
 
+/* #2904: is `name` a `ptr` state field of the actor being emitted? */
+static int actor_state_is_ptr(CodeGenerator* gen, const char* name) {
+    ASTNode* sd = actor_state_decl(gen, name);
+    return sd && sd->node_type && sd->node_type->kind == TYPE_PTR;
+}
+
 /* #2528: is `name` a `string` state field of the actor being emitted, whose
  * tracker is a field of the actor struct? */
 static int actor_state_string_tracked(CodeGenerator* gen, const char* name) {
@@ -14543,6 +14549,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             stmt->value);
                     fprintf(gen->output, " if (%s) aether_heap_str_free(_tmp_old);", trk);
                     fprintf(gen->output, " %s = 1; }\n", trk);
+                } else if (stmt->child_count > 0 && actor_state_is_ptr(gen, stmt->value) &&
+                           fn_value_into_ptr(gen, stmt->children[0])) {
+                    /* #2904: a `ptr` state field takes a closure boxed and a
+                     * bare function as its address, as every `ptr` slot
+                     * does (emit_closure_into_ptr). */
+                    fprintf(gen->output, "self->%s = ", stmt->value);
+                    emit_closure_into_ptr(gen, stmt->children[0]);
+                    fprintf(gen->output, ";\n");
                 } else if (stmt->child_count > 0 && stmt->children[0] &&
                            stmt->children[0]->node_type &&
                            stmt->children[0]->node_type->kind == TYPE_FUNCTION &&
@@ -15062,7 +15076,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         builder_saved = builder_cfg_begin(gen, stmt->children[0], cfg);
                         print_indent(gen);
                     }
-                    if (var_is_seq && stmt->child_count > 0) {
+                    /* #2904: a `ptr` local takes a closure boxed and a bare
+                     * function as its address, as every `ptr` slot does
+                     * (emit_closure_into_ptr). */
+                    Type* ptr_local_t = declared_var_type(gen, stmt->value);
+                    if (!ptr_local_t) ptr_local_t = stmt->node_type;
+                    if (ptr_local_t && ptr_local_t->kind == TYPE_PTR && stmt->child_count > 0 &&
+                        fn_value_into_ptr(gen, stmt->children[0])) {
+                        fprintf(gen->output, "%s = ", stmt->value);
+                        emit_closure_into_ptr(gen, stmt->children[0]);
+                        fprintf(gen->output, ";\n");
+                    } else if (var_is_seq && stmt->child_count > 0) {
                         ASTNode* srhs = stmt->children[0];
                         int srhs_owning = is_seq_owning_expr(gen, srhs);
                         int srhs_alias = (srhs->type == AST_IDENTIFIER &&
@@ -15701,6 +15725,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             } else if (decl_struct_take) {
                                 emit_struct_take(gen, stmt->children[0],
                                                  decl_struct_take, stmt->value);
+                            } else if (stmt->node_type && stmt->node_type->kind == TYPE_PTR &&
+                                       fn_value_into_ptr(gen, stmt->children[0])) {
+                                /* #2904: a `ptr` local takes a closure boxed
+                                 * and a bare function as its address, as
+                                 * every `ptr` slot does. */
+                                emit_closure_into_ptr(gen, stmt->children[0]);
                             } else if (closure_view_binding(stmt->children[0]) &&
                                        !is_promoted_capture(gen, stmt->value) &&
                                        !is_module_global_var(gen, stmt->value) &&
