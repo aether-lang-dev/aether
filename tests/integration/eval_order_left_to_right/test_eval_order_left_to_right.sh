@@ -140,7 +140,9 @@ fi
 # reads are of plain locals no call can reach. The C stays as it was. Nor
 # does any clause of `fib` or `rd` (#2857: a set's effects are all its
 # clauses', guards included), so reading `q.n` beside them needs no
-# temporary either.
+# temporary either. `setv` and `fill` write their fixed-size array
+# parameter, the function's own copy (#2887), so `ar[0]` beside a call of
+# either is read where it stands.
 cat > "$tmp/plain.ae" <<'AE'
 extern malloc(size: int) -> ptr
 
@@ -160,6 +162,20 @@ rd(b: *Box, 0) -> b.n
 rd(b: *Box, k: int) when k > b.n -> b.n + k
 rd(b: *Box, k: int) -> rd(b, k - 1)
 
+setv(a: int[2], v: int) -> int {
+    a[0] = v
+    return a[0]
+}
+
+set0(xs: int[], v: int) {
+    xs[0] = v
+}
+
+fill(a: int[2], v: int) -> int {
+    set0(a, v)
+    return a[0]
+}
+
 main() {
     a = 3
     b = 4
@@ -171,7 +187,9 @@ main() {
     p.n = 1
     f = pick(fib(a), b, fib(sq(b)))
     r = pick(q.n, rd(p, 3), q.n)
-    println(z + w + k + f + r)
+    int[2] ar = [1, 2]
+    g = setv(ar, 5) + ar[0] + fill(ar, 6) + ar[1]
+    println(z + w + k + f + r + g)
 }
 AE
 if ! "$AETHERC" "$tmp/plain.ae" "$tmp/plain.c" >/dev/null 2>&1; then

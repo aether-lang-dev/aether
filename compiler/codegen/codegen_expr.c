@@ -1051,6 +1051,18 @@ static int order_param_index(ASTNode* fn, const char* name) {
     return -1;
 }
 
+/* order_param_index for a write through the parameter `name`, which reaches
+ * its caller's memory: -1 for a fixed-size array parameter, the function's
+ * own copy of the caller's array (#2516, as E0900 treats it, #2785). A store
+ * into it, or into it by a callee handed it, changes nothing a caller reads,
+ * and marked as one, the caller's later reads of the array it passed were
+ * held in temporaries for nothing (#2887). */
+static int order_shared_param_index(ASTNode* fn, const char* name) {
+    int k = order_param_index(fn, name);
+    ASTNode* p = k >= 0 ? fn_param_at(fn, k) : NULL;
+    return p && type_is_sized_array(p->node_type) ? -1 : k;
+}
+
 /* What a call of entry `fn` runs (#2857). `fn` is the definition
  * order_callee_def finds for a name: the first clause of a clause set, and a
  * call of the set may run any clause, so its effects are every clause's.
@@ -1096,7 +1108,7 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node, Orde
     const char* t = order_write_target(node);
     if (t && is_module_global_var(gen, t)) e->writes_shared = 1;
     ASTNode* lv = order_through_lvalue(node);
-    int k = lv ? order_param_index(fn, order_lvalue_root(lv)) : -1;
+    int k = lv ? order_shared_param_index(fn, order_lvalue_root(lv)) : -1;
     if (k >= 0) e->writes_through |= 1u << k;
     if (lv && order_access_through_memory(lv)) e->writes_memory = 1;
     if ((node->type == AST_MEMBER_ACCESS || node->type == AST_ARRAY_ACCESS) &&
@@ -1115,7 +1127,7 @@ static void order_scan_body(CodeGenerator* gen, ASTNode* fn, ASTNode* node, Orde
                 if (arg && arg->type == AST_CLOSURE && arg->value &&
                     strcmp(arg->value, "trailing") == 0) continue;
                 if (c_through & (1u << a)) {
-                    int pk = order_param_index(fn, order_ref_arg_root(arg));
+                    int pk = order_shared_param_index(fn, order_ref_arg_root(arg));
                     if (pk >= 0) e->writes_through |= 1u << pk;
                 }
                 a++;

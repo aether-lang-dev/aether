@@ -1,0 +1,70 @@
+// Regression (#2887): a function that writes its fixed-size array parameter
+// writes its own copy (#2516, as E0900 treats it, #2785), not memory its
+// caller reads. The evaluation-order rule (#2813) counted the store as a
+// write through the parameter, so `first(arr, 9) + arr[0]` held `arr[0]` in
+// a temporary for nothing; the C was needless, the result the same. The
+// store, and one a callee makes into a slice of the copy, no longer count.
+// This test checks the results are unchanged: the caller's array is never
+// written, and a write through a slice or a pointer parameter, which does
+// reach the caller, is still ordered (left to right) against a read of it.
+// That the C for the first two shapes has no temporary is checked by
+// tests/integration/eval_order_left_to_right.
+
+extern exit(code: int)
+extern malloc(size: int) -> ptr
+
+struct Box {
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Writes its own copy.
+first(a: int[2], v: int) -> int {
+    a[0] = v
+    return a[0]
+}
+
+// Hands a slice of its own copy to a function that writes through it.
+set0(xs: int[], v: int) {
+    xs[0] = v
+}
+
+fill(a: int[2], v: int) -> int {
+    set0(a, v)
+    return a[0]
+}
+
+// Writes through a slice of the caller's array, and through a pointer.
+poke(xs: int[], v: int) -> int {
+    xs[0] = v
+    return 0
+}
+
+poke_box(b: *Box, v: int) -> int {
+    b.n = v
+    return 0
+}
+
+main() {
+    int[2] arr = [1, 2]
+    check(first(arr, 9) + arr[0] == 10, "a copy written, read beside it")
+    check(arr[0] + first(arr, 9) == 10, "a copy written, read before it")
+    check(fill(arr, 7) + arr[0] == 8, "a slice of a copy written by a callee")
+    check(arr[0] == 1 && arr[1] == 2, "the caller's array is unchanged")
+
+    check(arr[0] + poke(arr, 5) == 1, "a read ahead of a write through a slice")
+    check(poke(arr, 6) + arr[0] == 6, "a read after a write through a slice")
+
+    p = malloc(sizeof(Box)) as *Box
+    q = p
+    p.n = 1
+    check(q.n + poke_box(p, 3) == 1, "a read ahead of a write through a pointer")
+    check(poke_box(p, 4) + q.n == 4, "a read after a write through a pointer")
+    println("ok")
+}
