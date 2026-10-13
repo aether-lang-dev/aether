@@ -376,9 +376,19 @@ static void json_emit_str(FILE* out, const char* s) {
     fputc('"', out);
 }
 
+// The inputs and the events aether_describe() holds: the arrays of
+// AetherNamespaceManifest (AETHER_MANIFEST_MAX_INPUTS and
+// AETHER_MANIFEST_MAX_EVENTS in runtime/aether_host.h), whose layout the
+// describe stub below writes out. A namespace declaring more is refused
+// (#2888): the ones past the limit were dropped without a word, and the
+// library and its SDKs described a namespace without them.
+#define AE_MANIFEST_MAX_INPUTS 64
+#define AE_MANIFEST_MAX_EVENTS 64
+
 // Captured manifest used by both the JSON emitter and the C-describe
 // emitter. Borrowed pointers into the parsed AST's literal storage —
-// valid for the lifetime of the parse.
+// valid for the lifetime of the parse. The counts are of every input and
+// event declared, kept or not.
 typedef struct {
     const char* ns_name;
     const char* java_pkg;
@@ -386,9 +396,9 @@ typedef struct {
     const char* py_module;
     const char* rb_module;
     const char* go_package;
-    struct { const char* name; const char* type_sig; } inputs[64];
+    struct { const char* name; const char* type_sig; } inputs[AE_MANIFEST_MAX_INPUTS];
     int input_count;
-    struct { const char* name; const char* carries; } events[64];
+    struct { const char* name; const char* carries; } events[AE_MANIFEST_MAX_EVENTS];
     int event_count;
 } ExtractedManifest;
 
@@ -424,15 +434,19 @@ static void extract_manifest_walk(ExtractedManifest* m, ASTNode* node) {
         if (strcmp(name, "describe") == 0) {
             if (ARG_STR(0)) m->ns_name = ARG_STR(0);
         } else if (strcmp(name, "input") == 0) {
-            if (m->input_count < 64 && ARG_STR(0) && ARG_STR(1)) {
-                m->inputs[m->input_count].name = ARG_STR(0);
-                m->inputs[m->input_count].type_sig = ARG_STR(1);
+            if (ARG_STR(0) && ARG_STR(1)) {
+                if (m->input_count < AE_MANIFEST_MAX_INPUTS) {
+                    m->inputs[m->input_count].name = ARG_STR(0);
+                    m->inputs[m->input_count].type_sig = ARG_STR(1);
+                }
                 m->input_count++;
             }
         } else if (strcmp(name, "event") == 0) {
-            if (m->event_count < 64 && ARG_STR(0) && ARG_STR(1)) {
-                m->events[m->event_count].name = ARG_STR(0);
-                m->events[m->event_count].carries = ARG_STR(1);
+            if (ARG_STR(0) && ARG_STR(1)) {
+                if (m->event_count < AE_MANIFEST_MAX_EVENTS) {
+                    m->events[m->event_count].name = ARG_STR(0);
+                    m->events[m->event_count].carries = ARG_STR(1);
+                }
                 m->event_count++;
             }
         } else if (strcmp(name, "java") == 0) {
@@ -456,9 +470,11 @@ static void extract_manifest_walk(ExtractedManifest* m, ASTNode* node) {
     }
 }
 
-static void extract_manifest(ExtractedManifest* m, ASTNode* program) {
+/* Capture the manifest: 1, or 0 with the reason printed when it declares
+ * more inputs or events than aether_describe() holds. */
+static int extract_manifest(ExtractedManifest* m, ASTNode* program) {
     memset(m, 0, sizeof(*m));
-    if (!program) return;
+    if (!program) return 1;
 
     /* Walk every top-level function (`abi`, `setup`, `main`, whatever).
      * Skip externs and the import statements themselves — we only
@@ -470,12 +486,27 @@ static void extract_manifest(ExtractedManifest* m, ASTNode* program) {
                  && fn->type != AST_MAIN_FUNCTION)) continue;
         extract_manifest_walk(m, fn);
     }
+    int fits = 1;
+    if (m->input_count > AE_MANIFEST_MAX_INPUTS) {
+        fprintf(stderr, "Error: namespace '%s' declares %d inputs; aether_describe() holds at "
+                        "most %d (AETHER_MANIFEST_MAX_INPUTS)\n",
+                m->ns_name ? m->ns_name : "?", m->input_count, AE_MANIFEST_MAX_INPUTS);
+        fits = 0;
+    }
+    if (m->event_count > AE_MANIFEST_MAX_EVENTS) {
+        fprintf(stderr, "Error: namespace '%s' declares %d events; aether_describe() holds at "
+                        "most %d (AETHER_MANIFEST_MAX_EVENTS)\n",
+                m->ns_name ? m->ns_name : "?", m->event_count, AE_MANIFEST_MAX_EVENTS);
+        fits = 0;
+    }
+    return fits;
 }
 
-static void emit_manifest_json(FILE* out, ASTNode* program) {
-    if (!out) return;
+/* 1, or 0 (nothing written) for a manifest extract_manifest refuses. */
+static int emit_manifest_json(FILE* out, ASTNode* program) {
+    if (!out) return 0;
     ExtractedManifest m;
-    extract_manifest(&m, program);
+    if (!extract_manifest(&m, program)) return 0;
 
     fputs("{\n  \"namespace\": ", out); json_emit_str(out, m.ns_name); fputs(",\n", out);
 
@@ -505,6 +536,7 @@ static void emit_manifest_json(FILE* out, ASTNode* program) {
     fputs("    \"go\": {\"package\": ", out); json_emit_str(out, m.go_package); fputs("}\n", out);
     fputs("  }\n", out);
     fputs("}\n", out);
+    return 1;
 }
 
 // C-quote a string for embedding in a static initializer. Same escape
@@ -1211,10 +1243,11 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
 // AetherNamespaceManifest populated from the parsed manifest AST,
 // plus an aether_describe() exported function. This file is linked
 // into the namespace .so so the host can introspect at runtime.
-static void emit_describe_c(FILE* out, ASTNode* program) {
-    if (!out) return;
+/* 1, or 0 (nothing written) for a manifest extract_manifest refuses. */
+static int emit_describe_c(FILE* out, ASTNode* program) {
+    if (!out) return 0;
     ExtractedManifest m;
-    extract_manifest(&m, program);
+    if (!extract_manifest(&m, program)) return 0;
 
     /* The describe stub is intentionally self-contained — it doesn't
      * #include aether_host.h so that it can be linked into a .so even
@@ -1234,9 +1267,9 @@ static void emit_describe_c(FILE* out, ASTNode* program) {
     fputs("struct AetherNamespaceManifest {\n", out);
     fputs("    const char* namespace_name;\n", out);
     fputs("    int input_count;\n", out);
-    fputs("    struct AetherInputDecl inputs[64];\n", out);
+    fprintf(out, "    struct AetherInputDecl inputs[%d];\n", AE_MANIFEST_MAX_INPUTS);
     fputs("    int event_count;\n", out);
-    fputs("    struct AetherEventDecl events[64];\n", out);
+    fprintf(out, "    struct AetherEventDecl events[%d];\n", AE_MANIFEST_MAX_EVENTS);
     fputs("    struct AetherJavaBinding   java;\n", out);
     fputs("    struct AetherPythonBinding python;\n", out);
     fputs("    struct AetherRubyBinding   ruby;\n", out);
@@ -1274,6 +1307,7 @@ static void emit_describe_c(FILE* out, ASTNode* program) {
     fputs("const struct AetherNamespaceManifest* aether_describe(void) {\n", out);
     fputs("    return &g_aether_describe;\n", out);
     fputs("}\n", out);
+    return 1;
 }
 
 // Compile aether source to C
@@ -1411,12 +1445,12 @@ int compile_source(const char* input_path, const char* output_path) {
     // --emit-namespace-manifest: walk the AST for std.host builder calls
     // and emit JSON to stdout. Used by `ae build --namespace`. No codegen.
     if (emit_namespace_manifest) {
-        emit_manifest_json(stdout, program);
+        int emitted = emit_manifest_json(stdout, program);
         free_ast_node(program);
         free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
-        return 1;  // success
+        return emitted;  // 0: a manifest aether_describe() cannot hold (#2888)
     }
 
     // --emit-namespace-describe: walk the AST and emit a self-contained
@@ -1432,13 +1466,14 @@ int compile_source(const char* input_path, const char* output_path) {
             free(source);
             return 0;
         }
-        emit_describe_c(out, program);
+        int emitted = emit_describe_c(out, program);
         fclose(out);
+        if (!emitted) remove(output_path);   /* #2888: nothing half written */
         free_ast_node(program);
         free_tokens(tokens, token_count);
         free_parser(parser);
         free(source);
-        return 1;
+        return emitted;
     }
 
     // Step 2.4: a legacy `export` changes nothing in the file it is

@@ -1439,6 +1439,21 @@ static void ae_path_appendf(char** s, const char* fmt, ...) {
     *s = grown;
 }
 
+/* The working directory whole, a heap string for free(), or NULL when it
+ * cannot be read. getcwd fills a buffer it fits in or fails with ERANGE,
+ * so the buffer grows until it fits (#2888). */
+static char* ae_getcwd_whole(void) {
+    size_t cap = 256;
+    for (;;) {
+        char* buf = malloc(cap);
+        if (!buf) return NULL;
+        if (getcwd(buf, (int)cap)) return buf;
+        free(buf);
+        if (errno != ERANGE || cap >= ((size_t)1 << 20)) return NULL;
+        cap *= 2;
+    }
+}
+
 static int str_buf_grow(char** out, size_t* cap, size_t need_total) {
     if (need_total < *cap) return 1;
     size_t next = *cap ? *cap : 16384;
@@ -7067,17 +7082,31 @@ static int cmd_build(int argc, char** argv);
 // =============================================================================
 
 /* Captured manifest fields used during SDK generation. Mirrors the JSON
- * shape; only the fields the generators need. */
+ * shape; only the fields the generators need. Every string whole on the
+ * heap ("" when absent) and the inputs and events as many as the JSON has
+ * (#2888: 128-byte names were cut, and past 64 entries the rest dropped;
+ * aetherc refuses a namespace aether_describe() cannot hold). Freed with
+ * captured_manifest_free. */
 typedef struct {
-    char ns_name[128];
-    char py_module[128];
-    char rb_module[128];
-    char java_pkg[256];
-    char java_class[128];
+    char* name;
+    char* type;
+} CapturedInput;
+
+typedef struct {
+    char* name;
+    char* carries;
+} CapturedEvent;
+
+typedef struct {
+    char* ns_name;
+    char* py_module;
+    char* rb_module;
+    char* java_pkg;
+    char* java_class;
     int  input_count;
-    struct { char name[128]; char type[128]; } inputs[64];
+    CapturedInput* inputs;
     int  event_count;
-    struct { char name[128]; char carries[64]; } events[64];
+    CapturedEvent* events;
 } CapturedManifest;
 
 /* A function of the namespace, from `--list-functions`: its name, return
@@ -7181,45 +7210,72 @@ static int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
     return rc;
 }
 
+static char* sdk_buffer(size_t cap);
+
 /* Tiny ad-hoc JSON-ish field extractor. The aetherc JSON format is
  * stable and one-line-per-array-element, so simple substring + scanf
- * is sufficient — we don't pull in a real JSON parser. Returns 1 if
- * the field was found, 0 otherwise. Output is the unescaped string
- * content (no quotes); writes empty string on missing. */
-static int json_extract_string_field(const char* json, const char* key,
-                                     char* out, size_t out_size) {
-    out[0] = '\0';
-    /* Look for `"key":` */
+ * is sufficient: we don't pull in a real JSON parser. Returns the
+ * unescaped string content (no quotes), whole, as a heap string for
+ * free(): "" when the field is missing or null. */
+
+static char* json_string_field(const char* json, const char* key) {
+    /* Look for `"key":` (the keys are this file's own short literals) */
     char needle[160];
     snprintf(needle, sizeof(needle), "\"%s\":", key);
     const char* p = strstr(json, needle);
-    if (!p) return 0;
-    p += strlen(needle);
-    while (*p == ' ' || *p == '\t') p++;
-    if (*p == 'n' && strncmp(p, "null", 4) == 0) return 1; /* present, value null */
-    if (*p != '"') return 0;
-    p++;
-    size_t i = 0;
-    while (*p && *p != '"' && i + 1 < out_size) {
-        if (*p == '\\' && p[1]) {
-            char c = p[1];
-            if (c == 'n') out[i++] = '\n';
-            else if (c == 't') out[i++] = '\t';
-            else out[i++] = c;
-            p += 2;
-        } else {
-            out[i++] = *p++;
+    char* out = NULL;
+    if (p) {
+        p += strlen(needle);
+        while (*p == ' ' || *p == '\t') p++;
+        if (*p == '"') {
+            p++;
+            /* The value whole (#2888): its length first, then the copy. */
+            size_t n = 0;
+            for (const char* q = p; *q && *q != '"'; q += (*q == '\\' && q[1]) ? 2 : 1) n++;
+            out = sdk_buffer(n + 1);
+            size_t i = 0;
+            while (*p && *p != '"') {
+                if (*p == '\\' && p[1]) {
+                    char c = p[1];
+                    out[i++] = c == 'n' ? '\n' : c == 't' ? '\t' : c;
+                    p += 2;
+                } else {
+                    out[i++] = *p++;
+                }
+            }
+            out[i] = '\0';
         }
     }
-    out[i] = '\0';
-    return 1;
+    return out ? out : ae_path_printf("%s", "");
 }
 
+static void captured_manifest_free(CapturedManifest* m) {
+    free(m->ns_name);
+    free(m->py_module);
+    free(m->rb_module);
+    free(m->java_pkg);
+    free(m->java_class);
+    for (int i = 0; i < m->input_count; i++) {
+        free(m->inputs[i].name);
+        free(m->inputs[i].type);
+    }
+    free(m->inputs);
+    for (int i = 0; i < m->event_count; i++) {
+        free(m->events[i].name);
+        free(m->events[i].carries);
+    }
+    free(m->events);
+    memset(m, 0, sizeof(*m));
+}
+
+static void* ae_grow_array(void* arr, int count, int* cap, size_t size);
+
 /* Parse the manifest JSON produced by aetherc --emit-namespace-manifest.
- * Returns 0 on success, -1 on failure. */
+ * Returns 0 on success, -1 on failure; either way the caller frees `m`
+ * with captured_manifest_free. */
 static int parse_manifest_json(const char* json, CapturedManifest* m) {
     memset(m, 0, sizeof(*m));
-    json_extract_string_field(json, "namespace", m->ns_name, sizeof(m->ns_name));
+    m->ns_name = json_string_field(json, "namespace");
 
     /* Bindings live under "bindings": { "java": { "package":, "class": },
      * "python": { "module": }, "go": { "package": } }. Scope each
@@ -7229,16 +7285,10 @@ static int parse_manifest_json(const char* json, CapturedManifest* m) {
     const char* python_obj = strstr(json, "\"python\":");
     const char* ruby_obj   = strstr(json, "\"ruby\":");
     const char* go_obj     = strstr(json, "\"go\":");
-    if (java_obj)   {
-        json_extract_string_field(java_obj, "package", m->java_pkg,   sizeof(m->java_pkg));
-        json_extract_string_field(java_obj, "class",   m->java_class, sizeof(m->java_class));
-    }
-    if (python_obj) {
-        json_extract_string_field(python_obj, "module", m->py_module, sizeof(m->py_module));
-    }
-    if (ruby_obj) {
-        json_extract_string_field(ruby_obj, "module", m->rb_module, sizeof(m->rb_module));
-    }
+    m->java_pkg   = java_obj   ? json_string_field(java_obj, "package") : ae_path_printf("%s", "");
+    m->java_class = java_obj   ? json_string_field(java_obj, "class")   : ae_path_printf("%s", "");
+    m->py_module  = python_obj ? json_string_field(python_obj, "module") : ae_path_printf("%s", "");
+    m->rb_module  = ruby_obj   ? json_string_field(ruby_obj, "module")  : ae_path_printf("%s", "");
     /* Go binding stored but unused for now — emitter is a stub. */
     (void)go_obj;
 
@@ -7254,23 +7304,21 @@ static int parse_manifest_json(const char* json, CapturedManifest* m) {
 
     /* Walk inputs. */
     const char* p = inputs_start;
+    int cap = 0;
     while ((p = strstr(p, "{\"name\":")) && p < events_start) {
-        if (m->input_count >= 64) break;
-        json_extract_string_field(p, "name", m->inputs[m->input_count].name,
-                                  sizeof(m->inputs[0].name));
-        json_extract_string_field(p, "type", m->inputs[m->input_count].type,
-                                  sizeof(m->inputs[0].type));
+        m->inputs = ae_grow_array(m->inputs, m->input_count, &cap, sizeof(*m->inputs));
+        m->inputs[m->input_count].name = json_string_field(p, "name");
+        m->inputs[m->input_count].type = json_string_field(p, "type");
         m->input_count++;
         p++;
     }
     /* Walk events. */
     p = events_start;
+    cap = 0;
     while ((p = strstr(p, "{\"name\":")) && p < bindings_start) {
-        if (m->event_count >= 64) break;
-        json_extract_string_field(p, "name", m->events[m->event_count].name,
-                                  sizeof(m->events[0].name));
-        json_extract_string_field(p, "carries", m->events[m->event_count].carries,
-                                  sizeof(m->events[0].carries));
+        m->events = ae_grow_array(m->events, m->event_count, &cap, sizeof(*m->events));
+        m->events[m->event_count].name = json_string_field(p, "name");
+        m->events[m->event_count].carries = json_string_field(p, "carries");
         m->event_count++;
         p++;
     }
@@ -7427,6 +7475,34 @@ static void to_snake(const char* in, char* out, size_t out_size) {
     out[i] = '\0';
 }
 
+/* A heap buffer of `cap` bytes, out of memory ending the run. */
+static char* sdk_buffer(size_t cap) {
+    char* out = malloc(cap);
+    if (!out) {
+        fprintf(stderr, "Error: out of memory writing the namespace SDK\n");
+        exit(1);
+    }
+    return out;
+}
+
+/* to_camel and to_snake into heap strings sized for the longest result, for
+ * free() (#2888: 128 and 160 bytes cut a long name). CamelCase drops the
+ * underscores, so it is never longer than its input; snake_case adds at
+ * most one '_' before each character. */
+static char* camel_of(const char* in) {
+    size_t cap = strlen(in) + 1;
+    char* out = sdk_buffer(cap);
+    to_camel(in, out, cap);
+    return out;
+}
+
+static char* snake_of(const char* in) {
+    size_t cap = 2 * strlen(in) + 1;
+    char* out = sdk_buffer(cap);
+    to_snake(in, out, cap);
+    return out;
+}
+
 /* Generate the Python SDK file for a namespace. Single self-contained
  * .py module — no imports beyond stdlib (ctypes, pathlib). */
 static int emit_python_sdk(const CapturedManifest* m,
@@ -7435,17 +7511,16 @@ static int emit_python_sdk(const CapturedManifest* m,
                            const char* out_dir) {
     if (!m->py_module[0]) return 0;  /* no python binding declared */
 
-    char out_path[1024];
-    snprintf(out_path, sizeof(out_path), "%s/%s.py", out_dir, m->py_module);
+    char* out_path = ae_path_printf("%s/%s.py", out_dir, m->py_module);
     FILE* f = fopen(out_path, "w");
     if (!f) {
         fprintf(stderr, "Error: cannot write %s\n", out_path);
+        free(out_path);
         return -1;
     }
 
     /* Convert namespace name to a Python class name (snake_case → CamelCase). */
-    char cls[128];
-    to_camel(m->ns_name, cls, sizeof(cls));
+    char* cls = camel_of(m->ns_name);
 
     fprintf(f,
 "\"\"\"Auto-generated Aether namespace binding for `%s`.\n"
@@ -7595,15 +7670,13 @@ static int emit_python_sdk(const CapturedManifest* m,
      * future work tied to host_call(). For v1, set_<input> is a no-op
      * placeholder so the API surface is consistent.) */
     for (int i = 0; i < m->input_count; i++) {
-        char setter_name[160];
-        snprintf(setter_name, sizeof(setter_name), "set_%s", m->inputs[i].name);
         fprintf(f,
-"    def %s(self, value):\n"
+"    def set_%s(self, value):\n"
 "        \"\"\"Stash %s for the script to read. v1: stored on the instance only;\n"
 "        a future host_call() bridge will surface it to the running script.\"\"\"\n"
 "        self.%s = value\n"
 "\n",
-            setter_name, m->inputs[i].name, m->inputs[i].name);
+            m->inputs[i].name, m->inputs[i].name, m->inputs[i].name);
     }
 
     /* Per-event registration. */
@@ -7682,6 +7755,8 @@ static int emit_python_sdk(const CapturedManifest* m,
 
     fclose(f);
     printf("Generated Python SDK: %s\n", out_path);
+    free(cls);
+    free(out_path);
     return 0;
 }
 
@@ -7702,21 +7777,19 @@ static int emit_ruby_sdk(const CapturedManifest* m,
                          const char* out_dir) {
     if (!m->rb_module[0]) return 0;  /* no ruby binding declared */
 
-    char out_path[1024];
-    snprintf(out_path, sizeof(out_path), "%s/%s.rb", out_dir, m->rb_module);
+    char* out_path = ae_path_printf("%s/%s.rb", out_dir, m->rb_module);
     FILE* f = fopen(out_path, "w");
     if (!f) {
         fprintf(stderr, "Error: cannot write %s\n", out_path);
+        free(out_path);
         return -1;
     }
 
     /* Module name from the manifest's `ruby("module")` declaration —
      * conventionally snake_case. Class name is the namespace's name
      * mapped to CamelCase. */
-    char outer_module[160];
-    to_camel(m->rb_module, outer_module, sizeof(outer_module));
-    char cls[128];
-    to_camel(m->ns_name, cls, sizeof(cls));
+    char* outer_module = camel_of(m->rb_module);
+    char* cls = camel_of(m->ns_name);
 
     const char* lib_basename = strrchr(lib_path, '/');
     lib_basename = lib_basename ? lib_basename + 1 : lib_path;
@@ -7894,8 +7967,7 @@ static int emit_ruby_sdk(const CapturedManifest* m,
      * on_order_placed. */
     for (int i = 0; i < m->event_count; i++) {
         const char* ev = m->events[i].name;
-        char ev_snake[160];
-        to_snake(ev, ev_snake, sizeof(ev_snake));
+        char* ev_snake = snake_of(ev);
         fprintf(f,
 "  # Register a handler for the `%s` event. The block receives the int64 id.\n"
 "  # Holds the trampoline ref so Ruby's GC doesn't reclaim it while C still\n"
@@ -7909,6 +7981,7 @@ static int emit_ruby_sdk(const CapturedManifest* m,
 "    raise \"aether_event_register(%s) failed: rc=#{rc}\" if rc != 0\n"
 "  end\n\n",
             ev, ev_snake, ev, ev);
+        free(ev_snake);
     }
 
     /* Per-function method. Marshal strings to/from C string pointers. */
@@ -7977,6 +8050,9 @@ static int emit_ruby_sdk(const CapturedManifest* m,
 
     fclose(f);
     printf("Generated Ruby SDK: %s\n", out_path);
+    free(outer_module);
+    free(cls);
+    free(out_path);
     return 0;
 }
 
@@ -8031,19 +8107,21 @@ static int emit_java_sdk(const CapturedManifest* m,
                          const char* out_dir) {
     if (!m->java_class[0] || !m->java_pkg[0]) return 0;
 
-    /* package name → directory path: com.example.foo → com/example/foo */
-    char pkg_dir[1024];
-    snprintf(pkg_dir, sizeof(pkg_dir), "%s/%s", out_dir, m->java_pkg);
+    /* package name → directory path: com.example.foo → com/example/foo.
+     * Whole (#2888): cut at 1024 bytes, the dots were rewritten from an
+     * offset past the cut, and the file went elsewhere. */
+    char* pkg_dir = ae_path_printf("%s/%s", out_dir, m->java_pkg);
     for (char* p = pkg_dir + strlen(out_dir); *p; p++) {
         if (*p == '.') *p = '/';
     }
     mkdirs(pkg_dir);
 
-    char out_path[1280];
-    snprintf(out_path, sizeof(out_path), "%s/%s.java", pkg_dir, m->java_class);
+    char* out_path = ae_path_printf("%s/%s.java", pkg_dir, m->java_class);
+    free(pkg_dir);
     FILE* f = fopen(out_path, "w");
     if (!f) {
         fprintf(stderr, "Error: cannot write %s\n", out_path);
+        free(out_path);
         return -1;
     }
 
@@ -8172,25 +8250,22 @@ static int emit_java_sdk(const CapturedManifest* m,
 
     /* Per-input setter (camelCase). */
     for (int i = 0; i < m->input_count; i++) {
-        char input_camel[160];
-        to_camel(m->inputs[i].name, input_camel, sizeof(input_camel));
-        char setter[168];  // input_camel + "set" + NUL with headroom
-        snprintf(setter, sizeof(setter), "set%s", input_camel);
+        char* input_camel = camel_of(m->inputs[i].name);
         const char* jt = java_jtype_for(m->inputs[i].type);
         if (!jt) jt = "Object";
         fprintf(f,
-"    public void %s(%s value) {\n"
+"    public void set%s(%s value) {\n"
 "        /* v1: stored on the instance; future host_call() will surface to script. */\n"
 "        this.%s = value;\n"
 "    }\n\n",
-            setter, jt, m->inputs[i].name);
+            input_camel, jt, m->inputs[i].name);
+        free(input_camel);
     }
 
     /* Per-event registrar: on<EventName>(LongConsumer handler). */
     for (int i = 0; i < m->event_count; i++) {
         const char* ev = m->events[i].name;
-        char ev_camel[160];
-        to_camel(ev, ev_camel, sizeof(ev_camel));
+        char* ev_camel = camel_of(ev);
         fprintf(f,
 "    public void on%s(LongConsumer handler) {\n"
 "        try {\n"
@@ -8214,6 +8289,7 @@ static int emit_java_sdk(const CapturedManifest* m,
 "        } catch (Throwable t) { throw new RuntimeException(t); }\n"
 "    }\n\n",
             ev_camel, ev, ev);
+        free(ev_camel);
     }
 
     /* Per-function method (lowerCamel). */
@@ -8378,6 +8454,7 @@ static int emit_java_sdk(const CapturedManifest* m,
 
     fclose(f);
     printf("Generated Java SDK: %s\n", out_path);
+    free(out_path);
     return 0;
 }
 
@@ -8386,17 +8463,21 @@ static void emit_namespace_bindings(const char* manifest_path,
                                     const char* concat_path,
                                     const char* lib_path,
                                     const char* dir) {
-    /* Run aetherc --emit-namespace-manifest to capture JSON. */
-    char json[16384];
-    if (aetherc_capture_stdout("--emit-namespace-manifest", manifest_path,
-                               NULL, json, sizeof(json)) != 0) {
+    /* Run aetherc --emit-namespace-manifest to capture JSON, whole (#2888). */
+    char* json = NULL;
+    if (aetherc_capture_stdout_whole("--emit-namespace-manifest", manifest_path,
+                                     NULL, &json) != 0) {
         fprintf(stderr, "Warning: --emit-namespace-manifest failed; skipping SDK generation\n");
+        free(json);
         return;
     }
 
     CapturedManifest m;
-    if (parse_manifest_json(json, &m) != 0) {
+    int parsed = parse_manifest_json(json, &m);
+    free(json);
+    if (parsed != 0) {
         fprintf(stderr, "Warning: could not parse manifest JSON; skipping SDK generation\n");
+        captured_manifest_free(&m);
         return;
     }
 
@@ -8406,6 +8487,7 @@ static void emit_namespace_bindings(const char* manifest_path,
     if (aetherc_capture_stdout_whole("--list-functions", concat_path, NULL, &fn_list) != 0) {
         fprintf(stderr, "Warning: --list-functions failed; skipping SDK generation\n");
         free(fn_list);
+        captured_manifest_free(&m);
         return;
     }
 
@@ -8434,6 +8516,7 @@ static void emit_namespace_bindings(const char* manifest_path,
     }
     free(out_dir);
     captured_functions_free(fns, fn_count);
+    captured_manifest_free(&m);
 
     (void)dir;  /* may be needed for relative-path resolution later */
 }
@@ -8520,7 +8603,9 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
     /* Whole, as the manifest's path is (#2888). */
     char* cmd = ae_path_printf("\"%s\" --emit-namespace-describe \"%s\" \"%s\"",
                                tc.compiler, manifest_path, describe_c);
-    int described = run_cmd_quiet(cmd) == 0;
+    /* Its stderr shown: a manifest aether_describe() cannot hold is
+     * refused there, by name (#2888). */
+    int described = run_cmd_show_warnings(cmd) == 0;
     if (!described) {
         fprintf(stderr, "Error: aetherc --emit-namespace-describe failed\n");
         fprintf(stderr, "       cmd: %s\n", cmd);
@@ -8673,11 +8758,12 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
      *   --namespace .          →  ./lib<cwd_basename>.so
      */
     /* Normalize dir: strip trailing slash so target_dir works for both
-     * "aether" and "aether/". */
-    char target_dir[1024];
+     * "aether" and "aether/". The directory, the library's name and its
+     * paths below are built whole (#2888): cut at 1024, 512 and 256
+     * bytes, a long one named another library, or the -o path of the
+     * build and the path renamed to parted ways. */
+    char* target_dir = ae_path_printf("%s", dir);
     {
-        strncpy(target_dir, dir, sizeof(target_dir) - 1);
-        target_dir[sizeof(target_dir) - 1] = '\0';
         size_t dlen = strlen(target_dir);
         while (dlen > 1 && target_dir[dlen - 1] == '/') {
             target_dir[--dlen] = '\0';
@@ -8687,31 +8773,32 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
     /* Derive the library basename. Prefer -o, then the manifest's
      * namespace name (read by re-invoking aetherc to dump the JSON
      * manifest), then the directory's basename as a fallback. The
-     * manifest name is what users actually want — `namespace("trading")`
-     * → libtrading.so. */
-    char base_name[512];
+     * manifest name is what users actually want: `namespace("trading")`
+     * gives libtrading.so. */
+    char* base_name = NULL;
     if (output_name) {
-        strncpy(base_name, output_name, sizeof(base_name) - 1);
-        base_name[sizeof(base_name) - 1] = '\0';
+        base_name = ae_path_printf("%s", output_name);
     } else {
-        char ns_json[16384];
-        char ns_name[256] = "";
-        if (aetherc_capture_stdout("--emit-namespace-manifest", manifest_path,
-                                   NULL, ns_json, sizeof(ns_json)) == 0) {
-            json_extract_string_field(ns_json, "namespace", ns_name, sizeof(ns_name));
+        char* ns_json = NULL;
+        char* ns_name = NULL;
+        if (aetherc_capture_stdout_whole("--emit-namespace-manifest", manifest_path,
+                                         NULL, &ns_json) == 0) {
+            ns_name = json_string_field(ns_json, "namespace");
         }
-        if (ns_name[0]) {
-            strncpy(base_name, ns_name, sizeof(base_name) - 1);
-            base_name[sizeof(base_name) - 1] = '\0';
+        free(ns_json);
+        if (ns_name && ns_name[0]) {
+            base_name = ns_name;
         } else {
+            free(ns_name);
             /* Fallback: directory basename. */
             /* Both separators: _getcwd() on Windows returns backslashes,
              * and a '/'-only scan took the whole path as the basename
              * ("./libD:\Git\proj.c" was the output it then tried to open). */
             const char* base = target_dir;
-            static char cwd[1024];
+            char* cwd = NULL;
             if (strcmp(target_dir, ".") == 0) {
-                if (getcwd(cwd, sizeof(cwd))) {
+                cwd = ae_getcwd_whole();
+                if (cwd) {
                     base = cwd;
                     for (const char* q = cwd; *q; q++)
                         if (*q == '/' || *q == '\\') base = q + 1;
@@ -8720,14 +8807,13 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
                 for (const char* q = target_dir; *q; q++)
                     if (*q == '/' || *q == '\\') base = q + 1;
             }
-            strncpy(base_name, base, sizeof(base_name) - 1);
-            base_name[sizeof(base_name) - 1] = '\0';
+            base_name = ae_path_printf("%s", base);
+            free(cwd);
         }
     }
 
     /* Full output path with lib<base><ext>, anchored under target_dir. */
-    char out_path[2400];
-    snprintf(out_path, sizeof(out_path), "%s/lib%s%s", target_dir, base_name, lib_ext);
+    char* out_path = ae_path_printf("%s/lib%s%s", target_dir, base_name, lib_ext);
 
     /* Step 5: build the synthetic .ae as --emit=lib, then re-link with
      * the describe.c stub appended. We piggy-back on the existing
@@ -8741,9 +8827,7 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
      * literally — see cmd_build l.1532). So pass the path WITHOUT
      * the .so/.dylib/.dll suffix and let cmd_build's existing override
      * take effect. */
-    char out_no_ext[1024];
-    strncpy(out_no_ext, out_path, sizeof(out_no_ext) - 1);
-    out_no_ext[sizeof(out_no_ext) - 1] = '\0';
+    char* out_no_ext = ae_path_printf("%s", out_path);
     char* dot = strrchr(out_no_ext, '.');
     if (dot && (strcmp(dot, ".so") == 0 || strcmp(dot, ".dylib") == 0 || strcmp(dot, ".dll") == 0)) {
         *dot = '\0';
@@ -8772,7 +8856,7 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
                 fprintf(stderr, "Warning: built %s but couldn't rename to %s\n",
                         out_no_ext, out_path);
                 printf("Built namespace: %s\n", out_no_ext);
-                return rc;
+                goto done;
             }
         }
 #ifdef __APPLE__
@@ -8814,6 +8898,11 @@ static int build_namespace_with(const char* tmpdir, const char* dir, const char*
          * binding target the manifest declared. */
         emit_namespace_bindings(manifest_path, concat_path, out_path, dir);
     }
+done:
+    free(out_no_ext);
+    free(out_path);
+    free(base_name);
+    free(target_dir);
     return rc;
 }
 
