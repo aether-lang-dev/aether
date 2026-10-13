@@ -11224,12 +11224,13 @@ static int cmd_examples(int argc, char** argv) {
         examples_dir = argv[0];
     }
 
-    /* Each path whole, or reported and counted as a failure (#2862): read
-     * 511 bytes at a time, a longer path came back as two files, neither of
-     * which exists. The rows hold what the steps below take. */
-    char files[512][512];
+    /* Every example, each path whole (#2862): the list grows, and every path
+     * built from an example's below is a heap string. Read 511 bytes at a
+     * time into 512 rows, a longer path came back as two files, neither of
+     * which exists, and the 513th example on was refused. */
+    char** files = NULL;
     int file_count = 0;
-    int unlisted = 0;
+    int file_cap = 0;
 
 #ifdef _WIN32
     char* find_cmd = ae_path_printf("dir /b /s \"%s\\*.ae\" 2>nul", examples_dir);
@@ -11244,17 +11245,8 @@ static int cmd_examples(int argc, char** argv) {
         while (ae_read_line(pipe, &line, &line_cap) > 0) {
             line[strcspn(line, "\n\r")] = '\0';
             if (!line[0]) continue;
-            if (file_count == (int)(sizeof(files) / sizeof(files[0]))) {
-                fprintf(stderr, "Error: %s: not built, past the first %d examples\n",
-                        line, file_count);
-                unlisted++;
-            } else if (ae_sprintf(files[file_count], sizeof(files[0]), "%s", line) != 0) {
-                fprintf(stderr, "Error: %s: not built, the path is longer than %zu bytes\n",
-                        line, sizeof(files[0]) - 1);
-                unlisted++;
-            } else {
-                file_count++;
-            }
+            files = ae_grow_array(files, file_count, &file_cap, sizeof(char*));
+            files[file_count++] = ae_path_printf("%s", line);
         }
         free(line);
         pclose(pipe);
@@ -11262,14 +11254,15 @@ static int cmd_examples(int argc, char** argv) {
 
     if (file_count == 0) {
         printf("No .ae files found in %s/\n", examples_dir);
-        return unlisted > 0 ? 1 : 0;
+        free(files);
+        return 0;
     }
 
     printf("Building %d example(s)...\n\n", file_count);
 
     mkdirs("build/examples");
 
-    int pass = 0, fail = unlisted, skipped = 0;
+    int pass = 0, fail = 0, skipped = 0;
 
     for (int i = 0; i < file_count; i++) {
         const char* src = files[i];
@@ -11285,54 +11278,49 @@ static int cmd_examples(int argc, char** argv) {
         const char* slash = strrchr(src, '/');
         if (!slash) slash = strrchr(src, '\\');
         const char* name = slash ? slash + 1 : src;
-        char base[256];
-        strncpy(base, name, sizeof(base) - 1);
-        base[sizeof(base) - 1] = '\0';
+        char* base = ae_path_printf("%s", name);
         char* dot = strrchr(base, '.');
         if (dot) *dot = '\0';
 
         printf("  %-30s ", base);
         fflush(stdout);
 
-        char c_file[2048], exe_file[2048], cmd[AE_CMD_BUF];
-        snprintf(c_file, sizeof(c_file), "build/examples/%s.c", base);
-        snprintf(exe_file, sizeof(exe_file), "build/examples/%s" EXE_EXT, base);
+        char cmd[AE_CMD_BUF];
+        char* c_file = ae_path_printf("build/examples/%s.c", base);
+        char* exe_file = ae_path_printf("build/examples/%s" EXE_EXT, base);
+        free(base);
 
         // Find extra .c files in the same directory as the .ae source
-        char src_dir[512];
-        strncpy(src_dir, src, sizeof(src_dir) - 1);
-        src_dir[sizeof(src_dir) - 1] = '\0';
+        char* src_dir = ae_path_printf("%s", src);
         char* last_sep = strrchr(src_dir, '/');
         if (!last_sep) last_sep = strrchr(src_dir, '\\');
         if (last_sep) *last_sep = '\0';
-        else strcpy(src_dir, ".");
+        else { free(src_dir); src_dir = ae_path_printf("."); }
 
-        char extra_c[2048] = "";
-        char find_c[1024];
+        char* extra_c = ae_path_printf("%s", "");
 #ifdef _WIN32
-        snprintf(find_c, sizeof(find_c), "dir /b \"%s\\*.c\" 2>nul", src_dir);
+        char* find_c = ae_path_printf("dir /b \"%s\\*.c\" 2>nul", src_dir);
 #else
-        snprintf(find_c, sizeof(find_c), "find \"%s\" -maxdepth 1 -name '*.c' 2>/dev/null", src_dir);
+        char* find_c = ae_path_printf("find \"%s\" -maxdepth 1 -name '*.c' 2>/dev/null", src_dir);
 #endif
         FILE* c_pipe = popen(find_c, "r");
+        free(find_c);
         if (c_pipe) {
-            char c_line[512];
-            while (fgets(c_line, sizeof(c_line), c_pipe)) {
+            char* c_line = NULL;
+            size_t c_cap = 0;
+            while (ae_read_line(c_pipe, &c_line, &c_cap) > 0) {
                 c_line[strcspn(c_line, "\n\r")] = '\0';
-                if (strlen(c_line) == 0) continue;
-                char c_path[1100];
+                if (!c_line[0]) continue;
 #ifdef _WIN32
-                snprintf(c_path, sizeof(c_path), "%s\\%s", src_dir, c_line);
+                ae_path_appendf(&extra_c, " %s\\%s", src_dir, c_line);
 #else
-                snprintf(c_path, sizeof(c_path), "%s", c_line);
+                ae_path_appendf(&extra_c, " %s", c_line);
 #endif
-                if (strlen(extra_c) + strlen(c_path) + 2 < sizeof(extra_c)) {
-                    strcat(extra_c, " ");
-                    strcat(extra_c, c_path);
-                }
             }
+            free(c_line);
             pclose(c_pipe);
         }
+        free(src_dir);
 
         // Step 1: compile .ae -> .c
         // GCC conservatively assumes src (char* from glob) may be PATH_MAX-sized;
@@ -11348,26 +11336,28 @@ static int cmd_examples(int argc, char** argv) {
         if (run_cmd_quiet(cmd) != 0) {
             printf("FAIL (compile)\n");
             fail++;
-            continue;
-        }
-
-        // Step 2: link .c + extra -> exe
-        const char* extra = extra_c[0] ? extra_c : NULL;
-        build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, true, extra);
-        if (run_cmd_quiet(cmd) != 0) {
-            printf("FAIL (build)\n");
-            fail++;
+        } else {
+            // Step 2: link .c + extra -> exe
+            const char* extra = extra_c[0] ? extra_c : NULL;
+            build_gcc_cmd(cmd, sizeof(cmd), c_file, exe_file, true, extra);
+            if (run_cmd_quiet(cmd) != 0) {
+                printf("FAIL (build)\n");
+                fail++;
+            } else {
+                printf("OK\n");
+                pass++;
+            }
             remove(c_file);
-            continue;
         }
-
-        printf("OK\n");
-        pass++;
-        remove(c_file);
+        free(extra_c);
+        free(c_file);
+        free(exe_file);
     }
 
-    printf("\n%d passed, %d failed, %d total\n", pass, fail, file_count + unlisted - skipped);
+    printf("\n%d passed, %d failed, %d total\n", pass, fail, file_count - skipped);
     printf("Binaries in build/examples/\n");
+    for (int i = 0; i < file_count; i++) free(files[i]);
+    free(files);
     return (fail > 0) ? 1 : 0;
 }
 
