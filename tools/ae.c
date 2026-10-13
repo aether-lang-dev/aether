@@ -1596,9 +1596,10 @@ bool get_exe_path(char* buf, size_t size) {
     uint32_t sz = (uint32_t)size;
     if (_NSGetExecutablePath(buf, &sz) == 0) {
         char resolved[PATH_MAX];
-        if (realpath(buf, resolved)) {
-            strncpy(buf, resolved, size - 1);
-            buf[size - 1] = '\0';
+        /* Whole or not at all, as on Windows (#2888): cut, it named
+         * another file. */
+        if (realpath(buf, resolved) && strlen(resolved) < size) {
+            memcpy(buf, resolved, strlen(resolved) + 1);
             return true;
         }
     }
@@ -4118,14 +4119,13 @@ static void cmd_too_long(char* cmd, size_t size, int needed) {
  * ffmpeg package) failed with "file not found" from a binary release, which
  * builds no archive to carry it. LOCALBASE (the ports variable) wins, else
  * /usr/local. */
+/* The flags and the directories are built whole, kept for the run (#2888):
+ * written into 1200 bytes from two 1100-byte paths, a long prefix cut the
+ * flag mid-path and the compiler was handed a broken argument. */
 static const char* macos_homebrew_flags(int linking) {
 #if defined(__APPLE__) || defined(__FreeBSD__)
-    static char flags[2][1200];
-    static int computed = 0;
-    if (!computed) {
-        computed = 1;
-        flags[0][0] = flags[1][0] = '\0';
-        char inc[1100], lib[1100];
+    static char* flags[2] = { NULL, NULL };
+    if (!flags[0]) {
 #if defined(__APPLE__)
         const char* prefix = getenv("HOMEBREW_PREFIX");
         if (!prefix || !*prefix) prefix = "/opt/homebrew";
@@ -4133,15 +4133,19 @@ static const char* macos_homebrew_flags(int linking) {
         const char* prefix = getenv("LOCALBASE");
         if (!prefix || !*prefix) prefix = "/usr/local";
 #endif
-        snprintf(inc, sizeof(inc), "%s/include", prefix);
-        snprintf(lib, sizeof(lib), "%s/lib", prefix);
+        char* inc = ae_path_printf("%s/include", prefix);
+        char* lib = ae_path_printf("%s/lib", prefix);
         if (strchr(prefix, '"') == NULL && dir_exists(inc)) {
-            snprintf(flags[0], sizeof(flags[0]), " -idirafter \"%s\"", inc);
-            if (dir_exists(lib))
-                snprintf(flags[1], sizeof(flags[1]), " -idirafter \"%s\" -L\"%s\"", inc, lib);
-            else
-                snprintf(flags[1], sizeof(flags[1]), "%s", flags[0]);
+            flags[0] = ae_path_printf(" -idirafter \"%s\"", inc);
+            flags[1] = dir_exists(lib)
+                ? ae_path_printf(" -idirafter \"%s\" -L\"%s\"", inc, lib)
+                : ae_path_printf("%s", flags[0]);
+        } else {
+            flags[0] = ae_path_printf("%s", "");
+            flags[1] = ae_path_printf("%s", "");
         }
+        free(inc);
+        free(lib);
     }
     return flags[linking ? 1 : 0];
 #else
@@ -7076,17 +7080,52 @@ typedef struct {
     struct { char name[128]; char carries[64]; } events[64];
 } CapturedManifest;
 
+/* A function of the namespace, from `--list-functions`: its name, return
+ * type and parameters, each string whole and the parameters as many as it
+ * has (#2888: a 128-byte name or a 64-byte type was cut, past 16 parameters
+ * the rest were dropped, past 64 functions the rest too, and the bindings
+ * then named what the library does not export). Heap strings, freed with
+ * captured_functions_free. */
 typedef struct {
-    char name[128];
-    char ret[64];
+    char* name;
+    char* type;
+} CapturedParam;
+
+typedef struct {
+    char* name;
+    char* ret;
     int  param_count;
-    struct { char name[128]; char type[64]; } params[16];
+    CapturedParam* params;
 } CapturedFunction;
 
-/* Run aetherc with the given args and capture stdout into out_buf. */
+static int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
+                                        const char* arg2_or_null, char** out);
+
+/* Run aetherc with the given args and capture stdout into out_buf. Output
+ * that does not fit is reported and the capture fails (#2888): cut, the
+ * caller parsed what happened to fit. */
 int aetherc_capture_stdout(const char* arg1, const char* in_path,
                                   const char* arg2_or_null,
                                   char* out_buf, size_t out_size) {
+    char* whole = NULL;
+    int rc = aetherc_capture_stdout_whole(arg1, in_path, arg2_or_null, &whole);
+    size_t n = strlen(whole);
+    if (n >= out_size) {
+        fprintf(stderr, "Error: aetherc %s printed %zu bytes; at most %zu are read here\n",
+                arg1, n, out_size - 1);
+        out_buf[0] = '\0';
+        free(whole);
+        return rc ? rc : 1;
+    }
+    memcpy(out_buf, whole, n + 1);
+    free(whole);
+    return rc;
+}
+
+/* aetherc_capture_stdout into a heap string of any length, for free(). */
+static int aetherc_capture_stdout_whole(const char* arg1, const char* in_path,
+                                        const char* arg2_or_null, char** out) {
+    *out = ae_path_printf("%s", "");
     char* cmd;
     /* Forward the same `--lib` search path the real compile uses, so an
      * inspect/manifest prepass resolves bare-name `--lib`-backed imports
@@ -7111,7 +7150,6 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
     free(lib_flags);
     if (!cmd) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
-        out_buf[0] = '\0';
         return 1;
     }
     /* Through the same runner every other aetherc invocation uses, with the
@@ -7127,14 +7165,16 @@ int aetherc_capture_stdout(const char* arg1, const char* in_path,
     compile_log_path(capture, sizeof(capture));
     int rc = run_cmd_capture_stdout(cmd, capture);
     free(cmd);
-    out_buf[0] = '\0';
     /* Text mode, as popen("r") was: aetherc's stdout carries "\r\n" on
      * Windows, and a '\r' left on the last token of a line ("string\r")
-     * fails every type lookup the namespace SDK generators do. */
+     * fails every type lookup the namespace SDK generators do. Read whole,
+     * a chunk at a time. */
     FILE* p = fopen(capture, "r");
     if (p) {
-        size_t total = fread(out_buf, 1, out_size - 1, p);
-        out_buf[total] = '\0';
+        char chunk[4096];
+        size_t got;
+        while ((got = fread(chunk, 1, sizeof(chunk), p)) > 0)
+            ae_path_appendf(out, "%.*s", (int)got, chunk);
         fclose(p);
     }
     remove(capture);
@@ -7237,65 +7277,79 @@ static int parse_manifest_json(const char* json, CapturedManifest* m) {
     return 0;
 }
 
-/* Field `what` of function `fn`'s entry, copied into `dst` whole: 0, or -1
- * with the reason printed when it does not fit (#2862). Cut, a name bound
- * a symbol the library does not export. */
-static int fn_list_field(char* dst, size_t cap, const char* src, const char* what,
-                         const char* fn) {
-    if (ae_sprintf(dst, cap, "%s", src) == 0) return 0;
-    fprintf(stderr, "Warning: --list-functions: the %s of function '%s' is longer than %zu bytes\n",
-            what, fn, cap - 1);
-    return -1;
+/* `arr`, `count` elements of `size` bytes in `*cap` slots, with a slot for
+ * one more: grown as needed, out of memory ending the run. */
+static void* ae_grow_array(void* arr, int count, int* cap, size_t size) {
+    if (count < *cap) return arr;
+    int ncap = *cap ? *cap * 2 : 8;
+    void* grown = realloc(arr, (size_t)ncap * size);
+    if (!grown) {
+        fprintf(stderr, "Error: out of memory reading the namespace's function list\n");
+        exit(1);
+    }
+    *cap = ncap;
+    return grown;
 }
 
-/* Parse the function list `name|return|p1:t1,p2:t2,...` (one per line).
- * The number of entries, or -1 (the reason printed) for an entry whose name
- * or a type does not fit. Each line is read whole. */
-static int parse_function_list(const char* text, CapturedFunction* fns,
-                               int max_fns) {
-    int count = 0;
+static void captured_functions_free(CapturedFunction* fns, int n) {
+    for (int i = 0; i < n; i++) {
+        free(fns[i].name);
+        free(fns[i].ret);
+        for (int p = 0; p < fns[i].param_count; p++) {
+            free(fns[i].params[p].name);
+            free(fns[i].params[p].type);
+        }
+        free(fns[i].params);
+    }
+    free(fns);
+}
+
+/* Parse the function list `name|return|p1:t1,p2:t2,...` (one per line,
+ * the last one with or without its newline) into `*out`, a heap array for
+ * captured_functions_free. Returns the number of functions. Every line,
+ * name, type and parameter is taken whole, however many there are (#2888). */
+static int parse_function_list(const char* text, CapturedFunction** out) {
+    CapturedFunction* fns = NULL;
+    int count = 0, cap = 0;
     const char* p = text;
-    while (*p && count < max_fns) {
+    while (*p) {
         const char* eol = strchr(p, '\n');
-        if (!eol) break;
-        size_t line_len = eol - p;
-        if (line_len == 0) { p = eol + 1; continue; }
+        size_t line_len = eol ? (size_t)(eol - p) : strlen(p);
         char* line = ae_path_printf("%.*s", (int)line_len, p);
-        p = eol + 1;
+        p = eol ? eol + 1 : p + line_len;
 
         char* bar1 = strchr(line, '|');
-        if (!bar1) { free(line); continue; }
-        *bar1 = '\0';
-        char* bar2 = strchr(bar1 + 1, '|');
+        char* bar2 = bar1 ? strchr(bar1 + 1, '|') : NULL;
         if (!bar2) { free(line); continue; }
+        *bar1 = '\0';
         *bar2 = '\0';
 
-        CapturedFunction* f = &fns[count];
+        fns = ae_grow_array(fns, count, &cap, sizeof(*fns));
+        CapturedFunction* f = &fns[count++];
         memset(f, 0, sizeof(*f));
-        int ok = fn_list_field(f->name, sizeof(f->name), line, "name", line) == 0 &&
-                 fn_list_field(f->ret, sizeof(f->ret), bar1 + 1, "return type", line) == 0;
+        f->name = ae_path_printf("%s", line);
+        f->ret = ae_path_printf("%s", bar1 + 1);
 
         /* params: comma-separated name:type */
+        int pcap = 0;
         char* piece = bar2 + 1;
-        while (ok && *piece && f->param_count < 16) {
+        while (*piece) {
             char* comma = strchr(piece, ',');
             if (comma) *comma = '\0';
             char* colon = strchr(piece, ':');
             if (colon) {
                 *colon = '\0';
-                ok = fn_list_field(f->params[f->param_count].name, sizeof(f->params[0].name),
-                                   piece, "parameter name", line) == 0 &&
-                     fn_list_field(f->params[f->param_count].type, sizeof(f->params[0].type),
-                                   colon + 1, "parameter type", line) == 0;
+                f->params = ae_grow_array(f->params, f->param_count, &pcap, sizeof(*f->params));
+                f->params[f->param_count].name = ae_path_printf("%s", piece);
+                f->params[f->param_count].type = ae_path_printf("%s", colon + 1);
                 f->param_count++;
             }
             if (!comma) break;
             piece = comma + 1;
         }
         free(line);
-        if (!ok) return -1;
-        count++;
     }
+    *out = fns;
     return count;
 }
 
@@ -8173,11 +8227,19 @@ static int emit_java_sdk(const CapturedManifest* m,
         }
         if (!ok) continue;
 
-        char m_camel[160];
-        to_lower_camel(fn->name, m_camel, sizeof(m_camel));
+        /* lowerCamel is never longer than the name it is made from, so a
+         * buffer the name's size holds it whole, whatever the length. */
+        size_t m_cap = strlen(fn->name) + 1;
+        char* m_camel = malloc(m_cap);
+        if (!m_camel) {
+            fprintf(stderr, "Error: out of memory writing the Java SDK\n");
+            exit(1);
+        }
+        to_lower_camel(fn->name, m_camel, m_cap);
         const char* jret = java_jtype_for(fn->ret);
 
         fprintf(f, "    public %s %s(", jret, m_camel);
+        free(m_camel);
         for (int p = 0; p < fn->param_count; p++) {
             if (p > 0) fputs(", ", f);
             fprintf(f, "%s %s", java_jtype_for(fn->params[p].type), fn->params[p].name);
@@ -8338,31 +8400,28 @@ static void emit_namespace_bindings(const char* manifest_path,
         return;
     }
 
-    /* Run aetherc --list-functions on the synthetic concat file. */
-    char fn_list[16384];
-    if (aetherc_capture_stdout("--list-functions", concat_path,
-                               NULL, fn_list, sizeof(fn_list)) != 0) {
+    /* Run aetherc --list-functions on the synthetic concat file, and read
+     * its list whole (#2888): a 16 KB buffer dropped the functions past it. */
+    char* fn_list = NULL;
+    if (aetherc_capture_stdout_whole("--list-functions", concat_path, NULL, &fn_list) != 0) {
         fprintf(stderr, "Warning: --list-functions failed; skipping SDK generation\n");
+        free(fn_list);
         return;
     }
 
-    CapturedFunction fns[64];
-    int fn_count = parse_function_list(fn_list, fns, 64);
-    if (fn_count < 0) {
-        fprintf(stderr, "Warning: skipping SDK generation\n");
-        return;
-    }
+    CapturedFunction* fns = NULL;
+    int fn_count = parse_function_list(fn_list, &fns);
+    free(fn_list);
 
     /* Determine where to write SDKs. Place them next to the .so so
-     * users can `cp libfoo.so foo_module.py /target/` together. */
-    char out_dir[1024];
-    strncpy(out_dir, lib_path, sizeof(out_dir) - 1);
-    out_dir[sizeof(out_dir) - 1] = '\0';
+     * users can `cp libfoo.so foo_module.py /target/` together. The
+     * directory whole, as the library's path is (#2888). */
+    char* out_dir = ae_path_printf("%s", lib_path);
     char* slash = strrchr(out_dir, '/');
     char* bslash = strrchr(out_dir, '\\');   /* a Windows -o path */
     if (bslash > slash) slash = bslash;
     if (slash) *slash = '\0';
-    else strcpy(out_dir, ".");
+    else { free(out_dir); out_dir = ae_path_printf("."); }
 
     if (m.py_module[0]) {
         emit_python_sdk(&m, fns, fn_count, lib_path, out_dir);
@@ -8373,6 +8432,8 @@ static void emit_namespace_bindings(const char* manifest_path,
     if (m.java_class[0] && m.java_pkg[0]) {
         emit_java_sdk(&m, fns, fn_count, lib_path, out_dir);
     }
+    free(out_dir);
+    captured_functions_free(fns, fn_count);
 
     (void)dir;  /* may be needed for relative-path resolution later */
 }
@@ -8406,6 +8467,9 @@ static void emit_namespace_bindings(const char* manifest_path,
 
 #include <dirent.h>
 
+static int build_namespace_with(const char* tmpdir, const char* dir, const char* output_name,
+                                const char* manifest_path);
+
 static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     const char* dir = NULL;
     const char* output_name = NULL;
@@ -8427,8 +8491,16 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
         return 1;
     }
 
-    char manifest_path[1024];
-    snprintf(manifest_path, sizeof(manifest_path), "%s/manifest.ae", dir);
+    /* The manifest's path whole (#2888): cut at 1024 bytes, a long
+     * directory's manifest was reported missing. */
+    char* manifest_path = ae_path_printf("%s/manifest.ae", dir);
+    int rc = build_namespace_with(tmpdir, dir, output_name, manifest_path);
+    free(manifest_path);
+    return rc;
+}
+
+static int build_namespace_with(const char* tmpdir, const char* dir, const char* output_name,
+                                const char* manifest_path) {
     if (!path_exists(manifest_path)) {
         fprintf(stderr, "Error: %s not found, every namespace needs a manifest.ae\n", manifest_path);
         return 1;
@@ -8445,15 +8517,16 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
     /* Step 1: produce the describe.c stub from manifest.ae. */
     char describe_c[1056];  // tmpdir[1024] + "/aether_describe.c" + NUL
     snprintf(describe_c, sizeof(describe_c), "%s/aether_describe.c", tmpdir);
-    char cmd[16384];
-    snprintf(cmd, sizeof(cmd),
-        "\"%s\" --emit-namespace-describe \"%s\" \"%s\"",
-        tc.compiler, manifest_path, describe_c);
-    if (run_cmd_quiet(cmd) != 0) {
+    /* Whole, as the manifest's path is (#2888). */
+    char* cmd = ae_path_printf("\"%s\" --emit-namespace-describe \"%s\" \"%s\"",
+                               tc.compiler, manifest_path, describe_c);
+    int described = run_cmd_quiet(cmd) == 0;
+    if (!described) {
         fprintf(stderr, "Error: aetherc --emit-namespace-describe failed\n");
         fprintf(stderr, "       cmd: %s\n", cmd);
-        return 1;
     }
+    free(cmd);
+    if (!described) return 1;
     if (!path_exists(describe_c)) {
         fprintf(stderr, "Error: describe stub was not produced at %s\n", describe_c);
         return 1;
@@ -8717,14 +8790,14 @@ static int build_namespace_in(const char* tmpdir, int argc, char** argv) {
         {
             const char* base = strrchr(out_path, '/');
             base = base ? base + 1 : out_path;
-            char id_cmd[4096];
-            snprintf(id_cmd, sizeof(id_cmd),
-                     "install_name_tool -id '@rpath/%s' '%s' 2>/dev/null",
-                     base, out_path);
+            /* Whole (#2888): out_path holds up to 2399 bytes, twice here. */
+            char* id_cmd = ae_path_printf("install_name_tool -id '@rpath/%s' '%s' 2>/dev/null",
+                                          base, out_path);
             if (system(id_cmd) != 0) {
                 fprintf(stderr, "Warning: install_name_tool failed on %s; "
                                 "consumers may fail to dlopen.\n", out_path);
             }
+            free(id_cmd);
             /* Rewriting the id modifies the file, which invalidates the ad-hoc
              * signature ld64 attaches to everything it links on Apple silicon.
              * dyld does not report that as an error: the kernel SIGKILLs the
