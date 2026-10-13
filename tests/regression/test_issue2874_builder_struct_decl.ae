@@ -1,0 +1,84 @@
+// Regression (#2874): a builder that returns a struct, called with a
+// trailing block in a declaration (`p = mkpair(w) { ... }`), did not
+// compile: the declaration was emitted with ` = 0` to be assigned after the
+// block, an invalid initializer for a struct. The block and the arguments
+// now run ahead of the declaration, which is initialized from the call as
+// any declaration is, and the struct's strings are its own, freed at its
+// scope exit. Each shape runs in a round, and the rounds must not grow the
+// heap.
+
+import std.map
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+struct Pair {
+    a: string
+    b: string
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+builder mkpair(text: string): Pair {
+    a = ""
+    if _builder != null && map_has(_builder, "a") == 1 { a, _ = map.get(_builder, "a") }
+    p = Pair { a: string.concat(text, a), b: string.concat(text, "b") }
+    if _builder != null { map_free(_builder) }
+    return p
+}
+
+declared(w: string) -> int {
+    p = mkpair(w) {
+        set_opt("a", "1")
+    }
+    return string.length(p.a) + string.length(p.b)
+}
+
+round(w: string) -> int {
+    total = 0
+    i = 0
+    while i < 20 {
+        q = mkpair(w) {
+            set_opt("a", "22")
+        }
+        total = total + declared(w) + string.length(q.a)
+        q = mkpair(w) {
+            set_opt("a", "3")
+        }
+        total = total + string.length(q.a)
+        i = i + 1
+    }
+    return total
+}
+
+main() {
+    w = "x"
+    p = mkpair(w) {
+        set_opt("a", "1")
+    }
+    check(p.a == "x1" && p.b == "xb", "a declaration from a builder's struct (${p.a} ${p.b})")
+    p = mkpair(w) {
+        set_opt("a", "9")
+    }
+    check(p.a == "x9", "a reassignment from a builder's struct (${p.a})")
+    check(declared(w) == 4, "a declaration in a function")
+    v = string.concat("w", "v")
+    check(round(v) == 20 * (6 + 4 + 3), "the rounds")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round(v)
+            }, 5)
+        check(grown == 0, "the heap grew by ${grown} bytes")
+    }
+    println("ok")
+}

@@ -4946,34 +4946,6 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
     return 1;
 }
 
-/* datastar#4: is this initialiser a builder call carrying a trailing block?
- *
- * Such a call is lowered TWICE by design: the declaration emits it so the
- * variable has a value, and the builder handler further down re-emits it with
- * the filled config and reassigns. The ordinary declaration path already
- * suppresses its half for exactly this reason (`defer_with_trailing`, which
- * emits ` = 0`), but the heap-STRING reassignment path did not -- so a builder
- * declaring a `string` return ran its body twice, once with a NULL config.
- *
- * Silent, and side-effecting: the assigned value is correct because the second
- * write wins, so only a builder that DOES something reveals it. The datastar
- * port hit it as every SSE patch being streamed twice, once without its
- * selector.
- *
- * `err = sse.patch_elements(html) { ... }` is the natural shape for any
- * builder reporting an error Go-style, so this is on a common path. */
-static int init_is_builder_with_trailing(CodeGenerator* gen, ASTNode* init) {
-    if (!gen || !init) return 0;
-    if (init->type != AST_FUNCTION_CALL || !init->value) return 0;
-    if (!is_builder_func_reg(gen, init->value)) return 0;
-    for (int i = 0; i < init->child_count; i++) {
-        ASTNode* a = init->children[i];
-        if (a && a->type == AST_CLOSURE && a->value &&
-            strcmp(a->value, "trailing") == 0) return 1;
-    }
-    return 0;
-}
-
 /* Struct-reassignment helper (#465). For `<var> = <value>` where `<var>`
  * is a struct local with heap-string fields, emit
  * `<Struct>_replace(&<var>, <value>);`: the previous struct's owned strings
@@ -13600,7 +13572,8 @@ static void emit_builder_args_prelude(CodeGenerator* gen, ASTNode* call) {
  * stored, or thrown away, as any call's is, a string bound to a tracked
  * local freeing the one it replaces, one thrown away freed. Assigned by
  * hand before, a builder's string result was never tracked, and leaked.
- * Emitted inside a `{` the caller opens and closes. */
+ * The config is declared ahead of the statement, so the statement itself
+ * can be a declaration of what the call returns (#2874). */
 static int g_builder_cfg_seq = 0;
 static const char* emit_builder_prelude(CodeGenerator* gen, ASTNode* call) {
     const char* cfg = cg_internf("_bcfg%d", g_builder_cfg_seq++);
@@ -13608,8 +13581,14 @@ static const char* emit_builder_prelude(CodeGenerator* gen, ASTNode* call) {
     /* (void*)(intptr_t) bridges int-returning factories (aether-ui's
      * `_surface_window_factory() -> int`): a bare int to pointer
      * conversion is an error under GCC 14. */
-    fprintf(gen->output, "void* %s = (void*)(intptr_t)%s();\n", cfg,
-            get_builder_factory(gen, call->value));
+    if (hoist_ready(gen)) {
+        hoist_declare(gen, "void*", cfg);
+        fprintf(gen->output, "%s = (void*)(intptr_t)%s();\n", cfg,
+                get_builder_factory(gen, call->value));
+    } else {
+        fprintf(gen->output, "void* %s = (void*)(intptr_t)%s();\n", cfg,
+                get_builder_factory(gen, call->value));
+    }
     print_indent(gen);
     fprintf(gen->output, "_aether_ctx_push(%s);\n", cfg);
     ASTNode* block = trailing_dsl_block(gen, call);
@@ -13841,7 +13820,24 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
         codegen_maybe_emit_line(gen, stmt);
         stmt_control_prelude(gen, stmt);
     }
+    /* A builder call with a trailing block that this statement stores or
+     * throws away (gen->trailing_stmt_call): its block and arguments run
+     * here, then the statement is emitted as for any value, the call made
+     * with the filled config. Whatever the target: a local, a struct field,
+     * a module global, an actor's state (#2873), a new declaration (#2874).
+     * Each statement form used to run the block itself after a plain
+     * assignment, or not at all: the call ran twice, once with a NULL
+     * config (datastar#4), a field, a global or a state took the value with
+     * the block dropped, and a declaration of a struct did not compile. */
+    ASTNode* bcall = gen->trailing_stmt_call;
+    int builder_stmt = builder_call_to_run(gen, bcall);
+    BuilderCfg bsaved = { NULL, NULL, NULL };
+    if (builder_stmt) {
+        const char* cfg = emit_builder_prelude(gen, bcall);
+        bsaved = builder_cfg_begin(gen, bcall, cfg);
+    }
     generate_statement_body(gen, stmt);
+    if (builder_stmt) builder_cfg_end(gen, bsaved);
     if (g_ctl_deferred == stmt) g_ctl_deferred = NULL;
     control_prelude_end(ctl_depth);
     order_prelude_end(order_depth);
@@ -15075,23 +15071,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * for escaped seqs (returned / raw-stored) exactly like
                      * the heap-string escape gate. */
                     int var_is_seq = is_seq_var(gen, stmt->value);
-                    /* datastar#4: a builder call with a trailing block runs
-                     * once, with the config its block fills (run twice, once
-                     * with a NULL config, a builder with side effects showed
-                     * it). Its block and arguments run here, ahead of the
-                     * store, and the store below is the one any value gets,
-                     * the call made with the filled config. */
-                    int builder_open = init_is_builder_with_trailing(
-                                           gen, stmt->child_count > 0 ? stmt->children[0] : NULL) &&
-                                       builder_call_to_run(gen, stmt->children[0]);
-                    BuilderCfg builder_saved = { NULL, NULL, NULL };
-                    if (builder_open) {
-                        fprintf(gen->output, "{\n");
-                        gen->indent_level++;
-                        const char* cfg = emit_builder_prelude(gen, stmt->children[0]);
-                        builder_saved = builder_cfg_begin(gen, stmt->children[0], cfg);
-                        print_indent(gen);
-                    }
                     if (var_is_seq && stmt->child_count > 0) {
                         ASTNode* srhs = stmt->children[0];
                         int srhs_owning = is_seq_owning_expr(gen, srhs);
@@ -15402,12 +15381,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             fprintf(gen->output, "\n");
                         }
                     }
-                    if (builder_open) {
-                        builder_cfg_end(gen, builder_saved);
-                        gen->indent_level--;
-                        print_indent(gen);
-                        fprintf(gen->output, "}\n");
-                    }
                     // Handle trailing blocks on reassignment (same as first declaration)
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         stmt->children[0]->type == AST_FUNCTION_CALL) {
@@ -15683,13 +15656,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     }
 
                     if (stmt->child_count > 0) {
-                        // Check if this is a builder function with trailing block —
-                        // if so, just declare the variable; the builder handler assigns later
-                        int defer_with_trailing = builder_call_to_run(gen, stmt->children[0]);
-                        if (defer_with_trailing) {
-                            // Just declare — defer trailing block handler will assign
-                            fprintf(gen->output, " = 0");
-                        } else if (is_array_init && stmt->children[0]->child_count == 0) {
+                        if (is_array_init && stmt->children[0]->child_count == 0) {
                             // Empty array literal gets NULL, not {}
                             fprintf(gen->output, " = NULL");
                         } else {
@@ -15920,24 +15887,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         int init_is_defer = init_call->value &&
                             is_builder_func_reg(gen, init_call->value);
 
-                        if (init_is_defer) {
-                            // DEFER PATTERN for assignment: block first, then call
-                            // The variable was declared with 0; the block fills a
-                            // config, then the call made with it is assigned.
-                            if (builder_call_to_run(gen, init_call)) {
-                                print_indent(gen);
-                                fprintf(gen->output, "{\n");
-                                gen->indent_level++;
-                                const char* cfg = emit_builder_prelude(gen, init_call);
-                                print_indent(gen);
-                                fprintf(gen->output, "%s = ", safe_c_name(stmt->value));
-                                emit_builder_call(gen, init_call, cfg);
-                                fprintf(gen->output, ";\n");
-                                gen->indent_level--;
-                                print_indent(gen);
-                                fprintf(gen->output, "}\n");
-                            }
-                        } else {
+                        /* A builder's block ran ahead of the statement
+                         * (generate_statement). */
+                        if (!init_is_defer) {
                             // REGULAR PATTERN: function already called, push result as context
                             for (int tc = 0; tc < init_call->child_count; tc++) {
                                 ASTNode* trailing = init_call->children[tc];
@@ -15967,27 +15919,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (stmt->child_count >= 2) {
                 ASTNode* lhs = stmt->children[0];
                 ASTNode* rhs = stmt->children[1];
-
-                /* A builder call with a trailing block: its block and
-                 * arguments run first, then this assignment is emitted as
-                 * for any value, the call made with the filled config. Done
-                 * after the plain assignment, the call ran twice, once with
-                 * a NULL config (datastar#4), and a field store took the
-                 * value without running the block at all. */
-                if (builder_call_to_run(gen, rhs)) {
-                    print_indent(gen);
-                    fprintf(gen->output, "{\n");
-                    gen->indent_level++;
-                    const char* cfg = emit_builder_prelude(gen, rhs);
-                    BuilderCfg saved = builder_cfg_begin(gen, rhs, cfg);
-                    print_indent(gen);
-                    generate_statement_body(gen, stmt);
-                    builder_cfg_end(gen, saved);
-                    gen->indent_level--;
-                    print_indent(gen);
-                    fprintf(gen->output, "}\n");
-                    break;
-                }
 
                 /* #340: optional-chain assignment `recv?.field = rhs`. */
                 if (emit_optional_chain_assign(gen, lhs, rhs)) break;
@@ -17836,25 +17767,6 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 if (inner && inner->type == AST_BINARY_EXPRESSION &&
                     inner->value && strcmp(inner->value, "=") == 0 &&
                     inner->child_count == 2) {
-                    /* A builder call with a trailing block stored: its block
-                     * and arguments run first, then the store is emitted as
-                     * for any value (the field store below takes the call
-                     * made with the filled config). A field store took the
-                     * value before, with the block dropped and the builder
-                     * run unconfigured (#2855). */
-                    if (builder_call_to_run(gen, inner->children[1])) {
-                        print_indent(gen);
-                        fprintf(gen->output, "{\n");
-                        gen->indent_level++;
-                        const char* cfg = emit_builder_prelude(gen, inner->children[1]);
-                        BuilderCfg saved = builder_cfg_begin(gen, inner->children[1], cfg);
-                        generate_statement_body(gen, stmt);
-                        builder_cfg_end(gen, saved);
-                        gen->indent_level--;
-                        print_indent(gen);
-                        fprintf(gen->output, "}\n");
-                        break;
-                    }
                     /* #340: optional-chain assignment `recv?.field = rhs`. */
                     if (emit_optional_chain_assign(gen, inner->children[0],
                                                    inner->children[1])) {
@@ -17936,23 +17848,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                 int is_builder_call = has_trailing && inner->value &&
                     is_builder_func_reg(gen, inner->value);
 
-                if (is_builder_call && builder_call_to_run(gen, inner)) {
-                    /* BUILDER PATTERN: the block configures, the arguments
-                     * run, then this statement is emitted as for any call,
-                     * the call made with the filled config: a string it
-                     * returns, thrown away here, is freed, and its
-                     * arguments are drained. */
-                    print_indent(gen);
-                    fprintf(gen->output, "{\n");
-                    gen->indent_level++;
-                    const char* cfg = emit_builder_prelude(gen, inner);
-                    BuilderCfg saved = builder_cfg_begin(gen, inner, cfg);
-                    generate_statement_body(gen, stmt);
-                    builder_cfg_end(gen, saved);
-                    gen->indent_level--;
-                    print_indent(gen);
-                    fprintf(gen->output, "}\n");
-                } else if (has_trailing && !is_builder_call) {
+                /* A builder's block ran ahead of the statement
+                 * (generate_statement): the call is a plain one below. */
+                if (has_trailing && !is_builder_call) {
                     // REGULAR PATTERN: function runs first, block decorates
                     // Check if function returns void (no return value to capture)
                     int returns_void = 1;
