@@ -1,0 +1,62 @@
+// Regression (#2903): a closure local bound to a literal and then rebound
+// by a tuple destructure (`f, n = pair(5)`) was still called directly
+// through the first literal's function, as if the destructure had not
+// rebound it: `call(f)` printed 1 for 605, at every optimisation level.
+// The direct-call shortcut keeps a variable's literal only while every
+// binding of the variable is that literal; a destructure slot is a binding
+// of it to a closure the compiler cannot name, as `f = g` is.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+pair(n: int) -> (fn, int) {
+    g = || { return n * 121 }
+    return g, n
+}
+
+rebound_once() -> int {
+    f = || { return 1 }
+    int a = call(f)
+    f, n = pair(5)
+    int b = call(f)
+    return a * 10000 + b + n * 0
+}
+
+rebound_in_loop() -> int {
+    t = 0
+    f = || { return 1000 }
+    i = 0
+    while i < 3 {
+        int v = call(f)
+        t = t + v
+        f, _ = pair(i)
+        i = i + 1
+    }
+    int w = call(f)
+    return t + w
+}
+
+in_closure_body() -> int {
+    run = || {
+        h = || { return 2 }
+        h, k = pair(3)
+        int v = call(h)
+        return v + k
+    }
+    int r = call(run)
+    return r
+}
+
+main() {
+    check(rebound_once() == 10605, "a destructure rebinds a closure local (${rebound_once()})")
+    // 1000, then pair(0) gives 0, pair(1) gives 121, and the last is pair(2).
+    check(rebound_in_loop() == 1000 + 0 + 121 + 242, "a destructure in a loop (${rebound_in_loop()})")
+    check(in_closure_body() == 366, "a destructure in a closure's body (${in_closure_body()})")
+    println("ok")
+}

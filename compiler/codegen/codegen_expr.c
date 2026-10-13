@@ -3549,6 +3549,25 @@ static void discover_closures_scoped(CodeGenerator* gen, ASTNode* node, const ch
             closure_var_bind(gen, enclosing_func, node->value, cid_to_bind);
         }
     }
+    /* #2903: a slot of a tuple destructure binds its variable too, to the
+     * closure at its position of the tuple, which this walk cannot name
+     * (`f, n = pair(5)`). The slot has no initializer of its own, so the
+     * declaration case above left it out, the variable kept the literal it
+     * was bound to before, and call(f) ran that one. */
+    if (node->type == AST_TUPLE_DESTRUCTURE && node->child_count >= 2) {
+        ASTNode* rhs = node->children[node->child_count - 1];
+        Type* tt = rhs ? rhs->node_type : NULL;
+        for (int i = 0; i + 1 < node->child_count; i++) {
+            ASTNode* slot = node->children[i];
+            if (!slot || !slot->value || strcmp(slot->value, "_") == 0) continue;
+            Type* st = slot->node_type;
+            if ((!st || st->kind == TYPE_UNKNOWN) && tt && tt->kind == TYPE_TUPLE &&
+                i < tt->tuple_count)
+                st = tt->tuple_types[i];
+            if (st && st->kind == TYPE_FUNCTION && !st->is_fnptr)
+                closure_var_bind(gen, enclosing_func, slot->value, -1);
+        }
+    }
 }
 
 // Resolve call(<closure_var>) in `scope` to the concrete return type, or NULL.
