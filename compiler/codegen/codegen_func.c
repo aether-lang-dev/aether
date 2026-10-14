@@ -91,9 +91,8 @@ const char* c_callback_symbol(ASTNode* func) {
 ASTNode* fn_c_callback_def(CodeGenerator* gen, ASTNode* fn) {
     const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
     if (!dc) return is_c_callback(fn) ? fn : NULL;
-    for (int c = 0; c < dc->count; c++)
-        if (is_c_callback(dc->nodes[c])) return dc->nodes[c];
-    return NULL;
+    /* The index found it once (#2897): a scan per clause was quadratic. */
+    return dc->c_callback;
 }
 
 // Look up a top-level @c_callback function by its current AST value
@@ -1164,33 +1163,96 @@ void merge_return_tuple_types(ASTNode* node, Type* merged) {
     }
 }
 
-// Propagate a function's merged tuple return type to all call sites
-// and to tuple destructuring variables
-void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* type) {
-    if (!node) return;
-    if (node->type == AST_FUNCTION_CALL && node->value &&
-        strcmp(node->value, func_name) == 0) {
-        if (node->node_type) free_type(node->node_type);
-        node->node_type = clone_type(type);
+/* The tuple result of one name (#2897): the type its calls take, the last
+ * definition's in program order, and per position the type a variable
+ * destructured from a call takes when it has none: the first definition's
+ * that knows that position, else the last one's. A walk of the program per
+ * definition gave exactly these, and made a set of n clauses that return a
+ * tuple n walks of the program. */
+typedef struct {
+    Type* call_type;
+    Type** var_types;
+    char* var_known;
+    int var_count;
+} TupleResult;
+
+static void tuple_result_add(StrMap* results, const char* name, Type* type) {
+    TupleResult* r = strmap_get(results, name);
+    if (!r) {
+        r = calloc(1, sizeof(TupleResult));
+        if (!r) { fprintf(stderr, "Fatal: out of memory typing tuple calls\n"); exit(1); }
+        strmap_put(results, name, r);
     }
-    // Also update tuple destructure variables whose RHS is this function
+    r->call_type = type;
+    if (type->tuple_count > r->var_count) {
+        Type** vt = realloc(r->var_types, sizeof(Type*) * (size_t)type->tuple_count);
+        char* vk = realloc(r->var_known, (size_t)type->tuple_count);
+        if (!vt || !vk) { fprintf(stderr, "Fatal: out of memory typing tuple calls\n"); exit(1); }
+        for (int i = r->var_count; i < type->tuple_count; i++) { vt[i] = NULL; vk[i] = 0; }
+        r->var_types = vt;
+        r->var_known = vk;
+        r->var_count = type->tuple_count;
+    }
+    for (int i = 0; i < type->tuple_count; i++) {
+        if (r->var_known[i]) continue;
+        Type* t = type->tuple_types[i];
+        r->var_types[i] = t;
+        r->var_known[i] = t && t->kind != TYPE_UNKNOWN;
+    }
+}
+
+static void propagate_tuple_results(ASTNode* node, StrMap* results) {
+    if (!node) return;
+    if (node->type == AST_FUNCTION_CALL && node->value) {
+        TupleResult* r = strmap_get(results, node->value);
+        if (r) {
+            if (node->node_type) free_type(node->node_type);
+            node->node_type = clone_type(r->call_type);
+        }
+    }
+    // Also update tuple destructure variables whose RHS is such a call
     if (node->type == AST_TUPLE_DESTRUCTURE && node->child_count >= 2) {
         ASTNode* rhs = node->children[node->child_count - 1];
-        if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value &&
-            strcmp(rhs->value, func_name) == 0) {
-            int var_count = node->child_count - 1;
-            for (int i = 0; i < var_count && i < type->tuple_count; i++) {
-                ASTNode* var = node->children[i];
-                if (var && (!var->node_type || var->node_type->kind == TYPE_UNKNOWN)) {
-                    if (var->node_type) free_type(var->node_type);
-                    var->node_type = clone_type(type->tuple_types[i]);
-                }
+        TupleResult* r = (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value)
+                             ? strmap_get(results, rhs->value) : NULL;
+        int var_count = node->child_count - 1;
+        for (int i = 0; r && i < var_count && i < r->var_count; i++) {
+            ASTNode* var = node->children[i];
+            if (var && (!var->node_type || var->node_type->kind == TYPE_UNKNOWN)) {
+                if (var->node_type) free_type(var->node_type);
+                var->node_type = clone_type(r->var_types[i]);
             }
         }
     }
     for (int i = 0; i < node->child_count; i++) {
-        propagate_tuple_type_to_calls(node->children[i], func_name, type);
+        propagate_tuple_results(node->children[i], results);
     }
+}
+
+// Propagate each tuple-returning function's merged return type (a
+// definition's, a builder's or an extern's) to all its call sites and to
+// tuple destructuring variables, in one walk of the program.
+void propagate_tuple_types_to_calls(ASTNode* program) {
+    if (!program) return;
+    StrMap results;
+    strmap_init(&results);
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* child = program->children[i];
+        if (!child || !child->value || !child->node_type ||
+            child->node_type->kind != TYPE_TUPLE) continue;
+        if (child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION ||
+            child->type == AST_EXTERN_FUNCTION)
+            tuple_result_add(&results, child->value, child->node_type);
+    }
+    if (strmap_count(&results) > 0) propagate_tuple_results(program, &results);
+    for (int i = 0; i < strmap_count(&results); i++) {
+        TupleResult* r = strmap_value_at(&results, i);
+        if (!r) continue;
+        free(r->var_types);
+        free(r->var_known);
+        free(r);
+    }
+    strmap_free(&results);
 }
 
 /* Inline bodies for the std.mem scalar accessors (#1733).
@@ -1438,8 +1500,7 @@ ASTNode* fn_param_at(ASTNode* fn, int pos) {
  * dispatcher and each clause function's pattern parameters share: the
  * first clause binding a variable of a known type there gives it, else the
  * first literal or struct pattern with a type. A wildcard has none. */
-Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos) {
-    const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
+static Type* clauses_param_type_at(const DefClauses* dc, ASTNode* fn, int pos) {
     int n = dc ? dc->count : 1;
     Type* pattern_type = NULL;
     for (int c = 0; c < n; c++) {
@@ -1450,7 +1511,50 @@ Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos) {
             return p->node_type;
         if (!pattern_type) pattern_type = p->node_type;
     }
-    if (pattern_type) return pattern_type;
+    return pattern_type;
+}
+
+/* #2897: the set generate_combined_function emits, and the types its
+ * positions take (state 1: `types[pos]`, 2: none, each clause's own; 0: not
+ * asked yet). Each clause function and each test of the dispatcher asks for
+ * every position, and a scan of the set each time made a set's codegen grow
+ * with the square of its size. The parameters' types do not change while
+ * the set is emitted: the passes that retype nodes run before. */
+typedef struct {
+    const DefClauses* set;
+    Type** types;
+    char* state;
+    int cap;
+} ParamTypeMemo;
+
+static ParamTypeMemo* g_param_memo;
+
+Type* fn_param_type_at(CodeGenerator* gen, ASTNode* fn, int pos) {
+    const DefClauses* dc = gen ? fn_def_clause_set(gen->program, fn) : NULL;
+    Type* t;
+    ParamTypeMemo* m = (dc && pos >= 0 && g_param_memo && g_param_memo->set == dc)
+                           ? g_param_memo : NULL;
+    if (m && pos < m->cap && m->state[pos]) {
+        t = m->types[pos];
+    } else {
+        t = clauses_param_type_at(dc, fn, pos);
+        if (m) {
+            if (pos >= m->cap) {
+                int cap = pos + 8;
+                Type** nt = realloc(m->types, sizeof(Type*) * (size_t)cap);
+                if (!nt) { fprintf(stderr, "Fatal: out of memory emitting a clause set\n"); exit(1); }
+                m->types = nt;
+                char* ns = realloc(m->state, (size_t)cap);
+                if (!ns) { fprintf(stderr, "Fatal: out of memory emitting a clause set\n"); exit(1); }
+                memset(ns + m->cap, 0, (size_t)(cap - m->cap));
+                m->state = ns;
+                m->cap = cap;
+            }
+            m->types[pos] = t;
+            m->state[pos] = t ? 1 : 2;
+        }
+    }
+    if (t) return t;
     ASTNode* own = fn_param_at(fn, pos);
     return own ? own->node_type : NULL;
 }
@@ -2281,6 +2385,10 @@ static int emit_clause_dispatch(CodeGenerator* gen, ASTNode* clause, int returns
 void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int clause_count) {
     if (clause_count == 0) return;
     ASTNode* first = clauses[0];
+    /* The set's parameter types, found once for all its clauses (#2897). */
+    ParamTypeMemo memo = { fn_def_clause_set(gen->program, first), NULL, NULL, 0 };
+    ParamTypeMemo* prev_memo = g_param_memo;
+    if (memo.set) g_param_memo = &memo;
     for (int i = 0; i < clause_count; i++)
         emit_function(gen, clauses[i], clause_c_name(gen->program, clauses[i]));
 
@@ -2364,6 +2472,9 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
     unindent(gen);
     print_line(gen, "}");
     print_line(gen, "");
+    g_param_memo = prev_memo;
+    free(memo.types);
+    free(memo.state);
 }
 
 /* Emit one field of an extern struct body.

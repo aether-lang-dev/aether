@@ -817,6 +817,7 @@ typedef struct {
     ASTNode** nodes;           /* AST_FUNCTION_DEFINITION / AST_BUILDER_FUNCTION, program order */
     int count;
     int capacity;
+    ASTNode* c_callback;       /* the first @c_callback clause, or NULL (#2897) */
 } DefClauses;
 
 typedef struct {
@@ -827,10 +828,17 @@ typedef struct {
     StrMap externs;            /* name -> ASTNode* (own or imported AST_EXTERN_FUNCTION) */
     StrMap c_callbacks;        /* name -> const char* C symbol */
     StrMap clause_scopes;      /* `__clause_<ptr>` -> its clause (#2644, fn_scope_name) */
+    StrMap def_children;       /* `<ptr>` of a definition's child (its body, a
+                                * parameter) -> the definition (#2897) */
+    StrMap def_sets;           /* `<ptr>` of a definition -> the DefClauses it
+                                * is one of (#2897, fn_def_clause_set) */
 } ProgramIndex;
 
 ProgramIndex* program_index(ASTNode* program);
 void program_index_reset(void);
+/* The function definition (a clause of a set, or a single one) that has
+ * `child` among its children, or NULL (#2897). */
+ASTNode* program_index_def_of_child(ASTNode* program, ASTNode* child);
 /* The clauses defined under `name`, or NULL. */
 const DefClauses* program_index_clauses(ASTNode* program, const char* name);
 void mark_function_generated(CodeGenerator* gen, const char* func_name);

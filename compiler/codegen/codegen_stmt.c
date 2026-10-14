@@ -2418,6 +2418,9 @@ static int string_bind_owns_arm(CodeGenerator* gen, ASTNode* e, int may) {
 
 /* #2629: the function whose body is `root`, or NULL. */
 static ASTNode* fn_def_of_body(CodeGenerator* gen, ASTNode* root) {
+    /* #2897: the index answers without a scan of the program. */
+    ASTNode* owner = (gen && gen->program) ? program_index_def_of_child(gen->program, root) : NULL;
+    if (owner) return owner;
     for (int i = 0; gen && gen->program && root && i < gen->program->child_count; i++) {
         ASTNode* c = gen->program->children[i];
         if (!c || (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
@@ -2753,6 +2756,12 @@ static int call_to_open_classification(CodeGenerator* gen, ASTNode* e) {
  * set it is (#2644), whose own parameters and cells the body sees, or the
  * single definition. */
 static ASTNode* def_of_body(CodeGenerator* gen, const char* fn_name, ASTNode* body_root) {
+    /* #2897: from the index, not a scan of the set's clauses: asked once per
+     * return a clause's classification reads, the scan made a set's
+     * compile time grow with the cube of its size. */
+    ASTNode* owner = (gen && gen->program) ? program_index_def_of_child(gen->program, body_root)
+                                           : NULL;
+    if (owner && fn_name && owner->value && strcmp(owner->value, fn_name) == 0) return owner;
     const DefClauses* dc = (gen && gen->program && fn_name)
                                ? program_index_clauses(gen->program, fn_name) : NULL;
     for (int c = 0; dc && c < dc->count; c++)
@@ -3112,6 +3121,19 @@ static void provisional_drop_from(int base) {
     g_provisional_count = w;
 }
 
+/* One flag per clause of a set the classifiers memoise (#2897): `small`
+ * (`cap` bytes) when the set fits, else a heap array the caller frees when
+ * it is not `small`. */
+static char* clause_memo_flags(char* small, size_t cap, int nclauses) {
+    if (nclauses <= 0 || (size_t)nclauses <= cap) return small;
+    char* flags = (char*)malloc((size_t)nclauses);
+    if (!flags) {
+        fprintf(stderr, "Fatal: out of memory classifying a clause set\n");
+        exit(1);
+    }
+    return flags;
+}
+
 static ASTNode* fn_def_body(ASTNode* fn_def) {
     for (int i = 0; fn_def && i < fn_def->child_count; i++) {
         ASTNode* c = fn_def->children[i];
@@ -3154,8 +3176,12 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
      * asks this of the clause being emitted). */
     const DefClauses* dc = fn_clause_set(gen, fn_def);
     int nclauses = dc ? dc->count : 1;
-    char memoised[64];
-    for (int c = 0; c < nclauses && c < 64; c++) {
+    /* Every clause takes the answer (#2897): only the first 64 did, so a
+     * set past them classified itself again for each return of each later
+     * clause, a walk of every clause each time. */
+    char memoised_small[64];
+    char* memoised = clause_memo_flags(memoised_small, sizeof(memoised_small), nclauses);
+    for (int c = 0; c < nclauses; c++) {
         ASTNode* clause = dc ? dc->nodes[c] : fn_def;
         memoised[c] = clause && clause->annotation == NULL;
         if (memoised[c]) clause->annotation = strdup("heap_pending");
@@ -3180,13 +3206,14 @@ int function_def_returns_heap_string(CodeGenerator* gen, ASTNode* fn_def) {
     g_pending_low = saved_low < low ? saved_low : low;
     provisional_drop_from(base);
 
-    for (int c = 0; c < nclauses && c < 64; c++) {
+    for (int c = 0; c < nclauses; c++) {
         ASTNode* clause = dc ? dc->nodes[c] : fn_def;
         if (!memoised[c]) continue;
         free(clause->annotation);
         clause->annotation = strdup(result ? "heap_yes" : "heap_no");
         if (!result && low < base) provisional_add(clause, low);
     }
+    if (memoised != memoised_small) free(memoised);
     return result;
 }
 
@@ -5381,8 +5408,10 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
      * string result. */
     const DefClauses* dc = fn_clause_set(gen, fn_def);
     int nclauses = dc ? dc->count : 1;
-    char memoised[64];
-    for (int c = 0; c < nclauses && c < 64; c++) {
+    /* Every clause takes the answer, past the 64th too (#2897). */
+    char memoised_small[64];
+    char* memoised = clause_memo_flags(memoised_small, sizeof(memoised_small), nclauses);
+    for (int c = 0; c < nclauses; c++) {
         ASTNode* clause = dc ? dc->nodes[c] : fn_def;
         memoised[c] = clause && clause->annotation == NULL;
         if (memoised[c]) clause->annotation = strdup("heap_pending");
@@ -5429,7 +5458,7 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
 
     /* Build "heap_positions:1,0,1\0" — at most 2*tuple_count + 16. */
     size_t cap = (size_t)tuple_count * 2u + 32u;
-    for (int c = 0; c < nclauses && c < 64; c++) {
+    for (int c = 0; c < nclauses; c++) {
         ASTNode* clause = dc ? dc->nodes[c] : fn_def;
         if (!memoised[c]) continue;
         char* buf = (char*)malloc(cap);
@@ -5442,6 +5471,7 @@ int function_def_returns_heap_at(CodeGenerator* gen, ASTNode* fn_def,
         clause->annotation = buf;
         if (any_no && low < base) provisional_add(clause, low);
     }
+    if (memoised != memoised_small) free(memoised);
     free(per_pos);
     return result;
 }

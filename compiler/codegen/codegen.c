@@ -1513,6 +1513,21 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
                 dc->capacity = cap;
             }
             dc->nodes[dc->count++] = c;
+            if (!dc->c_callback && is_c_callback(c)) dc->c_callback = c;
+            /* #2897: the set a definition is one of, and which definition a
+             * body belongs to, answered without a scan of the set or of the
+             * program (fn_def_clause_set, def_of_body, fn_def_of_body). The
+             * first definition in program order keeps a shared child, as
+             * the scan found it. */
+            char key[32];
+            snprintf(key, sizeof(key), "%p", (void*)c);
+            strmap_put(&ix->def_sets, key, dc);
+            for (int k = 0; k < c->child_count; k++) {
+                if (!c->children[k]) continue;
+                snprintf(key, sizeof(key), "%p", (void*)c->children[k]);
+                if (!strmap_has(&ix->def_children, key))
+                    strmap_put(&ix->def_children, key, c);
+            }
             /* The first annotated clause binds a set's symbol (#2664,
              * fn_c_callback_def). */
             if (is_c_callback(c) && !strmap_has(&ix->c_callbacks, c->value))
@@ -1564,6 +1579,8 @@ void program_index_reset(void) {
     strmap_free(&ix->externs);
     strmap_free(&ix->c_callbacks);
     strmap_free(&ix->clause_scopes);
+    strmap_free(&ix->def_children);
+    strmap_free(&ix->def_sets);
     ix->program = NULL;
     ix->child_count = 0;
     ix->main_fn = NULL;
@@ -1575,15 +1592,33 @@ const DefClauses* program_index_clauses(ASTNode* program, const char* name) {
     return strmap_get(&ix->defs, name);
 }
 
+ASTNode* program_index_def_of_child(ASTNode* program, ASTNode* child) {
+    ProgramIndex* ix = program_index(program);
+    if (!ix || !child) return NULL;
+    char key[32];
+    snprintf(key, sizeof(key), "%p", (void*)child);
+    ASTNode* def = strmap_get(&ix->def_children, key);
+    /* The index is built once per program shape; a definition whose child
+     * was replaced since is not answered from it (the callers scan). */
+    for (int k = 0; def && k < def->child_count; k++)
+        if (def->children[k] == child) return def;
+    return NULL;
+}
+
 /* #2644: the clauses of the set `fn_def` is one of (`f(0) -> ...`, `f(n) ->
  * ...`), or NULL for a single definition. */
 const DefClauses* fn_def_clause_set(ASTNode* program, ASTNode* fn_def) {
     if (!program || !fn_def || !fn_def->value) return NULL;
     const DefClauses* dc = program_index_clauses(program, fn_def->value);
     if (!dc || dc->count < 2) return NULL;
-    for (int i = 0; i < dc->count; i++)
-        if (dc->nodes[i] == fn_def) return dc;
-    return NULL;
+    /* #2897: membership from the index, not a scan of the set: asked for
+     * each clause, and per name a clause's body reads, the scan made a
+     * set's codegen grow with the square of its size. A definition renamed
+     * since the index was built is no member of the set it names now. */
+    char key[32];
+    snprintf(key, sizeof(key), "%p", (void*)fn_def);
+    ProgramIndex* ix = program_index(program);
+    return (ix && strmap_get(&ix->def_sets, key) == dc) ? dc : NULL;
 }
 
 /* #2644: each clause of a set is a C function of its own, so it is a scope
@@ -8818,7 +8853,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     // `(Point, string)`) embeds that struct BY VALUE and so needs its
     // full definition visible first, else the generated C errors with
     // "unknown type name 'Point'" (issue #634). The merge must still
-    // run here, before propagate_tuple_type_to_calls below.
+    // run here, before propagate_tuple_types_to_calls below.
     extern void merge_return_tuple_types(ASTNode* node, Type* merged);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -8828,26 +8863,13 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         }
     }
     // Propagate merged return types to all function call sites in the program
-    // (call node_types may have UNKNOWN elements from before the merge)
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* child = program->children[i];
-        if (!child) continue;
-        // For each function with a tuple return type, update matching call sites
-        if ((child->type == AST_FUNCTION_DEFINITION || child->type == AST_BUILDER_FUNCTION) && child->node_type &&
-            child->node_type->kind == TYPE_TUPLE && child->value) {
-            // Find all calls to this function in the program and update their node_type
-            extern void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* type);
-            propagate_tuple_type_to_calls(program, child->value, child->node_type);
-        }
-        // Same propagation for tuple-returning externs — call sites
-        // need to know they're consuming a `_tuple_T1_T2` struct so
-        // the destructure (`a, b = extern_fn(...)`) emits correctly.
-        if (child->type == AST_EXTERN_FUNCTION && child->node_type &&
-            child->node_type->kind == TYPE_TUPLE && child->value) {
-            extern void propagate_tuple_type_to_calls(ASTNode* node, const char* func_name, Type* type);
-            propagate_tuple_type_to_calls(program, child->value, child->node_type);
-        }
-    }
+    // (call node_types may have UNKNOWN elements from before the merge), for
+    // definitions and for tuple-returning externs alike: call sites need to
+    // know they're consuming a `_tuple_T1_T2` struct so the destructure
+    // (`a, b = extern_fn(...)`) emits correctly. One walk for every
+    // function (#2897).
+    extern void propagate_tuple_types_to_calls(ASTNode* program);
+    propagate_tuple_types_to_calls(program);
     print_line(gen, "");
 
     // Pre-pass: identify builder functions (first param is _ctx: ptr).
