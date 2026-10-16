@@ -3914,7 +3914,7 @@ static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node) {
  *   - a `ptr` or an actor reference is a handle no slot owns, copied as a
  *     local's is;
  *   - a string is retained (aether_str_capture), a closure too (#2494);
- *   - a struct is copied, by `<Name>_dup` when it owns strings, closures
+ *   - a struct is copied, by `_aether_copy_<Name>` when it owns strings, closures
  *     or arrays (#2504), so the copy holds its own;
  *   - a tuple, an optional and a fixed-size array are copied with a
  *     reference taken to each part they own (capture_take, #2921).
@@ -4457,7 +4457,7 @@ static int capture_is_closure_value(CodeGenerator* gen, const char* name,
 
 /* #2504: a captured struct VALUE (not a promoted struct cell) whose type
  * owns heap strings: the struct's name, else NULL. The env must hold a copy
- * with strings of its own (`<Name>_dup`) and destroy it in its destructor.
+ * with strings of its own (`_aether_copy_<Name>`) and destroy it in its destructor.
  * A plain copy shared the declaring scope's strings, which its destroy frees
  * while a returned or stored closure still reads them. */
 static const char* capture_owning_struct(CodeGenerator* gen, const char* name,
@@ -4611,7 +4611,7 @@ static void emit_closure_env_typedef(CodeGenerator* gen, int ci) {
             }
             const char* owning = capture_owning_struct(gen, captures[i], parent_func);
             if (owning) {
-                fprintf(gen->output, "    %s_destroy(&_e->%s);\n", owning, captures[i]);
+                fprintf(gen->output, "    _aether_drop_%s(&_e->%s);\n", owning, captures[i]);
                 continue;
             }
             if (!promoted && !capture_is_retained_string(gen, captures[i], parent_func)) continue;
@@ -5036,12 +5036,12 @@ void emit_closure_definitions(CodeGenerator* gen) {
                 if (closure_param_is_promoted(gen, closure, p->value)) {
                     const char* cell = cg_internf("(*%s)", p->value);
                     print_indent(gen);
-                    fprintf(gen->output, "%s = %s_dup(%s);\n", cell, owning, cell);
+                    fprintf(gen->output, "%s = _aether_copy_%s(%s);\n", cell, owning, cell);
                     continue;
                 }
                 if (!struct_param_written(body, cname)) continue;
                 print_indent(gen);
-                fprintf(gen->output, "%s = %s_dup(%s);\n", cname, owning, cname);
+                fprintf(gen->output, "%s = _aether_copy_%s(%s);\n", cname, owning, cname);
                 push_struct_destroy_defer(gen, cname, p->node_type, p->line, p->column);
             }
             /* #2761: the `string?` pass too, in the order a function body
@@ -5108,7 +5108,7 @@ void emit_closure_definitions(CodeGenerator* gen) {
                             captures[i], captures[i], captures[i]);
                 } else if (capture_owning_struct(gen, captures[i], parent_func)) {
                     /* env owns a copy of the struct's strings (#2504) */
-                    fprintf(gen->output, "    _e->%s = %s_dup(%s);\n", captures[i],
+                    fprintf(gen->output, "    _e->%s = _aether_copy_%s(%s);\n", captures[i],
                             capture_owning_struct(gen, captures[i], parent_func), captures[i]);
                 } else if (capture_is_promoted(gen, captures[i], parent_func)) {
                     /* env owns a reference to the shared cell (#2019) */
@@ -5507,7 +5507,7 @@ void emit_message_field_init(CodeGenerator* gen, MessageFieldDef* fdef, ASTNode*
         rhs->node_type = make_string_seq_ptr_type();
     }
     /* #2525: a closure field holds a reference of its own, released by
-     * `<Msg>_release_fields` once the handler is done: a fresh closure's
+     * `_aether_msg_release_<Msg>` once the handler is done: a fresh closure's
      * is adopted, a local's or a field's retained. */
     if (rhs && rhs->node_type && rhs->node_type->kind == TYPE_FUNCTION &&
         !rhs->node_type->is_fnptr && fdef && fdef->c_type &&
@@ -8460,7 +8460,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             /* heap.free(p) — counterpart to heap.new(T) (issue #564, #790).
              * A POD box owns no heap fields, so a plain free(p) reclaims it.
              * A box whose struct has string fields (#790) routes through the
-             * generated `<Name>_heap_free`, which releases every owned field
+             * generated `_aether_heap_free_<Name>`, which releases every owned field
              * then frees the box. NULL-safe either way (free(NULL) is a no-op;
              * the typed free early-returns on NULL). One positional arg. */
             if (expr->value && strcmp(expr->value, "heap.free") == 0 &&
@@ -8491,14 +8491,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_unobserve_all(%s)", hf);
                     seq_next(gen, &s);
                     if (typed_free)
-                        fprintf(gen->output, "%s_heap_free((%s*)%s)", typed_free, typed_free, hf);
+                        fprintf(gen->output, "_aether_heap_free_%s((%s*)%s)", typed_free, typed_free, hf);
                     else
                         fprintf(gen->output, "free(%s)", hf);
                     seq_close(gen, &s);
                     break;
                 }
                 if (typed_free) {
-                    fprintf(gen->output, "%s_heap_free(", typed_free);
+                    fprintf(gen->output, "_aether_heap_free_%s(", typed_free);
                 } else {
                     fprintf(gen->output, "free(");
                 }
@@ -10786,7 +10786,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * length, sized from the source's
                              * length-aware header so binary content
                              * with embedded NULs round-trips intact.
-                             * The receiver's <Msg>_release_fields
+                             * The receiver's _aether_msg_release_<Msg>
                              * call (emitted at the receive-handler
                              * dispatch) string_releases the clone
                              * when the message is consumed. */
@@ -10890,7 +10890,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     (f->type_kind == TYPE_FUNCTION && f->c_type &&
                                      strcmp(f->c_type, "_AeClosure") == 0)) {
                                     reply_release = cg_internf(
-                                        "(void (*)(void*))%s_release_fields", reply_msg_name);
+                                        "(void (*)(void*))_aether_msg_release_%s", reply_msg_name);
                                     break;
                                 }
                             }
@@ -10934,7 +10934,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                              * skips it), every other owned field goes with
                              * the buffer. */
                             if (strcmp(reply_release, "NULL") != 0) {
-                                fprintf(gen->output, "if (_ask_r) { ((%s*)_ask_r)->%s = %s; %s_release_fields((%s*)_ask_r); } ",
+                                fprintf(gen->output, "if (_ask_r) { ((%s*)_ask_r)->%s = %s; _aether_msg_release_%s((%s*)_ask_r); } ",
                                         reply_msg_name, reply_field, c_zero, reply_msg_name, reply_msg_name);
                             }
                             fprintf(gen->output, "free(_ask_r); _ask_val; })");
@@ -11065,7 +11065,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 captures[i], src, src);
                     } else if (capture_owning_struct(gen, captures[i], cl_parent_func)) {
                         /* env owns a copy of the struct's strings (#2504) */
-                        fprintf(gen->output, "_e->%s = %s_dup(%s); ", captures[i],
+                        fprintf(gen->output, "_e->%s = _aether_copy_%s(%s); ", captures[i],
                                 capture_owning_struct(gen, captures[i], cl_parent_func), src);
                     } else if (capture_is_promoted(gen, captures[i], cl_parent_func)) {
                         /* env owns a reference to the shared cell (#2019) */

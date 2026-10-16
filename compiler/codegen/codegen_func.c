@@ -1663,6 +1663,8 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         // copies dedupe at link while the symbol stays externally addressable.
         // (#2041-adjacent: asks/pure-tls-client-defined-non-static-in-every-tu.)
         fprintf(gen->output, "AETHER_WEAK_DEF ");
+    } else if (lib_fn_is_local(gen, func)) {
+        fprintf(gen->output, "AETHER_LIB_LOCAL ");
     }
 
     /* Issue #501 follow-up: mark the names this function's `try` bodies
@@ -1932,7 +1934,7 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                     const char* lv = is_promoted ? cg_internf("(*%s)", child->value)
                                                  : child->value;
                     print_indent(gen);
-                    fprintf(gen->output, "%s = %s_dup(%s);\n", lv, owning, lv);
+                    fprintf(gen->output, "%s = _aether_copy_%s(%s);\n", lv, owning, lv);
                     if (!is_promoted)
                         push_struct_destroy_defer(gen, child->value, child->node_type,
                                                   child->line, child->column);
@@ -2311,6 +2313,8 @@ void generate_combined_function(CodeGenerator* gen, ASTNode** clauses, int claus
                                                            : "static AETHER_MAYBE_UNUSED ");
     } else if (cb_def) {
         fprintf(gen->output, "AETHER_WEAK_DEF ");
+    } else if (lib_fn_is_local(gen, first)) {
+        fprintf(gen->output, "AETHER_LIB_LOCAL ");
     }
     emit_fn_result_c_type(gen, first);
     const char* cb_sym = cb_def ? c_callback_symbol(cb_def) : NULL;
@@ -2466,9 +2470,9 @@ static void emit_struct_fields_op(CodeGenerator* gen, ASTNode* sd, const char* l
 }
 
 /* R2/R3 for a struct that owns (#2921): every string, closure and composite
- * field holds a reference of its own. `<Name>_dup` takes a reference to
- * every part of a copy, `<Name>_destroy` releases every part and empties
- * it, `<Name>_replace` stores a value the caller already took and destroys
+ * field holds a reference of its own. `_aether_copy_<Name>` takes a reference to
+ * every part of a copy, `_aether_drop_<Name>` releases every part and empties
+ * it, `_aether_store_<Name>` stores a value the caller already took and destroys
  * the one it replaces, and `_aether_move_<Name>` hands a local's parts over
  * and empties it. The rest are those for a value a `try` body writes
  * (volatile, #2690), the unwind journal (#2923), a heap.new box (#790), an
@@ -2480,39 +2484,39 @@ static void emit_struct_ops(CodeGenerator* gen, ASTNode* sd) {
         ASTNode* f = sd->children[i];
         if (f && f->type == AST_STRUCT_FIELD) own_emit_prototypes(gen, f->node_type);
     }
-    print_line(gen, "static inline void %s_destroy(%s* s) {", n, n);
+    print_line(gen, "static inline void _aether_drop_%s(%s* s) {", n, n);
     print_line(gen, "    if (!s) return;");
     emit_struct_fields_op(gen, sd, "s->", OWN_DROP);
     print_line(gen, "}");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void %s_publish(%s* s) {", n, n);
     emit_struct_fields_op(gen, sd, "s->", OWN_PUBLISH);
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_heap_free(%s* s) {", n, n);
+    print_line(gen, "static inline void _aether_heap_free_%s(%s* s) {", n, n);
     print_line(gen, "    if (!s) return;");
-    print_line(gen, "    %s_destroy(s);", n);
+    print_line(gen, "    _aether_drop_%s(s);", n);
     print_line(gen, "    free(s);");
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_replace(%s* dst, %s src) {", n, n, n);
+    print_line(gen, "static inline void _aether_store_%s(%s* dst, %s src) {", n, n, n);
     print_line(gen, "    %s old = *dst;", n);
     print_line(gen, "    *dst = src;");
-    print_line(gen, "    %s_destroy(&old);", n);
+    print_line(gen, "    _aether_drop_%s(&old);", n);
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_destroy_volatile(%s volatile* s) {", n, n);
-    print_line(gen, "    %s _ae_v = *s; %s_destroy(&_ae_v); *s = _ae_v;", n, n);
+    print_line(gen, "static inline void _aether_vdrop_%s(%s volatile* s) {", n, n);
+    print_line(gen, "    %s _ae_v = *s; _aether_drop_%s(&_ae_v); *s = _ae_v;", n, n);
     print_line(gen, "}");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void %s_destroy_unwind(const void* p) {", n);
-    print_line(gen, "    %s_destroy_volatile((%s volatile*)p);", n, n);
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_udrop_%s(const void* p) {", n);
+    print_line(gen, "    _aether_vdrop_%s((%s volatile*)p);", n, n);
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_replace_volatile(%s volatile* dst, %s src) {", n, n, n);
-    print_line(gen, "    %s _ae_v = *dst; %s_replace(&_ae_v, src); *dst = _ae_v;", n, n);
+    print_line(gen, "static inline void _aether_vstore_%s(%s volatile* dst, %s src) {", n, n, n);
+    print_line(gen, "    %s _ae_v = *dst; _aether_store_%s(&_ae_v, src); *dst = _ae_v;", n, n);
     print_line(gen, "}");
-    print_line(gen, "static inline %s %s_dup(%s src) {", n, n, n);
+    print_line(gen, "static inline %s _aether_copy_%s(%s src) {", n, n, n);
     emit_struct_fields_op(gen, sd, "src.", OWN_RETAIN);
     print_line(gen, "    return src;");
     print_line(gen, "}");
     print_line(gen, "static inline void _aether_dup_each_%s(%s* into, %s const volatile* src, int n) {",
                n, n, n);
-    print_line(gen, "    for (int _k = 0; _k < n; _k++) into[_k] = %s_dup(src[_k]);", n);
+    print_line(gen, "    for (int _k = 0; _k < n; _k++) into[_k] = _aether_copy_%s(src[_k]);", n);
     print_line(gen, "}");
     print_line(gen, "static inline %s _aether_move_%s(%s* s) {", n, n, n);
     print_line(gen, "    %s v = *s;", n);
@@ -2522,10 +2526,10 @@ static void emit_struct_ops(CodeGenerator* gen, ASTNode* sd) {
     print_line(gen, "static inline %s _aether_volatile_move_%s(%s volatile* s) {", n, n, n);
     print_line(gen, "    %s v = *s; %s w = v; (void)_aether_move_%s(&w); *s = w; return v;", n, n, n);
     print_line(gen, "}");
-    print_line(gen, "static inline void %s_cell_release(const void* cell) {", n);
+    print_line(gen, "static inline void _aether_cell_drop_%s(const void* cell) {", n);
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
-    print_line(gen, "    if (_aether_cell_last(h)) { %s_destroy((%s*)(void*)cell); free(h); }", n, n);
+    print_line(gen, "    if (_aether_cell_last(h)) { _aether_drop_%s((%s*)(void*)cell); free(h); }", n, n);
     print_line(gen, "}");
 }
 

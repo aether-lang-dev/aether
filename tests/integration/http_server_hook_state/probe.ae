@@ -1,0 +1,16 @@
+// #2910: a server frees the access logger's and the metrics collector's
+// state with it. The work is in shim.c, which serves requests on a socket
+// pair without starting the server.
+
+import std.http
+import std.os
+
+extern http_hook_state_probe(log_path: string) -> int
+
+main() {
+    path = os_getenv("ACCESS_LOG_PATH")
+    rc = http_hook_state_probe(path)
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+}

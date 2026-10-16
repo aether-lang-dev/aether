@@ -160,9 +160,14 @@ static void collect_typed(Frame* f, ASTNode* n) {
 
 /* The names the frame binds, outside the closures in it (a trailing block is
  * part of it). */
+static int outer_name(Frame* f, const char* name);
+
 static void collect_locals(Esc* esc, Frame* f, ASTNode* n) {
     if (!n || ast_is_own_function(n)) return;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && !writes_global(esc, f, n)) {
+    /* A closure's bare binding of a name of a frame it is written in is a
+     * store into that frame's variable, not a local of its own (#2846). */
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && !writes_global(esc, f, n) &&
+        !(n->type_inferred && outer_name(f, n->value))) {
         if (!strmap_has(&f->locals, n->value)) strmap_put(&f->locals, n->value, n);
         if (is_sized_array_type(n->node_type) && !strmap_has(&f->arrays, n->value))
             strmap_put(&f->arrays, n->value, n);
@@ -186,9 +191,10 @@ static ASTNode* frame_body(ASTNode* owner) {
     return NULL;
 }
 
-static void frame_init(Esc* esc, Frame* f, ASTNode* owner) {
+static void frame_init(Esc* esc, Frame* f, ASTNode* owner, Frame* parent) {
     memset(f, 0, sizeof(*f));
     f->owner = owner;
+    f->parent = parent;
     strmap_init(&f->typed);
     strmap_init(&f->locals);
     strmap_init(&f->params);
@@ -245,6 +251,21 @@ static int g_store_outer_only = 0;
  * store into that frame's variable. */
 static int own_name(Frame* f, const char* name) {
     return strmap_has(&f->params, name) || strmap_has(&f->typed, name);
+}
+
+/* The frame a closure frame `f` is written in (or one around it) whose
+ * variable `name` is: the closure neither takes it as a parameter nor
+ * declares it with a written type. NULL when it is none of theirs. */
+static Frame* outer_frame_of(Frame* f, const char* name) {
+    for (Frame* a = f; a && a->parent; a = a->parent) {
+        if (own_name(a, name)) return NULL;
+        if (strmap_has(&a->parent->locals, name)) return a->parent;
+    }
+    return NULL;
+}
+
+static int outer_name(Frame* f, const char* name) {
+    return outer_frame_of(f, name) != NULL;
 }
 
 /* With g_with_outer: is `name` one of the fixed-size arrays of a frame the
@@ -322,6 +343,7 @@ static ASTNode* value_path(ASTNode* e, char* out, size_t cap, int* whole) {
 }
 
 static int frame_view(Frame* f, const Views* v, ASTNode* e);
+static int closure_call_view(Frame* f, const Views* v, ASTNode* call);
 
 /* Can a value of type `t` hold a view: a slice, or a value with fields or
  * elements (a struct, a tuple, an array, an optional, a sum), or a closure?
@@ -384,6 +406,8 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
         }
         case AST_EXPRESSION_STATEMENT:
             return e->child_count > 0 && frame_view(f, v, e->children[0]);
+        case AST_FUNCTION_CALL:
+            return closure_call_view(f, v, e);
         case AST_IF_EXPRESSION:
             return (e->child_count > 1 && frame_view(f, v, e->children[1])) ||
                    (e->child_count > 2 && frame_view(f, v, e->children[2]));
@@ -461,6 +485,12 @@ static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
         case AST_CLOSURE:
             snprintf(out, cap, "a closure that captured a slice of it");
             return;
+        case AST_FUNCTION_CALL:
+            if (e->child_count > 0 && e->children[0] && e->children[0]->value)
+                snprintf(out, cap, "what `%s` returns, a slice of it", e->children[0]->value);
+            else
+                snprintf(out, cap, "a slice of it");
+            return;
         default:
             snprintf(out, cap, "a slice of it");
             return;
@@ -479,7 +509,7 @@ static void report(Esc* esc, Frame* f, ASTNode* at, const char* message) {
     esc->errors++;
 }
 
-typedef enum { LEAVES_BY_RETURN, LEAVES_TO_GLOBAL, LEAVES_TO_FIELD } Leaves;
+typedef enum { LEAVES_BY_RETURN, LEAVES_TO_GLOBAL, LEAVES_TO_FIELD, LEAVES_TO_OUTER } Leaves;
 
 /* `value`, a view of the frame's storage, leaves the frame. `target` names
  * the global or the variable whose field takes it. */
@@ -509,6 +539,14 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
         return;
     }
     switch (how) {
+        case LEAVES_TO_OUTER: {
+            Frame* o = outer_frame_of(f, target);
+            snprintf(msg, sizeof(msg),
+                     "`%s`, a variable of %s, is given by this closure a slice of its own storage "
+                     "(%s): the storage ends when the closure returns, while `%s` lives on",
+                     target, o ? o->shown : "the frame it is written in", what, target);
+            break;
+        }
         case LEAVES_BY_RETURN:
             snprintf(msg, sizeof(msg),
                      "%s returns a slice of its own storage (%s): the storage ends when %s "
@@ -726,12 +764,15 @@ static void flow_block(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int ne
  * check), `null` or `[]`. */
 /* The names a closure declares itself: its parameters and written-type
  * declarations, and those of the closures nested in it. */
-static void closure_own_names(ASTNode* n, StrMap* own) {
+static void closure_own_names(Frame* f, ASTNode* n, StrMap* own) {
     if (!n) return;
+    /* A bare binding of a name the frame `f` does not have is the closure's
+     * own local, as a written-type one is (#2846). */
     if ((n->type == AST_CLOSURE_PARAM && n->value) ||
-        (n->type == AST_VARIABLE_DECLARATION && n->value && !n->type_inferred))
+        (n->type == AST_VARIABLE_DECLARATION && n->value &&
+         (!n->type_inferred || !strmap_has(&f->locals, n->value))))
         strmap_put(own, n->value, n);
-    for (int i = 0; i < n->child_count; i++) closure_own_names(n->children[i], own);
+    for (int i = 0; i < n->child_count; i++) closure_own_names(f, n->children[i], own);
 }
 
 /* The calls of the closure the frame names `name`: `name(...)`, which the
@@ -865,7 +906,7 @@ static void closure_views(Frame* f, ASTNode* lit, const char* name, StrMap* own,
 static void taint_closure(Frame* f, ASTNode* lit, const char* name, Views* v) {
     StrMap own;
     strmap_init(&own);
-    closure_own_names(lit, &own);
+    closure_own_names(f, lit, &own);
     Views j;
     views_copy(&j, v);
     views_join(&j, &f->ever);
@@ -874,6 +915,77 @@ static void taint_closure(Frame* f, ASTNode* lit, const char* name, Views* v) {
     taint_stores(f, lit, &own, &j);
     strmap_free(&j);
     strmap_free(&own);
+}
+
+/* Does one of the returns in the closure body `n` (not those of closures
+ * nested in it) give a view where `j` says what holds one? An expression
+ * body is the value it returns. */
+static int returns_view(Frame* f, Views* j, ASTNode* n, int top) {
+    if (!n || (!top && ast_is_own_function(n))) return 0;
+    if (n->type == AST_RETURN_STATEMENT) {
+        for (int i = 0; i < n->child_count; i++)
+            if (frame_view(f, j, n->children[i])) return 1;
+        return 0;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (!c || c->type == AST_CLOSURE_PARAM) continue;
+        if (top && c->type != AST_BLOCK) {
+            if (frame_view(f, j, c)) return 1;
+        } else if (returns_view(f, j, c, 0)) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+/* The closure literal the frame binds `name` to, once and only once. */
+static ASTNode* closure_bound_once(ASTNode* n, const char* name, int* seen) {
+    if (!n || ast_is_own_function(n)) return NULL;
+    ASTNode* found = NULL;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0) {
+        (*seen)++;
+        if (n->child_count > 0 && n->children[0] && n->children[0]->type == AST_CLOSURE &&
+            ast_is_own_function(n->children[0]))
+            found = n->children[0];
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* r = closure_bound_once(n->children[i], name, seen);
+        if (r) found = r;
+    }
+    return found;
+}
+
+/* #2846: `call(get)` (what `get()` becomes) of a closure the frame binds to
+ * `get`: its result views the frame's storage when one of the closure's
+ * returns would, judged as its stores are. A call met while one is judged,
+ * and another function's result, are taken to be none, as everywhere in
+ * this check. */
+static int g_judging_call = 0;
+
+static int closure_call_view(Frame* f, const Views* v, ASTNode* call) {
+    if (g_judging_call || !call->value || strcmp(call->value, "call") != 0 ||
+        call->child_count == 0 || !call->children[0] ||
+        call->children[0]->type != AST_IDENTIFIER || !call->children[0]->value)
+        return 0;
+    const char* name = call->children[0]->value;
+    int seen = 0;
+    ASTNode* lit = closure_bound_once(frame_body(f->owner), name, &seen);
+    if (!lit || seen != 1) return 0;
+    g_judging_call = 1;
+    StrMap own;
+    strmap_init(&own);
+    closure_own_names(f, lit, &own);
+    Views j;
+    views_copy(&j, v);
+    views_join(&j, &f->ever);
+    views_join(&j, &f->sticky);
+    closure_views(f, lit, name, &own, &j);
+    int r = returns_view(f, &j, lit, 1);
+    strmap_free(&j);
+    strmap_free(&own);
+    g_judging_call = 0;
+    return r;
 }
 
 static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
@@ -973,6 +1085,11 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
                     report_escape(esc, f, n->children[0], LEAVES_TO_GLOBAL, n->value);
                 return;
             }
+            if (n->type_inferred && !strmap_has(&f->locals, n->value) && outer_name(f, n->value)) {
+                if (rep && frame_view(f, v, n->children[0]))
+                    report_escape(esc, f, n->children[0], LEAVES_TO_OUTER, n->value);
+                return;
+            }
             bind_path(f, v, n->value, 0, n->children[0]);
             return;
         default:
@@ -984,6 +1101,8 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
         if (left && left->type == AST_IDENTIFIER && left->value) {
             if (strmap_has(&f->locals, left->value))
                 bind_path(f, v, left->value, 0, value);
+            else if (rep && outer_name(f, left->value) && frame_view(f, v, value))
+                report_escape(esc, f, value, LEAVES_TO_OUTER, left->value);
             else if (rep && strmap_has(&esc->globals, left->value) &&
                      frame_view_store(f, v, value))
                 report_escape(esc, f, value, LEAVES_TO_GLOBAL, left->value);
@@ -1015,8 +1134,7 @@ static void check_closures_in(Esc* esc, ASTNode* n, Frame* parent) {
 
 static void check_frame(Esc* esc, ASTNode* owner, Frame* parent) {
     Frame f;
-    frame_init(esc, &f, owner);
-    f.parent = parent;
+    frame_init(esc, &f, owner, parent);
     ASTNode* body = frame_body(owner);
     /* Two walks: the first only learns which paths ever hold a view, so
      * that a closure's stores are judged, on the second, against what its

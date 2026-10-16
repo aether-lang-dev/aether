@@ -293,6 +293,10 @@ and every DLL `ae` links export no `main`.
   are not (an executable leaves those to process exit too).
 - Call both from one thread, the host's main or UI thread. They are not
   synchronized against each other.
+- Stop the host's own threads that send to the program's actors before
+  `aether_main_exit`: its drain waits for the actors to go idle. A send from
+  such a thread while the program is not running is dropped, counted by
+  `scheduler_stopped_sends()` and reported once (#2912).
 
 **Finding them.** They are plain exported symbols: `dlsym(h, "aether_main")`,
 a weak reference, or the `--emit=csrc` header, which declares both when the
@@ -504,7 +508,7 @@ different `.ae` sources are linked into one binary.
 
 | Function origin                     | `--emit=exe` | `--emit=lib`                            |
 |-------------------------------------|:------------:|:---------------------------------------:|
-| Local (defined in this `.ae`)       | external     | external + `aether_<name>` alias        |
+| Local (defined in this `.ae`)       | external     | `aether_<name>` alias exported; its own name hidden (#2937) |
 | Local with trailing `_` (`helper_`) | **`static`** | **`static`** (no `aether_<name>` alias) |
 | Local with tuple return type        | external     | external (no `aether_<name>` alias)     |
 | Imported Aether wrapper             | **`static`** | **`static`** (no `aether_<name>` alias) |
@@ -528,6 +532,15 @@ where cloned imported functions get `clone->is_imported = 1`, and
 [`compiler/codegen/codegen_func.c`](../compiler/codegen/codegen_func.c)
 where the `static AETHER_MAYBE_UNUSED ` prefix is emitted for functions
 guarded by `func->is_imported || trailing_underscore_private`.
+
+**A library calls its own functions, not a host's.** A function with an
+`aether_<name>` alias is emitted with hidden visibility under its own name
+(`AETHER_LIB_LOCAL`): it still links across the library's translation
+units, but it is not exported, so on ELF, where a call through an exported
+name binds to the first definition in the process, a host or another
+library defining the same name cannot take over the library's calls
+(#2937). A function without an alias (a builder, a tuple returner) and a
+`@c_callback` keep their exported names.
 
 **Locally-defined functions retain external linkage.** If two `.ae`
 files both define a function with the same name (e.g. both define

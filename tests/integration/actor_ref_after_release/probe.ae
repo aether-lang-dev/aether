@@ -1,0 +1,11 @@
+// #2527: a reference taken from a released actor whose block a new actor
+// has since taken. The work is in shim.c.
+
+extern actor_ref_probe() -> int
+
+main() {
+    rc = actor_ref_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+}

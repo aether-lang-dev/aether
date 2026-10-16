@@ -8,9 +8,9 @@
  *
  * A `-> string` export returns a string the caller owns (#2931): `shout`
  * copies its bytes out, gives it back through the library's release, and
- * SWIG frees the copy once Python has its own (%newobject). The C helper
- * must not be named `shout`: the library's own `shout` is a global symbol,
- * and on ELF the library's call to it would bind to the helper instead.
+ * SWIG frees the copy once Python has its own (%newobject). The helper has
+ * the library function's own name, `shout`: the library's call to its `shout`
+ * stays inside the library (#2937), where on ELF it bound to this helper.
  */
 
 %module aether_lib
@@ -30,10 +30,9 @@ extern void aether_config_string_release(const void* s);
 
 int32_t aether_add(int32_t a, int32_t b);
 
-%rename(shout) shout_copy;
-%newobject shout_copy;
+%newobject shout;
 %inline %{
-char* shout_copy(const char* s) {
+char* shout(const char* s) {
     const void* h = aether_shout(s);
     size_t n = aether_string_length(h);
     char* out = (char*)malloc(n + 1);

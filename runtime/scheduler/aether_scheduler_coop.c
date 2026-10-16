@@ -125,6 +125,32 @@ uint64_t scheduler_released_sends(void) {
     return g_coop_released_sends;
 }
 
+/* The cooperative scheduler runs on its one thread: no other thread sends
+ * to it, stopped or not (#2912). */
+uint64_t scheduler_stopped_sends(void) {
+    return 0;
+}
+
+AetherActorRef scheduler_actor_ref(ActorBase* actor) {
+    AetherActorRef ref = { actor, actor ? actor->id : 0 };
+    return ref;
+}
+
+void scheduler_send_ref(AetherActorRef ref, Message msg) {
+    if (ref.actor && ref.actor->id == ref.id) {
+        scheduler_send_remote(ref.actor, msg, -1);
+        return;
+    }
+    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    if (msg.zerocopy.owned && msg.zerocopy.data) free(msg.zerocopy.data);
+    g_coop_released_sends++;
+    if (!g_coop_released_send_reported) {
+        g_coop_released_send_reported = 1;
+        fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                        "dropped (reported once)\n", msg.type, ref.id);
+    }
+}
+
 static int coop_send_to_dead_actor(ActorBase* actor, Message* msg) {
     int dead = actor ? atomic_load_explicit(&actor->dead, memory_order_relaxed) : 1;
     if (!dead) return 0;

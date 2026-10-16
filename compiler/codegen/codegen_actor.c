@@ -365,14 +365,14 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
     return sname;
 }
 
-/* #2528: `<Actor>_destroy_state(void*)`, the scheduler's hook for what the
+/* #2528: `_aether_state_drop_<Actor>(void*)`, the scheduler's hook for what the
  * state fields own, run once by the free path that ends a scheduler-owned
  * actor, after it can no longer be stepped. Each state field of an owning
  * type releases what it holds through that type's drop (#2921): a string, a
  * closure's environment (#2525), a struct, tuple, optional or fixed-size
  * array that owns. A field widened to a pointer holds nothing of its own. */
 static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
-    print_line(gen, "static void %s_destroy_state(void* _p) {", actor->value);
+    print_line(gen, "static void _aether_state_drop_%s(void* _p) {", actor->value);
     indent(gen);
     print_line(gen, "%s* self = (%s*)_p;", actor->value, actor->value);
     print_line(gen, "(void)self;");
@@ -741,7 +741,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         print_line(gen, "static int %s_handlers_initialized = 0;", actor->value);
         print_line(gen, "");
         
-        print_line(gen, "static void %s_init_handlers(%s* self) {", actor->value, actor->value);
+        print_line(gen, "static void _aether_init_handlers_%s(%s* self) {", actor->value, actor->value);
         indent(gen);
         print_line(gen, "if (%s_handlers_initialized) return;", actor->value);
         
@@ -794,7 +794,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
         }
     }
 
-    print_line(gen, "void %s_step(%s* self) {", actor->value, actor->value);
+    print_line(gen, "void _aether_step_%s(%s* self) {", actor->value, actor->value);
     indent(gen);
 
     // Record this actor as the one currently running on this thread so
@@ -1014,7 +1014,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             print_line(gen, "%s_handle_%s(self, _msg_data);", actor->value, pattern->value);
                             /* Release heap-string fields the sender
                              * deep-copied at send time (#466). The
-                             * <Msg>_release_fields function is
+                             * _aether_msg_release_<Msg> function is
                              * emitted alongside the message struct
                              * iff the message has at least one
                              * string field; we always call it here
@@ -1033,7 +1033,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * always available. */
                             if (msg_def) {
                                 if (message_owns_fields(gen, pattern->value)) {
-                                    print_line(gen, "%s_release_fields((%s*)_msg_data);",
+                                    print_line(gen, "_aether_msg_release_%s((%s*)_msg_data);",
                                                pattern->value, pattern->value);
                                 }
                             }
@@ -1053,7 +1053,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * int branch above (#466). */
                             if (msg_def) {
                                 if (message_owns_fields(gen, pattern->value)) {
-                                    print_line(gen, "%s_release_fields((%s*)_msg_data);",
+                                    print_line(gen, "_aether_msg_release_%s((%s*)_msg_data);",
                                                pattern->value, pattern->value);
                                 }
                             }
@@ -1078,7 +1078,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "static int _single_core_cached = -1;");
     print_line(gen, "if (_single_core_cached < 0) _single_core_cached = (getenv(\"AETHER_SINGLE_CORE\") != NULL);");
     print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core_cached ? 0 : -1);");
-    print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))%s_step, sizeof(%s));",
+    print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))_aether_step_%s, sizeof(%s));",
                actor->value, actor->value, actor->value, actor->value);
     /* NULL means the allocation failed: nothing pools actors any more. The
      * second allocation that used to follow was no likelier to succeed, and
@@ -1127,7 +1127,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     }
-    print_line(gen, "actor->destroy_state = %s_destroy_state;   /* #2528 */", actor->value);
+    print_line(gen, "actor->destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates
@@ -1194,7 +1194,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "}");
     print_line(gen, "");
 
-    print_line(gen, "void send_%s(%s* actor, int type, int payload) {", actor->value, actor->value);
+    print_line(gen, "void _aether_send_%s(%s* actor, int type, int payload) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "Message msg = {type, 0, payload, NULL};");
     print_line(gen, "if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == aether_core_id_get()) {");

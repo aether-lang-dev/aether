@@ -14,7 +14,7 @@
  *                               a panic leaves (#2923)
  *
  * A fixed-size array's take the address of its first element. A struct's
- * are its <Name>_dup / <Name>_destroy (codegen_func.c), which this file
+ * are its _aether_copy_<Name> / _aether_drop_<Name> (codegen_func.c), which this file
  * calls for a struct part. Every type that reaches a place is registered by
  * the walk over the program (own_collect_types) and the functions are
  * emitted once all types are complete (emit_own_ops), prototypes first, so
@@ -177,8 +177,8 @@ void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op) {
         return;
     case TYPE_STRUCT: {
         const char* s = struct_owning_strings(gen, pt);
-        if (op == OWN_RETAIN) fprintf(o, "    %s = %s_dup(%s);\n", lv, s, lv);
-        else if (op == OWN_DROP) fprintf(o, "    %s_destroy(&%s);\n", s, lv);
+        if (op == OWN_RETAIN) fprintf(o, "    %s = _aether_copy_%s(%s);\n", lv, s, lv);
+        else if (op == OWN_DROP) fprintf(o, "    _aether_drop_%s(&%s);\n", s, lv);
         else if (op == OWN_PUBLISH) fprintf(o, "    %s_publish(&%s);\n", s, lv);
         else fprintf(o, "    (void)_aether_move_%s(&%s);\n", s, lv);
         return;
@@ -301,7 +301,7 @@ const char* own_unwind_fn(CodeGenerator* gen, Type* t) {
     if (t->kind == TYPE_FUNCTION) return "_aether_closure_drop_unwind";
     if (t->kind == TYPE_PTR) return "_aether_seq_drop_unwind";
     const char* s = struct_owning_strings(gen, t);
-    if (s) return cg_internf("%s_destroy_unwind", s);
+    if (s) return cg_internf("_aether_udrop_%s", s);
     return own_fn(gen, t, "drop_unwind");
 }
 

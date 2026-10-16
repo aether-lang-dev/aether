@@ -1084,11 +1084,21 @@ const char* http_server_set_health_probes_raw(HttpServer* server,
 // #260 Tier 3 / F1: access logger
 // =================================================================
 
+static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
+                                    void* user_data, void (*release)(void*));
+
 typedef struct {
     char* format;       /* "combined" or "json" */
     FILE* fp;           /* not closed by us — that's set up below */
     int   own_fp;       /* 1 if we opened it (need to fclose); 0 for stderr */
 } AccessLogState;
+
+static void access_log_release(void* p) {
+    AccessLogState* st = (AccessLogState*)p;
+    if (st->own_fp) fclose(st->fp);
+    free(st->format);
+    free(st);
+}
 
 /* Format a Common/Combined Log Format timestamp: "DD/MMM/YYYY:HH:MM:SS +0000".
  *
@@ -1199,7 +1209,7 @@ const char* http_server_set_access_log_raw(HttpServer* server,
         st->own_fp = 1;
     }
 
-    http_server_use_request_hook(server, access_log_hook, st);
+    server_add_request_hook(server, access_log_hook, st, access_log_release);
     return "";
 }
 
@@ -1232,6 +1242,20 @@ typedef struct {
      * rather than accumulated counters. */
     HttpServer* server;
 } MetricsState;
+
+static void metrics_release(void* p) {
+    MetricsState* st = (MetricsState*)p;
+    MetricsRoute* r = st->head;
+    while (r) {
+        MetricsRoute* next = r->next;
+        free(r->method);
+        free(r->path_pattern);
+        free(r);
+        r = next;
+    }
+    pthread_mutex_destroy(&st->lock);
+    free(st);
+}
 
 static MetricsRoute* metrics_route_for(MetricsState* st,
                                        const char* method,
@@ -1405,7 +1429,7 @@ const char* http_server_set_metrics_raw(HttpServer* server,
     if (!st) return "out of memory";
     pthread_mutex_init(&st->lock, NULL);
     st->server = server;
-    http_server_use_request_hook(server, metrics_hook, st);
+    server_add_request_hook(server, metrics_hook, st, metrics_release);
     const char* endpoint = (metrics_endpoint && *metrics_endpoint)
         ? metrics_endpoint : "/metrics";
     http_server_get(server, endpoint, metrics_handler, st);
@@ -2664,6 +2688,10 @@ struct HttpResponseTransformerNode {
 struct HttpRequestHookNode {
     HttpRequestHook hook;
     void* user_data;
+    /* #2910: frees user_data with the server, for a hook whose state the
+     * server owns (the access logger, the metrics collector); NULL for a
+     * hook the caller registered, whose state stays the caller's. */
+    void (*release)(void*);
     struct HttpRequestHookNode* next;
 };
 
@@ -3778,14 +3806,13 @@ static int ws_send_handshake(HttpConn* conn, const char* client_key) {
     return 0;
 }
 
-void http_server_use_request_hook(HttpServer* server,
-                                  HttpRequestHook hook,
-                                  void* user_data) {
-    if (!server || !hook) return;
+static void server_add_request_hook(HttpServer* server, HttpRequestHook hook,
+                                    void* user_data, void (*release)(void*)) {
     struct HttpRequestHookNode* node =
         (struct HttpRequestHookNode*)malloc(sizeof(*node));
     node->hook = hook;
     node->user_data = user_data;
+    node->release = release;
     node->next = NULL;
     if (!server->request_hook_chain) {
         server->request_hook_chain = node;
@@ -3794,6 +3821,13 @@ void http_server_use_request_hook(HttpServer* server,
         while (tail->next) tail = tail->next;
         tail->next = node;
     }
+}
+
+void http_server_use_request_hook(HttpServer* server,
+                                  HttpRequestHook hook,
+                                  void* user_data) {
+    if (!server || !hook) return;
+    server_add_request_hook(server, hook, user_data, NULL);
 }
 
 void http_server_use_response_transformer(HttpServer* server,
@@ -6058,16 +6092,13 @@ void http_server_free(HttpServer* server) {
         }
     }
 
-    // Free per-request observation hooks (#260 Tier 3 F1/F2). Note:
-    // we deliberately don't free the hook's user_data here — that's
-    // owned by the registering subsystem (access logger / metrics
-    // collector). Those leak across server free, which is fine for
-    // process-lifetime servers; a follow-up could add a destructor
-    // hook to clean them up too.
+    // Free per-request observation hooks (#260 Tier 3 F1/F2), and the
+    // state of those the server owns (#2910); a caller's hook keeps its own.
     {
         struct HttpRequestHookNode* h = server->request_hook_chain;
         while (h) {
             struct HttpRequestHookNode* next = h->next;
+            if (h->release) h->release(h->user_data);
             free(h);
             h = next;
         }

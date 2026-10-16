@@ -10,6 +10,7 @@
 /custom_lib_dir/
 /lib/
 tests/integration/actor_alignment/
+tests/integration/actor_ref_after_release/
 tests/integration/ae_inspect/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
@@ -113,6 +114,7 @@ tests/integration/host_racket/
 tests/integration/host_rhombus/
 tests/integration/host_tinygo/
 tests/integration/http_actor_mode_release/
+tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
@@ -161,6 +163,7 @@ tests/integration/https_client_pure_tls/
 tests/integration/https_windows_trust/
 tests/integration/http_server_tls/
 tests/integration/http_server_websocket/
+tests/integration/sched_foreign_send_lifecycle/
 tests/integration/tinyweb_tls/
 tests/integration/http_stream_upload/
 tests/integration/import_error_attribution/

@@ -354,6 +354,9 @@ static atomic_int g_threads_ready = 0;
 // live must not wipe the actor tables of the actors already running, so it is
 // a no-op; scheduler_shutdown() and scheduler_cleanup() end the lifecycle.
 static atomic_int g_sched_state = 0;
+/* #2912: sends from threads the scheduler does not own that are between
+ * their check of g_sched_state and their last touch of a core. */
+static atomic_int g_foreign_senders = 0;
 
 AETHER_TLS int current_core_id = -1;
 AETHER_TLS void* g_current_step_actor = NULL;
@@ -1228,17 +1231,80 @@ uint64_t scheduler_released_sends(void) {
 // A message to a dead actor cannot be delivered: release what travels with
 // it (no processed credit: the send is not counted yet on this path). A
 // released target means a send against the release contract.
-static void send_to_dead_actor(ActorBase* actor, Message* msg) {
-    AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
+static void release_undelivered(Message* msg) {
     if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
     if (msg->zerocopy.owned && msg->zerocopy.data) free(msg->zerocopy.data);
     if (msg->_reply_slot) reply_slot_decref((ActorReplySlot*)msg->_reply_slot);
+}
+
+static void send_to_dead_actor(ActorBase* actor, Message* msg) {
+    AETHER_TRACE_EVENT(AE_TRACE_DROP_DEAD, actor ? actor->id : 0, msg->type, msg->sender_id);
+    release_undelivered(msg);
     if (actor && (atomic_load_explicit(&actor->dead, memory_order_relaxed) & AETHER_ACTOR_RELEASED)) {
         atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
         if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
             fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
                             "dropped (reported once)\n", msg->type, actor->id);
         }
+    }
+}
+
+/* #2912: a thread the scheduler does not own (the main thread, a std.worker
+ * job, an http pool worker, a C host's thread) reaches a core's queues and
+ * lock only while the scheduler runs. It counts itself in g_foreign_senders,
+ * then reads the state; teardown changes the state, then waits for the
+ * count to drain before it touches a core. So a sender either sees the
+ * scheduler not running, and its send is dropped and reported, or finishes
+ * before any core goes. */
+static _Atomic uint64_t g_stopped_sends = 0;
+static atomic_flag g_stopped_send_reported = ATOMIC_FLAG_INIT;
+
+uint64_t scheduler_stopped_sends(void) {
+    return atomic_load_explicit(&g_stopped_sends, memory_order_relaxed);
+}
+
+static int foreign_send_enter(void) {
+    atomic_fetch_add(&g_foreign_senders, 1);
+    if (atomic_load(&g_sched_state) == 2) return 1;
+    atomic_fetch_sub(&g_foreign_senders, 1);
+    return 0;
+}
+
+static void foreign_send_leave(void) {
+    atomic_fetch_sub(&g_foreign_senders, 1);
+}
+
+static void send_while_stopped(ActorBase* actor, Message* msg) {
+    release_undelivered(msg);
+    atomic_fetch_add_explicit(&g_stopped_sends, 1, memory_order_relaxed);
+    if (!atomic_flag_test_and_set_explicit(&g_stopped_send_reported, memory_order_relaxed)) {
+        fprintf(stderr, "aether: message type %d sent to actor %d while the scheduler is not "
+                        "running; dropped (reported once)\n", msg->type, actor ? actor->id : 0);
+    }
+}
+
+/* Teardown's side, once g_sched_state no longer says running. */
+static void wait_for_foreign_senders(void) {
+    while (atomic_load(&g_foreign_senders) != 0) AETHER_PAUSE();
+}
+
+AetherActorRef scheduler_actor_ref(ActorBase* actor) {
+    AetherActorRef ref = { actor, actor ? __atomic_load_n(&actor->id, __ATOMIC_ACQUIRE) : 0 };
+    return ref;
+}
+
+void scheduler_send_ref(AetherActorRef ref, Message msg) {
+    if (ref.actor && __atomic_load_n(&ref.actor->id, __ATOMIC_ACQUIRE) == ref.id) {
+        scheduler_send_remote(ref.actor, msg, current_core_id);
+        return;
+    }
+    // The block is another actor's now: the one the reference was taken
+    // from was released.
+    release_undelivered(&msg);
+    atomic_fetch_add_explicit(&g_released_sends, 1, memory_order_relaxed);
+    if (!atomic_flag_test_and_set_explicit(&g_released_send_reported, memory_order_relaxed)) {
+        fprintf(stderr, "aether: message type %d sent to actor %d after its release; "
+                        "dropped (reported once)\n", msg.type, ref.id);
     }
 }
 
@@ -2342,6 +2408,12 @@ void scheduler_shutdown(void) {
     // Wait for any in-flight messages first
     scheduler_wait();
 
+    // Stopping (3): a send from a thread the scheduler does not own is
+    // refused from here on, not queued for cores about to stop (#2912).
+    int running = 2;
+    atomic_compare_exchange_strong(&g_sched_state, &running, 3);
+    wait_for_foreign_senders();
+
     // Signal threads to stop
     scheduler_stop();
 
@@ -2378,6 +2450,9 @@ void scheduler_shutdown(void) {
 // scheduler_cleanup() and a scheduler_init() that follows a
 // scheduler_shutdown() both release them this way.
 static void scheduler_free_core_tables(void) {
+    // g_sched_state is not running here (init has claimed it, or cleanup
+    // cleared it); a foreign sender still on its way out finishes first.
+    wait_for_foreign_senders();
     // Actors never released (a program or host that stops the scheduler
     // with actors alive, a panicked actor) are reachable only through the
     // tables freed here. Those the scheduler spawned end the way a release
@@ -2443,10 +2518,10 @@ static void scheduler_free_core_tables(void) {
 }
 
 void scheduler_cleanup(void) {
+    atomic_store(&g_sched_state, 0);
     // Free allocated scheduler resources
     scheduler_free_core_tables();
     num_cores = 0;
-    atomic_store_explicit(&g_sched_state, 0, memory_order_release);
 }
 
 static int register_actor(ActorBase* actor, int preferred_core);
@@ -2760,6 +2835,8 @@ void scheduler_send_local(ActorBase* actor, Message msg) {
     }
 }
 
+static void send_through_core(ActorBase* actor, Message msg, int from_core);
+
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
     AETHER_TRACE_EVENT(AE_TRACE_SEND_REMOTE, actor ? actor->id : 0,
                        msg.type, msg.sender_id);
@@ -2797,6 +2874,19 @@ void scheduler_send_remote(ActorBase* actor, Message msg, int from_core) {
         }
     }
 
+    if (current_core_id >= 0) {
+        send_through_core(actor, msg, from_core);
+        return;
+    }
+    if (!foreign_send_enter()) {
+        send_while_stopped(actor, &msg);
+        return;
+    }
+    send_through_core(actor, msg, from_core);
+    foreign_send_leave();
+}
+
+static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // Per-core sent counter - no atomic contention on hot path!
     if (likely(current_core_id >= 0)) {
         schedulers[current_core_id].messages_sent++;
@@ -2987,6 +3077,13 @@ void scheduler_send_batch_flush(void) {
     if (!g_batch_buffer || g_batch_buffer->count == 0) return;
 
     int count = g_batch_buffer->count;
+    if (!foreign_send_enter()) {
+        for (int i = 0; i < count; i++)
+            send_while_stopped(g_batch_buffer->actors[i], &g_batch_buffer->messages[i]);
+        g_batch_buffer->count = 0;
+        memset(g_batch_buffer->by_core, 0, sizeof(g_batch_buffer->by_core));
+        return;
+    }
 
     // === PHASE 1: Snapshot target cores and compute per-core counts ===
     // Read assigned_core ONCE per message and store it.  The by_core[] counts
@@ -3056,6 +3153,7 @@ void scheduler_send_batch_flush(void) {
 
     // Single atomic update for batch-sent messages
     atomic_fetch_add_explicit(&main_thread_sent, total_sent, memory_order_relaxed);
+    foreign_send_leave();
 
     // Reset buffer
     g_batch_buffer->count = 0;
@@ -3089,7 +3187,9 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 
     actor->alloc_size = actor_size;
     actor->destroy_state = NULL;   // the generated spawn sets it (#2528)
-    actor->id = atomic_fetch_add(&next_actor_id, 1);
+    /* Published for scheduler_send_ref, which may read a reused block's id
+     * from another thread (#2527). */
+    __atomic_store_n(&actor->id, atomic_fetch_add(&next_actor_id, 1), __ATOMIC_RELEASE);
     actor->step = step;
     atomic_init(&actor->active, 0);  // inactive until first message send
     actor->thread = 0;

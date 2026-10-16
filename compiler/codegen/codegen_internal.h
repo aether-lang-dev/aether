@@ -518,7 +518,7 @@ int call_param_keeps(CodeGenerator* gen, const char* func_name, int idx);
 /* Function/struct generation (codegen_func.c) */
 int has_return_value(ASTNode* node);
 /* #2528 (codegen_actor.c): a `string` state field, which owns what it
- * holds and is released by `<Actor>_destroy_state`. */
+ * holds and is released by `_aether_state_drop_<Actor>`. */
 int state_field_owns_string(ASTNode* state_decl);
 /* #2528: a `string[N]` (1) / `fn[N]` (2) state field, length in `*len`. */
 int state_array_owned(ASTNode* state_decl, int* len);
@@ -529,14 +529,14 @@ const char* state_struct_array_owned(CodeGenerator* gen, ASTNode* state_decl, in
 void emit_owned_string_element(CodeGenerator* gen, ASTNode* v);
 
 /* Struct-field heap-string ownership (#465). The struct typedef
- * emitter (generate_struct_definition) emits a `<Name>_destroy()`
+ * emitter (generate_struct_definition) emits a `_aether_drop_<Name>()`
  * for a struct whose fields own. The statement-codegen consumes
  * these helpers at struct-local declaration sites (push the
  * scope-exit destroy defer) and at field-write sites (the store
  * takes the new value and releases the old). */
 /* #2525: a `fn` field (a closure value, not a raw C function pointer): it
  * holds a reference of its own to the closure's env, released by
- * `<Name>_destroy` / `_replace`, retained by `_dup`. */
+ * `_aether_drop_<Name>` / `_replace`, retained by `_dup`. */
 int struct_field_is_closure(ASTNode* field);
 /* #2528: a `string[N]` (1) or `fn[N]` (2) field whose elements the struct
  * owns, length in `*len`; 0 otherwise. */
@@ -562,15 +562,15 @@ void emit_struct_literal_array_field(CodeGenerator* gen, const char* sname, ASTN
                                      const char* slit);
 /* #2690: a struct value a `try` body writes is declared volatile; may the
  * lvalue `lv` (a local, or a field or element held by one) be such a value?
- * Its release and replace are then the generated `<Name>_destroy_volatile`
- * and `<Name>_replace_volatile`, which these name. */
+ * Its release and replace are then the generated `_aether_vdrop_<Name>`
+ * and `_aether_vstore_<Name>`, which these name. */
 int lvalue_may_be_volatile(CodeGenerator* gen, ASTNode* lv);
 void emit_struct_unwind_track(CodeGenerator* gen, const char* var_name, const char* struct_name);
 const char* struct_destroy_fn(const char* sname, int is_volatile);
 const char* struct_replace_fn(const char* sname, int is_volatile);
 /* #2497: does a value of this struct own heap strings, in a `string` field
  * of its own or in a field that is itself such a struct held by value? It
- * then has `<Name>_destroy` / `_replace` / `_heap_free` / `_cell_release`,
+ * then has `_aether_drop_<Name>` / `_replace` / `_heap_free` / `_cell_release`,
  * which release the nested struct's strings too. */
 int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def);
 ASTNode* owning_struct_field_def(CodeGenerator* gen, ASTNode* field);
@@ -636,6 +636,7 @@ const char* sandbox_trust_wrapper_name(ASTNode* def, int site);
    agree or C rejects the file with "static declaration follows non-static
    declaration". #1366 */
 int fn_has_internal_linkage(ASTNode* func);
+int lib_fn_is_local(CodeGenerator* gen, ASTNode* fn);
 /* Look up a top-level @c_callback function by its current AST value
    (after any import-rename pass) and return its bound C symbol — or
    NULL when no such callback exists. Used at value-position

@@ -2707,11 +2707,11 @@ int lvalue_may_be_volatile(CodeGenerator* gen, ASTNode* lv) {
 /* The release or replace of an owning struct `sname` held where `volatile`
  * says: the generated `_volatile` helpers take a volatile pointer. */
 const char* struct_destroy_fn(const char* sname, int is_volatile) {
-    return cg_internf(is_volatile ? "%s_destroy_volatile" : "%s_destroy", sname);
+    return cg_internf(is_volatile ? "_aether_vdrop_%s" : "_aether_drop_%s", sname);
 }
 
 const char* struct_replace_fn(const char* sname, int is_volatile) {
-    return cg_internf(is_volatile ? "%s_replace_volatile" : "%s_replace", sname);
+    return cg_internf(is_volatile ? "_aether_vstore_%s" : "_aether_store_%s", sname);
 }
 
 /* #2497: may the trackers of the value struct `obj` (a field held by value,
@@ -3029,7 +3029,7 @@ static void emit_array_field_take(CodeGenerator* gen, int kind, const char* es, 
         fprintf(gen->output, "{ %s[_ae_k] = _ae_src[_ae_k]; _aether_closure_env_retain(%s[_ae_k].env); } }",
                 into, into);
     } else if (kind == AF_STRUCT) {
-        fprintf(gen->output, "%s[_ae_k] = %s_dup(_ae_src[_ae_k]); }", into, es);
+        fprintf(gen->output, "%s[_ae_k] = _aether_copy_%s(_ae_src[_ae_k]); }", into, es);
     } else {
         fprintf(gen->output, "%s[_ae_k] = _ae_src[_ae_k]; }", into);
     }
@@ -3101,7 +3101,7 @@ static void emit_whole_array_store_end(CodeGenerator* gen, int kind, const char*
     } else {
         /* The destination is reached through a volatile pointer, which
          * accepts a field of a volatile local (#2690) as well. */
-        fprintf(gen->output, "%s_replace_volatile(&_ae_fdst[_ae_k], _ae_farr[_ae_k]); }\n", es);
+        fprintf(gen->output, "_aether_vstore_%s(&_ae_fdst[_ae_k], _ae_farr[_ae_k]); }\n", es);
     }
 }
 
@@ -3291,7 +3291,7 @@ static int emit_struct_field_heap_assign(CodeGenerator* gen, ASTNode* lhs, ASTNo
      * struct pointer from heap.new (`p.field = ...`, accessor "->"). The
      * pointer case (#790) lets a heap.new'd struct own its string fields: the
      * box takes the string exactly as a value struct does, so the generated
-     * `<Name>_heap_free` / scope-exit destructor releases it. */
+     * `_aether_heap_free_<Name>` / scope-exit destructor releases it. */
     const char* acc;
     const char* struct_name;
     if (obj_type->kind == TYPE_STRUCT && obj_type->struct_name) {
@@ -3734,7 +3734,7 @@ void push_own_drop_carrier(CodeGenerator* gen, const char* name, Type* t, int li
 
 /* Struct-reassignment helper (#465). For `<var> = <value>` where `<var>`
  * is a struct local with heap-string fields, emit
- * `<Struct>_replace(&<var>, <value>);`: the previous struct's owned strings
+ * `_aether_store_<Struct>(&<var>, <value>);`: the previous struct's owned strings
  * are reclaimed, except one the new value takes over (`r = Rec { name:
  * r.name }`), which moves to it. Returns 1 if it emitted the assignment;
  * 0 leaves the caller to emit the bare one. */
@@ -4954,7 +4954,7 @@ static void emit_cell_store(CodeGenerator* gen, const char* name, Type* t, ASTNo
         fprintf(gen->output, ");\n");
     } else if (sname) {
         /* #2497: a struct owned elsewhere is copied in. */
-        fprintf(gen->output, "%s_replace(%s, ", sname, name);
+        fprintf(gen->output, "_aether_store_%s(%s, ", sname, name);
         emit_struct_take(gen, value, sname, NULL);
         fprintf(gen->output, ");\n");
     } else {
@@ -5147,7 +5147,7 @@ void emit_sized_array_param_copy(CodeGenerator* gen, Type* t, const char* name, 
 /* The function that gives back one reference to a promoted cell of C type
  * `c_type`; the last holder frees the cell. A string cell owns its heap
  * string and a struct cell the struct's owned string fields, so those free
- * the value first (`<Name>_cell_release`, generate_struct_definition); an
+ * the value first (`_aether_cell_drop_<Name>`, generate_struct_definition); an
  * int / ptr cell is freed as it is. The scope exit and each closure env's
  * destructor both release through here, so they agree. */
 const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
@@ -5167,7 +5167,7 @@ const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
     ASTNode* sdef = (c_type && gen->program && !aether_is_c_import_struct(c_type))
                         ? find_struct_definition_by_name(gen->program, c_type)
                         : NULL;
-    if (sdef && struct_owns_heap_strings(gen, sdef)) return cg_internf("%s_cell_release", c_type);
+    if (sdef && struct_owns_heap_strings(gen, sdef)) return cg_internf("_aether_cell_drop_%s", c_type);
     return "_aether_cell_release";
 }
 
@@ -6120,7 +6120,7 @@ void hoist_if_branch_vars(CodeGenerator* gen, ASTNode* body) {
 }
 
 
-/* A struct type whose values own heap strings: it has a `<Name>_destroy`.
+/* A struct type whose values own heap strings: it has a `_aether_drop_<Name>`.
  * NULL otherwise. */
 const char* struct_owning_strings(CodeGenerator* gen, Type* t) {
     if (!gen || !gen->program || !t || t->kind != TYPE_STRUCT || !t->struct_name) return NULL;
@@ -6642,7 +6642,7 @@ static void temps_close(CodeGenerator* gen, ValueTemps* vt, int destroy) {
         }
         if (destroy) {
             print_indent(gen);
-            fprintf(gen->output, "%s_destroy(&%s);\n",
+            fprintf(gen->output, "_aether_drop_%s(&%s);\n",
                     struct_owning_strings(gen, vt->nodes[i]->node_type), vt->names[i]);
         }
     }
@@ -6728,7 +6728,7 @@ static void emit_condition(CodeGenerator* gen, ASTNode* cond) {
     stmt_struct_temps_set(outer_nodes, outer_names, outer_count);
     for (int i = 0; i < count; i++) {
         seq_next(gen, &s);
-        fprintf(gen->output, "%s_destroy(&%s)",
+        fprintf(gen->output, "_aether_drop_%s(&%s)",
                 struct_owning_strings(gen, nodes[i]->node_type), names[i]);
     }
     seq_next(gen, &s);
@@ -6746,7 +6746,7 @@ static void emit_condition(CodeGenerator* gen, ASTNode* cond) {
  * a local owns is moved out of it on its last use (its trackers cleared, so
  * its scope exit releases nothing); anything else that only views a struct
  * owned elsewhere (a parameter, a variable still in use, a field, an
- * element) is copied with `<Name>_dup`. Storing the view as it was made two
+ * element) is copied with `_aether_copy_<Name>`. Storing the view as it was made two
  * owners of every string: `b = a` freed `a`'s strings twice. */
 int struct_take_shape(ASTNode* e) {
     if (e && e->type == AST_TUPLE_UNWRAP && e->child_count > 0 && e->children[0]) {
@@ -6800,7 +6800,7 @@ void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
                 is_try_clobbered_var(gen, e->value) ? "volatile_" : "", sname, e->value);
         return;
     }
-    fprintf(gen->output, "%s_dup(", sname);
+    fprintf(gen->output, "_aether_copy_%s(", sname);
     generate_expression(gen, e);
     fprintf(gen->output, ")");
 }
@@ -6864,7 +6864,7 @@ void emit_closure_take(CodeGenerator* gen, ASTNode* e) {
 /* #752 (caller side): a struct local that RECEIVES ownership of a
  * returned struct — a tuple-unpack target, or a local initialised from a
  * struct-returning call — owns that struct's heap-string fields and must
- * free them at scope exit. Push the same `<Struct>_destroy` defer the
+ * free them at scope exit. Push the same `_aether_drop_<Struct>` defer the
  * struct-literal declaration path uses. The callee already transferred
  * ownership (its own destroy was suppressed via mark_return_escaped_
  * struct_var), so this is the single owner; no double-free. Gated on the
@@ -6923,7 +6923,7 @@ static void emit_unwind_track_place(CodeGenerator* gen, const char* addr, const 
 
 void emit_struct_unwind_track(CodeGenerator* gen, const char* var_name, const char* struct_name) {
     emit_unwind_track_place(gen, cg_internf("&%s", var_name),
-                            cg_internf("%s_destroy_unwind", struct_name));
+                            cg_internf("_aether_udrop_%s", struct_name));
 }
 
 static void unwind_track_hold(CodeGenerator* gen) {
@@ -7152,7 +7152,7 @@ static void emit_destructure_state_store(CodeGenerator* gen, const char* name, T
     }
     const char* sname = struct_owning_strings(gen, pt);
     if (sname) {
-        fprintf(gen->output, "%s_replace(&self->%s, _tup%d._%d);\n", sname, name, tmp_id, j);
+        fprintf(gen->output, "_aether_store_%s(&self->%s, _tup%d._%d);\n", sname, name, tmp_id, j);
         return;
     }
     Type* st = actor_state_decl(gen, name) ? actor_state_decl(gen, name)->node_type : NULL;
@@ -8230,7 +8230,7 @@ static const char* emit_condition_ahead(CodeGenerator* gen, ASTNode* cond) {
     stmt_struct_temps_set(outer_nodes, outer_names, outer_count);
     for (int i = 0; i < count; i++) {
         print_indent(gen);
-        fprintf(gen->output, "%s_destroy(&%s);\n",
+        fprintf(gen->output, "_aether_drop_%s(&%s);\n",
                 struct_owning_strings(gen, nodes[i]->node_type), names[i]);
     }
     free(nodes);
@@ -9098,7 +9098,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (ds) generate_expression(gen, drhs);
                     else emit_composite_take(gen, drhs, dt);
                     fprintf(gen->output, "; %s(&_od); }\n",
-                            ds ? cg_internf("%s_destroy", ds) : own_fn(gen, dt, "drop"));
+                            ds ? cg_internf("_aether_drop_%s", ds) : own_fn(gen, dt, "drop"));
                 } else {
                     fprintf(gen->output, "(void)(");
                     generate_expression(gen, drhs);
@@ -9186,7 +9186,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * the old value's strings and shared a local struct's,
                      * which the handler's exit then freed. */
                     const char* sname = struct_owning_strings(gen, stmt->children[0]->node_type);
-                    fprintf(gen->output, "%s_replace(&self->%s, ", sname, stmt->value);
+                    fprintf(gen->output, "_aether_store_%s(&self->%s, ", sname, stmt->value);
                     emit_struct_take(gen, stmt->children[0], sname, stmt->value);
                     fprintf(gen->output, ");\n");
                 } else {
@@ -9569,7 +9569,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                              * whose elements are volatile (#2690). */
                             fprintf(gen->output, "{ %s const volatile* _ae_src = ", owning_elem);
                             generate_expression(gen, stmt->children[0]);
-                            fprintf(gen->output, "; for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s(&%s[_ae_k], %s_dup(_ae_src[_ae_k])); }\n",
+                            fprintf(gen->output, "; for (int _ae_k = 0; _ae_k < %d; _ae_k++) %s(&%s[_ae_k], _aether_copy_%s(_ae_src[_ae_k])); }\n",
                                     hoisted->array_size,
                                     struct_replace_fn(owning_elem,
                                                       is_try_clobbered_var(gen, stmt->value)),
@@ -9636,7 +9636,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                          * wholesale; without an explicit destroy of
                          * the previous instance, every heap-string
                          * field's old buffer leaks. Emit
-                         * `<Struct>_replace(&<var>, <value>)`, which
+                         * `_aether_store_<Struct>(&<var>, <value>)`, which
                          * stores the new value and destroys the one it
                          * replaces. */
                         Type* vtype = stmt->node_type;
@@ -9852,7 +9852,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 stmt->children[0]->value, stmt->value);
                         /* Struct-field heap-string ownership (#465).
                          * Push a function-exit defer that calls the
-                         * auto-emitted <Struct>_destroy(&<var>) to
+                         * auto-emitted _aether_drop_<Struct>(&<var>) to
                          * free any heap-owned string fields. The
                          * destroy function is no-op for structs
                          * without heap-string fields, but we only
@@ -12221,7 +12221,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         if (st_count > 0) {
                             stmt_struct_temps_set(st_outer_nodes, st_outer_names, st_outer_count);
                             for (int ti = 0; ti < st_count; ti++) {
-                                fprintf(gen->output, " %s_destroy(&%s);",
+                                fprintf(gen->output, " _aether_drop_%s(&%s);",
                                         struct_owning_strings(gen, st_nodes[ti]->node_type),
                                         st_names[ti]);
                             }
@@ -12538,7 +12538,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                  strcmp(f->c_type, "_AeClosure") == 0)) { reply_owns = 1; break; }
                         }
                         if (reply_owns) {
-                            fprintf(gen->output, "scheduler_reply_owned((ActorBase*)self, &_reply, sizeof(%s), (void (*)(void*))%s_release_fields); }\n",
+                            fprintf(gen->output, "scheduler_reply_owned((ActorBase*)self, &_reply, sizeof(%s), (void (*)(void*))_aether_msg_release_%s); }\n",
                                     reply_expr->value, reply_expr->value);
                         } else {
                             fprintf(gen->output, "scheduler_reply((ActorBase*)self, &_reply, sizeof(%s)); }\n",

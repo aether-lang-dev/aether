@@ -665,5 +665,110 @@ main() {
 AE
 refused closure_in_loop 12:12 "'pick' returns a slice of its own storage (\`v\`, which holds a slice of it)"
 
+# #2846: a closure's own frame ends when it returns. Its own array literal,
+# stored into a variable of the frame it is written in (directly or through
+# a local of its own), would view the closure's freed stack.
+cat > "$TMP/closure_own_literal.ae" <<'AE'
+main() {
+    let v: int[] = make([]int, 3)
+    set = || {
+        v = [7, 8, 9]
+    }
+    set()
+    println("${v[0]}")
+}
+AE
+refused closure_own_literal 4:13 "\`v\`, a variable of 'main', is given by this closure a slice of its own storage (an array literal)"
+
+cat > "$TMP/closure_own_literal_local.ae" <<'AE'
+f() -> int[] {
+    let v: int[] = make([]int, 2)
+    st = || {
+        t = [4, 5, 6]
+        v = t
+    }
+    st()
+    return v
+}
+
+main() {
+    println("${f().len}")
+}
+AE
+refused closure_own_literal_local 5:13 "\`v\`, a variable of 'f', is given by this closure a slice of its own storage (the array \`t\`)"
+
+# #2846: a bare binding inside a closure of a name the frame does not have is
+# the closure's own local, and carries a view of the frame's storage as a
+# written-type one does.
+cat > "$TMP/closure_inferred_local.ae" <<'AE'
+f(n: int) -> int[] {
+    arr = [1, 2, 3]
+    let w: int[] = arr
+    let v: int[] = make([]int, 2)
+    st = || {
+        t = w
+        v = t
+    }
+    st()
+    return v
+}
+
+main() {
+    println("${f(1).len}")
+}
+AE
+refused closure_inferred_local 10:12 "'f' returns a slice of its own storage (\`v\`, which holds a slice of it)"
+
+# #2846: a closure the frame binds, returning a view of the frame's storage:
+# its call's result is that view.
+cat > "$TMP/closure_call_result.ae" <<'AE'
+pick() -> int[] {
+    arr = [1, 2, 3]
+    get = || {
+        let w: int[] = arr
+        return w
+    }
+    return call(get)
+}
+
+main() {
+    println("${pick().len}")
+}
+AE
+refused closure_call_result 7:12 "'pick' returns a slice of its own storage (what \`get\` returns, a slice of it)"
+
+# The closure's own slices used inside it, a buffer the closure makes stored
+# out, and a closure returning a `make` buffer stay accepted.
+cat > "$TMP/closure_own_ok.ae" <<'AE'
+fill() -> int[] {
+    let v: int[] = make([]int, 2)
+    st = || {
+        t = [4, 5, 6]
+        total = t[0] + t[2]
+        v = make([]int, total)
+    }
+    st()
+    return v
+}
+
+fresh() -> int[] {
+    get = || {
+        return make([]int, 3)
+    }
+    return call(get)
+}
+
+main() {
+    println("own ok ${fill().len} ${fresh().len}")
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run closure_own_ok.ae 2>&1)
+case "$out" in
+    *"own ok 10 3"*) ;;
+    *) echo "  [FAIL] closure_own_ok: not \"own ok 10 3\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] slice_escape: a slice of a function's own storage stays in it"

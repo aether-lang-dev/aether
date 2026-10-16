@@ -1,0 +1,32 @@
+// Regression (#2932): a failed bounds check panics with its whole message.
+//
+// The message was formatted into a fixed 192-byte static buffer, so a long
+// source path cut off the part that says what went wrong, and two threads
+// failing a check at once wrote the same buffer. It is now built whole, as a
+// string the catch owns: caught 200 times here, each message ends with its
+// description, and the leaks gate checks every one is released.
+
+import std.string
+
+extern exit(code: int)
+
+main() {
+    let v: int[] = make([]int, 3)
+    i = 0
+    caught = 0
+    while i < 200 {
+        try {
+            x = v[3 + i % 5]
+            println("FAIL: no panic (${x})")
+            exit(1)
+        } catch e {
+            if string.ends_with(e, " out of range for length 3") == 0 {
+                println("FAIL: message cut: ${e}")
+                exit(1)
+            }
+            caught = caught + 1
+        }
+        i = i + 1
+    }
+    println("caught ${caught}")
+}

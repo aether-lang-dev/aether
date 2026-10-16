@@ -1,0 +1,11 @@
+// #2912: sends from a thread the scheduler does not own, across shutdown,
+// start again and cleanup. The work is in shim.c.
+
+extern sched_lifecycle_probe() -> int
+
+main() {
+    rc = sched_lifecycle_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+}

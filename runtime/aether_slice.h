@@ -22,6 +22,7 @@
  * `try` block can catch it and an actor step dies cleanly. */
 
 #include <stddef.h>
+#include <stdarg.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -66,23 +67,36 @@ static inline int64_t aether_slice_len(AetherSlice s) {
     return s.len == AETHER_SLICE_UNBOUNDED ? -1 : (int64_t)s.len;
 }
 
+/* #2932: a failed check panics with its message built whole, a long source
+ * path in it included, as a counted string the catch that receives it owns.
+ * Declared as the generated program declares them; std/string defines both. */
+void* aether_interp_string(const char* fmt, va_list ap);
+void string_release(const char* s);
+
+static inline void aether_slice_release_msg(const void* p) {
+    string_release((const char*)p);
+}
+
+static inline void aether_slice_panicf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    void* msg = aether_interp_string(fmt, ap);
+    va_end(ap);
+    if (!msg) aether_panic("slice bounds check failed (out of memory for its message)");
+    aether_panic_owned((const char*)msg, aether_slice_release_msg);
+}
+
 static inline void aether_slice_fail_index(int64_t idx, uint64_t len,
                                            const char* file, int line) {
-    static char msg[192];
-    snprintf(msg, sizeof msg,
-             "%s:%d: slice index %lld out of range for length %llu",
-             file, line, (long long)idx, (unsigned long long)len);
-    aether_panic(msg);
+    aether_slice_panicf("%s:%d: slice index %lld out of range for length %llu",
+                        file, line, (long long)idx, (unsigned long long)len);
 }
 
 static inline void aether_slice_fail_range(int64_t lo, int64_t hi, uint64_t len,
                                            const char* file, int line) {
-    static char msg[192];
-    snprintf(msg, sizeof msg,
-             "%s:%d: slice range %lld..%lld out of range for length %llu",
-             file, line, (long long)lo, (long long)hi,
-             (unsigned long long)len);
-    aether_panic(msg);
+    aether_slice_panicf("%s:%d: slice range %lld..%lld out of range for length %llu",
+                        file, line, (long long)lo, (long long)hi,
+                        (unsigned long long)len);
 }
 
 /* `s[i]` — the address of element i, checked against len (an unbounded

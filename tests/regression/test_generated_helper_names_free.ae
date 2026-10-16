@@ -1,0 +1,48 @@
+// Regression (#2804): a program may name its functions like the helpers the
+// compiler generates for its types.
+//
+// A struct that owns strings got Ship_dup, Ship_destroy, Ship_replace and
+// the like, a message Msg_release_fields, an actor Counter_step and
+// send_Counter, all in the program's own C namespace: a function of the
+// program with one of those names made C that did not compile ("conflicting
+// types"). The helpers are now in the reserved _aether_ namespace.
+
+import std.string
+
+extern exit(code: int)
+
+struct Ship {
+    name: string
+    speed: int
+}
+
+message Note { text: string }
+
+actor Counter {
+    state seen = ""
+    receive { Note(text) -> { seen = text } }
+}
+
+Ship_dup(n: int) -> int { return n + 1 }
+Ship_destroy(n: int) -> int { return n + 2 }
+Ship_replace(n: int) -> int { return n + 3 }
+Ship_heap_free(n: int) -> int { return n + 4 }
+Note_release_fields(n: int) -> int { return n + 5 }
+Counter_step(n: int) -> int { return n + 6 }
+send_Counter(n: int) -> int { return n + 7 }
+Counter_destroy_state(n: int) -> int { return n + 8 }
+
+main() {
+    s = Ship { name: string.concat("en", "terprise"), speed: 3 }
+    t = s
+    t.name = string.concat("vo", "yager")
+    c = spawn(Counter())
+    c ! Note { text: string.concat("hel", "lo") }
+    total = Ship_dup(0) + Ship_destroy(0) + Ship_replace(0) + Ship_heap_free(0) +
+    Note_release_fields(0) + Counter_step(0) + send_Counter(0) + Counter_destroy_state(0)
+    if total != 36 || s.name != "enterprise" || t.name != "voyager" {
+        println("FAIL: ${total} ${s.name} ${t.name}")
+        exit(1)
+    }
+    println("OK")
+}

@@ -332,6 +332,24 @@ int scheduler_released_actors_pending(void);
 /* Messages dropped because their target had been released (#2517): each is
  * a send made against the release contract. */
 uint64_t scheduler_released_sends(void);
+
+// Sends from a thread the scheduler does not own while it was not running
+// (stopped, starting again, cleaned up): dropped, their payload released,
+// and reported once on stderr (#2912).
+uint64_t scheduler_stopped_sends(void);
+
+// #2527: a reference that knows which actor it was taken from. The block a
+// released actor leaves goes to the next spawn of its size, which gets an id
+// of its own; a send through a reference taken from the released actor is
+// then dropped and counted by scheduler_released_sends(), rather than
+// delivered to the new actor, as a send through the bare pointer is.
+typedef struct {
+    ActorBase* actor;
+    int id;
+} AetherActorRef;
+
+AetherActorRef scheduler_actor_ref(ActorBase* actor);
+void scheduler_send_ref(AetherActorRef ref, Message msg);
 /* A thread that steps actors without being a core's scheduler thread
  * (aether_actor_thread, which inlines sends to actors of its core) takes
  * part in reclamation like a core (#2517): it registers before its first

@@ -274,7 +274,7 @@ lifetime"; shape by shape:
   block, or a `defer`, whose deferred statement is the point (#2507).
 
 - **Capturing a struct.** A struct that owns strings is captured as a copy
-  with strings of its own (`<Name>_dup`), destroyed with the env (#2504),
+  with strings of its own (`_aether_copy_<Name>`), destroyed with the env (#2504),
   so the declaring scope's destroy cannot free what a returned or stored
   closure reads. A struct the closure writes is a shared cell instead.
 

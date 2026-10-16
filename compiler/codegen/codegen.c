@@ -1531,7 +1531,7 @@ static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
  * Pushed by the struct-local-declaration site in codegen_stmt.c
  * for every local struct variable whose definition has at least
  * one heap-string field. The emitted defer calls the auto-
- * generated <StructName>_destroy(&<varname>) function, which
+ * generated _aether_drop_<StructName>(&<varname>) function, which
  * releases every field that owns. */
 static int try_emit_struct_destroy(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
@@ -2092,7 +2092,7 @@ ASTNode* find_message_definition(ASTNode* program, const char* name) {
 }
 
 /* #2921: does message `name` hold anything it owns: a string, a closure, a
- * struct or composite that owns? Its <Msg>_release_fields drops those once
+ * struct or composite that owns? Its _aether_msg_release_<Msg> drops those once
  * the handler is done. */
 int message_owns_fields(CodeGenerator* gen, const char* name) {
     ASTNode* def = gen->program ? find_message_definition(gen->program, name) : NULL;
@@ -3013,6 +3013,22 @@ static int lib_fn_identity(ASTNode* fn, const char** alias,
     *name = fn->value;
     *module = "";
     return 1;
+}
+
+/* #2937: a library function whose `aether_<name>` alias is its export keeps
+ * its own name inside the library (AETHER_LIB_LOCAL): on ELF a call through
+ * an exported name binds to the first definition in the process, so a host
+ * function of the same name took over the library's own calls. */
+int lib_fn_is_local(CodeGenerator* gen, ASTNode* fn) {
+    if (!gen->emit_lib || !fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value ||
+        fn_has_internal_linkage(fn) || !gen->program) return 0;
+    const char* alias;
+    const char* name;
+    const char* module;
+    LibSig sig;
+    const char* why = NULL;
+    return lib_fn_identity(fn, &alias, &name, &module) &&
+           lib_fn_is_export_head(gen->program, fn) && lib_fn_signature(gen, fn, &sig, &why);
 }
 
 /* The public identity of a module-level const in a --emit=lib build. A
@@ -5419,6 +5435,33 @@ static void emit_main_epilogue(CodeGenerator* gen, int runs_scheduler) {
     print_line(gen, "");
 }
 
+/* #2804: an actor's spawn_<Actor> is API (a host embedding the program
+ * calls it, through the header --emit-header writes), so a function of the
+ * program with that name is an error naming the actor, not two definitions
+ * of one symbol in the generated C. Every other generated helper is in the
+ * reserved _aether_ namespace. */
+static void report_actor_spawn_collisions(ASTNode* program) {
+    for (int i = 0; program && i < program->child_count; i++) {
+        ASTNode* a = program->children[i];
+        if (!a || a->type != AST_ACTOR_DEFINITION || !a->value) continue;
+        const char* spawn = cg_internf("spawn_%s", a->value);
+        for (int j = 0; j < program->child_count; j++) {
+            ASTNode* fn = program->children[j];
+            if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
+            if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value || fn->is_imported ||
+                strcmp(fn->value, spawn) != 0) continue;
+            char msg[512];
+            snprintf(msg, sizeof(msg),
+                     "function '%.200s' takes the name of the spawn function of actor '%.200s'",
+                     fn->value, a->value);
+            AetherError e = {NULL, NULL, fn->line, fn->column, msg,
+                             "rename the function: spawn_<Actor> is what a C host calls to start the actor",
+                             NULL, AETHER_ERR_NONE};
+            aether_error_report(&e);
+        }
+    }
+}
+
 /* --emit=lib reserves aether_main and aether_main_exit for a program that
  * defines main(). A top-level function whose own export would take one of
  * those names (`main_exit` exports as aether_main_exit) is a compile error,
@@ -7253,6 +7296,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#    define AETHER_WEAK_DEF");
     print_line(gen, "#  endif");
     print_line(gen, "#endif");
+    /* #2937: a library function exported through its aether_<name> alias,
+       out of the library's exported names (lib_fn_is_local). A DLL exports
+       what it names, so PE needs nothing. */
+    print_line(gen, "#ifndef AETHER_LIB_LOCAL");
+    print_line(gen, "#  if (defined(__GNUC__) || defined(__clang__)) && !defined(_WIN32)");
+    print_line(gen, "#    define AETHER_LIB_LOCAL __attribute__((visibility(\"hidden\")))");
+    print_line(gen, "#  else");
+    print_line(gen, "#    define AETHER_LIB_LOCAL");
+    print_line(gen, "#  endif");
+    print_line(gen, "#endif");
     /* #2146: vector lanes. The GCC/Clang vector extensions are the whole
        implementation — lane-wise `+ - * /`, `v[i]`, a comparison yielding an
        all-ones/zero mask per lane, and a vector `?:` that selects per lane.
@@ -8142,7 +8195,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * `string_release` is forward-declared with the extern-registry
      * pass's `const char*` signature above (next to the
      * aether_heap_str_free helper). Both that declaration and the
-     * extern-registry / <Msg>_release_fields ones are identical, so
+     * extern-registry / _aether_msg_release_<Msg> ones are identical, so
      * the duplicates are tolerated by C — no conflicting-types error. */
     print_line(gen, "extern void* string_new_with_length(const char* data, int length);");
     /* Issue #467: list / map heap-string-value owning-add helpers.
@@ -9093,6 +9146,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
 
     // Generate forward declarations for all functions FIRST so that
     // hoisted closure functions can call them without implicit declarations.
+    report_actor_spawn_collisions(program);
     print_line(gen, "// Forward declarations");
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
@@ -9120,6 +9174,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
         if (!cb_def && fn_has_internal_linkage(child)) {
             fprintf(gen->output, fn_is_inline_candidate(child) ? "static inline AETHER_MAYBE_UNUSED "
                                                                : "static AETHER_MAYBE_UNUSED ");
+        } else if (!cb_def && lib_fn_is_local(gen, child)) {
+            fprintf(gen->output, "AETHER_LIB_LOCAL ");
         }
 
         // The return type and the parameters exactly as the definition
@@ -9484,7 +9540,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                          * `void string_release(const char*)` exactly
                          * when std.string IS imported. */
                         print_line(gen, "extern void string_release(const char*);");
-                        print_line(gen, "static inline void %s_release_fields(%s* m) {",
+                        print_line(gen, "static inline void _aether_msg_release_%s(%s* m) {",
                                    child->value, child->value);
                         indent(gen);
                         print_line(gen, "if (!m) return;");

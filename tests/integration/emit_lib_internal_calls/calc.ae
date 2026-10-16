@@ -1,0 +1,12 @@
+// A library whose exports call its own functions (#2937).
+
+add1(n: int) -> int {
+    return n + 1
+}
+
+twice(n: int) -> int {
+    return add1(add1(n))
+}
+
+main() {
+}
