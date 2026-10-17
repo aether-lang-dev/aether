@@ -1,0 +1,107 @@
+// A struct's string field read in a loop body as an argument beside a call
+// is released once a pass, not twice.
+//
+// The bug: `add_named(b, p.name, deep(p))` in a loop, the second argument a
+// call that could change `p`, reads the field ahead of the call into a
+// temporary holding a reference of its own (a borrowed field handed over,
+// STRING_FIELD_TAKEN). The loop body's exit released it, leaving its flag
+// set, and the next pass's read released "the one before" again: every
+// string but the last lost a reference too many, and a struct that had kept
+// a copy of it (add_named stores its name) held freed memory once the
+// originals went.
+//
+// Pre-fix the copies' names read back as whatever reused their memory (the
+// strings made after the originals are freed), so the comparisons fail; the
+// test exercises the exit release clearing its flag
+// (try_emit_handover_exit_free).
+import std.heap
+import std.list
+import std.string
+
+extern exit(code: int)
+
+struct Named {
+    name: string
+    next: *Named
+}
+
+named(n: string) -> *Named {
+    p = heap.new(Named)
+    p.name = n
+    return p
+}
+
+add_named(into: ptr, n: string, v: @keep * Named) {
+    q = named(n)
+    q.next = v
+    list.add_raw(into, q as ptr)
+}
+
+// A copy of p and what follows it.
+deep(p: *Named) -> *Named {
+    q = heap.new(Named)
+    if p.next != null { q.next = deep(p.next) }
+    return q
+}
+
+copied(a: ptr) -> ptr {
+    b = list.new()
+    k = 0
+    while k < list.size(a) {
+        p = list.get_raw(a, k) as *Named
+        add_named(b, p.name, deep(p))
+        k = k + 1
+    }
+    return b
+}
+
+free_all(l: ptr) {
+    k = 0
+    while k < list.size(l) {
+        p = list.get_raw(l, k) as *Named
+        if p.next != null { free_all_one(p.next) }
+        p.name = ""
+        heap.free(p)
+        k = k + 1
+    }
+    list.free(l)
+}
+
+free_all_one(p: *Named) {
+    if p.next != null { free_all_one(p.next) }
+    p.name = ""
+    heap.free(p)
+}
+
+main() {
+    a = list.new()
+    k = 0
+    while k < 6 {
+        list.add_raw(a, named(string.concat("name-", "${k * 1111}")) as ptr)
+        k = k + 1
+    }
+    b = copied(a)
+    free_all(a)
+    // Strings the size of the originals, made where theirs were freed.
+    junk = list.new()
+    k = 0
+    while k < 6 {
+        list.add_raw(junk, named(string.concat("xxxx-", "${k * 2222}")) as ptr)
+        k = k + 1
+    }
+    bad = 0
+    k = 0
+    while k < list.size(b) {
+        q = list.get_raw(b, k) as *Named
+        want = string.concat("name-", "${k * 1111}")
+        if q.name != want {
+            println("copy ${k} reads '${q.name}', not '${want}'")
+            bad = bad + 1
+        }
+        k = k + 1
+    }
+    free_all(b)
+    free_all(junk)
+    if bad > 0 { exit(1) }
+    println("ok: each copy keeps its name")
+}

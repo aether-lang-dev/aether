@@ -1495,7 +1495,12 @@ static int try_emit_heap_string_exit_free(CodeGenerator* gen, ASTNode* deferred)
  * (emit_string_field_handover_ahead). Annotation:
  *   "handover_exit_free:<flag>:<temporary>"
  * Fires only on an exit taken before the call runs: the call's own write
- * drops it (drop_defer). */
+ * drops it (drop_defer). A borrowed one (STRING_FIELD_TAKEN) is released at
+ * its block's every exit, the end of a loop's body included, and the flag
+ * is cleared with it: the next pass's read releases the one before first
+ * when the flag is set, and with the flag left set a loop released each
+ * pass's string twice, the second time a reference some copy of it held
+ * (a struct field set from it). */
 /* A temporary that lives to its statement's end (call_returns_view): its
  * block releases it on every exit, and leaves it NULL for the next time the
  * block runs. Annotation: "scoped_temp_free:<name>". */
@@ -1522,7 +1527,7 @@ static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
     const char* flag = cg_intern_n(rest, (size_t)(sep - rest));
     print_indent(gen);
     fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "if (%s) aether_heap_str_free((void*)%s);\n", sep + 1, flag, sep + 1);
+            "if (%s) aether_heap_str_free((void*)%s); %s = 0;\n", sep + 1, flag, sep + 1, flag);
     return 1;
 }
 
