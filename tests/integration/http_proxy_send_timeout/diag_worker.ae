@@ -86,8 +86,10 @@ main() {
         }
     }
     first_ms = time.now_ms() - t0
+    t_sleep = time.now_ms()
     sleep(3000)
     t_stall_end = time.now_ms()
+    slept = t_stall_end - t_sleep
     total = 0
     burst = 0
     reads = 0
@@ -118,7 +120,7 @@ main() {
     if total > 3 * BIG {
         verdict = "whole"
     }
-    println("RESULT ${verdict} first_ms=${first_ms} burst=${burst} total=${total} close_ms=${close_ms} reads=${reads}")
+    println("RESULT ${verdict} first_ms=${first_ms} burst=${burst} total=${total} close_ms=${close_ms} reads=${reads} slept=${slept}")
     http.server_stop(s)
     http.server_stop(upstream)
     exit(0)

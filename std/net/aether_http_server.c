@@ -674,6 +674,31 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
                           AE_SEND_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) {
             sent += n;
+            /* DIAGNOSTIC ONLY (#3338): every 4 MB a connection sends, when
+             * and how much the kernel holds unsent. */
+            static int dlog = -1;
+            static long long dtotal[4096];
+            static int64_t dstart[4096];
+            if (dlog < 0) dlog = getenv("AETHER_SENDWAIT_LOG") != NULL;
+            if (dlog && c->fd >= 0 && c->fd < 4096) {
+                if (dtotal[c->fd] == 0) dstart[c->fd] = conn_now_ms();
+                long long before = dtotal[c->fd];
+                dtotal[c->fd] += n;
+                if (before / 4194304 != dtotal[c->fd] / 4194304) {
+                    int sndbuf = 0, unsent = -1;
+                    socklen_t sl = sizeof(sndbuf);
+                    getsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
+#if defined(__APPLE__)
+                    socklen_t ul = sizeof(unsent);
+                    getsockopt(c->fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
+#elif defined(__linux__)
+                    ioctl(c->fd, TIOCOUTQ, &unsent);
+#endif
+                    fprintf(stderr, "[sendprog] fd=%d t=%lld total=%lld sndbuf=%d unsent=%d\n",
+                            c->fd, (long long)(conn_now_ms() - dstart[c->fd]),
+                            dtotal[c->fd], sndbuf, unsent);
+                }
+            }
             continue;
         }
         if (n < 0 && errno == EINTR) continue;

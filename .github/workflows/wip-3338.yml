@@ -36,9 +36,9 @@ jobs:
       run: ./build/ae build tests/integration/http_proxy_send_timeout/diag_worker.ae -o build/diag_worker
     - name: Run it 40 times each way
       run: |
-        for pre in 0 1; do
+        for pre in 1; do
           whole=0
-          for i in $(seq 1 40); do
+          for i in $(seq 1 80); do
             DIAG_PRE=$pre AETHER_SENDWAIT_LOG=1 ./build/diag_worker > out.txt 2> err.txt
             r=$(grep '^RESULT' out.txt)
             echo "pre=$pre run $i: $r"
@@ -46,12 +46,14 @@ jobs:
               *whole*)
                 whole=$((whole + 1))
                 echo "---- pre=$pre run $i server waits and client buffer:"
-                head -60 err.txt
+                grep -v '^\[sendprog\]' err.txt | head -20
+                grep '^\[sendprog\]' err.txt | head -40
                 ;;
               *)
                 echo "  waits: $(grep -c '\[sendwait\]' err.txt), last: $(grep '\[sendwait\]' err.txt | tail -2 | tr '\n' ' ')"
+                echo "  progress: $(grep '\[sendprog\]' err.txt | tail -2 | tr '\n' ' ')"
                 ;;
             esac
           done
-          echo "PRE=$pre WHOLE $whole of 40"
+          echo "PRE=$pre WHOLE $whole of 80"
         done
