@@ -80,7 +80,7 @@ gateway(up_url: string, worker: int) -> ptr {
     if worker == 1 {
         http.server_use_middleware(s, mw_pass, 0)
     }
-    need("keepalive", http.server_set_keepalive(s, 1, 0, 1s))
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 300ms))
     pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
     need("upstream_add", proxy.upstream_add(pool, up_url, 1))
     opts = proxy.opts_new()
@@ -214,7 +214,7 @@ main() {
     }
     files = http.server_create(0)
     http.server_set_host(files, "127.0.0.1")
-    need("keepalive", http.server_set_keepalive(files, 1, 0, 1s))
+    need("keepalive", http.server_set_keepalive(files, 1, 0, 300ms))
     http.server_get(files, "/file", handle_file, 0)
     port = start(files)
     println("  [diag] files port ${port}")

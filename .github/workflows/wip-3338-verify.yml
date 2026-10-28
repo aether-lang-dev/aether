@@ -1,5 +1,5 @@
 # VERIFICATION ONLY (#3338): runs tests/integration/http_proxy_send_timeout
-# 80 times on macOS with the server's sends logged by connection and a
+# 80 times on macOS with a 300 ms idle timeout (the cut before macOS loopback starts absorbing at ~2 s), with the server's sends logged and a
 # loopback packet capture, to see what the stalled client's kernel
 # advertises when the worker path comes back whole. Lives on
 # wip/3338-verify only; deleted once read.
