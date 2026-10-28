@@ -1,7 +1,8 @@
 # VERIFICATION ONLY (#3338): runs tests/integration/http_proxy_send_timeout
-# 80 times on macOS with the server's waits and send progress logged, to see
-# why the worker path came back whole in 2 runs of 40 with little waiting at
-# the client's wake. Lives on wip/3338-verify only; deleted once read.
+# 80 times on macOS with the server's sends logged by connection and a
+# loopback packet capture, to see what the stalled client's kernel
+# advertises when the worker path comes back whole. Lives on
+# wip/3338-verify only; deleted once read.
 name: wip 3338 send-timeout verification
 
 on:
@@ -15,21 +16,40 @@ jobs:
   verify:
     name: macOS ARM64
     runs-on: macos-latest
-    timeout-minutes: 90
+    timeout-minutes: 100
     steps:
     - uses: actions/checkout@v4
     - name: Build
       run: CC=clang make -j4 compiler ae stdlib
     - name: Build the test
       run: ./build/ae build tests/integration/http_proxy_send_timeout/send_timeout.ae -o build/send_timeout
-    - name: Run it 80 times
+    - name: Run it 80 times under a loopback capture
       run: |
         pass=0; fail=0
         for i in $(seq 1 80); do
+          sudo tcpdump -i lo0 -nn -s 96 -w cap.pcap tcp 2>/dev/null &
+          tpid=$!
+          sleep 1
           if AETHER_SENDWAIT_LOG=1 ./build/send_timeout > out.txt 2> err.txt; then
-            pass=$((pass + 1)); echo "run $i ok: $(grep '\[diag\]' out.txt | tr '\n' ' ')"
+            pass=$((pass + 1)); ok=1
           else
-            fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; echo "---- its server log:"; head -120 err.txt
+            fail=$((fail + 1)); ok=0
           fi
+          sleep 1
+          sudo kill $tpid 2>/dev/null; wait $tpid 2>/dev/null || true
+          if [ $ok -eq 0 ]; then
+            echo "---- run $i FAILED:"; cat out.txt; echo "---- its server log:"; head -60 err.txt
+            wport=$(sed -n 's/.*gateway worker path port \([0-9]*\).*/\1/p' out.txt)
+            cport=$(sed -n "s/.*\[[a-z]*\] $wport->\([0-9]*\) .*/\1/p" err.txt | head -1)
+            echo "---- packets from the client ($cport) to the gateway ($wport): time, flags, ack, win"
+            sudo tcpdump -r cap.pcap -nn -tt "src port $cport and dst port $wport" 2>/dev/null \
+              | awk '{ for (k = 1; k <= NF; k++) { if ($k == "win") w = $(k+1); if ($k == "ack") a = $(k+1); if ($k == "Flags") f = $(k+1) }
+                       if (w != last || NR % 200 == 1) { print $1, f, a, w; last = w } }' | head -150
+            echo "---- packets from the gateway ($wport) to the client ($cport): per 100 ms, bytes"
+            sudo tcpdump -r cap.pcap -nn -tt "src port $wport and dst port $cport" 2>/dev/null \
+              | awk '{ t = int($1 * 10); for (k = 1; k <= NF; k++) if ($k == "length") { l = $(k+1); gsub(",", "", l) }
+                       b[t] += l } END { for (t in b) print t / 10, b[t] }' | sort -n | head -80
+          fi
+          rm -f cap.pcap
         done
         echo "PASS $pass FAIL $fail of 80"
