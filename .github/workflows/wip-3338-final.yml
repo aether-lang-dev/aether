@@ -1,0 +1,46 @@
+# VERIFICATION ONLY (#3338): the batch's http_proxy_send_timeout, as it will
+# merge, 80 times on macOS and 40 on Linux. Lives on wip/3338-final only;
+# deleted once read.
+name: wip 3338 final verification
+
+on:
+  push:
+    branches: [ 'wip/3338-final' ]
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            os: macos-latest
+            cc: clang
+            runs: 80
+          - name: Linux GCC
+            os: ubuntu-22.04
+            cc: gcc
+            runs: 40
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install toolchain
+      if: runner.os == 'Linux'
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config
+    - name: Build
+      run: CC=${{ matrix.cc }} make -j4 compiler ae stdlib
+    - name: Build the test
+      run: ./build/ae build tests/integration/http_proxy_send_timeout/send_timeout.ae -o build/send_timeout
+    - name: Run it
+      run: |
+        pass=0; fail=0
+        for i in $(seq 1 ${{ matrix.runs }}); do
+          if ./build/send_timeout > out.txt 2>&1; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; fi
+        done
+        echo "PASS $pass FAIL $fail of ${{ matrix.runs }}"
+        [ "$fail" -eq 0 ]
