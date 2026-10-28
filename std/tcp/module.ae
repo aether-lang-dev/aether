@@ -5,19 +5,21 @@
 // The implementations are in std/net/aether_net.c.
 
 exports(
-    tcp_connect_raw, tcp_send_raw,
+    tcp_connect_raw, tcp_connect_buffered_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
+    tcp_available_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     tcp_send_bytes_raw, tcp_receive_into_raw,
-    connect, write, write_n, write_slice, write_all, read, read_n, read_into,
+    connect, connect_buffered, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
-    server_port, server_poll, set_nodelay, set_read_buffer, poll, poll2
+    server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2
 )
 
 // Raw externs - escape hatch
 extern tcp_connect_raw(host: string, port: int) -> ptr
+extern tcp_connect_buffered_raw(host: string, port: int, read_buffer: int) -> ptr
 extern tcp_send_raw(sock: ptr, data: string) -> int
 // `data` is `ptr`, not `string`, and this is not exported (#2301): write_n
 // passes a byte[] slice's raw data pointer. A `string` parameter routes
@@ -41,6 +43,7 @@ extern tcp_server_port_raw(server: ptr) -> int
 extern tcp_server_poll_raw(server: ptr, timeout_ms: int) -> int
 extern tcp_set_nodelay_raw(sock: ptr, on: int) -> int
 extern tcp_set_read_buffer_raw(sock: ptr, bytes: int) -> int
+extern tcp_available_raw(sock: ptr) -> int
 extern tcp_accept_raw(server: ptr) -> ptr
 extern tcp_server_close(server: ptr) -> int
 extern tcp_fd_raw(sock: ptr) -> int
@@ -52,6 +55,26 @@ extern tcp_poll2_raw(a: ptr, b: ptr, timeout_ms: int) -> int
 // on failure. Caller must tcp.close the returned socket.
 connect(host: string, port: int) -> {
     sock = tcp_connect_raw(host, port)
+    if sock == null {
+        return null, "connect failed"
+    }
+    return sock, ""
+}
+
+// connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes
+// before the connection is made, so the window the connection opens with
+// is that size. A client meant to take little while it does not read (a
+// test of a server's send timeout) connects this way: set_read_buffer on a
+// connected socket shrinks the buffer, but the kernel still takes the
+// window it advertised when connecting (#3338). No kernel promises the
+// size, and macOS's loopback has taken far more; `available` says how much
+// is waiting. Returns (socket, "") or (null, error); `read_buffer` must be
+// positive.
+connect_buffered(host: string, port: int, read_buffer: int) -> {
+    if read_buffer <= 0 {
+        return null, "read_buffer must be positive"
+    }
+    sock = tcp_connect_buffered_raw(host, port, read_buffer)
     if sock == null {
         return null, "connect failed"
     }
@@ -265,16 +288,23 @@ set_nodelay(sock: ptr, on: bool) -> string {
 }
 
 // SO_RCVBUF: how many bytes the kernel holds for this socket before the
-// reader takes them. Setting it also stops the kernel growing the buffer
-// by itself while data arrives, which Linux, macOS and Windows do whether
-// the program reads or not. A client that must stop taking bytes when it
-// stops reading (a test of a server's send timeout, say) sets it small.
-// Returns "" on success or an error.
+// reader takes them. Setting it asks the kernel not to grow the buffer by
+// itself while data arrives, which Linux, macOS and Windows do whether the
+// program reads or not. On a connected socket the window advertised at
+// connect still stands: a client that must take little while it does not
+// read connects with connect_buffered instead. Returns "" on success or
+// an error.
 set_read_buffer(sock: ptr, bytes: int) -> string {
     if tcp_set_read_buffer_raw(sock, bytes) != 0 {
         return "set_read_buffer failed"
     }
     return ""
+}
+
+// How many received bytes are waiting on `sock`, readable without blocking,
+// or -1 on error (FIONREAD).
+available(sock: ptr) -> int {
+    return tcp_available_raw(sock)
 }
 
 // Accept an incoming connection. Returns (socket, "") on success,

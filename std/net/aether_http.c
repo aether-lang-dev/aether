@@ -2358,7 +2358,7 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
      * next time. */
     const char* why = NULL;
     int sockfd = aether_net_dial_addrs(dial_host, dial_port, addrs,
-                                       req->timeout_ns > 0 ? req->timeout_ns : 0, &why);
+                                       req->timeout_ns > 0 ? req->timeout_ns : 0, 0, &why);
     if (sockfd < 0) {
         ae_set_err(out_err, why);
         return -1;

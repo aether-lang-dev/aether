@@ -244,14 +244,18 @@ static inline int aether_addr_port(const struct sockaddr_storage* addr) {
 #define AETHER_DIAL_FIRST_TRY_MS 250
 
 /* Connect a fresh socket to `addr`: within `timeout_ns` when positive, else
- * blocking. Returns the descriptor in blocking mode, or -1 with *why set and
- * *timed_out 1 when the attempt ran out of time rather than failed. */
+ * blocking. `read_buffer` > 0 is the socket's SO_RCVBUF, set before the
+ * connection is made (0 leaves the kernel's). Returns the descriptor in
+ * blocking mode, or -1 with *why set and *timed_out 1 when the attempt ran
+ * out of time rather than failed. */
 int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
-                            long long timeout_ns, const char** why, int* timed_out);
+                            long long timeout_ns, int read_buffer,
+                            const char** why, int* timed_out);
 /* Dial `host`:`port` over the already-resolved `addrs` (reordered in place
- * by the remembered family). `timeout_ns` <= 0 means no limit. */
+ * by the remembered family). `timeout_ns` <= 0 means no limit; `read_buffer`
+ * as aether_net_connect_addr. */
 int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
-                          long long timeout_ns, const char** why);
+                          long long timeout_ns, int read_buffer, const char** why);
 /* Resolve, then aether_net_dial_addrs. */
 int aether_net_dial(const char* host, int port, long long timeout_ns, const char** why);
 /* The remembered family: put its addresses first. Returns that family, or 0

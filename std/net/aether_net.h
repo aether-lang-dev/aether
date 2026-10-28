@@ -13,6 +13,9 @@ typedef struct TcpReceiveResult {
 
 // TCP Client
 TcpSocket* tcp_connect_raw(const char* host, int port);
+// tcp_connect_raw with the receive buffer (SO_RCVBUF) set to `read_buffer`
+// bytes before the connection is made; NULL when `read_buffer` is not positive.
+TcpSocket* tcp_connect_buffered_raw(const char* host, int port, int read_buffer);
 int tcp_send_raw(TcpSocket* sock, const char* data);
 int tcp_send_n_raw(TcpSocket* sock, const char* data, int length);
 // The bytes received as a fresh counted AetherString (cast to char*) the
@@ -54,6 +57,8 @@ int tcp_set_nodelay_raw(TcpSocket* sock, int on);
 // SO_RCVBUF on a connected socket, which also stops the kernel growing it:
 // 0 on success, -1 on a null/closed handle, bytes <= 0, or setsockopt failure.
 int tcp_set_read_buffer_raw(TcpSocket* sock, int bytes);
+// How many received bytes wait to be read (FIONREAD), or -1 on error.
+int tcp_available_raw(TcpSocket* sock);
 TcpSocket* tcp_accept_raw(TcpServer* server);
 int tcp_server_close(TcpServer* server);
 

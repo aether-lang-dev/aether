@@ -89,9 +89,14 @@ between polls. `set_nodelay(sock, true)` turns on `TCP_NODELAY` for
 request/response lines (the runtime's headers already declare `setsockopt`
 with the platform's signature, so it cannot be declared from Aether).
 `set_read_buffer(sock, bytes)` sets the socket's receive buffer
-(`SO_RCVBUF`), which also stops the kernel growing it by itself while data
-arrives, read or not: a client that has to stop taking bytes when it stops
-reading, a test of a server's send timeout for one, sets it small.
+(`SO_RCVBUF`), which asks the kernel not to grow it by itself while data
+arrives, read or not. On a connected socket the window advertised when the
+connection opened still stands, so a client that has to take little while
+it does not read (a test of a server's send timeout, say) connects with
+`connect_buffered(host, port, bytes)` instead, which sets the buffer before
+the connection is made (#3338). No kernel promises the size: macOS's
+loopback has queued far more for a reader that read nothing. `available(sock)`
+says how many bytes are waiting to be read, so such a reader can tell.
 
 ```aether,fragment
 srv, err = tcp.listen_on("127.0.0.1", 0)
@@ -107,6 +112,6 @@ while !stopping {
 
 ## Exports
 
-`connect`, `listen`, `listen_on`, `accept`, `read`, `read_n`, `read_into`,
+`connect`, `connect_buffered`, `listen`, `listen_on`, `accept`, `available`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `set_read_buffer`, `fd`, `server_fd`, `tcp_close`, `tcp_server_close`.

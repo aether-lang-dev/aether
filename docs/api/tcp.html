@@ -16,6 +16,7 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#connect_raw">connect_raw</a></li>
+    <li><a href="#connect_buffered_raw">connect_buffered_raw</a></li>
     <li><a href="#send_raw">send_raw</a></li>
     <li><a href="#receive_raw">receive_raw</a></li>
     <li><a href="#receive_n_raw">receive_n_raw</a></li>
@@ -28,6 +29,7 @@
     <li><a href="#server_poll_raw">server_poll_raw</a></li>
     <li><a href="#set_nodelay_raw">set_nodelay_raw</a></li>
     <li><a href="#set_read_buffer_raw">set_read_buffer_raw</a></li>
+    <li><a href="#available_raw">available_raw</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#server_fd_raw">server_fd_raw</a></li>
     <li><a href="#poll_raw">poll_raw</a></li>
@@ -35,6 +37,7 @@
     <li><a href="#send_bytes_raw">send_bytes_raw</a></li>
     <li><a href="#receive_into_raw">receive_into_raw</a></li>
     <li><a href="#connect">connect</a></li>
+    <li><a href="#connect_buffered">connect_buffered</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_n">write_n</a></li>
     <li><a href="#write_slice">write_slice</a></li>
@@ -51,6 +54,7 @@
     <li><a href="#server_poll">server_poll</a></li>
     <li><a href="#set_nodelay">set_nodelay</a></li>
     <li><a href="#set_read_buffer">set_read_buffer</a></li>
+    <li><a href="#available">available</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#poll2">poll2</a></li>
   </ul>
@@ -162,6 +166,11 @@
       <p class="signature"><span class="sig-params">host: string, port: int</span></p>
       <p class="doc">Raw externs - escape hatch</p>
     </div>
+    <div class="function" id="connect_buffered_raw" data-name="connect_buffered_raw">
+      <h3 class="function-name">connect_buffered_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>connect_buffered_raw(host, port, read_buffer) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
+    </div>
     <div class="function" id="send_raw" data-name="send_raw">
       <h3 class="function-name">send_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>send_raw(sock, data) <span class="arrow">-&gt;</span> int</code></pre>
@@ -223,6 +232,11 @@
       <pre class="usage"><code>set_read_buffer_raw(sock, bytes) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, bytes: int</span></p>
     </div>
+    <div class="function" id="available_raw" data-name="available_raw">
+      <h3 class="function-name">available_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>available_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+    </div>
     <div class="function" id="fd_raw" data-name="fd_raw">
       <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
@@ -258,6 +272,12 @@
       <pre class="usage"><code>connect(host, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int</span></p>
       <p class="doc">Connect to host:port. Returns (socket, &quot;&quot;) on success, (null, error) on failure. Caller must tcp.close the returned socket.</p>
+    </div>
+    <div class="function" id="connect_buffered" data-name="connect_buffered">
+      <h3 class="function-name">connect_buffered <span class="kind">fn</span></h3>
+      <pre class="usage"><code>connect_buffered(host, port, read_buffer) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
+      <p class="doc">connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes before the connection is made, so the window the connection opens with is that size. A client meant to take little while it does not read (a test of a server's send timeout) connects this way: set_read_buffer on a connected socket shrinks the buffer, but the kernel still takes the window it advertised when connecting (#3338). No kernel promises the size, and macOS's loopback has taken far more; `available` says how much is waiting. Returns (socket, &quot;&quot;) or (null, error); `read_buffer` must be positive.</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
@@ -353,7 +373,13 @@
       <h3 class="function-name">set_read_buffer <span class="kind">fn</span></h3>
       <pre class="usage"><code>set_read_buffer(sock, bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, bytes: int</span></p>
-      <p class="doc">SO_RCVBUF: how many bytes the kernel holds for this socket before the reader takes them. Setting it also stops the kernel growing the buffer by itself while data arrives, which Linux, macOS and Windows do whether the program reads or not. A client that must stop taking bytes when it stops reading (a test of a server's send timeout, say) sets it small. Returns &quot;&quot; on success or an error.</p>
+      <p class="doc">SO_RCVBUF: how many bytes the kernel holds for this socket before the reader takes them. Setting it asks the kernel not to grow the buffer by itself while data arrives, which Linux, macOS and Windows do whether the program reads or not. On a connected socket the window advertised at connect still stands: a client that must take little while it does not read connects with connect_buffered instead. Returns &quot;&quot; on success or an error.</p>
+    </div>
+    <div class="function" id="available" data-name="available">
+      <h3 class="function-name">available <span class="kind">fn</span></h3>
+      <pre class="usage"><code>available(sock) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr</span></p>
+      <p class="doc">How many received bytes are waiting on `sock`, readable without blocking, or -1 on error (FIONREAD).</p>
     </div>
     <div class="function" id="poll" data-name="poll">
       <h3 class="function-name">poll <span class="kind">fn</span></h3>

@@ -85,7 +85,7 @@ header comment is the authoritative description.
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 38 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 42 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -2670,6 +2670,8 @@ main() {
 
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
+- `tcp.connect_buffered(host, port, read_buffer)` → `(ptr, string)` - Connect with the receive buffer (`SO_RCVBUF`) set to `read_buffer` bytes before the connection is made, so the window it opens with is that size; for a client meant to take little while it does not read. `tcp.set_read_buffer` on a connected socket leaves the window already advertised (#3338).
+- `tcp.available(sock)` → `int` - Bytes received and waiting to be read without blocking (`FIONREAD`), or -1. No kernel promises a receive buffer's size (macOS's loopback has queued far more), so a reader that needs to know asks this.
 - `tcp.write(sock, data)` → `(int, string)` - Write text-shaped data, return `(bytes_sent, err)`. Uses the legacy strlen-shaped raw send; use `tcp.write_n` for binary payloads.
 - `tcp.write_n(sock, data: byte[])` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends the slice's bytes, preserving embedded NUL bytes; send a string as `string.bytes(s)`, a prefix as `string.bytes(s)[0..n]`.
 - `tcp.read(sock, max)` → `(string, string)` - Read text-shaped data, return `(data, err)`. Use `tcp.read_n` for binary payloads.
@@ -2681,7 +2683,7 @@ main() {
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
 
 ### UDP slices (`std.udp`)
 

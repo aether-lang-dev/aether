@@ -1,0 +1,70 @@
+// std.tcp: connect_buffered sets the receive buffer before the connection is
+// made, and available says how many bytes wait to be read (#3338).
+//
+// set_read_buffer on a connected socket shrinks the buffer but leaves the
+// window the connection opened with, so a client meant to take little while
+// it does not read took that window anyway; connect_buffered sizes the
+// buffer first. No kernel promises the size (macOS's loopback has queued far
+// more), so a reader that needs to know asks available.
+//
+// Over loopback on an ephemeral port: a window under 1 refused; a buffered
+// connection that carries data both ways; available counting what the peer
+// sent before any read, then 0 once it is read; and available on no socket.
+
+import std.tcp
+import std.string
+import std.time
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    check(lerr == "", "tcp listen_on")
+    port = tcp.server_port(srv)
+
+    nosock, zerr = tcp.connect_buffered("127.0.0.1", port, 0)
+    check(nosock == null, "a read buffer of 0 gave a socket")
+    check(zerr == "read_buffer must be positive", "a read buffer of 0 said '${zerr}'")
+    _neg, nerr = tcp.connect_buffered("127.0.0.1", port, -5)
+    check(nerr != "", "a negative read buffer was taken")
+
+    conn, cerr = tcp.connect_buffered("127.0.0.1", port, 16384)
+    check(cerr == "", "connect_buffered: ${cerr}")
+    peer, aerr = tcp.accept(srv)
+    check(aerr == "", "accept: ${aerr}")
+
+    check(tcp.available(conn) == 0, "bytes waiting before the peer sent any")
+    msg = "eleven byte"
+    _w, werr = tcp.write(peer, msg)
+    check(werr == "", "peer write: ${werr}")
+    // Until all of it has arrived, a second at most.
+    t0 = time.now_ms()
+    while tcp.available(conn) < string.length(msg) && time.now_ms() - t0 < 1000 {
+        _r, _perr = tcp.poll(conn, 10)
+    }
+    check(tcp.available(conn) == string.length(msg),
+        "${tcp.available(conn)} bytes waiting, want ${string.length(msg)}")
+    got, rerr = tcp.read(conn, 64)
+    check(rerr == "", "read: ${rerr}")
+    check(got == msg, "read '${got}'")
+    check(tcp.available(conn) == 0, "bytes still waiting after reading them all")
+
+    // And the other way, through the small buffer's side.
+    _w2, werr2 = tcp.write(conn, "back")
+    check(werr2 == "", "client write: ${werr2}")
+    back, berr = tcp.read(peer, 64)
+    check(berr == "" && back == "back", "the peer read '${back}' (${berr})")
+
+    check(tcp.available(null) == -1, "no socket has bytes waiting")
+    tcp.close(conn)
+    tcp.close(peer)
+    tcp.server_close(srv)
+    println("OK")
+}
