@@ -32,6 +32,7 @@ import std.http
 import std.http.proxy
 import std.string
 import std.tcp
+import std.time
 
 extern exit(code: int)
 
@@ -110,6 +111,7 @@ late_reader(port: int, get: string) -> (string, int) {
         return "connect failed", 0
     }
     tcp.write(sock, "${get}${get}${get}")
+    t0 = time.now_ms()
     // The three seconds of not reading count from the server's first byte,
     // not from the request: a slow build (a sanitizer's) can take seconds to
     // fetch the body upstream, and a stall that began before the server sent
@@ -123,8 +125,12 @@ late_reader(port: int, get: string) -> (string, int) {
             waited = waited + 1
         }
     }
+    t_first = time.now_ms() - t0
+    t_s = time.now_ms()
     sleep(3000)
     taken = tcp.available(sock)
+    t_wake = time.now_ms()
+    println("  [diag] first_ms=${t_first} slept=${t_wake - t_s} taken=${taken}")
     total = 0
     quiet = 0
     closed = 0
@@ -143,6 +149,7 @@ late_reader(port: int, get: string) -> (string, int) {
             quiet = quiet + 1
         }
     }
+    println("  [diag] total=${total} closed=${closed} read_ms=${time.now_ms() - t_wake}")
     tcp.close(sock)
     if total > 3 * BIG {
         return "whole (${total} bytes, closed ${closed})", taken

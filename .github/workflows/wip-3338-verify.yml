@@ -1,7 +1,7 @@
 # VERIFICATION ONLY (#3338): runs tests/integration/http_proxy_send_timeout
-# 40 times on macOS and Linux with the fix, counting passes, failures and
-# the tries the kernel took away. Lives on wip/3338-verify only; the branch
-# is deleted once the counts are read.
+# 80 times on macOS with the server's waits and send progress logged, to see
+# why the worker path came back whole in 2 runs of 40 with little waiting at
+# the client's wake. Lives on wip/3338-verify only; deleted once read.
 name: wip 3338 send-timeout verification
 
 on:
@@ -13,35 +13,23 @@ permissions:
 
 jobs:
   verify:
-    name: ${{ matrix.name }}
-    runs-on: ${{ matrix.os }}
-    timeout-minutes: 60
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: macOS ARM64
-            os: macos-latest
-            cc: clang
-          - name: Linux GCC
-            os: ubuntu-22.04
-            cc: gcc
+    name: macOS ARM64
+    runs-on: macos-latest
+    timeout-minutes: 90
     steps:
     - uses: actions/checkout@v4
-    - name: Install toolchain
-      if: runner.os == 'Linux'
-      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config
     - name: Build
-      run: CC=${{ matrix.cc }} make -j4 compiler ae stdlib
+      run: CC=clang make -j4 compiler ae stdlib
     - name: Build the test
       run: ./build/ae build tests/integration/http_proxy_send_timeout/send_timeout.ae -o build/send_timeout
-    - name: Run it 40 times
+    - name: Run it 80 times
       run: |
-        pass=0; fail=0; retried=0
-        for i in $(seq 1 40); do
-          if ./build/send_timeout > out.txt 2>&1; then pass=$((pass + 1)); else fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; fi
-          r=$(grep -c "took the stall away" out.txt || true)
-          if [ "$r" -gt 0 ]; then retried=$((retried + 1)); echo "run $i: $r tries taken away"; grep "took the stall away" out.txt; fi
+        pass=0; fail=0
+        for i in $(seq 1 80); do
+          if AETHER_SENDWAIT_LOG=1 ./build/send_timeout > out.txt 2> err.txt; then
+            pass=$((pass + 1)); echo "run $i ok: $(grep '\[diag\]' out.txt | tr '\n' ' ')"
+          else
+            fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; echo "---- its server log:"; head -80 err.txt
+          fi
         done
-        echo "PASS $pass FAIL $fail of 40; runs with a try taken away: $retried"
-        [ "$fail" -eq 0 ]
+        echo "PASS $pass FAIL $fail of 80"

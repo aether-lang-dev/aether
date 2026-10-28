@@ -291,6 +291,10 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <fcntl.h>
     #include <limits.h>
     #include <poll.h>
+    #include <sys/ioctl.h>     /* DIAGNOSTIC (#3338): TIOCOUTQ */
+    #if defined(__linux__)
+        #include <linux/sockios.h>
+    #endif
     #include <errno.h>
     /* Linux + macOS sendfile(2) live in different headers with
      * different signatures. Only one is pulled in per platform. */
@@ -568,7 +572,10 @@ static int64_t conn_now_ms(void);
  * here ends when the client has taken next to nothing for that long: the
  * proxy event loop's bound, and nginx's send_timeout. conn_wait_io_ms waits
  * `ms` instead, 0 for no bound. */
-static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
+/* DIAGNOSTIC ONLY (#3338, branch wip/3338-diag, never merged): with
+ * AETHER_SENDWAIT_LOG set, every wait is logged with how long it took, its
+ * result, the revents, and the socket's free send space. */
+static int conn_wait_io_ms_real(HttpConn* c, short events, int ms, short* revents) {
     int64_t due = ms > 0 ? conn_now_ms() + ms : 0;
     for (;;) {
         int wait = -1;
@@ -579,10 +586,32 @@ static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
         }
         struct pollfd pfd = { c->fd, events, 0 };
         int r = poll(&pfd, 1, wait);
+        *revents = pfd.revents;
         if (r > 0) return 1;      /* an error or a hangup: the retry reports it */
         if (r == 0) return 0;
         if (errno != EINTR) return -1;
     }
+}
+static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
+    static int logging = -1;
+    if (logging < 0) logging = getenv("AETHER_SENDWAIT_LOG") != NULL;
+    int64_t t0 = conn_now_ms();
+    short rev = 0;
+    int r = conn_wait_io_ms_real(c, events, ms, &rev);
+    if (logging) {
+        int sndbuf = 0, unsent = -1;
+        socklen_t sl = sizeof(sndbuf);
+        getsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
+#if defined(__APPLE__)
+        socklen_t ul = sizeof(unsent);
+        getsockopt(c->fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
+#elif defined(__linux__)
+        ioctl(c->fd, TIOCOUTQ, &unsent);
+#endif
+        fprintf(stderr, "[sendwait] fd=%d ev=%d ms=%d took=%lld r=%d revents=0x%x sndbuf=%d unsent=%d\n",
+                c->fd, (int)events, ms, (long long)(conn_now_ms() - t0), r, (unsigned)rev, sndbuf, unsent);
+    }
+    return r;
 }
 
 static int conn_wait_io(HttpConn* c, short events) {
@@ -645,6 +674,31 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
                           AE_SEND_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) {
             sent += n;
+            /* DIAGNOSTIC ONLY (#3338): every 4 MB a connection sends, when
+             * and how much the kernel holds unsent. */
+            static int dlog = -1;
+            static long long dtotal[4096];
+            static int64_t dstart[4096];
+            if (dlog < 0) dlog = getenv("AETHER_SENDWAIT_LOG") != NULL;
+            if (dlog && c->fd >= 0 && c->fd < 4096) {
+                if (dtotal[c->fd] == 0) dstart[c->fd] = conn_now_ms();
+                long long before = dtotal[c->fd];
+                dtotal[c->fd] += n;
+                if (before / 4194304 != dtotal[c->fd] / 4194304) {
+                    int sndbuf = 0, unsent = -1;
+                    socklen_t sl = sizeof(sndbuf);
+                    getsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
+#if defined(__APPLE__)
+                    socklen_t ul = sizeof(unsent);
+                    getsockopt(c->fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
+#elif defined(__linux__)
+                    ioctl(c->fd, TIOCOUTQ, &unsent);
+#endif
+                    fprintf(stderr, "[sendprog] fd=%d t=%lld total=%lld sndbuf=%d unsent=%d\n",
+                            c->fd, (long long)(conn_now_ms() - dstart[c->fd]),
+                            dtotal[c->fd], sndbuf, unsent);
+                }
+            }
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
