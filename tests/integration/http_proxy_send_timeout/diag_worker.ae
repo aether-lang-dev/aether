@@ -1,0 +1,115 @@
+// DIAGNOSTIC ONLY (#3338, branch wip/3338-diag, never merged): the worker-path
+// case of send_timeout.ae, once, with timings. Prints one line:
+//   RESULT <cut|whole> first_ms=<request to first byte> burst=<bytes readable
+//   in the first 200 ms after the stall> total=<bytes> close_ms=<stall end to
+//   close> reads=<reads>
+// Run it with AETHER_SENDWAIT_LOG=1 for the server's waits and the client's
+// receive buffer.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+import std.time
+
+extern exit(code: int)
+
+const BIG = 33554432
+
+handle_big(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "application/octet-stream")
+    http.response_set_body(res, string.pad_end("", BIG, 120))
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+start(server: ptr) -> int {
+    if http.server_bind(server, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    err = http.server_start_background(server)
+    if err != "" {
+        println("FAIL: ${err}")
+        exit(1)
+    }
+    return http.server_port(server)
+}
+
+main() {
+    upstream = http.server_create(0)
+    http.server_set_host(upstream, "127.0.0.1")
+    http.server_get(upstream, "/big", handle_big, 0)
+    up_url = "http://127.0.0.1:${start(upstream)}"
+
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    http.server_use_middleware(s, mw_pass, 0)
+    _k = http.server_set_keepalive(s, 1, 0, 1s)
+    pool = proxy.upstream_pool_new("round_robin", 10, 0, 0)
+    _a = proxy.upstream_add(pool, up_url, 1)
+    opts = proxy.opts_new()
+    _c = proxy.opts_set_body_cap(opts, 67108864)
+    _m = proxy.mount(s, "/", pool, opts)
+    port = start(s)
+    sleep(100)
+
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        println("FAIL: connect")
+        exit(1)
+    }
+    _b = tcp.set_read_buffer(sock, 16384)
+    get = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n"
+    t0 = time.now_ms()
+    tcp.write(sock, "${get}${get}${get}")
+    waited = 0
+    while waited < 300 {
+        first, _ferr = tcp.poll(sock, 100)
+        if first {
+            waited = 300
+        } else {
+            waited = waited + 1
+        }
+    }
+    first_ms = time.now_ms() - t0
+    sleep(3000)
+    t_stall_end = time.now_ms()
+    total = 0
+    burst = 0
+    reads = 0
+    quiet = 0
+    close_ms = -1
+    while quiet < 20 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                close_ms = time.now_ms() - t_stall_end
+                quiet = 20
+            } else {
+                n = string.length(chunk)
+                total = total + n
+                reads = reads + 1
+                if time.now_ms() - t_stall_end < 200 {
+                    burst = burst + n
+                }
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    tcp.close(sock)
+    verdict = "cut"
+    if total > 3 * BIG {
+        verdict = "whole"
+    }
+    println("RESULT ${verdict} first_ms=${first_ms} burst=${burst} total=${total} close_ms=${close_ms} reads=${reads}")
+    http.server_stop(s)
+    http.server_stop(upstream)
+    exit(0)
+}

@@ -700,9 +700,17 @@ int tcp_set_nodelay_raw(TcpSocket* sock, int on) {
  * while data arrives, read or not. */
 int tcp_set_read_buffer_raw(TcpSocket* sock, int bytes) {
     if (!sock || !sock->connected || bytes <= 0) return -1;
+    /* DIAGNOSTIC ONLY (#3338, never merged). */
+    int before = 0, after = 0;
+    socklen_t bl = sizeof(before);
+    getsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (char*)&before, &bl);
     if (setsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (const char*)&bytes, sizeof(bytes)) != 0) {
         return -1;
     }
+    socklen_t al = sizeof(after);
+    getsockopt(sock->fd, SOL_SOCKET, SO_RCVBUF, (char*)&after, &al);
+    if (getenv("AETHER_SENDWAIT_LOG"))
+        fprintf(stderr, "[rcvbuf] fd=%d before=%d asked=%d after=%d\n", sock->fd, before, bytes, after);
     return 0;
 }
 

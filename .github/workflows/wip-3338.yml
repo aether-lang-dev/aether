@@ -1,0 +1,56 @@
+# DIAGNOSTIC ONLY (#3338): runs the worker-path send-timeout case 40 times on
+# macOS and Linux with the server's waits logged. Lives on wip/3338-diag only;
+# the branch is deleted when the cause is found.
+name: wip 3338 send-timeout diagnostic
+
+on:
+  push:
+    branches: [ 'wip/3338-diag' ]
+
+permissions:
+  contents: read
+
+jobs:
+  diag:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            os: macos-latest
+            cc: clang
+          - name: Linux GCC
+            os: ubuntu-22.04
+            cc: gcc
+    steps:
+    - uses: actions/checkout@v4
+    - name: Install toolchain
+      if: runner.os == 'Linux'
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config
+    - name: Build
+      run: CC=${{ matrix.cc }} make -j4 compiler ae stdlib
+    - name: Build the diagnostic
+      run: ./build/ae build tests/integration/http_proxy_send_timeout/diag_worker.ae -o build/diag_worker
+    - name: Run it 40 times
+      run: |
+        whole=0
+        for i in $(seq 1 40); do
+          AETHER_SENDWAIT_LOG=1 ./build/diag_worker > out.txt 2> err.txt
+          r=$(grep '^RESULT' out.txt)
+          echo "run $i: $r"
+          case "$r" in
+            *whole*)
+              whole=$((whole + 1))
+              echo "---- run $i server waits and client buffer:"
+              cat err.txt | head -60
+              ;;
+            *)
+              echo "  waits: $(grep -c '\[sendwait\]' err.txt), last: $(grep '\[sendwait\]' err.txt | tail -2 | tr '\n' ' ')"
+              grep '\[rcvbuf\]' err.txt
+              ;;
+          esac
+        done
+        echo "WHOLE $whole of 40"
