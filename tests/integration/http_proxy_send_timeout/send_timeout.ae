@@ -127,14 +127,7 @@ late_reader(port: int, get: string) -> (string, int) {
     }
     t_first = time.now_ms() - t0
     t_s = time.now_ms()
-    samples = ""
-    k = 0
-    while k < 6 {
-        sleep(500)
-        samples = "${samples} ${tcp.available(sock)}"
-        k = k + 1
-    }
-    println("  [diag] waiting during the stall:${samples}")
+    sleep(3000)
     taken = tcp.available(sock)
     t_wake = time.now_ms()
     println("  [diag] first_ms=${t_first} slept=${t_wake - t_s} taken=${taken}")
