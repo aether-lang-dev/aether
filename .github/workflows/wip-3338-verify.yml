@@ -29,7 +29,7 @@ jobs:
           if AETHER_SENDWAIT_LOG=1 ./build/send_timeout > out.txt 2> err.txt; then
             pass=$((pass + 1)); echo "run $i ok: $(grep '\[diag\]' out.txt | tr '\n' ' ')"
           else
-            fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; echo "---- its server log:"; head -80 err.txt
+            fail=$((fail + 1)); echo "---- run $i FAILED:"; cat out.txt; echo "---- its server log:"; head -120 err.txt
           fi
         done
         echo "PASS $pass FAIL $fail of 80"

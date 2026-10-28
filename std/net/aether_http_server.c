@@ -608,8 +608,12 @@ static int conn_wait_io_ms(HttpConn* c, short events, int ms) {
 #elif defined(__linux__)
         ioctl(c->fd, TIOCOUTQ, &unsent);
 #endif
-        fprintf(stderr, "[sendwait] fd=%d ev=%d ms=%d took=%lld r=%d revents=0x%x sndbuf=%d unsent=%d\n",
-                c->fd, (int)events, ms, (long long)(conn_now_ms() - t0), r, (unsigned)rev, sndbuf, unsent);
+        struct sockaddr_in la, pa; socklen_t lal = sizeof(la), pal = sizeof(pa);
+        int lp = 0, pp = 0;
+        if (getsockname(c->fd, (struct sockaddr*)&la, &lal) == 0) lp = ntohs(la.sin_port);
+        if (getpeername(c->fd, (struct sockaddr*)&pa, &pal) == 0) pp = ntohs(pa.sin_port);
+        fprintf(stderr, "[sendwait] %d->%d ev=%d ms=%d took=%lld r=%d revents=0x%x sndbuf=%d unsent=%d\n",
+                lp, pp, (int)events, ms, (long long)(conn_now_ms() - t0), r, (unsigned)rev, sndbuf, unsent);
     }
     return r;
 }
@@ -625,6 +629,46 @@ static int conn_wait_io(HttpConn* c, short events) {
  * than the send timeout without progress, then fails (#3257): on POSIX in
  * conn_wait_io, on Windows by SO_SNDTIMEO, which bounds each blocking send
  * there (conn_apply_send_timeout). */
+/* DIAGNOSTIC ONLY (#3338): per connection, by its local and peer ports:
+ * every 4 MB sent and every EAGAIN, with when and what the kernel holds. */
+static void diag_ports(int fd, int* lp, int* pp) {
+    struct sockaddr_in a; socklen_t al = sizeof(a);
+    *lp = *pp = 0;
+    if (getsockname(fd, (struct sockaddr*)&a, &al) == 0) *lp = ntohs(a.sin_port);
+    al = sizeof(a);
+    if (getpeername(fd, (struct sockaddr*)&a, &al) == 0) *pp = ntohs(a.sin_port);
+}
+static void diag_progress(int fd, int n) {
+    static int dlog = -1;
+    static struct { int lp, pp; long long total; int64_t start; int eagain; } t[256];
+    if (dlog < 0) dlog = getenv("AETHER_SENDWAIT_LOG") != NULL;
+    if (!dlog) return;
+    int lp, pp; diag_ports(fd, &lp, &pp);
+    int i;
+    for (i = 0; i < 256 && t[i].lp && !(t[i].lp == lp && t[i].pp == pp); i++) {}
+    if (i == 256) return;
+    if (!t[i].lp) { t[i].lp = lp; t[i].pp = pp; t[i].start = conn_now_ms(); }
+    int sndbuf = 0, unsent = -1; socklen_t sl = sizeof(sndbuf);
+    getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
+#if defined(__APPLE__)
+    socklen_t ul = sizeof(unsent); getsockopt(fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
+#elif defined(__linux__)
+    ioctl(fd, TIOCOUTQ, &unsent);
+#endif
+    if (n < 0) {
+        t[i].eagain++;
+        if (t[i].eagain <= 3 || t[i].eagain % 100 == 0)
+            fprintf(stderr, "[eagain] %d->%d t=%lld total=%lld n=%d sndbuf=%d unsent=%d\n", lp, pp,
+                    (long long)(conn_now_ms() - t[i].start), t[i].total, t[i].eagain, sndbuf, unsent);
+        return;
+    }
+    long long before = t[i].total;
+    t[i].total += n;
+    if (before / 4194304 != t[i].total / 4194304)
+        fprintf(stderr, "[sendprog] %d->%d t=%lld total=%lld sndbuf=%d unsent=%d\n", lp, pp,
+                (long long)(conn_now_ms() - t[i].start), t[i].total, sndbuf, unsent);
+}
+
 static int conn_send(HttpConn* c, const void* buf, int len) {
     if (c->pure_tls) {
         return pt_server_send(c->pure_tls, buf, len);
@@ -674,34 +718,11 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
                           AE_SEND_NOSIGNAL | MSG_DONTWAIT);
         if (n > 0) {
             sent += n;
-            /* DIAGNOSTIC ONLY (#3338): every 4 MB a connection sends, when
-             * and how much the kernel holds unsent. */
-            static int dlog = -1;
-            static long long dtotal[4096];
-            static int64_t dstart[4096];
-            if (dlog < 0) dlog = getenv("AETHER_SENDWAIT_LOG") != NULL;
-            if (dlog && c->fd >= 0 && c->fd < 4096) {
-                if (dtotal[c->fd] == 0) dstart[c->fd] = conn_now_ms();
-                long long before = dtotal[c->fd];
-                dtotal[c->fd] += n;
-                if (before / 4194304 != dtotal[c->fd] / 4194304) {
-                    int sndbuf = 0, unsent = -1;
-                    socklen_t sl = sizeof(sndbuf);
-                    getsockopt(c->fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
-#if defined(__APPLE__)
-                    socklen_t ul = sizeof(unsent);
-                    getsockopt(c->fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
-#elif defined(__linux__)
-                    ioctl(c->fd, TIOCOUTQ, &unsent);
-#endif
-                    fprintf(stderr, "[sendprog] fd=%d t=%lld total=%lld sndbuf=%d unsent=%d\n",
-                            c->fd, (long long)(conn_now_ms() - dstart[c->fd]),
-                            dtotal[c->fd], sndbuf, unsent);
-                }
-            }
+            diag_progress(c->fd, n);
             continue;
         }
         if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) diag_progress(c->fd, -1);
         if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK) &&
             conn_wait_io(c, POLLOUT) == 1)
             continue;
