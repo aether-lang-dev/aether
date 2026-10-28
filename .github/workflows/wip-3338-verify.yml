@@ -48,7 +48,7 @@ jobs:
             echo "---- packets from the gateway ($wport) to the client ($cport): per 100 ms, bytes"
             sudo tcpdump -r cap.pcap -nn -tt "src port $wport and dst port $cport" 2>/dev/null \
               | awk '{ t = int($1 * 10); for (k = 1; k <= NF; k++) if ($k == "length") { l = $(k+1); gsub(",", "", l) }
-                       b[t] += l } END { for (t in b) print t / 10, b[t] }' | sort -n | head -80
+                       b[t] += l } END { for (t in b) printf "%.1f %d\n", t / 10, b[t] }' | sort -n | head -80
           fi
           rm -f cap.pcap
         done

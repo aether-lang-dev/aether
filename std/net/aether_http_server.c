@@ -650,23 +650,29 @@ static void diag_progress(int fd, int n) {
     if (!t[i].lp) { t[i].lp = lp; t[i].pp = pp; t[i].start = conn_now_ms(); }
     int sndbuf = 0, unsent = -1; socklen_t sl = sizeof(sndbuf);
     getsockopt(fd, SOL_SOCKET, SO_SNDBUF, &sndbuf, &sl);
+    long long sbbytes = -1, sndwnd = -1, txbytes = -1;
 #if defined(__APPLE__)
     socklen_t ul = sizeof(unsent); getsockopt(fd, SOL_SOCKET, SO_NWRITE, &unsent, &ul);
+    struct tcp_connection_info ci; socklen_t cil = sizeof(ci);
+    if (getsockopt(fd, IPPROTO_TCP, TCP_CONNECTION_INFO, &ci, &cil) == 0) {
+        sbbytes = ci.tcpi_snd_sbbytes; sndwnd = ci.tcpi_snd_wnd; txbytes = (long long)ci.tcpi_txbytes;
+    }
 #elif defined(__linux__)
     ioctl(fd, TIOCOUTQ, &unsent);
 #endif
     if (n < 0) {
         t[i].eagain++;
         if (t[i].eagain <= 3 || t[i].eagain % 100 == 0)
-            fprintf(stderr, "[eagain] %d->%d t=%lld total=%lld n=%d sndbuf=%d unsent=%d\n", lp, pp,
-                    (long long)(conn_now_ms() - t[i].start), t[i].total, t[i].eagain, sndbuf, unsent);
+            fprintf(stderr, "[eagain] %d->%d t=%lld total=%lld n=%d sndbuf=%d unsent=%d sbbytes=%lld sndwnd=%lld txbytes=%lld\n", lp, pp,
+                    (long long)(conn_now_ms() - t[i].start), t[i].total, t[i].eagain, sndbuf, unsent,
+                    sbbytes, sndwnd, txbytes);
         return;
     }
     long long before = t[i].total;
     t[i].total += n;
     if (before / 4194304 != t[i].total / 4194304)
-        fprintf(stderr, "[sendprog] %d->%d t=%lld total=%lld sndbuf=%d unsent=%d\n", lp, pp,
-                (long long)(conn_now_ms() - t[i].start), t[i].total, sndbuf, unsent);
+        fprintf(stderr, "[sendprog] %d->%d t=%lld total=%lld sndbuf=%d unsent=%d sbbytes=%lld sndwnd=%lld txbytes=%lld\n", lp, pp,
+                (long long)(conn_now_ms() - t[i].start), t[i].total, sndbuf, unsent, sbbytes, sndwnd, txbytes);
 }
 
 static int conn_send(HttpConn* c, const void* buf, int len) {
