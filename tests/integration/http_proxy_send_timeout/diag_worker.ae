@@ -11,6 +11,7 @@ import std.http.proxy
 import std.string
 import std.tcp
 import std.time
+import std.os
 
 extern exit(code: int)
 
@@ -57,12 +58,21 @@ main() {
     port = start(s)
     sleep(100)
 
-    sock, cerr = tcp.connect("127.0.0.1", port)
+    pre = os.getenv("DIAG_PRE") == "1"
+    let sock: ptr = null
+    cerr = ""
+    if pre {
+        sock, cerr = tcp.connect_buffered("127.0.0.1", port, 16384)
+    } else {
+        sock, cerr = tcp.connect("127.0.0.1", port)
+    }
     if cerr != "" {
         println("FAIL: connect")
         exit(1)
     }
-    _b = tcp.set_read_buffer(sock, 16384)
+    if !pre {
+        _b = tcp.set_read_buffer(sock, 16384)
+    }
     get = "GET /big HTTP/1.1\r\nHost: x\r\n\r\n"
     t0 = time.now_ms()
     tcp.write(sock, "${get}${get}${get}")

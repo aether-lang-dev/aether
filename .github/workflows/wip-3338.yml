@@ -34,23 +34,24 @@ jobs:
       run: CC=${{ matrix.cc }} make -j4 compiler ae stdlib
     - name: Build the diagnostic
       run: ./build/ae build tests/integration/http_proxy_send_timeout/diag_worker.ae -o build/diag_worker
-    - name: Run it 40 times
+    - name: Run it 40 times each way
       run: |
-        whole=0
-        for i in $(seq 1 40); do
-          AETHER_SENDWAIT_LOG=1 ./build/diag_worker > out.txt 2> err.txt
-          r=$(grep '^RESULT' out.txt)
-          echo "run $i: $r"
-          case "$r" in
-            *whole*)
-              whole=$((whole + 1))
-              echo "---- run $i server waits and client buffer:"
-              cat err.txt | head -60
-              ;;
-            *)
-              echo "  waits: $(grep -c '\[sendwait\]' err.txt), last: $(grep '\[sendwait\]' err.txt | tail -2 | tr '\n' ' ')"
-              grep '\[rcvbuf\]' err.txt
-              ;;
-          esac
+        for pre in 0 1; do
+          whole=0
+          for i in $(seq 1 40); do
+            DIAG_PRE=$pre AETHER_SENDWAIT_LOG=1 ./build/diag_worker > out.txt 2> err.txt
+            r=$(grep '^RESULT' out.txt)
+            echo "pre=$pre run $i: $r"
+            case "$r" in
+              *whole*)
+                whole=$((whole + 1))
+                echo "---- pre=$pre run $i server waits and client buffer:"
+                head -60 err.txt
+                ;;
+              *)
+                echo "  waits: $(grep -c '\[sendwait\]' err.txt), last: $(grep '\[sendwait\]' err.txt | tail -2 | tr '\n' ' ')"
+                ;;
+            esac
+          done
+          echo "PRE=$pre WHOLE $whole of 40"
         done
-        echo "WHOLE $whole of 40"

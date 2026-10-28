@@ -6,6 +6,7 @@
 
 #if !AETHER_HAS_NETWORKING
 TcpSocket* tcp_connect_raw(const char* h, int p) { (void)h; (void)p; return NULL; }
+TcpSocket* tcp_connect_buffered_raw(const char* h, int p, int b) { (void)h; (void)p; (void)b; return NULL; }
 int tcp_send_raw(TcpSocket* s, const char* d) { (void)s; (void)d; return -1; }
 int tcp_send_n_raw(TcpSocket* s, const char* d, int n) { (void)s; (void)d; (void)n; return -1; }
 char* tcp_receive_raw(TcpSocket* s, int m) { (void)s; (void)m; return NULL; }
@@ -190,11 +191,23 @@ int aether_net_order(const char* host, int port, AetherAddrList* addrs) {
 }
 
 int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
-                            long long timeout_ns, const char** why, int* timed_out) {
+                            long long timeout_ns, int read_buffer,
+                            const char** why, int* timed_out) {
     *timed_out = 0;
     int sockfd = (int)socket(addr->ss_family, SOCK_STREAM, 0);
     if (sockfd < 0) {
         *why = "could not create socket";
+        return -1;
+    }
+    /* Before connect, so the SYN advertises a window this size (#3338). Set
+     * on a connected socket, the buffer shrinks, but the kernel still takes
+     * the window it already advertised, and on macOS it went on taking
+     * megabytes from a sender the reader had stopped reading. */
+    if (read_buffer > 0 &&
+        setsockopt(sockfd, SOL_SOCKET, SO_RCVBUF, (const char*)&read_buffer,
+                   sizeof(read_buffer)) != 0) {
+        close(sockfd);
+        *why = "could not set the receive buffer";
         return -1;
     }
     if (timeout_ns <= 0) {
@@ -289,7 +302,7 @@ int aether_net_connect_addr(const struct sockaddr_storage* addr, socklen_t len,
 }
 
 int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
-                          long long timeout_ns, const char** why) {
+                          long long timeout_ns, int read_buffer, const char** why) {
     *why = "could not resolve host";
     if (!addrs || addrs->n <= 0) return -1;
     /* A family that has connected to this host and port before is a proven
@@ -320,7 +333,8 @@ int aether_net_dial_addrs(const char* host, int port, AetherAddrList* addrs,
             if (!last && addrs->ss[i].ss_family != proven)
                 t = (left > 0 && left < first_try) ? left : first_try;
             int timed_out = 0;
-            int fd = aether_net_connect_addr(&addrs->ss[i], addrs->len[i], t, why, &timed_out);
+            int fd = aether_net_connect_addr(&addrs->ss[i], addrs->len[i], t, read_buffer,
+                                             why, &timed_out);
             if (fd >= 0) {
                 if (addrs->n > 1) aether_net_note_family(host, port, addrs->ss[i].ss_family);
                 return fd;
@@ -338,7 +352,7 @@ int aether_net_dial(const char* host, int port, long long timeout_ns, const char
         *why = "could not resolve host";
         return -1;
     }
-    return aether_net_dial_addrs(host, port, &addrs, timeout_ns, why);
+    return aether_net_dial_addrs(host, port, &addrs, timeout_ns, 0, why);
 }
 
 // Set read/write timeouts on a socket so blocking operations don't hang
@@ -357,7 +371,9 @@ static void net_set_socket_timeouts(int fd, int timeout_sec) {
 #endif
 }
 
-TcpSocket* tcp_connect_raw(const char* host, int port) {
+/* tcp_connect_raw, and with `read_buffer` > 0 the receive buffer set before
+ * the connection is made (tcp_connect_buffered_raw). */
+static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer) {
     // Sandbox check: is TCP connect to this host and port allowed?
     char tcp_res[300];
     if (!aether_sandbox_check("tcp", aether_net_resource(tcp_res, sizeof tcp_res, host, port))) return NULL;
@@ -370,7 +386,9 @@ TcpSocket* tcp_connect_raw(const char* host, int port) {
      * thread-safe and returns caller-owned memory. Each address the host has,
      * IPv6 or IPv4, is tried as aether_net_dial_addrs describes. */
     const char* why = NULL;
-    int sockfd = aether_net_dial(host, port, 0, &why);
+    AetherAddrList addrs;
+    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
+    int sockfd = aether_net_dial_addrs(host, port, &addrs, 0, read_buffer, &why);
     if (sockfd < 0) return NULL;
 
     net_set_socket_timeouts(sockfd, 30);
@@ -380,6 +398,15 @@ TcpSocket* tcp_connect_raw(const char* host, int port) {
     sock->fd = sockfd;
     sock->connected = 1;
     return sock;
+}
+
+TcpSocket* tcp_connect_raw(const char* host, int port) {
+    return tcp_connect_with(host, port, 0);
+}
+
+TcpSocket* tcp_connect_buffered_raw(const char* host, int port, int read_buffer) {
+    if (read_buffer <= 0) return NULL;
+    return tcp_connect_with(host, port, read_buffer);
 }
 
 int tcp_send_raw(TcpSocket* sock, const char* data) {

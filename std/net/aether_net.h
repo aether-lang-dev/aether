@@ -13,6 +13,9 @@ typedef struct TcpReceiveResult {
 
 // TCP Client
 TcpSocket* tcp_connect_raw(const char* host, int port);
+// tcp_connect_raw with the receive buffer (SO_RCVBUF) set to `read_buffer`
+// bytes before the connection is made; NULL when `read_buffer` is not positive.
+TcpSocket* tcp_connect_buffered_raw(const char* host, int port, int read_buffer);
 int tcp_send_raw(TcpSocket* sock, const char* data);
 int tcp_send_n_raw(TcpSocket* sock, const char* data, int length);
 // The bytes received as a fresh counted AetherString (cast to char*) the
