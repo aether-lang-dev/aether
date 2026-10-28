@@ -82,7 +82,7 @@ main() {
     burst = 0
     reads = 0
     quiet = 0
-    close_ms = -1
+    long close_ms = -1
     while quiet < 20 {
         ready, _perr = tcp.poll(sock, 100)
         if ready {
