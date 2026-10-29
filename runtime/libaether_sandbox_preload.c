@@ -104,15 +104,16 @@ static int check_grant(const char* category, const char* resource) {
         match_target = resolved;
     }
 
-    // In-process levels take priority (embedded Python mode)
+    // An embedded policy and preload grants are independent boundaries.
+    // When both are active, the operation must satisfy both policies.
     if (aether_sandbox_check_resolved) {
         int result = aether_sandbox_check_resolved(category, match_target);
-        if (result >= 0) {
-            if (!result) log_deny(category, match_target);
-            return result;
+        if (result == 0) {
+            log_deny(category, match_target);
+            return 0;
         }
     }
-    // Fall back to file-based grants (LD_PRELOAD mode)
+    // Apply file/shared-memory grants as the second policy when active.
     if (!sandbox_active) return 1;
     for (int i = 0; i < grant_count; i++) {
         if (grants[i].cat[0] == '*' && grants[i].pat[0] == '*') return 1;
