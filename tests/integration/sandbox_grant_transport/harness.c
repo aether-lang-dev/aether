@@ -57,6 +57,27 @@ int main(void) {
                                                      "/bin/true", NULL), -1);
     list_free(delimited_category);
 
+    void* multiline_category = pair("fs_read\n*", "*");
+    failures += expect_result("newline in category",
+                              aether_spawn_sandboxed(multiline_category,
+                                                     "/bin/true", NULL), -1);
+    list_free(multiline_category);
+
+    void* cr_pattern = pair("fs_read", "/tmp/allowed\r*:*");
+    failures += expect_result("carriage return in pattern",
+                              aether_spawn_sandboxed(cr_pattern, "/bin/true", NULL), -1);
+    list_free(cr_pattern);
+
+    void* cr_category = pair("fs_read\r", "*");
+    failures += expect_result("carriage return in category",
+                              aether_spawn_sandboxed(cr_category, "/bin/true", NULL), -1);
+    list_free(cr_category);
+
+    void* trailing_nl = pair("fs_read", "/tmp/allowed\n");
+    failures += expect_result("trailing newline in pattern",
+                              aether_spawn_sandboxed(trailing_nl, "/bin/true", NULL), -1);
+    list_free(trailing_nl);
+
     char* oversized_pattern = malloc(9001);
     if (!oversized_pattern) return 2;
     memset(oversized_pattern, 'a', 9000);
