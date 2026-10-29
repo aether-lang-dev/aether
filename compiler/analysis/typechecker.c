@@ -14265,6 +14265,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 var->node_type = clone_type(rhs_type->tuple_types[j]);
                 // Don't register _ (discard) in symbol table
                 if (var->value && strcmp(var->value, "_") != 0) {
+                    /* A destructure slot re-binds a visible name, or declares
+                     * a new local. It must not recover an outer binding that
+                     * this scope hid or sealed out. A local already visible
+                     * below the directive remains a valid re-bind, and a
+                     * genuinely new local remains valid in a sealed block. */
+                    Symbol* visible = lookup_symbol(table, var->value);
+                    if (!visible &&
+                        (scope_name_is_hidden(table, var->value) ||
+                         name_blocked_by_hide(table, var->value))) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                                 "'%s' is hidden in this scope by `hide` or `seal except`",
+                                 var->value);
+                        type_error(msg, var->line, var->column);
+                        slots_ok = 0;
+                        continue;
+                    }
                     /* #2762. A refused slot is bound already; the others are
                      * still registered, so their uses report nothing more. */
                     if (!destructure_slot_rebind(var, table, stmt->children[var_count])) {
