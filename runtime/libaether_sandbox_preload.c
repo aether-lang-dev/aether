@@ -178,7 +178,8 @@ static void __attribute__((constructor)) sandbox_init(void) {
         else log_mode = LOG_FILE;
     }
     // Legacy: AETHER_SANDBOX_VERBOSE=1 sets stderr mode
-    if (real_getenv("AETHER_SANDBOX_VERBOSE")) log_mode = LOG_STDERR;
+    const char* verbose_env = real_getenv("AETHER_SANDBOX_VERBOSE");
+    if (verbose_env && strcmp(verbose_env, "1") == 0) log_mode = LOG_STDERR;
 
     // An explicitly configured source is a containment request. If every
     // configured source fails to load, leave the sandbox active with zero
