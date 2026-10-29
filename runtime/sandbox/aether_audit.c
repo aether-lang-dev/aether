@@ -40,6 +40,17 @@ static audit_entry ring[AUDIT_RING_CAP];
 static int ring_head  = 0;   // index of next write
 static int ring_count = 0;   // entries currently held (<= AUDIT_RING_CAP)
 
+/* Field accessors form one entry read in category/resource/allowed order.
+ * Keep that read in thread-local storage so a concurrent append cannot move
+ * the logical index between fields. This object is linked into executables
+ * and emit-lib shared objects, so it needs the shared-library-safe TLS model. */
+#define QUERY_NONE     0
+#define QUERY_CATEGORY 1
+#define QUERY_RESOURCE 2
+static AETHER_TLS_SHARED audit_entry query_snapshot;
+static AETHER_TLS_SHARED int query_index = -1;
+static AETHER_TLS_SHARED int query_phase = QUERY_NONE;
+
 // One mutex guards both the sink-mode resolution and the ring buffer.
 // Audit is off the hot path of normal execution (it fires only inside
 // a sandbox block), so a single coarse lock is fine.
@@ -140,6 +151,16 @@ static int logical_to_physical(int i) {
     return (ring_head + i) % AUDIT_RING_CAP;            // wrapped
 }
 
+// Copy one logical entry while the caller holds audit_lock.
+static void snapshot_entry_locked(int i) {
+    memset(&query_snapshot, 0, sizeof(query_snapshot));
+    query_snapshot.allowed = -1;
+    if (i >= 0 && i < ring_count) {
+        query_snapshot = ring[logical_to_physical(i)];
+    }
+    query_index = i;
+}
+
 int aether_audit_count(void) {
     pthread_mutex_lock(audit_lock_get());
     int n = ring_count;
@@ -149,26 +170,32 @@ int aether_audit_count(void) {
 
 const char* aether_audit_entry_category(int i) {
     pthread_mutex_lock(audit_lock_get());
-    const char* r = "";
-    if (i >= 0 && i < ring_count) r = ring[logical_to_physical(i)].cat;
+    snapshot_entry_locked(i);
     pthread_mutex_unlock(audit_lock_get());
-    return r;
+    query_phase = QUERY_CATEGORY;
+    return query_snapshot.cat;
 }
 
 const char* aether_audit_entry_resource(int i) {
-    pthread_mutex_lock(audit_lock_get());
-    const char* r = "";
-    if (i >= 0 && i < ring_count) r = ring[logical_to_physical(i)].res;
-    pthread_mutex_unlock(audit_lock_get());
-    return r;
+    if (query_phase != QUERY_CATEGORY || query_index != i) {
+        pthread_mutex_lock(audit_lock_get());
+        snapshot_entry_locked(i);
+        pthread_mutex_unlock(audit_lock_get());
+    }
+    query_phase = QUERY_RESOURCE;
+    return query_snapshot.res;
 }
 
 int aether_audit_entry_allowed(int i) {
-    pthread_mutex_lock(audit_lock_get());
-    int r = -1;
-    if (i >= 0 && i < ring_count) r = ring[logical_to_physical(i)].allowed;
-    pthread_mutex_unlock(audit_lock_get());
-    return r;
+    if ((query_phase != QUERY_CATEGORY && query_phase != QUERY_RESOURCE) ||
+        query_index != i) {
+        pthread_mutex_lock(audit_lock_get());
+        snapshot_entry_locked(i);
+        pthread_mutex_unlock(audit_lock_get());
+    }
+    int allowed = query_snapshot.allowed;
+    query_phase = QUERY_NONE;
+    return allowed;
 }
 
 void aether_audit_clear(void) {
