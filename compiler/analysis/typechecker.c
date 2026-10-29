@@ -12485,6 +12485,26 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
         enum_rewrite_ast(nd->children[i], names, n);
 }
 
+/* A qualified enum member is lowered to one identifier before lexical scopes
+ * are checked. Preserve the prefix the source wrote so hide/seal decisions use
+ * `Color`, not the generated `Color_Red` constant name. */
+static int enum_member_source_prefix(const ASTNode* nd, char* out, size_t outsz) {
+    static const char marker[] = "enum_prefix:";
+    if (!nd || !nd->annotation || !out || outsz == 0) return 0;
+    size_t marker_len = sizeof(marker) - 1;
+    for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
+        if (p != nd->annotation && p[-1] != ';') continue;
+        const char* value = p + marker_len;
+        const char* end = strchr(value, ';');
+        size_t len = end ? (size_t)(end - value) : strlen(value);
+        if (len == 0 || len >= outsz) return 0;
+        memcpy(out, value, len);
+        out[len] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
 // #1044: rewrite `EnumName.Member` member-access nodes into a plain identifier
 // naming the C enum constant `EnumName_Member`, with the enum's type. Done up
 // front (in the resolve pass) so the identifier is in place before the
@@ -12504,6 +12524,9 @@ static void enum_rewrite_member_access(ASTNode* nd) {
         } else {
             char qualified[512];
             snprintf(qualified, sizeof(qualified), "%s_%s", ename, nd->value);
+            char marker[512];
+            snprintf(marker, sizeof(marker), "enum_prefix:%s", ename);
+            nd->annotation = annotation_add_marker(nd->annotation, marker);
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -16885,7 +16908,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return typecheck_function_call(expr, table);
             
         case AST_IDENTIFIER: {
-            Symbol* symbol = lookup_symbol(table, expr->value);
+            char enum_prefix[512];
+            int qualified_enum = enum_member_source_prefix(expr, enum_prefix,
+                                                            sizeof(enum_prefix));
+            if (qualified_enum && qualified_prefix_blocked(table, enum_prefix)) {
+                char error_msg[256];
+                snprintf(error_msg, sizeof(error_msg),
+                         "'%s' is hidden in this scope by `hide` or `seal except`",
+                         enum_prefix);
+                type_error(error_msg, expr->line, expr->column);
+                return 0;
+            }
+            /* The source prefix passed containment. Resolve the generated
+             * constant without applying hide/seal a second time to its C name;
+             * `seal except Color` grants `Color.Red`, not `Color_Red`. */
+            Symbol* symbol = qualified_enum ? lookup_member_symbol(table, expr->value)
+                                            : lookup_symbol(table, expr->value);
             if (!symbol) {
                 char error_msg[256];
                 if (expr->value && name_blocked_by_hide(table, expr->value)) {
