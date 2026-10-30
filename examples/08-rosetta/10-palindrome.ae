@@ -1,0 +1,46 @@
+// Palindrome detection: whether a phrase reads the same backward and forward.
+//
+// The task checks a sequence of bytes; its extra credit is an inexact
+// check that ignores case, spaces and punctuation. The exact check walks
+// in from both ends. The inexact one keeps the letters and digits of the
+// lowercased text, picked by a `match` on byte ranges, and checks those.
+// Four phrases are tried, two of them palindromes only inexactly.
+//
+// Run: ae run examples/08-rosetta/10-palindrome.ae
+// See: https://rosettacode.org/wiki/Palindrome_detection
+
+import std.string
+
+palindrome(s: string) -> bool {
+    n = string.length(s)
+    for i in 0..n / 2 {
+        if s[i] != s[n - 1 - i] {
+            return false
+        }
+    }
+    return true
+}
+
+inexact_palindrome(s: string) -> bool {
+    lower = string.to_lower(s)
+    kept = ""
+    for i in 0..string.length(lower) {
+        kept = match lower[i] {
+            97..=122, 48..=57 -> "${kept}${string.from_char(lower[i])}" // a-z, 0-9
+            _ -> kept
+        }
+    }
+    return palindrome(kept)
+}
+
+main() {
+    for s in ["racecar", "rosetta", "A man, a plan, a canal: Panama!", "In girum imus nocte et consumimur igni"] {
+        println("\"${s}\": exact ${palindrome(s)}, inexact ${inexact_palindrome(s)}")
+    }
+}
+
+// Output:
+// "racecar": exact true, inexact true
+// "rosetta": exact false, inexact false
+// "A man, a plan, a canal: Panama!": exact false, inexact true
+// "In girum imus nocte et consumimur igni": exact false, inexact true

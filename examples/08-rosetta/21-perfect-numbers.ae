@@ -1,0 +1,32 @@
+// Perfect numbers: numbers equal to the sum of their proper divisors.
+//
+// The task is a function that says whether a number is perfect, as 6 is:
+// 1 + 2 + 3 = 6. It adds up the divisors to half the number, the largest
+// a proper divisor can be. The program lists the perfect numbers below
+// 10,000.
+//
+// Run: ae run examples/08-rosetta/21-perfect-numbers.ae
+// See: https://rosettacode.org/wiki/Perfect_numbers
+
+perfect(n: int) -> bool {
+    total = 0
+    for d in 1..n / 2 + 1 {
+        if n % d == 0 {
+            total += d
+        }
+    }
+    return total == n
+}
+
+main() {
+    line = "below 10000:"
+    for n in 1..10000 {
+        if perfect(n) {
+            line = "${line} ${n}"
+        }
+    }
+    println(line)
+}
+
+// Output:
+// below 10000: 6 28 496 8128

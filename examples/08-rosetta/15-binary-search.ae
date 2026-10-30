@@ -1,0 +1,39 @@
+// Binary search: where a value is in a sorted array, or that it is not there.
+//
+// The task searches a sorted integer array by halving the range, and says
+// whether the value was found and at which index; here, five values in the
+// first ten primes. The answer is an `int?`: a clause with a guard gives
+// `none` once the range is empty, and the caller's `match` takes `some(i)`
+// and `none` apart. The midpoint low + (high - low) / 2 cannot overflow.
+//
+// Run: ae run examples/08-rosetta/15-binary-search.ae
+// See: https://rosettacode.org/wiki/Binary_search
+
+search(xs: int[], value: int, low: int, high: int) when high < low -> int? -> none
+search(xs: int[], value: int, low: int, high: int) -> int? {
+    mid = low + (high - low) / 2
+    if xs[mid] > value {
+        return search(xs, value, low, mid - 1)
+    }
+    if xs[mid] < value {
+        return search(xs, value, mid + 1, high)
+    }
+    return mid
+}
+
+main() {
+    xs = [2, 3, 5, 7, 11, 13, 17, 19, 23, 29]
+    for value in [2, 13, 29, 4, 30] {
+        match search(xs, value, 0, xs.len - 1) {
+            some(i) -> println("${value} is at index ${i}")
+            none -> println("${value} is not in the array")
+        }
+    }
+}
+
+// Output:
+// 2 is at index 0
+// 13 is at index 5
+// 29 is at index 9
+// 4 is not in the array
+// 30 is not in the array

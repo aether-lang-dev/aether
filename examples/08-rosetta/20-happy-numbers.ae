@@ -1,0 +1,31 @@
+// Happy numbers: numbers whose digit-square sums reach 1.
+//
+// The task prints the first 8 happy numbers. Replace n by the sum of the
+// squares of its digits until it reaches 1, happy, or loops forever. Every
+// unhappy number falls into the one loop through 4, so two clauses with
+// literals end the walk and a third takes the next step.
+//
+// Run: ae run examples/08-rosetta/20-happy-numbers.ae
+// See: https://rosettacode.org/wiki/Happy_numbers
+
+digit_squares(0) -> int -> 0
+digit_squares(n: int) -> int -> (n % 10) * (n % 10) + digit_squares(n / 10)
+
+happy(1) -> bool -> true
+happy(4) -> bool -> false
+happy(n: int) -> bool -> happy(digit_squares(n))
+
+main() {
+    line = "the first 8:"
+    found = 0
+    for (n = 1; found < 8; n += 1) {
+        if happy(n) {
+            line = "${line} ${n}"
+            found += 1
+        }
+    }
+    println(line)
+}
+
+// Output:
+// the first 8: 1 7 10 13 19 23 28 31

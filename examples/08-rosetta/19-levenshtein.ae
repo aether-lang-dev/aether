@@ -1,0 +1,47 @@
+// Levenshtein distance: the fewest one-character edits between two strings.
+//
+// The task shows the distance from "kitten" to "sitting", which is 3; the
+// task's "rosettacode" to "raisethysword" (8), the same reversed, and
+// "saturday" to "sunday" are shown too. The table is kept one row at a
+// time, in a `make` buffer freed by the `defer` beside it: each cell is the
+// cheapest of a deletion, an insertion and a substitution, free when the
+// two characters agree.
+//
+// Run: ae run examples/08-rosetta/19-levenshtein.ae
+// See: https://rosettacode.org/wiki/Levenshtein_distance
+
+import std.math
+import std.string
+
+levenshtein(a: string, b: string) -> int {
+    n = string.length(b)
+    row = make([]int, n + 1)
+    defer free(row)
+    for j in 0..n + 1 {
+        row[j] = j
+    }
+    for i in 1..string.length(a) + 1 {
+        diagonal = row[0]
+        row[0] = i
+        for j in 1..n + 1 {
+            above = row[j]
+            cost = if a[i - 1] == b[j - 1] { 0 } else { 1 }
+            row[j] = math.min_int(math.min_int(above, row[j - 1]) + 1, diagonal + cost)
+            diagonal = above
+        }
+    }
+    return row[n]
+}
+
+main() {
+    println("kitten -> sitting: ${levenshtein("kitten", "sitting")}")
+    println("rosettacode -> raisethysword: ${levenshtein("rosettacode", "raisethysword")}")
+    println("edocattesor -> drowsyhtesiar: ${levenshtein("edocattesor", "drowsyhtesiar")}")
+    println("saturday -> sunday: ${levenshtein("saturday", "sunday")}")
+}
+
+// Output:
+// kitten -> sitting: 3
+// rosettacode -> raisethysword: 8
+// edocattesor -> drowsyhtesiar: 8
+// saturday -> sunday: 3

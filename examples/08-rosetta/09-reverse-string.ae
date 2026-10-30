@@ -1,0 +1,30 @@
+// Reverse a string: the characters of a string in the opposite order.
+//
+// The task turns "asdf" into "fdsa", and its extra credit keeps each
+// combining character on the letter it marks. std.unicode counts and cuts
+// grapheme clusters, the characters a reader sees, so each moves whole.
+// The inputs are the task's two examples and "Hello, World!".
+//
+// Run: ae run examples/08-rosetta/09-reverse-string.ae
+// See: https://rosettacode.org/wiki/Reverse_a_string
+
+import std.unicode
+
+reverse(s: string) -> string {
+    out = ""
+    for i in 0..unicode.grapheme_len(s) {
+        out = "${unicode.grapheme_substring(s, i, 1)}${out}"
+    }
+    return out
+}
+
+main() {
+    for s in ["asdf", "as⃝df̅", "Hello, World!"] {
+        println("${s} -> ${reverse(s)}")
+    }
+}
+
+// Output:
+// asdf -> fdsa
+// as⃝df̅ -> f̅ds⃝a
+// Hello, World! -> !dlroW ,olleH

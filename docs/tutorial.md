@@ -707,6 +707,11 @@ supervisor (a process with a deadline and nothing left behind) and a
 terminal calculator (a builder DSL with closures). Read them for how the
 pieces fit, then write your own.
 
+The path ends with [Rosetta Code tasks](../examples/README.md#8-rosetta-code):
+classic problems (FizzBuzz, the N queens, quicksort, Levenshtein distance)
+solved in Aether, with their length beside the Go and Python solutions.
+They are good exercises too: try one before reading its file.
+
 ## Where next
 
 - [Language reference](language-reference.md): every construct, in full.

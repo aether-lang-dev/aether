@@ -138,6 +138,48 @@ Whole programs, each putting several of the ideas above to work.
 | [03-build-supervisor.ae](07-applications/03-build-supervisor.ae) | `os.run_supervised`: a deadline, a process group, nothing left behind | [stdlib reference](../docs/stdlib-reference.md) |
 | [04-calculator.ae](07-applications/04-calculator.ae) | a terminal UI: a button grid as a DSL, closures over ref cells | [Closures and lifetimes](../docs/closures-and-lifetimes.md) |
 
+## 8. Rosetta Code
+
+Classic programming tasks as [Rosetta Code](https://rosettacode.org)
+states them, each a whole program whose output CI checks like the rest
+(#1191). The lines are counted the same way for each language: a
+non-blank line that is not only a comment, for Aether's file here (its
+header and Output block left out) and for the first Go and Python
+solution in [RosettaCodeData](https://github.com/acmeism/RosettaCodeData)
+(1d475861, 2026-07-16). The other languages' first files are not always
+whole programs (Python's GCD imports `fractions.gcd`, Go's leap year is the
+function alone), so the counts compare length, not like for like.
+
+| Example | Task | Lines: Aether, Go, Python |
+|---|---|---|
+| [01-fizzbuzz.ae](08-rosetta/01-fizzbuzz.ae) | [FizzBuzz](https://rosettacode.org/wiki/FizzBuzz) | 13, 16, 9 |
+| [02-ackermann.ae](08-rosetta/02-ackermann.ae) | [Ackermann function](https://rosettacode.org/wiki/Ackermann_function) | 12, 9, 3 |
+| [03-fibonacci.ae](08-rosetta/03-fibonacci.ae) | [Fibonacci sequence](https://rosettacode.org/wiki/Fibonacci_sequence) | 22, 6, 10 |
+| [04-factorial.ae](08-rosetta/04-factorial.ae) | [Factorial](https://rosettacode.org/wiki/Factorial) | 12, 19, 2 |
+| [05-gcd.ae](08-rosetta/05-gcd.ae) | [Greatest common divisor](https://rosettacode.org/wiki/Greatest_common_divisor) | 9, 35, 1 |
+| [06-sieve.ae](08-rosetta/06-sieve.ae) | [Sieve of Eratosthenes](https://rosettacode.org/wiki/Sieve_of_Eratosthenes) | 22, 33, 7 |
+| [07-hanoi.ae](08-rosetta/07-hanoi.ae) | [Towers of Hanoi](https://rosettacode.org/wiki/Towers_of_Hanoi) | 9, 25, 6 |
+| [08-n-queens.ae](08-rosetta/08-n-queens.ae) | [N-queens problem](https://rosettacode.org/wiki/N-queens_problem) | 50, 51, 7 |
+| [09-reverse-string.ae](08-rosetta/09-reverse-string.ae) | [Reverse a string](https://rosettacode.org/wiki/Reverse_a_string) | 13, 63, 1 |
+| [10-palindrome.ae](08-rosetta/10-palindrome.ae) | [Palindrome detection](https://rosettacode.org/wiki/Palindrome_detection) | 26, 11, 2 |
+| [11-roman-encode.ae](08-rosetta/11-roman-encode.ae) | [Roman numerals/Encode](https://rosettacode.org/wiki/Roman_numerals/Encode) | 17, 32, 2 |
+| [13-binary-digits.ae](08-rosetta/13-binary-digits.ae) | [Binary digits](https://rosettacode.org/wiki/Binary_digits) | 7, 9, 17 |
+| [14-quicksort.ae](08-rosetta/14-quicksort.ae) | [Sorting algorithms/Quicksort](https://rosettacode.org/wiki/Sorting_algorithms/Quicksort) | 36, 66, 19 |
+| [15-binary-search.ae](08-rosetta/15-binary-search.ae) | [Binary search](https://rosettacode.org/wiki/Binary_search) | 20, 12, 9 |
+| [16-hailstone.ae](08-rosetta/16-hailstone.ae) | [Hailstone sequence](https://rosettacode.org/wiki/Hailstone_sequence) | 23, 29, 14 |
+| [19-levenshtein.ae](08-rosetta/19-levenshtein.ae) | [Levenshtein distance](https://rosettacode.org/wiki/Levenshtein_distance) | 27, 34, 17 |
+| [20-happy-numbers.ae](08-rosetta/20-happy-numbers.ae) | [Happy numbers](https://rosettacode.org/wiki/Happy_numbers) | 16, 26, 10 |
+| [21-perfect-numbers.ae](08-rosetta/21-perfect-numbers.ae) | [Perfect numbers](https://rosettacode.org/wiki/Perfect_numbers) | 18, 29, 6 |
+| [22-look-and-say.ae](08-rosetta/22-look-and-say.ae) | [Look-and-say sequence](https://rosettacode.org/wiki/Look-and-say_sequence) | 22, 28, 17 |
+| [23-josephus.ae](08-rosetta/23-josephus.ae) | [Josephus problem](https://rosettacode.org/wiki/Josephus_problem) | 27, 39, 13 |
+| [24-pascals-triangle.ae](08-rosetta/24-pascals-triangle.ae) | [Pascal's triangle](https://rosettacode.org/wiki/Pascal's_triangle) | 20, 35, 9 |
+| [25-prime-decomposition.ae](08-rosetta/25-prime-decomposition.ae) | [Prime decomposition](https://rosettacode.org/wiki/Prime_decomposition) | 34, 35, 52 |
+
+Over these 22 tasks: Aether 455 lines, Go 642, Python 233. Three tasks of
+the tranche wait for compiler fixes and are left out rather than written
+around them: Roman numerals/Decode and Leap year (#3478, an `if` value
+whose condition ends in a call) and Caesar cipher (#3479, `c = s[i]`).
+
 ## Writing an example
 
 An example is one `.ae` file, or a directory when it needs more than one

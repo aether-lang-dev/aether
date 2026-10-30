@@ -1,0 +1,30 @@
+// Ackermann function: A(m, n), a recursion that is not primitive recursive.
+//
+// The task is a function for A(m, n), defined by three cases: n + 1 when
+// m is 0, A(m - 1, 1) when n is 0, and A(m - 1, A(m, n - 1)) otherwise.
+// Three clauses are those cases, a literal 0 matching a zero argument.
+// The table is m = 0 to 3 by n = 0 to 4; it stops at m = 3 because
+// A(4, 1) recurses too deep for a short demo.
+//
+// Run: ae run examples/08-rosetta/02-ackermann.ae
+// See: https://rosettacode.org/wiki/Ackermann_function
+
+ackermann(0, n: int) -> int -> n + 1
+ackermann(m: int, 0) -> int -> ackermann(m - 1, 1)
+ackermann(m: int, n: int) -> int -> ackermann(m - 1, ackermann(m, n - 1))
+
+main() {
+    for m in 0..4 {
+        line = "A(${m}, 0..4):"
+        for n in 0..5 {
+            line = "${line} ${ackermann(m, n)}"
+        }
+        println(line)
+    }
+}
+
+// Output:
+// A(0, 0..4): 1 2 3 4 5
+// A(1, 0..4): 2 3 4 5 6
+// A(2, 0..4): 3 5 7 9 11
+// A(3, 0..4): 5 13 29 61 125

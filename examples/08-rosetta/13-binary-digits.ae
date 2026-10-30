@@ -1,0 +1,24 @@
+// Binary digits: a non-negative integer written in base 2.
+//
+// The task prints the binary digits of a number and nothing else, with no
+// leading zeros: 0, 5, 50 and 9000 give 0, 101, 110010 and 10001100101000.
+// Two clauses: a guard takes 0 and 1 as they are, and a larger n is the
+// digits of n / 2 followed by n % 2, joined by interpolation.
+//
+// Run: ae run examples/08-rosetta/13-binary-digits.ae
+// See: https://rosettacode.org/wiki/Binary_digits
+
+binary(n: int) when n < 2 -> string -> "${n}"
+binary(n: int) -> string -> "${binary(n / 2)}${n % 2}"
+
+main() {
+    for n in [0, 5, 50, 9000] {
+        println(binary(n))
+    }
+}
+
+// Output:
+// 0
+// 101
+// 110010
+// 10001100101000

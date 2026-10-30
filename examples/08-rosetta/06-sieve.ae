@@ -1,0 +1,36 @@
+// Sieve of Eratosthenes: the primes up to a limit, by crossing out multiples.
+//
+// The task is the sieve itself: cross out the multiples of each prime
+// found, from its square up, and what stays uncrossed is prime. A `make`
+// buffer of bools holds the marks, freed by the `defer` beside it, and the
+// primes go into a slice that grows with `push`. The limit here is 100.
+//
+// Run: ae run examples/08-rosetta/06-sieve.ae
+// See: https://rosettacode.org/wiki/Sieve_of_Eratosthenes
+
+primes_up_to(limit: int) -> int[] {
+    crossed = make([]bool, limit + 1)
+    defer free(crossed)
+    int[] primes = []
+    for n in 2..limit + 1 {
+        if !crossed[n] {
+            primes.push(n)
+            for (m = n * n; m <= limit; m += n) {
+                crossed[m] = true
+            }
+        }
+    }
+    return primes
+}
+
+main() {
+    primes = primes_up_to(100)
+    line = "${primes.len} primes up to 100:"
+    for p in primes {
+        line = "${line} ${p}"
+    }
+    println(line)
+}
+
+// Output:
+// 25 primes up to 100: 2 3 5 7 11 13 17 19 23 29 31 37 41 43 47 53 59 61 67 71 73 79 83 89 97

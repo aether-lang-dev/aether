@@ -1,0 +1,37 @@
+// Roman numerals/Encode: a positive integer written as a Roman numeral.
+//
+// The task writes each decimal digit separately, from the left, skipping
+// zeros: 1990 is MCMXC, 2008 MMVIII, 1666 MDCLXVI; 2026 and 3999 are shown
+// too. Two constant tables pair each value with its symbol, the
+// subtractive pairs (CM, XC, IV) included, so taking the largest value
+// that fits, again and again, spells the numeral.
+//
+// Run: ae run examples/08-rosetta/11-roman-encode.ae
+// See: https://rosettacode.org/wiki/Roman_numerals/Encode
+
+const VALUES[] = [1000, 900, 500, 400, 100, 90, 50, 40, 10, 9, 5, 4, 1]
+const SYMBOLS[] = ["M", "CM", "D", "CD", "C", "XC", "L", "XL", "X", "IX", "V", "IV", "I"]
+
+roman(n: int) -> string {
+    out = ""
+    for i in 0..VALUES.len {
+        while n >= VALUES[i] {
+            out = "${out}${SYMBOLS[i]}"
+            n -= VALUES[i]
+        }
+    }
+    return out
+}
+
+main() {
+    for n in [1990, 2008, 1666, 2026, 3999] {
+        println("${n} = ${roman(n)}")
+    }
+}
+
+// Output:
+// 1990 = MCMXC
+// 2008 = MMVIII
+// 1666 = MDCLXVI
+// 2026 = MMXXVI
+// 3999 = MMMCMXCIX
