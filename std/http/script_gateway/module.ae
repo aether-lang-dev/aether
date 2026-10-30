@@ -53,10 +53,11 @@
 //
 // ### Windows
 //
-// The library is a DLL, loaded with LoadLibrary. A POSIX host links with
-// -rdynamic, so a script's runtime calls bind to the host's own runtime when
-// it is loaded; Windows has no equivalent, so there the host and every
-// script are built on the shared runtime (aether.dll) and run on it
+// The library is a DLL, loaded with LoadLibrary. On Linux, FreeBSD and
+// macOS a script built the default way carries a runtime of its own and runs
+// on it (#3481); one built with --shared-runtime shares the host's. Windows
+// has no way for a DLL to bind to the host executable, so there the host and
+// every script are built on the shared runtime (aether.dll) and run on it
 // together:
 //
 // ```sh

@@ -901,10 +901,11 @@ struct holding a string has no such copy: by value, the program's drop
 releases the library's strings, and through a typed pointer the program's
 stores do. A builder that uses its config fills, grows or frees a map the
 program made, and a factory in the library would not help, since the
-trailing block fills the config with the program's runtime. So where the
-copies stay apart (macOS, Windows: no ELF interposition) `ae` refuses to
-import a static-runtime library whose exports pass such a struct or whose
-builders use their config, and names the rebuild with `--shared-runtime`.
+trailing block fills the config with the program's runtime. So, since the
+copies stay apart on every platform (#3481: a self-contained library binds
+to its own runtime on ELF too), `ae` refuses to import a static-runtime
+library whose exports pass such a struct or whose builders use their
+config, and names the rebuild with `--shared-runtime`.
 Closures cross either way: an environment carries its own release, which
 runs in the library that made it.
 

@@ -1,0 +1,43 @@
+// Josephus problem: who survives when every kth prisoner in a circle is killed.
+//
+// The task numbers the prisoners 0 to n - 1 and asks who is left; with
+// n = 41 and k = 3, Josephus stood at 30. Two clauses give the survivor by
+// recurrence. The extra credit, the whole killing sequence, walks the
+// circle as the executioner does, over a `make` buffer of who is dead.
+//
+// Run: ae run examples/08-rosetta/23-josephus.ae
+// See: https://rosettacode.org/wiki/Josephus_problem
+
+survivor(1, k: int) -> int -> 0
+survivor(n: int, k: int) -> int -> (survivor(n - 1, k) + k) % n
+
+killing_order(n: int, k: int) -> int[] {
+    dead = make([]bool, n)
+    int[] order = []
+    at = n - 1
+    while order.len < n {
+        living = 0
+        while living < k {
+            at = (at + 1) % n
+            if !dead[at] {
+                living += 1
+            }
+        }
+        dead[at] = true
+        order.push(at)
+    }
+    return order
+}
+
+main() {
+    println("n = 41, k = 3: survivor ${survivor(41, 3)}")
+    order = killing_order(5, 2)
+    println("n = 5, k = 2: killed ${order[0]} ${order[1]} ${order[2]} ${order[3]}, survivor ${order[4]}")
+    order = killing_order(41, 3)
+    println("n = 41, k = 3: the last three ${order[38]} ${order[39]} ${order[40]}")
+}
+
+// Output:
+// n = 41, k = 3: survivor 30
+// n = 5, k = 2: killed 1 3 0 4, survivor 2
+// n = 41, k = 3: the last three 34 15 30

@@ -1,7 +1,7 @@
 // Ownership: what the compiler frees, and what the program frees.
 //
 // Aether has no garbage collector, and it does not ask you to free
-// everything either. Two kinds of value, two rules:
+// everything either. Three kinds of value, three rules:
 //
 // Values the program owns are counted by the compiler: strings, closures,
 // string sequences, and the structs, tuples, optionals and arrays built
@@ -12,8 +12,15 @@
 // caller one reference. The program writes no free for these, and
 // freeing a parameter it only borrows is refused (E0901).
 //
+// A slice's buffer, the one `make([]T, n)` hands out or `push` grows, has
+// one owner instead of a count: a local that holds it releases it when its
+// scope ends, and so does a local, a caller or a `@keep` parameter it moves
+// to. A buffer put in a field, a module `var`, a tuple or a message, or
+// held by a local a closure captures, is the program's to give back:
+// `free(s.items)` releases it and empties the field.
+//
 // Handles are `ptr`s, and a `ptr` owns nothing: a list or a map, a
-// `heap.new` box, a `make` buffer, a C allocation. Whoever makes one
+// `heap.new` box, a C allocation. Whoever makes one
 // frees it, with `defer` right after; a function that returns one hands
 // that duty to its caller. A function that keeps a `ptr` parameter past
 // the call says so with `@keep` (E0902 otherwise). A string goes into a

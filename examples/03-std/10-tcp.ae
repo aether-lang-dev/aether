@@ -1,0 +1,85 @@
+// TCP: a server and a client over a socket, in one program.
+//
+// TCP is the layer under HTTP: std.tcp connects, listens, accepts, reads
+// and writes, and each call returns an error string to check. TCP carries
+// a stream of bytes, not messages: a read returns what has arrived, which
+// may be part of a message or more than one. So a protocol says where a
+// message ends (here a newline), and the reader keeps reading until it gets
+// there, keeping whatever came after it for the next message. The server
+// listens on the loopback address only, on a port the system picks. One
+// thread can play both sides: a connection waits in the listener's queue,
+// complete, until the server accepts it.
+//
+// Run: ae run examples/03-std/10-tcp.ae
+// See: std/tcp/README.md
+
+import std.string
+import std.tcp
+
+// A socket, and what has arrived on it past the last line read.
+struct LineReader {
+    sock: ptr
+    pending: string
+}
+
+// The next line, without its newline, however its bytes arrive.
+read_line(r: *LineReader) -> (string, string) {
+    while true {
+        at = string.index_of(r.pending, "\n")
+        if at >= 0 {
+            line = string.substring(r.pending, 0, at)
+            r.pending = string.substring(r.pending, at + 1, string.length(r.pending))
+            return line, ""
+        }
+        part, err = tcp.read(r.sock, 64)
+        if err != "" {
+            return "", err
+        }
+        r.pending = string.concat(r.pending, part)
+    }
+}
+
+// Ends the program with a message when a step failed.
+check(what: string, err: string) {
+    if err != "" {
+        println("${what} failed: ${err}")
+        exit(1)
+    }
+}
+
+main() {
+    srv, err = tcp.listen_on("127.0.0.1", 0)
+    check("listen", err)
+    defer tcp.server_close(srv)
+
+    // The client connects and sends its line.
+    client, cerr = tcp.connect("127.0.0.1", tcp.server_port(srv))
+    check("connect", cerr)
+    defer tcp.close(client)
+    // write_all, because one write may send only part of what it is given.
+    request = "hello over tcp\n"
+    _sent, werr = tcp.write_all(client, string.bytes(request))
+    check("the client's write", werr)
+
+    // The server takes the connection, reads the line, answers in capitals.
+    conn, aerr = tcp.accept(srv)
+    check("accept", aerr)
+    defer tcp.close(conn)
+    server_side = LineReader { sock: conn, pending: "" }
+    line, rerr = read_line(&server_side)
+    check("the server's read", rerr)
+    println("server: got '${line}'")
+    reply_line = "${string.to_upper(line)}\n"
+    _answered, aw = tcp.write_all(conn, string.bytes(reply_line))
+    check("the server's write", aw)
+
+    // The client reads the answer.
+    client_side = LineReader { sock: client, pending: "" }
+    answer, ar = read_line(&client_side)
+    check("the client's read", ar)
+    println("client: the server said '${answer}'")
+}
+
+// Output:
+// server: got 'hello over tcp'
+// client: the server said 'HELLO OVER TCP'

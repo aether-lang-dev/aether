@@ -10,8 +10,9 @@
 //
 // Generated code reaches all of this through the functions below, never by
 // naming the per-thread state (a Windows DLL cannot export thread-locals),
-// so every library sharing one runtime image (the shared runtime, or ELF
-// interposition) shares each thread's levels.
+// so every library sharing one runtime image (the shared runtime, or, on
+// ELF, a library linked without -Bsymbolic, which `ae` no longer makes since
+// #3481) shares each thread's levels.
 //
 // When AETHER_HAS_SANDBOX is not defined, aether_sandbox_check is a
 // no-op macro that always returns 1, zero overhead.

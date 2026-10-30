@@ -74,8 +74,68 @@ safe to use: it cannot hand over another tree than the one pinned.
 
 A package that publishes a release artifact for the host (a binary package,
 or `<repo>-<tag>-<os>-<arch>.tar.gz`) is installed from it instead when a
-version is given, verified by its `.sha256` (getting-started.md, "Add a
-package"). `--source` skips that and takes the source archive.
+version is given, verified by its `.sha256` ("Release artifacts" below).
+`--source` skips that and takes the source archive.
+
+## Release artifacts
+
+With `@version`, `ae add` prefers a **published release artifact** when the
+package ships one for your platform, and takes the source archive otherwise.
+The asset is expected at the same layout Aether's own releases use:
+
+```
+https://<package>/releases/download/<tag>/<repo>-<tag>-<os>-<arch>.tar.gz
+```
+
+(`.zip` is tried too; `<os>-<arch>` is `linux-x86_64`, `macos-arm64`, and
+so on.) A sibling `<asset>.sha256` is verified when present: a
+**mismatch is fatal and installs nothing**, and there is no silent
+fall-back to the source, which would defeat the check. An artifact with no
+published checksum installs with a warning.
+
+Prebuilt `--emit=lib` artifacts are directly importable: the binary-import
+prepass reads the artifact's catalog and synthesizes the interface, so a
+released library needs no toolchain to consume. Set
+`AE_RELEASE_BASE_URL` to point at an internal mirror serving the same
+layout, and the source archives at `<package>/archive/<tag>.tar.gz`.
+
+### Publishing a binary package
+
+For a **binary package**, publish `aether.toml` with a `[package]` section
+containing `binary = "<stem>"` and `modules = "."`, plus
+`<stem>-<tag>-<triple>.<ext>` and its
+`.sha256` sidecar. Unlike the archive path, a binary package requires the
+checksum: a missing or mismatched checksum is fatal. If the declared binary
+is missing for the selected target, `ae add` fails without trying another
+libc or a source archive.
+
+Publish Linux binary packages under distinct glibc and musl identities:
+
+| Build target | Release triple |
+| --- | --- |
+| `x86_64-linux` (glibc) | `linux-x86_64` |
+| `aarch64-linux` (glibc) | `linux-arm64` |
+| `x86_64-linux-musl` | `linux-x86_64-musl` |
+| `aarch64-linux-musl` | `linux-arm64-musl` |
+
+Automatic selection uses the CPU and libc that `ae` was built for, retaining
+the existing unsuffixed glibc names. To fetch a foreign binary, give its
+**release triple** explicitly (rather than the compiler's build-target spelling):
+
+```bash
+ae add github.com/user/repo@v1.0.0 --target linux-arm64-musl
+```
+
+The explicit target is preserved in the asset name; it does not fall back to
+the host's libc. The package cache holds one target per package. Use a separate
+`HOME` per target when assembling a multi-target release. `ae add` refuses to
+reuse an installed binary for a different target and preserves its bytes.
+Older binary caches without a target record must be removed and fetched again
+so the selected asset and its checksum are verified.
+
+For example, a stem of `libfoo` yields
+`libfoo-v1.0.0-linux-arm64-musl.so` and
+`libfoo-v1.0.0-linux-arm64-musl.so.sha256`.
 
 ## The fetcher
 

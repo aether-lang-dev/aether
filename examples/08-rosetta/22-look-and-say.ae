@@ -1,0 +1,46 @@
+// Look-and-say sequence: each term says the runs of digits in the one before.
+//
+// The task generates successive terms: 1 is "one 1", 11, which is "two
+// 1s", 21, then 1211, and so on. Each run of one digit becomes its length
+// followed by the digit, by interpolation. The program prints the first 10
+// terms.
+//
+// Run: ae run examples/08-rosetta/22-look-and-say.ae
+// See: https://rosettacode.org/wiki/Look-and-say_sequence
+
+import std.string
+
+next_term(term: string) -> string {
+    out = ""
+    n = string.length(term)
+    i = 0
+    while i < n {
+        j = i
+        while j < n && term[j] == term[i] {
+            j += 1
+        }
+        out = "${out}${j - i}${string.substring(term, i, i + 1)}"
+        i = j
+    }
+    return out
+}
+
+main() {
+    term = "1"
+    for k in 0..10 {
+        println(term)
+        term = next_term(term)
+    }
+}
+
+// Output:
+// 1
+// 11
+// 21
+// 1211
+// 111221
+// 312211
+// 13112221
+// 1113213211
+// 31131211131221
+// 13211311123113112211

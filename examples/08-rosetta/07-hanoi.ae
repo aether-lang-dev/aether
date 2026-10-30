@@ -1,0 +1,37 @@
+// Towers of Hanoi: the moves that carry a stack of disks to another peg.
+//
+// The task is to solve the puzzle with recursion: move the n - 1 disks
+// above out of the way, move disk n, and put the n - 1 back on top of it.
+// Two clauses: a literal 0 is no disks and nothing to do. Four disks take
+// fifteen moves.
+//
+// Run: ae run examples/08-rosetta/07-hanoi.ae
+// See: https://rosettacode.org/wiki/Towers_of_Hanoi
+
+hanoi(0, src: string, dst: string, via: string) {}
+hanoi(n: int, src: string, dst: string, via: string) {
+    hanoi(n - 1, src, via, dst)
+    println("move disk ${n} from ${src} to ${dst}")
+    hanoi(n - 1, via, dst, src)
+}
+
+main() {
+    hanoi(4, "A", "C", "B")
+}
+
+// Output:
+// move disk 1 from A to B
+// move disk 2 from A to C
+// move disk 1 from B to C
+// move disk 3 from A to B
+// move disk 1 from C to A
+// move disk 2 from C to B
+// move disk 1 from A to B
+// move disk 4 from A to C
+// move disk 1 from B to C
+// move disk 2 from B to A
+// move disk 1 from C to A
+// move disk 3 from B to C
+// move disk 1 from A to B
+// move disk 2 from A to C
+// move disk 1 from B to C

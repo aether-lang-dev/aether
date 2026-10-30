@@ -1,0 +1,36 @@
+// FizzBuzz: the numbers 1 to 100, with Fizz, Buzz and FizzBuzz for multiples.
+//
+// The task prints 1 to 100, but Fizz for a multiple of three, Buzz for a
+// multiple of five and FizzBuzz for a multiple of both. A clause set with
+// guards says it: the first clause whose guard holds gives the word. All
+// hundred are printed, ten to a line, to keep the output short.
+//
+// Run: ae run examples/08-rosetta/01-fizzbuzz.ae
+// See: https://rosettacode.org/wiki/FizzBuzz
+
+fizzbuzz(n: int) when n % 15 == 0 -> string -> "FizzBuzz"
+fizzbuzz(n: int) when n % 3 == 0 -> string -> "Fizz"
+fizzbuzz(n: int) when n % 5 == 0 -> string -> "Buzz"
+fizzbuzz(n: int) -> string -> "${n}"
+
+main() {
+    for row in 0..10 {
+        line = fizzbuzz(row * 10 + 1)
+        for col in 2..11 {
+            line = "${line} ${fizzbuzz(row * 10 + col)}"
+        }
+        println(line)
+    }
+}
+
+// Output:
+// 1 2 Fizz 4 Buzz Fizz 7 8 Fizz Buzz
+// 11 Fizz 13 14 FizzBuzz 16 17 Fizz 19 Buzz
+// Fizz 22 23 Fizz Buzz 26 Fizz 28 29 FizzBuzz
+// 31 32 Fizz 34 Buzz Fizz 37 38 Fizz Buzz
+// 41 Fizz 43 44 FizzBuzz 46 47 Fizz 49 Buzz
+// Fizz 52 53 Fizz Buzz 56 Fizz 58 59 FizzBuzz
+// 61 62 Fizz 64 Buzz Fizz 67 68 Fizz Buzz
+// 71 Fizz 73 74 FizzBuzz 76 77 Fizz 79 Buzz
+// Fizz 82 83 Fizz Buzz 86 Fizz 88 89 FizzBuzz
+// 91 92 Fizz 94 Buzz Fizz 97 98 Fizz Buzz

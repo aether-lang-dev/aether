@@ -1642,7 +1642,8 @@ int run_cross_build(const char* c_file, const char* out_file,
          * which shipped no library until selaenium's cross build.) */
         /* -DAETHER_NO_LIB_MAIN: no entry point in a shared library (see the
          * Tier-A link below). */
-        const char* fbsd_lib_flags = emit_lib ? "-shared -fPIC -DAETHER_NO_LIB_MAIN" : "";
+        /* -Bsymbolic: the library keeps the runtime it carries (#3481). */
+        const char* fbsd_lib_flags = emit_lib ? "-shared -fPIC -Wl,-Bsymbolic -DAETHER_NO_LIB_MAIN" : "";
         /* --size strips at link time as well: same GNU/LLD spellings the Tier-A
          * ELF/PE path uses (FreeBSD's ld.lld takes them). */
         const char* fbsd_size_link = !ae_build_size_mode() ? ""
@@ -1731,7 +1732,9 @@ int run_cross_build(const char* c_file, const char* out_file,
                              "-Wl,--out-implib,\"%s.lib\"", implib);
                     elf_pe_lib_flags = pe_lib_flags;
                 } else {
-                    elf_pe_lib_flags = "-shared -fPIC";
+                    /* -Bsymbolic: the library binds the runtime it carries
+                     * to itself, not to an importing program's (#3481). */
+                    elf_pe_lib_flags = "-shared -fPIC -Wl,-Bsymbolic";
                 }
             }
             /* --size strips at link time as well as suppressing debug info

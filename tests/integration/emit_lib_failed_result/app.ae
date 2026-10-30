@@ -2,10 +2,11 @@
 // runtime (#3388): a failed call is raised again as a panic here, and the
 // string the library would have returned is not kept by either runtime.
 //
-// The reason is printed in the handler and not kept: on ELF, where the
-// program is linked with -rdynamic, the library's runtime calls bind to the
-// program's runtime (one runtime, not two), so words.used() reads the
-// program's count, which a kept reason string would be part of (#3437).
+// The reason is printed in the handler and not kept: a library linked
+// without -Bsymbolic (before #3481) binds its runtime calls to a program
+// linked -rdynamic on ELF (one runtime, not two), so words.used() would
+// read the program's count, which a kept reason string would be part of
+// (#3437). Printed and dropped, the count is the same either way.
 import words
 
 main() {

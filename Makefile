@@ -2001,8 +2001,8 @@ docs-serve: docs docs-server
 # program and the --emit=lib libraries it imports in binary form share ONE
 # runtime: one scheduler, one set of panic frames (a panic raised in a library
 # reaches the program's catch), one config. A statically linked library keeps
-# its own copy; ELF interposition happens to merge most of it on Linux, macOS
-# and Windows merge none. `ae build --shared-runtime` links against this.
+# its own copy on every platform (on ELF `ae` links it -Bsymbolic, #3481).
+# `ae build --shared-runtime` links against this.
 #
 # It lives in its own directory, never beside libaether.a: a linker searching
 # -L<dir> for -laether takes a .so/.dylib/.dll.a there over the .a, and every
@@ -2281,7 +2281,7 @@ self-test: compiler
 	@echo "Running Compiler Self-Test"
 	@echo "==================================="
 	@echo "Testing compiler on complex syntax..."
-	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/11-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/16-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
 		echo "✓ Complex syntax compilation successful"
 	@echo ""
 	@echo "Testing collections..."

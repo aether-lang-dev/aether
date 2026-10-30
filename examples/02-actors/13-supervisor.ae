@@ -7,7 +7,7 @@
 // child alone; past its restart budget it gives up and ends itself, and
 // whoever monitors it gets a Down that says why.
 //
-// Run: ae run examples/02-actors/12-supervisor.ae
+// Run: ae run examples/02-actors/13-supervisor.ae
 // See: std/supervise/README.md, docs/actor-concurrency.md#supervisors
 
 import std.actors

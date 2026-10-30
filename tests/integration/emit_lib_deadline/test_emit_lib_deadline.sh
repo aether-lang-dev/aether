@@ -12,6 +12,9 @@
 #      references to aether_caps_deadline_tripped or aether_exec_poll
 #      (the loop-head safe point since #2956), proving the gate
 #      elides the tripwire on exe builds (`--emit=exe` pays nothing).
+#   4. A function that returns a value and ends in a loop nothing leaves
+#      (forever.ae) compiles under -Werror=return-type and, ended at its
+#      deadline, returns its zero value: the C does not fall off its end.
 
 set -e
 
@@ -130,4 +133,53 @@ EXE_COUNT=$(grep -c -e "aether_caps_deadline_tripped" -e "aether_exec_poll" "$TM
     exit 1
 }
 
-echo "  [PASS] emit_lib_deadline: tripwire fires within ${ELAPSED}ms; --emit=exe is zero-overhead"
+
+# --- Step 4: a function that returns a value and ends in a loop nothing
+# leaves. Ended at a loop head, the call reaches the end of its body, so
+# the C returns the result's zero value there instead of falling off the
+# end (-Wreturn-type, and a value the caller read undefined). ---
+"$AETHERC" --emit=lib "$SCRIPT_DIR/forever.ae" "$TMPDIR/forever_lib.c" \
+    >"$TMPDIR/build_forever.log" 2>&1 || {
+    echo "  [FAIL] aetherc --emit=lib forever.ae:"
+    head -30 "$TMPDIR/build_forever.log"
+    exit 1
+}
+cat >"$TMPDIR/harness_forever.c" <<'EOF2'
+#include <stdio.h>
+#include "../include/libaether.h"
+
+extern int forever(void);
+
+int main(void) {
+    aether_set_call_deadline(1);
+    printf("RESULT=%d\n", forever());
+    return 0;
+}
+EOF2
+"${CC:-cc}" -O2 -Werror=return-type -I"$ROOT" -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
+   -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/utils" \
+   -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \
+   -I"$ROOT/std" -I"$ROOT/std/string" -I"$ROOT/std/collections" \
+   -I"$ROOT/include" \
+   "$TMPDIR/forever_lib.c" \
+   "$TMPDIR/harness_forever.c" \
+   -L"$ROOT/build" -laether \
+   -o "$TMPDIR/harness_forever" \
+   -lm -pthread \
+   2>"$TMPDIR/cc_forever.log" || {
+    echo "  [FAIL] cc -Werror=return-type forever_lib.c:"
+    head -30 "$TMPDIR/cc_forever.log"
+    exit 1
+}
+"$TMPDIR/harness_forever" >"$TMPDIR/run_forever.log" 2>&1 || {
+    echo "  [FAIL] forever() under a deadline:"
+    cat "$TMPDIR/run_forever.log"
+    exit 1
+}
+grep -q '^RESULT=0$' "$TMPDIR/run_forever.log" || {
+    echo "  [FAIL] forever() ended at its deadline did not return 0:"
+    cat "$TMPDIR/run_forever.log"
+    exit 1
+}
+
+echo "  [PASS] emit_lib_deadline: tripwire fires within ${ELAPSED}ms; a loop nothing leaves returns its zero value; --emit=exe is zero-overhead"

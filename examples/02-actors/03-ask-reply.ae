@@ -5,9 +5,11 @@
 // first field is the answer (`reply Found { value: v }`); the asker gets a
 // value of that type, inferred from the handler. Sends from main and asks
 // from main reach the actor in the order they were written, so an ask sees
-// every message sent before it. A handler that never replies leaves the
-// asker waiting until the ask times out (5 seconds), and it then gets the
-// type's zero. The map in the store's state is a handle: the actor frees
+// every message sent before it. A handler that returns without replying
+// ends the ask at once, and one that has not returned after 5 seconds
+// times it out: either way the asker gets the type's zero, and `v, err =`
+// says why ("the handler returned without replying", "ask timed out after
+// 5000 ms"). The map in the store's state is a handle: the actor frees
 // it in the handler that closes it.
 //
 // Run: ae run examples/02-actors/03-ask-reply.ae

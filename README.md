@@ -389,10 +389,17 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 
 ## Documentation
 
-- [Getting Started Guide](docs/getting-started.md) - Installation and first steps
-- [Bootstrapping from source (HEAD)](docs/bootstrap-from-source.md) - Build + install the toolchain and contrib straight from this repo (for consumers tracking HEAD or pre-package); humans and LLMs
-- [Language Tutorial](docs/tutorial.md) - Learn Aether syntax and concepts
+**Learn Aether**, in this order:
+
+- [Getting Started](docs/getting-started.md) - Install, a first program, a project, the tools
+- [The path through the examples](examples/README.md) - One idea per file, from the first program to actors, std, C, the sandbox and whole programs; CI builds every one and checks the output of each that runs unattended
+- [The tutorial](docs/tutorial.md) - The path told in prose, a chapter per part, with common mistakes, exercises and a syntax quick reference
+- [Glossary](docs/glossary.md) - The words the others use, defined
 - [Language Reference](docs/language-reference.md) - Complete language specification
+
+**Reference and guides:**
+
+- [Bootstrapping from source (HEAD)](docs/bootstrap-from-source.md) - Build + install the toolchain and contrib straight from this repo (for consumers tracking HEAD or pre-package); humans and LLMs
 - [Standard Library Reference](docs/stdlib-reference.md) - Full stdlib surface
 - [Testing](docs/testing.md) - `std.spec` BDD framework (describe/it, assertions, fluent chain) + `ae test` discovery and `--format=tap|aeocha-v1` reporting
 - [HTTP Server](docs/http-server.md) - TLS, HTTP/2, middleware, health probes, metrics, graceful shutdown

@@ -55,7 +55,6 @@ main() {
         return fs.WALK_CONTINUE
     }
     names = make([]string, list.size(found))
-    defer free(names)
     for i in 0..names.len {
         name, _ = list.get_string(found, i)
         names[i] = name

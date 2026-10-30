@@ -5,8 +5,8 @@
 // words (std.sort) so that equal ones sit together, and counts each run.
 // Then the five most common, ties in alphabetical order. A file that
 // cannot be read is a message and exit status 1. The arrays come from
-// `make` and go with `defer free`; every string is released by the
-// compiler.
+// `make`, and each is released with the local that owns it; every string
+// is released by the compiler.
 //
 // Run: ae run examples/07-applications/01-word-count/main.ae -- examples/07-applications/01-word-count/sample.md
 // See: docs/language-reference.md
@@ -56,7 +56,6 @@ main() {
     defer list.free(found)
     words_of(text, found)
     words = make([]string, list.size(found))
-    defer free(words)
     for i in 0..words.len {
         w, _ = list.get_string(found, i)
         words[i] = w
@@ -65,9 +64,7 @@ main() {
 
     // Equal words are neighbours now: one entry per run.
     distinct = make([]string, words.len)
-    defer free(distinct)
     counts = make([]int, words.len)
-    defer free(counts)
     kinds = 0
     for i in 0..words.len {
         if kinds > 0 && distinct[kinds - 1] == words[i] {
