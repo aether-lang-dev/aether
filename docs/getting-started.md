@@ -1,6 +1,9 @@
 # Getting Started with Aether
 
-This guide covers installation and basic usage of the Aether programming language.
+This page installs Aether, runs a first program, and starts a project. The
+language itself is taught by [the path through the examples](../examples/README.md),
+with [the tutorial](tutorial.md) beside it; [Learn Aether](#learn-aether) at
+the end says how they fit together.
 
 ## Installation
 
@@ -121,465 +124,47 @@ After installation, open any `.ae` file and VS Code will automatically apply syn
 
 ## Your First Aether Program
 
-**Option A: Create a project (recommended)**
-
-```bash
-ae init myproject
-cd myproject
-ae run
-```
-
-This creates a project with `aether.toml`, `src/main.ae`, and `tests/`.
-
-**Option B: Run a single file**
-
 Create `hello.ae`:
 
 ```aether
 main() {
-    println("Hello, Aether!")
+    name = "Aether"
+    println("Hello, ${name}!")
 }
 ```
+
+Run it:
 
 ```bash
 ae run hello.ae
 ```
 
-**Build an executable:**
+`ae run` compiles the file to C, builds it and runs it, keeping the build
+in a cache so the next run of an unchanged file starts at once. The other
+everyday commands:
 
 ```bash
-ae build hello.ae -o hello
+ae build hello.ae -o hello      # an executable
 ./hello
-```
-
-**Build for WebAssembly:**
-
-```bash
-ae build --target wasm hello.ae
+ae check hello.ae               # type-check only, no build
+ae fmt hello.ae                 # format in place (--check to only check)
+ae build --target wasm hello.ae # WebAssembly; needs Emscripten (emcc) on PATH
 node hello.js
 ```
 
-Requires [Emscripten](https://emscripten.org/) (`emcc` on PATH).
-
-**Type-check without compiling:**
+## A Project
 
 ```bash
-ae check hello.ae
+ae init myproject
+cd myproject
+ae run
+ae test
 ```
 
-**Add a package (GitHub, GitLab, Bitbucket, Codeberg, or a self-hosted forge):**
-
-```bash
-ae add github.com/user/repo          # the default branch
-ae add github.com/user/repo@v1.0.0   # specific version
-ae add gitlab.com/user/repo           # GitLab
-ae add codeberg.org/user/repo         # Codeberg
-ae add github.com/user/repo@v1.1.0 --update   # move a pinned dependency
-ae add github.com/user/repo@v1.0.0 --source   # the source, even with a release artifact
-```
-
-`ae add` takes the source archive the forge serves for the tag (or for the
-default branch) and needs no git. It pins the hash of the tree in
-`aether.toml`'s `[dependency-hashes]`: a later `ae add` must get the same
-tree, a build refuses an installed package that is not it, and `--update`
-is how a pin moves. Without `@version` it installs the version
-`aether.toml` names, so on a fresh checkout `ae add <package>` installs the
-pinned dependency. [package-fetching.md](package-fetching.md) has the
-details, mirrors included.
-
-With `@version`, `ae add` prefers a **published release artifact** when the
-package ships one for your platform, and takes the source archive otherwise.
-The asset is expected at the same layout Aether's own releases use:
-
-```
-https://<package>/releases/download/<tag>/<repo>-<tag>-<os>-<arch>.tar.gz
-```
-
-(`.zip` is tried too; `<os>-<arch>` is `linux-x86_64`, `macos-arm64`, and
-so on.) A sibling `<asset>.sha256` is verified when present: a
-**mismatch is fatal and installs nothing**, and there is no silent
-fall-back to the source, which would defeat the check. An artifact with no
-published checksum installs with a warning.
-
-Prebuilt `--emit=lib` artifacts are directly importable: the binary-import
-prepass reads the artifact's catalog and synthesizes the interface, so a
-released library needs no toolchain to consume. Set
-`AE_RELEASE_BASE_URL` to point at an internal mirror serving the same
-layout, and the source archives at `<package>/archive/<tag>.tar.gz`
-([package-fetching.md](package-fetching.md)).
-
-For a **binary package**, publish `aether.toml` with a `[package]` section
-containing `binary = "<stem>"` and `modules = "."`, plus
-`<stem>-<tag>-<triple>.<ext>` and its
-`.sha256` sidecar. Unlike the archive path, a binary package requires the
-checksum: a missing or mismatched checksum is fatal. If the declared binary
-is missing for the selected target, `ae add` fails without trying another
-libc or a source archive.
-
-Publish Linux binary packages under distinct glibc and musl identities:
-
-| Build target | Release triple |
-| --- | --- |
-| `x86_64-linux` (glibc) | `linux-x86_64` |
-| `aarch64-linux` (glibc) | `linux-arm64` |
-| `x86_64-linux-musl` | `linux-x86_64-musl` |
-| `aarch64-linux-musl` | `linux-arm64-musl` |
-
-Automatic selection uses the CPU and libc that `ae` was built for, retaining
-the existing unsuffixed glibc names. To fetch a foreign binary, give its
-**release triple** explicitly (rather than the compiler's build-target spelling):
-
-```bash
-ae add github.com/user/repo@v1.0.0 --target linux-arm64-musl
-```
-
-The explicit target is preserved in the asset name; it does not fall back to
-the host's libc. The package cache holds one target per package. Use a separate
-`HOME` per target when assembling a multi-target release. `ae add` refuses to
-reuse an installed binary for a different target and preserves its bytes.
-Older binary caches without a target record must be removed and fetched again
-so the selected asset and its checksum are verified.
-
-For example, a stem of `libfoo` yields
-`libfoo-v1.0.0-linux-arm64-musl.so` and
-`libfoo-v1.0.0-linux-arm64-musl.so.sha256`.
-
-## Error Handling
-
-Functions that can fail return `(value, error)` tuples. Check the error first, handle it, then continue, no `else` needed:
-
-```aether
-safe_divide(a: int, b: int) -> {
-    if b == 0 {
-        return 0, "division by zero"
-    }
-    return a / b, ""
-}
-
-main() {
-    result, err = safe_divide(10, 3)
-    if err != "" {
-        println("Error: ${err}")
-        exit(1)
-    }
-    println("Result: ${result}")
-
-    // Discard error with _
-    val, _ = safe_divide(42, 7)
-    println(val)
-}
-```
-
-## Function Contracts (`requires` / `ensures`)
-
-Aether supports Eiffel-style runtime contracts, pre/postconditions you attach directly to a function declaration. They document intent at the boundary, fire as `aether_panic` on violation (which prints the failed predicate by name), and elide entirely when the predicate is provably constant-true at compile time.
-
-```aether,fragment
-add(a: int, b: int) -> int
-    requires a >= 0
-    requires b >= 0
-    ensures result >= a
-    ensures result >= b
-{
-    return a + b
-}
-
-safe_div(a: int, b: int) -> int
-    requires b != 0
-{
-    return a / b
-}
-```
-
-- `requires <expr>` runs at function entry, with parameters in scope.
-- `ensures <expr>` runs before each `return`, with `result` bound to the value about to be returned.
-- Multiple clauses, freely interleaved, each is checked independently so the panic message names the specific failed predicate.
-- `aetherc --no-contracts` (analog of `-DNDEBUG`) drops every check at codegen for release builds.
-
-See [Function contracts](language-reference.md#function-contracts-requires--ensures) for the full semantics, the const-fold elision rules, and v1 limitations.
-
-## Interactive REPL
-
-Experiment with Aether interactively:
-
-```bash
-ae repl
-```
-
-```
-  ┌───────────────────────────┐
-  │   Aether <version> REPL   │
-  │   :help for commands      │
-  └───────────────────────────┘
-
-ae> x = 5
-
-ae> y = 3
-
-ae> println(x + y)
-
-8
-ae> :show
-  x = 5
-  y = 3
-ae> :quit
-```
-
-Assignments and constants persist across evaluations. Multi-line blocks (if/while/for) auto-continue until braces close. Use `:reset` to clear the session, `:show` to see accumulated code.
-
-## Actor-Based Programming
-
-Aether is built around the actor model. Here is a simple counter example:
-
-```aether
-message Ping {}
-
-actor Counter {
-    state count = 0
-
-    receive {
-        Ping() -> {
-            count = count + 1
-        }
-    }
-}
-
-main() {
-    c = spawn(Counter())
-    c ! Ping {}
-    c ! Ping {}
-    c ! Ping {}
-
-    // Wait for all messages to be processed
-    wait_for_idle()
-
-    println("Count: ${c.count}")
-}
-```
-
-Actors are lightweight concurrent entities that communicate through asynchronous messages. Each actor has private state and a mailbox for incoming messages. Messages are defined with the `message` keyword and sent with the `!` operator. The runtime distributes actors across available CPU cores automatically.
-
-Use `wait_for_idle()` to block until all actors have finished processing their messages. This is essential when you need to read actor state or coordinate completion.
-
-## Module System
-
-Import modules using the `import` statement:
-
-```aether
-import std.map
-
-main() {
-    mymap = map.new()
-    defer map.free(mymap)
-
-    map.put(mymap, "greeting", "hello")
-
-    println("Map created")
-}
-```
-
-Functions are called using **namespace-style syntax**: `namespace.function()`.
-Stdlib functions that can fail return `(value, err)` tuples,
-check `err` first, then use `value`:
-
-```aether,fragment
-body, err = http.get("http://example.com")
-if err != "" { println("failed: ${err}"); return }
-println(body)
-```
-
-| Import | Namespace | Example |
-|--------|-----------|---------|
-| `import std.string` | `string` | `string.length(s)`, `n, err = string.to_int("42")` |
-| `import std.file` | `file` | `content, err = file.read("f")`, `file.exists("f")` |
-| `import std.dir` | `dir` | `err = dir.create("d")`, `dir.exists("d")` |
-| `import std.path` | `path` | `path.join("a", "b")`, `path.basename("a/b")` |
-| `import std.list` | `list` | `list.new()`, `err = list.add(l, item)` |
-| `import std.map` | `map` | `map.new()`, `err = map.put(m, k, v)` |
-| `import std.json` | `json` | `v, err = json.parse(str)`, `json.obj()` |
-| `import std.math` | `math` | `math.abs_int(x)`, `math.sqrt(x)` |
-| `import std.http` | `http` | `body, err = http.get(url)`, `http.server_create(port)` |
-| `import std.tcp` | `tcp` | `sock, err = tcp.connect(host, port)`, `tcp.write(sock, data)` |
-| `import std.log` | `log` | `err = log.init("app.log", 0)`, `log.write(0, msg)` |
-| `import std.io` | `io` | `content, err = io.read_file("f")`, `io.getenv("HOME")` |
-| `import std.os` | `os` | `out, err = os.exec("ls")`, `os.system("cmd")` |
-
-Raw externs are preserved under a `_raw` suffix (e.g. `http.get_raw`) for
-advanced callers who need direct access to the underlying ptr or status code.
-
-### Creating Your Own Modules
-
-You can write reusable modules in pure Aether, no C required. Place your module in `lib/<name>/module.ae`:
-
-**lib/mymath/module.ae:**
-```aether,fragment
-export const PI = 3
-
-export double_it(x) {
-    return multiply(x, 2)
-}
-
-export add(a, b) {
-    return a + b
-}
-
-// Private helper, not accessible from outside
-multiply(a, b) {
-    return a * b
-}
-```
-
-**src/main.ae:**
-```aether,fails
-import mymath
-
-main() {
-    println(mymath.double_it(5))    // 10
-    println(mymath.add(3, 4))       // 7
-    println(mymath.PI)              // 3
-    // mymath.multiply(2, 3)        // Error: not exported
-}
-```
-
-Use `export` to control which functions and constants are part of your module's public API. Non-exported symbols are private, they can be used internally by exported functions but are not accessible to importers. If a module has no `export` declarations, all symbols are public (backwards compatible).
-
-Modules support functions, constants, intra-module calls (functions calling other functions in the same module), and export visibility. See [Module System Design](module-system-design.md#pure-aether-modules) for full details.
-
-## Standard Library
-
-Aether includes a standard library with the following modules:
-
-| Module | Description |
-|--------|-------------|
-| `std.string` | String operations |
-| `std.file` | File operations |
-| `std.dir` | Directory operations |
-| `std.path` | Path utilities |
-| `std.list` | Dynamic array (ArrayList) |
-| `std.map` | Hash map (HashMap) |
-| `std.json` | JSON parsing and creation |
-| `std.http` | HTTP client and server |
-| `std.tcp` | TCP sockets |
-| `std.log` | Structured logging |
-| `std.math` | Math functions |
-| `std.io` | Console I/O, environment variables |
-| `std.os` | Shell execution, command output capture |
-
-See the [Standard Library Reference](stdlib-reference.md) for every module and its API.
-
-> When you read a file or get data from stdlib functions, the result is a
-> regular string: you can `print()` it, use it in `"${interpolation}"`, or pass it in messages
-> directly. No conversion needed.
-
-### Error Handling and Memory
-
-Stdlib functions that can fail return a `(value, err)` tuple.
-Check the error string first, then use the value. A string a stdlib
-function returns is a counted value that the local holding it owns, so
-there is nothing to free:
-
-```aether
-import std.io
-
-main() {
-    // io.getenv is infallible; returns null if unset
-    home = io.getenv("HOME")
-    if home != null {
-        println(home)
-    }
-
-    // io.read_file returns (value, err)
-    content, err = io.read_file("data.txt")
-    if err != "" {
-        println("cannot read: ${err}")
-        return
-    }
-    println(content)
-}
-```
-
-A string needs no cleanup: the local, field or element holding it releases
-it when it is overwritten or goes out of scope. `free(s)` or `release(s)` on
-a string releases it early and leaves the place empty.
-
-A handle is different: a list, a map or a C buffer is a `ptr` the program
-frees itself, through its module (`list.free`, `map.free`), or with the
-`free()` builtin for memory from `make` or `malloc`. `defer` keeps the free
-next to the allocation. See [Memory Management](memory-management.md).
-
-## Pattern Matching
-
-Functions can be defined as several clauses, each matching a different shape of
-argument, with guards to narrow a clause further. The first clause that matches
-runs.
-
-### Function Pattern Matching
-
-Define functions with multiple clauses that match on argument values:
-
-```aether,fragment
-// Match on literal values
-factorial(0) -> 1
-factorial(n) when n > 0 -> n * factorial(n - 1)
-
-// Fibonacci with multiple base cases
-fib(0) -> 0
-fib(1) -> 1
-fib(n) when n > 1 -> fib(n - 1) + fib(n - 2)
-
-// Guards for conditional matching
-classify(x) when x < 0 -> "negative"
-classify(x) when x == 0 -> "zero"
-classify(x) when x > 0 -> "positive"
-
-// Multi-parameter pattern matching
-gcd(a, 0) -> a
-gcd(a, b) when b > 0 -> gcd(b, a - (a / b) * b)
-```
-
-This style replaces verbose if/else chains with declarative, readable code.
-
-### Match Statements
-
-Use `match` for value dispatch:
-
-```aether,fragment
-match (value) {
-    0 -> { println("Zero") }
-    1 -> { println("One") }
-    _ -> { println("Other") }
-}
-```
-
-### List Patterns
-
-A slice (`int[]`) matches list patterns: `[]` for empty, `[x]` for one
-element, and `[h | t]` for a head and the rest, itself a slice. An array
-passes to a slice parameter with its length:
-
-```aether,run
-describe(nums: int[]) -> string {
-    return match nums {
-        [] -> "empty"
-        [x] -> "one: ${x}"
-        [h | t] -> "head ${h}, ${t.len} more"
-    }
-}
-
-main() {
-    println(describe([1, 2, 3]))
-    println(describe([]))
-}
-```
-
-```output
-head 1, 2 more
-empty
-```
-
-## Project Configuration
-
-Projects use `aether.toml` for configuration. Created automatically by `ae init`:
+`ae init` writes `aether.toml`, `src/main.ae` and `tests/`. `ae run` and
+`ae build` in the directory build the program `aether.toml` names, and
+`ae test` runs the tests under `tests/` ([Testing](testing.md)). The
+configuration:
 
 ```toml
 [package]
@@ -599,97 +184,64 @@ target = "native"
 # link_flags = "-lsqlite3 -lcurl"  # Link external C libraries
 ```
 
-### Linking C Libraries
+`link_flags` links C libraries a program calls through `extern`
+([C interoperability](c-interop.md)). A project's own modules live in
+`lib/<name>/module.ae`; [the modules example](../examples/01-language/14-modules/main.ae)
+shows one, and [`--lib`](../examples/06-tooling/04-lib-path/main.ae) adds
+more directories to search.
 
-To link external C libraries, add `link_flags` to the `[build]` section:
-
-```toml
-[build]
-link_flags = "-lsqlite3 -lcurl -lssl"
-```
-
-This allows Aether programs to use libraries like SQLite, libcurl, OpenSSL, etc.
-
-### Command-Line Arguments
-
-Read command-line arguments through `std.os`:
-
-```aether
-import std.os
-
-main() {
-    count = os.args_count()
-    for (i = 0; i < count; i = i + 1) {
-        println(os.args_get(i))
-    }
-}
-```
-
-To pass arguments, build and run the binary directly:
+### Packages
 
 ```bash
-ae build myprogram.ae -o myprogram
-./myprogram arg1 arg2
+ae add github.com/user/repo          # the default branch
+ae add github.com/user/repo@v1.0.0   # a version
+ae add github.com/user/repo@v1.1.0 --update   # move a pinned dependency
 ```
 
-### Environment Variables
+GitHub, GitLab, Bitbucket, Codeberg and self-hosted forges work the same
+way. `ae add` needs no git: it takes the archive the forge serves, pins the
+hash of its tree in `aether.toml`, and refuses a later fetch that is not
+that tree. With a version, it takes the package's release artifact for your
+platform when the package publishes one. [Package fetching](package-fetching.md)
+has the rest: mirrors, release artifacts, and publishing binary packages.
 
-Read configuration from environment variables using `std.os`:
+## Tools for When You Are Stuck
 
-```aether
-import std.os
+**`ae help <script.ae>`** turns the compiler's terse findings into
+suggestions: a misspelt name, a missing import, a YAML-shaped line inside a
+builder block. `--fix` applies the safe rewrites after showing the diff,
+and `--json` is for CI. It makes no network call and runs nothing
+([Config-IS-Code Diagnostics](cic-help.md),
+[an example](../examples/06-tooling/05-ae-help/broken.ae)).
 
-main() {
-    home = os.getenv("HOME")
-    if home != null {
-        println("Home directory: ${home}")
-    }
-}
+**`ae repl`** evaluates as you type. Assignments and constants persist,
+multi-line blocks continue until their braces close, `:show` prints the
+session, `:reset` clears it and `:quit` leaves.
+
+```
+ae> x = 5
+ae> println(x * 2)
+10
+ae> :quit
 ```
 
-The builtin `getenv()` also works without an import for quick scripts; its string is released with the local that holds it.
+## Learn Aether
 
-## When something doesn't compile
+Three documents, each with one job:
 
-Aether's typer is precise, `error[E0301]: Undefined function 'super_token'` is the right output for a build pipeline but not always for an operator authoring a config script. `ae help <script.ae>` translates the typer's terse output into actionable, on-machine suggestions:
+1. **[The path](../examples/README.md)**: the examples in order, from the
+   first program to actors, the standard library, C, the sandbox, the
+   tools and whole programs. Each is one file that teaches one idea, says
+   how to run it, and ends with the output it prints; CI checks that it
+   still does.
+2. **[The tutorial](tutorial.md)**: the path told as a story. A chapter per
+   part, saying what each step shows and why it comes there, the mistakes
+   newcomers make, and exercises with their answers.
+3. **[The language reference](language-reference.md)**: everything, to look
+   up. The [glossary](glossary.md) defines the words the others use.
 
-```bash
-ae help my_script.ae              # Human-readable findings
-ae help my_script.ae --json       # Machine-readable (CI integration)
-ae help my_script.ae --fix        # Apply safe rewrites after diff confirmation
-```
-
-Heuristics cover Levenshtein-matched name suggestions, YAML/HCL-shape detection inside closure-DSL blocks (`port: 9990` → `port(9990)`), missing-import detection against the stdlib catalog, type-mismatch English ("Drop the quotes"), and library-author-shipped `*.help.md` hints. Hard privacy contract: no network calls, no file reads outside the script + its imports + co-located hints, no execution of the script. See [Config-IS-Code Diagnostics](cic-help.md) and [`examples/06-tooling/05-ae-help/`](../examples/06-tooling/05-ae-help/broken.ae) for a worked example.
-
-## Layering modules across multiple directories
-
-PATH-style `--lib` chains let you layer project-local module overrides on top of vendored or shared roots:
-
-```bash
-# Try a local patch in lib/foo/ first, fall back to vendor/foo/:
-ae run main.ae --lib lib --lib vendor
-
-# Same as a separator-string (':' POSIX, ';' Windows):
-ae run main.ae --lib "lib:vendor"
-
-# Or via env var:
-AETHER_LIB_DIR="lib:vendor" ae run main.ae
-
-# See what the toolchain will actually search, in order:
-ae lib-path --lib "lib:vendor"
-```
-
-Left-most entry wins on a name collision; each `import` walks the chain independently. See [`examples/06-tooling/04-lib-path/`](../examples/06-tooling/04-lib-path/main.ae) for a runnable demo and [Module System](module-system-design.md#lib-search-path) for the design.
-
-## Next Steps
-
-- Read the [Tutorial](tutorial.md) for a guided introduction
-- Learn about [C Interoperability](c-interop.md) to use C libraries
-- See [C Embedding Guide](c-embedding.md) to embed Aether actors in C applications
-- Explore [Standard Library Documentation](stdlib-reference.md)
-- See [Architecture](architecture.md) for compiler and runtime internals
-- See [Runtime Optimizations](runtime-optimizations.md) for performance details
-- Use `ae upgrade` to get the latest release, or `ae version list` to see and switch between releases
+Start with the first chapter of the tutorial and its examples, run each
+one, and change it.
 
 ## Version Management
 
@@ -759,36 +311,7 @@ the old size, because it counts every reflinked file at full size even though
 the space really has come back. `df` shows the truth. After a *hardlink* dedupe
 `du` drops, because it counts a shared inode once.
 
-## Troubleshooting
-
-### Build Failures
-
-**"Aether compiler not found" (Windows)**
-- Make sure you **restarted your terminal** after adding `C:\aether\bin` to PATH
-- Verify: `where ae` should show `C:\aether\bin\ae.exe`
-- Verify: `where aetherc` should show `C:\aether\bin\aetherc.exe`
-- If both exist but it still fails, set `AETHER_HOME`: `set AETHER_HOME=C:\aether`
-
-**"gcc: command not found" (Windows)**
-- This should not happen with the pre-built binary, `ae` auto-downloads GCC (~80 MB) on first run
-- If you built from source via MSYS2, open the "MSYS2 MinGW 64-bit" shell, not plain PowerShell
-- Verify: `gcc --version` should show MinGW-w64 GCC
-
-**"pthread.h: No such file or directory"**
-- Linux: `sudo apt-get install libpthread-stubs0-dev`
-- Windows: The Aether runtime uses Win32 threads natively, no pthread library needed
-
-**Test failures**
-- Run `make test` for unit tests, `make test-ae` for integration tests
-- Check for port conflicts if network tests fail (port 8080)
-
-### Quick tips when you hit trouble
-
-1. Rebuild from scratch if anything looks stale: `make clean && make`.
-2. On Windows, launch `ae` from a directory where your user can write (the first run downloads GCC into `~\.aether\`).
-3. Inside an actor body, `state` is a reserved keyword, pick a different local-variable name; outside actor bodies it has no special meaning.
-
-### WebAssembly and Embedded Targets
+## WebAssembly and Embedded Targets
 
 Aether supports cross-compilation to platforms without pthreads or POSIX APIs via the `PLATFORM` Makefile variable:
 
@@ -810,7 +333,7 @@ On threadless platforms, the cooperative scheduler (`aether_scheduler_coop.c`) r
 
 Stdlib modules that depend on filesystem or networking return errors gracefully (NULL, 0, -1). Console I/O (`print`, `println`) always works.
 
-#### ESP32 (Xtensa)
+### ESP32 (Xtensa)
 
 The generated C builds as an [ESP-IDF](https://docs.espressif.com/projects/esp-idf/) component for the ESP32 (the chip on boards such as the ESP32-2432S028R "cheap yellow display"): ESP-IDF's `xtensa-esp32-elf-gcc` compiles it with the runtime, using the cooperative scheduler, and the generated C supplies the `app_main()` entry point ESP-IDF calls. `tests/esp32/project/` is a working project; its `main/CMakeLists.txt` lists the runtime sources and the settings an ESP32 needs, notably smaller scheduler tables (`MAX_CORES=1 QUEUE_SIZE=64 SCHEDULER_DRAIN_BATCH=32 MAX_ACTORS_PER_CORE=256`; at the defaults they need about 10 MB, against roughly 320 KB of DRAM).
 
@@ -819,6 +342,38 @@ make ci-esp32   # needs podman or docker; pulls espressif/idf
 ```
 
 builds a few programs (hello-world, a stateful actor, an actor pipeline, ping-pong) into firmware and boots each in Espressif's QEMU, checking the console output. A program is about 150 KB of firmware. Not yet covered: threads (FreeRTOS has pthreads, so the multicore scheduler is a candidate), the filesystem and networking, and real hardware.
+
+## Troubleshooting
+
+### Build Failures
+
+**"Aether compiler not found" (Windows)**
+- Make sure you **restarted your terminal** after adding `C:\aether\bin` to PATH
+- Verify: `where ae` should show `C:\aether\bin\ae.exe`
+- Verify: `where aetherc` should show `C:\aether\bin\aetherc.exe`
+- If both exist but it still fails, set `AETHER_HOME`: `set AETHER_HOME=C:\aether`
+
+**"gcc: command not found" (Windows)**
+- This should not happen with the pre-built binary, `ae` auto-downloads GCC (~80 MB) on first run
+- If you built from source via MSYS2, open the "MSYS2 MinGW 64-bit" shell, not plain PowerShell
+- Verify: `gcc --version` should show MinGW-w64 GCC
+
+**"pthread.h: No such file or directory"**
+- Linux: `sudo apt-get install libpthread-stubs0-dev`
+- Windows: The Aether runtime uses Win32 threads natively, no pthread library needed
+
+**A function from the standard library is undefined**
+- `ae run` reads the standard library of the installed toolchain: run `ae version`, and `ae upgrade` when it names a newer release.
+
+**Test failures (building from source)**
+- Run `make test` for unit tests, `make test-ae` for integration tests
+- Check for port conflicts if network tests fail (port 8080)
+
+### Quick tips when you hit trouble
+
+1. Building from source and anything looks stale: rebuild with `make clean && make`.
+2. On Windows, launch `ae` from a directory where your user can write (the first run downloads GCC into `~\.aether\`).
+3. Inside an actor body, `state` is a reserved keyword, pick a different local-variable name; outside actor bodies it has no special meaning.
 
 ### Platform-Specific Notes
 

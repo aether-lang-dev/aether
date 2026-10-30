@@ -1,6 +1,6 @@
 // #3090: the messages one actor sends another arrive in the order it sent
-// them (tutorial.md: "Message ordering is guaranteed within a single
-// actor"), while the target moves between cores.
+// them (tutorial.md: "messages from one sender reach an actor in the
+// order they were sent"), while the target moves between cores.
 //
 // Eight senders, spread over the cores, each stream numbered messages to
 // four targets at once. A target busy with messages when a send from
