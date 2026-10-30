@@ -1,8 +1,9 @@
 // A panic inside a binary-imported library reaches the host's catch
-// (#2297). Holds where the host and the library share one runtime: a
+// (#2297) as itself where the host and the library share one runtime: a
 // library built with --shared-runtime, which is how the test script runs
-// it. A library with a runtime of its own keeps it on every platform
-// (#3481), so its panic stays in it.
+// it. A library with a runtime of its own (on every platform since #3481)
+// ends the call in its own frame, and the import stub raises the failure
+// again in the program with the same reason (#2956).
 
 import engine
 

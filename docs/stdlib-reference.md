@@ -1398,7 +1398,7 @@ main() {
 
 Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directly on the connection thread.
 
-On Windows the script is a DLL loaded with `LoadLibrary`. A POSIX host links with `-rdynamic`, so a script's runtime calls bind to the host's own runtime; Windows has no equivalent, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
+On Linux, FreeBSD and macOS a script built the default way carries a runtime of its own and runs on it (#3481); built with `--shared-runtime`, it shares the host's. On Windows the script is a DLL loaded with `LoadLibrary`, which cannot bind to the host executable's runtime, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
 
 ```sh
 ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll

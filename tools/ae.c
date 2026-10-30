@@ -494,6 +494,9 @@ static const char* const k_ae_import_duties[] = {
     "shared_runtime",   /* 1.5: the program links the shared runtime */
     "runtime_abi",      /* 1.11: that runtime's ABI is the library's */
     "actors",           /* 1.7: the program runs the scheduler */
+    "own_runtime",      /* #3481: the library keeps its own runtime, so what needs
+                         * one runtime is refused (ae_refuse_split_ownership) and
+                         * its actors' in-flight messages are warned of */
 };
 
 #define AE_CATALOG_MINOR_KNOWN 11
@@ -519,22 +522,30 @@ static int ae_elf_binds_own(const char* path) {
     unsigned char eh[64];
     int r = -1;
     size_t got = fread(eh, 1, sizeof(eh), f);
-    if (got >= 52 && memcmp(eh, "\x7f" "ELF", 4) == 0 && (eh[4] == 1 || eh[4] == 2)) {
-        int is64 = eh[4] == 2, big = eh[5] == 2;
+    int is64 = got > 4 && eh[4] == 2;
+    /* The whole header of its class, and a byte order it names. */
+    if (got >= (size_t)(is64 ? 64 : 52) && memcmp(eh, "\x7f" "ELF", 4) == 0 &&
+        (eh[4] == 1 || eh[4] == 2) && (eh[5] == 1 || eh[5] == 2)) {
+        int big = eh[5] == 2;
         uint64_t phoff = is64 ? ae_elf_field(eh + 32, 8, big) : ae_elf_field(eh + 28, 4, big);
         int phentsize = (int)ae_elf_field(eh + (is64 ? 54 : 42), 2, big);
         int phnum = (int)ae_elf_field(eh + (is64 ? 56 : 44), 2, big);
         unsigned char ph[56];
-        for (int i = 0; i < phnum && phentsize >= (is64 ? 56 : 32) && r < 0; i++) {
-            if (fseek(f, (long)(phoff + (uint64_t)i * (uint64_t)phentsize), SEEK_SET) != 0 ||
+        /* PN_XNUM (0xffff) keeps the real count elsewhere: not read here. */
+        for (int i = 0; i < phnum && phnum != 0xffff && phentsize >= (is64 ? 56 : 32) && r < 0; i++) {
+            uint64_t at = phoff + (uint64_t)i * (uint64_t)phentsize;
+            if (at > (uint64_t)LONG_MAX || fseek(f, (long)at, SEEK_SET) != 0 ||
                 fread(ph, 1, is64 ? 56 : 32, f) != (size_t)(is64 ? 56 : 32))
                 break;
             if (ae_elf_field(ph, 4, big) != 2) continue;   /* PT_DYNAMIC */
             uint64_t off = is64 ? ae_elf_field(ph + 8, 8, big) : ae_elf_field(ph + 4, 4, big);
             uint64_t size = is64 ? ae_elf_field(ph + 32, 8, big) : ae_elf_field(ph + 16, 4, big);
             int ent = is64 ? 16 : 8;
-            if (size > (1u << 20) || fseek(f, (long)off, SEEK_SET) != 0) break;
-            unsigned char* dyn = (unsigned char*)malloc(size ? size : 1);
+            /* An empty dynamic segment says nothing: left unknown. */
+            if (size < (uint64_t)ent || size > (1u << 20) || off > (uint64_t)LONG_MAX ||
+                fseek(f, (long)off, SEEK_SET) != 0)
+                break;
+            unsigned char* dyn = (unsigned char*)malloc(size);
             if (!dyn) break;
             if (fread(dyn, 1, size, f) == size) {
                 r = 0;
@@ -6353,8 +6364,9 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     if (rc != 0) { remove(stub_path); return 0; }
 
     // Make the stub resolvable and link the artifact (absolute path +
-    // rpath so the produced binary finds it at run time). The host's
-    // -rdynamic + static libaether satisfy the .so's runtime symbols.
+    // rpath so the produced binary finds it at run time). The .so runs on
+    // the runtime it carries (-Bsymbolic on ELF, #3481), or on the shared
+    // runtime when it was built with --shared-runtime.
     tc_lib_dir_append_one(stubdir);
     char* abs_so = ae_abspath(so_path);
     char* dir = ae_path_printf("%s", abs_so);

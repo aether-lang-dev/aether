@@ -831,7 +831,7 @@ an executable link is the whole increment.
 
 | target | artifact | extra link flags |
 |---|---|---|
-| `*-linux`, other ELF | `.so` | `-shared -fPIC` |
+| `*-linux`, other ELF | `.so` | `-shared -fPIC -Wl,-Bsymbolic` (the library keeps the runtime it carries, #3481) |
 | `*-windows` | `.dll` | `-shared -fPIC -Wl,--export-all-symbols` |
 | `*-macos`, `*-ios` | `.dylib` | `-dynamiclib -install_name @rpath/<leaf>` |
 | `wasm32-*` | `.wasm` | `--no-entry --gc-sections` + `--export=` per symbol |

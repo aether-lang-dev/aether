@@ -4916,6 +4916,31 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rs.result->kind == TYPE_STRING) strings_returned = 1;
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
+    /* #3481: a library with a runtime of its own keeps it on every platform
+     * (on ELF `ae` links it -Bsymbolic), so what needs one runtime has to
+     * meet an importer that knows: a struct holding strings across its edge,
+     * a builder that uses the config the program makes (both refused), and
+     * actors the program's exit cannot drain (warned of). An importer of
+     * 0.864.0 or before took the copies on ELF as merged and let them pass,
+     * one runtime then releasing the other's strings; naming the duty makes
+     * it refuse the library instead. */
+    int needs_own_runtime = 0;
+    if (!gen->lib_shared_runtime) {
+        if (lib_runs_actors) needs_own_runtime = 1;
+        for (int i = 0; i < fn_count && !needs_own_runtime; i++) {
+            LibSig os;
+            const char* owhy = NULL;
+            if (!lib_fn_signature(gen, fns[i], &os, &owhy)) continue;
+            for (int k = -1; k < os.count && !needs_own_runtime; k++) {
+                Type* t = k < 0 ? os.result : os.ptypes[k];
+                while (t && t->kind == TYPE_PTR && t->element_type) t = t->element_type;
+                if (struct_owning_strings(gen, t)) needs_own_runtime = 1;
+            }
+        }
+        for (int r = 0; r < clo_count && !needs_own_runtime; r++)
+            if (strcmp(rec_role[r], "builder") == 0 && rec_fn[r] && !builder_never_uses_config(rec_fn[r]))
+                needs_own_runtime = 1;
+    }
     /* #2957: "1.11" adds host_abi, runtime_abi and requires, the duties an
      * importer must perform to use this library, each one it knows by name;
      * one it does not know makes it refuse the library. The 1.10 duty is
@@ -4925,10 +4950,11 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * has the program run the scheduler. */
     const char* schema = "1.11";
     char requires[160];
-    snprintf(requires, sizeof(requires), "outcome_check%s%s%s",
+    snprintf(requires, sizeof(requires), "outcome_check%s%s%s%s",
              strings_returned ? ",string_release" : "",
              gen->lib_shared_runtime ? ",shared_runtime,runtime_abi" : "",
-             lib_runs_actors ? ",actors" : "");
+             lib_runs_actors ? ",actors" : "",
+             needs_own_runtime ? ",own_runtime" : "");
     fprintf(gen->output, "    \"%s\", \"", schema);
     fprintf(gen->output, "%s", AETHER_VERSION);   /* the aetherc that wrote it */
     fprintf(gen->output, "\", ");

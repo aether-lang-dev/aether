@@ -1224,8 +1224,9 @@ function's `(..., _builder)` entry point). The stub is dropped onto the
 module search path, so the *existing* source-import machinery
 (typecheck, namespace prefixing, builder registration) rehydrates the
 library, no special call-site syntax. The artifact is linked in
-(absolute path + `-rpath`), and the host's `-rdynamic` + static
-`libaether` satisfy the `.so`'s runtime symbols.
+(absolute path + `-rpath`), and the `.so` runs on the runtime it carries
+(linked `-Bsymbolic` on ELF, #3481), or on the shared runtime when it was
+built with `--shared-runtime`.
 
 Scope of the current implementation:
 
@@ -1255,8 +1256,10 @@ A library built the default way carries its own copy of the runtime, linked
 in statically: one scheduler, one set of panic frames, one config per image.
 That keeps a library self-contained for a C or Python host, but a program
 that imports Aether libraries in binary form then runs on several runtimes,
-on every platform: a panic raised inside a library never reaches the
-program's `catch`. macOS's two-level namespace and Windows' PE keep the
+on every platform. A panic raised inside a library ends the call in the
+library's own execution frame, and the program's import stub raises the
+failure again with the same reason (#2956), so a `try` around the call
+catches it; the panic itself does not cross. macOS's two-level namespace and Windows' PE keep the
 copies apart by themselves; on ELF (Linux, FreeBSD) `ae` links a
 self-contained library with `-Bsymbolic`, so its runtime calls bind to its
 own copy, not to the one a program linked `-rdynamic` exports (#3481: they
@@ -1290,9 +1293,12 @@ ae build app.ae -o app                                            # imports both
 - Each copy of the runtime frees only what it made. A string an export
   returns crosses as a copy ([above](#strings-an-export-returns)), but a
   struct holding a string (returned by value, or reached through a typed
-  pointer) and a builder that uses its config have none. Where the copies
-  stay apart (macOS, Windows), importing a static library that has such an
-  export is an error naming each one, with the rebuild: `--shared-runtime`.
+  pointer) and a builder that uses its config have none. The copies stay
+  apart on every platform (#3481), so importing a static library that has
+  such an export is an error naming each one, with the rebuild:
+  `--shared-runtime`. Such a library names the `own_runtime` duty in its
+  catalog, so an importer of 0.864.0 or before, which took ELF's copies as
+  merged, refuses it rather than let the copies free each other's values.
 - A sandbox's grants are each thread's, in the runtime: on one runtime a
   library's export called from inside another's `sandbox.enforce` block is
   held to the block's grants. Where the copies stay apart, the inner copy
@@ -1460,10 +1466,10 @@ The integration suite under `tests/integration/` covers:
 | `emit_lib_with_capability/` | `--with=fs,net,os` opt-ins; `--with=first-party` and `--with=all` aliases |
 | `lib_meta/` | `aether_lib_meta` + `ae lib-info` round-trip, schema, source, function count, three signatures, c_symbol gating, source refs |
 | `binary_import_package/` | `--package` builds two modules into one library: stable `aether_<module>__<name>` symbols, schema 1.4 module records, export-list and `_`-suffix privacy, a host importing both modules by name from the binary (#2297) |
-| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, closures both ways with their captures, one module state shared by a host and a second binary library; static runtime on Linux/FreeBSD (a library panic caught; elsewhere the import is refused, since `*Model` holds a string) and `--shared-runtime` (caught everywhere, schema 1.5), Windows included (#2297) |
+| `binary_import_structs/` | Schema 1.3 struct records and source signatures: a struct by value, `*Struct` field access, a function-pointer field, closures both ways with their captures, one module state shared by a host and a second binary library; static runtime (the import refused on every platform, since `*Model` holds a string, #3481) and `--shared-runtime` (a library panic caught everywhere, schema 1.5), Windows included (#2297) |
 | `binary_import_ownership/` | Strings an export or a builder returns are given back to the library's runtime: 0 growth and no leaks(1) findings for a binary import (static and shared runtime) and a C host releasing through the catalog's `string_release`; a struct holding a string and a builder freeing its config run on one runtime and are refused across two (#2931, #2861) |
 | `binary_import_keep/` | A `@keep ptr` and an `@into ptr` export cross the catalog's source signature, and each importer gets the same E0902 verdict from `ae check` against the library as against its source (a string or a borrowed `ptr` to the `@keep` parameter, an `@into` result that escapes); the accepted one runs (#3013) |
-| `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static on Linux/FreeBSD; elsewhere a warning) (#2297) |
+| `binary_import_actors/` | A library's actors in a program with none of its own: the first spawn starts the scheduler, schema 1.7 `actors` passes through a second library, and the program's exit drains a fire-and-forget message (shared runtime everywhere, static: a warning, on every platform since #3481) (#2297) |
 | `emit_lib_keeps_main/` | A program's `main()` as `aether_main` / `aether_main_exit`: a C host runs it (args, an ask/reply, its return value), the actors outlive `aether_main` and `aether_main_exit` drains them, a second `aether_main` is rejected, a rerun works without leaking scheduler tables (macOS `leaks`), the executable prints the same lines, no pair without `main()`, the reserved `main_exit`, the `--emit=csrc` header, and aarch64-linux / Android cross builds |
 | `emit_lib_kind_safe/` | Kind-discriminator predicates + deep-free safety, adversarial low-address probe (`(AetherValue*)42`) survives, kind correctly classifies map/list/scalar slots, deep-free walks nested map+list+scalars, magic-clear-on-free defends UAF probes |
 

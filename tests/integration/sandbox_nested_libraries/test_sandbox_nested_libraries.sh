@@ -18,7 +18,9 @@
 #    2c. the outer library linked into a program with a runtime of its own
 #    that exports nothing and looks first (#3445);
 #    2d. a program with the panic and no sandbox, -rdynamic on Linux, and a
-#    library whose block catches a panic from a nested block (#3438);
+#    library whose block catches a panic from a nested block (#3438); 2e,
+#    with a second library; 2f, on ELF, both linked without -Bsymbolic, so
+#    they run the program's panic (interposition);
 # 3. both built with --shared-runtime (skipped where build/shared has none).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -171,6 +173,40 @@ if [ "$got" != "$want_two" ]; then
     head -5 "$TMP/caught2.err" | sed 's/^/        /'
     fail=1
 fi
+# 2f. on ELF, the same two libraries linked by hand from aetherc's C without
+# -Bsymbolic, as a C build of `--emit=lib` C still may be and as libraries
+# linked before #3481 were: under the program linked -rdynamic they run the
+# program's panic, try frames and step barrier (interposition), so the hooks
+# list of #3438 must serve each copy's levels.
+hand_note=""
+if [ -n "$rdyn" ]; then
+    mkdir -p "$TMP/hand"
+    hand_lib() {   # $1 = source stem
+        "$ROOT/build/aetherc" --emit=lib --with=os,extern "$SCRIPT_DIR/$1.ae" "$TMP/hand/$1.c" \
+            > "$TMP/hand/$1.log" 2>&1 &&
+        # shellcheck disable=SC2046,SC2086
+        "$CC" -O1 -shared -fPIC -DAETHER_NO_LIB_MAIN $("$AE" cflags --cflags) "$TMP/hand/$1.c" \
+            "$SCRIPT_DIR/hooks.c" -o "$TMP/hand/lib$1.$ext" $("$AE" cflags --libs) $dl \
+            >> "$TMP/hand/$1.log" 2>&1
+    }
+    if ! hand_lib caught || ! hand_lib inner; then
+        echo "  [FAIL] sandbox_nested_libraries: the hand-linked libraries did not build"
+        tail -8 "$TMP/hand/caught.log" "$TMP/hand/inner.log" 2>/dev/null | sed 's/^/        /'
+        fail=1
+    elif command -v readelf >/dev/null 2>&1 && readelf -d "$TMP/hand/libcaught.$ext" | grep -q SYMBOLIC; then
+        echo "  [FAIL] sandbox_nested_libraries: the hand-linked library is -Bsymbolic, so it tests nothing"
+        fail=1
+    else
+        got="$("$TMP/host_caught" "$TMP/hand/libcaught.$ext" "$TMP/hand/libinner.$ext" 2>"$TMP/hand.err" | tr -d '\r')"
+        if [ "$got" != "$want_two" ]; then
+            echo "  [FAIL] sandbox_nested_libraries: two hand-linked libraries running the program's panic:"
+            printf '%s\n' "$got" | sed 's/^/        got:  /'
+            head -5 "$TMP/hand.err" | sed 's/^/        /'
+            fail=1
+        fi
+        hand_note=", the same libraries linked without -Bsymbolic under it"
+    fi
+fi
 
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
@@ -198,6 +234,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused, naming --shared-runtime), a program whose copy looked first and exports nothing, a panic caught inside the block of a library loaded by a program linked -rdynamic$shared_note"
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused, naming --shared-runtime), a program whose copy looked first and exports nothing, a panic caught inside the block of a library loaded by a program linked -rdynamic$hand_note$shared_note"
 fi
 exit $fail

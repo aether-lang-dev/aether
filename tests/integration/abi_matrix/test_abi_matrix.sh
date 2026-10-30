@@ -188,9 +188,12 @@ refuse_app() {
         bad "$1: the refusal does not say why and name the rebuild" "$2/app_build.log"
     fi
 }
-if [ "$ext" = so ] && command -v readelf >/dev/null 2>&1 &&
-   ! readelf -d "$TMP/new/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
-    bad "this ae linked libmlib.$ext without -Bsymbolic: it would run on an importing program's runtime"
+if [ "$ext" = so ]; then
+    if ! command -v readelf >/dev/null 2>&1; then
+        echo "  [NOTE] abi_matrix: no readelf, so this ae's -Bsymbolic link is not checked"
+    elif ! readelf -d "$TMP/new/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
+        bad "this ae linked libmlib.$ext without -Bsymbolic: it would run on an importing program's runtime"
+    fi
 fi
 old_static_abi="$(static_abi "$TMP/old/libmlib.$ext")"
 old_binds_own=1

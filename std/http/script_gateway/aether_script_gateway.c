@@ -89,8 +89,9 @@ static int sg_readable(const char* path) {
 
 #ifdef _WIN32
 /* A POSIX host links with -rdynamic, so a script built with its runtime
- * calls left unresolved binds them to the host's own runtime at dlopen.
- * Windows has nothing like it: a DLL's imports name the module that
+ * calls left unresolved (no runtime of its own) binds them to the host's
+ * runtime at dlopen; one built the default way keeps the runtime it carries
+ * (#3481). Windows has nothing like it: a DLL's imports name the module that
  * provides them, and a script cannot import from the host executable. Host
  * and script share one runtime there only when both link the shared runtime
  * (`ae build --shared-runtime`, aether.dll), which is what this checks.
