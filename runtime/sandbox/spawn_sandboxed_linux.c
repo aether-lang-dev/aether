@@ -36,6 +36,7 @@ extern const char* aether_string_data(const void*);
 
 // The preload library's lookup, shared with the contrib process hosts.
 #include "aether_sandbox_preload_path.h"
+#include "aether_sandbox_grants.h"
 #include "aether_sandbox_shm.h"
 // The close-on-exec pipe, the fork, and what a child execs with.
 #include "../utils/aether_spawn.h"
@@ -91,25 +92,14 @@ static int sandbox_report(int errfd) {
 // Serialize grants from a list to shared memory
 // Format: "category:pattern\n" lines, null-terminated
 static int serialize_grants(void* grant_list, char* shm_name, size_t shm_name_size) {
-    int n = list_size(grant_list);
-    if (n <= 0 || n % 2 != 0) return -1;
-
-    // Build the grant string
-    char buf[8192];
-    int pos = 0;
-    for (int i = 0; i < n && pos < 8000; i += 2) {
-        const char* cat = aether_string_data(list_get_raw(grant_list, i));
-        const char* pat = aether_string_data(list_get_raw(grant_list, i + 1));
-        if (!cat || !pat) continue;
-        int w = snprintf(buf + pos, sizeof(buf) - pos, "%s:%s\n", cat, pat);
-        // snprintf returns the length it WOULD have written; an entry that
-        // does not fit must deny the spawn, not advance pos past buf.
-        if (w < 0 || (size_t)w >= sizeof(buf) - (size_t)pos) return -1;
-        pos += w;
-    }
+    char buf[AETHER_SANDBOX_GRANTS_SIZE];
+    size_t data_size = 0;
+    if (aether_sandbox_serialize_grants(
+            grant_list, buf, sizeof buf, &data_size) != 0)
+        return aether_sandbox_grants_err_code(errno);
 
     return aether_sandbox_shm_write(
-        shm_name, shm_name_size, buf, (size_t)pos + 1);
+        shm_name, shm_name_size, buf, data_size);
 }
 
 // Is the `fork` category granted in the grant list? The LD_PRELOAD layer
@@ -326,8 +316,9 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
 
     // Serialize grants to shared memory
     char shm_name[AETHER_SANDBOX_SHM_NAME_SIZE];
-    if (serialize_grants(grant_list, shm_name, sizeof shm_name) < 0) {
-        fprintf(stderr, "[aether] cannot create shared memory for grants\n");
+    int grants_rc = serialize_grants(grant_list, shm_name, sizeof shm_name);
+    if (grants_rc < 0) {
+        fprintf(stderr, "[aether] %s\n", aether_sandbox_grants_err_msg(grants_rc));
         return -1;
     }
 
