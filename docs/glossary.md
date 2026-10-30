@@ -14,8 +14,9 @@ goes into variables, messages and state. `actor_ref[Member]` is a reference
 to an actor of one kind.
 
 **ask (`?`).** `ref ? Msg { ... }` sends a message and waits for the
-handler's `reply`. It ends at once with an error when the actor is dead or
-its mailbox is full, and after 5 seconds when no reply comes.
+handler's `reply`. It ends at once with an error when the actor is dead,
+its mailbox is full, or its handler returns without replying, and after 5
+seconds when the handler has not returned.
 [Ask pattern](language-reference.md#ask-pattern-request-reply)
 
 **audit trail.** The record of every check the sandbox made, allowed or
@@ -47,9 +48,10 @@ clause. [Contracts](language-reference.md#function-contracts-requires--ensures)
 **core.** One of the scheduler's threads: one per CPU the process may use,
 up to 16. Each runs the actors assigned to it.
 
-**counted value.** A string, closure, or a struct, array, tuple or optional
-made from them. Every place that holds one owns one reference, and the
-compiler releases it; the program writes no free.
+**counted value.** A string, a closure, a string sequence, or a struct,
+tuple, optional, sum value or fixed-size array made from them. Every place
+that holds one owns one reference, and the compiler releases it; the
+program writes no free.
 [Memory management](memory-management.md)
 
 **credit.** In `std.stream`, the right to send one more chunk. The consumer
@@ -86,8 +88,9 @@ environment variable, a program, a host. A sandbox with no grants allows
 nothing. [The containment sandbox](containment-sandbox.md)
 
 **handle.** A `ptr` a module gave the program: a list, a map, a JSON
-document, a socket, a buffer from `make`. The program frees it, through its
-module, usually with `defer` next to the call that made it.
+document, a socket, a `heap.new` box, memory from C. A `ptr` owns nothing,
+so the program frees it, through its module, usually with `defer` next to
+the call that made it.
 
 **handler.** One arm of an actor's `receive` block: what it does with one
 kind of message.
@@ -95,7 +98,8 @@ kind of message.
 **interpolation.** `"${expr}"`: a value written into a string.
 
 **link.** A tie between two actors: when one ends, the other ends too,
-unless it traps exits. [Links](actor-concurrency.md#links)
+with the same reason, unless it traps exits. An end whose reason is
+"normal" (a stop) ends nobody. [Links](actor-concurrency.md#links)
 
 **mailbox.** Where an actor's messages wait until it handles them.
 
@@ -116,7 +120,8 @@ project. [Modules](language-reference.md#modules-and-imports)
 [Optionals](language-reference.md#optionals)
 
 **outcome.** How a call into an exported function ended, from
-`aether_last_outcome()`: ok, panicked, deadline, cancelled, memory cap.
+`aether_last_outcome()`: ok, panicked, deadline, cancelled, memory cap,
+out of memory, or incompatible (a library made for another runtime).
 
 **panic.** What a bug raises: it unwinds to the nearest `try`, and in an
 actor's handler it ends that actor. Outside both, it ends the program.
@@ -133,7 +138,9 @@ gives a fallback, and `!` passes the error up.
 the panic barrier, the sandbox.
 
 **safe point.** A place where a library's code checks whether its call
-should end (a deadline, a cancel): every loop head, under `--emit=lib`.
+should end (a deadline, a cancel): every loop head of code built as a
+library (`--emit=lib`, `--emit=obj`), and every few thousand values a JSON
+parse reads.
 
 **sandbox.** A list of grants that `sandbox.enforce` holds a block of code
 to. [The containment sandbox](containment-sandbox.md)
@@ -146,7 +153,9 @@ delivers their messages.
 **send (`!`).** `ref ! Msg { ... }`: a message on its way, without waiting.
 
 **slice (`T[]`).** A view of elements stored elsewhere: a pointer and a
-length. `xs[lo..hi]` makes one. [Slices](language-reference.md#slices-t)
+length. `xs[lo..hi]` makes one. The buffer `make([]T, n)` hands out has one
+owner, the local that holds it, which releases it when its scope ends: the
+program writes no free. [Slices](language-reference.md#slices-t)
 
 **spawn.** `spawn(Name())` starts an actor and returns its `actor_ref`.
 
@@ -154,8 +163,9 @@ length. `xs[lo..hi]` makes one. [Slices](language-reference.md#slices-t)
 `state name = value`. [State variables](language-reference.md#state-variables)
 
 **std, contrib.** `std/` is the standard library every install has;
-`contrib/` holds modules that need a library or a toolchain of their own
-(a database, another language).
+`contrib/` holds modules outside it, such as bridges to a database or to
+another language, which a build may leave out.
+[std or contrib](stdlib-vs-contrib.md)
 
 **step.** One run of an actor's handler for one message.
 

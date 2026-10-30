@@ -34,7 +34,7 @@ static void sleep_ms(int ms) {
 #ifdef _WIN32
     Sleep((DWORD)ms);
 #else
-    struct timespec t = { 0, (long)ms * 1000000L };
+    struct timespec t = { ms / 1000, (long)(ms % 1000) * 1000000L };
     nanosleep(&t, NULL);
 #endif
 }
@@ -47,7 +47,8 @@ static void* cancel_soon(void* arg) {
 }
 
 int main(void) {
-    /* A deadline for every call this thread makes, until it is set to 0. */
+    /* A deadline 50 ms from now for this thread's calls (one instant, not a
+     * budget per call); 0 clears it. */
     aether_set_call_deadline(50);
     report("spin under a 50 ms deadline", aether_spin());
     aether_set_call_deadline(0);

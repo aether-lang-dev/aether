@@ -1,4 +1,4 @@
-- **The examples path teaches what batch 9 added (#3476).** Six new
+- **The examples path teaches what batch 9 added (#3476).** Seven new
   examples, each with its output checked by `make check-examples`:
   ending an actor (`actors.stop`, `actors.kill`, a panic, and the reason
   a monitor's `Down` carries), links and trapping exits, a bounded mailbox

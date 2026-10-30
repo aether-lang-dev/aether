@@ -147,8 +147,8 @@ non-blank line that is not only a comment, for Aether's file here (its
 header and Output block left out) and for the first Go and Python
 solution in [RosettaCodeData](https://github.com/acmeism/RosettaCodeData)
 (1d475861, 2026-07-16). The other languages' first files are not always
-whole programs (Python's GCD imports `fractions.gcd`, Go's leap year is the
-function alone), so the counts compare length, not like for like.
+whole programs (Python's GCD imports `fractions.gcd`, and its string
+reversal is `input()[::-1]`), so the counts compare length, not like for like.
 
 | Example | Task | Lines: Aether, Go, Python |
 |---|---|---|

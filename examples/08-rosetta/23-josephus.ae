@@ -13,7 +13,6 @@ survivor(n: int, k: int) -> int -> (survivor(n - 1, k) + k) % n
 
 killing_order(n: int, k: int) -> int[] {
     dead = make([]bool, n)
-    defer free(dead)
     int[] order = []
     at = n - 1
     while order.len < n {

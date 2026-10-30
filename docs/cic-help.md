@@ -368,5 +368,5 @@ stands alone.
   `ae help` introspects.
 - [`closures-and-builder-dsl.md`](closures-and-builder-dsl.md), the
   syntax/semantics the help command's pattern matcher walks.
-- [`getting-started.md`](getting-started.md), where the help command
-  itself should be cross-linked once it ships.
+- [`getting-started.md`](getting-started.md), which introduces the help
+  command to newcomers ("Tools for When You Are Stuck").

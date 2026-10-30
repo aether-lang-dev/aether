@@ -42,7 +42,6 @@ main() {
 
     keys, _ = map.keys(capitals)
     countries = make([]string, map.keys_size(keys))
-    defer free(countries)
     for i in 0..countries.len {
         countries[i] = map.keys_get(keys, i)
     }

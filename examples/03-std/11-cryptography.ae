@@ -8,7 +8,10 @@
 //   and anyone with the public key can check it.
 // They take their input as a `byte[]` slice: `string.bytes(s)` is a
 // string's. What they return as a `ptr` is a std.bytes buffer the program
-// owns and frees; `wipe_free` zeroes a secret before it lets it go.
+// owns and frees; `wipe_free` zeroes a secret before it lets it go. A tag
+// received is compared with `ct.bytes_eq_slice`, which takes as long
+// whatever the bytes hold: `==` stops at the first difference, and how
+// long it took tells an attacker how much of a forged tag was right.
 //
 // Run: ae run examples/03-std/11-cryptography.ae
 // See: docs/stdlib-reference.md#cryptography-stdcryptography
@@ -16,9 +19,18 @@
 import std.bytes
 import std.encoding
 import std.string
+import std.cryptography.ct
 import std.cryptography.ed25519
 import std.cryptography.hmac
 import std.cryptography.sha2
+
+// Whether a received tag is the one the key makes for the message.
+tag_ok(key: string, msg: string, received: ptr) -> bool {
+    expected = hmac.hmac_sha256(string.bytes(key), string.bytes(msg))
+    same = ct.bytes_eq_slice(bytes.view(expected), bytes.view(received)) == 1
+    bytes.free(expected)
+    return same
+}
 
 main() {
     // A hash: the same input always gives the same 32 bytes.
@@ -26,10 +38,9 @@ main() {
 
     // An HMAC: only a holder of the key can make the same tag.
     msg = "pay 10 to alice"
-    tag = hmac.hmac_sha256_hex(string.bytes("shared key"), string.bytes(msg))
-    again = hmac.hmac_sha256_hex(string.bytes("shared key"), string.bytes(msg))
-    other = hmac.hmac_sha256_hex(string.bytes("wrong key"), string.bytes(msg))
-    println("hmac matches with the key: ${tag == again}, with another key: ${tag == other}")
+    tag = hmac.hmac_sha256(string.bytes("shared key"), string.bytes(msg))
+    println("hmac checks with the key: ${tag_ok("shared key", msg, tag)}, with another key: ${tag_ok("wrong key", msg, tag)}")
+    bytes.free(tag)
 
     // A signature. The 32-byte private seed comes from a hash here so the
     // output is the same every run; a real one comes from random bytes
@@ -49,7 +60,7 @@ main() {
 
 // Output:
 // sha256(abc) = ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad
-// hmac matches with the key: true, with another key: false
+// hmac checks with the key: true, with another key: false
 // public key: d1e633b86e5acea0fb20c459575bb672fed1e2c97af24561911bbeedd4ec96c3
 // signature verifies: true
 // on a changed message: false

@@ -54,9 +54,7 @@ draw(cols: int[]) {
 main() {
     for n in 1..11 {
         cols = make([]int, n)
-        defer free(cols)
         first = make([]int, n)
-        defer free(first)
         first[0] = -1
         println("${n} x ${n}: ${place(cols, 0, first)}")
         if n == 8 {

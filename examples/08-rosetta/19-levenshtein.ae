@@ -3,7 +3,7 @@
 // The task shows the distance from "kitten" to "sitting", which is 3; the
 // task's "rosettacode" to "raisethysword" (8), the same reversed, and
 // "saturday" to "sunday" are shown too. The table is kept one row at a
-// time, in a `make` buffer freed by the `defer` beside it: each cell is the
+// time, in a `make` buffer its local owns and releases: each cell is the
 // cheapest of a deletion, an insertion and a substitution, free when the
 // two characters agree.
 //
@@ -16,7 +16,6 @@ import std.string
 levenshtein(a: string, b: string) -> int {
     n = string.length(b)
     row = make([]int, n + 1)
-    defer free(row)
     for j in 0..n + 1 {
         row[j] = j
     }

@@ -1,12 +1,13 @@
 // Ending an actor, and what its watchers are told.
 //
-// An actor ends once, by the first of three things: it stops itself
-// (`actors.stop()` in its own handler, reason "normal"), something kills it
-// (`actors.kill(ref)`, from anywhere, reason "killed"), or its handler
-// panics (the panic's message is the reason). An actor that monitors it
-// (`actors.monitor(ref)`, from a handler) gets one `Down { ref, reason }`
-// when it ends. A message sent to an actor that has ended is dropped and
-// counted, never delivered.
+// An actor ends once. Here it ends in each of the three common ways: it
+// stops itself (`actors.stop()` in its own handler, reason "normal"),
+// something kills it (`actors.kill(ref)`, from anywhere, reason "killed"),
+// or its handler panics (the panic's message is the reason). The end of an
+// actor it is linked to can end it too (the next example). An actor that
+// monitors it (`actors.monitor(ref)`, from a handler) gets one
+// `Down { ref, reason }` when it ends. A message sent to an actor that has
+// ended is dropped and counted, never delivered.
 //
 // Run: ae run examples/02-actors/11-ending.ae
 // See: docs/actor-concurrency.md#the-end-of-an-actor

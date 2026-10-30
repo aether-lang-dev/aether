@@ -5,8 +5,9 @@
 // scripts, an editor's plugins) bounds what that code may take. Every
 // exported function runs in an execution frame, so however a call ends,
 // the host gets control back with an outcome (`aether_last_outcome()`):
-// - a deadline (`aether_set_call_deadline(ms)`) ends a call that runs too
-//   long, at its next loop head, with AETHER_DEADLINE;
+// - a deadline (`aether_set_call_deadline(ms)`, an instant ms from when it
+//   is set, for this thread's calls) ends a call still running past it,
+//   at its next loop head, with AETHER_DEADLINE;
 // - another thread ends a running call with `aether_exec_cancel(token)`,
 //   where the token is `aether_exec_token()` of the calling thread, with
 //   AETHER_CANCELLED;
@@ -34,10 +35,8 @@ spin() -> int {
 // The length of a string of n * 16 bytes, built a piece at a time.
 grow(n: int) -> int {
     s = ""
-    i = 0
-    while i < n {
+    for i in 0..n {
         s = string.concat(s, "0123456789abcdef")
-        i = i + 1
     }
     return string.length(s)
 }

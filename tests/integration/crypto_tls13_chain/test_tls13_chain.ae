@@ -392,7 +392,12 @@ main() {
     // A trust anchor's own pathLenConstraint holds, as on OpenSSL and Go
     // (#3432): a root with pathLenConstraint 0 allows no CA below it. The
     // root without the extension is "the same leaf under its root" above.
-    fails = fails + check("a CA below a pathLenConstraint 0 root", anchor_result(pem_rootpl0(), pem_plleaf(), pem_icapl()), 0)
+    pl_why = anchor_result(pem_rootpl0(), pem_plleaf(), pem_icapl())
+    fails = fails + check("a CA below a pathLenConstraint 0 root", pl_why, 0)
+    if string.equals(pl_why, "a CA's path length constraint is exceeded") != 1 {
+        println("FAIL a CA below a pathLenConstraint 0 root: refused, but not for its path length (${pl_why})")
+        fails = fails + 1
+    }
     fails = fails + check("an end entity of a pathLenConstraint 0 root", anchor_result(pem_rootpl0(), pem_pldirect(), ""), 1)
 
     // A pinned self-signed leaf with basicConstraints cA FALSE: trusted as

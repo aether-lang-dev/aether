@@ -2,7 +2,7 @@
 //
 // The task is the sieve itself: cross out the multiples of each prime
 // found, from its square up, and what stays uncrossed is prime. A `make`
-// buffer of bools holds the marks, freed by the `defer` beside it, and the
+// buffer of bools holds the marks, released with its local, and the
 // primes go into a slice that grows with `push`. The limit here is 100.
 //
 // Run: ae run examples/08-rosetta/06-sieve.ae
@@ -10,7 +10,6 @@
 
 primes_up_to(limit: int) -> int[] {
     crossed = make([]bool, limit + 1)
-    defer free(crossed)
     int[] primes = []
     for n in 2..limit + 1 {
         if !crossed[n] {

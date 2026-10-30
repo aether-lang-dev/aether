@@ -164,7 +164,7 @@ ae test
 `ae init` writes `aether.toml`, `src/main.ae` and `tests/`. `ae run` and
 `ae build` in the directory build the program `aether.toml` names, and
 `ae test` runs the tests under `tests/` ([Testing](testing.md)). The
-configuration:
+configuration `ae init` writes:
 
 ```toml
 [package]
@@ -172,6 +172,8 @@ name = "myproject"
 version = "0.1.0"
 description = "A new Aether project"
 license = "MIT"
+# modules = "mylib, mylib/internal"  # Importable modules, if this is a library
+# modules = "."  # Export the package ROOT (for a core/*.ae package whose modules import each other as import core.*)
 
 [[bin]]
 name = "myproject"
@@ -181,10 +183,11 @@ path = "src/main.ae"
 
 [build]
 target = "native"
-# link_flags = "-lsqlite3 -lcurl"  # Link external C libraries
+# link_flags = "-lsqlite3 -lcurl"  # Add extra linker flags
 ```
 
-`link_flags` links C libraries a program calls through `extern`
+`modules` is for a package other projects import. `link_flags` links C
+libraries a program calls through `extern`
 ([C interoperability](c-interop.md)). A project's own modules live in
 `lib/<name>/module.ae`; [the modules example](../examples/01-language/14-modules/main.ae)
 shows one, and [`--lib`](../examples/06-tooling/04-lib-path/main.ae) adds
@@ -231,12 +234,13 @@ Three documents, each with one job:
 
 1. **[The path](../examples/README.md)**: the examples in order, from the
    first program to actors, the standard library, C, the sandbox, the
-   tools and whole programs. Each is one file that teaches one idea, says
-   how to run it, and ends with the output it prints; CI checks that it
-   still does.
+   tools and whole programs. Each is one file that teaches one idea and
+   says how to run it. CI builds every one, and runs those that run
+   unattended to check they still print the output written at their end.
 2. **[The tutorial](tutorial.md)**: the path told as a story. A chapter per
-   part, saying what each step shows and why it comes there, the mistakes
-   newcomers make, and exercises with their answers.
+   part, saying what each step shows and why it comes there; the first two
+   chapters add the mistakes newcomers make and exercises with answers,
+   and a quick reference of the syntax closes it.
 3. **[The language reference](language-reference.md)**: everything, to look
    up. The [glossary](glossary.md) defines the words the others use.
 
@@ -359,7 +363,7 @@ builds a few programs (hello-world, a stateful actor, an actor pipeline, ping-po
 - Verify: `gcc --version` should show MinGW-w64 GCC
 
 **"pthread.h: No such file or directory"**
-- Linux: `sudo apt-get install libpthread-stubs0-dev`
+- Linux: the C library's development headers are missing: `build-essential` brings them on Debian and Ubuntu (`libc6-dev`), and the other distributions' packages listed under Prerequisites do too
 - Windows: The Aether runtime uses Win32 threads natively, no pthread library needed
 
 **A function from the standard library is undefined**

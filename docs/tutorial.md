@@ -3,8 +3,10 @@
 This tutorial is the story told alongside [the path through the
 examples](../examples/README.md). The path is the code: one file per idea,
 each saying how to run it and ending with what it prints. This page says
-what each step shows, why it comes where it does, and what newcomers get
-wrong, and each chapter ends with exercises and their answers.
+what each step shows and why it comes where it does. The first two
+chapters, the language and actors, also list the mistakes newcomers make
+and end with exercises and their answers. A [quick reference](#quick-reference)
+of the syntax closes the page.
 
 Read a chapter, then run its examples in order from the repository root
 and change them:
@@ -46,7 +48,7 @@ and the one stateful thing with an inside and an outside is the actor
 
 A line ends a statement, and `${...}` puts any value into a string. A local
 takes its type from the first value it is given and keeps it. Conditions
-take no parentheses, every body takes braces, and `if` is also a value:
+need no parentheses, every body takes braces, and `if` is also a value:
 
 ```aether,run
 main() {
@@ -247,11 +249,17 @@ statement however the block ends.
 
 Ownership is the last step of the chapter because it explains the others.
 Aether has no garbage collector, and it does not ask you to free
-everything either. Strings, closures, and the structs, arrays and
-optionals made from them are counted: the compiler frees them, and you
-write no free. A *handle*, a `ptr` a module gave you (a list, a map, a
-JSON document, a buffer), is the program's to free, through its module,
-and `defer` keeps the free next to the `new`:
+everything either. Three rules cover it:
+
+- **Counted values**: strings, closures, string sequences, and the
+  structs, tuples, optionals and fixed-size arrays made from them. The
+  compiler counts them and frees them; you write no free.
+- **A slice's buffer** (`make([]T, n)`, or one `push` grows) has one owner,
+  the local that holds it, and is released when that local's scope ends.
+  You write no free for it either.
+- **A handle**, a `ptr` a module gave you (a list, a map, a JSON document,
+  a socket), is the program's to free, through its module, and `defer`
+  keeps the free next to the `new`:
 
 ```aether,run
 import std.list
@@ -271,9 +279,9 @@ main() {
 
 ### Common mistakes
 
-- **Freeing a value the compiler counts.** A string needs no free, and
-  freeing a parameter the function only borrows is refused (E0901). Free
-  handles, and only handles.
+- **Freeing what the compiler frees.** A string or a `make` buffer needs
+  no free, and freeing a parameter the function only borrows is refused
+  (E0901). Free handles.
 - **Forgetting a handle.** A `list.new()` with no `list.free` leaks it.
   Write the `defer` on the next line.
 - **Changing a local's type.** `count = 0` then `count = "many"` is a
@@ -430,8 +438,9 @@ total: 12
 
 The ask sees both adds: messages from one sender reach an actor in the
 order they were sent. `wait_for_idle()` is the other way to wait: it
-returns once every actor has nothing left to do, which is how a program
-lets its actors finish before it ends.
+returns once every actor has nothing left to do, receive timeouts that are
+counting down included, so main can go on knowing what they did. (The end
+of `main` waits for the messages already sent anyway.)
 
 ### Actors that talk to each other
 
@@ -487,16 +496,19 @@ bottleneck, its work can be split over several by key.
 
 ### Common mistakes
 
-- **Reading an actor's state from outside.** Ask it (`?`), or have it send
-  what it knows; its state is its own.
+- **Reading an actor's state while it runs.** A reference reaches an
+  actor's state (`c.total`), but read while the actor is handling messages
+  it races them. Ask it (`?`), or read after `wait_for_idle()`.
 - **Expecting order between two senders.** Main and another actor sending
   to the same actor interleave in any order. Wait for one before the
   other, or route both through one sender.
 - **Calling `wait_for_idle()` inside an actor.** It waits for every actor,
   this one too, so it can never return there; it panics instead. Call it
   from main.
-- **Blocking in a handler.** A handler that sleeps or waits on a socket
-  holds a core. Keep handlers short, and give slow work its own actor.
+- **Blocking in a handler.** A handler that sleeps, waits on a socket or
+  computes for long stalls every actor that shares its core. Keep handlers
+  short, and hand blocking work to [std.worker](../std/worker/README.md),
+  a thread pool outside the scheduler.
 - **Using a handle after sending it.** A `ptr` sent in a message belongs to
   the receiver now; the sender must not touch it again.
 
@@ -648,10 +660,13 @@ file a library a C program links, each function an `aether_<name>`
 export.
 
 A program that runs Aether code it does not control bounds it: every
-export runs in an execution frame, so a deadline, a cancel from another
-thread or a memory budget ends a call and gives the host an outcome,
-never a crash. And Aether can host other languages (Python, Lua, Tcl, Go)
-inside the program, under the sandbox of chapter 5. [C
+export runs in an execution frame, so a panic, a deadline, a cancel from
+another thread or a memory budget ends the call and gives the host an
+outcome. A deadline or a cancel lands at the call's next safe point, a
+loop head, so code with no loop (straight-line code, or a long C call) runs
+on until it returns. Aether also hosts other languages under the sandbox
+of chapter 5: Python, Lua and Tcl inside the program, a Go program as a
+child process, and a TinyGo library in-process. [C
 interoperability](c-interop.md) and [emit=lib](emit-lib.md) are the
 references.
 
@@ -711,6 +726,62 @@ The path ends with [Rosetta Code tasks](../examples/README.md#8-rosetta-code):
 classic problems (FizzBuzz, the N queens, quicksort, Levenshtein distance)
 solved in Aether, with their length beside the Go and Python solutions.
 They are good exercises too: try one before reading its file.
+
+## Quick reference
+
+```aether,fragment
+// Values
+x = 42                         // a local's type comes from its value
+long big = 3_000_000_000       // or is written before the name
+const LIMIT = 10
+name = "Ada"
+println("${name} is ${x}")     // interpolation
+
+// Control flow
+if x > 10 { ... } else if x > 5 { ... } else { ... }
+kind = if x > 10 { "big" } else { "small" }
+while x > 0 { x = x - 1 }
+for i in 0..10 { ... }         // 0 to 9
+for item in xs { ... }
+
+// Functions
+add(a: int, b: int) -> int { return a + b }
+square(x: int) -> x * x
+split(n: int) -> (int, int) { return n / 2, n % 2 }
+greet(name: string, greeting: string = "Hello") -> string { ... }
+fact(0) -> 1
+fact(n) when n > 0 -> n * fact(n - 1)
+
+// Data
+struct Point { x: int y: int }
+p = Point { x: 1, y: 2 }
+enum Color { Red, Green }
+type Shape = Circle | Rect
+area = match s { Circle -> ... Rect -> ... }
+int? maybe = none
+v = maybe ?? 0
+
+// Failure
+parse(s: string) -> int! { ... return 0, "why" }
+n = parse("7") or 0
+try { ... } catch msg { ... }
+defer list.free(items)
+
+// Actors
+message Add { n: int }
+message Total {}
+actor Counter {
+    state total = 0
+    receive {
+        Add(n) -> { total = total + n }
+        Total() -> { reply total }
+    }
+}
+c = spawn(Counter())
+c ! Add { n: 5 }               // send
+int t = c ? Total {}           // ask
+wait_for_idle()
+```
 
 ## Where next
 

@@ -392,8 +392,8 @@ Same file is config, validation, conditional logic, and the entry point. No seco
 **Learn Aether**, in this order:
 
 - [Getting Started](docs/getting-started.md) - Install, a first program, a project, the tools
-- [The path through the examples](examples/README.md) - One idea per file, from the first program to actors, std, C, the sandbox and whole programs; every output checked in CI
-- [The tutorial](docs/tutorial.md) - The path told in prose, a chapter per part, with common mistakes and exercises
+- [The path through the examples](examples/README.md) - One idea per file, from the first program to actors, std, C, the sandbox and whole programs; CI builds every one and checks the output of each that runs unattended
+- [The tutorial](docs/tutorial.md) - The path told in prose, a chapter per part, with common mistakes, exercises and a syntax quick reference
 - [Glossary](docs/glossary.md) - The words the others use, defined
 - [Language Reference](docs/language-reference.md) - Complete language specification
 

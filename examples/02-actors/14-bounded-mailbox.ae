@@ -28,22 +28,18 @@ actor Ingest {
     state handled = 0
     receive {
         Burst(n) -> {
-            i = 1
-            while i <= n {
+            for i in 1..n + 1 {
                 err = try_send(self, Line { n: i })
                 if err == "" {
                     println("line ${i}: sent")
                 } else {
                     println("line ${i}: ${err}")
                 }
-                i = i + 1
             }
         }
         Flood(n) -> {
-            i = 1
-            while i <= n {
+            for i in 1..n + 1 {
                 self ! Line { n: i } // past the bound: dropped and counted
-                i = i + 1
             }
         }
         Line(n) -> { handled = handled + 1 }
