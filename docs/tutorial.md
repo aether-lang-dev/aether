@@ -252,11 +252,14 @@ Aether has no garbage collector, and it does not ask you to free
 everything either. Three rules cover it:
 
 - **Counted values**: strings, closures, string sequences, and the
-  structs, tuples, optionals and fixed-size arrays made from them. The
-  compiler counts them and frees them; you write no free.
-- **A slice's buffer** (`make([]T, n)`, or one `push` grows) has one owner,
-  the local that holds it, and is released when that local's scope ends.
-  You write no free for it either.
+  structs, tuples, optionals, sum values and fixed-size arrays made from
+  them. The compiler counts them and frees them; you write no free.
+- **A slice's buffer** (`make([]T, n)`, or one `push` grows) has one owner.
+  A local that holds it releases it when its scope ends, as does a local,
+  a caller or a `@keep` parameter it moves to. Put in a struct's field, a
+  module `var`, a tuple or a message, or held by a local a closure
+  captures, it is yours to give back with `free` (`free(s.items)` empties
+  the field).
 - **A handle**, a `ptr` a module gave you (a list, a map, a JSON document,
   a socket), is the program's to free, through its module, and `defer`
   keeps the free next to the `new`:
@@ -279,9 +282,10 @@ main() {
 
 ### Common mistakes
 
-- **Freeing what the compiler frees.** A string or a `make` buffer needs
-  no free, and freeing a parameter the function only borrows is refused
-  (E0901). Free handles.
+- **Freeing what the compiler frees, or not freeing what it leaves.** A
+  string needs no free, nor does a `make` buffer a local holds; freeing a
+  parameter the function only borrows is refused (E0901). A buffer stored
+  in a struct's field is not freed with the struct: free it.
 - **Forgetting a handle.** A `list.new()` with no `list.free` leaks it.
   Write the `defer` on the next line.
 - **Changing a local's type.** `count = 0` then `count = "many"` is a
@@ -395,11 +399,10 @@ main() {
 
 ## 2. Actors
 
-Aether's concurrency is actors: a piece of state that only messages reach.
-Nothing outside an actor touches its state; other code sends it a message,
-and it changes its own state, one message at a time. So there are no locks
-to take and no data races to find. The scheduler runs actors on every
-core, so many actors use the whole machine.
+Aether's concurrency is actors: a piece of state that messages reach.
+Other code sends an actor a message, and the actor changes its own state,
+one message at a time, so there are no locks to take. The scheduler runs
+actors on every core, so many actors use the whole machine.
 
 ### A first actor, its state, and asking it
 
@@ -619,7 +622,7 @@ got 6
 [10-tcp](../examples/03-std/10-tcp.ae) ·
 [11-cryptography](../examples/03-std/11-cryptography.ae)
 
-The standard library follows the two rules of chapter 1 everywhere. A call
+The standard library follows two rules from chapter 1 everywhere. A call
 that can fail returns its value and an error string, so a program checks
 `err` and goes on. What a module hands out as a `ptr` (a JSON document, a
 server, a socket) is a handle the program frees through that module.
@@ -631,8 +634,9 @@ server, a socket) is a handle the program frees through that module.
   builds documents to encode.
 - **The network.** `std.http` serves by route and fetches: the same server
   API carries middleware, health probes and metrics, HTTP/2 and TLS, and
-  `std.http.proxy` forwards to upstreams. Under it, `std.tcp` is the
-  socket: a byte stream, so a protocol says where a message ends.
+  `std.http.proxy` forwards to upstreams. `std.tcp` is the socket itself,
+  the layer HTTP runs on: a byte stream, so a protocol says where a message
+  ends.
 - **Logs and secrets.** `std.log` writes levelled lines. The
   `std.cryptography` modules are written in Aether: hashes, HMACs,
   signatures, and the pure-Aether TLS.
@@ -666,7 +670,7 @@ outcome. A deadline or a cancel lands at the call's next safe point, a
 loop head, so code with no loop (straight-line code, or a long C call) runs
 on until it returns. Aether also hosts other languages under the sandbox
 of chapter 5: Python, Lua and Tcl inside the program, a Go program as a
-child process, and a TinyGo library in-process. [C
+child process, and a Go library built as a C shared library in-process. [C
 interoperability](c-interop.md) and [emit=lib](emit-lib.md) are the
 references.
 

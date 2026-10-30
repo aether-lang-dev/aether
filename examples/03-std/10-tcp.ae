@@ -56,7 +56,9 @@ main() {
     client, cerr = tcp.connect("127.0.0.1", tcp.server_port(srv))
     check("connect", cerr)
     defer tcp.close(client)
-    _sent, werr = tcp.write(client, "hello over tcp\n")
+    // write_all, because one write may send only part of what it is given.
+    request = "hello over tcp\n"
+    _sent, werr = tcp.write_all(client, string.bytes(request))
     check("the client's write", werr)
 
     // The server takes the connection, reads the line, answers in capitals.
@@ -67,7 +69,8 @@ main() {
     line, rerr = read_line(&server_side)
     check("the server's read", rerr)
     println("server: got '${line}'")
-    _answered, aw = tcp.write(conn, "${string.to_upper(line)}\n")
+    reply_line = "${string.to_upper(line)}\n"
+    _answered, aw = tcp.write_all(conn, string.bytes(reply_line))
     check("the server's write", aw)
 
     // The client reads the answer.

@@ -154,8 +154,9 @@ delivers their messages.
 
 **slice (`T[]`).** A view of elements stored elsewhere: a pointer and a
 length. `xs[lo..hi]` makes one. The buffer `make([]T, n)` hands out has one
-owner, the local that holds it, which releases it when its scope ends: the
-program writes no free. [Slices](language-reference.md#slices-t)
+owner: a local that holds it releases it when its scope ends. Put in a
+field, a module `var`, a tuple or a message, or held by a local a closure
+captures, it is the program's to `free`. [Slices](language-reference.md#slices-t)
 
 **spawn.** `spawn(Name())` starts an actor and returns its `actor_ref`.
 

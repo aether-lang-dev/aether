@@ -33,8 +33,8 @@ actor Producer {
         // Offer lines until the window is full or every line has gone.
         More() -> {
             while sent < total {
-                if stream.offer(s, "log line ${sent + 1}") == 0 {
-                    break // no credit left: wait for the next one
+                if stream.offer(s, "log line ${sent + 1}") != 1 {
+                    break // 0: no credit left, wait for the next one
                 }
                 sent = sent + 1
             }
