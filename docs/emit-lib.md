@@ -1254,11 +1254,13 @@ Scope of the current implementation:
 A library built the default way carries its own copy of the runtime, linked
 in statically: one scheduler, one set of panic frames, one config per image.
 That keeps a library self-contained for a C or Python host, but a program
-that imports Aether libraries in binary form then runs on several runtimes.
-On Linux and FreeBSD ELF symbol interposition happens to bind a library's
-runtime calls to the program's copy; macOS's two-level namespace and Windows'
-PE keep them apart, so a panic raised inside a library never reaches the
-program's `catch` there.
+that imports Aether libraries in binary form then runs on several runtimes,
+on every platform: a panic raised inside a library never reaches the
+program's `catch`. macOS's two-level namespace and Windows' PE keep the
+copies apart by themselves; on ELF (Linux, FreeBSD) `ae` links a
+self-contained library with `-Bsymbolic`, so its runtime calls bind to its
+own copy, not to the one a program linked `-rdynamic` exports (#3481: they
+did, and a library made for one release then ran on another's runtime).
 
 `--shared-runtime` links against the runtime as a shared library instead,
 `aether.dll` (with `libaether.dll.a`), `libaether.dylib` or `libaether.so`,
@@ -1324,10 +1326,9 @@ ae build app.ae -o app                                          # has none
   way out, `main()` drains the scheduler and joins it, so a message the
   library sent fire-and-forget is still delivered.
 - **Draining needs one runtime.** The drain reaches the library's actors
-  where the program and the library share one runtime: `--shared-runtime`
-  everywhere, or ELF interposition with the default static runtime (Linux,
-  FreeBSD). On macOS and Windows a static library's actors run on that
-  library's own scheduler. `ae` warns that messages still in flight when the
+  where the program and the library share one runtime: `--shared-runtime`.
+  A static library's actors run on that library's own scheduler, on every
+  platform (#3481). `ae` warns that messages still in flight when the
   program exits are not delivered, and names the library to rebuild with
   `--shared-runtime`.
 - **A C host** calls `scheduler_shutdown()` before it exits to deliver what

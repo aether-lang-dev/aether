@@ -10,14 +10,11 @@
 # and a function taking or returning a struct was not exported at all.
 #
 # Two passes over the same sources:
-#   static runtime  each library carries its own copy of libaether. Where
-#                   ELF interposition merges the copies (Linux, FreeBSD), a
-#                   second binary library (script) importing the engine, and
-#                   the host importing both, share the engine's one module
-#                   state, and a panic in the engine reaches the host's
-#                   catch. Elsewhere the copies stay apart and neither may
-#                   free the other's strings, so importing the engine, whose
-#                   *Model holds one, is refused, naming the rebuild (#2931).
+#   static runtime  each library carries its own copy of libaether, and on
+#                   every platform (#3481) the copies stay apart: neither
+#                   may free the other's strings, so importing the engine,
+#                   whose *Model holds one, is refused, naming the rebuild
+#                   (#2931).
 #   shared runtime  `--shared-runtime`: the libraries link aether.dll /
 #                   libaether.so / libaether.dylib, their catalogs say so
 #                   (schema 1.5), and the host follows. One runtime, so the
@@ -30,10 +27,9 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] binary_import_structs: ae not built"; exit 0; }
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   ELF=0; EXE=".exe" ;;
-    Darwin)                          SO_EXT=".dylib"; ELF=0; EXE="" ;;
-    Linux|FreeBSD)                   SO_EXT=".so";    ELF=1; EXE="" ;;
-    *)                               SO_EXT=".so";    ELF=0; EXE="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   EXE=".exe" ;;
+    Darwin)                          SO_EXT=".dylib"; EXE="" ;;
+    *)                               SO_EXT=".so";    EXE="" ;;
 esac
 
 fail() {
@@ -88,25 +84,20 @@ panic_check() {
 }
 
 # ---- static runtime ----
-if [ "$ELF" = 1 ]; then
-    run_pass "$WORK/static" "" "static runtime"
-    panic_check "$WORK/static" "static runtime"
-else
-    mkdir -p "$WORK/static"
-    cp "$SCRIPT_DIR/engine.ae" "$SCRIPT_DIR/app.ae" "$WORK/static/"
-    cd "$WORK/static"
-    AETHER_HOME="$ROOT" "$AE" build --emit=lib engine.ae -o "libengine$SO_EXT" >engine.log 2>&1 \
-        || fail "static runtime: ae build --emit=lib engine.ae" engine.log
-    rm -f engine.ae
-    if AETHER_HOME="$ROOT" "$AE" run app.ae >run.log 2>&1; then
-        fail "static runtime: importing a library whose *Model holds a string was not refused" run.log
-    fi
-    grep -q "model_new\` passes \*Model, which holds strings" run.log \
-        || fail "static runtime: the refusal does not name model_new and *Model" run.log
-    grep -q "ae build --emit=lib --shared-runtime" run.log \
-        || fail "static runtime: the refusal does not name the rebuild" run.log
-    cd "$WORK"
+mkdir -p "$WORK/static"
+cp "$SCRIPT_DIR/engine.ae" "$SCRIPT_DIR/app.ae" "$WORK/static/"
+cd "$WORK/static"
+AETHER_HOME="$ROOT" "$AE" build --emit=lib engine.ae -o "libengine$SO_EXT" >engine.log 2>&1 \
+    || fail "static runtime: ae build --emit=lib engine.ae" engine.log
+rm -f engine.ae
+if AETHER_HOME="$ROOT" "$AE" run app.ae >run.log 2>&1; then
+    fail "static runtime: importing a library whose *Model holds a string was not refused" run.log
 fi
+grep -q "model_new\` passes \*Model, which holds strings" run.log \
+    || fail "static runtime: the refusal does not name model_new and *Model" run.log
+grep -q "ae build --emit=lib --shared-runtime" run.log \
+    || fail "static runtime: the refusal does not name the rebuild" run.log
+cd "$WORK"
 
 # ---- shared runtime (where this toolchain built one) ----
 if [ -d "$ROOT/build/shared" ]; then
