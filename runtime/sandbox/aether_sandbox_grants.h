@@ -55,4 +55,22 @@ static int aether_sandbox_serialize_grants(void* grant_list, char* buf,
     return 0;
 }
 
+// Wrapper result codes for serialize_grants() in the spawn files, so the
+// caller can say which step failed. All map to spawn_sandboxed's -1.
+#define AETHER_SANDBOX_GRANTS_ERR_SHM     (-1)  // shared memory could not be created
+#define AETHER_SANDBOX_GRANTS_ERR_INVALID (-2)  // EINVAL from serialize_grants
+#define AETHER_SANDBOX_GRANTS_ERR_TOOBIG  (-3)  // E2BIG from serialize_grants
+
+static inline int aether_sandbox_grants_err_code(int err) {
+    return err == EINVAL ? AETHER_SANDBOX_GRANTS_ERR_INVALID
+         : err == E2BIG  ? AETHER_SANDBOX_GRANTS_ERR_TOOBIG
+                         : AETHER_SANDBOX_GRANTS_ERR_SHM;
+}
+
+static inline const char* aether_sandbox_grants_err_msg(int code) {
+    return code == AETHER_SANDBOX_GRANTS_ERR_INVALID ? "invalid grant list"
+         : code == AETHER_SANDBOX_GRANTS_ERR_TOOBIG  ? "grant list too large"
+                                                     : "cannot create shared memory for grants";
+}
+
 #endif

@@ -90,7 +90,8 @@ static int serialize_grants(void* grant_list, char* shm_name, size_t shm_name_si
     char buf[AETHER_SANDBOX_GRANTS_SIZE];
     size_t data_size = 0;
     if (aether_sandbox_serialize_grants(
-            grant_list, buf, sizeof buf, &data_size) != 0) return -1;
+            grant_list, buf, sizeof buf, &data_size) != 0)
+        return aether_sandbox_grants_err_code(errno);
 
     return aether_sandbox_shm_write(
         shm_name, shm_name_size, buf, data_size);
@@ -109,8 +110,9 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
 
     // Serialize grants to shared memory
     char shm_name[AETHER_SANDBOX_SHM_NAME_SIZE];
-    if (serialize_grants(grant_list, shm_name, sizeof shm_name) < 0) {
-        fprintf(stderr, "[aether] cannot create shared memory for grants\n");
+    int grants_rc = serialize_grants(grant_list, shm_name, sizeof shm_name);
+    if (grants_rc < 0) {
+        fprintf(stderr, "[aether] %s\n", aether_sandbox_grants_err_msg(grants_rc));
         return -1;
     }
 
