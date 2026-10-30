@@ -1,0 +1,77 @@
+// Ending an actor, and what its watchers are told.
+//
+// An actor ends once, by the first of three things: it stops itself
+// (`actors.stop()` in its own handler, reason "normal"), something kills it
+// (`actors.kill(ref)`, from anywhere, reason "killed"), or its handler
+// panics (the panic's message is the reason). An actor that monitors it
+// (`actors.monitor(ref)`, from a handler) gets one `Down { ref, reason }`
+// when it ends. A message sent to an actor that has ended is dropped and
+// counted, never delivered.
+//
+// Run: ae run examples/02-actors/11-ending.ae
+// See: docs/actor-concurrency.md#the-end-of-an-actor
+
+import std.actors
+
+message Work { n: int }
+message Finish {}
+message Watch { who: actor_ref, label: string }
+
+actor Worker {
+    receive {
+        Work(n) -> {
+            if n < 0 {
+                panic("negative work: ${n}")
+            }
+            println("worker: did ${n}")
+        }
+        Finish() -> { actors.stop() }
+    }
+}
+
+actor Watcher {
+    state name = ""
+    receive {
+        Watch(who, label) -> {
+            name = label
+            _id = actors.monitor(who)
+        }
+        Down(ref, reason) -> { println("watcher: ${name} ended: ${reason}") }
+    }
+}
+
+watch(who: actor_ref, label: string) {
+    w = spawn(Watcher())
+    w ! Watch { who: who, label: label }
+}
+
+main() {
+    a = spawn(Worker())
+    b = spawn(Worker())
+    c = spawn(Worker())
+    watch(a, "a")
+    watch(b, "b")
+    watch(c, "c")
+    wait_for_idle()
+
+    a ! Work { n: 1 }
+    a ! Finish {} // a stops itself
+    wait_for_idle()
+
+    actors.kill(b) // b is killed from outside
+    wait_for_idle()
+
+    c ! Work { n: -1 } // c's handler panics
+    wait_for_idle()
+
+    a ! Work { n: 2 } // a has ended: dropped, and counted
+    wait_for_idle()
+    println("sends to ended actors: ${actors.dead_sends()}")
+}
+
+// Output:
+// worker: did 1
+// watcher: a ended: normal
+// watcher: b ended: killed
+// watcher: c ended: negative work: -1
+// sends to ended actors: 1

@@ -20,7 +20,7 @@ clock (`os.now_monotonic_ns`) and printing **ops/sec**.
 | # | Design | Read path | Write path | Source |
 |---|--------|-----------|------------|--------|
 | 1 | **Single-owner actor** | `?` ask to the one owner | `!` to the one owner | the "one mutex" trap (`docs/design/sharded-actor-map.md`) |
-| 2 | **Sharded actor map** | `?` ask to `shards[hash(key)%N]` | `!` to `shards[hash(key)%N]` | `examples/02-actors/11-sharded-map.ae` |
+| 2 | **Sharded actor map** | `?` ask to `shards[hash(key)%N]` | `!` to `shards[hash(key)%N]` | `examples/02-actors/16-sharded-map.ae` |
 | 3 | **COW snapshot cell** | lock-free `snapshot.load`, no mailbox | rebuild the whole map, `snapshot.store`, defer-free the displaced snapshot by one generation | `std.snapshot` / `docs/design/snapshot-cell.md` |
 
 **Workload mixes** (each runs a fixed 100 000-op budget over 64 keys):
@@ -148,5 +148,5 @@ three designs, not artifacts of one machine.
   design, shard-count guidance, and the Zipfian skew caveat.
 - [`docs/design/snapshot-cell.md`](snapshot-cell.md), the COW cell, the
   reclamation contract, and when read-mostly is the right call.
-- [`examples/02-actors/11-sharded-map.ae`](../../examples/02-actors/11-sharded-map.ae),
+- [`examples/02-actors/16-sharded-map.ae`](../../examples/02-actors/16-sharded-map.ae),
   the canonical sharded-map example the benchmark's design 2 mirrors.

@@ -1,0 +1,51 @@
+// A host's limits on the Aether code it runs: a deadline, a cancel and a
+// budget.
+//
+// A program that embeds Aether to run code it does not control (a game's
+// scripts, an editor's plugins) bounds what that code may take. Every
+// exported function runs in an execution frame, so however a call ends,
+// the host gets control back with an outcome (`aether_last_outcome()`):
+// - a deadline (`aether_set_call_deadline(ms)`) ends a call that runs too
+//   long, at its next loop head, with AETHER_DEADLINE;
+// - another thread ends a running call with `aether_exec_cancel(token)`,
+//   where the token is `aether_exec_token()` of the calling thread, with
+//   AETHER_CANCELLED;
+// - an execution account (`aether_exec_account_new`) gives a script a
+//   memory budget (and a deadline) of its own, across all its calls: an
+//   allocation past it ends the call with AETHER_MEMORY_CAP.
+// The call returns its result's zero value, its defers run and what it
+// owned is freed. host.c is the program and run.sh builds and runs it;
+// `ae cflags` names the include path and the runtime to link.
+//
+// Run: sh examples/04-interop/07-limits/run.sh
+// See: docs/emit-lib.md#per-call-resource-caps
+
+import std.string
+
+// Counts for ever: only a deadline or a cancel ends it, and the call then
+// returns 0, an int's zero value.
+spin() -> int {
+    n = 0
+    while true {
+        n = n + 1
+    }
+}
+
+// The length of a string of n * 16 bytes, built a piece at a time.
+grow(n: int) -> int {
+    s = ""
+    i = 0
+    while i < n {
+        s = string.concat(s, "0123456789abcdef")
+        i = i + 1
+    }
+    return string.length(s)
+}
+
+// Output:
+// spin under a 50 ms deadline: returned 0, deadline
+// spin cancelled from another thread: returned 0, cancelled
+// grow(100) under a 64 KiB budget: returned 1600, ok
+// grow(100000) under the same budget: returned 0, memory cap
+// the budget was exceeded: yes
+// grow(10) after that: returned 160, ok

@@ -1,0 +1,77 @@
+// TCP: a server and a client over a socket, in one program.
+//
+// std.tcp is the layer under std.http: connect, listen, accept, read and
+// write, each returning an error string to check. TCP carries a stream of
+// bytes, not messages: a read returns what has arrived, which may be part
+// of a message or more than one. So a protocol says where a message ends
+// (here a newline) and the reader reads until it gets there. The server
+// listens on the loopback address only, on a port the system picks.
+//
+// Run: ae run examples/03-std/10-tcp.ae
+// See: std/tcp/README.md
+
+import std.string
+import std.tcp
+
+message Ask { port: int, text: string }
+
+// Read one line, without its newline, however the bytes arrive.
+read_line(sock: ptr) -> (string, string) {
+    line = ""
+    while !string.ends_with(line, "\n") {
+        part, err = tcp.read(sock, 64)
+        if err != "" {
+            return "", err
+        }
+        line = string.concat(line, part)
+    }
+    return string.substring(line, 0, string.length(line) - 1), ""
+}
+
+// The client: connect, send a line, read the answer.
+actor Client {
+    receive {
+        Ask(port, text) -> {
+            sock, err = tcp.connect("127.0.0.1", port)
+            if err != "" {
+                println("client: connect failed: ${err}")
+            } else {
+                _n, werr = tcp.write(sock, "${text}\n")
+                if werr == "" {
+                    answer, rerr = read_line(sock)
+                    if rerr == "" {
+                        println("client: the server said '${answer}'")
+                    }
+                }
+                tcp.close(sock)
+            }
+        }
+    }
+}
+
+main() {
+    srv, err = tcp.listen_on("127.0.0.1", 0)
+    if err != "" {
+        println("listen failed: ${err}")
+        return
+    }
+    client = spawn(Client())
+    client ! Ask { port: tcp.server_port(srv), text: "hello over tcp" }
+
+    // Serve one connection: read a line, answer it in capitals.
+    sock, aerr = tcp.accept(srv)
+    if aerr == "" {
+        line, rerr = read_line(sock)
+        if rerr == "" {
+            println("server: got '${line}'")
+            _n, _werr = tcp.write(sock, "${string.to_upper(line)}\n")
+        }
+        tcp.close(sock)
+    }
+    wait_for_idle()
+    tcp.server_close(srv)
+}
+
+// Output:
+// server: got 'hello over tcp'
+// client: the server said 'HELLO OVER TCP'

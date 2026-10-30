@@ -2281,7 +2281,7 @@ self-test: compiler
 	@echo "Running Compiler Self-Test"
 	@echo "==================================="
 	@echo "Testing compiler on complex syntax..."
-	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/11-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
+	@./$(BUILD_DIR)/aetherc$(EXE_EXT) examples/02-actors/16-sharded-map.ae $(BUILD_DIR)/test_compile.c && \
 		echo "✓ Complex syntax compilation successful"
 	@echo ""
 	@echo "Testing collections..."

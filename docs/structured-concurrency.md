@@ -151,7 +151,7 @@ Strategies mirror Erlang: `one_for_one`, `one_for_all`, `rest_for_one`;
 restart kinds `permanent`, `transient`, `temporary`; past `max_restarts`
 within `within_secs` the supervisor kills its children and ends with a
 reason that says why, so a supervisor above it takes the failure. See
-std/supervise/README.md and examples/02-actors/12-supervisor.ae.
+std/supervise/README.md and examples/02-actors/13-supervisor.ae.
 
 ## Phase 2, capability-scoped concurrency
 
@@ -231,7 +231,7 @@ crypto-miner actor because it cannot name one.
    Extend existing `hide`/`seal except` denial to concurrency sites.
 6. **Docs and worked example.** Done for Phase 1:
    `docs/actor-concurrency.md` ("The delivery contract", "The end of an
-   actor", "Supervisors") and examples/02-actors/12-supervisor.ae. The
+   actor", "Supervisors") and examples/02-actors/13-supervisor.ae. The
    sealed subtree waits for Phase 2.
 
 Phase 1 shipped without Phase 2. Phase 2 can ship independently, they

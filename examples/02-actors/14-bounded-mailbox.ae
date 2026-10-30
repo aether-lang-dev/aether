@@ -1,0 +1,83 @@
+// A bounded mailbox: what an actor will hold, and what a sender is told.
+//
+// A send never blocks its sender, so an actor's mailbox has no bound: what
+// it has not handled yet waits in memory. `@mailbox(bound: N)` before the
+// actor makes it take at most N messages it has not handled yet. Past
+// that a send is refused at once, never waited on:
+// - `try_send(ref, Msg { ... })` sends as `!` does and says what happened:
+//   "" when it sent, "the mailbox is full" or "the actor is dead";
+// - a plain `!` is dropped, counted by `actors.full_drops(ref)`, and
+//   reported once on stderr;
+// - an ask fails at once with "the mailbox is full".
+//
+// Here the actor queues work for itself. While its handler runs it handles
+// nothing else, so what it sends itself fills its own mailbox.
+//
+// Run: ae run examples/02-actors/14-bounded-mailbox.ae
+// See: docs/language-reference.md#a-bounded-mailbox
+
+import std.actors
+
+message Burst { n: int }
+message Flood { n: int }
+message Line { n: int }
+message Count {}
+
+@mailbox(bound: 3)
+actor Ingest {
+    state handled = 0
+    receive {
+        Burst(n) -> {
+            i = 1
+            while i <= n {
+                err = try_send(self, Line { n: i })
+                if err == "" {
+                    println("line ${i}: sent")
+                } else {
+                    println("line ${i}: ${err}")
+                }
+                i = i + 1
+            }
+        }
+        Flood(n) -> {
+            i = 1
+            while i <= n {
+                self ! Line { n: i } // past the bound: dropped and counted
+                i = i + 1
+            }
+        }
+        Line(n) -> { handled = handled + 1 }
+        Count() -> { reply handled }
+    }
+}
+
+main() {
+    ingest = spawn(Ingest())
+
+    ingest ! Burst { n: 5 }
+    wait_for_idle()
+    int after_burst = ingest ? Count {}
+    // print, unlike println, flushes stdout: the lines so far are out
+    // before the runtime reports the first drop on stderr.
+    print("handled: ${after_burst}\n")
+
+    ingest ! Flood { n: 5 }
+    wait_for_idle()
+    int after_flood = ingest ? Count {}
+    println("handled: ${after_flood}, dropped by a full mailbox: ${actors.full_drops(ingest)}")
+
+    actors.kill(ingest)
+    wait_for_idle()
+    println("after a kill: ${try_send(ingest, Line { n: 0 })}")
+}
+
+// Output:
+// line 1: sent
+// line 2: sent
+// line 3: sent
+// line 4: the mailbox is full
+// line 5: the mailbox is full
+// handled: 3
+// aether: message type 2 to actor 1 dropped: its mailbox is full (bound 3); counted by actors.full_drops (reported once)
+// handled: 6, dropped by a full mailbox: 2
+// after a kill: the actor is dead

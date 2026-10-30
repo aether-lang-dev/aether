@@ -13,7 +13,7 @@
 // forced open are panics too.
 //
 // Run: ae run examples/01-language/10-errors.ae
-// See: docs/language-reference.md#the-t-result-type-and-or--sugar
+// See: docs/language-reference.md#the-t-result-type-and-or---sugar
 
 import std.string
 
