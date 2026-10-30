@@ -14,11 +14,12 @@
 # A deliberately hung native program runs under a 3 s limit twice over, in
 # the foreground of a bash that traps SIGTERM and in the background beside
 # it, inside a "sweep" shell that reports what it saw. The sweep shell has to
-# survive and see 124, both copies of the program have to be gone, and on
-# Windows the trap must not have run, since nothing may be signalled there.
-# Elsewhere the limit is timeout(1), whose SIGTERM is exactly what the trap
-# sees. The program gives up by itself after 60 s, so a limit that failed
-# cannot leave it behind for long.
+# survive and see 124, and both copies of the program have to be gone. On
+# Windows the shell trap must not have run, since nothing may be signalled
+# there. Elsewhere each native copy records the SIGTERM it receives directly;
+# this does not depend on when a particular bash prints or runs its trap. The
+# program gives up by itself after 60 s, so a limit that failed cannot leave
+# it behind for long.
 #
 # #2772: where neither timeout(1) nor gtimeout exists (GitHub's macOS
 # runners) the limit is sweep_timeout_posix, the same bound in perl; before
@@ -50,11 +51,36 @@ cat > "$TMP/hang.c" <<'EOF'
 #define SELF ((unsigned long)GetCurrentProcessId())
 #define NAP() Sleep(1000)
 #else
+#include <fcntl.h>
+#include <signal.h>
 #include <unistd.h>
 #define SELF ((unsigned long)getpid())
 #define NAP() sleep(1)
+
+static volatile sig_atomic_t term_fd = -1;
+
+static void on_term(int signal) {
+    static const char marker[] = "SIGTERM\n";
+    int fd = (int)term_fd;
+    if (fd >= 0) {
+        (void)write(fd, marker, sizeof marker - 1);
+        close(fd);
+    }
+    _exit(128 + signal);
+}
 #endif
 int main(int argc, char** argv) {
+#ifndef _WIN32
+    if (argc > 2) {
+        term_fd = open(argv[2], O_WRONLY | O_CREAT | O_TRUNC, 0600);
+        if (term_fd < 0) return 2;
+        struct sigaction action = {0};
+        sigemptyset(&action.sa_mask);
+        action.sa_handler = on_term;
+        action.sa_flags = 0;
+        if (sigaction(SIGTERM, &action, NULL) != 0) return 2;
+    }
+#endif
     FILE* f = argc > 1 ? fopen(argv[1], "a") : NULL;
     if (f) { fprintf(f, "%lu\n", SELF); fclose(f); }
     for (int i = 0; i < 60; i++) NAP();
@@ -72,14 +98,14 @@ ${CC:-cc} -o "$hang" "$TMP/hang.c" 2>"$TMP/cc.log" \
 # land on the same offset on Windows, and a pid would be lost.
 cat > "$TMP/hung_test.sh" <<'EOF'
 trap 'echo "SIGTERM reached the test"' TERM
-"$1" "$2.background" &
-"$1" "$2.foreground"
+"$1" "$2.background" "$3.background" &
+"$1" "$2.foreground" "$3.foreground"
 EOF
 
 cat > "$TMP/sweep.sh" <<'EOF'
 . "$1/tests/lib/sweep_timeout.sh"
 sweep_timeout_bound TO "$1" 3
-$TO bash "$2" "$3" "$4"
+$TO bash "$2" "$3" "$4" "$5"
 echo "rc=$?"
 echo "sweep shell still running"
 EOF
@@ -88,12 +114,13 @@ EOF
 # picks with _SWEEP_TIMEOUT_TOOLS set to TOOLS ("default" leaves it unset).
 check_hung() {
     label="$1"
-    rm -f "$TMP/pid.background" "$TMP/pid.foreground"
+    rm -f "$TMP/pid.background" "$TMP/pid.foreground" \
+        "$TMP/term.background" "$TMP/term.foreground"
     start=$(date +%s)
     if [ "$2" = default ]; then
-        out=$(bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" 2>&1)
+        out=$(bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" "$TMP/term" 2>&1)
     else
-        out=$(_SWEEP_TIMEOUT_TOOLS="$2" bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" 2>&1)
+        out=$(_SWEEP_TIMEOUT_TOOLS="$2" bash "$TMP/sweep.sh" "$ROOT" "$TMP/hung_test.sh" "$hang" "$TMP/pid" "$TMP/term" 2>&1)
     fi
     sweep_rc=$?
     elapsed=$(( $(date +%s) - start ))
@@ -123,8 +150,10 @@ check_hung() {
         printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
             && fail "$label: the limit signalled the test on Windows, where a signal can reach unrelated processes (#2758)"
     else
-        printf '%s\n' "$out" | grep -q "SIGTERM reached the test" \
-            || fail "$label: the limit's SIGTERM never reached the test: $out"
+        for copy in background foreground; do
+            grep -qx "SIGTERM" "$TMP/term.$copy" 2>/dev/null \
+                || fail "$label: SIGTERM never reached the $copy program: $out"
+        done
     fi
 }
 

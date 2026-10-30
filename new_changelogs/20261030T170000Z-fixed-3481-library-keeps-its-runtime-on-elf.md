@@ -13,3 +13,5 @@
   exit, naming `--shared-runtime`, as it did on macOS and Windows. A
   library of another runtime ABI linked before this is refused at import
   on ELF, naming the rebuild, instead of ending the program.
+  This replaces 0.864.0's note that the matrix expects ELF's merged
+  runtimes: the copies no longer merge.

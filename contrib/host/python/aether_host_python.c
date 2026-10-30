@@ -264,16 +264,17 @@ int python_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_to
     if (python_init() != 0) return -1;
     register_map_module();
 
+    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
+
     // Freeze inputs and set active token
     extern void aether_shared_map_freeze_inputs_by_token(uint64_t);
     aether_shared_map_freeze_inputs_by_token(map_token);
+    uint64_t previous_map_token = py_current_map_token;
     py_current_map_token = map_token;
 
     // Inject convenience imports so user code just calls aether_map_get/put
     const char* preamble =
         "from _aether_map import aether_map_get, aether_map_put\n";
-
-    if (aether_sandbox_depth() >= AETHER_SANDBOX_MAX_LEVELS) return -1;
 
     // The grants as a level of this thread's, in the runtime (#2955)
     aether_sandbox_push(perms);
@@ -284,7 +285,7 @@ int python_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_to
 
     // Restore
     aether_sandbox_pop();
-    py_current_map_token = 0;
+    py_current_map_token = previous_map_token;
 
     return result;
 }

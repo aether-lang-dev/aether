@@ -170,10 +170,15 @@ run_app() {
         echo "      stderr:"; tail -12 "$2/app.err" | sed 's/^/        /'
     fi
 }
-# A library with a runtime of its own linked before #3481 on ELF binds that
-# runtime to the program's (an `ae build` program exports its runtime), so it
-# would run on this one, of another version: this importer refuses it at
-# build, naming the rebuild, instead of the program ending on its first call.
+# On ELF this ae links a library with a runtime of its own -Bsymbolic, so it
+# keeps that runtime in any program (#3481), as Mach-O and PE keep the copies
+# apart by themselves. A library linked before that binds its runtime's calls
+# to the importer's, which every Aether program exports (-rdynamic), and so
+# would run on the importer's runtime: one made for another runtime ABI is
+# refused by this importer at build, naming the rebuild, instead of the
+# program ending on its first call. A level-0 library records no ID and has
+# no check.
+static_abi() { "$TMP/host_new$exe" "$1" "$1" --runtime-abi 2>/dev/null; }
 refuse_app() {
     cp "$SCRIPT_DIR/app.ae" "$2/app.ae"
     if (cd "$2" && AETHER_HOME="$3" "$4" build app.ae -o app > app_build.log 2>&1); then
@@ -183,23 +188,24 @@ refuse_app() {
         bad "$1: the refusal does not say why and name the rebuild" "$2/app_build.log"
     fi
 }
-this_version="$(tr -d '\r\n' < "$ROOT/VERSION" 2>/dev/null)"
-# This ae links a library with a runtime of its own -Bsymbolic on ELF, so it
-# keeps that runtime in any program (#3481).
 if [ "$ext" = so ] && command -v readelf >/dev/null 2>&1 &&
    ! readelf -d "$TMP/new/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
     bad "this ae linked libmlib.$ext without -Bsymbolic: it would run on an importing program's runtime"
 fi
+old_static_abi="$(static_abi "$TMP/old/libmlib.$ext")"
 old_binds_own=1
-if [ "$ext" = so ] && [ "$old_version" != "$this_version" ]; then
+if [ "$ext" = so ] && [ -n "$old_static_abi" ] &&
+   [ "$old_static_abi" != "$(static_abi "$TMP/new/libmlib.$ext")" ]; then
     if ! command -v readelf >/dev/null 2>&1; then
         old_binds_own=unknown
     elif ! readelf -d "$TMP/old/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
         old_binds_own=0
     fi
 fi
+app_note=""
 case "$old_binds_own" in
-    0) refuse_app "this importer, the $old_version library (linked before #3481)" "$TMP/old" "$ROOT" "$AE" ;;
+    0) refuse_app "this importer, the $old_version library (linked before #3481)" "$TMP/old" "$ROOT" "$AE"
+       app_note=" (the $old_version library, linked before #3481, refused at import)" ;;
     unknown) echo "  [NOTE] abi_matrix: no readelf, so this importer with the $old_version library is not run" ;;
     *) run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE" ;;
 esac
@@ -261,6 +267,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
+    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways$app_note run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
 fi
 exit $fail
