@@ -30,32 +30,36 @@ printf 'exec:/not-used\n' > "$TMP/deny-read.grants"
 printf 'fs_read:%s\n' "$TMP/data.txt" > "$TMP/allow-read.grants"
 fail=0
 
+# expected: 0 (read allowed) or 3 (harness exit code for EACCES, the denial
+# status the sandbox returns). Any other status, e.g. 4 for a different
+# errno, is a failure rather than a denial.
 run_case() {
     label="$1"
     checker="$2"
     grants="$3"
     expected="$4"
-    if LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$grants" \
-            AETHER_SANDBOX_LOG=none "$TMP/harness" "$checker" "$TMP/data.txt" \
-            >"$TMP/out" 2>"$TMP/err"; then
-        got=allow
-    else
-        got=deny
-    fi
-    if [ "$got" = "$expected" ]; then
+    LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$grants" \
+        AETHER_SANDBOX_LOG=none "$TMP/harness" "$checker" "$TMP/data.txt" \
+        >"$TMP/out" 2>"$TMP/err"
+    got=$?
+    if [ "$got" -eq "$expected" ]; then
         echo "  [PASS] $label"
     else
-        echo "  [FAIL] $label: got $got, expected $expected"
+        echo "  [FAIL] $label: exit $got, expected $expected"
         fail=1
     fi
 }
 
 run_case "preload denial survives an allowing embedded checker" \
-    allow "$TMP/deny-read.grants" deny
+    allow "$TMP/deny-read.grants" 3
 run_case "embedded denial survives an allowing preload policy" \
-    deny "$TMP/allow-read.grants" deny
+    deny "$TMP/allow-read.grants" 3
 run_case "both policies allowing permits the read" \
-    allow "$TMP/allow-read.grants" allow
+    allow "$TMP/allow-read.grants" 0
+run_case "no thread level (-1): file grants lacking the resource deny" \
+    none "$TMP/deny-read.grants" 3
+run_case "no thread level (-1): file grants holding the resource allow" \
+    none "$TMP/allow-read.grants" 0
 
 echo ""
 echo "sandbox_policy_intersection: $([ "$fail" -eq 0 ] && echo PASS || echo FAIL)"
