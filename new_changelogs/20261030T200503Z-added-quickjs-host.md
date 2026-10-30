@@ -1,0 +1,1 @@
+- **QuickJS host module (`contrib.host.quickjs`):** Integrated QuickJS as a member of the `contrib/host` family with `quickjs_run`, `quickjs_run_sandboxed`, `quickjs_run_sandboxed_with_map`, `quickjs_init`, and `quickjs_finalize`.

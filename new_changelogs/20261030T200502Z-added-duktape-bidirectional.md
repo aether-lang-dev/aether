@@ -1,0 +1,1 @@
+- **Duktape bidirectional API (`contrib.host.duktape`):** Persistent VM (`duktape_vm_new`), host callback registration (`duktape_vm_register`), typed arguments and returns (`duktape_arg_*` / `duktape_push_*`), global setters, and typed evaluation result readers matching Lua's #904 embedding surface.
