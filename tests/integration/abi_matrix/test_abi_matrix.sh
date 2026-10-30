@@ -159,8 +159,13 @@ run_app() {
         bad "$1: app.ae did not build" "$2/app_build.log"
         return
     fi
-    expect "$1" "$(cd "$2" && PATH="$2:$PATH" LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        DYLD_LIBRARY_PATH="$2${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ./app$exe 2>"$2/app.err" | tr -d '\r')" "$app_want"
+    got="$(cd "$2" && PATH="$2:$PATH" LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        DYLD_LIBRARY_PATH="$2${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ./app$exe 2>"$2/app.err" | tr -d '\r')"
+    expect "$1" "$got" "$app_want"
+    # What the program said on stderr: an abort prints nothing on stdout.
+    if [ "$got" != "$app_want" ] && [ -s "$2/app.err" ]; then
+        echo "      stderr:"; tail -12 "$2/app.err" | sed 's/^/        /'
+    fi
 }
 run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
 run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
