@@ -37,7 +37,9 @@ out="$(AETHER_SANDBOX_PRELOAD="$ROOT/build/libaether_sandbox.so" \
        AETHER_SANDBOX_LOG=none "$TMP/harness" 2>&1 </dev/null)"
 rc=$?
 if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q \
-        '^PASS: sandbox grant transport validates complete input$'; then
+        '^PASS: sandbox grant transport validates complete input$' &&
+   printf '%s' "$out" | grep -q 'invalid grant list' &&
+   printf '%s' "$out" | grep -q 'grant list too large'; then
     echo "  [PASS] sandbox grant transport accepts deny-all and rejects invalid input"
     echo "PASS: sandbox_grant_transport"
     exit 0
