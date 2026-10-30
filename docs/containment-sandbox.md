@@ -439,6 +439,13 @@ should have both.
   size limit, the sandbox stays active with zero grants rather than
   running unrestricted.
 
+- **An empty grant list starts the child with nothing allowed.**
+  `spawn_sandboxed` with no grants runs a compute-only worker: it can use
+  the pipes it was given, but no files, exec or network. Malformed lists
+  (odd length, a `:` in a category, CR or LF in a category or pattern) and
+  lists over the transport size limit are refused with `-1` and the
+  message "invalid grant list" or "grant list too large".
+
 - **`execve` with an explicit environment keeps the sandbox controls.**
   The preload layer re-adds `LD_PRELOAD` and the `AETHER_SANDBOX_*` /
   `AETHER_CAPSICUM` entries it captured at startup, so the child stays
