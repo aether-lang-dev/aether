@@ -84,6 +84,7 @@ builds and runs them.
 | [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
 | [05-hosts/python.ae](04-interop/05-hosts/python.ae) | Python run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/lua.ae](04-interop/05-hosts/lua.ae) | Lua run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/quickjs.ae](04-interop/05-hosts/quickjs.ae) | QuickJS run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |

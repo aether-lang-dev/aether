@@ -32,6 +32,14 @@
 #include <string.h>
 #include <sys/wait.h>
 
+#define AE_DUK_TNIL   0
+#define AE_DUK_TBOOL  1
+#define AE_DUK_TINT   2
+#define AE_DUK_TSTR   3
+#define AE_DUK_TTABLE 4
+#define AE_DUK_TERR   5
+#define AE_DUK_TOTHER 6
+
 // --- libduktape dlopen table ------------------------------------------------
 
 static void* libduktape_handle = NULL;
@@ -64,14 +72,34 @@ static struct {
     void (*duk_push_int)(duk_context* ctx, duk_int_t val);
     void (*duk_push_boolean)(duk_context* ctx, duk_bool_t val);
     void (*duk_push_undefined)(duk_context* ctx);
+    void (*duk_push_null)(duk_context* ctx);
+    void (*duk_push_number)(duk_context* ctx, duk_double_t val);
+    void (*duk_push_pointer)(duk_context* ctx, void* p);
+    duk_idx_t (*duk_push_object)(duk_context* ctx);
+    duk_idx_t (*duk_push_array)(duk_context* ctx);
+    void (*duk_push_global_object)(duk_context* ctx);
+    void (*duk_push_current_function)(duk_context* ctx);
     duk_idx_t (*duk_push_c_function)(duk_context* ctx,
                                      duk_c_function func, duk_idx_t nargs);
+    duk_idx_t (*duk_push_error_object_raw)(duk_context* ctx, duk_errcode_t err_code,
+                                           const char* filename, duk_int_t line,
+                                           const char* fmt, ...);
+    void (*duk_throw_raw)(duk_context* ctx);
     // Value getters.
     const char* (*duk_require_string)(duk_context* ctx, duk_idx_t idx);
     const char* (*duk_require_lstring)(duk_context* ctx, duk_idx_t idx,
                                        duk_size_t* out_len);
     const char* (*duk_to_string)(duk_context* ctx, duk_idx_t idx);
-    // Globals.
+    const char* (*duk_get_string)(duk_context* ctx, duk_idx_t idx);
+    duk_double_t (*duk_get_number)(duk_context* ctx, duk_idx_t idx);
+    duk_bool_t (*duk_get_boolean)(duk_context* ctx, duk_idx_t idx);
+    void* (*duk_get_pointer)(duk_context* ctx, duk_idx_t idx);
+    duk_int_t (*duk_get_type)(duk_context* ctx, duk_idx_t idx);
+    duk_errcode_t (*duk_get_error_code)(duk_context* ctx, duk_idx_t idx);
+    // Globals and Properties.
+    duk_bool_t (*duk_get_prop_string)(duk_context* ctx, duk_idx_t idx, const char* key);
+    duk_bool_t (*duk_put_prop_string)(duk_context* ctx, duk_idx_t idx, const char* key);
+    duk_bool_t (*duk_put_prop_index)(duk_context* ctx, duk_idx_t idx, duk_uarridx_t arr_idx);
     duk_bool_t (*duk_put_global_string)(duk_context* ctx, const char* key);
 } g_duk;
 
@@ -85,21 +113,39 @@ static int resolve_duktape_symbols(void* h) {
         }                                                              \
     } while (0)
 
-    RESOLVE(duk_create_heap,        "duk_create_heap");
-    RESOLVE(duk_destroy_heap,       "duk_destroy_heap");
-    RESOLVE(duk_eval_raw,           "duk_eval_raw");
-    RESOLVE(duk_safe_to_lstring,    "duk_safe_to_lstring");
-    RESOLVE(duk_get_top,            "duk_get_top");
-    RESOLVE(duk_pop,                "duk_pop");
-    RESOLVE(duk_push_string,        "duk_push_string");
-    RESOLVE(duk_push_int,           "duk_push_int");
-    RESOLVE(duk_push_boolean,       "duk_push_boolean");
-    RESOLVE(duk_push_undefined,     "duk_push_undefined");
-    RESOLVE(duk_push_c_function,    "duk_push_c_function");
-    RESOLVE(duk_require_string,     "duk_require_string");
-    RESOLVE(duk_require_lstring,    "duk_require_lstring");
-    RESOLVE(duk_to_string,          "duk_to_string");
-    RESOLVE(duk_put_global_string,  "duk_put_global_string");
+    RESOLVE(duk_create_heap,           "duk_create_heap");
+    RESOLVE(duk_destroy_heap,          "duk_destroy_heap");
+    RESOLVE(duk_eval_raw,              "duk_eval_raw");
+    RESOLVE(duk_safe_to_lstring,       "duk_safe_to_lstring");
+    RESOLVE(duk_get_top,               "duk_get_top");
+    RESOLVE(duk_pop,                   "duk_pop");
+    RESOLVE(duk_push_string,           "duk_push_string");
+    RESOLVE(duk_push_int,              "duk_push_int");
+    RESOLVE(duk_push_boolean,          "duk_push_boolean");
+    RESOLVE(duk_push_undefined,        "duk_push_undefined");
+    RESOLVE(duk_push_null,             "duk_push_null");
+    RESOLVE(duk_push_number,           "duk_push_number");
+    RESOLVE(duk_push_pointer,          "duk_push_pointer");
+    RESOLVE(duk_push_object,           "duk_push_object");
+    RESOLVE(duk_push_array,            "duk_push_array");
+    RESOLVE(duk_push_global_object,    "duk_push_global_object");
+    RESOLVE(duk_push_current_function, "duk_push_current_function");
+    RESOLVE(duk_push_c_function,       "duk_push_c_function");
+    RESOLVE(duk_push_error_object_raw, "duk_push_error_object_raw");
+    RESOLVE(duk_throw_raw,             "duk_throw_raw");
+    RESOLVE(duk_require_string,        "duk_require_string");
+    RESOLVE(duk_require_lstring,       "duk_require_lstring");
+    RESOLVE(duk_to_string,             "duk_to_string");
+    RESOLVE(duk_get_string,            "duk_get_string");
+    RESOLVE(duk_get_number,            "duk_get_number");
+    RESOLVE(duk_get_boolean,           "duk_get_boolean");
+    RESOLVE(duk_get_pointer,           "duk_get_pointer");
+    RESOLVE(duk_get_type,              "duk_get_type");
+    RESOLVE(duk_get_error_code,        "duk_get_error_code");
+    RESOLVE(duk_get_prop_string,       "duk_get_prop_string");
+    RESOLVE(duk_put_prop_string,       "duk_put_prop_string");
+    RESOLVE(duk_put_prop_index,        "duk_put_prop_index");
+    RESOLVE(duk_put_global_string,     "duk_put_global_string");
     return 0;
 #undef RESOLVE
 }
@@ -109,14 +155,7 @@ static void* try_dlopen(const char* name) {
     return dlopen(name, RTLD_NOW | RTLD_GLOBAL);
 }
 
-// Load libduktape on first use. Strict two-step contract:
-//   1. ${AETHER_DUKTAPE_SONAME} env var (orchestrator-supplied exact,
-//      e.g. "libduktape.so.207"). Duktape is embedded-only (no
-//      `duktape` CLI to probe with), so the orchestrator may need
-//      to find the soname via `ldconfig -p | grep libduktape` or
-//      similar package-manager-specific probes.
-//   2. libduktape.so (Debian-style unversioned symlink).
-// No hardcoded version-list fallback. Orchestrator owns the probe.
+// Load libduktape on first use.
 static int load_libduktape(void) {
     if (libduktape_handle) return 0;
 
@@ -162,20 +201,12 @@ static const char* dh_safe_to_string(duk_context* c, duk_idx_t idx) {
 
 static duk_context* ctx = NULL;
 
-
 extern int list_size(void*);
 extern void* list_get_raw(void*, int);
-/* A grant list std.sandbox built holds plain C strings; one a program
- * built can hold Aether strings (a helper that keeps its `string`
- * parameter stores its own copy). This reads the bytes of either. */
 extern const char* aether_string_data(const void*);
 
-// The shared grant matcher (runtime/aether_sandbox_match.h).
 #include "aether_sandbox_match.h"
 
-/* What JS reaches goes through the natives below; each checks the calling
- * thread's grant levels, the ones run_sandboxed pushed and any enforce block
- * around the call, so a nested call can only narrow them (#2955). */
 static int check_sandbox(const char* category, const char* resource) {
     return aether_sandbox_check(category, resource);
 }
@@ -394,6 +425,262 @@ int duktape_run_sandboxed_with_map(void* perms, const char* code, uint64_t map_t
     return result;
 }
 
+// --- Tier 2: Bidirectional Embedding API (#904) ----------------------------
+
+void* duktape_vm_new(void) {
+    if (load_libduktape() != 0) return NULL;
+    duk_context* c = dh_create_heap_default();
+    if (!c) return NULL;
+    register_bindings(c);
+    return (void*)c;
+}
+
+void duktape_vm_free(void* c) {
+    if (!c) return;
+    duk_context* ctx_to_free = (duk_context*)c;
+    if (ctx_to_free == ctx) {
+        ctx = NULL;
+    }
+    g_duk.duk_destroy_heap(ctx_to_free);
+}
+
+static duk_ret_t duktape_host_cb_trampoline(duk_context* c) {
+    g_duk.duk_push_current_function(c);
+    g_duk.duk_get_prop_string(c, -1, "\xFFhost_fn");
+    void* host_fn = (void*)g_duk.duk_get_pointer(c, -1);
+    g_duk.duk_pop(c); // pop pointer
+    g_duk.duk_pop(c); // pop function
+    if (!host_fn) return 0;
+    int (*fn)(void*) = (int (*)(void*))host_fn;
+    return (duk_ret_t)fn((void*)c);
+}
+
+int duktape_vm_register(void* c, const char* name, void* host_fn) {
+    if (!c || !name || !host_fn) return -1;
+    duk_context* ctx_ptr = (duk_context*)c;
+
+    char tmp[256];
+    strncpy(tmp, name, sizeof(tmp) - 1);
+    tmp[sizeof(tmp) - 1] = '\0';
+
+    g_duk.duk_push_global_object(ctx_ptr);
+    int depth_pushed = 1;
+
+    char* curr = tmp;
+    char* dot = strchr(curr, '.');
+
+    while (dot) {
+        *dot = '\0';
+        g_duk.duk_get_prop_string(ctx_ptr, -1, curr);
+        if (g_duk.duk_get_type(ctx_ptr, -1) != DUK_TYPE_OBJECT) {
+            g_duk.duk_pop(ctx_ptr);
+            g_duk.duk_push_object(ctx_ptr);
+            g_duk.duk_put_prop_string(ctx_ptr, -2, curr);
+            g_duk.duk_get_prop_string(ctx_ptr, -1, curr);
+        }
+        depth_pushed++;
+        curr = dot + 1;
+        dot = strchr(curr, '.');
+    }
+
+    g_duk.duk_push_c_function(ctx_ptr, duktape_host_cb_trampoline, DUK_VARARGS);
+    g_duk.duk_push_pointer(ctx_ptr, host_fn);
+    g_duk.duk_put_prop_string(ctx_ptr, -2, "\xFFhost_fn");
+    g_duk.duk_put_prop_string(ctx_ptr, -2, curr);
+
+    for (int i = 0; i < depth_pushed; i++) {
+        g_duk.duk_pop(ctx_ptr);
+    }
+    return 0;
+}
+
+void duktape_vm_set_global_str(void* c, const char* name, const char* value) {
+    if (!c || !name) return;
+    duk_context* ctx_ptr = (duk_context*)c;
+    g_duk.duk_push_string(ctx_ptr, value ? value : "");
+    g_duk.duk_put_global_string(ctx_ptr, name);
+}
+
+void duktape_vm_set_global_int(void* c, const char* name, int64_t value) {
+    if (!c || !name) return;
+    duk_context* ctx_ptr = (duk_context*)c;
+    g_duk.duk_push_number(ctx_ptr, (double)value);
+    g_duk.duk_put_global_string(ctx_ptr, name);
+}
+
+void duktape_vm_set_global_strlist(void* c, const char* name, void* items) {
+    if (!c || !name) return;
+    duk_context* ctx_ptr = (duk_context*)c;
+    g_duk.duk_push_array(ctx_ptr);
+    if (items) {
+        int count = list_size(items);
+        for (int i = 0; i < count; i++) {
+            void* item = list_get_raw(items, i);
+            const char* str = item ? aether_string_data(item) : "";
+            g_duk.duk_push_string(ctx_ptr, str ? str : "");
+            g_duk.duk_put_prop_index(ctx_ptr, -2, (duk_uarridx_t)i);
+        }
+    }
+    g_duk.duk_put_global_string(ctx_ptr, name);
+}
+
+int duktape_vm_eval(void* c, const char* code) {
+    if (!c || !code) return -1;
+    duk_context* ctx_ptr = (duk_context*)c;
+    duk_int_t rc = dh_peval_string(ctx_ptr, code);
+    if (rc != 0) {
+        return -1;
+    }
+    return 0;
+}
+
+int duktape_vm_result_type(void* c) {
+    if (!c) return AE_DUK_TNIL;
+    duk_context* ctx_ptr = (duk_context*)c;
+    if (g_duk.duk_get_top(ctx_ptr) == 0) return AE_DUK_TNIL;
+    if (g_duk.duk_get_error_code(ctx_ptr, -1) != 0) return AE_DUK_TERR;
+    duk_int_t t = g_duk.duk_get_type(ctx_ptr, -1);
+    switch (t) {
+        case DUK_TYPE_UNDEFINED:
+        case DUK_TYPE_NULL:
+        case DUK_TYPE_NONE:
+            return AE_DUK_TNIL;
+        case DUK_TYPE_BOOLEAN:
+            return AE_DUK_TBOOL;
+        case DUK_TYPE_NUMBER:
+            return AE_DUK_TINT;
+        case DUK_TYPE_STRING:
+            return AE_DUK_TSTR;
+        case DUK_TYPE_OBJECT:
+            return AE_DUK_TTABLE;
+        default:
+            return AE_DUK_TOTHER;
+    }
+}
+
+int64_t duktape_vm_result_int(void* c) {
+    if (!c) return 0;
+    duk_context* ctx_ptr = (duk_context*)c;
+    if (g_duk.duk_get_top(ctx_ptr) == 0) return 0;
+    return (int64_t)g_duk.duk_get_number(ctx_ptr, -1);
+}
+
+const char* duktape_vm_result_str(void* c) {
+    if (!c) return "";
+    duk_context* ctx_ptr = (duk_context*)c;
+    if (g_duk.duk_get_top(ctx_ptr) == 0) return "";
+    return dh_safe_to_string(ctx_ptr, -1);
+}
+
+int duktape_vm_result_bool(void* c) {
+    if (!c) return 0;
+    duk_context* ctx_ptr = (duk_context*)c;
+    if (g_duk.duk_get_top(ctx_ptr) == 0) return 0;
+    return (int)g_duk.duk_get_boolean(ctx_ptr, -1);
+}
+
+void duktape_vm_pop_result(void* c) {
+    if (!c) return;
+    duk_context* ctx_ptr = (duk_context*)c;
+    if (g_duk.duk_get_top(ctx_ptr) > 0) {
+        g_duk.duk_pop(ctx_ptr);
+    }
+}
+
+const char* duktape_vm_set_instruction_limit(void* c, int64_t budget, int every) {
+    (void)c; (void)budget; (void)every;
+    return "execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK";
+}
+
+int duktape_arg_count(void* c) {
+    if (!c) return 0;
+    return (int)g_duk.duk_get_top((duk_context*)c);
+}
+
+int duktape_arg_type(void* c, int i) {
+    if (!c || i < 1) return AE_DUK_TNIL;
+    duk_context* ctx_ptr = (duk_context*)c;
+    duk_idx_t idx = (duk_idx_t)(i - 1);
+    if (idx >= g_duk.duk_get_top(ctx_ptr)) return AE_DUK_TNIL;
+    if (g_duk.duk_get_error_code(ctx_ptr, idx) != 0) return AE_DUK_TERR;
+    duk_int_t t = g_duk.duk_get_type(ctx_ptr, idx);
+    switch (t) {
+        case DUK_TYPE_UNDEFINED:
+        case DUK_TYPE_NULL:
+        case DUK_TYPE_NONE:
+            return AE_DUK_TNIL;
+        case DUK_TYPE_BOOLEAN:
+            return AE_DUK_TBOOL;
+        case DUK_TYPE_NUMBER:
+            return AE_DUK_TINT;
+        case DUK_TYPE_STRING:
+            return AE_DUK_TSTR;
+        case DUK_TYPE_OBJECT:
+            return AE_DUK_TTABLE;
+        default:
+            return AE_DUK_TOTHER;
+    }
+}
+
+const char* duktape_arg_str(void* c, int i) {
+    if (!c || i < 1) return "";
+    duk_context* ctx_ptr = (duk_context*)c;
+    duk_idx_t idx = (duk_idx_t)(i - 1);
+    if (idx >= g_duk.duk_get_top(ctx_ptr)) return "";
+    const char* s = g_duk.duk_get_string(ctx_ptr, idx);
+    return s ? s : "";
+}
+
+int64_t duktape_arg_int(void* c, int i) {
+    if (!c || i < 1) return 0;
+    duk_context* ctx_ptr = (duk_context*)c;
+    duk_idx_t idx = (duk_idx_t)(i - 1);
+    if (idx >= g_duk.duk_get_top(ctx_ptr)) return 0;
+    return (int64_t)g_duk.duk_get_number(ctx_ptr, idx);
+}
+
+int duktape_arg_bool(void* c, int i) {
+    if (!c || i < 1) return 0;
+    duk_context* ctx_ptr = (duk_context*)c;
+    duk_idx_t idx = (duk_idx_t)(i - 1);
+    if (idx >= g_duk.duk_get_top(ctx_ptr)) return 0;
+    return (int)g_duk.duk_get_boolean(ctx_ptr, idx);
+}
+
+void duktape_push_int(void* c, int64_t v) {
+    if (!c) return;
+    g_duk.duk_push_number((duk_context*)c, (double)v);
+}
+
+void duktape_push_str(void* c, const char* v) {
+    if (!c) return;
+    if (v) g_duk.duk_push_string((duk_context*)c, v);
+    else g_duk.duk_push_undefined((duk_context*)c);
+}
+
+void duktape_push_bool(void* c, int v) {
+    if (!c) return;
+    g_duk.duk_push_boolean((duk_context*)c, v != 0 ? 1 : 0);
+}
+
+void duktape_push_nil(void* c) {
+    if (!c) return;
+    g_duk.duk_push_null((duk_context*)c);
+}
+
+void duktape_push_double(void* c, double v) {
+    if (!c) return;
+    g_duk.duk_push_number((duk_context*)c, v);
+}
+
+int duktape_raise_error(void* c, const char* msg) {
+    if (!c) return 0;
+    duk_context* ctx_ptr = (duk_context*)c;
+    g_duk.duk_push_error_object_raw(ctx_ptr, 1 /* DUK_ERR_ERROR */, NULL, 0, "%s", msg ? msg : "error");
+    g_duk.duk_throw_raw(ctx_ptr);
+    return 0;
+}
+
 #else
 #include <stdio.h>
 int duktape_init(void) {
@@ -408,4 +695,29 @@ int duktape_run_sandboxed_with_map(void* perms, const char* code,
   (void)perms; (void)code; (void)token;
   return duktape_init();
 }
+
+void* duktape_vm_new(void) { duktape_init(); return NULL; }
+void duktape_vm_free(void* c) { (void)c; }
+int duktape_vm_register(void* c, const char* name, void* host_fn) { (void)c; (void)name; (void)host_fn; return -1; }
+void duktape_vm_set_global_str(void* c, const char* name, const char* value) { (void)c; (void)name; (void)value; }
+void duktape_vm_set_global_int(void* c, const char* name, int64_t value) { (void)c; (void)name; (void)value; }
+void duktape_vm_set_global_strlist(void* c, const char* name, void* items) { (void)c; (void)name; (void)items; }
+int duktape_vm_eval(void* c, const char* code) { (void)c; (void)code; return -1; }
+int duktape_vm_result_type(void* c) { (void)c; return 0; }
+int64_t duktape_vm_result_int(void* c) { (void)c; return 0; }
+const char* duktape_vm_result_str(void* c) { (void)c; return ""; }
+int duktape_vm_result_bool(void* c) { (void)c; return 0; }
+void duktape_vm_pop_result(void* c) { (void)c; }
+const char* duktape_vm_set_instruction_limit(void* c, int64_t budget, int every) { (void)c; (void)budget; (void)every; return "execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK"; }
+int duktape_arg_count(void* c) { (void)c; return 0; }
+int duktape_arg_type(void* c, int i) { (void)c; (void)i; return 0; }
+const char* duktape_arg_str(void* c, int i) { (void)c; (void)i; return ""; }
+int64_t duktape_arg_int(void* c, int i) { (void)c; (void)i; return 0; }
+int duktape_arg_bool(void* c, int i) { (void)c; (void)i; return 0; }
+void duktape_push_int(void* c, int64_t v) { (void)c; (void)v; }
+void duktape_push_str(void* c, const char* v) { (void)c; (void)v; }
+void duktape_push_bool(void* c, int v) { (void)c; (void)v; }
+void duktape_push_nil(void* c) { (void)c; }
+void duktape_push_double(void* c, double v) { (void)c; (void)v; }
+int duktape_raise_error(void* c, const char* msg) { (void)c; (void)msg; return 0; }
 #endif

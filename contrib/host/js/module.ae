@@ -21,11 +21,55 @@ import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls t
 
 exports (
     js_run_sandboxed, js_run_sandboxed_with_map,
-    js_run, js_init, js_finalize
+    js_run, js_init, js_finalize,
+    // #904 bidirectional API
+    js_vm_new, js_vm_free, js_vm_register,
+    js_vm_set_global_str, js_vm_set_global_int, js_vm_set_global_strlist,
+    js_vm_eval, js_vm_result_type, js_vm_result_int, js_vm_result_str,
+    js_vm_result_bool, js_vm_pop_result, js_vm_set_instruction_limit,
+    js_arg_count, js_arg_type, js_arg_str, js_arg_int, js_arg_bool,
+    js_push_int, js_push_str, js_push_bool, js_push_nil, js_push_double,
+    js_raise_error,
+    // typed-value tags
+    JS_TNIL, JS_TBOOL, JS_TINT, JS_TSTR, JS_TTABLE, JS_TERR, JS_TOTHER
 )
+
+const JS_TNIL   = 0
+const JS_TBOOL  = 1
+const JS_TINT   = 2
+const JS_TSTR   = 3
+const JS_TTABLE = 4
+const JS_TERR   = 5
+const JS_TOTHER = 6
 
 @extern("duktape_run_sandboxed") js_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 @extern("duktape_run_sandboxed_with_map") js_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 @extern("duktape_run") js_run(code: string) -> int
 @extern("duktape_init") js_init() -> int
 @extern("duktape_finalize") js_finalize()
+
+@extern("duktape_vm_new") js_vm_new() -> ptr
+@extern("duktape_vm_free") js_vm_free(vm: ptr)
+@extern("duktape_vm_register") js_vm_register(vm: ptr, name: string, host_fn: ptr) -> int
+@extern("duktape_vm_set_global_str") js_vm_set_global_str(vm: ptr, name: string, value: string)
+@extern("duktape_vm_set_global_int") js_vm_set_global_int(vm: ptr, name: string, value: long)
+@extern("duktape_vm_set_global_strlist") js_vm_set_global_strlist(vm: ptr, name: string, items: ptr)
+@extern("duktape_vm_eval") js_vm_eval(vm: ptr, code: string) -> int
+@extern("duktape_vm_result_type") js_vm_result_type(vm: ptr) -> int
+@extern("duktape_vm_result_int") js_vm_result_int(vm: ptr) -> long
+@extern("duktape_vm_result_str") js_vm_result_str(vm: ptr) -> string
+@extern("duktape_vm_result_bool") js_vm_result_bool(vm: ptr) -> int
+@extern("duktape_vm_pop_result") js_vm_pop_result(vm: ptr)
+@extern("duktape_vm_set_instruction_limit") js_vm_set_instruction_limit(vm: ptr, budget: long, every: int) -> string
+
+@extern("duktape_arg_count") js_arg_count(vm: ptr) -> int
+@extern("duktape_arg_type") js_arg_type(vm: ptr, i: int) -> int
+@extern("duktape_arg_str") js_arg_str(vm: ptr, i: int) -> string
+@extern("duktape_arg_int") js_arg_int(vm: ptr, i: int) -> long
+@extern("duktape_arg_bool") js_arg_bool(vm: ptr, i: int) -> int
+@extern("duktape_push_int") js_push_int(vm: ptr, v: long)
+@extern("duktape_push_str") js_push_str(vm: ptr, v: string)
+@extern("duktape_push_bool") js_push_bool(vm: ptr, v: int)
+@extern("duktape_push_nil") js_push_nil(vm: ptr)
+@extern("duktape_push_double") js_push_double(vm: ptr, v: float)
+@extern("duktape_raise_error") js_raise_error(vm: ptr, msg: string) -> int
