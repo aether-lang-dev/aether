@@ -14,6 +14,58 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.864.0]
+
+### Fixed
+
+- **A zero sandbox verbosity flag stays quiet.**
+  `AETHER_SANDBOX_VERBOSE=0`, the default supplied to sandboxed children, no
+  longer overrides the selected log mode or enables stderr diagnostics.
+
+- **The embedded Python host now restores nested shared-map contexts.**
+  `python.run_sandboxed_with_map` preserves the caller's map token across a
+  nested hosted run and still clears the token when the outermost run returns.
+  A rejected over-depth call no longer replaces the active map context.
+
+- **Shared-map host tests now exercise provisioned language runtimes.** The
+  Lua, JavaScript, Python, Perl, and Ruby bridges now compile with the
+  sandbox ABI enabled and receive their detected runtime library paths,
+  instead of failing before their grant-map checks run.
+
+- **The sweep timeout integration test no longer depends on macOS Bash trap timing.**
+  Its foreground and background helpers now record SIGTERM delivery directly,
+  while the test still verifies process-group cleanup and the timeout status.
+
+- **Effect-tag validation now fails closed at analyzer limits.** A call graph
+  deeper than 128 levels or wider than the 512-function visited set is
+  rejected instead of treating the unexamined path as capability-free.
+
+- **Tuple destructuring now respects lexical containment.** A slot can no
+  longer re-bind an outer name excluded by `hide` or `seal except`; visible
+  locals and new locals inside a sealed block keep their existing behavior.
+
+- **Qualified enum members now retain their lexical prefix.** `hide Color`
+  blocks `Color.Red`, while `seal except Color` permits it; containment no
+  longer checks the generated `Color_Red` constant name.
+
+- **The cross-version ABI matrix expects ELF's merged runtimes.** On Linux and
+  FreeBSD a library with a runtime of its own binds to its importer's runtime,
+  so an Aether consumer of a library from another release is refused by the
+  library's ABI check, with its reason; the matrix failed on every release
+  since 0.860.0 by expecting the pair to run.
+
+### Security
+
+- **Embedded and preload sandbox policies now intersect.** An allowing
+  in-process checker no longer bypasses a stricter shared-memory or file grant
+  list; an operation must satisfy every active containment layer.
+
+- **`std.audit` now returns coherent entries during concurrent writes.** Its
+  field accessors previously released the ring lock between category,
+  resource, and verdict reads, so a wrapped ring could advance and combine
+  fields from different entries. Each accessor sequence now reads one
+  thread-local snapshot.
+
 ## [0.863.0]
 
 ### Fixed
