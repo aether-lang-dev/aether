@@ -12,9 +12,14 @@ network and OS modules) is **not compiled in**, so scripts have **no ambient
 file, network, or OS access of their own**. They reach only what Aether exposes
 to them via host functions.
 
-When code is executed under `quickjs.run_sandboxed(perms, code)`, Aether pushes
-the grant list for the duration of the run so any Aether host function called from
-the script is checked against `perms`.
+`quickjs.run_sandboxed(perms, code)` pushes the grant list for the length of
+the run (and pops it again, also when the script throws). Its script runs in a
+fresh runtime with no host functions, so on its own it can only compute; the
+shared-map variant below adds `aether_map_get` / `aether_map_put`. To give a
+script host functions that are held to grants, register them with
+[`contrib.quickjs`](../../quickjs/README.md) (`quickjs.function`) and run under
+`sandbox.enforce(grants) { … }`: each host function's `fs`, `net` or `os` call is
+then checked against those grants. `test_host_quickjs.ae` shows both.
 
 ## Usage
 

@@ -13,6 +13,10 @@
 // For the full persistent runtime API (handles, closures, values, promises),
 // import `contrib.quickjs` directly.
 import std.sandbox
+// The engine: importing contrib.quickjs is what compiles its C (and the
+// QuickJS amalgamation) into the program, through its @source. Without it a
+// program importing only this module fails to link (qjs_* undefined).
+import contrib.quickjs as qjs_engine
 
 exports (
     quickjs_run_sandboxed, quickjs_run_sandboxed_with_map,

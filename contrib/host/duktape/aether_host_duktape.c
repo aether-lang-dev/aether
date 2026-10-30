@@ -27,6 +27,7 @@
 #ifdef AETHER_HAS_DUKTAPE
 #include <duktape.h>
 #include <dlfcn.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -67,6 +68,7 @@ static struct {
     // Stack manipulation.
     duk_idx_t (*duk_get_top)(duk_context* ctx);
     void (*duk_pop)(duk_context* ctx);
+    void (*duk_replace)(duk_context* ctx, duk_idx_t to_idx);
     // Value pushers.
     const char* (*duk_push_string)(duk_context* ctx, const char* str);
     void (*duk_push_int)(duk_context* ctx, duk_int_t val);
@@ -119,6 +121,7 @@ static int resolve_duktape_symbols(void* h) {
     RESOLVE(duk_safe_to_lstring,       "duk_safe_to_lstring");
     RESOLVE(duk_get_top,               "duk_get_top");
     RESOLVE(duk_pop,                   "duk_pop");
+    RESOLVE(duk_replace,               "duk_replace");
     RESOLVE(duk_push_string,           "duk_push_string");
     RESOLVE(duk_push_int,              "duk_push_int");
     RESOLVE(duk_push_boolean,          "duk_push_boolean");
@@ -444,6 +447,13 @@ void duktape_vm_free(void* c) {
     g_duk.duk_destroy_heap(ctx_to_free);
 }
 
+// What duktape_raise_error returns, so a host fn can `return
+// duktape.raise_error(vm, msg)`. The Error is already on the stack; the
+// trampoline throws it after the host fn has returned. Throwing inside
+// raise_error would longjmp out of the Aether host fn and skip its cleanup
+// (defers, releases).
+#define AE_DUK_RAISE (-1)
+
 static duk_ret_t duktape_host_cb_trampoline(duk_context* c) {
     g_duk.duk_push_current_function(c);
     g_duk.duk_get_prop_string(c, -1, "\xFFhost_fn");
@@ -452,7 +462,23 @@ static duk_ret_t duktape_host_cb_trampoline(duk_context* c) {
     g_duk.duk_pop(c); // pop function
     if (!host_fn) return 0;
     int (*fn)(void*) = (int (*)(void*))host_fn;
-    return (duk_ret_t)fn((void*)c);
+    int rc = fn((void*)c);
+    if (rc == AE_DUK_RAISE) g_duk.duk_throw_raw(c);
+    // Duktape reads a C function's return as 0 (undefined), 1 (the stack
+    // top) or a negative error code; pass nothing else through.
+    return rc > 0 ? 1 : 0;
+}
+
+// A JS number as int64 without undefined behaviour: a C cast of NaN or of
+// a value outside int64's range is UB. Non-numbers and NaN read as 0;
+// out-of-range values saturate.
+static int64_t duktape_number_to_i64(duk_context* c, duk_idx_t idx) {
+    if (g_duk.duk_get_type(c, idx) != DUK_TYPE_NUMBER) return 0;
+    double d = g_duk.duk_get_number(c, idx);
+    if (d != d) return 0;
+    if (d >= 9223372036854775807.0) return INT64_MAX;
+    if (d <= -9223372036854775808.0) return INT64_MIN;
+    return (int64_t)d;
 }
 
 int duktape_vm_register(void* c, const char* name, void* host_fn) {
@@ -460,8 +486,9 @@ int duktape_vm_register(void* c, const char* name, void* host_fn) {
     duk_context* ctx_ptr = (duk_context*)c;
 
     char tmp[256];
-    strncpy(tmp, name, sizeof(tmp) - 1);
-    tmp[sizeof(tmp) - 1] = '\0';
+    size_t name_len = strlen(name);
+    if (name_len >= sizeof(tmp)) return -1;   // not silently truncated
+    memcpy(tmp, name, name_len + 1);
 
     g_duk.duk_push_global_object(ctx_ptr);
     int depth_pushed = 1;
@@ -529,6 +556,14 @@ int duktape_vm_eval(void* c, const char* code) {
     duk_context* ctx_ptr = (duk_context*)c;
     duk_int_t rc = dh_peval_string(ctx_ptr, code);
     if (rc != 0) {
+        // The stack top is now what was thrown. Make it an Error, so
+        // vm_result_type reads DUKTAPE_TERR from the value itself even for
+        // `throw "x"`.
+        if (g_duk.duk_get_error_code(ctx_ptr, -1) == 0) {
+            const char* m = dh_safe_to_string(ctx_ptr, -1);
+            g_duk.duk_push_error_object_raw(ctx_ptr, 1 /* DUK_ERR_ERROR */, NULL, 0, "%s", m ? m : "error");
+            g_duk.duk_replace(ctx_ptr, -2);
+        }
         return -1;
     }
     return 0;
@@ -562,7 +597,7 @@ int64_t duktape_vm_result_int(void* c) {
     if (!c) return 0;
     duk_context* ctx_ptr = (duk_context*)c;
     if (g_duk.duk_get_top(ctx_ptr) == 0) return 0;
-    return (int64_t)g_duk.duk_get_number(ctx_ptr, -1);
+    return duktape_number_to_i64(ctx_ptr, -1);
 }
 
 const char* duktape_vm_result_str(void* c) {
@@ -636,7 +671,7 @@ int64_t duktape_arg_int(void* c, int i) {
     duk_context* ctx_ptr = (duk_context*)c;
     duk_idx_t idx = (duk_idx_t)(i - 1);
     if (idx >= g_duk.duk_get_top(ctx_ptr)) return 0;
-    return (int64_t)g_duk.duk_get_number(ctx_ptr, idx);
+    return duktape_number_to_i64(ctx_ptr, idx);
 }
 
 int duktape_arg_bool(void* c, int i) {
@@ -677,8 +712,7 @@ int duktape_raise_error(void* c, const char* msg) {
     if (!c) return 0;
     duk_context* ctx_ptr = (duk_context*)c;
     g_duk.duk_push_error_object_raw(ctx_ptr, 1 /* DUK_ERR_ERROR */, NULL, 0, "%s", msg ? msg : "error");
-    g_duk.duk_throw_raw(ctx_ptr);
-    return 0;
+    return AE_DUK_RAISE;   // the trampoline throws it
 }
 
 #else
@@ -719,5 +753,5 @@ void duktape_push_str(void* c, const char* v) { (void)c; (void)v; }
 void duktape_push_bool(void* c, int v) { (void)c; (void)v; }
 void duktape_push_nil(void* c) { (void)c; }
 void duktape_push_double(void* c, double v) { (void)c; (void)v; }
-int duktape_raise_error(void* c, const char* msg) { (void)c; (void)msg; return 0; }
+int duktape_raise_error(void* c, const char* msg) { (void)c; (void)msg; return -1; }
 #endif

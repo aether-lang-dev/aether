@@ -122,7 +122,7 @@ main() {
 | `duktape.vm_set_instruction_limit(vm, budget, every) -> string` | returns `"execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK"` because system libduktape packages disable this build option |
 | `duktape.arg_count/_type/_str/_int/_bool(vm, i)` | **inside a callback**: read args (1-based) |
 | `duktape.push_int/_str/_bool/_nil/_double(vm, v)` | **inside a callback**: push a result value |
-| `duktape.raise_error(vm, msg) -> int` | raise a JS `Error` from a callback (`return duktape.raise_error(vm, msg)`) |
+| `duktape.raise_error(vm, msg) -> int` | raise a JS `Error` from a callback: `return duktape.raise_error(vm, msg)`. The error is thrown into the script after the callback returns, so the callback's defers still run |
 
 Typed-value tags exported as consts: `DUK_TNIL`, `DUK_TBOOL`, `DUK_TINT`,
 `DUK_TSTR`, `DUK_TTABLE`, `DUK_TERR`, `DUK_TOTHER`.

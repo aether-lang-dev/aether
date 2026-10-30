@@ -12,13 +12,16 @@ case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) echo "  [SKIP] host_duktape_bidirectional on Windows"; exit 0 ;;
 esac
 
-DUK_CFLAGS="${DUK_CFLAGS:-}"; DUK_SONAME="${AETHER_DUKTAPE_SONAME:-}"
-if [ -z "$DUK_CFLAGS" ]; then
-    if pkg-config --exists duktape 2>/dev/null; then
-        DUK_CFLAGS="$(pkg-config --cflags duktape)"
-    elif [ -f "/usr/include/duktape.h" ]; then
-        DUK_CFLAGS="-I/usr/include"
-    fi
+# Headers are found separately from DUK_CFLAGS: pkg-config prints no flags
+# when duktape.h sits in a default include directory, and an empty
+# DUK_CFLAGS must not read as "no headers".
+DUK_CFLAGS="${DUK_CFLAGS:-}"; DUK_SONAME="${AETHER_DUKTAPE_SONAME:-}"; DUK_HEADERS=0
+if [ -n "$DUK_CFLAGS" ]; then
+    DUK_HEADERS=1
+elif pkg-config --exists duktape 2>/dev/null; then
+    DUK_CFLAGS="$(pkg-config --cflags duktape)"; DUK_HEADERS=1
+elif [ -f "/usr/include/duktape.h" ] || [ -f "/usr/local/include/duktape.h" ]; then
+    DUK_HEADERS=1
 fi
 
 if [ -z "$DUK_SONAME" ]; then
@@ -29,7 +32,7 @@ if [ -z "$DUK_SONAME" ]; then
     fi
 fi
 
-if [ -z "$DUK_CFLAGS" ] || [ -z "$DUK_SONAME" ]; then
+if [ "$DUK_HEADERS" -ne 1 ] || [ -z "$DUK_SONAME" ]; then
     echo "  [SKIP] host_duktape_bidirectional: no matching libduktape headers+runtime"; exit 0
 fi
 [ -f "$ROOT/build/libaether.a" ] || { echo "  [SKIP] libaether.a not built"; exit 0; }
@@ -166,9 +169,10 @@ int main(void) {
 }
 CEOF
 then
-    echo "  [SKIP] host_duktape_bidirectional: harness compile/link failed"
+    # Headers and runtime are present, so a build failure is a real failure.
+    echo "  [FAIL] host_duktape_bidirectional: harness compile/link failed"
     head -8 "$TMPDIR/cc.log" | sed 's/^/      /'
-    exit 0
+    exit 1
 fi
 
 OUT="$("$TMPDIR/t" 2>&1)"

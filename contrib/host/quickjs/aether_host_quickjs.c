@@ -17,7 +17,11 @@ extern int qjs_eval(void* q, const char* code, const char* filename, int flags);
 extern const char* qjs_error(void* q);
 extern void qjs_release(void* q, int h);
 extern int qjs_function(void *qp, const char *name, int arity, AeQjsClosure cb);
-extern void qjs_set_global(void *qp, const char *name, int v);
+// Defined by contrib/quickjs/aether_quickjs.c, which a program gets by
+// importing contrib.quickjs (this module's module.ae does). These must
+// match those definitions exactly; there is no shared header.
+extern int qjs_global(void *qp);
+extern int qjs_set(void *qp, int obj, const char *name, int val);
 extern int qjs_string(void *qp, const char *s);
 extern int qjs_undefined(void *qp);
 extern int qjs_get_index(void *qp, int obj, int i);
@@ -67,6 +71,9 @@ int quickjs_run_sandboxed(void* perms, const char* code) {
     aether_sandbox_pop();
     return res;
 }
+
+// Not in aether_shared_map.h; the Duktape host declares it the same way.
+extern void aether_shared_map_freeze_inputs_by_token(uint64_t token);
 
 static uint64_t quickjs_current_map_token = 0;
 

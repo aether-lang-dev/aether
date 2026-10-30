@@ -33,7 +33,10 @@ main() {
                 "an erroring script returns non-zero")
         }
 
-        spec.it_when(have_qjs, "quickjs.run_sandboxed enforces sandbox grants", reason) callback {
+        // QuickJS has no file, network or OS access of its own; grants decide
+        // what the Aether host functions a script calls may do. This checks
+        // that model (contrib.quickjs host functions under sandbox.enforce).
+        spec.it_when(have_qjs, "host functions a script calls are held to the grants in force", reason) callback {
             reader = sandbox.new("reader") {
                 grant_fs_read("/etc/hostname")
             }
@@ -95,6 +98,29 @@ main() {
             spec.assert_str_eq(aether_shared_map_get(map, "reply"), "hello Alice", "aether_map_put reply matches")
             spec.assert_str_eq(aether_shared_map_get(map, "doubled"), "10", "aether_map_put doubled matches")
 
+            aether_shared_map_revoke_token(token)
+            aether_shared_map_free(map)
+        }
+
+        // The wrappers push the grants for the run and must pop them again,
+        // also when the script throws; a leftover level would hold every
+        // later call to grants it never asked for.
+        spec.it_when(have_qjs, "run_sandboxed and run_sandboxed_with_map leave the grant stack as they found it", reason) callback {
+            g = sandbox.new("g") { grant_env("TERM") }
+            defer sandbox.free(g)
+            before = aether_sandbox_depth()
+
+            spec.assert_eq(quickjs.run_sandboxed(g, "var ok = 1;"), 0, "a good script runs")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after success")
+            spec.assert_not_eq(quickjs.run_sandboxed(g, "throw new Error(\"boom\");"), 0, "a throwing script fails")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after an error")
+
+            token_buf = c_malloc(8)
+            map = aether_shared_map_new(token_buf)
+            token = mem.get_long(token_buf, 0)
+            c_free(token_buf)
+            spec.assert_not_eq(quickjs.run_sandboxed_with_map(g, "throw new Error(\"boom\");", token), 0, "a throwing map script fails")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after a map script error")
             aether_shared_map_revoke_token(token)
             aether_shared_map_free(map)
         }

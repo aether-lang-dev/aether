@@ -1367,6 +1367,7 @@ sandboxes. Each hosted language is a module under `contrib/host/`.
 contrib/host/python/, import contrib.host.python   (CPython 3.x)
 contrib/host/lua/, import contrib.host.lua      (Lua 5.3)
 contrib/host/duktape/, import contrib.host.duktape (Duktape ES5)
+contrib/host/js/, import contrib.host.js       (alias of duktape)
 contrib/host/quickjs/, import contrib.host.quickjs (QuickJS ES2023)
 contrib/host/perl/, import contrib.host.perl     (Perl 5.x)
 contrib/host/ruby/, import contrib.host.ruby     (CRuby 3.x)

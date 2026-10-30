@@ -3,6 +3,8 @@
 import contrib.host.duktape
 import std.spec
 import std.string
+import std.os
+import std.list
 
 @c_callback
 cb_add(vm: ptr) -> int {
@@ -42,6 +44,22 @@ cb_echo_double(vm: ptr) -> int {
 cb_raise_err(vm: ptr) -> int {
     msg = duktape.arg_str(vm, 1)
     return duktape.raise_error(vm, msg)
+}
+
+// Raises, with a defer that must still run: raise_error returns to the
+// trampoline, which throws only after this function has returned.
+@c_callback
+cb_raise_with_cleanup(vm: ptr) -> int {
+    defer os.setenv("AE_DUK_CB_CLEANUP", "ran")
+    return duktape.raise_error(vm, "raised after cleanup")
+}
+
+// Pushes two values and returns 2; the call's result is the stack top.
+@c_callback
+cb_two_values(vm: ptr) -> int {
+    duktape.push_int(vm, 1)
+    duktape.push_int(vm, 2)
+    return 2
 }
 
 main() {
@@ -94,8 +112,11 @@ main() {
             duktape.vm_set_global_str(vm, "GSTR", "héllo €")
             duktape.vm_set_global_int(vm, "GINT", 100)
 
-            let keys: *StringList = ["k1", "k2"]
+            keys = list.new()
+            list.add(keys, "k1")
+            list.add(keys, "k2")
             duktape.vm_set_global_strlist(vm, "KEYS", keys)
+            list.free(keys)
 
             // Dotted callback and persistent state
             rc1 = duktape.vm_eval(vm, "var x = app.math.add(2, 3); x += GINT; x;")
@@ -145,6 +166,59 @@ main() {
             // Execution limit return message check
             lim_msg = duktape.vm_set_instruction_limit(vm, 1000, 10)
             spec.assert_true(string.contains(lim_msg, "execution limit unavailable"), "execution limit unavailable message")
+
+            duktape.vm_free(vm)
+        }
+
+        spec.it_when(have_duktape, "errors, numbers and callback returns are well defined", reason) callback {
+            vm = duktape.vm_new()
+            spec.assert_not_null(vm, "vm_new created VM")
+
+            // A thrown non-Error is still an error result.
+            rc_s = duktape.vm_eval(vm, "throw 'plain string';")
+            spec.assert_not_eq(rc_s, 0, "throwing a string fails the eval")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TERR, "a thrown string reads as an error")
+            spec.assert_true(string.contains(duktape.vm_result_str(vm), "plain string"), "the error keeps the thrown text")
+            duktape.vm_pop_result(vm)
+
+            // Numbers that are not int64 read without undefined behaviour.
+            duktape.vm_eval(vm, "0 / 0")
+            nan_v = duktape.vm_result_int(vm)
+            spec.assert_true(nan_v == 0, "NaN reads as 0 (a 64-bit compare: assert_eq would truncate)")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "1e30")
+            big = duktape.vm_result_int(vm)
+            spec.assert_true(big == 9223372036854775807, "a huge number saturates to the int64 maximum")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "-1e30")
+            spec.assert_true(duktape.vm_result_int(vm) < 0, "a huge negative number saturates negative")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "'not a number'")
+            str_v = duktape.vm_result_int(vm)
+            spec.assert_true(str_v == 0, "a string reads as 0")
+            duktape.vm_pop_result(vm)
+
+            // A callback's cleanup runs even when it raises.
+            _se = os.setenv("AE_DUK_CB_CLEANUP", "")
+            duktape.vm_register(vm, "host.raise_cleanup", cb_raise_with_cleanup)
+            rc_r = duktape.vm_eval(vm, "try { host.raise_cleanup(); 'no throw'; } catch (e) { e.message; }")
+            spec.assert_eq(rc_r, 0, "the raise is catchable")
+            spec.assert_str_eq(duktape.vm_result_str(vm), "raised after cleanup", "the caught message")
+            duktape.vm_pop_result(vm)
+            cleanup = os.getenv("AE_DUK_CB_CLEANUP")
+            spec.assert_str_eq(cleanup, "ran", "the raising callback's defer ran")
+
+            // A callback returning more than one value returns its top.
+            duktape.vm_register(vm, "host.two", cb_two_values)
+            rc_t = duktape.vm_eval(vm, "host.two()")
+            spec.assert_eq(rc_t, 0, "returning 2 is not an error")
+            spec.assert_eq(duktape.vm_result_int(vm), 2, "the result is the stack top")
+            duktape.vm_pop_result(vm)
+
+            // A name too long for the registration buffer is refused, not truncated.
+            long_name = "n"
+            while string.length(long_name) < 300 { long_name = string.concat(long_name, "n") }
+            spec.assert_eq(duktape.vm_register(vm, long_name, cb_two_values), -1, "a 300-character name is refused")
 
             duktape.vm_free(vm)
         }
