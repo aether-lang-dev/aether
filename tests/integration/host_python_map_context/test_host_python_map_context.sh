@@ -32,16 +32,21 @@ if [ ! -f "$ROOT/build/libaether.a" ]; then
 fi
 export AETHER_PYTHON_SONAME="$PY_SONAME"
 
+# librt exists (and is needed for shm_open) on older Linux glibc only; macOS
+# has no -lrt.
+RT_LIB=""
+[ "$(uname -s 2>/dev/null)" = "Linux" ] && RT_LIB="-lrt"
+
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-if ! gcc -o "$TMPDIR/test_python_map_context" \
+if ! ${CC:-gcc} -o "$TMPDIR/test_python_map_context" \
     "$ROOT/contrib/host/python/aether_host_python.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
     $PY_CFLAGS -I"$ROOT" -I"$ROOT/runtime" \
     -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX -rdynamic \
-    -L"$ROOT/build" -laether $PY_LIBS -ldl -lm -lrt -lpthread \
+    -L"$ROOT/build" -laether $PY_LIBS -ldl -lm $RT_LIB -lpthread \
     -Wno-discarded-qualifiers \
     -xc - 2>"$TMPDIR/cc.log" <<'CEOF'
 #include <stdint.h>
@@ -135,9 +140,10 @@ int main(void)
 }
 CEOF
 then
-    echo "  [SKIP] host_python_map_context: harness compile/link failed"
+    # python3-config was found, so a build failure is a real failure.
+    echo "  [FAIL] host_python_map_context: harness compile/link failed"
     head -12 "$TMPDIR/cc.log" | sed 's/^/      /'
-    exit 0
+    exit 1
 fi
 
 "$TMPDIR/test_python_map_context"
