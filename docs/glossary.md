@@ -44,8 +44,8 @@ clause. [Contracts](language-reference.md#function-contracts-requires--ensures)
 **cooperative scheduler.** The scheduler for targets without threads
 (WebAssembly, ESP32): every actor runs on one thread, stepped in turn.
 
-**core.** One of the scheduler's threads, one per CPU by default. Each runs
-the actors assigned to it.
+**core.** One of the scheduler's threads: one per CPU the process may use,
+up to 16. Each runs the actors assigned to it.
 
 **counted value.** A string, closure, or a struct, array, tuple or optional
 made from them. Every place that holds one owns one reference, and the
