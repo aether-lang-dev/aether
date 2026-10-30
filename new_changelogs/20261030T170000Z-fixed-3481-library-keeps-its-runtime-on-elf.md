@@ -8,13 +8,15 @@
   on Linux since 0.861.0. `ae` now links such a library `-Bsymbolic`,
   natively and in cross builds, as macOS and Windows keep the copies apart
   by themselves, so on every platform a static-runtime library runs on its
-  own runtime: `ae` refuses an import that needs one runtime (a struct
-  holding strings, a builder using its config) and warns that a library's
-  actors are not drained at exit, naming `--shared-runtime`, as it did on
-  macOS and Windows. Such a library names the `own_runtime` duty in its
-  catalog, so an importer of 0.864.0 or before, which took ELF's copies as
-  merged, refuses it instead of letting the two runtimes free each other's
-  values. A library of another runtime ABI linked before this is refused
+  own runtime: `ae` refuses an import that needs one runtime (a struct or
+  tuple holding strings, a builder using its config) and warns that a
+  library's actors are not drained at exit, naming `--shared-runtime`, as
+  it did on macOS and Windows. On ELF such a library, and one that runs
+  actors, names the `own_runtime` duty in its catalog, so an importer of
+  0.860.0 to 0.864.0, which took ELF's copies as merged, refuses it instead
+  of letting the two runtimes free each other's values. `--shared-runtime`
+  with `--target` is refused: a cross-built library carries the target's
+  runtime. A library of another runtime ABI linked before this is refused
   at import on ELF, naming the rebuild, instead of ending the program. A
   failure inside a library still reaches a `try` around the call: the
   import stub raises it again (#2956). This replaces 0.864.0's note that

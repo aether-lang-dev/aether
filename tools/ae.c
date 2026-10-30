@@ -69,6 +69,7 @@ extern char** environ;
  * `compiler/aether_lib_path.h` (a tiny no-AST-deps header) so this
  * include is light. Issue #413. */
 #include "../compiler/aether_lib_path.h"
+#include "../compiler/aether_lib_strings.h"   /* #3481: what a library value holds, read as codegen reads it */
 #include "../compiler/aether_source_text.h"
 
 #include "apkg/toml_parser.h"
@@ -531,8 +532,11 @@ static int ae_elf_binds_own(const char* path) {
         int phentsize = (int)ae_elf_field(eh + (is64 ? 54 : 42), 2, big);
         int phnum = (int)ae_elf_field(eh + (is64 ? 56 : 44), 2, big);
         unsigned char ph[56];
-        /* PN_XNUM (0xffff) keeps the real count elsewhere: not read here. */
-        for (int i = 0; i < phnum && phnum != 0xffff && phentsize >= (is64 ? 56 : 32) && r < 0; i++) {
+        /* PN_XNUM (0xffff) keeps the real count elsewhere: not read here. An
+         * offset past LONG_MAX is refused up front, so the sum below (under
+         * 2^32 past it) cannot wrap. */
+        for (int i = 0; i < phnum && phnum != 0xffff && phentsize >= (is64 ? 56 : 32) &&
+                        phoff <= (uint64_t)LONG_MAX && r < 0; i++) {
             uint64_t at = phoff + (uint64_t)i * (uint64_t)phentsize;
             if (at > (uint64_t)LONG_MAX || fseek(f, (long)at, SEEK_SET) != 0 ||
                 fread(ph, 1, is64 ? 56 : 32, f) != (size_t)(is64 ? 56 : 32))
@@ -5782,75 +5786,33 @@ static int ae_lib_provides_module(const char* so_path, const char* module) {
     return found;
 }
 
-/* #2931: whether a value of catalog type `type` holds a counted string,
- * itself or in a field of a struct the catalog records (by value or through
- * a typed pointer). A function pointer holds none. */
-static int ae_type_holds_string(const _AeLibInfoMeta* m, int minor, const char* type, int depth) {
-    /* A parameter's `@keep` or `@into` (#3013) is not part of its type. */
-    while (*type == ' ' || *type == '@') {
-        if (*type == '@')
-            while (*type && *type != ' ') type++;
-        else
-            type++;
+/* #2931: the catalog's struct records, as aether_lib_strings.h reads them
+ * (schema >= 1.3; an older catalog records none). */
+typedef struct { const _AeLibInfoMeta* m; int minor; } AeLibStructs;
+
+static const char* ae_lib_field_type(const void* ctx, const char* name, size_t len, int k) {
+    const AeLibStructs* s = (const AeLibStructs*)ctx;
+    if (s->minor < 3 || !s->m->structs) return NULL;
+    for (int i = 0; i < s->m->struct_count; i++) {
+        const _AeLibInfoStruct* st = &s->m->structs[i];
+        if (!st->name || strlen(st->name) != len || strncmp(st->name, name, len) != 0) continue;
+        if (k >= st->field_count || !st->fields) return NULL;
+        return st->fields[k].type ? st->fields[k].type : "";
     }
-    while (*type == ' ' || *type == '*') type++;
-    if (strncmp(type, "struct ", 7) == 0) type += 7;
-    if (strncmp(type, "fn", 2) == 0 && !(isalnum((unsigned char)type[2]) || type[2] == '_'))
-        return 0;
-    size_t n = 0;
-    while (isalnum((unsigned char)type[n]) || type[n] == '_') n++;
-    if (n == 6 && strncmp(type, "string", 6) == 0) return 1;
-    if (depth > 16 || minor < 3 || !m->structs) return 0;
-    for (int i = 0; i < m->struct_count; i++) {
-        const _AeLibInfoStruct* st = &m->structs[i];
-        if (!st->name || strlen(st->name) != n || strncmp(st->name, type, n) != 0) continue;
-        for (int k = 0; k < st->field_count && st->fields; k++)
-            if (st->fields[k].type &&
-                ae_type_holds_string(m, minor, st->fields[k].type, depth + 1)) return 1;
-        return 0;
-    }
-    return 0;
+    return NULL;
 }
 
-/* The struct a signature ("(a: A, b: B) -> R" or "(A, B) -> R") passes
- * that holds a counted string, NULL when there is none; a plain string
- * crosses as itself, so it does not count here. */
+/* The type a signature passes that holds a counted string, NULL when there
+ * is none (aether_lib_signature_string_type). */
 static const char* ae_signature_string_struct(const _AeLibInfoMeta* m, int minor,
                                               const char* sig, char* out, size_t cap) {
-    if (!sig) return NULL;
-    int depth = 0;
-    const char* start = sig[0] == '(' ? sig + 1 : sig;
-    for (const char* p = start; ; p++) {
-        if (*p == '(') depth++;
-        else if (*p == ')' && depth > 0) depth--;
-        else if (*p == '\0' || (depth == 0 && (*p == ',' || *p == ')'))) {
-            const char* t = start;
-            for (const char* q = start; q < p; q++)
-                if (*q == ':') { t = q + 1; break; }
-            while (t < p && (*t == ' ' || *t == '-' || *t == '>')) t++;
-            snprintf(out, cap, "%.*s", (int)(p - t), t);
-            size_t len = strlen(out);
-            while (len > 0 && out[len - 1] == ' ') out[--len] = '\0';
-            const char* bare = out;
-            while (*bare == '*') bare++;
-            if (strncmp(bare, "struct ", 7) == 0) bare += 7;
-            if (strcmp(bare, "string") != 0 && ae_type_holds_string(m, minor, out, 0)) return out;
-            if (*p == '\0') return NULL;
-            start = p + 1;
-            if (*p == ')') {
-                /* The parameters end here; the result follows the arrow. */
-                const char* arrow = strstr(start, "->");
-                if (!arrow) return NULL;
-                p = arrow + 1;
-                start = arrow + 2;
-            }
-        }
-    }
+    AeLibStructs s = { m, minor };
+    return aether_lib_signature_string_type(sig, ae_lib_field_type, &s, out, cap);
 }
 
 /* #2931, #2861: two copies of the runtime cannot free each other's counted
- * values. A string crosses as a copy; a struct holding strings (by value or
- * through a typed pointer, where the program's stores release the
+ * values. A string crosses as a copy; a struct or tuple holding strings (by
+ * value or through a typed pointer, where the program's stores release the
  * library's strings) and a builder's config the library uses have no copy,
  * so a library that keeps its own runtime (every platform since #3481: on
  * ELF it no longer binds to the program's) has such an import refused,
@@ -10130,6 +10092,19 @@ static int cmd_build(int argc, char** argv) {
             "--target=aarch64-ios).\n"
             "  For a native static library, link your objects against the "
             "installed libaether.a — see `ae cflags`.\n");
+        return 1;
+    }
+
+    /* #3481: a cross-built library links the target's runtime into itself
+     * (it has no shared runtime to link), and on ELF keeps it -Bsymbolic.
+     * Its catalog would say the runtime is shared while it runs on its own,
+     * and the importer would skip the refusal of what needs one runtime. */
+    if (is_cross && g_emit_lib && g_shared_runtime && !g_emit_csrc && !g_emit_obj) {
+        fprintf(stderr,
+            "Error: --shared-runtime is not available with --target: a cross-built "
+            "library carries the target's runtime.\n"
+            "  Build it on the target with `ae build --emit=lib --shared-runtime`, "
+            "or leave the flag out for a library with a runtime of its own.\n");
         return 1;
     }
 

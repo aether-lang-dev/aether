@@ -57,6 +57,12 @@ run_pass() {
         # 1.11: every catalog has the outcome slot (#2956) and the host ABI, the runtime ABI and the duties (#2957); `actors` (1.7) is in it.
         echo "$INFO" | grep -q "Schema:[[:space:]]*1\.11" || { echo "$INFO"; fail "$label: lib$lib's schema is not 1.11"; }
         echo "$INFO" | grep -q "Actors:[[:space:]]*yes" || { echo "$INFO"; fail "$label: lib$lib's catalog does not say it runs actors"; }
+        # #3481: on ELF a library with a runtime of its own names `own_runtime`,
+        # so an importer of 0.860.0 to 0.864.0, which took that runtime as the
+        # program's, refuses it; elsewhere, and on the shared runtime, none does.
+        want=0; [ "$SO_EXT" = .so ] && [ "$drains" = 0 ] && want=1
+        has=0; echo "$INFO" | grep -q "Requires:.*own_runtime" && has=1
+        [ "$has" = "$want" ] || { echo "$INFO"; fail "$label: lib$lib names own_runtime: $has, expected $want"; }
     done
 
     OUT="$(AETHER_HOME="$ROOT" "$AE" run app.ae 2>run.log)" || { echo "$OUT"; fail "$label: ae run app.ae" run.log; }

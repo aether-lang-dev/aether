@@ -39,6 +39,7 @@ catalog asks of its importer is listed in `requires`, its duties:
 | `shared_runtime` | link the program against the shared runtime the library runs on (1.5) |
 | `runtime_abi` | check that runtime is the one the library was made for (1.11) |
 | `actors` | run the library's actors on the program's scheduler (1.7) |
+| `own_runtime` | keep apart from the program's the runtime the library carries: refuse what needs one runtime, warn that its actors are not drained (#3481; named on ELF only, by a static-runtime library that has such an export or runs actors) |
 
 An importer that finds a duty it does not know refuses the library, naming
 the duty, both Aether versions and the fix (upgrade `ae`, or rebuild the
@@ -91,7 +92,8 @@ catalogs and libraries compiled for a runtime of another ABI.
 |---|---|
 | A C host and a self-contained library of any version | Yes, using the functions of the library's level (read `host_abi`); a host built with older headers uses its own level's |
 | An Aether program importing a self-contained library | Yes, when the importer knows every duty the catalog requires; a library of an older version is read by its minor. On ELF, a library of another runtime ABI linked before #3481 (without `-Bsymbolic`, so it would run on the program's runtime) is refused at import, naming the rebuild |
-| An importer older than schema 1.11 and a newer library | Calls that succeed work; it cannot read `requires`, so it does not check outcomes, and a failed call reads as its zero value, as with 0.856's own libraries |
+| An importer older than schema 1.11 and a newer library | Calls that succeed work; it cannot read `requires`, so it does not check outcomes, and a failed call reads as its zero value, as with 0.856's own libraries. On ELF it also takes a library's own runtime as the program's, so it does not refuse a value that needs one runtime (#3481); rebuild such a library with `--shared-runtime` for it |
+| An importer of 0.860.0 to 0.864.0 and an ELF library of a later `ae` | Refused when the library names `own_runtime` (#3481); read otherwise |
 | Anything on `--shared-runtime` | Only on the runtime it was made for (one runtime ABI ID) |
 | Two self-contained libraries of different versions in one process | Yes; each runs on its own runtime, and the shared facilities are refused across layouts |
 | `--emit=csrc` and `--emit=obj` | Only with the runtime of the Aether that generated them |

@@ -69,6 +69,13 @@ refused() {
     grep -qF "ae build --emit=lib --shared-runtime" "$1.log" || fail "$3: the refusal does not name the rebuild" "$1.log"
 }
 
+# duty <library> <names own_runtime: 1 or 0> <label>
+duty() {
+    AETHER_HOME="$ROOT" "$AE" lib-info "./$1" >"$1.info" 2>&1 || fail "$3: ae lib-info $1" "$1.info"
+    has=0; grep -q "Requires:.*own_runtime" "$1.info" && has=1
+    [ "$has" = "$2" ] || fail "$3: $1 names own_runtime: $has, expected $2" "$1.info"
+}
+
 # run_pass <dir> <library flags> <label> <one runtime: 1 or 0>
 run_pass() {
     dir="$1"; flags="$2"; label="$3"; one="$4"
@@ -80,6 +87,14 @@ run_pass() {
             || fail "$label: ae build --emit=lib $lib.ae" "$lib.log"
         rm -f "$lib.ae"
     done
+    # #3481: on ELF a library with a runtime of its own names `own_runtime`
+    # for what needs one runtime, so an importer of 0.860.0 to 0.864.0, which
+    # took that runtime as the program's, refuses it; a library without such
+    # a value, one elsewhere, and one on the shared runtime name none.
+    want=0; [ "$SO_EXT" = .so ] && [ "$one" = 0 ] && want=1
+    duty "libtext$SO_EXT" 0 "$label"
+    duty "librec$SO_EXT" "$want" "$label"
+    duty "libfrees$SO_EXT" "$want" "$label"
 
     build_app app_text "$label"
     echo "$OUT" | grep -q "^hi world$" || { echo "$OUT"; fail "$label: text.greet"; }

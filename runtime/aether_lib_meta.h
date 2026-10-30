@@ -105,9 +105,11 @@
  * against the runtime they run on before the first call; and `requires`,
  * the duties its importer must perform, by name, comma-separated:
  * outcome_check (1.10), string_release (1.9), shared_runtime (1.5),
- * runtime_abi (1.11), actors (1.7). An importer refuses a catalog that
- * requires a duty it does not know, and reads one whose newer fields it
- * only does not know (docs/abi-policy.md). Every catalog is "1.11".
+ * runtime_abi (1.11), actors (1.7), and on ELF own_runtime (#3481: the
+ * library keeps the runtime it carries apart from the program's). An
+ * importer refuses a catalog that requires a duty it does not know, and
+ * reads one whose newer fields it only does not know (docs/abi-policy.md).
+ * Every catalog is "1.11".
  *
  * Schema versioning: `schema_version` is "1.0" for function-only
  * artifacts, "1.1" once closure records are present, "1.2" once

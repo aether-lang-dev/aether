@@ -142,7 +142,7 @@ content-addressable. Fields:
 | `structs[]` | Schema 1.3: the structs the exports use, `name`, `kind` (`""`, `"extern"`, `"extern_packed"`), `fields[]` (`name`, `type` as Aether source, `flags`), `source_file`, `source_line` |
 | `host_abi` | Schema 1.11: the host ABI level of `libaether.h` the library was built at ([abi-policy.md](abi-policy.md)) |
 | `runtime_abi` | Schema 1.11: the runtime ABI it was compiled for (`AETHER_RUNTIME_ABI_ID`, such as `"0.856.0/abi1"`) |
-| `requires[]` | Schema 1.11: what its importer must do (`outcome_check`, `string_release`, `shared_runtime`, `runtime_abi`, `actors`); an importer that does not know one refuses the library |
+| `requires[]` | Schema 1.11: what its importer must do (`outcome_check`, `string_release`, `shared_runtime`, `runtime_abi`, `actors`, and on ELF `own_runtime`); an importer that does not know one refuses the library |
 
 ```json
 {
@@ -1291,14 +1291,22 @@ ae build app.ae -o app                                            # imports both
   built static gets a warning naming the static one: rebuild it with
   `--shared-runtime`.
 - Each copy of the runtime frees only what it made. A string an export
-  returns crosses as a copy ([above](#strings-an-export-returns)), but a
-  struct holding a string (returned by value, or reached through a typed
-  pointer) and a builder that uses its config have none. The copies stay
-  apart on every platform (#3481), so importing a static library that has
-  such an export is an error naming each one, with the rebuild:
-  `--shared-runtime`. Such a library names the `own_runtime` duty in its
-  catalog, so an importer of 0.864.0 or before, which took ELF's copies as
-  merged, refuses it rather than let the copies free each other's values.
+  returns crosses as a copy ([above](#strings-an-export-returns)). Two
+  things have no copy: a value holding a string (a struct or a tuple with
+  one in it, passed by value or reached through a typed pointer), and the
+  config a builder uses. The copies stay apart on every platform (#3481), so
+  importing a static library that has such an export is an error naming
+  each one, with the rebuild: `--shared-runtime`.
+- On Linux and FreeBSD such a library, and one that runs actors, names the
+  `own_runtime` duty in its catalog. An importer of 0.860.0 to 0.864.0 took
+  ELF's copies as merged; it does not know the duty, so it refuses the
+  whole library rather than let the copies free each other's values or
+  leave its actors undrained without a word. Elsewhere those importers kept
+  the copies apart too, so no duty is named there. An importer of 0.859.0
+  or before reads no duties at all.
+- A cross build (`--target`) links the target's runtime into the library,
+  so `--shared-runtime` with `--target` is refused: build such a library
+  on its target.
 - A sandbox's grants are each thread's, in the runtime: on one runtime a
   library's export called from inside another's `sandbox.enforce` block is
   held to the block's grants. Where the copies stay apart, the inner copy
