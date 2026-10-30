@@ -16912,7 +16912,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             int qualified_enum = enum_member_source_prefix(expr, enum_prefix,
                                                             sizeof(enum_prefix));
             if (qualified_enum && qualified_prefix_blocked(table, enum_prefix)) {
-                char error_msg[256];
+                char error_msg[640];
                 snprintf(error_msg, sizeof(error_msg),
                          "'%s' is hidden in this scope by `hide` or `seal except`",
                          enum_prefix);
