@@ -498,6 +498,62 @@ static const char* const k_ae_import_duties[] = {
 
 #define AE_CATALOG_MINOR_KNOWN 11
 
+#if !defined(_WIN32) && !defined(__APPLE__)
+/* An unsigned field of n bytes of an ELF file, in its byte order. */
+static uint64_t ae_elf_field(const unsigned char* p, int n, int big) {
+    uint64_t v = 0;
+    for (int i = 0; i < n; i++) v |= (uint64_t)p[big ? n - 1 - i : i] << (8 * i);
+    return v;
+}
+
+/* #3481: 1 when the ELF library at `path` binds the definitions it holds to
+ * itself (DT_SYMBOLIC, or DF_SYMBOLIC in DT_FLAGS: linked -Bsymbolic, as
+ * `ae` links a library with a runtime of its own since #3481), 0 when it
+ * does not, -1 when it cannot be read. One that does not binds the runtime
+ * it carries to the program's when the program exports one (an `ae build`
+ * program is linked -rdynamic), and so runs on the program's runtime. Read
+ * from the file's headers and dynamic segment. */
+static int ae_elf_binds_own(const char* path) {
+    FILE* f = fopen(path, "rb");
+    if (!f) return -1;
+    unsigned char eh[64];
+    int r = -1;
+    size_t got = fread(eh, 1, sizeof(eh), f);
+    if (got >= 52 && memcmp(eh, "\x7f" "ELF", 4) == 0 && (eh[4] == 1 || eh[4] == 2)) {
+        int is64 = eh[4] == 2, big = eh[5] == 2;
+        uint64_t phoff = is64 ? ae_elf_field(eh + 32, 8, big) : ae_elf_field(eh + 28, 4, big);
+        int phentsize = (int)ae_elf_field(eh + (is64 ? 54 : 42), 2, big);
+        int phnum = (int)ae_elf_field(eh + (is64 ? 56 : 44), 2, big);
+        unsigned char ph[56];
+        for (int i = 0; i < phnum && phentsize >= (is64 ? 56 : 32) && r < 0; i++) {
+            if (fseek(f, (long)(phoff + (uint64_t)i * (uint64_t)phentsize), SEEK_SET) != 0 ||
+                fread(ph, 1, is64 ? 56 : 32, f) != (size_t)(is64 ? 56 : 32))
+                break;
+            if (ae_elf_field(ph, 4, big) != 2) continue;   /* PT_DYNAMIC */
+            uint64_t off = is64 ? ae_elf_field(ph + 8, 8, big) : ae_elf_field(ph + 4, 4, big);
+            uint64_t size = is64 ? ae_elf_field(ph + 32, 8, big) : ae_elf_field(ph + 16, 4, big);
+            int ent = is64 ? 16 : 8;
+            if (size > (1u << 20) || fseek(f, (long)off, SEEK_SET) != 0) break;
+            unsigned char* dyn = (unsigned char*)malloc(size ? size : 1);
+            if (!dyn) break;
+            if (fread(dyn, 1, size, f) == size) {
+                r = 0;
+                for (uint64_t k = 0; k + (uint64_t)ent <= size; k += (uint64_t)ent) {
+                    uint64_t tag = ae_elf_field(dyn + k, ent / 2, big);
+                    uint64_t val = ae_elf_field(dyn + k + ent / 2, ent / 2, big);
+                    if (tag == 0) break;                            /* DT_NULL */
+                    if (tag == 16) r = 1;                           /* DT_SYMBOLIC */
+                    if (tag == 30 && (val & 0x2)) r = 1;            /* DT_FLAGS, DF_SYMBOLIC */
+                }
+            }
+            free(dyn);
+        }
+    }
+    fclose(f);
+    return r;
+}
+#endif
+
 /* A library's catalog against this importer (#2957): 0 when it can be used;
  * otherwise each reason on stderr, naming what is missing, both versions and
  * the fix, and -1. Called before anything of the library is used. */
@@ -543,6 +599,22 @@ static int ae_lib_check_compat(const _AeLibInfoMeta* m, const char* so_path) {
                 so_path, m->runtime_abi ? m->runtime_abi : "(none)", AETHER_RUNTIME_ABI_ID);
         refused = 1;
     }
+#if !defined(_WIN32) && !defined(__APPLE__)
+    /* #3481: a library with a runtime of its own, linked before `ae` bound
+     * one to itself on ELF, binds to the program's (an `ae build` program
+     * exports its runtime) and so runs on a runtime of another version than
+     * the one it was made for: its first call would refuse, and the program
+     * end on the panic. Refused here instead, naming the rebuild. */
+    else if (!shared && minor >= 11 && m->runtime_abi &&
+             strcmp(m->runtime_abi, AETHER_RUNTIME_ABI_ID) != 0 && ae_elf_binds_own(so_path) == 0) {
+        fprintf(stderr, "Error: %s carries the Aether runtime %s, but was linked by Aether %s to run on\n"
+                        "       the program's runtime instead, and this program's is %s.\n"
+                        "       Rebuild the library with this Aether (it then keeps its own runtime), or with\n"
+                        "       `ae build --emit=lib --shared-runtime`.\n",
+                so_path, m->runtime_abi, built_by, AETHER_RUNTIME_ABI_ID);
+        refused = 1;
+    }
+#endif
     return refused ? -1 : 0;
 }
 
@@ -5107,7 +5179,23 @@ void build_gcc_cmd(char* cmd, size_t size,
      * weak C main() for whoever links the OBJECT into an executable (see
      * emit_lib_weak_main in codegen.c); a shared library ae links itself has
      * no use for one, and should not export an entry point. */
+    /* #3481: a library that carries its own runtime runs on it. On ELF a
+     * program linked -rdynamic exports its runtime, and the library's calls
+     * into its own copy bound to the program's instead (interposition): the
+     * library's code ran on a runtime it was not made for, of another
+     * version across releases, which its runtime ABI check refuses.
+     * -Bsymbolic binds a library's references to what it defines itself,
+     * as macOS's two-level namespace and Windows' PE always have; it still
+     * exports them, for a C host. A --shared-runtime library defines no
+     * runtime of its own, and keeps binding to the one it shares. */
+#if !defined(__APPLE__)
+    const char* emit_lib_flags = (g_emit_lib && !g_emit_exe)
+        ? (g_shared_runtime ? "-fPIC -shared -DAETHER_NO_LIB_MAIN "
+                            : "-fPIC -shared -Wl,-Bsymbolic -DAETHER_NO_LIB_MAIN ")
+        : "";
+#else
     const char* emit_lib_flags = (g_emit_lib && !g_emit_exe) ? "-fPIC -shared -DAETHER_NO_LIB_MAIN " : "";
+#endif
     // Coverage builds skip -pipe — gcov works fine with it, but it
     // adds nothing when -O0 -g is already forced. Keeping the flag
     // string short helps the cmd-buffer size budget.
@@ -5753,11 +5841,11 @@ static const char* ae_signature_string_struct(const _AeLibInfoMeta* m, int minor
  * values. A string crosses as a copy; a struct holding strings (by value or
  * through a typed pointer, where the program's stores release the
  * library's strings) and a builder's config the library uses have no copy,
- * so where the library keeps its own runtime (no ELF interposition) such an
- * import is refused, naming the rebuild that gives both one runtime. */
+ * so a library that keeps its own runtime (every platform since #3481: on
+ * ELF it no longer binds to the program's) has such an import refused,
+ * naming the rebuild that gives both one runtime. */
 static void ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const char* module,
                                       const char* so_path) {
-#if defined(_WIN32) || defined(__APPLE__)
     char ty[200];
     int refused = 0;
     for (int i = 0; i < m->function_count && m->functions; i++) {
@@ -5799,9 +5887,6 @@ static void ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const 
                         "on the program's runtime.\n");
         exit(1);
     }
-#else
-    (void)m; (void)minor; (void)module; (void)so_path;
-#endif
 }
 
 /* `module` NULL: the whole catalog (a bare import of a one-module
@@ -6492,10 +6577,10 @@ static void prepare_binary_imports(const char* main_file) {
             g_binimport_static_names, g_binimport_static_rt > 1 ? "were" : "was",
             g_binimport_static_rt > 1 ? "them" : "it");
     }
-#if defined(_WIN32) || defined(__APPLE__)
-    /* Without ELF interposition, a static-runtime library's actors run on
-     * the library's own scheduler, which the program's exit does not drain:
-     * a message still in flight when main() returns is not delivered. */
+    /* A static-runtime library's actors run on the library's own scheduler
+     * (on every platform since #3481), which the program's exit does not
+     * drain: a message still in flight when main() returns is not
+     * delivered. */
     if (g_binimport_static_actor_names[0]) {
         fprintf(stderr,
             "Warning: %s runs actors on its own static runtime, so messages still in flight\n"
@@ -6503,7 +6588,6 @@ static void prepare_binary_imports(const char* main_file) {
             "         `ae build --emit=lib --shared-runtime` to run them on the program's.\n",
             g_binimport_static_actor_names);
     }
-#endif
 }
 
 /* #2297: Windows has no rpath. After a link that names DLLs (binary imports,

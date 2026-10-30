@@ -47,7 +47,10 @@ library). A newer minor whose duties it knows is read.
 **The runtime ABI.** `AETHER_RUNTIME_ABI_ID` (`runtime/aether_abi.h`) is
 the Aether version, `/abi` and `AETHER_RUNTIME_ABI_REV`, and the flags
 that change layouts (`+debug-mailbox`). A self-contained library carries
-its own runtime, so this ABI never crosses its edge. A `--shared-runtime`
+its own runtime, so this ABI never crosses its edge: on ELF `ae` links it
+`-Bsymbolic`, so its runtime calls bind to its own copy, not to the one a
+program linked `-rdynamic` exports, as macOS and Windows keep them apart by
+themselves (#3481). A `--shared-runtime`
 library, and C emitted with `--emit=csrc` or `--emit=obj`, must run on the
 runtime it was made for. The shared runtime reports its ID
 (`aether_runtime_abi()`), and the catalog of a shared-runtime library
@@ -87,7 +90,7 @@ catalogs and libraries compiled for a runtime of another ABI.
 | Combination | Supported |
 |---|---|
 | A C host and a self-contained library of any version | Yes, using the functions of the library's level (read `host_abi`); a host built with older headers uses its own level's |
-| An Aether program importing a self-contained library | Yes, when the importer knows every duty the catalog requires; a library of an older version is read by its minor |
+| An Aether program importing a self-contained library | Yes, when the importer knows every duty the catalog requires; a library of an older version is read by its minor. On ELF, a library of another runtime ABI linked before #3481 (without `-Bsymbolic`, so it would run on the program's runtime) is refused at import, naming the rebuild |
 | An importer older than schema 1.11 and a newer library | Calls that succeed work; it cannot read `requires`, so it does not check outcomes, and a failed call reads as its zero value, as with 0.856's own libraries |
 | Anything on `--shared-runtime` | Only on the runtime it was made for (one runtime ABI ID) |
 | Two self-contained libraries of different versions in one process | Yes; each runs on its own runtime, and the shared facilities are refused across layouts |

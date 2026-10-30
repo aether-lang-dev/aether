@@ -11,10 +11,9 @@
 # way out: crowd's slow fire-and-forget message is still delivered.
 #
 # Two passes over the same sources:
-#   static runtime  each library carries its own libaether. The actors run
-#                   wherever the importer's calls land; the exit drain reaches
-#                   them only where ELF interposition merges the copies
-#                   (Linux, FreeBSD). Elsewhere `ae` warns that it cannot.
+#   static runtime  each library carries its own libaether and runs its
+#                   actors on its own scheduler, which the program's exit
+#                   does not drain, on every platform (#3481); `ae` warns.
 #   shared runtime  `--shared-runtime`: one runtime, one scheduler, and the
 #                   program's exit drains it on every platform.
 set -e
@@ -25,10 +24,9 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] binary_import_actors: ae not built"; exit 0; }
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   ELF=0; EXE=".exe" ;;
-    Darwin)                          SO_EXT=".dylib"; ELF=0; EXE="" ;;
-    Linux|FreeBSD)                   SO_EXT=".so";    ELF=1; EXE="" ;;
-    *)                               SO_EXT=".so";    ELF=0; EXE="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   EXE=".exe" ;;
+    Darwin)                          SO_EXT=".dylib"; EXE="" ;;
+    *)                               SO_EXT=".so";    EXE="" ;;
 esac
 
 fail() {
@@ -65,7 +63,7 @@ run_pass() {
     echo "$OUT" | grep -q "^OK" || { echo "$OUT"; fail "$label: the actors did not count to 300"; }
     if [ "$drains" = 1 ]; then
         echo "$OUT" | grep -q "^late 7" || { echo "$OUT"; fail "$label: the exit did not drain the library's in-flight message" run.log; }
-    elif [ "$ELF" = 0 ]; then
+    else
         grep -q "runs actors on its own static runtime" run.log \
             || fail "$label: no warning that the static runtime's messages are not drained" run.log
     fi
@@ -80,7 +78,7 @@ run_pass() {
 }
 
 # ---- static runtime ----
-run_pass "$WORK/static" "" "static runtime" "$ELF"
+run_pass "$WORK/static" "" "static runtime" 0
 
 # ---- shared runtime (where this toolchain built one) ----
 if [ -d "$ROOT/build/shared" ]; then

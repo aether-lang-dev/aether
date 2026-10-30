@@ -13,7 +13,10 @@
 #     a panic in one, an account of the new one suspended while the old one
 #     runs and resumed, both unloaded
 #   Aether consumers (app.ae, a binary import):
-#     this importer, the old library; the old importer, this library
+#     this importer, the old library; the old importer, this library. On
+#     ELF this ae links a library -Bsymbolic, so it keeps its own runtime in
+#     a program that exports one (#3481); an old library linked without it,
+#     of another version, is refused at import, naming the rebuild.
 #   The shared runtime:
 #     this host, this library on this shared runtime       the baseline
 #     this host, the old library on the old shared runtime
@@ -167,7 +170,39 @@ run_app() {
         echo "      stderr:"; tail -12 "$2/app.err" | sed 's/^/        /'
     fi
 }
-run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
+# A library with a runtime of its own linked before #3481 on ELF binds that
+# runtime to the program's (an `ae build` program exports its runtime), so it
+# would run on this one, of another version: this importer refuses it at
+# build, naming the rebuild, instead of the program ending on its first call.
+refuse_app() {
+    cp "$SCRIPT_DIR/app.ae" "$2/app.ae"
+    if (cd "$2" && AETHER_HOME="$3" "$4" build app.ae -o app > app_build.log 2>&1); then
+        bad "$1: app.ae built; the import was not refused" "$2/app_build.log"
+    elif ! grep -q "carries the Aether runtime" "$2/app_build.log" ||
+         ! grep -q -- "--shared-runtime" "$2/app_build.log"; then
+        bad "$1: the refusal does not say why and name the rebuild" "$2/app_build.log"
+    fi
+}
+this_version="$(tr -d '\r\n' < "$ROOT/VERSION" 2>/dev/null)"
+# This ae links a library with a runtime of its own -Bsymbolic on ELF, so it
+# keeps that runtime in any program (#3481).
+if [ "$ext" = so ] && command -v readelf >/dev/null 2>&1 &&
+   ! readelf -d "$TMP/new/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
+    bad "this ae linked libmlib.$ext without -Bsymbolic: it would run on an importing program's runtime"
+fi
+old_binds_own=1
+if [ "$ext" = so ] && [ "$old_version" != "$this_version" ]; then
+    if ! command -v readelf >/dev/null 2>&1; then
+        old_binds_own=unknown
+    elif ! readelf -d "$TMP/old/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
+        old_binds_own=0
+    fi
+fi
+case "$old_binds_own" in
+    0) refuse_app "this importer, the $old_version library (linked before #3481)" "$TMP/old" "$ROOT" "$AE" ;;
+    unknown) echo "  [NOTE] abi_matrix: no readelf, so this importer with the $old_version library is not run" ;;
+    *) run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE" ;;
+esac
 run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
 
 # The shared runtime. $1 = case dir, $2 = library dir, $3 = runtime dir,

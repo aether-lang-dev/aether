@@ -12,10 +12,9 @@
 #
 # 1. one runtime: both libraries' C linked into the host;
 # 2. each library built the default way, with its own copy of the runtime:
-#    on macOS and Windows the copies stay apart, so the inner one cannot read
-#    the outer block's grants; it refuses, and its message names
-#    --shared-runtime (on Linux and FreeBSD ELF interposition binds both to
-#    one copy: the same answers, no message);
+#    the copies stay apart (on every platform since #3481), so the inner one
+#    cannot read the outer block's grants; it refuses, and its message names
+#    --shared-runtime;
 #    2c. the outer library linked into a program with a runtime of its own
 #    that exports nothing and looks first (#3445);
 #    2d. a program with the panic and no sandbox, -rdynamic on Linux, and a
@@ -37,10 +36,10 @@ fail=0
 want="before 1 inner 0 granted 0 outer 0 after 1"
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; apart=1; dl="" ;;
-    Darwin) ext=dylib; apart=1; dl="" ;;
-    Linux) ext=so; apart=0; dl="-ldl" ;;
-    *) ext=so; apart=0; dl="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; dl="" ;;
+    Darwin) ext=dylib; dl="" ;;
+    Linux) ext=so; dl="-ldl" ;;
+    *) ext=so; dl="" ;;
 esac
 
 # 1. one runtime
@@ -95,7 +94,7 @@ if [ "$got" != "$want" ]; then
     head -5 "$TMP/apart.err" | sed 's/^/        /'
     fail=1
 fi
-if [ "$apart" = 1 ] && ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
+if ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
     echo "  [FAIL] sandbox_nested_libraries: a runtime per library: the refusal does not name --shared-runtime"
     head -5 "$TMP/apart.err" | sed 's/^/        /'
     fail=1
@@ -136,10 +135,11 @@ fi
 # 2d. a program with the panic of a runtime of its own and no sandbox,
 # linked -rdynamic on Linux as `ae build` links one, loading a library with a
 # runtime of its own whose enforce block catches a panic raised in a nested
-# block (#3438): under ELF interposition the library runs the program's panic
-# and try frames, so its sandbox must set the program's pointers. With them
-# each copy's own, the catch left the nested level in force (PATH 0) and the
-# block's end the outer one (probe 0 after it).
+# block (#3438). Before #3481 the library ran the program's panic and try
+# frames there (ELF interposition), so its sandbox had to set the program's
+# pointers; now it runs its own on every platform, and the catch must still
+# leave neither the nested level (PATH 0) nor, at the block's end, the outer
+# one (probe 0 after it) in force.
 rdyn=""
 case "$(uname -s 2>/dev/null)" in Linux|FreeBSD) rdyn="-rdynamic" ;; esac
 # shellcheck disable=SC2046,SC2086
@@ -198,6 +198,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart), a program whose copy looked first and exports nothing, a panic caught inside the block of a library that runs the program's panic$shared_note"
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused, naming --shared-runtime), a program whose copy looked first and exports nothing, a panic caught inside the block of a library loaded by a program linked -rdynamic$shared_note"
 fi
 exit $fail

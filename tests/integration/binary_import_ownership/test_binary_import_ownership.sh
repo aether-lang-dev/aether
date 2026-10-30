@@ -11,9 +11,9 @@
 #      finds nothing on macOS.
 #   3. A struct holding a string, returned by value, and a builder that frees
 #      its config. Neither can be copied between two copies of the runtime, so
-#      they need one: the shared runtime, or the static one where ELF
-#      interposition merges the copies (Linux, FreeBSD). There they run and
-#      grow 0; elsewhere the import is refused, naming the rebuild.
+#      they need one, the shared runtime: with the static one each library
+#      keeps its own copy (on every platform since #3481), and the import is
+#      refused, naming the rebuild. On the shared runtime they run and grow 0.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -22,10 +22,9 @@ AE="$ROOT/build/ae"
 CC="${CC:-cc}"
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   ELF=0; EXE=".exe" ;;
-    Darwin)                          SO_EXT=".dylib"; ELF=0; EXE="" ;;
-    Linux|FreeBSD)                   SO_EXT=".so";    ELF=1; EXE="" ;;
-    *)                               SO_EXT=".so";    ELF=0; EXE="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   EXE=".exe" ;;
+    Darwin)                          SO_EXT=".dylib"; EXE="" ;;
+    *)                               SO_EXT=".so";    EXE="" ;;
 esac
 LEAKS=0
 if [ "$(uname -s)" = Darwin ] && command -v leaks >/dev/null 2>&1; then LEAKS=1; fi
@@ -102,7 +101,7 @@ run_pass() {
     cd "$WORK"
 }
 
-run_pass "$WORK/static" "" "static runtime" "$ELF"
+run_pass "$WORK/static" "" "static runtime" 0
 
 # The C host, against the static library.
 cd "$WORK/static"
