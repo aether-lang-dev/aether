@@ -30,6 +30,22 @@ if [ ! -f "$ROOT/build/libaether.a" ]; then
     echo "  [SKIP] host_python_map_context: libaether.a not built"
     exit 0
 fi
+# A framework Python (macOS) reports INSTSONAME relative to its framework
+# prefix, e.g. Python.framework/Versions/3.13/Python, which dlopen cannot
+# find on its own; resolve a relative name to the file it names.
+case "$PY_SONAME" in
+    /*) ;;
+    *)
+        for PY_DIR in \
+            "$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("PYTHONFRAMEWORKPREFIX") or "")' 2>/dev/null)" \
+            "$(python3 -c 'import sysconfig; print(sysconfig.get_config_var("LIBDIR") or "")' 2>/dev/null)"; do
+            if [ -n "$PY_DIR" ] && [ -f "$PY_DIR/$PY_SONAME" ]; then
+                PY_SONAME="$PY_DIR/$PY_SONAME"
+                break
+            fi
+        done
+        ;;
+esac
 export AETHER_PYTHON_SONAME="$PY_SONAME"
 
 # librt exists (and is needed for shm_open) on older Linux glibc only; macOS

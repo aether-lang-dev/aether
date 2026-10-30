@@ -162,8 +162,37 @@ run_app() {
     expect "$1" "$(cd "$2" && PATH="$2:$PATH" LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
         DYLD_LIBRARY_PATH="$2${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ./app$exe 2>"$2/app.err" | tr -d '\r')" "$app_want"
 }
-run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
-run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
+# On ELF a library with a runtime of its own binds that runtime's calls to
+# the importer's, which every Aether program exports (-rdynamic): the copies
+# merge, as binary_import_actors relies on. A library made for another
+# runtime ABI then runs on the importer's runtime, so its check must refuse
+# it and say why. Mach-O and PE keep the copies apart, and a level-0 library
+# records no ID and has no check.
+static_abi() { "$TMP/host_new$exe" "$1" "$1" --runtime-abi 2>/dev/null; }
+run_app_refused() {
+    cp "$SCRIPT_DIR/app.ae" "$2/app.ae"
+    if ! (cd "$2" && AETHER_HOME="$3" "$4" build app.ae -o app > app_build.log 2>&1); then
+        bad "$1: app.ae did not build" "$2/app_build.log"
+        return
+    fi
+    # The refusal is a panic: an inner shell keeps its "Aborted" off the log.
+    got="$(cd "$2" && LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        sh -c './app 2>app.err; exit $?' 2>/dev/null)"
+    if [ -n "$got" ] || ! grep -q "the library was made for Aether runtime" "$2/app.err"; then
+        bad "$1 (another runtime ABI, merged on ELF): not refused with its reason" "$2/app.err"
+    fi
+}
+old_static_abi="$(static_abi "$TMP/old/libmlib.$ext")"
+if [ "$ext" = so ] && [ -n "$old_static_abi" ] &&
+   [ "$old_static_abi" != "$(static_abi "$TMP/new/libmlib.$ext")" ]; then
+    run_app_refused "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
+    run_app_refused "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
+    app_note=" (refused across runtime ABIs, the ELF copies merging)"
+else
+    run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
+    run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
+    app_note=""
+fi
 
 # The shared runtime. $1 = case dir, $2 = library dir, $3 = runtime dir,
 # $4 = optional host mode:
@@ -221,6 +250,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
+    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways$app_note run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
 fi
 exit $fail
