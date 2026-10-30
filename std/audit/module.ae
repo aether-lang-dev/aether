@@ -44,8 +44,9 @@ extern string_concat(a: string, b: string) -> string @heap
 extern aether_audit_count() -> int
 
 // Field accessors for buffered entry `i` (0-based, oldest first).
-// The category/resource strings are borrowed — copy before the slot
-// is overwritten. The `entry()` wrapper below does that for you.
+// Category, resource, and allowed share one per-thread snapshot when called
+// in that order. The strings are borrowed from that snapshot; the `entry()`
+// wrapper below copies them before beginning another read.
 extern aether_audit_entry_category(i: int) -> string
 extern aether_audit_entry_resource(i: int) -> string
 extern aether_audit_entry_allowed(i: int) -> int // 1 allowed, 0 denied, -1 out of range

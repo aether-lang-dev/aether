@@ -127,7 +127,7 @@ main() {
 
 ## Testing
 
-Three tests exercise this host, each covering a different facet:
+Four tests exercise this host, each covering a different facet:
 
 - **Namespace / FFI**:
   [`tests/integration/namespace_python/`](../../../tests/integration/namespace_python/),
@@ -153,6 +153,12 @@ Three tests exercise this host, each covering a different facet:
   the frozen `name` to `TAMPERED`; Aether reads the map back and asserts
   the write landed and the frozen input is untampered. SKIPs when the
   Python dev package isn't installed.
+
+- **Nested shared-map context**:
+  [`tests/integration/host_python_map_context/`](../../../tests/integration/host_python_map_context/)
+  enters `run_sandboxed_with_map` recursively through the embedded CPython
+  process. It verifies that the inner run sees only its map, the outer map is
+  restored afterward, and no token remains active after the outer return.
 
 - **Build smoke**:
   [`tests/scripts/contrib_build.sh`](../../../tests/scripts/contrib_build.sh),
