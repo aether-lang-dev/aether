@@ -49,6 +49,10 @@
 //               with a leaf (akikeyidleaf and so on); akiself, whose AKI
 //               names its own serial, and akiselfleaf
 //   pinned      a self-signed leaf (peer.example, cA FALSE), its own anchor
+//   rootpl0     a self-signed root with pathLenConstraint 0 (#3432); icapl,
+//               a CA under it, and plleaf (pl.example) under icapl; pldirect
+//               (direct.example), an end entity of rootpl0. OpenSSL refuses
+//               plleaf ("path length constraint exceeded") and takes pldirect.
 
 import std.list
 import std.string
@@ -194,6 +198,22 @@ fn pem_kunocaleaf() -> string {
 
 fn pem_pinned() -> string {
     return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_rootpl0() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBfzCCASWgAwIBAgICNDIwCgYIKoZIzj0EAwIwJDEiMCAGA1UEAwwZQ2hhaW4g\nVGVzdCBSb290IHBhdGhMZW4gMDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAw\nMDAwMFowJDEiMCAGA1UEAwwZQ2hhaW4gVGVzdCBSb290IHBhdGhMZW4gMDBZMBMG\nByqGSM49AgEGCCqGSM49AwEHA0IABJixxflMvkDeua89RNt+KArzeGyQ8hnlDH5R\nZzYiY4d1I8FzEJQcjKPycZdFCYuNXyWuYKA9Uv0r6jKReOZsU0ijRTBDMBIGA1Ud\nEwEB/wQIMAYBAf8CAQAwDgYDVR0PAQH/BAQDAgEGMB0GA1UdDgQWBBQ6eD+1J16X\n591e4CrL6gUi9T0IKTAKBggqhkjOPQQDAgNIADBFAiAgLUCT6/LgwwoQVWaz36t6\nvn+1oYTXOfqE/QJbvtNS3QIhAOhrdUCU+O/CmfCOSq6kWcsVpaPAR4i7qI1vIAfq\nJwH+\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_icapl() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBqzCCAVGgAwIBAgICNDMwCgYIKoZIzj0EAwIwJDEiMCAGA1UEAwwZQ2hhaW4g\nVGVzdCBSb290IHBhdGhMZW4gMDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAw\nMDAwMFowMjEwMC4GA1UEAwwnQ2hhaW4gVGVzdCBJbnRlcm1lZGlhdGUgdW5kZXIg\ncGF0aExlbiAwMFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE7lexepBf+j1EAG3B\n/tgknaUIaLHGqs2IUhMkdsLoDGzuPz6vXC3HXySXx2W8isGJBPQ8bO6TwRCKDdXv\nJb20/KNjMGEwDwYDVR0TAQH/BAUwAwEB/zAOBgNVHQ8BAf8EBAMCAQYwHQYDVR0O\nBBYEFIY5FRWcWrq5LFmAPNRfeeNKxChSMB8GA1UdIwQYMBaAFDp4P7UnXpfn3V7g\nKsvqBSL1PQgpMAoGCCqGSM49BAMCA0gAMEUCIQCCiwWO4z8kDvDN1Hg+qtv98jXT\nb3VG1ClmrjXfOXv0/AIgRDHoEgB2agcKCOWt5KKJK1nng1PqyT6IHeUCQ+0w5xY=\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_plleaf() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIByDCCAW2gAwIBAgICNDQwCgYIKoZIzj0EAwIwMjEwMC4GA1UEAwwnQ2hhaW4g\nVGVzdCBJbnRlcm1lZGlhdGUgdW5kZXIgcGF0aExlbiAwMCAXDTI2MDEwMTAwMDAw\nMFoYDzIxMjYwMTAxMDAwMDAwWjAVMRMwEQYDVQQDDApwbC5leGFtcGxlMFkwEwYH\nKoZIzj0CAQYIKoZIzj0DAQcDQgAETLmE9IQVKOAXDeR/uW3/dYF5h1iAbLzEAJrF\n9q+7TN4Feqkar7uzboHVkLuZ2EMo8QONDx4QwU4+hnWvDxR/paOBjTCBijAMBgNV\nHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIHgDATBgNVHSUEDDAKBggrBgEFBQcDATAV\nBgNVHREEDjAMggpwbC5leGFtcGxlMB0GA1UdDgQWBBRzQKvkW9RPKr7oZD5gN8nR\nVAFpMjAfBgNVHSMEGDAWgBSGORUVnFq6uSxZgDzUX3njSsQoUjAKBggqhkjOPQQD\nAgNJADBGAiEAttcVwI+fd1u3CbS8ggb3tCofR7eMR+kJlA3vdX6SNfgCIQCE3n2y\nX0QPc/8H31I4eWzyx+b2cT/fztIrU6BhS+mUkQ==\n-----END CERTIFICATE-----\n"
+}
+
+fn pem_pldirect() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBwjCCAWegAwIBAgICNDUwCgYIKoZIzj0EAwIwJDEiMCAGA1UEAwwZQ2hhaW4g\nVGVzdCBSb290IHBhdGhMZW4gMDAgFw0yNjAxMDEwMDAwMDBaGA8yMTI2MDEwMTAw\nMDAwMFowGTEXMBUGA1UEAwwOZGlyZWN0LmV4YW1wbGUwWTATBgcqhkjOPQIBBggq\nhkjOPQMBBwNCAAR6QCQbdqF6/klw7YKA6egcCMDJIXHpMZSaxnkpGsoLiKDYHNSF\nz5pZOIIDs1hMmZTTgOaopEMzz3wZLCDWv5+Po4GRMIGOMAwGA1UdEwEB/wQCMAAw\nDgYDVR0PAQH/BAQDAgeAMBMGA1UdJQQMMAoGCCsGAQUFBwMBMBkGA1UdEQQSMBCC\nDmRpcmVjdC5leGFtcGxlMB0GA1UdDgQWBBQHZsheJCEETMGvixypCTuNM6RswzAf\nBgNVHSMEGDAWgBQ6eD+1J16X591e4CrL6gUi9T0IKTAKBggqhkjOPQQDAgNJADBG\nAiEAr8lcqOA0THyGFeI7/keW4m7IiDLv8/0bIQ2okBNHDWACIQCaG8jwlGhx4gC4\nPJGN04x/Qgqj8fVjjpDFBhipcMPFdA==\n-----END CERTIFICATE-----\n"
 }
 
 fn pem_icabadku() -> string {
@@ -368,6 +388,12 @@ main() {
     fails = fails + check("a root whose AKI names another key, issuer and serial", anchor_result(pem_akiall(), pem_akiallleaf(), ""), 0)
     fails = fails + check("a root whose AKI names its own serial", anchor_result(pem_akiself(), pem_akiselfleaf(), ""), 1)
     fails = fails + check("the same leaf under its root", anchor_result(pem_root(), pem_leaf(), pem_ica()), 1)
+
+    // A trust anchor's own pathLenConstraint holds, as on OpenSSL and Go
+    // (#3432): a root with pathLenConstraint 0 allows no CA below it. The
+    // root without the extension is "the same leaf under its root" above.
+    fails = fails + check("a CA below a pathLenConstraint 0 root", anchor_result(pem_rootpl0(), pem_plleaf(), pem_icapl()), 0)
+    fails = fails + check("an end entity of a pathLenConstraint 0 root", anchor_result(pem_rootpl0(), pem_pldirect(), ""), 1)
 
     // A pinned self-signed leaf with basicConstraints cA FALSE: trusted as
     // it stands (it has no issuer), as OpenSSL trusts it.

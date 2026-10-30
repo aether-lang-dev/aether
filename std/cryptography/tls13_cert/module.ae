@@ -3270,7 +3270,9 @@ fn names_allowed(cx: *ChainCtx, ca: *LeafCert, c: *LeafCert) -> int {
 }
 
 // The checks over the whole candidate path (leaf at 0, anchor last): path
-// length constraints and name constraints. 0 if they hold.
+// length constraints and name constraints. 0 if they hold. The anchor is
+// checked as every CA is: a root's own pathLenConstraint holds, as on
+// OpenSSL and Go (#3432).
 fn path_code(cx: *ChainCtx) -> int {
     n = list_size(cx.path)
     j = 1
