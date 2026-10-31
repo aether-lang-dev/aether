@@ -127,7 +127,7 @@ main() {
             ipc.write(ch, "next")
             fd10, _p10, err10 = ipc.recv_fd(ch, 64)
             spec.assert_eq(fd10, -1, "ten descriptors: none handed over")
-            spec.assert_err_contains(err10, "truncated", "ten descriptors: refused")
+            spec.assert_err_contains(err10, "more than one descriptor", "ten descriptors: refused")
             spec.assert_eq(open_fds(), base, "ten descriptors: all closed")
 
             ipc.write(ch, "next")

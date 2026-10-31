@@ -2,8 +2,9 @@
  * os.run_socket, so its channel is fd AETHER_IPC_FD. Each message waits for
  * the probe's "next" first, so no two arrive in one recvmsg:
  *   1. two descriptors in one message
- *   2. ten descriptors in one message (more than recv_fd makes room for:
- *      the kernel truncates the control data)
+ *   2. ten descriptors in one message (more than the eight recv_fd once
+ *      made room for: macOS then installed all ten but showed eight, and
+ *      the two it hid stayed open in the probe)
  *   3. one descriptor, as the rules allow, to show the channel still works
  * Each descriptor is a fresh open of /dev/null, so every one the probe is
  * handed is a new entry in its descriptor table. Exits 0 when the probe

@@ -108,11 +108,14 @@ _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
 #define IPC_NOSIGNAL 0
 #endif
 
-/* The most descriptors one recvmsg makes room for. A message carrying more
- * is truncated by the kernel (MSG_CTRUNC), which closes what did not fit;
- * recv_fd closes the rest. Room for more than one is what lets recv_fd see
- * a second descriptor and refuse it, rather than only a truncation. */
-#define IPC_MAX_FDS 8
+/* The most descriptors one recvmsg makes room for: more than any one
+ * message can carry (Linux's SCM_MAX_FD is 253, macOS refuses past 254), so
+ * every descriptor a peer sends is seen and a refusal closes them all. Room
+ * for fewer is not safe: macOS truncates the control data (MSG_CTRUNC) but
+ * still installs every descriptor, and those past the buffer stay open in
+ * this process with no way to name them. A truncation (another kernel's
+ * limit) is still refused. */
+#define IPC_MAX_FDS 256
 
 /* "<what>: <strerror(err)>" in a per-thread buffer, valid until this
  * thread's next failing call. */
@@ -306,12 +309,23 @@ _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     int fds[IPC_MAX_FDS];
     size_t nfds = 0;
     int foreign = 0;
+    /* Only the bytes the kernel filled count. Under MSG_CTRUNC macOS leaves
+     * cmsg_len at what was sent (ten descriptors' worth in a buffer with
+     * room for eight); the descriptors it claims past the buffer are stack,
+     * and closing them would close whatever descriptors they happened to
+     * name. */
+    const char* control_end = (const char*)msg.msg_control + msg.msg_controllen;
     for (struct cmsghdr* c = CMSG_FIRSTHDR(&msg); c; c = CMSG_NXTHDR(&msg, c)) {
+        if ((const char*)c + CMSG_LEN(0) > control_end) break;
         if (c->cmsg_level != SOL_SOCKET || c->cmsg_type != SCM_RIGHTS) {
             foreign = 1;
             continue;
         }
-        size_t count = (c->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+        size_t len = c->cmsg_len;
+        size_t room = (size_t)(control_end - (const char*)c);
+        if (len > room) len = room;
+        if (len < CMSG_LEN(0)) break;
+        size_t count = (len - CMSG_LEN(0)) / sizeof(int);
         for (size_t i = 0; i < count; i++) {
             int fd;
             memcpy(&fd, CMSG_DATA(c) + i * sizeof(int), sizeof fd);

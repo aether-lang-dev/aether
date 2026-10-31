@@ -104,7 +104,10 @@ main() {
    was truncated, that carries more than one descriptor, or a control
    message other than `SCM_RIGHTS` is an error, and every descriptor that
    did arrive is closed first, so a hostile peer cannot fill the
-   receiver's descriptor table with messages it refuses.
+   receiver's descriptor table with messages it refuses. `recv_fd` makes
+   room for more descriptors than one message can carry (Linux allows 253,
+   macOS 254), so none arrives unseen: macOS installs every descriptor of a
+   truncated message, including those past the buffer.
 2. **Close-on-exec at receipt.** On Linux and FreeBSD the descriptor is
    created close-on-exec (`MSG_CMSG_CLOEXEC`). macOS lacks that and sets
    it straight after receipt, so a `fork` on another thread in between can
