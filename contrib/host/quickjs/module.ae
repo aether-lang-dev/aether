@@ -1,0 +1,30 @@
+// contrib.host.quickjs — Embedded QuickJS Host Module
+//
+// Thin host wrapper around contrib.quickjs.
+//
+// Usage:
+//   import contrib.host.quickjs
+//
+//   worker = sandbox.new("worker") {
+//       grant_env("HOME")
+//   }
+//   quickjs.run_sandboxed(worker, "var x = 10;")
+//
+// For the full persistent runtime API (handles, closures, values, promises),
+// import `contrib.quickjs` directly.
+import std.sandbox
+// The engine: importing contrib.quickjs is what compiles its C (and the
+// QuickJS amalgamation) into the program, through its @source. Without it a
+// program importing only this module fails to link (qjs_* undefined).
+import contrib.quickjs as qjs_engine
+
+exports (
+    quickjs_run_sandboxed, quickjs_run_sandboxed_with_map,
+    quickjs_run, quickjs_init, quickjs_finalize
+)
+
+extern quickjs_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+extern quickjs_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
+extern quickjs_run(code: string) -> int
+extern quickjs_init() -> int
+extern quickjs_finalize()

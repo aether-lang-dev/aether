@@ -1,0 +1,142 @@
+// Integration tests for contrib.host.quickjs — co-located with the bridge,
+// written in Aether against std.spec.
+import contrib.host.quickjs
+import contrib.quickjs as qjs
+import std.spec
+import std.sandbox
+import std.fs
+import std.mem
+
+@extern("malloc") c_malloc(size: int) -> ptr
+@extern("free") c_free(p: ptr)
+extern aether_sandbox_depth() -> int
+
+main() {
+    fw = spec.init()
+
+    have_qjs = 0
+    q_probe = qjs.runtime(1024, 0)
+    if q_probe != null {
+        have_qjs = 1
+        qjs.dispose(q_probe)
+    }
+    reason = "QuickJS amalgamation not available"
+
+    spec.describe(fw, "contrib.host.quickjs") {
+        spec.it_when(have_qjs, "quickjs.run evaluates script and reports success", reason) callback {
+            spec.assert_eq(quickjs.run("var a = 10; var b = 20; if (a + b !== 30) throw new Error('bad');"), 0,
+                "a valid script returns 0")
+        }
+
+        spec.it_when(have_qjs, "quickjs.run propagates thrown JS error as non-zero", reason) callback {
+            spec.assert_not_eq(quickjs.run("throw new Error('deliberate_qjs_err');"), 0,
+                "an erroring script returns non-zero")
+        }
+
+        // QuickJS has no file, network or OS access of its own; grants decide
+        // what the Aether host functions a script calls may do. This checks
+        // that model (contrib.quickjs host functions under sandbox.enforce).
+        spec.it_when(have_qjs, "host functions a script calls are held to the grants in force", reason) callback {
+            reader = sandbox.new("reader") {
+                grant_fs_read("/etc/hostname")
+            }
+            defer sandbox.free(reader)
+
+            refused = sandbox.new("refused") {
+                grant_env("TERM")
+            }
+            defer sandbox.free(refused)
+
+            // Test Aether host function inside sandbox: fs.read
+            q_allowed = qjs.runtime(1024, 0)
+            read_fn = qjs.function(q_allowed, "hostRead", 1, |q_ptr: ptr, this_h: int, args: int| {
+                path = qjs.arg_string(q_ptr, args, 0)
+                content, err = fs.read(path)
+                if err != "" {
+                    return qjs.throw_error(q_ptr, "Error", err)
+                }
+                return qjs.new_string(q_ptr, content)
+            })
+            qjs.set_global(q_allowed, "hostRead", read_fn)
+            qjs.release(q_allowed, read_fn)
+
+            // Under reader grants, hostRead works
+            sandbox.enforce(reader) callback {
+                h_res, err_res = qjs.eval(q_allowed, "hostRead('/etc/hostname')", "<test>")
+                spec.assert_str_eq(err_res, "", "hostRead allowed under reader grants")
+                if h_res > 0 { qjs.release(q_allowed, h_res) }
+            }
+
+            // Under refused grants, hostRead fails
+            sandbox.enforce(refused) callback {
+                h_res, err_res = qjs.eval(q_allowed, "hostRead('/etc/hostname')", "<test>")
+                spec.assert_err(err_res, "hostRead refused under refused grants")
+                if h_res > 0 { qjs.release(q_allowed, h_res) }
+            }
+
+            spec.assert_eq(qjs.handles(q_allowed), 0, "no leaked handles in q_allowed")
+            qjs.dispose(q_allowed)
+        }
+
+        spec.it_when(have_qjs, "quickjs.run_sandboxed_with_map round-trips values", reason) callback {
+            dummy = sandbox.new("dummy") {}
+            defer sandbox.free(dummy)
+
+            token_buf = c_malloc(8)
+            map = aether_shared_map_new(token_buf)
+            token = mem.get_long(token_buf, 0)
+            c_free(token_buf)
+
+            aether_shared_map_put(map, "user", "Alice")
+            aether_shared_map_put(map, "count", "5")
+
+            script = "var u = aether_map_get('user'); var c = parseInt(aether_map_get('count')); aether_map_put('reply', 'hello ' + u); aether_map_put('doubled', String(c * 2));"
+
+            rc = quickjs.run_sandboxed_with_map(dummy, script, token)
+            spec.assert_eq(rc, 0, "run_sandboxed_with_map returns 0")
+
+            spec.assert_str_eq(aether_shared_map_get(map, "reply"), "hello Alice", "aether_map_put reply matches")
+            spec.assert_str_eq(aether_shared_map_get(map, "doubled"), "10", "aether_map_put doubled matches")
+
+            aether_shared_map_revoke_token(token)
+            aether_shared_map_free(map)
+        }
+
+        // The wrappers push the grants for the run and must pop them again,
+        // also when the script throws; a leftover level would hold every
+        // later call to grants it never asked for.
+        spec.it_when(have_qjs, "run_sandboxed and run_sandboxed_with_map leave the grant stack as they found it", reason) callback {
+            g = sandbox.new("g") { grant_env("TERM") }
+            defer sandbox.free(g)
+            before = aether_sandbox_depth()
+
+            spec.assert_eq(quickjs.run_sandboxed(g, "var ok = 1;"), 0, "a good script runs")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after success")
+            spec.assert_not_eq(quickjs.run_sandboxed(g, "throw new Error(\"boom\");"), 0, "a throwing script fails")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after an error")
+
+            token_buf = c_malloc(8)
+            map = aether_shared_map_new(token_buf)
+            token = mem.get_long(token_buf, 0)
+            c_free(token_buf)
+            spec.assert_not_eq(quickjs.run_sandboxed_with_map(g, "throw new Error(\"boom\");", token), 0, "a throwing map script fails")
+            spec.assert_eq(aether_sandbox_depth(), before, "depth restored after a map script error")
+            aether_shared_map_revoke_token(token)
+            aether_shared_map_free(map)
+        }
+
+        spec.it_when(have_qjs, "init and finalize are idempotent", reason) callback {
+            spec.assert_eq(quickjs.init(), 0, "init returns 0")
+            quickjs.finalize()
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+    return _rc
+}
+
+extern aether_shared_map_new(out_token: ptr) -> ptr
+extern aether_shared_map_put(map: ptr, key: string, val: string)
+extern aether_shared_map_get(map: ptr, key: string) -> string
+extern aether_shared_map_revoke_token(token: long)
+extern aether_shared_map_free(map: ptr)

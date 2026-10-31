@@ -13,6 +13,15 @@
 //   }
 //   duktape.run_sandboxed(worker, "print(env('HOME'))")
 //
+// Bidirectional embedding (#904):
+//   vm = duktape.vm_new()
+//   duktape.vm_register(vm, "app.add", add_cb)
+//   duktape.vm_set_global_str(vm, "NAME", "Aether")
+//   duktape.vm_eval(vm, "app.add(2, 3)")
+//   res = duktape.vm_result_int(vm)
+//   duktape.vm_pop_result(vm)
+//   duktape.vm_free(vm)
+//
 // `contrib.host.js` is kept as a back-compat alias module that
 // re-exports these functions — new code should import this
 // `contrib.host.duktape` module directly.
@@ -21,11 +30,59 @@ import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls t
 
 exports (
     duktape_run_sandboxed, duktape_run_sandboxed_with_map,
-    duktape_run, duktape_init, duktape_finalize
+    duktape_run, duktape_init, duktape_finalize,
+    // #904 bidirectional API
+    duktape_vm_new, duktape_vm_free, duktape_vm_register,
+    duktape_vm_set_global_str, duktape_vm_set_global_int, duktape_vm_set_global_strlist,
+    duktape_vm_eval, duktape_vm_result_type, duktape_vm_result_int, duktape_vm_result_str,
+    duktape_vm_result_bool, duktape_vm_pop_result, duktape_vm_set_instruction_limit,
+    duktape_arg_count, duktape_arg_type, duktape_arg_str, duktape_arg_int, duktape_arg_bool,
+    duktape_push_int, duktape_push_str, duktape_push_bool, duktape_push_nil, duktape_push_double,
+    duktape_raise_error,
+    // typed-value tags (returned by *_result_type / *_arg_type)
+    DUK_TNIL, DUK_TBOOL, DUK_TINT, DUK_TSTR, DUK_TTABLE, DUK_TERR, DUK_TOTHER
 )
 
+// --- Typed value tags (must match aether_host_duktape.c AE_DUK_T*) ---------
+const DUK_TNIL   = 0
+const DUK_TBOOL  = 1
+const DUK_TINT   = 2
+const DUK_TSTR   = 3
+const DUK_TTABLE = 4
+const DUK_TERR   = 5
+const DUK_TOTHER = 6
+
+// --- Tier 1: fire-and-forget -----------------------------------------------
 extern duktape_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 extern duktape_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 extern duktape_run(code: string) -> int
 extern duktape_init() -> int
 extern duktape_finalize()
+
+// --- Tier 2: bidirectional embedding (#904) --------------------------------
+extern duktape_vm_new() -> ptr
+extern duktape_vm_free(vm: ptr)
+extern duktape_vm_register(vm: ptr, name: string, host_fn: ptr) -> int
+extern duktape_vm_set_global_str(vm: ptr, name: string, value: string)
+extern duktape_vm_set_global_int(vm: ptr, name: string, value: long)
+extern duktape_vm_set_global_strlist(vm: ptr, name: string, items: ptr)
+extern duktape_vm_eval(vm: ptr, code: string) -> int
+extern duktape_vm_result_type(vm: ptr) -> int
+extern duktape_vm_result_int(vm: ptr) -> long
+extern duktape_vm_result_str(vm: ptr) -> string
+extern duktape_vm_result_bool(vm: ptr) -> int
+extern duktape_vm_pop_result(vm: ptr)
+extern duktape_vm_set_instruction_limit(vm: ptr, budget: long, every: int) -> string
+
+// --- Callback-side stack API (used INSIDE a registered host fn) ------------
+extern duktape_arg_count(vm: ptr) -> int
+extern duktape_arg_type(vm: ptr, i: int) -> int
+extern duktape_arg_str(vm: ptr, i: int) -> string
+extern duktape_arg_int(vm: ptr, i: int) -> long
+extern duktape_arg_bool(vm: ptr, i: int) -> int
+extern duktape_push_int(vm: ptr, v: long)
+extern duktape_push_str(vm: ptr, v: string)
+extern duktape_push_bool(vm: ptr, v: int)
+extern duktape_push_nil(vm: ptr)
+extern duktape_push_double(vm: ptr, v: float)
+extern duktape_raise_error(vm: ptr, msg: string) -> int

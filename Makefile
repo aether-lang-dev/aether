@@ -3293,7 +3293,7 @@ test-ubsan:
 # has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
 # the Racket VM), so it is not listed here (the check SKIPs missing-bridge
 # dirs).
-CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket
+CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket quickjs
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.

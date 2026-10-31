@@ -77,6 +77,56 @@ main() {
 }
 ```
 
+## Bidirectional embedding (#904)
+
+The fire-and-forget `run_sandboxed` is enough to *run* a script, but a host
+that uses JavaScript as a first-class, callback-driven extension surface
+needs a **persistent, host-owned VM** that registers host
+callbacks the script can call, injects globals, and returns a **typed** result.
+That tier:
+
+```aether
+import contrib.host.duktape
+
+@c_callback
+app_add(vm: ptr) -> int {
+    a = duktape.arg_int(vm, 1)
+    b = duktape.arg_int(vm, 2)
+    duktape.push_int(vm, a + b)
+    return 1
+}
+
+main() {
+    vm = duktape.vm_new()
+    duktape.vm_register(vm, "app.math.add", app_add)
+    duktape.vm_set_global_str(vm, "NAME", "Aether")
+    duktape.vm_set_global_int(vm, "BASE", 100)
+
+    status = duktape.vm_eval(vm, "app.math.add(2, 3) + BASE")
+    t = duktape.vm_result_type(vm)
+    if t == DUK_TINT { reply = duktape.vm_result_int(vm) }
+    duktape.vm_pop_result(vm)
+    duktape.vm_free(vm)
+}
+```
+
+| Call | Effect |
+|------|--------|
+| `duktape.vm_new() -> ptr` | create a persistent host-owned VM handle |
+| `duktape.vm_register(vm, name, fn_ptr) -> int` | register an Aether `(vm: ptr) -> int` `@c_callback` as a JS function (dotted names like `"app.math.add"` create/reuse parent objects) |
+| `duktape.vm_set_global_str/_int/_strlist(vm, name, v)` | inject a global before a run (string / int / string-array) |
+| `duktape.vm_eval(vm, code) -> int` | run; leaves the single return value on the VM stack |
+| `duktape.vm_result_type(vm) -> int` | typed tag of the result (`DUK_T*`) |
+| `duktape.vm_result_int/_str/_bool(vm)` | read the typed result |
+| `duktape.vm_pop_result(vm)` | clear the stack after reading |
+| `duktape.vm_set_instruction_limit(vm, budget, every) -> string` | returns `"execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK"` because system libduktape packages disable this build option |
+| `duktape.arg_count/_type/_str/_int/_bool(vm, i)` | **inside a callback**: read args (1-based) |
+| `duktape.push_int/_str/_bool/_nil/_double(vm, v)` | **inside a callback**: push a result value |
+| `duktape.raise_error(vm, msg) -> int` | raise a JS `Error` from a callback: `return duktape.raise_error(vm, msg)`. The error is thrown into the script after the callback returns, so the callback's defers still run |
+
+Typed-value tags exported as consts: `DUK_TNIL`, `DUK_TBOOL`, `DUK_TINT`,
+`DUK_TSTR`, `DUK_TTABLE`, `DUK_TERR`, `DUK_TOTHER`.
+
 ## Containment model
 
 Duktape implements ES5.1. No ambient capabilities: all functions
@@ -100,17 +150,14 @@ containment model of the host bridges.
 
 ## Testing
 
-There's no dedicated `host_duktape/` end-to-end test (no fib-style
-set-piece). Coverage comes from two cross-cutting tests instead:
+Coverage comes from three test suites:
 
+- [`tests/integration/host_duktape_bidirectional/`](../../../tests/integration/host_duktape_bidirectional/):
+  dedicated C harness exercising the bidirectional API (persistent VM, dotted callback registration,
+  typed args/results, try/catch error handling, non-ASCII round trip `"héllo €"`, and limit check).
 - [`tests/sandbox/test_shared_map_all.sh`](../../../tests/sandbox/test_shared_map_all.sh):
   the `run_sandboxed_with_map` shared-map round-trip run across
-  ALL host bridges. Its JS (Duktape) case compiles
-  `aether_host_duktape.c`, seeds a map (`name`=Bob, `count`=7),
-  runs JS that reads those keys, writes back `doubled`, and tries to
-  tamper with `name`; it asserts the read, the write (`result=14`),
-  and that the frozen `name` stays `Bob`. SKIPs when Duktape's dev
-  headers aren't installed.
+  ALL host bridges.
 - [`tests/scripts/contrib_build.sh`](../../../tests/scripts/contrib_build.sh):
   the `make contrib` smoke test; its `duktape` catalogue entry
   verifies the bridge archive `libaether_host_duktape.a` compiles and
@@ -122,17 +169,8 @@ set-piece). Coverage comes from two cross-cutting tests instead:
 through `import contrib.host.duktape`: the path a real user takes, so it covers
 module.ae's declarations and the contrib-link plumbing as well as the C shim.
 
-It asserts that a script evaluates; that the interpreter **genuinely runs**
-(Duktape computes a value and a second eval asserts on it Duktape-side, so a
-bridge that loaded `libduktape` but never evaluated would not pass); that runtime
-errors *and* syntax errors propagate as failures rather than being swallowed;
+It asserts that a script evaluates; that state persists across calls; that callbacks
+and typed results work; that non-ASCII strings round trip; that errors propagate;
 and that `init` is idempotent while the VM is live.
 
-Run by `make contrib-host-check`'s `[3/3]` phase, which resolves this
-runtime's soname first. Without Duktape installed the specs report **skipped**
-(#1610's `it_when`) rather than failing: an absent runtime is a provisioning
-gap, not a code defect.
-
-Assertions are on **return codes and Duktape-side state, never on the bridge's
-stdout**: the embedded interpreter buffers its own output and it is not
-reliably flushed when an Aether program exits.
+Run by `make contrib-host-check`'s `[3/3]` phase.

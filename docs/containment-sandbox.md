@@ -1366,7 +1366,9 @@ sandboxes. Each hosted language is a module under `contrib/host/`.
 ```
 contrib/host/python/, import contrib.host.python   (CPython 3.x)
 contrib/host/lua/, import contrib.host.lua      (Lua 5.3)
-contrib/host/js/, import contrib.host.js       (Duktape ES5)
+contrib/host/duktape/, import contrib.host.duktape (Duktape ES5)
+contrib/host/js/, import contrib.host.js       (alias of duktape)
+contrib/host/quickjs/, import contrib.host.quickjs (QuickJS ES2023)
 contrib/host/perl/, import contrib.host.perl     (Perl 5.x)
 contrib/host/ruby/, import contrib.host.ruby     (CRuby 3.x)
 contrib/host/tcl/, import contrib.host.tcl      (Tcl 8.5+)
@@ -1377,31 +1379,31 @@ contrib/host/tcl/, import contrib.host.tcl      (Tcl 8.5+)
 | Model | How it works | Used by |
 |-------|-------------|---------|
 | **LD_PRELOAD interception** | Intercept libc calls (connect, open, getenv, execve). The hosted language has ambient access to libc; we filter it. | Python, Lua, Perl, Ruby, Tcl |
-| **Native bindings only** | The hosted engine has NO ambient access. We expose only the functions we choose (env, readFile, etc.), each with a sandbox check built in. | JS (Duktape) |
+| **Native bindings only** | The hosted engine has NO ambient access. We expose only the functions we choose (env, readFile, etc.), each with a sandbox check built in. | JS (Duktape), QuickJS |
 
-The native bindings model (Duktape) is the purest containment, there
-is nothing to intercept because there is nothing ambient. The hosted
+The native bindings model (Duktape and QuickJS) is the purest containment: there
+is nothing to intercept because there is nothing ambient (`quickjs-libc` is omitted). The hosted
 code can only call functions we explicitly provide.
 
 ### Host module matrix
 
-| | Python | Lua | JS (Duktape) | Perl | Ruby | Tcl |
-|---|--------|-----|-------------|------|------|-----|
-| **Runtime** | CPython 3.x | Lua 5.3 | Duktape 2.x | Perl 5.x | CRuby 3.x | Tcl 8.5+ |
-| **Dev package** | python3-dev | liblua5.3-dev | duktape-dev | (ships with perl) | ruby-dev | tcl-dev |
-| **Compile flag** | AETHER_HAS_PYTHON | AETHER_HAS_LUA | AETHER_HAS_DUKTAPE | AETHER_HAS_PERL | AETHER_HAS_RUBY | AETHER_HAS_TCL |
-| **Link** | -lpython3.11 | -llua5.3 | -lduktape | -lperl | -lruby-3.1 | -framework Tcl / -ltcl |
-| **Containment model** | LD_PRELOAD | LD_PRELOAD | Native bindings | LD_PRELOAD | LD_PRELOAD | LD_PRELOAD |
-| **Needs LD_PRELOAD .so** | Yes | Yes | No | Yes | Yes | Yes |
-| **env var access** | libc getenv (intercepted) | libc getenv (intercepted) | `env()` binding (checked) | %ENV scrubbed at entry | ENV scrubbed at entry | ::env lazy via getenv (intercepted) |
-| **File access** | libc open/fopen (intercepted) | libc fopen (intercepted) | `readFile()` binding (checked) | libc open (intercepted) | libc open (intercepted) | libc open (intercepted) |
-| **Network** | libc connect (intercepted) | libc connect (intercepted) | Not exposed | libc connect (intercepted) | libc connect (intercepted) | libc connect (intercepted) |
-| **Process exec** | libc execve (intercepted) | libc execve (intercepted) | Not exposed | libc execve (intercepted) | libc execve (intercepted) | libc execve (intercepted) |
-| **Env cache issue** | Yes, os.environ cached at startup; use ctypes.CDLL(None).getenv | No, os.getenv goes through libc | No, no cache | Yes, %ENV cached; scrubbed by host module | Yes, ENV cached; scrubbed by host module | Yes, ::env cached; not auto-scrubbed |
-| **Sandbox grants honoured** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Glob patterns work** | Yes (prefix, suffix, exact, wildcard) | Yes | Yes | Yes | Yes | Yes |
-| **Nested sandbox** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Guest knows it's sandboxed** | No | No | No | No | No | No |
+| | Python | Lua | JS (Duktape) | QuickJS | Perl | Ruby | Tcl |
+|---|--------|-----|-------------|---------|------|------|-----|
+| **Runtime** | CPython 3.x | Lua 5.3 | Duktape 2.x | QuickJS (quickjs-ng) | Perl 5.x | CRuby 3.x | Tcl 8.5+ |
+| **Dev package** | python3-dev | liblua5.3-dev | duktape-dev | (pinned amalgamation) | (ships with perl) | ruby-dev | tcl-dev |
+| **Compile flag** | AETHER_HAS_PYTHON | AETHER_HAS_LUA | AETHER_HAS_DUKTAPE | AETHER_HAS_QUICKJS | AETHER_HAS_PERL | AETHER_HAS_RUBY | AETHER_HAS_TCL |
+| **Link** | -lpython3.11 | -llua5.3 | -lduktape | -lm | -lperl | -lruby-3.1 | -framework Tcl / -ltcl |
+| **Containment model** | LD_PRELOAD | LD_PRELOAD | Native bindings | Native bindings (no libc) | LD_PRELOAD | LD_PRELOAD | LD_PRELOAD |
+| **Needs LD_PRELOAD .so** | Yes | Yes | No | No | Yes | Yes | Yes |
+| **env var access** | libc getenv (intercepted) | libc getenv (intercepted) | `env()` binding (checked) | Host function grants | %ENV scrubbed at entry | ENV scrubbed at entry | ::env lazy via getenv (intercepted) |
+| **File access** | libc open/fopen (intercepted) | libc fopen (intercepted) | `readFile()` binding (checked) | Host function grants | libc open (intercepted) | libc open (intercepted) | libc open (intercepted) |
+| **Network** | libc connect (intercepted) | libc connect (intercepted) | Not exposed | Host function grants | libc connect (intercepted) | libc connect (intercepted) | libc connect (intercepted) |
+| **Process exec** | libc execve (intercepted) | libc execve (intercepted) | Not exposed | Host function grants | libc execve (intercepted) | libc execve (intercepted) | libc execve (intercepted) |
+| **Env cache issue** | Yes, os.environ cached at startup; use ctypes.CDLL(None).getenv | No, os.getenv goes through libc | No, no cache | No, no cache | Yes, %ENV cached; scrubbed by host module | Yes, ENV cached; scrubbed by host module | Yes, ::env cached; not auto-scrubbed |
+| **Sandbox grants honoured** | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Glob patterns work** | Yes (prefix, suffix, exact, wildcard) | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Nested sandbox** | Yes | Yes | Yes | Yes | Yes | Yes | Yes |
+| **Guest knows it's sandboxed** | No | No | No | No | No | No | No |
 
 ### Shared-interpreter behavior
 
