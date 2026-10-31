@@ -1,0 +1,245 @@
+// The std.cbor fuzz target, built --emit=obj and called from fuzz_cbor.c's
+// LLVMFuzzerTestOneInput. Beyond "doesn't crash, doesn't leak", it checks:
+//   - a value that parses re-encodes deterministically, and that encoding
+//     parses and re-encodes to the same bytes;
+//   - a value that parses under stricter options also parses under the
+//     defaults, and to the same value;
+//   - what the stricter options accept keeps to them (depth, array length,
+//     map size, indefinite lengths).
+// It calls abort() only for those; an ordinary parse error is a pass.
+import std.cbor
+import std.bytes
+import std.string
+
+extern abort()
+
+// Compare two binary strings byte for byte.
+fn same_bytes(s1: string, s2: string) -> bool {
+    l1 = string.length(s1)
+    l2 = string.length(s2)
+    if l1 != l2 {
+        return false
+    }
+    i = 0
+    while i < l1 {
+        if string.char_at_n(s1, l1, i) != string.char_at_n(s2, l2, i) {
+            return false
+        }
+        i = i + 1
+    }
+    return true
+}
+
+fn is_digit(c: int) -> bool {
+    return c >= 48 && c <= 57
+}
+
+// Whether d[i] starts an indefinite-length marker: `_` not followed by a
+// digit (`_0`..`_3` are encoding-width indicators, as in `{_0 }`).
+fn indefinite_mark(d: string, n: int, i: int) -> bool {
+    if i >= n || (string.char_at_n(d, n, i) & 255) != 95 { return false }
+    return i + 1 >= n || !is_digit(string.char_at_n(d, n, i + 1) & 255)
+}
+
+// An item appears at `level` (the number of containers around it): note
+// that the level holds something, and say whether that deep is allowed.
+// max_depth bounds items, the top one being at 0, so an empty container one
+// level past it is fine (`1({})` passes max_depth 1).
+fn item_at(lv: ptr, level: int, max_depth: int) -> bool {
+    bytes.set_le64(lv, level * 24 + 16, 1)
+    return level <= max_depth
+}
+
+// Whether a value decoded under `o` keeps to its limits, read from the
+// value's diagnostic notation `d` (std.cbor exports no array accessor): no
+// item deeper than max_depth, where arrays, maps and tags (`N(...)`) each
+// add a level; no array longer than max_array_elements; no map with more
+// than max_map_pairs; and no indefinite-length item (`[_`, `{_`, `(_`) when
+// they are refused. One pass, skipping quoted text. Each level keeps 3 longs
+// in `lv`: its kind (0 array, 1 map, 2 tag), its commas or colons, and
+// whether it holds anything. Levels reach max_depth + 1 at most: an item
+// there fails before a deeper level opens.
+fn within_limits(d: string, o: cbor.CborDecodeOptions) -> bool {
+    n = string.length(d)
+    lv = bytes.new((o.max_depth + 2) * 24)
+    defer bytes.free(lv)
+    bytes.set_length(lv, (o.max_depth + 2) * 24)
+    depth = 0
+    in_text = 0
+    in_hex = 0
+    plain = 0 // open `simple(` and `(_` parens: not levels, and their commas separate chunks
+    prev = 32
+    i = 0
+    while i < n {
+        c = string.char_at_n(d, n, i) & 255
+        if in_text == 1 {
+            if c == 92 {
+                i = i + 1
+            } else if c == 34 {
+                in_text = 0
+            }
+        } else if in_hex == 1 {
+            if c == 39 { in_hex = 0 }
+        } else if c == 34 {
+            in_text = 1
+            if !item_at(lv, depth, o.max_depth) { return false }
+        } else if c == 39 {
+            in_hex = 1
+        } else if c == 91 || c == 123 || (c == 40 && is_digit(prev)) {
+            // [ { or a tag's (: the container is an item at this level
+            if c != 40 && !item_at(lv, depth, o.max_depth) { return false }
+            depth = depth + 1
+            kind = 2
+            if c == 91 { kind = 0 }
+            if c == 123 { kind = 1 }
+            bytes.set_le64(lv, depth * 24, kind)
+            bytes.set_le64(lv, depth * 24 + 8, 0)
+            bytes.set_le64(lv, depth * 24 + 16, 0)
+            if o.allow_indefinite == 0 && indefinite_mark(d, n, i + 1) {
+                return false
+            }
+        } else if c == 40 {
+            // `(_ ...)`, an indefinite-length string's chunks, or `simple(N)`
+            if o.allow_indefinite == 0 && indefinite_mark(d, n, i + 1) {
+                return false
+            }
+            plain = plain + 1
+        } else if c == 41 && plain > 0 {
+            plain = plain - 1
+        } else if (c == 93 || c == 125 || c == 41) && depth > 0 {
+            kind = bytes.get_le64(lv, depth * 24)
+            marks = bytes.get_le64(lv, depth * 24 + 8)
+            seen = bytes.get_le64(lv, depth * 24 + 16)
+            if kind == 0 && marks + seen > o.max_array_elements {
+                return false
+            }
+            if kind == 1 && marks > o.max_map_pairs {
+                return false
+            }
+            depth = depth - 1
+        } else if depth > 0 && plain == 0 && ((c == 44 && bytes.get_le64(lv, depth * 24) == 0) || (c == 58 && bytes.get_le64(lv, depth * 24) == 1)) {
+            bytes.set_le64(lv, depth * 24 + 8, bytes.get_le64(lv, depth * 24 + 8) + 1)
+        } else if c == 95 {
+            // `_` then a digit is an encoding-width indicator; skip both
+            // (so a tag written `24_0(` still reads as a tag)
+            if i + 1 < n && is_digit(string.char_at_n(d, n, i + 1) & 255) {
+                i = i + 1
+                c = string.char_at_n(d, n, i) & 255
+            }
+        } else if c != 32 && c != 44 {
+            // a scalar, or a tag number (the tag is an item at this level)
+            if !item_at(lv, depth, o.max_depth) { return false }
+        }
+        prev = c
+        i = i + 1
+    }
+    return true
+}
+
+// Whether the input reached cbor.parse whole: run_fuzz_cbor.sh passes the
+// 2 bytes 41 00, which must decode to a 1-byte byte string (cut at the NUL,
+// they would be the truncated 41). 1 if so, 0 otherwise.
+fuzz_check_nul(data: ptr, len: int) -> int {
+    if len != 2 { return 0 }
+    x = bytes.string_from_ptr(data, len)
+    v, err = cbor.parse(x)
+    if err != "" {
+        return 0
+    }
+    t = cbor.type(v)
+    if t != cbor.CBOR_BYTES {
+        cbor.free(v)
+        return 0
+    }
+    b_str, b_err = cbor.get_bytes(v)
+    if b_err != "" {
+        cbor.free(v)
+        return 0
+    }
+    b_len = string.length(b_str)
+    cbor.free(v)
+    if b_len == 1 {
+        return 1
+    }
+    return 0
+}
+
+// One fuzzer input: `len` bytes at `data`, zeros included.
+fuzz_target(data: ptr, len: int) {
+    if len < 0 {
+        return
+    }
+    x = bytes.string_from_ptr(data, len)
+
+    // 1. Parse with the default options. An error is fine.
+    v, err = cbor.parse(x)
+    parsed_ok = (err == "")
+
+    // 2. A parsed value round-trips through the deterministic encoding.
+    e1 = ""
+    if parsed_ok {
+        _diag, _ = cbor.diagnose(v)
+
+        enc, eerr = cbor.encode_deterministic(v)
+        if eerr != "" {
+            abort()
+        }
+        e1 = enc
+
+        v_e1, perr = cbor.parse(e1)
+        if perr != "" {
+            abort()
+        }
+        e2, eerr2 = cbor.encode_deterministic(v_e1)
+        if eerr2 != "" {
+            abort()
+        }
+        if !same_bytes(e1, e2) {
+            abort()
+        }
+        cbor.free(v_e1)
+    }
+
+    // 3. Parse again with small limits taken from the first byte, so the
+    // limit checks fire at small sizes.
+    if len > 0 {
+        first_b = string.char_at_n(x, len, 0) & 255
+        cbor.CborDecodeOptions opts_var
+        opts_var.allow_indefinite = first_b & 1
+        opts_var.allow_duplicate_keys = (first_b >> 1) & 1
+        opts_var.max_depth = 1 + ((first_b >> 2) & 15)
+        opts_var.max_array_elements = 1 + ((first_b >> 3) & 15)
+        opts_var.max_map_pairs = 1 + ((first_b >> 4) & 15)
+
+        v_var, err_var = cbor.parse_with(x, opts_var)
+
+        // What the small limits accepted keeps to them.
+        if err_var == "" {
+            d_var, derr = cbor.diagnose(v_var)
+            if derr != "" || !within_limits(d_var, opts_var) {
+                abort()
+            }
+        }
+
+        // With duplicate keys refused, these options are no looser than the
+        // defaults (which allow indefinite lengths), so what they accept the
+        // defaults accept.
+        if err_var == "" && !parsed_ok && opts_var.allow_duplicate_keys == 0 {
+            abort()
+        }
+        // The limits decide whether a value is accepted, never what it is.
+        if err_var == "" && parsed_ok {
+            e_var, everr = cbor.encode_deterministic(v_var)
+            if everr != "" || !same_bytes(e1, e_var) {
+                abort()
+            }
+        }
+        if err_var == "" {
+            cbor.free(v_var)
+        }
+    }
+
+    if parsed_ok {
+        cbor.free(v)
+    }
+}
