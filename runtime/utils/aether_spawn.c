@@ -10,6 +10,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __APPLE__
@@ -131,6 +132,30 @@ pid_t aether_fork(void) {
     if (pid != 0) pthread_rwlock_unlock(&aether_fork_lock);
     return pid;
 #endif
+}
+
+/* std.os's socket channel (os.run_socket, os.socketpair). Every platform
+ * with pipe2 has SOCK_CLOEXEC too; macOS has neither and takes the lock as
+ * aether_pipe_cloexec does. */
+int aether_socketpair_cloexec(int fds[2]) {
+#ifdef AETHER_HAVE_PIPE2
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) != 0) return -1;
+#else
+    pthread_rwlock_rdlock(&aether_fork_lock);
+    int rc = socketpair(AF_UNIX, SOCK_STREAM, 0, fds);
+    if (rc == 0) {
+        fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+        fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+    }
+    pthread_rwlock_unlock(&aether_fork_lock);
+    if (rc != 0) return -1;
+#endif
+#ifdef SO_NOSIGPIPE
+    int on = 1;
+    setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+    setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &on, sizeof(on));
+#endif
+    return 0;
 }
 #endif
 

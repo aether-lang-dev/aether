@@ -28,7 +28,7 @@ check_banned() {
 for mod in \
     std.net std.http std.http.client std.tcp std.udp \
     std.fs std.file std.dir \
-    std.os std.dl \
+    std.os std.dl std.ipc \
     contrib.host.python; do
     check_banned "$mod"
 done

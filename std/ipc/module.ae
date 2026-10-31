@@ -1,78 +1,128 @@
-// std.ipc — child-to-parent and two-way channel IPC with descriptor passing.
+// std.ipc — a process's channel to its parent: a report pipe, or a two-way
+// socket that can also pass open file descriptors.
 //
-// Companion to std.os.run_pipe and std.os.run_socket (parent side). When
-// a parent spawns a child via std.os, the child can use std.ipc.parent_channel()
-// to find the inherited channel descriptor.
+// Companion to std.os.run_pipe and std.os.run_socket (parent side).
+// When a parent spawns a child via os.run_pipe /
+// os.run_pipe_drain_and_wait / os.run_socket, the child can use
+// std.ipc.parent_channel() to find the fd of the inherited channel,
+// and parent_channel_kind() to learn which kind it is.
 //
-// Supports two channel types:
-//   - "pipe": write-only report pipe created by os.run_pipe / os.run_pipe_drain_and_wait.
-//   - "socket": bidirectional Unix domain socket created by os.run_socket.
+// Models the brief in
+// `~/scm/aetherBuild/asks/lightweight-ipc-dx.md` (DX shape) +
+// `lightweight-ipc-dx-aether-reply.md` (proposed surface) +
+// `lightweight-ipc-dx-aeb-final.md` (agreement).
 //
-// Functions:
-//   parent_channel() -> int                     Find channel fd or -1
-//   parent_channel_kind() -> string             "pipe", "socket", or ""
-//   write(fd, bytes) -> string                  Write bytes; "" or err
-//   write_close(fd, bytes) -> string            Write bytes + close; "" or err
-//   read(fd, max) -> (data, err)                Read up to max bytes; "" data and "" err on EOF
-//   send_fd(ch, fd, payload) -> string          Send 1 descriptor + >=1 byte payload
-//   recv_fd(ch, max) -> (fd, payload, err)      Receive 1 descriptor + payload
+// Primitives:
+//
+//   parent_channel() -> int                    find fd or -1
+//   parent_channel_kind() -> string            "pipe", "socket" or ""
+//   write(fd, bytes) -> string                 write all; "" or err
+//   write_close(fd, bytes) -> string           write + close; "" or err
+//   read(fd, max) -> (data, err)               one read; ("", "") at EOF
+//   send_fd(ch, fd, payload) -> string         pass a descriptor; "" or err
+//   recv_fd(ch, max) -> (fd, payload, err)     receive one descriptor
+//
+// (write/write_close were originally named `send`/`send_close` per the
+// design discussion; renamed because `send` is a reserved keyword in
+// Aether for actor message-passing. `write` reads correctly here — the
+// channel IS a writeable file descriptor under the hood.)
+//
+// read, send_fd and recv_fd work on any connected AF_UNIX stream socket,
+// the parent's end from os.run_socket and both ends of os.socketpair
+// included, not only on parent_channel(). send_fd / recv_fd are POSIX-only;
+// on Windows they, and parent_channel(), report that there is none.
+//
+// Common shape — child writes one report at exit:
+//
+//   import std.ipc
+//
+//   ch = ipc.parent_channel()
+//   if ch >= 0 {
+//       err = ipc.write_close(ch, "passed=44\nfailed=3\n")
+//   }
 
-import std.net
+import std.io
 
 exports(
     ipc_parent_channel_raw, ipc_parent_channel_kind_raw,
     ipc_write_raw, ipc_read_raw, ipc_send_fd_raw, ipc_recv_fd_raw,
-    ipc_set_sock_buf_raw, ipc_get_cloexec_raw, test_ipc_send_two_fds, ipc_test_send_async_raw,
     parent_channel, parent_channel_kind, write, write_close, read, send_fd, recv_fd
 )
 
+// Returns the parent-channel fd if the parent spawned this process
+// via os.run_pipe or os.run_socket (i.e. AETHER_IPC_FD is set in env
+// and the named fd is open); -1 otherwise. Children of os.run /
+// os.run_capture see -1 — those don't open a back-channel. On Windows
+// always -1 (v1 stub). The fd value is whatever the parent picked;
+// current parent-side default is 3 but consumers MUST NOT hardcode that.
 extern ipc_parent_channel_raw() -> int
 extern ipc_parent_channel_kind_raw() -> string
 extern ipc_write_raw(fd: int, bytes: @aether string) -> string
 extern ipc_read_raw(fd: int, max: int) -> (string @heap, string)
 extern ipc_send_fd_raw(ch: int, fd: int, payload: @aether string) -> string
 extern ipc_recv_fd_raw(ch: int, max: int) -> (int, string @heap, string)
-extern ipc_set_sock_buf_raw(fd: int, size: int) -> int
-extern ipc_get_cloexec_raw(fd: int) -> int
-extern test_ipc_send_two_fds(ch: int, fd1: int, fd2: int, payload: string) -> int
-extern ipc_test_send_async_raw(fd: int, payload: string) -> int
 
-// Returns the parent-channel fd if the parent spawned this process
-// via os.run_pipe or os.run_socket (i.e. AETHER_IPC_FD is set in env
-// and the named fd is open); -1 otherwise.
+// Aether-side wrappers. parent_channel returns the raw int from
+// the extern; -1 sentinel for "no parent channel."
 parent_channel() -> int { return ipc_parent_channel_raw() }
 
-// Returns the channel kind: "pipe" for a pipe channel, "socket" for a socket
-// channel, or "" when no channel exists.
+// "socket" for a channel from os.run_socket (two-way, can pass
+// descriptors), "pipe" for one from os.run_pipe (write-only from the
+// child), "" when parent_channel() finds none.
 parent_channel_kind() -> string { return ipc_parent_channel_kind_raw() }
 
-// Write `bytes` to `fd`. Returns "" on success, non-empty error string
-// on failure. Loops on short writes and handles SIGPIPE / EINTR.
+// Write all of `bytes` to `fd`. Returns "" on success, non-empty
+// error string on failure. A short write continues where it stopped
+// and an interrupted one retries, so "" means every byte went; a
+// string with a zero byte in it goes whole. On a socket whose peer has
+// gone this is an error, not SIGPIPE.
+//
+// For the common case where the child writes one payload and
+// exits, prefer write_close so the parent's read_all loop sees
+// EOF promptly.
 write(fd: int, bytes: string) -> string {
     return ipc_write_raw(fd, bytes)
 }
 
-// Write `bytes` then close the channel.
+// Write `bytes` then close the channel. The common case: child
+// produces one structured report at exit and closes the fd so
+// the parent's drain loop sees EOF and stops.
+//
+// Calling close releases the writer's reference on the pipe; the
+// parent sees EOF only after every writer has closed. If the
+// child is itself going to exit immediately after, the kernel
+// will close the fd anyway during process teardown — explicit
+// close is still preferred because it lets the parent's reader
+// unblock before the child exits, useful when the parent's
+// reader runs in the same thread as the child-wait loop.
 write_close(fd: int, bytes: string) -> string {
     werr = write(fd, bytes)
-    net.fd_close(fd)
+    io.fd_close(fd)
     return werr
 }
 
-// Binary-safe read of up to `max` bytes from `fd`. Returns (payload, err).
-// On EOF (end-of-stream), returns ("", ""). On error, returns ("", err).
-read(ch: int, max: int) -> (string @heap, string) {
+// One read of up to `max` bytes: (data, "") with what arrived, which
+// may be less than was written (the channel is a byte stream; framing
+// is the caller's), ("", "") at end of stream, or ("", err).
+// Binary-safe. Blocks until something arrives.
+read(ch: int, max: int) -> {
     return ipc_read_raw(ch, max)
 }
 
-// Send one open file descriptor `fd` across socket channel `ch`, accompanied by
-// `payload` (must be at least 1 byte). Returns "" on success, error message on failure.
+// Pass the open descriptor `fd` to the process at the other end of
+// socket `ch`, attached to `payload`, which must be at least one byte
+// (on a stream socket a descriptor travels with bytes). The receiver
+// gets its own descriptor for the same open file; this side's `fd`
+// stays open, so close it when this side is done with it.
 send_fd(ch: int, fd: int, payload: string) -> string {
     return ipc_send_fd_raw(ch, fd, payload)
 }
 
-// Receive one open file descriptor and payload up to `max` bytes from socket
-// channel `ch`. Returns (received_fd, payload, err).
-recv_fd(ch: int, max: int) -> (int, string @heap, string) {
+// Receive one descriptor from socket `ch`, with the bytes that came
+// with it (up to `max`): (fd, payload, ""), or (-1, "", err). The
+// descriptor is close-on-exec. A message carrying no descriptor, more
+// than one, or control data of another kind is an error, and every
+// descriptor that did arrive is closed first.
+recv_fd(ch: int, max: int) -> {
     return ipc_recv_fd_raw(ch, max)
 }

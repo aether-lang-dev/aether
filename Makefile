@@ -960,6 +960,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_runtime_observe.c \
            tests/runtime/test_runtime_process_mem.c \
            tests/runtime/test_spawn_env.c \
+           tests/runtime/test_ipc_write.c \
            tests/runtime/test_runtime_schema.c \
            tests/runtime/test_runtime_intmap.c \
            tests/runtime/test_tools_sha256.c tools/ae_sha256.c \

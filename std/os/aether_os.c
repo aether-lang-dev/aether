@@ -295,6 +295,23 @@ static const char* aether_exec_failure(int e) {
     }
 }
 
+/* "<what>: <strerror(err)>" in a per-thread buffer, valid until this
+ * thread's next call. strerror_r, not strerror: the runtime runs actor,
+ * worker and HTTP threads, and strerror's buffer is shared. */
+static const char* aether_os_strerror_msg(const char* what, int err) {
+    static __thread char msg[256];
+    char buf[128];
+    const char* reason = buf;
+    buf[0] = '\0';
+#if defined(__GLIBC__) && defined(_GNU_SOURCE)
+    reason = strerror_r(err, buf, sizeof buf);
+#else
+    if (strerror_r(err, buf, sizeof buf) != 0) snprintf(buf, sizeof buf, "error %d", err);
+#endif
+    snprintf(msg, sizeof msg, "%s: %s", what, reason);
+    return msg;
+}
+
 /* Reap a child whose exec failed. */
 static void aether_reap_failed(pid_t pid) {
     int st = 0;
@@ -1870,46 +1887,27 @@ typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_st
  * takes the environment's lock, and a lock another thread held at the fork
  * is never released in the child. The array is malloc'd; its strings are
  * the base's and a literal. NULL when malloc fails. */
-#include <sys/socket.h>
-
 static char** aether_ipc_env(char** base) {
     static const char* const ipc[] = { "AETHER_IPC_FD=3" };
     return aether_spawn_env(base ? base : aether_environ, ipc, 1);
 }
 
+/* os.run_socket's child env: as aether_ipc_env, plus AETHER_IPC_KIND=socket,
+ * which ipc.parent_channel_kind() reads. Either of the two in `base` is
+ * replaced, not duplicated. */
 static char** aether_ipc_socket_env(char** base) {
     static const char* const ipc[] = { "AETHER_IPC_FD=3", "AETHER_IPC_KIND=socket" };
     return aether_spawn_env(base ? base : aether_environ, ipc, 2);
 }
 
-static int aether_socketpair_cloexec(int fds[2]) {
-#if defined(SOCK_CLOEXEC)
-    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) == 0) {
-#ifdef SO_NOSIGPIPE
-        int val = 1;
-        setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
-        setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
-#endif
-        return 0;
-    }
-    if (errno != EINVAL) return -1;
-#endif
-    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) return -1;
-    (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC);
-    (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
-#ifdef SO_NOSIGPIPE
-    int val = 1;
-    setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
-    setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
-#endif
-    return 0;
-}
-
+/* A connected AF_UNIX stream pair, both ends close-on-exec, for a process
+ * to use itself (std.ipc's tests do) or to hand one end to a child it
+ * spawns some other way. Returns (fd_a, fd_b, err). */
 _tuple_int_int_string os_socketpair_raw(void) {
     _tuple_int_int_string out = { -1, -1, "" };
     int fds[2];
     if (aether_socketpair_cloexec(fds) < 0) {
-        out._2 = strerror(errno);
+        out._2 = aether_os_strerror_msg("os.socketpair", errno);
         return out;
     }
     out._0 = fds[0];
@@ -1917,6 +1915,26 @@ _tuple_int_int_string os_socketpair_raw(void) {
     return out;
 }
 
+/* Spawn child with a back-channel at fd 3, set AETHER_IPC_FD=3 in child's
+ * env. The channel is the write end of a pipe (os_run_pipe_raw) or one end
+ * of a socket pair (os_run_socket_raw, which also sets
+ * AETHER_IPC_KIND=socket). Returns (parent_fd, child_pid, err). On success,
+ * err is "" and caller must:
+ *   1. Read from (and, for a socket, write to) parent_fd.
+ *   2. Call os_wait_pid_raw(child_pid) to reap.
+ *   3. Close parent_fd.
+ *
+ * Failure modes return (-1, -1, "<reason>") with no child left to reap:
+ * a program that could not start reads so too, the reason from its exec
+ * (#3170). An explicit env is refused before the fork: the child's
+ * AETHER_IPC_FD would have to be spliced into it, and it used to make the
+ * child exit 127 without running the program.
+ *
+ * Pipe-buffer deadlock window: if child writes > OS pipe buffer
+ * (typically 16K-64K) without parent reading concurrently, the
+ * child blocks forever on its write. For payload-at-exit usage
+ * with large payloads, prefer os_run_pipe_drain_and_wait_raw. A socket
+ * has the same window in both directions. */
 static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* argv_list, void* env_list, int is_socket) {
     _tuple_int_int_string out = { -1, -1, "" };
     if (!prog) {
@@ -1931,7 +1949,7 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
     int chanfd[2];
     if (is_socket) {
         if (aether_socketpair_cloexec(chanfd) != 0) {
-            out._2 = "socketpair failed";
+            out._2 = aether_os_strerror_msg("os.run_socket: socketpair", errno);
             return out;
         }
     } else {
@@ -1960,6 +1978,9 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         return out;
     }
 
+    /* The child's env: the one given, or environ, with AETHER_IPC_FD=3 (and
+     * for a socket AETHER_IPC_KIND=socket). The spliced array borrows the
+     * given one's strings, so only its array goes. */
     char** spliced = is_socket ? aether_ipc_socket_env(x.envp) : aether_ipc_env(x.envp);
     free(x.envp);
     x.envp = spliced;
@@ -1985,6 +2006,7 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         return out;
     }
     if (pid == 0) {
+        /* Child — wire chanfd[1] to fd 3; its env says so. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(chanfd[0]);

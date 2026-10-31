@@ -1,81 +1,59 @@
-// Integration test child process for std.ipc socket channel and fd passing.
+// The child for probe.ae: spawned with os.run_socket, it finds its
+// channel with std.ipc, answers a request, reads a file through a
+// descriptor the parent passes, and echoes 1 MB back.
 
 import std.ipc
 import std.io
 import std.bytes
+import std.strbuilder
 import std.string
 
 extern exit(code: int)
 
+const BIG = 1048576
+
+fail(msg: string) {
+    println("FAIL child: ${msg}")
+    exit(1)
+}
+
 main() {
     ch = ipc.parent_channel()
+    if ch < 0 { fail("no parent channel") }
     kind = ipc.parent_channel_kind()
+    if kind != "socket" { fail("expected a socket channel, got '${kind}'") }
 
-    if ch < 0 {
-        println("FAIL child: no parent channel")
-        exit(1)
-    }
-
-    if kind != "socket" {
-        println("FAIL child: expected socket channel, got '${kind}'")
-        exit(1)
-    }
-
-    // 1. Read request from parent
     req, rerr = ipc.read(ch, 100)
-    if rerr != "" {
-        println("FAIL child read request: ${rerr}")
-        exit(1)
-    }
-    if req != "hello child" {
-        println("FAIL child read request mismatch: got '${req}'")
-        exit(1)
-    }
-
-    // 2. Reply to parent
+    if rerr != "" { fail("read request: ${rerr}") }
+    if req != "hello child" { fail("request was '${req}'") }
     werr = ipc.write(ch, "hello parent")
-    if werr != "" {
-        println("FAIL child write reply: ${werr}")
-        exit(1)
-    }
+    if werr != "" { fail("write reply: ${werr}") }
 
-    // 3. Receive file descriptor from parent
-    recvd_fd, payload, recv_err = ipc.recv_fd(ch, 1024)
-    if recv_err != "" {
-        println("FAIL child recv_fd: ${recv_err}")
-        exit(1)
-    }
-    if recvd_fd < 0 {
-        println("FAIL child recv_fd invalid descriptor: ${recvd_fd}")
-        exit(1)
-    }
-    if payload != "read_file_req" {
-        println("FAIL child recv_fd payload mismatch: got '${payload}'")
-        exit(1)
-    }
-
-    // 4. Read file through received descriptor
+    fd, payload, ferr = ipc.recv_fd(ch, 1024)
+    if ferr != "" { fail("recv_fd: ${ferr}") }
+    if payload != "read_file_req" { fail("recv_fd payload was '${payload}'") }
     buf = bytes.new(256)
-    n_read, read_err = io.fd_read_into(recvd_fd, bytes.capacity_view(buf)[0..256])
-    if read_err != "" {
-        println("FAIL child fd_read_into: ${read_err}")
-        bytes.free(buf)
-        exit(1)
-    }
-    _ = bytes.set_length(buf, n_read)
-    content = bytes.to_string(buf, n_read)
+    n, read_err = io.fd_read_into(fd, bytes.capacity_view(buf)[0..256])
+    if read_err != "" { fail("read through the descriptor: ${read_err}") }
+    content = bytes.to_string(buf, n)
     bytes.free(buf)
-
-    // Close received descriptor
-    _ = io.fd_close(recvd_fd)
-
-    // 5. Send file contents back to parent
+    io.fd_close(fd)
     werr2 = ipc.write(ch, "content: ${content}")
-    if werr2 != "" {
-        println("FAIL child write content reply: ${werr2}")
-        exit(1)
-    }
+    if werr2 != "" { fail("write content: ${werr2}") }
 
-    _ = io.fd_close(ch)
+    // Take all of BIG before answering: the parent's write of it can
+    // only finish while this side reads.
+    sb = strbuilder.new(BIG)
+    while strbuilder.length(sb) < BIG {
+        chunk, cerr = ipc.read(ch, 65536)
+        if cerr != "" { fail("read big: ${cerr}") }
+        if string.length(chunk) == 0 { fail("end of stream inside big") }
+        strbuilder.append(sb, chunk)
+    }
+    big = strbuilder.finish(sb)
+    berr = ipc.write(ch, big)
+    if berr != "" { fail("write big: ${berr}") }
+
+    io.fd_close(ch)
     exit(0)
 }
