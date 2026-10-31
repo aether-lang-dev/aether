@@ -55,13 +55,17 @@ is the only host with it today. Who should get it, and how hard:
   `DUK_USE_EXEC_TIMEOUT_CHECK`, so `duktape_vm_set_instruction_limit` returns
   `"execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK"`.
 
-- [ ] **Tcl** (`contrib/host/tcl`) — MEDIUM value, LOW-MEDIUM effort. Tcl's C
+- [x] **Tcl** (`contrib/host/tcl`) — MEDIUM value, LOW-MEDIUM effort. Tcl's C
   API is command-oriented, not stack-oriented: host callbacks register as
   `Tcl_CreateObjCommand` (the host fn reads `objv[]` Tcl_Obj args and sets the
-  interp result), typed values via `Tcl_GetIntFromObj`/`Tcl_NewStringObj`/etc,
-  `Tcl_Eval` + `Tcl_GetObjResult` for typed eval, `Tcl_SetVar` for globals,
-  `Tcl_LimitSetCommands`/`Tcl_LimitTypeSet` for the guard. Different idiom from
-  Lua but a clean 1:1 mapping; everything's already a `Tcl_Obj`.
+  interp result), typed values via `Tcl_GetWideIntFromObj`/`Tcl_NewStringObj`/etc,
+  `Tcl_EvalObjEx` + `Tcl_GetObjResult` for typed eval, `Tcl_SetVar2Ex` for
+  globals, `Tcl_LimitSetCommands`/`Tcl_LimitTypeSet` for the guard. Done as
+  `tcl_vm_*` / `tcl_arg_*` / `tcl_push_*`. A VM is its own interpreter, refused
+  from any thread but its creator's (Tcl's rule). Two guards: the command
+  limit, and a time limit for the loops that run no commands (`while 1 {}`).
+  The eval goes in as an object, not a string: Tcl checks limits only in
+  compiled code, and a top-level loop run as a string never reaches a check.
 
 - [ ] **Ruby** (`contrib/host/ruby`) — MEDIUM value, HIGH effort. MRI's
   embedding C-API can do it (`rb_define_global_function` with a

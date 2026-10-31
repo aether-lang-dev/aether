@@ -1,0 +1,160 @@
+// Integration tests for contrib.host.tcl — co-located with the bridge,
+// written in Aether against std.spec. The C harness in
+// tests/integration/host_tcl_bidirectional/ covers the bidirectional tier
+// more deeply (both limits, the thread check, memory); this spec is the
+// Aether-side surface: @c_callback commands, typed results, and a callback
+// that evaluates on its own VM.
+import contrib.host.tcl
+import std.spec
+import std.string
+import std.os
+import std.list
+
+@c_callback
+cb_add(vm: ptr) -> int {
+    tcl.push_int(vm, tcl.arg_int(vm, 1) + tcl.arg_int(vm, 2))
+    return 1
+}
+
+@c_callback
+cb_echo_str(vm: ptr) -> int {
+    tcl.push_str(vm, tcl.arg_str(vm, 1))
+    return 1
+}
+
+@c_callback
+cb_count(vm: ptr) -> int {
+    tcl.push_int(vm, tcl.arg_count(vm))
+    return 1
+}
+
+// Raises, with a defer that must still run: raise_error returns to the
+// trampoline, which fails the command only after this function has returned.
+@c_callback
+cb_raise_with_cleanup(vm: ptr) -> int {
+    defer os.setenv("AE_TCL_CB_CLEANUP", "ran")
+    return tcl.raise_error(vm, "raised after cleanup")
+}
+
+// Evaluates on its own VM in the middle of the script's call to it.
+@c_callback
+cb_nested(vm: ptr) -> int {
+    n = tcl.arg_int(vm, 1)
+    long inner = -1
+    if tcl.vm_eval(vm, "app.add 40 2") == 0 { inner = tcl.vm_result_int(vm) }
+    tcl.vm_pop_result(vm)
+    tcl.push_int(vm, n * 100 + inner)
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    have_tcl = 0
+    if tcl.init() == 0 { have_tcl = 1 }
+    reason = "libtcl not loadable (set AETHER_TCL_SONAME)"
+
+    spec.describe(fw, "contrib.host.tcl") {
+        spec.it_when(have_tcl, "runs a script and reports a failing one", reason) callback {
+            spec.assert_eq(tcl.run("set aether_probe [expr {6 * 7}]"), 0, "a valid script returns 0")
+            spec.assert_eq(tcl.run("if {$aether_probe != 42} { error wrong }"), 0,
+                "state persists in the shared interpreter")
+            spec.assert_not_eq(tcl.run("error deliberate"), 0, "an erroring script must NOT report success")
+        }
+
+        spec.it_when(have_tcl, "persistent VM with host commands and typed values (#904)", reason) callback {
+            vm = tcl.vm_new()
+            spec.assert_not_null(vm, "vm_new created a VM")
+            spec.assert_eq(tcl.vm_register(vm, "app.add", cb_add), 0, "a dotted command name registers")
+            tcl.vm_register(vm, "host.echo_str", cb_echo_str)
+            tcl.vm_register(vm, "host.count", cb_count)
+
+            tcl.vm_set_global_str(vm, "GSTR", "héllo €")
+            tcl.vm_set_global_int(vm, "GINT", 100)
+            keys = list.new()
+            list.add(keys, "k1")
+            list.add(keys, "k 2")
+            tcl.vm_set_global_strlist(vm, "KEYS", keys)
+            list.free(keys)
+
+            spec.assert_eq(tcl.vm_eval(vm, "set x [expr {[app.add 2 3] + $GINT}]"), 0, "eval ok")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TINT, "an expr result is an int")
+            spec.assert_eq(tcl.vm_result_int(vm), 105, "callback plus global")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "expr {$x + 5}")
+            spec.assert_eq(tcl.vm_result_int(vm), 110, "state persists between evals")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "host.echo_str $GSTR")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TSTR, "a string")
+            spec.assert_str_eq(tcl.vm_result_str(vm), "héllo €", "non-ASCII round trip")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "host.count a b c")
+            spec.assert_eq(tcl.vm_result_int(vm), 3, "the command's name is not an argument")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "lindex $KEYS 1")
+            spec.assert_str_eq(tcl.vm_result_str(vm), "k 2", "a string list global is a Tcl list")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "expr {1.5 * 3}")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TFLOAT, "a double")
+            spec.assert_true(tcl.vm_result_double(vm) == 4.5, "reads as 4.5")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "list a b")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TTABLE, "a list")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_eval(vm, "set unused 1; puts -nonewline {}")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TNIL, "a command returning nothing is nil")
+            tcl.vm_pop_result(vm)
+
+            tcl.vm_free(vm)
+        }
+
+        spec.it_when(have_tcl, "errors, nested evals and limits", reason) callback {
+            vm = tcl.vm_new()
+            tcl.vm_register(vm, "app.add", cb_add)
+            tcl.vm_register(vm, "host.nested", cb_nested)
+
+            _se = os.setenv("AE_TCL_CB_CLEANUP", "")
+            tcl.vm_register(vm, "host.raise", cb_raise_with_cleanup)
+            spec.assert_eq(tcl.vm_eval(vm, "catch {host.raise} m; set m"), 0, "a raise is catchable")
+            spec.assert_str_eq(tcl.vm_result_str(vm), "raised after cleanup", "the caught message")
+            tcl.vm_pop_result(vm)
+            spec.assert_str_eq(os.getenv("AE_TCL_CB_CLEANUP"), "ran", "the raising callback's defer ran")
+
+            spec.assert_not_eq(tcl.vm_eval(vm, "host.raise"), 0, "an uncaught raise fails the eval")
+            spec.assert_eq(tcl.vm_result_type(vm), tcl.TCL_TERR, "and reads as an error")
+            tcl.vm_pop_result(vm)
+
+            spec.assert_eq(tcl.vm_eval(vm, "host.nested 7"), 0, "a callback evaluates on its own VM")
+            spec.assert_eq(tcl.vm_result_int(vm), 742, "and both results come back")
+            tcl.vm_pop_result(vm)
+
+            spec.assert_str_eq(tcl.vm_set_instruction_limit(vm, 5000, 1), "", "instruction limit set")
+            spec.assert_not_eq(tcl.vm_eval(vm, "while 1 {incr i}"), 0, "a command loop is stopped")
+            spec.assert_true(string.contains(tcl.vm_result_str(vm), "command count limit"), "by the command limit")
+            tcl.vm_pop_result(vm)
+            tcl.vm_set_instruction_limit(vm, 0, 1)
+
+            spec.assert_str_eq(tcl.vm_set_time_limit(vm, 200, 1), "", "time limit set")
+            spec.assert_not_eq(tcl.vm_eval(vm, "while 1 {}"), 0, "a loop of no commands is stopped")
+            spec.assert_true(string.contains(tcl.vm_result_str(vm), "time limit"), "by the time limit")
+            tcl.vm_pop_result(vm)
+            tcl.vm_set_time_limit(vm, 0, 1)
+
+            spec.assert_eq(tcl.vm_eval(vm, "expr {2 + 2}"), 0, "the VM evaluates after a limit")
+            tcl.vm_pop_result(vm)
+            tcl.vm_free(vm)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+
+    if have_tcl == 1 { tcl.finalize() }
+    return _rc
+}

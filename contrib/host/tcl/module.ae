@@ -13,12 +13,92 @@
 //       grant_fs_read("/etc/*")
 //   }
 //   tcl.run_sandboxed(worker, "puts $::env(HOME)")
+//
+// Bidirectional embedding (#904):
+//   vm = tcl.vm_new()
+//   tcl.vm_register(vm, "app.add", add_cb)    // a Tcl command: `app.add 2 3`
+//   tcl.vm_set_global_str(vm, "NAME", "Aether")
+//   tcl.vm_eval(vm, "app.add 2 3")
+//   res = tcl.vm_result_int(vm)
+//   tcl.vm_pop_result(vm)
+//   tcl.vm_free(vm)
 import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
 
 
-exports (tcl_run_sandboxed, tcl_run, tcl_init, tcl_finalize)
+exports (
+    tcl_run_sandboxed, tcl_run, tcl_init, tcl_finalize,
+    // #904 bidirectional API
+    tcl_vm_new, tcl_vm_free, tcl_vm_register,
+    tcl_vm_set_global_str, tcl_vm_set_global_int, tcl_vm_set_global_strlist,
+    tcl_vm_eval, tcl_vm_result_type, tcl_vm_result_int, tcl_vm_result_double,
+    tcl_vm_result_str, tcl_vm_result_bool, tcl_vm_pop_result,
+    tcl_vm_set_instruction_limit, tcl_vm_set_time_limit,
+    tcl_arg_count, tcl_arg_type, tcl_arg_str, tcl_arg_int, tcl_arg_double, tcl_arg_bool,
+    tcl_push_int, tcl_push_str, tcl_push_bool, tcl_push_nil, tcl_push_double,
+    tcl_raise_error,
+    // typed-value tags (returned by *_result_type / *_arg_type)
+    TCL_TNIL, TCL_TBOOL, TCL_TINT, TCL_TSTR, TCL_TTABLE, TCL_TERR, TCL_TOTHER, TCL_TFLOAT
+)
 
+// --- Typed value tags (must match aether_host_tcl.c AE_TCL_T*) -------------
+// The first seven are Lua's and Duktape's. Tcl reads a value's tag from its
+// internal representation: `expr {2+3}` is TCL_TINT, but the literal 5 in
+// `set x 5` is still a string, TCL_TSTR. The readers convert either way.
+const TCL_TNIL   = 0
+const TCL_TBOOL  = 1
+const TCL_TINT   = 2
+const TCL_TSTR   = 3
+const TCL_TTABLE = 4
+const TCL_TERR   = 5
+const TCL_TOTHER = 6
+const TCL_TFLOAT = 7
+
+// --- Tier 1: fire-and-forget -----------------------------------------------
 extern tcl_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 extern tcl_run(code: string) -> int
 extern tcl_init() -> int
 extern tcl_finalize()
+
+// --- Tier 2: bidirectional embedding (#904) --------------------------------
+// A VM is its own interpreter, used only from the thread that made it (Tcl's
+// rule); the calls refuse any other thread.
+extern tcl_vm_new() -> ptr
+extern tcl_vm_free(vm: ptr)
+// Registers an Aether `@c_callback (vm: ptr) -> int` as the Tcl command
+// `name`, taken verbatim: "app.add" is called `app.add 2 3`, and
+// "app::add" lands in the namespace ::app.
+extern tcl_vm_register(vm: ptr, name: string, host_fn: ptr) -> int
+extern tcl_vm_set_global_str(vm: ptr, name: string, value: string)
+extern tcl_vm_set_global_int(vm: ptr, name: string, value: long)
+extern tcl_vm_set_global_strlist(vm: ptr, name: string, items: ptr)
+// Runs at global level; 0 on success, -1 on an error, which is then the
+// result (TCL_TERR, its message as the string).
+extern tcl_vm_eval(vm: ptr, code: string) -> int
+extern tcl_vm_result_type(vm: ptr) -> int
+extern tcl_vm_result_int(vm: ptr) -> long
+extern tcl_vm_result_double(vm: ptr) -> float
+extern tcl_vm_result_str(vm: ptr) -> string
+extern tcl_vm_result_bool(vm: ptr) -> int
+extern tcl_vm_pop_result(vm: ptr)
+// Per outermost eval. The instruction limit counts Tcl commands, so a loop
+// that runs none (`while 1 {}`) needs the time limit. "" when set.
+extern tcl_vm_set_instruction_limit(vm: ptr, budget: long, every: int) -> string
+extern tcl_vm_set_time_limit(vm: ptr, ms: long, every: int) -> string
+
+// --- Callback side (used INSIDE a registered host fn) ----------------------
+// Args are 1..arg_count(vm). A Tcl command returns one value, so the last
+// push is the result; return 1 to return it, 0 to return nothing.
+extern tcl_arg_count(vm: ptr) -> int
+extern tcl_arg_type(vm: ptr, i: int) -> int
+extern tcl_arg_str(vm: ptr, i: int) -> string
+extern tcl_arg_int(vm: ptr, i: int) -> long
+extern tcl_arg_double(vm: ptr, i: int) -> float
+extern tcl_arg_bool(vm: ptr, i: int) -> int
+extern tcl_push_int(vm: ptr, v: long)
+extern tcl_push_str(vm: ptr, v: string)
+extern tcl_push_bool(vm: ptr, v: int)
+extern tcl_push_nil(vm: ptr)
+extern tcl_push_double(vm: ptr, v: float)
+// `return tcl.raise_error(vm, msg)`: the command fails with msg after the
+// callback has returned, so the callback's defers run.
+extern tcl_raise_error(vm: ptr, msg: string) -> int
