@@ -1,0 +1,32 @@
+// Factorial: n!, the product of 1 to n, with 0! = 1.
+//
+// The task is a function for n!, where trapping a negative n is optional.
+// Three clauses: a guard turns a negative n into an error, a literal 0
+// gives 1, and any other n recurses. The result is a `long!`, a value or
+// an error, and `!` after the inner call hands an error up unchanged.
+// The program shows 0!, 1!, 5!, 10! and 20!, and the error for -3.
+//
+// Run: ae run examples/08-rosetta/04-factorial.ae
+// See: https://rosettacode.org/wiki/Factorial
+
+factorial(n: int) when n < 0 -> long! {
+    return 0, "no factorial of ${n}"
+}
+factorial(0) -> long! -> 1
+factorial(n: int) -> long! -> n * factorial(n - 1)!
+
+main() {
+    for n in [0, 1, 5, 10, 20] {
+        println("${n}! = ${factorial(n) or 0}")
+    }
+    _, err = factorial(-3)
+    println("-3! fails: ${err}")
+}
+
+// Output:
+// 0! = 1
+// 1! = 1
+// 5! = 120
+// 10! = 3628800
+// 20! = 2432902008176640000
+// -3! fails: no factorial of -3

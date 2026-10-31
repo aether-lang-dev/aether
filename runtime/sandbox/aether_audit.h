@@ -31,11 +31,10 @@ void aether_sandbox_audit(const char* category, const char* resource,
 int aether_audit_count(void);
 
 // Field accessors for entry `i` (0-based, oldest first). Out-of-range
-// `i` yields "" / -1. The returned string points into the ring buffer
-// and stays valid only until that slot is overwritten by a later
-// aether_sandbox_audit() call or dropped by aether_audit_clear(). A
-// caller that records audit entries concurrently with querying should
-// copy the string promptly; the std.audit wrappers do.
+// `i` yields "" / -1. Reading category, resource, then allowed forms one
+// per-thread snapshot, so a concurrent append cannot mix fields from
+// different entries. The returned strings stay valid until the next category
+// or resource accessor on the same thread; the std.audit wrappers copy them.
 const char* aether_audit_entry_category(int i);
 const char* aether_audit_entry_resource(int i);
 int         aether_audit_entry_allowed(int i);   // 1 allowed, 0 denied

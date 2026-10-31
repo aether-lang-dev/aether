@@ -104,15 +104,16 @@ static int check_grant(const char* category, const char* resource) {
         match_target = resolved;
     }
 
-    // In-process levels take priority (embedded Python mode)
+    // An embedded policy and preload grants are independent boundaries.
+    // When both are active, the operation must satisfy both policies.
     if (aether_sandbox_check_resolved) {
         int result = aether_sandbox_check_resolved(category, match_target);
-        if (result >= 0) {
-            if (!result) log_deny(category, match_target);
-            return result;
+        if (result == 0) {
+            log_deny(category, match_target);
+            return 0;
         }
     }
-    // Fall back to file-based grants (LD_PRELOAD mode)
+    // Apply file/shared-memory grants as the second policy when active.
     if (!sandbox_active) return 1;
     for (int i = 0; i < grant_count; i++) {
         if (grants[i].cat[0] == '*' && grants[i].pat[0] == '*') return 1;
@@ -177,7 +178,8 @@ static void __attribute__((constructor)) sandbox_init(void) {
         else log_mode = LOG_FILE;
     }
     // Legacy: AETHER_SANDBOX_VERBOSE=1 sets stderr mode
-    if (real_getenv("AETHER_SANDBOX_VERBOSE")) log_mode = LOG_STDERR;
+    const char* verbose_env = real_getenv("AETHER_SANDBOX_VERBOSE");
+    if (verbose_env && strcmp(verbose_env, "1") == 0) log_mode = LOG_STDERR;
 
     // An explicitly configured source is a containment request. If every
     // configured source fails to load, leave the sandbox active with zero

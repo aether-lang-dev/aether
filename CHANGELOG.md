@@ -14,6 +14,147 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.865.0]
+
+### Added
+
+- **The examples path teaches what batch 9 added (#3476).** Seven new
+  examples, each with its output checked by `make check-examples`:
+  ending an actor (`actors.stop`, `actors.kill`, a panic, and the reason
+  a monitor's `Down` carries), links and trapping exits, a bounded mailbox
+  with `try_send`, a std.stream producer held to a window of credits,
+  std.tcp (a server and a client, reading a stream up to where a message
+  ends), the pure-Aether cryptography (SHA-256, an HMAC, an Ed25519
+  signature), and a C host's limits on the code it runs (a deadline, a
+  cancel from another thread, an execution account's memory budget).
+  Links now come before the supervisor built on them: `12-supervisor.ae`
+  is `13-supervisor.ae`, and `11-sharded-map.ae` is `16-sharded-map.ae`.
+
+- **A glossary (#1604).** `docs/glossary.md` defines the words the
+  tutorial, the examples and the reference use (actor, handle, borrowed,
+  link, safe point, sum type and the rest), each with where to read more,
+  and the path links it.
+
+- **Rosetta Code in the examples (#1191).** `examples/08-rosetta/` holds a
+  first tranche of 22 classic tasks (FizzBuzz to prime decomposition with
+  std.bignum), each a whole program whose output `make check-examples`
+  checks, and the path's README compares their length with the first Go
+  and Python solutions in RosettaCodeData. Three more tasks wait for
+  #3478 and #3479.
+
+### Changed
+
+- **One way to learn Aether (#3475).** Getting started, the tutorial,
+  three more tutorials and the examples taught the same things four times,
+  in four orders, partly in an older style (the deprecated `export`
+  keyword, answers built from `print` chains). Now each has one job:
+  `docs/getting-started.md` installs and starts a project, the examples
+  are the path, `docs/tutorial.md` is that path told in prose (a chapter
+  per part, common mistakes, exercises with answers, every program checked
+  by `make check-docs`), and `docs/tutorials/` is folded into it. The
+  README's documentation list starts with the path. The package-publishing
+  details moved from getting-started to `docs/package-fetching.md`.
+  The path also says what the runtime does where it did not: a `make`
+  buffer has one owner, the local that releases it (11-arrays-and-slices
+  and 17-ownership called it a handle the program frees, and five examples
+  freed one by hand), and an ask whose handler returns without replying
+  ends at once (03-ask-reply said it waited out the 5-second timeout).
+
+### Fixed
+
+- **A trust anchor's own pathLenConstraint is pinned by a test (#3432).**
+  Path validation has checked the anchor as it checks every CA since the
+  rewrite for #3303, so a root with pathLenConstraint 0 allows no CA below
+  it, as on OpenSSL and Go. Nothing tested it: crypto_tls13_chain now has a
+  real root with pathLenConstraint 0, refused with a CA below it and taken
+  with an end entity directly under it, and the anchor check, taken out of
+  the path loop, fails the first case.
+
+- **A library with a runtime of its own keeps it on Linux and FreeBSD
+  (#3481).** An `ae build` program is linked `-rdynamic`, so it exports
+  its runtime, and on ELF a library's calls into the runtime it carries
+  bound to the program's instead: its code ran on a runtime it was not
+  made for. Across versions its runtime ABI check refused, and the program
+  ended on the panic ("the library was made for Aether runtime 0.860.0/abi1
+  and runs on 0.863.0/abi1"), which kept the cross-version ABI matrix red
+  on Linux since 0.861.0. `ae` now links such a library `-Bsymbolic`,
+  natively and in cross builds, as macOS and Windows keep the copies apart
+  by themselves, so on every platform a static-runtime library runs on its
+  own runtime: `ae` refuses an import that needs one runtime (a struct or
+  tuple holding strings, a builder using its config) and warns that a
+  library's actors are not drained at exit, naming `--shared-runtime`, as
+  it did on macOS and Windows. On ELF such a library, and one that runs
+  actors, names the `own_runtime` duty in its catalog, so an importer of
+  0.860.0 to 0.864.0, which took ELF's copies as merged, refuses it instead
+  of letting the two runtimes free each other's values. `--shared-runtime`
+  with `--target` is refused: a cross-built library carries the target's
+  runtime. A library of another runtime ABI linked before this is refused
+  at import on ELF, naming the rebuild, instead of ending the program. A
+  failure inside a library still reaches a `try` around the call: the
+  import stub raises it again (#2956). This replaces 0.864.0's note that
+  the matrix expects ELF's merged runtimes.
+
+- **A library function that ends in a loop nothing leaves returns its zero
+  value when a deadline or a cancel ends it.** Such a function needs no
+  `return`, but under `--emit=lib` the safe point at each loop head leaves
+  the loop, and the C then fell off the end of a function that returns a
+  value: clang warned (`-Wreturn-type`, into the output of
+  `examples/04-interop/07-limits`), and the value the export's wrapper read
+  was undefined. The function now returns its result's zero value there,
+  as the wrapper does.
+
+## [0.864.0]
+
+### Fixed
+
+- **A zero sandbox verbosity flag stays quiet.**
+  `AETHER_SANDBOX_VERBOSE=0`, the default supplied to sandboxed children, no
+  longer overrides the selected log mode or enables stderr diagnostics.
+
+- **The embedded Python host now restores nested shared-map contexts.**
+  `python.run_sandboxed_with_map` preserves the caller's map token across a
+  nested hosted run and still clears the token when the outermost run returns.
+  A rejected over-depth call no longer replaces the active map context.
+
+- **Shared-map host tests now exercise provisioned language runtimes.** The
+  Lua, JavaScript, Python, Perl, and Ruby bridges now compile with the
+  sandbox ABI enabled and receive their detected runtime library paths,
+  instead of failing before their grant-map checks run.
+
+- **The sweep timeout integration test no longer depends on macOS Bash trap timing.**
+  Its foreground and background helpers now record SIGTERM delivery directly,
+  while the test still verifies process-group cleanup and the timeout status.
+
+- **Effect-tag validation now fails closed at analyzer limits.** A call graph
+  deeper than 128 levels or wider than the 512-function visited set is
+  rejected instead of treating the unexamined path as capability-free.
+
+- **Tuple destructuring now respects lexical containment.** A slot can no
+  longer re-bind an outer name excluded by `hide` or `seal except`; visible
+  locals and new locals inside a sealed block keep their existing behavior.
+
+- **Qualified enum members now retain their lexical prefix.** `hide Color`
+  blocks `Color.Red`, while `seal except Color` permits it; containment no
+  longer checks the generated `Color_Red` constant name.
+
+- **The cross-version ABI matrix expects ELF's merged runtimes.** On Linux and
+  FreeBSD a library with a runtime of its own binds to its importer's runtime,
+  so an Aether consumer of a library from another release is refused by the
+  library's ABI check, with its reason; the matrix failed on every release
+  since 0.860.0 by expecting the pair to run.
+
+### Security
+
+- **Embedded and preload sandbox policies now intersect.** An allowing
+  in-process checker no longer bypasses a stricter shared-memory or file grant
+  list; an operation must satisfy every active containment layer.
+
+- **`std.audit` now returns coherent entries during concurrent writes.** Its
+  field accessors previously released the ring lock between category,
+  resource, and verdict reads, so a wrapped ring could advance and combine
+  fields from different entries. Each accessor sequence now reads one
+  thread-local snapshot.
+
 ## [0.863.0]
 
 ### Fixed

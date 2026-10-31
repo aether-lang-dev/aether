@@ -1,0 +1,84 @@
+// N-queens problem: queens on an N x N board, no two attacking each other.
+//
+// The task is the eight queens puzzle, extended to N x N. The solver puts
+// one queen a row, in each column no queen above attacks, and backtracks;
+// a slice holds the column of each row's queen. It counts the solutions
+// for N = 1 to 10 (92 for eight) and draws the first 8 x 8 one.
+//
+// Run: ae run examples/08-rosetta/08-n-queens.ae
+// See: https://rosettacode.org/wiki/N-queens_problem
+
+// Whether a queen at (row, col) is safe from the queens in the rows above.
+safe(cols: int[], row: int, col: int) -> bool {
+    for r in 0..row {
+        d = cols[r] - col
+        if d == 0 || d == row - r || d == r - row {
+            return false
+        }
+    }
+    return true
+}
+
+// Counts the boards that complete from `row` down, and copies the first
+// one found into `first`.
+place(cols: int[], row: int, first: int[]) -> int {
+    if row == cols.len {
+        if first[0] < 0 {
+            for r in 0..cols.len {
+                first[r] = cols[r]
+            }
+        }
+        return 1
+    }
+    count = 0
+    for col in 0..cols.len {
+        if safe(cols, row, col) {
+            cols[row] = col
+            count += place(cols, row + 1, first)
+        }
+    }
+    return count
+}
+
+draw(cols: int[]) {
+    for r in 0..cols.len {
+        line = ""
+        for c in 0..cols.len {
+            square = if cols[r] == c { "Q" } else { "." }
+            line = "${line}${square}"
+        }
+        println(line)
+    }
+}
+
+main() {
+    for n in 1..11 {
+        cols = make([]int, n)
+        first = make([]int, n)
+        first[0] = -1
+        println("${n} x ${n}: ${place(cols, 0, first)}")
+        if n == 8 {
+            draw(first)
+        }
+    }
+}
+
+// Output:
+// 1 x 1: 1
+// 2 x 2: 0
+// 3 x 3: 0
+// 4 x 4: 2
+// 5 x 5: 10
+// 6 x 6: 4
+// 7 x 7: 40
+// 8 x 8: 92
+// Q.......
+// ....Q...
+// .......Q
+// .....Q..
+// ..Q.....
+// ......Q.
+// .Q......
+// ...Q....
+// 9 x 9: 352
+// 10 x 10: 724

@@ -29,7 +29,6 @@ main() {
     println("fnv1a(\"aether\") = ${shim_fnv1a("aether")}")
 
     squares = make([]int, 5)
-    defer free(squares)
     shim_fill_squares(squares, squares.len)
     println("squares: ${squares[0]} ${squares[1]} ${squares[2]} ${squares[3]} ${squares[4]}")
 

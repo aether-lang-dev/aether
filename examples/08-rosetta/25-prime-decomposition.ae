@@ -1,0 +1,55 @@
+// Prime decomposition: the primes whose product is a given number.
+//
+// The task returns the prime factors of an n above 1, with no limit set by
+// the machine's word size; the last of four numbers here is 2^100 - 1.
+// std.bignum does the arithmetic, and with
+// `type Big = owned ptr drop bignum.free` each value is freed when its
+// local is bound again and when the function returns. Trial division: a
+// divisor that divides what is left is prime, smaller primes being gone.
+//
+// Run: ae run examples/08-rosetta/25-prime-decomposition.ae
+// See: https://rosettacode.org/wiki/Prime_decomposition
+
+import std.bignum
+import std.string
+
+type Big = owned ptr drop bignum.free
+
+decompose(n: ptr) -> string[] {
+    string[] factors = []
+    rest = bignum.clone(n) as Big
+    d = bignum.from_int(2) as Big
+    one = bignum.from_int(1) as Big
+    while true {
+        square = bignum.multiply(d, d) as Big
+        if bignum.compare(square, rest) > 0 {
+            break
+        }
+        r = bignum.remainder(rest, d) as Big
+        if bignum.is_zero(r) == 1 {
+            factors.push(bignum.to_decimal(d))
+            rest = bignum.divide(rest, d) as Big
+        } else {
+            d = bignum.add(d, one) as Big
+        }
+    }
+    if bignum.compare(rest, one) > 0 {
+        factors.push(bignum.to_decimal(rest))
+    }
+    return factors
+}
+
+main() {
+    for text in ["12", "1234567", "600851475143", "1267650600228229401496703205375"] {
+        parsed, _ = bignum.from_decimal(text)
+        n = parsed as Big
+        factors = decompose(n)
+        println("${text} = ${string.join(string.seq_from_strings(factors), " * ")}")
+    }
+}
+
+// Output:
+// 12 = 2 * 2 * 3
+// 1234567 = 127 * 9721
+// 600851475143 = 71 * 839 * 1471 * 6857
+// 1267650600228229401496703205375 = 3 * 5 * 5 * 5 * 11 * 31 * 41 * 101 * 251 * 601 * 1801 * 4051 * 8101 * 268501

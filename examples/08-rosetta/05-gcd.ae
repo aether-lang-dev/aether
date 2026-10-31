@@ -1,0 +1,27 @@
+// Greatest common divisor: the largest integer dividing both of two integers.
+//
+// The task is the GCD of two integers. Euclid's algorithm is two clauses:
+// a literal 0 in the second place ends it with the first number, made
+// positive, and any other pair recurses on (b, a % b). Five pairs are
+// shown, a negative number and a zero among them.
+//
+// Run: ae run examples/08-rosetta/05-gcd.ae
+// See: https://rosettacode.org/wiki/Greatest_common_divisor
+
+gcd(a: int, 0) -> int -> if a < 0 { -a } else { a }
+gcd(a: int, b: int) -> int -> gcd(b, a % b)
+
+main() {
+    println("gcd(40902, 24140) = ${gcd(40902, 24140)}")
+    println("gcd(1071, 462) = ${gcd(1071, 462)}")
+    println("gcd(-12, 18) = ${gcd(-12, 18)}")
+    println("gcd(17, 5) = ${gcd(17, 5)}")
+    println("gcd(0, 9) = ${gcd(0, 9)}")
+}
+
+// Output:
+// gcd(40902, 24140) = 34
+// gcd(1071, 462) = 21
+// gcd(-12, 18) = 6
+// gcd(17, 5) = 1
+// gcd(0, 9) = 9

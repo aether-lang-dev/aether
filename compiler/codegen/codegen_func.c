@@ -1,5 +1,6 @@
 #include "codegen_internal.h"
 #include "../aether_error.h"
+#include "../analysis/missing_return.h"
 
 // True when this function definition is annotated `@c_callback`.
 // The annotation (#235) marks a function as having a stable, externally-
@@ -2310,6 +2311,24 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
         fprintf(gen->output, "return ");
         emit_no_match_value(gen, func);
         fprintf(gen->output, ";\n");
+    } else if (gen->emit_lib && result && result->kind != TYPE_VOID && body &&
+               body->type == AST_BLOCK && body->child_count > 0) {
+        /* A body that ends in a loop nothing leaves needs no return. Under
+         * --emit=lib a deadline or a cancel leaves each loop at its head,
+         * and the call then ends here: it returns its result's zero value,
+         * as the export's wrapper does, instead of falling off the end of a
+         * function that returns one. */
+        ASTNode* last = body->children[body->child_count - 1];
+        if (last && (last->type == AST_WHILE_LOOP || last->type == AST_FOR_LOOP) &&
+            !stmt_can_complete(gen->program, last)) {
+            print_indent(gen);
+            fprintf(gen->output, "return ");
+            if (result->kind == TYPE_FUNCTION)
+                fprintf(gen->output, "(%s){0}", get_c_type(result));
+            else
+                emit_no_match_value(gen, func);
+            fprintf(gen->output, ";\n");
+        }
     }
 
     gen->current_promoted_captures = prev_promoted;

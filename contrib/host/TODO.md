@@ -47,15 +47,13 @@ is the only host with it today. Who should get it, and how hard:
   discipline is the wrinkle — every `PyObject*` the bridge holds needs
   correct `Py_INCREF`/`DECREF`, unlike Lua's stack-GC).
 
-- [ ] **Duktape / JS** (`contrib/host/duktape`, `js` is its alias) — HIGH
-  value, LOWEST effort of the JS-family. Duktape's stack API is almost
-  identical in shape to Lua's (`duk_push_*` / `duk_get_*` / `duk_get_top` /
-  `duk_push_c_function` with a magic/hidden-symbol upvalue for the host fn
-  ptr; `duk_pcompile`+`duk_pcall` for typed eval; `duk_put_global_string` for
-  globals; `duk_set_global_object` + a custom exec-timeout via the
-  `DUK_USE_EXEC_TIMEOUT_CHECK` hook). The Lua trampoline pattern (host fn ptr
-  through a hidden property) maps over almost line-for-line. **Best
-  second-after-Lua pick on effort/value.**
+- [x] **Duktape / JS** (`contrib/host/duktape`, `js` is its alias) — HIGH
+  value, LOWEST effort of the JS-family. Persistent VM (`duktape_vm_new`), host
+  callbacks (`duktape_vm_register` with hidden property `"\xFFhost_fn"`), typed args
+  and returns (`duktape_arg_*` / `duktape_push_*`), global setters, and
+  typed eval result (`duktape_vm_result_*`). System `libduktape` packages disable
+  `DUK_USE_EXEC_TIMEOUT_CHECK`, so `duktape_vm_set_instruction_limit` returns
+  `"execution limit unavailable: libduktape built without DUK_USE_EXEC_TIMEOUT_CHECK"`.
 
 - [ ] **Tcl** (`contrib/host/tcl`) — MEDIUM value, LOW-MEDIUM effort. Tcl's C
   API is command-oriented, not stack-oriented: host callbacks register as
@@ -128,6 +126,9 @@ modelled on `host_lua_bidirectional/` (callback + typed result + global inject
 
 ## JS (Duktape)
 - [x] Purest containment — no LD_PRELOAD needed; only explicitly-exposed functions are callable. Bindings: `print`, `env`, `readFile`, `fileExists`, `writeFile`, `exec`. All sandbox-checked via `check_sandbox` against the active grant list.
+
+## QuickJS
+- [x] Wrapped as a member of `contrib/host` family (`contrib/host/quickjs`, `import contrib.host.quickjs`), offering `run`, `run_sandboxed`, `run_sandboxed_with_map`, `init`, and `finalize`. Already carries full bidirectional API (`runtime`, `function`, handles, values, promises, `set_time_limit`) through `contrib.quickjs`.
 
 ## Perl
 - [x] Function names prefixed `aether_perl_` to avoid conflict with Perl's own `perl_run`/`perl_init`. Documented in `contrib/host/perl/README.md` Notes section.

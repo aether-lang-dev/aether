@@ -39,7 +39,7 @@ LUA_OUT=$(gcc -o $AE_TMP/test_map_lua \
     "$ROOT/contrib/host/lua/aether_host_lua.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
-    $LUA_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_LUA \
+    $LUA_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_LUA -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether $LUA_LIBS -ldl -lm -lrt \
     -Wno-discarded-qualifiers \
     -xc - 2>/dev/null << 'CEOF'
@@ -88,7 +88,7 @@ JS_OUT=$(gcc -o $AE_TMP/test_map_js \
     "$ROOT/contrib/host/duktape/aether_host_duktape.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
-    $JS_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_DUKTAPE \
+    $JS_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_DUKTAPE -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether $JS_LIBS -ldl -lm -lrt \
     -Wno-discarded-qualifiers \
     -xc - 2>/dev/null << 'CEOF'
@@ -135,7 +135,7 @@ PY_OUT=$(gcc -o $AE_TMP/test_map_py \
     "$ROOT/contrib/host/python/aether_host_python.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
-    $PY_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_PYTHON \
+    $PY_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether $PY_LIBS -ldl -lm -lrt \
     -Wno-discarded-qualifiers \
     -xc - 2>/dev/null << 'CEOF'
@@ -186,7 +186,7 @@ PERL_OUT=$(gcc -o $AE_TMP/test_map_perl \
     "$ROOT/contrib/host/perl/aether_host_perl.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
-    $PERL_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_PERL \
+    $PERL_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_PERL -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether $PERL_LIBS -lrt \
     -Wno-discarded-qualifiers \
     -xc - 2>/dev/null << 'CEOF'
@@ -233,7 +233,7 @@ RUBY_OUT=$(gcc -o $AE_TMP/test_map_ruby \
     "$ROOT/contrib/host/ruby/aether_host_ruby.c" \
     "$ROOT/runtime/aether_sandbox.c" \
     "$ROOT/runtime/aether_shared_map.c" \
-    $RUBY_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_RUBY \
+    $RUBY_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_RUBY -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether $RUBY_LIBS -ldl -lm -lrt \
     -Wno-discarded-qualifiers \
     -xc - 2>/dev/null << 'CEOF'

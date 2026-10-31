@@ -1,0 +1,81 @@
+// Links: a failure takes down the actors linked to it.
+//
+// `actors.link(ref)`, from a handler, ties two actors both ways. When one
+// of them ends, the other ends too, with the same reason, unless it traps
+// exits (`actors.trap_exits(true)`): then it gets a `Down` with the reason
+// and goes on. A stop's reason, "normal", ends nobody. So a failure climbs
+// a chain of links until it reaches an actor that traps exits. The
+// supervisor in the next example is built that way.
+//
+// Run: ae run examples/02-actors/12-links.ae
+// See: docs/actor-concurrency.md#links
+
+import std.actors
+
+message LinkTo { other: actor_ref }
+message Parse { text: string }
+message Finish {}
+message Ping {}
+
+// Parses what it is sent, and panics at input it cannot read.
+actor Parser {
+    receive {
+        Parse(text) -> {
+            if text == "}" {
+                panic("cannot parse '${text}'")
+            }
+            println("parser: read '${text}'")
+        }
+        Finish() -> { actors.stop() }
+    }
+}
+
+// Owns a parser through a link: if the parser fails, so does the session.
+actor Session {
+    receive {
+        LinkTo(other) -> { actors.link(other) }
+        Ping() -> { reply "alive" }
+    }
+}
+
+// Traps exits: a linked actor's end reaches it as a Down, and it goes on.
+actor Guard {
+    receive {
+        LinkTo(other) -> {
+            actors.trap_exits(true)
+            actors.link(other)
+        }
+        Down(ref, reason) -> { println("guard: its session ended: ${reason}") }
+        Ping() -> { reply "alive" }
+    }
+}
+
+main() {
+    // guard <-> session <-> parser
+    parser = spawn(Parser())
+    session = spawn(Session())
+    guard = spawn(Guard())
+    session ! LinkTo { other: parser }
+    guard ! LinkTo { other: session }
+    wait_for_idle()
+
+    parser ! Parse { text: "{" }
+    parser ! Parse { text: "}" } // the parser panics, the session ends with it
+    wait_for_idle()
+    println("guard after the failure: ${guard ? Ping {}}")
+
+    // A parser that stops normally ends nobody linked to it.
+    parser2 = spawn(Parser())
+    session2 = spawn(Session())
+    session2 ! LinkTo { other: parser2 }
+    wait_for_idle()
+    parser2 ! Finish {}
+    wait_for_idle()
+    println("session 2 after its parser stopped: ${session2 ? Ping {}}")
+}
+
+// Output:
+// parser: read '{'
+// guard: its session ended: cannot parse '}'
+// guard after the failure: alive
+// session 2 after its parser stopped: alive

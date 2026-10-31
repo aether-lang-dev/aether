@@ -11,6 +11,7 @@
 #include "aether_stdlib_symbols.h"   /* #1366: generated */
 #include "../aether_module.h"
 #include "../aether_error.h"
+#include "../aether_lib_strings.h"   /* #3481: what a library value holds, read as `ae` reads it */
 #include "../analysis/actor_reply.h"
 #include "../analysis/sandbox_trust.h"
 #include "../analysis/hoist.h"
@@ -4261,6 +4262,27 @@ static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
     return b.s;
 }
 
+/* #3481: the catalog's struct records as aether_lib_strings.h reads them,
+ * field `k` of the recorded struct named `name` spelled as its record
+ * spells it, so the duty a library names is decided from what `ae` reads. */
+typedef struct { ASTNode** structs; int count; } LibCatalogStructs;
+
+static const char* lib_catalog_field_type(const void* ctx, const char* name, size_t len, int k) {
+    const LibCatalogStructs* cs = (const LibCatalogStructs*)ctx;
+    for (int i = 0; i < cs->count; i++) {
+        ASTNode* sd = cs->structs[i];
+        if (!sd->value || strlen(sd->value) != len || strncmp(sd->value, name, len) != 0) continue;
+        for (int f = 0; f < sd->child_count; f++) {
+            ASTNode* fld = sd->children[f];
+            if (!fld || fld->type != AST_STRUCT_FIELD || k-- > 0) continue;
+            const char* t = cg_type_source(fld->node_type);
+            return t ? t : "";
+        }
+        return NULL;
+    }
+    return NULL;
+}
+
 static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     if (!gen || !gen->emit_lib || !program) return;
 
@@ -4916,13 +4938,49 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             rs.result->kind == TYPE_STRING) strings_returned = 1;
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
+    /* #3481: on ELF `ae` links a library with a runtime of its own
+     * -Bsymbolic, so it keeps that runtime there too. What needs one runtime
+     * has to meet an importer that knows: what `ae` refuses to import (a
+     * value holding strings across the library's edge, a builder that uses
+     * the config the program makes; ae_refuse_split_ownership, read here
+     * from the same catalog spellings through aether_lib_strings.h) and
+     * actors the program's exit cannot drain (warned of). An importer of
+     * 0.860.0 to 0.864.0 took the copies on ELF as merged and let them pass,
+     * one runtime then releasing the other's strings; naming the duty makes
+     * it refuse the library instead. Named for ELF only (below): elsewhere
+     * those importers kept the copies apart and refuse or warn themselves. */
+    int needs_own_runtime = 0;
+    if (!gen->lib_shared_runtime) {
+        if (lib_runs_actors) needs_own_runtime = 1;
+        LibCatalogStructs cs = { structs, struct_count };
+        char oty[200];
+        for (int i = 0; i < fn_count && !needs_own_runtime; i++) {
+            /* The signature `ae` reads: the source one when the catalog
+             * carries them, the display one otherwise. */
+            char* disp = src_sig_needed ? NULL : fn_signature_string(gen, fns[i]);
+            const char* sig = disp ? disp : (src_sigs[i] ? src_sigs[i] : "");
+            if (aether_lib_signature_string_type(sig, lib_catalog_field_type, &cs, oty, sizeof(oty)))
+                needs_own_runtime = 1;
+            free(disp);
+        }
+        for (int r = 0; r < clo_count && !needs_own_runtime; r++) {
+            if (strcmp(rec_role[r], "builder") != 0) continue;
+            if (!builder_never_uses_config(rec_fn[r])) { needs_own_runtime = 1; break; }
+            char* disp = (rec_sig[r] || !rec_fn[r]) ? NULL : fn_signature_string(gen, rec_fn[r]);
+            const char* sig = disp ? disp : (rec_sig[r] ? rec_sig[r] : "");
+            if (aether_lib_signature_string_type(sig, lib_catalog_field_type, &cs, oty, sizeof(oty)))
+                needs_own_runtime = 1;
+            free(disp);
+        }
+    }
     /* #2957: "1.11" adds host_abi, runtime_abi and requires, the duties an
      * importer must perform to use this library, each one it knows by name;
      * one it does not know makes it refuse the library. The 1.10 duty is
      * the outcome check after every call; a returned string is given back;
      * a shared-runtime library makes the program link the shared runtime,
      * whose runtime ABI must be the library's; a library that runs actors
-     * has the program run the scheduler. */
+     * has the program run the scheduler. `own_runtime` follows the list
+     * where it applies (#3481, below). */
     const char* schema = "1.11";
     char requires[160];
     snprintf(requires, sizeof(requires), "outcome_check%s%s%s",
@@ -4956,8 +5014,13 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
     fprintf(gen->output, "\"%s\",\n", lib_outcome_symbol(gen));
     /* #2957: the host ABI level, the runtime ABI of the headers this C is
      * compiled against (aether_abi.h, the one the stubs check at their
-     * first call), and the duties. */
-    fprintf(gen->output, "    %d, AETHER_RUNTIME_ABI_ID, \"%s\"\n};\n\n", AETHER_HOST_ABI, requires);
+     * first call), and the duties. `own_runtime` only when the C is built
+     * for ELF, the one format whose older importers took a library's
+     * runtime as the program's (#3481). */
+    fprintf(gen->output, "    %d, AETHER_RUNTIME_ABI_ID, \"%s\"\n", AETHER_HOST_ABI, requires);
+    if (needs_own_runtime)
+        fprintf(gen->output, "#if defined(__ELF__)\n    \",own_runtime\"\n#endif\n");
+    fprintf(gen->output, "};\n\n");
 
     /* #996 --emit=csrc: serialize the identical catalog as JSON alongside the
      * C struct. Driven by the same fns[]/closure/const tables emitted above, so
@@ -4980,6 +5043,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             emit_json_string(j, cg_intern_n(p, n));
             p += n + (e ? 1 : 0);
         }
+        /* Listed as the C names it for an ELF target (above). */
+        if (needs_own_runtime) { fputs(", ", j); emit_json_string(j, "own_runtime"); }
         fputs("],\n", j);
         if (gen->lib_shared_runtime) {
             fputs("  \"runtime\": ", j); emit_json_string(j, "shared"); fputs(",\n", j);

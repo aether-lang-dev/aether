@@ -1,0 +1,38 @@
+// Hailstone sequence: the Collatz sequence from n down to 1.
+//
+// The task: generate the sequence (n / 2 after an even n, 3n + 1 after an
+// odd one, until 1), show that 27's has 112 elements, and find the start
+// below 100,000 with the longest one. The sequence is a `long[]` that
+// grows with `push`; each is released when its local is bound again.
+//
+// Run: ae run examples/08-rosetta/16-hailstone.ae
+// See: https://rosettacode.org/wiki/Hailstone_sequence
+
+hailstone(n: long) -> long[] {
+    long[] seq = []
+    seq.push(n)
+    while n != 1 {
+        n = if n % 2 == 0 { n / 2 } else { 3 * n + 1 }
+        seq.push(n)
+    }
+    return seq
+}
+
+main() {
+    h = hailstone(27)
+    println("27: ${h.len} elements, ${h[0]}, ${h[1]}, ${h[2]}, ${h[3]}, ..., ${h[h.len - 4]}, ${h[h.len - 3]}, ${h[h.len - 2]}, ${h[h.len - 1]}")
+    best = 1
+    longest = 1
+    for n in 1..100000 {
+        seq = hailstone(n)
+        if seq.len > longest {
+            best = n
+            longest = seq.len
+        }
+    }
+    println("below 100000: ${best}, with ${longest} elements")
+}
+
+// Output:
+// 27: 112 elements, 27, 82, 41, 124, ..., 8, 4, 2, 1
+// below 100000: 77031, with 351 elements

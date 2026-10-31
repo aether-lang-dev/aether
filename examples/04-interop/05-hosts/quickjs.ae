@@ -1,0 +1,30 @@
+// Hosting QuickJS: JavaScript scripts run inside an Aether program.
+//
+// contrib.host.quickjs embeds the QuickJS engine. `quickjs.run(code)`
+// evaluates JavaScript code; `quickjs.run_sandboxed(grants, code)` evaluates
+// it with the Aether permission checker installed for any host functions.
+// QuickJS has no ambient file or network access of its own.
+//
+// Run: ae run examples/04-interop/05-hosts/quickjs.ae
+// Needs: QuickJS amalgamation, fetched with `sh scripts/fetch-quickjs-amalgamation.sh`
+// See: docs/containment-sandbox.md
+
+import std.sandbox
+import contrib.host.quickjs
+
+main() {
+    rc = quickjs.run("var x = (2 + 3) * 7; if (x !== 35) throw new Error('wrong');")
+    if rc == 0 {
+        println("QuickJS evaluated math successfully.")
+    }
+
+    nothing = sandbox.new("nothing") {
+        grant_env("TERM")
+    }
+    defer sandbox.free(nothing)
+
+    if quickjs.run_sandboxed(nothing, "var y = 100; if (y !== 100) throw new Error('err');") == 0 {
+        println("Sandboxed execution completed.")
+    }
+    quickjs.finalize()
+}

@@ -15,11 +15,14 @@
  * with RTLD_LOCAL so symbols don't pollute the host process's
  * global namespace.
  *
- * On Windows the library is a DLL loaded with LoadLibrary, and the host
- * and the script must both be built with `ae build --shared-runtime`:
- * there is no -rdynamic there for a script to bind to the host's runtime,
- * so they share aether.dll instead. A mismatch is refused at mount with
- * KIND_IO (sg_host_runtime_check and sg_script_runtime_check in the .c).
+ * On POSIX a script built the default way carries a runtime of its own and
+ * runs on it (on Linux and FreeBSD too since #3481, where `ae` links it
+ * -Bsymbolic); one built with --shared-runtime shares the host's. On
+ * Windows the library is a DLL loaded with LoadLibrary, and the host and
+ * the script must both be built with `ae build --shared-runtime`: a DLL
+ * cannot bind to the host executable's runtime, so they share aether.dll
+ * instead. A mismatch is refused at mount with KIND_IO
+ * (sg_host_runtime_check and sg_script_runtime_check in the .c).
  *
  * Lifetime: dlopen handles are intentionally not dlclose()d. The
  * gateway is a long-lived hosting feature; the .so stays mapped

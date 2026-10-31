@@ -1,23 +1,66 @@
 // Integration tests for contrib.host.duktape — co-located with the bridge,
-// written in Aether against std.spec. Companion to
-// contrib/host/ruby/test_host_ruby.ae; see that file for the reasoning
-// behind co-locating and for driving the bridge through its `import`
-// rather than a C harness (it covers module.ae's declarations and the
-// contrib-link plumbing, not just the C shim).
-//
-// SKIPPING: the bridge dlopens libduktape at runtime, so a box without Lua
-// cannot run these. That is a provisioning gap, not a code defect, so
-// they skip (#1610's it_when) rather than fail. The probe is lua_init()
-// itself — it returns non-zero when libduktape cannot be loaded, which is
-// exactly the condition that matters.
-//
-// STDOUT: as with Ruby, the embedded interpreter's own print output is
-// buffered by its runtime and is not reliably flushed when an Aether
-// program exits. These tests therefore assert on RETURN CODES and on
-// state observed back through Lua, never on the bridge's stdout.
-
+// written in Aether against std.spec.
 import contrib.host.duktape
 import std.spec
+import std.string
+import std.os
+import std.list
+
+@c_callback
+cb_add(vm: ptr) -> int {
+    a = duktape.arg_int(vm, 1)
+    b = duktape.arg_int(vm, 2)
+    duktape.push_int(vm, a + b)
+    return 1
+}
+
+@c_callback
+cb_echo_str(vm: ptr) -> int {
+    s = duktape.arg_str(vm, 1)
+    duktape.push_str(vm, s)
+    return 1
+}
+
+@c_callback
+cb_echo_bool(vm: ptr) -> int {
+    b = duktape.arg_bool(vm, 1)
+    duktape.push_bool(vm, b)
+    return 1
+}
+
+@c_callback
+cb_echo_nil(vm: ptr) -> int {
+    duktape.push_nil(vm)
+    return 1
+}
+
+@c_callback
+cb_echo_double(vm: ptr) -> int {
+    duktape.push_double(vm, 3.14159)
+    return 1
+}
+
+@c_callback
+cb_raise_err(vm: ptr) -> int {
+    msg = duktape.arg_str(vm, 1)
+    return duktape.raise_error(vm, msg)
+}
+
+// Raises, with a defer that must still run: raise_error returns to the
+// trampoline, which throws only after this function has returned.
+@c_callback
+cb_raise_with_cleanup(vm: ptr) -> int {
+    defer os.setenv("AE_DUK_CB_CLEANUP", "ran")
+    return duktape.raise_error(vm, "raised after cleanup")
+}
+
+// Pushes two values and returns 2; the call's result is the stack top.
+@c_callback
+cb_two_values(vm: ptr) -> int {
+    duktape.push_int(vm, 1)
+    duktape.push_int(vm, 2)
+    return 2
+}
 
 main() {
     fw = spec.init()
@@ -32,11 +75,6 @@ main() {
                 "a valid script returns 0")
         }
 
-        // A bridge that loads libduktape and resolves its symbols but never
-        // evaluates would satisfy the return-code check above. This can
-        // only pass if the interpreter really ran: Lua computes a value,
-        // and a second eval asserts on it Duktape-side, erroring when the
-        // arithmetic did not happen.
         spec.it_when(have_duktape, "really executes — Duktape-side state persists", reason) callback {
             spec.assert_eq(duktape.run("aether_sum = (2 + 3) * 7"), 0,
                 "computation evaluates")
@@ -44,27 +82,145 @@ main() {
                 "Duktape sees 35 — the interpreter genuinely ran")
         }
 
-        // A bridge that swallows script errors is worse than one that
-        // cannot run at all: the caller believes the script worked.
-        // Asserted negatively so the bridge may change its error code.
         spec.it_when(have_duktape, "propagates a runtime error as failure", reason) callback {
             spec.assert_not_eq(duktape.run("throw new Error('deliberate');"), 0,
                 "an erroring script must NOT report success")
         }
 
-        // A syntax error takes a different path through the Duktape loader
-        // than a runtime error, and must also be reported.
         spec.it_when(have_duktape, "reports a syntax error as failure", reason) callback {
             spec.assert_not_eq(duktape.run("function ("), 0,
                 "unparseable code must NOT report success")
         }
 
-        // A host that defensively calls init before each eval must not
-        // pay for it or crash: while the VM is live, init is a no-op.
         spec.it_when(have_duktape, "init is idempotent while the VM is live", reason) callback {
             spec.assert_eq(duktape.init(), 0, "second init returns 0")
             spec.assert_eq(duktape.run("aether_probe = 1"), 0,
                 "the VM still evaluates afterwards")
+        }
+
+        spec.it_when(have_duktape, "persistent VM with host callbacks and typed values (#904)", reason) callback {
+            vm = duktape.vm_new()
+            spec.assert_not_null(vm, "vm_new created VM")
+
+            duktape.vm_register(vm, "app.math.add", cb_add)
+            duktape.vm_register(vm, "host.echo_str", cb_echo_str)
+            duktape.vm_register(vm, "host.echo_bool", cb_echo_bool)
+            duktape.vm_register(vm, "host.echo_nil", cb_echo_nil)
+            duktape.vm_register(vm, "host.echo_double", cb_echo_double)
+            duktape.vm_register(vm, "host.raise_err", cb_raise_err)
+
+            duktape.vm_set_global_str(vm, "GSTR", "héllo €")
+            duktape.vm_set_global_int(vm, "GINT", 100)
+
+            keys = list.new()
+            list.add(keys, "k1")
+            list.add(keys, "k2")
+            duktape.vm_set_global_strlist(vm, "KEYS", keys)
+            list.free(keys)
+
+            // Dotted callback and persistent state
+            rc1 = duktape.vm_eval(vm, "var x = app.math.add(2, 3); x += GINT; x;")
+            spec.assert_eq(rc1, 0, "eval 1 ok")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TINT, "result type is int")
+            spec.assert_eq(duktape.vm_result_int(vm), 105, "result value is 105")
+            duktape.vm_pop_result(vm)
+
+            // State persisted
+            rc2 = duktape.vm_eval(vm, "x + 5")
+            spec.assert_eq(rc2, 0, "eval 2 ok")
+            spec.assert_eq(duktape.vm_result_int(vm), 110, "state x persisted")
+            duktape.vm_pop_result(vm)
+
+            // Non-ASCII round trip
+            rc3 = duktape.vm_eval(vm, "host.echo_str(GSTR)")
+            spec.assert_eq(rc3, 0, "non-ascii eval ok")
+            spec.assert_str_eq(duktape.vm_result_str(vm), "héllo €", "non-ascii round trip string match")
+            duktape.vm_pop_result(vm)
+
+            // Bool & Nil & StringList
+            duktape.vm_eval(vm, "host.echo_bool(true)")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TBOOL, "bool type")
+            spec.assert_eq(duktape.vm_result_bool(vm), 1, "bool true")
+            duktape.vm_pop_result(vm)
+
+            duktape.vm_eval(vm, "host.echo_nil()")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TNIL, "nil type")
+            duktape.vm_pop_result(vm)
+
+            duktape.vm_eval(vm, "KEYS.length === 2 && KEYS[1] === 'k2'")
+            spec.assert_eq(duktape.vm_result_bool(vm), 1, "strlist global verified in JS")
+            duktape.vm_pop_result(vm)
+
+            // Try/catch callback error
+            rc_err = duktape.vm_eval(vm, "try { host.raise_err('cb_error_msg'); } catch (e) { e.message; }")
+            spec.assert_eq(rc_err, 0, "try/catch eval ok")
+            spec.assert_str_eq(duktape.vm_result_str(vm), "cb_error_msg", "caught error message match")
+            duktape.vm_pop_result(vm)
+
+            // Uncaught error
+            rc_uncaught = duktape.vm_eval(vm, "throw new Error('uncaught_err');")
+            spec.assert_not_eq(rc_uncaught, 0, "uncaught error returns non-zero")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TERR, "result type is error")
+            duktape.vm_pop_result(vm)
+
+            // Execution limit return message check
+            lim_msg = duktape.vm_set_instruction_limit(vm, 1000, 10)
+            spec.assert_true(string.contains(lim_msg, "execution limit unavailable"), "execution limit unavailable message")
+
+            duktape.vm_free(vm)
+        }
+
+        spec.it_when(have_duktape, "errors, numbers and callback returns are well defined", reason) callback {
+            vm = duktape.vm_new()
+            spec.assert_not_null(vm, "vm_new created VM")
+
+            // A thrown non-Error is still an error result.
+            rc_s = duktape.vm_eval(vm, "throw 'plain string';")
+            spec.assert_not_eq(rc_s, 0, "throwing a string fails the eval")
+            spec.assert_eq(duktape.vm_result_type(vm), duktape.DUK_TERR, "a thrown string reads as an error")
+            spec.assert_true(string.contains(duktape.vm_result_str(vm), "plain string"), "the error keeps the thrown text")
+            duktape.vm_pop_result(vm)
+
+            // Numbers that are not int64 read without undefined behaviour.
+            duktape.vm_eval(vm, "0 / 0")
+            nan_v = duktape.vm_result_int(vm)
+            spec.assert_true(nan_v == 0, "NaN reads as 0 (a 64-bit compare: assert_eq would truncate)")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "1e30")
+            big = duktape.vm_result_int(vm)
+            spec.assert_true(big == 9223372036854775807, "a huge number saturates to the int64 maximum")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "-1e30")
+            spec.assert_true(duktape.vm_result_int(vm) < 0, "a huge negative number saturates negative")
+            duktape.vm_pop_result(vm)
+            duktape.vm_eval(vm, "'not a number'")
+            str_v = duktape.vm_result_int(vm)
+            spec.assert_true(str_v == 0, "a string reads as 0")
+            duktape.vm_pop_result(vm)
+
+            // A callback's cleanup runs even when it raises.
+            _se = os.setenv("AE_DUK_CB_CLEANUP", "")
+            duktape.vm_register(vm, "host.raise_cleanup", cb_raise_with_cleanup)
+            rc_r = duktape.vm_eval(vm, "try { host.raise_cleanup(); 'no throw'; } catch (e) { e.message; }")
+            spec.assert_eq(rc_r, 0, "the raise is catchable")
+            spec.assert_str_eq(duktape.vm_result_str(vm), "raised after cleanup", "the caught message")
+            duktape.vm_pop_result(vm)
+            cleanup = os.getenv("AE_DUK_CB_CLEANUP")
+            spec.assert_str_eq(cleanup, "ran", "the raising callback's defer ran")
+
+            // A callback returning more than one value returns its top.
+            duktape.vm_register(vm, "host.two", cb_two_values)
+            rc_t = duktape.vm_eval(vm, "host.two()")
+            spec.assert_eq(rc_t, 0, "returning 2 is not an error")
+            spec.assert_eq(duktape.vm_result_int(vm), 2, "the result is the stack top")
+            duktape.vm_pop_result(vm)
+
+            // A name too long for the registration buffer is refused, not truncated.
+            long_name = "n"
+            while string.length(long_name) < 300 { long_name = string.concat(long_name, "n") }
+            spec.assert_eq(duktape.vm_register(vm, long_name, cb_two_values), -1, "a 300-character name is refused")
+
+            duktape.vm_free(vm)
         }
     }
 

@@ -7,8 +7,8 @@
 // `xs[lo..hi]` is a slice of the elements from lo up to hi, sharing them.
 // `.len` is the length. Every index is checked: one out of range is a
 // panic naming it. `make([]T, n)` allocates n zeroed elements whose
-// length is known only when the program runs; that buffer is a handle,
-// and `free` gives it back.
+// length is known only when the program runs; the local that holds the
+// buffer owns it, and releases it when its scope ends (17-ownership.ae).
 //
 // Run: ae run examples/01-language/11-arrays-and-slices.ae
 // See: docs/language-reference.md#slices-t
@@ -59,7 +59,6 @@ main() {
     println("${names.len} names, last ${names[names.len - 1]}")
 
     squares = make([]int, 6)
-    defer free(squares)
     for i in 0..squares.len {
         squares[i] = i * i
     }
@@ -79,4 +78,4 @@ main() {
 // 2 2 [80, 50]
 // 3 names, last linus
 // [0, 1, 4, 9, 16, 25]
-// caught: examples/01-language/11-arrays-and-slices.ae:70: array index 7 out of range for length 5
+// caught: examples/01-language/11-arrays-and-slices.ae:69: array index 7 out of range for length 5

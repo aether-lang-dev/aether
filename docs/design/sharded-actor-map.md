@@ -13,7 +13,7 @@ readers and writers without collapsing onto a single core.
 [Design discussion on the issue tracker](https://github.com/aether-lang-dev/aether/issues/839).
 
 See the runnable example at
-[`examples/02-actors/11-sharded-map.ae`](../../examples/02-actors/11-sharded-map.ae) and
+[`examples/02-actors/16-sharded-map.ae`](../../examples/02-actors/16-sharded-map.ae) and
 the regression test under
 [`tests/integration/sharded_actor_map/`](../../tests/integration/sharded_actor_map/).
 

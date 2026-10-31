@@ -332,6 +332,44 @@ main() {
 EOF
 run_reject "hide blocks DSL receiver fallback across nested scopes" $AE_TMP/ae_hide_dsl_receiver_outer.ae
 
+# Cases 20-22: tuple destructuring is a write to every named slot. It must
+# not re-bind an outer name that the current scope hid or sealed out.
+cat > $AE_TMP/ae_hide_destructure.ae << 'EOF'
+pair() -> (string, int) { return "changed", 1 }
+main() {
+    secret = "original"
+    {
+        hide secret
+        secret, _ = pair()
+    }
+}
+EOF
+run_reject "hide blocks tuple-destructure write" $AE_TMP/ae_hide_destructure.ae
+
+cat > $AE_TMP/ae_seal_destructure.ae << 'EOF'
+pair() -> (string, int) { return "changed", 1 }
+main() {
+    secret = "original"
+    {
+        seal except pair
+        secret, _ = pair()
+    }
+}
+EOF
+run_reject "seal except blocks tuple-destructure write" $AE_TMP/ae_seal_destructure.ae
+
+cat > $AE_TMP/ae_seal_local_destructure.ae << 'EOF'
+pair() -> (string, int) { return "changed", 1 }
+main() {
+    {
+        seal except pair
+        local = "original"
+        local, fresh = pair()
+    }
+}
+EOF
+run_accept "seal except permits local tuple-destructure bindings" $AE_TMP/ae_seal_local_destructure.ae
+
 # Cleanup
 rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out
 

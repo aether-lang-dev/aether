@@ -1,0 +1,39 @@
+// Fibonacci sequence: the nth Fibonacci number, for negative n too.
+//
+// The task is a function for F(n), where F(0) = 0, F(1) = 1 and each
+// later term is the sum of the two before; F(-n) = (-1)^(n+1) F(n) is
+// optional. A clause with a guard takes a negative n to the positive one,
+// and the other walks the pair (a, b) along with a tuple assignment. The
+// program shows F(0) to F(15), F(-1) to F(-8), and F(92).
+//
+// Run: ae run examples/08-rosetta/03-fibonacci.ae
+// See: https://rosettacode.org/wiki/Fibonacci_sequence
+
+fib(n: int) when n < 0 -> long -> if n % 2 == 0 { -fib(-n) } else { fib(-n) }
+fib(n: int) -> long {
+    long a = 0
+    long b = 1
+    for i in 0..n {
+        a, b = (b, a + b)
+    }
+    return a
+}
+
+main() {
+    line = "F(0) to F(15):"
+    for n in 0..16 {
+        line = "${line} ${fib(n)}"
+    }
+    println(line)
+    line = "F(-1) to F(-8):"
+    for n in 1..9 {
+        line = "${line} ${fib(-n)}"
+    }
+    println(line)
+    println("F(92) = ${fib(92)}, the last that fits in a long")
+}
+
+// Output:
+// F(0) to F(15): 0 1 1 2 3 5 8 13 21 34 55 89 144 233 377 610
+// F(-1) to F(-8): 1 -1 2 -3 5 -8 13 -21
+// F(92) = 7540113804746346429, the last that fits in a long

@@ -1,0 +1,21 @@
+// Functions that return a value and end in a loop nothing leaves: they
+// need no return, but under --emit=lib a deadline leaves the loop at its
+// head, and the call then returns its result's zero value.
+
+forever() -> int {
+    n = 0
+    while true {
+        n = n + 1
+    }
+}
+
+// The same for a closure result, whose zero value is a C struct.
+forever_fn() -> fn {
+    n = 0
+    while true {
+        n = n + 1
+    }
+}
+
+main() {
+}

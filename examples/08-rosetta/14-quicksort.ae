@@ -1,0 +1,53 @@
+// Sorting algorithms/Quicksort: an array sorted by partitioning around a pivot.
+//
+// The task sorts an array with quicksort; this is its in-place version,
+// over nine integers. The partition swaps around the middle element, and
+// the two sides are sorted as sub-slices: `xs[..right + 1]` and
+// `xs[left..]` view the same elements, so the recursive calls sort them
+// where they are. A `match` on list patterns prints the result.
+//
+// Run: ae run examples/08-rosetta/14-quicksort.ae
+// See: https://rosettacode.org/wiki/Sorting_algorithms/Quicksort
+
+quicksort(xs: int[]) {
+    if xs.len < 2 {
+        return
+    }
+    pivot = xs[xs.len / 2]
+    left = 0
+    right = xs.len - 1
+    while left <= right {
+        while xs[left] < pivot {
+            left += 1
+        }
+        while xs[right] > pivot {
+            right -= 1
+        }
+        if left <= right {
+            xs[left], xs[right] = (xs[right], xs[left])
+            left += 1
+            right -= 1
+        }
+    }
+    quicksort(xs[..right + 1])
+    quicksort(xs[left..])
+}
+
+show(xs: int[]) -> string {
+    return match xs {
+        [] -> ""
+        [x] -> "${x}"
+        [x | rest] -> "${x} ${show(rest)}"
+    }
+}
+
+main() {
+    xs = [65, 2, -31, 0, 99, 2, 83, 782, 1]
+    println("before: ${show(xs)}")
+    quicksort(xs)
+    println("after:  ${show(xs)}")
+}
+
+// Output:
+// before: 65 2 -31 0 99 2 83 782 1
+// after:  -31 0 1 2 2 65 83 99 782

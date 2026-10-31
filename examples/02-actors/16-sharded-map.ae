@@ -9,7 +9,7 @@
 // meets the same map. docs/design/sharded-actor-map.md has the rationale
 // and how many shards to use.
 //
-// Run: ae run examples/02-actors/11-sharded-map.ae
+// Run: ae run examples/02-actors/16-sharded-map.ae
 // See: docs/design/sharded-actor-map.md
 
 import std.map

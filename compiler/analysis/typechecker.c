@@ -11848,10 +11848,20 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
 /* Walk `node`; return the first forbidden capability reached (recursing into
  * user-function callees), writing the offending `ns.fn` spelling to `outcall`.
  * `forbid` is the comma list of forbidden caps; `visited` guards recursion. */
+enum {
+    EFFECT_MAX_DEPTH = 128,
+    EFFECT_MAX_VISITED = 512
+};
+
 static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forbid,
                                const char** visited, int* nvisited,
-                               char* outcall, size_t outsz, int depth) {
-    if (!node || depth > 128) return NULL;
+                               char* outcall, size_t outsz, int depth,
+                               int* incomplete) {
+    if (!node) return NULL;
+    if (depth > EFFECT_MAX_DEPTH) {
+        *incomplete = 1;
+        return NULL;
+    }
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
@@ -11873,21 +11883,26 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
             int seen = 0;
             for (int i = 0; i < *nvisited; i++)
                 if (strcmp(visited[i], callee) == 0) { seen = 1; break; }
-            if (!seen && *nvisited < 512) {
+            if (!seen) {
                 if (def && def->child_count > 0) {
-                    visited[(*nvisited)++] = callee;
-                    for (int i = 0; i < program->child_count; i++) {
-                        ASTNode* clause = program->children[i];
-                        if (!clause ||
-                            (clause->type != AST_FUNCTION_DEFINITION &&
-                             clause->type != AST_BUILDER_FUNCTION) ||
-                            !clause->value || strcmp(clause->value, callee) != 0 ||
-                            clause->child_count == 0)
-                            continue;
-                        ASTNode* body = clause->children[clause->child_count - 1];
-                        const char* c = effect_scan(program, body, forbid, visited,
-                                                    nvisited, outcall, outsz, depth + 1);
-                        if (c) return c;
+                    if (*nvisited >= EFFECT_MAX_VISITED) {
+                        *incomplete = 1;
+                    } else {
+                        visited[(*nvisited)++] = callee;
+                        for (int i = 0; i < program->child_count; i++) {
+                            ASTNode* clause = program->children[i];
+                            if (!clause ||
+                                (clause->type != AST_FUNCTION_DEFINITION &&
+                                 clause->type != AST_BUILDER_FUNCTION) ||
+                                !clause->value || strcmp(clause->value, callee) != 0 ||
+                                clause->child_count == 0)
+                                continue;
+                            ASTNode* body = clause->children[clause->child_count - 1];
+                            const char* c = effect_scan(program, body, forbid, visited,
+                                                        nvisited, outcall, outsz, depth + 1,
+                                                        incomplete);
+                            if (c) return c;
+                        }
                     }
                 }
             }
@@ -11895,7 +11910,7 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
     }
     for (int i = 0; i < node->child_count; i++) {
         const char* c = effect_scan(program, node->children[i], forbid, visited,
-                                    nvisited, outcall, outsz, depth);
+                                    nvisited, outcall, outsz, depth, incomplete);
         if (c) return c;
     }
     return NULL;
@@ -11914,11 +11929,12 @@ static void check_effect_tags(ASTNode* program) {
         if (!eff) continue;
         const char* forbid = eff + 7;  /* "fs,net,os" or a subset */
         if (fn->child_count == 0) continue;
-        const char* visited[512];
+        const char* visited[EFFECT_MAX_VISITED];
         int nv = 0;
         if (fn->value) visited[nv++] = fn->value;  /* no self-recursion loop */
         char offending[160];
         offending[0] = '\0';
+        int incomplete = 0;
         const char* cap = NULL;
         for (int j = 0; j < program->child_count && !cap; j++) {
             ASTNode* clause = program->children[j];
@@ -11930,7 +11946,7 @@ static void check_effect_tags(ASTNode* program) {
                 continue;
             ASTNode* body = clause->children[clause->child_count - 1];
             cap = effect_scan(program, body, forbid, visited, &nv,
-                              offending, sizeof(offending), 0);
+                              offending, sizeof(offending), 0, &incomplete);
         }
         if (cap) {
             /* #2729: named as the source spells it (`checks.shell`), not by
@@ -11943,6 +11959,17 @@ static void check_effect_tags(ASTNode* program) {
                 "`%s` operation through `%s`. Remove that call path, or drop the "
                 "effect tag.", name, cap, cap, offending);
             g_tc_file = fn->source_file;   /* #2064: the definition's own file */
+            type_error(msg, fn->line, fn->column);
+            g_tc_file = NULL;
+        } else if (incomplete) {
+            char shown[160];
+            const char* name = ast_source_name(fn, shown, sizeof(shown));
+            char msg[400];
+            snprintf(msg, sizeof(msg),
+                "function '%s' carries an effect tag, but effect analysis exceeded "
+                "its call-graph limit (%d levels or %d functions). Validation is refused.",
+                name, EFFECT_MAX_DEPTH, EFFECT_MAX_VISITED);
+            g_tc_file = fn->source_file;
             type_error(msg, fn->line, fn->column);
             g_tc_file = NULL;
         }
@@ -12458,6 +12485,26 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
         enum_rewrite_ast(nd->children[i], names, n);
 }
 
+/* A qualified enum member is lowered to one identifier before lexical scopes
+ * are checked. Preserve the prefix the source wrote so hide/seal decisions use
+ * `Color`, not the generated `Color_Red` constant name. */
+static int enum_member_source_prefix(const ASTNode* nd, char* out, size_t outsz) {
+    static const char marker[] = "enum_prefix:";
+    if (!nd || !nd->annotation || !out || outsz == 0) return 0;
+    size_t marker_len = sizeof(marker) - 1;
+    for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
+        if (p != nd->annotation && p[-1] != ';') continue;
+        const char* value = p + marker_len;
+        const char* end = strchr(value, ';');
+        size_t len = end ? (size_t)(end - value) : strlen(value);
+        if (len == 0 || len >= outsz) return 0;
+        memcpy(out, value, len);
+        out[len] = '\0';
+        return 1;
+    }
+    return 0;
+}
+
 // #1044: rewrite `EnumName.Member` member-access nodes into a plain identifier
 // naming the C enum constant `EnumName_Member`, with the enum's type. Done up
 // front (in the resolve pass) so the identifier is in place before the
@@ -12477,6 +12524,9 @@ static void enum_rewrite_member_access(ASTNode* nd) {
         } else {
             char qualified[512];
             snprintf(qualified, sizeof(qualified), "%s_%s", ename, nd->value);
+            char marker[512];
+            snprintf(marker, sizeof(marker), "enum_prefix:%s", ename);
+            nd->annotation = annotation_add_marker(nd->annotation, marker);
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -14238,6 +14288,23 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 var->node_type = clone_type(rhs_type->tuple_types[j]);
                 // Don't register _ (discard) in symbol table
                 if (var->value && strcmp(var->value, "_") != 0) {
+                    /* A destructure slot re-binds a visible name, or declares
+                     * a new local. It must not recover an outer binding that
+                     * this scope hid or sealed out. A local already visible
+                     * below the directive remains a valid re-bind, and a
+                     * genuinely new local remains valid in a sealed block. */
+                    Symbol* visible = lookup_symbol(table, var->value);
+                    if (!visible &&
+                        (scope_name_is_hidden(table, var->value) ||
+                         name_blocked_by_hide(table, var->value))) {
+                        char msg[256];
+                        snprintf(msg, sizeof(msg),
+                                 "'%s' is hidden in this scope by `hide` or `seal except`",
+                                 var->value);
+                        type_error(msg, var->line, var->column);
+                        slots_ok = 0;
+                        continue;
+                    }
                     /* #2762. A refused slot is bound already; the others are
                      * still registered, so their uses report nothing more. */
                     if (!destructure_slot_rebind(var, table, stmt->children[var_count])) {
@@ -16841,7 +16908,22 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return typecheck_function_call(expr, table);
             
         case AST_IDENTIFIER: {
-            Symbol* symbol = lookup_symbol(table, expr->value);
+            char enum_prefix[512];
+            int qualified_enum = enum_member_source_prefix(expr, enum_prefix,
+                                                            sizeof(enum_prefix));
+            if (qualified_enum && qualified_prefix_blocked(table, enum_prefix)) {
+                char error_msg[640];
+                snprintf(error_msg, sizeof(error_msg),
+                         "'%s' is hidden in this scope by `hide` or `seal except`",
+                         enum_prefix);
+                type_error(error_msg, expr->line, expr->column);
+                return 0;
+            }
+            /* The source prefix passed containment. Resolve the generated
+             * constant without applying hide/seal a second time to its C name;
+             * `seal except Color` grants `Color.Red`, not `Color_Red`. */
+            Symbol* symbol = qualified_enum ? lookup_member_symbol(table, expr->value)
+                                            : lookup_symbol(table, expr->value);
             if (!symbol) {
                 char error_msg[256];
                 if (expr->value && name_blocked_by_hide(table, expr->value)) {

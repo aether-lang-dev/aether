@@ -13,9 +13,13 @@ Run them from the repository root:
 ae run examples/01-language/01-hello.ae
 ```
 
-With a toolchain built from this tree, that is `./build/ae run ...`. The
-[language reference](../docs/language-reference.md) is the full story
-behind each step; every row below links the part it builds on.
+With a toolchain built from this tree, that is `./build/ae run ...`.
+[The tutorial](../docs/tutorial.md) walks this path in prose, a chapter
+per part below (the first two with the mistakes newcomers make and
+exercises); the [glossary](../docs/glossary.md) defines its words. The [language
+reference](../docs/language-reference.md) is the full story behind each
+step; every row below links the part it builds on. [Getting
+started](../docs/getting-started.md) installs the toolchain.
 
 ## 1. The language
 
@@ -30,7 +34,7 @@ behind each step; every row below links the part it builds on.
 | [07-enums-and-sums.ae](01-language/07-enums-and-sums.ae) | `enum`, sum types, exhaustive `match` | [Sum types](../docs/language-reference.md#sum--variant-types) |
 | [08-match.ae](01-language/08-match.ae) | literals, ranges, strings, list and struct patterns | [Match expressions](../docs/language-reference.md#match-expressions) |
 | [09-optionals.ae](01-language/09-optionals.ae) | `T?`, `none`, `??`, `?.`, narrowing | [Optionals](../docs/language-reference.md#optionals) |
-| [10-errors.ae](01-language/10-errors.ae) | `(value, err)`, `T!`, `or`, `!`, `panic` and `try` | [Result types](../docs/language-reference.md#the-t-result-type-and-or--sugar) |
+| [10-errors.ae](01-language/10-errors.ae) | `(value, err)`, `T!`, `or`, `!`, `panic` and `try` | [Result types](../docs/language-reference.md#the-t-result-type-and-or---sugar) |
 | [11-arrays-and-slices.ae](01-language/11-arrays-and-slices.ae) | fixed arrays, slices, `.len`, checked indexes, `make` | [Slices](../docs/language-reference.md#slices-t) |
 | [12-collections.ae](01-language/12-collections.ae) | std.list, std.map, std.set, sorting | [Handles](../docs/memory-management.md#handles-and-defer) |
 | [13-closures.ae](01-language/13-closures.ae) | closures, captured variables, `fn` parameters, trailing blocks | [Closures](../docs/closures-and-builder-dsl.md) |
@@ -53,8 +57,12 @@ behind each step; every row below links the part it builds on.
 | [08-state-machine.ae](02-actors/08-state-machine.ae) | an enum as state, a transition table | [Enums](../docs/language-reference.md#enums) |
 | [09-timeouts.ae](02-actors/09-timeouts.ae) | `receive ... after`, a watchdog | [Actor timeouts](../docs/actor-concurrency.md#actor-timeouts) |
 | [10-crash-isolation.ae](02-actors/10-crash-isolation.ae) | a panic stays in its actor, and the others go on | [Panics](../docs/actor-concurrency.md#panic-and-stack-traces) |
-| [11-sharded-map.ae](02-actors/11-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
-| [12-supervisor.ae](02-actors/12-supervisor.ae) | a crashed actor restarted under the same ref, and a supervisor that gives up | [Supervisors](../docs/actor-concurrency.md#supervisors) |
+| [11-ending.ae](02-actors/11-ending.ae) | `actors.stop`, `actors.kill`, a panic; the reason a monitor's `Down` carries | [The end of an actor](../docs/actor-concurrency.md#the-end-of-an-actor) |
+| [12-links.ae](02-actors/12-links.ae) | `actors.link`, `actors.trap_exits`: a failure climbs the links | [Links](../docs/actor-concurrency.md#links) |
+| [13-supervisor.ae](02-actors/13-supervisor.ae) | a crashed actor restarted under the same ref, and a supervisor that gives up | [Supervisors](../docs/actor-concurrency.md#supervisors) |
+| [14-bounded-mailbox.ae](02-actors/14-bounded-mailbox.ae) | `@mailbox(bound: N)`, `try_send`, what a full mailbox does to `!` | [A bounded mailbox](../docs/language-reference.md#a-bounded-mailbox) |
+| [15-streams.ae](02-actors/15-streams.ae) | std.stream: a producer held to a window of credits | [std.stream](../std/stream/README.md) |
+| [16-sharded-map.ae](02-actors/16-sharded-map.ae) | keys split over owner actors instead of a lock | [Sharded actor map](../docs/design/sharded-actor-map.md) |
 
 ## 3. The standard library
 
@@ -69,6 +77,8 @@ behind each step; every row below links the part it builds on.
 | [07-reverse-proxy.ae](03-std/07-reverse-proxy.ae) | forwarding to an upstream with std.http.proxy | [Reverse proxy](../docs/http-reverse-proxy.md) |
 | [08-proxy-pool.ae](03-std/08-proxy-pool.ae) | a weighted pool configured as code | [Reverse proxy](../docs/http-reverse-proxy.md) |
 | [09-logging.ae](03-std/09-logging.ae) | std.log levels, a log file, the threshold | [stdlib reference](../docs/stdlib-reference.md) |
+| [10-tcp.ae](03-std/10-tcp.ae) | std.tcp: a server and a client, reading a stream up to where a message ends | [std.tcp](../std/tcp/README.md) |
+| [11-cryptography.ae](03-std/11-cryptography.ae) | SHA-256, an HMAC, an Ed25519 signature and its check | [Cryptography](../docs/stdlib-reference.md#cryptography-stdcryptography) |
 
 ## 4. C and other languages
 
@@ -84,10 +94,12 @@ builds and runs them.
 | [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
 | [05-hosts/python.ae](04-interop/05-hosts/python.ae) | Python run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/lua.ae](04-interop/05-hosts/lua.ae) | Lua run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
+| [05-hosts/quickjs.ae](04-interop/05-hosts/quickjs.ae) | QuickJS run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |
 | [06-java-host/aether/manifest.ae](04-interop/06-java-host/aether/manifest.ae) | a namespace with a generated Java SDK, called from Java | [Embedded namespaces](../docs/embedded-namespaces-and-host-bindings.md) |
+| [07-limits/script.ae](04-interop/07-limits/script.ae) | a host's limits on the code it runs: a deadline, a cancel, a memory budget | [Per-call resource caps](../docs/emit-lib.md#per-call-resource-caps) |
 
 ## 5. Containing code
 
@@ -126,6 +138,48 @@ Whole programs, each putting several of the ideas above to work.
 | [02-chat-room.ae](07-applications/02-chat-room.ae) | actors that keep each other in state and broadcast | [Actor runtime](../docs/actor-concurrency.md) |
 | [03-build-supervisor.ae](07-applications/03-build-supervisor.ae) | `os.run_supervised`: a deadline, a process group, nothing left behind | [stdlib reference](../docs/stdlib-reference.md) |
 | [04-calculator.ae](07-applications/04-calculator.ae) | a terminal UI: a button grid as a DSL, closures over ref cells | [Closures and lifetimes](../docs/closures-and-lifetimes.md) |
+
+## 8. Rosetta Code
+
+Classic programming tasks as [Rosetta Code](https://rosettacode.org)
+states them, each a whole program whose output CI checks like the rest
+(#1191). The lines are counted the same way for each language: a
+non-blank line that is not only a comment, for Aether's file here (its
+header and Output block left out) and for the first Go and Python
+solution in [RosettaCodeData](https://github.com/acmeism/RosettaCodeData)
+(1d475861, 2026-07-16). The other languages' first files are not always
+whole programs (Python's GCD imports `fractions.gcd`, and its string
+reversal is `input()[::-1]`), so the counts compare length, not like for like.
+
+| Example | Task | Lines: Aether, Go, Python |
+|---|---|---|
+| [01-fizzbuzz.ae](08-rosetta/01-fizzbuzz.ae) | [FizzBuzz](https://rosettacode.org/wiki/FizzBuzz) | 13, 16, 9 |
+| [02-ackermann.ae](08-rosetta/02-ackermann.ae) | [Ackermann function](https://rosettacode.org/wiki/Ackermann_function) | 12, 9, 3 |
+| [03-fibonacci.ae](08-rosetta/03-fibonacci.ae) | [Fibonacci sequence](https://rosettacode.org/wiki/Fibonacci_sequence) | 22, 6, 10 |
+| [04-factorial.ae](08-rosetta/04-factorial.ae) | [Factorial](https://rosettacode.org/wiki/Factorial) | 12, 19, 2 |
+| [05-gcd.ae](08-rosetta/05-gcd.ae) | [Greatest common divisor](https://rosettacode.org/wiki/Greatest_common_divisor) | 9, 35, 1 |
+| [06-sieve.ae](08-rosetta/06-sieve.ae) | [Sieve of Eratosthenes](https://rosettacode.org/wiki/Sieve_of_Eratosthenes) | 21, 33, 7 |
+| [07-hanoi.ae](08-rosetta/07-hanoi.ae) | [Towers of Hanoi](https://rosettacode.org/wiki/Towers_of_Hanoi) | 9, 25, 6 |
+| [08-n-queens.ae](08-rosetta/08-n-queens.ae) | [N-queens problem](https://rosettacode.org/wiki/N-queens_problem) | 48, 51, 7 |
+| [09-reverse-string.ae](08-rosetta/09-reverse-string.ae) | [Reverse a string](https://rosettacode.org/wiki/Reverse_a_string) | 13, 63, 1 |
+| [10-palindrome.ae](08-rosetta/10-palindrome.ae) | [Palindrome detection](https://rosettacode.org/wiki/Palindrome_detection) | 26, 11, 2 |
+| [11-roman-encode.ae](08-rosetta/11-roman-encode.ae) | [Roman numerals/Encode](https://rosettacode.org/wiki/Roman_numerals/Encode) | 17, 32, 2 |
+| [13-binary-digits.ae](08-rosetta/13-binary-digits.ae) | [Binary digits](https://rosettacode.org/wiki/Binary_digits) | 7, 9, 17 |
+| [14-quicksort.ae](08-rosetta/14-quicksort.ae) | [Sorting algorithms/Quicksort](https://rosettacode.org/wiki/Sorting_algorithms/Quicksort) | 36, 66, 19 |
+| [15-binary-search.ae](08-rosetta/15-binary-search.ae) | [Binary search](https://rosettacode.org/wiki/Binary_search) | 20, 12, 9 |
+| [16-hailstone.ae](08-rosetta/16-hailstone.ae) | [Hailstone sequence](https://rosettacode.org/wiki/Hailstone_sequence) | 23, 29, 14 |
+| [19-levenshtein.ae](08-rosetta/19-levenshtein.ae) | [Levenshtein distance](https://rosettacode.org/wiki/Levenshtein_distance) | 26, 34, 17 |
+| [20-happy-numbers.ae](08-rosetta/20-happy-numbers.ae) | [Happy numbers](https://rosettacode.org/wiki/Happy_numbers) | 16, 26, 10 |
+| [21-perfect-numbers.ae](08-rosetta/21-perfect-numbers.ae) | [Perfect numbers](https://rosettacode.org/wiki/Perfect_numbers) | 18, 29, 6 |
+| [22-look-and-say.ae](08-rosetta/22-look-and-say.ae) | [Look-and-say sequence](https://rosettacode.org/wiki/Look-and-say_sequence) | 22, 28, 17 |
+| [23-josephus.ae](08-rosetta/23-josephus.ae) | [Josephus problem](https://rosettacode.org/wiki/Josephus_problem) | 26, 39, 13 |
+| [24-pascals-triangle.ae](08-rosetta/24-pascals-triangle.ae) | [Pascal's triangle](https://rosettacode.org/wiki/Pascal's_triangle) | 20, 35, 9 |
+| [25-prime-decomposition.ae](08-rosetta/25-prime-decomposition.ae) | [Prime decomposition](https://rosettacode.org/wiki/Prime_decomposition) | 34, 35, 52 |
+
+Over these 22 tasks: Aether 450 lines, Go 642, Python 233. Three tasks of
+the tranche wait for compiler fixes and are left out rather than written
+around them: Roman numerals/Decode and Leap year (#3478, an `if` value
+whose condition ends in a call) and Caesar cipher (#3479, `c = s[i]`).
 
 ## Writing an example
 

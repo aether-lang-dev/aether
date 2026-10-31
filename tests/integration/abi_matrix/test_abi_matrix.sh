@@ -13,7 +13,10 @@
 #     a panic in one, an account of the new one suspended while the old one
 #     runs and resumed, both unloaded
 #   Aether consumers (app.ae, a binary import):
-#     this importer, the old library; the old importer, this library
+#     this importer, the old library; the old importer, this library. On
+#     ELF this ae links a library -Bsymbolic, so it keeps its own runtime in
+#     a program that exports one (#3481); an old library linked without it,
+#     of another version, is refused at import, naming the rebuild.
 #   The shared runtime:
 #     this host, this library on this shared runtime       the baseline
 #     this host, the old library on the old shared runtime
@@ -159,10 +162,56 @@ run_app() {
         bad "$1: app.ae did not build" "$2/app_build.log"
         return
     fi
-    expect "$1" "$(cd "$2" && PATH="$2:$PATH" LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
-        DYLD_LIBRARY_PATH="$2${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ./app$exe 2>"$2/app.err" | tr -d '\r')" "$app_want"
+    got="$(cd "$2" && PATH="$2:$PATH" LD_LIBRARY_PATH="$2${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" \
+        DYLD_LIBRARY_PATH="$2${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" ./app$exe 2>"$2/app.err" | tr -d '\r')"
+    expect "$1" "$got" "$app_want"
+    # What the program said on stderr: an abort prints nothing on stdout.
+    if [ "$got" != "$app_want" ] && [ -s "$2/app.err" ]; then
+        echo "      stderr:"; tail -12 "$2/app.err" | sed 's/^/        /'
+    fi
 }
-run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE"
+# On ELF this ae links a library with a runtime of its own -Bsymbolic, so it
+# keeps that runtime in any program (#3481), as Mach-O and PE keep the copies
+# apart by themselves. A library linked before that binds its runtime's calls
+# to the importer's, which every Aether program exports (-rdynamic), and so
+# would run on the importer's runtime: one made for another runtime ABI is
+# refused by this importer at build, naming the rebuild, instead of the
+# program ending on its first call. A level-0 library records no ID and has
+# no check.
+static_abi() { "$TMP/host_new$exe" "$1" "$1" --runtime-abi 2>/dev/null; }
+refuse_app() {
+    cp "$SCRIPT_DIR/app.ae" "$2/app.ae"
+    if (cd "$2" && AETHER_HOME="$3" "$4" build app.ae -o app > app_build.log 2>&1); then
+        bad "$1: app.ae built; the import was not refused" "$2/app_build.log"
+    elif ! grep -q "carries the Aether runtime" "$2/app_build.log" ||
+         ! grep -q -- "--shared-runtime" "$2/app_build.log"; then
+        bad "$1: the refusal does not say why and name the rebuild" "$2/app_build.log"
+    fi
+}
+if [ "$ext" = so ]; then
+    if ! command -v readelf >/dev/null 2>&1; then
+        echo "  [NOTE] abi_matrix: no readelf, so this ae's -Bsymbolic link is not checked"
+    elif ! readelf -d "$TMP/new/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
+        bad "this ae linked libmlib.$ext without -Bsymbolic: it would run on an importing program's runtime"
+    fi
+fi
+old_static_abi="$(static_abi "$TMP/old/libmlib.$ext")"
+old_binds_own=1
+if [ "$ext" = so ] && [ -n "$old_static_abi" ] &&
+   [ "$old_static_abi" != "$(static_abi "$TMP/new/libmlib.$ext")" ]; then
+    if ! command -v readelf >/dev/null 2>&1; then
+        old_binds_own=unknown
+    elif ! readelf -d "$TMP/old/libmlib.$ext" 2>/dev/null | grep -q SYMBOLIC; then
+        old_binds_own=0
+    fi
+fi
+app_note=""
+case "$old_binds_own" in
+    0) refuse_app "this importer, the $old_version library (linked before #3481)" "$TMP/old" "$ROOT" "$AE"
+       app_note=" (the $old_version library, linked before #3481, refused at import)" ;;
+    unknown) echo "  [NOTE] abi_matrix: no readelf, so this importer with the $old_version library is not run" ;;
+    *) run_app "this importer, the $old_version library" "$TMP/old" "$ROOT" "$AE" ;;
+esac
 run_app "the $old_version importer, this library" "$TMP/new" "$OLD_HOME" "$OLD_AE"
 
 # The shared runtime. $1 = case dir, $2 = library dir, $3 = runtime dir,
@@ -221,6 +270,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
+    echo "  [PASS] abi_matrix: against $old_version (host ABI level $old_level): C hosts of either header and level, two libraries with a runtime each in one process (an account suspended and resumed beside the old one), and Aether consumers both ways$app_note run typed calls, strings given back with no byte kept, errors and deadlines at their levels$shared_note; shared-runtime pairs checked by runtime ABI ID"
 fi
 exit $fail

@@ -12,7 +12,7 @@
 //   2. SHARDED ACTOR MAP  — lock striping, actor-native: N owner actors,
 //      key routed by hash(key) % N, so unrelated keys hit different
 //      mailboxes. Fire-and-forget writes to distinct shards drain in
-//      parallel. (examples/02-actors/11-sharded-map.ae)
+//      parallel. (examples/02-actors/16-sharded-map.ae)
 //   3. COW SNAPSHOT CELL  — std.snapshot. One atomic pointer to an
 //      immutable map; reads are LOCK-FREE acquire loads with NO mailbox
 //      round-trip; a write rebuilds the map and publishes with store(),

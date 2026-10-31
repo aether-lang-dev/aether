@@ -12,14 +12,15 @@
 #
 # 1. one runtime: both libraries' C linked into the host;
 # 2. each library built the default way, with its own copy of the runtime:
-#    on macOS and Windows the copies stay apart, so the inner one cannot read
-#    the outer block's grants; it refuses, and its message names
-#    --shared-runtime (on Linux and FreeBSD ELF interposition binds both to
-#    one copy: the same answers, no message);
+#    the copies stay apart (on every platform since #3481), so the inner one
+#    cannot read the outer block's grants; it refuses, and its message names
+#    --shared-runtime;
 #    2c. the outer library linked into a program with a runtime of its own
 #    that exports nothing and looks first (#3445);
 #    2d. a program with the panic and no sandbox, -rdynamic on Linux, and a
-#    library whose block catches a panic from a nested block (#3438);
+#    library whose block catches a panic from a nested block (#3438); 2e,
+#    with a second library; 2f, on ELF, both linked without -Bsymbolic, so
+#    they run the program's panic (interposition);
 # 3. both built with --shared-runtime (skipped where build/shared has none).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -37,10 +38,10 @@ fail=0
 want="before 1 inner 0 granted 0 outer 0 after 1"
 
 case "$(uname -s 2>/dev/null)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; apart=1; dl="" ;;
-    Darwin) ext=dylib; apart=1; dl="" ;;
-    Linux) ext=so; apart=0; dl="-ldl" ;;
-    *) ext=so; apart=0; dl="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) ext=dll; dl="" ;;
+    Darwin) ext=dylib; dl="" ;;
+    Linux) ext=so; dl="-ldl" ;;
+    *) ext=so; dl="" ;;
 esac
 
 # 1. one runtime
@@ -95,7 +96,7 @@ if [ "$got" != "$want" ]; then
     head -5 "$TMP/apart.err" | sed 's/^/        /'
     fail=1
 fi
-if [ "$apart" = 1 ] && ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
+if ! grep -q -- "--shared-runtime" "$TMP/apart.err"; then
     echo "  [FAIL] sandbox_nested_libraries: a runtime per library: the refusal does not name --shared-runtime"
     head -5 "$TMP/apart.err" | sed 's/^/        /'
     fail=1
@@ -136,10 +137,11 @@ fi
 # 2d. a program with the panic of a runtime of its own and no sandbox,
 # linked -rdynamic on Linux as `ae build` links one, loading a library with a
 # runtime of its own whose enforce block catches a panic raised in a nested
-# block (#3438): under ELF interposition the library runs the program's panic
-# and try frames, so its sandbox must set the program's pointers. With them
-# each copy's own, the catch left the nested level in force (PATH 0) and the
-# block's end the outer one (probe 0 after it).
+# block (#3438). Before #3481 the library ran the program's panic and try
+# frames there (ELF interposition), so its sandbox had to set the program's
+# pointers; now it runs its own on every platform, and the catch must still
+# leave neither the nested level (PATH 0) nor, at the block's end, the outer
+# one (probe 0 after it) in force.
 rdyn=""
 case "$(uname -s 2>/dev/null)" in Linux|FreeBSD) rdyn="-rdynamic" ;; esac
 # shellcheck disable=SC2046,SC2086
@@ -171,6 +173,40 @@ if [ "$got" != "$want_two" ]; then
     head -5 "$TMP/caught2.err" | sed 's/^/        /'
     fail=1
 fi
+# 2f. on ELF, the same two libraries linked by hand from aetherc's C without
+# -Bsymbolic, as a C build of `--emit=lib` C still may be and as libraries
+# linked before #3481 were: under the program linked -rdynamic they run the
+# program's panic, try frames and step barrier (interposition), so the hooks
+# list of #3438 must serve each copy's levels.
+hand_note=""
+if [ -n "$rdyn" ]; then
+    mkdir -p "$TMP/hand"
+    hand_lib() {   # $1 = source stem
+        "$ROOT/build/aetherc" --emit=lib --with=os,extern "$SCRIPT_DIR/$1.ae" "$TMP/hand/$1.c" \
+            > "$TMP/hand/$1.log" 2>&1 &&
+        # shellcheck disable=SC2046,SC2086
+        "$CC" -O1 -shared -fPIC -DAETHER_NO_LIB_MAIN $("$AE" cflags --cflags) "$TMP/hand/$1.c" \
+            "$SCRIPT_DIR/hooks.c" -o "$TMP/hand/lib$1.$ext" $("$AE" cflags --libs) $dl \
+            >> "$TMP/hand/$1.log" 2>&1
+    }
+    if ! hand_lib caught || ! hand_lib inner; then
+        echo "  [FAIL] sandbox_nested_libraries: the hand-linked libraries did not build"
+        tail -8 "$TMP/hand/caught.log" "$TMP/hand/inner.log" 2>/dev/null | sed 's/^/        /'
+        fail=1
+    elif command -v readelf >/dev/null 2>&1 && readelf -d "$TMP/hand/libcaught.$ext" | grep -q SYMBOLIC; then
+        echo "  [FAIL] sandbox_nested_libraries: the hand-linked library is -Bsymbolic, so it tests nothing"
+        fail=1
+    else
+        got="$("$TMP/host_caught" "$TMP/hand/libcaught.$ext" "$TMP/hand/libinner.$ext" 2>"$TMP/hand.err" | tr -d '\r')"
+        if [ "$got" != "$want_two" ]; then
+            echo "  [FAIL] sandbox_nested_libraries: two hand-linked libraries running the program's panic:"
+            printf '%s\n' "$got" | sed 's/^/        got:  /'
+            head -5 "$TMP/hand.err" | sed 's/^/        /'
+            fail=1
+        fi
+        hand_note=", the same libraries linked without -Bsymbolic under it"
+    fi
+fi
 
 # 3. one shared runtime
 if ls "$ROOT/build/shared/" 2>/dev/null | grep -q "aether"; then
@@ -198,6 +234,6 @@ else
 fi
 
 if [ "$fail" = 0 ]; then
-    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused where the copies stay apart), a program whose copy looked first and exports nothing, a panic caught inside the block of a library that runs the program's panic$shared_note"
+    echo "  [PASS] sandbox_nested_libraries: an inner library's export inside an outer enforce is held to it, its own grant_all narrows nothing, and the outer block stays checked: one runtime, a runtime per library (refused, naming --shared-runtime), a program whose copy looked first and exports nothing, a panic caught inside the block of a library loaded by a program linked -rdynamic$hand_note$shared_note"
 fi
 exit $fail

@@ -1,0 +1,86 @@
+// A stream: a fast producer held to what its consumer has handled.
+//
+// A send never blocks, so a producer that outruns its consumer piles
+// messages up in memory without bound. std.stream puts a bound back: the
+// producer starts with `window` credits, each chunk it sends costs one,
+// and the consumer returns one for each chunk it has handled. With none
+// left, `stream.offer` returns 0 and the producer stops until the next
+// `StreamCredit` comes. So at most `window` chunks are ever in flight,
+// and nobody waits.
+//
+// Run: ae run examples/02-actors/15-streams.ae
+// See: std/stream/README.md
+
+import std.stream
+
+message Start { s: ptr, total: int }
+message More {}
+message Report {}
+
+actor Producer {
+    state s: ptr = null
+    state total = 0
+    state sent = 0
+    state finished = 0
+    state peak = 0
+
+    receive {
+        Start(s: st, total: t) -> {
+            s = st
+            total = t
+            self ! More {}
+        }
+        // Offer lines until the window is full or every line has gone.
+        More() -> {
+            while sent < total {
+                if stream.offer(s, "log line ${sent + 1}") != 1 {
+                    break // 0: no credit left, wait for the next one
+                }
+                sent = sent + 1
+            }
+            peak = stream.peak(s)
+            if sent == total && finished == 0 {
+                stream.finish(s)
+                finished = 1
+            }
+        }
+        StreamCredit(s: st, n) -> {
+            if stream.credit(st, n) == 0 {
+                s = null // the consumer has the end: the stream is freed
+            } else if finished == 0 {
+                self ! More {}
+            }
+        }
+        Report() -> { reply peak }
+    }
+}
+
+actor Consumer {
+    state count = 0
+    receive {
+        StreamChunk(s, data, last) -> {
+            if last == 0 {
+                count = count + 1
+            }
+            stream.consumed(s, last)
+        }
+        Report() -> { reply count }
+    }
+}
+
+main() {
+    p = spawn(Producer())
+    c = spawn(Consumer())
+    s = stream.connect(p, c, 3) // at most 3 lines in flight
+    p ! Start { s: s, total: 20 }
+    wait_for_idle()
+
+    int got = c ? Report {}
+    int peak = p ? Report {}
+    println("the consumer handled ${got} lines")
+    println("the most in flight at once: ${peak}")
+}
+
+// Output:
+// the consumer handled 20 lines
+// the most in flight at once: 3

@@ -286,8 +286,9 @@ Rules of thumb:
 
 - [install-layout.md](install-layout.md), exactly what `make install` /
   `install.sh` lay down, and the MANIFEST contract aeb relies on.
-- [getting-started.md](getting-started.md), first program, project
-  config, error handling, the language tour.
+- [getting-started.md](getting-started.md), installing, a first program,
+  a project and the tools; the language itself is taught by the path in
+  [examples/README.md](../examples/README.md) and [tutorial.md](tutorial.md).
 - [emit-lib.md](emit-lib.md), building Aether as a `.so`/`.dylib` for
   FFI hosts (`--emit=lib`).
 - [CONTRIBUTING.md](../CONTRIBUTING.md), the contributor flow, including

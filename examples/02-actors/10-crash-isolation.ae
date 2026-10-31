@@ -8,7 +8,7 @@
 // does. Crashes stay where they happen. Another actor learns of one
 // through `actors.monitor` (a `Down` message) or `actors.link`, and
 // std.supervise restarts a crashed actor under the same ref
-// (12-supervisor.ae). An ask is how a caller finds out on its own:
+// (13-supervisor.ae). An ask is how a caller finds out on its own:
 // `v, err = actor ? Msg {}` ends at once with "the actor is dead" for a
 // dead actor, and with "the actor died before it replied" for one that
 // dies handling the ask.

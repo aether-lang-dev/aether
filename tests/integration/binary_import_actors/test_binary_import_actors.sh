@@ -11,10 +11,9 @@
 # way out: crowd's slow fire-and-forget message is still delivered.
 #
 # Two passes over the same sources:
-#   static runtime  each library carries its own libaether. The actors run
-#                   wherever the importer's calls land; the exit drain reaches
-#                   them only where ELF interposition merges the copies
-#                   (Linux, FreeBSD). Elsewhere `ae` warns that it cannot.
+#   static runtime  each library carries its own libaether and runs its
+#                   actors on its own scheduler, which the program's exit
+#                   does not drain, on every platform (#3481); `ae` warns.
 #   shared runtime  `--shared-runtime`: one runtime, one scheduler, and the
 #                   program's exit drains it on every platform.
 set -e
@@ -25,10 +24,9 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] binary_import_actors: ae not built"; exit 0; }
 
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   ELF=0; EXE=".exe" ;;
-    Darwin)                          SO_EXT=".dylib"; ELF=0; EXE="" ;;
-    Linux|FreeBSD)                   SO_EXT=".so";    ELF=1; EXE="" ;;
-    *)                               SO_EXT=".so";    ELF=0; EXE="" ;;
+    MINGW*|MSYS*|CYGWIN*|Windows_NT) SO_EXT=".dll";   EXE=".exe" ;;
+    Darwin)                          SO_EXT=".dylib"; EXE="" ;;
+    *)                               SO_EXT=".so";    EXE="" ;;
 esac
 
 fail() {
@@ -59,13 +57,19 @@ run_pass() {
         # 1.11: every catalog has the outcome slot (#2956) and the host ABI, the runtime ABI and the duties (#2957); `actors` (1.7) is in it.
         echo "$INFO" | grep -q "Schema:[[:space:]]*1\.11" || { echo "$INFO"; fail "$label: lib$lib's schema is not 1.11"; }
         echo "$INFO" | grep -q "Actors:[[:space:]]*yes" || { echo "$INFO"; fail "$label: lib$lib's catalog does not say it runs actors"; }
+        # #3481: on ELF a library with a runtime of its own names `own_runtime`,
+        # so an importer of 0.860.0 to 0.864.0, which took that runtime as the
+        # program's, refuses it; elsewhere, and on the shared runtime, none does.
+        want=0; [ "$SO_EXT" = .so ] && [ "$drains" = 0 ] && want=1
+        has=0; echo "$INFO" | grep -q "Requires:.*own_runtime" && has=1
+        [ "$has" = "$want" ] || { echo "$INFO"; fail "$label: lib$lib names own_runtime: $has, expected $want"; }
     done
 
     OUT="$(AETHER_HOME="$ROOT" "$AE" run app.ae 2>run.log)" || { echo "$OUT"; fail "$label: ae run app.ae" run.log; }
     echo "$OUT" | grep -q "^OK" || { echo "$OUT"; fail "$label: the actors did not count to 300"; }
     if [ "$drains" = 1 ]; then
         echo "$OUT" | grep -q "^late 7" || { echo "$OUT"; fail "$label: the exit did not drain the library's in-flight message" run.log; }
-    elif [ "$ELF" = 0 ]; then
+    else
         grep -q "runs actors on its own static runtime" run.log \
             || fail "$label: no warning that the static runtime's messages are not drained" run.log
     fi
@@ -80,7 +84,7 @@ run_pass() {
 }
 
 # ---- static runtime ----
-run_pass "$WORK/static" "" "static runtime" "$ELF"
+run_pass "$WORK/static" "" "static runtime" 0
 
 # ---- shared runtime (where this toolchain built one) ----
 if [ -d "$ROOT/build/shared" ]; then

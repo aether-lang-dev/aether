@@ -382,6 +382,14 @@ probe_tinygo() {
     return 0
 }
 
+probe_quickjs() {
+    if [ -f "$ROOT/contrib/quickjs/amalgamation/quickjs-amalgam.c" ]; then
+        echo "-I$ROOT/contrib/quickjs"
+        return 0
+    fi
+    return 1
+}
+
 probe_factor() {
     # The bridge .c loads libfactor purely via dlopen (mirrors host/lua,
     # host/python after their dlopen rewrites) — it needs NO Factor dev
@@ -575,6 +583,7 @@ CATALOGUE=(
     "factor|host_factor  contrib/host/factor/aether_host_factor.c AETHER_HAS_FACTOR  probe_factor"
     "racket|host_racket  contrib/host/racket/aether_host_racket.c AETHER_HAS_RACKET  probe_racket"
     "aether|host_aether  contrib/host/aether/aether_host_aether.c AETHER_HAS_AETHER_HOST probe_aether"
+    "quickjs|host_quickjs contrib/host/quickjs/aether_host_quickjs.c AETHER_HAS_QUICKJS probe_quickjs"
 )
 
 # Find a catalogue line by short name. Echoes the build_module arg list
