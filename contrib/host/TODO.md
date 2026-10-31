@@ -37,15 +37,15 @@ is the only host with it today. Who should get it, and how hard:
 **Tier-1 candidates — in-process dlopen hosts with a C value-stack to bridge
 (highest value, the Lua pattern ports directly):**
 
-- [ ] **Python** (`contrib/host/python`) — HIGHEST value after Lua. CPython's
-  C-API has the exact shapes: `PyObject_CallObject` / `PyCFunction` for host
-  callbacks, `PyArg_*` + `Py_BuildValue` for typed args/returns,
-  `PyRun_String` returning a `PyObject*` for typed eval, `PyDict_SetItemString`
-  on `__main__` for globals, and `PyEval_SetTrace`/sys.settrace for the
-  instruction guard. Marshalling table: int/float/str/bool/None/list/dict ↔
-  the same typed tags Lua uses. Effort: **medium-high** (CPython refcounting
-  discipline is the wrinkle — every `PyObject*` the bridge holds needs
-  correct `Py_INCREF`/`DECREF`, unlike Lua's stack-GC).
+- [x] **Python** (`contrib/host/python`) — HIGHEST value after Lua. Done as
+  `python_vm_*` / `python_arg_*` / `python_push_*`: `PyCFunction`s holding a
+  capsule for host callbacks, `Py_CompileStringExFlags` (expression, then
+  statements) + `PyEval_EvalCode` for typed eval, a globals dict per VM, and
+  `PyEval_SetTrace` for the instruction guard. Two tags beyond Lua's: bytes
+  (`PY_TBYTES`, crossing as `std.bytes` handles) and float (`PY_TFLOAT`); an
+  int past 64 bits is `PY_TOTHER`. All VMs share the one interpreter, so they
+  are not isolated from each other, and every call takes the GIL. Refcounts go
+  through `Py_IncRef`/`Py_DecRef`, never the macros, as the dlopen model needs.
 
 - [x] **Duktape / JS** (`contrib/host/duktape`, `js` is its alias) — HIGH
   value, LOWEST effort of the JS-family. Persistent VM (`duktape_vm_new`), host

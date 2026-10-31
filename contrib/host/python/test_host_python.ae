@@ -5,19 +5,63 @@
 // rather than a C harness (it covers module.ae's declarations and the
 // contrib-link plumbing, not just the C shim).
 //
-// SKIPPING: the bridge dlopens libpython at runtime, so a box without Lua
-// cannot run these. That is a provisioning gap, not a code defect, so
-// they skip (#1610's it_when) rather than fail. The probe is lua_init()
+// SKIPPING: the bridge dlopens libpython at runtime, so a box without
+// Python cannot run these. That is a provisioning gap, not a code defect, so
+// they skip (#1610's it_when) rather than fail. The probe is python_init()
 // itself — it returns non-zero when libpython cannot be loaded, which is
 // exactly the condition that matters.
 //
 // STDOUT: as with Ruby, the embedded interpreter's own print output is
 // buffered by its runtime and is not reliably flushed when an Aether
 // program exits. These tests therefore assert on RETURN CODES and on
-// state observed back through Lua, never on the bridge's stdout.
+// state observed back through Python, never on the bridge's stdout.
 
 import contrib.host.python
 import std.spec
+import std.bytes
+import std.os
+import std.string
+
+@c_callback
+cb_add(vm: ptr) -> int {
+    python.push_int(vm, python.arg_int(vm, 1) + python.arg_int(vm, 2))
+    return 1
+}
+
+// Doubles the bytes it is given, embedded zeros and all.
+@c_callback
+cb_twice(vm: ptr) -> int {
+    b = python.arg_bytes(vm, 1)
+    if b == null { return python.raise_error(vm, "want bytes") }
+    defer bytes.free(b)
+    n = bytes.length(b)
+    out = bytes.new(n * 2)
+    defer bytes.free(out)
+    bytes.copy_from_bytes(out, 0, b, 0, n)
+    bytes.copy_from_bytes(out, n, b, 0, n)
+    bytes.set_length(out, n * 2)
+    python.push_bytes(vm, out)
+    return 1
+}
+
+// Raises, with a defer that must still run: raise_error returns to the
+// trampoline, which raises only after this function has returned.
+@c_callback
+cb_raise_with_cleanup(vm: ptr) -> int {
+    defer os.setenv("AE_PY_CB_CLEANUP", "ran")
+    return python.raise_error(vm, "raised after cleanup")
+}
+
+// Evaluates on its own VM in the middle of the script's call to it.
+@c_callback
+cb_nested(vm: ptr) -> int {
+    n = python.arg_int(vm, 1)
+    long inner = -1
+    if python.vm_eval(vm, "app.add(40, 2)") == 0 { inner = python.vm_result_int(vm) }
+    python.vm_pop_result(vm)
+    python.push_int(vm, n * 100 + inner)
+    return 1
+}
 
 main() {
     fw = spec.init()
@@ -34,7 +78,7 @@ main() {
 
         // A bridge that loads libpython and resolves its symbols but never
         // evaluates would satisfy the return-code check above. This can
-        // only pass if the interpreter really ran: Lua computes a value,
+        // only pass if the interpreter really ran: Python computes a value,
         // and a second eval asserts on it Python-side, erroring when the
         // arithmetic did not happen.
         spec.it_when(have_python, "really executes — Python-side state persists", reason) callback {
@@ -66,6 +110,82 @@ assert builtins.aether_sum == 35, 'wrong'"), 0,
             spec.assert_eq(python.init(), 0, "second init returns 0")
             spec.assert_eq(python.run("aether_probe = 1"), 0,
                 "the VM still evaluates afterwards")
+        }
+
+        spec.it_when(have_python, "persistent VM with host functions and typed values (#904)", reason) callback {
+            vm = python.vm_new()
+            spec.assert_not_null(vm, "vm_new created a VM")
+            spec.assert_eq(python.vm_register(vm, "app.add", cb_add), 0, "a dotted name registers")
+            python.vm_register(vm, "app.bytes.twice", cb_twice)
+            python.vm_set_global_int(vm, "BASE", 100)
+            python.vm_set_global_str(vm, "NAME", "héllo")
+
+            spec.assert_eq(python.vm_eval(vm, "total = app.add(2, 3) + BASE"), 0, "statements run")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TNIL, "statements give None")
+            python.vm_pop_result(vm)
+            python.vm_eval(vm, "total")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TINT, "an int")
+            spec.assert_eq(python.vm_result_int(vm), 105, "callback plus global, kept between evals")
+            python.vm_pop_result(vm)
+
+            python.vm_eval(vm, "NAME + '!'")
+            spec.assert_str_eq(python.vm_result_str(vm), "héllo!", "a str")
+            python.vm_pop_result(vm)
+
+            python.vm_eval(vm, "True")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TBOOL, "True is a bool, not an int")
+            python.vm_pop_result(vm)
+
+            python.vm_eval(vm, "2**64")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TOTHER, "an int past 64 bits")
+            spec.assert_eq(python.vm_result_int(vm), 0, "reads 0, not a wrapped value")
+            python.vm_pop_result(vm)
+
+            python.vm_eval(vm, "app.bytes.twice(b'a\\x00')")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TBYTES, "bytes")
+            b = python.vm_result_bytes(vm)
+            spec.assert_not_null(b, "read as a std.bytes handle")
+            spec.assert_eq(bytes.length(b), 4, "embedded zeros kept")
+            spec.assert_eq(bytes.get(b, 1), 0, "the zero")
+            spec.assert_eq(bytes.get(b, 2), 97, "the copy")
+            bytes.free(b)
+            python.vm_pop_result(vm)
+
+            python.vm_free(vm)
+        }
+
+        spec.it_when(have_python, "errors, nested evals and the limit", reason) callback {
+            vm = python.vm_new()
+            python.vm_register(vm, "app.add", cb_add)
+            python.vm_register(vm, "host.nested", cb_nested)
+            python.vm_register(vm, "host.fail", cb_raise_with_cleanup)
+
+            _se = os.setenv("AE_PY_CB_CLEANUP", "")
+            spec.assert_eq(python.vm_eval(vm, "try:\n    host.fail()\nexcept RuntimeError as e:\n    m = str(e)"), 0, "a raise is catchable")
+            python.vm_pop_result(vm)
+            python.vm_eval(vm, "m")
+            spec.assert_str_eq(python.vm_result_str(vm), "raised after cleanup", "the caught message")
+            python.vm_pop_result(vm)
+            spec.assert_str_eq(os.getenv("AE_PY_CB_CLEANUP"), "ran", "the raising callback's defer ran")
+
+            spec.assert_not_eq(python.vm_eval(vm, "1 / 0"), 0, "an exception fails the eval")
+            spec.assert_eq(python.vm_result_type(vm), python.PY_TERR, "and reads as an error")
+            spec.assert_str_eq(python.vm_result_str(vm), "ZeroDivisionError: division by zero", "type and message")
+            python.vm_pop_result(vm)
+
+            spec.assert_eq(python.vm_eval(vm, "host.nested(7)"), 0, "a callback evaluates on its own VM")
+            spec.assert_eq(python.vm_result_int(vm), 742, "and both results come back")
+            python.vm_pop_result(vm)
+
+            spec.assert_str_eq(python.vm_set_instruction_limit(vm, 5000, 1), "", "limit set")
+            spec.assert_not_eq(python.vm_eval(vm, "while True:\n    pass"), 0, "a loop is stopped")
+            spec.assert_true(string.contains(python.vm_result_str(vm), "instruction limit"), "by the limit")
+            python.vm_pop_result(vm)
+            python.vm_set_instruction_limit(vm, 0, 1)
+
+            spec.assert_eq(python.vm_eval(vm, "2 + 2"), 0, "the VM evaluates after the limit")
+            python.vm_pop_result(vm)
+            python.vm_free(vm)
         }
     }
 
