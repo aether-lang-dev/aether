@@ -1,0 +1,181 @@
+// std/ipc/test_ipc.ae — unit spec for std.ipc socket channel & descriptor passing
+
+import std.ipc
+import std.os
+import std.fs
+import std.io
+import std.bytes
+import std.string
+import std.dir
+
+extern exit(code: int)
+
+assert_true(cond: int, msg: string) {
+    if cond == 0 {
+        println("FAIL: ${msg}")
+        exit(1)
+    } else {
+        println("  PASS ${msg}")
+    }
+}
+
+assert_eq_str(got: string, expected: string, msg: string) {
+    if got != expected {
+        println("FAIL: ${msg} (got '${got}', expected '${expected}')")
+        exit(1)
+    } else {
+        println("  PASS ${msg}")
+    }
+}
+
+assert_eq_int(got: int, expected: int, msg: string) {
+    if got != expected {
+        println("FAIL: ${msg} (got ${got}, expected ${expected})")
+        exit(1)
+    } else {
+        println("  PASS ${msg}")
+    }
+}
+
+count_open_fds() -> int {
+    entries, dir_err = dir.list("/proc/self/fd")
+    if dir_err != "" || entries == null { return -1 }
+    c = dir.list_count(entries)
+    dir.list_free(entries)
+    return c
+}
+
+main() {
+    println("=== std.ipc test_ipc ===")
+
+    // 1. Initial state checks
+    assert_eq_int(ipc.parent_channel(), -1, "parent_channel is -1 when no channel exists")
+    assert_eq_str(ipc.parent_channel_kind(), "", "parent_channel_kind is empty when no channel exists")
+
+    // 2. os.socketpair checks
+    fd_a, fd_b, sp_err = os.socketpair()
+    assert_eq_str(sp_err, "", "socketpair returns valid open descriptors")
+    assert_true(fd_a >= 0 && fd_b >= 0, "socketpair fds are non-negative")
+    assert_true(ipc.get_cloexec_raw(fd_a) != 0, "socketpair fd_a is close-on-exec")
+    assert_true(ipc.get_cloexec_raw(fd_b) != 0, "socketpair fd_b is close-on-exec")
+
+    // 3. Bidirectional write / read roundtrips (including embedded NUL byte)
+    msg_zero = string.concat("hello\0world", "!!")
+    w_err1 = ipc.write(fd_a, msg_zero)
+    assert_eq_str(w_err1, "", "ipc.write with embedded zero byte succeeds")
+
+    read_data1, r_err1 = ipc.read(fd_b, 100)
+    assert_eq_str(r_err1, "", "ipc.read succeeds")
+    assert_eq_int(string.length(read_data1), string.length(msg_zero), "read payload preserves length with zero byte")
+    assert_eq_str(read_data1, msg_zero, "read payload matches msg_zero")
+
+    // Reverse direction (fd_b -> fd_a)
+    rev_msg = "hello from b to a"
+    w_err_rev = ipc.write(fd_b, rev_msg)
+    assert_eq_str(w_err_rev, "", "ipc.write reverse b to a succeeds")
+    read_rev, r_err_rev = ipc.read(fd_a, 100)
+    assert_eq_str(r_err_rev, "", "ipc.read reverse on a succeeds")
+    assert_eq_str(read_rev, rev_msg, "reverse payload matches")
+
+    // 4. Large payload roundtrip (1 MB) to test short write looping / EINTR handling
+    mb_chunk = "0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF0123456789ABCDEF" // 64 bytes
+    // Build 1 MB = 16384 * 64 bytes
+    big_buf = string.concat("", "")
+    i = 0
+    while i < 16384 {
+        big_buf = string.concat(big_buf, mb_chunk)
+        i = i + 1
+    }
+    assert_eq_int(string.length(big_buf), 1048576, "constructed 1 MB payload")
+
+    // Increase socket buffers to facilitate 1 MB transfers
+    _ = ipc.set_sock_buf_raw(fd_a, 262144)
+    _ = ipc.set_sock_buf_raw(fd_b, 262144)
+
+    // Send asynchronously in a helper thread to avoid deadlock if socket buffer fills
+    _ = ipc.test_send_async_raw(fd_a, big_buf)
+
+    // Read 1 MB in chunks
+    recvd_big = string.concat("", "")
+    chunk = ""
+    chunk_err = ""
+    while string.length(recvd_big) < 1048576 {
+        chunk, chunk_err = ipc.read(fd_b, 65536)
+        assert_eq_str(chunk_err, "", "chunk read error is empty")
+        if string.length(chunk) == 0 { break }
+        recvd_big = string.concat(recvd_big, chunk)
+    }
+    assert_eq_int(string.length(recvd_big), 1048576, "read 1 MB payload length matches")
+    assert_eq_str(recvd_big, big_buf, "1 MB payload content matches")
+
+    // 5. Descriptor passing (Rule 2: close-on-exec, Rule 5: refusal of empty payload)
+    tmp_path = "${os.temp_dir()}/std_ipc_test_file_${os.getpid()}.txt"
+    _ = fs.write_atomic(tmp_path, string.bytes("fd passing content\n"))
+
+    t_fd, t_err = io.fd_open_read(tmp_path)
+    assert_eq_str(t_err, "", "opened temp file for reading")
+
+    sfd_err = ipc.send_fd(fd_a, t_fd, "check_file")
+    assert_eq_str(sfd_err, "", "send_fd succeeds")
+    _ = io.fd_close(t_fd)
+
+    recvd_fd, payload, rfd_err = ipc.recv_fd(fd_b, 100)
+    assert_eq_str(rfd_err, "", "recv_fd succeeds")
+    assert_true(recvd_fd >= 0, "received valid descriptor")
+    assert_eq_str(payload, "check_file", "received payload matches")
+    assert_true(ipc.get_cloexec_raw(recvd_fd) != 0, "received descriptor is close-on-exec")
+
+    // Verify reading through received descriptor
+    buf_recvd = bytes.new(256)
+    n_recvd, read_f_err = io.fd_read_into(recvd_fd, bytes.capacity_view(buf_recvd)[0..256])
+    assert_eq_str(read_f_err, "", "read from received descriptor succeeds")
+    _ = bytes.set_length(buf_recvd, n_recvd)
+    file_content = bytes.to_string(buf_recvd, n_recvd)
+    bytes.free(buf_recvd)
+    assert_eq_str(file_content, "fd passing content\n", "read content through received descriptor matches")
+    _ = io.fd_close(recvd_fd)
+    _ = fs.delete(tmp_path)
+
+    // 6. Refusal of empty payload in send_fd
+    empty_sfd_err = ipc.send_fd(fd_a, fd_a, "")
+    assert_true(empty_sfd_err != "", "send_fd with empty payload is refused")
+
+    // 7. Message without descriptor sent to recv_fd (Rule 5)
+    _ = ipc.write(fd_a, "plain payload no fd")
+    no_fd, _no_fd_payload, no_fd_err = ipc.recv_fd(fd_b, 100)
+    assert_eq_int(no_fd, -1, "recv_fd without descriptor returns fd=-1")
+    assert_true(no_fd_err != "", "recv_fd without descriptor returns non-empty error")
+
+    // 8. SIGPIPE resistance (Rule 3): write to closed peer returns error
+    _ = io.fd_close(fd_b)
+    pipe_err = ipc.write(fd_a, "should fail quietly without SIGPIPE")
+    assert_true(pipe_err != "", "write to closed peer returns error")
+    _ = io.fd_close(fd_a)
+
+    // 9. Linux leak test (Rule 1): sending multiple descriptors in one message
+    initial_fd_count = count_open_fds()
+    if initial_fd_count >= 0 {
+        s_a, s_b, _ = os.socketpair()
+        dummy1, _, _ = os.socketpair()
+        dummy2, _, _ = os.socketpair()
+
+        before_fds = count_open_fds()
+        send_two_rc = ipc.test_ipc_send_two_fds(s_a, dummy1, dummy2, "two_fds_payload")
+        assert_eq_int(send_two_rc, 0, "sent two descriptors in one message via helper")
+
+        bad_fd, _bad_payload, bad_err = ipc.recv_fd(s_b, 100)
+        assert_eq_int(bad_fd, -1, "recv_fd errors on multiple descriptors")
+        assert_true(bad_err != "", "recv_fd returns error on multiple descriptors")
+
+        after_fds = count_open_fds()
+        assert_eq_int(after_fds, before_fds, "proc fd count is unchanged (no leaked descriptors)")
+
+        _ = io.fd_close(s_a)
+        _ = io.fd_close(s_b)
+        _ = io.fd_close(dummy1)
+        _ = io.fd_close(dummy2)
+    }
+
+    println("All PASS")
+    return
+}

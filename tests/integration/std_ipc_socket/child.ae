@@ -1,0 +1,81 @@
+// Integration test child process for std.ipc socket channel and fd passing.
+
+import std.ipc
+import std.io
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+main() {
+    ch = ipc.parent_channel()
+    kind = ipc.parent_channel_kind()
+
+    if ch < 0 {
+        println("FAIL child: no parent channel")
+        exit(1)
+    }
+
+    if kind != "socket" {
+        println("FAIL child: expected socket channel, got '${kind}'")
+        exit(1)
+    }
+
+    // 1. Read request from parent
+    req, rerr = ipc.read(ch, 100)
+    if rerr != "" {
+        println("FAIL child read request: ${rerr}")
+        exit(1)
+    }
+    if req != "hello child" {
+        println("FAIL child read request mismatch: got '${req}'")
+        exit(1)
+    }
+
+    // 2. Reply to parent
+    werr = ipc.write(ch, "hello parent")
+    if werr != "" {
+        println("FAIL child write reply: ${werr}")
+        exit(1)
+    }
+
+    // 3. Receive file descriptor from parent
+    recvd_fd, payload, recv_err = ipc.recv_fd(ch, 1024)
+    if recv_err != "" {
+        println("FAIL child recv_fd: ${recv_err}")
+        exit(1)
+    }
+    if recvd_fd < 0 {
+        println("FAIL child recv_fd invalid descriptor: ${recvd_fd}")
+        exit(1)
+    }
+    if payload != "read_file_req" {
+        println("FAIL child recv_fd payload mismatch: got '${payload}'")
+        exit(1)
+    }
+
+    // 4. Read file through received descriptor
+    buf = bytes.new(256)
+    n_read, read_err = io.fd_read_into(recvd_fd, bytes.capacity_view(buf)[0..256])
+    if read_err != "" {
+        println("FAIL child fd_read_into: ${read_err}")
+        bytes.free(buf)
+        exit(1)
+    }
+    _ = bytes.set_length(buf, n_read)
+    content = bytes.to_string(buf, n_read)
+    bytes.free(buf)
+
+    // Close received descriptor
+    _ = io.fd_close(recvd_fd)
+
+    // 5. Send file contents back to parent
+    werr2 = ipc.write(ch, "content: ${content}")
+    if werr2 != "" {
+        println("FAIL child write content reply: ${werr2}")
+        exit(1)
+    }
+
+    _ = io.fd_close(ch)
+    exit(0)
+}

@@ -16,9 +16,22 @@
   <h2>Exports</h2>
   <ul class="function-nav">
     <li><a href="#parent_channel_raw">parent_channel_raw</a></li>
+    <li><a href="#parent_channel_kind_raw">parent_channel_kind_raw</a></li>
+    <li><a href="#write_raw">write_raw</a></li>
+    <li><a href="#read_raw">read_raw</a></li>
+    <li><a href="#send_fd_raw">send_fd_raw</a></li>
+    <li><a href="#recv_fd_raw">recv_fd_raw</a></li>
+    <li><a href="#set_sock_buf_raw">set_sock_buf_raw</a></li>
+    <li><a href="#get_cloexec_raw">get_cloexec_raw</a></li>
+    <li><a href="#test_ipc_send_two_fds">test_ipc_send_two_fds</a></li>
+    <li><a href="#test_send_async_raw">test_send_async_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
+    <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_close">write_close</a></li>
+    <li><a href="#read">read</a></li>
+    <li><a href="#send_fd">send_fd</a></li>
+    <li><a href="#recv_fd">recv_fd</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -118,31 +131,97 @@
 <main class="content">
   <div class="module-header">
     <h1>ipc</h1>
-    <p class="module-desc">std.ipc — child-to-parent back-channel IPC.</p>
+    <p class="module-desc">std.ipc — child-to-parent and two-way channel IPC with descriptor passing.</p>
     <p class="import-line"><code>import std.ipc</code></p>
   </div>
   <div class="functions" id="functions">
     <div class="function" id="parent_channel_raw" data-name="parent_channel_raw">
       <h3 class="function-name">parent_channel_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>parent_channel_raw() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Returns the parent-channel fd if the parent spawned this process via os.run_pipe (i.e. AETHER_IPC_FD is set in env and the named fd is open); -1 otherwise. Children of os.run / os.run_capture see -1 — those don't open a back-channel. On Windows always -1 (v1 stub). The fd value is whatever the parent picked; current parent-side default is 3 but consumers MUST NOT hardcode that.</p>
+    </div>
+    <div class="function" id="parent_channel_kind_raw" data-name="parent_channel_kind_raw">
+      <h3 class="function-name">parent_channel_kind_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>parent_channel_kind_raw() <span class="arrow">-&gt;</span> string</code></pre>
+    </div>
+    <div class="function" id="write_raw" data-name="write_raw">
+      <h3 class="function-name">write_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>write_raw(fd, bytes) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, bytes: string</span></p>
+    </div>
+    <div class="function" id="read_raw" data-name="read_raw">
+      <h3 class="function-name">read_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>read_raw(fd, max) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, max: int</span></p>
+    </div>
+    <div class="function" id="send_fd_raw" data-name="send_fd_raw">
+      <h3 class="function-name">send_fd_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>send_fd_raw(ch, fd, payload) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, fd: int, payload: string</span></p>
+    </div>
+    <div class="function" id="recv_fd_raw" data-name="recv_fd_raw">
+      <h3 class="function-name">recv_fd_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>recv_fd_raw(ch, max) <span class="arrow">-&gt;</span> (int, string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+    </div>
+    <div class="function" id="set_sock_buf_raw" data-name="set_sock_buf_raw">
+      <h3 class="function-name">set_sock_buf_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_sock_buf_raw(fd, size) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, size: int</span></p>
+    </div>
+    <div class="function" id="get_cloexec_raw" data-name="get_cloexec_raw">
+      <h3 class="function-name">get_cloexec_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>get_cloexec_raw(fd) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="test_ipc_send_two_fds" data-name="test_ipc_send_two_fds">
+      <h3 class="function-name">test_ipc_send_two_fds <span class="kind">extern</span></h3>
+      <pre class="usage"><code>test_ipc_send_two_fds(ch, fd1, fd2, payload) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, fd1: int, fd2: int, payload: string</span></p>
+    </div>
+    <div class="function" id="test_send_async_raw" data-name="test_send_async_raw">
+      <h3 class="function-name">test_send_async_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>test_send_async_raw(fd, payload) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, payload: string</span></p>
     </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
-      <p class="doc">Aether-side wrappers. parent_channel returns the raw int from the extern; -1 sentinel for &quot;no parent channel.&quot;</p>
+      <p class="doc">Returns the parent-channel fd if the parent spawned this process via os.run_pipe or os.run_socket (i.e. AETHER_IPC_FD is set in env and the named fd is open); -1 otherwise.</p>
+    </div>
+    <div class="function" id="parent_channel_kind" data-name="parent_channel_kind">
+      <h3 class="function-name">parent_channel_kind <span class="kind">fn</span></h3>
+      <pre class="usage"><code>parent_channel_kind() <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="doc">Returns the channel kind: &quot;pipe&quot; for a pipe channel, &quot;socket&quot; for a socket channel, or &quot;&quot; when no channel exists.</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
       <pre class="usage"><code>write(fd, bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">fd: int, bytes: string</span></p>
-      <p class="doc">Write `bytes` to the back-channel `fd`. Returns &quot;&quot; on success, non-empty error string on failure. Wraps std.net.fd_write — the underlying transport is an inherited pipe, so the same byte-stream semantics apply (partial writes are possible on interrupted system calls; the wrapped C extern handles EINTR). For the common case where the child writes one payload and exits, prefer write_close so the parent's read_all loop sees EOF promptly.</p>
+      <p class="doc">Write `bytes` to `fd`. Returns &quot;&quot; on success, non-empty error string on failure. Loops on short writes and handles SIGPIPE / EINTR.</p>
     </div>
     <div class="function" id="write_close" data-name="write_close">
       <h3 class="function-name">write_close <span class="kind">fn</span></h3>
       <pre class="usage"><code>write_close(fd, bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">fd: int, bytes: string</span></p>
-      <p class="doc">Write `bytes` then close the channel. The common case: child produces one structured report at exit and closes the fd so the parent's drain loop sees EOF and stops. Calling close releases the writer's reference on the pipe; the parent sees EOF only after every writer has closed. If the child is itself going to exit immediately after, the kernel will close the fd anyway during process teardown — explicit close is still preferred because it lets the parent's reader unblock before the child exits, useful when the parent's reader runs in the same thread as the child-wait loop.</p>
+      <p class="doc">Write `bytes` then close the channel.</p>
+    </div>
+    <div class="function" id="read" data-name="read">
+      <h3 class="function-name">read <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read(ch, max) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+      <p class="doc">Binary-safe read of up to `max` bytes from `fd`. Returns (payload, err). On EOF (end-of-stream), returns (&quot;&quot;, &quot;&quot;). On error, returns (&quot;&quot;, err).</p>
+    </div>
+    <div class="function" id="send_fd" data-name="send_fd">
+      <h3 class="function-name">send_fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>send_fd(ch, fd, payload) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, fd: int, payload: string</span></p>
+      <p class="doc">Send one open file descriptor `fd` across socket channel `ch`, accompanied by `payload` (must be at least 1 byte). Returns &quot;&quot; on success, error message on failure.</p>
+    </div>
+    <div class="function" id="recv_fd" data-name="recv_fd">
+      <h3 class="function-name">recv_fd <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv_fd(ch, max) <span class="arrow">-&gt;</span> (int, string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+      <p class="doc">Receive one open file descriptor and payload up to `max` bytes from socket channel `ch`. Returns (received_fd, payload, err).</p>
     </div>
   </div>
 </main>

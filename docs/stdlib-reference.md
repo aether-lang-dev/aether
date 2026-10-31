@@ -43,7 +43,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
-| `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 4 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
+| `std.ipc` | Child-to-parent back-channel for processes started by `std.os`. | 17 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 51 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
@@ -63,7 +63,7 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 64 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 9 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 80 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 84 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 10 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -3108,6 +3108,8 @@ spawned child exited 5
 - `os.wait_pid_timeout(pid, secs)` → `(int, int, string)` - Wait at most `secs` for one child: status, `timed_out`, error. A child that times out is left running
 - `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`, or -1 and the reason when the child could not start
 - `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only). A program that cannot start is an `err` with no child to reap; an explicit `env` is the child's whole environment, with `AETHER_IPC_FD=3` in place of any it gives
+- `os.run_socket(prog, argv, env)` → `(int, int, string)` - Spawn child with a bidirectional socket channel (`AF_UNIX`, `SOCK_STREAM`), with child descriptor at fd 3 and `AETHER_IPC_FD=3` and `AETHER_IPC_KIND=socket` in its environment
+- `os.socketpair()` → `(int, int, string)` - Create a connected pair of Unix domain stream sockets with `O_CLOEXEC` set on both ends
 - `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`

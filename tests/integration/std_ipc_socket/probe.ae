@@ -1,0 +1,132 @@
+// std.ipc socket channel and descriptor passing integration test probe.
+
+import std.ipc
+import std.os
+import std.fs
+import std.io
+import std.string
+import std.list
+
+extern exit(code: int)
+
+const CHILD_SRC = "tests/integration/std_ipc_socket/child.ae"
+
+build_child(bin: string) -> string {
+    argv = list.new()
+    list.add(argv, "build")
+    list.add(argv, CHILD_SRC)
+    list.add(argv, "-o")
+    list.add(argv, bin)
+    out, exit_code, err = os.run_capture("build/ae", argv, null)
+    list.free(argv)
+    if err != "" { return "spawn error: ${err}" }
+    if exit_code != 0 {
+        return "ae build exit ${exit_code}: ${out}"
+    }
+    return ""
+}
+
+main() {
+    println("std_ipc_socket test probe")
+
+    child_bin = "${os.temp_dir()}/std_ipc_socket_child_${os.getpid()}"
+    berr = build_child(child_bin)
+    if berr != "" {
+        println("FAIL: cannot build child: ${berr}")
+        exit(1)
+    }
+
+    // Create temp file for descriptor passing
+    tmp_path = "${os.temp_dir()}/std_ipc_socket_file_${os.getpid()}.txt"
+    _ = fs.write_atomic(tmp_path, string.bytes("secret data 42\n"))
+
+    // Spawn child via os.run_socket
+    argv = list.new()
+    parent_fd, child_pid, spawn_err = os.run_socket(child_bin, argv, null)
+    list.free(argv)
+
+    if spawn_err != "" {
+        println("FAIL os.run_socket: ${spawn_err}")
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    if parent_fd < 0 || child_pid <= 0 {
+        println("FAIL os.run_socket invalid return: fd=${parent_fd}, pid=${child_pid}")
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    // 1. Send request to child
+    werr = ipc.write(parent_fd, "hello child")
+    if werr != "" {
+        println("FAIL write request: ${werr}")
+        _ = io.fd_close(parent_fd)
+        _ = os.wait_pid(child_pid)
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    // 2. Read reply from child
+    rep_msg, rerr = ipc.read(parent_fd, 100)
+    if rerr != "" || rep_msg != "hello parent" {
+        println("FAIL read reply: err='${rerr}', rep_msg='${rep_msg}'")
+        _ = io.fd_close(parent_fd)
+        _ = os.wait_pid(child_pid)
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    // 3. Open temp file and send descriptor
+    f_fd, f_err = io.fd_open_read(tmp_path)
+    if f_err != "" || f_fd < 0 {
+        println("FAIL open temp file: err='${f_err}', fd=${f_fd}")
+        _ = io.fd_close(parent_fd)
+        _ = os.wait_pid(child_pid)
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    send_err = ipc.send_fd(parent_fd, f_fd, "read_file_req")
+    _ = io.fd_close(f_fd) // parent can close its handle after sending
+
+    if send_err != "" {
+        println("FAIL send_fd: ${send_err}")
+        _ = io.fd_close(parent_fd)
+        _ = os.wait_pid(child_pid)
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    // 4. Read report back from child
+    report, report_err = ipc.read(parent_fd, 1024)
+    if report_err != "" || report != "content: secret data 42\n" {
+        println("FAIL read report: err='${report_err}', report='${report}'")
+        _ = io.fd_close(parent_fd)
+        _ = os.wait_pid(child_pid)
+        _ = fs.delete(tmp_path)
+        _ = fs.delete(child_bin)
+        exit(1)
+    }
+
+    _ = io.fd_close(parent_fd)
+
+    // Reap child
+    exit_code, wpid_err = os.wait_pid(child_pid)
+    _ = fs.delete(tmp_path)
+    _ = fs.delete(child_bin)
+
+    if wpid_err != "" || exit_code != 0 {
+        println("FAIL wait_pid: err='${wpid_err}', exit_code=${exit_code}")
+        exit(1)
+    }
+
+    println("PASS std_ipc_socket round-trip and fd-passing successful")
+    exit(0)
+}

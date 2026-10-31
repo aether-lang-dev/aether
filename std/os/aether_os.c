@@ -58,6 +58,15 @@ _tuple_int_int_string os_run_pipe_raw(const char* p, void* a, void* e) {
     _tuple_int_int_string out = { -1, -1, "os.run_pipe unavailable" };
     return out;
 }
+_tuple_int_int_string os_run_socket_raw(const char* p, void* a, void* e) {
+    (void)p; (void)a; (void)e;
+    _tuple_int_int_string out = { -1, -1, "os.run_socket unavailable" };
+    return out;
+}
+_tuple_int_int_string os_socketpair_raw(void) {
+    _tuple_int_int_string out = { -1, -1, "os.socketpair unavailable" };
+    return out;
+}
 _tuple_int_string os_wait_pid_raw(int pid) {
     (void)pid;
     _tuple_int_string out = { -1, "os.wait_pid unavailable" };
@@ -1861,29 +1870,54 @@ typedef struct { int _0; int _1; int _2; const char* _3; } _tuple_int_int_int_st
  * takes the environment's lock, and a lock another thread held at the fork
  * is never released in the child. The array is malloc'd; its strings are
  * the base's and a literal. NULL when malloc fails. */
+#include <sys/socket.h>
+
 static char** aether_ipc_env(char** base) {
     static const char* const ipc[] = { "AETHER_IPC_FD=3" };
     return aether_spawn_env(base ? base : aether_environ, ipc, 1);
 }
 
-/* Spawn child with a back-channel pipe at fd 3 (write end), set
- * AETHER_IPC_FD=3 in child's env. Returns (parent_read_fd,
- * child_pid, err). On success, err is "" and caller must:
- *   1. Read from parent_read_fd until EOF.
- *   2. Call os_wait_pid_raw(child_pid) to reap.
- *   3. Close parent_read_fd.
- *
- * Failure modes return (-1, -1, "<reason>") with no child left to reap:
- * a program that could not start reads so too, the reason from its exec
- * (#3170). An explicit env is refused before the fork: the child's
- * AETHER_IPC_FD would have to be spliced into it, and it used to make the
- * child exit 127 without running the program.
- *
- * Pipe-buffer deadlock window: if child writes > OS pipe buffer
- * (typically 16K-64K) without parent reading concurrently, the
- * child blocks forever on its write. For payload-at-exit usage
- * with large payloads, prefer os_run_pipe_drain_and_wait_raw. */
-_tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* env_list) {
+static char** aether_ipc_socket_env(char** base) {
+    static const char* const ipc[] = { "AETHER_IPC_FD=3", "AETHER_IPC_KIND=socket" };
+    return aether_spawn_env(base ? base : aether_environ, ipc, 2);
+}
+
+static int aether_socketpair_cloexec(int fds[2]) {
+#if defined(SOCK_CLOEXEC)
+    if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, fds) == 0) {
+#ifdef SO_NOSIGPIPE
+        int val = 1;
+        setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
+        setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
+#endif
+        return 0;
+    }
+    if (errno != EINVAL) return -1;
+#endif
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, fds) < 0) return -1;
+    (void)fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    (void)fcntl(fds[1], F_SETFD, FD_CLOEXEC);
+#ifdef SO_NOSIGPIPE
+    int val = 1;
+    setsockopt(fds[0], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
+    setsockopt(fds[1], SOL_SOCKET, SO_NOSIGPIPE, &val, sizeof(val));
+#endif
+    return 0;
+}
+
+_tuple_int_int_string os_socketpair_raw(void) {
+    _tuple_int_int_string out = { -1, -1, "" };
+    int fds[2];
+    if (aether_socketpair_cloexec(fds) < 0) {
+        out._2 = strerror(errno);
+        return out;
+    }
+    out._0 = fds[0];
+    out._1 = fds[1];
+    return out;
+}
+
+static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* argv_list, void* env_list, int is_socket) {
     _tuple_int_int_string out = { -1, -1, "" };
     if (!prog) {
         out._2 = "null prog";
@@ -1894,16 +1928,23 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         return out;
     }
 
-
-    int pipefd[2];
-    if (aether_pipe_cloexec(pipefd) != 0) {
-        out._2 = "pipe failed";
-        return out;
+    int chanfd[2];
+    if (is_socket) {
+        if (aether_socketpair_cloexec(chanfd) != 0) {
+            out._2 = "socketpair failed";
+            return out;
+        }
+    } else {
+        if (aether_pipe_cloexec(chanfd) != 0) {
+            out._2 = "pipe failed";
+            return out;
+        }
     }
+
     int errp[2];
     if (aether_pipe_cloexec(errp) != 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(chanfd[0]);
+        close(chanfd[1]);
         out._2 = "pipe failed";
         return out;
     }
@@ -1911,21 +1952,20 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     AetherExec x;
     const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
     if (xerr) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(chanfd[0]);
+        close(chanfd[1]);
         close(errp[0]);
         close(errp[1]);
         out._2 = xerr;
         return out;
     }
-    /* The child's env: the one given, or environ, with AETHER_IPC_FD=3. The
-     * spliced array borrows the given one's strings, so only its array goes. */
-    char** spliced = aether_ipc_env(x.envp);
+
+    char** spliced = is_socket ? aether_ipc_socket_env(x.envp) : aether_ipc_env(x.envp);
     free(x.envp);
     x.envp = spliced;
     if (!x.envp) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(chanfd[0]);
+        close(chanfd[1]);
         close(errp[0]);
         close(errp[1]);
         aether_exec_release(&x);
@@ -1936,8 +1976,8 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
 
     pid_t pid = aether_fork();
     if (pid < 0) {
-        close(pipefd[0]);
-        close(pipefd[1]);
+        close(chanfd[0]);
+        close(chanfd[1]);
         close(errp[0]);
         close(errp[1]);
         aether_exec_release(&x);
@@ -1945,31 +1985,38 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
         return out;
     }
     if (pid == 0) {
-        /* Child — wire pipefd[1] to fd 3; its env says so. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
-        close(pipefd[0]);
+        close(chanfd[0]);
         close(errp[0]);
         int ef = aether_child_lift_fd(errp[1]);
-        int chan = aether_child_lift_fd(pipefd[1]);
+        int chan = aether_child_lift_fd(chanfd[1]);
         if (aether_child_fd(chan, 3) < 0) aether_child_exec_failed(ef);
         close(chan);
         aether_child_exec(&x);
         aether_child_exec_failed(ef);
     }
-    close(pipefd[1]);
+    close(chanfd[1]);
     aether_exec_release(&x);
     int exec_err = aether_exec_errno(errp);
     if (exec_err) {
-        close(pipefd[0]);
+        close(chanfd[0]);
         aether_reap_failed(pid);
         out._2 = aether_exec_failure(exec_err);
         return out;
     }
 
-    out._0 = pipefd[0];
+    out._0 = chanfd[0];
     out._1 = pid;
     return out;
+}
+
+_tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* env_list) {
+    return aether_spawn_channel_raw(prog, argv_list, env_list, 0);
+}
+
+_tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void* env_list) {
+    return aether_spawn_channel_raw(prog, argv_list, env_list, 1);
 }
 
 /* Wait for a child, return (exit_code, err). Reaps the child so
@@ -3925,6 +3972,17 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
     if (sp._1[0]) { out._2 = sp._1; return out; }   /* err */
     out._0 = -1;        /* no back-channel pipe on Windows */
     out._1 = sp._0;     /* token doubles as the wait_pid handle */
+    return out;
+}
+
+_tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void* env_list) {
+    (void)prog; (void)argv_list; (void)env_list;
+    _tuple_int_int_string out = { -1, -1, "unsupported on Windows" };
+    return out;
+}
+
+_tuple_int_int_string os_socketpair_raw(void) {
+    _tuple_int_int_string out = { -1, -1, "unsupported on Windows" };
     return out;
 }
 

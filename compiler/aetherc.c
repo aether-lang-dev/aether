@@ -1103,6 +1103,7 @@ static const ModuleCapability module_capabilities[] = {
     { "std.tcp", "net" },
     { "std.udp", "net" },
     { "std.os", "os" },
+    { "std.ipc", "os" },
     { "std.dl", "os" },
     { "contrib.host", "extern" },
 };
