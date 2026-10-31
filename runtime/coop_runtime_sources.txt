@@ -68,4 +68,5 @@ std/fs/aether_fs.c
 std/log/aether_log.c
 std/io/aether_io.c
 std/os/aether_os.c
+std/ipc/aether_ipc.c
 std/quote/aether_quote.c

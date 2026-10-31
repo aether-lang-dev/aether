@@ -275,8 +275,8 @@
     </a>
     <a href="ipc.html" class="module-card">
       <h3>ipc</h3>
-      <p>std.ipc — child-to-parent back-channel IPC.</p>
-      <span class="count">4 exports</span>
+      <p>std.ipc — a process's channel to its parent: a report pipe, or a two-way socket that can also pass open file descriptors.</p>
+      <span class="count">13 exports</span>
     </a>
     <a href="json.html" class="module-card">
       <h3>json</h3>
@@ -376,7 +376,7 @@
     <a href="os.html" class="module-card">
       <h3>os</h3>
       <p>std.os - Shell &amp; Process Execution Import with: import std.os</p>
-      <span class="count">80 exports</span>
+      <span class="count">84 exports</span>
     </a>
     <a href="path.html" class="module-card">
       <h3>path</h3>
@@ -1517,9 +1517,18 @@
       <li class="function-item" data-name="fd_read_line"><a href="io.html#fd_read_line"><span class="fn-name">fd_read_line</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="fd_read_line_status"><a href="io.html#fd_read_line_status"><span class="fn-name">fd_read_line_status</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="parent_channel_raw"><a href="ipc.html#parent_channel_raw"><span class="fn-name">parent_channel_raw</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="parent_channel_kind_raw"><a href="ipc.html#parent_channel_kind_raw"><span class="fn-name">parent_channel_kind_raw</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="write_raw"><a href="ipc.html#write_raw"><span class="fn-name">write_raw</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="read_raw"><a href="ipc.html#read_raw"><span class="fn-name">read_raw</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="send_fd_raw"><a href="ipc.html#send_fd_raw"><span class="fn-name">send_fd_raw</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="recv_fd_raw"><a href="ipc.html#recv_fd_raw"><span class="fn-name">recv_fd_raw</span><span class="fn-module">ipc</span></a></li>
       <li class="function-item" data-name="parent_channel"><a href="ipc.html#parent_channel"><span class="fn-name">parent_channel</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="parent_channel_kind"><a href="ipc.html#parent_channel_kind"><span class="fn-name">parent_channel_kind</span><span class="fn-module">ipc</span></a></li>
       <li class="function-item" data-name="write"><a href="ipc.html#write"><span class="fn-name">write</span><span class="fn-module">ipc</span></a></li>
       <li class="function-item" data-name="write_close"><a href="ipc.html#write_close"><span class="fn-name">write_close</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="read"><a href="ipc.html#read"><span class="fn-name">read</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="send_fd"><a href="ipc.html#send_fd"><span class="fn-name">send_fd</span><span class="fn-module">ipc</span></a></li>
+      <li class="function-item" data-name="recv_fd"><a href="ipc.html#recv_fd"><span class="fn-name">recv_fd</span><span class="fn-module">ipc</span></a></li>
       <li class="function-item" data-name="parse_raw"><a href="json.html#parse_raw"><span class="fn-name">parse_raw</span><span class="fn-module">json</span></a></li>
       <li class="function-item" data-name="last_error"><a href="json.html#last_error"><span class="fn-name">last_error</span><span class="fn-module">json</span></a></li>
       <li class="function-item" data-name="stringify_raw"><a href="json.html#stringify_raw"><span class="fn-name">stringify_raw</span><span class="fn-module">json</span></a></li>
@@ -2134,6 +2143,10 @@
       <li class="function-item" data-name="run_pipe"><a href="os.html#run_pipe"><span class="fn-name">run_pipe</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="wait_pid"><a href="os.html#wait_pid"><span class="fn-name">wait_pid</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="run_pipe_drain_and_wait"><a href="os.html#run_pipe_drain_and_wait"><span class="fn-name">run_pipe_drain_and_wait</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="run_socket_raw"><a href="os.html#run_socket_raw"><span class="fn-name">run_socket_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="socketpair_raw"><a href="os.html#socketpair_raw"><span class="fn-name">socketpair_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="run_socket"><a href="os.html#run_socket"><span class="fn-name">run_socket</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="socketpair"><a href="os.html#socketpair"><span class="fn-name">socketpair</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="spawn_proc"><a href="os.html#spawn_proc"><span class="fn-name">spawn_proc</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="wait"><a href="os.html#wait"><span class="fn-name">wait</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="wait_any"><a href="os.html#wait_any"><span class="fn-name">wait_any</span><span class="fn-module">os</span></a></li>

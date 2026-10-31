@@ -1,0 +1,188 @@
+// std.ipc, co-located with the module: what works within one process,
+// over a socket pair from os.socketpair(). The cross-process half (a
+// child spawned with os.run_socket, a hostile peer sending descriptors
+// recv_fd must refuse, a 1 MB transfer each way) is
+// tests/integration/std_ipc_socket/.
+//
+// On Windows the socket channel does not exist, and the suite checks
+// that each entry point says so instead of skipping: portable code calls
+// them unguarded.
+
+import std.spec
+import std.ipc
+import std.os
+import std.fs
+import std.io
+import std.bytes
+import std.string
+import std.list
+
+// 0 when a child process inherits `fd`, as it would when the descriptor
+// is not close-on-exec: the shell's redirection from it fails otherwise.
+child_sees_fd(fd: int) -> int {
+    argv = list.new()
+    list.add(argv, "-c")
+    list.add(argv, "exec 2>/dev/null; exec 9>&${fd}")
+    _out, code, _err = os.run_capture("/bin/sh", argv, null)
+    list.free(argv)
+    return code
+}
+
+// The first `n` bytes of the file `fd` reads from.
+read_fd(fd: int, n: int) -> string {
+    buf = bytes.new(n)
+    got, err = io.fd_read_into(fd, bytes.capacity_view(buf)[0..n])
+    if err != "" {
+        bytes.free(buf)
+        return "read failed: ${err}"
+    }
+    s = bytes.to_string(buf, got)
+    bytes.free(buf)
+    return s
+}
+
+main() {
+    fw = spec.init()
+    on_windows = string.equals(os.platform(), "windows")
+
+    spec.describe(fw, "std.ipc without a parent channel") {
+        spec.it("parent_channel is -1 and its kind is empty") callback {
+            spec.assert_eq(ipc.parent_channel(), -1, "no AETHER_IPC_FD, no channel")
+            spec.assert_str_eq(ipc.parent_channel_kind(), "", "no channel, no kind")
+        }
+    }
+
+    if on_windows == 1 {
+        spec.describe(fw, "std.ipc socket channel on Windows") {
+            spec.it("reports each socket entry point as unsupported") callback {
+                _a, _b, sp_err = os.socketpair()
+                spec.assert_err(sp_err, "os.socketpair")
+                spec.assert_err(ipc.send_fd(3, 4, "x"), "ipc.send_fd")
+                fd, _p, rerr = ipc.recv_fd(3, 16)
+                spec.assert_eq(fd, -1, "ipc.recv_fd gives no descriptor")
+                spec.assert_err(rerr, "ipc.recv_fd")
+            }
+        }
+        return spec.run_summary(fw)
+    }
+
+    spec.describe(fw, "os.socketpair") {
+        // The probe's own control: a descriptor that is inherited (stdout)
+        // must read as inherited, or "not inherited" below proves nothing.
+        spec.it("child_sees_fd sees a descriptor a child does inherit") callback {
+            spec.assert_eq(child_sees_fd(1), 0, "stdout is inherited")
+        }
+
+        spec.it("gives two open descriptors, both close-on-exec") callback {
+            a, b, err = os.socketpair()
+            spec.assert_ok(err, "socketpair")
+            spec.assert_true(a >= 0 && b >= 0, "both ends are descriptors")
+            spec.assert_not_eq(child_sees_fd(a), 0, "a child does not inherit end a")
+            spec.assert_not_eq(child_sees_fd(b), 0, "a child does not inherit end b")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+    }
+
+    spec.describe(fw, "ipc.write and ipc.read") {
+        spec.it("carry bytes both ways, a zero byte and all included") callback {
+            a, b, _ = os.socketpair()
+            there = string.concat("hello\0world", "\xff!")
+            spec.assert_ok(ipc.write(a, there), "write a to b")
+            got, err = ipc.read(b, 100)
+            spec.assert_ok(err, "read on b")
+            spec.assert_eq(string.length(got), 13, "every byte arrived, past the zero")
+            spec.assert_true(got == there, "and they are the bytes sent")
+
+            spec.assert_ok(ipc.write(b, "and back"), "write b to a")
+            back, err2 = ipc.read(a, 100)
+            spec.assert_ok(err2, "read on a")
+            spec.assert_str_eq(back, "and back", "the reply arrived")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("reads end of stream as no bytes and no error") callback {
+            a, b, _ = os.socketpair()
+            io.fd_close(a)
+            got, err = ipc.read(b, 100)
+            spec.assert_ok(err, "end of stream is not an error")
+            spec.assert_eq(string.length(got), 0, "and carries no bytes")
+            io.fd_close(b)
+        }
+
+        // Without MSG_NOSIGNAL (SO_NOSIGPIPE on macOS) this write ends the
+        // whole test process with SIGPIPE, and the summary never prints.
+        spec.it("fails, rather than raising SIGPIPE, writing to a closed peer") callback {
+            a, b, _ = os.socketpair()
+            io.fd_close(b)
+            err = ipc.write(a, "into the void")
+            spec.assert_err_contains(err, "ipc.write", "an error naming the call")
+            io.fd_close(a)
+        }
+
+        spec.it("refuses a bad descriptor and a non-positive max") callback {
+            spec.assert_err(ipc.write(-1, "x"), "write to -1")
+            _d, err = ipc.read(-1, 10)
+            spec.assert_err(err, "read from -1")
+            a, b, _ = os.socketpair()
+            _d2, err2 = ipc.read(a, 0)
+            spec.assert_err(err2, "read of max 0")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+    }
+
+    spec.describe(fw, "ipc.send_fd and ipc.recv_fd") {
+        spec.it("pass an open file the receiver reads through") callback {
+            path = "${os.temp_dir()}/std_ipc_spec_${os.getpid()}.txt"
+            fs.write_atomic(path, string.bytes("passed by descriptor\n"))
+            f, ferr = io.fd_open_read(path)
+            spec.assert_ok(ferr, "open the file")
+
+            a, b, _ = os.socketpair()
+            spec.assert_ok(ipc.send_fd(a, f, "open this"), "send_fd")
+            io.fd_close(f)
+            fs.delete(path)
+
+            got, payload, err = ipc.recv_fd(b, 100)
+            spec.assert_ok(err, "recv_fd")
+            spec.assert_true(got >= 0, "a descriptor arrived")
+            spec.assert_str_eq(payload, "open this", "with its payload")
+            spec.assert_str_eq(read_fd(got, 64), "passed by descriptor\n",
+                "the file reads through it, though the sender closed its own and the path is gone")
+            spec.assert_not_eq(child_sees_fd(got), 0, "the received descriptor is close-on-exec")
+            io.fd_close(got)
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("refuses an empty payload") callback {
+            a, b, _ = os.socketpair()
+            spec.assert_err_contains(ipc.send_fd(a, a, ""), "empty payload", "nothing to attach it to")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("reports a message without a descriptor as an error") callback {
+            a, b, _ = os.socketpair()
+            ipc.write(a, "just bytes")
+            got, _p, err = ipc.recv_fd(b, 100)
+            spec.assert_eq(got, -1, "no descriptor")
+            spec.assert_err_contains(err, "no descriptor", "an error saying so")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("reports end of stream as an error") callback {
+            a, b, _ = os.socketpair()
+            io.fd_close(a)
+            got, _p, err = ipc.recv_fd(b, 100)
+            spec.assert_eq(got, -1, "no descriptor")
+            spec.assert_err_contains(err, "end of stream", "an error saying so")
+            io.fd_close(b)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

@@ -24,6 +24,7 @@ exports(
     platform, arch, temp_dir, cpu_count,
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
+    os_run_socket_raw, os_socketpair_raw, run_socket, socketpair,
     spawn_proc, wait, wait_any, wait_any_timeout,
     os_spawn_to_raw, spawn_proc_to,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
@@ -106,6 +107,8 @@ extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @
 // explicit env is the child's whole environment, with AETHER_IPC_FD=3 in
 // place of any it gives.
 extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
+extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
+extern os_socketpair_raw() -> (int, int, string)
 
 // Wait for a child to exit and reap it. Companion to
 // os_run_pipe_raw. Returns (exit_code, err). Calling this
@@ -347,6 +350,23 @@ run_capture(prog: string, argv: ptr, env: ptr) -> {
 // child that never writes to fd 3 behaves the same on both.
 run_pipe(prog: string, argv: ptr, env: ptr) -> {
     return os_run_pipe_raw(prog, argv, env)
+}
+
+// Spawn child with std.ipc socket channel (AF_UNIX socketpair).
+// Returns (parent_socket_fd, child_pid, err). Child sees AETHER_IPC_FD=3
+// and AETHER_IPC_KIND=socket in its environment; std.ipc.parent_channel()
+// resolves to fd 3 and std.ipc.parent_channel_kind() resolves to "socket".
+// Parent end is close-on-exec. Caller MUST call os.wait_pid(child_pid) to reap.
+// On Windows / non-filesystem targets, returns (-1, -1, "unsupported on Windows" or error).
+run_socket(prog: string, argv: ptr, env: ptr) -> {
+    return os_run_socket_raw(prog, argv, env)
+}
+
+// Create a connected pair of Unix domain sockets (AF_UNIX, SOCK_STREAM).
+// Returns (fd_a, fd_b, err). Both ends are close-on-exec.
+// On Windows / non-filesystem targets, returns (-1, -1, "unsupported on Windows" or error).
+socketpair() -> {
+    return os_socketpair_raw()
 }
 
 // Wait for and reap a child spawned via os.run_pipe. Returns

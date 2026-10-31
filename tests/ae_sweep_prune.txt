@@ -257,6 +257,7 @@ tests/integration/spec_why_message/
 tests/integration/std_dl/
 tests/integration/std_ipc_bash_chain/
 tests/integration/std_ipc_roundtrip/
+tests/integration/std_ipc_socket/
 tests/integration/std_mem_byte_access/
 tests/integration/std_strbuilder_csv/
 tests/integration/std_strbuilder_no_leak/

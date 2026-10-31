@@ -1,0 +1,149 @@
+// std.ipc socket channel, across processes. Spawns child.ae with
+// os.run_socket and runs a conversation over the channel: a request and
+// its reply, a file passed by descriptor and read by the child, 1 MB
+// each way. Then spawns hostile_peer (its path in AETHER_IPC_HOSTILE_PEER,
+// built by the shell script) and checks recv_fd refuses what it sends
+// without the refused descriptors staying open in this process.
+
+import std.ipc
+import std.os
+import std.fs
+import std.io
+import std.dir
+import std.string
+import std.strbuilder
+import std.list
+import std.spec
+
+const CHILD_SRC = "tests/integration/std_ipc_socket/child.ae"
+const BIG = 1048576
+
+build_child(bin: string) -> string {
+    argv = list.new()
+    list.add(argv, "build")
+    list.add(argv, CHILD_SRC)
+    list.add(argv, "-o")
+    list.add(argv, bin)
+    out, code, err = os.run_capture("build/ae", argv, null)
+    list.free(argv)
+    if err != "" { return "spawn error: ${err}" }
+    if code != 0 { return "ae build exit ${code}: ${out}" }
+    return ""
+}
+
+// Entries in this process's descriptor table, or -1 where it cannot be
+// listed. /dev/fd is the table on macOS; FreeBSD without fdescfs shows
+// only 0-2 there, which makes the leak checks below vacuous but not wrong.
+open_fds() -> int {
+    path = "/proc/self/fd"
+    if fs.exists(path) == 0 { path = "/dev/fd" }
+    entries, err = dir.list(path)
+    if err != "" { return -1 }
+    n = dir.list_count(entries)
+    dir.list_free(entries)
+    return n
+}
+
+// 1 MB of a repeating pattern, so a lost or reordered chunk shows.
+big_payload() -> string {
+    sb = strbuilder.new(BIG)
+    i = 0
+    while strbuilder.length(sb) < BIG {
+        strbuilder.append(sb, "${i % 10}0123456789abcdefghijklmnopqrstuvwxyz")
+        i = i + 1
+    }
+    strbuilder.truncate(sb, BIG)
+    s = strbuilder.finish(sb)
+    return s
+}
+
+main() {
+    fw = spec.init()
+    tmp = os.temp_dir()
+    pid = os.getpid()
+    child_bin = "${tmp}/std_ipc_socket_child_${pid}"
+    file_path = "${tmp}/std_ipc_socket_file_${pid}.txt"
+
+    spec.describe(fw, "std_ipc_socket") {
+        spec.it("talks to a child over os.run_socket") callback {
+            spec.assert_ok(build_child(child_bin), "build the child")
+            fs.write_atomic(file_path, string.bytes("secret data 42\n"))
+
+            argv = list.new()
+            ch, child, err = os.run_socket(child_bin, argv, null)
+            list.free(argv)
+            spec.assert_ok(err, "os.run_socket")
+
+            spec.assert_ok(ipc.write(ch, "hello child"), "write the request")
+            answer, rerr = ipc.read(ch, 100)
+            spec.assert_ok(rerr, "read the reply")
+            spec.assert_str_eq(answer, "hello parent", "the child answered")
+
+            f, ferr = io.fd_open_read(file_path)
+            spec.assert_ok(ferr, "open the file")
+            spec.assert_ok(ipc.send_fd(ch, f, "read_file_req"), "send its descriptor")
+            io.fd_close(f)
+            report, perr = ipc.read(ch, 1024)
+            spec.assert_ok(perr, "read the child's report")
+            spec.assert_str_eq(report, "content: secret data 42\n",
+                "the child read the file through the passed descriptor")
+
+            big = big_payload()
+            spec.assert_ok(ipc.write(ch, big), "write 1 MB")
+            sb = strbuilder.new(BIG)
+            while strbuilder.length(sb) < BIG {
+                chunk, cerr = ipc.read(ch, 65536)
+                spec.assert_ok(cerr, "read the echo")
+                if string.length(chunk) == 0 { break }
+                strbuilder.append(sb, chunk)
+            }
+            echo = strbuilder.finish(sb)
+            spec.assert_eq(string.length(echo), BIG, "1 MB came back")
+            spec.assert_true(string.equals(echo, big) == 1, "byte for byte")
+
+            io.fd_close(ch)
+            code, werr = os.wait_pid(child)
+            spec.assert_ok(werr, "reap the child")
+            spec.assert_eq(code, 0, "the child exited cleanly")
+            fs.delete(file_path)
+            fs.delete(child_bin)
+        }
+
+        spec.it("refuses a hostile peer's descriptors and closes them") callback {
+            peer = os.getenv("AETHER_IPC_HOSTILE_PEER")
+            spec.assert_true(string.length(peer) > 0, "AETHER_IPC_HOSTILE_PEER names the peer")
+            argv = list.new()
+            ch, child, err = os.run_socket(peer, argv, null)
+            list.free(argv)
+            spec.assert_ok(err, "spawn the hostile peer")
+            base = open_fds()
+
+            ipc.write(ch, "next")
+            fd2, _p2, err2 = ipc.recv_fd(ch, 64)
+            spec.assert_eq(fd2, -1, "two descriptors: none handed over")
+            spec.assert_err_contains(err2, "more than one descriptor", "two descriptors: refused")
+            spec.assert_eq(open_fds(), base, "two descriptors: both closed")
+
+            ipc.write(ch, "next")
+            fd10, _p10, err10 = ipc.recv_fd(ch, 64)
+            spec.assert_eq(fd10, -1, "ten descriptors: none handed over")
+            spec.assert_err_contains(err10, "more than one descriptor", "ten descriptors: refused")
+            spec.assert_eq(open_fds(), base, "ten descriptors: all closed")
+
+            ipc.write(ch, "next")
+            fd1, p1, err1 = ipc.recv_fd(ch, 64)
+            spec.assert_ok(err1, "one descriptor: accepted, the channel still works")
+            spec.assert_str_eq(p1, "one", "one descriptor: its payload")
+            spec.assert_eq(open_fds(), base + 1, "one descriptor: exactly one more open")
+            io.fd_close(fd1)
+
+            ipc.write(ch, "next")
+            io.fd_close(ch)
+            code, werr = os.wait_pid(child)
+            spec.assert_ok(werr, "reap the peer")
+            spec.assert_eq(code, 0, "the peer ran to the end")
+        }
+    }
+
+    return spec.run_summary(fw)
+}

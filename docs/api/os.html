@@ -75,6 +75,10 @@
     <li><a href="#run_pipe">run_pipe</a></li>
     <li><a href="#wait_pid">wait_pid</a></li>
     <li><a href="#run_pipe_drain_and_wait">run_pipe_drain_and_wait</a></li>
+    <li><a href="#run_socket_raw">run_socket_raw</a></li>
+    <li><a href="#socketpair_raw">socketpair_raw</a></li>
+    <li><a href="#run_socket">run_socket</a></li>
+    <li><a href="#socketpair">socketpair</a></li>
     <li><a href="#spawn_proc">spawn_proc</a></li>
     <li><a href="#wait">wait</a></li>
     <li><a href="#wait_any">wait_any</a></li>
@@ -505,6 +509,26 @@
       <pre class="usage"><code>run_pipe_drain_and_wait(prog, argv, env) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
       <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
       <p class="doc">Convenience: spawn + drain back-channel pipe + wait + reap, all in one call. Returns (channel_payload, exit_code, err). Recommended entry point for &quot;child writes structured report at exit; parent reads it after.&quot; No pipe-buffer deadlock risk regardless of payload size. On Windows, returns (&quot;&quot;, -1, &quot;unsupported on Windows&quot;).</p>
+    </div>
+    <div class="function" id="run_socket_raw" data-name="run_socket_raw">
+      <h3 class="function-name">run_socket_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>run_socket_raw(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+    </div>
+    <div class="function" id="socketpair_raw" data-name="socketpair_raw">
+      <h3 class="function-name">socketpair_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>socketpair_raw() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+    </div>
+    <div class="function" id="run_socket" data-name="run_socket">
+      <h3 class="function-name">run_socket <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run_socket(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Spawn child with std.ipc socket channel (AF_UNIX socketpair). Returns (parent_socket_fd, child_pid, err). Child sees AETHER_IPC_FD=3 and AETHER_IPC_KIND=socket in its environment; std.ipc.parent_channel() resolves to fd 3 and std.ipc.parent_channel_kind() resolves to &quot;socket&quot;. Parent end is close-on-exec. Caller MUST call os.wait_pid(child_pid) to reap. On Windows / non-filesystem targets, returns (-1, -1, &quot;unsupported on Windows&quot; or error).</p>
+    </div>
+    <div class="function" id="socketpair" data-name="socketpair">
+      <h3 class="function-name">socketpair <span class="kind">fn</span></h3>
+      <pre class="usage"><code>socketpair() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="doc">Create a connected pair of Unix domain sockets (AF_UNIX, SOCK_STREAM). Returns (fd_a, fd_b, err). Both ends are close-on-exec. On Windows / non-filesystem targets, returns (-1, -1, &quot;unsupported on Windows&quot; or error).</p>
     </div>
     <div class="function" id="spawn_proc" data-name="spawn_proc">
       <h3 class="function-name">spawn_proc <span class="kind">fn</span></h3>

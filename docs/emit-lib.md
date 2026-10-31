@@ -445,7 +445,8 @@ way you would treat any other cross-language value exchange.
 
 - `std.net`, `std.http` and its children, `std.tcp`, `std.udp` networking
 - `std.fs`, `std.file`, `std.dir` filesystem
-- `std.os`, `std.dl` process, environment, shell, and dynamic loading
+- `std.os`, `std.dl`, `std.ipc` process, environment, shell, dynamic
+  loading, and the parent channel (which can pass open descriptors)
 - `contrib.host.*` foreign-language runtimes
 
 The rationale: a library embedded in a host process shouldn't have
@@ -473,7 +474,7 @@ untrusted user script, opt into specific capability categories:
 ```sh
 ae build --emit=lib --with=fs           file.ae   # std.fs, std.file, std.dir
 ae build --emit=lib --with=net          file.ae   # std.net/http/tcp/udp families
-ae build --emit=lib --with=os           file.ae   # std.os, std.dl
+ae build --emit=lib --with=os           file.ae   # std.os, std.dl, std.ipc
 ae build --emit=lib --with=fs,os        file.ae   # multiple, comma-separated
 ae build --emit=lib --with=extern       file.ae   # own C externs, contrib.host.*
 ae build --emit=lib --with=first-party  file.ae   # alias for fs,net,os,extern

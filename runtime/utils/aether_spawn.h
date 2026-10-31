@@ -38,6 +38,14 @@
 int aether_pipe_cloexec(int fds[2]);
 pid_t aether_fork(void);
 
+/* A connected AF_UNIX stream pair under the same rules as
+ * aether_pipe_cloexec: both ends close on exec (SOCK_CLOEXEC, or fcntl under
+ * the fork lock where that is missing), and on macOS and the BSDs both carry
+ * SO_NOSIGPIPE, so a write to a closed peer fails with EPIPE rather than
+ * raising SIGPIPE. Defined where aether_fork is. Returns 0, or -1 with errno
+ * set. */
+int aether_socketpair_cloexec(int fds[2]);
+
 /* The program a child runs. A name with a '/' is taken as given. A bare
  * name is looked up on this process's PATH, whatever env the child is
  * given, as Windows and Go do: the first entry where it is a regular file
