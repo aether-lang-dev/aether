@@ -13,14 +13,50 @@
 //   }
 //   python.run_sandboxed(worker, "print('hello')")
 //   python.run_sandboxed(worker, script, "arg1", "arg2")
+//
+// Bidirectional embedding (#904):
+//   vm = python.vm_new()
+//   python.vm_register(vm, "app.math.add", add_cb)
+//   python.vm_set_global_str(vm, "NAME", "Aether")
+//   python.vm_eval(vm, "app.math.add(2, 3)")
+//   res = python.vm_result_int(vm)
+//   python.vm_pop_result(vm)
+//   python.vm_free(vm)
 import std.sandbox   // sandbox.Grants, the grant list the run_sandboxed calls take
 
 
 exports (
     python_run_sandboxed, python_run_sandboxed_with_map,
-    python_run, python_init, python_finalize
+    python_run, python_init, python_finalize,
+    // #904 bidirectional API
+    python_vm_new, python_vm_free, python_vm_register,
+    python_vm_set_global_str, python_vm_set_global_int, python_vm_set_global_strlist,
+    python_vm_eval, python_vm_result_type, python_vm_result_int, python_vm_result_str,
+    python_vm_result_bool, python_vm_result_double, python_vm_result_bytes,
+    python_vm_pop_result, python_vm_set_instruction_limit,
+    python_arg_count, python_arg_type, python_arg_str, python_arg_int, python_arg_bool,
+    python_arg_double, python_arg_bytes,
+    python_push_int, python_push_str, python_push_bool, python_push_nil, python_push_double,
+    python_push_bytes, python_raise_error,
+    // typed-value tags (returned by *_result_type / *_arg_type)
+    PY_TNIL, PY_TBOOL, PY_TINT, PY_TSTR, PY_TTABLE, PY_TERR, PY_TOTHER,
+    PY_TBYTES, PY_TFLOAT
 )
 
+// --- Typed value tags (must match aether_host_python.c AE_PY_T*) ------------
+// The first seven are Lua's and Duktape's. A bool is PY_TBOOL, never an int;
+// an int outside 64 bits is PY_TOTHER; a list or dict is PY_TTABLE.
+const PY_TNIL   = 0
+const PY_TBOOL  = 1
+const PY_TINT   = 2
+const PY_TSTR   = 3
+const PY_TTABLE = 4
+const PY_TERR   = 5
+const PY_TOTHER = 6
+const PY_TBYTES = 7
+const PY_TFLOAT = 8
+
+// --- Tier 1: fire-and-forget -----------------------------------------------
 // Run Python code string within a sandbox
 // Returns: 0 on success, -1 on error
 extern python_run_sandboxed(perms: sandbox.Grants, code: string) -> int
@@ -35,3 +71,57 @@ extern python_init() -> int
 
 // Finalize Python runtime (optional cleanup)
 extern python_finalize()
+
+// --- Tier 2: bidirectional embedding (#904) --------------------------------
+// A VM is a globals dict on the process's one interpreter: VMs share
+// sys.modules and imported state. Any thread may use a VM, one at a time.
+extern python_vm_new() -> ptr
+extern python_vm_free(vm: ptr)
+// Registers an Aether `@c_callback (vm: ptr) -> int` as a Python function.
+// "app.math.add" makes (or reuses) the modules app and app.math.
+extern python_vm_register(vm: ptr, name: string, host_fn: ptr) -> int
+extern python_vm_set_global_str(vm: ptr, name: string, value: string)
+extern python_vm_set_global_int(vm: ptr, name: string, value: long)
+extern python_vm_set_global_strlist(vm: ptr, name: string, items: ptr)
+// An expression gives its value, statements give None. 0 on success, -1 on
+// an exception, which is then the result: PY_TERR, read with result_str as
+// "<ExceptionType>: <message>".
+extern python_vm_eval(vm: ptr, code: string) -> int
+extern python_vm_result_type(vm: ptr) -> int
+// Numbers read either way: a float as an int truncates (saturating), and a
+// PY_TOTHER int too big for 64 bits reads 0 here and its nearest double below.
+extern python_vm_result_int(vm: ptr) -> long
+extern python_vm_result_double(vm: ptr) -> float
+// A str result, or an error's message; "" for other types.
+extern python_vm_result_str(vm: ptr) -> string
+// 1 only for True.
+extern python_vm_result_bool(vm: ptr) -> int
+// A bytes result as a new std.bytes handle (caller frees); null otherwise.
+// A str never reads as bytes, nor bytes as a str.
+extern python_vm_result_bytes(vm: ptr) -> ptr
+extern python_vm_pop_result(vm: ptr)
+// Per outermost eval; budget counts trace events (lines, calls, returns);
+// `every` is ignored. 0 disarms. "" when set. Bounds Python code, not a loop
+// inside C such as sum(range(10**12)).
+extern python_vm_set_instruction_limit(vm: ptr, budget: long, every: int) -> string
+
+// --- Callback side (used INSIDE a registered host fn) ----------------------
+// Args are 1..arg_count(vm), read like results. The last push is the
+// callback's return value; return 1 to return it, 0 to return None.
+extern python_arg_count(vm: ptr) -> int
+extern python_arg_type(vm: ptr, i: int) -> int
+extern python_arg_str(vm: ptr, i: int) -> string
+extern python_arg_int(vm: ptr, i: int) -> long
+extern python_arg_bool(vm: ptr, i: int) -> int
+extern python_arg_double(vm: ptr, i: int) -> float
+extern python_arg_bytes(vm: ptr, i: int) -> ptr
+extern python_push_int(vm: ptr, v: long)
+extern python_push_str(vm: ptr, v: string)
+extern python_push_bool(vm: ptr, v: int)
+extern python_push_nil(vm: ptr)
+extern python_push_double(vm: ptr, v: float)
+// `b` is a std.bytes handle; the bytes are copied, embedded zeros and all.
+extern python_push_bytes(vm: ptr, b: ptr)
+// `return python.raise_error(vm, msg)`: the script sees RuntimeError(msg)
+// after the callback has returned, so the callback's defers run.
+extern python_raise_error(vm: ptr, msg: string) -> int
