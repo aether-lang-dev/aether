@@ -240,8 +240,8 @@ float32_from_bits(val: long) -> float {
         exp = exp + 1
         frac = frac & 8388607
         real_exp = exp - 127 + 1023
-        dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
-        return mem.float_from_bits(dbits)
+        uint64 dbits = ((sign as uint64) << 63) | ((real_exp as uint64) << 52) | ((frac as uint64) << 29)
+        return mem.float_from_bits(dbits as long)
     }
     if exp == 255 {
         if frac == 0 {
@@ -251,8 +251,9 @@ float32_from_bits(val: long) -> float {
         return mem.float_from_bits(9221120237041090560 as long)
     }
     real_exp = exp - 127 + 1023
-    dbits = ((sign as long) << 63) | ((real_exp as long) << 52) | ((frac as long) << 29)
-    return mem.float_from_bits(dbits)
+    // Assembled unsigned: a signed shift into bit 63 is undefined in C.
+    uint64 dbits = ((sign as uint64) << 63) | ((real_exp as uint64) << 52) | ((frac as uint64) << 29)
+    return mem.float_from_bits(dbits as long)
 }
 
 float16_to_float32(val: int) -> float {
@@ -336,9 +337,11 @@ read_value(r: ptr, ai: int) -> (long, string) {
         b6 = rd(reader, reader.offset + 6)
         b7 = rd(reader, reader.offset + 7)
         reader.offset = reader.offset + 8
-        v = ((b0 as long) << 56) | ((b1 as long) << 48) | ((b2 as long) << 40) | ((b3 as long) << 32) |
-        ((b4 as long) << 24) | ((b5 as long) << 16) | ((b6 as long) << 8) | (b7 as long)
-        return v, ok
+        // Assembled unsigned (a signed shift into bit 63 is undefined in C),
+        // then kept as that bit pattern.
+        uint64 v = ((b0 as uint64) << 56) | ((b1 as uint64) << 48) | ((b2 as uint64) << 40) | ((b3 as uint64) << 32) |
+        ((b4 as uint64) << 24) | ((b5 as uint64) << 16) | ((b6 as uint64) << 8) | (b7 as uint64)
+        return v as long, ok
     }
     return 0, "cbor: invalid additional information"
 }
@@ -535,12 +538,15 @@ fn parse_float(reader: *Reader, width: int) -> (ptr, string) {
     if reader.offset + width > reader.len {
         return null, "cbor: unexpected EOF"
     }
-    bits = 0 as long
+    // Unsigned, as in read_value: shifting a set top bit of a long is
+    // undefined in C.
+    uint64 ubits = 0
     i = 0
     while i < width {
-        bits = (bits << 8) | (rd(reader, reader.offset + i) as long)
+        ubits = (ubits << 8) | (rd(reader, reader.offset + i) as uint64)
         i = i + 1
     }
+    bits = ubits as long
     reader.offset = reader.offset + width
     cv = heap.new(CborValue)
     cv.type = CBOR_FLOAT
@@ -2237,7 +2243,7 @@ format_float_diag(val: float) -> string {
     if is_pos_inf(val) { return "Infinity" }
     if is_neg_inf(val) { return "-Infinity" }
     bits = mem.bits_of_float(val)
-    if (bits << 1) == 0 {
+    if (bits & 9223372036854775807) == 0 {
         // Zero keeps its sign: -0.0 is a distinct float.
         if bits < 0 { return "-0.0" }
         return "0.0"
