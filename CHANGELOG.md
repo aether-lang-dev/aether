@@ -14,6 +14,31 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.866.0]
+
+### Added
+
+- **The Duktape host has Lua's bidirectional embedding API.**
+  `contrib.host.duktape` (and its `contrib.host.js` alias) gains a persistent
+  VM (`vm_new` / `vm_free`), Aether callbacks the script calls by dotted name
+  (`vm_register(vm, "app.math.add", fn)`), typed arguments and returns
+  (`arg_*` / `push_*`), global setters, and typed eval results with the same
+  type tags as Lua (#904). A callback's `return duktape.raise_error(vm, msg)`
+  throws into the script after the callback has returned, so its defers still
+  run. Numbers that are not an int64 (NaN, out of range) read as 0 or
+  saturate rather than cast with undefined behaviour, and a thrown non-Error
+  still reads as an error result. `vm_set_instruction_limit` reports that the
+  limit is unavailable: the system libduktape this host loads is built
+  without `DUK_USE_EXEC_TIMEOUT_CHECK`.
+
+- **QuickJS joins the `contrib/host` family.** `contrib.host.quickjs` wraps
+  `contrib.quickjs` with the surface every host shares: `run`,
+  `run_sandboxed`, `run_sandboxed_with_map` (the shared map as
+  `aether_map_get` / `aether_map_put`), `init` and `finalize`. The engine has
+  no file, network or OS access of its own, so grants decide only what the
+  Aether host functions a script calls may do. `contrib.quickjs`'s own API is
+  unchanged, and remains the bidirectional tier for QuickJS.
+
 ## [0.865.0]
 
 ### Added
