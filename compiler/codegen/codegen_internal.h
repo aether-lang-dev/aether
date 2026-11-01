@@ -820,6 +820,8 @@ typedef struct {
                                 * parameter) -> the definition (#2897) */
     StrMap def_sets;           /* `<ptr>` of a definition -> the DefClauses it
                                 * is one of (#2897, fn_def_clause_set) */
+    StrMap fn_globals;         /* name -> the first module `var`/`const` that may
+                                * hold a fn pointer (#3499, lookup_fnptr_global) */
 } ProgramIndex;
 
 ProgramIndex* program_index(ASTNode* program);

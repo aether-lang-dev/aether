@@ -833,16 +833,11 @@ Type* lookup_fnptr_local(CodeGenerator* gen, const char* name) {
  * on a `void*`), which C rejects. NULL when `name` is not such a global. */
 Type* lookup_fnptr_global(CodeGenerator* gen, const char* name) {
     if (!gen || !gen->program || !name) return NULL;
-    for (int i = 0; i < gen->program->child_count; i++) {
-        ASTNode* c = gen->program->children[i];
-        if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-        if (!c || c->type != AST_CONST_DECLARATION || !c->value) continue;
-        if (!(c->annotation && strcmp(c->annotation, "global_var") == 0) &&
-            !is_fnptr_const_decl(c)) continue;
-        if (strcmp(c->value, name) != 0) continue;
-        return is_fnptr_type(c->node_type) ? c->node_type : NULL;
-    }
-    return NULL;
+    /* From the program index (#3499): asked for every call, a scan of the
+     * program made codegen grow with the square of its size. */
+    ProgramIndex* ix = program_index(gen->program);
+    ASTNode* c = ix ? strmap_get(&ix->fn_globals, name) : NULL;
+    return (c && is_fnptr_type(c->node_type)) ? c->node_type : NULL;
 }
 
 /* #2648: a module-level `const` of a typed fn-pointer type. It holds a
@@ -1308,6 +1303,13 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (!c) continue;
+        /* #3499: the module `var`s and fn-pointer `const`s a call may go
+         * through (lookup_fnptr_global), the first of each name. */
+        ASTNode* g = (c->type == AST_EXPORT_STATEMENT && c->child_count > 0) ? c->children[0] : c;
+        if (g && g->type == AST_CONST_DECLARATION && g->value &&
+            ((g->annotation && strcmp(g->annotation, "global_var") == 0) || is_fnptr_const_decl(g)) &&
+            !strmap_has(&ix->fn_globals, g->value))
+            strmap_put(&ix->fn_globals, g->value, g);
         if ((c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) && c->value) {
             DefClauses* dc = strmap_get(&ix->defs, c->value);
             if (!dc) {
@@ -1391,6 +1393,7 @@ void program_index_reset(void) {
     strmap_free(&ix->clause_scopes);
     strmap_free(&ix->def_children);
     strmap_free(&ix->def_sets);
+    strmap_free(&ix->fn_globals);
     ix->program = NULL;
     ix->child_count = 0;
     ix->main_fn = NULL;
@@ -6374,30 +6377,22 @@ static void mangle_keyword_value_idents(ASTNode* program) {
  * a program can see. A write to a module variable or an actor's state is
  * not a local, and keeps its name. Both walks visit a node's children before
  * the node, so a binding's initializer comes before the binding. */
-typedef struct {
-    const char** names;  /* interned (cg_intern), never freed one by one */
-    int count, cap;
-} NameSet;
+/* A set of names in insertion order, hashed (#3499): a list scanned per
+ * reference made this pass grow with the square of the program, since
+ * every reference is checked against every function. */
+typedef StrMap NameSet;
 
 static int nameset_has(const NameSet* s, const char* name) {
-    for (int i = 0; name && i < s->count; i++)
-        if (strcmp(s->names[i], name) == 0) return 1;
-    return 0;
+    return name && strmap_has(s, name);
 }
 
 static void nameset_add(NameSet* s, const char* name) {
-    if (!name || !name[0] || nameset_has(s, name)) return;
-    if (s->count == s->cap) {
-        s->cap = s->cap ? s->cap * 2 : 16;
-        s->names = (const char**)aether_xrealloc((void*)s->names, (size_t)s->cap * sizeof(*s->names));
-    }
-    s->names[s->count++] = cg_intern(name);
+    if (!name || !name[0] || strmap_has(s, name)) return;
+    strmap_put(s, name, NULL);
 }
 
 static void nameset_free(NameSet* s) {
-    free((void*)s->names);
-    s->names = NULL;
-    s->count = s->cap = 0;
+    strmap_free(s);
 }
 
 static int is_value_name_node(const ASTNode* n) {
@@ -6416,33 +6411,23 @@ static int is_binding_node(const ASTNode* n) {
  * as the extern declarations below emit them). */
 typedef struct {
     NameSet names;      /* every function and extern, by its Aether name */
-    ASTNode** externs;
-    int extern_count, extern_cap;
+    StrMap externs;     /* the first extern of each name */
 } ShadowFns;
 
 static void shadow_fns_add_extern(ShadowFns* f, ASTNode* ext) {
     if (!ext || !ext->value) return;
     nameset_add(&f->names, ext->value);
-    if (f->extern_count == f->extern_cap) {
-        f->extern_cap = f->extern_cap ? f->extern_cap * 2 : 32;
-        f->externs = (ASTNode**)aether_xrealloc((void*)f->externs,
-                                                (size_t)f->extern_cap * sizeof(*f->externs));
-    }
-    f->externs[f->extern_count++] = ext;
+    if (!strmap_has(&f->externs, ext->value)) strmap_put(&f->externs, ext->value, ext);
 }
 
 static void shadow_fns_free(ShadowFns* f) {
     nameset_free(&f->names);
-    free((void*)f->externs);
-    f->externs = NULL;
-    f->extern_count = f->extern_cap = 0;
+    strmap_free(&f->externs);
 }
 
 /* The extern named `name`, or NULL. */
 static ASTNode* shadow_fns_extern(const ShadowFns* f, const char* name) {
-    for (int i = 0; name && i < f->extern_count; i++)
-        if (strcmp(f->externs[i]->value, name) == 0) return f->externs[i];
-    return NULL;
+    return name ? (ASTNode*)strmap_get(&f->externs, name) : NULL;
 }
 
 /* Every C spelling a reference to `v` could have that names one of `fns`,
@@ -6512,8 +6497,8 @@ static void rename_locals_shadowing_functions_in(ASTNode* scope, const ShadowFns
                                                  const NameSet* fixed) {
     LocalShadowScan s = {fns, fixed, {0}, {0}, {0}};
     scan_local_shadows(scope, &s);
-    for (int i = 0; i < s.renamed.count; i++) {
-        const char* from = s.renamed.names[i];
+    for (int i = 0; i < strmap_count(&s.renamed); i++) {
+        const char* from = strmap_key_at(&s.renamed, i);
         char* to = prefixed_name("ae_local_", from);
         int active = 0;
         rename_local_after_binding(scope, from, to, &active);
@@ -6527,7 +6512,7 @@ static void rename_locals_shadowing_functions_in(ASTNode* scope, const ShadowFns
 static void rename_locals_shadowing_functions(ASTNode* program) {
     if (!program) return;
     NameSet globals = {0};
-    ShadowFns fns = {{0}, NULL, 0, 0};
+    ShadowFns fns = {{0}, {0}};
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (!c || !c->value) continue;
@@ -6545,7 +6530,7 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
             }
         }
     }
-    for (int i = 0; fns.names.count > 0 && i < program->child_count; i++) {
+    for (int i = 0; strmap_count(&fns.names) > 0 && i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (!c) continue;
         if (c->type == AST_FUNCTION_DEFINITION || c->type == AST_MAIN_FUNCTION ||
@@ -6553,7 +6538,7 @@ static void rename_locals_shadowing_functions(ASTNode* program) {
             rename_locals_shadowing_functions_in(c, &fns, &globals);
         } else if (c->type == AST_ACTOR_DEFINITION) {
             NameSet fixed = {0};
-            for (int g = 0; g < globals.count; g++) nameset_add(&fixed, globals.names[g]);
+            for (int g = 0; g < strmap_count(&globals); g++) nameset_add(&fixed, strmap_key_at(&globals, g));
             for (int k = 0; k < c->child_count; k++) {
                 ASTNode* st = c->children[k];
                 if (st && st->type == AST_STATE_DECLARATION && st->value)
@@ -6689,7 +6674,7 @@ static void rename_scoped_bindings(ASTNode* program) {
         } else if (c->type == AST_ACTOR_DEFINITION) {
             /* An actor's state is `self->name`, no local. */
             NameSet fixed = {0};
-            for (int g = 0; g < globals.count; g++) nameset_add(&fixed, globals.names[g]);
+            for (int g = 0; g < strmap_count(&globals); g++) nameset_add(&fixed, strmap_key_at(&globals, g));
             for (int k = 0; k < c->child_count; k++) {
                 ASTNode* st = c->children[k];
                 if (st && st->type == AST_STATE_DECLARATION && st->value)

@@ -3662,16 +3662,20 @@ static const char* import_written_prefix(ASTNode* imp) {
  * and `vg.region`, both renamed off "region" by module_assign_namespaces)
  * doesn't have the first one's rewrite blindly consume every "region.name"
  * in the body before the second's ever runs — see
- * rewrite_qualified_prefix_ambiguous. */
-static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
-                                    const char* self_name) {
-    if (!body || !scope_ast) return;
-
+ * rewrite_qualified_prefix_ambiguous. The imports are collected once per
+ * scope (#3499): collected again for each of a program's top-level nodes,
+ * the merge grew with the square of the program. */
 #define REWRITE_MAX_IMPORTS 64
+typedef struct {
     const char* writtens[REWRITE_MAX_IMPORTS];
     AetherModule* mods[REWRITE_MAX_IMPORTS];
-    int n = 0;
-    for (int i = 0; i < scope_ast->child_count && n < REWRITE_MAX_IMPORTS; i++) {
+    int n;
+} ImportPrefixes;
+
+static void import_prefixes_collect(ImportPrefixes* ip, ASTNode* scope_ast,
+                                    const char* self_name) {
+    ip->n = 0;
+    for (int i = 0; scope_ast && i < scope_ast->child_count && ip->n < REWRITE_MAX_IMPORTS; i++) {
         ASTNode* imp = scope_ast->children[i];
         if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
         if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
@@ -3679,31 +3683,42 @@ static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
         const char* ns = module_namespace_of(imp->value);
         if (strcmp(written, ns) == 0) continue;
         if (self_name && strcmp(written, module_last_segment(self_name)) == 0) continue;
-        writtens[n] = written;
-        mods[n] = module_find(imp->value);
-        n++;
+        ip->writtens[ip->n] = written;
+        ip->mods[ip->n] = module_find(imp->value);
+        ip->n++;
     }
+}
 
+static void import_prefixes_rewrite(const ImportPrefixes* ip, ASTNode* body) {
+    if (!body) return;
     int done[REWRITE_MAX_IMPORTS] = {0};
-    for (int i = 0; i < n; i++) {
+    for (int i = 0; i < ip->n; i++) {
         if (done[i]) continue;
         AetherModule* candidates[REWRITE_MAX_IMPORTS];
         int ncand = 0;
-        candidates[ncand++] = mods[i];
+        candidates[ncand++] = ip->mods[i];
         done[i] = 1;
-        for (int j = i + 1; j < n; j++) {
-            if (!done[j] && strcmp(writtens[i], writtens[j]) == 0) {
-                candidates[ncand++] = mods[j];
+        for (int j = i + 1; j < ip->n; j++) {
+            if (!done[j] && strcmp(ip->writtens[i], ip->writtens[j]) == 0) {
+                candidates[ncand++] = ip->mods[j];
                 done[j] = 1;
             }
         }
         if (ncand == 1) {
-            if (mods[i]) rewrite_qualified_prefix(body, writtens[i], module_namespace_of(mods[i]->name), NULL, 0);
+            if (ip->mods[i]) rewrite_qualified_prefix(body, ip->writtens[i], module_namespace_of(ip->mods[i]->name), NULL, 0);
         } else {
-            rewrite_qualified_prefix_ambiguous(body, writtens[i], candidates, ncand, NULL, 0);
+            rewrite_qualified_prefix_ambiguous(body, ip->writtens[i], candidates, ncand, NULL, 0);
         }
     }
+}
 #undef REWRITE_MAX_IMPORTS
+
+static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
+                                    const char* self_name) {
+    if (!body || !scope_ast) return;
+    ImportPrefixes ip;
+    import_prefixes_collect(&ip, scope_ast, self_name);
+    import_prefixes_rewrite(&ip, body);
 }
 
 /* The registered module whose parsed AST is `mod_ast`, or NULL. */
@@ -4421,10 +4436,12 @@ void module_merge_into_program(ASTNode* program) {
     /* #2209: the program's own code names its imports by alias or last
      * segment; point each at the imported module's namespace before any
      * module body is cloned in beside it. */
+    ImportPrefixes prog_imports;
+    import_prefixes_collect(&prog_imports, program, NULL);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child || child->type == AST_IMPORT_STATEMENT) continue;
-        rewrite_import_prefixes(child, program, NULL);
+        import_prefixes_rewrite(&prog_imports, child);
     }
 
     // Find insertion point: just before AST_MAIN_FUNCTION

@@ -6367,6 +6367,8 @@ static void order_const_declarations(ASTNode* program) {
 }
 
 static void tc_clauses_reset(void);
+static ASTNode* tc_first_def(ASTNode* program, const char* name);
+static ASTNode* tc_first_extern(ASTNode* program, const char* name, const char* merged);
 
 /* ---- qualified type names: `mod.T`, `*mod.T` ---------------------------
  *
@@ -9855,13 +9857,7 @@ static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
         for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
         merged[n] = '\0';
     }
-    for (int c = 0; c < program->child_count; c++) {
-        ASTNode* e = program->children[c];
-        if (!e || e->type != AST_EXTERN_FUNCTION || !e->value) continue;
-        if (!strcmp(e->value, name)) return e;
-        if (dotted && (e->is_imported || e->origin_module) && !strcmp(e->value, merged)) return e;
-    }
-    return NULL;
+    return tc_first_extern(program, name, dotted ? merged : NULL);
 }
 
 /* The declaration a call is checked against: an Aether function, or an
@@ -11811,15 +11807,12 @@ static const char* effect_call_capability(const char* ns) {
     return NULL;
 }
 
+/* The first definition named `name`, from the checker's index (#3499): a
+ * scan of the program per call made checking grow with the square of its
+ * size. */
 static ASTNode* effect_find_func(ASTNode* program, const char* name) {
     if (!program || !name) return NULL;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if ((c->type == AST_FUNCTION_DEFINITION || c->type == AST_BUILDER_FUNCTION) &&
-            c->value && strcmp(c->value, name) == 0)
-            return c;
-    }
-    return NULL;
+    return tc_first_def(program, name);
 }
 
 /* The definition a call names, or NULL when the walk cannot see one (a
@@ -19361,6 +19354,10 @@ typedef struct {
 } TcClauses;
 
 static StrMap g_tc_clauses;
+/* #3499: the externs of the program by name, the first in program order,
+ * and of those a module brought, each as its position + 1. */
+static StrMap g_tc_externs;
+static StrMap g_tc_imported_externs;
 static ASTNode* g_tc_clauses_program = NULL;
 static int g_tc_clauses_child_count = -1;
 
@@ -19370,38 +19367,72 @@ static void tc_clauses_reset(void) {
         if (tc) { free(tc->nodes); free(tc); }
     }
     strmap_free(&g_tc_clauses);
+    strmap_free(&g_tc_externs);
+    strmap_free(&g_tc_imported_externs);
     g_tc_clauses_program = NULL;
     g_tc_clauses_child_count = -1;
+}
+
+/* Index `program`'s definitions and externs, once per program shape: the
+ * checker adds top-level nodes (derived functions, a clause set's join) but
+ * renames and frees none, and an addition changes the count. */
+static void tc_decls_index(ASTNode* program) {
+    if (g_tc_clauses_program == program && g_tc_clauses_child_count == program->child_count)
+        return;
+    tc_clauses_reset();
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* c = program->children[i];
+        if (c && c->value && c->type == AST_EXTERN_FUNCTION) {
+            void* at = (void*)(intptr_t)(i + 1);
+            if (!strmap_has(&g_tc_externs, c->value)) strmap_put(&g_tc_externs, c->value, at);
+            if ((c->is_imported || c->origin_module) &&
+                !strmap_has(&g_tc_imported_externs, c->value))
+                strmap_put(&g_tc_imported_externs, c->value, at);
+            continue;
+        }
+        if (!c || !c->value ||
+            (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
+        TcClauses* tc = strmap_get(&g_tc_clauses, c->value);
+        if (!tc) {
+            tc = calloc(1, sizeof(TcClauses));
+            if (!tc) continue;
+            strmap_put(&g_tc_clauses, c->value, tc);
+        }
+        if (tc->count == tc->cap) {
+            int cap = tc->cap ? tc->cap * 2 : 2;
+            ASTNode** nn = realloc(tc->nodes, sizeof(ASTNode*) * (size_t)cap);
+            if (!nn) continue;
+            tc->nodes = nn;
+            tc->cap = cap;
+        }
+        tc->nodes[tc->count++] = c;
+    }
+    g_tc_clauses_program = program;
+    g_tc_clauses_child_count = program->child_count;
+}
+
+/* #3499: the first function or builder named `name` in `program`. */
+static ASTNode* tc_first_def(ASTNode* program, const char* name) {
+    tc_decls_index(program);
+    const TcClauses* tc = strmap_get(&g_tc_clauses, name);
+    return (tc && tc->count > 0) ? tc->nodes[0] : NULL;
+}
+
+/* #3499: the first extern in `program` named `name`, or, when `merged` is
+ * given, a module's extern named `merged`, whichever comes first. */
+static ASTNode* tc_first_extern(ASTNode* program, const char* name, const char* merged) {
+    tc_decls_index(program);
+    intptr_t a = (intptr_t)strmap_get(&g_tc_externs, name);
+    intptr_t b = merged ? (intptr_t)strmap_get(&g_tc_imported_externs, merged) : 0;
+    intptr_t at = (a && b) ? (a < b ? a : b) : (a ? a : b);
+    return at ? program->children[at - 1] : NULL;
 }
 
 /* The clauses of the set `fn` is one of, or NULL for a single definition. */
 static const TcClauses* tc_clauses_of(ASTNode* fn) {
     ASTNode* program = g_typecheck_program;
     if (!program || !fn || !fn->value) return NULL;
-    if (g_tc_clauses_program != program || g_tc_clauses_child_count != program->child_count) {
-        tc_clauses_reset();
-        for (int i = 0; i < program->child_count; i++) {
-            ASTNode* c = program->children[i];
-            if (!c || !c->value ||
-                (c->type != AST_FUNCTION_DEFINITION && c->type != AST_BUILDER_FUNCTION)) continue;
-            TcClauses* tc = strmap_get(&g_tc_clauses, c->value);
-            if (!tc) {
-                tc = calloc(1, sizeof(TcClauses));
-                if (!tc) continue;
-                strmap_put(&g_tc_clauses, c->value, tc);
-            }
-            if (tc->count == tc->cap) {
-                int cap = tc->cap ? tc->cap * 2 : 2;
-                ASTNode** nn = realloc(tc->nodes, sizeof(ASTNode*) * (size_t)cap);
-                if (!nn) continue;
-                tc->nodes = nn;
-                tc->cap = cap;
-            }
-            tc->nodes[tc->count++] = c;
-        }
-        g_tc_clauses_program = program;
-        g_tc_clauses_child_count = program->child_count;
-    }
+    tc_decls_index(program);
     const TcClauses* tc = strmap_get(&g_tc_clauses, fn->value);
     if (!tc || tc->count < 2) return NULL;
     for (int i = 0; i < tc->count; i++)
