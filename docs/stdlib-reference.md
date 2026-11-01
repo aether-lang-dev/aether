@@ -1971,7 +1971,7 @@ Coming from Java's `java.security`, Python's `cryptography`, or Go's `crypto/*`,
 
 - **Public-key crypto (RSA, ECDSA, Ed25519, X25519), symmetric ciphers (AES, ChaCha20-Poly1305), and key derivation (KDFs).** These live under [`std.cryptography`](../std/cryptography/) (`rsa`, `aes`, `chacha20poly1305`, `ed25519`, `x25519`, `p256`, `secp256k1`, `pem`, `asn1`, ...), pure-Aether ports with no OpenSSL dependency. Each family is a separate sub-module you import explicitly.
 - **URL-safe Base64 (RFC 4648 §5).** Standard alphabet only; URL-safe (`-` / `_` instead of `+` / `/`) is a separate variant the wrappers don't expose.
-- **Constant-time comparison.** Equality checks via `string.equals` are not constant-time; callers comparing hashes for security-sensitive cases need their own constant-time helper.
+- **Constant-time comparison.** Equality checks via `string.equals` are not constant-time. Compare a MAC tag, a hash or any other secret-derived bytes with `std.cryptography.ct`: `ct.bytes_eq(a, b, n)` for two buffers, or `ct.bytes_eq_slice(a, b)` for two `byte[]` (1 when equal; slices of different lengths are unequal), which take the same time wherever the bytes differ (`examples/03-std/11-cryptography.ae` checks an HMAC tag this way).
 
 Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a fresh counted string the caller owns, or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
 

@@ -63,9 +63,11 @@ extern "C" {
  * Thread-safe: relaxed atomic store. */
 AETHER_API void aether_set_memory_cap(uint64_t bytes);
 
-/* Per-thread wall-clock deadline. After this call, every safe point
- * (every loop head in `--emit=lib` builds, and every 4096 values a
- * JSON parse reads) checks `now >= deadline_at`. Inside an export the
+/* Per-thread wall-clock deadline: one instant, `deadline_at = now + ms`
+ * when this is called, not a budget each call gets. After this call,
+ * every safe point (every loop head in `--emit=lib` builds, and every
+ * 4096 values a JSON parse reads) of every call on this thread checks
+ * `now >= deadline_at`, until a fresh deadline or 0. Inside an export the
  * first one past the deadline ends the call (#2956): the export returns
  * its zero value with the outcome AETHER_DEADLINE, its defers and owned
  * locals released on the way, and a `try` in the script does not catch

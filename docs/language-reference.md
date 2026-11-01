@@ -3722,9 +3722,11 @@ each sender's messages still arrive in the order they were sent (#3241).
 
 ### Reply Statement
 
-The `reply` statement sends a response back to the waiting `?` caller. Omitting
-`reply` in a handler that was invoked via `?` causes the caller to time out
-(`err` is `"ask timed out after 5000 ms"` in the two-name form above).
+The `reply` statement sends a response back to the waiting `?` caller. A
+handler invoked via `?` that returns without a `reply` ends the ask at once:
+`err` is `"the handler returned without replying"` in the two-name form
+above, and the caller does not wait out its timeout. The timeout
+(`"ask timed out after 5000 ms"`) is for a handler that has not returned.
 
 Actors respond using the `reply` statement:
 
