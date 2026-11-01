@@ -14,6 +14,8 @@
 #      they need one, the shared runtime: with the static one each library
 #      keeps its own copy (on every platform since #3481), and the import is
 #      refused, naming the rebuild. On the shared runtime they run and grow 0.
+#   4. Every build, refused or not, removes the stub directory it wrote under
+#      the temp dir (#3485: a refusal left it behind on Windows).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -53,46 +55,35 @@ no_leaks() {
     grep -q "0 leaks for 0 total leaked bytes" leaks.out || fail "$label: leaks(1) found leaks" leaks.out
 }
 
-# build_app <app> <label>: ae build the app and run it; its output in $OUT.
-# Checks that a successful binary-import build leaves no stub directory behind (#3485).
-build_app() {
-    app="$1"; label="$2"
-    stubs_dir="$(mktemp -d)"
-    if ! TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
-         AETHER_HOME="$ROOT" "$AE" build "$app.ae" -o "$app" >"$app.log" 2>&1; then
-        rm -rf "$stubs_dir"
-        fail "$label: ae build $app.ae" "$app.log"
-    fi
-    for s in "$stubs_dir"/ae-binimport-*; do
-        if [ -e "$s" ]; then
-            rm -rf "$stubs_dir"
-            fail "$label: successful build left stub directory behind"
-        fi
+# ae_build <app> <label>: ae build the app with a temp dir of its own, and
+# fail if it leaves an ae-binimport-* stub directory there; ae's status.
+ae_build() {
+    stubs="$WORK/tmp-$1"
+    rm -rf "$stubs"; mkdir -p "$stubs"
+    TMPDIR="$stubs" TEMP="$stubs" TMP="$stubs" \
+        AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1
+    rc=$?
+    for s in "$stubs"/ae-binimport-*; do
+        [ -e "$s" ] && fail "$2: the build left its stub directory $s" "$1.log"
     done
-    rm -rf "$stubs_dir"
-    OUT="$("./$app$EXE" 2>&1)" || { echo "$OUT"; fail "$label: $app failed"; }
+    rm -rf "$stubs"
+    return $rc
+}
+
+# build_app <app> <label>: ae build the app and run it; its output in $OUT.
+build_app() {
+    ae_build "$1" "$2" || fail "$2: ae build $1.ae" "$1.log"
+    OUT="$("./$1$EXE" 2>&1)" || { echo "$OUT"; fail "$2: $1 failed"; }
 }
 
 # refused <app> <what> <label>: importing the library is refused, naming
-# what crosses and the rebuild. Also checks that the refused build leaves
-# no stub directory behind (#3485).
+# what crosses and the rebuild.
 refused() {
-    app="$1"; what="$2"; label="$3"
-    stubs_dir="$(mktemp -d)"
-    if TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
-       AETHER_HOME="$ROOT" "$AE" build "$app.ae" -o "$app" >"$app.log" 2>&1; then
-        rm -rf "$stubs_dir"
-        fail "$label: importing it was not refused" "$app.log"
+    if ae_build "$1" "$3"; then
+        fail "$3: importing it was not refused" "$1.log"
     fi
-    for s in "$stubs_dir"/ae-binimport-*; do
-        if [ -e "$s" ]; then
-            rm -rf "$stubs_dir"
-            fail "$label: refused build left stub directory behind"
-        fi
-    done
-    rm -rf "$stubs_dir"
-    grep -qF "$what" "$app.log" || fail "$label: the refusal does not say \"$what\"" "$app.log"
-    grep -qF "ae build --emit=lib --shared-runtime" "$app.log" || fail "$label: the refusal does not name the rebuild" "$app.log"
+    grep -qF "$2" "$1.log" || fail "$3: the refusal does not say \"$2\"" "$1.log"
+    grep -qF "ae build --emit=lib --shared-runtime" "$1.log" || fail "$3: the refusal does not name the rebuild" "$1.log"
 }
 
 # duty <library> <names own_runtime: 1 or 0> <label>
@@ -153,39 +144,9 @@ echo "$HOUT" | grep -q "^host: aether_text_string_release OK$" || { echo "$HOUT"
 no_leaks "C host" "./host$EXE" "./libtext$SO_EXT"
 cd "$WORK"
 
-# #3485: Incompatible library refusal (ae_lib_check_compat) leaves no stub directory behind.
-mkdir -p "$WORK/compat"
-cp "$SCRIPT_DIR/app_badcompat.ae" "$WORK/compat/"
-cd "$WORK/compat"
-case "$(uname -s)" in
-    Darwin) SHARED_FLAG="-dynamiclib" ;;
-    *)      SHARED_FLAG="-shared" ;;
-esac
-$CC $SHARED_FLAG -fPIC "$SCRIPT_DIR/badcompat.c" -o "libbadcompat$SO_EXT" >compat_cc.log 2>&1 \
-    || fail "badcompat: cc" compat_cc.log
-
-stubs_dir="$(mktemp -d)"
-if TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
-   AETHER_HOME="$ROOT" "$AE" build "app_badcompat.ae" -o "app_badcompat" >"app_badcompat.log" 2>&1; then
-    rm -rf "$stubs_dir"
-    fail "badcompat: importing it was not refused" "app_badcompat.log"
-fi
-for s in "$stubs_dir"/ae-binimport-*; do
-    if [ -e "$s" ]; then
-        rm -rf "$stubs_dir"
-        fail "badcompat: refused build left stub directory behind"
-    fi
-done
-rm -rf "$stubs_dir"
-grep -qF "its catalog is schema 99.0" "app_badcompat.log" \
-    || fail "badcompat: the refusal does not name schema 99.0" "app_badcompat.log"
-grep -qF "this ae" "app_badcompat.log" \
-    || fail "badcompat: the refusal does not mention this ae" "app_badcompat.log"
-cd "$WORK"
-
 if [ -d "$ROOT/build/shared" ]; then
     run_pass "$WORK/shared" "--shared-runtime" "shared runtime" 1
-    echo "  [PASS] binary_import_ownership: returned strings given back (static, shared, C host); one-runtime values refused across two; stub dirs cleaned up on refusal"
+    echo "  [PASS] binary_import_ownership: returned strings given back (static, shared, C host); one-runtime values refused across two; no stub directory left"
 else
-    echo "  [PASS] binary_import_ownership: returned strings given back (static, C host); one-runtime values refused across two; stub dirs cleaned up on refusal (no shared runtime built here)"
+    echo "  [PASS] binary_import_ownership: returned strings given back (static, C host); one-runtime values refused across two; no stub directory left (no shared runtime built here)"
 fi

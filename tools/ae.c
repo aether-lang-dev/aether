@@ -5816,7 +5816,8 @@ static const char* ae_signature_string_struct(const _AeLibInfoMeta* m, int minor
  * library's strings) and a builder's config the library uses have no copy,
  * so a library that keeps its own runtime (every platform since #3481: on
  * ELF it no longer binds to the program's) has such an import refused,
- * naming the rebuild that gives both one runtime. */
+ * naming the rebuild that gives both one runtime. 1 when it is refused (each
+ * reason on stderr), 0 otherwise. */
 static int ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const char* module,
                                      const char* so_path) {
     char ty[200];
@@ -5866,7 +5867,9 @@ static int ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const c
 /* `module` NULL: the whole catalog (a bare import of a one-module
  * library). Otherwise only the functions and constants of that module of
  * a package library (#2297); struct records are shared by all its
- * modules and always declared. */
+ * modules and always declared. 0 when the stub is written, -1 when the
+ * library cannot be read (the build goes on and fails later), 1 when the
+ * import is refused (the reasons are on stderr; the caller exits). */
 static int ae_generate_binimport_stub(const char* so_path, const char* module, FILE* out) {
     void* h = ae_lib_open(so_path);
     if (!h) return -1;
@@ -6330,8 +6333,10 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     if (!sf) return 0;   /* best-effort: leave the build to fail later */
     int rc = ae_generate_binimport_stub(so_path, dotted ? mod : NULL, sf);
     fclose(sf);
+    /* A refusal exits only now, with the stub closed (#3485): exit() runs
+     * the atexit removal before it closes open streams, and Windows cannot
+     * delete a file that is open, so the stub directory stayed behind. */
     if (rc > 0) {
-        remove(stub_path);
         ae_remove_binimport_stubdirs();
         exit(1);
     }
