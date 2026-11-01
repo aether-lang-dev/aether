@@ -1872,24 +1872,33 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             // chain of any length is nested two-armed if-expressions and
             // types as they do, the last `else` still required.
             Token* t = advance_token(parser); // consume 'if'
+            /* #3478: the `{` after the condition opens the then arm, so a
+             * call that ends the condition takes no trailing block, as in an
+             * `if` statement or a `match` (the in_condition guard). The arms
+             * sit inside braces, where a call may take one again. */
+            int saved_in_condition = parser->in_condition;
+            parser->in_condition = 1;
             ASTNode* cond = parse_expression(parser);
-            if (!cond) return NULL;
-            if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-            ASTNode* then_expr = parse_expression(parser);
-            if (!then_expr) return NULL;
-            if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
-            if (!expect_token(parser, TOKEN_ELSE)) return NULL;
+            parser->in_condition = 0;
+            ASTNode* then_expr = NULL;
             ASTNode* else_expr = NULL;
-            Token* after_else = peek_token(parser);
-            if (after_else && after_else->type == TOKEN_IF) {
-                else_expr = parse_primary_expression(parser);
-                if (!else_expr) return NULL;
-            } else {
-                if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-                else_expr = parse_expression(parser);
-                if (!else_expr) return NULL;
-                if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            int ok = cond && expect_token(parser, TOKEN_LEFT_BRACE) &&
+                     (then_expr = parse_expression(parser)) != NULL &&
+                     expect_token(parser, TOKEN_RIGHT_BRACE) &&
+                     expect_token(parser, TOKEN_ELSE);
+            if (ok) {
+                Token* after_else = peek_token(parser);
+                if (after_else && after_else->type == TOKEN_IF) {
+                    else_expr = parse_primary_expression(parser);
+                    ok = else_expr != NULL;
+                } else {
+                    ok = expect_token(parser, TOKEN_LEFT_BRACE) &&
+                         (else_expr = parse_expression(parser)) != NULL &&
+                         expect_token(parser, TOKEN_RIGHT_BRACE);
+                }
             }
+            parser->in_condition = saved_in_condition;
+            if (!ok) return NULL;
 
             ASTNode* if_expr = create_ast_node(AST_IF_EXPRESSION, NULL, t->line, t->column);
             if_expr->node_type = create_type(TYPE_UNKNOWN);

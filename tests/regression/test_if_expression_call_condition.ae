@@ -1,0 +1,37 @@
+// Regression (#3478): an `if` used as a value parses when its condition
+// ends in a call.
+//
+// The expression form parsed its condition without the guard the `if`
+// statement, `while` and `match` use, so the call at its end took the then
+// arm's `{` as a trailing block, and the `else` after it was "Expected
+// LEFT_BRACE, got ELSE". The condition is now parsed under that guard, and
+// the arms inside their braces without it, so a call there may still take
+// a block.
+
+extern exit(code: int)
+
+yes(x: int) -> bool -> x > 0
+
+twice(f: fn) -> int {
+    return call(f) * 2
+}
+
+check(got: int, want: int, what: string) {
+    if got != want {
+        println("FAIL: ${what}: ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    s = if yes(1) { "yes" } else { "no" }
+    if s != "yes" {
+        println("FAIL: a call alone as the condition: ${s}")
+        exit(1)
+    }
+    check(if 1 < 2 && yes(1) { 1 } else { 2 }, 1, "a call that ends the condition")
+    check(if yes(-1) { 1 } else if yes(2) { 2 } else { 3 }, 2, "an else-if chain of calls")
+    // A call inside an arm still takes a trailing block.
+    check(if yes(1) { twice() || -> 21 } else { 0 }, 42, "a trailing block in the then arm")
+    println("ok")
+}
