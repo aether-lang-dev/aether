@@ -1,0 +1,72 @@
+// Regression: a panic while a `return` inside a `try` computes its value is
+// the try's to catch.
+//
+// Found while fixing #3479: a return with no defers to run popped the try
+// frames before it computed the value, so `try { return xs[i] } catch e`
+// with `i` out of range, or a call that panics, ended the process with
+// "panic outside any try/catch". The value is now computed inside the
+// frames and they are popped after, as the defer-aware return already did:
+// a single value, a tuple, and the program's own `main` alike.
+
+import std.string
+
+extern exit(code: int)
+
+boom(n: int) -> int {
+    if n > 2 {
+        panic("boom ${n}")
+    }
+    return n
+}
+
+// One value, no defer to run.
+pick(i: int) -> int {
+    xs = [10, 20, 30]
+    try {
+        return xs[i]
+    } catch e {
+        if string.contains(e, "out of range") == 0 {
+            println("FAIL: pick: ${e}")
+            exit(1)
+        }
+    }
+    return -1
+}
+
+// A call that panics, returned as the value.
+through(n: int) -> int {
+    try {
+        return boom(n)
+    } catch e {
+        return -n
+    }
+}
+
+// A tuple.
+pair(i: int) -> (int, int) {
+    xs = [1, 2]
+    try {
+        return i, xs[i]
+    } catch e {
+        return -1, -1
+    }
+}
+
+check(got: int, want: int, what: string) {
+    if got != want {
+        println("FAIL: ${what}: ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+main() {
+    check(pick(1), 20, "an index in range")
+    check(pick(7), -1, "an index out of range, caught")
+    check(through(1), 1, "a call that returns")
+    check(through(5), -5, "a call that panics, caught")
+    a, b = pair(1)
+    check(a + b, 3, "a tuple in range")
+    c, d = pair(9)
+    check(c + d, -2, "a tuple out of range, caught")
+    println("ok")
+}
