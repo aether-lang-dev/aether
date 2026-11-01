@@ -421,8 +421,11 @@ int main(void) {
     long a = rss_kb(); churn(vm, 10000);
     long bb = rss_kb(); churn(vm, 10000);
     long c = rss_kb();
+    // One-sided on purpose: a leak makes the object count GROW. Python 3.14's
+    // incremental GC can free pre-existing garbage during the loop, so the
+    // count may legitimately shrink (5390 -> 5375 observed on 3.14).
     ev(vm, "gc.collect()\nfinal_ref = sys.getrefcount(tracked_obj)\nfinal_objs = len(gc.get_objects())\n");
-    ev(vm, "final_ref == init_ref and abs(final_objs - init_objs) < 10");
+    ev(vm, "final_ref == init_ref and final_objs - init_objs < 10");
     CHECK(python_vm_result_bool(vm) == 1, "refcount or gc objects grew");
     long g1 = bb - a, g2 = c - bb, g = g1 < g2 ? g1 : g2;
     CHECK(g < 256, "memory grows: %ld kB then %ld kB over 10000 rounds", g1, g2);
