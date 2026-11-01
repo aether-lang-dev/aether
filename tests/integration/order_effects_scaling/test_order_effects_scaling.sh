@@ -90,10 +90,17 @@ compile_ms() {
 
 chain 4000
 chain 16000
-compile_ms 4000
-small=$MS
-compile_ms 16000
-large=$MS
+# The best of three of each, taken in turn, so a moment the runner is busy
+# slows one run, not the comparison (a single run each on macOS ARM64 once
+# measured 220 ms and 3263 ms, 14x, where this machine measures 3.7x).
+small=""
+large=""
+for run in 1 2 3; do
+    compile_ms 4000
+    if [ -z "$small" ] || [ "$MS" -lt "$small" ]; then small=$MS; fi
+    compile_ms 16000
+    if [ -z "$large" ] || [ "$MS" -lt "$large" ]; then large=$MS; fi
+done
 
 if [ "$large" -gt "$LIMIT_MS" ]; then
     echo "  [FAIL] order_effects_scaling: a chain of 16000 calls took ${large} ms to compile (ceiling ${LIMIT_MS} ms)"
