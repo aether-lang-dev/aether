@@ -164,8 +164,8 @@ static inline void aether_array_fail_index(int64_t idx, uint64_t len,
                         file, line, (long long)idx, (unsigned long long)len);
 }
 
-/* #3479: `s[i]` on a string outside `0 ..< length`, the slice's panic with
- * the string's length. */
+/* #3479: `s[i]` on a string outside `0 ..= length` (`length` is its
+ * terminator, 0), the slice's panic with the string's length. */
 static inline void aether_string_fail_index(int64_t idx, uint64_t len,
                                             const char* file, int line) {
     aether_slice_panicf("%s:%d: string index %lld out of range for length %llu",

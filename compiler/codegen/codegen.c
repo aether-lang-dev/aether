@@ -9815,13 +9815,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!s) return \"\";");
     print_line(gen, "    return aether_string_data(s);");
     print_line(gen, "}");
-    /* #3479: `s[i]` is the string's byte i, read unsigned (a plain char is
-     * signed on some targets), and checked against the string's length as a
-     * slice index is against the slice's; past the end it read past it. */
-    print_line(gen, "static inline uint8_t _aether_str_at(const void* s, int64_t i, const char* file, int line) {");
+    /* #3479: `s[i]` is the string's byte i as an int from 0 to 255, read
+     * unsigned (a plain char is signed on some targets). Index `length` is
+     * the terminator, 0, as a C-style scan (`while s[j] != 0`) reads it; one
+     * below 0 or past it panics, as a slice index outside its length does:
+     * it read past the string. */
+    print_line(gen, "static inline int _aether_str_at(const void* s, int64_t i, const char* file, int line) {");
     print_line(gen, "    uint64_t n = s ? (uint64_t)aether_string_length(s) : 0;");
-    print_line(gen, "    if ((uint64_t)i >= n) aether_string_fail_index(i, n, file, line);");
-    print_line(gen, "    return (uint8_t)_aether_safe_str(s)[i];");
+    print_line(gen, "    if ((uint64_t)i > n) aether_string_fail_index(i, n, file, line);");
+    print_line(gen, "    if ((uint64_t)i == n) return 0;");
+    print_line(gen, "    return (int)(unsigned char)_aether_safe_str(s)[i];");
     print_line(gen, "}");
     /* Owned-print helpers: a heap-producing CALL in bare print/println
      * argument position (`println(string.concat(a, b))`) is a temporary

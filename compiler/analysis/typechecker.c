@@ -17835,13 +17835,15 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = clone_type(arr_type->element_type);
                 }
-                /* #3479: `s[i]` on a string reads one byte, the type
-                 * `string.bytes(s)[i]` has; a local bound to it was left to
-                 * codegen's `int` default. */
+                /* #3479: `s[i]` on a string reads one byte as an `int`
+                 * from 0 to 255, the type codegen always gave a local bound
+                 * to it, now the checker's: the local was left to codegen's
+                 * default with a warning. Not a `byte`, which would refuse
+                 * `uint32 u = s[i]` and wrap `c = s[i]; c = c - 100`. */
                 if (arr_type && arr_type->kind == TYPE_STRING &&
-                    (!expr->node_type || expr->node_type->kind != TYPE_BYTE)) {
+                    (!expr->node_type || expr->node_type->kind != TYPE_INT)) {
                     if (expr->node_type) free_type(expr->node_type);
-                    expr->node_type = create_type(TYPE_BYTE);
+                    expr->node_type = create_type(TYPE_INT);
                 }
 
                 // Indexing a bare `ptr` (void*, element_type == NULL) has no
