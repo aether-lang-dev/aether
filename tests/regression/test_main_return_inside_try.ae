@@ -1,0 +1,55 @@
+// Regression: main's `return` computes its value before main's defers run.
+//
+// Found by the review of a fix to returns inside a `try`: main ran its
+// defers (the program's own and the release of its owned locals) before it
+// computed the value it returns. A value reading a released local read
+// freed memory, and once a panic in the value was caught by a `try` around
+// it, main went on with its defers run, its locals released, and ran the
+// defers again at its end. The value is now computed first, as every other
+// function's return does.
+
+import std.string
+
+extern exit(code: int)
+
+var deferred = 0
+
+boom(n: int) -> int {
+    if n > 2 {
+        panic("boom ${n}")
+    }
+    return n
+}
+
+once() {
+    deferred = deferred + 1
+    if deferred > 1 {
+        println("FAIL: main's defer ran twice")
+        exit(1)
+    }
+}
+
+main() {
+    s = string.concat("he", "llo")
+    defer once()
+    caught = 0
+    try {
+        return boom(5)
+    } catch e {
+        caught = 1
+    }
+    if caught != 1 {
+        println("FAIL: the panic in main's returned value was not caught")
+        exit(1)
+    }
+    if deferred != 0 {
+        println("FAIL: main's defer ran before main returned")
+        exit(1)
+    }
+    if string.length(s) != 5 {
+        println("FAIL: a local was released before main returned")
+        exit(1)
+    }
+    println("ok ${s}")
+    return string.length(s) - 5
+}

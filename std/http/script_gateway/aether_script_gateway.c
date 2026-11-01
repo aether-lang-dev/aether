@@ -178,11 +178,12 @@ static const char* sg_script_runtime_check(void* script, const char* so_path) {
 
 #if defined(__wasi__)
 /* WASI has no dynamic loader (and no dladdr): a mount fails at the load,
- * before there is a script to check. */
+ * before there is a script to check. Should a loader load one, what its
+ * runtime is cannot be read, so it is refused rather than run unchecked. */
 static const char* sg_script_runtime_check(void* script, const char* so_path) {
     (void)script;
     (void)so_path;
-    return NULL;
+    return "script_gateway: no way to tell which runtime a script runs on here (WASI)";
 }
 #else
 /* The reason a script was refused, per thread like std.dl's last error. */

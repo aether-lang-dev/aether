@@ -12446,6 +12446,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // In main(), all returns go through main_exit so scheduler_wait() always runs
             if (gen->in_main_function) {
+                /* The value is computed first, while the locals it reads
+                 * are live and inside the try frames it was written in;
+                 * then the defers run and the frames are popped, as any
+                 * other function's return does. The defers ran first: a
+                 * value read a released local (`return string.length(s)`
+                 * after `s`'s release), and once a panic in it was caught,
+                 * main went on with its defers run, and ran them again. */
+                int main_value = stmt->child_count > 0 && stmt->children[0] &&
+                                 stmt->children[0]->type != AST_PRINT_STATEMENT;
+                if (main_value) {
+                    print_indent(gen);
+                    fprintf(gen->output, "main_exit_ret = ");
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ";\n");
+                }
                 if (gen->defer_count > 0) {
                     emit_all_defers(gen);
                 }
@@ -12454,15 +12469,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * main() doesn't leak the panic frame.  goto and
                  * return are both non-local exits as far as the
                  * try-frame stack is concerned. */
-                if (stmt->child_count > 0 && stmt->children[0] &&
-                    stmt->children[0]->type != AST_PRINT_STATEMENT) {
-                    /* The value is read inside the try frames it was written
-                     * in, then they are popped: popped first, a panic while
-                     * reading it escaped the `try` around it. */
-                    print_indent(gen);
-                    fprintf(gen->output, "main_exit_ret = ");
-                    generate_expression(gen, stmt->children[0]);
-                    fprintf(gen->output, ";\n");
+                if (main_value) {
                     emit_try_pops_for_nonlocal_exit(gen);
                     print_line(gen, "goto main_exit;");
                     gen->main_exit_targeted = 1;
