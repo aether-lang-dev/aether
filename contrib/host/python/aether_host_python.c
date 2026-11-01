@@ -22,13 +22,17 @@
 // RTLD_GLOBAL they get isolated and segfault on shared singletons
 // like _Py_NoneStruct.
 
+// Python.h must precede every system header (it defines feature-test macros).
+#ifdef AETHER_HAS_PYTHON
+#include <Python.h>
+#endif
+
 #include "aether_host_python.h"
 #include "../../../runtime/aether_sandbox.h"
 #include "../../../runtime/aether_shared_map.h"
 #include "../../../std/string/aether_string.h"
 
 #ifdef AETHER_HAS_PYTHON
-#include <Python.h>
 #include "../aep_dl.h"
 #include <stdio.h>
 #include <stdlib.h>

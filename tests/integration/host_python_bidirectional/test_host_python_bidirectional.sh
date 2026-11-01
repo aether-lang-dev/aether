@@ -58,8 +58,6 @@ SOURCE_FILE="${AETHER_PYTHON_BRIDGE_SRC:-$ROOT/contrib/host/python/aether_host_p
 
 if ! gcc -o "$TMPDIR/t" \
     "$SOURCE_FILE" \
-    "$ROOT/runtime/aether_sandbox.c" \
-    "$ROOT/runtime/aether_shared_map.c" \
     $PY_CFLAGS -I"$ROOT" -I"$ROOT/contrib/host/python" -I"$ROOT/runtime" -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether -ldl -lm $RT_LIB -lpthread \
     -xc - 2>"$TMPDIR/cc.log" << 'CEOF'

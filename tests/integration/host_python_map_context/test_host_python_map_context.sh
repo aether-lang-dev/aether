@@ -58,8 +58,6 @@ trap 'rm -rf "$TMPDIR"' EXIT
 
 if ! ${CC:-gcc} -o "$TMPDIR/test_python_map_context" \
     "$ROOT/contrib/host/python/aether_host_python.c" \
-    "$ROOT/runtime/aether_sandbox.c" \
-    "$ROOT/runtime/aether_shared_map.c" \
     $PY_CFLAGS -I"$ROOT" -I"$ROOT/runtime" \
     -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX -rdynamic \
     -L"$ROOT/build" -laether $PY_LIBS -ldl -lm $RT_LIB -lpthread \
