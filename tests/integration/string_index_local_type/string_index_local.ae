@@ -1,0 +1,77 @@
+// #3479: a local bound to one byte of a string (`c = s[i]`) is typed by the
+// read, a byte, as a local bound to an element of a byte[] is. It used to be
+// left unresolved until codegen defaulted it to int, with a warning.
+// test_string_index_local_type.sh builds this with no warning and runs it;
+// the sweep runs it as well.
+import std.string
+
+extern exit(code: int)
+
+struct Holder {
+    text: string
+}
+
+returned() -> string {
+    return "ABC"
+}
+
+from_param(text: string, i: int) -> int {
+    c = text[i]
+    return c as int
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    s = "XYZ"
+    c = s[0]
+    check(c == 88, "a local's s[0] is 88")
+
+    check(from_param("PARAM", 0) == 80, "a parameter's text[0] is 80")
+
+    h = Holder { text: "FIELD" }
+    f = h.text[0]
+    check(f == 70, "a field's text[0] is 70")
+
+    r = returned()[0]
+    check(r == 65, "a returned string's [0] is 65")
+
+    let seq: *StringSeq = ["SEQ1", "SEQ2"]
+    head = string.seq_head(seq)
+    q = head[0]
+    check(q == 83, "a *StringSeq head's [0] is 83")
+
+    arr = ["ARR1", "ARR2"]
+    a = arr[0][0]
+    check(a == 65, "a string[] element's [0] is 65")
+
+    // A byte is unsigned: a high byte reads 195, not -61.
+    high = "\xC3"
+    b = high[0]
+    check(b == 195, "\"\\xC3\"[0] is 195")
+
+    d = s[0] + 1
+    check(d == 89, "s[0] + 1 is 89")
+    check(s[0] == 88, "s[0] == 88")
+
+    upper = false
+    match c {
+        65..=90 -> upper = true
+        _ -> upper = false
+    }
+    check(upper, "a match over 65..=90 takes the byte")
+
+    // The local is a byte, so arithmetic stored back into it wraps, as a
+    // byte[] element's local does; widen with `as int` to go below 0.
+    w = s[0]
+    w = w - 100
+    check(w == 244, "a byte local's 88 - 100 wraps to 244")
+    check(s[0] as int - 100 == -12, "s[0] as int - 100 is -12")
+
+    println("PASS: string_index_local_type")
+}
