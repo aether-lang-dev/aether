@@ -1,0 +1,55 @@
+// Regression (#3479): `s[i]` on a string is its byte i, typed `byte`,
+// read unsigned and checked against the string's length.
+//
+// The checker gave the read no type, so a local bound to it warned
+// "unresolved type in codegen, defaulting to int"; the generated C read a
+// plain `char`, which is signed on x86, so a byte past 127 (any non-ASCII
+// UTF-8 byte) read negative there and positive on ARM; and an index past
+// the end read past the string. The read now has the type
+// `string.bytes(s)[i]` has, and the value it has, and an index outside
+// `0 ..< length` panics, as a slice index does, where a `try` catches it.
+
+import std.string
+
+extern exit(code: int)
+
+check(got: int, want: int, what: string) {
+    if got != want {
+        println("FAIL: ${what}: ${got}, want ${want}")
+        exit(1)
+    }
+}
+
+first(text: string) -> int {
+    c = text[0]
+    return c
+}
+
+main() {
+    s = "é"
+    c = s[0]
+    check(c, 195, "a lead byte bound to a local")
+    check(s[1], 169, "a continuation byte")
+    check(s[0], string.bytes(s)[0], "the byte string.bytes reads")
+    check(first("A"), 65, "a parameter's byte")
+    t = "Az"
+    check(t[1] - t[0], 57, "arithmetic on two bytes")
+    caught = 0
+    i = 2
+    while i < 5 {
+        try {
+            x = t[i]
+            println("FAIL: no panic at ${i} (${x})")
+            exit(1)
+        } catch e {
+            if string.ends_with(e, "string index ${i} out of range for length 2") == 0 {
+                println("FAIL: message: ${e}")
+                exit(1)
+            }
+            caught = caught + 1
+        }
+        i = i + 1
+    }
+    check(caught, 3, "indexes past the end caught")
+    println("ok")
+}

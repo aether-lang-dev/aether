@@ -17835,6 +17835,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = clone_type(arr_type->element_type);
                 }
+                /* #3479: `s[i]` on a string reads one byte, the type
+                 * `string.bytes(s)[i]` has; a local bound to it was left to
+                 * codegen's `int` default. */
+                if (arr_type && arr_type->kind == TYPE_STRING &&
+                    (!expr->node_type || expr->node_type->kind != TYPE_BYTE)) {
+                    if (expr->node_type) free_type(expr->node_type);
+                    expr->node_type = create_type(TYPE_BYTE);
+                }
 
                 // Indexing a bare `ptr` (void*, element_type == NULL) has no
                 // element type: it lowers to a C index on `void*` and leaks

@@ -9815,6 +9815,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!s) return \"\";");
     print_line(gen, "    return aether_string_data(s);");
     print_line(gen, "}");
+    /* #3479: `s[i]` is the string's byte i, read unsigned (a plain char is
+     * signed on some targets), and checked against the string's length as a
+     * slice index is against the slice's; past the end it read past it. */
+    print_line(gen, "static inline uint8_t _aether_str_at(const void* s, int64_t i, const char* file, int line) {");
+    print_line(gen, "    uint64_t n = s ? (uint64_t)aether_string_length(s) : 0;");
+    print_line(gen, "    if ((uint64_t)i >= n) aether_string_fail_index(i, n, file, line);");
+    print_line(gen, "    return (uint8_t)_aether_safe_str(s)[i];");
+    print_line(gen, "}");
     /* Owned-print helpers: a heap-producing CALL in bare print/println
      * argument position (`println(string.concat(a, b))`) is a temporary
      * nothing else owns; these print it and free it in one composable
