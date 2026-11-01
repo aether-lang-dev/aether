@@ -223,6 +223,13 @@ static inline void* aether_slice_view_at_w(AetherSlice s, int64_t i, size_t elem
     return (char*)s.ptr + (uint64_t)i * elem_size;
 }
 
+/* The address `lo` elements into `p`. An empty slice can have a NULL
+ * store, and NULL + 0 is undefined in C (UBSan reports it), so offset 0
+ * is `p` itself. */
+static inline void* aether_slice_offset(void* p, int64_t lo, size_t elem_size) {
+    return lo ? (char*)p + (uint64_t)lo * elem_size : p;
+}
+
 /* `s[lo..hi]` — the half-open sub-slice [lo, hi), sharing the backing
  * store. `hi` past the end, `lo > hi`, or a negative bound is a panic;
  * on an unbounded view only `lo <= hi` and `lo >= 0` can be checked. */
@@ -233,7 +240,7 @@ static inline AetherSlice aether_slice_sub(AetherSlice s, int64_t lo, int64_t hi
         (s.len != AETHER_SLICE_UNBOUNDED && (uint64_t)hi > s.len)) {
         aether_slice_fail_range(lo, hi, s.len, file, line);
     }
-    AetherSlice d = aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+    AetherSlice d = aether_slice_derive(s, aether_slice_offset(s.ptr, lo, elem_size),
                                         (uint64_t)(hi - lo));
     /* #3072: a view of a bounded slice's elements, or of any view's from
      * an offset, owns nothing. */
@@ -248,7 +255,7 @@ static inline AetherSlice aether_slice_from(AetherSlice s, int64_t lo,
                                             const char* file, int line) {
     if (s.len == AETHER_SLICE_UNBOUNDED) {
         if (lo < 0) aether_slice_fail_range(lo, lo, s.len, file, line);
-        AetherSlice d = aether_slice_derive(s, (char*)s.ptr + (uint64_t)lo * elem_size,
+        AetherSlice d = aether_slice_derive(s, aether_slice_offset(s.ptr, lo, elem_size),
                                             AETHER_SLICE_UNBOUNDED);
         if (lo != 0) d.flags |= AETHER_SLICE_BORROWED;   /* #3072 */
         return d;

@@ -32,3 +32,7 @@ docs/api/** text eol=lf
 # A text an example reads and counts the bytes of: the same bytes on every
 # checkout, so the output it prints is the one its Output block holds.
 examples/07-applications/01-word-count/sample.md text eol=lf
+
+# Fuzz seeds are raw CBOR: a seed of one 0x0a byte reads as text to git and
+# would become 0d 0a under autocrlf.
+tests/fuzz/cbor/corpus/** binary

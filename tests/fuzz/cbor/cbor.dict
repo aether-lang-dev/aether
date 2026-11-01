@@ -1,0 +1,81 @@
+# CBOR libFuzzer dictionary
+
+# Major types (high 3 bits): 0..7 with zero argument
+"\x00"
+"\x20"
+"\x40"
+"\x60"
+"\x80"
+"\xa0"
+"\xc0"
+"\xe0"
+
+# Additional information headers for each major type:
+# Major 0: unsigned int
+"\x18"
+"\x19"
+"\x1a"
+"\x1b"
+
+# Major 1: negative int
+"\x38"
+"\x39"
+"\x3a"
+"\x3b"
+
+# Major 2: byte string
+"\x58"
+"\x59"
+"\x5a"
+"\x5b"
+"\x5f"
+
+# Major 3: text string
+"\x78"
+"\x79"
+"\x7a"
+"\x7b"
+"\x7f"
+
+# Major 4: array
+"\x98"
+"\x99"
+"\x9a"
+"\x9b"
+"\x9f"
+
+# Major 5: map
+"\xb8"
+"\xb9"
+"\xba"
+"\xbb"
+"\xbf"
+
+# Major 6: tag
+"\xd8"
+"\xd9"
+"\xda"
+"\xdb"
+
+# Major 7: simple & floats
+"\xf4"
+"\xf5"
+"\xf6"
+"\xf7"
+"\xf8"
+"\xf9"
+"\xfa"
+"\xfb"
+
+# Break byte
+"\xff"
+
+# Tag heads: 2, 3, 24, and 55799
+# Tag 2 (bignum positive): 0xc2
+"\xc2"
+# Tag 3 (bignum negative): 0xc3
+"\xc3"
+# Tag 24 (encoded CBOR data item): 0xd8\x18
+"\xd8\x18"
+# Tag 55799 (self-described CBOR): 0xd9\xd9\xf7
+"\xd9\xd9\xf7"
