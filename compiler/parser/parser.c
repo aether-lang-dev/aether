@@ -3053,6 +3053,13 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             }
 
             // Parse arguments
+            /* Inside the parentheses a `{` cannot open the body of an if, a
+             * while or a match whose condition the call is part of, so the
+             * arguments parse as they do anywhere: a struct literal, a call
+             * with a trailing block (#3478 review; the `if` expression and the
+             * statements alike). */
+            int saved_args_in_condition = parser->in_condition;
+            parser->in_condition = 0;
             if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
                 /* #2998: the `(` or `,` an argument has to follow, for the
                  * error when it is missing: `x = f(` used to compile. */
@@ -3073,6 +3080,7 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                             if (peek_token(parser) &&
                                 peek_token(parser)->type == TOKEN_RIGHT_PAREN)
                                 advance_token(parser);   /* as below */
+                            parser->in_condition = saved_args_in_condition;
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -3094,6 +3102,7 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                             if (peek_token(parser) &&
                                 peek_token(parser)->type == TOKEN_RIGHT_PAREN)
                                 advance_token(parser);
+                            parser->in_condition = saved_args_in_condition;
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -3103,10 +3112,12 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 } while (match_token(parser, TOKEN_COMMA));
 
                 if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
+                    parser->in_condition = saved_args_in_condition;
                     free_ast_node(func_call);
                     return NULL;
                 }
             }
+            parser->in_condition = saved_args_in_condition;
 
             // Capture the closing paren's line for the trailing-block
             // line check below. Both arg-list paths (empty via

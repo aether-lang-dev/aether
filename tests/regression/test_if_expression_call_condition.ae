@@ -6,11 +6,20 @@
 // arm's `{` as a trailing block, and the `else` after it was "Expected
 // LEFT_BRACE, got ELSE". The condition is now parsed under that guard, and
 // the arms inside their braces without it, so a call there may still take
-// a block.
+// a block. A call's arguments parse as they do anywhere, a struct literal
+// among them, in the expression form and the statement form alike: inside
+// the parentheses a `{` cannot open the body.
 
 extern exit(code: int)
 
+struct Point {
+    x: int
+    y: int
+}
+
 yes(x: int) -> bool -> x > 0
+
+same(p: Point, q: Point) -> bool -> p.x == q.x && p.y == q.y
 
 twice(f: fn) -> int {
     return call(f) * 2
@@ -33,5 +42,12 @@ main() {
     check(if yes(-1) { 1 } else if yes(2) { 2 } else { 3 }, 2, "an else-if chain of calls")
     // A call inside an arm still takes a trailing block.
     check(if yes(1) { twice() || -> 21 } else { 0 }, 42, "a trailing block in the then arm")
+    p = Point { x: 1, y: 2 }
+    check(if same(p, Point { x: 1, y: 2 }) == true { 1 } else { 0 }, 1, "a struct literal argument in the condition")
+    hit = 0
+    if same(p, Point { x: 1, y: 2 }) {
+        hit = 1
+    }
+    check(hit, 1, "a struct literal argument in an if statement's condition")
     println("ok")
 }
