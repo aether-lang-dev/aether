@@ -596,13 +596,14 @@ worked Python round-trip, that helper included.
 ## Per-call resource caps
 
 Hosts loading untrusted Aether scripts bound the script's
-resource use via two TLS-backed knobs in `include/libaether.h`:
+resource use via two knobs in `include/libaether.h`, a process-wide memory
+cap and a per-thread deadline:
 
 ```c
 #include <libaether.h>
 
 aether_set_memory_cap(64 * 1024 * 1024);   // 64 MiB ceiling
-aether_set_call_deadline(50);              // 50 ms wall-clock
+aether_set_call_deadline(50);              // this thread's deadline: 50 ms from now
 
 call_into_aether();                        // returns inside both bounds
 
@@ -645,7 +646,12 @@ process, inside an export or not: a message the scheduler has no memory to
 queue behind an actor's earlier messages, since it has no place that keeps
 their order.
 
-**Wall-clock deadline.** Per-thread monotonic (`CLOCK_MONOTONIC`).
+**Wall-clock deadline.** One instant per thread, on the monotonic clock
+(`CLOCK_MONOTONIC`): `aether_set_call_deadline(ms)` sets it to `ms` from the
+moment it is called. It is not a budget each call gets: every call the thread
+makes after that instant is cut at its first safe point, until the host sets
+a fresh deadline or `0`. A host that wants each call bounded sets the
+deadline before each one.
 The codegen emits a safe point, `if (aether_caps_armed && aether_exec_poll())
 { __aether_abort_call(); break; }`, at every `for` / `while` loop head
 under `--emit=lib` not under `--emit=exe` (zero overhead on

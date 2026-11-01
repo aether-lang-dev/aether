@@ -1356,7 +1356,7 @@ if kind == fs.KIND_OK {
 
 ## In-process script gateway (`std.http.script_gateway`)
 
-CGI-style ergonomics, one `.ae` script file per route, without paying the per-request fork/exec cost. The script is pre-compiled with `aetherc --emit=lib --with=net script.ae -o script.so` to a shared library; the host server `dlopen()`s it once at mount time and dispatches matched requests via a direct indirect call. Empirically ~50× faster than the equivalent subprocess-spawn dispatch.
+CGI-style ergonomics, one `.ae` script file per route, without paying the per-request fork/exec cost. The script is pre-compiled with `ae build --emit=lib --shared-runtime --with=net script.ae -o script.so` to a shared library; the host server `dlopen()`s it once at mount time and dispatches matched requests via a direct indirect call. Empirically ~50× faster than the equivalent subprocess-spawn dispatch.
 
 ### Script shape
 
@@ -1373,10 +1373,10 @@ import std.http
 }
 ```
 
-Build it as a shared library, `--with=net` is required because `std.http` is the `net` capability and `--emit=lib` is capability-empty by default:
+Build it as a shared library on the shared runtime (below). `--with=net` is required because `std.http` is the `net` capability and `--emit=lib` is capability-empty by default:
 
 ```sh
-aetherc --emit=lib --with=net greeting.ae -o /var/aether/scripts/greeting.so
+ae build --emit=lib --shared-runtime --with=net greeting.ae -o /var/aether/scripts/greeting.so
 ```
 
 ### Mount in the host
@@ -1398,14 +1398,20 @@ main() {
 
 Now `GET /greet/anything` runs `aether_script_handle` from `greeting.so` directly on the connection thread.
 
-On Linux, FreeBSD and macOS a script built the default way carries a runtime of its own and runs on it (#3481); built with `--shared-runtime`, it shares the host's. On Windows the script is a DLL loaded with `LoadLibrary`, which cannot bind to the host executable's runtime, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
+The script and the host run on one runtime: the script fills request and response objects the host's runtime frees. A script built the default way (`ae build --emit=lib`) carries a runtime of its own and keeps it (#3481), so it is refused at mount on every platform with `KIND_IO` and a message naming `--shared-runtime` (#3501). Build scripts on the shared runtime:
+
+```sh
+ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.so
+```
+
+On Linux and FreeBSD such a script runs on the host's runtime whatever the host was built with: an `ae build` program is linked `-rdynamic`, and the script's calls bind to its runtime. On macOS a script binds to the shared runtime it links, so its host is built with `ae build --shared-runtime` too (with a static host it is refused, naming that). On Windows the script is a DLL loaded with `LoadLibrary`, which cannot bind to the host executable's runtime, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
 
 ```sh
 ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
 ae build --shared-runtime host.ae -o host
 ```
 
-A host or script on its own static runtime is refused at mount with `KIND_IO` and a message naming `--shared-runtime`.
+A host or script that would run on a runtime of its own is refused at mount with `KIND_IO` and a message naming `--shared-runtime`.
 
 ### API
 
@@ -1418,7 +1424,7 @@ A host or script on its own static runtime is refused at mount with `KIND_IO` an
 | `KIND_OK` | 0 | mount succeeded |
 | `KIND_NOT_FOUND` | 1 | `so_path` is missing or unreadable |
 | `KIND_INVALID` | 6 | null arg, or `.so` missing the `aether_script_handle` entrypoint |
-| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); on Windows also a host or script not built with `--shared-runtime` |
+| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); also a script that carries a runtime of its own, on Windows a host not on the shared runtime, and on macOS a `--shared-runtime` script whose host is not on it (the message names `--shared-runtime`) |
 | `KIND_UNAVAILABLE` | 99 | a platform with no dynamic loader; no supported platform returns it |
 
 ### Sandbox
@@ -1971,7 +1977,7 @@ Coming from Java's `java.security`, Python's `cryptography`, or Go's `crypto/*`,
 
 - **Public-key crypto (RSA, ECDSA, Ed25519, X25519), symmetric ciphers (AES, ChaCha20-Poly1305), and key derivation (KDFs).** These live under [`std.cryptography`](../std/cryptography/) (`rsa`, `aes`, `chacha20poly1305`, `ed25519`, `x25519`, `p256`, `secp256k1`, `pem`, `asn1`, ...), pure-Aether ports with no OpenSSL dependency. Each family is a separate sub-module you import explicitly.
 - **URL-safe Base64 (RFC 4648 §5).** Standard alphabet only; URL-safe (`-` / `_` instead of `+` / `/`) is a separate variant the wrappers don't expose.
-- **Constant-time comparison.** Equality checks via `string.equals` are not constant-time; callers comparing hashes for security-sensitive cases need their own constant-time helper.
+- **Constant-time comparison.** Equality checks via `string.equals` are not constant-time. Compare a MAC tag, a hash or any other secret-derived bytes with `std.cryptography.ct`: `ct.bytes_eq(a, b, n)` for two buffers, or `ct.bytes_eq_slice(a, b)` for two `byte[]` (1 when equal; slices of different lengths are unequal), which take the same time wherever the bytes differ (`examples/03-std/11-cryptography.ae` checks an HMAC tag this way).
 
 Raw externs: `cryptography_sha1_hex_raw`, `cryptography_sha256_hex_raw` return a fresh counted string the caller owns, or NULL on failure. The Go-style wrappers translate the NULL into `("", "openssl unavailable")`.
 

@@ -23,7 +23,13 @@
 #ifdef _WIN32
 #include <windows.h>
 #define ea_sleep_ms(ms) Sleep(ms)
-static double ea_now_ms(void) {
+/* #3488: a free's cost is CPU work, so it is timed by the thread's own CPU
+ * clock where there is one fine enough: a wall clock counts the time the
+ * thread was not running, and on a loaded runner (macOS ASan) one 40,000-
+ * block free took 22 times one of 10,000. Windows' thread times tick at
+ * 15.6 ms, too coarse for a free of a few milliseconds: there it is the
+ * performance counter, as before. */
+static double ea_cpu_ms(void) {
     LARGE_INTEGER f, c;
     QueryPerformanceFrequency(&f);
     QueryPerformanceCounter(&c);
@@ -33,9 +39,9 @@ static double ea_now_ms(void) {
 #include <unistd.h>
 #include <time.h>
 #define ea_sleep_ms(ms) usleep((ms) * 1000)
-static double ea_now_ms(void) {
+static double ea_cpu_ms(void) {
     struct timespec t;
-    clock_gettime(CLOCK_MONOTONIC, &t);
+    clock_gettime(CLOCK_THREAD_CPUTIME_ID, &t);
     return (double)t.tv_sec * 1000.0 + (double)t.tv_nsec / 1e6;
 }
 #endif
@@ -235,20 +241,20 @@ TEST_CATEGORY(accounts_active_time_many_nested, TEST_CATEGORY_RUNTIME) {
     ASSERT_EQ(EA_DEEP, charged);
 }
 /* #3410: freeing an account of 4n blocks takes about four times as long as
- * one of n, not sixteen. The best of three runs of each, with another
+ * one of n, not sixteen. The best of five runs of each, with another
  * account live, so the table outlives the free. */
 static double ea_free_ms(int n) {
     double best = 1e18;
     AetherExecAccount* keep = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
     void** blocks = (void**)malloc(sizeof(void*) * (size_t)n);
-    for (int run = 0; run < 3; run++) {
+    for (int run = 0; run < 5; run++) {
         AetherExecAccount* a = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
         aether_exec_use(a, NULL);
         for (int i = 0; i < n; i++) blocks[i] = aether_caps_malloc(32);
         aether_exec_use(NULL, NULL);
-        double t0 = ea_now_ms();
+        double t0 = ea_cpu_ms();
         aether_exec_account_free(a);
-        double t = ea_now_ms() - t0;
+        double t = ea_cpu_ms() - t0;
         if (t < best) best = t;
         for (int i = 0; i < n; i++) aether_caps_free(blocks[i], 32);
     }

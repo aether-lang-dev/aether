@@ -46,6 +46,8 @@ typedef struct {
     ActorBase* ask;        // asked on every message when set
     ActorBase* watch;      // its count is read when the ask returns
     int pause_ms;          // slept before replying
+    ActorBase* hold_for;   // the reply waits until this has handled hold_want
+    int hold_want;
     atomic_int got;        // messages handled
     atomic_int result;     // what the ask returned
     atomic_int watched;    // `watch`'s count when it did
@@ -76,6 +78,15 @@ static void relief_step(ReliefActor* self) {
         atomic_store(&self->done, 1);
     }
     if (self->pause_ms) relief_sleep_ms(self->pause_ms);
+    /* #3483: the reply waits for an event, not a pause a slow runner
+     * outlasts: until `hold_for` has handled `hold_want`, or 2 s, inside
+     * the asker's 3 s timeout so a relief that fails shows as a short count. */
+    if (self->hold_for) {
+        uint64_t until = aether_now_ns() + 2000ULL * 1000000ULL;
+        while (atomic_load(&((ReliefActor*)self->hold_for)->got) < self->hold_want &&
+               aether_now_ns() < until)
+            relief_sleep_ms(1);
+    }
     scheduler_reply((ActorBase*)self, &value, sizeof value);   // no asker: nothing
     atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
 }
@@ -129,33 +140,47 @@ static void test_ask_relief_chain_back_to_waiting_core(void) {
     free(c);
 }
 
-/* An actor of a core waiting in an ask runs meanwhile: D, on A's core, is
- * sent 20 messages (they fit its mailbox, #3241) while A waits 400 ms for
- * B. They waited for A's reply. */
+/* An actor of a core waiting in an ask runs meanwhile: D, on A's core 0, is
+ * sent 20 messages (they fit its mailbox, #3241) once A waits for B, and B,
+ * on core 2, holds its reply until D has handled them (or 2 s pass). They
+ * waited for A's reply. #3483: B paused 400 ms instead, and on a slow runner
+ * (macOS ASan, Valgrind) the pause ended with 11 of the 20 handled. B is on
+ * core 2, as in the overflow cases below, so core 1 is the relief's choice
+ * for D: on core 1 B's long step was a core D could be moved behind, and B
+ * waited for D while D waited for B. */
 static void test_ask_relief_other_actor_runs(void) {
     scheduler_init(3);
-    ReliefActor* b = relief_actor(1);
+    ReliefActor* b = relief_actor(2);
     ReliefActor* d = relief_actor(0);
     ReliefActor* a = relief_actor(0);
-    b->pause_ms = 400;
+    b->hold_for = (ActorBase*)d;
+    b->hold_want = 20;
     a->ask = (ActorBase*)b;
     a->watch = (ActorBase*)d;
     scheduler_start();
 
     relief_send(a);
-    relief_sleep_ms(50);
+    /* B has A's ask, so A is waiting for it. */
+    uint64_t until = aether_now_ns() + 3000ULL * 1000000ULL;
+    while (atomic_load(&b->got) < 1 && aether_now_ns() < until) relief_sleep_ms(1);
+    int asked = atomic_load(&b->got) >= 1;
     for (int i = 0; i < 20; i++) relief_send(d);
     int done = relief_wait_done(a, 6000);
     scheduler_shutdown();
     scheduler_cleanup();
 
-    ASSERT_TRUE(done);
-    ASSERT_EQ(43, atomic_load(&a->result));
-    ASSERT_EQ(20, atomic_load(&a->watched));
-    ASSERT_EQ(20, atomic_load(&d->got));
+    /* Read before the actors are freed, so a failed check leaks nothing. */
+    int result = atomic_load(&a->result);
+    int watched = atomic_load(&a->watched);
+    int got = atomic_load(&d->got);
     free(a);
     free(b);
     free(d);
+    ASSERT_TRUE(asked);
+    ASSERT_TRUE(done);
+    ASSERT_EQ(43, result);
+    ASSERT_EQ(20, watched);
+    ASSERT_EQ(20, got);
 }
 
 /* An ask to an actor of the same core whose message is still in the batch

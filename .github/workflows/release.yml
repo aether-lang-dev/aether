@@ -40,7 +40,7 @@ jobs:
   # ================================================================== #
   prepare:
     name: Prepare release
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: github.ref == 'refs/heads/main'
 
     # `pull-requests: read` lets the decide step query PR state via gh,
@@ -57,7 +57,7 @@ jobs:
       tag:     ${{ steps.decide.outputs.tag }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -166,14 +166,14 @@ jobs:
     name: Auto-bump version
     needs: prepare
     if: needs.prepare.outputs.action == 'bump' || needs.prepare.outputs.action == 'refresh'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     permissions:
       contents: write
       pull-requests: write
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -383,7 +383,7 @@ jobs:
     name: Tag release
     needs: prepare
     if: needs.prepare.outputs.action == 'tag'
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     permissions:
       contents: write
@@ -393,7 +393,7 @@ jobs:
       version: ${{ steps.t.outputs.version }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         fetch-depth: 0
         fetch-tags: true
@@ -494,7 +494,7 @@ jobs:
             timeout: 80
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         # Full history + all tags. A shallow checkout of a tag does not
@@ -678,7 +678,7 @@ jobs:
         cd release && TZ=UTC+12 zip -r ../aether-${VERSION}-${{ matrix.target }}.zip *
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: aether-${{ matrix.target }}
         path: |
@@ -711,11 +711,11 @@ jobs:
         (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
         startsWith(github.ref, 'refs/tags/')
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         # Full history + all tags. A shallow checkout of a tag does not
@@ -733,7 +733,7 @@ jobs:
     # libc) comes from the sibling aether-crossbuild repo, which fetches
     # FreeBSD's published base.txz (BSD-licensed, freely redistributable).
     - name: Checkout aether-crossbuild
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
       with:
         repository: aether-lang-dev/aether-crossbuild
         path: crossbuild
@@ -908,7 +908,7 @@ jobs:
           || { echo "::error::the sysroot probe did not produce a FreeBSD binary"; exit 1; }
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: aether-freebsd-x86_64
         path: |
@@ -938,11 +938,11 @@ jobs:
         (needs.tag.result == 'success' && needs.tag.outputs.tag != '') ||
         startsWith(github.ref, 'refs/tags/')
       )
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 30
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
         fetch-depth: 0
@@ -1008,7 +1008,7 @@ jobs:
         ls -la "aether-${VERSION}-android-aarch64-sysroot.tar.xz"
 
     - name: Upload artifact
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: aether-android-aarch64
         path: |
@@ -1021,7 +1021,7 @@ jobs:
     # quietly drops a platform because its build broke is worse than no
     # release, and dropping it silently is what hid the last FreeBSD break.
     needs: [tag, build, build-freebsd, build-android]
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     if: |
       always() && needs.build.result == 'success'
       && needs.build-freebsd.result == 'success'
@@ -1034,12 +1034,12 @@ jobs:
       contents: write
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         ref: ${{ needs.tag.outputs.tag || github.ref }}
 
     - name: Download all artifacts
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         merge-multiple: true
 
@@ -1058,7 +1058,7 @@ jobs:
       run: python3 .github/scripts/build_release_body.py ${{ steps.tag.outputs.version }}
 
     - name: Create GitHub Release
-      uses: softprops/action-gh-release@v2
+      uses: softprops/action-gh-release@v3
       with:
         tag_name:   ${{ steps.tag.outputs.tag }}
         name:       Aether ${{ steps.tag.outputs.version }}

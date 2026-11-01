@@ -1091,6 +1091,11 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                 if (array_type && array_type->kind == TYPE_ARRAY && array_type->element_type) {
                     free_type(node->node_type);
                     node->node_type = clone_type(array_type->element_type);
+                } else if (array_type && array_type->kind == TYPE_STRING) {
+                    /* #3479: `s[i]` reads one byte of the string, as an
+                     * `int` from 0 to 255. */
+                    free_type(node->node_type);
+                    node->node_type = create_type(TYPE_INT);
                 }
             }
             break;

@@ -12446,6 +12446,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             }
             // In main(), all returns go through main_exit so scheduler_wait() always runs
             if (gen->in_main_function) {
+                /* The value is computed first, while the locals it reads
+                 * are live and inside the try frames it was written in;
+                 * then the defers run and the frames are popped, as any
+                 * other function's return does. The defers ran first: a
+                 * value read a released local (`return string.length(s)`
+                 * after `s`'s release), and once a panic in it was caught,
+                 * main went on with its defers run, and ran them again. */
+                int main_value = stmt->child_count > 0 && stmt->children[0] &&
+                                 stmt->children[0]->type != AST_PRINT_STATEMENT;
+                if (main_value) {
+                    print_indent(gen);
+                    fprintf(gen->output, "main_exit_ret = ");
+                    generate_expression(gen, stmt->children[0]);
+                    fprintf(gen->output, ";\n");
+                }
                 if (gen->defer_count > 0) {
                     emit_all_defers(gen);
                 }
@@ -12454,15 +12469,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * main() doesn't leak the panic frame.  goto and
                  * return are both non-local exits as far as the
                  * try-frame stack is concerned. */
-                emit_try_pops_for_nonlocal_exit(gen);
-                print_indent(gen);
-                if (stmt->child_count > 0 && stmt->children[0] &&
-                    stmt->children[0]->type != AST_PRINT_STATEMENT) {
-                    fprintf(gen->output, "main_exit_ret = ");
-                    generate_expression(gen, stmt->children[0]);
-                    fprintf(gen->output, "; goto main_exit;\n");
+                if (main_value) {
+                    emit_try_pops_for_nonlocal_exit(gen);
+                    print_line(gen, "goto main_exit;");
                     gen->main_exit_targeted = 1;
                 } else {
+                    emit_try_pops_for_nonlocal_exit(gen);
+                    print_indent(gen);
                     if (stmt->child_count > 0 && stmt->children[0] &&
                         stmt->children[0]->type == AST_PRINT_STATEMENT) {
                         generate_statement(gen, stmt->children[0]);
@@ -12656,10 +12669,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     print_line(gen, "return;");
                 } else if (stmt->child_count > 1) {
                     // Multi-value return: return a, b → return (_tuple_X_Y){a, b}
-                    /* Issue #501: drain try frames first; the
-                     * print_indent below is for the `return ...`
-                     * line, which lands after the drained pops. */
-                    emit_try_pops_for_nonlocal_exit(gen);
+                    /* Issue #501: drain try frames. Inside a `try` the
+                     * tuple is built first, into `_ae_tr`, and the frames
+                     * popped after, so a panic while building it is the
+                     * try's to catch. */
+                    int in_try = gen->try_frame_depth > 0;
                     print_indent(gen);
                     // Use the function's known return type if it's a tuple
                     // (avoids UNKNOWN types from unresolved identifiers)
@@ -12685,18 +12699,42 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     /* #2478: the positions are evaluated left to right. */
                     order_prelude_begin(gen, stmt->children, stmt->child_count, NULL);
                     int arrays = tuple_return_has_array(gen, stmt);
-                    if (arrays) fprintf(gen->output, "{ %s _ae_tr = (%s){", tname, tname);
+                    if (arrays || in_try) fprintf(gen->output, "{ %s _ae_tr = (%s){", tname, tname);
                     else fprintf(gen->output, "return (%s){", tname);
                     for (int j = 0; j < stmt->child_count; j++) {
                         if (j > 0) fprintf(gen->output, ", ");
                         emit_tuple_return_position(gen, stmt->children[j], j);
                     }
                     fprintf(gen->output, "};\n");
-                    if (arrays) {
-                        emit_tuple_array_fills(gen, stmt, "_ae_tr");
+                    if (arrays || in_try) {
+                        if (arrays) emit_tuple_array_fills(gen, stmt, "_ae_tr");
+                        emit_try_pops_for_nonlocal_exit(gen);
                         print_line(gen, "return _ae_tr; }");
                     }
                     if (owned) free_type(tuple);
+                } else if (gen->try_frame_depth > 0 && stmt->child_count > 0) {
+                    /* Inside a `try`: the value is computed inside its frames
+                     * and they are popped after, as the defer-aware path
+                     * does. Popped first, a panic while computing it (an
+                     * index out of range, a call that panics) escaped the
+                     * `try` written around it and ended the process. */
+                    print_line(gen, "{");
+                    gen->indent_level++;
+                    Type* fn_ret = gen->current_func_return_type;
+                    Type* ret_type = (fn_ret && fn_ret->kind != TYPE_VOID &&
+                                      fn_ret->kind != TYPE_UNKNOWN)
+                                     ? fn_ret : stmt->children[0]->node_type;
+                    const char* ret_c_type =
+                        (ret_type && ret_type->kind != TYPE_VOID && ret_type->kind != TYPE_UNKNOWN)
+                        ? c_result_type(ret_type) : "int";
+                    print_indent(gen);
+                    fprintf(gen->output, "%s _builder_ret = ", ret_c_type);
+                    emit_return_value(gen, stmt);
+                    fprintf(gen->output, ";\n");
+                    emit_try_pops_for_nonlocal_exit(gen);
+                    print_line(gen, "return _builder_ret;");
+                    gen->indent_level--;
+                    print_line(gen, "}");
                 } else {
                     /* Issue #501: drain try frames before the
                      * print_indent for the `return <expr>;` line. */

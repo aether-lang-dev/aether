@@ -4,8 +4,8 @@
  *   1. Load the library through std.dl: dlopen(RTLD_NOW | RTLD_LOCAL) on
  *      POSIX, LoadLibrary on Windows.
  *   2. Look up "aether_script_handle" in it.
- *   3. On Windows, check that the host and the script run on one runtime
- *      (see sg_host_runtime_check and sg_script_runtime_check).
+ *   3. Check that the host and the script run on one runtime
+ *      (sg_script_runtime_check; on Windows sg_host_runtime_check too).
  *   4. Allocate a ScriptMount struct holding (path_prefix, fn).
  *   5. Register a middleware on the host server that fires the fn
  *      when req->path starts with path_prefix.
@@ -14,10 +14,15 @@
  * fork, no exec, no IPC.
  */
 
+#if !defined(_WIN32) && !defined(_GNU_SOURCE)
+#define _GNU_SOURCE    /* glibc declares dladdr under it (#3501) */
+#endif
+
 #include "aether_script_gateway.h"
 #include "../../net/aether_http_server.h"
 #include "../../dl/aether_dl.h"
 #include "../../../runtime/aether_sandbox.h"
+#include "../../../runtime/aether_abi.h"              /* aether_runtime_abi, #3501 */
 #include "../../../runtime/utils/aether_compiler.h"  /* AETHER_TLS */
 
 #include <stdlib.h>
@@ -29,6 +34,7 @@
 #include <io.h>        /* _access */
 #else
 #include <unistd.h>    /* access */
+#include <dlfcn.h>     /* dladdr, #3501 */
 #endif
 
 /* (handle, kind, message) tuple: same ABI as fs.copy's tuple but
@@ -157,6 +163,70 @@ static const char* sg_script_runtime_check(void* script, const char* so_path) {
              so_path, rt_name);
     return g_sg_err;
 }
+#else  /* POSIX */
+/* #3501: on POSIX a host shares its runtime with a script when the script
+ * carries none (its runtime calls left unresolved, bound to the host's at
+ * dlopen: an `ae build` program is linked -rdynamic) or links the shared
+ * runtime the host runs on. One built the default way carries a runtime of
+ * its own and keeps it (on ELF `ae` links it -Bsymbolic, #3481): two runtimes,
+ * each with its own caps, config and panic frames, while the script fills
+ * objects the host's runtime frees. It is refused at mount, as on Windows.
+ *
+ * What runtime the script gets is read from where its loader finds one: the
+ * image that defines the runtime's `aether_runtime_abi` for the script's
+ * handle, against the image that holds this runtime's (the host's). */
+
+#if defined(__wasi__)
+/* WASI has no dynamic loader (and no dladdr): a mount fails at the load,
+ * before there is a script to check. Should a loader load one, what its
+ * runtime is cannot be read, so it is refused rather than run unchecked. */
+static const char* sg_script_runtime_check(void* script, const char* so_path) {
+    (void)script;
+    (void)so_path;
+    return "script_gateway: no way to tell which runtime a script runs on here (WASI)";
+}
+#else
+/* The reason a script was refused, per thread like std.dl's last error. */
+static AETHER_TLS char g_sg_err[512];
+
+static const void* sg_image_of(const void* addr) {
+    Dl_info info;
+    if (!addr || !dladdr(addr, &info)) return NULL;
+    return info.dli_fbase;
+}
+
+static const char* sg_script_runtime_check(void* script, const char* so_path) {
+    const void* host_rt = sg_image_of((const void*)&aether_runtime_abi);
+    void* abi = aether_dl_symbol_raw(script, "aether_runtime_abi");
+    /* No runtime in the script or what it links: its calls bind to the host's. */
+    if (!abi || !host_rt) return NULL;
+    const void* script_rt = sg_image_of(abi);
+    if (!script_rt || script_rt == host_rt) return NULL;
+    const void* script_img = sg_image_of(aether_dl_symbol_raw(script, "aether_script_handle"));
+    if (script_rt == script_img) {
+        snprintf(g_sg_err, sizeof(g_sg_err),
+                 "script_gateway: %s carries a runtime of its own, not the host's; "
+                 "build it with `ae build --emit=lib --shared-runtime`",
+                 so_path);
+        return g_sg_err;
+    }
+#if defined(__APPLE__)
+    /* The shared runtime, while the host runs on its own: a Mach-O image binds
+     * each import to the library that provides it, so the script runs on the
+     * shared runtime and the host on another. */
+    snprintf(g_sg_err, sizeof(g_sg_err),
+             "script_gateway: %s runs on the shared runtime and the host on its own; "
+             "build the host with `ae build --shared-runtime` too",
+             so_path);
+    return g_sg_err;
+#else
+    /* The shared runtime, while the host's is the program's own: on ELF the
+     * script's calls bind to the first definition in the global scope, the
+     * program's (linked -rdynamic), so both run on the host's. */
+    return NULL;
+#endif
+}
+#endif  /* __wasi__ */
 #endif  /* _WIN32 */
 
 _aether_sg_tuple script_gateway_mount_so_raw(void* server,
@@ -228,7 +298,6 @@ _aether_sg_tuple script_gateway_mount_so_raw(void* server,
         return out;
     }
 
-#ifdef _WIN32
     const char* script_err = sg_script_runtime_check(h, so_path);
     if (script_err) {
         /* Its runtime is not the host's, so nothing of it may run here. */
@@ -236,7 +305,6 @@ _aether_sg_tuple script_gateway_mount_so_raw(void* server,
         _aether_sg_tuple out = { 0, AETHER_SCRIPT_GATEWAY_KIND_IO, script_err };
         return out;
     }
-#endif
 
     ScriptMount* m = (ScriptMount*)calloc(1, sizeof(ScriptMount));
     if (!m) {

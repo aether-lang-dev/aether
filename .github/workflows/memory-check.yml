@@ -41,7 +41,7 @@ concurrency:
 jobs:
   valgrind-test:
     name: Valgrind Memory Leak Check
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # A healthy run takes about a minute: 66 s on PR #2601, 25 s of it the
     # Valgrind run itself. It used to take an hour, while idle actor threads
     # spun (#2592) and Valgrind's default lock starved the threads they waited
@@ -51,7 +51,7 @@ jobs:
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install dependencies
       run: |
@@ -133,7 +133,7 @@ jobs:
 
     - name: Upload Valgrind report
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: valgrind-report
         path: |
@@ -147,14 +147,14 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-26.04, macos-latest]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Setup GCC
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-26.04'
       run: |
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make
@@ -167,7 +167,7 @@ jobs:
     - name: Build with AddressSanitizer
       run: |
         make clean
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+        if [ "${{ matrix.os }}" = "ubuntu-26.04" ]; then
           # Linux supports LeakSanitizer
           make compiler CFLAGS="-fsanitize=address -fsanitize=leak -fno-omit-frame-pointer -O1 -g" \
                         LDFLAGS="-fsanitize=address -fsanitize=leak -pthread -lm"
@@ -183,7 +183,7 @@ jobs:
 
     - name: Run tests with ASAN
       run: |
-        if [ "${{ matrix.os }}" = "ubuntu-latest" ]; then
+        if [ "${{ matrix.os }}" = "ubuntu-26.04" ]; then
           export ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:abort_on_error=1"
           export LSAN_OPTIONS="report_objects=1"
         else
@@ -196,7 +196,7 @@ jobs:
     # nothing checked that, and every program leaked. Linux only: LeakSanitizer
     # is the whole point and macOS has no LSan.
     - name: Compiler leak gate
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-26.04'
       run: bash tests/scripts/check_compiler_leaks.sh
 
     # The C unit tests under UBSan, on macOS (Apple clang). On Linux they run
@@ -222,11 +222,11 @@ jobs:
 
   memory-profiling:
     name: Memory Usage Profiling
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Install dependencies
       run: |
@@ -269,7 +269,7 @@ jobs:
         echo "SUCCESS: Peak memory usage acceptable"
 
     - name: Upload profiling report
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: memory-profile
         path: |
@@ -282,11 +282,11 @@ jobs:
 
     strategy:
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-26.04, macos-latest]
 
     steps:
     - name: Checkout code
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     # Linux only, as the setup steps above. The macOS runner already has
     # clang and make; the brew fallback that ran there installed nothing the
@@ -294,7 +294,7 @@ jobs:
     # `brew update` failed the job whenever a tap preinstalled on the runner
     # could not be fetched (#2895).
     - name: Setup GCC
-      if: matrix.os == 'ubuntu-latest'
+      if: matrix.os == 'ubuntu-26.04'
       run: |
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc make

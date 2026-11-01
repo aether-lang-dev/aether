@@ -25,10 +25,11 @@
 // }
 // ```
 //
-// Build it as a shared library:
+// Build it as a shared library on the shared runtime, so it runs on the
+// host's (see "One runtime" below):
 //
 // ```sh
-// ae build --emit=lib greeting.ae -o /var/aether/scripts/greeting.so
+// ae build --emit=lib --shared-runtime --with=net greeting.ae -o /var/aether/scripts/greeting.so
 // ```
 //
 // And mount in the host:
@@ -51,23 +52,29 @@
 // Now `GET /greet/anything` runs `aether_script_handle` from
 // greeting.so directly on the connection thread.
 //
-// ### Windows
+// ### One runtime
 //
-// The library is a DLL, loaded with LoadLibrary. On Linux, FreeBSD and
-// macOS a script built the default way carries a runtime of its own and runs
-// on it (#3481); one built with --shared-runtime shares the host's. Windows
-// has no way for a DLL to bind to the host executable, so there the host and
-// every script are built on the shared runtime (aether.dll) and run on it
-// together:
+// A script fills request and response objects the host's runtime frees, so
+// the two run on one runtime. A script built the default way
+// (`ae build --emit=lib`) carries a runtime of its own and keeps it (#3481):
+// it is refused at mount, on every platform, with KIND_IO and a message
+// naming `--shared-runtime`, rather than run on two runtimes that each keep
+// their own caps, config and panic frames (#3501).
+//
+// On Linux and FreeBSD a `--shared-runtime` script runs on the host's
+// runtime whatever the host was built with: an `ae build` program is linked
+// -rdynamic, and the script's calls bind to its runtime. On macOS such a
+// script binds to the shared runtime it links, so its host is built with
+// `ae build --shared-runtime` too (with a static host it is refused, naming
+// that).
+// On Windows the library is a DLL, loaded with LoadLibrary, which cannot
+// bind to the host executable: there too the host and every script are
+// built on the shared runtime (aether.dll) and run on it together:
 //
 // ```sh
 // ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
 // ae build --shared-runtime host.ae -o host
 // ```
-//
-// A host or a script on its own static runtime is refused at mount with
-// KIND_IO and a message naming `--shared-runtime`, rather than run on two
-// runtimes that each keep their own caps, config and panic frames.
 //
 // ### Lifetime
 //
@@ -111,9 +118,11 @@ extern script_gateway_mount_so_raw(server: ptr, path_prefix: string, so_path: st
 //
 //   KIND_NOT_FOUND:    `so_path` is missing or unreadable
 //   KIND_INVALID:      null arg, or .so missing the entrypoint
-//   KIND_IO:           dlopen failure (incompatible ABI, etc.), or on
-//                      Windows a host or script not built with
-//                      --shared-runtime
+//   KIND_IO:           dlopen failure (incompatible ABI, etc.), or a
+//                      script that carries a runtime of its own, on Windows
+//                      a host not on the shared runtime, on macOS a
+//                      --shared-runtime script whose host is not on it:
+//                      the message names --shared-runtime
 mount(server: ptr, path_prefix: string, so_path: string) -> {
     return script_gateway_mount_so_raw(server, path_prefix, so_path)
 }

@@ -62,11 +62,20 @@ build_app() {
 # refused <app> <what> <label>: importing the library is refused, naming
 # what crosses and the rebuild.
 refused() {
-    if AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1; then
+    # #3485: in a temp directory of its own, so what the refusal leaves there
+    # can be seen: the stub directory the import wrote is removed.
+    tmp="$PWD/tmp_$1"
+    mkdir -p "$tmp"
+    tmp_env="$tmp"
+    command -v cygpath >/dev/null 2>&1 && tmp_env="$(cygpath -m "$tmp")"
+    if TMPDIR="$tmp_env" TEMP="$tmp_env" TMP="$tmp_env" \
+       AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1; then
         fail "$3: importing it was not refused" "$1.log"
     fi
     grep -qF "$2" "$1.log" || fail "$3: the refusal does not say \"$2\"" "$1.log"
     grep -qF "ae build --emit=lib --shared-runtime" "$1.log" || fail "$3: the refusal does not name the rebuild" "$1.log"
+    left="$(ls -d "$tmp"/ae-binimport-* 2>/dev/null)"
+    [ -z "$left" ] || fail "$3: the refused import left its stub directory ($left)" "$1.log"
 }
 
 # duty <library> <names own_runtime: 1 or 0> <label>

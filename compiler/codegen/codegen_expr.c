@@ -11981,6 +11981,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 }
                 int str_base = base && base->node_type &&
                                base->node_type->kind == TYPE_STRING;
+                /* #3479: a read of a string's byte, checked and unsigned
+                 * (a store through `s[i]` is refused by the checker). */
+                if (str_base && !gen->generating_lvalue) {
+                    fprintf(gen->output, "_aether_str_at(");
+                    generate_expression(gen, base);
+                    fprintf(gen->output, ", (int64_t)(");
+                    generate_read(gen, expr->children[1]);
+                    fprintf(gen->output, "), ");
+                    emit_slice_diag_file(gen, expr);
+                    fprintf(gen->output, ", %d)", expr->line);
+                    break;
+                }
                 /* #3113: an index into a fixed-size `T[N]` is checked
                  * against N, as a slice's is against its length: a local,
                  * a field, a parameter, an actor's state or a `const`

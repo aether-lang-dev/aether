@@ -5816,8 +5816,9 @@ static const char* ae_signature_string_struct(const _AeLibInfoMeta* m, int minor
  * library's strings) and a builder's config the library uses have no copy,
  * so a library that keeps its own runtime (every platform since #3481: on
  * ELF it no longer binds to the program's) has such an import refused,
- * naming the rebuild that gives both one runtime. */
-static void ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const char* module,
+ * naming the rebuild that gives both one runtime. 1 when it refused (the
+ * caller ends the build, after closing the stub it was writing, #3485). */
+static int ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const char* module,
                                       const char* so_path) {
     char ty[200];
     int refused = 0;
@@ -5858,8 +5859,8 @@ static void ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const 
         fprintf(stderr, "       Each copy of the runtime frees only what it made. Rebuild the "
                         "library with\n       `ae build --emit=lib --shared-runtime` so it runs "
                         "on the program's runtime.\n");
-        exit(1);
     }
+    return refused;
 }
 
 /* `module` NULL: the whole catalog (a bare import of a one-module
@@ -5873,8 +5874,11 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
     if (!mf) { ae_lib_close(h); return -1; }
     const _AeLibInfoMeta* m = mf();
     if (!m) { ae_lib_close(h); return -1; }
-    /* #2957: refused before anything of it is used or declared. */
-    if (ae_lib_check_compat(m, so_path) != 0) exit(1);
+    /* #2957: refused before anything of it is used or declared. A refusal
+     * returns 2, and the caller ends the build once the stub it was writing
+     * is closed and removed (#3485: exiting here left the file open, so
+     * Windows could not remove its directory). */
+    if (ae_lib_check_compat(m, so_path) != 0) { ae_lib_close(h); return 2; }
 
     fprintf(out, "// Auto-generated Aether interface for %s\n", so_path);
     fprintf(out, "// Synthesized by `ae` from the artifact's aether_lib_meta\n");
@@ -5944,7 +5948,10 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
 
     /* #2931: a string an export returns is handed over (schema >= 1.9). */
     int shared_rt = minor >= 5 && m->runtime && strcmp(m->runtime, "shared") == 0;
-    if (!shared_rt) ae_refuse_split_ownership(m, minor, module, so_path);
+    if (!shared_rt && ae_refuse_split_ownership(m, minor, module, so_path)) {
+        ae_lib_close(h);
+        return 2;
+    }
     int strings_handed = minor >= 9 && m->string_release && m->string_release[0];
     if (strings_handed && !shared_rt) {
         fprintf(out, "@extern(\"aether_string_import\") __aes_import(s: @aether ptr) -> string @heap\n");
@@ -6141,13 +6148,6 @@ static char* ae_source_module_path(const char* mod) {
     return NULL;
 }
 
-static int ae_source_module_exists(const char* mod) {
-    char* p = ae_source_module_path(mod);
-    int found = p != NULL;
-    free(p);
-    return found;
-}
-
 // Locate a binary artifact for module `mod` (libMOD.so / MOD.so /
 // libMOD.dylib / MOD.dylib) on the search path. Both extensions are
 // tried on every POSIX platform: a shared object is identified by its
@@ -6323,7 +6323,9 @@ static int ae_emit_binimport_stub(const char* mod, const char* so_path,
     if (!sf) return 0;   /* best-effort: leave the build to fail later */
     int rc = ae_generate_binimport_stub(so_path, dotted ? mod : NULL, sf);
     fclose(sf);
-    if (rc != 0) { remove(stub_path); return 0; }
+    if (rc != 0) remove(stub_path);
+    if (rc == 2) exit(1);   /* refused, and said why; atexit removes the stub dir */
+    if (rc != 0) return 0;
 
     // Make the stub resolvable and link the artifact (absolute path +
     // rpath so the produced binary finds it at run time). The .so runs on

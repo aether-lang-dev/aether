@@ -1872,24 +1872,33 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             // chain of any length is nested two-armed if-expressions and
             // types as they do, the last `else` still required.
             Token* t = advance_token(parser); // consume 'if'
+            /* #3478: the `{` after the condition opens the then arm, so a
+             * call that ends the condition takes no trailing block, as in an
+             * `if` statement or a `match` (the in_condition guard). The arms
+             * sit inside braces, where a call may take one again. */
+            int saved_in_condition = parser->in_condition;
+            parser->in_condition = 1;
             ASTNode* cond = parse_expression(parser);
-            if (!cond) return NULL;
-            if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-            ASTNode* then_expr = parse_expression(parser);
-            if (!then_expr) return NULL;
-            if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
-            if (!expect_token(parser, TOKEN_ELSE)) return NULL;
+            parser->in_condition = 0;
+            ASTNode* then_expr = NULL;
             ASTNode* else_expr = NULL;
-            Token* after_else = peek_token(parser);
-            if (after_else && after_else->type == TOKEN_IF) {
-                else_expr = parse_primary_expression(parser);
-                if (!else_expr) return NULL;
-            } else {
-                if (!expect_token(parser, TOKEN_LEFT_BRACE)) return NULL;
-                else_expr = parse_expression(parser);
-                if (!else_expr) return NULL;
-                if (!expect_token(parser, TOKEN_RIGHT_BRACE)) return NULL;
+            int ok = cond && expect_token(parser, TOKEN_LEFT_BRACE) &&
+                     (then_expr = parse_expression(parser)) != NULL &&
+                     expect_token(parser, TOKEN_RIGHT_BRACE) &&
+                     expect_token(parser, TOKEN_ELSE);
+            if (ok) {
+                Token* after_else = peek_token(parser);
+                if (after_else && after_else->type == TOKEN_IF) {
+                    else_expr = parse_primary_expression(parser);
+                    ok = else_expr != NULL;
+                } else {
+                    ok = expect_token(parser, TOKEN_LEFT_BRACE) &&
+                         (else_expr = parse_expression(parser)) != NULL &&
+                         expect_token(parser, TOKEN_RIGHT_BRACE);
+                }
             }
+            parser->in_condition = saved_in_condition;
+            if (!ok) return NULL;
 
             ASTNode* if_expr = create_ast_node(AST_IF_EXPRESSION, NULL, t->line, t->column);
             if_expr->node_type = create_type(TYPE_UNKNOWN);
@@ -3044,6 +3053,13 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
             }
 
             // Parse arguments
+            /* Inside the parentheses a `{` cannot open the body of an if, a
+             * while or a match whose condition the call is part of, so the
+             * arguments parse as they do anywhere: a struct literal, a call
+             * with a trailing block (#3478 review; the `if` expression and the
+             * statements alike). */
+            int saved_args_in_condition = parser->in_condition;
+            parser->in_condition = 0;
             if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
                 /* #2998: the `(` or `,` an argument has to follow, for the
                  * error when it is missing: `x = f(` used to compile. */
@@ -3064,6 +3080,7 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                             if (peek_token(parser) &&
                                 peek_token(parser)->type == TOKEN_RIGHT_PAREN)
                                 advance_token(parser);   /* as below */
+                            parser->in_condition = saved_args_in_condition;
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -3085,6 +3102,7 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                             if (peek_token(parser) &&
                                 peek_token(parser)->type == TOKEN_RIGHT_PAREN)
                                 advance_token(parser);
+                            parser->in_condition = saved_args_in_condition;
                             free_ast_node(func_call);
                             return NULL;
                         }
@@ -3094,10 +3112,12 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 } while (match_token(parser, TOKEN_COMMA));
 
                 if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
+                    parser->in_condition = saved_args_in_condition;
                     free_ast_node(func_call);
                     return NULL;
                 }
             }
+            parser->in_condition = saved_args_in_condition;
 
             // Capture the closing paren's line for the trailing-block
             // line check below. Both arg-list paths (empty via
