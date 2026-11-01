@@ -42,9 +42,9 @@ concurrency:
 jobs:
   collect:
     name: Fold settled fragments
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
       with:
         # The collector reads each fragment's commit time to decide whether
         # it has settled, so it needs the history, not a shallow clone.

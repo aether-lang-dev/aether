@@ -92,11 +92,11 @@ jobs:
   # ============================================================
   windows-cross:
     name: Windows / cross-build (x86_64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     timeout-minutes: 25
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install toolchain
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils
@@ -105,7 +105,7 @@ jobs:
     # mingw-w64 headers + CRT sources, so there is no sysroot to fetch.
     - name: Restore zig toolchain cache
       id: zig_cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: |
           .zig
@@ -124,7 +124,7 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.zig_cache.outputs.cache-hit != 'true'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: |
           .zig
@@ -159,7 +159,7 @@ jobs:
 
     - name: Upload cross-built binaries
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: aether-windows-cross-x86_64
         path: |
@@ -181,7 +181,7 @@ jobs:
   # ============================================================
   windows-wine:
     name: Windows / runtime under Wine (x86_64)
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-26.04
     # Dependency installation can take 20 minutes on hosted runners; leave
     # time for the complete cross-build and runtime sweep after setup.
     timeout-minutes: 60
@@ -189,7 +189,7 @@ jobs:
     # a gate, so it must not add latency to an otherwise green run.
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     - name: Install toolchain
       run: |
@@ -263,7 +263,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Set up MSYS2 / MinGW-w64
       uses: msys2/setup-msys2@v2
@@ -293,7 +293,7 @@ jobs:
     # key already embeds the source hash).
     - name: Restore miniaudio object cache
       id: audio_cache
-      uses: actions/cache/restore@v4
+      uses: actions/cache/restore@v5
       with:
         path: .ci-cache
         key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
@@ -322,14 +322,14 @@ jobs:
       if: >-
         github.event_name == 'push' && github.ref == 'refs/heads/main'
         && steps.audio_cache.outputs.cache-hit != 'true' && matrix.target == 'ci'
-      uses: actions/cache/save@v4
+      uses: actions/cache/save@v5
       with:
         path: .ci-cache
         key: audio-obj-windows-${{ matrix.root }}-${{ hashFiles('std/audio/miniaudio.h', 'std/audio/stb_vorbis.c', 'std/audio/aether_audio.c', 'std/audio/aether_audio.h') }}
 
     - name: Upload Windows binaries
       if: matrix.target == 'ci'
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: aether-windows-${{ matrix.root }}
         path: |
@@ -383,7 +383,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     # MINGW64 (msvcrt), the C runtime the baseline was measured on: a heap
     # count is the C runtime's own.
@@ -420,7 +420,7 @@ jobs:
     # failure is read from.
     - name: Upload the grid's report
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: ownership-grid-${{ matrix.slot }}
         path: |
@@ -446,7 +446,7 @@ jobs:
         shell: msys2 {0}
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
     - name: Set up MSYS2 / MinGW-w64
       uses: msys2/setup-msys2@v2
       with:
@@ -470,7 +470,7 @@ jobs:
       run: make ownership-grid-check OWNERSHIP_GRID_ARGS="--mode both --update-baseline"
     - name: Upload the baseline
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: ownership-grid-baseline
         path: |
@@ -491,7 +491,7 @@ jobs:
 
     steps:
     - name: Checkout repository
-      uses: actions/checkout@v4
+      uses: actions/checkout@v5
 
     - name: Set up Visual Studio developer environment
       uses: ilammy/msvc-dev-cmd@v1
@@ -533,7 +533,7 @@ jobs:
     # is the one the windows-cross job built; the script runs under Git Bash,
     # with cl.exe on PATH from msvc-dev-cmd.
     - name: Download the cross-built aetherc
-      uses: actions/download-artifact@v4
+      uses: actions/download-artifact@v7
       with:
         name: aether-windows-cross-x86_64
         path: build/cross

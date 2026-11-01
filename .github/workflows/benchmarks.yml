@@ -58,7 +58,7 @@ jobs:
     timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 120 || 30 }}
 
     steps:
-    - uses: actions/checkout@v4
+    - uses: actions/checkout@v5
 
     # gcc and g++ for C, C++ and Aether; GNU time for CPU time and memory.
     - name: Install C, C++ and GNU time
@@ -66,12 +66,12 @@ jobs:
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
         sudo apt-get install -y gcc g++ make time
 
-    - uses: actions/setup-go@v5
+    - uses: actions/setup-go@v6
       with:
         go-version: stable
         cache: false
 
-    - uses: actions/setup-java@v4
+    - uses: actions/setup-java@v5
       with:
         distribution: temurin
         java-version: '21'
@@ -129,7 +129,7 @@ jobs:
 
     - name: Upload results
       if: always()
-      uses: actions/upload-artifact@v4
+      uses: actions/upload-artifact@v6
       with:
         name: benchmark-results
         path: |
