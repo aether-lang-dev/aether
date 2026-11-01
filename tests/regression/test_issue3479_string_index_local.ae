@@ -1,0 +1,125 @@
+// #3479: Binding one byte of a string to a local leaves the local's type
+// to codegen (defaulting to int with a warning).
+//
+// Every way the string can arrive:
+// - a local
+// - a parameter
+// - a struct field
+// - a function's return value (f()[0])
+// - a string from a *StringSeq and a string[] element
+// High byte ("\xC3"[0]) must read 195, not -61.
+// Arithmetic (s[0] + 1), comparison (s[0] == 88), and match over range work.
+// Compiled with warnings as errors (verified via build log check).
+
+import std.os
+import std.fs
+import std.mem
+import std.list
+import std.string
+
+extern exit(code: int)
+
+struct StringContainer {
+    text: string
+}
+
+fn_return_str() -> string {
+    return "ABC"
+}
+
+check_param(param_str: string, index: int) -> int {
+    c = param_str[index]
+    return c as int
+}
+
+check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+prints_a_warning(log: string) -> bool {
+    if string.contains(log, "warning[") == 1 {
+        return true
+    }
+    return string.starts_with(log, "warning:") == 1 || string.contains(log, "\nwarning:") == 1
+}
+
+main() {
+    // 1. Local string
+    s = "XYZ"
+    c_local = s[0]
+    check(c_local == 88, "local s[0] == 88")
+
+    // 2. Parameter
+    c_param = check_param("PARAM", 0)
+    check(c_param == 80, "param string[0] == 80")
+
+    // 3. Struct field
+    cont = StringContainer { text: "FIELD" }
+    c_field = cont.text[0]
+    check(c_field == 70, "struct field text[0] == 70")
+
+    // 4. Function return value
+    c_fn = fn_return_str()[0]
+    check(c_fn == 65, "function return[0] == 65")
+
+    // 5. String from a *StringSeq and string[] element
+    let seq: *StringSeq = ["SEQ1", "SEQ2"]
+    s_from_seq = string.seq_head(seq)
+    c_seq = s_from_seq[0]
+    check(c_seq == 83, "*StringSeq head string[0] == 83 ('S')")
+
+    arr = ["ARR1", "ARR2"]
+    c_arr = arr[0][0]
+    check(c_arr == 65, "string[] element[0][0] == 65 ('A')")
+
+    // 6. High byte: "\xC3"[0] must read 195, not -61
+    high_str = "\xC3"
+    c_high = high_str[0]
+    check(c_high == 195, "high byte \"\\xC3\"[0] must read 195, not -61")
+
+    // 7. Arithmetic and comparison
+    d = s[0] + 1
+    check(d == 89, "d = s[0] + 1 must be 89")
+    check(s[0] == 88, "s[0] == 88 comparison")
+
+    // 8. Match over a range
+    matched_uppercase = false
+    match c_local {
+        65..=90 -> matched_uppercase = true
+        _ -> matched_uppercase = false
+    }
+    check(matched_uppercase, "match c { 65..=90 -> ... } works for inferred local")
+
+    // 9. Warnings as errors verification:
+    // Build this test with ae build and verify no warnings are emitted in the build log.
+    out_dir = "build"
+    log_file = "${out_dir}/test_3479_build.log"
+    argv = list.new()
+    list.add(argv, "build")
+    list.add(argv, "--with=all")
+    list.add(argv, "tests/regression/test_issue3479_string_index_local.ae")
+    list.add(argv, "--emit=csrc")
+    tok, serr = os.spawn_proc_to("./build/ae", argv, null, log_file)
+    list.free(argv)
+    if serr != "" {
+        println("FAIL: spawn failed: ${serr}")
+        exit(1)
+    }
+    toks = list.new()
+    list.add(toks, mem.long_to_ptr(tok as long))
+    _, code, _ = os.wait_any(toks)
+    list.free(toks)
+    check(code == 0, "ae build exited 0")
+    build_log, _ = fs.read(log_file)
+    _ = fs.delete(log_file)
+    _ = fs.delete("build/test_issue3479_string_index_local.c")
+    _ = fs.delete("build/test_issue3479_string_index_local.h")
+    _ = fs.delete("build/test_issue3479_string_index_local.catalog.json")
+
+    check(!prints_a_warning(build_log), "build log must not contain any warnings (clean build)")
+
+    println("PASS: issue3479_string_index_local")
+}
