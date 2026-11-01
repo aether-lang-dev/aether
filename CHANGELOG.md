@@ -14,6 +14,78 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.871.0]
+
+### Fixed
+
+- **Compile time grows linearly with a program's size again (#3499).**
+  Three lookups by name scanned the whole program for each call or each
+  top-level node: the checker's callee and extern lookups, codegen's
+  function-pointer globals and its set of function names that a local may
+  shadow, and the merge's import prefixes. A chain of 8000 functions took
+  1 s here and 22 to 25 s on the release's macOS x86_64 runner, which
+  failed the release twice. Each lookup is now answered from an index
+  (the checker's clause index, codegen's program index, a hashed name set),
+  and the same chain compiles in a third of a second; at 32000 functions,
+  1.3 s instead of about 20. `order_effects_scaling` now compares 4000 and
+  16000 functions on the same runner, so it no longer depends on the
+  runner's speed.
+
+- **An `if` used as a value parses when its condition ends in a call
+  (#3478).** `s = if leap(year) { "leap" } else { "common" }` failed with
+  "Expected LEFT_BRACE, got ELSE": the expression form parsed its condition
+  without the guard the `if` statement uses, so the call took the then
+  arm's `{` as a trailing block. A call inside an arm still takes one.
+
+- **`s[i]` on a string is a checked `int` from 0 to 255 (#3479).** A local
+  bound to it warned that its type was left to codegen; the read was a
+  plain `char`, so a byte past 127 (any non-ASCII UTF-8 byte) was negative
+  on x86 and positive on ARM; and an index past the end read past the
+  string. It is now an `int` with the value `string.bytes(s)[i]` has.
+  `s[length]` is the terminator, 0, as a C-style scan reads it, and an
+  index below 0 or past the terminator is the panic `string index 5 out of
+  range for length 3`, which a `try` catches, as a slice index's is.
+
+- **A refused binary import leaves nothing in the temp directory (#3485).**
+  `ae` refused it from inside the stub it was writing, so on Windows the
+  open file kept its `ae-binimport-<pid>-<n>` directory from being
+  removed: one more for every refused build, over a thousand on one
+  development machine. The stub is now closed and removed before `ae`
+  exits.
+
+- **Three reference statements now say what the runtime does (#3480).** A
+  handler that takes an ask and returns without a `reply` ends the ask at
+  once with "the handler returned without replying"; the language
+  reference said the caller timed out. std.cryptography's note on
+  constant-time comparison now points to `ct.bytes_eq` and
+  `ct.bytes_eq_slice` instead of telling callers to write their own. And
+  `aether_set_call_deadline(ms)` sets one instant per thread, `ms` from
+  when it is called, which every later call is cut at until a fresh
+  deadline, not a budget per call (emit-lib.md and libaether.h).
+
+- **`script_gateway.mount` refuses a script that carries a runtime of its
+  own on Linux, FreeBSD and macOS too (#3501).** Since #3481 a script built
+  the default way (`ae build --emit=lib`) keeps its own runtime on every
+  platform, and on POSIX it was mounted unchecked: two runtimes, each with
+  its own caps, config and panic frames, while the script filled objects
+  the host's runtime frees. It is now refused at mount with `KIND_IO` and a
+  message naming `--shared-runtime`, as Windows refuses it. A
+  `--shared-runtime` script mounts on Linux and FreeBSD whatever the host
+  was built with; on macOS the host is built with `--shared-runtime` too.
+  The module's documentation now builds scripts with `--shared-runtime`.
+
+- **A panic while a `return` inside a `try` computes its value is caught,
+  and `main` computes what it returns before its defers run.** A `return`
+  with no defers to run popped the try frames before it computed the
+  value, so `try { return xs[i] } catch e { ... }` with `i` out of range,
+  or a returned call that panics, ended the process with "panic outside
+  any try/catch". The value is now computed inside the frames and they are
+  popped after, for a single value and a tuple, as a return with defers
+  already did. `main` ran its defers, and released its owned locals,
+  before computing the value it returns: `return string.length(s)` read a
+  released `s`. It now computes the value first, as every other function
+  does.
+
 ## [0.870.0]
 
 ### Added
