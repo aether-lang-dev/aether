@@ -23,6 +23,13 @@
 #   5. a script built on its own static runtime
 #   6. a host built on its own static runtime
 #
+# On POSIX (#3501) the same refusal holds for a script that carries a runtime
+# of its own (`ae build --emit=lib`, the default):
+#   5. it is refused with KIND_IO naming --shared-runtime;
+#   6. a --shared-runtime script on the static host mounts on ELF, where its
+#      calls bind to the host's runtime, and is refused on macOS, where it
+#      would run on the shared runtime beside the host's.
+#
 # DESIGN — same defensive shape the proxy_pool tests landed in:
 #   - No `set -e` (transient curl flakes shouldn't kill the script
 #     silently; explicit `fail` calls do the right thing).
@@ -265,5 +272,68 @@ if [ "$WINDOWS" = "1" ]; then
     fi
     echo "  [PASS] http_script_gateway: 6/6 (happy path, static fallback, missing .dll, no entrypoint, static script, static host)"
 else
-    echo "  [PASS] http_script_gateway: 4/4 (happy path, static fallback, missing .so, no entrypoint)"
+    # --- Test 5 (#3501): a script built the default way carries a runtime of
+    # its own and keeps it (-Bsymbolic on ELF, #3481): refused at mount with
+    # KIND_IO naming --shared-runtime, as on Windows ---
+    OWN_SO="$TMPDIR/own_runtime$SO_EXT"
+    if ! AETHER_HOME="$ROOT" "$AE" build --emit=lib --with=net \
+            "$SCRIPT_DIR/script.ae" -o "$OWN_SO" >"$TMPDIR/own_script.build.log" 2>&1; then
+        echo "  [FAIL] ae build --emit=lib script.ae (its own runtime):"
+        head -30 "$TMPDIR/own_script.build.log"
+        exit 1
+    fi
+    "$TMPDIR/host" "$BAD_PORT" "$OWN_SO" >"$TMPDIR/host_own.log" 2>&1
+    RC=$?
+    [ "$RC" != "0" ] || fail "own-runtime script: host exited 0 (expected non-zero)"
+    if ! grep -q "kind=5" "$TMPDIR/host_own.log" ||
+       ! grep -q -- "--shared-runtime" "$TMPDIR/host_own.log"; then
+        echo "  [FAIL] own-runtime script: expected kind=5 (KIND_IO) naming --shared-runtime:"
+        head -10 "$TMPDIR/host_own.log"
+        exit 1
+    fi
+
+    # --- Test 6: a --shared-runtime script on this static host. On ELF its
+    # calls bind to the host's runtime (the program is linked -rdynamic, and
+    # the global scope finds its definitions first): it mounts. A Mach-O
+    # image binds each import to its library, so on macOS it would run on
+    # the shared runtime beside the host's own: refused, naming the host's
+    # rebuild. Only where this toolchain built the shared runtime. ---
+    if [ -d "$ROOT/build/shared" ]; then
+        SHARED_SO="$TMPDIR/shared_script$SO_EXT"
+        if ! AETHER_HOME="$ROOT" "$AE" build --emit=lib --shared-runtime --with=net \
+                "$SCRIPT_DIR/script.ae" -o "$SHARED_SO" >"$TMPDIR/shared_script.build.log" 2>&1; then
+            echo "  [FAIL] ae build --emit=lib --shared-runtime script.ae:"
+            head -30 "$TMPDIR/shared_script.build.log"
+            exit 1
+        fi
+        if [ "$(uname -s)" = Darwin ]; then
+            "$TMPDIR/host" "$BAD_PORT" "$SHARED_SO" >"$TMPDIR/host_shared.log" 2>&1
+            RC=$?
+            [ "$RC" != "0" ] || fail "shared script, static host: host exited 0 (expected non-zero on macOS)"
+            if ! grep -q "kind=5" "$TMPDIR/host_shared.log" ||
+               ! grep -q -- "--shared-runtime" "$TMPDIR/host_shared.log"; then
+                echo "  [FAIL] shared script, static host: expected kind=5 naming --shared-runtime:"
+                head -10 "$TMPDIR/host_shared.log"
+                exit 1
+            fi
+        else
+            "$TMPDIR/host" "$BAD_PORT" "$SHARED_SO" >"$TMPDIR/host_shared.log" 2>&1 &
+            HOST_PID=$!
+            deadline=$(($(date +%s) + 15))
+            while [ "$(date +%s)" -lt "$deadline" ] && ! grep -q '^READY$' "$TMPDIR/host_shared.log" 2>/dev/null; do
+                kill -0 "$HOST_PID" 2>/dev/null || break
+                sleep 0.1
+            done
+            grep -q '^READY$' "$TMPDIR/host_shared.log" 2>/dev/null || {
+                echo "  [FAIL] shared script, static host: the mount was refused on ELF:"
+                head -10 "$TMPDIR/host_shared.log"
+                exit 1
+            }
+            kill_server "$HOST_PID"
+            HOST_PID=""
+        fi
+        echo "  [PASS] http_script_gateway: 6/6 (happy path, static fallback, missing .so, no entrypoint, own-runtime script, shared script)"
+    else
+        echo "  [PASS] http_script_gateway: 5/5 (happy path, static fallback, missing .so, no entrypoint, own-runtime script; no shared runtime built here)"
+    fi
 fi
