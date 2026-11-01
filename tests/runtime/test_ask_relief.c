@@ -79,9 +79,10 @@ static void relief_step(ReliefActor* self) {
     }
     if (self->pause_ms) relief_sleep_ms(self->pause_ms);
     /* #3483: the reply waits for an event, not a pause a slow runner
-     * outlasts: until `hold_for` has handled `hold_want`, or 3 s. */
+     * outlasts: until `hold_for` has handled `hold_want`, or 2 s, inside
+     * the asker's 3 s timeout so a relief that fails shows as a short count. */
     if (self->hold_for) {
-        uint64_t until = aether_now_ns() + 3000ULL * 1000000ULL;
+        uint64_t until = aether_now_ns() + 2000ULL * 1000000ULL;
         while (atomic_load(&((ReliefActor*)self->hold_for)->got) < self->hold_want &&
                aether_now_ns() < until)
             relief_sleep_ms(1);
@@ -139,14 +140,17 @@ static void test_ask_relief_chain_back_to_waiting_core(void) {
     free(c);
 }
 
-/* An actor of a core waiting in an ask runs meanwhile: D, on A's core, is
- * sent 20 messages (they fit its mailbox, #3241) once A waits for B, and B
- * holds its reply until D has handled them (or 3 s pass). They waited for
- * A's reply. #3483: B paused 400 ms instead, and on a slow runner (macOS
- * ASan, Valgrind) the pause ended with 11 of the 20 handled. */
+/* An actor of a core waiting in an ask runs meanwhile: D, on A's core 0, is
+ * sent 20 messages (they fit its mailbox, #3241) once A waits for B, and B,
+ * on core 2, holds its reply until D has handled them (or 2 s pass). They
+ * waited for A's reply. #3483: B paused 400 ms instead, and on a slow runner
+ * (macOS ASan, Valgrind) the pause ended with 11 of the 20 handled. B is on
+ * core 2, as in the overflow cases below, so core 1 is the relief's choice
+ * for D: on core 1 B's long step was a core D could be moved behind, and B
+ * waited for D while D waited for B. */
 static void test_ask_relief_other_actor_runs(void) {
     scheduler_init(3);
-    ReliefActor* b = relief_actor(1);
+    ReliefActor* b = relief_actor(2);
     ReliefActor* d = relief_actor(0);
     ReliefActor* a = relief_actor(0);
     b->hold_for = (ActorBase*)d;
