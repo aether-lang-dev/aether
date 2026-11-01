@@ -54,19 +54,45 @@ no_leaks() {
 }
 
 # build_app <app> <label>: ae build the app and run it; its output in $OUT.
+# Checks that a successful binary-import build leaves no stub directory behind (#3485).
 build_app() {
-    AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1 || fail "$2: ae build $1.ae" "$1.log"
-    OUT="$("./$1$EXE" 2>&1)" || { echo "$OUT"; fail "$2: $1 failed"; }
+    app="$1"; label="$2"
+    stubs_dir="$(mktemp -d)"
+    if ! TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
+         AETHER_HOME="$ROOT" "$AE" build "$app.ae" -o "$app" >"$app.log" 2>&1; then
+        rm -rf "$stubs_dir"
+        fail "$label: ae build $app.ae" "$app.log"
+    fi
+    for s in "$stubs_dir"/ae-binimport-*; do
+        if [ -e "$s" ]; then
+            rm -rf "$stubs_dir"
+            fail "$label: successful build left stub directory behind"
+        fi
+    done
+    rm -rf "$stubs_dir"
+    OUT="$("./$app$EXE" 2>&1)" || { echo "$OUT"; fail "$label: $app failed"; }
 }
 
 # refused <app> <what> <label>: importing the library is refused, naming
-# what crosses and the rebuild.
+# what crosses and the rebuild. Also checks that the refused build leaves
+# no stub directory behind (#3485).
 refused() {
-    if AETHER_HOME="$ROOT" "$AE" build "$1.ae" -o "$1" >"$1.log" 2>&1; then
-        fail "$3: importing it was not refused" "$1.log"
+    app="$1"; what="$2"; label="$3"
+    stubs_dir="$(mktemp -d)"
+    if TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
+       AETHER_HOME="$ROOT" "$AE" build "$app.ae" -o "$app" >"$app.log" 2>&1; then
+        rm -rf "$stubs_dir"
+        fail "$label: importing it was not refused" "$app.log"
     fi
-    grep -qF "$2" "$1.log" || fail "$3: the refusal does not say \"$2\"" "$1.log"
-    grep -qF "ae build --emit=lib --shared-runtime" "$1.log" || fail "$3: the refusal does not name the rebuild" "$1.log"
+    for s in "$stubs_dir"/ae-binimport-*; do
+        if [ -e "$s" ]; then
+            rm -rf "$stubs_dir"
+            fail "$label: refused build left stub directory behind"
+        fi
+    done
+    rm -rf "$stubs_dir"
+    grep -qF "$what" "$app.log" || fail "$label: the refusal does not say \"$what\"" "$app.log"
+    grep -qF "ae build --emit=lib --shared-runtime" "$app.log" || fail "$label: the refusal does not name the rebuild" "$app.log"
 }
 
 # duty <library> <names own_runtime: 1 or 0> <label>
@@ -127,9 +153,39 @@ echo "$HOUT" | grep -q "^host: aether_text_string_release OK$" || { echo "$HOUT"
 no_leaks "C host" "./host$EXE" "./libtext$SO_EXT"
 cd "$WORK"
 
+# #3485: Incompatible library refusal (ae_lib_check_compat) leaves no stub directory behind.
+mkdir -p "$WORK/compat"
+cp "$SCRIPT_DIR/app_badcompat.ae" "$WORK/compat/"
+cd "$WORK/compat"
+case "$(uname -s)" in
+    Darwin) SHARED_FLAG="-dynamiclib" ;;
+    *)      SHARED_FLAG="-shared" ;;
+esac
+$CC $SHARED_FLAG -fPIC "$SCRIPT_DIR/badcompat.c" -o "libbadcompat$SO_EXT" >compat_cc.log 2>&1 \
+    || fail "badcompat: cc" compat_cc.log
+
+stubs_dir="$(mktemp -d)"
+if TMPDIR="$stubs_dir" TEMP="$stubs_dir" TMP="$stubs_dir" \
+   AETHER_HOME="$ROOT" "$AE" build "app_badcompat.ae" -o "app_badcompat" >"app_badcompat.log" 2>&1; then
+    rm -rf "$stubs_dir"
+    fail "badcompat: importing it was not refused" "app_badcompat.log"
+fi
+for s in "$stubs_dir"/ae-binimport-*; do
+    if [ -e "$s" ]; then
+        rm -rf "$stubs_dir"
+        fail "badcompat: refused build left stub directory behind"
+    fi
+done
+rm -rf "$stubs_dir"
+grep -qF "its catalog is schema 99.0" "app_badcompat.log" \
+    || fail "badcompat: the refusal does not name schema 99.0" "app_badcompat.log"
+grep -qF "this ae" "app_badcompat.log" \
+    || fail "badcompat: the refusal does not mention this ae" "app_badcompat.log"
+cd "$WORK"
+
 if [ -d "$ROOT/build/shared" ]; then
     run_pass "$WORK/shared" "--shared-runtime" "shared runtime" 1
-    echo "  [PASS] binary_import_ownership: returned strings given back (static, shared, C host); one-runtime values refused across two"
+    echo "  [PASS] binary_import_ownership: returned strings given back (static, shared, C host); one-runtime values refused across two; stub dirs cleaned up on refusal"
 else
-    echo "  [PASS] binary_import_ownership: returned strings given back (static, C host); one-runtime values refused across two (no shared runtime built here)"
+    echo "  [PASS] binary_import_ownership: returned strings given back (static, C host); one-runtime values refused across two; stub dirs cleaned up on refusal (no shared runtime built here)"
 fi
