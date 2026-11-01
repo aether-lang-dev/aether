@@ -176,6 +176,15 @@ static const char* sg_script_runtime_check(void* script, const char* so_path) {
  * image that defines the runtime's `aether_runtime_abi` for the script's
  * handle, against the image that holds this runtime's (the host's). */
 
+#if defined(__wasi__)
+/* WASI has no dynamic loader (and no dladdr): a mount fails at the load,
+ * before there is a script to check. */
+static const char* sg_script_runtime_check(void* script, const char* so_path) {
+    (void)script;
+    (void)so_path;
+    return NULL;
+}
+#else
 /* The reason a script was refused, per thread like std.dl's last error. */
 static AETHER_TLS char g_sg_err[512];
 
@@ -216,6 +225,7 @@ static const char* sg_script_runtime_check(void* script, const char* so_path) {
     return NULL;
 #endif
 }
+#endif  /* __wasi__ */
 #endif  /* _WIN32 */
 
 _aether_sg_tuple script_gateway_mount_so_raw(void* server,

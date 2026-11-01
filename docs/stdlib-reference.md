@@ -1404,7 +1404,7 @@ The script and the host run on one runtime: the script fills request and respons
 ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.so
 ```
 
-On Linux and FreeBSD such a script runs on the host's runtime whatever the host was built with: an `ae build` program is linked `-rdynamic`, and the script's calls bind to its runtime. On macOS a script binds to the shared runtime it links, so the host is built with `ae build --shared-runtime` too. On Windows the script is a DLL loaded with `LoadLibrary`, which cannot bind to the host executable's runtime, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
+On Linux and FreeBSD such a script runs on the host's runtime whatever the host was built with: an `ae build` program is linked `-rdynamic`, and the script's calls bind to its runtime. On macOS a script binds to the shared runtime it links, so its host is built with `ae build --shared-runtime` too (with a static host it is refused, naming that). On Windows the script is a DLL loaded with `LoadLibrary`, which cannot bind to the host executable's runtime, so the host and each script are built on the shared runtime (`aether.dll`) and run on it together:
 
 ```sh
 ae build --emit=lib --shared-runtime --with=net greeting.ae -o greeting.dll
@@ -1424,7 +1424,7 @@ A host or script that would run on a runtime of its own is refused at mount with
 | `KIND_OK` | 0 | mount succeeded |
 | `KIND_NOT_FOUND` | 1 | `so_path` is missing or unreadable |
 | `KIND_INVALID` | 6 | null arg, or `.so` missing the `aether_script_handle` entrypoint |
-| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); also a script that carries a runtime of its own, and on macOS and Windows a host not on the shared runtime (the message names `--shared-runtime`) |
+| `KIND_IO` | 5 | `dlopen` / `LoadLibrary` failure (incompatible ABI, etc.); also a script that carries a runtime of its own, on Windows a host not on the shared runtime, and on macOS a `--shared-runtime` script whose host is not on it (the message names `--shared-runtime`) |
 | `KIND_UNAVAILABLE` | 99 | a platform with no dynamic loader; no supported platform returns it |
 
 ### Sandbox

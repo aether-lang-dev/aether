@@ -63,9 +63,10 @@
 //
 // On Linux and FreeBSD a `--shared-runtime` script runs on the host's
 // runtime whatever the host was built with: an `ae build` program is linked
-// -rdynamic, and the script's calls bind to its runtime. On macOS a script
-// binds to the shared runtime it links, so the host is built with
-// `ae build --shared-runtime` too (a static host is refused, naming that).
+// -rdynamic, and the script's calls bind to its runtime. On macOS such a
+// script binds to the shared runtime it links, so its host is built with
+// `ae build --shared-runtime` too (with a static host it is refused, naming
+// that).
 // On Windows the library is a DLL, loaded with LoadLibrary, which cannot
 // bind to the host executable: there too the host and every script are
 // built on the shared runtime (aether.dll) and run on it together:
@@ -118,8 +119,9 @@ extern script_gateway_mount_so_raw(server: ptr, path_prefix: string, so_path: st
 //   KIND_NOT_FOUND:    `so_path` is missing or unreadable
 //   KIND_INVALID:      null arg, or .so missing the entrypoint
 //   KIND_IO:           dlopen failure (incompatible ABI, etc.), or a
-//                      script that carries a runtime of its own (and on
-//                      macOS and Windows a host not on the shared runtime):
+//                      script that carries a runtime of its own, on Windows
+//                      a host not on the shared runtime, on macOS a
+//                      --shared-runtime script whose host is not on it:
 //                      the message names --shared-runtime
 mount(server: ptr, path_prefix: string, so_path: string) -> {
     return script_gateway_mount_so_raw(server, path_prefix, so_path)

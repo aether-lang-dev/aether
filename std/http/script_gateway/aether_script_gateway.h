@@ -20,7 +20,7 @@
  * is refused at mount with KIND_IO on every platform (#3501), and a script
  * is built with `ae build --emit=lib --shared-runtime`. On Linux and FreeBSD
  * such a script runs on the host's runtime whatever the host was built with
- * (the program is linked -rdynamic); on macOS the host is built with
+ * (the program is linked -rdynamic); on macOS its host is built with
  * --shared-runtime too. On Windows the library is a DLL loaded with
  * LoadLibrary, and the host and the script must both be built with
  * `ae build --shared-runtime`: a DLL cannot bind to the host executable's
