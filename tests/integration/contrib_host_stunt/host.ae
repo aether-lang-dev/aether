@@ -18,7 +18,7 @@
 // bridge's level nests in the block's.
 //
 // Prints the stunt's line, or for a host-checked check (spin, silent,
-// oversize) the host's own verdict, and exits 0 when it matched.
+// oversize, half-frame) the host's own verdict, and exits 0 when it matched.
 
 import contrib.host.stunt
 import std.sandbox
@@ -327,6 +327,14 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
             exit(0)
         }
         println("oversize: refused=${refused} rc=${rc} line=${line} - host-checked: FAIL")
+        exit(1)
+    }
+    if check == "half-frame" {
+        if refused == ipc.TIMED_OUT_INSIDE_FRAME {
+            println("half-frame: timed out inside the frame, hung up - host-checked: PASS")
+            exit(0)
+        }
+        println("half-frame: refused=${refused} rc=${rc} line=${line} - host-checked: FAIL")
         exit(1)
     }
     if rc < 0 {

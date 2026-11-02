@@ -6,7 +6,7 @@
   covers what a bridge must handle: the grant checks, the preload (libc,
   dlopen of libc, `syscall()`), Landlock and seccomp (the syscall
   instruction), nested levels, typed host callbacks, the shared map, the
-  cached environment, the instruction limit and cancel, an oversize frame.
+  cached environment, the instruction limit and cancel, an oversize frame, a frame cut off part-way.
   `tests/integration/contrib_host_stunt` runs it under nine policies with no
   interpreter installed; reverting the preload's dlopen-by-path fix, the
   `::ffff:` normalisation, or nested-level checking each fails a check. The

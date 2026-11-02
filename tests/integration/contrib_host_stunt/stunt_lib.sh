@@ -139,7 +139,7 @@ applies() {   # applies <mode> <check>
             [ "$UNCONT" = 1 ] || return 1
             case "$modes" in *child*) ;; *) return 1 ;; esac
             case "$2" in
-                callback-*|map-*|binding-*|env-cached|spin|silent|oversize) return 0 ;;
+                callback-*|map-*|binding-*|env-cached|spin|silent|oversize|half-frame) return 0 ;;
                 *) return 1 ;;
             esac ;;
     esac

@@ -690,6 +690,16 @@ static int c_oversize(st_vm* vm, char* d, size_t cap) {
     return OUT_SUCCEEDED;
 }
 
+/* Half a message: the transport writes a frame's header and part of its
+ * payload, then stalls (stunt_main.c's handling of this call). A child's host
+ * must time out inside the frame and hang up, not wait for the rest. */
+static int c_half_frame(st_vm* vm, char* d, size_t cap) {
+    char why[256];
+    if (host_call(vm, "__stall_mid_frame", 0, NULL, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    detail(d, cap, "the transport did not stall");
+    return OUT_ERROR;
+}
+
 /* ---- the catalogue ------------------------------------------------------- */
 
 #define BOTH  "in-process,child"
@@ -731,6 +741,7 @@ static const st_check CATALOGUE[] = {
     { "spin",                      BOTH,  1, c_spin,                     "loop until stopped: the host's instruction limit or cancel must end it" },
     { "silent",                    CHILD, 1, c_silent,                   "never answer, never exit: the host must kill it after a grace period" },
     { "oversize",                  CHILD, 1, c_oversize,                 "send the host one 1 MiB message: the host must refuse the frame" },
+    { "half-frame",                CHILD, 1, c_half_frame,               "send a frame's header and part of its payload, then stall: the host must time out inside the frame" },
 };
 
 #define NCHECKS ((int)(sizeof CATALOGUE / sizeof CATALOGUE[0]))

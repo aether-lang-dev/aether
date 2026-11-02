@@ -15,6 +15,9 @@
  *   host -> child   OK s<text> | OK i<int> | OK n | ERR <reason>
  *   host -> child   CANCEL                     at any time; stops spin
  *   child -> host   RESULT <code> <line>       last, then the child exits <code>
+ *
+ * Every message is written whole as one frame, except by half-frame, which
+ * stops part-way through one on purpose.
  */
 #include "stunt.h"
 
@@ -84,9 +87,17 @@ static char* read_frame(void) {
     return buf;
 }
 
+/* half-frame: a header announcing 64 bytes, 10 of them, then nothing more. */
+static void stall_mid_frame(void) {
+    const unsigned char h[4] = { 0, 0, 0, 64 };
+    if (write_all(g_ch, (const char*)h, 4) == 0) (void)write_all(g_ch, "CALL greet", 10);
+    for (;;) pause();
+}
+
 /* Every host function goes to the host: the fallback under "*". */
 static int forward(void* vm) {
     const char* name = st_call_name(vm);
+    if (strcmp(name, "__stall_mid_frame") == 0) stall_mid_frame();
     size_t cap = strlen(name) + 16;
     int n = st_arg_count(vm);
     for (int i = 1; i <= n; i++) cap += strlen(st_arg_str(vm, i)) + 32;

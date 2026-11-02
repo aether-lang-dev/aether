@@ -21,7 +21,7 @@ bridges; nothing is replaced.
 ```sh
 stunt list                          # the catalogue: name, modes, who judges it, what it does
 stunt <check> <succeed|refused>     # run one check
-stunt <check> host                  # a host-checked one (spin, silent, oversize)
+stunt <check> host                  # a host-checked one (spin, silent, oversize, half-frame)
 ```
 
 stunt runs the one check, compares the outcome with the expectation and
@@ -74,6 +74,7 @@ work. A connect is non-blocking: refused at once, or let through.
 | `spin` | in-process, child | **host-checked**: loop until stopped, by the instruction limit or a cancel |
 | `silent` | child | **host-checked**: never answer, never exit; the host must kill it after a grace period |
 | `oversize` | child | **host-checked**: send the host one 1 MiB message; the host must refuse the frame |
+| `half-frame` | child | **host-checked**: send a frame's header and part of its payload, then stall; the host must time out inside the frame (`ipc.TIMED_OUT_INSIDE_FRAME`) and hang up |
 
 The `open-*`, `write-*`, `getenv-*`, `connect-*`, `exec-*`, `dlopen-*` and
 `syscall-*` rows go the way an interpreter's own runtime goes (Lua's
@@ -137,6 +138,10 @@ host -> child   OK s<text> | OK i<int> | OK n | ERR <reason>
 host -> child   CANCEL                          at any time; stops spin
 child -> host   RESULT <code> <line>            last; then it exits <code>
 ```
+
+The host reads and writes only whole frames, with `ipc.read_frame_timeout`
+and `ipc.write_frame`; the child writes each message as one frame, except
+`half-frame`, which stops inside one on purpose.
 
 Every host function is the host's to answer, so `callback-*`, `map-*` and
 `binding-*` mean the same in both modes. The host passes the child only the
