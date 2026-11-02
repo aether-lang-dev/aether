@@ -2028,6 +2028,17 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         return out;
     }
 
+    /* A socket's parent end is marked so std.ipc refuses a descriptor the
+     * child sends up it. If it cannot be marked the child is already
+     * running with its end, so it is ended rather than left unguarded. */
+    if (is_socket && aether_ipc_mark_parent_end(chanfd[0]) != 0) {
+        close(chanfd[0]);
+        kill(pid, SIGKILL);
+        aether_reap_failed(pid);
+        out._2 = "os.run_socket: too many open channels";
+        return out;
+    }
+
     out._0 = chanfd[0];
     out._1 = pid;
     return out;

@@ -3169,6 +3169,11 @@ main() {
 - `ipc.read(fd, max)` → `(string, string)` - One binary-safe read of up to `max` bytes; `("", "")` at end of stream
 - `ipc.send_fd(ch, fd, payload)` → `string` - Pass an open descriptor over a socket channel, attached to a payload of at least one byte (POSIX only)
 - `ipc.recv_fd(ch, max)` → `(int, string, string)` - Receive exactly one descriptor (close-on-exec) and its payload; a message with none, several, or other control data is an error, and every descriptor that arrived is closed (POSIX only)
+- `ipc.recv(ch, max)` → `(string, int, string)` - One receive: the bytes and the descriptor that came with them, `-1` when none. At most one descriptor; the parent end of an `os.run_socket` channel takes none from its child (POSIX only)
+- `ipc.write_frame(ch, data)` → `string` - One frame: a 4-byte big-endian length, then the bytes (any bytes, NUL and newline included)
+- `ipc.read_frame(ch, max)` → `(string, string)` - One whole frame; a header announcing more than `max` is an error and nothing is buffered. End of stream is an error, so `("", "")` is an empty frame
+- `ipc.read_frame_timeout(ch, max, timeout_ms)` → `(string, string)` - `read_frame` with a deadline over the whole frame (POSIX only when the timeout is not negative)
+- `ipc.wait_readable(ch, timeout_ms)` → `(int, string)` - `poll`: 1 when a read will not block, 0 on a timeout (POSIX only)
 
 ### Signal numbers (`std.signal`)
 

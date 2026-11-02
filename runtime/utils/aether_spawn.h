@@ -65,4 +65,17 @@ char** aether_spawn_environ(void);
 char** aether_spawn_env(char** base, const char* const* set, int nset);
 #endif
 
+/* The parent ends of std.ipc's channels, so std.ipc can refuse what a child
+ * sends up them. aether_spawn_channel (os.run_socket, and any other spawner
+ * that hands its caller one end of a socket pair for a child) marks the end
+ * it returns; std.ipc asks before accepting a descriptor from it, and
+ * io.fd_close forgets the number as it closes it, so a later socket that
+ * reuses the number is not taken for a parent end. A fixed table, lock-free:
+ * marking fails (-1, errno ENOSPC) rather than letting a channel go
+ * unmarked, and the caller then does not hand the channel out. Defined on
+ * every platform; where there are no channels nothing is ever marked. */
+int aether_ipc_mark_parent_end(int fd);
+void aether_ipc_forget_fd(int fd);
+int aether_ipc_is_parent_end(int fd);
+
 #endif

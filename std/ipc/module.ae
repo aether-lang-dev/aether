@@ -21,6 +21,11 @@
 //   read(fd, max) -> (data, err)               one read; ("", "") at EOF
 //   send_fd(ch, fd, payload) -> string         pass a descriptor; "" or err
 //   recv_fd(ch, max) -> (fd, payload, err)     receive one descriptor
+//   recv(ch, max) -> (data, fd, err)           bytes and the descriptor, if any
+//   write_frame(ch, data) -> string            one length-prefixed frame
+//   read_frame(ch, max) -> (data, err)         one frame, capped at max
+//   read_frame_timeout(ch, max, ms) -> (data, err)   the same, bounded
+//   wait_readable(ch, ms) -> (ready, err)      bound a wait with poll()
 //
 // (write/write_close were originally named `send`/`send_close` per the
 // design discussion; renamed because `send` is a reserved keyword in
@@ -31,6 +36,14 @@
 // the parent's end from os.run_socket and both ends of os.socketpair
 // included, not only on parent_channel(). send_fd / recv_fd are POSIX-only;
 // on Windows they, and parent_channel(), report that there is none.
+// recv and wait_readable are the same; write_frame, read_frame and
+// read_frame_timeout work on Windows over plain descriptors (read_frame_timeout
+// and wait_readable need poll(), which a CRT descriptor lacks, so with a
+// deadline they report that).
+//
+// A descriptor never travels up a channel: the parent end os.run_socket
+// returns refuses any descriptor its child sends, in recv and recv_fd. The
+// child end, and both ends of os.socketpair, accept.
 //
 // Common shape — child writes one report at exit:
 //
@@ -46,7 +59,9 @@ import std.io
 exports(
     ipc_parent_channel_raw, ipc_parent_channel_kind_raw,
     ipc_write_raw, ipc_read_raw, ipc_send_fd_raw, ipc_recv_fd_raw,
-    parent_channel, parent_channel_kind, write, write_close, read, send_fd, recv_fd
+    ipc_recv_raw, ipc_write_frame_raw, ipc_read_frame_raw, ipc_wait_readable_raw,
+    parent_channel, parent_channel_kind, write, write_close, read, send_fd, recv_fd,
+    recv, write_frame, read_frame, read_frame_timeout, wait_readable
 )
 
 // Returns the parent-channel fd if the parent spawned this process
@@ -61,6 +76,10 @@ extern ipc_write_raw(fd: int, bytes: @aether string) -> string
 extern ipc_read_raw(fd: int, max: int) -> (string @heap, string)
 extern ipc_send_fd_raw(ch: int, fd: int, payload: @aether string) -> string
 extern ipc_recv_fd_raw(ch: int, max: int) -> (int, string @heap, string)
+extern ipc_recv_raw(ch: int, max: int) -> (string @heap, int, string)
+extern ipc_write_frame_raw(ch: int, data: @aether string) -> string
+extern ipc_read_frame_raw(ch: int, max: int, timeout_ms: int) -> (string @heap, string)
+extern ipc_wait_readable_raw(ch: int, timeout_ms: int) -> (int, string)
 
 // Aether-side wrappers. parent_channel returns the raw int from
 // the extern; -1 sentinel for "no parent channel."
@@ -125,4 +144,65 @@ send_fd(ch: int, fd: int, payload: string) -> string {
 // descriptor that did arrive is closed first.
 recv_fd(ch: int, max: int) -> {
     return ipc_recv_fd_raw(ch, max)
+}
+
+// One receive from socket `ch`: (data, fd, ""), up to `max` bytes and the
+// descriptor that came with them, or -1 when the message carried none. One
+// recvmsg returns both, so a peer need not announce a descriptor before
+// sending it. ("", -1, "") is end of stream; ("", -1, err) a failure.
+//
+// At most one descriptor (close-on-exec). More than one, control data of
+// another kind, or control data cut short is an error, and every descriptor
+// that arrived is closed first, with the bytes that came with it.
+//
+// The parent end of a channel os.run_socket made takes no descriptor at all:
+// one arriving from the child is closed and an error returned, with no opt-in
+// by the host (a sandboxed child has no business handing its parent
+// descriptors). The child end and os.socketpair's ends accept. The parent end
+// is the descriptor os.run_socket returned, until it is closed with
+// io.fd_close; recv_fd refuses on it too. read, which receives no control
+// data, lets the kernel drop a descriptor riding on the bytes.
+recv(ch: int, max: int) -> {
+    return ipc_recv_raw(ch, max)
+}
+
+// Write `data` as one frame: a 4-byte big-endian unsigned length, then the
+// bytes. Any bytes, 0x00 and 0x0a included: the length is the string's, not
+// a terminator's. "" or an error; a payload of 4 GiB or more is one. An empty
+// payload is a frame of length 0.
+write_frame(ch: int, data: string) -> string {
+    return ipc_write_frame_raw(ch, data)
+}
+
+// Read one frame: (data, "") whole, blocking until all of it has arrived.
+// `max` is a hard cap on the payload: a header announcing more is an error,
+// and nothing is allocated or read past the header. A frame split at any
+// offset across writes reads the same. Exactly the frame is consumed, never
+// a byte of the next.
+//
+// A frame of length 0 is ("", ""). End of stream before the first header
+// byte is the error "end of stream", so ("", "") is never an end; end inside
+// a frame is an error too. Receives no descriptors (see recv).
+read_frame(ch: int, max: int) -> {
+    return ipc_read_frame_raw(ch, max, -1)
+}
+
+// read_frame with a deadline: `timeout_ms` bounds the whole frame, header
+// and payload together, so a peer that sends a header and stalls, or drips
+// bytes, cannot hold the reader past it. A negative timeout waits forever,
+// as read_frame does. On a timeout the error says "timed out" and the stream
+// is mid-frame: close the channel. Not available on Windows (an error there,
+// unless the timeout is negative).
+read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
+    return ipc_read_frame_raw(ch, max, timeout_ms)
+}
+
+// Wait up to `timeout_ms` for `ch` to be readable (poll): (1, "") when a
+// read will not block, which includes the peer having closed (the read then
+// gives end of stream), (0, "") on a timeout, (0, err) on a failure. A
+// negative timeout waits forever; 0 asks without waiting. Bounds the wait for
+// the first byte of read, recv or read_frame; once a frame has started use
+// read_frame_timeout to bound the rest. An error on Windows.
+wait_readable(ch: int, timeout_ms: int) -> {
+    return ipc_wait_readable_raw(ch, timeout_ms)
 }

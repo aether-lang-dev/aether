@@ -28,6 +28,19 @@ child_sees_fd(fd: int) -> int {
     return code
 }
 
+// A frame by hand, not by write_frame, so the tests do not trust what they
+// test: the 4-byte big-endian length of `payload` (under 65536), then it.
+frame_of(payload: string) -> string {
+    n = string.length(payload)
+    head = string.concat(string.from_char(0), string.from_char(0))
+    head = string.concat(head, string.from_char(n / 256))
+    head = string.concat(head, string.from_char(n % 256))
+    return string.concat(head, payload)
+}
+
+// 7 bytes with a zero byte, a newline, a high byte and a CR in them.
+const BINARY = "a\0b\nc\xffd\r"
+
 // The first `n` bytes of the file `fd` reads from.
 read_fd(fd: int, n: int) -> string {
     buf = bytes.new(n)
@@ -61,6 +74,12 @@ main() {
                 fd, _p, rerr = ipc.recv_fd(3, 16)
                 spec.assert_eq(fd, -1, "ipc.recv_fd gives no descriptor")
                 spec.assert_err(rerr, "ipc.recv_fd")
+                _d, _f, cerr = ipc.recv(3, 16)
+                spec.assert_err(cerr, "ipc.recv")
+                _r, werr = ipc.wait_readable(3, 10)
+                spec.assert_err(werr, "ipc.wait_readable")
+                _fd, terr = ipc.read_frame_timeout(3, 16, 10)
+                spec.assert_err(terr, "ipc.read_frame_timeout needs a poll")
             }
         }
         return spec.run_summary(fw)
@@ -180,6 +199,260 @@ main() {
             got, _p, err = ipc.recv_fd(b, 100)
             spec.assert_eq(got, -1, "no descriptor")
             spec.assert_err_contains(err, "end of stream", "an error saying so")
+            io.fd_close(b)
+        }
+    }
+
+    spec.describe(fw, "ipc.recv") {
+        spec.it("returns the bytes and the descriptor of one message") callback {
+            path = "${os.temp_dir()}/std_ipc_recv_${os.getpid()}.txt"
+            fs.write_atomic(path, string.bytes("through recv\n"))
+            f, _ = io.fd_open_read(path)
+            a, b, _ = os.socketpair()
+            spec.assert_ok(ipc.send_fd(a, f, "no announcement"), "send_fd")
+            io.fd_close(f)
+            fs.delete(path)
+
+            data, got, err = ipc.recv(b, 100)
+            spec.assert_ok(err, "recv")
+            spec.assert_str_eq(data, "no announcement", "the bytes")
+            spec.assert_true(got >= 0, "and a descriptor with them, in the one call")
+            spec.assert_str_eq(read_fd(got, 64), "through recv\n", "it reads through")
+            spec.assert_not_eq(child_sees_fd(got), 0, "close-on-exec")
+            io.fd_close(got)
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("gives -1 for a message that carried no descriptor") callback {
+            a, b, _ = os.socketpair()
+            ipc.write(a, BINARY)
+            data, got, err = ipc.recv(b, 100)
+            spec.assert_ok(err, "recv")
+            spec.assert_eq(got, -1, "no descriptor")
+            spec.assert_true(data == BINARY, "binary bytes intact")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("reads end of stream as no bytes, no descriptor, no error") callback {
+            a, b, _ = os.socketpair()
+            io.fd_close(a)
+            data, got, err = ipc.recv(b, 100)
+            spec.assert_ok(err, "end of stream is not an error")
+            spec.assert_eq(string.length(data), 0, "no bytes")
+            spec.assert_eq(got, -1, "no descriptor")
+            io.fd_close(b)
+        }
+
+        spec.it("refuses a bad channel and a non-positive max") callback {
+            _d, _f, err = ipc.recv(-1, 10)
+            spec.assert_err(err, "recv on -1")
+            a, b, _ = os.socketpair()
+            _d2, _f2, err2 = ipc.recv(a, 0)
+            spec.assert_err(err2, "recv of max 0")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+    }
+
+    spec.describe(fw, "ipc.write_frame and ipc.read_frame") {
+        spec.it("write a 4-byte big-endian length, then the bytes") callback {
+            a, b, _ = os.socketpair()
+            spec.assert_ok(ipc.write_frame(a, BINARY), "write_frame")
+            raw, err = ipc.read(b, 100)
+            spec.assert_ok(err, "read the wire")
+            spec.assert_true(raw == frame_of(BINARY), "header 00 00 00 08, then the bytes")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("round-trip binary: NUL, newline, 0xff, and an empty frame") callback {
+            a, b, _ = os.socketpair()
+            spec.assert_ok(ipc.write_frame(a, BINARY), "write binary")
+            spec.assert_ok(ipc.write_frame(a, ""), "write empty")
+            spec.assert_ok(ipc.write_frame(a, "\n"), "write a newline")
+            got, err = ipc.read_frame(b, 100)
+            spec.assert_ok(err, "read binary")
+            spec.assert_eq(string.length(got), 8, "every byte arrived")
+            spec.assert_true(got == BINARY, "the bytes sent")
+            empty, eerr = ipc.read_frame(b, 100)
+            spec.assert_ok(eerr, "read empty")
+            spec.assert_eq(string.length(empty), 0, "a frame of no bytes")
+            nl, nerr = ipc.read_frame(b, 100)
+            spec.assert_ok(nerr, "read newline")
+            spec.assert_true(nl == "\n", "a newline alone")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("read whole a frame split at every offset") callback {
+            wire = frame_of(BINARY)
+            total = string.length(wire)
+            k = 1
+            while k < total {
+                a, b, _ = os.socketpair()
+                // The first part, a pause for the reader to block on it,
+                // then the rest, and a second frame right behind.
+                ipc.write(a, string.substring(wire, 0, k))
+                ipc.write(a, string.concat(string.substring(wire, k, total), frame_of("next")))
+                got, err = ipc.read_frame(b, 100)
+                spec.assert_ok(err, "split at ${k}")
+                spec.assert_true(got == BINARY, "whole frame split at ${k}")
+                nxt, nerr = ipc.read_frame(b, 100)
+                spec.assert_ok(nerr, "the next frame after a split at ${k}")
+                spec.assert_str_eq(nxt, "next", "and nothing of it was taken by the first read")
+                io.fd_close(a)
+                io.fd_close(b)
+                k = k + 1
+            }
+        }
+
+        spec.it("read a frame dribbled a byte at a time") callback {
+            wire = frame_of(BINARY)
+            total = string.length(wire)
+            a, b, _ = os.socketpair()
+            i = 0
+            while i < total {
+                ipc.write(a, string.substring(wire, i, i + 1))
+                i = i + 1
+            }
+            got, err = ipc.read_frame(b, 100)
+            spec.assert_ok(err, "dribbled")
+            spec.assert_true(got == BINARY, "whole")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("refuse a header announcing more than max, reading nothing past it") callback {
+            a, b, _ = os.socketpair()
+            // 0xffffffff bytes announced, 5 sent.
+            big = string.concat(string.concat(string.from_char(255), string.from_char(255)),
+                                string.concat(string.from_char(255), string.from_char(255)))
+            ipc.write(a, string.concat(big, "hello"))
+            got, err = ipc.read_frame(b, 1000)
+            spec.assert_err_contains(err, "longer than max", "oversize header")
+            spec.assert_eq(string.length(got), 0, "no data")
+            rest, rerr = ipc.read(b, 100)
+            spec.assert_ok(rerr, "read the rest")
+            spec.assert_str_eq(rest, "hello", "the payload was left unread: nothing was buffered")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("accept a frame of exactly max and refuse one byte over") callback {
+            a, b, _ = os.socketpair()
+            ipc.write_frame(a, "12345")
+            got, err = ipc.read_frame(b, 5)
+            spec.assert_ok(err, "5 within max 5")
+            spec.assert_str_eq(got, "12345", "payload")
+            ipc.write_frame(a, "123456")
+            _g, err2 = ipc.read_frame(b, 5)
+            spec.assert_err_contains(err2, "longer than max", "6 over max 5")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("tell end of stream from an empty frame, and truncation from both") callback {
+            a, b, _ = os.socketpair()
+            io.fd_close(a)
+            _g, err = ipc.read_frame(b, 10)
+            spec.assert_err_contains(err, "end of stream", "closed at a frame boundary")
+            io.fd_close(b)
+
+            c, d, _ = os.socketpair()
+            ipc.write(c, string.substring(frame_of("abcdef"), 0, 7))
+            io.fd_close(c)
+            _g2, err2 = ipc.read_frame(d, 10)
+            spec.assert_err_contains(err2, "inside a frame", "closed mid-payload")
+            io.fd_close(d)
+
+            e, f, _ = os.socketpair()
+            ipc.write(e, string.substring(frame_of("abcdef"), 0, 2))
+            io.fd_close(e)
+            _g3, err3 = ipc.read_frame(f, 10)
+            spec.assert_err_contains(err3, "inside a frame header", "closed mid-header")
+            io.fd_close(f)
+        }
+
+        spec.it("refuse a bad channel and a non-positive max") callback {
+            spec.assert_err(ipc.write_frame(-1, "x"), "write_frame to -1")
+            _g, err = ipc.read_frame(-1, 10)
+            spec.assert_err(err, "read_frame from -1")
+            a, b, _ = os.socketpair()
+            _g2, err2 = ipc.read_frame(a, 0)
+            spec.assert_err(err2, "read_frame of max 0")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+    }
+
+    spec.describe(fw, "ipc.wait_readable and ipc.read_frame_timeout") {
+        spec.it("times out on a silent peer, after about the time asked") callback {
+            a, b, _ = os.socketpair()
+            t0 = os.now_monotonic_ms()
+            ready, err = ipc.wait_readable(b, 100)
+            took = os.now_monotonic_ms() - t0
+            spec.assert_ok(err, "wait_readable")
+            spec.assert_eq(ready, 0, "nothing to read")
+            spec.assert_true(took >= 80, "it waited (${took} ms)")
+            spec.assert_true(took < 5000, "and not forever (${took} ms)")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("is ready at once when bytes are there, and at end of stream") callback {
+            a, b, _ = os.socketpair()
+            ipc.write(a, "x")
+            ready, err = ipc.wait_readable(b, 5000)
+            spec.assert_ok(err, "bytes there")
+            spec.assert_eq(ready, 1, "readable")
+            ipc.read(b, 10)
+            ready0, _ = ipc.wait_readable(b, 0)
+            spec.assert_eq(ready0, 0, "a timeout of 0 asks without waiting")
+            io.fd_close(a)
+            ready2, _ = ipc.wait_readable(b, 5000)
+            spec.assert_eq(ready2, 1, "a closed peer is readable: the read says end of stream")
+            io.fd_close(b)
+        }
+
+        spec.it("refuses a bad descriptor") callback {
+            _r, err = ipc.wait_readable(-1, 10)
+            spec.assert_err(err, "wait on -1")
+            _r2, err2 = ipc.wait_readable(9999, 10)
+            spec.assert_err(err2, "wait on a closed number")
+        }
+
+        spec.it("read_frame_timeout times out on a silent peer") callback {
+            a, b, _ = os.socketpair()
+            t0 = os.now_monotonic_ms()
+            _g, err = ipc.read_frame_timeout(b, 100, 100)
+            took = os.now_monotonic_ms() - t0
+            spec.assert_err_contains(err, "timed out", "nothing sent")
+            spec.assert_true(took >= 80 && took < 5000, "in about 100 ms (${took})")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("read_frame_timeout bounds a peer that sends a header and stalls") callback {
+            a, b, _ = os.socketpair()
+            ipc.write(a, string.substring(frame_of("abcdef"), 0, 6))
+            t0 = os.now_monotonic_ms()
+            _g, err = ipc.read_frame_timeout(b, 100, 150)
+            took = os.now_monotonic_ms() - t0
+            spec.assert_err_contains(err, "timed out", "stalled mid-payload")
+            spec.assert_true(took >= 120 && took < 5000, "in about 150 ms (${took})")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("read_frame_timeout reads a frame that arrives in time") callback {
+            a, b, _ = os.socketpair()
+            ipc.write_frame(a, BINARY)
+            got, err = ipc.read_frame_timeout(b, 100, 5000)
+            spec.assert_ok(err, "in time")
+            spec.assert_true(got == BINARY, "whole")
+            io.fd_close(a)
             io.fd_close(b)
         }
     }
