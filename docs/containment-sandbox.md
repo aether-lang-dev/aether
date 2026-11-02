@@ -715,10 +715,21 @@ the sandbox needs them.
 `libc.so.6` directly. This enables ctypes/Fiddle/DynaLoader escape.
 Don't grant it unless necessary. Without it:
 
-- Python `ctypes.CDLL("libc.so.6")` is blocked
+- Python `ctypes.CDLL("libc.so.6")` is blocked, and so is
+  `ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6")`: the preload
+  matches libc and the dynamic loader (glibc's `libc.so.6`, musl's
+  `libc.musl-*.so.1`, `ld-linux*`, `ld-musl-*`, FreeBSD's `libc.so.7` and
+  `ld-elf.so.1`) by the basename of the name, by the basename of where a
+  path leads (symlinks, `..`, `/lib` or `/usr/lib`), and by the handle the
+  loader returns (a name found on `LD_LIBRARY_PATH`)
 - Perl `DynaLoader::dl_load_file("libc.so.6")` is blocked
 - Ruby `Fiddle.dlopen("libc.so.6")` loads but calls are still intercepted
 - Lua has no FFI, not a vector
+
+That is the preload layer. A guest that finds libc's `syscall` some other
+way (its address read from libc's symbol table in memory, say) is past
+it; on Linux, Landlock under `sandbox.spawn_socket` is what refuses the
+open that follows.
 
 ### 5. Grant list follows least privilege
 
@@ -763,7 +774,7 @@ cat sandbox-config.ae
 | Network to non-granted hosts | `connect` interception |
 | Env var access outside grants | `getenv` interception |
 | Process execution outside grants | `execve` interception |
-| `dlopen("libc.so.6")` (ctypes escape) | `dlopen` interception |
+| `dlopen` of libc or the loader, by any name or path (ctypes escape) | `dlopen` interception |
 | Raw `syscall()` | `syscall` interception |
 | Shellcode via `mmap(PROT_EXEC)` | `mmap`/`mmap64` interception |
 | Shellcode via `mprotect(PROT_EXEC)` | `mprotect` interception |

@@ -21,6 +21,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/auxv.h>            // getauxval(AT_BASE): the loader, for dlopen
+#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -753,29 +756,111 @@ int mprotect(void* addr, size_t len, int prot) {
     return real_mprotect(addr, len, prot);
 }
 
-// dlopen — block loading of native libraries unless granted
-// This prevents Python ctypes, Ruby Fiddle, Perl DynaLoader,
-// Java Panama/JNI from loading arbitrary .so files that bypass the sandbox.
+// dlopen of libc or the dynamic loader: refused without a native grant.
+//
+// A handle on libc is the ctypes / Fiddle / DynaLoader escape: dlsym on it
+// finds the real open, connect and execve, past this library's. The check
+// used to compare the name with "libc.so.6" and "libc.so", so
+// CDLL("/usr/lib/libc.so.6") got round it. Now a name is libc's or the
+// loader's when any of these is:
+//   - the basename of the name as given ("libc.so.6", ".../libc.so.6");
+//   - the basename of where a path leads, ".." and symlinks resolved, so a
+//     symlink called libplain.so is seen for what it points at;
+//   - the object the loader opened: after a load is let through, a handle
+//     that is libc's or the loader's own (the ones this process is running
+//     on) is closed again and refused, which catches any spelling the loader
+//     resolves by its own search (a hard link, an LD_LIBRARY_PATH entry).
+// /lib and /usr/lib, multiarch directories and lib64 need nothing of their
+// own: the basename and the handle are the same through all of them.
+//
+// This is the preload layer, a guest's libc calls. On Linux the wall is
+// Landlock (sandbox.spawn_socket), which refuses the open of a file outside
+// the grants however the guest reaches the syscall; a guest that copies
+// libc somewhere it can write, or issues the syscall itself, is stopped
+// there, not here.
+
+// glibc "libc.so", "libc.so.6", "libc-2.31.so"; musl "libc.musl-x86_64.so.1";
+// FreeBSD "libc.so.7"; the loaders "ld-linux-x86-64.so.2",
+// "ld-linux-aarch64.so.1", "ld-2.31.so", "ld-musl-x86_64.so.1", "ld64.so.2"
+// (ppc64, s390x), "ld.so.1", "ld-elf.so.1" (FreeBSD).
+// Only these shapes: "libc-client.so" (UW IMAP) and the like are not libc.
+static int aether_is_libc_name(const char* base) {
+    if (!base || !*base) return 0;
+    if (strcmp(base, "libc.so") == 0 || strncmp(base, "libc.so.", 8) == 0) return 1;
+    if (strncmp(base, "libc.musl-", 10) == 0) return 1;
+    if (strncmp(base, "libc-", 5) == 0 && base[5] >= '0' && base[5] <= '9') return 1;
+    if (strncmp(base, "ld-linux", 8) == 0 || strncmp(base, "ld-musl-", 8) == 0 ||
+        strncmp(base, "ld-elf", 6) == 0) {
+        return 1;
+    }
+    if (strncmp(base, "ld-", 3) == 0 && base[3] >= '0' && base[3] <= '9') return 1;
+    if (strncmp(base, "ld64.so", 7) == 0 || strncmp(base, "ld.so", 5) == 0) return 1;
+    return 0;
+}
+
+static const char* aether_basename(const char* p) {
+    const char* slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+
+static int aether_names_libc(const char* filename) {
+    if (aether_is_libc_name(aether_basename(filename))) return 1;
+    if (strchr(filename, '/')) {
+        char resolved[PATH_MAX];
+        if (aether_sandbox_canon_path(filename, resolved, sizeof(resolved)) &&
+            aether_is_libc_name(aether_basename(resolved))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The handles of the libc and loader this process runs on, found once by
+// asking the loader which object holds a libc function (and, on Linux, the
+// loader's base address), opened with RTLD_NOLOAD so nothing new is mapped.
+// Each stays open: it pins nothing that is not loaded for good anyway.
+static void* aether_libc_handle = NULL;
+static void* aether_loader_handle = NULL;
+static int aether_core_handles_found = 0;
+
+static void aether_find_core_handles(void) {
+    if (aether_core_handles_found) return;
+    Dl_info info;
+    if (dladdr((void*)strlen, &info) && info.dli_fname && info.dli_fname[0]) {
+        aether_libc_handle = real_dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    }
+#if defined(__linux__)
+    unsigned long base = getauxval(AT_BASE);
+    if (base && dladdr((void*)base, &info) && info.dli_fname && info.dli_fname[0]) {
+        aether_loader_handle = real_dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    }
+#endif
+    aether_core_handles_found = 1;
+}
+
 void* dlopen(const char* filename, int flags) {
     if (!real_dlopen) real_dlopen = dlsym(RTLD_NEXT, "dlopen");
-    if (filename && sandbox_active) {
-        // Allow NULL (self), system libraries, and runtime paths
-        // Block explicit loading of libc (ctypes/Fiddle escape vector)
-        int is_escape_target = 0;
-        if (strcmp(filename, "libc.so.6") == 0 || strcmp(filename, "libc.so") == 0) {
-            is_escape_target = 1;
-        }
-        if (is_escape_target && !check_grant("native", filename)) {
-            log_deny("native", filename);
+    // NULL (the program itself) is not a load. Everything other than libc
+    // and the loader (Python's .so modules, Ruby's extensions) loads: the
+    // sandbox holds at the libc calls those make, which come through here.
+    if (!filename || !sandbox_active) return real_dlopen(filename, flags);
+    if (aether_names_libc(filename)) {
+        if (!check_grant("native", filename)) {
             errno = EACCES;
             return NULL;
         }
-        // Everything else (Python .so modules, Ruby .so extensions, etc.)
-        // is allowed — the sandbox enforces at the libc call level, not
-        // at the module loading level. The loaded module's calls still
-        // go through our intercepted open/connect/getenv.
+        return real_dlopen(filename, flags);
     }
-    return real_dlopen(filename, flags);
+    void* h = real_dlopen(filename, flags);
+    if (!h) return NULL;
+    aether_find_core_handles();
+    if ((h == aether_libc_handle || h == aether_loader_handle) &&
+        !check_grant("native", filename)) {
+        dlclose(h);
+        errno = EACCES;
+        return NULL;
+    }
+    return h;
 }
 
 // syscall — block direct syscall() which bypasses all libc interception

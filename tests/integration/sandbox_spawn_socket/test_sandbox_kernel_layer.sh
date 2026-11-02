@@ -158,6 +158,7 @@ if command -v python3 > /dev/null 2>&1; then
     run "$TMP/py.out" "$PY" python3 "$GUEST"
     expect "python3 with grant_runtime" "$TMP/py.out" "started python"
     expect "the guest's open" "$TMP/py.out" "open: refused"
+    expect "the guest's dlopen of libc by its path" "$TMP/py.out" "dlopen: refused"
     if [ "$LANDLOCK" = 1 ]; then
         expect "the guest's raw openat by ctypes" "$TMP/py.out" "raw: refused (Permission denied)"
     fi
@@ -168,9 +169,11 @@ if command -v python3 > /dev/null 2>&1; then
     run "$TMP/py_tcp.out" "$PY,tcp=127.0.0.1:9" python3 "$GUEST"
     expect "the guest's connect with a tcp grant" "$TMP/py_tcp.out" "connect: ALLOWED"
     echo "  [PASS] sandbox_kernel_layer: and its connect goes through with a tcp grant"
-    # The preload alone does not stop ctypes reaching libc's syscall(): the
-    # row the kernel layer is for.
+    # The preload alone refuses a handle on libc but does not stop ctypes
+    # calling libc's syscall() at an address read from libc's symbol table:
+    # the row the kernel layer is for.
     "$TMP/nolandlock" "$TMP/host" "$PY,nolandlock" python3 "$GUEST" > "$TMP/py_nll.out" 2>&1 || fail "host exited non-zero" "$TMP/py_nll.out"
+    expect "the preload alone, dlopen" "$TMP/py_nll.out" "dlopen: refused"
     expect "the preload alone" "$TMP/py_nll.out" "raw: ALLOWED"
     echo "  [PASS] sandbox_kernel_layer: without Landlock the ctypes openat gets through (what Landlock is for)"
 else
