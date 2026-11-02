@@ -4,7 +4,8 @@
 # - the importer: a catalog of another major, one that requires a duty this
 #   importer does not know (refused, naming it, both versions and the fix),
 #   one of a newer minor with nothing new to do (read), and shared-runtime
-#   libraries of another runtime ABI or of none recorded (refused);
+#   libraries of another runtime ABI or of none recorded (refused), none of
+#   them leaving its stub directory in the temp dir (#3485);
 # - the first call: a library compiled for another runtime ABI than the
 #   runtime it links returns zero values with AETHER_INCOMPATIBLE, none of
 #   its code run, and its preflight says why;
@@ -53,9 +54,20 @@ fake() {
     cp "$SCRIPT_DIR/app.ae" "$d/app.ae"
 }
 
-# $1 = case dir: 0 when the importer built the program
+# $1 = case dir: 0 when the importer built the program. #3485: in a temp
+# directory of its own, so what the import leaves there can be seen: the
+# stub directory it wrote is removed, whether it was refused or not.
 import_it() {
-    (cd "$TMP/$1" && "$AE" build app.ae -o app > build.log 2>&1)
+    tmp="$TMP/$1/tmp"
+    mkdir -p "$tmp"
+    tmp_env="$tmp"
+    command -v cygpath >/dev/null 2>&1 && tmp_env="$(cygpath -m "$tmp")"
+    (cd "$TMP/$1" && TMPDIR="$tmp_env" TEMP="$tmp_env" TMP="$tmp_env" \
+        "$AE" build app.ae -o app > build.log 2>&1)
+    rc=$?
+    left="$(ls -d "$tmp"/ae-binimport-* 2>/dev/null)"
+    [ -z "$left" ] || bad "$1: the import left its stub directory ($left)" "$TMP/$1/build.log"
+    return $rc
 }
 
 # $1 = case dir, $2 = a fixed string its build log must hold, $3 = label
