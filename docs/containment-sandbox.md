@@ -738,12 +738,87 @@ cat sandbox-config.ae
 
 | Attack vector | Why |
 |--------------|-----|
-| Statically linked binaries | Don't use libc, bypass LD_PRELOAD entirely. Process creation by such binaries is still caught by the seccomp-bpf clone fence (see below). |
+| Statically linked binaries | Don't use libc, bypass LD_PRELOAD entirely. On Linux, Landlock still holds their file access and the seccomp filter their process creation (see below). |
 | `ptrace` self | Can modify own process memory to skip checks |
 | Kernel exploits | We're userspace, can't defend against kernel bugs |
 
 For these vectors, combine with OS-level sandboxing (seccomp-bpf,
 Linux namespaces, OpenBSD pledge/unveil) for defence in depth.
+
+### Kernel layer: Landlock
+
+`LD_PRELOAD` sees only calls that go through libc. Python's `ctypes`,
+LuaJIT's FFI or Ruby's `fiddle` can reach libc's own `syscall` (or a static
+binary can issue the instruction), and open what the grants never allowed.
+On Linux both sandboxed spawns (`spawn_sandboxed` and `sandbox.spawn_socket`)
+therefore put the child under **Landlock** before it execs: Linux 5.13 and
+later, no root, no user namespace. Its rules come from the grants, so the
+kernel refuses such an `openat` itself (`EACCES`).
+
+The ruleset is built in the parent, before the fork, and the child only
+applies it (`PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`), which
+keeps the child to async-signal-safe calls. Its code is
+`runtime/sandbox/aether_sandbox_kernel_linux.c`.
+
+**How grants become rules.** The ruleset handles every fs right of the
+kernel's ABI (`REFER` from ABI 2, `TRUNCATE` from ABI 3; `IOCTL_DEV` is not
+handled, so ioctls on already-open terminals keep working).
+
+| Grant | Landlock rights |
+|---|---|
+| `grant_fs_read(p)` | `READ_FILE`, `READ_DIR` |
+| `grant_fs_write(p)` | `WRITE_FILE`, `TRUNCATE`, `REMOVE_*`, `MAKE_*`, `REFER` |
+| `grant_fs(p)` | both |
+| `grant_exec(cmd)` | `EXECUTE`, `READ_FILE` on the program the command's first word names (a bare name is looked up on `PATH`) |
+| `grant_tcp(host, port)` | `CONNECT_TCP` on `port`, ABI 4 (Linux 6.7) and later; the host is held by the preload only, since Landlock rules name ports, not hosts |
+| `grant_tcp(host, 0)`, `grant_tcp_listen()` | connect (bind) is then not handled by Landlock: any port is not a port rule. The seccomp filter and the preload still hold it |
+| `grant_udp` | nothing: Landlock has no UDP rules |
+
+From ABI 6 (Linux 6.12) the ruleset also scopes abstract Unix sockets and
+signals: the child cannot connect to an abstract socket made outside its
+sandbox, or signal a process outside it (the parent included).
+
+**How patterns become rules.** A grant is never widened to fit Landlock.
+
+| Pattern | Rule |
+|---|---|
+| `*` | `/` and everything under it |
+| `/dir/*` | `/dir` and everything under it |
+| `/dir/name*` | each entry of `/dir` whose name starts with `name` **when the child starts**: one made later is not covered (narrower) |
+| `/dir/file` (exact) | that file; a path that does not exist gets no rule, so a file the child is to create needs its directory granted (narrower) |
+| `/dir` (exact, a directory) | no rule: a Landlock rule on a directory covers what is under it, which the exact grant does not (narrower) |
+| `*.txt` (a suffix), or a `*` inside a path | cannot be expressed. `spawn_socket` refuses with a reason; `spawn_sandboxed` runs the child without Landlock and says so on stderr |
+
+**What the child may read to start.** Under Landlock the child's own
+`execve` is checked too, and so are the opens the dynamic loader makes, which
+the preload never sees. The kernel layer adds, read-only:
+
+- the program (`EXECUTE`, `READ_FILE`), its ELF interpreter from `PT_INTERP`
+  (`EXECUTE`, `READ_FILE`), and for a `#!` script its interpreter the same
+  way; a file that is neither runs under `/bin/sh`, which gets the same;
+- the directory the ELF interpreter really lives in, `READ_FILE` only (no
+  listing): the system library directory, `/usr/lib/x86_64-linux-gnu` on
+  Debian and Ubuntu, `/usr/lib` on Arch and Fedora. Libraries elsewhere
+  (`/usr/local/lib`, `$ORIGIN`) need a `grant_fs_read`;
+- `/etc/ld.so.cache`, `/usr/lib/locale` (glibc's locale archive) and
+  `/dev/urandom` (`READ_FILE`); `/dev/null` (`READ_FILE`, `WRITE_FILE`);
+- `libaether_sandbox.so`, and `spawn_sandboxed`'s shared-memory grant file
+  (`spawn_socket`'s grants are on an inherited memfd, which needs no rule).
+
+On ABI 1 (Linux 5.13 to 5.18) `REFER` does not exist and the kernel refuses
+every rename or link across directories under a ruleset; that is Landlock's
+own rule.
+
+**A kernel without Landlock** (older than 5.13, or with `landlock` left out
+of `lsm=`):
+
+- `sandbox.spawn_socket` fails closed: it returns an error naming the
+  missing Landlock and starts nothing. A host that accepts the weaker
+  containment says so in its grant list with `grant_without_landlock()`,
+  and the child then runs with the preload and seccomp only;
+- `spawn_sandboxed` keeps working for the callers it had before Landlock,
+  and prints a warning to stderr (once per process) that a raw syscall can
+  now open what the grants do not allow.
 
 ### Kernel-level fence for process creation, the clone3 gap, closed
 

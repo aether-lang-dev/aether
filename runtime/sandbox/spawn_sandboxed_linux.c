@@ -132,7 +132,10 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         shm_unlink(shm_name);
         return -1;
     }
-    if (aether_sandbox_kernel_prepare(kernel, grant_list, 0, kerr, sizeof kerr) != 0) {
+    char shm_path[sizeof shm_name + 16];
+    snprintf(shm_path, sizeof shm_path, "/dev/shm%s", shm_name);   // glibc's shm_open
+    if (aether_sandbox_kernel_prepare(kernel, grant_list, 0, preload_path, shm_path,
+                                      kerr, sizeof kerr) != 0) {
         fprintf(stderr, "[aether] spawn_sandboxed: %s\n", kerr);
         free(kernel);
         shm_unlink(shm_name);
@@ -152,6 +155,9 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         shm_unlink(shm_name);
         return -1;
     }
+    // What it needs to exec the program under Landlock. Not strict: a rule
+    // that cannot be added drops Landlock for this child, with a warning.
+    aether_sandbox_kernel_program(kernel, path, "/bin/sh", kerr, sizeof kerr);
     char* argv[] = { (char*)program, (char*)arg, NULL };
     char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
     char preload_var[sizeof preload_path + 16];
@@ -294,6 +300,17 @@ typedef struct {
     char reason[512];
 } SpawnSocketCtx;
 
+// Once the program is resolved: the Landlock rules to exec it.
+static int spawn_socket_ready(void* ctx, const char* path, const char* sh_path) {
+    SpawnSocketCtx* c = (SpawnSocketCtx*)ctx;
+    char why[512];
+    if (aether_sandbox_kernel_program(&c->kernel, path, sh_path, why, sizeof why) != 0) {
+        snprintf(c->reason, sizeof c->reason, "%s; nothing was started", why);
+        return -1;
+    }
+    return 0;
+}
+
 static int spawn_socket_child(void* ctx) {
     return aether_sandbox_kernel_apply(&((SpawnSocketCtx*)ctx)->kernel);
 }
@@ -345,6 +362,7 @@ _tuple_int_int_string aether_sandbox_spawn_socket_raw(void* grant_list, const ch
         return out;
     }
     if (aether_sandbox_kernel_prepare(&ctx->kernel, grant_list, AETHER_SBX_STRICT,
+                                      preload_path, NULL,
                                       ctx->reason, sizeof ctx->reason) != 0) {
         out._2 = spawn_socket_fail("sandbox.spawn_socket: %s; nothing was started", ctx->reason);
         free(ctx);
@@ -375,6 +393,7 @@ _tuple_int_int_string aether_sandbox_spawn_socket_raw(void* grant_list, const ch
     hook.env = set;
     hook.nenv = nset;
     hook.keep_fd = gfd;
+    hook.ready = spawn_socket_ready;
     hook.child = spawn_socket_child;
     hook.failed = spawn_socket_failed;
     hook.ctx = ctx;

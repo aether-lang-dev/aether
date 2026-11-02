@@ -5,6 +5,7 @@
  *
  *   probe hello <file>        channel, argv, env, libc fopen of /etc/passwd and <file>
  *   probe raw_openat <path>   openat by a raw syscall
+ *   probe raw_passwd          raw_openat /etc/passwd (for spawn_sandboxed, which passes one arg)
  *   probe raw_socket <family> socket(AF_INET|AF_INET6|AF_UNIX, SOCK_STREAM) by a raw syscall
  *   probe raw_execve          execve of this program ("execed") by a raw syscall
  *   probe execed              what raw_execve runs, when it is let through
@@ -106,6 +107,11 @@ int main(int argc, char** argv) {
         return 0;
     }
 #ifdef HAVE_RAW
+    if (strcmp(mode, "raw_passwd") == 0) {
+        argv[2] = (char*)"/etc/passwd";
+        mode = "raw_openat";
+        argc = 3;
+    }
     if (strcmp(mode, "raw_openat") == 0 && argc > 2) {
         long r = raw4(NR_OPENAT, -100 /* AT_FDCWD */, (long)argv[2], O_RDONLY, 0);
         if (r >= 0) close((int)r);

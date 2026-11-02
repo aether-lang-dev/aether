@@ -29,11 +29,17 @@ typedef struct AetherSandboxKernel {
     int seccomp;                                  // 1: install `filter`
     unsigned short filter_len;
     struct sock_filter filter[AETHER_SBX_FILTER_MAX];
+    int landlock_fd;                              // the ruleset, or -1: no Landlock
+    int landlock_abi;                             // the kernel's ABI, 0 when none
+    unsigned long long landlock_fs;               // the fs rights it handles
+    int flags;
+    int warned;                                   // a warning was printed
 } AetherSandboxKernel;
 
 // What a child that could not apply the layer reports, with errno.
 enum {
     AETHER_SBX_STEP_SECCOMP = 1,
+    AETHER_SBX_STEP_LANDLOCK = 2,
 };
 
 // How strict prepare is (the two spawns differ only here).
@@ -44,10 +50,21 @@ enum {
 //     the kernel layer).
 #define AETHER_SBX_STRICT 1
 
-// Parent, before the fork. 0 when `k` is ready; -1 when the spawn must not
-// start, with the reason in `err`.
+// Parent, before the fork. 0 when `k` is ready for aether_sandbox_kernel_
+// program; -1 when the spawn must not start, with the reason in `err`.
+// `preload` and `grants_path` (either may be NULL) are files the child must
+// read before its own code runs: the preload library, and spawn_sandboxed's
+// shared-memory object.
 int aether_sandbox_kernel_prepare(AetherSandboxKernel* k, void* grant_list,
-                                  int flags, char* err, size_t errsz);
+                                  int flags, const char* preload,
+                                  const char* grants_path, char* err, size_t errsz);
+
+// Parent, once the program is resolved: what the child needs to exec it
+// (the program, its ELF interpreter, the interpreter of a #! script, and
+// /bin/sh at `sh_path` for a file that is neither), and the loader's floor.
+// 0, or -1 with the reason in `err`.
+int aether_sandbox_kernel_program(AetherSandboxKernel* k, const char* path,
+                                  const char* sh_path, char* err, size_t errsz);
 
 // Child, before exec: async-signal-safe. 0, or a nonzero
 // AETHER_SBX_STEP_* with errno set.

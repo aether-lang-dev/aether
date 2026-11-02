@@ -1,0 +1,11 @@
+// spawn_sandboxed with fs_read on one directory: sandboxed <dir> <program> <arg>
+import std.os
+import std.list
+extern println(s: string)
+main() {
+    g = list.new()
+    list.add(g, "fs_read")
+    list.add(g, "${os.args_get(1)}/*")
+    rc = spawn_sandboxed(g, os.args_get(2), os.args_get(3))
+    println("rc=${rc}")
+}

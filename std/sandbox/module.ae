@@ -34,8 +34,10 @@
 // What is checked: std's own fs / net / os / udp entry points, and, under
 // the LD_PRELOAD library, libc's open / connect / listen / accept / execve
 // / dlopen. Code that bypasses libc (raw syscall(), statically linked
-// binaries, io_uring) is not contained by this layer; on FreeBSD,
-// std.capsicum adds kernel enforcement. See docs/containment-sandbox.md.
+// binaries, io_uring) is not contained by that layer; a child that
+// spawn_sandboxed or spawn_socket starts on Linux is held by a kernel layer
+// as well (Landlock and seccomp), and on FreeBSD std.capsicum adds kernel
+// enforcement. See docs/containment-sandbox.md.
 
 import std.list
 import std.string
@@ -63,7 +65,8 @@ extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string
 exports(
     Grants, new, enforce, free, spawn_socket, spawn_socket_uncontained,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
-    grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork
+    grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork,
+    grant_without_landlock
 )
 
 // A grant list. Opaque: made by new(), filled by the grant_* calls in its
@@ -270,3 +273,11 @@ grant_native(_ctx: Grants, path: string) { add_grant(_ctx, "native", path) }
 // and a clone or clone3 that is not a thread. Without it the child can start
 // threads but no process; the kernel fence refuses the rest.
 grant_fork(_ctx: Grants) { add_grant(_ctx, "fork", "*") }
+
+// Let sandbox.spawn_socket start the child on a kernel with no Landlock
+// (before Linux 5.13, or with landlock left out of lsm=), held by the
+// preload and seccomp only. Without it spawn_socket refuses there, since a
+// raw syscall (ctypes, a static binary) could then open what the fs grants
+// do not allow. It is a grant so the choice sits in the host's grant list,
+// where a review reads it; it grants the child nothing.
+grant_without_landlock(_ctx: Grants) { add_grant(_ctx, "landlock", "optional") }
