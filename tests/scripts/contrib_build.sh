@@ -429,6 +429,13 @@ probe_racket() {
     return 1
 }
 
+probe_stunt() {
+    # stunt, the test double (contrib/host/stunt): the bridge dlopens
+    # libstunt at runtime and needs only the in-tree runtime headers + libc.
+    echo ""
+    return 0
+}
+
 probe_aether() {
     # The Aether-hosts-Aether bridge fork+execs a compiled child under
     # LD_PRELOAD=libaether_sandbox.so. It depends only on the in-tree
@@ -462,6 +469,8 @@ cross_class() {   # <module-name> -> echoes the class token
         # them. Cross-buildable; the target dlopen's its own liblua/libduktape.
         host_lua)              echo "tier3:lua.h:" ;;
         host_duktape)          echo "tier3:duktape.h:" ;;
+        # stunt's bridge has no dependency at all: it compiles like core.
+        host_stunt)            echo "tier1" ;;
         # host bridges whose headers are arch/config-GENERATED multiarch
         # dispatchers (pyconfig.h / ruby/config.h / perl's config.h) that can't
         # be portably cross-staged — ctr_notes.md Bug 6. Not cross-buildable here.
@@ -584,6 +593,7 @@ CATALOGUE=(
     "racket|host_racket  contrib/host/racket/aether_host_racket.c AETHER_HAS_RACKET  probe_racket"
     "aether|host_aether  contrib/host/aether/aether_host_aether.c AETHER_HAS_AETHER_HOST probe_aether"
     "quickjs|host_quickjs contrib/host/quickjs/aether_host_quickjs.c AETHER_HAS_QUICKJS probe_quickjs"
+    "stunt|host_stunt    contrib/host/stunt/aether_host_stunt.c   AETHER_HAS_STUNT   probe_stunt"
 )
 
 # Find a catalogue line by short name. Echoes the build_module arg list

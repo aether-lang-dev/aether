@@ -2072,6 +2072,31 @@ $(SANDBOX_PRELOAD): runtime/libaether_sandbox_preload.c runtime/aether_sandbox_p
 	fi
 endif
 
+# stunt (contrib/host/stunt): the test double a host bridge loads the way it
+# loads an interpreter. `make stunt` builds libstunt and the stunt program
+# into build/stunt/, for contrib-host-check's co-located spec; the tests in
+# tests/integration/contrib_host_stunt build their own, with -Werror.
+STUNT_DIR := $(BUILD_DIR)/stunt
+ifneq ($(IS_WINDOWS),)
+STUNT_LIB := $(STUNT_DIR)/stunt.dll
+STUNT_SHARED := -shared
+else ifeq ($(DETECTED_OS),Darwin)
+STUNT_LIB := $(STUNT_DIR)/libstunt.dylib
+STUNT_SHARED := -dynamiclib -fPIC
+else
+STUNT_LIB := $(STUNT_DIR)/libstunt.so
+STUNT_SHARED := -shared -fPIC
+endif
+STUNT_LIBS := $(if $(filter Linux,$(shell uname -s)),-ldl,)
+.PHONY: stunt
+stunt: $(STUNT_LIB) $(STUNT_DIR)/stunt$(EXE_EXT)
+$(STUNT_LIB): contrib/host/stunt/stunt.c contrib/host/stunt/stunt.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c11 -O1 -Wall -Wextra $(STUNT_SHARED) -o $@ contrib/host/stunt/stunt.c $(STUNT_LIBS)
+$(STUNT_DIR)/stunt$(EXE_EXT): contrib/host/stunt/stunt.c contrib/host/stunt/stunt_main.c contrib/host/stunt/stunt.h
+	@mkdir -p $(dir $@)
+	$(CC) -std=c11 -O1 -Wall -Wextra -o $@ contrib/host/stunt/stunt.c contrib/host/stunt/stunt_main.c $(STUNT_LIBS)
+
 # Precompiled stdlib archive — runtime + std for user programs.
 stdlib: $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) $(LIB_MAIN_ARCHIVE) $(BUILD_TARGET_STAMP) $(SHARED_RT) $(SANDBOX_PRELOAD)
 
@@ -3299,8 +3324,8 @@ test-ubsan:
 # in-tree sandbox runtime, so they belong in the syntax gate too. `rhombus`
 # has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
 # the Racket VM), so it is not listed here (the check SKIPs missing-bridge
-# dirs).
-CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket quickjs
+# dirs). `stunt` is the test double (contrib/host/stunt/README.md).
+CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket quickjs stunt
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.
@@ -3538,7 +3563,7 @@ check-contrib-modules: compiler ae stdlib
 		exit 1; \
 	fi
 
-contrib-host-check: compiler ae stdlib
+contrib-host-check: compiler ae stdlib stunt
 	@echo "==================================="
 	@echo "  contrib/host bridge check"
 	@echo "==================================="
@@ -3585,6 +3610,7 @@ contrib-host-check: compiler ae stdlib
 	    perl) command -v perl >/dev/null 2>&1 && { \
 	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
 	      export AETHER_PERL_SONAME; }; ;; \
+	    stunt) AETHER_STUNT_LIB="$(CURDIR)/$(STUNT_LIB)"; export AETHER_STUNT_LIB; ;; \
 	  esac; \
 	  if [ ! -f "$(BUILD_DIR)/contrib/libaether_host_$$lang.a" ]; then \
 	    MODULES="$$lang" bash tests/scripts/contrib_build.sh >/dev/null 2>&1 || true; \

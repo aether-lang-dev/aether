@@ -1,0 +1,95 @@
+// Integration tests for contrib.host.stunt, co-located with the bridge like
+// the Lua and Ruby ones: driven through the import, so they cover
+// module.ae's declarations and the contrib-link plumbing too. The sandbox
+// rows of the catalogue are in tests/integration/contrib_host_stunt; these
+// are the bridge's own surface.
+//
+// SKIPPING: the bridge dlopens libstunt (AETHER_STUNT_LIB, which
+// `make contrib-host-check` sets after `make stunt`); without it they skip.
+
+import contrib.host.stunt
+import std.sandbox
+import std.spec
+import std.string
+
+@c_callback
+spec_greet(vm: ptr) -> int {
+    stunt.push_str(vm, "hello, ${stunt.arg_str(vm, 1)}")
+    return 1
+}
+
+main() {
+    fw = spec.init()
+
+    have = 0
+    if stunt.init() == 0 { have = 1 }
+    reason = "libstunt not loadable (set AETHER_STUNT_LIB)"
+
+    spec.describe(fw, "contrib.host.stunt") {
+        spec.it_when(have, "runs a check and reports the match", reason) callback {
+            spec.assert_eq(stunt.run("callback-unregistered refused"), stunt.STUNT_PASS,
+                "an unregistered host function is refused, as expected")
+        }
+
+        // A bridge that always reports PASS would satisfy the case above.
+        spec.it_when(have, "reports a mismatch as failure", reason) callback {
+            spec.assert_eq(stunt.run("callback-unregistered succeed"), stunt.STUNT_FAIL,
+                "the wrong expectation must NOT report a match")
+        }
+
+        spec.it_when(have, "refuses a check it does not have", reason) callback {
+            spec.assert_eq(stunt.run("no-such-check succeed"), stunt.STUNT_USAGE,
+                "an unknown check is a usage error")
+            spec.assert_eq(stunt.run("map-get maybe"), stunt.STUNT_USAGE,
+                "an unknown expectation is a usage error")
+        }
+
+        spec.it_when(have, "calls a registered host function with its argument", reason) callback {
+            vm = stunt.vm_new()
+            stunt.vm_register(vm, "greet", spec_greet)
+            spec.assert_eq(stunt.vm_eval(vm, "callback-greet succeed"), stunt.STUNT_PASS,
+                "greet(\"stunt\") came back \"hello, stunt\"")
+            spec.assert_true(string.contains(stunt.vm_result(vm), "hello, stunt") == 1,
+                "the result line carries the callback's answer")
+            stunt.vm_free(vm)
+        }
+
+        spec.it_when(have, "gives the guest the shared map, inputs frozen", reason) callback {
+            m = stunt.map_new()
+            stunt.map_put(m, "input", "stunt-in")
+            nothing = sandbox.new("no-grants") {
+            }
+            tok = stunt.map_token(m)
+            spec.assert_eq(stunt.run_sandboxed_with_map(nothing, "map-get succeed", tok), stunt.STUNT_PASS,
+                "the guest reads the input")
+            spec.assert_eq(stunt.run_sandboxed_with_map(nothing, "map-set succeed", tok), stunt.STUNT_PASS,
+                "the guest adds an output")
+            spec.assert_eq(stunt.run_sandboxed_with_map(nothing, "map-overwrite-input refused", tok), stunt.STUNT_PASS,
+                "the guest cannot overwrite the input")
+            spec.assert_true(stunt.map_get(m, "output") == "stunt-out", "the host reads the output back")
+            stunt.map_free(m)
+            sandbox.free(nothing)
+        }
+
+        spec.it_when(have, "holds the host's bindings to the grants", reason) callback {
+            nothing = sandbox.new("no-grants") {
+            }
+            spec.assert_eq(stunt.run_sandboxed(nothing, "binding-getenv-home refused"), stunt.STUNT_PASS,
+                "getenv is refused with no env grant")
+            sandbox.free(nothing)
+        }
+
+        spec.it_when(have, "stops spin at the instruction limit", reason) callback {
+            vm = stunt.vm_new()
+            stunt.vm_set_instruction_limit(vm, 100000)
+            spec.assert_eq(stunt.vm_eval(vm, "spin host"), stunt.STUNT_STOPPED,
+                "spin is stopped, not run forever")
+            stunt.vm_free(vm)
+        }
+    }
+
+    _rc = spec.run_summary(fw)
+
+    if have == 1 { stunt.finalize() }
+    return _rc
+}
