@@ -67,7 +67,9 @@ static inline void aether_sandbox_exe_dir(char* dir, size_t size) {
 }
 
 /* Try one candidate: copy it to `buf` and say whether it exists; note it in
- * `tried` either way. */
+ * `tried` either way. A candidate longer than `buf` is not taken: cut short,
+ * it would name some other file. Every snprintf here checks its result, for
+ * that reason (and gcc's -Wformat-truncation, which -Werror builds hit). */
 static inline int aether_sandbox_try_preload(const char* path, char* buf, size_t size,
                                              char* tried, size_t tried_size) {
     if (tried && tried_size > 0) {
@@ -76,7 +78,11 @@ static inline int aether_sandbox_try_preload(const char* path, char* buf, size_t
             snprintf(tried + used, tried_size - used, "%s%s", used ? ", " : "", path);
     }
     if (access(path, F_OK) != 0) return 0;
-    snprintf(buf, size, "%s", path);
+    int n = snprintf(buf, size, "%s", path);
+    if (n < 0 || (size_t)n >= size) {
+        if (size) buf[0] = '\0';
+        return 0;
+    }
     return 1;
 }
 
@@ -86,7 +92,9 @@ static inline int aether_sandbox_try_root(const char* root, char* buf, size_t si
     static const char* const subdirs[] = { "lib/aether", "lib", "build" };
     char candidate[1200];
     for (size_t i = 0; i < sizeof(subdirs) / sizeof(subdirs[0]); i++) {
-        snprintf(candidate, sizeof(candidate), "%s/%s/" AETHER_SANDBOX_PRELOAD_NAME, root, subdirs[i]);
+        int n = snprintf(candidate, sizeof(candidate), "%s/%s/" AETHER_SANDBOX_PRELOAD_NAME,
+                         root, subdirs[i]);
+        if (n < 0 || (size_t)n >= sizeof(candidate)) continue;
         if (aether_sandbox_try_preload(candidate, buf, size, tried, tried_size)) return 1;
     }
     return 0;
@@ -107,8 +115,9 @@ static inline int aether_sandbox_find_preload(char* buf, size_t size, char* trie
     char exe_dir[1024];
     aether_sandbox_exe_dir(exe_dir, sizeof(exe_dir));
     if (exe_dir[0]) {
-        snprintf(candidate, sizeof(candidate), "%s/" AETHER_SANDBOX_PRELOAD_NAME, exe_dir);
-        if (aether_sandbox_try_preload(candidate, buf, size, tried, tried_size)) return 1;
+        int n = snprintf(candidate, sizeof(candidate), "%s/" AETHER_SANDBOX_PRELOAD_NAME, exe_dir);
+        if (n >= 0 && (size_t)n < sizeof(candidate) &&
+            aether_sandbox_try_preload(candidate, buf, size, tried, tried_size)) return 1;
     }
 
     const char* home = getenv("AETHER_HOME");
@@ -116,8 +125,9 @@ static inline int aether_sandbox_find_preload(char* buf, size_t size, char* trie
         if (aether_sandbox_try_root(home, buf, size, tried, tried_size)) return 1;
     }
     if (exe_dir[0]) {
-        snprintf(candidate, sizeof(candidate), "%s/..", exe_dir);
-        if (aether_sandbox_try_root(candidate, buf, size, tried, tried_size)) return 1;
+        int n = snprintf(candidate, sizeof(candidate), "%s/..", exe_dir);
+        if (n >= 0 && (size_t)n < sizeof(candidate) &&
+            aether_sandbox_try_root(candidate, buf, size, tried, tried_size)) return 1;
     }
     return 0;
 }
