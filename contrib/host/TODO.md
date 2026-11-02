@@ -11,6 +11,19 @@
   - Shared map `aether_map_get`/`aether_map_put` bindings for Perl and Ruby currently use eval-injected hashes — outputs stay in the hosted language. Need XS (Perl) or C extension (Ruby) to write outputs back to the C map.
   - `string:bytes` mode for shared map — binary data without base64
 
+## stunt (the test double)
+- [x] `contrib/host/stunt`: a scriptless engine in C that a bridge loads as it
+  loads an interpreter (`libstunt`, dlopen'd), or that a host spawns with
+  `sandbox.spawn_socket`, with a named catalogue of checks covering what a
+  bridge must handle: grant checks, the preload, Landlock and seccomp rows,
+  nested levels, typed callbacks, the shared map, the cached environment,
+  the instruction limit and cancel, an oversize frame. No interpreter
+  package; runs on every POSIX lane. Tests in
+  `tests/integration/contrib_host_stunt`. See its README.
+- [ ] A hosts repository with the real bridges and more languages, each held
+  to stunt's catalogue by name; then the real bridges here move out, with a
+  transition.
+
 ## Python
 - [x] Dedicated `examples/04-interop/05-hosts/python.ae` written against the current stdlib + sandbox API (the `lazy-evaluation` recovery path no longer exists, confirmed via pickaxe search across all refs).
 - [x] `os.environ` is cached at CPython startup: sandbox `getenv` interception only works via `ctypes.CDLL(None).getenv`, not `os.environ.get()`. Covered in `docs/containment-sandbox.md` → host module matrix (Env cache issue row) and the "Shared-interpreter behavior" section below it. The `examples/04-interop/05-hosts/python.ae` demonstrates the `ctypes` workaround inline.
