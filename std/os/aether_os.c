@@ -1443,7 +1443,9 @@ static void aether_child_exec(const AetherExec* x) {
     char** env = x->env ? x->env : aether_environ;
     execve(x->path, x->argv, env);
     if (errno != ENOEXEC) return;
-    execve(AETHER_OS_SHELL, x->sh_argv, env);
+    /* sh_argv[0], not the literal: the pointer a spawn hook was told about
+     * (AetherSpawnHook.ready). */
+    execve(x->sh_argv[0], x->sh_argv, env);
     errno = ENOEXEC;
 }
 
@@ -1895,9 +1897,17 @@ static char** aether_ipc_env(char** base) {
 /* os.run_socket's child env: as aether_ipc_env, plus AETHER_IPC_KIND=socket,
  * which ipc.parent_channel_kind() reads. Either of the two in `base` is
  * replaced, not duplicated. */
-static char** aether_ipc_socket_env(char** base) {
+static char** aether_ipc_socket_env(char** base, const char* const* extra, int nextra) {
     static const char* const ipc[] = { "AETHER_IPC_FD=3", "AETHER_IPC_KIND=socket" };
-    return aether_spawn_env(base ? base : aether_environ, ipc, 2);
+    if (nextra <= 0) return aether_spawn_env(base ? base : aether_environ, ipc, 2);
+    const char** set = (const char**)malloc((size_t)(nextra + 2) * sizeof(char*));
+    if (!set) return NULL;
+    set[0] = ipc[0];
+    set[1] = ipc[1];
+    for (int i = 0; i < nextra; i++) set[i + 2] = extra[i];
+    char** env = aether_spawn_env(base ? base : aether_environ, set, nextra + 2);
+    free(set);
+    return env;
 }
 
 /* A connected AF_UNIX stream pair, both ends close-on-exec, for a process
@@ -1935,7 +1945,8 @@ _tuple_int_int_string os_socketpair_raw(void) {
  * child blocks forever on its write. For payload-at-exit usage
  * with large payloads, prefer os_run_pipe_drain_and_wait_raw. A socket
  * has the same window in both directions. */
-static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* argv_list, void* env_list, int is_socket) {
+static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* argv_list, void* env_list, int is_socket,
+                                                      const AetherSpawnHook* hook) {
     _tuple_int_int_string out = { -1, -1, "" };
     if (!prog) {
         out._2 = "null prog";
@@ -1981,7 +1992,9 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
     /* The child's env: the one given, or environ, with AETHER_IPC_FD=3 (and
      * for a socket AETHER_IPC_KIND=socket). The spliced array borrows the
      * given one's strings, so only its array goes. */
-    char** spliced = is_socket ? aether_ipc_socket_env(x.envp) : aether_ipc_env(x.envp);
+    char** spliced = is_socket
+        ? aether_ipc_socket_env(x.envp, hook ? hook->env : NULL, hook ? hook->nenv : 0)
+        : aether_ipc_env(x.envp);
     free(x.envp);
     x.envp = spliced;
     if (!x.envp) {
@@ -1994,6 +2007,16 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         return out;
     }
     x.env = x.envp;
+
+    if (hook && hook->ready && hook->ready(hook->ctx, x.path, x.sh_argv[0]) != 0) {
+        close(chanfd[0]);
+        close(chanfd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        aether_exec_release(&x);
+        out._2 = hook->failed ? hook->failed(hook->ctx, 0, 0) : "spawn refused";
+        return out;
+    }
 
     pid_t pid = aether_fork();
     if (pid < 0) {
@@ -2015,6 +2038,19 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
         int chan = aether_child_lift_fd(chanfd[1]);
         if (aether_child_fd(chan, 3) < 0) aether_child_exec_failed(ef);
         close(chan);
+        if (hook) {
+            /* A hook's step goes up the error pipe in the bits above an
+             * errno's, so the parent can tell it from an exec failure. */
+            if (hook->keep_fd >= 0 && fcntl(hook->keep_fd, F_SETFD, 0) == -1) {
+                errno = (1 << 16) | (errno & 0xffff);
+                aether_child_exec_failed(ef);
+            }
+            int step = hook->child ? hook->child(hook->ctx) : 0;
+            if (step != 0) {
+                errno = ((step + 1) << 16) | (errno & 0xffff);
+                aether_child_exec_failed(ef);
+            }
+        }
         aether_child_exec(&x);
         aether_child_exec_failed(ef);
     }
@@ -2024,7 +2060,13 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
     if (exec_err) {
         close(chanfd[0]);
         aether_reap_failed(pid);
-        out._2 = aether_exec_failure(exec_err);
+        int step = (exec_err >> 16) - 1;
+        if (hook && step >= 0) {
+            out._2 = hook->failed ? hook->failed(hook->ctx, step, exec_err & 0xffff)
+                                  : "the child could not be set up";
+        } else {
+            out._2 = aether_exec_failure(exec_err);
+        }
         return out;
     }
 
@@ -2045,11 +2087,24 @@ static _tuple_int_int_string aether_spawn_channel_raw(const char* prog, void* ar
 }
 
 _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* env_list) {
-    return aether_spawn_channel_raw(prog, argv_list, env_list, 0);
+    return aether_spawn_channel_raw(prog, argv_list, env_list, 0, NULL);
 }
 
 _tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void* env_list) {
-    return aether_spawn_channel_raw(prog, argv_list, env_list, 1);
+    return aether_spawn_channel_raw(prog, argv_list, env_list, 1, NULL);
+}
+
+/* os.run_socket with a hook (runtime/utils/aether_spawn.h): what
+ * sandbox.spawn_socket starts its child with. A keep_fd step reads as step
+ * 0 to `failed`; the hook's own child steps as themselves. */
+int aether_os_run_socket_hooked(const char* prog, void* argv_list, void* env_list,
+                                const AetherSpawnHook* hook,
+                                int* fd, int* pid, const char** errmsg) {
+    _tuple_int_int_string r = aether_spawn_channel_raw(prog, argv_list, env_list, 1, hook);
+    if (fd) *fd = r._0;
+    if (pid) *pid = r._1;
+    if (errmsg) *errmsg = r._2;
+    return r._2 && r._2[0] ? -1 : 0;
 }
 
 /* Wait for a child, return (exit_code, err). Reaps the child so

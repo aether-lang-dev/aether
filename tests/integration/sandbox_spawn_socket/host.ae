@@ -1,0 +1,112 @@
+// sandbox.spawn_socket's test host. Usage:
+//
+//   host <grants> <program> [args...]
+//
+// <grants> is "-" for none, else a comma-separated list of kind=pattern:
+// fs_read, fs_write, fs, exec, env, native, fork, tcp (host:port, or host
+// for any port), udp, listen, all, nolandlock, runtime (an interpreter's
+// name). It runs <program> under sandbox.spawn_socket with those grants and
+// the env SPAWN_TEST=hello plus PATH, then prints:
+//
+//   spawn: ok | spawn: <err>
+//   <every byte the child sent on its socket>
+//   exit=<code>
+
+import std.sandbox
+import std.os
+import std.ipc
+import std.io
+import std.list
+import std.string
+
+extern exit(code: int)
+
+fn add(g: sandbox.Grants, item: string) {
+    eq = string.index_of(item, "=")
+    kind = item
+    pat = ""
+    if eq >= 0 {
+        kind = string.substring(item, 0, eq)
+        pat = string.substring(item, eq + 1, string.length(item))
+    }
+    if kind == "fs_read" { sandbox.grant_fs_read(g, pat) return }
+    if kind == "fs_write" { sandbox.grant_fs_write(g, pat) return }
+    if kind == "fs" { sandbox.grant_fs(g, pat) return }
+    if kind == "exec" { sandbox.grant_exec(g, pat) return }
+    if kind == "env" { sandbox.grant_env(g, pat) return }
+    if kind == "native" { sandbox.grant_native(g, pat) return }
+    if kind == "fork" { sandbox.grant_fork(g) return }
+    if kind == "listen" { sandbox.grant_tcp_listen(g) return }
+    if kind == "all" { sandbox.grant_all(g) return }
+    if kind == "tcp" || kind == "udp" {
+        host = pat
+        port = 0
+        colon = string.index_of(pat, ":")
+        if colon >= 0 {
+            host = string.substring(pat, 0, colon)
+            p, perr = string.to_int(string.substring(pat, colon + 1, string.length(pat)))
+            if perr == "" { port = p }
+        }
+        if kind == "tcp" { sandbox.grant_tcp(g, host, port) } else { sandbox.grant_udp(g, host, port) }
+        return
+    }
+    println("host: unknown grant kind ${kind}")
+    exit(2)
+}
+
+main() {
+    if os.args_count() < 3 {
+        println("usage: host <grants> <program> [args...]")
+        exit(2)
+    }
+    spec = os.args_get(1)
+    prog = os.args_get(2)
+
+    g = sandbox.new("spawn-socket-test") {
+    }
+    if spec != "-" {
+        items = string.split(spec, ",")
+        n = string.array_size(items)
+        i = 0
+        while i < n {
+            add(g, string.array_get(items, i))
+            i = i + 1
+        }
+        string.array_free(items)
+    }
+
+    argv = list.new()
+    i = 3
+    while i < os.args_count() {
+        list.add(argv, os.args_get(i))
+        i = i + 1
+    }
+    env = list.new()
+    list.add(env, "SPAWN_TEST=hello")
+    list.add(env, "PATH=/usr/bin:/bin")
+
+    ch, pid, err = sandbox.spawn_socket(g, prog, argv, env)
+    list.free(argv)
+    list.free(env)
+    if err != "" {
+        println("spawn: ${err}")
+        println("fd=${ch} pid=${pid}")
+        sandbox.free(g)
+        exit(0)
+    }
+    println("spawn: ok")
+    while 1 == 1 {
+        data, rerr = ipc.read(ch, 4096)
+        if rerr != "" {
+            println("read error: ${rerr}")
+            break
+        }
+        if data == "" { break }
+        print(data)
+    }
+    io.fd_close(ch)
+    code, werr = os.wait_pid(pid)
+    if werr != "" { println("wait: ${werr}") }
+    println("exit=${code}")
+    sandbox.free(g)
+}

@@ -554,11 +554,42 @@ interception model requires.
 |----------|----------------|-------|
 | **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | `spawn_sandboxed` finds the library as described below, the program's own path from `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
 | **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (the program's own path comes from `sysctl(KERN_PROC_PATHNAME)`, no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
-| **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly. |
-| **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub. |
+| **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly; `sandbox.spawn_socket` returns an error and starts nothing. |
+| **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub; `sandbox.spawn_socket` returns an error and starts nothing. |
 
 The in-process layer (module boundary, scope boundary, and the stdlib
 grant checks) is pure C and works on every platform regardless.
+
+### A sandboxed child with a socket: `sandbox.spawn_socket`
+
+```aether,fragment
+ch, pid, err = sandbox.spawn_socket(guest, "python3", argv, env)
+```
+
+`os.run_socket`'s channel (the child's fd 3, `AETHER_IPC_FD=3`,
+`AETHER_IPC_KIND=socket`) with `spawn_sandboxed`'s containment, held to the
+grant list: the preload library, and the kernel layer below ("Kernel
+layer"). `argv` is a `std.list` of the arguments after the program and
+`env` the child's whole environment as `"KEY=VALUE"` (null for this
+process's); the sandbox adds its own variables. It returns at once with
+the parent's end of the socket and the child's pid; reap the child with
+`os.wait_pid` and close the socket.
+
+It **fails closed**. Where the child cannot be contained (macOS, Windows,
+Android, and FreeBSD until it has a kernel layer for a foreign program),
+and on Linux when the preload library cannot be found or the kernel layer
+cannot be set up as asked, it returns `(-1, -1, reason)` and starts
+nothing. A host that wants a child with no sandbox at all asks for one by
+name, `sandbox.spawn_socket_uncontained(perms, ...)`: the same signature
+(the grants are ignored), so the two differ by one word and the
+uncontained one is easy to find in review.
+
+The grants reach the child's preload on a sealed memfd it inherits
+(`AETHER_SANDBOX_GRANTS_FD`), not on a named shared-memory object:
+`spawn_sandboxed` waits for its child and then removes the object, and
+`spawn_socket` does not wait. The memfd has no name to remove, its seals
+stop the child changing it, and a program the child is granted to exec
+reads the same grants from it.
 
 ### Where `spawn_sandboxed` finds the preload library
 

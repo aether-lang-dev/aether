@@ -124,6 +124,11 @@ The same grant list goes to:
 
 - `spawn_sandboxed(perms, prog, args...)`, which runs a child process with
   `libaether_sandbox.so` preloaded, so the child's libc calls are checked too;
+- `sandbox.spawn_socket(perms, prog, argv, env)`, the same containment with
+  a socket to the child (its fd 3, as `os.run_socket` gives it), returning
+  `(fd, pid, err)`. It fails closed: where the child cannot be contained
+  it returns an error and starts nothing. `sandbox.spawn_socket_uncontained`
+  is the explicit way to run one with no sandbox;
 - the `contrib/host/<lang>` modules, which run embedded Lua, Python, Ruby and
   others under it: `python.run_sandboxed(worker, code)`.
 

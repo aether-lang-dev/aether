@@ -63,6 +63,40 @@ char** aether_spawn_environ(void);
  * any KEY= entry of its own, the set ones last. The array is malloc'd and
  * borrows its strings from `base` and `set`; NULL when malloc fails. */
 char** aether_spawn_env(char** base, const char* const* set, int nset);
+
+/* os.run_socket with more done to the child (sandbox.spawn_socket's
+ * containment, runtime/sandbox/spawn_sandboxed_linux.c). The channel, the
+ * env, the program's lookup and the exec-error pipe are os.run_socket's own
+ * (std/os/aether_os.c); the hook adds:
+ *   env/nenv  "KEY=VALUE" strings the child's env has in place of its own;
+ *   keep_fd   a descriptor (4 or above) the child keeps open across exec,
+ *             at the same number; -1 for none;
+ *   ready     in the parent once the program is resolved, before the fork:
+ *             `path` and `sh_path` are the pointers the child will pass to
+ *             execve (the program, then /bin/sh for a file with no #!
+ *             line). 0, or -1 to start nothing, with the reason left for
+ *             `failed` to give (step 0);
+ *   child     in the child, after fd 3 is in place and before exec: only
+ *             async-signal-safe calls. 0, or a step above 0 with errno set:
+ *             the child then exits without running the program;
+ *   failed    in the parent: the err the call returns for a step that
+ *             failed (`err` is the errno the child reported).
+ * Any of the functions may be NULL. Returns 0 with *fd and *pid set, or -1
+ * with *errmsg set and nothing left to reap. Defined where os.run_socket
+ * is (not Windows). */
+typedef struct AetherSpawnHook {
+    const char* const* env;
+    int nenv;
+    int keep_fd;
+    int (*ready)(void* ctx, const char* path, const char* sh_path);
+    int (*child)(void* ctx);
+    const char* (*failed)(void* ctx, int step, int err);
+    void* ctx;
+} AetherSpawnHook;
+
+int aether_os_run_socket_hooked(const char* prog, void* argv_list, void* env_list,
+                                const AetherSpawnHook* hook,
+                                int* fd, int* pid, const char** errmsg);
 #endif
 
 /* The parent ends of std.ipc's channels, so std.ipc can refuse what a child

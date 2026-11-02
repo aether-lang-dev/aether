@@ -55,8 +55,13 @@ extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 extern aether_string_raw_ptr(s: ptr) -> ptr
 @extern("strdup") strdup_raw(s: ptr) -> ptr
 
+// sandbox.spawn_socket's C half (runtime/sandbox/spawn_sandboxed_*.c), and
+// os.run_socket's, which spawn_socket_uncontained is.
+extern aether_sandbox_spawn_socket_raw(perms: ptr, prog: string, argv: ptr, env: ptr) -> (int, int, string)
+extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
+
 exports(
-    Grants, new, enforce, free,
+    Grants, new, enforce, free, spawn_socket, spawn_socket_uncontained,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
     grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork
 )
@@ -180,6 +185,41 @@ fn free_list(perms: ptr) {
         i = i + 1
     }
     list.free(perms)
+}
+
+// ---- A sandboxed child process ----
+
+// Run `prog` in a child process held to `perms`, with a socket to talk to
+// it: os.run_socket's channel (the child's fd 3, AETHER_IPC_FD=3 and
+// AETHER_IPC_KIND=socket in its env, so std.ipc.parent_channel() finds it)
+// with spawn_sandboxed's containment. Returns (fd, pid, err): the parent's
+// end of the socket and the child's pid, or (-1, -1, reason) with no child
+// started. Reap the child with os.wait_pid(pid) and close fd when done.
+//
+//   argv   a std.list of the arguments after the program, or null
+//   env    a std.list of "KEY=VALUE", the child's whole environment, or
+//          null for this process's; the sandbox's own variables are added
+//
+// The child starts with libaether_sandbox.so in LD_PRELOAD, checking its
+// libc calls against `perms`, and a kernel layer under it that holds what
+// the preload cannot see (docs/containment-sandbox.md, "Kernel layer").
+//
+// It fails closed: where the child cannot be contained (macOS, Windows,
+// FreeBSD for now; on Linux, a kernel layer that cannot be set up as
+// asked) it returns an error and starts nothing. Running one uncontained
+// is spawn_socket_uncontained, by name.
+spawn_socket(perms: Grants, prog: string, argv: ptr, env: ptr) -> (int, int, string) {
+    return aether_sandbox_spawn_socket_raw(perms as ptr, prog, argv, env)
+}
+
+// spawn_socket with NO sandbox: plain os.run_socket. `perms` is taken and
+// ignored, so a host switches between the two by name and the uncontained
+// one is easy to find in review (grep for spawn_socket_uncontained). For
+// development on a platform spawn_socket refuses, never for a guest that
+// is not trusted.
+spawn_socket_uncontained(perms: Grants, prog: string, argv: ptr, env: ptr) -> (int, int, string) {
+    _ = perms
+    return os_run_socket_raw(prog, argv, env)
 }
 
 // ---- Grants: call these in new()'s trailing block ----

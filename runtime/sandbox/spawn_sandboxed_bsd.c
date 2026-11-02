@@ -192,4 +192,20 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
     return -1;
 }
 
+typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
+
+// sandbox.spawn_socket fails closed on FreeBSD for now: the preload and an
+// Aether child's own Capsicum are here, but nothing yet holds a foreign
+// child (python3) past libc, which is what this call promises. Nothing is
+// started; sandbox.spawn_socket_uncontained runs one with no sandbox.
+_tuple_int_int_string aether_sandbox_spawn_socket_raw(void* grant_list, const char* prog,
+                                                      void* argv_list, void* env_list) {
+    (void)grant_list; (void)prog; (void)argv_list; (void)env_list;
+    _tuple_int_int_string out = { -1, -1,
+        "sandbox.spawn_socket: cannot contain a child on FreeBSD yet (no kernel layer for "
+        "a foreign program), so nothing was started "
+        "(sandbox.spawn_socket_uncontained runs one with no sandbox)" };
+    return out;
+}
+
 #endif // __FreeBSD__

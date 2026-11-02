@@ -337,7 +337,7 @@ C
 
     # The filter's literals are each ABI's real numbers, from the kernel
     # headers zig ships for that architecture.
-    SRC="$ROOT/runtime/sandbox/spawn_sandboxed_linux.c"
+    SRC="$ROOT/runtime/sandbox/aether_sandbox_kernel_linux.c"
     nums_of() { sed -n "s/.*$1\[\] *= *{ *\([0-9, ]*\)}.*/\1/p" "$SRC" | tr -d ' '; }
     hdr_of() {   # <target> <names...>: the numbers of those syscalls, comma-joined
         t="$1"; shift

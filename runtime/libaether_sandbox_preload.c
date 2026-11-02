@@ -188,8 +188,37 @@ static void __attribute__((constructor)) sandbox_init(void) {
     int source_requested = 0;
     int source_loaded = 0;
 
-    // Try shared memory first (set by aether_spawn_sandboxed).
-    const char* shm_name = real_getenv("AETHER_SANDBOX_SHM");
+    // A descriptor first (sandbox.spawn_socket): a sealed memfd this
+    // process inherited, read from its start and left open, so an exec it
+    // is granted reads the same grants. When it is named it is the only
+    // source: a descriptor that cannot be read leaves zero grants, never the
+    // other sources' (fail closed).
+    const char* grants_fd = real_getenv("AETHER_SANDBOX_GRANTS_FD");
+    if (grants_fd) {
+        source_requested = 1;
+        char* end = NULL;
+        long gfd = strtol(grants_fd, &end, 10);
+        struct stat st;
+        if (end && *end == '\0' && gfd >= 0 && gfd < INT_MAX &&
+            fstat((int)gfd, &st) == 0 && st.st_size >= 0 &&
+            st.st_size <= MAX_GRANT_SOURCE_SIZE) {
+            char buf[MAX_GRANT_SOURCE_SIZE];
+            ssize_t got = 0;
+            while (got < st.st_size) {
+                ssize_t r = pread((int)gfd, buf + got, (size_t)(st.st_size - got), got);
+                if (r < 0 && errno == EINTR) continue;
+                if (r <= 0) break;
+                got += r;
+            }
+            if (got == st.st_size) {
+                parse_grants(buf, (int)got);
+                source_loaded = 1;
+            }
+        }
+    }
+
+    // Shared memory (set by aether_spawn_sandboxed).
+    const char* shm_name = grants_fd ? NULL : real_getenv("AETHER_SANDBOX_SHM");
     if (shm_name) {
         source_requested = 1;
         int fd = shm_open(shm_name, O_RDONLY, 0);
@@ -214,7 +243,7 @@ static void __attribute__((constructor)) sandbox_init(void) {
     }
 
     // Fall back to grant file (manual LD_PRELOAD usage)
-    if (!source_loaded) {
+    if (!source_loaded && !grants_fd) {
         const char* grant_file = real_getenv("AETHER_SANDBOX_GRANTS");
         if (grant_file) {
             source_requested = 1;
@@ -545,7 +574,8 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 
     if (!env_has_nonempty(merged_env, count, "LD_PRELOAD") ||
         (!env_has_nonempty(merged_env, count, "AETHER_SANDBOX_SHM") &&
-         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS"))) {
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS") &&
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS_FD"))) {
         errno = EPERM;
         return -1;
     }
