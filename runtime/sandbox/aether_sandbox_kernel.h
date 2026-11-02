@@ -34,6 +34,8 @@ typedef struct AetherSandboxKernel {
     unsigned long long landlock_fs;               // the fs rights it handles
     int flags;
     int warned;                                   // a warning was printed
+    int want_seccomp;                             // 0 for grant_all()
+    int grant_fork, grant_exec, grant_net;        // what the filter lets through
 } AetherSandboxKernel;
 
 // What a child that could not apply the layer reports, with errno.
@@ -61,10 +63,15 @@ int aether_sandbox_kernel_prepare(AetherSandboxKernel* k, void* grant_list,
 
 // Parent, once the program is resolved: what the child needs to exec it
 // (the program, its ELF interpreter, the interpreter of a #! script, and
-// /bin/sh at `sh_path` for a file that is neither), and the loader's floor.
-// 0, or -1 with the reason in `err`.
+// /bin/sh at `sh_path` for a file that is neither), and the loader's floor;
+// and the seccomp filter, which lets the child's execve of exactly these two
+// pointers through. 0, or -1 with the reason in `err`.
 int aether_sandbox_kernel_program(AetherSandboxKernel* k, const char* path,
                                   const char* sh_path, char* err, size_t errsz);
+
+// 1 when the child's exec is fenced (no exec grant): its env then carries
+// AETHER_SANDBOX_NO_EXEC=1, and the preload installs the second filter.
+int aether_sandbox_kernel_exec_fenced(const AetherSandboxKernel* k);
 
 // Child, before exec: async-signal-safe. 0, or a nonzero
 // AETHER_SBX_STEP_* with errno set.

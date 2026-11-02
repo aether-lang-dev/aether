@@ -68,7 +68,7 @@ static void sandbox_child_failed(int fd, int step, int code) {
 static void sandbox_child_exec(const char* path, char** argv, char** sh_argv, char** env) {
     execve(path, argv, env);
     if (errno != ENOEXEC) return;
-    execve("/bin/sh", sh_argv, env);
+    execve(sh_argv[0], sh_argv, env);   // the pointer the kernel layer allows
     errno = ENOEXEC;
 }
 
@@ -155,17 +155,27 @@ int aether_spawn_sandboxed(void* grant_list, const char* program, const char* ar
         shm_unlink(shm_name);
         return -1;
     }
-    // What it needs to exec the program under Landlock. Not strict: a rule
-    // that cannot be added drops Landlock for this child, with a warning.
-    aether_sandbox_kernel_program(kernel, path, "/bin/sh", kerr, sizeof kerr);
     char* argv[] = { (char*)program, (char*)arg, NULL };
     char* sh_argv[] = { (char*)"/bin/sh", path, (char*)arg, NULL };
+    // What it needs to exec the program under Landlock, and the seccomp
+    // filter, which lets exactly these two execve pointers through. Not
+    // strict: a Landlock rule that cannot be added drops Landlock for this
+    // child, with a warning; a filter that cannot be built stops it.
+    if (aether_sandbox_kernel_program(kernel, path, sh_argv[0], kerr, sizeof kerr) != 0) {
+        fprintf(stderr, "[aether] spawn_sandboxed: %s\n", kerr);
+        free(path);
+        aether_sandbox_kernel_release(kernel);
+        free(kernel);
+        shm_unlink(shm_name);
+        return -1;
+    }
     char preload_var[sizeof preload_path + 16];
     char shm_var[sizeof shm_name + 32];
     snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
     snprintf(shm_var, sizeof shm_var, "AETHER_SANDBOX_SHM=%s", shm_name);
-    const char* set[3] = { preload_var, shm_var, NULL };
+    const char* set[4] = { preload_var, shm_var, NULL, NULL };
     int nset = 2;
+    if (aether_sandbox_kernel_exec_fenced(kernel)) set[nset++] = "AETHER_SANDBOX_NO_EXEC=1";
     if (!getenv("AETHER_SANDBOX_VERBOSE")) set[nset++] = "AETHER_SANDBOX_VERBOSE=0";
     char** env = aether_spawn_env(aether_spawn_environ(), set, nset);
     int errp[2];
@@ -384,8 +394,9 @@ _tuple_int_int_string aether_sandbox_spawn_socket_raw(void* grant_list, const ch
     char fd_var[48];
     snprintf(preload_var, sizeof preload_var, "LD_PRELOAD=%s", preload_path);
     snprintf(fd_var, sizeof fd_var, "AETHER_SANDBOX_GRANTS_FD=%d", gfd);
-    const char* set[4] = { preload_var, fd_var, NULL, NULL };
+    const char* set[5] = { preload_var, fd_var, NULL, NULL, NULL };
     int nset = 2;
+    if (aether_sandbox_kernel_exec_fenced(&ctx->kernel)) set[nset++] = "AETHER_SANDBOX_NO_EXEC=1";
     if (!getenv("AETHER_SANDBOX_VERBOSE")) set[nset++] = "AETHER_SANDBOX_VERBOSE=0";
 
     AetherSpawnHook hook;

@@ -9,6 +9,12 @@
 #   makes landlock_create_ruleset fail with ENOSYS) spawn_socket refuses
 #   unless the host passes grant_without_landlock(), and spawn_sandboxed
 #   still runs its child, with a warning.
+#
+#   seccomp: an AF_INET socket is refused without a tcp grant and allowed
+#   with one (AF_UNIX always); execve is refused without grant_exec and
+#   allowed with it, for a dynamic child (the preload's second filter) and a
+#   static one (the spawn's own filter); ptrace, unshare of a namespace and
+#   io_uring are refused.
 
 set -e
 
@@ -46,6 +52,11 @@ for a in host sandboxed; do
     "$AE" build "$SCRIPT_DIR/$a.ae" -o "$TMP/$a" > "$TMP/build.log" 2>&1 || fail "cannot build $a.ae" "$TMP/build.log"
 done
 echo "greeting=from the fixture" > "$TMP/fixture.txt"
+
+${CC:-cc} -D_GNU_SOURCE -I"$ROOT" -I"$ROOT/runtime" -I"$ROOT/runtime/utils" -o "$TMP/filter_check" \
+    "$SCRIPT_DIR/filter_check.c" > "$TMP/fc.log" 2>&1 || fail "cannot build filter_check.c" "$TMP/fc.log"
+"$TMP/filter_check" > "$TMP/fc.out" 2>&1 || fail "a seccomp filter is malformed" "$TMP/fc.out"
+echo "  [PASS] sandbox_kernel_layer: every seccomp filter the layer builds is well formed"
 
 # Does this kernel have Landlock? (The ABI query: landlock_create_ruleset
 # with LANDLOCK_CREATE_RULESET_VERSION.)
@@ -96,6 +107,43 @@ if [ "$LANDLOCK" = 1 ]; then
 else
     echo "  [SKIP] sandbox_kernel_layer: this kernel has no Landlock; only the no-Landlock cases run"
 fi
+
+# ---- seccomp ----
+run "$TMP/sc_inet.out" "$G" "$TMP/probe" raw_socket AF_INET
+expect "AF_INET without a tcp grant" "$TMP/sc_inet.out" "raw socket AF_INET: refused (Operation not permitted)"
+run "$TMP/sc_inet6.out" "$G" "$TMP/probe" raw_socket AF_INET6
+expect "AF_INET6 without a tcp grant" "$TMP/sc_inet6.out" "raw socket AF_INET6: refused (Operation not permitted)"
+run "$TMP/sc_unix.out" "$G" "$TMP/probe" raw_socket AF_UNIX
+expect "AF_UNIX" "$TMP/sc_unix.out" "raw socket AF_UNIX: ALLOWED"
+run "$TMP/sc_inet_tcp.out" "$G,tcp=1.1.1.1:443" "$TMP/probe" raw_socket AF_INET
+expect "AF_INET with a tcp grant" "$TMP/sc_inet_tcp.out" "raw socket AF_INET: ALLOWED"
+echo "  [PASS] sandbox_kernel_layer: an AF_INET socket needs a tcp grant"
+
+run "$TMP/sc_exec.out" "$G" "$TMP/probe" raw_execve
+expect "a raw execve without grant_exec" "$TMP/sc_exec.out" "raw execve: refused (Operation not permitted)"
+run "$TMP/sc_exec_ok.out" "$G,exec=$TMP/probe" "$TMP/probe" raw_execve
+expect "a raw execve with grant_exec" "$TMP/sc_exec_ok.out" "execed: ALLOWED"
+echo "  [PASS] sandbox_kernel_layer: a raw execve needs grant_exec (dynamic child: the preload's second filter)"
+
+# A static child never runs the preload: its first execve is the one the
+# spawn's filter lets through, and a second one is refused by that filter.
+if ${CC:-cc} -static -O1 -o "$TMP/probe_static" "$SCRIPT_DIR/probe.c" > "$TMP/cc_static.log" 2>&1; then
+    run "$TMP/sc_static.out" "$G" "$TMP/probe_static" raw_execve
+    expect "a static child's raw execve" "$TMP/sc_static.out" "raw execve: refused (Operation not permitted)"
+    run "$TMP/sc_static_ok.out" "$G,exec=$TMP/probe_static" "$TMP/probe_static" raw_execve
+    expect "a static child's raw execve with grant_exec" "$TMP/sc_static_ok.out" "execed: ALLOWED"
+    echo "  [PASS] sandbox_kernel_layer: a static child's raw execve needs grant_exec too (the spawn's filter)"
+else
+    echo "  [SKIP] sandbox_kernel_layer: no static libc here for the static child"
+fi
+
+for m in raw_ptrace raw_unshare; do
+    run "$TMP/sc_$m.out" "$G" "$TMP/probe" $m
+    expect "$m" "$TMP/sc_$m.out" "refused (Operation not permitted)"
+done
+run "$TMP/sc_uring.out" "$G" "$TMP/probe" raw_iouring
+expect "io_uring_setup" "$TMP/sc_uring.out" "raw io_uring_setup: refused (Function not implemented)"
+echo "  [PASS] sandbox_kernel_layer: ptrace, a new namespace and io_uring are refused"
 
 # ---- A kernel with no Landlock ----
 "$TMP/nolandlock" "$TMP/host" "$G" "$TMP/probe" raw_openat /etc/passwd > "$TMP/nll.out" 2>&1 || fail "host exited non-zero" "$TMP/nll.out"

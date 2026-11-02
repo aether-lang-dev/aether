@@ -739,7 +739,7 @@ cat sandbox-config.ae
 | Attack vector | Why |
 |--------------|-----|
 | Statically linked binaries | Don't use libc, bypass LD_PRELOAD entirely. On Linux, Landlock still holds their file access and the seccomp filter their process creation (see below). |
-| `ptrace` self | Can modify own process memory to skip checks |
+| `ptrace` self | Can modify own process memory to skip checks. Under `spawn_sandboxed` and `sandbox.spawn_socket` on Linux, the seccomp filter refuses `ptrace` |
 | Kernel exploits | We're userspace, can't defend against kernel bugs |
 
 For these vectors, combine with OS-level sandboxing (seccomp-bpf,
@@ -853,21 +853,59 @@ Each is trapped with its own syscall numbers. Any other ABI kills the
 process, and on an architecture the filter does not cover
 `spawn_sandboxed` refuses to run the child (below) rather than fall back
 to the libc-level fence alone. The kernel fence
-is automatic, and the grant list says only whether it is there: if
-`fork:*` (`grant_fork()`) is granted, the filter isn't installed at all;
-otherwise it fires unconditionally. If the kernel doesn't support seccomp, the
+is automatic: with `fork:*` (`grant_fork()`) granted the process-creation
+rules are left out, and the rest of the filter (below) stays. If the kernel doesn't support seccomp, the
 child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.
 
-The complementary gap, `connect()` and
-`execve()` issued by statically-linked binaries or raw asm, remains.
-Those callers can still skip the LD_PRELOAD layer for network reach
-and exec, since the seccomp filter here targets only the
-process-creation family. Adding seccomp arms for `connect`/`execve`
-is a natural extension but introduces a much wider filter that needs
-its own discussion (an allowlist by host/path becomes a per-call BPF
-program); not done here.
+### Kernel layer: the seccomp filter, beyond process creation
+
+The same filter (`runtime/sandbox/aether_sandbox_kernel_linux.c`, built in
+the parent and installed in the child after Landlock) holds the rest of what
+the preload cannot see. It is installed for every grant list except
+`grant_all()`; the grants decide only which of its rules apply.
+
+| Syscalls | Answer | Unless |
+|---|---|---|
+| `fork`, `vfork`; `clone` without `CLONE_THREAD` | `EPERM` | `grant_fork()` |
+| `clone` or `unshare` with a `CLONE_NEW*` flag (a new namespace) | `EPERM` | never |
+| `clone3` | `ENOSYS` (libc falls back to `clone`, whose flags the filter reads) | never |
+| `execve`, `execveat` | `EPERM` | `grant_exec(...)`; see below for the program's own exec |
+| `socket(AF_INET or AF_INET6, ...)` | `EPERM` | a `grant_tcp`, `grant_udp` or `grant_tcp_listen` |
+| `socketcall` (i386, arguments in memory) | `EPERM` | the same network grants |
+| `ptrace`, `process_vm_readv`, `process_vm_writev`, `bpf`, `mount`, `umount2`, `pivot_root`, `setns`, `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `mount_setattr`, `keyctl`, `add_key`, `request_key`, `userfaultfd`, `perf_event_open` | `EPERM` | never |
+| `io_uring_setup`, `io_uring_enter`, `io_uring_register` | `ENOSYS` (the answer of a kernel without io_uring, so libuv and others fall back) | never |
+
+`AF_UNIX` and other families pass: the channel is a Unix socket, and
+glibc's resolver talks to netlink. A network grant opens `AF_INET` sockets
+of every type, since resolving a name for a TCP grant needs UDP to the
+resolver; which hosts are reached is the preload's to check, and on Linux
+6.7+ Landlock holds connect to the granted ports.
+
+**The program's own exec.** The filter is installed before the child execs
+its program, and that one `execve` has to pass. Without `grant_exec`, the
+filter allows `execve` only when its first argument is the exact pointer
+the child passes (the resolved program, or `/bin/sh` for a file with no
+`#!` line), compared in all 64 bits; a compat ABI's `execve` is always
+refused. Once the program runs that pointer means nothing, and the preload's
+constructor, before any of the program's own code, installs a second filter
+that refuses every `execve` and `execveat` (the spawn sets
+`AETHER_SANDBOX_NO_EXEC=1`; a filter that cannot be installed stops the
+process with exit 126). Filters stack and the strictest answer wins, so the
+child cannot undo it. A static program, which the preload never enters,
+keeps the pointer check and Landlock, under which it can execute only its
+own file and its loader.
+
+**ABIs.** The filter dispatches on `seccomp_data.arch`: the native ABI's
+numbers, on x86_64 also i386 (`int 0x80`) and x32 (the number with
+`0x40000000` set, masked off, plus x32's own numbers for `execve`,
+`execveat`, `ptrace` and `process_vm_*`), on aarch64 also 32-bit ARM. Any
+other ABI kills the process. On an architecture the filter does not cover,
+both spawns refuse to start the child. The numbers are literals, checked
+against the kernel headers zig ships for every architecture by
+`tests/integration/sandbox_clone_fence`, and every filter the builder can
+make is checked well formed by `tests/integration/sandbox_spawn_socket`.
 
 ### Interception surface, what LD_PRELOAD sees and what it doesn't
 

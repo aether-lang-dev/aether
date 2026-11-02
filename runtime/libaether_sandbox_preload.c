@@ -155,6 +155,79 @@ static void parse_grants(const char* data, int len) {
 extern char** environ;
 static void snapshot_sandbox_env(void);
 
+#if defined(__linux__)
+// The second stage of the exec fence (runtime/sandbox/
+// aether_sandbox_kernel_linux.c, "The program's own execve"). The spawn's
+// filter has to let the child's one execve of its program through; once
+// that program is running, this constructor, before any of its code, adds
+// a filter that refuses every further execve and execveat. The spawn sets
+// AETHER_SANDBOX_NO_EXEC=1 when the grants have no exec. Filters stack, and
+// the strictest answer wins, so this one cannot be undone. If it cannot be
+// installed the process stops (126) rather than run with exec open.
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#ifndef AUDIT_ARCH_AARCH64
+#define AUDIT_ARCH_AARCH64     0xC00000B7u
+#endif
+#ifndef AUDIT_ARCH_ARM
+#define AUDIT_ARCH_ARM         0x40000028u
+#endif
+#ifndef AUDIT_ARCH_RISCV64
+#define AUDIT_ARCH_RISCV64     0xC00000F3u
+#endif
+#ifndef AUDIT_ARCH_LOONGARCH64
+#define AUDIT_ARCH_LOONGARCH64 0xC0000102u
+#endif
+static void install_no_exec_filter(void) {
+    /* execve, execveat: native (x86_64 59/322 and x32's 520/545 after the
+     * x32 bit; generic 221/281), compat (i386 11/358, ARM 11/387). */
+#if defined(__x86_64__) && !defined(__ILP32__)
+    const unsigned native = AUDIT_ARCH_X86_64, compat = AUDIT_ARCH_I386, mask = ~0x40000000u;
+    const unsigned n0 = 59, n1 = 322, n2 = 520, n3 = 545, c0 = 11, c1 = 358;
+#elif defined(__aarch64__)
+    const unsigned native = AUDIT_ARCH_AARCH64, compat = AUDIT_ARCH_ARM, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 11, c1 = 387;
+#elif defined(__riscv) && __riscv_xlen == 64
+    const unsigned native = AUDIT_ARCH_RISCV64, compat = 0, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 221, c1 = 281;
+#elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
+    const unsigned native = AUDIT_ARCH_LOONGARCH64, compat = 0, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 221, c1 = 281;
+#else
+    fprintf(stderr, "[aether] sandbox: no exec fence for this architecture\n");
+    _exit(126);
+#endif
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv) || defined(__loongarch__)
+    struct sock_filter f[] = {
+        /* 0 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        /* 1 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native, 2, 0),    /* -> 4 */
+        /* 2 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, compat, 7, 0),    /* -> 10 */
+        /* 3 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* 4 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        /* 5 */ BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask),
+        /* 6 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n0, 7, 0),        /* -> 14 */
+        /* 7 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n1, 6, 0),
+        /* 8 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n2, 5, 0),
+        /* 9 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n3, 4, 3),        /* -> 14 : 13 */
+        /* 10 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        /* 11 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, c0, 2, 0),       /* -> 14 */
+        /* 12 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, c1, 1, 0),       /* -> 14 : 13 */
+        /* 13 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* 14 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+    };
+    struct sock_fprog prog = { .len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        fprintf(stderr, "[aether] sandbox: cannot install the exec fence: %s\n", strerror(errno));
+        _exit(126);
+    }
+#endif
+}
+#endif
+
 // Load grants from shared memory or file
 static void __attribute__((constructor)) sandbox_init(void) {
     // Resolve real libc functions FIRST, before we intercept getenv
@@ -169,6 +242,13 @@ static void __attribute__((constructor)) sandbox_init(void) {
 
     // Capture the sandbox controls before any user code can edit environ.
     snapshot_sandbox_env();
+
+#if defined(__linux__)
+    {
+        const char* no_exec = real_getenv("AETHER_SANDBOX_NO_EXEC");
+        if (no_exec && strcmp(no_exec, "1") == 0) install_no_exec_filter();
+    }
+#endif
 
     // Log mode: file (default), stderr, or none
     const char* log_env = real_getenv("AETHER_SANDBOX_LOG");
