@@ -74,3 +74,55 @@ afl-clang-fast -fsanitize=fuzzer,address,undefined -g -O1 \
     tests/fuzz/cbor/fuzz_cbor.c fuzz_cbor_ae.o $(build/ae cflags) -o fuzz_cbor_afl
 afl-fuzz -i tests/fuzz/cbor/corpus -o afl_out -x tests/fuzz/cbor/cbor.dict -- ./fuzz_cbor_afl
 ```
+
+## Frame-reader fuzzer (`tests/fuzz/ipc_frames/`)
+
+`std.ipc`'s `read_frame` and `read_frame_timeout` take length-prefixed
+frames from a sandboxed child over the socket `sandbox.spawn_socket` keeps
+(#3503). The reader keeps no state between calls, so what each call returns
+is a pure function of the bytes available when it is made. The harness
+delivers a fuzzer-chosen byte stream over an `os.socketpair` in chunks cut at
+fuzzer-chosen offsets, with a fuzzer-chosen `max`, and checks every answer
+against a model of the documented contract (`std/ipc/module.ae`): the whole
+payload and nothing of the next frame; `TIMED_OUT_BETWEEN_FRAMES` with
+nothing consumed when no byte of a frame is there; `TIMED_OUT_INSIDE_FRAME`
+with the part consumed when some of one is; "longer than max" with exactly
+the header consumed; and the three end-of-stream errors once the writer is
+gone. Each payload the reader hands back goes through `cbor.parse`, which
+may fail (a pass) but must not crash or leak. Linux only: the timeout form
+needs `poll()`.
+
+### Files
+
+- **`fuzz_ipc_frames.ae`**: the target, built `--emit=obj --with=extern,os`,
+  exporting `fuzz_target(data: ptr, len: int)`. Byte 0 picks `max`
+  (1..4081), byte 1 the number of chunks (1..8), the next bytes the cut
+  offsets, and the rest is the stream. A disagreement with the model
+  `abort()`s.
+- **`fuzz_ipc_frames.c`**: `LLVMFuzzerTestOneInput`.
+- **`gen_corpus.py`** writes **`corpus/`**: whole, empty and split frames,
+  a frame split at every byte, short headers and payloads, frames at and one
+  over `max`, headers announcing 2^31 and 2^32 - 1 bytes, a payload that is
+  not CBOR, forty small frames, and a 4 KB frame. Edit the script, not the
+  files.
+- **`ipc_frames.dict`**: frame headers at the lengths that matter and a few
+  CBOR heads.
+- **`run_fuzz_ipc_frames.sh`**: builds and runs the harness under libFuzzer,
+  ASan and UBSan for `FUZZ_SECONDS` (default 60).
+- **`prove_mutants.sh`**: compiles three one-line edits of a copy of
+  `std/ipc/aether_ipc.c` (the real file is untouched) and shows the model
+  catches each: **M1** the `max` check removed; **M2** a timeout inside a
+  frame reported as the between-frames one; **M3** an empty frame answered
+  as a timeout.
+
+### Running
+
+```sh
+make fuzz-ipc-frames                                   # 60 seconds
+FUZZ_SECONDS=1800 sh tests/fuzz/ipc_frames/run_fuzz_ipc_frames.sh
+sh tests/fuzz/ipc_frames/prove_mutants.sh
+```
+
+Not part of `make test` or CI. Output stays in `build/fuzz/ipc_frames/`
+(`FUZZ_OUT` moves it). A reproducer is run and minimised as for the CBOR
+fuzzer, with `build/fuzz/ipc_frames/fuzz_ipc_frames`.

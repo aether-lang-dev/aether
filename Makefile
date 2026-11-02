@@ -1413,6 +1413,13 @@ test-windows-wine: ae stdlib
 fuzz-cbor: compiler ae stdlib
 	@sh tests/fuzz/cbor/run_fuzz_cbor.sh
 
+.PHONY: fuzz-ipc-frames
+# Coverage-guided fuzzing of std.ipc's frame reader over a socket pair, checked
+# against a model of its contract (needs clang with libFuzzer; Linux only).
+# Not part of `make test` or CI; FUZZ_SECONDS sets the run time (default 60).
+fuzz-ipc-frames: compiler ae stdlib
+	@sh tests/fuzz/ipc_frames/run_fuzz_ipc_frames.sh
+
 # Test .ae source files - compiles and runs each test file.
 #
 # The shell tests run $(NPROC) at a time (SH_NPROC overrides). They were serial
