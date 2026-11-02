@@ -255,8 +255,13 @@ typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
 
 static __thread char spawn_socket_err[1024];
 
+// A message that does not fit is cut short with "..." (a diagnostic, never a
+// path that is used).
 static const char* spawn_socket_fail(const char* fmt, const char* detail) {
-    snprintf(spawn_socket_err, sizeof spawn_socket_err, fmt, detail);
+    int n = snprintf(spawn_socket_err, sizeof spawn_socket_err, fmt, detail);
+    if (n < 0) return "sandbox.spawn_socket: failed";
+    if ((size_t)n >= sizeof spawn_socket_err)
+        memcpy(spawn_socket_err + sizeof spawn_socket_err - 4, "...", 4);
     return spawn_socket_err;
 }
 
@@ -315,7 +320,9 @@ static int spawn_socket_ready(void* ctx, const char* path, const char* sh_path) 
     SpawnSocketCtx* c = (SpawnSocketCtx*)ctx;
     char why[512];
     if (aether_sandbox_kernel_program(&c->kernel, path, sh_path, why, sizeof why) != 0) {
-        snprintf(c->reason, sizeof c->reason, "%s; nothing was started", why);
+        int n = snprintf(c->reason, sizeof c->reason, "%s; nothing was started", why);
+        if (n < 0 || (size_t)n >= sizeof c->reason)
+            memcpy(c->reason + sizeof c->reason - 4, "...", 4);
         return -1;
     }
     return 0;
