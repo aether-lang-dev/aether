@@ -703,8 +703,20 @@ const char* ipc_write_frame_raw(int ch, const void* data) {
 }
 
 /* The one frame reader. timeout_ms < 0 waits as long as the peer takes;
- * otherwise it bounds the whole frame, header and payload. After a timeout or
- * an error mid-frame the stream is out of step: close the channel. */
+ * otherwise it bounds the whole frame, header and payload.
+ *
+ * A timeout has two answers, so a caller can tell them apart without a
+ * poll of its own first. Before the first header byte nothing was consumed:
+ * the stream is between frames and fit to use (send a CANCEL, read again).
+ * Once a byte of the frame has been read, the bytes already taken are gone
+ * with the call (the reader keeps no state between calls), so the stream is
+ * out of step and the only safe thing is to close it. Keeping the partial
+ * frame for the next call instead would need per-descriptor state the
+ * runtime would have to find, size and free, and a caller that then wrote
+ * to the peer would still be talking across a half-read frame. The strings
+ * are std.ipc's TIMED_OUT_BETWEEN_FRAMES and TIMED_OUT_INSIDE_FRAME. */
+#define IPC_TIMED_OUT_BETWEEN "ipc.read_frame: timed out before a frame began"
+#define IPC_TIMED_OUT_INSIDE "ipc.read_frame: timed out inside a frame; the stream is out of step"
 _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
     if (ch < 0) return ipc_read_failed("ipc.read_frame: invalid descriptor");
     if (max <= 0) return ipc_read_failed("ipc.read_frame: max must be positive");
@@ -718,7 +730,9 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
         return ipc_read_failed(got == 0 ? "ipc.read_frame: end of stream"
                                         : "ipc.read_frame: stream ended inside a frame header");
     }
-    if (st == IPC_FILL_TIMEOUT) return ipc_read_failed("ipc.read_frame: timed out");
+    if (st == IPC_FILL_TIMEOUT) {
+        return ipc_read_failed(got == 0 ? IPC_TIMED_OUT_BETWEEN : IPC_TIMED_OUT_INSIDE);
+    }
     if (st == IPC_FILL_ERR) {
         if (e == ENOSYS) return ipc_read_failed("ipc.read_frame: a timeout is unavailable here");
         return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
@@ -738,7 +752,7 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
     if (st != IPC_FILL_OK) {
         free(buf);
         if (st == IPC_FILL_EOF) return ipc_read_failed("ipc.read_frame: stream ended inside a frame");
-        if (st == IPC_FILL_TIMEOUT) return ipc_read_failed("ipc.read_frame: timed out");
+        if (st == IPC_FILL_TIMEOUT) return ipc_read_failed(IPC_TIMED_OUT_INSIDE);
         return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
     }
     AetherString* s = string_new_with_length(buf, len);

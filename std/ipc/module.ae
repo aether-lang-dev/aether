@@ -25,6 +25,7 @@
 //   write_frame(ch, data) -> string            one length-prefixed frame
 //   read_frame(ch, max) -> (data, err)         one frame, capped at max
 //   read_frame_timeout(ch, max, ms) -> (data, err)   the same, bounded
+//   TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME  its two timeouts
 //   wait_readable(ch, ms) -> (ready, err)      bound a wait with poll()
 //
 // (write/write_close were originally named `send`/`send_close` per the
@@ -61,7 +62,8 @@ exports(
     ipc_write_raw, ipc_read_raw, ipc_send_fd_raw, ipc_recv_fd_raw,
     ipc_recv_raw, ipc_write_frame_raw, ipc_read_frame_raw, ipc_wait_readable_raw,
     parent_channel, parent_channel_kind, write, write_close, read, send_fd, recv_fd,
-    recv, write_frame, read_frame, read_frame_timeout, wait_readable
+    recv, write_frame, read_frame, read_frame_timeout, wait_readable,
+    TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME
 )
 
 // Returns the parent-channel fd if the parent spawned this process
@@ -187,12 +189,24 @@ read_frame(ch: int, max: int) -> {
     return ipc_read_frame_raw(ch, max, -1)
 }
 
+// read_frame_timeout's error when the deadline passed before the first byte
+// of a frame arrived. Nothing was consumed: the stream is between frames and
+// fit to use, to send the peer a CANCEL, say, and read its answer.
+const TIMED_OUT_BETWEEN_FRAMES = "ipc.read_frame: timed out before a frame began"
+
+// read_frame_timeout's error when the deadline passed part-way through a
+// frame's header or payload. The bytes already read are gone with the call,
+// so the stream is out of step: close the channel.
+const TIMED_OUT_INSIDE_FRAME = "ipc.read_frame: timed out inside a frame; the stream is out of step"
+
 // read_frame with a deadline: `timeout_ms` bounds the whole frame, header
 // and payload together, so a peer that sends a header and stalls, or drips
 // bytes, cannot hold the reader past it. A negative timeout waits forever,
-// as read_frame does. On a timeout the error says "timed out" and the stream
-// is mid-frame: close the channel. Not available on Windows (an error there,
-// unless the timeout is negative).
+// as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES
+// when no byte of a frame had arrived (the stream is intact; carry on using
+// it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other
+// error leaves the stream unusable too. Not available on Windows (an error
+// there, unless the timeout is negative).
 read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
     return ipc_read_frame_raw(ch, max, timeout_ms)
 }
@@ -201,8 +215,9 @@ read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
 // read will not block, which includes the peer having closed (the read then
 // gives end of stream), (0, "") on a timeout, (0, err) on a failure. A
 // negative timeout waits forever; 0 asks without waiting. Bounds the wait for
-// the first byte of read, recv or read_frame; once a frame has started use
-// read_frame_timeout to bound the rest. An error on Windows.
+// the first byte of read or recv. Frames need no wait first:
+// read_frame_timeout tells a timeout between frames from one inside a frame.
+// An error on Windows.
 wait_readable(ch: int, timeout_ms: int) -> {
     return ipc_wait_readable_raw(ch, timeout_ms)
 }

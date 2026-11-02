@@ -37,6 +37,8 @@
     <li><a href="#read_frame">read_frame</a></li>
     <li><a href="#read_frame_timeout">read_frame_timeout</a></li>
     <li><a href="#wait_readable">wait_readable</a></li>
+    <li><a href="#TIMED_OUT_BETWEEN_FRAMES">TIMED_OUT_BETWEEN_FRAMES</a></li>
+    <li><a href="#TIMED_OUT_INSIDE_FRAME">TIMED_OUT_INSIDE_FRAME</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -251,13 +253,23 @@
       <h3 class="function-name">read_frame_timeout <span class="kind">fn</span></h3>
       <pre class="usage"><code>read_frame_timeout(ch, max, timeout_ms) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, max: int, timeout_ms: int</span></p>
-      <p class="doc">read_frame with a deadline: `timeout_ms` bounds the whole frame, header and payload together, so a peer that sends a header and stalls, or drips bytes, cannot hold the reader past it. A negative timeout waits forever, as read_frame does. On a timeout the error says &quot;timed out&quot; and the stream is mid-frame: close the channel. Not available on Windows (an error there, unless the timeout is negative).</p>
+      <p class="doc">read_frame with a deadline: `timeout_ms` bounds the whole frame, header and payload together, so a peer that sends a header and stalls, or drips bytes, cannot hold the reader past it. A negative timeout waits forever, as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES when no byte of a frame had arrived (the stream is intact; carry on using it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other error leaves the stream unusable too. Not available on Windows (an error there, unless the timeout is negative).</p>
     </div>
     <div class="function" id="wait_readable" data-name="wait_readable">
       <h3 class="function-name">wait_readable <span class="kind">fn</span></h3>
       <pre class="usage"><code>wait_readable(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
-      <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read, recv or read_frame; once a frame has started use read_frame_timeout to bound the rest. An error on Windows.</p>
+      <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read or recv. Frames need no wait first: read_frame_timeout tells a timeout between frames from one inside a frame. An error on Windows.</p>
+    </div>
+    <div class="function" id="TIMED_OUT_BETWEEN_FRAMES" data-name="TIMED_OUT_BETWEEN_FRAMES">
+      <h3 class="function-name">TIMED_OUT_BETWEEN_FRAMES <span class="kind">const</span></h3>
+      <pre class="usage"><code>TIMED_OUT_BETWEEN_FRAMES = &quot;ipc.read_frame: timed out before a frame began&quot;</code></pre>
+      <p class="doc">read_frame_timeout's error when the deadline passed before the first byte of a frame arrived. Nothing was consumed: the stream is between frames and fit to use, to send the peer a CANCEL, say, and read its answer.</p>
+    </div>
+    <div class="function" id="TIMED_OUT_INSIDE_FRAME" data-name="TIMED_OUT_INSIDE_FRAME">
+      <h3 class="function-name">TIMED_OUT_INSIDE_FRAME <span class="kind">const</span></h3>
+      <pre class="usage"><code>TIMED_OUT_INSIDE_FRAME = &quot;ipc.read_frame: timed out inside a frame; the stream is out of step&quot;</code></pre>
+      <p class="doc">read_frame_timeout's error when the deadline passed part-way through a frame's header or payload. The bytes already read are gone with the call, so the stream is out of step: close the channel.</p>
     </div>
   </div>
 </main>

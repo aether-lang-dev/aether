@@ -76,7 +76,7 @@ On either end:
   carry whole messages (below).
 - `wait_readable(ch, timeout_ms) -> (ready, err)` and
   `read_frame_timeout(ch, max, timeout_ms) -> (data, err)` bound a wait
-  (below).
+  (below); a frame timeout says whether the stream is still in step.
 
 A parent that has checked a request can open a file and hand the child the
 open descriptor, so a child that cannot open files itself still reads it:
@@ -144,17 +144,38 @@ without waiting. It bounds the first byte of any read.
 
 A peer that sends a header and then stalls, or drips a byte at a time, gets
 past a wait for the first byte, so `read_frame_timeout(ch, max, timeout_ms)`
-bounds the whole frame, header and payload together, and says `timed out`.
-After a timeout the stream is mid-frame: close the channel. `read_frame` is
-the same call with no timeout.
+bounds the whole frame, header and payload together. `read_frame` is the
+same call with no timeout.
+
+A timeout is one of two errors, and they mean different things for the
+stream:
+
+- `ipc.TIMED_OUT_BETWEEN_FRAMES`: the deadline passed before the first byte
+  of a frame arrived. Nothing was consumed, the stream is between frames,
+  and it is fit to use: write to the peer (a CANCEL, say) and read again.
+- `ipc.TIMED_OUT_INSIDE_FRAME`: the deadline passed part-way through a
+  header or payload. The bytes already read are gone with the call, so the
+  stream is out of step: close the channel.
+
+Any other error leaves the stream unusable too. So a host needs no
+`wait_readable` before each frame to know whether it can still talk to a
+worker that has gone quiet. The reader keeps no partial frame between calls
+on purpose: that would be per-descriptor state for the runtime to track and
+free, and a host that wrote to the peer meanwhile would still be talking
+across a half-read frame.
 
 ```aether,fragment
 import std.ipc
 
 // Take one reply from a worker, however it misbehaves: at most 64 KiB, in
-// at most two seconds.
+// at most two seconds. A worker that has said nothing yet is asked to stop
+// and gets one more second; one that stalled inside a frame is cut off.
 answer_from(ch: int) -> string {
     data, err = ipc.read_frame_timeout(ch, 65536, 2000)
+    if err == ipc.TIMED_OUT_BETWEEN_FRAMES {
+        ipc.write_frame(ch, "CANCEL")
+        data, err = ipc.read_frame_timeout(ch, 65536, 1000)
+    }
     if err != "" { return "" }
     return data
 }
@@ -219,4 +240,5 @@ does: passing descriptors hands out authority.
 
 `parent_channel`, `parent_channel_kind`, `write`, `write_close`, `read`,
 `send_fd`, `recv_fd`, `recv`, `write_frame`, `read_frame`,
-`read_frame_timeout`, `wait_readable`.
+`read_frame_timeout`, `wait_readable`, and the constants
+`TIMED_OUT_BETWEEN_FRAMES` and `TIMED_OUT_INSIDE_FRAME`.

@@ -446,6 +446,33 @@ main() {
             io.fd_close(b)
         }
 
+        spec.it("a timeout before any byte leaves the stream usable, and says so") callback {
+            a, b, _ = os.socketpair()
+            _g, err = ipc.read_frame_timeout(b, 100, 50)
+            spec.assert_true(err == ipc.TIMED_OUT_BETWEEN_FRAMES, "clean: ${err}")
+            ipc.write_frame(a, "after")
+            got, err2 = ipc.read_frame_timeout(b, 100, 5000)
+            spec.assert_ok(err2, "the next frame reads")
+            spec.assert_true(got == "after", "whole and in step")
+            io.fd_close(a)
+            io.fd_close(b)
+        }
+
+        spec.it("a timeout part-way through a header or payload says the stream is lost") callback {
+            a, b, _ = os.socketpair()
+            ipc.write(a, string.substring(frame_of("abcdef"), 0, 2))
+            _g, err = ipc.read_frame_timeout(b, 100, 50)
+            spec.assert_true(err == ipc.TIMED_OUT_INSIDE_FRAME, "mid-header: ${err}")
+            io.fd_close(a)
+            io.fd_close(b)
+            c, d, _ = os.socketpair()
+            ipc.write(c, string.substring(frame_of("abcdef"), 0, 6))
+            _g2, err3 = ipc.read_frame_timeout(d, 100, 50)
+            spec.assert_true(err3 == ipc.TIMED_OUT_INSIDE_FRAME, "mid-payload: ${err3}")
+            io.fd_close(c)
+            io.fd_close(d)
+        }
+
         spec.it("read_frame_timeout reads a frame that arrives in time") callback {
             a, b, _ = os.socketpair()
             ipc.write_frame(a, BINARY)
