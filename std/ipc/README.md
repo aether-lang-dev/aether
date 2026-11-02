@@ -148,12 +148,12 @@ bounds the whole frame, header and payload together, and says `timed out`.
 After a timeout the stream is mid-frame: close the channel. `read_frame` is
 the same call with no timeout.
 
-```aether
+```aether,fragment
 import std.ipc
 
 // Take one reply from a worker, however it misbehaves: at most 64 KiB, in
 // at most two seconds.
-reply(ch: int) -> string {
+answer_from(ch: int) -> string {
     data, err = ipc.read_frame_timeout(ch, 65536, 2000)
     if err != "" { return "" }
     return data
