@@ -19,6 +19,8 @@
     <li><a href="#new">new</a></li>
     <li><a href="#enforce">enforce</a></li>
     <li><a href="#free">free</a></li>
+    <li><a href="#spawn_socket">spawn_socket</a></li>
+    <li><a href="#spawn_socket_uncontained">spawn_socket_uncontained</a></li>
     <li><a href="#grant_all">grant_all</a></li>
     <li><a href="#grant_fs_read">grant_fs_read</a></li>
     <li><a href="#grant_fs_write">grant_fs_write</a></li>
@@ -30,6 +32,8 @@
     <li><a href="#grant_udp">grant_udp</a></li>
     <li><a href="#grant_native">grant_native</a></li>
     <li><a href="#grant_fork">grant_fork</a></li>
+    <li><a href="#grant_without_landlock">grant_without_landlock</a></li>
+    <li><a href="#grant_runtime">grant_runtime</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -155,6 +159,18 @@
       <p class="signature"><span class="sig-params">perms: Grants</span></p>
       <p class="doc">Release a grant list made by new(), and the grant strings it owns.</p>
     </div>
+    <div class="function" id="spawn_socket" data-name="spawn_socket">
+      <h3 class="function-name">spawn_socket <span class="kind">fn</span></h3>
+      <pre class="usage"><code>spawn_socket(perms, prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">perms: Grants, prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Run `prog` in a child process held to `perms`, with a socket to talk to it: os.run_socket's channel (the child's fd 3, AETHER_IPC_FD=3 and AETHER_IPC_KIND=socket in its env, so std.ipc.parent_channel() finds it) with spawn_sandboxed's containment. Returns (fd, pid, err): the parent's end of the socket and the child's pid, or (-1, -1, reason) with no child started. Reap the child with os.wait_pid(pid) and close fd when done. argv   a std.list of the arguments after the program, or null env    a std.list of &quot;KEY=VALUE&quot;, the child's whole environment, or null for this process's; the sandbox's own variables are added The child starts with libaether_sandbox.so in LD_PRELOAD, checking its libc calls against `perms`, and a kernel layer under it that holds what the preload cannot see (docs/containment-sandbox.md, &quot;Kernel layer&quot;). It fails closed: where the child cannot be contained (macOS, Windows, FreeBSD for now; on Linux, a kernel layer that cannot be set up as asked) it returns an error and starts nothing. Running one uncontained is spawn_socket_uncontained, by name.</p>
+    </div>
+    <div class="function" id="spawn_socket_uncontained" data-name="spawn_socket_uncontained">
+      <h3 class="function-name">spawn_socket_uncontained <span class="kind">fn</span></h3>
+      <pre class="usage"><code>spawn_socket_uncontained(perms, prog, argv, env) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">perms: Grants, prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">spawn_socket with NO sandbox: plain os.run_socket. `perms` is taken and ignored, so a host switches between the two by name and the uncontained one is easy to find in review (grep for spawn_socket_uncontained). For development on a platform spawn_socket refuses, never for a guest that is not trusted.</p>
+    </div>
     <div class="function" id="grant_all" data-name="grant_all">
       <h3 class="function-name">grant_all <span class="kind">fn</span></h3>
       <pre class="usage"><code>grant_all(_ctx)</code></pre>
@@ -220,6 +236,18 @@
       <pre class="usage"><code>grant_fork(_ctx)</code></pre>
       <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
       <p class="doc">Starting new processes, in a child spawn_sandboxed starts: fork, vfork, and a clone or clone3 that is not a thread. Without it the child can start threads but no process; the kernel fence refuses the rest.</p>
+    </div>
+    <div class="function" id="grant_without_landlock" data-name="grant_without_landlock">
+      <h3 class="function-name">grant_without_landlock <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_without_landlock(_ctx)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants</span></p>
+      <p class="doc">Let sandbox.spawn_socket start the child on a kernel with no Landlock (before Linux 5.13, or with landlock left out of lsm=), held by the preload and seccomp only. Without it spawn_socket refuses there, since a raw syscall (ctypes, a static binary) could then open what the fs grants do not allow. It is a grant so the choice sits in the host's grant list, where a review reads it; it grants the child nothing.</p>
+    </div>
+    <div class="function" id="grant_runtime" data-name="grant_runtime">
+      <h3 class="function-name">grant_runtime <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_runtime(_ctx, name)</code></pre>
+      <p class="signature"><span class="sig-params">_ctx: Grants, name: string</span></p>
+      <p class="doc">The runtime's library, readable: see above.</p>
     </div>
   </div>
 </main>

@@ -71,7 +71,7 @@ header comment is the authoritative description.
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
-| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 15 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
+| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 19 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
