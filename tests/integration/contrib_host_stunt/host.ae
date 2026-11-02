@@ -1,0 +1,363 @@
+// The host the stunt tests drive (test_*.sh beside this). Usage:
+//
+//   host inproc <policy> <check> <expectation>
+//   host child <policy> <check> <expectation>
+//   host child-uncontained <policy> <check> <expectation>
+//
+// inproc loads libstunt through contrib.host.stunt (AETHER_STUNT_LIB) and
+// runs the check under the policy's grants with stunt.vm_eval_sandboxed;
+// run it under libaether_sandbox.so for the libc checks to be held. child
+// runs the stunt program (STUNT_EXE) with sandbox.spawn_socket and serves
+// what it asks for over std.ipc frames; child-uncontained the same with
+// sandbox.spawn_socket_uncontained, for the checks that are about the host,
+// not the child's containment.
+//
+// <policy> is "-" for no grants, or kind=pattern,... with kinds fs_read,
+// fs_write, exec, env, tcp (host:port), native, fork. In inproc,
+// "<outer>|<inner>" runs the check inside sandbox.enforce(<outer>), so the
+// bridge's level nests in the block's.
+//
+// Prints the stunt's line, or for a host-checked check (spin, silent,
+// oversize) the host's own verdict, and exits 0 when it matched.
+
+import contrib.host.stunt
+import std.sandbox
+import std.os
+import std.ipc
+import std.io
+import std.fs
+import std.list
+import std.string
+
+extern exit(code: int)
+extern aether_sandbox_depth() -> int
+
+// ---- host functions the guest calls ----------------------------------------
+
+@c_callback
+host_greet(vm: ptr) -> int {
+    name = stunt.arg_str(vm, 1)
+    stunt.push_str(vm, "hello, ${name}")
+    return 1
+}
+
+@c_callback
+host_add(vm: ptr) -> int {
+    if stunt.arg_type(vm, 1) != stunt.STUNT_TINT || stunt.arg_type(vm, 2) != stunt.STUNT_TINT {
+        return stunt.raise_error(vm, "add takes two ints")
+    }
+    stunt.push_int(vm, stunt.arg_int(vm, 1) + stunt.arg_int(vm, 2))
+    return 1
+}
+
+// ---- policies --------------------------------------------------------------
+
+fn add_grant(g: sandbox.Grants, item: string) {
+    eq = string.index_of(item, "=")
+    kind = item
+    pat = ""
+    if eq >= 0 {
+        kind = string.substring(item, 0, eq)
+        pat = string.substring(item, eq + 1, string.length(item))
+    }
+    if kind == "fs_read" { sandbox.grant_fs_read(g, pat) return }
+    if kind == "fs_write" { sandbox.grant_fs_write(g, pat) return }
+    if kind == "exec" { sandbox.grant_exec(g, pat) return }
+    if kind == "env" { sandbox.grant_env(g, pat) return }
+    if kind == "native" { sandbox.grant_native(g, pat) return }
+    if kind == "fork" { sandbox.grant_fork(g) return }
+    if kind == "tcp" {
+        host = pat
+        port = 0
+        colon = string.index_of(pat, ":")
+        if colon >= 0 {
+            host = string.substring(pat, 0, colon)
+            p, perr = string.to_int(string.substring(pat, colon + 1, string.length(pat)))
+            if perr == "" { port = p }
+        }
+        sandbox.grant_tcp(g, host, port)
+        return
+    }
+    println("host: unknown grant kind ${kind}")
+    exit(2)
+}
+
+fn grants(spec: string) -> sandbox.Grants {
+    g = sandbox.new("stunt") {
+    }
+    if spec != "-" && spec != "" {
+        items = string.split(spec, ",")
+        n = string.array_size(items)
+        i = 0
+        while i < n {
+            add_grant(g, string.array_get(items, i))
+            i = i + 1
+        }
+        string.array_free(items)
+    }
+    return g
+}
+
+// ---- in-process ------------------------------------------------------------
+
+fn finish_inproc(vm: ptr, g: sandbox.Grants, check: string, expect: string) {
+    before = aether_sandbox_depth()
+    rc = stunt.vm_eval_sandboxed(vm, g, "${check} ${expect}")
+    after = aether_sandbox_depth()
+    if after != before {
+        println("host: ${check}: the bridge left ${after - before} level(s) in force")
+        exit(1)
+    }
+    line = stunt.vm_result(vm)
+    if check == "spin" {
+        if rc == stunt.STUNT_STOPPED && string.contains(line, "instruction limit") == 1 {
+            println("spin: stopped at the instruction limit - host-checked: PASS")
+            exit(0)
+        }
+        println("spin: ${line} - host-checked: FAIL")
+        exit(1)
+    }
+    println(line)
+    exit(rc)
+}
+
+fn run_inproc(spec: string, check: string, expect: string) {
+    vm = stunt.vm_new()
+    if vm == null {
+        println("host: cannot load libstunt (AETHER_STUNT_LIB)")
+        exit(1)
+    }
+    stunt.vm_register(vm, "greet", host_greet)
+    stunt.vm_register(vm, "add", host_add)
+    m = stunt.map_new()
+    stunt.map_put(m, "input", "stunt-in")
+    stunt.vm_set_map(vm, stunt.map_token(m))
+    if check == "spin" { stunt.vm_set_instruction_limit(vm, 5000000) }
+
+    bar = string.index_of(spec, "|")
+    if bar < 0 {
+        finish_inproc(vm, grants(spec), check, expect)
+        return
+    }
+    outer = grants(string.substring(spec, 0, bar))
+    inner = grants(string.substring(spec, bar + 1, string.length(spec)))
+    sandbox.enforce(outer) callback {
+        if aether_sandbox_depth() != 1 {
+            println("host: the enforce block is not one level deep")
+            exit(1)
+        }
+        finish_inproc(vm, inner, check, expect)
+    }
+}
+
+// ---- child -----------------------------------------------------------------
+
+// The value of a frame argument: its type letter dropped.
+fn arg_text(a: string) -> string {
+    return string.substring(a, 1, string.length(a))
+}
+
+fn guarded_read(g: sandbox.Grants, path: string) -> string {
+    box = list.new()
+    sandbox.enforce(g) callback {
+        text, err = fs.read(path)
+        if err == "" { list.add(box, text) }
+    }
+    if list.size(box) == 0 { return "ERR refused: fs_read ${path}" }
+    out, _e = list.get_string(box, 0)
+    return "OK s${out}"
+}
+
+fn guarded_getenv(g: sandbox.Grants, name: string) -> string {
+    box = list.new()
+    sandbox.enforce(g) callback {
+        v = os.getenv(name)
+        if v != "" { list.add(box, v) }
+    }
+    if list.size(box) == 0 { return "ERR refused: env ${name}" }
+    out, _e = list.get_string(box, 0)
+    return "OK s${out}"
+}
+
+// One CALL frame, answered as the in-process bridge answers the same call.
+fn serve(g: sandbox.Grants, token: long, frame: string) -> string {
+    parts = string.split(string.substring(frame, 5, string.length(frame)), "\t")
+    n = string.array_size(parts)
+    name = string.array_get(parts, 0)
+    a1 = ""
+    a2 = ""
+    if n > 1 { a1 = string.array_get(parts, 1) }
+    if n > 2 { a2 = string.array_get(parts, 2) }
+    answer = "ERR no host function ${name}"
+    if name == "greet" {
+        answer = "OK shello, ${arg_text(a1)}"
+    } else if name == "add" {
+        x, xe = string.to_int(arg_text(a1))
+        y, ye = string.to_int(arg_text(a2))
+        if xe == "" && ye == "" && string.starts_with(a1, "i") == 1 && string.starts_with(a2, "i") == 1 {
+            answer = "OK i${x + y}"
+        } else {
+            answer = "ERR add takes two ints"
+        }
+    } else if name == "read_file" {
+        answer = guarded_read(g, arg_text(a1))
+    } else if name == "getenv" {
+        answer = guarded_getenv(g, arg_text(a1))
+    } else if name == "aether_map_get" {
+        key = arg_text(a1)
+        if stunt.map_guest_has(token, key) == 1 {
+            answer = "OK s${stunt.map_guest_get(token, key)}"
+        } else {
+            answer = "OK n"
+        }
+    } else if name == "aether_map_put" {
+        r = stunt.map_guest_put(token, arg_text(a1), arg_text(a2))
+        answer = "OK i${r}"
+    }
+    string.array_free(parts)
+    return answer
+}
+
+fn run_child(spec: string, check: string, expect: string, contained: int) {
+    exe = os.getenv("STUNT_EXE")
+    if exe == "" {
+        println("host: STUNT_EXE is not set")
+        exit(2)
+    }
+    g = grants(spec)
+    // The program the host runs is the host's to grant, as a script is.
+    sandbox.grant_fs_read(g, exe)
+
+    // The child's environment is what the grants allow it to see: a copy a
+    // guest takes at start (env-cached) is then no wider than getenv.
+    env = list.new()
+    list.add(env, "PATH=/usr/bin:/bin")
+    home = guarded_getenv(g, "HOME")
+    if string.starts_with(home, "OK s") == 1 {
+        list.add(env, "HOME=${string.substring(home, 4, string.length(home))}")
+    }
+    argv = list.new()
+    list.add(argv, check)
+    list.add(argv, expect)
+
+    ch = -1
+    pid = -1
+    err = ""
+    if contained == 1 {
+        ch, pid, err = sandbox.spawn_socket(g, exe, argv, env)
+    } else {
+        ch, pid, err = sandbox.spawn_socket_uncontained(g, exe, argv, env)
+    }
+    if err != "" {
+        println("host: spawn: ${err}")
+        exit(1)
+    }
+
+    m = stunt.map_new()
+    stunt.map_put(m, "input", "stunt-in")
+    stunt.map_freeze(m)
+    token = stunt.map_token(m)
+
+    host_checked = 0
+    if expect == "host" { host_checked = 1 }
+    wait_ms = 20000
+    if host_checked == 1 { wait_ms = 500 }
+    cancelled = 0
+    killed = 0
+    refused = ""
+    rc = -1
+    line = ""
+    going = 1
+    while going == 1 {
+        data, rerr = ipc.read_frame_timeout(ch, 65536, wait_ms)
+        if rerr != "" {
+            if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES && cancelled == 0 {
+                ipc.write_frame(ch, "CANCEL")
+                cancelled = 1
+                wait_ms = 1000
+            } else if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES {
+                os.kill(pid, 9)
+                killed = 1
+                going = 0
+            } else {
+                refused = rerr
+                os.kill(pid, 9)
+                going = 0
+            }
+        } else if string.starts_with(data, "CALL ") == 1 {
+            werr = ipc.write_frame(ch, serve(g, token, data))
+            if werr != "" { going = 0 }
+        } else if string.starts_with(data, "RESULT ") == 1 {
+            rest = string.substring(data, 7, string.length(data))
+            sp = string.index_of(rest, " ")
+            if sp > 0 {
+                v, verr = string.to_int(string.substring(rest, 0, sp))
+                if verr == "" { rc = v }
+                line = string.substring(rest, sp + 1, string.length(rest))
+            }
+            going = 0
+        } else {
+            refused = "an unexpected frame: ${data}"
+            os.kill(pid, 9)
+            going = 0
+        }
+    }
+    io.fd_close(ch)
+    code, werr = os.wait_pid(pid)
+
+    if check == "spin" {
+        if cancelled == 1 && rc == stunt.STUNT_STOPPED && string.contains(line, "cancelled") == 1 {
+            println("spin: cancelled at the deadline - host-checked: PASS")
+            exit(0)
+        }
+        println("spin: cancelled=${cancelled} rc=${rc} line=${line} - host-checked: FAIL")
+        exit(1)
+    }
+    if check == "silent" {
+        if killed == 1 && rc == -1 {
+            println("silent: no answer to CANCEL, killed after grace - host-checked: PASS")
+            exit(0)
+        }
+        println("silent: killed=${killed} rc=${rc} line=${line} - host-checked: FAIL")
+        exit(1)
+    }
+    if check == "oversize" {
+        if string.contains(refused, "longer than max") == 1 {
+            println("oversize: frame refused (${refused}) - host-checked: PASS")
+            exit(0)
+        }
+        println("oversize: refused=${refused} rc=${rc} line=${line} - host-checked: FAIL")
+        exit(1)
+    }
+    if rc < 0 {
+        println("host: ${check}: no RESULT from the child (${refused}; killed=${killed}, exit ${code} ${werr})")
+        exit(1)
+    }
+    println(line)
+    if code != rc {
+        println("host: ${check}: the child said ${rc} and exited ${code}")
+        exit(1)
+    }
+    exit(rc)
+}
+
+main() {
+    if os.args_count() != 5 {
+        println("usage: host inproc|child|child-uncontained <policy> <check> <expectation>")
+        exit(2)
+    }
+    mode = os.args_get(1)
+    spec = os.args_get(2)
+    check = os.args_get(3)
+    expect = os.args_get(4)
+    if mode == "inproc" {
+        run_inproc(spec, check, expect)
+    } else if mode == "child" {
+        run_child(spec, check, expect, 1)
+    } else if mode == "child-uncontained" {
+        run_child(spec, check, expect, 0)
+    } else {
+        println("host: unknown mode ${mode}")
+        exit(2)
+    }
+}
