@@ -102,7 +102,7 @@ main() {
             // pieces, and the child's echo of it.
             bin = "a\0b\nc\xffd"
             wire = string.concat(string.concat(string.from_char(0), string.from_char(0)),
-                                 string.concat(string.concat(string.from_char(0), string.from_char(7)), bin))
+                string.concat(string.concat(string.from_char(0), string.from_char(7)), bin))
             i = 0
             while i < string.length(wire) {
                 spec.assert_ok(ipc.write(ch, string.substring(wire, i, i + 1)), "dribble a byte")

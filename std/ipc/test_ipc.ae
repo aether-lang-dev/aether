@@ -328,7 +328,7 @@ main() {
             a, b, _ = os.socketpair()
             // 0xffffffff bytes announced, 5 sent.
             big = string.concat(string.concat(string.from_char(255), string.from_char(255)),
-                                string.concat(string.from_char(255), string.from_char(255)))
+                string.concat(string.from_char(255), string.from_char(255)))
             ipc.write(a, string.concat(big, "hello"))
             got, err = ipc.read_frame(b, 1000)
             spec.assert_err_contains(err, "longer than max", "oversize header")

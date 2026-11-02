@@ -18,6 +18,7 @@ tests/integration/ae_add_hash_pin/
 tests/integration/ae_add_release_artifact/
 tests/integration/ae_run_cflags/
 tests/integration/ae_run_ends_with_ae/
+tests/integration/sandbox_spawn_socket/
 tests/integration/server_jobs_helpers/
 tests/integration/aether_string_ffi_unwrap/
 tests/integration/threaded_dispatch/
