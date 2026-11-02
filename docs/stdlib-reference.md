@@ -43,7 +43,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
-| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 13 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
+| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 24 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 51 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
@@ -71,7 +71,7 @@ header comment is the authoritative description.
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
-| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 15 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
+| `std.sandbox` | Grant lists, and blocks that run with only those grants in force. | 19 | [guide](../std/sandbox/README.md) · [source](../std/sandbox/module.ae) |
 | `std.schema` | Declarative typed validation and coercion. | 35 | [guide](../std/schema/README.md) · [source](../std/schema/module.ae) |
 | `std.set` | Unordered set of unique strings. | 14 | [guide](../std/set/README.md) · [source](../std/set/module.ae) |
 | `std.signal` | POSIX signal-number constants. | 11 | [guide](../std/signal/README.md) · [source](../std/signal/module.ae) |
@@ -3169,6 +3169,11 @@ main() {
 - `ipc.read(fd, max)` → `(string, string)` - One binary-safe read of up to `max` bytes; `("", "")` at end of stream
 - `ipc.send_fd(ch, fd, payload)` → `string` - Pass an open descriptor over a socket channel, attached to a payload of at least one byte (POSIX only)
 - `ipc.recv_fd(ch, max)` → `(int, string, string)` - Receive exactly one descriptor (close-on-exec) and its payload; a message with none, several, or other control data is an error, and every descriptor that arrived is closed (POSIX only)
+- `ipc.recv(ch, max)` → `(string, int, string)` - One receive: the bytes and the descriptor that came with them, `-1` when none. At most one descriptor; the parent end of an `os.run_socket` channel takes none from its child (POSIX only)
+- `ipc.write_frame(ch, data)` → `string` - One frame: a 4-byte big-endian length, then the bytes (any bytes, NUL and newline included)
+- `ipc.read_frame(ch, max)` → `(string, string)` - One whole frame; a header announcing more than `max` is an error and nothing is buffered. End of stream is an error, so `("", "")` is an empty frame
+- `ipc.read_frame_timeout(ch, max, timeout_ms)` → `(string, string)` - `read_frame` with a deadline over the whole frame (POSIX only when the timeout is not negative). A timeout is `ipc.TIMED_OUT_BETWEEN_FRAMES` when no byte of a frame had arrived (the stream is still usable) or `ipc.TIMED_OUT_INSIDE_FRAME` when one had (close the channel)
+- `ipc.wait_readable(ch, timeout_ms)` → `(int, string)` - `poll`: 1 when a read will not block, 0 on a timeout (POSIX only)
 
 ### Signal numbers (`std.signal`)
 

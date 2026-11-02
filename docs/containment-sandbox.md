@@ -77,6 +77,8 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_native(path)` | `native` | library being `dlopen`ed |
 | `grant_fork()` | `fork` | a new process in a child `spawn_sandboxed` starts (threads need no grant) |
 | `grant_all()` | `*` | everything |
+| `grant_runtime(name)` | `fs_read` | what interpreter `name` needs to start, asked of it (below) |
+| `grant_without_landlock()` | (none) | lets `sandbox.spawn_socket` run on a kernel without Landlock |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
 child process and what the `contrib/host/<lang>` modules take as their
@@ -554,11 +556,75 @@ interception model requires.
 |----------|----------------|-------|
 | **Linux** | LD_PRELOAD (`libaether_sandbox.so`) | `spawn_sandboxed` finds the library as described below, the program's own path from `/proc/self/exe`. Intercepts the glibc large-file (`open64`/`fopen64`/`mmap64`) and `clone3` entry points in addition to the common surface. |
 | **FreeBSD** | LD_PRELOAD + **Capsicum self-sandbox** + **Casper** | LD_PRELOAD works as on Linux (the program's own path comes from `sysctl(KERN_PROC_PATHNAME)`, no `/proc`; no `*64`/`clone3`). An Aether process launched with `AETHER_CAPSICUM=1` enters FreeBSD capability mode at startup, kernel-enforced, unbypassable containment; `spawn_sandboxed` sets that for Aether children automatically. `std.casper` lets a capability-mode process still resolve DNS / read passwd / read sysctl by delegating to the Casper daemon. See [`aether_compared_to_capsicum.md`](aether_compared_to_capsicum.md). |
-| **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly. |
-| **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub. |
+| **macOS** | Not supported | `DYLD_INSERT_LIBRARIES` exists but the hardened runtime ignores it for system binaries. `spawn_sandboxed` is a stub that fails loudly; `sandbox.spawn_socket` returns an error and starts nothing. |
+| **Windows** | Not supported | No `LD_PRELOAD` equivalent. `spawn_sandboxed` is a stub; `sandbox.spawn_socket` returns an error and starts nothing. |
 
 The in-process layer (module boundary, scope boundary, and the stdlib
 grant checks) is pure C and works on every platform regardless.
+
+### A sandboxed child with a socket: `sandbox.spawn_socket`
+
+```aether,fragment
+ch, pid, err = sandbox.spawn_socket(guest, "python3", argv, env)
+```
+
+`os.run_socket`'s channel (the child's fd 3, `AETHER_IPC_FD=3`,
+`AETHER_IPC_KIND=socket`) with `spawn_sandboxed`'s containment, held to the
+grant list: the preload library, and the kernel layer below ("Kernel
+layer"). `argv` is a `std.list` of the arguments after the program and
+`env` the child's whole environment as `"KEY=VALUE"` (null for this
+process's); the sandbox adds its own variables. It returns at once with
+the parent's end of the socket and the child's pid; reap the child with
+`os.wait_pid` and close the socket.
+
+It **fails closed**. Where the child cannot be contained (macOS, Windows,
+Android, and FreeBSD until it has a kernel layer for a foreign program),
+and on Linux when the preload library cannot be found or the kernel layer
+cannot be set up as asked, it returns `(-1, -1, reason)` and starts
+nothing. A host that wants a child with no sandbox at all asks for one by
+name, `sandbox.spawn_socket_uncontained(perms, ...)`: the same signature
+(the grants are ignored), so the two differ by one word and the
+uncontained one is easy to find in review.
+
+The grants reach the child's preload on a sealed memfd it inherits
+(`AETHER_SANDBOX_GRANTS_FD`), not on a named shared-memory object:
+`spawn_sandboxed` waits for its child and then removes the object, and
+`spawn_socket` does not wait. The memfd has no name to remove, its seals
+stop the child changing it, and a program the child is granted to exec
+reads the same grants from it.
+
+### Starting a foreign interpreter: `grant_runtime`
+
+Under the kernel layer a child reads nothing it is not granted, and an
+interpreter has to read its own library before it runs a line. Two kinds of
+guest, two answers (aether#3503):
+
+- **An Aether worker** locks itself down after it starts: it calls
+  `sandbox.enforce` before its first step, so it needs no start-up grants
+  and no platform paths (the `cap_enter` shape).
+- **A foreign interpreter** cannot, so the host grants what it needs to
+  start with a preset:
+
+```aether,fragment
+guest = sandbox.new("python-guest") {
+    grant_runtime("python3")           // its stdlib, lib-dynload, site-packages, libpython
+    grant_fs_read("python/guest.py")   // the script is the host's to grant
+}
+ch, pid, err = sandbox.spawn_socket(guest, "python3", argv, null)
+```
+
+`grant_runtime` asks the interpreter, in the unsandboxed host, when the grant
+list is built: `python3 -I -c ...` prints the directories on its `sys.path`
+(`-I` leaves out `PYTHONPATH`, the user's site-packages and the current
+directory) and libpython's file, and each becomes a read grant (`dir/*`, a
+file, or `libpython3.X.so*`). The interpreter knows where this machine's
+install keeps them, a distribution's `/usr/lib/python3.X`, a Homebrew or
+pyenv prefix, `/usr/local`; a table of paths would guess, per platform, and
+go stale. The table in `std/sandbox/module.ae` says only which interpreters
+can be asked and how (`python3`, `python` today). A name it does not know,
+or an interpreter that cannot be asked, panics with the reason, rather than
+leave a list that fails later inside the child. It grants no exec (the
+interpreter is the program the spawn runs) and not the guest's script.
 
 ### Where `spawn_sandboxed` finds the preload library
 
@@ -649,10 +715,21 @@ the sandbox needs them.
 `libc.so.6` directly. This enables ctypes/Fiddle/DynaLoader escape.
 Don't grant it unless necessary. Without it:
 
-- Python `ctypes.CDLL("libc.so.6")` is blocked
+- Python `ctypes.CDLL("libc.so.6")` is blocked, and so is
+  `ctypes.CDLL("/usr/lib/x86_64-linux-gnu/libc.so.6")`: the preload
+  matches libc and the dynamic loader (glibc's `libc.so.6`, musl's
+  `libc.musl-*.so.1`, `ld-linux*`, `ld-musl-*`, FreeBSD's `libc.so.7` and
+  `ld-elf.so.1`) by the basename of the name, by the basename of where a
+  path leads (symlinks, `..`, `/lib` or `/usr/lib`), and by the handle the
+  loader returns (a name found on `LD_LIBRARY_PATH`)
 - Perl `DynaLoader::dl_load_file("libc.so.6")` is blocked
 - Ruby `Fiddle.dlopen("libc.so.6")` loads but calls are still intercepted
 - Lua has no FFI, not a vector
+
+That is the preload layer. A guest that finds libc's `syscall` some other
+way (its address read from libc's symbol table in memory, say) is past
+it; on Linux, Landlock under `sandbox.spawn_socket` is what refuses the
+open that follows.
 
 ### 5. Grant list follows least privilege
 
@@ -697,7 +774,7 @@ cat sandbox-config.ae
 | Network to non-granted hosts | `connect` interception |
 | Env var access outside grants | `getenv` interception |
 | Process execution outside grants | `execve` interception |
-| `dlopen("libc.so.6")` (ctypes escape) | `dlopen` interception |
+| `dlopen` of libc or the loader, by any name or path (ctypes escape) | `dlopen` interception |
 | Raw `syscall()` | `syscall` interception |
 | Shellcode via `mmap(PROT_EXEC)` | `mmap`/`mmap64` interception |
 | Shellcode via `mprotect(PROT_EXEC)` | `mprotect` interception |
@@ -707,12 +784,87 @@ cat sandbox-config.ae
 
 | Attack vector | Why |
 |--------------|-----|
-| Statically linked binaries | Don't use libc, bypass LD_PRELOAD entirely. Process creation by such binaries is still caught by the seccomp-bpf clone fence (see below). |
-| `ptrace` self | Can modify own process memory to skip checks |
+| Statically linked binaries | Don't use libc, bypass LD_PRELOAD entirely. On Linux, Landlock still holds their file access and the seccomp filter their process creation (see below). |
+| `ptrace` self | Can modify own process memory to skip checks. Under `spawn_sandboxed` and `sandbox.spawn_socket` on Linux, the seccomp filter refuses `ptrace` |
 | Kernel exploits | We're userspace, can't defend against kernel bugs |
 
 For these vectors, combine with OS-level sandboxing (seccomp-bpf,
 Linux namespaces, OpenBSD pledge/unveil) for defence in depth.
+
+### Kernel layer: Landlock
+
+`LD_PRELOAD` sees only calls that go through libc. Python's `ctypes`,
+LuaJIT's FFI or Ruby's `fiddle` can reach libc's own `syscall` (or a static
+binary can issue the instruction), and open what the grants never allowed.
+On Linux both sandboxed spawns (`spawn_sandboxed` and `sandbox.spawn_socket`)
+therefore put the child under **Landlock** before it execs: Linux 5.13 and
+later, no root, no user namespace. Its rules come from the grants, so the
+kernel refuses such an `openat` itself (`EACCES`).
+
+The ruleset is built in the parent, before the fork, and the child only
+applies it (`PR_SET_NO_NEW_PRIVS`, then `landlock_restrict_self`), which
+keeps the child to async-signal-safe calls. Its code is
+`runtime/sandbox/aether_sandbox_kernel_linux.c`.
+
+**How grants become rules.** The ruleset handles every fs right of the
+kernel's ABI (`REFER` from ABI 2, `TRUNCATE` from ABI 3; `IOCTL_DEV` is not
+handled, so ioctls on already-open terminals keep working).
+
+| Grant | Landlock rights |
+|---|---|
+| `grant_fs_read(p)` | `READ_FILE`, `READ_DIR` |
+| `grant_fs_write(p)` | `WRITE_FILE`, `TRUNCATE`, `REMOVE_*`, `MAKE_*`, `REFER` |
+| `grant_fs(p)` | both |
+| `grant_exec(cmd)` | `EXECUTE`, `READ_FILE` on the program the command's first word names (a bare name is looked up on `PATH`) |
+| `grant_tcp(host, port)` | `CONNECT_TCP` on `port`, ABI 4 (Linux 6.7) and later; the host is held by the preload only, since Landlock rules name ports, not hosts |
+| `grant_tcp(host, 0)`, `grant_tcp_listen()` | connect (bind) is then not handled by Landlock: any port is not a port rule. The seccomp filter and the preload still hold it |
+| `grant_udp` | nothing: Landlock has no UDP rules |
+
+From ABI 6 (Linux 6.12) the ruleset also scopes abstract Unix sockets and
+signals: the child cannot connect to an abstract socket made outside its
+sandbox, or signal a process outside it (the parent included).
+
+**How patterns become rules.** A grant is never widened to fit Landlock.
+
+| Pattern | Rule |
+|---|---|
+| `*` | `/` and everything under it |
+| `/dir/*` | `/dir` and everything under it |
+| `/dir/name*` | each entry of `/dir` whose name starts with `name` **when the child starts**: one made later is not covered (narrower) |
+| `/dir/file` (exact) | that file; a path that does not exist gets no rule, so a file the child is to create needs its directory granted (narrower) |
+| `/dir` (exact, a directory) | no rule: a Landlock rule on a directory covers what is under it, which the exact grant does not (narrower) |
+| `*.txt` (a suffix), or a `*` inside a path | cannot be expressed. `spawn_socket` refuses with a reason; `spawn_sandboxed` runs the child without Landlock and says so on stderr |
+
+**What the child may read to start.** Under Landlock the child's own
+`execve` is checked too, and so are the opens the dynamic loader makes, which
+the preload never sees. The kernel layer adds, read-only:
+
+- the program (`EXECUTE`, `READ_FILE`), its ELF interpreter from `PT_INTERP`
+  (`EXECUTE`, `READ_FILE`), and for a `#!` script its interpreter the same
+  way; a file that is neither runs under `/bin/sh`, which gets the same;
+- the directory the ELF interpreter really lives in, `READ_FILE` only (no
+  listing): the system library directory, `/usr/lib/x86_64-linux-gnu` on
+  Debian and Ubuntu, `/usr/lib` on Arch and Fedora. Libraries elsewhere
+  (`/usr/local/lib`, `$ORIGIN`) need a `grant_fs_read`;
+- `/etc/ld.so.cache`, `/usr/lib/locale` (glibc's locale archive) and
+  `/dev/urandom` (`READ_FILE`); `/dev/null` (`READ_FILE`, `WRITE_FILE`);
+- `libaether_sandbox.so`, and `spawn_sandboxed`'s shared-memory grant file
+  (`spawn_socket`'s grants are on an inherited memfd, which needs no rule).
+
+On ABI 1 (Linux 5.13 to 5.18) `REFER` does not exist and the kernel refuses
+every rename or link across directories under a ruleset; that is Landlock's
+own rule.
+
+**A kernel without Landlock** (older than 5.13, or with `landlock` left out
+of `lsm=`):
+
+- `sandbox.spawn_socket` fails closed: it returns an error naming the
+  missing Landlock and starts nothing. A host that accepts the weaker
+  containment says so in its grant list with `grant_without_landlock()`,
+  and the child then runs with the preload and seccomp only;
+- `spawn_sandboxed` keeps working for the callers it had before Landlock,
+  and prints a warning to stderr (once per process) that a raw syscall can
+  now open what the grants do not allow.
 
 ### Kernel-level fence for process creation, the clone3 gap, closed
 
@@ -747,21 +899,59 @@ Each is trapped with its own syscall numbers. Any other ABI kills the
 process, and on an architecture the filter does not cover
 `spawn_sandboxed` refuses to run the child (below) rather than fall back
 to the libc-level fence alone. The kernel fence
-is automatic, and the grant list says only whether it is there: if
-`fork:*` (`grant_fork()`) is granted, the filter isn't installed at all;
-otherwise it fires unconditionally. If the kernel doesn't support seccomp, the
+is automatic: with `fork:*` (`grant_fork()`) granted the process-creation
+rules are left out, and the rest of the filter (below) stays. If the kernel doesn't support seccomp, the
 child aborts with `exit(126)` rather than silently running uncontained
 a `spawn_sandboxed` that asked for containment we can't deliver
 must not exec.
 
-The complementary gap, `connect()` and
-`execve()` issued by statically-linked binaries or raw asm, remains.
-Those callers can still skip the LD_PRELOAD layer for network reach
-and exec, since the seccomp filter here targets only the
-process-creation family. Adding seccomp arms for `connect`/`execve`
-is a natural extension but introduces a much wider filter that needs
-its own discussion (an allowlist by host/path becomes a per-call BPF
-program); not done here.
+### Kernel layer: the seccomp filter, beyond process creation
+
+The same filter (`runtime/sandbox/aether_sandbox_kernel_linux.c`, built in
+the parent and installed in the child after Landlock) holds the rest of what
+the preload cannot see. It is installed for every grant list except
+`grant_all()`; the grants decide only which of its rules apply.
+
+| Syscalls | Answer | Unless |
+|---|---|---|
+| `fork`, `vfork`; `clone` without `CLONE_THREAD` | `EPERM` | `grant_fork()` |
+| `clone` or `unshare` with a `CLONE_NEW*` flag (a new namespace) | `EPERM` | never |
+| `clone3` | `ENOSYS` (libc falls back to `clone`, whose flags the filter reads) | never |
+| `execve`, `execveat` | `EPERM` | `grant_exec(...)`; see below for the program's own exec |
+| `socket(AF_INET or AF_INET6, ...)` | `EPERM` | a `grant_tcp`, `grant_udp` or `grant_tcp_listen` |
+| `socketcall` (i386, arguments in memory) | `EPERM` | the same network grants |
+| `ptrace`, `process_vm_readv`, `process_vm_writev`, `bpf`, `mount`, `umount2`, `pivot_root`, `setns`, `open_tree`, `move_mount`, `fsopen`, `fsconfig`, `fsmount`, `mount_setattr`, `keyctl`, `add_key`, `request_key`, `userfaultfd`, `perf_event_open` | `EPERM` | never |
+| `io_uring_setup`, `io_uring_enter`, `io_uring_register` | `ENOSYS` (the answer of a kernel without io_uring, so libuv and others fall back) | never |
+
+`AF_UNIX` and other families pass: the channel is a Unix socket, and
+glibc's resolver talks to netlink. A network grant opens `AF_INET` sockets
+of every type, since resolving a name for a TCP grant needs UDP to the
+resolver; which hosts are reached is the preload's to check, and on Linux
+6.7+ Landlock holds connect to the granted ports.
+
+**The program's own exec.** The filter is installed before the child execs
+its program, and that one `execve` has to pass. Without `grant_exec`, the
+filter allows `execve` only when its first argument is the exact pointer
+the child passes (the resolved program, or `/bin/sh` for a file with no
+`#!` line), compared in all 64 bits; a compat ABI's `execve` is always
+refused. Once the program runs that pointer means nothing, and the preload's
+constructor, before any of the program's own code, installs a second filter
+that refuses every `execve` and `execveat` (the spawn sets
+`AETHER_SANDBOX_NO_EXEC=1`; a filter that cannot be installed stops the
+process with exit 126). Filters stack and the strictest answer wins, so the
+child cannot undo it. A static program, which the preload never enters,
+keeps the pointer check and Landlock, under which it can execute only its
+own file and its loader.
+
+**ABIs.** The filter dispatches on `seccomp_data.arch`: the native ABI's
+numbers, on x86_64 also i386 (`int 0x80`) and x32 (the number with
+`0x40000000` set, masked off, plus x32's own numbers for `execve`,
+`execveat`, `ptrace` and `process_vm_*`), on aarch64 also 32-bit ARM. Any
+other ABI kills the process. On an architecture the filter does not cover,
+both spawns refuse to start the child. The numbers are literals, checked
+against the kernel headers zig ships for every architecture by
+`tests/integration/sandbox_clone_fence`, and every filter the builder can
+make is checked well formed by `tests/integration/sandbox_spawn_socket`.
 
 ### Interception surface, what LD_PRELOAD sees and what it doesn't
 

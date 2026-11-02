@@ -20,7 +20,16 @@
  * channel. The receiver is the side a hostile peer attacks, so recv_fd
  * accepts exactly one descriptor per message and closes every one that
  * arrived when it refuses a message: otherwise a peer could fill the
- * receiver's descriptor table with messages it rejects. */
+ * receiver's descriptor table with messages it rejects.
+ *
+ * recv is the one receive: the bytes and the descriptor, if any, from one
+ * recvmsg. The parent end of a channel os.run_socket made (marked in
+ * aether_spawn.c's table) refuses any descriptor, in recv and recv_fd alike:
+ * a child has no business handing its parent descriptors.
+ *
+ * Frames (write_frame / read_frame) are a 4-byte big-endian length and
+ * that many bytes, the reader capped by the caller's max. wait_readable and
+ * the timeout form of read_frame bound a wait with poll(). */
 
 #include "../../runtime/config/aether_optimization_config.h"
 
@@ -30,11 +39,15 @@
 #include <string.h>
 
 #include "../string/aether_string.h"
+#include "../../runtime/utils/aether_spawn.h"
 
 typedef struct { const char* _0; const char* _1; } _tuple_string_string;
 typedef struct { int _0; const char* _1; const char* _2; } _tuple_int_string_string;
+typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
+typedef struct { int _0; const char* _1; } _tuple_int_string;
 
 #if AETHER_HAS_FILESYSTEM
+#include <stdint.h>
 /* The bytes of a string argument: an AetherString carries its length, so a
  * payload with a zero byte in it goes whole; a plain char* goes to its NUL. */
 static const char* ipc_bytes(const void* obj, size_t* len) {
@@ -62,6 +75,16 @@ static _tuple_int_string_string ipc_recv_failed(const char* err) {
     return out;
 }
 
+static _tuple_string_int_string ipc_recv_msg_failed(const char* err) {
+    _tuple_string_int_string out = { (const char*)string_empty(), -1, err };
+    return out;
+}
+
+static _tuple_int_string ipc_wait_failed(const char* err) {
+    _tuple_int_string out = { 0, err };
+    return out;
+}
+
 #if !AETHER_HAS_FILESYSTEM
 
 int ipc_parent_channel_raw(void) { return -1; }
@@ -81,6 +104,22 @@ const char* ipc_send_fd_raw(int ch, int fd, const void* payload) {
 _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     (void)ch; (void)max;
     return ipc_recv_failed("ipc.recv_fd: unavailable in this build");
+}
+_tuple_string_int_string ipc_recv_raw(int ch, int max) {
+    (void)ch; (void)max;
+    return ipc_recv_msg_failed("ipc.recv: unavailable in this build");
+}
+const char* ipc_write_frame_raw(int ch, const void* data) {
+    (void)ch; (void)data;
+    return "ipc.write_frame: unavailable in this build";
+}
+_tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
+    (void)ch; (void)max; (void)timeout_ms;
+    return ipc_read_failed("ipc.read_frame: unavailable in this build");
+}
+_tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
+    (void)ch; (void)timeout_ms;
+    return ipc_wait_failed("ipc.wait_readable: unavailable in this build");
 }
 
 #elif !defined(_WIN32)
@@ -254,15 +293,27 @@ static void ipc_close_all(const int* fds, size_t n) {
     for (size_t i = 0; i < n; i++) close(fds[i]);
 }
 
-/* Receive one descriptor and the bytes that came with it (up to `max`).
+/* "<what>: <text>" in a per-thread buffer of its own, valid until this
+ * thread's next call. */
+static const char* ipc_msg(const char* what, const char* text) {
+    static __thread char msg[256];
+    snprintf(msg, sizeof msg, "%s: %s", what, text);
+    return msg;
+}
+
+/* One recvmsg for recv and recv_fd: up to `max` bytes in *out (malloc'd, the
+ * caller's) and the descriptor that came with them in *out_fd, -1 when none.
  *
  * The channel is a byte stream, so the bytes are whatever one recvmsg
  * returns: the payload sent with the descriptor, and possibly bytes written
  * after it. Framing is the caller's.
  *
- * Exactly one descriptor, in one SCM_RIGHTS message, or an error: on a
+ * At most one descriptor, in one SCM_RIGHTS message, or an error: on a
  * truncated control buffer, a control message of another kind, more than
- * one descriptor, or none, every descriptor that arrived is closed first.
+ * one descriptor, or any at all on the parent end of a channel, every
+ * descriptor that arrived is closed first, and the bytes with them are
+ * dropped. `want_fd` (recv_fd) makes a message without a descriptor an
+ * error too, and end of stream.
  *
  * Close-on-exec at receipt: MSG_CMSG_CLOEXEC sets it as the descriptor is
  * made (Linux, FreeBSD). macOS lacks it and gets fcntl straight after
@@ -270,12 +321,15 @@ static void ipc_close_all(const int* fds, size_t n) {
  * copies the descriptor into that child, and an exec there keeps it. That
  * is the race aether_pipe_cloexec closes with the fork lock; holding the
  * lock across a recvmsg that may block would stall every fork, so here it
- * stays open. */
-_tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
-    if (ch < 0) return ipc_recv_failed("ipc.recv_fd: invalid channel");
-    if (max <= 0) return ipc_recv_failed("ipc.recv_fd: max must be positive");
+ * stays open.
+ *
+ * Returns NULL, or the error (*out and *out_fd are then unset). */
+static const char* ipc_recv_core(int ch, int max, const char* what, int want_fd,
+                                 char** out, size_t* out_n, int* out_fd) {
+    if (ch < 0) return ipc_msg(what, "invalid channel");
+    if (max <= 0) return ipc_msg(what, "max must be positive");
     char* buf = (char*)malloc((size_t)max);
-    if (!buf) return ipc_recv_failed("ipc.recv_fd: out of memory");
+    if (!buf) return ipc_msg(what, "out of memory");
 
     struct iovec iov;
     iov.iov_base = buf;
@@ -301,7 +355,7 @@ _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     if (n < 0) {
         int e = errno;
         free(buf);
-        return ipc_recv_failed(ipc_errno_msg("ipc.recv_fd", e));
+        return ipc_errno_msg(what, e);
     }
 
     /* Collect every descriptor that arrived before judging the message, so
@@ -336,31 +390,64 @@ _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
 
     const char* err = NULL;
     if (msg.msg_flags & MSG_CTRUNC) {
-        err = "ipc.recv_fd: control data truncated (too many descriptors in one message)";
+        err = ipc_msg(what, "control data truncated (too many descriptors in one message)");
     } else if (foreign) {
-        err = "ipc.recv_fd: a control message other than SCM_RIGHTS";
+        err = ipc_msg(what, "a control message other than SCM_RIGHTS");
+    } else if (nfds > 0 && aether_ipc_is_parent_end(ch)) {
+        err = ipc_msg(what, "descriptor from the child refused (the parent end of a channel takes none)");
     } else if (nfds > 1) {
-        err = "ipc.recv_fd: more than one descriptor in one message";
-    } else if (nfds == 0) {
-        err = n == 0 ? "ipc.recv_fd: end of stream (peer closed)"
-                     : "ipc.recv_fd: message carried no descriptor";
+        err = ipc_msg(what, "more than one descriptor in one message");
+    } else if (nfds == 0 && want_fd) {
+        err = ipc_msg(what, n == 0 ? "end of stream (peer closed)"
+                                   : "message carried no descriptor");
     }
     if (err) {
         ipc_close_all(fds, nfds);
         free(buf);
-        return ipc_recv_failed(err);
+        return err;
     }
 
 #ifndef MSG_CMSG_CLOEXEC
-    fcntl(fds[0], F_SETFD, FD_CLOEXEC);
+    if (nfds == 1) fcntl(fds[0], F_SETFD, FD_CLOEXEC);
 #endif
-    AetherString* s = string_new_with_length(buf, (size_t)n);
+    *out = buf;
+    *out_n = (size_t)n;
+    *out_fd = nfds == 1 ? fds[0] : -1;
+    return NULL;
+}
+
+/* Receive one descriptor and the bytes that came with it (up to `max`). */
+_tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
+    char* buf = NULL;
+    size_t n = 0;
+    int fd = -1;
+    const char* err = ipc_recv_core(ch, max, "ipc.recv_fd", 1, &buf, &n, &fd);
+    if (err) return ipc_recv_failed(err);
+    AetherString* s = string_new_with_length(buf, n);
     free(buf);
     if (!s) {
-        close(fds[0]);
+        close(fd);
         return ipc_recv_failed("ipc.recv_fd: out of memory");
     }
-    _tuple_int_string_string out = { fds[0], (const char*)s, "" };
+    _tuple_int_string_string out = { fd, (const char*)s, "" };
+    return out;
+}
+
+/* One receive: the bytes (up to `max`) and the descriptor, if one came with
+ * them. ("", -1, "") at end of stream. */
+_tuple_string_int_string ipc_recv_raw(int ch, int max) {
+    char* buf = NULL;
+    size_t n = 0;
+    int fd = -1;
+    const char* err = ipc_recv_core(ch, max, "ipc.recv", 0, &buf, &n, &fd);
+    if (err) return ipc_recv_msg_failed(err);
+    AetherString* s = string_new_with_length(buf, n);
+    free(buf);
+    if (!s) {
+        if (fd >= 0) close(fd);
+        return ipc_recv_msg_failed("ipc.recv: out of memory");
+    }
+    _tuple_string_int_string out = { (const char*)s, fd, "" };
     return out;
 }
 #else
@@ -372,7 +459,102 @@ _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     (void)ch; (void)max;
     return ipc_recv_failed("ipc.recv_fd: unavailable in this build (no sockets)");
 }
+_tuple_string_int_string ipc_recv_raw(int ch, int max) {
+    (void)ch; (void)max;
+    return ipc_recv_msg_failed("ipc.recv: unavailable in this build (no sockets)");
+}
 #endif /* IPC_HAS_SOCKETS */
+
+/* The primitives the frame code below is written over (it is written once,
+ * for every platform). now_ms is a monotonic clock; fill reads exactly `len`
+ * bytes into dst, giving up at the absolute time `deadline_ms` (none when
+ * negative) without ever reading past `len`. */
+#include <poll.h>
+#include <time.h>
+
+static long long ipc_now_ms(void) {
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (long long)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+}
+
+#if IPC_HAS_SOCKETS
+/* poll(2) for readability for up to `ms` (negative: forever). 1 readable (or
+ * hung up, or errored: a read then will not block), 0 timed out, -1 failed
+ * with errno set. */
+static int ipc_poll_in(int fd, long long ms) {
+    long long end = ms < 0 ? -1 : ipc_now_ms() + ms;
+    for (;;) {
+        int wait = -1;
+        if (end >= 0) {
+            long long left = end - ipc_now_ms();
+            wait = left <= 0 ? 0 : (left > 0x7fffffff ? 0x7fffffff : (int)left);
+        }
+        struct pollfd p;
+        p.fd = fd;
+        p.events = POLLIN;
+        p.revents = 0;
+        int r = poll(&p, 1, wait);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) {
+            if (end >= 0 && ipc_now_ms() < end) continue;   /* woke early */
+            return 0;
+        }
+        if (p.revents & POLLNVAL) {
+            errno = EBADF;
+            return -1;
+        }
+        return 1;
+    }
+}
+#endif
+
+#define IPC_FILL_OK 0
+#define IPC_FILL_EOF 1
+#define IPC_FILL_TIMEOUT 2
+#define IPC_FILL_ERR 3
+
+static int ipc_fill(int fd, char* dst, size_t len, long long deadline_ms, size_t* got, int* err) {
+    *got = 0;
+    while (*got < len) {
+        if (deadline_ms >= 0) {
+#if IPC_HAS_SOCKETS
+            long long left = deadline_ms - ipc_now_ms();
+            int r = ipc_poll_in(fd, left < 0 ? 0 : left);
+            if (r < 0) { *err = errno; return IPC_FILL_ERR; }
+            if (r == 0) return IPC_FILL_TIMEOUT;
+#else
+            *err = ENOSYS;
+            return IPC_FILL_ERR;
+#endif
+        }
+        ssize_t n = read(fd, dst + *got, len - *got);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            *err = errno;
+            return IPC_FILL_ERR;
+        }
+        if (n == 0) return IPC_FILL_EOF;
+        *got += (size_t)n;
+    }
+    return IPC_FILL_OK;
+}
+
+_tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
+    if (ch < 0) return ipc_wait_failed("ipc.wait_readable: invalid descriptor");
+#if IPC_HAS_SOCKETS
+    int r = ipc_poll_in(ch, timeout_ms);
+    if (r < 0) return ipc_wait_failed(ipc_errno_msg("ipc.wait_readable", errno));
+    _tuple_int_string out = { r, "" };
+    return out;
+#else
+    (void)timeout_ms;
+    return ipc_wait_failed("ipc.wait_readable: unavailable in this build (no sockets)");
+#endif
+}
 
 #else /* _WIN32 */
 
@@ -393,22 +575,34 @@ const char* ipc_parent_channel_kind_raw(void) { return ""; }
 /* write and read stay plain CRT descriptor I/O here, as std.net's fd_write
  * is; the socket channel and descriptor passing are POSIX-only (Windows
  * passes handles with DuplicateHandle, a different shape). */
-const char* ipc_write_raw(int fd, const void* bytes) {
-    if (fd < 0) return "ipc.write: invalid descriptor";
-    size_t len = 0;
-    const char* data = ipc_bytes(bytes, &len);
+/* "<what>: <strerror(err)>"; one buffer, as the rest of the Windows path is
+ * not called from several threads at once. */
+static const char* ipc_errno_msg(const char* what, int err) {
+    static char msg[256];
+    snprintf(msg, sizeof msg, "%s: %s", what, strerror(err));
+    return msg;
+}
+
+static const char* ipc_write_all(int fd, const char* data, size_t len, const char* what) {
     size_t done = 0;
     while (done < len) {
         unsigned chunk = (len - done) > 0x7fffffffu ? 0x7fffffffu : (unsigned)(len - done);
         int n = _write(fd, data + done, chunk);
         if (n < 0) {
             if (errno == EINTR) continue;
-            return "ipc.write: write failed";
+            return ipc_errno_msg(what, errno ? errno : EIO);
         }
-        if (n == 0) return "ipc.write: write failed";
+        if (n == 0) return ipc_errno_msg(what, errno ? errno : EIO);
         done += (size_t)n;
     }
     return "";
+}
+
+const char* ipc_write_raw(int fd, const void* bytes) {
+    if (fd < 0) return "ipc.write: invalid descriptor";
+    size_t len = 0;
+    const char* data = ipc_bytes(bytes, &len);
+    return ipc_write_all(fd, data, len, "ipc.write");
 }
 
 _tuple_string_string ipc_read_raw(int fd, int max) {
@@ -433,9 +627,138 @@ const char* ipc_send_fd_raw(int ch, int fd, const void* payload) {
     return "ipc.send_fd: unsupported on Windows";
 }
 
+_tuple_string_int_string ipc_recv_raw(int ch, int max) {
+    (void)ch; (void)max;
+    return ipc_recv_msg_failed("ipc.recv: unsupported on Windows");
+}
+
+/* The frame code below over CRT descriptors. A deadline needs poll(), which
+ * a CRT descriptor has no answer to: the calls that take one report that. */
+#include <windows.h>
+
+static long long ipc_now_ms(void) { return (long long)GetTickCount64(); }
+
+#define IPC_FILL_OK 0
+#define IPC_FILL_EOF 1
+#define IPC_FILL_TIMEOUT 2
+#define IPC_FILL_ERR 3
+
+static int ipc_fill(int fd, char* dst, size_t len, long long deadline_ms, size_t* got, int* err) {
+    *got = 0;
+    if (deadline_ms >= 0) {
+        *err = ENOSYS;
+        return IPC_FILL_ERR;
+    }
+    while (*got < len) {
+        size_t want = len - *got;
+        int n = _read(fd, dst + *got, want > 0x7fffffffu ? 0x7fffffffu : (unsigned)want);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            *err = errno;
+            return IPC_FILL_ERR;
+        }
+        if (n == 0) return IPC_FILL_EOF;
+        *got += (size_t)n;
+    }
+    return IPC_FILL_OK;
+}
+
+_tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
+    (void)ch; (void)timeout_ms;
+    return ipc_wait_failed("ipc.wait_readable: unsupported on Windows");
+}
+
 _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     (void)ch; (void)max;
     return ipc_recv_failed("ipc.recv_fd: unsupported on Windows");
 }
 
 #endif /* AETHER_HAS_FILESYSTEM / _WIN32 */
+
+#if AETHER_HAS_FILESYSTEM
+/* Frames: a 4-byte big-endian unsigned length, then that many bytes, any
+ * bytes. The reader takes exactly the header and then exactly the payload,
+ * never a byte of the next frame, so it holds no state between calls and a
+ * frame split at any offset across writes reads whole. The length is checked
+ * against the caller's `max` before a byte is allocated for it. */
+#define IPC_FRAME_HEADER 4
+
+const char* ipc_write_frame_raw(int ch, const void* data) {
+    if (ch < 0) return "ipc.write_frame: invalid descriptor";
+    size_t len = 0;
+    const char* bytes = ipc_bytes(data, &len);
+    if (len > 0xffffffffu) return "ipc.write_frame: payload longer than a frame can announce (4 GiB - 1)";
+    /* One buffer, one write: header and payload cannot be split by another
+     * writer's bytes between them. */
+    unsigned char* buf = (unsigned char*)malloc(len + IPC_FRAME_HEADER);
+    if (!buf) return "ipc.write_frame: out of memory";
+    buf[0] = (unsigned char)(len >> 24);
+    buf[1] = (unsigned char)(len >> 16);
+    buf[2] = (unsigned char)(len >> 8);
+    buf[3] = (unsigned char)len;
+    if (len) memcpy(buf + IPC_FRAME_HEADER, bytes, len);
+    const char* err = ipc_write_all(ch, (const char*)buf, len + IPC_FRAME_HEADER, "ipc.write_frame");
+    free(buf);
+    return err;
+}
+
+/* The one frame reader. timeout_ms < 0 waits as long as the peer takes;
+ * otherwise it bounds the whole frame, header and payload.
+ *
+ * A timeout has two answers, so a caller can tell them apart without a
+ * poll of its own first. Before the first header byte nothing was consumed:
+ * the stream is between frames and fit to use (send a CANCEL, read again).
+ * Once a byte of the frame has been read, the bytes already taken are gone
+ * with the call (the reader keeps no state between calls), so the stream is
+ * out of step and the only safe thing is to close it. Keeping the partial
+ * frame for the next call instead would need per-descriptor state the
+ * runtime would have to find, size and free, and a caller that then wrote
+ * to the peer would still be talking across a half-read frame. The strings
+ * are std.ipc's TIMED_OUT_BETWEEN_FRAMES and TIMED_OUT_INSIDE_FRAME. */
+#define IPC_TIMED_OUT_BETWEEN "ipc.read_frame: timed out before a frame began"
+#define IPC_TIMED_OUT_INSIDE "ipc.read_frame: timed out inside a frame; the stream is out of step"
+_tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
+    if (ch < 0) return ipc_read_failed("ipc.read_frame: invalid descriptor");
+    if (max <= 0) return ipc_read_failed("ipc.read_frame: max must be positive");
+    long long deadline = timeout_ms < 0 ? -1 : ipc_now_ms() + timeout_ms;
+
+    unsigned char hdr[IPC_FRAME_HEADER];
+    size_t got = 0;
+    int e = 0;
+    int st = ipc_fill(ch, (char*)hdr, sizeof hdr, deadline, &got, &e);
+    if (st == IPC_FILL_EOF) {
+        return ipc_read_failed(got == 0 ? "ipc.read_frame: end of stream"
+                                        : "ipc.read_frame: stream ended inside a frame header");
+    }
+    if (st == IPC_FILL_TIMEOUT) {
+        return ipc_read_failed(got == 0 ? IPC_TIMED_OUT_BETWEEN : IPC_TIMED_OUT_INSIDE);
+    }
+    if (st == IPC_FILL_ERR) {
+        if (e == ENOSYS) return ipc_read_failed("ipc.read_frame: a timeout is unavailable here");
+        return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
+    }
+    uint32_t len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
+                   ((uint32_t)hdr[2] << 8) | (uint32_t)hdr[3];
+    if ((uint64_t)len > (uint64_t)max) {
+        return ipc_read_failed("ipc.read_frame: frame longer than max");
+    }
+    if (len == 0) {
+        _tuple_string_string out = { (const char*)string_empty(), "" };
+        return out;
+    }
+    char* buf = (char*)malloc(len);
+    if (!buf) return ipc_read_failed("ipc.read_frame: out of memory");
+    st = ipc_fill(ch, buf, len, deadline, &got, &e);
+    if (st != IPC_FILL_OK) {
+        free(buf);
+        if (st == IPC_FILL_EOF) return ipc_read_failed("ipc.read_frame: stream ended inside a frame");
+        if (st == IPC_FILL_TIMEOUT) return ipc_read_failed(IPC_TIMED_OUT_INSIDE);
+        return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
+    }
+    AetherString* s = string_new_with_length(buf, len);
+    free(buf);
+    if (!s) return ipc_read_failed("ipc.read_frame: out of memory");
+    _tuple_string_string out = { (const char*)s, "" };
+    return out;
+}
+#endif /* AETHER_HAS_FILESYSTEM */

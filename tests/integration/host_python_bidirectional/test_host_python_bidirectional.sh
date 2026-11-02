@@ -58,8 +58,6 @@ SOURCE_FILE="${AETHER_PYTHON_BRIDGE_SRC:-$ROOT/contrib/host/python/aether_host_p
 
 if ! gcc -o "$TMPDIR/t" \
     "$SOURCE_FILE" \
-    "$ROOT/runtime/aether_sandbox.c" \
-    "$ROOT/runtime/aether_shared_map.c" \
     $PY_CFLAGS -I"$ROOT" -I"$ROOT/contrib/host/python" -I"$ROOT/runtime" -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX \
     -L"$ROOT/build" -laether -ldl -lm $RT_LIB -lpthread \
     -xc - 2>"$TMPDIR/cc.log" << 'CEOF'
@@ -423,8 +421,11 @@ int main(void) {
     long a = rss_kb(); churn(vm, 10000);
     long bb = rss_kb(); churn(vm, 10000);
     long c = rss_kb();
+    // One-sided on purpose: a leak makes the object count GROW. Python 3.14's
+    // incremental GC can free pre-existing garbage during the loop, so the
+    // count may legitimately shrink (5390 -> 5375 observed on 3.14).
     ev(vm, "gc.collect()\nfinal_ref = sys.getrefcount(tracked_obj)\nfinal_objs = len(gc.get_objects())\n");
-    ev(vm, "final_ref == init_ref and abs(final_objs - init_objs) < 10");
+    ev(vm, "final_ref == init_ref and final_objs - init_objs < 10");
     CHECK(python_vm_result_bool(vm) == 1, "refcount or gc objects grew");
     long g1 = bb - a, g2 = c - bb, g = g1 < g2 ? g1 : g2;
     CHECK(g < 256, "memory grows: %ld kB then %ld kB over 10000 rounds", g1, g2);

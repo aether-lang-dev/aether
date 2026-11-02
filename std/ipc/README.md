@@ -67,7 +67,16 @@ On either end:
   attached to `payload`, which must be at least one byte. The receiver gets
   its own descriptor for the same open file; the sender's stays open.
 - `recv_fd(ch, max) -> (fd, payload, err)` receives one descriptor and the
-  bytes that came with it.
+  bytes that came with it; a message with none is an error.
+- `recv(ch, max) -> (data, fd, err)` is the one receive: the bytes and the
+  descriptor, if any, from a single `recvmsg`. `fd` is `-1` when the message
+  carried none, so a peer need not announce a descriptor before sending it.
+  `("", -1, "")` is end of stream.
+- `write_frame(ch, data) -> err` and `read_frame(ch, max) -> (data, err)`
+  carry whole messages (below).
+- `wait_readable(ch, timeout_ms) -> (ready, err)` and
+  `read_frame_timeout(ch, max, timeout_ms) -> (data, err)` bound a wait
+  (below); a frame timeout says whether the stream is still in step.
 
 A parent that has checked a request can open a file and hand the child the
 open descriptor, so a child that cannot open files itself still reads it:
@@ -98,9 +107,99 @@ main() {
 }
 ```
 
+## Frames
+
+The channel is a byte stream, so a reader that wants messages needs
+framing, and one that reads a hostile peer needs a bound. A frame is
+
+    +--------------------+------------------------+
+    | length: 4 bytes,   | payload: `length`      |
+    | big-endian, unsigned| bytes, any bytes      |
+    +--------------------+------------------------+
+
+`write_frame(ch, data)` writes the header and the payload in one write.
+The payload may hold any byte: `0x00` and `0x0a` included, since the length
+is the string's, not a terminator's. An empty payload is a frame of length 0;
+4 GiB or more cannot be announced and is an error.
+
+`read_frame(ch, max)` returns one whole payload and consumes exactly that
+frame, never a byte of the next, so it keeps no state between calls and
+a frame split at any offset across writes reads the same. `max` is a hard
+cap checked on the header: a frame announcing more is an error, and not a
+byte is allocated for it or read past the header. Choose `max` for what the
+peer may reasonably send, not for what it claims.
+
+A frame of length 0 reads `("", "")`. End of stream is never that: before a
+header it is the error `end of stream`, inside a header or payload
+`stream ended inside a frame`. Frames are read with plain reads, so a
+descriptor riding on the bytes is dropped by the kernel; use `recv` for
+descriptors.
+
+## Bounding a wait
+
+`wait_readable(ch, timeout_ms)` is `poll`: `(1, "")` when a read will not
+block (bytes are there, or the peer has closed and the read gives end of
+stream), `(0, "")` on a timeout. A negative timeout waits forever, `0` asks
+without waiting. It bounds the first byte of any read.
+
+A peer that sends a header and then stalls, or drips a byte at a time, gets
+past a wait for the first byte, so `read_frame_timeout(ch, max, timeout_ms)`
+bounds the whole frame, header and payload together. `read_frame` is the
+same call with no timeout.
+
+A timeout is one of two errors, and they mean different things for the
+stream:
+
+- `ipc.TIMED_OUT_BETWEEN_FRAMES`: the deadline passed before the first byte
+  of a frame arrived. Nothing was consumed, the stream is between frames,
+  and it is fit to use: write to the peer (a CANCEL, say) and read again.
+- `ipc.TIMED_OUT_INSIDE_FRAME`: the deadline passed part-way through a
+  header or payload. The bytes already read are gone with the call, so the
+  stream is out of step: close the channel.
+
+Any other error leaves the stream unusable too. So a host needs no
+`wait_readable` before each frame to know whether it can still talk to a
+worker that has gone quiet. The reader keeps no partial frame between calls
+on purpose: that would be per-descriptor state for the runtime to track and
+free, and a host that wrote to the peer meanwhile would still be talking
+across a half-read frame.
+
+```aether,fragment
+import std.ipc
+
+// Take one reply from a worker, however it misbehaves: at most 64 KiB, in
+// at most two seconds. A worker that has said nothing yet is asked to stop
+// and gets one more second; one that stalled inside a frame is cut off.
+answer_from(ch: int) -> string {
+    data, err = ipc.read_frame_timeout(ch, 65536, 2000)
+    if err == ipc.TIMED_OUT_BETWEEN_FRAMES {
+        ipc.write_frame(ch, "CANCEL")
+        data, err = ipc.read_frame_timeout(ch, 65536, 1000)
+    }
+    if err != "" { return "" }
+    return data
+}
+```
+
+## Descriptors only go down
+
+A descriptor travels from the parent to a child, never the other way. The
+parent end of a channel `os.run_socket` made (the descriptor it returned)
+refuses any descriptor its child sends, with no opt-in: `recv` and
+`recv_fd` close it, and every other that rode on the same message, and return
+an error, dropping the bytes that came with them. The child end, and both
+ends of `os.socketpair`, accept.
+
+The parent ends are recorded by the runtime when `os.run_socket` hands them
+out, in a table in `runtime/utils/aether_spawn.h`
+(`aether_ipc_mark_parent_end`), and forgotten when `io.fd_close` closes the
+number, so a socket that later reuses it is not taken for one. Close a
+channel with `io.fd_close` (`write_close` does). `IPC_MAX_FDS` stays what
+bounds how many descriptors one message is looked at for.
+
 ## What the receiver can rely on
 
-1. **Exactly one descriptor per message.** A message whose control data
+1. **At most one descriptor per message.** A message whose control data
    was truncated, that carries more than one descriptor, or a control
    message other than `SCM_RIGHTS` is an error, and every descriptor that
    did arrive is closed first, so a hostile peer cannot fill the
@@ -125,9 +224,11 @@ main() {
 ## Platforms
 
 - **Linux, FreeBSD, macOS:** both kinds of channel and descriptor passing.
-- **Windows:** no parent channel (`parent_channel()` is `-1`); `write` and
-  `read` are plain descriptor I/O; `os.run_socket`, `os.socketpair`,
-  `send_fd` and `recv_fd` report that they are unsupported. Windows passes
+- **Windows:** no parent channel (`parent_channel()` is `-1`); `write`,
+  `read`, `write_frame` and `read_frame` are plain descriptor I/O;
+  `os.run_socket`, `os.socketpair`, `send_fd`, `recv_fd` and `recv` report
+  that they are unsupported, as do `wait_readable` and `read_frame_timeout`
+  with a timeout (a CRT descriptor has no `poll`). Windows passes
   handles with `DuplicateHandle`, a different shape.
 - **Builds without a filesystem** (WASM, embedded): every function
   exists and reports that it is unavailable.
@@ -138,4 +239,6 @@ does: passing descriptors hands out authority.
 ## Exports
 
 `parent_channel`, `parent_channel_kind`, `write`, `write_close`, `read`,
-`send_fd`, `recv_fd`.
+`send_fd`, `recv_fd`, `recv`, `write_frame`, `read_frame`,
+`read_frame_timeout`, `wait_readable`, and the constants
+`TIMED_OUT_BETWEEN_FRAMES` and `TIMED_OUT_INSIDE_FRAME`.

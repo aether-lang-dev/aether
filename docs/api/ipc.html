@@ -21,6 +21,10 @@
     <li><a href="#read_raw">read_raw</a></li>
     <li><a href="#send_fd_raw">send_fd_raw</a></li>
     <li><a href="#recv_fd_raw">recv_fd_raw</a></li>
+    <li><a href="#recv_raw">recv_raw</a></li>
+    <li><a href="#write_frame_raw">write_frame_raw</a></li>
+    <li><a href="#read_frame_raw">read_frame_raw</a></li>
+    <li><a href="#wait_readable_raw">wait_readable_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
     <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
     <li><a href="#write">write</a></li>
@@ -28,6 +32,13 @@
     <li><a href="#read">read</a></li>
     <li><a href="#send_fd">send_fd</a></li>
     <li><a href="#recv_fd">recv_fd</a></li>
+    <li><a href="#recv">recv</a></li>
+    <li><a href="#write_frame">write_frame</a></li>
+    <li><a href="#read_frame">read_frame</a></li>
+    <li><a href="#read_frame_timeout">read_frame_timeout</a></li>
+    <li><a href="#wait_readable">wait_readable</a></li>
+    <li><a href="#TIMED_OUT_BETWEEN_FRAMES">TIMED_OUT_BETWEEN_FRAMES</a></li>
+    <li><a href="#TIMED_OUT_INSIDE_FRAME">TIMED_OUT_INSIDE_FRAME</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -160,6 +171,26 @@
       <pre class="usage"><code>recv_fd_raw(ch, max) <span class="arrow">-&gt;</span> (int, string, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
     </div>
+    <div class="function" id="recv_raw" data-name="recv_raw">
+      <h3 class="function-name">recv_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>recv_raw(ch, max) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+    </div>
+    <div class="function" id="write_frame_raw" data-name="write_frame_raw">
+      <h3 class="function-name">write_frame_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>write_frame_raw(ch, data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, data: string</span></p>
+    </div>
+    <div class="function" id="read_frame_raw" data-name="read_frame_raw">
+      <h3 class="function-name">read_frame_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>read_frame_raw(ch, max, timeout_ms) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="wait_readable_raw" data-name="wait_readable_raw">
+      <h3 class="function-name">wait_readable_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_readable_raw(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
+    </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
@@ -199,6 +230,46 @@
       <pre class="usage"><code>recv_fd(ch, max) <span class="arrow">-&gt;</span> (int, string, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
       <p class="doc">Receive one descriptor from socket `ch`, with the bytes that came with it (up to `max`): (fd, payload, &quot;&quot;), or (-1, &quot;&quot;, err). The descriptor is close-on-exec. A message carrying no descriptor, more than one, or control data of another kind is an error, and every descriptor that did arrive is closed first.</p>
+    </div>
+    <div class="function" id="recv" data-name="recv">
+      <h3 class="function-name">recv <span class="kind">fn</span></h3>
+      <pre class="usage"><code>recv(ch, max) <span class="arrow">-&gt;</span> (string, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+      <p class="doc">One receive from socket `ch`: (data, fd, &quot;&quot;), up to `max` bytes and the descriptor that came with them, or -1 when the message carried none. One recvmsg returns both, so a peer need not announce a descriptor before sending it. (&quot;&quot;, -1, &quot;&quot;) is end of stream; (&quot;&quot;, -1, err) a failure. At most one descriptor (close-on-exec). More than one, control data of another kind, or control data cut short is an error, and every descriptor that arrived is closed first, with the bytes that came with it. The parent end of a channel os.run_socket made takes no descriptor at all: one arriving from the child is closed and an error returned, with no opt-in by the host (a sandboxed child has no business handing its parent descriptors). The child end and os.socketpair's ends accept. The parent end is the descriptor os.run_socket returned, until it is closed with io.fd_close; recv_fd refuses on it too. read, which receives no control data, lets the kernel drop a descriptor riding on the bytes.</p>
+    </div>
+    <div class="function" id="write_frame" data-name="write_frame">
+      <h3 class="function-name">write_frame <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_frame(ch, data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, data: string</span></p>
+      <p class="doc">Write `data` as one frame: a 4-byte big-endian unsigned length, then the bytes. Any bytes, 0x00 and 0x0a included: the length is the string's, not a terminator's. &quot;&quot; or an error; a payload of 4 GiB or more is one. An empty payload is a frame of length 0.</p>
+    </div>
+    <div class="function" id="read_frame" data-name="read_frame">
+      <h3 class="function-name">read_frame <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_frame(ch, max) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int</span></p>
+      <p class="doc">Read one frame: (data, &quot;&quot;) whole, blocking until all of it has arrived. `max` is a hard cap on the payload: a header announcing more is an error, and nothing is allocated or read past the header. A frame split at any offset across writes reads the same. Exactly the frame is consumed, never a byte of the next. A frame of length 0 is (&quot;&quot;, &quot;&quot;). End of stream before the first header byte is the error &quot;end of stream&quot;, so (&quot;&quot;, &quot;&quot;) is never an end; end inside a frame is an error too. Receives no descriptors (see recv).</p>
+    </div>
+    <div class="function" id="read_frame_timeout" data-name="read_frame_timeout">
+      <h3 class="function-name">read_frame_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>read_frame_timeout(ch, max, timeout_ms) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, max: int, timeout_ms: int</span></p>
+      <p class="doc">read_frame with a deadline: `timeout_ms` bounds the whole frame, header and payload together, so a peer that sends a header and stalls, or drips bytes, cannot hold the reader past it. A negative timeout waits forever, as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES when no byte of a frame had arrived (the stream is intact; carry on using it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other error leaves the stream unusable too. Not available on Windows (an error there, unless the timeout is negative).</p>
+    </div>
+    <div class="function" id="wait_readable" data-name="wait_readable">
+      <h3 class="function-name">wait_readable <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait_readable(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
+      <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read or recv. Frames need no wait first: read_frame_timeout tells a timeout between frames from one inside a frame. An error on Windows.</p>
+    </div>
+    <div class="function" id="TIMED_OUT_BETWEEN_FRAMES" data-name="TIMED_OUT_BETWEEN_FRAMES">
+      <h3 class="function-name">TIMED_OUT_BETWEEN_FRAMES <span class="kind">const</span></h3>
+      <pre class="usage"><code>TIMED_OUT_BETWEEN_FRAMES = &quot;ipc.read_frame: timed out before a frame began&quot;</code></pre>
+      <p class="doc">read_frame_timeout's error when the deadline passed before the first byte of a frame arrived. Nothing was consumed: the stream is between frames and fit to use, to send the peer a CANCEL, say, and read its answer.</p>
+    </div>
+    <div class="function" id="TIMED_OUT_INSIDE_FRAME" data-name="TIMED_OUT_INSIDE_FRAME">
+      <h3 class="function-name">TIMED_OUT_INSIDE_FRAME <span class="kind">const</span></h3>
+      <pre class="usage"><code>TIMED_OUT_INSIDE_FRAME = &quot;ipc.read_frame: timed out inside a frame; the stream is out of step&quot;</code></pre>
+      <p class="doc">read_frame_timeout's error when the deadline passed part-way through a frame's header or payload. The bytes already read are gone with the call, so the stream is out of step: close the channel.</p>
     </div>
   </div>
 </main>

@@ -5,7 +5,8 @@
  *   2. ten descriptors in one message (more than the eight recv_fd once
  *      made room for: macOS then installed all ten but showed eight, and
  *      the two it hid stayed open in the probe)
- *   3. one descriptor, as the rules allow, to show the channel still works
+ *   3. one descriptor: fine from the child end of a channel, but the probe
+ *      is the parent end, which takes none
  * Each descriptor is a fresh open of /dev/null, so every one the probe is
  * handed is a new entry in its descriptor table. Exits 0 when the probe
  * closes the channel. Built by test_std_ipc_socket.sh with $CC: the public

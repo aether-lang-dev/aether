@@ -29,9 +29,12 @@ main() {
     werr = ipc.write(ch, "hello parent")
     if werr != "" { fail("write reply: ${werr}") }
 
-    fd, payload, ferr = ipc.recv_fd(ch, 1024)
-    if ferr != "" { fail("recv_fd: ${ferr}") }
-    if payload != "read_file_req" { fail("recv_fd payload was '${payload}'") }
+    // The child end takes a descriptor, and in the one receive with its
+    // bytes: the parent announced nothing first.
+    payload, fd, ferr = ipc.recv(ch, 1024)
+    if ferr != "" { fail("recv: ${ferr}") }
+    if payload != "read_file_req" { fail("recv payload was '${payload}'") }
+    if fd < 0 { fail("recv gave no descriptor") }
     buf = bytes.new(256)
     n, read_err = io.fd_read_into(fd, bytes.capacity_view(buf)[0..256])
     if read_err != "" { fail("read through the descriptor: ${read_err}") }
@@ -40,6 +43,12 @@ main() {
     io.fd_close(fd)
     werr2 = ipc.write(ch, "content: ${content}")
     if werr2 != "" { fail("write content: ${werr2}") }
+
+    // A frame the parent writes a byte at a time comes back whole.
+    frame, frerr = ipc.read_frame_timeout(ch, 64, 10000)
+    if frerr != "" { fail("read_frame: ${frerr}") }
+    ferr2 = ipc.write_frame(ch, frame)
+    if ferr2 != "" { fail("write_frame: ${ferr2}") }
 
     // Take all of BIG before answering: the parent's write of it can
     // only finish while this side reads.

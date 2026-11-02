@@ -337,14 +337,20 @@ C
 
     # The filter's literals are each ABI's real numbers, from the kernel
     # headers zig ships for that architecture.
-    SRC="$ROOT/runtime/sandbox/spawn_sandboxed_linux.c"
-    nums_of() { sed -n "s/.*$1\[\] *= *{ *\([0-9, ]*\)}.*/\1/p" "$SRC" | tr -d ' '; }
-    hdr_of() {   # <target> <names...>: the numbers of those syscalls, comma-joined
+    SRC="$ROOT/runtime/sandbox/aether_sandbox_kernel_linux.c"
+    # The tables: <name>_nr[SC_COUNT] = { ... } in the order of the
+    # "SBX_NAMES:" comment, -1 for a call the ABI does not have; x32's own
+    # numbers in x32_nr, in the order of "SBX_X32_NAMES:".
+    nums_of() { sed -n "s/.*[^a-z0-9_]$1\[[A-Z_0-9]*\] *= *{ *\([-0-9, ]*\)}.*/\1/p" "$SRC" | tr -d ' '; }
+    names_of() { sed -n "s|^// $1: ||p" "$SRC"; }
+    hdr_of() {   # <target> <names...>: the numbers of those syscalls (-1 if none), comma-joined
         t="$1"; shift
         defs=$(echo '#include <sys/syscall.h>' | zig cc -target "$t" -E -dM -x c - 2>/dev/null)
         out=""
         for nm in "$@"; do
-            v=$(printf '%s\n' "$defs" | sed -n "s/^#define SYS_$nm \([0-9]*\)$/\1/p")
+            v=$(printf '%s\n' "$defs" | sed -n -e "s/^#define SYS_$nm \([0-9]*\)$/\1/p" \
+                -e "s/^#define SYS_$nm (0x40000000 + \([0-9]*\))$/\1/p")
+            [ -n "$v" ] || v=-1
             out="$out${out:+,}$v"
         done
         echo "$out"
@@ -353,18 +359,25 @@ C
         label="$1"; arr="$2"; t="$3"; shift 3
         want=$(hdr_of "$t" "$@"); got=$(nums_of "$arr")
         if [ -n "$want" ] && [ "$want" = "$got" ]; then
-            echo "  [PASS] $label syscall numbers match $t's headers ($got)"
+            echo "  [PASS] $label syscall numbers match $t's headers"
         else
             echo "  [FAIL] $label: the filter has '$got', $t's headers say '$want'"
             exit 1
         fi
     }
-    check_nums "x86_64"            x86_64_nums   x86_64-linux-musl      clone fork vfork clone3
-    check_nums "i386"              legacy32_nums x86-linux-musl         clone fork vfork clone3
-    check_nums "32-bit ARM"        legacy32_nums arm-linux-musleabihf   clone fork vfork clone3
-    check_nums "aarch64"           generic_nums  aarch64-linux-musl     clone clone3
-    check_nums "riscv64"           generic_nums  riscv64-linux-musl     clone clone3
-    check_nums "loongarch64"       generic_nums  loongarch64-linux-musl clone clone3
+    NAMES=$(names_of SBX_NAMES)
+    X32NAMES=$(names_of SBX_X32_NAMES)
+    [ -n "$NAMES" ] && [ -n "$X32NAMES" ] || { echo "  [FAIL] no SBX_NAMES in $SRC"; exit 1; }
+    # shellcheck disable=SC2086
+    {
+    check_nums "x86_64"      x86_64_nr  x86_64-linux-musl      $NAMES
+    check_nums "x32"         x32_nr     x86_64-linux-muslx32   $X32NAMES
+    check_nums "i386"        i386_nr    x86-linux-musl         $NAMES
+    check_nums "32-bit ARM"  arm_nr     arm-linux-musleabihf   $NAMES
+    check_nums "aarch64"     generic_nr aarch64-linux-musl     $NAMES
+    check_nums "riscv64"     generic_nr riscv64-linux-musl     $NAMES
+    check_nums "loongarch64" generic_nr loongarch64-linux-musl $NAMES
+    }
 
     # The fence compiles for every architecture it claims.
     for t in aarch64-linux-musl riscv64-linux-musl loongarch64-linux-musl; do

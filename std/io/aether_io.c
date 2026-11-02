@@ -1,6 +1,7 @@
 #include "aether_io.h"
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_spawn.h"
 
 #if !AETHER_HAS_FILESYSTEM
 // Console I/O always works; file ops return errors
@@ -367,6 +368,7 @@ const char* io_fd_close_raw(int fd) {
      * not retry (the descriptor is already gone); BSD/macOS says you
      * may. Single attempt is portable and matches stdlib's general
      * stance. */
+    aether_ipc_forget_fd(fd);   /* before the number can be reused */
     if (AE_FD_CLOSE(fd) != 0) return "close failed";
     return "";
 }

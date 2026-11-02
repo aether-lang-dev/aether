@@ -21,6 +21,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include <sys/socket.h>
+#if defined(__linux__)
+#include <sys/auxv.h>            // getauxval(AT_BASE): the loader, for dlopen
+#endif
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
@@ -155,6 +158,79 @@ static void parse_grants(const char* data, int len) {
 extern char** environ;
 static void snapshot_sandbox_env(void);
 
+#if defined(__linux__)
+// The second stage of the exec fence (runtime/sandbox/
+// aether_sandbox_kernel_linux.c, "The program's own execve"). The spawn's
+// filter has to let the child's one execve of its program through; once
+// that program is running, this constructor, before any of its code, adds
+// a filter that refuses every further execve and execveat. The spawn sets
+// AETHER_SANDBOX_NO_EXEC=1 when the grants have no exec. Filters stack, and
+// the strictest answer wins, so this one cannot be undone. If it cannot be
+// installed the process stops (126) rather than run with exec open.
+#include <stddef.h>
+#include <sys/prctl.h>
+#include <linux/audit.h>
+#include <linux/filter.h>
+#include <linux/seccomp.h>
+#ifndef AUDIT_ARCH_AARCH64
+#define AUDIT_ARCH_AARCH64     0xC00000B7u
+#endif
+#ifndef AUDIT_ARCH_ARM
+#define AUDIT_ARCH_ARM         0x40000028u
+#endif
+#ifndef AUDIT_ARCH_RISCV64
+#define AUDIT_ARCH_RISCV64     0xC00000F3u
+#endif
+#ifndef AUDIT_ARCH_LOONGARCH64
+#define AUDIT_ARCH_LOONGARCH64 0xC0000102u
+#endif
+static void install_no_exec_filter(void) {
+    /* execve, execveat: native (x86_64 59/322 and x32's 520/545 after the
+     * x32 bit; generic 221/281), compat (i386 11/358, ARM 11/387). */
+#if defined(__x86_64__) && !defined(__ILP32__)
+    const unsigned native = AUDIT_ARCH_X86_64, compat = AUDIT_ARCH_I386, mask = ~0x40000000u;
+    const unsigned n0 = 59, n1 = 322, n2 = 520, n3 = 545, c0 = 11, c1 = 358;
+#elif defined(__aarch64__)
+    const unsigned native = AUDIT_ARCH_AARCH64, compat = AUDIT_ARCH_ARM, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 11, c1 = 387;
+#elif defined(__riscv) && __riscv_xlen == 64
+    const unsigned native = AUDIT_ARCH_RISCV64, compat = 0, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 221, c1 = 281;
+#elif defined(__loongarch64) || (defined(__loongarch__) && defined(__loongarch_lp64))
+    const unsigned native = AUDIT_ARCH_LOONGARCH64, compat = 0, mask = ~0u;
+    const unsigned n0 = 221, n1 = 281, n2 = 221, n3 = 281, c0 = 221, c1 = 281;
+#else
+    fprintf(stderr, "[aether] sandbox: no exec fence for this architecture\n");
+    _exit(126);
+#endif
+#if defined(__x86_64__) || defined(__aarch64__) || defined(__riscv) || defined(__loongarch__)
+    struct sock_filter f[] = {
+        /* 0 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, arch)),
+        /* 1 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, native, 2, 0),    /* -> 4 */
+        /* 2 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, compat, 7, 0),    /* -> 10 */
+        /* 3 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* 4 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        /* 5 */ BPF_STMT(BPF_ALU | BPF_AND | BPF_K, mask),
+        /* 6 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n0, 7, 0),        /* -> 14 */
+        /* 7 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n1, 6, 0),
+        /* 8 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n2, 5, 0),
+        /* 9 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, n3, 4, 3),        /* -> 14 : 13 */
+        /* 10 */ BPF_STMT(BPF_LD | BPF_W | BPF_ABS, offsetof(struct seccomp_data, nr)),
+        /* 11 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, c0, 2, 0),       /* -> 14 */
+        /* 12 */ BPF_JUMP(BPF_JMP | BPF_JEQ | BPF_K, c1, 1, 0),       /* -> 14 : 13 */
+        /* 13 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ALLOW),
+        /* 14 */ BPF_STMT(BPF_RET | BPF_K, SECCOMP_RET_ERRNO | (EPERM & SECCOMP_RET_DATA)),
+    };
+    struct sock_fprog prog = { .len = (unsigned short)(sizeof f / sizeof f[0]), .filter = f };
+    if (prctl(PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0) != 0 ||
+        prctl(PR_SET_SECCOMP, SECCOMP_MODE_FILTER, &prog) != 0) {
+        fprintf(stderr, "[aether] sandbox: cannot install the exec fence: %s\n", strerror(errno));
+        _exit(126);
+    }
+#endif
+}
+#endif
+
 // Load grants from shared memory or file
 static void __attribute__((constructor)) sandbox_init(void) {
     // Resolve real libc functions FIRST, before we intercept getenv
@@ -169,6 +245,13 @@ static void __attribute__((constructor)) sandbox_init(void) {
 
     // Capture the sandbox controls before any user code can edit environ.
     snapshot_sandbox_env();
+
+#if defined(__linux__)
+    {
+        const char* no_exec = real_getenv("AETHER_SANDBOX_NO_EXEC");
+        if (no_exec && strcmp(no_exec, "1") == 0) install_no_exec_filter();
+    }
+#endif
 
     // Log mode: file (default), stderr, or none
     const char* log_env = real_getenv("AETHER_SANDBOX_LOG");
@@ -188,8 +271,37 @@ static void __attribute__((constructor)) sandbox_init(void) {
     int source_requested = 0;
     int source_loaded = 0;
 
-    // Try shared memory first (set by aether_spawn_sandboxed).
-    const char* shm_name = real_getenv("AETHER_SANDBOX_SHM");
+    // A descriptor first (sandbox.spawn_socket): a sealed memfd this
+    // process inherited, read from its start and left open, so an exec it
+    // is granted reads the same grants. When it is named it is the only
+    // source: a descriptor that cannot be read leaves zero grants, never the
+    // other sources' (fail closed).
+    const char* grants_fd = real_getenv("AETHER_SANDBOX_GRANTS_FD");
+    if (grants_fd) {
+        source_requested = 1;
+        char* end = NULL;
+        long gfd = strtol(grants_fd, &end, 10);
+        struct stat st;
+        if (end && *end == '\0' && gfd >= 0 && gfd < INT_MAX &&
+            fstat((int)gfd, &st) == 0 && st.st_size >= 0 &&
+            st.st_size <= MAX_GRANT_SOURCE_SIZE) {
+            char buf[MAX_GRANT_SOURCE_SIZE];
+            ssize_t got = 0;
+            while (got < st.st_size) {
+                ssize_t r = pread((int)gfd, buf + got, (size_t)(st.st_size - got), got);
+                if (r < 0 && errno == EINTR) continue;
+                if (r <= 0) break;
+                got += r;
+            }
+            if (got == st.st_size) {
+                parse_grants(buf, (int)got);
+                source_loaded = 1;
+            }
+        }
+    }
+
+    // Shared memory (set by aether_spawn_sandboxed).
+    const char* shm_name = grants_fd ? NULL : real_getenv("AETHER_SANDBOX_SHM");
     if (shm_name) {
         source_requested = 1;
         int fd = shm_open(shm_name, O_RDONLY, 0);
@@ -214,7 +326,7 @@ static void __attribute__((constructor)) sandbox_init(void) {
     }
 
     // Fall back to grant file (manual LD_PRELOAD usage)
-    if (!source_loaded) {
+    if (!source_loaded && !grants_fd) {
         const char* grant_file = real_getenv("AETHER_SANDBOX_GRANTS");
         if (grant_file) {
             source_requested = 1;
@@ -545,7 +657,8 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 
     if (!env_has_nonempty(merged_env, count, "LD_PRELOAD") ||
         (!env_has_nonempty(merged_env, count, "AETHER_SANDBOX_SHM") &&
-         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS"))) {
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS") &&
+         !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS_FD"))) {
         errno = EPERM;
         return -1;
     }
@@ -643,29 +756,111 @@ int mprotect(void* addr, size_t len, int prot) {
     return real_mprotect(addr, len, prot);
 }
 
-// dlopen — block loading of native libraries unless granted
-// This prevents Python ctypes, Ruby Fiddle, Perl DynaLoader,
-// Java Panama/JNI from loading arbitrary .so files that bypass the sandbox.
+// dlopen of libc or the dynamic loader: refused without a native grant.
+//
+// A handle on libc is the ctypes / Fiddle / DynaLoader escape: dlsym on it
+// finds the real open, connect and execve, past this library's. The check
+// used to compare the name with "libc.so.6" and "libc.so", so
+// CDLL("/usr/lib/libc.so.6") got round it. Now a name is libc's or the
+// loader's when any of these is:
+//   - the basename of the name as given ("libc.so.6", ".../libc.so.6");
+//   - the basename of where a path leads, ".." and symlinks resolved, so a
+//     symlink called libplain.so is seen for what it points at;
+//   - the object the loader opened: after a load is let through, a handle
+//     that is libc's or the loader's own (the ones this process is running
+//     on) is closed again and refused, which catches any spelling the loader
+//     resolves by its own search (a hard link, an LD_LIBRARY_PATH entry).
+// /lib and /usr/lib, multiarch directories and lib64 need nothing of their
+// own: the basename and the handle are the same through all of them.
+//
+// This is the preload layer, a guest's libc calls. On Linux the wall is
+// Landlock (sandbox.spawn_socket), which refuses the open of a file outside
+// the grants however the guest reaches the syscall; a guest that copies
+// libc somewhere it can write, or issues the syscall itself, is stopped
+// there, not here.
+
+// glibc "libc.so", "libc.so.6", "libc-2.31.so"; musl "libc.musl-x86_64.so.1";
+// FreeBSD "libc.so.7"; the loaders "ld-linux-x86-64.so.2",
+// "ld-linux-aarch64.so.1", "ld-2.31.so", "ld-musl-x86_64.so.1", "ld64.so.2"
+// (ppc64, s390x), "ld.so.1", "ld-elf.so.1" (FreeBSD).
+// Only these shapes: "libc-client.so" (UW IMAP) and the like are not libc.
+static int aether_is_libc_name(const char* base) {
+    if (!base || !*base) return 0;
+    if (strcmp(base, "libc.so") == 0 || strncmp(base, "libc.so.", 8) == 0) return 1;
+    if (strncmp(base, "libc.musl-", 10) == 0) return 1;
+    if (strncmp(base, "libc-", 5) == 0 && base[5] >= '0' && base[5] <= '9') return 1;
+    if (strncmp(base, "ld-linux", 8) == 0 || strncmp(base, "ld-musl-", 8) == 0 ||
+        strncmp(base, "ld-elf", 6) == 0) {
+        return 1;
+    }
+    if (strncmp(base, "ld-", 3) == 0 && base[3] >= '0' && base[3] <= '9') return 1;
+    if (strncmp(base, "ld64.so", 7) == 0 || strncmp(base, "ld.so", 5) == 0) return 1;
+    return 0;
+}
+
+static const char* aether_basename(const char* p) {
+    const char* slash = strrchr(p, '/');
+    return slash ? slash + 1 : p;
+}
+
+static int aether_names_libc(const char* filename) {
+    if (aether_is_libc_name(aether_basename(filename))) return 1;
+    if (strchr(filename, '/')) {
+        char resolved[PATH_MAX];
+        if (aether_sandbox_canon_path(filename, resolved, sizeof(resolved)) &&
+            aether_is_libc_name(aether_basename(resolved))) {
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// The handles of the libc and loader this process runs on, found once by
+// asking the loader which object holds a libc function (and, on Linux, the
+// loader's base address), opened with RTLD_NOLOAD so nothing new is mapped.
+// Each stays open: it pins nothing that is not loaded for good anyway.
+static void* aether_libc_handle = NULL;
+static void* aether_loader_handle = NULL;
+static int aether_core_handles_found = 0;
+
+static void aether_find_core_handles(void) {
+    if (aether_core_handles_found) return;
+    Dl_info info;
+    if (dladdr((void*)strlen, &info) && info.dli_fname && info.dli_fname[0]) {
+        aether_libc_handle = real_dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    }
+#if defined(__linux__)
+    unsigned long base = getauxval(AT_BASE);
+    if (base && dladdr((void*)base, &info) && info.dli_fname && info.dli_fname[0]) {
+        aether_loader_handle = real_dlopen(info.dli_fname, RTLD_LAZY | RTLD_NOLOAD);
+    }
+#endif
+    aether_core_handles_found = 1;
+}
+
 void* dlopen(const char* filename, int flags) {
     if (!real_dlopen) real_dlopen = dlsym(RTLD_NEXT, "dlopen");
-    if (filename && sandbox_active) {
-        // Allow NULL (self), system libraries, and runtime paths
-        // Block explicit loading of libc (ctypes/Fiddle escape vector)
-        int is_escape_target = 0;
-        if (strcmp(filename, "libc.so.6") == 0 || strcmp(filename, "libc.so") == 0) {
-            is_escape_target = 1;
-        }
-        if (is_escape_target && !check_grant("native", filename)) {
-            log_deny("native", filename);
+    // NULL (the program itself) is not a load. Everything other than libc
+    // and the loader (Python's .so modules, Ruby's extensions) loads: the
+    // sandbox holds at the libc calls those make, which come through here.
+    if (!filename || !sandbox_active) return real_dlopen(filename, flags);
+    if (aether_names_libc(filename)) {
+        if (!check_grant("native", filename)) {
             errno = EACCES;
             return NULL;
         }
-        // Everything else (Python .so modules, Ruby .so extensions, etc.)
-        // is allowed — the sandbox enforces at the libc call level, not
-        // at the module loading level. The loaded module's calls still
-        // go through our intercepted open/connect/getenv.
+        return real_dlopen(filename, flags);
     }
-    return real_dlopen(filename, flags);
+    void* h = real_dlopen(filename, flags);
+    if (!h) return NULL;
+    aether_find_core_handles();
+    if ((h == aether_libc_handle || h == aether_loader_handle) &&
+        !check_grant("native", filename)) {
+        dlclose(h);
+        errno = EACCES;
+        return NULL;
+    }
+    return h;
 }
 
 // syscall — block direct syscall() which bypasses all libc interception

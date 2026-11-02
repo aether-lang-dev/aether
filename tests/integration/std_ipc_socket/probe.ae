@@ -2,8 +2,9 @@
 // os.run_socket and runs a conversation over the channel: a request and
 // its reply, a file passed by descriptor and read by the child, 1 MB
 // each way. Then spawns hostile_peer (its path in AETHER_IPC_HOSTILE_PEER,
-// built by the shell script) and checks recv_fd refuses what it sends
-// without the refused descriptors staying open in this process.
+// built by the shell script) and checks this parent end refuses every
+// descriptor it sends, by recv and recv_fd, without the refused ones
+// staying open in this process.
 
 import std.ipc
 import std.os
@@ -29,6 +30,14 @@ build_child(bin: string) -> string {
     if err != "" { return "spawn error: ${err}" }
     if code != 0 { return "ae build exit ${code}: ${out}" }
     return ""
+}
+
+// Hold for `ms` by waiting on a socket nobody writes to.
+pause(ms: int) {
+    a, b, _ = os.socketpair()
+    ipc.wait_readable(a, ms)
+    io.fd_close(a)
+    io.fd_close(b)
 }
 
 // Entries in this process's descriptor table, or -1 where it cannot be
@@ -88,6 +97,22 @@ main() {
             spec.assert_str_eq(report, "content: secret data 42\n",
                 "the child read the file through the passed descriptor")
 
+            // A binary frame, its header and payload dribbled a byte at a
+            // time with pauses so the child's read_frame really gets it in
+            // pieces, and the child's echo of it.
+            bin = "a\0b\nc\xffd"
+            wire = string.concat(string.concat(string.from_char(0), string.from_char(0)),
+                string.concat(string.concat(string.from_char(0), string.from_char(7)), bin))
+            i = 0
+            while i < string.length(wire) {
+                spec.assert_ok(ipc.write(ch, string.substring(wire, i, i + 1)), "dribble a byte")
+                pause(10)
+                i = i + 1
+            }
+            echoed, eferr = ipc.read_frame_timeout(ch, 64, 10000)
+            spec.assert_ok(eferr, "read the echoed frame")
+            spec.assert_true(string.equals(echoed, bin) == 1, "the binary frame came back whole")
+
             big = big_payload()
             spec.assert_ok(ipc.write(ch, big), "write 1 MB")
             sb = strbuilder.new(BIG)
@@ -118,24 +143,26 @@ main() {
             spec.assert_ok(err, "spawn the hostile peer")
             base = open_fds()
 
+            // The parent end of an os.run_socket channel takes no descriptor
+            // from its child, however many, and by whichever call.
             ipc.write(ch, "next")
-            fd2, _p2, err2 = ipc.recv_fd(ch, 64)
+            two_data, fd2, err2 = ipc.recv(ch, 64)
             spec.assert_eq(fd2, -1, "two descriptors: none handed over")
-            spec.assert_err_contains(err2, "more than one descriptor", "two descriptors: refused")
+            spec.assert_err_contains(err2, "from the child", "two descriptors: refused")
+            spec.assert_eq(string.length(two_data), 0, "two descriptors: and the bytes dropped")
             spec.assert_eq(open_fds(), base, "two descriptors: both closed")
 
             ipc.write(ch, "next")
             fd10, _p10, err10 = ipc.recv_fd(ch, 64)
             spec.assert_eq(fd10, -1, "ten descriptors: none handed over")
-            spec.assert_err_contains(err10, "more than one descriptor", "ten descriptors: refused")
+            spec.assert_err_contains(err10, "from the child", "ten descriptors: refused by recv_fd too")
             spec.assert_eq(open_fds(), base, "ten descriptors: all closed")
 
             ipc.write(ch, "next")
-            fd1, p1, err1 = ipc.recv_fd(ch, 64)
-            spec.assert_ok(err1, "one descriptor: accepted, the channel still works")
-            spec.assert_str_eq(p1, "one", "one descriptor: its payload")
-            spec.assert_eq(open_fds(), base + 1, "one descriptor: exactly one more open")
-            io.fd_close(fd1)
+            _d1, fd1, err1 = ipc.recv(ch, 64)
+            spec.assert_eq(fd1, -1, "one descriptor: none handed over")
+            spec.assert_err_contains(err1, "from the child", "one descriptor: refused as well")
+            spec.assert_eq(open_fds(), base, "one descriptor: closed, not leaked")
 
             ipc.write(ch, "next")
             io.fd_close(ch)

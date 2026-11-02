@@ -169,3 +169,50 @@ int aether_socketpair_cloexec(int fds[2]) {
 #endif
 
 #endif
+
+/* The parent-end table (aether_spawn.h). A slot holds fd+1, 0 when free. */
+#if !defined(_WIN32) && !defined(__wasi__)
+#include <errno.h>
+#define AETHER_IPC_PARENT_ENDS 1024
+static int aether_ipc_parent_ends[AETHER_IPC_PARENT_ENDS];
+
+int aether_ipc_mark_parent_end(int fd) {
+    if (fd < 0) return -1;
+    int want = fd + 1;
+    for (int i = 0; i < AETHER_IPC_PARENT_ENDS; i++) {
+        if (__atomic_load_n(&aether_ipc_parent_ends[i], __ATOMIC_ACQUIRE) == want) return 0;
+    }
+    for (int i = 0; i < AETHER_IPC_PARENT_ENDS; i++) {
+        int expect = 0;
+        if (__atomic_compare_exchange_n(&aether_ipc_parent_ends[i], &expect, want, 0,
+                                        __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE)) {
+            return 0;
+        }
+    }
+    errno = ENOSPC;
+    return -1;
+}
+
+void aether_ipc_forget_fd(int fd) {
+    if (fd < 0) return;
+    int want = fd + 1;
+    for (int i = 0; i < AETHER_IPC_PARENT_ENDS; i++) {
+        int expect = want;
+        __atomic_compare_exchange_n(&aether_ipc_parent_ends[i], &expect, 0, 0,
+                                    __ATOMIC_ACQ_REL, __ATOMIC_ACQUIRE);
+    }
+}
+
+int aether_ipc_is_parent_end(int fd) {
+    if (fd < 0) return 0;
+    int want = fd + 1;
+    for (int i = 0; i < AETHER_IPC_PARENT_ENDS; i++) {
+        if (__atomic_load_n(&aether_ipc_parent_ends[i], __ATOMIC_ACQUIRE) == want) return 1;
+    }
+    return 0;
+}
+#else
+int aether_ipc_mark_parent_end(int fd) { (void)fd; return 0; }
+void aether_ipc_forget_fd(int fd) { (void)fd; }
+int aether_ipc_is_parent_end(int fd) { (void)fd; return 0; }
+#endif
