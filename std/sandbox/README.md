@@ -128,7 +128,9 @@ The same grant list goes to:
   a socket to the child (its fd 3, as `os.run_socket` gives it), returning
   `(fd, pid, err)`. It fails closed: where the child cannot be contained
   it returns an error and starts nothing. `sandbox.spawn_socket_uncontained`
-  is the explicit way to run one with no sandbox;
+  is the explicit way to run one with no sandbox. A foreign interpreter's
+  start-up reads come from `grant_runtime("python3")`, which asks the
+  interpreter for them;
 - the `contrib/host/<lang>` modules, which run embedded Lua, Python, Ruby and
   others under it: `python.run_sandboxed(worker, code)`.
 

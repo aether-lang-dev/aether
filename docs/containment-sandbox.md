@@ -77,6 +77,8 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_native(path)` | `native` | library being `dlopen`ed |
 | `grant_fork()` | `fork` | a new process in a child `spawn_sandboxed` starts (threads need no grant) |
 | `grant_all()` | `*` | everything |
+| `grant_runtime(name)` | `fs_read` | what interpreter `name` needs to start, asked of it (below) |
+| `grant_without_landlock()` | (none) | lets `sandbox.spawn_socket` run on a kernel without Landlock |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
 child process and what the `contrib/host/<lang>` modules take as their
@@ -590,6 +592,39 @@ The grants reach the child's preload on a sealed memfd it inherits
 `spawn_socket` does not wait. The memfd has no name to remove, its seals
 stop the child changing it, and a program the child is granted to exec
 reads the same grants from it.
+
+### Starting a foreign interpreter: `grant_runtime`
+
+Under the kernel layer a child reads nothing it is not granted, and an
+interpreter has to read its own library before it runs a line. Two kinds of
+guest, two answers (aether#3503):
+
+- **An Aether worker** locks itself down after it starts: it calls
+  `sandbox.enforce` before its first step, so it needs no start-up grants
+  and no platform paths (the `cap_enter` shape).
+- **A foreign interpreter** cannot, so the host grants what it needs to
+  start with a preset:
+
+```aether,fragment
+guest = sandbox.new("python-guest") {
+    grant_runtime("python3")           // its stdlib, lib-dynload, site-packages, libpython
+    grant_fs_read("python/guest.py")   // the script is the host's to grant
+}
+ch, pid, err = sandbox.spawn_socket(guest, "python3", argv, null)
+```
+
+`grant_runtime` asks the interpreter, in the unsandboxed host, when the grant
+list is built: `python3 -I -c ...` prints the directories on its `sys.path`
+(`-I` leaves out `PYTHONPATH`, the user's site-packages and the current
+directory) and libpython's file, and each becomes a read grant (`dir/*`, a
+file, or `libpython3.X.so*`). The interpreter knows where this machine's
+install keeps them, a distribution's `/usr/lib/python3.X`, a Homebrew or
+pyenv prefix, `/usr/local`; a table of paths would guess, per platform, and
+go stale. The table in `std/sandbox/module.ae` says only which interpreters
+can be asked and how (`python3`, `python` today). A name it does not know,
+or an interpreter that cannot be asked, panics with the reason, rather than
+leave a list that fails later inside the child. It grants no exec (the
+interpreter is the program the spawn runs) and not the guest's script.
 
 ### Where `spawn_sandboxed` finds the preload library
 

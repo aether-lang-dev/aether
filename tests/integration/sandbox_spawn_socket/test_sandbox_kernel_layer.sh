@@ -145,6 +145,38 @@ run "$TMP/sc_uring.out" "$G" "$TMP/probe" raw_iouring
 expect "io_uring_setup" "$TMP/sc_uring.out" "raw io_uring_setup: refused (Function not implemented)"
 echo "  [PASS] sandbox_kernel_layer: ptrace, a new namespace and io_uring are refused"
 
+# ---- A foreign interpreter: python3 with grant_runtime ----
+if command -v python3 > /dev/null 2>&1; then
+    GUEST="$TMP/guest.py"
+    cp "$SCRIPT_DIR/guest.py" "$GUEST"
+    PY="runtime=python3,fs_read=$GUEST"
+    # Without the preset the interpreter cannot read its own library.
+    run "$TMP/py_bare.out" "fs_read=$GUEST" python3 "$GUEST"
+    if grep -q "^started python" "$TMP/py_bare.out"; then
+        fail "python3 started without grant_runtime, so the test proves nothing about it" "$TMP/py_bare.out"
+    fi
+    run "$TMP/py.out" "$PY" python3 "$GUEST"
+    expect "python3 with grant_runtime" "$TMP/py.out" "started python"
+    expect "the guest's open" "$TMP/py.out" "open: refused"
+    if [ "$LANDLOCK" = 1 ]; then
+        expect "the guest's raw openat by ctypes" "$TMP/py.out" "raw: refused (Permission denied)"
+    fi
+    expect "the guest's connect" "$TMP/py.out" "connect: refused (Operation not permitted)"
+    expect "the guest's exit" "$TMP/py.out" "exit=0"
+    echo "  [PASS] sandbox_kernel_layer: python3 starts with grant_runtime alone, and its probes are refused"
+    # With a tcp grant the socket is allowed (the peer refuses: port 9).
+    run "$TMP/py_tcp.out" "$PY,tcp=127.0.0.1:9" python3 "$GUEST"
+    expect "the guest's connect with a tcp grant" "$TMP/py_tcp.out" "connect: ALLOWED"
+    echo "  [PASS] sandbox_kernel_layer: and its connect goes through with a tcp grant"
+    # The preload alone does not stop ctypes reaching libc's syscall(): the
+    # row the kernel layer is for.
+    "$TMP/nolandlock" "$TMP/host" "$PY,nolandlock" python3 "$GUEST" > "$TMP/py_nll.out" 2>&1 || fail "host exited non-zero" "$TMP/py_nll.out"
+    expect "the preload alone" "$TMP/py_nll.out" "raw: ALLOWED"
+    echo "  [PASS] sandbox_kernel_layer: without Landlock the ctypes openat gets through (what Landlock is for)"
+else
+    echo "  [SKIP] sandbox_kernel_layer: no python3 for the foreign-interpreter cases"
+fi
+
 # ---- A kernel with no Landlock ----
 "$TMP/nolandlock" "$TMP/host" "$G" "$TMP/probe" raw_openat /etc/passwd > "$TMP/nll.out" 2>&1 || fail "host exited non-zero" "$TMP/nll.out"
 expect "spawn_socket with no Landlock" "$TMP/nll.out" "this kernel has no Landlock"

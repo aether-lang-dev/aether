@@ -52,6 +52,8 @@ extern strdup(s: string) -> ptr
 // on macOS and a grant named through a symlink covers where it leads.
 extern aether_sandbox_grant_pattern(category: string, pattern: string) -> ptr
 @extern("free") libc_free(p: ptr)
+// grant_runtime asks an interpreter for its paths (os.run_capture's C half).
+extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @heap, int, string)
 // For freezing a grant list: an element's characters (a plain C string or an
 // Aether string), and a malloc'd copy of them.
 extern aether_string_raw_ptr(s: ptr) -> ptr
@@ -66,7 +68,7 @@ exports(
     Grants, new, enforce, free, spawn_socket, spawn_socket_uncontained,
     grant_all, grant_fs_read, grant_fs_write, grant_fs, grant_exec,
     grant_env, grant_tcp, grant_tcp_listen, grant_udp, grant_native, grant_fork,
-    grant_without_landlock
+    grant_without_landlock, grant_runtime
 )
 
 // A grant list. Opaque: made by new(), filled by the grant_* calls in its
@@ -281,3 +283,76 @@ grant_fork(_ctx: Grants) { add_grant(_ctx, "fork", "*") }
 // do not allow. It is a grant so the choice sits in the host's grant list,
 // where a review reads it; it grants the child nothing.
 grant_without_landlock(_ctx: Grants) { add_grant(_ctx, "landlock", "optional") }
+
+// ---- grant_runtime: what a foreign interpreter needs to start ----
+//
+// A foreign interpreter in a sandboxed child (python3 under spawn_socket)
+// has to read its own library before it runs a line, and under the kernel
+// layer it reads nothing it is not granted. grant_runtime("python3") grants
+// that library, and nothing else, without a platform path in the host.
+//
+// How: it asks the interpreter, here in the unsandboxed host, when the
+// grant list is built: `python3 -I -c ...` prints the directories on its
+// sys.path (the standard library, its zip, lib-dynload, the system
+// site-packages; -I leaves out PYTHONPATH, the user's site-packages and the
+// current directory) and libpython's file. Each becomes a read grant:
+// fs_read "dir/*" for a directory, the file itself for a file, and a name
+// prefix for libpython (libpython3.14.so*). The interpreter knows where this
+// machine's install keeps them (a distribution's /usr/lib/python3.X, a
+// Homebrew or pyenv prefix, /usr/local), which a table of paths would only
+// guess and let go stale. The table here says only which interpreters can
+// be asked and how; for one it does not know, grant its library directories
+// with grant_fs_read.
+//
+// This is for foreign interpreters only. An Aether worker locks itself down
+// after it starts, with sandbox.enforce before its first step, and needs no
+// preset.
+//
+// It grants no exec: the interpreter is the program the spawn runs, and the
+// spawn's kernel layer lets the child execute that. The script the guest
+// runs is the host's to grant (grant_fs_read("guest.py")). A runtime that
+// cannot be asked (not installed, not on PATH) panics with the reason: a
+// grant list that silently lacked it would fail later, in the child, with
+// less to go on.
+fn runtime_query(name: string) -> string {
+    if name == "python3" || name == "python" {
+        return "import os, sys, sysconfig\nfor p in sys.path:\n    if not p or '\\n' in p: continue\n    r = os.path.realpath(p)\n    if os.path.isdir(r): print('D ' + r)\n    elif os.path.isfile(r): print('F ' + r)\nd = sysconfig.get_config_var('LIBDIR')\nl = sysconfig.get_config_var('LDLIBRARY')\nif d and l and os.path.isfile(os.path.join(d, l)):\n    print('P ' + os.path.join(os.path.realpath(d), l))\n"
+    }
+    return ""
+}
+
+// The runtime's library, readable: see above.
+grant_runtime(_ctx: Grants, name: string) {
+    query = runtime_query(name)
+    if query == "" {
+        panic("sandbox: grant_runtime knows python3 and python, not '${name}'; grant its library directories with grant_fs_read")
+    }
+    argv = list.new()
+    list.add(argv, "-I")
+    list.add(argv, "-c")
+    list.add(argv, query)
+    out, code, err = os_run_capture_status_raw(name, argv, null)
+    list.free(argv)
+    if err != "" {
+        panic("sandbox: grant_runtime(\"${name}\"): cannot ask ${name} for its paths: ${err}")
+    }
+    if code != 0 {
+        panic("sandbox: grant_runtime(\"${name}\"): ${name} exited ${code} when asked for its paths")
+    }
+    rows = string.split(out, "\n")
+    n = string.array_size(rows)
+    i = 0
+    while i < n {
+        row = string.array_get(rows, i)
+        len = string.length(row)
+        if len > 2 {
+            kind = string.substring(row, 0, 2)
+            path = string.substring(row, 2, len)
+            if kind == "D " { add_grant(_ctx, "fs_read", "${path}/*") }
+            if kind == "F " { add_grant(_ctx, "fs_read", path) }
+            if kind == "P " { add_grant(_ctx, "fs_read", "${path}*") }
+        }
+        i = i + 1
+    }
+    string.array_free(rows)
+}

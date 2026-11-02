@@ -4,7 +4,8 @@
 //
 // <grants> is "-" for none, else a comma-separated list of kind=pattern:
 // fs_read, fs_write, fs, exec, env, native, fork, tcp (host:port, or host
-// for any port), udp, listen, all, nolandlock (grant_without_landlock). It runs <program> under sandbox.spawn_socket with those grants and
+// for any port), udp, listen, all, nolandlock (grant_without_landlock), runtime
+// (grant_runtime, an interpreter's name). It runs <program> under sandbox.spawn_socket with those grants and
 // the env SPAWN_TEST=hello plus PATH, then prints:
 //
 //   spawn: ok | spawn: <err>
@@ -38,6 +39,7 @@ fn add(g: sandbox.Grants, item: string) {
     if kind == "listen" { sandbox.grant_tcp_listen(g) return }
     if kind == "all" { sandbox.grant_all(g) return }
     if kind == "nolandlock" { sandbox.grant_without_landlock(g) return }
+    if kind == "runtime" { sandbox.grant_runtime(g, pat) return }
     if kind == "tcp" || kind == "udp" {
         host = pat
         port = 0
