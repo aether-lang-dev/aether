@@ -75,7 +75,9 @@ build "$TMP/def"
 build "$TMP/quick" --quick
 build "$TMP/prof"  --profile
 
-if [ "$(has_debug "$TMP/def")" != "0" ]; then
+# Under the ASan sweep every compile carries -g, so its reports name file and
+# line (#3539); the default build's lack of debug info is checked elsewhere.
+if [ "${AETHER_SANITIZER:-}" != asan ] && [ "$(has_debug "$TMP/def")" != "0" ]; then
     echo "  [FAIL] build_profile_flag: the default build carries debug info"
     exit 1
 fi

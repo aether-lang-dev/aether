@@ -175,9 +175,12 @@ with `SAN_LEAKS=fail`: until the test programs that never free what they
 make are fixed (#3547), leaks are listed in the summary and the run passes
 on them. A fault stays the signal it is (`handle_segv=0`), so a program's
 own fault-to-panic handler and `ae run`'s crash report behave as without
-ASan, and the few tests that check what ASan replaces (FORTIFY, an
-address-space limit, Valgrind, two runtime copies in one process) read
-`AETHER_SANITIZER` and take another path. Its canaries
+ASan. Libraries that carry their own runtime copy and the sandbox's preload
+are part of the design, so the one-definition and link-order checks are off
+(`detect_odr_violation=0`, `verify_asan_link_order=0`). The few tests that
+check what ASan replaces (FORTIFY, an address-space limit, Valgrind, RSS,
+a build without debug info) read `AETHER_SANITIZER` and take another path.
+Its canaries
 are `tests/asan/overflow.ae`, which writes one byte past an 8 byte block, and
 `tests/asan/leak.ae`, which drops the only pointer to one: each must be
 stopped with its report before the corpus counts. aetherc and `ae` run

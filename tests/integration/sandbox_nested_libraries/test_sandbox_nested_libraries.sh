@@ -28,14 +28,6 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 CC="${CC:-cc}"
-# Cases 2 to 2f load libraries that each carry a copy of the runtime, and 2d
-# to 2f make the program's copy interpose on theirs: the same globals in two
-# objects on purpose. AddressSanitizer's one-definition check reports that,
-# so under ASan it is off here and only here (#3539).
-if [ "${AETHER_SANITIZER:-}" = asan ]; then
-    ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_odr_violation=0"
-    export ASAN_OPTIONS
-fi
 export AETHER_HOME="$ROOT"
 
 [ -x "$AE" ] || { echo "  [SKIP] sandbox_nested_libraries: $AE not built"; exit 0; }

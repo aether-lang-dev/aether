@@ -115,13 +115,20 @@ case "$san" in
         # program's own fault-to-panic handler and `ae run`'s crash report
         # see what they see without ASan; ASan's errors are found at the
         # access, not by catching the fault.
+        # detect_odr_violation=0: a library built with --emit=lib carries
+        # its own copy of the runtime, and a program that loads two of them
+        # (or interposes its own, #3445) has the runtime's globals twice on
+        # purpose; that is the design, not a one-definition mistake.
+        # verify_asan_link_order=0: the sandbox runs a contained child with
+        # its preload library first (LD_PRELOAD), which ASan otherwise
+        # refuses to start under.
         # detect_leaks is left to each binary's default, not set here: on
         # Linux a program reports its leaks, while aetherc and ae turn theirs
         # off (compiler/aether_toolchain_asan.h), since aetherc's leaks are
         # gated shape by shape in check_compiler_leaks.sh (#1667). Their
         # memory errors still stop them. With leaks only reported,
         # LeakSanitizer's exit code is 0, so a leak alone fails no test.
-        ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:log_exe_name=1:log_path=$reports/report"
+        ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:detect_odr_violation=0:verify_asan_link_order=0:log_exe_name=1:log_path=$reports/report"
         LSAN_OPTIONS="exitcode=$([ $leaks_fail = 1 ] && echo 23 || echo 0)"
         export ASAN_OPTIONS LSAN_OPTIONS
         ;;
