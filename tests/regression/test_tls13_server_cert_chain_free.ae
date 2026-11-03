@@ -1,0 +1,68 @@
+// Regression (#3539): the certificate chain tls13_server.parse_cert_chain_pem
+// gives has a way to be freed.
+//
+// The chain is a list of DER buffers and `lens` a second list, both the
+// caller's. The function that frees them was private to the module, so a
+// program that loaded a chain for accept could not give it back; every
+// program that did leaked the chain. LeakSanitizer found it in the TLS
+// tests. free_cert_chain(chain, lens) is public now.
+//
+// A chain is loaded and freed again, a refused text frees what it began,
+// and the leak check runs where the heap count is exact
+// (mem.heap_in_use_exact): after a warm-up, some window of loads grows the
+// heap by exactly 0.
+
+import std.mem
+import std.list
+import std.string
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+fn pem() -> string {
+    return "-----BEGIN CERTIFICATE-----\nMIIBezCCASGgAwIBAgIFUEVFUgEwCgYIKoZIzj0EAwIwFzEVMBMGA1UEAwwMcGVl\nci5leGFtcGxlMCAXDTI2MDEwMTAwMDAwMFoYDzIxMjYwMTAxMDAwMDAwWjAXMRUw\nEwYDVQQDDAxwZWVyLmV4YW1wbGUwWTATBgcqhkjOPQIBBggqhkjOPQMBBwNCAARv\n7S9eWT57ZTmAOztQD2+5EetBRQ+B+cOtLJCr7BVBQPQExOwo/jrT1ahb6i7ZxObZ\nFrq4KWW801ggO2EZ0SqXo1gwVjAMBgNVHRMBAf8EAjAAMA4GA1UdDwEB/wQEAwIH\ngDAXBgNVHREEEDAOggxwZWVyLmV4YW1wbGUwHQYDVR0OBBYEFH8HRengm5cRK0K4\na6DbxP8afdpfMAoGCCqGSM49BAMCA0gAMEUCIDCIjkFoXJK1RI1twupNRu+WcP5M\nrU1MCAQ84vwQWP4tAiEArDbfJRioR7QSSuE4iKxVCCFaHbJs/7eLq3CNJGUFXoM=\n-----END CERTIFICATE-----\n"
+}
+
+// Load a chain of two (the certificate twice) and free it; 1 when it held
+// both.
+fn load_and_free(text: string) -> int {
+    chain, lens = tls13_server.parse_cert_chain_pem(text)
+    if chain == null { return 0 }
+    n = list.list_size(chain)
+    tls13_server.free_cert_chain(chain, lens)
+    if n != 2 { return 0 }
+    return 1
+}
+
+fn loads(text: string, n: int) -> int {
+    good = 0
+    i = 0
+    while i < n {
+        good = good + load_and_free(text)
+        refused, rlens, why = tls13_server.parse_cert_chain_pem_checked("-----BEGIN CERTIFICATE-----\nnot base64\n-----END CERTIFICATE-----\n")
+        if refused == null && why != "" { good = good + 1 }
+        tls13_server.free_cert_chain(refused, rlens)
+        i = i + 1
+    }
+    return good
+}
+
+main() {
+    two = string.concat(pem(), pem())
+    check(loads(two, 1) == 2, "a chain of two loads, and a bad block is refused")
+    if mem.heap_in_use_exact() {
+        loads(two, 20)
+        grown = mem.steady_growth(|| {
+                check(loads(two, 10) == 20, "the same loads in a window")
+            }, 5)
+        check(grown == 0, "a window of 10 loads grew the heap by ${grown} bytes in every run")
+    }
+    println("PASS a loaded certificate chain can be freed")
+}
