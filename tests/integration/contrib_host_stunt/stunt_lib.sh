@@ -87,8 +87,17 @@ fi
 # exist they would only show that nothing holds them.
 PRELOAD="$ROOT/build/libaether_sandbox.so"
 INPROC_LIBC=0
-if { [ "$PLAT" = linux ] || [ "$PLAT" = freebsd ]; } && [ -f "$PRELOAD" ]; then
-    INPROC_LIBC=1
+if [ "$PLAT" = linux ] || [ "$PLAT" = freebsd ]; then
+    if [ -f "$PRELOAD" ]; then
+        INPROC_LIBC=1
+    else
+        # Without it the libc rows and the child mode drop out, and what is
+        # left can still pass: say so. On a GitHub runner the preload is
+        # built, so its absence there is a broken build: a failure.
+        [ "${GITHUB_ACTIONS:-}" = true ] && [ "$PLAT" = linux ] &&
+            die "build/libaether_sandbox.so is missing on this GitHub runner: the libc rows and the child mode would not run"
+        echo "  [SKIP] $NAME: build/libaether_sandbox.so is missing, so the libc rows and the child mode are left out"
+    fi
 fi
 
 # The contained child: Linux with Landlock (spawn_socket refuses without it).
