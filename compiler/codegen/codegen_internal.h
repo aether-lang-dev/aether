@@ -488,6 +488,19 @@ void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs
 int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
 Type* module_global_decl_type(CodeGenerator* gen, const char* name);   /* #2796 */
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
+/* #3527: the conversion an interpolation, print or println writes a value
+ * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
+ * print_fmt_refuse reports as a compile error naming it. */
+typedef enum {
+    PF_NONE = 0, PF_INT, PF_UINT, PF_LONG, PF_ULONG, PF_DURATION,
+    PF_DOUBLE, PF_LDOUBLE, PF_BOOL, PF_STRING
+} PrintFmt;
+PrintFmt print_fmt_of(const Type* t);
+void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what);
+const char* print_fmt_arg_cast(PrintFmt f);
+void emit_print_scalar(CodeGenerator* gen, ASTNode* v, int newline);
+void emit_print_format_spec(CodeGenerator* gen, ASTNode* v);
+void emit_print_format_arg(CodeGenerator* gen, ASTNode* v);
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the

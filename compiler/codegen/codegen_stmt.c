@@ -13407,26 +13407,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
 
                     Type* arg_type = first_arg->node_type;
 
-                    // Generate printf with appropriate format string based on type
-                    if (arg_type->kind == TYPE_INT) {
-                        // Narrow to (int) to match %d: a single-scalar message
-                        // field rides the intptr_t payload slot, so a TYPE_INT
-                        // value can be stored wider. Genuine ints only reach
-                        // here (ptr/actor-ref use %s), so nothing is truncated.
-                        fprintf(gen->output, "printf(\"%%d\", (int)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                        // The runtime formatter, '.' whatever the process
-                        // locale; printf follows LC_NUMERIC (#3525).
-                        fprintf(gen->output, "_aether_interp_print(\"%%f\", (double)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_LONGDOUBLE) {
-                        fprintf(gen->output, "_aether_interp_print(\"%%Lf\", (long double)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_STRING) {
+                    /* #3527: a string or a pointer by length, anything
+                     * else by its kind's conversion (emit_print_scalar), a
+                     * uint64 included, which fell through to `%d`; a kind
+                     * with none refused. */
+                    if (arg_type->kind == TYPE_STRING) {
                         /* A heap-producing CALL in bare argument position
                          * (`print(string.concat(a, b))`) is a temporary
                          * nothing else owns: print-and-free via the owned
@@ -13446,36 +13431,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             generate_expression(gen, first_arg);
                             fprintf(gen->output, ");\n");
                         }
-                    } else if (arg_type->kind == TYPE_BOOL) {
-                        fprintf(gen->output, "printf(\"%%s\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, " ? \"true\" : \"false\");\n");
-                    } else if (arg_type->kind == TYPE_INT64) {
-                        fprintf(gen->output, "printf(\"%%lld\", (long long)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_UINT32) {
-                        /* Through %d a uint32 past 2^31 prints negative;
-                         * uint32_t is unsigned int on every target, so %u
-                         * is its conversion. */
-                        fprintf(gen->output, "printf(\"%%u\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_DURATION) {
-                        /* #3526: written by the formatter (%D). */
-                        fprintf(gen->output, "_aether_interp_print(\"%%D\", (long long)(");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, "));\n");
                     } else if (arg_type->kind == TYPE_PTR) {
                         // NULL-safe, and by length (#2521)
                         fprintf(gen->output, "_aether_print_str(");
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
                     } else {
-                        // Unknown type - default to %d
-                        fprintf(gen->output, "printf(\"%%d\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
+                        emit_print_scalar(gen, first_arg, 0);
+                        fprintf(gen->output, ";\n");
                     }
                 } else if (stmt->child_count == 1) {
                     // String literal - print directly
@@ -13484,10 +13447,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         emit_print_literal_format(gen, arg);
                         fprintf(gen->output, ";\n");
                     } else {
-                        // Unknown type - default to %d
-                        fprintf(gen->output, "printf(\"%%d\", ");
-                        generate_expression(gen, arg);
-                        fprintf(gen->output, ");\n");
+                        /* #3527: no type to write it by. */
+                        print_fmt_refuse(gen, arg, "print");
+                        fprintf(gen->output, "(void)0;\n");
                     }
                 } else {
                     // Multiple arguments - first is format string
@@ -13518,25 +13480,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     fprintf(gen->output, "%%%%");
                                 } else if (arg_idx < stmt->child_count) {
                                     // Replace with type-correct specifier
-                                    ASTNode* arg = stmt->children[arg_idx];
-                                    Type* atype = arg->node_type;
-                                    if (atype && atype->kind == TYPE_LONGDOUBLE) {
-                                        fprintf(gen->output, "%%Lf");
-                                    } else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) {
-                                        fprintf(gen->output, "%%f");
-                                    } else if (atype && atype->kind == TYPE_INT64) {
-                                        fprintf(gen->output, "%%lld");
-                                    } else if (atype && atype->kind == TYPE_UINT32) {
-                                        fprintf(gen->output, "%%u");
-                                    } else if (atype && atype->kind == TYPE_DURATION) {
-                                        fprintf(gen->output, "%%D");   /* #3526 */
-                                    } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {
-                                        fprintf(gen->output, "%%s");
-                                    } else if (atype && atype->kind == TYPE_BOOL) {
-                                        fprintf(gen->output, "%%s");
-                                    } else {
-                                        fprintf(gen->output, "%%d");
-                                    }
+                                    /* #3527: the argument's own conversion. */
+                                    emit_print_format_spec(gen, stmt->children[arg_idx]);
                                     arg_idx++;
                                 } else {
                                     // More specifiers than args — keep original
@@ -13559,32 +13504,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         // Emit arguments with type-safe wrappers
                         for (int i = 1; i < stmt->child_count; i++) {
                             if (i > 1) fprintf(gen->output, ", ");
-                            ASTNode* arg = stmt->children[i];
-                            Type* atype = arg->node_type;
-                            if (atype && atype->kind == TYPE_INT64) {
-                                fprintf(gen->output, "(long long)");
-                                generate_expression(gen, arg);
-                            } else if (atype && atype->kind == TYPE_DURATION) {
-                                fprintf(gen->output, "(long long)(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
-                            } else if (atype && atype->kind == TYPE_BOOL) {
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, " ? \"true\" : \"false\"");
-                            } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {
-                                fprintf(gen->output, "_aether_safe_str(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
-                            } else if (atype && atype->kind == TYPE_INT) {
-                                // Narrow to (int) to match the %d chosen above:
-                                // a single-scalar message field rides the
-                                // intptr_t payload slot, so a TYPE_INT value can
-                                // be stored wider. Genuine ints only.
-                                fprintf(gen->output, "(int)");
-                                generate_expression(gen, arg);
-                            } else {
-                                generate_expression(gen, arg);
-                            }
+                            emit_print_format_arg(gen, stmt->children[i]);   /* #3527 */
                         }
                         fprintf(gen->output, ");\n");
                     } else {
