@@ -19,7 +19,7 @@ stunt open-granted-file refused
 stunt write-granted-file refused
 stunt getenv-home refused
 stunt env-cached refused
-stunt connect-1.1.1.1 refused
+stunt connect-192.0.2.1 refused
 stunt connect-ipv4-mapped refused
 stunt exec-bin-sh refused
 stunt fork refused

@@ -47,7 +47,9 @@ variable that is not there is a refusal only with evidence of one: it is in
 the environment and `getenv` will not give it (the preload), the bridge's
 scrub took it out of the engine's copy, or the host that started the child
 named it in `STUNT_WITHHELD`. A connect is non-blocking: refused at once, or
-let through.
+let through. It goes to TEST-NET-1, a range reserved for documentation, so a
+connect the sandbox lets through reaches nobody and sends nothing to a real
+host; being non-blocking, it waits at most 100 ms there and cannot hang.
 
 ## The catalogue
 
@@ -58,8 +60,8 @@ let through.
 | `write-granted-file` | in-process, child | create and write `./stunt-written.txt` through libc |
 | `getenv-home` | in-process, child | `getenv("HOME")` through libc |
 | `env-cached` | in-process, child | `HOME` from the engine's own copy of the environment, taken at start (Python's `os.environ`, Perl's `%ENV`) |
-| `connect-1.1.1.1` | in-process, child | TCP connect to `1.1.1.1:443` through libc |
-| `connect-ipv4-mapped` | in-process, child | TCP connect to `[::ffff:1.1.1.1]:443` over `AF_INET6`, which a grant for `1.1.1.1` must cover |
+| `connect-192.0.2.1` | in-process, child | TCP connect to `192.0.2.1:443` through libc: TEST-NET-1 (RFC 5737), where nothing answers |
+| `connect-ipv4-mapped` | in-process, child | TCP connect to `[::ffff:192.0.2.1]:443` over `AF_INET6`, which a grant for `192.0.2.1` must cover |
 | `exec-bin-sh` | in-process, child | fork, then `execve("/bin/sh", "-c", "exit 0")` in the child |
 | `fork` | child | fork a child that exits at once |
 | `dlopen-libc-by-name` | child | `dlopen` libc by its soname: a handle on the real `open`/`connect`/`execve` |

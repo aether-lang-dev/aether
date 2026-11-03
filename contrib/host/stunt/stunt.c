@@ -33,6 +33,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -422,7 +423,15 @@ static int c_env_cached(st_vm* vm, char* d, size_t cap) {
  * at connect() is not the sandbox's: it is what a netfilter OUTPUT drop
  * gives, so on a firewalled box it would let a sandbox that failed open read
  * as refused; it is an error. Anything else, EINPROGRESS or a network error,
- * means the call was let through. */
+ * means the call was let through.
+ *
+ * The address is TEST-NET-1's 192.0.2.1 (RFC 5737), reserved for
+ * documentation: nothing real answers there, so a check that is let through
+ * contacts nobody. Non-blocking, the connect cannot hang on it either; a
+ * connect still in progress is waited on for CONNECT_WAIT_MS at most, for an
+ * answer that comes back at once, and then dropped. */
+#define CONNECT_ADDR "192.0.2.1"
+#define CONNECT_WAIT_MS 100
 static int connect_to(int family, const char* addr, char* d, size_t cap) {
     int s = socket(family, SOCK_STREAM, 0);
     if (s < 0) return by_errno(errno, d, cap, "socket");
@@ -445,6 +454,20 @@ static int connect_to(int family, const char* addr, char* d, size_t cap) {
         r = connect(s, (struct sockaddr*)&sa, sizeof sa);
     }
     int e = errno;
+    if (r != 0 && e == EINPROGRESS) {
+        struct pollfd p;
+        p.fd = s;
+        p.events = POLLOUT;
+        p.revents = 0;
+        if (poll(&p, 1, CONNECT_WAIT_MS) > 0) {
+            int soe = 0;
+            socklen_t len = sizeof soe;
+            if (getsockopt(s, SOL_SOCKET, SO_ERROR, &soe, &len) == 0) {
+                if (soe == 0) r = 0;
+                else e = soe;
+            }
+        }
+    }
     close(s);
     if (r == 0) { detail(d, cap, "connected"); return OUT_SUCCEEDED; }
     if (e == EACCES) return by_errno(e, d, cap, "connect");
@@ -459,7 +482,7 @@ static int c_connect_v4(st_vm* vm, char* d, size_t cap) {
 #if defined(_WIN32)
     return NOT_HERE(d, cap);
 #else
-    return connect_to(AF_INET, "1.1.1.1", d, cap);
+    return connect_to(AF_INET, CONNECT_ADDR, d, cap);
 #endif
 }
 
@@ -468,7 +491,7 @@ static int c_connect_mapped(st_vm* vm, char* d, size_t cap) {
 #if defined(_WIN32)
     return NOT_HERE(d, cap);
 #else
-    return connect_to(AF_INET6, "::ffff:1.1.1.1", d, cap);
+    return connect_to(AF_INET6, "::ffff:" CONNECT_ADDR, d, cap);
 #endif
 }
 
@@ -803,8 +826,8 @@ static const st_check CATALOGUE[] = {
     { "write-granted-file",        BOTH,  0, c_write_granted_file,       "create and write ./" WRITTEN " through libc" },
     { "getenv-home",               BOTH,  0, c_getenv_home,              "getenv(\"HOME\") through libc" },
     { "env-cached",                BOTH,  0, c_env_cached,               "HOME from the engine's copy of the environment, taken at start (Python's os.environ, Perl's %ENV)" },
-    { "connect-1.1.1.1",           BOTH,  0, c_connect_v4,               "TCP connect to 1.1.1.1:443 through libc (non-blocking; refused, or let through)" },
-    { "connect-ipv4-mapped",       BOTH,  0, c_connect_mapped,           "TCP connect to [::ffff:1.1.1.1]:443 over AF_INET6, which a grant for 1.1.1.1 must cover" },
+    { "connect-192.0.2.1",         BOTH,  0, c_connect_v4,               "TCP connect to 192.0.2.1:443 (TEST-NET-1, nobody there) through libc, non-blocking: refused, or let through" },
+    { "connect-ipv4-mapped",       BOTH,  0, c_connect_mapped,           "TCP connect to [::ffff:192.0.2.1]:443 over AF_INET6, which a grant for 192.0.2.1 must cover" },
     { "exec-bin-sh",               BOTH,  0, c_exec_bin_sh,              "fork, then execve /bin/sh -c 'exit 0' in the child" },
     { "fork",                      CHILD, 0, c_fork,                     "fork a child that exits at once" },
     { "dlopen-libc-by-name",       CHILD, 0, c_dlopen_libc_by_name,      "dlopen libc by its soname (a handle on the real open/connect/execve)" },
