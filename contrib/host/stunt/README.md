@@ -178,9 +178,10 @@ stunt syscall-openat refused
 stunt env-cached succeed
 ```
 
-`stunt_lib.sh` builds `libstunt`, the `stunt` program, the bridge and the
-host (`host.ae`), and runs each check in every mode that applies, chosen by
-check name: in-process everywhere (the libc rows under the preload, on Linux
+`stunt_lib.sh` builds the `stunt` program for its catalogue and, at the
+first run that applies, `libstunt`, the bridge and the host (`host.ae`), so a
+script with nothing to run here builds nothing more. It runs each check in
+every mode that applies, chosen by check name: in-process everywhere (the libc rows under the preload, on Linux
 and FreeBSD); the contained child on Linux with Landlock; the uncontained
 child (`sandbox.spawn_socket_uncontained`) on macOS and FreeBSD, where the
 contained spawn refuses, for the rows that are about the host. Windows has
