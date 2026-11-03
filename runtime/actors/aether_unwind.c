@@ -156,18 +156,39 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
  * has no such step: a host's thread calling into an --emit=lib library, a
  * std.worker thread, an HTTP server's pool thread. Each left both buffers
  * behind. So the first growth of either on a thread marks it, and the mark's
- * thread-exit hook (a pthread key's destructor, an FLS callback on Windows,
- * both run in the ending thread while its thread-locals still stand) gives
- * them back. The key is made once per runtime copy, at its first use, and
+ * thread-exit hook gives them back. The hook reads the thread-locals, so it
+ * is one that runs in the ending thread while they still stand:
+ *   - Linux, the BSDs: a pthread key's destructor (the C library frees the
+ *     thread's TLS block after the destructors);
+ *   - Windows: an FLS callback, through the same key;
+ *   - Apple: a TLV terminator (_tlv_atexit, what C++ thread_local
+ *     destructors use). dyld keeps a thread's thread-locals in a block of
+ *     its own that a pthread key's destructor frees, and that key, made when
+ *     the image loaded, comes before ours, so a key's destructor read a
+ *     fresh zeroed block and the journal was lost; the terminators run
+ *     before the block goes. dyld never unloads an image with
+ *     thread-locals, so a terminator never runs into code that is gone.
+ * Elsewhere the key is made once per runtime copy, at its first use, and
  * deleted when the copy is unloaded, so no thread ends into code that is
  * gone. */
-static pthread_key_t g_unwind_exit_key;
-static _Atomic int g_unwind_exit_key_state;   /* 0 none, 1 being made, 2 made, 3 none to be had */
-
 static void unwind_thread_ends(void* mark) {
     (void)mark;
     aether_unwind_thread_cleanup();
 }
+
+#if defined(__APPLE__)
+void _tlv_atexit(void (*term)(void*), void* arg);   /* libdyld, in libSystem */
+
+static AETHER_TLS_SHARED int t_unwind_marked;
+
+static void unwind_mark_thread(void) {
+    if (t_unwind_marked) return;
+    t_unwind_marked = 1;
+    _tlv_atexit(unwind_thread_ends, NULL);
+}
+#else
+static pthread_key_t g_unwind_exit_key;
+static _Atomic int g_unwind_exit_key_state;   /* 0 none, 1 being made, 2 made, 3 none to be had */
 
 static void unwind_mark_thread(void) {
     int s = atomic_load_explicit(&g_unwind_exit_key_state, memory_order_acquire);
@@ -197,6 +218,7 @@ AETHER_DESTRUCTOR static void unwind_exit_key_delete(void) {
         pthread_key_delete(g_unwind_exit_key);
 }
 #endif
+#endif /* __APPLE__ */
 
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     if (t_frames.depth == 0 || !p || !free_fn) return;
