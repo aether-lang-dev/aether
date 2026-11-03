@@ -781,9 +781,16 @@ char* xml_builder_finish(XmlBuilder* b) {
     sb_init(&b->sb);
     if (!raw) return NULL;
     char* err = NULL;
-    char* formatted = xml_pretty(raw, strlen(raw), b->pretty_indent, &err);
-    free(raw);
+    size_t raw_len = strlen(raw);
+    char* formatted = xml_pretty(raw, raw_len, b->pretty_indent, &err);
     if (err) free(err);
+    if (!formatted) {
+        /* Not a whole document yet (an element left open, no root): give
+         * back what was written, unformatted, as the plain writer does,
+         * rather than lose it. */
+        formatted = (char*)string_new_with_length(raw, raw_len);
+    }
+    free(raw);
     return formatted;
 }
 
@@ -795,7 +802,8 @@ typedef enum {
     NODE_TOP_ITEM = 1,
     NODE_TEXT,
     NODE_CDATA,
-    NODE_ELEMENT
+    NODE_ELEMENT,
+    NODE_MISC        /* comment, PI or DOCTYPE inside an element: kept verbatim */
 } PrettyNodeKind;
 
 typedef struct PrettyNode PrettyNode;
@@ -1005,7 +1013,7 @@ char* xml_pretty(const char* data, size_t len, int indent, char** out_err) {
             PrettyNode* cur = stack[stack_depth - 1];
             PrettyNode cn;
             memset(&cn, 0, sizeof(cn));
-            cn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_TEXT;
+            cn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
             cn.span_start = pos;
             cn.span_end = end_pos;
             if (!add_child_node(cur, cn)) goto parse_oom;
@@ -1035,7 +1043,7 @@ char* xml_pretty(const char* data, size_t len, int indent, char** out_err) {
             PrettyNode* cur = stack[stack_depth - 1];
             PrettyNode pin;
             memset(&pin, 0, sizeof(pin));
-            pin.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_TEXT;
+            pin.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
             pin.span_start = pos;
             pin.span_end = end_pos;
             if (!add_child_node(cur, pin)) goto parse_oom;
@@ -1058,7 +1066,7 @@ char* xml_pretty(const char* data, size_t len, int indent, char** out_err) {
             PrettyNode* cur = stack[stack_depth - 1];
             PrettyNode dtn;
             memset(&dtn, 0, sizeof(dtn));
-            dtn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_TEXT;
+            dtn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
             dtn.span_start = pos;
             dtn.span_end = end_pos;
             if (!add_child_node(cur, dtn)) goto parse_oom;
@@ -1186,6 +1194,11 @@ char* xml_pretty_str(const char* s, int indent, char** out_err) {
     return xml_pretty(s ? s : "", s ? strlen(s) : 0, indent, out_err);
 }
 
+/* The (formatted, error) tuple xml.pretty's extern returns; generated code
+ * declares the same layout. */
+typedef struct { const char* _0; const char* _1; } _tuple_string_string;
+
+_tuple_string_string xml_pretty_tuple(const char* s, int indent);
 _tuple_string_string xml_pretty_tuple(const char* s, int indent) {
     char* err = NULL;
     char* formatted = xml_pretty_str(s, indent, &err);

@@ -122,8 +122,5 @@ char* xml_escape(const char* s);
 char* xml_pretty(const char* data, size_t len, int indent, char** out_err);
 char* xml_pretty_str(const char* s, int indent, char** out_err);
 
-/* Aether extern binding helpers: pretty printer returns (formatted, error) */
-typedef struct { const char* _0; const char* _1; } _tuple_string_string;
-_tuple_string_string xml_pretty_tuple(const char* s, int indent);
 
 #endif /* AETHER_XML_H */

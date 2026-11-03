@@ -262,14 +262,14 @@ main() {
     if deep_err != "" {
         println("  FAIL [depth 500]: ${deep_err}")
         fails = fails + 1
-    } else if string.length(deep_out) < 500000 {
+    } else if string.length(deep_out) != 253504 { // 499 open lines (d spaces + "<a>\n"), "<a>leaf</a>" at depth 499, 499 close lines
         println("  FAIL [depth 500]: output length unexpected: ${string.length(deep_out)}")
         fails = fails + 1
     }
 
     // ---- 15. Scale: ~2 MB document and linear performance check ----
-    scale_1x = make_scale_doc(8000)   // ~500 KB
-    scale_4x = make_scale_doc(32000)  // ~2 MB
+    scale_1x = make_scale_doc(8000) // ~500 KB
+    scale_4x = make_scale_doc(32000) // ~2 MB
     t0 = time.now_ms()
     _out_1x, err_1x = xml.pretty(scale_1x, 2)
     t1 = time.now_ms()
@@ -328,6 +328,19 @@ main() {
         println("  FAIL [builder writer_pretty]: output mismatch")
         println("    pretty_built:      [${pretty_built}]")
         println("    pretty_from_plain: [${pretty_from_plain}]")
+        fails = fails + 1
+    }
+
+    // An unfinished document (an element left open) cannot be formatted;
+    // finish gives back what was written, unformatted, as the plain writer
+    // does, rather than an empty string.
+    wu = xml.writer_pretty(2)
+    xml.start(wu, "a")
+    xml.element(wu, "b", "x")
+    unfinished = xml.finish(wu)
+    xml.free_builder(wu)
+    if unfinished != "<a><b>x</b>" {
+        println("  FAIL [builder writer_pretty unfinished]: got [${unfinished}]")
         fails = fails + 1
     }
 
