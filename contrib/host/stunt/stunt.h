@@ -31,9 +31,21 @@ typedef struct st_vm st_vm;
 typedef int (*st_host_fn)(void* vm);
 
 /* An interrupt handler, called every ST_INTERRUPT_EVERY instructions of a
- * long-running check (spin); non-zero stops the check, as a cancel does. */
+ * long-running check (spin); non-zero stops the check, as a cancel does.
+ * ST_INTERRUPT_HUNG_UP says the host has gone: that stops silent too, which
+ * answers nothing else. */
 typedef int (*st_interrupt_fn)(void* ud);
 #define ST_INTERRUPT_EVERY 10000
+#define ST_INTERRUPT_HUNG_UP 2
+
+/* The instruction limit the bridge's tier 1 (stunt.run) and the stand-alone
+ * stunt program set, so spin with nothing else to stop it still ends. */
+#define ST_DEFAULT_BUDGET 50000000
+/* How long silent waits for the host to kill it before it gives up. */
+#define ST_SILENT_CAP_MS 30000
+/* The stunt program run by a host ends by SIGALRM after this many seconds,
+ * whatever it is doing, so a host that never reaps it cannot leave it. */
+#define ST_CHILD_CAP_S 60
 
 /* Typed values (arguments and results). */
 #define ST_TNIL 0

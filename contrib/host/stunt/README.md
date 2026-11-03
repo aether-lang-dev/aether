@@ -151,6 +151,13 @@ The host reads and writes only whole frames, with `ipc.read_frame_timeout`
 and `ipc.write_frame`; the child writes each message as one frame, except
 `half-frame`, which stops inside one on purpose.
 
+None of the host-checked rows can outlive a broken host. `silent` and
+`half-frame` stop when the host hangs up (the socket polls closed or reads
+EOF), and after 30 s regardless; a child the host started ends by `SIGALRM`
+after 60 s whatever it is doing; and `spin` has a default instruction limit
+wherever no host is there to cancel it: the bridge's tier 1
+(`stunt.run("spin host")`) and the stunt program run by hand.
+
 Every host function is the host's to answer, so `callback-*`, `map-*` and
 `binding-*` mean the same in both modes; an `ERR` is a refusal only when its
 reason starts `refused:`. The host passes the child only the environment the

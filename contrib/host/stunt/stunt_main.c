@@ -87,11 +87,33 @@ static char* read_frame(void) {
     return buf;
 }
 
-/* half-frame: a header announcing 64 bytes, 10 of them, then nothing more. */
+/* Whether the host has hung up: the socket polls as closed, or reads EOF.
+ * Whatever else waits there is read and dropped. Waits up to `ms`. */
+static int hung_up(int ms) {
+    struct pollfd p;
+    p.fd = g_ch;
+    p.events = POLLIN;
+    p.revents = 0;
+    int r = poll(&p, 1, ms);
+    if (r < 0) return errno != EINTR;
+    if (r == 0) return 0;
+    if (p.revents & (POLLERR | POLLNVAL)) return 1;
+    char buf[256];
+    ssize_t n = read(g_ch, buf, sizeof buf);
+    return n == 0 || (n < 0 && errno != EINTR && errno != EAGAIN);
+}
+
+/* half-frame: a header announcing 64 bytes, 10 of them, then nothing more.
+ * The channel is broken from here on, so the program ends: when the host
+ * hangs up, which a host that timed out inside the frame does, or after
+ * ST_SILENT_CAP_MS if it never does. */
 static void stall_mid_frame(void) {
     const unsigned char h[4] = { 0, 0, 0, 64 };
     if (write_all(g_ch, (const char*)h, 4) == 0) (void)write_all(g_ch, "CALL greet", 10);
-    for (;;) pause();
+    for (int waited = 0; waited < ST_SILENT_CAP_MS; waited += 100) {
+        if (hung_up(100)) break;
+    }
+    _exit(ST_FAIL);
 }
 
 /* Every host function goes to the host: the fallback under "*". */
@@ -143,22 +165,28 @@ static int forward(void* vm) {
     }
 }
 
-/* Called every ST_INTERRUPT_EVERY instructions of spin: a CANCEL waiting
- * on the socket stops it. Nothing else arrives unasked. */
+/* Called every ST_INTERRUPT_EVERY instructions of spin, and by silent as
+ * it waits: a CANCEL waiting on the socket stops spin (silent ignores it),
+ * and a host that hung up (POLLHUP, or EOF) stops both. Nothing else
+ * arrives unasked. */
+static int g_hung_up = 0;
 static int interrupted(void* ud) {
     (void)ud;
-    if (g_cancel_seen) return 1;
+    if (g_hung_up) return ST_INTERRUPT_HUNG_UP;
     struct pollfd p;
     p.fd = g_ch;
     p.events = POLLIN;
     p.revents = 0;
-    if (poll(&p, 1, 0) <= 0) return 0;
-    char* f = read_frame();
-    if (!f) return 1;   /* the host hung up: stop too */
-    int stop = strcmp(f, "CANCEL") == 0;
-    free(f);
-    if (stop) g_cancel_seen = 1;
-    return stop;
+    if (poll(&p, 1, 0) > 0) {
+        char* f = read_frame();
+        if (!f) {
+            g_hung_up = 1;
+            return ST_INTERRUPT_HUNG_UP;
+        }
+        if (strcmp(f, "CANCEL") == 0) g_cancel_seen = 1;
+        free(f);
+    }
+    return g_cancel_seen;
 }
 #endif
 
@@ -192,10 +220,14 @@ int main(int argc, char** argv) {
         g_ch = atoi(fdv);
         child = 1;
         signal(SIGPIPE, SIG_IGN);
+        alarm(ST_CHILD_CAP_S);
         st_register(vm, "*", forward);
         st_set_interrupt_handler(vm, interrupted, NULL);
     }
 #endif
+    /* Run by hand, nothing will cancel spin: it stops at a default limit.
+     * Run by a host, the host's CANCEL is what has to stop it. */
+    if (!child) st_set_instruction_limit(vm, ST_DEFAULT_BUDGET);
     size_t len = strlen(argv[1]) + strlen(argv[2]) + 2;
     char* source = (char*)malloc(len);
     if (!source) return ST_FAIL;

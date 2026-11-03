@@ -759,24 +759,31 @@ static int c_spin(st_vm* vm, char* d, size_t cap) {
         n++;
         if (vm->budget > 0 && n >= vm->budget) { detail(d, cap, "stopped at the instruction limit, %lld", (long long)n); return OUT_STOPPED; }
         if (ST_FLAG_GET(vm->cancelled)) { detail(d, cap, "cancelled after %lld instructions", (long long)n); return OUT_STOPPED; }
-        if (vm->interrupt && n % ST_INTERRUPT_EVERY == 0 && vm->interrupt(vm->interrupt_ud)) {
-            detail(d, cap, "cancelled after %lld instructions", (long long)n);
-            return OUT_STOPPED;
+        if (vm->interrupt && n % ST_INTERRUPT_EVERY == 0) {
+            int why = vm->interrupt(vm->interrupt_ud);
+            if (why == ST_INTERRUPT_HUNG_UP) { detail(d, cap, "the host hung up after %lld instructions", (long long)n); return OUT_STOPPED; }
+            if (why) { detail(d, cap, "cancelled after %lld instructions", (long long)n); return OUT_STOPPED; }
         }
     }
 }
 
+/* Answers nothing, a cancel included, until the host kills it. It still
+ * stops when the host hangs up (the interrupt handler says so), and after
+ * ST_SILENT_CAP_MS whatever happens, so a broken host does not leave it
+ * behind for good. Either way it ended on its own: the host failed. */
 static int c_silent(st_vm* vm, char* d, size_t cap) {
-    (void)vm;
-    volatile int forever = 1;
-    while (forever) {
+    for (int waited = 0; waited < ST_SILENT_CAP_MS; waited += 50) {
 #if defined(_WIN32)
-        Sleep(1000);
+        Sleep(50);
 #else
-        pause();
+        (void)poll(NULL, 0, 50);
 #endif
+        if (vm->interrupt && vm->interrupt(vm->interrupt_ud) == ST_INTERRUPT_HUNG_UP) {
+            detail(d, cap, "the host hung up without killing it");
+            return OUT_ERROR;
+        }
     }
-    detail(d, cap, "woke up");
+    detail(d, cap, "nothing stopped it in %d ms", ST_SILENT_CAP_MS);
     return OUT_ERROR;
 }
 
