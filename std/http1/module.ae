@@ -345,10 +345,10 @@ decode_chunked(buf: byte[], start: int) -> (ptr, string) {
     done = 0
     err = ""
     while done == 0 {
-        // chunk-size line: hex digits up to CRLF (ignore any ;ext).
+        // chunk-size line: chunk-size [ chunk-ext ] CRLF.
         eol = find_crlf(buf, p)
         if eol < 0 { err = "incomplete"; done = 1 } else {
-            sz = parse_hex_prefix(buf, p, eol)
+            sz = chunk_size_line(buf, p, eol)
             if sz < 0 { err = "bad chunk size"; done = 1 } else {
                 data_start = eol + 2
                 if sz == 0 {
@@ -356,10 +356,17 @@ decode_chunked(buf: byte[], start: int) -> (ptr, string) {
                     // Require the final CRLF to be present.
                     if data_start + 1 < len + 1 { done = 1 } else { err = "incomplete"; done = 1 }
                 } else {
-                    if data_start + sz + 2 > len { err = "incomplete"; done = 1 } else {
-                        bytes.copy_from_slice(out, outn, buf[data_start..data_start + sz])
-                        outn = outn + sz
-                        p = data_start + sz + 2 // skip the chunk's trailing CRLF
+                    // Compared without adding to sz, which can be near the
+                    // largest int.
+                    if sz > len - data_start - 2 { err = "incomplete"; done = 1 } else {
+                        if buf[data_start + sz] != 13 || buf[data_start + sz + 1] != 10 {
+                            err = "bad chunk framing"
+                            done = 1
+                        } else {
+                            bytes.copy_from_slice(out, outn, buf[data_start..data_start + sz])
+                            outn = outn + sz
+                            p = data_start + sz + 2 // past the chunk's trailing CRLF
+                        }
                     }
                 }
             }
@@ -373,26 +380,129 @@ decode_chunked(buf: byte[], start: int) -> (ptr, string) {
     return body, ""
 }
 
-// Parse a run of hex digits at buf[from..to) (stopping at ';' or CRLF/space)
-// into an int. Returns -1 if there are no hex digits.
-fn parse_hex_prefix(buf: byte[], from: int, to: int) -> int {
+// The largest Content-Length or chunk size: the largest int.
+const HTTP1_COUNT_MAX = 2147483647
+
+// buf[from..to) read whole as a count in `base` (10 or 16), by the rules
+// std.net reads one with (#3520, http_parse_count): every byte a digit of the
+// base, at least one, no more digits than `max` has, and at most `max`. The
+// count, or -1. The readers this replaces skipped any byte that was not a
+// digit ("5abc9" was 59), stopped at the first one that was not hex ("0x5"
+// was 0, the last chunk) and wrapped past the largest int.
+fn parse_count(buf: byte[], from: int, to: int, base: int, max: int) -> int {
+    if to <= from { return -1 }
+    digits = 1
+    m = max
+    while m >= base {
+        m = m / base
+        digits = digits + 1
+    }
+    if to - from > digits { return -1 }
     v = 0
-    seen = 0
     i = from
     while i < to {
-        c = buf[i]
-        d = hex_digit(c)
-        if d < 0 { i = to } else { v = (v * 16) + d; seen = 1; i = i + 1 }
+        d = digit_of(buf[i], base)
+        if d < 0 { return -1 }
+        if v > (max - d) / base { return -1 }
+        v = (v * base) + d
+        i = i + 1
     }
-    if seen == 0 { return -1 }
     return v
 }
 
-fn hex_digit(c: int) -> int {
+fn digit_of(c: int, base: int) -> int {
     if c >= 48 && c <= 57 { return c - 48 }
-    if c >= 97 && c <= 102 { return c - 87 }
-    if c >= 65 && c <= 70 { return c - 55 }
+    if base == 16 {
+        if c >= 97 && c <= 102 { return c - 87 }
+        if c >= 65 && c <= 70 { return c - 55 }
+    }
     return -1
+}
+
+// An RFC 9110 token character: a letter, a digit or one of !#$%&'*+-.^_`|~.
+fn is_tchar(c: int) -> int {
+    if c >= 48 && c <= 57 { return 1 }
+    if c >= 65 && c <= 90 { return 1 }
+    if c >= 97 && c <= 122 { return 1 }
+    if c == 33 || (c >= 35 && c <= 39) || c == 42 || c == 43 || c == 45 || c == 46 { return 1 }
+    if c == 94 || c == 95 || c == 96 || c == 124 || c == 126 { return 1 }
+    return 0
+}
+
+// The first offset at or after `i` in buf[..to) that is not a space or tab.
+fn skip_ws(buf: byte[], i: int, to: int) -> int {
+    j = i
+    while j < to {
+        if buf[j] != 32 && buf[j] != 9 { return j }
+        j = j + 1
+    }
+    return to
+}
+
+// Past the closing quote of a quoted-string whose opening quote is just
+// before `i`, or -1: qdtext and quoted-pair are tab, space, the visible
+// characters and bytes 0x80 and up.
+fn quoted_end(buf: byte[], i: int, to: int) -> int {
+    j = i
+    while j < to {
+        c = buf[j]
+        if c == 34 { return j + 1 }
+        if c == 92 {
+            j = j + 1
+            if j == to { return -1 }
+            c = buf[j]
+        }
+        if c != 9 && (c < 32 || c == 127) { return -1 }
+        j = j + 1
+    }
+    return -1
+}
+
+// A chunk-size line, buf[from..to) without its CRLF:
+//     chunk-size [ chunk-ext ]                                 RFC 9112 7.1
+//     chunk-ext = *( BWS ";" BWS name [ BWS "=" BWS value ] )
+//     name = token, value = token / quoted-string
+// read as std.net reads one (#3520). The size, or -1. An extension is read to
+// its end rather than skipped, so a CR or a stray byte inside one is refused.
+fn chunk_size_line(buf: byte[], from: int, to: int) -> int {
+    i = from
+    while i < to {
+        if digit_of(buf[i], 16) < 0 { break }
+        i = i + 1
+    }
+    sz = parse_count(buf, from, i, 16, HTTP1_COUNT_MAX)
+    if sz < 0 { return -1 }
+    while i < to {
+        i = skip_ws(buf, i, to)
+        if i == to { return -1 }
+        if buf[i] != 59 { return -1 }
+        i = skip_ws(buf, i + 1, to)
+        name_at = i
+        while i < to {
+            if is_tchar(buf[i]) == 0 { break }
+            i = i + 1
+        }
+        if i == name_at { return -1 }
+        after_name = i
+        i = skip_ws(buf, i, to)
+        if i < to && buf[i] == 61 {
+            i = skip_ws(buf, i + 1, to)
+            if i < to && buf[i] == 34 {
+                i = quoted_end(buf, i + 1, to)
+                if i < 0 { return -1 }
+            } else {
+                value_at = i
+                while i < to {
+                    if is_tchar(buf[i]) == 0 { break }
+                    i = i + 1
+                }
+                if i == value_at { return -1 }
+            }
+        } else {
+            i = after_name
+        }
+    }
+    return sz
 }
 
 // Parse a decimal uint from a string, ignoring surrounding whitespace. Returns
@@ -447,7 +557,9 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
         return berr
     }
     if cl != null {
-        want = parse_uint_bytes(cl)
+        want = parse_content_length(cl)
+        // Not a count of bytes, so no answer about where the body ends.
+        if want < 0 { return "bad content-length" }
         have = len - body_start
         if have < want { return "incomplete" }
         r.body = slice_body(buf, body_start, want)
@@ -468,17 +580,11 @@ fn slice_body(buf: byte[], from: int, n: int) -> ptr {
     return bytes.from_slice(buf[from..from + n])
 }
 
-// Parse a decimal uint from a bytes buffer (Content-Length value).
-fn parse_uint_bytes(b: ptr) -> int {
+// A Content-Length value (a bytes buffer) read whole as a decimal count, or
+// -1 when it is not one (#3520).
+fn parse_content_length(b: ptr) -> int {
     n = bytes.length(b)
-    v = 0
-    i = 0
-    while i < n {
-        c = bytes.get(b, i) & 0xFF
-        if c >= 48 && c <= 57 { v = (v * 10) + (c - 48) }
-        i = i + 1
-    }
-    return v
+    return parse_count(bytes.view(b)[0..n], 0, n, 10, HTTP1_COUNT_MAX)
 }
 
 // ---- streaming driver over a tls13_client connection ----

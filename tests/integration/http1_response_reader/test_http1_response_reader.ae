@@ -11,6 +11,19 @@ fn sb(s: string) -> ptr { n = string_length(s); b = bytes.new(n); if n > 0 { byt
 fn body_str(r: ptr) -> string {
     return bytes.string_from_slice(http1.body(r))
 }
+// 1 when `msg`, all of it fed at once, is refused as malformed rather than
+// framed or waited on.
+fn refused(label: string, msg: string) -> int {
+    r = http1.response_new()
+    m = sb(msg)
+    e = http1.feed(r, bytes.view(m), 0)
+    got = 0
+    if string.equals(e, "") != 1 && string.equals(e, "incomplete") != 1 { got = 1 }
+    if got == 1 { println("ok   refused: ${label}") } else { println("FAIL not refused: ${label} (err='${e}')") }
+    http1.response_free(r)
+    bytes.free(m)
+    return got
+}
 main() {
     ok = 1
 
@@ -82,6 +95,28 @@ main() {
     if string.equals(i6, "incomplete") == 1 && string.equals(e6, "") == 1 && string.equals(body_str(r6), "hello") == 1 { println("ok   chunked resumes across feeds") } else { println("FAIL chunked-resume i='${i6}' e='${e6}' body='${body_str(r6)}'"); ok = 0 }
     http1.response_free(r6)
     bytes.free(p1); bytes.free(p2)
+
+    // 7. Framing numbers are read whole, by std.net's rules (#3520): the
+    // Content-Length reader skipped any byte that was not a digit, and the
+    // chunk-size reader stopped at the first one that was not hex and
+    // wrapped past the largest int. Each of these framed a body.
+    ok = ok & refused("a Content-Length with letters in it", "HTTP/1.1 200 OK\r\nContent-Length: 5abc\r\n\r\nhello")
+    ok = ok & refused("a signed Content-Length", "HTTP/1.1 200 OK\r\nContent-Length: +5\r\n\r\nhello")
+    ok = ok & refused("a Content-Length past the largest int", "HTTP/1.1 200 OK\r\nContent-Length: 4294967301\r\n\r\nhello")
+    ok = ok & refused("a Content-Length padded with zeros", "HTTP/1.1 200 OK\r\nContent-Length: 000000000005\r\n\r\nhello")
+    ok = ok & refused("a chunk size written 0x5", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n0x5\r\nhello\r\n0\r\n\r\n")
+    ok = ok & refused("a chunk size past the largest int", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n100000005\r\nhello\r\n0\r\n\r\n")
+    ok = ok & refused("a chunk size with a stray byte after it", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 x\r\nhello\r\n0\r\n\r\n")
+    ok = ok & refused("a CR inside a chunk extension", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;a\rb\r\nhello\r\n0\r\n\r\n")
+    ok = ok & refused("chunk data not followed by CRLF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhelXY0\r\n\r\n")
+
+    // 8. Chunk extensions are read, then ignored (RFC 9112 7.1).
+    r8 = http1.response_new()
+    m8 = sb("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 ; name=value\r\nhello\r\n6;q=\"a \\\" b\";flag\r\n world\r\n0;last\r\n\r\n")
+    e8 = http1.feed(r8, bytes.view(m8), 0)
+    if string.equals(e8, "") == 1 && string.equals(body_str(r8), "hello world") == 1 { println("ok   chunk extensions read and ignored") } else { println("FAIL chunk extensions err='${e8}' body='${body_str(r8)}'"); ok = 0 }
+    http1.response_free(r8)
+    bytes.free(m8)
 
     if ok == 1 { println("http1: all checks pass") } else { println("http1: FAILURES"); exit(1) }
 }
