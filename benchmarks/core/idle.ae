@@ -1,0 +1,53 @@
+// Scheduling next to idle actors (#3518): one ping-pong pair passes
+// `count` messages while `idle` other actors sit with empty mailboxes. A
+// scheduler that reads every actor on each pass gets slower as `idle` grows.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+
+message Ping { n: int }
+message Nothing {}
+
+actor Idle {
+    receive {
+        Nothing() -> {}
+    }
+}
+
+actor Side {
+    state peer = 0
+    state target = 0
+    receive {
+        Ping(n) -> {
+            if n < target { peer ! Ping { n: n + 1 } }
+        }
+    }
+}
+
+bench(idle: int, count: int) -> float {
+    i = 0
+    while i < idle {
+        _x = spawn(Idle())
+        i = i + 1
+    }
+    a = spawn(Side())
+    b = spawn(Side())
+    a.peer = b
+    b.peer = a
+    a.target = count
+    b.target = count
+    t0 = os.now_monotonic_ns()
+    a ! Ping { n: 0 }
+    wait_for_idle()
+    t1 = os.now_monotonic_ns()
+    return (t1 - t0) as float / count as float
+}
+
+main() {
+    count = 200000
+    // Each run adds to the actors already spawned: 0, then 1k, then 100k.
+    println("row pingpong_idle_0 ${bench(0, count)} ns/msg")
+    println("row pingpong_idle_1k ${bench(1000, count)} ns/msg")
+    println("row pingpong_idle_100k ${bench(99000, count)} ns/msg")
+}

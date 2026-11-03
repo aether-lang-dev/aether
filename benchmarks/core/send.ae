@@ -1,0 +1,63 @@
+// Send cost per message (#3518). Two actors pass one message back and forth
+// `count` times: a one-int message, a two-int message, a string field that is
+// forwarded as received (the copy path), and a string field built fresh for
+// each send (a temporary the message can take).
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.string
+
+message P1 { n: int }
+message P2 { n: int, m: int }
+message PS { n: int, s: string }
+message PF { n: int, s: string }
+
+actor Side {
+    state peer = 0
+    state target = 0
+    receive {
+        P1(n) -> {
+            if n < target { peer ! P1 { n: n + 1 } }
+        }
+        P2(n, m) -> {
+            if n < target { peer ! P2 { n: n + 1, m: m + 1 } }
+        }
+        PS(n, s) -> {
+            if n < target { peer ! PS { n: n + 1, s: s } }
+        }
+        PF(n, s) -> {
+            if n < target { peer ! PF { n: n + 1, s: string.from_int(n) } }
+        }
+    }
+}
+
+bench(kind: int, count: int) -> float {
+    a = spawn(Side())
+    b = spawn(Side())
+    a.peer = b
+    b.peer = a
+    a.target = count
+    b.target = count
+    t0 = os.now_monotonic_ns()
+    if kind == 1 {
+        a ! P1 { n: 0 }
+    } else if kind == 2 {
+        a ! P2 { n: 0, m: 0 }
+    } else if kind == 3 {
+        a ! PS { n: 0, s: "a string field of some length" }
+    } else {
+        a ! PF { n: 0, s: string.from_int(0) }
+    }
+    wait_for_idle()
+    t1 = os.now_monotonic_ns()
+    return (t1 - t0) as float / count as float
+}
+
+main() {
+    count = 400000
+    println("row send_1int ${bench(1, count)} ns/msg")
+    println("row send_2int ${bench(2, count)} ns/msg")
+    println("row send_string_forwarded ${bench(3, count)} ns/msg")
+    println("row send_string_fresh ${bench(4, count)} ns/msg")
+}

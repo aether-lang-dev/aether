@@ -1717,6 +1717,29 @@ test-all: test test-ae check-standalone
 # Benchmark presets: full (10M), medium (1M), low (100K), stress (100M)
 BENCHMARK_PRESET ?= low
 
+# ---- Core benchmarks (#3518): sends, asks, strings, maps, JSON, ae ----
+#
+# bench-core                 runs benchmarks/core with this tree, best of
+#                            BENCH_RUNS (default 5)
+# bench-core-compare BASE=d  the same with the tree at d (built at the merge
+#                            base) beside it, runs interleaved, change per row
+#
+# BENCH_ONLY=send,strings picks programs; the table also goes to
+# build/bench-core.tsv. See benchmarks/core/run.ae.
+.PHONY: bench-core bench-core-compare
+bench-core: compiler ae stdlib
+	@AETHER_HOME= ./$(BUILD_DIR)/ae run benchmarks/core/run.ae
+
+bench-core-compare: compiler ae stdlib
+ifndef BASE
+	@echo "make bench-core-compare: set BASE to a tree built at the merge base"
+	@echo "  e.g. git worktree add ../base \$$(git merge-base HEAD origin/main)"
+	@echo "       make -C ../base compiler ae stdlib"
+	@echo "       make bench-core-compare BASE=../base"
+	@exit 1
+endif
+	@AETHER_HOME= BENCH_BASE="$(BASE)" ./$(BUILD_DIR)/ae run benchmarks/core/run.ae
+
 # ---- JSON parser benchmark (standalone; no actor runtime needed) ----
 #
 # bench-json         — runs the current std/json parser against corpus/
@@ -2769,63 +2792,6 @@ endif
 	@echo "Building executable..."
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(BUILD_DIR)/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "✓ Built: $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT)"
-
-# Benchmark computed goto dispatch
-bench-dispatch:
-	@echo "Building computed goto benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o $(BUILD_DIR)/bench_computed_goto$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running benchmark..."
-	@./$(BUILD_DIR)/bench_computed_goto$(EXE_EXT)
-
-# Benchmark manual prefetch hints
-bench-prefetch:
-	@echo "Building prefetch benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o $(BUILD_DIR)/bench_prefetch$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running benchmark..."
-	@./$(BUILD_DIR)/bench_prefetch$(EXE_EXT)
-
-# Profile-Guided Optimization (PGO) - train the compiler's inliner and
-# branch-placement heuristics using a recorded workload. Run-time
-# improvement is workload-dependent; measure before and after.
-pgo-generate:
-	@echo "==================================="
-	@echo "PGO Step 1: Building with instrumentation..."
-	@echo "==================================="
-	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running workload to collect profile data..."
-	@./$(BUILD_DIR)/pgo_workload$(EXE_EXT)
-	@echo "Profile data collected in *.gcda files"
-
-pgo-build:
-	@echo "==================================="
-	@echo "PGO Step 2: Building with profile data..."
-	@echo "==================================="
-	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "PGO-optimized benchmark built"
-
-pgo-baseline:
-	@echo "Building baseline (no PGO)..."
-	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Baseline benchmark built"
-
-pgo-benchmark: pgo-baseline pgo-generate pgo-build
-	@echo "==================================="
-	@echo "PGO BENCHMARK COMPARISON"
-	@echo "==================================="
-	@echo ""
-	@echo "Baseline (no PGO):"
-	@./$(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT)
-	@echo ""
-	@echo "-----------------------------------"
-	@echo ""
-	@echo "PGO-Optimized:"
-	@./$(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT)
-
-pgo-clean:
-	@echo "Cleaning PGO profile data..."
-	@$(RM) *.gcda *.gcno 2>/dev/null || true
-	@$(RM) $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) 2>/dev/null || true
-	@echo "✓ PGO data cleaned"
 
 # Interactive REPL — integrated into ae CLI, no external dependencies
 repl: ae

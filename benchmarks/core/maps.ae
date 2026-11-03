@@ -1,0 +1,33 @@
+// std.map put and get with string keys (#3518). The key text is built in the
+// loop in both rows, so the difference between the rows is the map's own.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.map
+import std.string
+
+main() {
+    n = 200000
+    m = map.new()
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        map.put(m, "key-${i}", "value")
+        i = i + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row map_put ${(t1 - t0) as float / n as float} ns/op")
+
+    found = 0
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        if map.has(m, "key-${i}") != 0 { found = found + 1 }
+        i = i + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row map_get ${(t1 - t0) as float / n as float} ns/op")
+    if found != n { println("map lost keys: ${found} of ${n}") }
+    map.free(m)
+}

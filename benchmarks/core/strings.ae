@@ -1,0 +1,81 @@
+// std.string hot paths (#3518): concatenation, interpolation, substring,
+// search through a long text and splitting a long line.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.string
+
+per_op(t0: long, t1: long, n: int) -> float {
+    return (t1 - t0) as float / n as float
+}
+
+main() {
+    n = 2000000
+    total = 0
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        s = string.concat("ab", "cd")
+        t = string.concat(s, "ef")
+        total = total + string.length(t)
+        i = i + 1
+    }
+    println("row string_concat ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        s = "item ${i} of ${n}"
+        total = total + string.length(s)
+        i = i + 1
+    }
+    println("row string_interp ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        s = string.substring("the quick brown fox jumps over the lazy dog", 4, 19)
+        total = total + string.length(s)
+        i = i + 1
+    }
+    println("row string_substring ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    // A 256 KiB text with the needle only at its end.
+    text = "abcdefghijklmnop"
+    k = 0
+    while k < 14 {
+        text = string.concat(text, text)
+        k = k + 1
+    }
+    text = string.concat(text, "needle")
+    searches = 400
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < searches {
+        total = total + string.index_of(text, "needle")
+        i = i + 1
+    }
+    println("row string_index_of_256k ${per_op(t0, os.now_monotonic_ns(), searches) / 1000.0} us/search")
+
+    // A line of 2000 comma separated fields.
+    line = "field"
+    k = 0
+    while k < 1999 {
+        line = string.concat(line, ",field")
+        k = k + 1
+    }
+    splits = 2000
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < splits {
+        parts = string.split(line, ",")
+        total = total + string.array_size(parts)
+        string.array_free(parts)
+        i = i + 1
+    }
+    println("row string_split_2000 ${per_op(t0, os.now_monotonic_ns(), splits) / 1000.0} us/split")
+
+    if total == 0 { println("nothing measured") }
+}

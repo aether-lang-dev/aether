@@ -1,0 +1,4 @@
+// The program `ae run` builds for the cache hit row of benchmarks/core/run.ae.
+main() {
+    println("hello")
+}

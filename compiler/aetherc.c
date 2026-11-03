@@ -49,6 +49,26 @@ static int g_lib_actors = 0;
 
 // Global flags
 static bool verbose_mode = false;
+
+/* --time-phases (#3518): how long each phase of a compile took, written to
+ * stderr as `phase <name> <ms>` lines as each one ends, for
+ * benchmarks/core/run.ae. The clock is the runtime's monotonic one, which
+ * aetherc links (runtime/aether_resource_caps.c). */
+int64_t aether_caps_now_ns(void);
+static bool time_phases = false;
+static double phase_started_ms = 0;
+
+static double phase_clock_ms(void) {
+    return (double)aether_caps_now_ns() / 1000000.0;
+}
+
+/* Ends the phase running since the last mark; a NULL name only starts one. */
+static void phase_mark(const char* name) {
+    if (!time_phases) return;
+    double now = phase_clock_ms();
+    if (name) fprintf(stderr, "phase %s %.3f\n", name, now - phase_started_ms);
+    phase_started_ms = now;
+}
 static bool dump_ast_mode = false;
 static bool emit_c_mode = false;
 static const char* csrc_header_path = NULL;  // #996 --emit-header=<path>
@@ -1438,7 +1458,9 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     
     int token_count = 0;
+    phase_mark(NULL);
     Token** tokens = lexer_tokenize(source, &token_count);
+    phase_mark("lex");
     if (!tokens) {
         fprintf(stderr, "error: out of memory while lexing %s\n", input_path);
         free(source);
@@ -1459,6 +1481,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (verbose_mode) printf("Step 2: Parsing...\n");
     Parser* parser = create_parser(tokens, token_count);
     ASTNode* program = parse_program(parser);
+    phase_mark("parse");
 
     // Stamp every parsed node with its source path so codegen can
     // emit `#line N "path"` directives. Imported-module nodes get
@@ -1596,6 +1619,7 @@ int compile_source(const char* input_path, const char* output_path) {
     // Step 2.6: Merge pure Aether module functions into program AST
     module_set_emit_lib(emit_lib);
     module_merge_into_program(program);
+    phase_mark("merge");
     /* The merge reports a struct defined differently in two modules
      * (#2129). Nothing downstream re-checks the count before codegen, so
      * without this gate a clash whose losing side the pruner happened to
@@ -1738,7 +1762,8 @@ int compile_source(const char* input_path, const char* output_path) {
         free(source);
         return 0;
     }
-    
+    phase_mark("typecheck");
+
     if (verbose_mode) printf("Type checking successful\n");
     if (check_only_mode && !emit_short_names_mode) typecheck_warn_short_names();
 
@@ -1963,11 +1988,13 @@ int compile_source(const char* input_path, const char* output_path) {
     codegen->source_file = input_path;
     codegen->lib_id = g_lib_id;
     int errors_before_codegen = aether_error_count();
+    phase_mark("analysis");
     generate_program(codegen, program);
     int write_ok = close_generated_file(output, output_path);
     if (!close_generated_file(csrc_header, csrc_header_path))   write_ok = 0;
     if (!close_generated_file(csrc_catalog, csrc_catalog_path)) write_ok = 0;
     if (!close_generated_file(header_output, header_path))      write_ok = 0;
+    phase_mark("codegen");
     if (!write_ok) {
         /* compile_source reports failure as 0; every caller tests
          * !compile_source(...). Returning 1 here would print the error and
@@ -2291,6 +2318,7 @@ void print_help(const char* program_name) {
     printf("Options:\n");
     printf("  --version, -v                    Show version information\n");
     printf("  --verbose                        Show detailed compilation phases and timing\n");
+    printf("  --time-phases                    Print `phase <name> <ms>` to stderr as each phase ends\n");
     printf("  --emit-c                         Print generated C code to stdout\n");
     printf("  --emit-header [path]             Generate C header for embedding (default: auto)\n");
     printf("  --emit-deps=<path>              Write the resolver dependency manifest (files read +\n");
@@ -2439,6 +2467,9 @@ int main(int argc, char *argv[]) {
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--verbose") == 0) {
             verbose_mode = true;
+            arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--time-phases") == 0) {
+            time_phases = true;
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--emit-c") == 0) {
             emit_c_mode = true;

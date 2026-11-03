@@ -1,0 +1,51 @@
+// std.json building and encoding (#3518): an object with many keys, a deep
+// nesting of objects, and encoding a large document.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.json
+import std.string
+
+main() {
+    keys = 5000
+    t0 = os.now_monotonic_ns()
+    wide = json.obj()
+    i = 0
+    while i < keys {
+        _ = json.set(wide, "k${i}", json.num(i as float))
+        i = i + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row json_object_5000_keys ${(t1 - t0) as float / 1000000.0} ms/build")
+
+    depth = 300
+    t0 = os.now_monotonic_ns()
+    inner = json.obj()
+    _ = json.set(inner, "leaf", json.str("x"))
+    d = 0
+    while d < depth {
+        outer = json.obj()
+        _ = json.set(outer, "child", inner)
+        _ = json.set(outer, "n", json.num(d as float))
+        inner = outer
+        d = d + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row json_nest_300 ${(t1 - t0) as float / 1000000.0} ms/build")
+
+    rounds = 50
+    total = 0
+    t0 = os.now_monotonic_ns()
+    r = 0
+    while r < rounds {
+        out, err = json.encode(wide)
+        if err == "" { total = total + string.length(out) }
+        r = r + 1
+    }
+    t1 = os.now_monotonic_ns()
+    println("row json_encode_5000_keys ${(t1 - t0) as float / rounds as float / 1000.0} us/encode")
+    if total == 0 { println("encode produced nothing") }
+    json.free(wide)
+    json.free(inner)
+}

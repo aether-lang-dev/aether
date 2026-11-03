@@ -1,0 +1,350 @@
+// The core benchmark runner (#3518).
+//
+// Builds every program of benchmarks/core with a tree's own `ae`, runs it
+// BENCH_RUNS times and keeps the best (lowest) value of each row it prints.
+// With BENCH_BASE naming another tree (a build of the merge base), both are
+// built and their runs interleave, one base run then one branch run, so a
+// machine that slows down part way slows both. Lower is better in every row.
+//
+// Run from the repository root after `make compiler ae stdlib`:
+//   AETHER_HOME= ./build/ae run benchmarks/core/run.ae
+//   AETHER_HOME= BENCH_BASE=../base ./build/ae run benchmarks/core/run.ae
+//   AETHER_HOME= BENCH_ONLY=send,strings ./build/ae run benchmarks/core/run.ae
+// `make bench-core` and `make bench-core-compare BASE=<tree>` do the same.
+//
+// A program prints `row <name> <value> <unit>` lines. The runner also times
+// each benchmarks/ownership program whole (BENCH_OWNERSHIP picks them, a
+// single comma for none), and adds rows of its own: an `ae run` of hello.ae
+// on a warm cache, a cold `ae build` of compile_heavy.ae (a fresh cache
+// directory each time, so it includes the C compiler), and aetherc's own
+// phases of that compile from `--time-phases` (missing from a tree whose
+// aetherc has no such flag).
+//
+// The table goes to stdout, and a tab separated copy (name, unit, base,
+// branch) to BENCH_OUT, by default build/bench-core.tsv.
+
+import std.os
+import std.fs
+import std.list
+import std.string
+import std.floatarr
+
+extern exit(code: int)
+
+const MAX_ROWS = 96
+const PROGRAMS = "send,ask,idle,strings,maps,json,alloc_par"
+const OWNERSHIP = "alias,closure,concat,fields,interp,list,listheap,passret,seq,splitjoin"
+
+// (stdout and stderr together, exit status); -1 when sh could not start.
+sh_run(cmd: string) -> (string, int) {
+    argv = list.new()
+    _a = list.add(argv, "-c")
+    _b = list.add(argv, cmd)
+    out, err_out, status, err = os.run_full("sh", argv, null, "")
+    list.free(argv)
+    if err != "" {
+        return "${out}${err_out}", -1
+    }
+    return "${out}${err_out}", status
+}
+
+env_or(name: string, fallback: string) -> string {
+    v = os.getenv(name)
+    if v == null || string.length(v) == 0 {
+        return fallback
+    }
+    return v
+}
+
+// `t` holds the rows seen so far, each "<name> <unit>", in the order they
+// were first seen; `best` holds the lowest value per row for one tree, -1
+// until one is seen.
+row_index(t: ptr, name: string, unit: string) -> int {
+    key = "${name} ${unit}"
+    n = list.size(t)
+    i = 0
+    while i < n {
+        s, _e = list.get_string(t, i)
+        if s == key {
+            return i
+        }
+        i = i + 1
+    }
+    if n >= MAX_ROWS {
+        return -1
+    }
+    _a = list.add(t, key)
+    return n
+}
+
+has(items: ptr, s: string) -> bool {
+    n = list.size(items)
+    i = 0
+    while i < n {
+        v, _e = list.get_string(items, i)
+        if v == s {
+            return true
+        }
+        i = i + 1
+    }
+    return false
+}
+
+record(t: ptr, best: ptr, name: string, unit: string, value: float) {
+    i = row_index(t, name, unit)
+    if i < 0 {
+        return
+    }
+    old, _e = floatarr.get(best, i)
+    if old < 0.0 || value < old {
+        _s = floatarr.set(best, i, value)
+    }
+}
+
+// Every `row <name> <value> <unit>` line of a run's output.
+record_rows(t: ptr, best: ptr, out: string) {
+    lines = string.split(out, "\n")
+    n = string.array_size(lines)
+    i = 0
+    while i < n {
+        line = string.trim(string.array_get(lines, i))
+        if string.starts_with(line, "row ") != 0 {
+            parts = string.split(line, " ")
+            if string.array_size(parts) == 4 {
+                v, err = string.to_double(string.array_get(parts, 2))
+                if err == "" {
+                    record(t, best, string.array_get(parts, 1), string.array_get(parts, 3), v)
+                }
+            }
+            string.array_free(parts)
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+}
+
+// `phase <name> <ms>` lines from aetherc --time-phases.
+record_phases(t: ptr, best: ptr, out: string) {
+    lines = string.split(out, "\n")
+    n = string.array_size(lines)
+    i = 0
+    while i < n {
+        line = string.trim(string.array_get(lines, i))
+        if string.starts_with(line, "phase ") != 0 {
+            parts = string.split(line, " ")
+            if string.array_size(parts) == 3 {
+                v, err = string.to_double(string.array_get(parts, 2))
+                if err == "" {
+                    record(t, best, "compile_phase_${string.array_get(parts, 1)}", "ms", v)
+                }
+            }
+            string.array_free(parts)
+        }
+        i = i + 1
+    }
+    string.array_free(lines)
+}
+
+ms_since(t0: long) -> float {
+    return (os.now_monotonic_ns() - t0) as float / 1000000.0
+}
+
+// Builds benchmarks/<src>/<prog>.ae with the tree's own ae as <dir>/<tag>_<prog>.
+build_program(tree: string, tag: string, src: string, prog: string, dir: string) -> bool {
+    out, status = sh_run("${tree}/build/ae build benchmarks/${src}/${prog}.ae -o ${dir}/${tag}_${prog} 2>&1")
+    if status != 0 {
+        println("[${tag}] ${src}/${prog} did not build:")
+        println(out)
+        return false
+    }
+    return true
+}
+
+// One round for one tree: every program once, each ownership program timed
+// whole, then the runner's own rows.
+run_round(t: ptr, tree: string, tag: string, dir: string, progs: ptr, owns: ptr, built: ptr, best: ptr, round: int) {
+    n = string.array_size(progs)
+    i = 0
+    while i < n {
+        prog = string.array_get(progs, i)
+        if has(built, prog) {
+            out, status = sh_run("${dir}/${tag}_${prog}")
+            if status == 0 {
+                record_rows(t, best, out)
+            } else {
+                println("[${tag}] ${prog} exited ${status}:")
+                println(out)
+            }
+        }
+        i = i + 1
+    }
+
+    // benchmarks/ownership (#2925): each prints one total, so the whole run
+    // is what is timed, as the ownership model's budgets were measured.
+    m = string.array_size(owns)
+    j = 0
+    while j < m {
+        own = string.array_get(owns, j)
+        if has(built, own) {
+            t0 = os.now_monotonic_ns()
+            _out, st = sh_run("${dir}/${tag}_${own}")
+            if st == 0 {
+                record(t, best, "ownership_${own}", "ms", ms_since(t0))
+            }
+        }
+        j = j + 1
+    }
+
+    // `ae run` on a warm cache: the build is cached from the first round's
+    // warm up, so this is the cache lookup plus starting the program.
+    t0 = os.now_monotonic_ns()
+    _o, st = sh_run("${tree}/build/ae run benchmarks/core/hello.ae")
+    if st == 0 {
+        record(t, best, "ae_run_cache_hit", "ms", ms_since(t0))
+    }
+
+    // A cold build: a cache directory of its own each round.
+    cache = "${dir}/cache_${tag}_${round}"
+    t0 = os.now_monotonic_ns()
+    _o2, st2 = sh_run("AETHER_CACHE_DIR=${cache} ${tree}/build/ae build benchmarks/core/compile_heavy.ae -o ${dir}/${tag}_heavy")
+    if st2 == 0 {
+        record(t, best, "ae_build_cold_heavy", "ms", ms_since(t0))
+    }
+    _r = sh_run("rm -rf ${cache}")
+
+    phases, st3 = sh_run("${tree}/build/aetherc --time-phases benchmarks/core/compile_heavy.ae ${dir}/${tag}_heavy.c 2>&1")
+    if st3 == 0 {
+        record_phases(t, best, phases)
+    }
+}
+
+fmt(x: float) -> string {
+    if x < 0.0 {
+        return "-"
+    }
+    if x >= 100.0 {
+        v = (x + 0.5) as long
+        return "${v}"
+    }
+    if x >= 10.0 {
+        v = (x * 10.0 + 0.5) as long
+        return "${v / 10}.${v % 10}"
+    }
+    v = (x * 100.0 + 0.5) as long
+    frac = v % 100
+    if frac < 10 {
+        return "${v / 100}.0${frac}"
+    }
+    return "${v / 100}.${frac}"
+}
+
+change(base: float, branch: float) -> string {
+    if base <= 0.0 || branch < 0.0 {
+        return ""
+    }
+    p = (branch - base) * 1000.0 / base
+    tenths = if p < 0.0 { (p - 0.5) as long } else { (p + 0.5) as long }
+    sign = if tenths > 0 { "+" } else { "" }
+    whole = tenths / 10
+    part = if tenths < 0 { (0 - tenths) % 10 } else { tenths % 10 }
+    if tenths < 0 && whole == 0 {
+        return "-0.${part}%"
+    }
+    return "${sign}${whole}.${part}%"
+}
+
+cell(s: string, width: int) -> string {
+    return string.pad_end(s, width, 32)
+}
+
+main() {
+    runs_text = env_or("BENCH_RUNS", "5")
+    runs, rerr = string.to_int(runs_text)
+    if rerr != "" || runs < 1 {
+        println("BENCH_RUNS must be a positive number, got '${runs_text}'")
+        exit(2)
+    }
+    base_tree = env_or("BENCH_BASE", "")
+    out_path = env_or("BENCH_OUT", "build/bench-core.tsv")
+    dir = "build/bench-core"
+    _m = sh_run("mkdir -p ${dir}")
+    progs = string.split(env_or("BENCH_ONLY", PROGRAMS), ",")
+    owns = string.split(env_or("BENCH_OWNERSHIP", OWNERSHIP), ",")
+
+    base_best, _e1 = floatarr.new_filled(MAX_ROWS, -1.0)
+    branch_best, _e2 = floatarr.new_filled(MAX_ROWS, -1.0)
+    base_built = list.new()
+    branch_built = list.new()
+    t = list.new()
+
+    n = string.array_size(progs)
+    i = 0
+    while i < n {
+        prog = string.array_get(progs, i)
+        if base_tree != "" && build_program(base_tree, "base", "core", prog, dir) {
+            _a = list.add(base_built, prog)
+        }
+        if build_program(".", "branch", "core", prog, dir) {
+            _b = list.add(branch_built, prog)
+        }
+        i = i + 1
+    }
+    m = string.array_size(owns)
+    j = 0
+    while j < m {
+        own = string.array_get(owns, j)
+        if string.length(own) > 0 {
+            if base_tree != "" && build_program(base_tree, "base", "ownership", own, dir) {
+                _c = list.add(base_built, own)
+            }
+            if build_program(".", "branch", "ownership", own, dir) {
+                _d = list.add(branch_built, own)
+            }
+        }
+        j = j + 1
+    }
+    // Warm the `ae run` cache of each tree once before anything is timed.
+    if base_tree != "" {
+        _w1 = sh_run("${base_tree}/build/ae run benchmarks/core/hello.ae")
+    }
+    _w2 = sh_run("./build/ae run benchmarks/core/hello.ae")
+
+    r = 0
+    while r < runs {
+        if base_tree != "" {
+            run_round(t, base_tree, "base", dir, progs, owns, base_built, base_best, r)
+        }
+        run_round(t, ".", "branch", dir, progs, owns, branch_built, branch_best, r)
+        r = r + 1
+    }
+
+    println("")
+    against = if base_tree != "" { ", base ${base_tree}" } else { "" }
+    println("best of ${runs} runs, lower is better${against}")
+    println("${cell("row", 30)}${cell("unit", 12)}${cell("base", 10)}${cell("branch", 10)}change")
+    tsv = "name\tunit\tbase\tbranch\n"
+    rows = list.size(t)
+    k = 0
+    while k < rows {
+        key, _n = list.get_string(t, k)
+        sp = string.index_of(key, " ")
+        name = string.substring(key, 0, sp)
+        unit = string.substring(key, sp + 1, string.length(key))
+        b, _x = floatarr.get(base_best, k)
+        v, _y = floatarr.get(branch_best, k)
+        println("${cell(name, 30)}${cell(unit, 12)}${cell(fmt(b), 10)}${cell(fmt(v), 10)}${change(b, v)}")
+        tsv = "${tsv}${name}\t${unit}\t${b}\t${v}\n"
+        k = k + 1
+    }
+    werr = fs.write(out_path, tsv)
+    if werr != "" {
+        println("could not write ${out_path}: ${werr}")
+    }
+    string.array_free(progs)
+    string.array_free(owns)
+    list.free(base_built)
+    list.free(branch_built)
+    list.free(t)
+    floatarr.free(base_best)
+    floatarr.free(branch_best)
+}
