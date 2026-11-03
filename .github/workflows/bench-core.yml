@@ -63,6 +63,8 @@ jobs:
 
     - name: Run both
       run: |
+        # A failed build or run fails the step: tee alone would hide it.
+        set -o pipefail
         make bench-core-compare BASE=../base BENCH_RUNS=5 | tee bench-core.txt
         {
           echo '### Core benchmarks, best of 5, lower is better'

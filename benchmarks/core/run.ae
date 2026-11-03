@@ -48,6 +48,12 @@ sh_run(cmd: string) -> (string, int) {
     return "${out}${err_out}", status
 }
 
+// A command's output, trimmed.
+sh_text(cmd: string) -> string {
+    out, _status = sh_run(cmd)
+    return string.trim(out)
+}
+
 env_or(name: string, fallback: string) -> string {
     v = os.getenv(name)
     if v == null || string.length(v) == 0 {
@@ -149,9 +155,13 @@ ms_since(t0: long) -> float {
     return (os.now_monotonic_ns() - t0) as float / 1000000.0
 }
 
-// Builds benchmarks/<src>/<prog>.ae with the tree's own ae as <dir>/<tag>_<prog>.
-build_program(tree: string, tag: string, src: string, prog: string, dir: string) -> bool {
-    out, status = sh_run("${tree}/build/ae build benchmarks/${src}/${prog}.ae -o ${dir}/${tag}_${prog} 2>&1")
+// Builds <root>/benchmarks/<src>/<prog>.ae with the tree's own ae as
+// <dir>/<tag>_<prog>, from inside the tree: aetherc finds std from the
+// working directory first, so a build run from this checkout compiled this
+// checkout's std .ae modules against the base's libaether, and every std
+// .ae change measured the same on both sides. Paths are absolute.
+build_program(root: string, tree: string, tag: string, src: string, prog: string, dir: string) -> bool {
+    out, status = sh_run("cd ${tree} && ./build/ae build ${root}/benchmarks/${src}/${prog}.ae -o ${dir}/${tag}_${prog} 2>&1")
     if status != 0 {
         println("[${tag}] ${src}/${prog} did not build:")
         println(out)
@@ -162,7 +172,7 @@ build_program(tree: string, tag: string, src: string, prog: string, dir: string)
 
 // One round for one tree: every program once, each ownership program timed
 // whole, then the runner's own rows.
-run_round(t: ptr, tree: string, tag: string, dir: string, progs: ptr, owns: ptr, built: ptr, best: ptr, round: int) {
+run_round(t: ptr, root: string, tree: string, tag: string, dir: string, progs: ptr, owns: ptr, built: ptr, best: ptr, round: int) {
     n = string.array_size(progs)
     i = 0
     while i < n {
@@ -198,7 +208,7 @@ run_round(t: ptr, tree: string, tag: string, dir: string, progs: ptr, owns: ptr,
     // `ae run` on a warm cache: the build is cached from the first round's
     // warm up, so this is the cache lookup plus starting the program.
     t0 = os.now_monotonic_ns()
-    _o, st = sh_run("${tree}/build/ae run benchmarks/core/hello.ae")
+    _o, st = sh_run("cd ${tree} && ./build/ae run ${root}/benchmarks/core/hello.ae")
     if st == 0 {
         record(t, best, "ae_run_cache_hit", "ms", ms_since(t0))
     }
@@ -206,13 +216,13 @@ run_round(t: ptr, tree: string, tag: string, dir: string, progs: ptr, owns: ptr,
     // A cold build: a cache directory of its own each round.
     cache = "${dir}/cache_${tag}_${round}"
     t0 = os.now_monotonic_ns()
-    _o2, st2 = sh_run("AETHER_CACHE_DIR=${cache} ${tree}/build/ae build benchmarks/core/compile_heavy.ae -o ${dir}/${tag}_heavy")
+    _o2, st2 = sh_run("cd ${tree} && AETHER_CACHE_DIR=${cache} ./build/ae build ${root}/benchmarks/core/compile_heavy.ae -o ${dir}/${tag}_heavy")
     if st2 == 0 {
         record(t, best, "ae_build_cold_heavy", "ms", ms_since(t0))
     }
     _r = sh_run("rm -rf ${cache}")
 
-    phases, st3 = sh_run("${tree}/build/aetherc --time-phases benchmarks/core/compile_heavy.ae ${dir}/${tag}_heavy.c 2>&1")
+    phases, st3 = sh_run("cd ${tree} && ./build/aetherc --time-phases ${root}/benchmarks/core/compile_heavy.ae ${dir}/${tag}_heavy.c 2>&1")
     if st3 == 0 {
         record_phases(t, best, phases)
     }
@@ -264,9 +274,12 @@ main() {
         println("BENCH_RUNS must be a positive number, got '${runs_text}'")
         exit(2)
     }
-    base_tree = env_or("BENCH_BASE", "")
+    // Absolute: every build runs from inside its own tree.
+    root = sh_text("pwd")
+    base_arg = env_or("BENCH_BASE", "")
+    base_tree = if base_arg != "" { sh_text("cd ${base_arg} && pwd") } else { "" }
     out_path = env_or("BENCH_OUT", "build/bench-core.tsv")
-    dir = "build/bench-core"
+    dir = "${root}/build/bench-core"
     _m = sh_run("mkdir -p ${dir}")
     progs = string.split(env_or("BENCH_ONLY", PROGRAMS), ",")
     owns = string.split(env_or("BENCH_OWNERSHIP", OWNERSHIP), ",")
@@ -281,10 +294,10 @@ main() {
     i = 0
     while i < n {
         prog = string.array_get(progs, i)
-        if base_tree != "" && build_program(base_tree, "base", "core", prog, dir) {
+        if base_tree != "" && build_program(root, base_tree, "base", "core", prog, dir) {
             _a = list.add(base_built, prog)
         }
-        if build_program(".", "branch", "core", prog, dir) {
+        if build_program(root, root, "branch", "core", prog, dir) {
             _b = list.add(branch_built, prog)
         }
         i = i + 1
@@ -294,10 +307,10 @@ main() {
     while j < m {
         own = string.array_get(owns, j)
         if string.length(own) > 0 {
-            if base_tree != "" && build_program(base_tree, "base", "ownership", own, dir) {
+            if base_tree != "" && build_program(root, base_tree, "base", "ownership", own, dir) {
                 _c = list.add(base_built, own)
             }
-            if build_program(".", "branch", "ownership", own, dir) {
+            if build_program(root, root, "branch", "ownership", own, dir) {
                 _d = list.add(branch_built, own)
             }
         }
@@ -305,16 +318,16 @@ main() {
     }
     // Warm the `ae run` cache of each tree once before anything is timed.
     if base_tree != "" {
-        _w1 = sh_run("${base_tree}/build/ae run benchmarks/core/hello.ae")
+        _w1 = sh_run("cd ${base_tree} && ./build/ae run ${root}/benchmarks/core/hello.ae")
     }
-    _w2 = sh_run("./build/ae run benchmarks/core/hello.ae")
+    _w2 = sh_run("./build/ae run ${root}/benchmarks/core/hello.ae")
 
     r = 0
     while r < runs {
         if base_tree != "" {
-            run_round(t, base_tree, "base", dir, progs, owns, base_built, base_best, r)
+            run_round(t, root, base_tree, "base", dir, progs, owns, base_built, base_best, r)
         }
-        run_round(t, ".", "branch", dir, progs, owns, branch_built, branch_best, r)
+        run_round(t, root, root, "branch", dir, progs, owns, branch_built, branch_best, r)
         r = r + 1
     }
 
