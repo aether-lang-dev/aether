@@ -371,6 +371,29 @@ int string_contains(const void* str, const void* substring) {
     return string_index_of(str, substring) >= 0;
 }
 
+/* Where the `nlen` bytes of `needle` first start in hay[0..hlen) at or after
+ * `from`, or SIZE_MAX for nowhere. An empty needle is at `from`.
+ *
+ * memchr finds each place the needle's first byte occurs, and only there is
+ * the rest compared: index_of, split and replace called memcmp at every
+ * offset of the haystack, a libc call per byte for a one byte separator
+ * (#3531). A one byte needle is memchr alone. */
+static size_t str_find(const char* hay, size_t hlen, size_t from,
+                       const char* needle, size_t nlen) {
+    if (from > hlen || nlen > hlen - from) return SIZE_MAX;
+    if (nlen == 0) return from;
+    const char* p = hay + from;
+    const char* last = hay + (hlen - nlen);   /* the last place it can start */
+    const unsigned char first = (unsigned char)needle[0];
+    while (p <= last) {
+        const char* q = (const char*)memchr(p, first, (size_t)(last - p) + 1);
+        if (!q) return SIZE_MAX;
+        if (nlen == 1 || memcmp(q + 1, needle + 1, nlen - 1) == 0) return (size_t)(q - hay);
+        p = q + 1;
+    }
+    return SIZE_MAX;
+}
+
 int string_index_of(const void* str, const void* substring) {
     if (!str || !substring) return -1;
     // Needle is binary-aware too: accepts AetherString* (for
@@ -378,18 +401,10 @@ int string_index_of(const void* str, const void* substring) {
     // AetherString needle ran strlen past the struct header and
     // returned garbage lengths — matters for packed-string
     // protocols that use string_from_char(2) as a separator.
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    size_t slen = str_len(str);
-    const char* sdata = str_data(str);
-    if (sub_len > slen) return -1;
-
-    for (size_t i = 0; i <= slen - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    size_t at = str_find(str_data(str), str_len(str), 0,
+                         str_data(substring), str_len(substring));
+    /* A position past INT_MAX panics, as string_length does (#3523). */
+    return at == SIZE_MAX ? -1 : str_int(at);
 }
 
 // Like string_index_of but starts the scan at byte offset `start`.
@@ -404,20 +419,10 @@ int string_index_of(const void* str, const void* substring) {
 // + start` which allocates a fresh copy of the tail on each step.
 int string_index_of_from(const void* str, const void* substring, int start) {
     if (!str || !substring) return -1;
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    size_t slen = str_len(str);
-    const char* sdata = str_data(str);
     if (start < 0) start = 0;
-    if ((size_t)start > slen) return -1;
-    if (sub_len > slen - (size_t)start) return -1;
-
-    for (size_t i = (size_t)start; i <= slen - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    size_t at = str_find(str_data(str), str_len(str), (size_t)start,
+                         str_data(substring), str_len(substring));
+    return at == SIZE_MAX ? -1 : str_int(at);
 }
 
 // Construct a 1-byte AetherString whose single byte is `code & 0xff`.
@@ -478,16 +483,13 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
     size_t new_len = new_sub ? str_len(new_sub) : 0;
     const char* new_data = new_sub ? str_data(new_sub) : NULL;
 
+    /* Hits found with str_find, not a compare at every offset (#3531). */
     long hits = 0;
     if (old_len > 0 && old_len <= slen && max_hits != 0) {
-        for (size_t i = 0; i + old_len <= slen; ) {
-            if (memcmp(sdata + i, old_data, old_len) == 0) {
-                hits++;
-                i += old_len;
-                if (max_hits > 0 && hits >= max_hits) break;
-            } else {
-                i++;
-            }
+        for (size_t at = str_find(sdata, slen, 0, old_data, old_len); at != SIZE_MAX;
+             at = str_find(sdata, slen, at + old_len, old_data, old_len)) {
+            hits++;
+            if (max_hits > 0 && hits >= max_hits) break;
         }
     }
     if (hits == 0) {
@@ -500,19 +502,18 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
     if (!out) return NULL;
     char* result = out->data;
 
-    size_t w = 0;
-    long done = 0;
-    for (size_t i = 0; i < slen; ) {
-        if (done < hits && i + old_len <= slen &&
-            memcmp(sdata + i, old_data, old_len) == 0) {
-            memcpy(result + w, new_data, new_len);
-            w += new_len;
-            i += old_len;
-            done++;
-        } else {
-            result[w++] = sdata[i++];
-        }
+    /* The text between hits goes over whole, and each hit is the next
+     * str_find from where the last one ended: the hits counted above. */
+    size_t w = 0, i = 0;
+    for (long done = 0; done < hits; done++) {
+        size_t at = str_find(sdata, slen, i, old_data, old_len);
+        memcpy(result + w, sdata + i, at - i);
+        w += at - i;
+        if (new_len) memcpy(result + w, new_data, new_len);
+        w += new_len;
+        i = at + old_len;
     }
+    memcpy(result + w, sdata + i, slen - i);
     return out;
 }
 
@@ -606,18 +607,11 @@ int string_index_of_from_n(const void* str, int known_length,
     if (!str || !substring) return -1;
     if (known_length < 0) return -1;
     known_length = aether_string_bound_n(str, known_length);
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    const char* sdata = str_data(str);
     if (start < 0) start = 0;
-    if ((size_t)start > (size_t)known_length) return -1;
-    if (sub_len > (size_t)known_length - (size_t)start) return -1;
-    for (size_t i = (size_t)start; i <= (size_t)known_length - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    /* At most known_length, an int, so the position fits one. */
+    size_t at = str_find(str_data(str), (size_t)known_length, (size_t)start,
+                         str_data(substring), str_len(substring));
+    return at == SIZE_MAX ? -1 : (int)at;
 }
 
 AetherString* string_to_upper(const void* str) {
@@ -734,15 +728,13 @@ AetherStringArray* string_split(const void* str, const void* delimiter) {
         return arr;
     }
 
-    // Count how many pieces we'll produce. At this point slen >= delim_len
-    // so the loop bound `slen - delim_len` won't underflow.
+    // Count how many pieces we'll produce: one more than the delimiters,
+    // each found with str_find rather than a compare at every offset
+    // (#3531).
     size_t count = 1;
-    size_t upper = slen - delim_len;
-    for (size_t i = 0; i <= upper; i++) {
-        if (memcmp(sdata + i, delim_data, delim_len) == 0) {
-            count++;
-            i += delim_len - 1;
-        }
+    for (size_t at = str_find(sdata, slen, 0, delim_data, delim_len); at != SIZE_MAX;
+         at = str_find(sdata, slen, at + delim_len, delim_data, delim_len)) {
+        count++;
     }
 
     arr->strings = (AetherString**)aether_caps_malloc(sizeof(AetherString*) * count);
@@ -750,14 +742,12 @@ AetherStringArray* string_split(const void* str, const void* delimiter) {
 
     size_t start = 0;
     size_t idx = 0;
-    for (size_t i = 0; i <= upper; i++) {
-        if (memcmp(sdata + i, delim_data, delim_len) == 0) {
-            AetherString* piece = string_new_with_length(sdata + start, i - start);
-            if (!piece) { string_array_partial_free(arr, idx, count); return NULL; }
-            arr->strings[idx++] = piece;
-            start = i + delim_len;
-            i += delim_len - 1;
-        }
+    for (size_t at = str_find(sdata, slen, 0, delim_data, delim_len); at != SIZE_MAX;
+         at = str_find(sdata, slen, start, delim_data, delim_len)) {
+        AetherString* piece = string_new_with_length(sdata + start, at - start);
+        if (!piece) { string_array_partial_free(arr, idx, count); return NULL; }
+        arr->strings[idx++] = piece;
+        start = at + delim_len;
     }
     // Tail piece (may be empty if input ends with the delimiter).
     AetherString* tail = string_new_with_length(sdata + start, slen - start);
