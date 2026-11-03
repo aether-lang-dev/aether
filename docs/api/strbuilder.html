@@ -158,7 +158,7 @@
       <h3 class="function-name">append_n <span class="kind">fn</span></h3>
       <pre class="usage"><code>append_n(b, s, n) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, s: string, n: int</span></p>
-      <p class="doc">Append exactly `n` bytes from `s`. Binary-safe — embedded NULs round-trip cleanly. Returns 1 on success, 0 on failure.</p>
+      <p class="doc">Append exactly `n` bytes from `s`. Binary-safe: embedded NULs round-trip cleanly. A heap or counted string never gives more bytes than it holds: a larger `n` is cut to its length. Returns 1 on success, 0 on failure.</p>
     </div>
     <div class="function" id="append_byte" data-name="append_byte">
       <h3 class="function-name">append_byte <span class="kind">fn</span></h3>

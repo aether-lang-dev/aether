@@ -319,6 +319,12 @@ int aether_bytes_copy_from_string(AetherBytes* b, int dst,
                                   const void* src, int src_len) {
     if (is_aether_string(b)) return 0;
     if (!b || dst < 0 || !src || src_len < 0) return 0;
+    /* `src` arrives with its header (the extern's parameter is `@aether
+     * string`), and a counted string copies no more than it holds: a 4096
+     * for a three byte string copied 4093 bytes of whatever followed it
+     * (#3523). A bare char* has no length to check, and its `src_len`
+     * stands. */
+    src_len = aether_string_bound_n(src, src_len);
     if (src_len == 0) return 1;
     size_t needed = (size_t)dst + (size_t)src_len;
     if (needed < (size_t)dst) return 0;  /* overflow */

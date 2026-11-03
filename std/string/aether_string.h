@@ -46,6 +46,19 @@ static inline int is_aether_string(const void* ptr) {
     return 1;
 }
 
+// The bytes a length-aware (`_n`) function reads of `s` when its caller
+// says `n` (#3523): `n`, cut to the stored length when `s` carries an
+// AetherString header. That length is exact, so the cut loses nothing an
+// embedded NUL needs and only keeps a longer `n` from reading past the end.
+// A bare char* has no length of its own to check against, and its `n`
+// stands. A negative `n` is 0.
+static inline int aether_string_bound_n(const void* s, int n) {
+    if (n < 0) return 0;
+    if (is_aether_string(s) && (size_t)n > ((const AetherString*)s)->length)
+        return (int)((const AetherString*)s)->length;
+    return n;
+}
+
 // String creation
 AetherString* string_new(const char* cstr);
 AetherString* string_from_cstr(const char* cstr);  // Alias for new

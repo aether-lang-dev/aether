@@ -47,11 +47,16 @@ AetherStrBuilder* aether_strbuilder_new(int cap_hint);
  * 0 on failure (NULL builder, NULL s, OOM, or cap exceeded). */
 int aether_strbuilder_append(AetherStrBuilder* b, const void* s);
 
-/* Append exactly `n` bytes from `s`. Binary-safe — embedded NULs
- * round-trip. `s` may be AetherString* (read via aether_string_data)
- * or plain `const char*`. Returns 1 on success, 0 on failure
- * (negative n, NULL s, OOM, etc.). n == 0 is a no-op success. */
+/* Append exactly `n` bytes from `s`, a payload read as raw bytes (never as
+ * an AetherString header). Binary-safe: embedded NULs round-trip.
+ * Returns 1 on success, 0 on failure (negative n, NULL s, OOM, etc.).
+ * n == 0 is a no-op success. */
 int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n);
+
+/* strbuilder.append_n's extern (#3523): `s` is an AetherString* or a bare
+ * `const char*`, and for an AetherString `n` is cut to its stored length
+ * before its payload is appended. */
+int aether_strbuilder_append_string_n(AetherStrBuilder* b, const void* s, int n);
 
 /* Append `n` raw bytes from `data` (#2301): the landing point for a `byte[]`
  * slice. Unlike append_n, `data` is never read as an AetherString, so binary

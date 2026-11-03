@@ -274,7 +274,9 @@ get_be64(b: ptr, index: int) -> long {
 // Copy `src_len` bytes from `src` into the buffer starting at offset
 // `dst`. `src` may be either a plain `string` literal or an
 // AetherString-bearing value (binary-safe via aether_string_data on
-// the C side). Returns 1 on success, 0 on failure.
+// the C side). A heap or counted string never gives more bytes than
+// it holds: a larger `src_len` is cut to its length. Returns 1 on
+// success, 0 on failure.
 copy_from_string(b: @moves ptr, dst: int, src: string, src_len: int) -> int {
     return aether_bytes_copy_from_string(b, dst, src, src_len)
 }

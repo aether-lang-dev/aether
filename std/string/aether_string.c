@@ -15,6 +15,7 @@
 #include "../../runtime/aether_locale_num.h"
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
 #include "../../runtime/utils/aether_count.h"
+#include "../../runtime/actors/aether_panic.h"
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -31,6 +32,17 @@ static inline size_t str_len(const void* s) {
     if (!s) return 0;
     if (is_aether_string(s)) return ((const AetherString*)s)->length;
     return strlen((const char*)s);
+}
+
+// A length or position as the int the string API returns (#3523). One past
+// INT_MAX has no right int answer: cast, a string over 2 GiB read as a
+// negative length, and a loop over it did nothing and said nothing. Cut to
+// INT_MAX it would be a wrong length or a wrong position just as quietly, so
+// it panics.
+static inline int str_int(size_t v) {
+    if (v > (size_t)INT_MAX)
+        aether_panic("string: a length or position past 2 GiB does not fit an int");
+    return (int)v;
 }
 
 // Alias for string literal creation
@@ -235,7 +247,7 @@ AetherString* string_concat_wrapped(const void* a, const void* b) {
 }
 
 int string_length(const void* str) {
-    return (int)str_len(str);
+    return str_int(str_len(str));
 }
 
 int string_char_at(const void* str, int index) {
@@ -488,12 +500,14 @@ AetherString* string_replace_all(const void* str, const void* old_sub, const voi
  * str_len() → strlen() on the unwrapped data and silently truncate
  * at the first NUL.
  *
- * Trusts the caller's `str_len` parameter — does NOT consult the
- * AetherString header even if one happens to be present. start/end
- * are clamped to [0, str_len]. */
+ * The caller's `str_len_bytes` is the length, cut to the stored one when
+ * `str` carries an AetherString header (#3523): that length is exact, so
+ * the cut keeps every embedded NUL and only stops a longer `str_len_bytes`
+ * reading past the end. A bare char* has no length to check, and its
+ * `str_len_bytes` stands. start/end are clamped to [0, str_len_bytes]. */
 AetherString* string_substring_n(const void* str, int str_len_bytes, int start, int end) {
     if (!str) return NULL;
-    if (str_len_bytes < 0) str_len_bytes = 0;
+    str_len_bytes = aether_string_bound_n(str, str_len_bytes);
     /* Resolve to the payload through str_data so we work uniformly
      * for both AetherString* inputs (bytes.finish, string_concat_wrapped,
      * string_new_with_length, fs.read_binary, etc.) and bare char*
@@ -502,10 +516,11 @@ AetherString* string_substring_n(const void* str, int str_len_bytes, int start, 
      * `string_*`-prefixed externs (is_stdlib_string_aware_extern), so
      * this function must do its own header dispatch.
      *
-     * `str_len_bytes` stays authoritative for slice bounds — we do
-     * NOT replace it with str_len(str). Callers may have tracked the
-     * length themselves through binary content with embedded NULs,
-     * which is the whole reason the `_n` variant exists. */
+     * `str_len_bytes` stays authoritative for slice bounds below the
+     * stored length. It is not replaced with str_len(str), which for a
+     * bare char* is strlen. Callers may have tracked the length
+     * themselves through binary content with embedded NULs, which is the
+     * whole reason the `_n` variant exists. */
     const char* sdata = str_data(str);
     if (start < 0) start = 0;
     if (end > str_len_bytes) end = str_len_bytes;
@@ -540,26 +555,30 @@ int string_length_n(const void* str, int known_length) {
  * string_char_at pays on every call when `str` arrives as a plain
  * `const char*`. Filed in string-length-aware-accessors.md after
  * avn's bench profile showed __strlen_avx2 dominating CPU at the
- * slow batches. Trusts the caller's known_length absolutely — does
- * NOT consult an AetherString header even if one is present. Same
+ * slow batches. The caller's known_length is cut to the stored length
+ * when `str` carries an AetherString header (#3523), so a longer one no
+ * longer reads past the end; a bare char*'s is trusted. Same
  * miss-return convention as string_char_at ('\0' for out-of-range
  * and NULL input). */
 int string_char_at_n(const void* str, int known_length, int index) {
     if (!str) return 0;
     if (known_length < 0) return 0;
+    known_length = aether_string_bound_n(str, known_length);
     if (index < 0 || index >= known_length) return 0;
     return (int)(unsigned char)str_data(str)[index];
 }
 
 /* Length-aware index_of_from. Same motivation as string_char_at_n:
  * caller has already cached the haystack length. Needle is still
- * strlen'd (small / fixed). `start` clamped to [0, known_length];
- * `start` > known_length OR needle longer than the searchable
- * range returns -1. */
+ * strlen'd (small / fixed). known_length is cut to the stored length
+ * when `str` carries an AetherString header (#3523). `start` clamped to
+ * [0, known_length]; `start` > known_length OR needle longer than the
+ * searchable range returns -1. */
 int string_index_of_from_n(const void* str, int known_length,
                            const char* substring, int start) {
     if (!str || !substring) return -1;
     if (known_length < 0) return -1;
+    known_length = aether_string_bound_n(str, known_length);
     size_t sub_len = str_len(substring);
     const char* sub_data = str_data(substring);
     const char* sdata = str_data(str);

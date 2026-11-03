@@ -90,6 +90,8 @@ extern string_concat(a: string, b: string) -> string @heap
 // its payload bytes at naive-C-extern boundaries (#297). The C ABI is
 // unchanged — the header still declares `AetherString*`.
 extern string_concat_wrapped(a: string, b: string) -> string @heap
+// The length in bytes. A string longer than an int can count (2 GiB)
+// panics rather than reporting a negative or cut length.
 extern string_length(str: string) -> int
 extern string_char_at(str: string, index: int) -> int
 extern string_equals(a: string, b: string) -> int
@@ -120,16 +122,17 @@ extern string_replace(str: string, old: string, new: string) -> string @heap
 extern string_replace_all(str: string, old: string, new: string) -> string @heap
 extern string_substring(str: string, start: int, end: int) -> string @heap
 
-// Length-aware sibling — caller supplies the source length explicitly.
+// Length-aware sibling: the caller supplies the source length explicitly.
 // Reach for this when `str` arrives as a `string` parameter at a
 // function boundary (where #297's auto-unwrap may have stripped the
 // AetherString header) AND the content may contain embedded NULs.
 // The plain string_substring would call str_len() on the unwrapped
 // data and fall through to strlen, truncating at the first NUL.
 //
-// Trusts the caller's `str_len_bytes` parameter — does NOT consult
-// the AetherString header even if one happens to be present.
-// start / end are clamped to [0, str_len_bytes].
+// The caller's `str_len_bytes` is cut to the string's stored length
+// when it has one (a heap or counted string), so a larger value never
+// reads past the end; a plain C string's is trusted. start / end are
+// clamped to [0, str_len_bytes].
 extern string_substring_n(str: string, str_len_bytes: int, start: int, end: int) -> string @heap
 
 // Identity helper documenting intent: in code that receives a
@@ -150,14 +153,16 @@ extern string_length_n(str: string, known_length: int) -> int
 // iterator-walk loops over a multi-KB body whose length the caller
 // has already cached. Filed in string-length-aware-accessors.md
 // after avn's bench profile showed __strlen_avx2 dominating CPU.
+// A `known_length` past a counted string's stored length is cut to it.
 extern string_char_at_n(str: string, known_length: int, index: int) -> int
 
 // Length-aware sibling of string_index_of_from. Same motivation as
-// string_char_at_n — caller has already cached the haystack length.
+// string_char_at_n: the caller has already cached the haystack length.
 // Needle is still strlen'd (small / fixed). Returns the absolute
 // offset of the first match at or after `start`, or -1 on miss.
 // `start` clamped to [0, known_length]; needle longer than the
-// searchable range returns -1.
+// searchable range returns -1. A `known_length` past a counted
+// string's stored length is cut to it.
 extern string_index_of_from_n(str: string, known_length: int,
     substring: string, start: int) -> int
 

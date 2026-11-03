@@ -1,10 +1,13 @@
 #include "test_harness.h"
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_process_mem.h"
+#include "../../runtime/actors/aether_panic.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -52,6 +55,36 @@ TEST_CATEGORY(string_length, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(5, string_length(s));
     string_free(s);
 }
+
+/* #3523: string_length returned (int) of a size_t, so a string over 2 GiB
+ * read as a negative length and a loop over it quietly did nothing. It
+ * panics instead. A header claiming 2 GiB and ten bytes is enough:
+ * string_length reads the header, not the bytes. */
+#if SIZE_MAX > INT_MAX && !defined(__wasi__)
+static volatile int g_huge_length = 0;
+TEST_CATEGORY(string_length_past_int_panics, TEST_CATEGORY_STDLIB) {
+    static char bytes[1] = "";
+    AetherString huge;
+    memset(&huge, 0, sizeof huge);
+    huge.magic = AETHER_STRING_MAGIC;
+    huge.ref_count = AETHER_STRING_PINNED_REFS;
+    huge.length = (size_t)INT_MAX + 10;
+    huge.capacity = huge.length + 1;
+    huge.data = bytes;
+
+    char caught[96] = "";
+    g_huge_length = 0;
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        g_huge_length = string_length(&huge);
+    }
+    snprintf(caught, sizeof caught, "%s", f->reason ? f->reason : "");
+    aether_try_pop();
+
+    ASSERT_EQ(0, g_huge_length);
+    ASSERT_STREQ("string: a length or position past 2 GiB does not fit an int", caught);
+}
+#endif
 
 TEST_CATEGORY(string_char_at, TEST_CATEGORY_STDLIB) {
     AetherString* s = string_from_cstr("Hello");

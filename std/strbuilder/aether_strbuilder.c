@@ -107,6 +107,20 @@ int aether_strbuilder_append_n(AetherStrBuilder* b, const void* s, int n) {
     return 1;
 }
 
+/* strbuilder.append_n's boundary (#3523). The raw append_n above takes the
+ * payload alone, so it cannot see how long the string is, and an `n` past
+ * the end appended whatever followed it. This one's extern parameter is
+ * `@aether string`: a counted string arrives with its header, and `n` is
+ * cut to the length it holds before the payload goes to append_n. A bare
+ * char* (a literal handed to the extern directly) has no length to check,
+ * and its `n` stands, as before. */
+int aether_strbuilder_append_string_n(AetherStrBuilder* b, const void* s, int n) {
+    if (!b || !s) return 0;
+    if (n < 0) return 0;
+    n = aether_string_bound_n(s, n);
+    return aether_strbuilder_append_n(b, aether_string_data(s), n);
+}
+
 int aether_strbuilder_append_bytes(AetherStrBuilder* b, const void* data, int n) {
     if (!b || n < 0 || (!data && n > 0)) return 0;
     if (n == 0) return 1;
