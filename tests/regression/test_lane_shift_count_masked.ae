@@ -1,0 +1,50 @@
+// Regression (#3524): a lane shift's count is masked to the lane width, as
+// a scalar shift's is.
+//
+// `lanes.i32shl` and the other lane shifts passed the count to C's vector
+// shift as it was, where a count of the lane width or more is undefined: x86
+// gave 0, and a negative count was anything. Each now masks it (`n & 31` for
+// i32x4, `n & 15` for i16x8), so a shift by the width is no shift and a
+// negative count takes its low bits, and a left shift into the sign bit
+// wraps. A count inside the width shifts as before.
+
+import std.lanes
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    a = lanes.i32x4(1, -16, 256, 7)
+    // Through variables, so no C compiler folds them.
+    w32 = 32
+    w33 = 33
+    w36 = 36
+    neg = -1
+    check(lanes.i32lane(lanes.i32shl(a, w32), 0) == 1, "i32shl by 32 is no shift")
+    check(lanes.i32lane(lanes.i32shl(a, w33), 0) == 2, "i32shl by 33 is by 1")
+    check(lanes.i32lane(lanes.i32shr(a, w33), 1) == -8, "i32shr by 33 is by 1")
+    check(lanes.i32lane(lanes.i32shr_u(a, w36), 2) == 16, "i32shr_u by 36 is by 4")
+    check(lanes.i32lane(lanes.i32shl(a, neg), 0) == -2147483647 - 1, "i32shl by -1 is by 31")
+    check(lanes.i32lane(lanes.i32shr_u(a, neg), 1) == 1, "i32shr_u by -1 is by 31")
+    check(lanes.i32lane(lanes.i32shl(a, 32), 3) == 7, "i32shl by a constant 32")
+    h = lanes.i16x8(1, -16, 256, 7, 1, 1, 1, 1)
+    w16 = 16
+    w17 = 17
+    check(lanes.i16lane(lanes.i16shl(h, w16), 0) == 1, "i16shl by 16 is no shift")
+    check(lanes.i16lane(lanes.i16shl(h, w17), 2) == 512, "i16shl by 17 is by 1")
+    check(lanes.i16lane(lanes.i16shr(h, w17), 1) == -8, "i16shr by 17 is by 1")
+    check(lanes.i16lane(lanes.i16shl(h, neg), 0) == -32768, "i16shl by -1 is by 15")
+
+    // A count inside the width shifts as before.
+    check(lanes.i32lane(lanes.i32shl(a, 3), 3) == 56, "i32shl by 3")
+    check(lanes.i32lane(lanes.i32shr(a, 2), 1) == -4, "i32shr by 2")
+    check(lanes.i32lane(lanes.i32shr_u(lanes.i32x4(-1, 0, 0, 0), 28), 0) == 15, "i32shr_u by 28")
+    check(lanes.i16lane(lanes.i16shl(h, 2), 3) == 28, "i16shl by 2")
+    println("lane shifts: ok")
+}

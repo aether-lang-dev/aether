@@ -9171,6 +9171,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
     print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
     print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef uint16_t AeU16x8 __attribute__((vector_size(16)));");   /* #3524: i16x8's left shift */
     /* #2428: eight lanes, 32 bytes. With AVX2 an f32x8 is one 256-bit
        register and each operation one instruction. Without it the type is
        a struct of two four-lane halves. A plain 32-byte vector would compile
@@ -9357,10 +9358,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_mul(AeI32x4 a, AeI32x4 b) { return a * b; }");
     /* Shifts by a compile-time-or-runtime constant count; the count is the
        same for every lane (a vector-scalar shift), which is what the hardware
-       shift-immediate/GPR-count forms provide. */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { return a << (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)n; AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+       shift-immediate/GPR-count forms provide. #3524: the count is masked to
+       the lane's width (& 31 here, & 15 for 16-bit lanes), as a scalar
+       shift's is, where C leaves a count of the width or more undefined
+       (x86 gives 0, a scalar shift on ARM64 masks), and a left shift runs
+       in unsigned, so a bit shifted into the sign is defined. Inlined, a
+       constant count inside the width folds the mask away: the plain
+       shift-immediate instruction. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u << (uint32_t)(n & 31); AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)(n & 31); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)(n & 31); AeI32x4 r; memcpy(&r, &u, 16); return r; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_min(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a < b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_max(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a > b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_sum(AeI32x4 v) { return (int64_t)v[0] + v[1] + v[2] + v[3]; }");
@@ -9373,8 +9380,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_add(AeI16x8 a, AeI16x8 b) { return a + b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_sub(AeI16x8 a, AeI16x8 b) { return a - b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_mul(AeI16x8 a, AeI16x8 b) { return a * b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { return a << (int16_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { AeU16x8 u; memcpy(&u, &a, 16); u = u << (uint16_t)(n & 15); AeI16x8 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)(n & 15); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
     emit_lane_int_div_helpers(gen);

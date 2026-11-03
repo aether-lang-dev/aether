@@ -3962,7 +3962,10 @@ follow the same rules.
 them lane by lane, with a lane value or a scalar on either side: a `0` in
 any lane of the divisor panics with `division_by_zero` and the position, and
 a lane's most negative value divided by `-1` is itself, its remainder `0`
-(`i16x8`: `-32768 / -1` is `-32768`). `v /= w` and `v %= w` too.
+(`i16x8`: `-32768 / -1` is `-32768`). `v /= w` and `v %= w` too. The lane
+shifts (`lanes.i32shl`, `i32shr`, `i32shr_u`, `i16shl`, `i16shr`) mask their
+count to the lane width, `n & 31` and `n & 15`, and a left shift into the
+sign bit wraps.
 
 None of this costs anything where an operand is a constant that keeps C
 defined: a divisor other than `0` and `-1`, a shift count inside the width,

@@ -172,6 +172,11 @@ lanes.i32lane(a, 0) / lanes.i32sum(a)     // read one lane / sum (as long)
 `i16max`, `i16load`, `i16store`, `i16lane`, `i16splat`, `i16x8`), with 16-bit
 lanes read back sign-extended to `int`.
 
+A shift count is masked to the lane width, as a scalar shift's is (#3524):
+`n & 31` for `i32x4`, `n & 15` for `i16x8`, so `lanes.i32shl(a, 33)` shifts by
+1. A left shift into the sign bit wraps. A constant count inside the width is
+the plain shift instruction.
+
 The hot exit of these kernels is a **saturating pack**: narrow wide
 accumulators to the next size down, clamping (not wrapping) out-of-range
 lanes:

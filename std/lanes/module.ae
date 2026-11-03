@@ -164,7 +164,8 @@ exports(
 @extern("_ae_i32x4_sub") i32sub(a: i32x4, b: i32x4) -> i32x4
 @extern("_ae_i32x4_mul") i32mul(a: i32x4, b: i32x4) -> i32x4
 // Shift every lane by the same count `n`: shl (logical left), shr (ARITHMETIC
-// right, sign-preserving), shr_u (LOGICAL right, zero-filling).
+// right, sign-preserving), shr_u (LOGICAL right, zero-filling). The count is
+// masked to the lane width, as a scalar shift's is: `n & 31` (#3524).
 @extern("_ae_i32x4_shl") i32shl(a: i32x4, n: long) -> i32x4
 @extern("_ae_i32x4_shr") i32shr(a: i32x4, n: long) -> i32x4
 @extern("_ae_i32x4_shr_u") i32shr_u(a: i32x4, n: long) -> i32x4
@@ -185,6 +186,7 @@ exports(
 @extern("_ae_i16x8_add") i16add(a: i16x8, b: i16x8) -> i16x8
 @extern("_ae_i16x8_sub") i16sub(a: i16x8, b: i16x8) -> i16x8
 @extern("_ae_i16x8_mul") i16mul(a: i16x8, b: i16x8) -> i16x8
+// The count is masked to the lane width: `n & 15` (#3524).
 @extern("_ae_i16x8_shl") i16shl(a: i16x8, n: long) -> i16x8
 @extern("_ae_i16x8_shr") i16shr(a: i16x8, n: long) -> i16x8
 @extern("_ae_i16x8_min") i16min(a: i16x8, b: i16x8) -> i16x8
