@@ -273,10 +273,14 @@ void stunt_vm_cancel(void* vm) { if (vm && S.lib) S.cancel((st_vm*)vm); }
 
 static st_vm* g_vm = NULL;
 
+// Tier 1 has no way to set a limit or cancel, so its VM gets a default
+// limit: stunt.run("spin host") stops instead of spinning for good.
 int stunt_init(void) {
     if (g_vm) return 0;
     g_vm = (st_vm*)stunt_vm_new();
-    return g_vm ? 0 : -1;
+    if (!g_vm) return -1;
+    S.set_limit(g_vm, ST_DEFAULT_BUDGET);
+    return 0;
 }
 
 void stunt_finalize(void) {

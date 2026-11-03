@@ -79,6 +79,13 @@ main() {
             sandbox.free(nothing)
         }
 
+        // Tier 1 has no limit or cancel of its own to set: its default limit
+        // is all that stops spin there.
+        spec.it_when(have, "stops spin in tier 1 by a default limit", reason) callback {
+            spec.assert_eq(stunt.run("spin host"), stunt.STUNT_STOPPED,
+                "stunt.run(\"spin host\") is stopped, not run forever")
+        }
+
         spec.it_when(have, "stops spin at the instruction limit", reason) callback {
             vm = stunt.vm_new()
             stunt.vm_set_instruction_limit(vm, 100000)

@@ -31,6 +31,8 @@ import std.string
 
 extern exit(code: int)
 extern aether_sandbox_depth() -> int
+// 1 when every level in force grants it (runtime/aether_sandbox.h).
+extern aether_sandbox_check_slow(category: string, resource: string) -> int
 
 // ---- host functions the guest calls ----------------------------------------
 
@@ -157,26 +159,44 @@ fn arg_text(a: string) -> string {
     return string.substring(a, 1, string.length(a))
 }
 
+// The bridge's answers (aether_host_stunt.c): "ERR refused: ..." only when
+// the grants say no, which the guest counts as a refusal; any other failure
+// is an ERR without that prefix, which it counts as an error.
 fn guarded_read(g: sandbox.Grants, path: string) -> string {
     box = list.new()
     sandbox.enforce(g) callback {
-        text, err = fs.read(path)
-        if err == "" { list.add(box, text) }
+        if aether_sandbox_check_slow("fs_read", path) == 0 {
+            list.add(box, "ERR refused: fs_read ${path}")
+        } else {
+            text, err = fs.read(path)
+            if err == "" {
+                list.add(box, "OK s${text}")
+            } else {
+                list.add(box, "ERR ${err}")
+            }
+        }
     }
-    if list.size(box) == 0 { return "ERR refused: fs_read ${path}" }
     out, _e = list.get_string(box, 0)
-    return "OK s${out}"
+    return out
 }
 
+// An unset variable is "OK n", nothing, as the bridge pushes nil.
 fn guarded_getenv(g: sandbox.Grants, name: string) -> string {
     box = list.new()
     sandbox.enforce(g) callback {
-        v = os.getenv(name)
-        if v != "" { list.add(box, v) }
+        if aether_sandbox_check_slow("env", name) == 0 {
+            list.add(box, "ERR refused: env ${name}")
+        } else {
+            v = os.getenv(name)
+            if v == "" {
+                list.add(box, "OK n")
+            } else {
+                list.add(box, "OK s${v}")
+            }
+        }
     }
-    if list.size(box) == 0 { return "ERR refused: env ${name}" }
     out, _e = list.get_string(box, 0)
-    return "OK s${out}"
+    return out
 }
 
 // One CALL frame, answered as the in-process bridge answers the same call.
@@ -229,12 +249,16 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
     sandbox.grant_fs_read(g, exe)
 
     // The child's environment is what the grants allow it to see: a copy a
-    // guest takes at start (env-cached) is then no wider than getenv.
+    // guest takes at start (env-cached) is then no wider than getenv. What
+    // the host has and keeps back it names in STUNT_WITHHELD, so the child
+    // can tell a refusal from a variable that was never set.
     env = list.new()
     list.add(env, "PATH=/usr/bin:/bin")
     home = guarded_getenv(g, "HOME")
     if string.starts_with(home, "OK s") == 1 {
         list.add(env, "HOME=${string.substring(home, 4, string.length(home))}")
+    } else if string.starts_with(home, "ERR refused:") == 1 && os.getenv("HOME") != "" {
+        list.add(env, "STUNT_WITHHELD=HOME")
     }
     argv = list.new()
     list.add(argv, check)
@@ -258,10 +282,18 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
     stunt.map_freeze(m)
     token = stunt.map_token(m)
 
+    // A host-checked check gets 500 ms before the CANCEL (the deadline),
+    // then `grace` to answer it. That covers the child starting, seeing the
+    // CANCEL and writing its RESULT, so it is generous: a loaded runner can
+    // be slow to start a process, and an answer that comes sooner ends the
+    // wait sooner. silent never answers, so its grace only sets how long it
+    // runs before the kill, and stays short.
     host_checked = 0
     if expect == "host" { host_checked = 1 }
     wait_ms = 20000
     if host_checked == 1 { wait_ms = 500 }
+    grace = 10000
+    if check == "silent" { grace = 1000 }
     cancelled = 0
     killed = 0
     refused = ""
@@ -274,7 +306,7 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
             if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES && cancelled == 0 {
                 ipc.write_frame(ch, "CANCEL")
                 cancelled = 1
-                wait_ms = 1000
+                wait_ms = grace
             } else if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES {
                 os.kill(pid, 9)
                 killed = 1

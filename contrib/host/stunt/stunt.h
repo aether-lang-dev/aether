@@ -31,9 +31,21 @@ typedef struct st_vm st_vm;
 typedef int (*st_host_fn)(void* vm);
 
 /* An interrupt handler, called every ST_INTERRUPT_EVERY instructions of a
- * long-running check (spin); non-zero stops the check, as a cancel does. */
+ * long-running check (spin); non-zero stops the check, as a cancel does.
+ * ST_INTERRUPT_HUNG_UP says the host has gone: that stops silent too, which
+ * answers nothing else. */
 typedef int (*st_interrupt_fn)(void* ud);
 #define ST_INTERRUPT_EVERY 10000
+#define ST_INTERRUPT_HUNG_UP 2
+
+/* The instruction limit the bridge's tier 1 (stunt.run) and the stand-alone
+ * stunt program set, so spin with nothing else to stop it still ends. */
+#define ST_DEFAULT_BUDGET 50000000
+/* How long silent waits for the host to kill it before it gives up. */
+#define ST_SILENT_CAP_MS 30000
+/* The stunt program run by a host ends by SIGALRM after this many seconds,
+ * whatever it is doing, so a host that never reaps it cannot leave it. */
+#define ST_CHILD_CAP_S 60
 
 /* Typed values (arguments and results). */
 #define ST_TNIL 0
@@ -66,7 +78,10 @@ void   st_set_interrupt_handler(st_vm* vm, st_interrupt_fn fn, void* ud);
 
 /* The engine copies the environment when it is made, as Python's os.environ
  * and Perl's %ENV do; env-cached reads that copy. A host entering a sandbox
- * scrubs it: entries `keep` returns 0 for are dropped, and stay dropped. */
+ * scrubs it: entries `keep` returns 0 for are dropped, and stay dropped;
+ * env-cached counts a dropped name as refused, and one that was never there
+ * as an error. A host starting the engine in a child with less than its own
+ * environment names what it kept back in STUNT_WITHHELD=NAME,... */
 void   st_env_scrub(st_vm* vm, int (*keep)(const char* name));
 
 /* The catalogue. `modes` is "in-process,child", "child" or "in-process";

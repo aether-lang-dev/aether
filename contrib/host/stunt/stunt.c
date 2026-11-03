@@ -6,9 +6,10 @@
  * instruction), or through the host (a registered function, the shared
  * map). The engine judges the outcome itself where it can: a refusal is
  * the error a sandbox gives (EACCES or EPERM from libc, the preload or the
- * kernel), or an error from a host function; anything else that fails is
- * reported as an error, never as a refusal, so a missing file or an
- * unreachable network cannot pass for a sandbox at work.
+ * kernel), or a host function's error that says so by starting "refused:";
+ * anything else that fails is reported as an error, never as a refusal, so
+ * a missing file, an unset variable or an unreachable network cannot pass
+ * for a sandbox at work.
  *
  * Built two ways from this one file: a shared library a bridge dlopens
  * (libstunt), and, with stunt_main.c, the stunt program a host spawns.
@@ -32,6 +33,7 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -76,6 +78,8 @@ struct st_vm {
     int nfns;
     char** env;        /* the copy of the environment taken by st_new */
     int nenv;
+    char** hidden;     /* names kept from the copy: scrubbed, or withheld by the host */
+    int nhidden;
     int64_t budget;
     st_flag cancelled;
     st_interrupt_fn interrupt;
@@ -91,6 +95,27 @@ struct st_vm {
     char result[ST_LINE];
 };
 
+#define ST_WITHHELD "STUNT_WITHHELD"
+
+/* Records `name` as kept from the engine: by st_env_scrub, or by the host. */
+static void hide(st_vm* vm, const char* name) {
+    for (int i = 0; i < vm->nhidden; i++) {
+        if (strcmp(vm->hidden[i], name) == 0) return;
+    }
+    char** grown = (char**)realloc(vm->hidden, ((size_t)vm->nhidden + 1) * sizeof(char*));
+    if (!grown) return;
+    vm->hidden = grown;
+    char* copy = strdup(name);
+    if (copy) vm->hidden[vm->nhidden++] = copy;
+}
+
+static int hidden(st_vm* vm, const char* name) {
+    for (int i = 0; i < vm->nhidden; i++) {
+        if (strcmp(vm->hidden[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 st_vm* st_new(void) {
     st_vm* vm = (st_vm*)calloc(1, sizeof *vm);
     if (!vm) return NULL;
@@ -103,6 +128,24 @@ st_vm* st_new(void) {
         for (int i = 0; i < n; i++) {
             char* copy = strdup(env[i]);
             if (copy) vm->env[vm->nenv++] = copy;
+        }
+    }
+    /* A host that starts the engine in a child with less than its own
+     * environment names what it kept back in STUNT_WITHHELD, a comma list;
+     * that is how a missing variable is told from one the host never had. */
+    for (int i = 0; i < n; i++) {
+        if (strncmp(env[i], ST_WITHHELD "=", sizeof ST_WITHHELD) != 0) continue;
+        const char* p = env[i] + sizeof ST_WITHHELD;
+        while (*p) {
+            size_t len = strcspn(p, ",");
+            if (len > 0 && len < 256) {
+                char name[256];
+                memcpy(name, p, len);
+                name[len] = '\0';
+                hide(vm, name);
+            }
+            p += len;
+            if (*p == ',') p++;
         }
     }
     return vm;
@@ -125,6 +168,8 @@ void st_free(st_vm* vm) {
     for (int i = 0; i < vm->nfns; i++) free(vm->fns[i].name);
     for (int i = 0; i < vm->nenv; i++) free(vm->env[i]);
     free(vm->env);
+    for (int i = 0; i < vm->nhidden; i++) free(vm->hidden[i]);
+    free(vm->hidden);
     free(vm);
 }
 
@@ -162,7 +207,7 @@ void st_env_scrub(st_vm* vm, int (*keep)(const char* name)) {
         memcpy(name, e, n);
         name[n] = '\0';
         if (keep(name)) vm->env[w++] = e;
-        else free(e);
+        else { hide(vm, name); free(e); }
     }
     vm->nenv = w;
     if (vm->env) vm->env[w] = NULL;
@@ -278,6 +323,16 @@ static int by_errno(int e, char* d, size_t cap, const char* what) {
 #define FIXTURE "stunt-fixture.txt"
 #define WRITTEN "stunt-written.txt"
 
+/* A host function's error is a refusal only when the host says it is one:
+ * its reason starts "refused:" (the bridge's and host.ae's read_file and
+ * getenv do this when the grants say no). A missing file, a failed read or
+ * no such function is an error, never a refusal. */
+static int host_refused(const char* why) { return strncmp(why, "refused:", 8) == 0; }
+static int host_failed(const char* why, char* d, size_t cap) {
+    detail(d, cap, "%s", why);
+    return host_refused(why) ? OUT_REFUSED : OUT_ERROR;
+}
+
 static void first_line(const char* s, char* out, size_t cap) {
     size_t n = strcspn(s, "\r\n");
     if (n >= cap) n = cap - 1;
@@ -329,25 +384,54 @@ static int c_write_granted_file(st_vm* vm, char* d, size_t cap) {
 #endif
 }
 
-static int c_getenv_home(st_vm* vm, char* d, size_t cap) {
-    (void)vm;
-    const char* v = getenv("HOME");
-    if (!v) { detail(d, cap, "HOME is unset"); return OUT_REFUSED; }
-    detail(d, cap, "HOME=%s", v);
-    return OUT_SUCCEEDED;
+/* Whether `name` is in the process's environment, read past getenv (and
+ * so past any preload's getenv): how a getenv that says NULL for a variable
+ * that is there is told from one that is simply unset. */
+static int in_environ(const char* name) {
+    size_t n = strlen(name);
+    for (char** e = ST_ENVIRON; e && *e; e++) {
+        if (strncmp(*e, name, n) == 0 && (*e)[n] == '=') return 1;
+    }
+    return 0;
 }
 
+/* A NULL getenv is a refusal only with evidence of one: the variable is in
+ * the environment and getenv would not give it (the preload), or the host
+ * withheld it from this process. HOME simply unset is an error. */
+static int c_getenv_home(st_vm* vm, char* d, size_t cap) {
+    const char* v = getenv("HOME");
+    if (v) { detail(d, cap, "HOME=%s", v); return OUT_SUCCEEDED; }
+    if (in_environ("HOME")) { detail(d, cap, "getenv gave NULL; HOME is in the environment"); return OUT_REFUSED; }
+    if (hidden(vm, "HOME")) { detail(d, cap, "the host withheld HOME"); return OUT_REFUSED; }
+    detail(d, cap, "HOME is unset");
+    return OUT_ERROR;
+}
+
+/* HOME missing from the copy is a refusal when the scrub took it out or the
+ * host withheld it; when it was never there, an error. */
 static int c_env_cached(st_vm* vm, char* d, size_t cap) {
     const char* v = cached_env(vm, "HOME");
-    if (!v) { detail(d, cap, "HOME is not in the copy"); return OUT_REFUSED; }
-    detail(d, cap, "HOME=%s from the copy", v);
-    return OUT_SUCCEEDED;
+    if (v) { detail(d, cap, "HOME=%s from the copy", v); return OUT_SUCCEEDED; }
+    if (hidden(vm, "HOME")) { detail(d, cap, "HOME was kept from the copy"); return OUT_REFUSED; }
+    detail(d, cap, "HOME was never in the environment");
+    return OUT_ERROR;
 }
 
 #if !defined(_WIN32)
-/* A non-blocking connect: the sandbox refuses at once (EACCES from the
- * preload, EPERM from seccomp at socket()); anything else, EINPROGRESS or
- * a network error, means the call was let through. */
+/* A non-blocking connect: the sandbox refuses at once, with EACCES from the
+ * preload or Landlock at connect(), or EPERM from seccomp at socket(). EPERM
+ * at connect() is not the sandbox's: it is what a netfilter OUTPUT drop
+ * gives, so on a firewalled box it would let a sandbox that failed open read
+ * as refused; it is an error. Anything else, EINPROGRESS or a network error,
+ * means the call was let through.
+ *
+ * The address is TEST-NET-1's 192.0.2.1 (RFC 5737), reserved for
+ * documentation: nothing real answers there, so a check that is let through
+ * contacts nobody. Non-blocking, the connect cannot hang on it either; a
+ * connect still in progress is waited on for CONNECT_WAIT_MS at most, for an
+ * answer that comes back at once, and then dropped. */
+#define CONNECT_ADDR "192.0.2.1"
+#define CONNECT_WAIT_MS 100
 static int connect_to(int family, const char* addr, char* d, size_t cap) {
     int s = socket(family, SOCK_STREAM, 0);
     if (s < 0) return by_errno(errno, d, cap, "socket");
@@ -370,9 +454,24 @@ static int connect_to(int family, const char* addr, char* d, size_t cap) {
         r = connect(s, (struct sockaddr*)&sa, sizeof sa);
     }
     int e = errno;
+    if (r != 0 && e == EINPROGRESS) {
+        struct pollfd p;
+        p.fd = s;
+        p.events = POLLOUT;
+        p.revents = 0;
+        if (poll(&p, 1, CONNECT_WAIT_MS) > 0) {
+            int soe = 0;
+            socklen_t len = sizeof soe;
+            if (getsockopt(s, SOL_SOCKET, SO_ERROR, &soe, &len) == 0) {
+                if (soe == 0) r = 0;
+                else e = soe;
+            }
+        }
+    }
     close(s);
     if (r == 0) { detail(d, cap, "connected"); return OUT_SUCCEEDED; }
-    if (e == EACCES || e == EPERM) return by_errno(e, d, cap, "connect");
+    if (e == EACCES) return by_errno(e, d, cap, "connect");
+    if (e == EPERM) { detail(d, cap, "connect: %s (a firewall's answer, not the sandbox's)", strerror(e)); return OUT_ERROR; }
     detail(d, cap, "let through: %s", strerror(e));
     return OUT_SUCCEEDED;
 }
@@ -383,7 +482,7 @@ static int c_connect_v4(st_vm* vm, char* d, size_t cap) {
 #if defined(_WIN32)
     return NOT_HERE(d, cap);
 #else
-    return connect_to(AF_INET, "1.1.1.1", d, cap);
+    return connect_to(AF_INET, CONNECT_ADDR, d, cap);
 #endif
 }
 
@@ -392,7 +491,7 @@ static int c_connect_mapped(st_vm* vm, char* d, size_t cap) {
 #if defined(_WIN32)
     return NOT_HERE(d, cap);
 #else
-    return connect_to(AF_INET6, "::ffff:1.1.1.1", d, cap);
+    return connect_to(AF_INET6, "::ffff:" CONNECT_ADDR, d, cap);
 #endif
 }
 
@@ -504,14 +603,16 @@ static int c_dlopen_libm(st_vm* vm, char* d, size_t cap) {
 #endif
 }
 
-/* libc's own syscall(): what ctypes, Perl's syscall and Ruby's Fiddle reach. */
+/* libc's own syscall(): what ctypes, Perl's syscall and Ruby's Fiddle reach.
+ * Only EPERM or EACCES is a refusal. ENOSYS is not: the preload's syscall()
+ * gives EPERM while its sandbox is active and ENOSYS while it is not, so
+ * ENOSYS means a preload whose grants never applied. */
 static int c_syscall_fn_openat(st_vm* vm, char* d, size_t cap) {
     (void)vm;
 #if (defined(__linux__) || defined(__FreeBSD__)) && defined(SYS_openat)
     errno = 0;
     long r = syscall(SYS_openat, (long)AT_FDCWD, "/etc/passwd", (long)O_RDONLY, 0L);
     if (r >= 0) { close((int)r); detail(d, cap, "opened /etc/passwd"); return OUT_SUCCEEDED; }
-    if (errno == ENOSYS) { detail(d, cap, "syscall(): %s", strerror(errno)); return OUT_REFUSED; }
     return by_errno(errno, d, cap, "syscall()");
 #else
     detail(d, cap, "no syscall() here");
@@ -572,13 +673,13 @@ static int c_syscall_socket(st_vm* vm, char* d, size_t cap) {
 
 /* ---- the checks: through the host ---------------------------------------- */
 
-/* A host function's error is a refusal: a host that may not grant a thing
- * says so, and a guest cannot tell why. */
+/* A checked binding: refused when the host says "refused:", an error for
+ * any other failure, and an error when it answers nothing at all. */
 static int c_host_str(st_vm* vm, const char* fn, const char* arg, char* d, size_t cap) {
     st_val a = sval(arg);
     char why[256];
-    if (host_call(vm, fn, 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
-    if (vm->ret_type != ST_TSTR) { detail(d, cap, "%s(\"%s\") gave nothing", fn, arg); return OUT_REFUSED; }
+    if (host_call(vm, fn, 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
+    if (vm->ret_type != ST_TSTR) { detail(d, cap, "%s(\"%s\") gave nothing", fn, arg); return OUT_ERROR; }
     char line[96];
     first_line(vm->ret_s, line, sizeof line);
     detail(d, cap, "%s(\"%s\") = \"%s\"", fn, arg, line);
@@ -592,7 +693,7 @@ static int c_binding_getenv_home(st_vm* vm, char* d, size_t cap) { return c_host
 static int c_callback_greet(st_vm* vm, char* d, size_t cap) {
     st_val a = sval("stunt");
     char why[256];
-    if (host_call(vm, "greet", 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "greet", 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type != ST_TSTR) { detail(d, cap, "greet returned type %d, not a string", vm->ret_type); return OUT_ERROR; }
     if (strcmp(vm->ret_s, "hello, stunt") != 0) { detail(d, cap, "greet(\"stunt\") = \"%s\"", vm->ret_s); return OUT_ERROR; }
     detail(d, cap, "greet(\"stunt\") = \"hello, stunt\"");
@@ -602,16 +703,22 @@ static int c_callback_greet(st_vm* vm, char* d, size_t cap) {
 static int c_callback_add(st_vm* vm, char* d, size_t cap) {
     st_val a[2] = { ival(2), ival(40) };
     char why[256];
-    if (host_call(vm, "add", 2, a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "add", 2, a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type != ST_TINT) { detail(d, cap, "add returned type %d, not an int", vm->ret_type); return OUT_ERROR; }
     if (vm->ret_i != 42) { detail(d, cap, "add(2, 40) = %lld", (long long)vm->ret_i); return OUT_ERROR; }
     detail(d, cap, "add(2, 40) = 42");
     return OUT_SUCCEEDED;
 }
 
+/* The one host error this check counts as a refusal is the host's answer
+ * to a name it does not know, "no host function nope"; any other failure
+ * (a hang-up, a reply not understood) is an error. */
 static int c_callback_unregistered(st_vm* vm, char* d, size_t cap) {
     char why[256];
-    if (host_call(vm, "nope", 0, NULL, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "nope", 0, NULL, why, sizeof why) != 0) {
+        detail(d, cap, "%s", why);
+        return strcmp(why, "no host function nope") == 0 ? OUT_REFUSED : OUT_ERROR;
+    }
     detail(d, cap, "nope() answered");
     return OUT_SUCCEEDED;
 }
@@ -619,8 +726,8 @@ static int c_callback_unregistered(st_vm* vm, char* d, size_t cap) {
 static int c_map_get(st_vm* vm, char* d, size_t cap) {
     st_val a = sval("input");
     char why[256];
-    if (host_call(vm, "aether_map_get", 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
-    if (vm->ret_type != ST_TSTR) { detail(d, cap, "input is not in the map"); return OUT_REFUSED; }
+    if (host_call(vm, "aether_map_get", 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
+    if (vm->ret_type != ST_TSTR) { detail(d, cap, "input is not in the map"); return OUT_ERROR; }
     if (strcmp(vm->ret_s, "stunt-in") != 0) { detail(d, cap, "input = \"%s\"", vm->ret_s); return OUT_ERROR; }
     detail(d, cap, "input = \"stunt-in\"");
     return OUT_SUCCEEDED;
@@ -629,13 +736,13 @@ static int c_map_get(st_vm* vm, char* d, size_t cap) {
 static int map_put(st_vm* vm, const char* key, const char* value, char* d, size_t cap) {
     st_val a[2] = { sval(key), sval(value) };
     char why[256];
-    if (host_call(vm, "aether_map_put", 2, a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "aether_map_put", 2, a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type == ST_TINT && vm->ret_i != 0) { detail(d, cap, "put %s: refused by the map", key); return OUT_REFUSED; }
     st_val k = sval(key);
     if (host_call(vm, "aether_map_get", 1, &k, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_ERROR; }
     if (vm->ret_type != ST_TSTR || strcmp(vm->ret_s, value) != 0) {
         detail(d, cap, "put %s, then read back %s", key, vm->ret_type == ST_TSTR ? vm->ret_s : "nothing");
-        return OUT_REFUSED;
+        return OUT_ERROR;
     }
     detail(d, cap, "%s = \"%s\", read back", key, value);
     return OUT_SUCCEEDED;
@@ -652,24 +759,31 @@ static int c_spin(st_vm* vm, char* d, size_t cap) {
         n++;
         if (vm->budget > 0 && n >= vm->budget) { detail(d, cap, "stopped at the instruction limit, %lld", (long long)n); return OUT_STOPPED; }
         if (ST_FLAG_GET(vm->cancelled)) { detail(d, cap, "cancelled after %lld instructions", (long long)n); return OUT_STOPPED; }
-        if (vm->interrupt && n % ST_INTERRUPT_EVERY == 0 && vm->interrupt(vm->interrupt_ud)) {
-            detail(d, cap, "cancelled after %lld instructions", (long long)n);
-            return OUT_STOPPED;
+        if (vm->interrupt && n % ST_INTERRUPT_EVERY == 0) {
+            int why = vm->interrupt(vm->interrupt_ud);
+            if (why == ST_INTERRUPT_HUNG_UP) { detail(d, cap, "the host hung up after %lld instructions", (long long)n); return OUT_STOPPED; }
+            if (why) { detail(d, cap, "cancelled after %lld instructions", (long long)n); return OUT_STOPPED; }
         }
     }
 }
 
+/* Answers nothing, a cancel included, until the host kills it. It still
+ * stops when the host hangs up (the interrupt handler says so), and after
+ * ST_SILENT_CAP_MS whatever happens, so a broken host does not leave it
+ * behind for good. Either way it ended on its own: the host failed. */
 static int c_silent(st_vm* vm, char* d, size_t cap) {
-    (void)vm;
-    volatile int forever = 1;
-    while (forever) {
+    for (int waited = 0; waited < ST_SILENT_CAP_MS; waited += 50) {
 #if defined(_WIN32)
-        Sleep(1000);
+        Sleep(50);
 #else
-        pause();
+        (void)poll(NULL, 0, 50);
 #endif
+        if (vm->interrupt && vm->interrupt(vm->interrupt_ud) == ST_INTERRUPT_HUNG_UP) {
+            detail(d, cap, "the host hung up without killing it");
+            return OUT_ERROR;
+        }
     }
-    detail(d, cap, "woke up");
+    detail(d, cap, "nothing stopped it in %d ms", ST_SILENT_CAP_MS);
     return OUT_ERROR;
 }
 
@@ -719,8 +833,8 @@ static const st_check CATALOGUE[] = {
     { "write-granted-file",        BOTH,  0, c_write_granted_file,       "create and write ./" WRITTEN " through libc" },
     { "getenv-home",               BOTH,  0, c_getenv_home,              "getenv(\"HOME\") through libc" },
     { "env-cached",                BOTH,  0, c_env_cached,               "HOME from the engine's copy of the environment, taken at start (Python's os.environ, Perl's %ENV)" },
-    { "connect-1.1.1.1",           BOTH,  0, c_connect_v4,               "TCP connect to 1.1.1.1:443 through libc (non-blocking; refused, or let through)" },
-    { "connect-ipv4-mapped",       BOTH,  0, c_connect_mapped,           "TCP connect to [::ffff:1.1.1.1]:443 over AF_INET6, which a grant for 1.1.1.1 must cover" },
+    { "connect-192.0.2.1",         BOTH,  0, c_connect_v4,               "TCP connect to 192.0.2.1:443 (TEST-NET-1, nobody there) through libc, non-blocking: refused, or let through" },
+    { "connect-ipv4-mapped",       BOTH,  0, c_connect_mapped,           "TCP connect to [::ffff:192.0.2.1]:443 over AF_INET6, which a grant for 192.0.2.1 must cover" },
     { "exec-bin-sh",               BOTH,  0, c_exec_bin_sh,              "fork, then execve /bin/sh -c 'exit 0' in the child" },
     { "fork",                      CHILD, 0, c_fork,                     "fork a child that exits at once" },
     { "dlopen-libc-by-name",       CHILD, 0, c_dlopen_libc_by_name,      "dlopen libc by its soname (a handle on the real open/connect/execve)" },

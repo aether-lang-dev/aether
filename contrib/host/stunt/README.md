@@ -38,10 +38,18 @@ cannot take), and 3 when a host-checked check was stopped.
 The expectation lives in the test, which knows the grants it gave, so one
 catalogue runs under any number of policies. stunt judges an outcome itself
 wherever it can. A **refusal** is what a sandbox gives: `EACCES` or `EPERM`
-from libc, the preload library or the kernel, or an error from a host
-function. Anything else that goes wrong (a missing file, an unreachable
-network) is an **error**, never a refusal, so it cannot pass for a sandbox at
-work. A connect is non-blocking: refused at once, or let through.
+from libc, the preload library or the kernel, or a host function's error
+whose reason starts `refused:` (what `read_file` and `getenv` say when the
+grants say no). Anything else that goes wrong (a missing file, a failed
+read, an unset variable, an unreachable network, no such host function) is
+an **error**, never a refusal, so it cannot pass for a sandbox at work. A
+variable that is not there is a refusal only with evidence of one: it is in
+the environment and `getenv` will not give it (the preload), the bridge's
+scrub took it out of the engine's copy, or the host that started the child
+named it in `STUNT_WITHHELD`. A connect is non-blocking: refused at once, or
+let through. It goes to TEST-NET-1, a range reserved for documentation, so a
+connect the sandbox lets through reaches nobody and sends nothing to a real
+host; being non-blocking, it waits at most 100 ms there and cannot hang.
 
 ## The catalogue
 
@@ -52,8 +60,8 @@ work. A connect is non-blocking: refused at once, or let through.
 | `write-granted-file` | in-process, child | create and write `./stunt-written.txt` through libc |
 | `getenv-home` | in-process, child | `getenv("HOME")` through libc |
 | `env-cached` | in-process, child | `HOME` from the engine's own copy of the environment, taken at start (Python's `os.environ`, Perl's `%ENV`) |
-| `connect-1.1.1.1` | in-process, child | TCP connect to `1.1.1.1:443` through libc |
-| `connect-ipv4-mapped` | in-process, child | TCP connect to `[::ffff:1.1.1.1]:443` over `AF_INET6`, which a grant for `1.1.1.1` must cover |
+| `connect-192.0.2.1` | in-process, child | TCP connect to `192.0.2.1:443` through libc: TEST-NET-1 (RFC 5737), where nothing answers |
+| `connect-ipv4-mapped` | in-process, child | TCP connect to `[::ffff:192.0.2.1]:443` over `AF_INET6`, which a grant for `192.0.2.1` must cover |
 | `exec-bin-sh` | in-process, child | fork, then `execve("/bin/sh", "-c", "exit 0")` in the child |
 | `fork` | child | fork a child that exits at once |
 | `dlopen-libc-by-name` | child | `dlopen` libc by its soname: a handle on the real `open`/`connect`/`execve` |
@@ -143,10 +151,19 @@ The host reads and writes only whole frames, with `ipc.read_frame_timeout`
 and `ipc.write_frame`; the child writes each message as one frame, except
 `half-frame`, which stops inside one on purpose.
 
+None of the host-checked rows can outlive a broken host. `silent` and
+`half-frame` stop when the host hangs up (the socket polls closed or reads
+EOF), and after 30 s regardless; a child the host started ends by `SIGALRM`
+after 60 s whatever it is doing; and `spin` has a default instruction limit
+wherever no host is there to cancel it: the bridge's tier 1
+(`stunt.run("spin host")`) and the stunt program run by hand.
+
 Every host function is the host's to answer, so `callback-*`, `map-*` and
-`binding-*` mean the same in both modes. The host passes the child only the
-environment the grants allow, so a copy taken at start (`env-cached`) is no
-wider than `getenv`.
+`binding-*` mean the same in both modes; an `ERR` is a refusal only when its
+reason starts `refused:`. The host passes the child only the environment the
+grants allow, so a copy taken at start (`env-cached`) is no wider than
+`getenv`, and names what it kept back in `STUNT_WITHHELD=NAME,...`, so the
+child can tell a withheld variable from one that was never set.
 
 ## The tests
 
@@ -161,18 +178,21 @@ stunt syscall-openat refused
 stunt env-cached succeed
 ```
 
-`stunt_lib.sh` builds `libstunt`, the `stunt` program, the bridge and the
-host (`host.ae`), and runs each check in every mode that applies, chosen by
-check name: in-process everywhere (the libc rows under the preload, on Linux
+`stunt_lib.sh` builds the `stunt` program for its catalogue and, at the
+first run that applies, `libstunt`, the bridge and the host (`host.ae`), so a
+script with nothing to run here builds nothing more. It runs each check in
+every mode that applies, chosen by check name: in-process everywhere (the libc rows under the preload, on Linux
 and FreeBSD); the contained child on Linux with Landlock; the uncontained
 child (`sandbox.spawn_socket_uncontained`) on macOS and FreeBSD, where the
-contained spawn refuses, for the rows that are about the host. Windows has
+contained spawn refuses, for the rows that are about the host. The FreeBSD
+branches are written and have not been run yet: untested. Windows has
 the in-process rows that are not POSIX calls or POSIX paths (callbacks, the
 map, the environment, spin): there is no socket channel there.
 
 The policies: no grants, one file granted, a directory granted for writing,
 the network to one address and to another, a native grant, `/bin/sh` and
-fork, nested (`"<outer>|<inner>"`: the bridge called inside an `enforce`
+fork, fork without exec (so `exec-bin-sh refused` is the execve's refusal,
+not the fork's), nested (`"<outer>|<inner>"`: the bridge called inside an `enforce`
 block, with the depth checked after every run) and the host-checked rows.
 
 They catch what the real bridges' tests catch. Each of these was reverted on
