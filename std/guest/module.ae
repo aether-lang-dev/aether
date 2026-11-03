@@ -1,0 +1,395 @@
+// std.guest: an Aether host running a guest in a separate, sandboxed child
+// process, and talking to it both ways over std.ipc.
+//
+// The guest is a worker program: an engine for some language with nothing
+// of its own to reach the world through. Every SAY and every call to a
+// function the host mounted comes up the socket as a frame, and the host
+// answers it. Two walls hold the child: the process sandbox the host spawns
+// it in (sandbox.spawn_socket), and the worker's own sandbox.enforce, which
+// it enters with no grants before its script's first step. The worker's
+// half is std.guest.child; README.md beside this file has the protocol,
+// every message in both directions.
+//
+// Deadlines. Each exchange, from what the host last sent or received to the
+// guest's next frame, is bounded by `deadline_ms`. When it passes the host
+// sends CANCEL; a guest whose script is looping or waiting on a reply stops
+// it in the engine and answers ERROR "cancelled by host: ...". One that does
+// not answer within `grace_ms` is hung up on and killed. A frame over
+// `max_frame`, a malformed one or one that stalls part way is refused the
+// same way. Every spawn, GRANT, DENY, timeout, cancel and kill goes to one
+// audit log, with what the guest reported from its own sandbox.
+//
+// Usage:
+//
+//   perms = sandbox.new("rexx") {}            // the worker reads nothing
+//   g, err = guest.launch(perms, "build/rexxae-worker", null, "rexx", "audit.log")
+//   guest.mount(&g, "GREET", 1, 1)
+//   guest.start(&g, source)
+//   while true {
+//       e = guest.next(&g)
+//       if e.kind == "SAY" { println(guest.printable(e.text)) }
+//       else if e.kind == "CALL" { guest.answer(&g, guest.json_string("hi")) }
+//       else if e.kind == "LOG" { }           // only after guest.log_level
+//       else { break }                        // DONE, ERROR or KILLED
+//   }
+
+exports(Guest, Event, launch, launch_uncontained, mount, probe, log_level,
+    start, answer, fail, grant_file, deny, cancel, next, close, audit,
+    json_string, printable, level_name, MAX_FRAME, DEADLINE_MS, GRACE_MS)
+
+import std.io
+import std.ipc
+import std.list
+import std.os
+import std.sandbox
+import std.string
+
+// The largest frame either side accepts.
+const MAX_FRAME = 65536
+// The default bound on one exchange, and on the answer to a CANCEL.
+const DEADLINE_MS = 5000
+const GRACE_MS = 1000
+
+// A running guest. `deadline_ms`, `grace_ms` and `max_frame` may be changed
+// at any time.
+struct Guest {
+    ch: int
+    pid: int
+    name: string
+    audit_path: string
+    deadline_ms: int
+    grace_ms: int
+    max_frame: int
+    // 1 once DONE, ERROR or KILLED has been returned: the child is reaped.
+    over: int
+}
+
+// One thing the guest did. kind is
+//   SAY     text
+//   LOG     code = the level 0..5, name = TRACE .. FATAL, text = the
+//           message, tags = a JSON object; nothing to answer
+//   CALL    name, text = the arguments as a JSON array; answer it with
+//           answer, fail, grant_file or deny before the next call to next
+//   DONE    code, the script's exit code
+//   ERROR   text, the guest's message ("cancelled by host: ..." after a
+//           deadline or a cancel)
+//   KILLED  text, why the host hung up and killed it
+struct Event {
+    kind: string
+    name: string
+    text: string
+    code: int
+    tags: string
+}
+
+fn event(kind: string, name: string, text: string, code: int) -> Event {
+    return Event { kind: kind, name: name, text: text, code: code, tags: "" }
+}
+
+// TRACE, DEBUG, INFO, WARN, ERROR or FATAL for a level 0..5; "?" otherwise.
+level_name(level: int) -> string {
+    match level {
+        0 -> { return "TRACE" }
+        1 -> { return "DEBUG" }
+        2 -> { return "INFO" }
+        3 -> { return "WARN" }
+        4 -> { return "ERROR" }
+        5 -> { return "FATAL" }
+        _ -> { return "?" }
+    }
+}
+
+// "<level> <n> <tags> <message>" from a LOG frame, or why it is malformed.
+fn log_event(rest: string) -> (Event, string) {
+    level_text, after_level = split_verb(rest)
+    count_text, after_count = split_verb(after_level)
+    level, lerr = string.to_int(level_text)
+    count, cerr = string.to_int(count_text)
+    if lerr != "" || cerr != "" || level < 0 || level > 5 || count < 2 || count > string.length(after_count) {
+        return event("LOG", "", "", -1), "protocol: malformed LOG"
+    }
+    tags = string.substring(after_count, 0, count)
+    msg = ""
+    if string.length(after_count) > count + 1 {
+        msg = string.substring(after_count, count + 1, string.length(after_count))
+    }
+    e = event("LOG", level_name(level), msg, level)
+    e.tags = tags
+    return e, ""
+}
+
+fn new_guest(ch: int, pid: int, name: string, audit_path: string) -> Guest {
+    return Guest {
+        ch: ch, pid: pid, name: name, audit_path: audit_path,
+        deadline_ms: DEADLINE_MS, grace_ms: GRACE_MS, max_frame: MAX_FRAME, over: 0
+    }
+}
+
+// Starts the worker program `prog` in a child held to `perms`
+// (sandbox.spawn_socket), with `args`, a std.list of strings, as its
+// arguments (null for none: an Aether worker reads everything from the
+// socket; a foreign interpreter takes its script, `-I guest.py`). Fails closed: where the child cannot be contained
+// (macOS, Windows; Linux without Landlock) it returns the reason and starts
+// nothing. `name` labels the audit log lines; `audit_path` is the log (""
+// for none). An Aether worker needs no grants to run a script: it is one
+// binary and reads its script from the socket.
+launch(perms: sandbox.Grants, prog: string, args: ptr, name: string, audit_path: string) -> (Guest, string) {
+    argv = if args == null { list.new() } else { args }
+    env = list.new()
+    ch, pid, err = sandbox.spawn_socket(perms, prog, argv, env)
+    if args == null { list.free(argv) }
+    list.free(env)
+    g = new_guest(ch, pid, name, audit_path)
+    if err != "" {
+        g.over = 1
+        audit(&g, "SPAWN refused: ${err}")
+        return g, err
+    }
+    audit(&g, "SPAWN ${prog} (sandbox.spawn_socket)")
+    return g, ""
+}
+
+// launch with NO process sandbox (sandbox.spawn_socket_uncontained), for
+// development where spawn_socket refuses (macOS). The worker still locks
+// itself down with sandbox.enforce. The audit log says which it was.
+launch_uncontained(perms: sandbox.Grants, prog: string, args: ptr, name: string, audit_path: string) -> (Guest, string) {
+    argv = if args == null { list.new() } else { args }
+    env = list.new()
+    ch, pid, err = sandbox.spawn_socket_uncontained(perms, prog, argv, env)
+    if args == null { list.free(argv) }
+    list.free(env)
+    g = new_guest(ch, pid, name, audit_path)
+    if err != "" {
+        g.over = 1
+        audit(&g, "SPAWN refused: ${err}")
+        return g, err
+    }
+    audit(&g, "SPAWN ${prog} UNCONTAINED (sandbox.spawn_socket_uncontained)")
+    return g, ""
+}
+
+// Mounts a host function `name` taking min..max arguments. Before start.
+mount(g: *Guest, name: string, min: int, max: int) -> string {
+    return ipc.write_frame(g.ch, "MOUNT ${name} ${min} ${max}")
+}
+
+// Asks the guest to check its own wall once it has locked down: it tries
+// to read /etc/passwd and connect to 1.1.1.1:443 and reports both as AUDIT
+// lines. Before start.
+probe(g: *Guest) -> string {
+    return ipc.write_frame(g.ch, "PROBE")
+}
+
+// Sets the guest's log threshold: -1 off (the default), 0 trace, 1 debug,
+// 2 info, 3 warn, 4 error, 5 fatal. Before start it holds from the first
+// step; after, from the guest's next step, also while a CALL waits for its
+// answer. Out of range: the error, and nothing is sent.
+log_level(g: *Guest, level: int) -> string {
+    if level < -1 || level > 5 { return "log_level: -1 (off) or 0..5, not ${level}" }
+    return ipc.write_frame(g.ch, "LOGLEVEL ${level}")
+}
+
+// Sends the script; the guest locks itself down and runs it.
+start(g: *Guest, source: string) -> string {
+    return ipc.write_frame(g.ch, "SCRIPT ${source}")
+}
+
+// Answers the pending CALL with a JSON value.
+answer(g: *Guest, json: string) -> string {
+    return ipc.write_frame(g.ch, "REPLY ${json}")
+}
+
+// Fails the pending CALL; the script sees an error with this message.
+fail(g: *Guest, why: string) -> string {
+    return ipc.write_frame(g.ch, "FAIL ${why}")
+}
+
+// Answers the pending CALL, a request for the file `name`, with the file at
+// `path` as an open descriptor: the guest reads it and the script gets
+// {"granted":true,"text":...}. If `path` cannot be opened it is a deny.
+grant_file(g: *Guest, name: string, path: string) -> string {
+    fd, oerr = io.fd_open_read(path)
+    if oerr != "" { return deny(g, name, oerr) }
+    audit(g, "GRANT ${printable(name)} -> ${path}")
+    err = ipc.write_frame(g.ch, "FILE")
+    if err == "" { err = ipc.send_fd(g.ch, fd, "F") }
+    io.fd_close(fd)
+    return err
+}
+
+// Answers the pending CALL, a request for the file `name`, with no: the
+// script gets {"granted":false,"why":why}.
+deny(g: *Guest, name: string, why: string) -> string {
+    audit(g, "DENY ${printable(name)}: ${why}")
+    return ipc.write_frame(g.ch, "REPLY {\"granted\":false,\"why\":${json_string(why)}}")
+}
+
+// Asks the guest to stop its script now. next() then returns its ERROR.
+cancel(g: *Guest, reason: string) -> string {
+    audit(g, "CANCEL ${reason}")
+    return ipc.write_frame(g.ch, "CANCEL ${reason}")
+}
+
+// The guest's next event, waiting at most deadline_ms for it (see the top
+// of this file). AUDIT frames go to the audit log and are not returned.
+next(g: *Guest) -> Event {
+    if g.over == 1 { return event("ERROR", "", "the guest has finished", -1) }
+    while true {
+        data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, g.deadline_ms)
+        // Nothing of a frame arrived: the stream is still in step, so CANCEL
+        // can go down it. Any other error (a frame that stalled part way
+        // included) leaves it out of step.
+        if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES { return deadline_passed(g) }
+        if rerr != "" { return hang_up(g, "frame refused: ${rerr}") }
+        verb, rest = split_verb(data)
+        match verb {
+            "AUDIT" -> { audit(g, "reports: ${printable(rest)}") }
+            "SAY" -> { return event("SAY", "", rest, 0) }
+            "LOG" -> {
+                e, lerr = log_event(rest)
+                if lerr != "" { return hang_up(g, lerr) }
+                return e
+            }
+            "CALL" -> {
+                name, args = split_verb(rest)
+                return event("CALL", name, args, 0)
+            }
+            "DONE" -> { return ended(g, verb, rest) }
+            "ERROR" -> { return ended(g, verb, rest) }
+            _ -> { return hang_up(g, "protocol: unexpected '${printable(verb)}'") }
+        }
+    }
+}
+
+// DONE <code> or ERROR <message>: the guest has finished; reap it.
+fn ended(g: *Guest, verb: string, rest: string) -> Event {
+    if verb == "ERROR" {
+        audit(g, "ERROR ${printable(rest)}")
+        finish(g)
+        return event("ERROR", "", rest, -1)
+    }
+    code, cerr = string.to_int(rest)
+    if cerr != "" { code = -1 }
+    finish(g)
+    return event("DONE", "", "", code)
+}
+
+// The exchange ran out of time with nothing received, so the stream is
+// still between frames: ask the guest to cancel and give it grace_ms to
+// say it has.
+fn deadline_passed(g: *Guest) -> Event {
+    audit(g, "TIMEOUT no frame within ${g.deadline_ms} ms; CANCEL sent")
+    serr = ipc.write_frame(g.ch, "CANCEL deadline of ${g.deadline_ms} ms passed")
+    if serr != "" { return hang_up(g, "CANCEL not delivered: ${serr}") }
+    while true {
+        data, rerr = ipc.read_frame_timeout(g.ch, g.max_frame, g.grace_ms)
+        if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES {
+            return hang_up(g, "no answer to CANCEL within ${g.grace_ms} ms")
+        }
+        if rerr != "" { return hang_up(g, "after CANCEL: ${rerr}") }
+        verb, rest = split_verb(data)
+        if verb == "ERROR" || verb == "DONE" { return ended(g, verb, rest) }
+        if verb == "AUDIT" { audit(g, "reports: ${printable(rest)}") }
+        // A SAY, LOG or CALL already on its way when the CANCEL went: dropped.
+    }
+}
+
+// Hangs up and kills the guest.
+fn hang_up(g: *Guest, why: string) -> Event {
+    audit(g, "KILLED ${why}")
+    io.fd_close(g.ch)
+    // Never a pid of 0 or below: kill(2) would take a process group, or all.
+    if g.pid > 0 {
+        os.kill(g.pid, 9)
+        os.wait_pid(g.pid)
+    }
+    g.over = 1
+    return event("KILLED", "", why, -1)
+}
+
+// After DONE or ERROR: hang up and reap. A guest that says it is done and
+// then does not exit is killed after grace_ms (rounded up to a second).
+fn finish(g: *Guest) {
+    io.fd_close(g.ch)
+    g.over = 1
+    if g.pid <= 0 { return }
+    secs = (g.grace_ms + 999) / 1000
+    _status, timed_out, _err = os.wait_pid_timeout(g.pid, secs)
+    if timed_out != 0 {
+        audit(g, "KILLED did not exit after it finished")
+        os.kill(g.pid, 9)
+        os.wait_pid(g.pid)
+    }
+}
+
+// Ends a guest early: hangs up and kills it. Safe after it has finished.
+close(g: *Guest) {
+    if g.over == 1 { return }
+    hang_up(g, "closed by the host")
+}
+
+// One line in the audit log, labelled with the guest's name: "" or why it
+// could not be written. With no audit log, nothing.
+audit(g: *Guest, line: string) -> string {
+    if g.audit_path == "" { return "" }
+    return io.append_file(g.audit_path, "${g.name} ${line}\n")
+}
+
+// `s` as a JSON string literal.
+json_string(s: string) -> string {
+    hex = "0123456789abcdef"
+    out = "\""
+    run = 0
+    i = 0
+    n = string.length(s)
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 34 || c == 92 || (c >= 0 && c < 32) {
+            out = string.concat(out, string.substring(s, run, i))
+            if c == 34 {
+                out = string.concat(out, "\\\"")
+            } else if c == 92 {
+                out = string.concat(out, "\\\\")
+            } else if c == 10 {
+                out = string.concat(out, "\\n")
+            } else {
+                hi = c / 16
+                lo = c % 16
+                out = string.concat(out, "\\u00${string.substring(hex, hi, hi + 1)}${string.substring(hex, lo, lo + 1)}")
+            }
+            run = i + 1
+        }
+        i = i + 1
+    }
+    out = string.concat(out, string.substring(s, run, n))
+    return string.concat(out, "\"")
+}
+
+// `s` safe to print or log: control bytes, DEL and backslashes as \xNN, so a
+// guest cannot forge a log line or send escape sequences to a terminal.
+printable(s: string) -> string {
+    hex = "0123456789abcdef"
+    out = ""
+    run = 0
+    i = 0
+    n = string.length(s)
+    while i < n {
+        c = string.char_at(s, i)
+        if c >= 0 && (c < 32 || c == 127 || c == 92) {
+            out = string.concat(out, string.substring(s, run, i))
+            hi = c / 16
+            lo = c % 16
+            out = string.concat(out, "\\x${string.substring(hex, hi, hi + 1)}${string.substring(hex, lo, lo + 1)}")
+            run = i + 1
+        }
+        i = i + 1
+    }
+    return string.concat(out, string.substring(s, run, n))
+}
+
+// "VERB the rest" -> ("VERB", "the rest").
+fn split_verb(line: string) -> (string, string) {
+    at = string.index_of(line, " ")
+    if at < 0 { return line, "" }
+    return string.substring(line, 0, at), string.substring(line, at + 1, string.length(line))
+}

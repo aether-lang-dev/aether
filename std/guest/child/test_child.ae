@@ -1,0 +1,213 @@
+// std.guest.child, co-located with the module: the guest's half of the
+// protocol over a socket pair in one process, the test playing the host
+// on the other end with raw std.ipc frames. The cross-process run, with
+// std.guest as the host and a real child, is tests/integration/std_guest/.
+//
+// On Windows the socket channel does not exist, so only the pure parts run.
+
+import std.spec
+import std.fs
+import std.io
+import std.ipc
+import std.os
+import std.string
+import std.guest.child
+
+// The host's next frame from the guest, or the error.
+fn heard(ch: int) -> string {
+    data, err = ipc.read_frame(ch, 65536)
+    if err != "" { return "error: ${err}" }
+    return data
+}
+
+// Whether a frame is waiting.
+fn waiting(ch: int) -> int {
+    ready, _ = ipc.wait_readable(ch, 0)
+    return ready
+}
+
+main() {
+    fw = spec.init()
+    posix = !string.equals(os.platform(), "windows")
+    spec.describe(fw, "std.guest.child, pure") {
+        spec.it("splits a verb from the rest") callback {
+            v, r = child.split_verb("CALL F [1, 2]")
+            spec.assert_str_eq("${v}|${r}", "CALL|F [1, 2]", "verb and rest")
+            v, r = child.split_verb("PROBE")
+            spec.assert_str_eq("${v}|${r}", "PROBE|", "a bare verb")
+        }
+        spec.it("writes a JSON string literal") callback {
+            spec.assert_str_eq(child.json_string("a\"b\\c\nd\x01"), "\"a\\\"b\\\\c\\nd\\u0001\"", "escaped")
+            spec.assert_str_eq(child.json_string(""), "\"\"", "empty")
+        }
+    }
+    if posix {
+        spec.describe(fw, "std.guest.child over a socket pair") {
+            spec.it("reads mounts, PROBE and LOGLEVEL up to the script") callback {
+                host, ch, _ = os.socketpair()
+                ipc.write_frame(host, "MOUNT GREET 1 2")
+                ipc.write_frame(host, "PROBE")
+                ipc.write_frame(host, "LOGLEVEL 2")
+                ipc.write_frame(host, "SCRIPT say hi\nsay there")
+                h = child.attach(ch, "spec")
+                spec.assert_str_eq(child.read_script(h), "", "read")
+                spec.assert_str_eq(h.source, "say hi\nsay there", "the script, newline and all")
+                spec.assert_eq(h.probe, 1, "probe asked for")
+                spec.assert_eq(h.log_level, 2, "threshold")
+                spec.assert_eq(child.mount_count(h), 1, "one mount")
+                name, lo, hi = child.mount_at(h, 0)
+                spec.assert_str_eq("${name} ${lo} ${hi}", "GREET 1 2", "its name and arity")
+                spec.assert_true(child.is_mounted(h, "GREET"), "mounted")
+                spec.assert_false(child.is_mounted(h, "GREE"), "a prefix is not")
+                spec.assert_false(child.is_mounted(h, "greet"), "compared exactly")
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("refuses a malformed MOUNT and tells the host") callback {
+                cases = ["MOUNT F", "MOUNT F x 1", "MOUNT F -1 1", "MOUNT F 2 1", "LOGLEVEL 6", "BYE"]
+                want = ["protocol: MOUNT wants NAME min max", "protocol: MOUNT F: arity is not a number",
+                    "protocol: MOUNT F: arity -1..1 is not 0 <= min <= max", "protocol: MOUNT F: arity 2..1 is not 0 <= min <= max",
+                    "protocol: LOGLEVEL wants -1 (off) or 0..5, got '6'", "protocol: expected MOUNT, PROBE, LOGLEVEL or SCRIPT, got 'BYE'"]
+                i = 0
+                while i < 6 {
+                    host, ch, _ = os.socketpair()
+                    ipc.write_frame(host, cases[i])
+                    h = child.attach(ch, "spec")
+                    spec.assert_str_eq(child.read_script(h), want[i], cases[i])
+                    spec.assert_str_eq(heard(host), "ERROR ${want[i]}", "the host is told")
+                    io.fd_close(host)
+                    io.fd_close(ch)
+                    i = i + 1
+                }
+            }
+            spec.it("frames SAY, LOG, AUDIT, DONE and ERROR, holding LOG to the threshold") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                child.say(h, "two\nlines")
+                child.log(h, 3, "{}", "off by default")
+                h.log_level = 3
+                child.log(h, 2, "{}", "below")
+                child.log(h, 3, "{\"k\":1}", "at it")
+                child.log(h, 9, "{}", "no such level")
+                child.audit(h, "a note")
+                child.done(h, 7)
+                child.error(h, "boom")
+                spec.assert_str_eq(heard(host), "SAY two\nlines", "SAY")
+                spec.assert_str_eq(heard(host), "LOG 3 7 {\"k\":1} at it", "LOG, with the tags' length")
+                spec.assert_str_eq(heard(host), "AUDIT a note", "AUDIT")
+                spec.assert_str_eq(heard(host), "DONE 7", "DONE")
+                spec.assert_str_eq(heard(host), "ERROR boom", "ERROR")
+                spec.assert_eq(waiting(host), 0, "nothing else")
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("polls for a CANCEL without waiting, applying a LOGLEVEL on the way") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                spec.assert_str_eq(child.poll(h), "", "nothing yet")
+                ipc.write_frame(host, "LOGLEVEL 1")
+                spec.assert_str_eq(child.poll(h), "", "a LOGLEVEL is no cancel")
+                spec.assert_eq(h.log_level, 1, "applied")
+                ipc.write_frame(host, "LOGLEVEL 0")
+                ipc.write_frame(host, "CANCEL time is up")
+                spec.assert_str_eq(child.poll(h), "time is up", "the cancel, behind a LOGLEVEL")
+                spec.assert_eq(h.log_level, 0, "that applied too")
+                spec.assert_str_eq(child.poll(h), "time is up", "and it stays")
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("cancels on a frame the protocol has no place for while the script runs") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                ipc.write_frame(host, "REPLY 1")
+                spec.assert_str_eq(child.poll(h), "protocol: unexpected 'REPLY' while the script runs", "a breach cancels")
+                b, c, _ = os.socketpair()
+                g = child.attach(c, "spec")
+                ipc.write_frame(b, "LOGLEVEL x")
+                spec.assert_str_eq(child.poll(g), "protocol: LOGLEVEL wants -1 (off) or 0..5, got 'x'", "so does a bad LOGLEVEL")
+                d, e, _ = os.socketpair()
+                k = child.attach(e, "spec")
+                ipc.write_frame(d, "CANCEL")
+                spec.assert_str_eq(child.poll(k), "no reason given", "a CANCEL with no reason still cancels")
+                io.fd_close(host)
+                io.fd_close(ch)
+                io.fd_close(b)
+                io.fd_close(c)
+                io.fd_close(d)
+                io.fd_close(e)
+            }
+            spec.it("calls the host and takes each kind of answer") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                ipc.write_frame(host, "REPLY {\"a\":1}")
+                r = child.call_host(h, "F", "[1]")
+                spec.assert_str_eq(heard(host), "CALL F [1]", "the CALL")
+                spec.assert_str_eq("${r.kind} ${r.text}", "VALUE {\"a\":1}", "REPLY")
+                ipc.write_frame(host, "FAIL no")
+                r = child.call_host(h, "F", "[]")
+                heard(host)
+                spec.assert_str_eq("${r.kind} ${r.text}", "FAIL no", "FAIL")
+                ipc.write_frame(host, "FAIL")
+                r = child.call_host(h, "F", "[]")
+                heard(host)
+                spec.assert_str_eq("${r.kind} ${r.text}", "FAIL host function failed", "FAIL with no message")
+                ipc.write_frame(host, "LOGLEVEL 4")
+                ipc.write_frame(host, "REPLY true")
+                r = child.call_host(h, "F", "[]")
+                heard(host)
+                spec.assert_str_eq("${r.kind} ${r.text}", "VALUE true", "a LOGLEVEL while it waits")
+                spec.assert_eq(h.log_level, 4, "applied")
+                ipc.write_frame(host, "CANCEL enough")
+                r = child.call_host(h, "F", "[]")
+                heard(host)
+                spec.assert_str_eq("${r.kind} ${r.text}", "CANCEL enough", "a CANCEL instead")
+                spec.assert_str_eq(h.cancel, "enough", "recorded")
+                r = child.call_host(h, "F", "[]")
+                spec.assert_str_eq("${r.kind} ${r.text}", "CANCEL enough", "after a cancel, nothing more is sent")
+                spec.assert_eq(waiting(host), 0, "no CALL went")
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("keeps the stream in step when a bad LOGLEVEL comes while a call waits") callback {
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                ipc.write_frame(host, "LOGLEVEL 9")
+                ipc.write_frame(host, "REPLY 1")
+                ipc.write_frame(host, "CANCEL later")
+                r = child.call_host(h, "F", "[]")
+                spec.assert_str_eq("${r.kind} ${r.text}", "CANCEL protocol: LOGLEVEL wants -1 (off) or 0..5, got '9'", "cancelled")
+                spec.assert_eq(waiting(ch), 1, "the reply was taken, the next frame is still there")
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("takes a granted file as a descriptor") callback {
+                path = "${os.temp_dir()}/std_guest_child_spec_${os.getpid()}.txt"
+                fs.write(path, "line one\n\"two\"")
+                fd, oerr = io.fd_open_read(path)
+                spec.assert_str_eq(oerr, "", "opened")
+                host, ch, _ = os.socketpair()
+                h = child.attach(ch, "spec")
+                ipc.write_frame(host, "FILE")
+                ipc.send_fd(host, fd, "F")
+                io.fd_close(fd)
+                r = child.call_host(h, "REQUEST", "[\"config\"]")
+                spec.assert_str_eq("${r.kind} ${r.text}", "VALUE {\"granted\":true,\"text\":\"line one\\n\\\"two\\\"\"}", "its text")
+                ipc.write_frame(host, "FILE")
+                ipc.write(host, "F")
+                r = child.call_host(h, "REQUEST", "[\"x\"]")
+                spec.assert_str_eq("${r.kind} ${r.text}", "VALUE {\"granted\":false,\"why\":\"no descriptor came with FILE\"}", "a FILE with no descriptor is a refusal")
+                fs.delete(path)
+                io.fd_close(host)
+                io.fd_close(ch)
+            }
+            spec.it("says so when the process has no channel to a host") callback {
+                h, err = child.open("spec")
+                if ipc.parent_channel() < 0 {
+                    spec.assert_str_eq(err, "spec: no socket channel to a host; a host starts this with guest.launch", "no channel")
+                    spec.assert_eq(h.ch, -1, "and no descriptor")
+                }
+            }
+        }
+    }
+    return spec.run_summary(fw)
+}

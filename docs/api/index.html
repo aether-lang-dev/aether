@@ -40,6 +40,7 @@
     <li><a href="file.html">file</a></li>
     <li><a href="floatarr.html">floatarr</a></li>
     <li><a href="fs.html">fs</a></li>
+    <li><a href="guest.html">guest</a></li>
     <li><a href="hash.html">hash</a></li>
     <li><a href="host.html">host</a></li>
     <li><a href="http.html">http</a></li>
@@ -237,6 +238,11 @@
       <h3>fs</h3>
       <p>std.fs - File System Module Import with: import std.fs Note: fs is otherwise extern-only (no std.string import) to stay a thin syscall layer.</p>
       <span class="count">150 exports</span>
+    </a>
+    <a href="guest.html" class="module-card">
+      <h3>guest</h3>
+      <p>std.guest: an Aether host running a guest in a separate, sandboxed child process, and talking to it both ways over std.ipc.</p>
+      <span class="count">22 exports</span>
     </a>
     <a href="hash.html" class="module-card">
       <h3>hash</h3>
@@ -1242,6 +1248,28 @@
       <li class="function-item" data-name="KIND_UNAVAILABLE"><a href="fs.html#KIND_UNAVAILABLE"><span class="fn-name">KIND_UNAVAILABLE</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="last_os_error"><a href="fs.html#last_os_error"><span class="fn-name">last_os_error</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="error_message"><a href="fs.html#error_message"><span class="fn-name">error_message</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="Guest"><a href="guest.html#Guest"><span class="fn-name">Guest</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="Event"><a href="guest.html#Event"><span class="fn-name">Event</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="launch"><a href="guest.html#launch"><span class="fn-name">launch</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="launch_uncontained"><a href="guest.html#launch_uncontained"><span class="fn-name">launch_uncontained</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="mount"><a href="guest.html#mount"><span class="fn-name">mount</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="probe"><a href="guest.html#probe"><span class="fn-name">probe</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="log_level"><a href="guest.html#log_level"><span class="fn-name">log_level</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="start"><a href="guest.html#start"><span class="fn-name">start</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="answer"><a href="guest.html#answer"><span class="fn-name">answer</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="fail"><a href="guest.html#fail"><span class="fn-name">fail</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="grant_file"><a href="guest.html#grant_file"><span class="fn-name">grant_file</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="deny"><a href="guest.html#deny"><span class="fn-name">deny</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="cancel"><a href="guest.html#cancel"><span class="fn-name">cancel</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="next"><a href="guest.html#next"><span class="fn-name">next</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="close"><a href="guest.html#close"><span class="fn-name">close</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="audit"><a href="guest.html#audit"><span class="fn-name">audit</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="json_string"><a href="guest.html#json_string"><span class="fn-name">json_string</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="printable"><a href="guest.html#printable"><span class="fn-name">printable</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="level_name"><a href="guest.html#level_name"><span class="fn-name">level_name</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="MAX_FRAME"><a href="guest.html#MAX_FRAME"><span class="fn-name">MAX_FRAME</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="DEADLINE_MS"><a href="guest.html#DEADLINE_MS"><span class="fn-name">DEADLINE_MS</span><span class="fn-module">guest</span></a></li>
+      <li class="function-item" data-name="GRACE_MS"><a href="guest.html#GRACE_MS"><span class="fn-name">GRACE_MS</span><span class="fn-module">guest</span></a></li>
       <li class="function-item" data-name="fnv32"><a href="hash.html#fnv32"><span class="fn-name">fnv32</span><span class="fn-module">hash</span></a></li>
       <li class="function-item" data-name="fnv64"><a href="hash.html#fnv64"><span class="fn-name">fnv64</span><span class="fn-module">hash</span></a></li>
       <li class="function-item" data-name="murmur3_32"><a href="hash.html#murmur3_32"><span class="fn-name">murmur3_32</span><span class="fn-module">hash</span></a></li>

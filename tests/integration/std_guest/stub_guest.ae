@@ -1,0 +1,110 @@
+// A worker for std.guest's tests, on std.guest.child: its "engine" runs a
+// script of one command a line, so each case can say exactly what the
+// guest does.
+//
+//   say TEXT          a SAY
+//   call NAME JSON    a call to a mounted function; SAYs "value JSON",
+//                     "fail MESSAGE", or stops on a cancel
+//   log LEVEL TEXT    a log message at LEVEL (0..5), with a tag
+//   big N             a SAY of N bytes
+//   spin              loops until the host cancels, polling for it
+//   deaf              stops answering: reads every frame, CANCEL
+//                     included, and replies to none
+//   args              a SAY of its own arguments (after the program)
+//   exit N            DONE with exit code N
+//
+// Between lines it polls for a CANCEL. A mounted name with a '!' in it is
+// one this engine cannot mount: the engine's own check, after read_script.
+
+import std.guest.child
+import std.ipc
+import std.os
+import std.string
+
+main() {
+    h, err = child.open("stub-guest")
+    if err != "" {
+        println(err)
+        exit(2)
+    }
+    if child.read_script(h) != "" { exit(1) }
+    n = child.mount_count(h)
+    i = 0
+    while i < n {
+        name, _lo, _hi = child.mount_at(h, i)
+        if string.index_of(name, "!") >= 0 {
+            child.error(h, "cannot mount '${name}': not a name this engine takes")
+            exit(1)
+        }
+        i = i + 1
+    }
+    child.run(h) callback {
+        run_script(h)
+    }
+    exit(0)
+}
+
+run_script(h: *child.Host) {
+    lines = string.split(h.source, "\n")
+    defer string.array_free(lines)
+    count = string.array_size(lines)
+    i = 0
+    while i < count {
+        if child.poll(h) != "" {
+            child.error(h, "cancelled by host: ${h.cancel}")
+            return
+        }
+        line = string.copy(string.array_get(lines, i))
+        cmd, rest = child.split_verb(line)
+        if cmd == "say" {
+            child.say(h, rest)
+        } else if cmd == "call" {
+            name, args = child.split_verb(rest)
+            if !child.is_mounted(h, name) {
+                child.error(h, "${name} is not mounted")
+                return
+            }
+            r = child.call_host(h, name, args)
+            if r.kind == "CANCEL" {
+                child.error(h, "cancelled by host: ${r.text}")
+                return
+            }
+            if r.kind == "FAIL" { child.say(h, "fail ${r.text}") } else { child.say(h, "value ${r.text}") }
+        } else if cmd == "log" {
+            level_text, text = child.split_verb(rest)
+            level, _ = string.to_int(level_text)
+            child.log(h, level, "{\"line\":${i + 1}}", text)
+        } else if cmd == "big" {
+            size, _ = string.to_int(rest)
+            out = ""
+            while string.length(out) < size { out = "${out}xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx" }
+            child.say(h, out)
+        } else if cmd == "spin" {
+            while child.poll(h) == "" {}
+            child.error(h, "cancelled by host: ${h.cancel}")
+            return
+        } else if cmd == "deaf" {
+            while true {
+                _, rerr = ipc.read_frame(h.ch, child.MAX_FRAME)
+                if rerr != "" { exit(0) }
+            }
+        } else if cmd == "args" {
+            out = ""
+            k = 1
+            while k < os.args_count() {
+                out = "${out}[${os.args_get(k)}]"
+                k = k + 1
+            }
+            child.say(h, out)
+        } else if cmd == "exit" {
+            code, _ = string.to_int(rest)
+            child.done(h, code)
+            return
+        } else if cmd != "" {
+            child.error(h, "stub: unknown command '${cmd}'")
+            return
+        }
+        i = i + 1
+    }
+    child.done(h, 0)
+}
