@@ -780,7 +780,10 @@ finalize_to_bytes(c: *GostCtx) -> ptr {
     return out
 }
 
+// What the context owns: its buffers and its reference to the variant name,
+// which `free` alone would not release (#3539).
 free_internals(c: *GostCtx) {
+    c.variant = ""
     if c.IV != null { bytes.wipe_free(c.IV); c.IV = null }
     if c.N != null { bytes.wipe_free(c.N); c.N = null }
     if c.Sigma != null { bytes.wipe_free(c.Sigma); c.Sigma = null }

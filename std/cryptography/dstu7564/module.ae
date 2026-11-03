@@ -478,6 +478,7 @@ new(algo: string) -> {
         ctx.columns = 16
         ctx.rounds = 14
     } else {
+        free_internals(ctx)
         mem.wipe(ctx, sizeof(DstuCtx))
         free(ctx)
         return null, "unknown algorithm"
@@ -580,8 +581,11 @@ finalize_to_bytes(c_ctx: *DstuCtx) -> ptr {
     return out
 }
 
+// What the context owns: the buffer and its reference to the algo name,
+// which `free` alone would not release (#3539).
 free_internals(c: *DstuCtx) {
     if c.buf != null { bytes.wipe_free(c.buf); c.buf = null }
+    c.algo = ""
 }
 
 final_bytes(ctx: ptr) -> ptr {

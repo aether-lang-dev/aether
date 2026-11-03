@@ -88,6 +88,7 @@ new(algo: string) -> {
         ctx.v4 = 0xa13c42a223be8d87
         ctx.rounds = 8
     } else {
+        free_internals(ctx)
         mem.wipe(ctx, sizeof(AsconCtx))
         free(ctx)
         return null, "unknown algorithm"
@@ -149,11 +150,14 @@ finalize_to_bytes(c: *AsconCtx) -> ptr {
     return out
 }
 
+// What the context owns: the block buffer and its reference to the algo
+// name, which `free` alone would not release (#3539).
 free_internals(c: *AsconCtx) {
     if c.block != null {
         bytes.wipe_free(c.block)
         c.block = null
     }
+    c.algo = ""
 }
 
 final_bytes(ctx: ptr) -> ptr {
