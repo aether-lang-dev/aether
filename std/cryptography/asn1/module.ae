@@ -620,6 +620,8 @@ encode_oid(dotted: string) -> ptr {
     //
     // The `have` flag that catches the empty-arc cases was already here,
     // set and cleared and never read.
+    //
+    // Every refusal frees `content` before it returns null (#3539).
     content = bytes.new(0)
     clen = 0
     n = string.length(dotted)
@@ -637,6 +639,7 @@ encode_oid(dotted: string) -> ptr {
         }
         if ch == 46 {
             if have == 0 {
+                bytes.wipe_free(content)
                 return null // empty arc: "", "1..2", "1.2.", ".1.2"
             }
             if arccount == 0 {
@@ -645,6 +648,7 @@ encode_oid(dotted: string) -> ptr {
                 // encoding -- 40*arc1 + arc2 would land in another arc's
                 // range and decode as a different OID.
                 if arc1 < 0 || arc1 > 2 {
+                    bytes.wipe_free(content)
                     return null
                 }
             } else {
@@ -654,6 +658,7 @@ encode_oid(dotted: string) -> ptr {
                     // which is what makes the 40*arc1 + arc2 folding
                     // reversible. Only arc 2 is open-ended.
                     if arc1 < 2 && arc2 > 39 {
+                        bytes.wipe_free(content)
                         return null
                     }
                     // base128, not a single byte: under arc 2 the folded
@@ -669,6 +674,7 @@ encode_oid(dotted: string) -> ptr {
             have = 0
         } else {
             if ch < 48 || ch > 57 {
+                bytes.wipe_free(content)
                 return null // not a digit: "1.2.x", "1.2-3"
             }
             cur = (cur * 10) + (ch - 48)
@@ -679,6 +685,7 @@ encode_oid(dotted: string) -> ptr {
     // Two arcs minimum: the first two fold into one subidentifier, so a
     // single-arc input has nothing to fold and encoded as an empty OID.
     if arccount < 2 {
+        bytes.wipe_free(content)
         return null
     }
     return wrap_tlv(0x06, content)

@@ -1,0 +1,65 @@
+// Regression (#3539): asn1.encode_oid frees its buffer when it refuses a
+// string that is not an OID.
+//
+// encode_oid builds the content bytes as it reads the arcs, and each of its
+// refusals (an empty arc, a first arc past 2, a second arc past 39 under 0
+// or 1, a non-digit, a single arc) returned null without freeing them. Every
+// refused string leaked the buffer. LeakSanitizer found it in
+// tests/integration/asn1_oid_and_cert_validation.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same refusals grows the heap by
+// exactly 0.
+
+import std.mem
+import std.bytes
+import std.string
+import std.cryptography.asn1
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+// Each kind of refusal, and one OID that encodes; the number refused.
+fn refusals() -> int {
+    refused = 0
+    if asn1.encode_oid("") == null { refused = refused + 1 }
+    if asn1.encode_oid("1") == null { refused = refused + 1 }
+    if asn1.encode_oid("1..2") == null { refused = refused + 1 }
+    if asn1.encode_oid("1.2.") == null { refused = refused + 1 }
+    if asn1.encode_oid("1.2.x") == null { refused = refused + 1 }
+    if asn1.encode_oid("3.2.1") == null { refused = refused + 1 }
+    if asn1.encode_oid("1.40.1") == null { refused = refused + 1 }
+    good = asn1.encode_oid("1.2.840.113549.1.1.1")
+    if good == null {
+        refused = refused + 100
+    } else {
+        bytes.free(good)
+    }
+    return refused
+}
+
+main() {
+    check(refusals() == 7, "seven strings refused, one OID encoded")
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 20 {
+            refusals()
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 20 {
+                    check(refusals() == 7, "the same refusals in a window")
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 140 refusals grew the heap by ${grown} bytes in every run")
+    }
+    println("PASS encode_oid frees its buffer on a refusal")
+}
