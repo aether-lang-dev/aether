@@ -10,12 +10,6 @@
 #include <errno.h>
 #include <stdarg.h>
 #include <stdio.h>
-#ifdef _WIN32
-#ifndef popen
-#  define popen  _popen
-#  define pclose _pclose
-#endif
-#endif
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -23,6 +17,7 @@
 #ifdef _WIN32
 #  include <windows.h>
 #  include <direct.h>
+#  include <process.h>
 #  include <sys/utime.h>
 #  define PATH_SEP "\\"
 #else
@@ -35,6 +30,10 @@
 // --------------------------------------------------------------------------
 // Cache infrastructure
 // --------------------------------------------------------------------------
+
+/* The table of remembered content hashes in the cache directory (#3532,
+ * file_hash below); not a slot. */
+#define FILE_MEMO_NAME "filehash.v1"
 
 
 
@@ -154,7 +153,8 @@ static int cache_slot_is_countable(const char* name) {
     if (strstr(name, ".tmp.")) return 0;
     size_t n = strlen(name);
     if (n > 5 && strcmp(name + n - 5, ".deps") == 0) return 0;
-    if (strcmp(name, "gc.stamp") == 0 || strcmp(name, "latest_release") == 0) return 0;
+    if (strcmp(name, "gc.stamp") == 0 || strcmp(name, "latest_release") == 0 ||
+        strcmp(name, FILE_MEMO_NAME) == 0) return 0;
     return 1;
 }
 
@@ -281,6 +281,13 @@ int cache_enforce_limit(const char* keep, int force) {
      * source keys on the tree walk once and writes a new one. Runs for an
      * unlimited cache too. */
     cache_sweep_stale_depfiles(s_cache_dir, 30 * 24 * 3600);
+    /* And the temporaries of writers that died before publishing (#3532):
+     * swept here, behind the same ten minute stamp, not on every command.
+     * Each sweep reads the whole cache directory, and a cache the test
+     * sweep had grown to 140,000 entries made that 48 ms of every cache
+     * hit on Windows. A temporary only appears where something publishes,
+     * which is where this runs. */
+    gc_stale_cache_tmp(s_cache_dir);
     if (max == 0) return 0;
 
     int count = 0;
@@ -345,8 +352,8 @@ void remove_dsym_bundle(const char* exe_path) {
 
 // Sweep orphaned `*.tmp.<pid>` slots left by crashed/killed writers.
 // Age-gated to an hour so we never reap a temp another process is
-// actively linking. Runs once per process (from init_cache_dir); a
-// directory scan over a few hundred entries is noise next to a compile.
+// actively linking. Runs with the eviction scan, at most once per ten
+// minutes per cache directory (cache_enforce_limit).
 void gc_stale_cache_tmp(const char* dir) {
     time_t now = time(NULL);
 #ifdef _WIN32
@@ -413,7 +420,6 @@ void init_cache_dir(void) {
         exit(1);
     }
     mkdirs(s_cache_dir);
-    gc_stale_cache_tmp(s_cache_dir);
 }
 
 /* FNV-1a over `s`, continuing from `h`: a string hashed in pieces hashes
@@ -428,16 +434,41 @@ static unsigned long long fnv64_str(const char* s) {
     return fnv64_more(14695981039346656037ULL, s);
 }
 
-// FNV-64 hash of a file's contents
+/* A hash of a file's contents, 0 when it cannot be read whole.
+ *
+ * Eight bytes at a time (#3532): the key reads aetherc, ae, libaether.a and
+ * the headers, about 18 MB in a source tree, and byte-at-a-time FNV spent
+ * most of a cache hit's hashing time in its multiply chain. Each step xors a
+ * word in, multiplies by an odd constant and folds the high half down, all
+ * three invertible, so a change in any one word always changes the result.
+ * The tail and the length go in last, so files that differ only in trailing
+ * zero bytes differ too. */
 static unsigned long long fnv64_file(const char* path) {
     FILE* f = fopen(path, "rb");
     if (!f) return 0;
     unsigned long long h = 14695981039346656037ULL;
-    unsigned char buf[4096];
+    unsigned long long total = 0;
+    unsigned char buf[65536];
+    size_t have = 0;   /* bytes carried from the last read, fewer than 8 */
     size_t n;
-    while ((n = fread(buf, 1, sizeof(buf), f)) > 0) {
-        for (size_t i = 0; i < n; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+    while ((n = fread(buf + have, 1, sizeof(buf) - have, f)) > 0) {
+        total += n;
+        n += have;
+        size_t i = 0;
+        for (; i + 8 <= n; i += 8) {
+            unsigned long long w;
+            memcpy(&w, buf + i, 8);
+            h ^= w;
+            h *= 0x9E3779B97F4A7C15ULL;
+            h ^= h >> 32;
+        }
+        have = n - i;
+        memmove(buf, buf + i, have);
     }
+    for (size_t i = 0; i < have; i++) { h ^= buf[i]; h *= 1099511628211ULL; }
+    h ^= total;
+    h *= 0x9E3779B97F4A7C15ULL;
+    h ^= h >> 29;
     /* CRITICAL: fread returns 0 for both EOF and a read error, so without this
      * an I/O error partway through hashes the bytes read so far and hands that
      * back as if it were the file's hash. This value keys the build cache, and
@@ -448,6 +479,239 @@ static unsigned long long fnv64_file(const char* path) {
         return 0;
     }
     fclose(f);
+    return h ? h : 1;
+}
+
+/* ---- Content hashes remembered between runs (#3532) -------------------------
+ *
+ * A cache hit used to read every file of the key again: aetherc (11 MB on
+ * Windows), ae, libaether.a, the contrib archives, the C compiler, and in a
+ * source tree every runtime and std header. The key still holds those files'
+ * CONTENT hashes, for the reason the binaries are hashed by content (a
+ * rebuild within one second keeps a seconds-resolution mtime); what is new
+ * is that a file whose size, modification time and identity (POSIX: device,
+ * inode and change time; Windows: creation and change time) are those
+ * recorded with its hash is not read again.
+ *
+ * A hash is recorded only for a file last modified at least two seconds
+ * before it was read, git's rule for racily clean index entries: a file
+ * written again in the same clock tick as the recorded mtime would otherwise
+ * keep that mtime with other bytes. Anything written later carries a later
+ * mtime, and the change time cannot be set back by `touch -d` or `cp -p`,
+ * so restoring an old mtime still changes the identity.
+ *
+ * The table is a text file in the cache directory, replaced whole by rename,
+ * so a reader sees one writer's table or another's, never a mix; a lost
+ * update costs one hash next run. Past FILE_MEMO_MAX entries it starts over
+ * empty. */
+#define FILE_MEMO_MAX 8192
+
+typedef struct {
+    char* path;   /* absolute */
+    unsigned long long size, mtime_ns, ident, hash;
+} FileMemo;
+
+static FileMemo* s_memo = NULL;
+static size_t s_memo_cap = 0;    /* slots, a power of two; half full at most */
+static size_t s_memo_count = 0;
+static int s_memo_loaded = 0;
+static int s_memo_dirty = 0;
+
+/* Size, modification time (ns since 1970) and identity of a regular file;
+ * 0 when it is not one or cannot be asked. */
+static int file_stat_id(const char* path, unsigned long long* size,
+                        unsigned long long* mtime_ns, unsigned long long* ident) {
+#ifdef _WIN32
+    /* NTFS's ChangeTime moves on every write and on every attribute change,
+     * and SetFileTime cannot set it, as POSIX's ctime. */
+    HANDLE fh = CreateFileA(path, FILE_READ_ATTRIBUTES,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                            OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, NULL);
+    if (fh == INVALID_HANDLE_VALUE) return 0;
+    FILE_BASIC_INFO bi;
+    LARGE_INTEGER sz;
+    int ok = GetFileInformationByHandleEx(fh, FileBasicInfo, &bi, sizeof(bi)) &&
+             GetFileSizeEx(fh, &sz);
+    CloseHandle(fh);
+    if (!ok || (bi.FileAttributes & FILE_ATTRIBUTE_DIRECTORY)) return 0;
+    unsigned long long w = (unsigned long long)bi.LastWriteTime.QuadPart;
+    /* FILETIME counts 100 ns from 1601; nothing older than 1970 is kept. */
+    if (w < 116444736000000000ULL) return 0;
+    *size = (unsigned long long)sz.QuadPart;
+    *mtime_ns = (w - 116444736000000000ULL) * 100ULL;
+    unsigned long long id = 14695981039346656037ULL;
+    id = (id ^ (unsigned long long)bi.CreationTime.QuadPart) * 1099511628211ULL;
+    id = (id ^ (unsigned long long)bi.ChangeTime.QuadPart) * 1099511628211ULL;
+    *ident = id;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0 || !S_ISREG(st.st_mode)) return 0;
+    *size = (unsigned long long)st.st_size;
+    *mtime_ns = stat_mtime_ns(&st);
+#if defined(__APPLE__)
+    unsigned long long ctime_ns = (unsigned long long)st.st_ctimespec.tv_sec * 1000000000ULL +
+                                  (unsigned long long)st.st_ctimespec.tv_nsec;
+#else
+    unsigned long long ctime_ns = (unsigned long long)st.st_ctim.tv_sec * 1000000000ULL +
+                                  (unsigned long long)st.st_ctim.tv_nsec;
+#endif
+    unsigned long long id = 14695981039346656037ULL;
+    id = (id ^ (unsigned long long)st.st_dev) * 1099511628211ULL;
+    id = (id ^ (unsigned long long)st.st_ino) * 1099511628211ULL;
+    id = (id ^ ctime_ns) * 1099511628211ULL;
+    *ident = id;
+#endif
+    return 1;
+}
+
+/* The slot for `path`, inserted when `insert` (NULL when out of memory or
+ * absent). */
+static FileMemo* memo_slot(const char* path, int insert) {
+    if (insert && (s_memo_count + 1) * 2 > s_memo_cap) {
+        size_t ncap = s_memo_cap ? s_memo_cap * 2 : 512;
+        FileMemo* nt = calloc(ncap, sizeof(FileMemo));
+        if (!nt) return NULL;
+        for (size_t i = 0; i < s_memo_cap; i++) {
+            if (!s_memo[i].path) continue;
+            size_t j = (size_t)fnv64_str(s_memo[i].path) & (ncap - 1);
+            while (nt[j].path) j = (j + 1) & (ncap - 1);
+            nt[j] = s_memo[i];
+        }
+        free(s_memo);
+        s_memo = nt;
+        s_memo_cap = ncap;
+    }
+    if (!s_memo_cap) return NULL;
+    size_t mask = s_memo_cap - 1;
+    size_t i = (size_t)fnv64_str(path) & mask;
+    while (s_memo[i].path) {
+        if (strcmp(s_memo[i].path, path) == 0) return &s_memo[i];
+        i = (i + 1) & mask;
+    }
+    if (!insert) return NULL;
+    s_memo[i].path = strdup(path);
+    if (!s_memo[i].path) return NULL;
+    s_memo_count++;
+    return &s_memo[i];
+}
+
+static void memo_path(char* out, size_t outsz) {
+    init_cache_dir();
+    snprintf(out, outsz, "%s/%s", s_cache_dir, FILE_MEMO_NAME);
+}
+
+static void memo_load(void) {
+    if (s_memo_loaded) return;
+    s_memo_loaded = 1;
+    char p[600];
+    memo_path(p, sizeof(p));
+    FILE* f = fopen(p, "r");
+    if (!f) return;
+    char* line = NULL;
+    size_t cap = 0;
+    if (ae_read_line(f, &line, &cap) > 0 && strncmp(line, "# aether-filehash v1", 20) == 0) {
+        while (ae_read_line(f, &line, &cap) > 0) {
+            if (s_memo_count >= FILE_MEMO_MAX) {
+                /* Too many to keep: start over, the next runs refill it. */
+                s_memo_dirty = 1;
+                for (size_t i = 0; i < s_memo_cap; i++) free(s_memo[i].path);
+                memset(s_memo, 0, s_memo_cap * sizeof(FileMemo));
+                s_memo_count = 0;
+                break;
+            }
+            unsigned long long h, size, mtime, ident;
+            int used = 0;
+            if (sscanf(line, "%llx %llu %llu %llx %n", &h, &size, &mtime, &ident, &used) != 4 ||
+                used <= 0)
+                continue;
+            char* path = line + used;
+            size_t n = strlen(path);
+            while (n > 0 && (path[n - 1] == '\n' || path[n - 1] == '\r')) path[--n] = '\0';
+            if (n == 0 || h == 0) continue;
+            FileMemo* m = memo_slot(path, 1);
+            if (!m) break;
+            m->hash = h;
+            m->size = size;
+            m->mtime_ns = mtime;
+            m->ident = ident;
+        }
+    }
+    free(line);
+    fclose(f);
+}
+
+/* Write the table back when this run added to it. */
+static void memo_save(void) {
+    if (!s_memo_dirty || !s_memo) return;
+    s_memo_dirty = 0;
+    char p[600], tmp[700];
+    memo_path(p, sizeof(p));
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", p, (int)getpid());
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    int ok = fprintf(f, "# aether-filehash v1\n") > 0;
+    for (size_t i = 0; ok && i < s_memo_cap; i++) {
+        const FileMemo* m = &s_memo[i];
+        if (!m->path) continue;
+        ok = fprintf(f, "%016llx %llu %llu %016llx %s\n", m->hash, m->size, m->mtime_ns,
+                     m->ident, m->path) > 0;
+    }
+    if (fclose(f) != 0) ok = 0;
+    if (!ok) { remove(tmp); return; }
+#ifdef _WIN32
+    /* The table is replaced, not published once: a later run rewrites it. */
+    if (!MoveFileExA(tmp, p, MOVEFILE_REPLACE_EXISTING)) remove(tmp);
+#else
+    if (rename(tmp, p) != 0) remove(tmp);
+#endif
+}
+
+static char* cwd_dup(void);
+static int cache_path_is_absolute(const char* p);
+
+/* `path` as an absolute path in a buffer the caller frees; NULL when out of
+ * memory or the working directory cannot be read. */
+static char* memo_key_path(const char* path) {
+    if (cache_path_is_absolute(path)) return strdup(path);
+    char* cwd = cwd_dup();
+    if (!cwd) return NULL;
+    size_t cl = strlen(cwd), pl = strlen(path);
+    char* out = malloc(cl + 1 + pl + 1);
+    if (out) {
+        memcpy(out, cwd, cl);
+        out[cl] = '/';
+        memcpy(out + cl + 1, path, pl + 1);
+    }
+    free(cwd);
+    return out;
+}
+
+/* The content hash of `path` (fnv64_file's), from the table when the file
+ * is as it was when last hashed. */
+static unsigned long long file_hash(const char* path) {
+    unsigned long long size, mtime_ns, ident;
+    if (!file_stat_id(path, &size, &mtime_ns, &ident)) return fnv64_file(path);
+    char* key = memo_key_path(path);
+    if (!key) return fnv64_file(path);
+    memo_load();
+    FileMemo* m = memo_slot(key, 0);
+    if (m && m->size == size && m->mtime_ns == mtime_ns && m->ident == ident) {
+        free(key);
+        return m->hash;
+    }
+    unsigned long long h = fnv64_file(path);
+    /* Settled only: modified at least two seconds before this read. */
+    if (h && (long long)(mtime_ns / 1000000000ULL) + 2 <= (long long)time(NULL)) {
+        m = memo_slot(key, 1);
+        if (m) {
+            m->hash = h;
+            m->size = size;
+            m->mtime_ns = mtime_ns;
+            m->ident = ident;
+            s_memo_dirty = 1;
+        }
+    }
+    free(key);
     return h;
 }
 
@@ -477,7 +741,7 @@ static void hash_archives_in(const char* dir, unsigned long long* acc) {
         if (strcmp(name, "libaether.a") == 0 || strcmp(name, "libaether_compiler.a") == 0)
             continue;
         snprintf(p, sizeof(p), "%s%s%s", dir, PATH_SEP, name);
-        *acc += fnv64_str(name) ^ fnv64_file(p);
+        *acc += fnv64_str(name) ^ file_hash(p);
 #ifdef _WIN32
     } while (FindNextFileA(h, &fd));
     FindClose(h);
@@ -637,7 +901,7 @@ static void fold_header_includes(const char* header, unsigned long long* acc,
             *acc = (*acc * 1099511628211ULL) ^ 0ULL;
             continue;
         }
-        *acc = (*acc * 1099511628211ULL) ^ fnv64_file(path);
+        *acc = (*acc * 1099511628211ULL) ^ file_hash(path);
         fold_header_includes(path, acc, seen, nseen, depth + 1, overflow);
     }
     free(line);
@@ -689,7 +953,7 @@ static int fold_depfile(const char* depfile, unsigned long long* acc) {
         const char* path = sp + 1;
         *acc ^= fnv64_str(path);
         if (strcmp(kind, "read") == 0) {
-            *acc = (*acc * 1099511628211ULL) ^ fnv64_file(path);
+            *acc = (*acc * 1099511628211ULL) ^ file_hash(path);
             if (is_header_path(path)) fold_header_includes(path, acc, seen, &nseen, 0, &overflow);
             any = 1;
         } else if (strcmp(kind, "absent") == 0) {
@@ -808,7 +1072,7 @@ static void walk_entry(TreeWalk* w, const char* name, int is_dir, int depth) {
         return;
     }
     w->acc ^= fnv64_str(w->rel);
-    w->acc = (w->acc * 1099511628211ULL) ^ fnv64_file(w->full);
+    w->acc = (w->acc * 1099511628211ULL) ^ file_hash(w->full);
     w->count++;
 }
 
@@ -1095,7 +1359,7 @@ static unsigned long long c_compiler_fingerprint(void) {
         char* resolved = resolve_program(word);
         if (!resolved) continue;
         h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
-        h = (h * 1099511628211ULL) ^ fnv64_file(resolved);
+        h = (h * 1099511628211ULL) ^ file_hash(resolved);
         /* The file found on PATH may be a trampoline whose bytes never
          * change when the compiler behind it does: macOS's /usr/bin/gcc
          * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
@@ -1106,14 +1370,23 @@ static unsigned long long c_compiler_fingerprint(void) {
         char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
         free(resolved);
         if (!cmd) continue;
-        FILE* pipe = popen(cmd, "r");
+        /* Spawned directly, as every compile step is (#3532): popen hands
+         * the line to cmd.exe on Windows, a second process start that was
+         * about half of this probe's 23 ms there. */
+        char out_path[1200];
+        snprintf(out_path, sizeof(out_path), "%s/ae_ccver_%d.out", get_temp_dir(),
+                 (int)getpid());
+        run_cmd_capture_stdout(cmd, out_path);
         free(cmd);
-        if (!pipe) continue;
-        char line[512];
-        if (fgets(line, sizeof(line), pipe)) {
-            h = (h * 1099511628211ULL) ^ fnv64_str(line);
+        FILE* vf = fopen(out_path, "r");
+        if (vf) {
+            char line[512];
+            if (fgets(line, sizeof(line), vf)) {
+                h = (h * 1099511628211ULL) ^ fnv64_str(line);
+            }
+            fclose(vf);
         }
-        pclose(pipe);
+        remove(out_path);
     }
     free(word);
     free(owned);
@@ -1176,7 +1449,7 @@ unsigned long long compute_cache_key(const char* ae_file,
     /* A salt that could not be built (out of memory) would leave part of
      * the build's identity out of the key: no key, as for an unread file. */
     if (!extra_salt) return 0;
-    unsigned long long src_hash = fnv64_file(ae_file);
+    unsigned long long src_hash = file_hash(ae_file);
     if (src_hash == 0) return 0;
     tc_seed_lib_dirs_from_env();
 
@@ -1198,11 +1471,11 @@ unsigned long long compute_cache_key(const char* ae_file,
      * only fold that reflects an actual change in what these produce.
      * A hash of 0 (unreadable) folds in nothing rather than colliding. */
     struct stat st; (void)st;
-    unsigned long long cc_hash = fnv64_file(tc.compiler);
+    unsigned long long cc_hash = file_hash(tc.compiler);
     if (cc_hash) key_append(&key, ":cc=%016llx", cc_hash);
     char self_path[1200];
     if (get_exe_path(self_path, sizeof(self_path))) {
-        unsigned long long ae_hash = fnv64_file(self_path);
+        unsigned long long ae_hash = file_hash(self_path);
         if (ae_hash) key_append(&key, ":ae=%016llx", ae_hash);
     }
     /* #2477: and the C compiler that turns aetherc's output into the binary. */
@@ -1210,7 +1483,7 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (!ccid) key.oom = 1;
     key_append(&key, ":ccid=%016llx", ccid);
     if (tc.has_lib) {
-        unsigned long long lib_hash = fnv64_file(tc.lib);
+        unsigned long long lib_hash = file_hash(tc.lib);
         if (lib_hash) key_append(&key, ":lib=%016llx", lib_hash);
         unsigned long long contrib_hash = hash_contrib_archives(tc.lib);
         if (contrib_hash)
@@ -1253,7 +1526,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         if (!tok) key.oom = 1;
         const char* cursor = extra_files;
         while (tok && extras_next(&cursor, tok, list_len)) {
-            unsigned long long fh = fnv64_file(tok);
+            unsigned long long fh = file_hash(tok);
             key_append(&key, ":%016llx", fh);
         }
         free(tok);
@@ -1421,6 +1694,7 @@ unsigned long long compute_cache_key(const char* ae_file,
                extra_salt ? extra_salt : "");
 
     if (key.oom && tc.verbose) fprintf(stderr, "[cache] no key: out of memory\n");
+    memo_save();
     unsigned long long h = (complete && !key.oom) ? fnv64_str(key.buf) : 0;
     free(key.buf);
     if (!complete || key.oom) return 0;
