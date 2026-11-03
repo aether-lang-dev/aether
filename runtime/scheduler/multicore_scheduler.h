@@ -36,8 +36,11 @@
 #define g_sched_features g_aether_config
 
 // Reply slot for ask/reply pattern (experimental)
-// Heap-allocated per ask call; freed by whoever holds the last reference (refcounted).
-typedef struct {
+// Reused across asks (#3533): made once, with its mutex and condition
+// variable, and lent to an ask while its count is above zero; at zero both
+// the asker and the actor side have let go of it, and the next ask may take
+// it. The slots live for the process, on one list, as the reclaim readers do.
+typedef struct ActorReplySlot {
     void*              reply_data;   // malloc'd reply payload; returned to caller, caller must free
     size_t             reply_size;   // size of reply_data
     volatile int       reply_ready;  // 1 when reply has been set
@@ -45,8 +48,9 @@ typedef struct {
     volatile int       failed;       // AETHER_ASK_DEAD / _DIED: no reply can come (#3151)
     pthread_mutex_t    mutex;        // protects reply_ready / timed_out / cond
     pthread_cond_t     cond;         // signalled by scheduler_reply()
-    atomic_int         refcount;     // starts at 2 (asker + actor); freed when hits 0
+    atomic_int         refcount;     // 2 while lent (asker + actor); 0: free for the next ask
     uint64_t           deadline_ns;  // the cooperative ask's: a reply after it is late, 0 = none (#3330)
+    struct ActorReplySlot* all_next; // every slot made, for the next ask to find a free one
 } ActorReplySlot;
 
 // I/O readiness message — delivered to actor when the poller reports fd ready.
