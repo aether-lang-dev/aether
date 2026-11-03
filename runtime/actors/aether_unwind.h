@@ -74,7 +74,9 @@ void aether_unwind_drain_current(void);
 int aether_unwind_journal_size(void);
 
 // Release the journal's TLS backing storage. Call at thread exit
-// (scheduler threads); process exit reclaims the main thread's.
+// (scheduler threads); process exit reclaims the main thread's. Any other
+// thread whose journal or teardown queue grew runs it from a thread-exit
+// hook (aether_unwind.c, #3539).
 void aether_unwind_thread_cleanup(void);
 
 // Tear down an object whose last reference was just released, and whose

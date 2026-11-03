@@ -6,6 +6,7 @@
 #include "../utils/aether_fatal.h"   /* aether_fatal_flush (#3435) */
 #include "../utils/aether_compiler.h"
 #include "aether_frames.h"
+#include "../utils/aether_thread.h"
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -149,6 +150,54 @@ void aether_exec_defer_interruption(void) {
 
 static void journal_at(const void* p, AetherUnwindFree free_fn, int depth);
 
+/* The journal and the teardown queue are this thread's, and go back when it
+ * ends (#3539). A scheduler thread gives them back itself
+ * (aether_unwind_thread_cleanup), but any other thread that ran Aether code
+ * has no such step: a host's thread calling into an --emit=lib library, a
+ * std.worker thread, an HTTP server's pool thread. Each left both buffers
+ * behind. So the first growth of either on a thread marks it, and the mark's
+ * thread-exit hook (a pthread key's destructor, an FLS callback on Windows,
+ * both run in the ending thread while its thread-locals still stand) gives
+ * them back. The key is made once per runtime copy, at its first use, and
+ * deleted when the copy is unloaded, so no thread ends into code that is
+ * gone. */
+static pthread_key_t g_unwind_exit_key;
+static _Atomic int g_unwind_exit_key_state;   /* 0 none, 1 being made, 2 made, 3 none to be had */
+
+static void unwind_thread_ends(void* mark) {
+    (void)mark;
+    aether_unwind_thread_cleanup();
+}
+
+static void unwind_mark_thread(void) {
+    int s = atomic_load_explicit(&g_unwind_exit_key_state, memory_order_acquire);
+    if (s != 2) {
+        int none = 0;
+        if (s == 0 && atomic_compare_exchange_strong_explicit(&g_unwind_exit_key_state, &none, 1,
+                                                              memory_order_acq_rel,
+                                                              memory_order_acquire)) {
+            s = pthread_key_create(&g_unwind_exit_key, unwind_thread_ends) == 0 ? 2 : 3;
+            atomic_store_explicit(&g_unwind_exit_key_state, s, memory_order_release);
+        } else {
+            /* Another thread is making it: one pthread_key_create, so short. */
+            while ((s = atomic_load_explicit(&g_unwind_exit_key_state, memory_order_acquire)) == 1) {
+            }
+        }
+        if (s != 2) return;   /* no key: the buffers stay, the old leak at worst */
+    }
+    /* Any non-null value: the hook runs only for a thread that set one. */
+    pthread_setspecific(g_unwind_exit_key, (const void*)&g_unwind_exit_key);
+}
+
+#if AETHER_GCC_COMPAT
+AETHER_DESTRUCTOR static void unwind_exit_key_delete(void) {
+    int made = 2;
+    if (atomic_compare_exchange_strong_explicit(&g_unwind_exit_key_state, &made, 3,
+                                                memory_order_acq_rel, memory_order_acquire))
+        pthread_key_delete(g_unwind_exit_key);
+}
+#endif
+
 void aether_unwind_track(const void* p, AetherUnwindFree free_fn) {
     if (t_frames.depth == 0 || !p || !free_fn) return;
     journal_at(p, free_fn, t_frames.depth);
@@ -179,6 +228,7 @@ int aether_unwind_track_owned_place(const void* place, AetherUnwindDropPtr drop)
         AetherUnwindEntry* grown =
             (AetherUnwindEntry*)realloc(F->journal, (size_t)cap * sizeof(AetherUnwindEntry));
         if (!grown) return 0;   /* no room to journal it: the old leak at worst */
+        if (!F->journal_capacity) unwind_mark_thread();
         F->journal = grown;
         F->journal_capacity = cap;
     }
@@ -210,6 +260,7 @@ static void journal_at(const void* p, AetherUnwindFree free_fn, int depth) {
             (AetherUnwindEntry*)realloc(t_frames.journal,
                                         (size_t)cap * sizeof(AetherUnwindEntry));
         if (!grown) return;  // OOM: skip journaling; worst case is the old leak
+        if (!t_frames.journal_capacity) unwind_mark_thread();
         t_frames.journal = grown;
         t_frames.journal_capacity = cap;
     }
@@ -321,6 +372,7 @@ void aether_teardown(void* obj) {
                 (*(AetherTeardown*)obj)(obj);
                 return;
             }
+            if (!tls_teardown_capacity) unwind_mark_thread();
             tls_teardown_queue = q;
             tls_teardown_capacity = cap;
         }
