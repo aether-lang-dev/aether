@@ -39,7 +39,7 @@ header comment is the authoritative description.
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 148 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
-| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
+| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
@@ -2636,7 +2636,10 @@ arrive, and a header or chunk boundary can land anywhere in one; it
 accumulates them and parses once a complete response is there, returning
 `"incomplete"` until then. `read_response_conn` does the reading too, from a
 connection of the pure-Aether TLS client (`std.cryptography.tls13_client`). Content-Length, chunked, and
-close-delimited bodies are all framed.
+close-delimited bodies are all framed. A 1xx, 204 or 304 response, and any
+response to HEAD, ends at its header section whatever its headers say (RFC
+9110), as `std.net` reads one; make the reader for a HEAD request's response
+with `response_new_for("HEAD")`.
 
 ```aether,run
 import std.http1
@@ -2689,6 +2692,7 @@ chunked body Wikipedia
 
 **Functions:**
 - `http1.response_new()` → `ptr`, `http1.response_free(r)`
+- `http1.response_new_for(method)` → `ptr` - A reader for the response to a `method` request: the response to `"HEAD"` has no body
 - `http1.feed(r, data: byte[], is_eof)` → `string` - Add the bytes of `data` (copied in); `""` once a response is complete, `"incomplete"` before
 - `http1.read_response_conn(r, conn)` → `string` - Read a whole response from a `tls13_client` connection
 - `http1.status_code(r)` → `int`, `status_reason(r)` → `ptr` (a C string), `header(r, name)` → `string` (case-insensitive), `header_count(r)` → `int`

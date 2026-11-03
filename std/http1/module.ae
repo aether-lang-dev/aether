@@ -9,8 +9,10 @@
 // in record-sized chunks. Turning that into a complete HTTP/1.1 response means
 // framing it: find the end of headers, parse the status line + headers, then
 // read the body delimited by ONE of Content-Length, chunked transfer-encoding,
-// or connection-close. A header/body boundary or a chunk boundary can land
-// anywhere in a chunk, so everything is done over a growable accumulator.
+// or connection-close. A 1xx, 204 or 304 response, and the response to a HEAD
+// request (read it with response_new_for("HEAD")), has no body. A header/body
+// boundary or a chunk boundary can land anywhere in a chunk, so everything is
+// done over a growable accumulator.
 //
 // Two layers, so the framing logic is unit-testable WITHOUT a live server:
 //   1. parse_response(r, buf, is_eof) : a pure parser over a byte[] view of a
@@ -21,7 +23,7 @@
 //
 // Import with:  import std.http1
 //
-//   resp = http1.response_new()
+//   resp = http1.response_new()   // http1.response_new_for("HEAD") for HEAD
 //   err  = http1.read_response_conn(resp, conn)
 //   http1.status_code(resp) / http1.header(resp, "content-type") /
 //   http1.body(resp)              // a byte[] view of the decoded body
@@ -39,7 +41,7 @@ extern string_length(s: string) -> int
 
 exports(
     HttpResponse,
-    response_new, response_free,
+    response_new, response_new_for, response_free,
     parse_status_line, parse_headers,
     feed, read_response_conn,
     status_code, status_reason, header, header_count,
@@ -63,6 +65,7 @@ struct HttpResponse {
     body_len_v: int
     headers_done: int // 1 once the status line + headers are parsed
     header_end: int // byte offset in buf just past the "\r\n\r\n"
+    head_request: int // 1 when it answers a HEAD request, so it has no body
 }
 
 response_new() -> ptr {
@@ -79,7 +82,20 @@ response_new() -> ptr {
     r.body_len_v = 0
     r.headers_done = 0
     r.header_end = 0
+    r.head_request = 0
     return r as ptr
+}
+
+// A reader for the response to a request of `method`, which it needs to know:
+// a response to HEAD ends at its header section, whatever its headers say
+// (RFC 9110 9.3.2). response_new() reads the response to any other method.
+response_new_for(method: string) -> ptr {
+    rp = response_new()
+    if string.equals(method, "HEAD") == 1 {
+        r = rp as *HttpResponse
+        r.head_request = 1
+    }
+    return rp
 }
 
 response_free(rp: @frees ptr) {
@@ -561,6 +577,22 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
 
     is_chunked = 0
     if te != null { is_chunked = value_contains_ci(te, "chunked") }
+    want = -1
+    if is_chunked == 0 && cl != null {
+        if header_values_differ(r, "content-length") == 1 { return "conflicting content-length" }
+        want = parse_content_length(cl)
+        // Not a count of bytes, so no answer about where the body ends.
+        if want < 0 { return "bad content-length" }
+    }
+    // A 1xx, 204 or 304 response, and any response to HEAD, ends at its
+    // header section whatever its headers say (RFC 9110 6.4.1), as std.net
+    // reads one (no_body_expected), and as there, a length that is not one
+    // is refused first. The reader took a 204's Content-Length for a body.
+    if no_body_expected(r) == 1 {
+        r.body = slice_body(buf, body_start, 0)
+        r.body_len_v = 0
+        return ""
+    }
     if is_chunked == 1 {
         b, berr = decode_chunked(buf, body_start)
         if string.equals(berr, "") == 1 {
@@ -572,10 +604,6 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
         return berr
     }
     if cl != null {
-        if header_values_differ(r, "content-length") == 1 { return "conflicting content-length" }
-        want = parse_content_length(cl)
-        // Not a count of bytes, so no answer about where the body ends.
-        if want < 0 { return "bad content-length" }
         have = len - body_start
         if have < want { return "incomplete" }
         r.body = slice_body(buf, body_start, want)
@@ -594,6 +622,15 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
 
 fn slice_body(buf: byte[], from: int, n: int) -> ptr {
     return bytes.from_slice(buf[from..from + n])
+}
+
+// 1 when the response in `r` has no body (RFC 9110 6.4.1): an interim 1xx,
+// a 204 or a 304, or any response to a HEAD request.
+fn no_body_expected(r: *HttpResponse) -> int {
+    if r.head_request == 1 { return 1 }
+    if r.status >= 100 && r.status < 200 { return 1 }
+    if r.status == 204 || r.status == 304 { return 1 }
+    return 0
 }
 
 // A Content-Length value (a bytes buffer) read whole as a decimal count, or
