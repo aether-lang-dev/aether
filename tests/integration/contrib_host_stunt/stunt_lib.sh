@@ -98,6 +98,9 @@ RAW=0
 if [ "$PLAT" = linux ] && [ -f "$PRELOAD" ]; then
     (cd "$WORK" && "$BIN/host" child - callback-greet succeed) > "$TMP/probe.out" 2>&1
     if grep -q "has no Landlock" "$TMP/probe.out"; then
+        # GitHub's Linux runners have Landlock, and the child mode is what
+        # those jobs are there to run: losing it there is a failure.
+        [ "${GITHUB_ACTIONS:-}" = true ] && die "no Landlock on this GitHub runner: the child mode would not run" "$TMP/probe.out"
         echo "  [SKIP] $NAME: this kernel has no Landlock, so spawn_socket starts nothing: the child mode is left out"
     elif grep -q "callback-greet: succeeded" "$TMP/probe.out"; then
         CHILD=1
