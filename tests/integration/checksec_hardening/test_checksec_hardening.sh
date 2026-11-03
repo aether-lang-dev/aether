@@ -37,12 +37,6 @@ if [ ! -x "$AE" ]; then
     echo "  [SKIP] checksec_hardening: ae not built"
     exit 0
 fi
-# Under AddressSanitizer the overflow is stopped by ASan before FORTIFY sees
-# it, so the run says nothing about the hardening flags (#3539).
-if [ "${AETHER_SANITIZER:-}" = asan ]; then
-    echo "  [SKIP] checksec_hardening: ASan catches the overflow before FORTIFY"
-    exit 0
-fi
 
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT

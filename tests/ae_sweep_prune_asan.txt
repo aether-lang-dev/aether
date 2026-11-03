@@ -1,0 +1,41 @@
+# Tests the ASan sweep (`make test-asan-ae`, #3539) leaves out, as a fixed
+# substring of the path, the way tests/ae_sweep_prune.txt is read. Each one
+# checks something AddressSanitizer replaces, so under it the test says
+# nothing about the code; every one still runs on the other legs.
+#
+# One reason per entry, and it has to be about what ASan changes, not about a
+# failure nobody looked at:
+#   RSS         bounds the resident set, which under ASan holds its
+#               quarantine and shadow memory; LeakSanitizer checks the same
+#               leaks in the same run
+#   SANDBOX     confines a child through the sandbox's preload library, whose
+#               libc interposition ASan's own interceptors take over
+#   CODE-SHAPE  reads the compiled code (inlining, vector instructions,
+#               FORTIFY's abort, debug info, -Werror warnings), which ASan's
+#               instrumentation and the sweep's -g change
+#   STACK       compiles a nesting deep enough that ASan's larger frames
+#               overflow the compiler's stack
+
+# RSS
+tests/integration/bytes_finish_return_no_leak/
+tests/integration/heap_leak_cross_fn_recursion/
+tests/integration/heap_leak_interp_as_arg/
+tests/integration/heap_tracker_nested_tuple_err_no_leak/
+tests/integration/heap_tracker_return_escape_no_leak/
+tests/integration/panic_unwind_no_leak/
+tests/integration/std_strbuilder_no_leak/
+tests/integration/string_substring_n_no_leak/
+
+# SANDBOX
+tests/integration/sandbox_
+tests/integration/contrib_host_stunt/
+
+# CODE-SHAPE
+tests/integration/build_profile_flag/
+tests/integration/checksec_hardening/
+tests/integration/destructure_unused_local/
+tests/integration/lane_wide/
+tests/integration/packed_array_c_abi/
+
+# STACK
+tests/integration/parser_no_count_limits/

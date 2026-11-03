@@ -190,7 +190,12 @@ case "${AE_SWEEP_SHARD:-}" in
         ;;
 esac
 echo "== test-$san: the .ae corpus (make test-ae${AE_SWEEP_SHARD:+, shard $AE_SWEEP_SHARD})"
-"$make_cmd" test-ae CC="$CC" NPROC="$nproc" || status=1
+# Under ASan, the tests that check what ASan replaces (RSS, the sandbox's
+# preload, the compiled code's shape, deep compiler recursion) are left out,
+# each with its reason in tests/ae_sweep_prune_asan.txt.
+prune=""
+[ "$san" = asan ] && prune="$root/tests/ae_sweep_prune_asan.txt"
+"$make_cmd" test-ae CC="$CC" NPROC="$nproc" AE_SWEEP_EXTRA_PRUNE="$prune" || status=1
 
 # Which report files are errors and which are leaks. A file holding only a
 # WARNING (allocator_may_return_null's note on an impossible request) is

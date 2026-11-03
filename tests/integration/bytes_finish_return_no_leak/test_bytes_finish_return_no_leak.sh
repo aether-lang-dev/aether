@@ -19,14 +19,6 @@ trap 'rm -rf "$tmpdir"' EXIT
 
 cd "$SCRIPT_DIR" || exit 1
 
-# The probe bounds RSS, which under AddressSanitizer holds its quarantine
-# and shadow memory as well; LeakSanitizer checks the same leak there
-# (#3539).
-if [ "${AETHER_SANITIZER:-}" = asan ]; then
-    echo "  [SKIP] bytes_finish_return_no_leak: RSS is ASan's own under ASan; LSan covers it"
-    exit 0
-fi
-
 if ! "$AE" build probe.ae -o "$tmpdir/probe" >"$tmpdir/build.log" 2>&1; then
     echo "  [FAIL] bytes_finish_return_no_leak: build failed"
     sed 's/^/    /' "$tmpdir/build.log" | head -30
