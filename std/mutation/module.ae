@@ -145,6 +145,7 @@ _oracle(test_path: string, incl: string, bin: string) -> int {
     list.add(chk_argv, "check")
     list.add(chk_argv, test_path)
     chk_out, chk_err, _chk_rc, _chk_e = os.run_full(ae, chk_argv, null, "")
+    list.free(chk_argv)
     if string.contains(chk_out, "error[") == 1 || string.contains(chk_err, "error[") == 1 {
         _restore_env("AETHER_CACHE_DIR", saved_cache)
         _restore_env("AETHER_LIB_DIR", saved_lib)
@@ -161,6 +162,7 @@ _oracle(test_path: string, incl: string, bin: string) -> int {
     list.add(bld_argv, "-o")
     list.add(bld_argv, bin)
     _bo, _be, _brc, _bee = os.run_full(ae, bld_argv, null, "")
+    list.free(bld_argv)
     _restore_env("AETHER_CACHE_DIR", saved_cache)
     _restore_env("AETHER_LIB_DIR", saved_lib)
     probe = _probe_binary(bin)
@@ -182,6 +184,7 @@ _oracle(test_path: string, incl: string, bin: string) -> int {
     _ = os.setenv("AE_SPEC_REPORT", rpt)
     run_argv = list.new()
     _ro, _re, _rrc, run_err = os.run_full(probe, run_argv, null, "")
+    list.free(run_argv)
     _restore_env("AE_SPEC_FORMAT", saved_fmt)
     _restore_env("AE_SPEC_REPORT", saved_rpt)
     if string.equals(run_err, "") == 0 {
@@ -597,9 +600,13 @@ run(sut_path: string, test_path: string, lib_dir: string) -> int {
     println("")
 
     killed = ref(0)
+    defer ref_free(killed)
     survived = ref(0)
+    defer ref_free(survived)
     nocompile = ref(0)
+    defer ref_free(nocompile)
     survivors = list.new()
+    defer list.free(survivors)
 
     // Core ~6 operators. Multi-char comparisons first so single-char
     // rules can't partially match them.

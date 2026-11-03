@@ -1,0 +1,83 @@
+// Regression (#3539): std.mutation frees the argument lists, counters and
+// survivor list it makes.
+//
+// Each mutant's oracle built three argument lists (check, build, run) and
+// passed them to os.run_full, which borrows them; nothing freed them. run()
+// kept its counts in three ref cells and the survivors in a list, freed on
+// no return. A mutation run leaked all of them, and more with every mutant.
+// LeakSanitizer found it running examples/06-tooling/02-mutation.
+//
+// This program is its own toolchain: run() reaches the `ae` it names in
+// AE_BIN, here this program, whose `check` prints nothing, whose `build`
+// copies the program to the binary asked for, and which run as that binary
+// (AE_SPEC_REPORT set) writes a report of no failures. The SUT has one
+// mutation site, so a run checks, builds and runs twice. Where the heap
+// count is exact (mem.heap_in_use_exact), some run of the same work leaves
+// it as it found it.
+
+import std.mem
+import std.os
+import std.fs
+import std.string
+import std.mutation
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+// The toolchain this program plays; 1 when it played one.
+fn as_toolchain() -> int {
+    report = os.getenv("AE_SPEC_REPORT")
+    if report != null && report != "" {
+        fs.write(report, "version=1\nfailed=0\n")
+        return 1
+    }
+    role = os.args_get(1)
+    if role == "check" { return 1 }
+    if role == "build" {
+        me = os.argv0()
+        out = os.args_get(4)
+        if string.ends_with(me, ".exe") == 1 { out = "${out}.exe" }
+        _n, _k, cerr = fs.copy(me, out)
+        if cerr != "" { return 2 }
+        _c, _ck, _cm = fs.chmod(out, 493)
+        return 1
+    }
+    return 0
+}
+
+main() {
+    played = as_toolchain()
+    if played == 2 { exit(1) }
+    if played == 1 { return }
+
+    dir, derr = fs.make_temp_dir("", "ae_mutation_leak")
+    check(derr == "", "a temp dir: ${derr}")
+    sut = "${dir}/sut.ae"
+    test = "${dir}/test.ae"
+    fs.write(sut, "sum() -> int {\n    return 1 + 2\n}\n")
+    fs.write(test, "main() {}\n")
+    _ = os.setenv("AE_BIN", os.argv0())
+
+    // The fake suite never fails, so the one mutant survives.
+    check(mutation.run(sut, test, dir) == 1, "one mutant, and it survives")
+    if mem.heap_in_use_exact() {
+        mutation.run(sut, test, dir)
+        long grown = -1
+        tries = 0
+        while tries < 5 && grown != 0 {
+            before = mem.heap_in_use()
+            check(mutation.run(sut, test, dir) == 1, "the same run again")
+            grown = mem.heap_in_use() - before
+            tries = tries + 1
+        }
+        check(grown == 0, "a mutation run grew the heap by ${grown} bytes in every try")
+    }
+    _r = fs.remove_tree(dir)
+    println("PASS a mutation run frees what it makes")
+}
