@@ -149,8 +149,13 @@ main() {
     ok = ok & no_body("a 304 with a Content-Length", "GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 1234\r\n\r\n", 304)
     ok = ok & no_body("a 200 to HEAD with a Content-Length", "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\n\r\n", 200)
     ok = ok & no_body("a 200 to HEAD sent chunked", "HEAD", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n", 200)
+    // A length past what a body read could hold says only how long the
+    // resource is: a HEAD of a file over 2 GiB, a 304 of one.
+    ok = ok & no_body("a 200 to HEAD of a file over 2 GiB", "HEAD", "HTTP/1.1 200 OK\r\nContent-Length: 3000000000\r\n\r\n", 200)
+    ok = ok & no_body("a 304 of a file over 2 GiB", "GET", "HTTP/1.1 304 Not Modified\r\nContent-Length: 3000000000\r\n\r\n", 304)
     // As std.net reads it, a length that is not one is refused even here.
     ok = ok & refused("a 204 with two lengths that disagree", "HTTP/1.1 204\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\n")
+    ok = ok & refused("a 204 with a length that is no number", "HTTP/1.1 204\r\nContent-Length: 5x\r\n\r\n")
     // The same 200 to a GET still waits for its body.
     rg = http1.response_new_for("GET")
     mg = sb("HTTP/1.1 200 OK\r\nContent-Length: 5\r\n\r\n")

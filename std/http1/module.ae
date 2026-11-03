@@ -578,17 +578,25 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
     is_chunked = 0
     if te != null { is_chunked = value_contains_ci(te, "chunked") }
     want = -1
+    nobody = no_body_expected(r)
     if is_chunked == 0 && cl != null {
         if header_values_differ(r, "content-length") == 1 { return "conflicting content-length" }
-        want = parse_content_length(cl)
-        // Not a count of bytes, so no answer about where the body ends.
-        if want < 0 { return "bad content-length" }
+        if nobody == 1 {
+            // No body is read, so the length is only checked for being one:
+            // a HEAD of a file over 2 GiB says how long it is, past the int
+            // a body read here could hold.
+            if is_count_text(cl) == 0 { return "bad content-length" }
+        } else {
+            want = parse_content_length(cl)
+            // Not a count of bytes, so no answer about where the body ends.
+            if want < 0 { return "bad content-length" }
+        }
     }
     // A 1xx, 204 or 304 response, and any response to HEAD, ends at its
     // header section whatever its headers say (RFC 9110 6.4.1), as std.net
     // reads one (no_body_expected), and as there, a length that is not one
     // is refused first. The reader took a 204's Content-Length for a body.
-    if no_body_expected(r) == 1 {
+    if nobody == 1 {
         r.body = slice_body(buf, body_start, 0)
         r.body_len_v = 0
         return ""
@@ -638,6 +646,20 @@ fn no_body_expected(r: *HttpResponse) -> int {
 fn parse_content_length(b: ptr) -> int {
     n = bytes.length(b)
     return parse_count(bytes.view(b)[0..n], 0, n, 10, HTTP1_COUNT_MAX)
+}
+
+// Whether a Content-Length value is a decimal count of any size: one digit
+// or more and nothing else. What a response with no body is checked for.
+fn is_count_text(b: ptr) -> int {
+    n = bytes.length(b)
+    if n == 0 { return 0 }
+    i = 0
+    while i < n {
+        c = bytes.get(b, i)
+        if c < 48 || c > 57 { return 0 }
+        i = i + 1
+    }
+    return 1
 }
 
 // ---- streaming driver over a tls13_client connection ----
