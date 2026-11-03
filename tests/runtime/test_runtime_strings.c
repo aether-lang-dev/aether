@@ -84,6 +84,31 @@ TEST_CATEGORY(string_length_past_int_panics, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(0, g_huge_length);
     ASSERT_STREQ("string: a length or position past 2 GiB does not fit an int", caught);
 }
+
+/* #3523: string_char_at compared the index with `(int)len` and
+ * string_substring clamped `end` to `(int)slen`, both negative for a string
+ * over 2 GiB, so every byte read as out of range and every substring came
+ * back empty. The positions are the caller's ints and always fit; the
+ * length is compared as a size_t. Only the first bytes are read, so the
+ * header can claim the length over a short buffer. */
+TEST_CATEGORY(string_positions_in_a_string_past_int, TEST_CATEGORY_STDLIB) {
+    static char bytes[4] = "xyz";
+    AetherString huge;
+    memset(&huge, 0, sizeof huge);
+    huge.magic = AETHER_STRING_MAGIC;
+    huge.ref_count = AETHER_STRING_PINNED_REFS;
+    huge.length = (size_t)INT_MAX + 10;
+    huge.capacity = huge.length + 1;
+    huge.data = bytes;
+
+    ASSERT_EQ('x', string_char_at(&huge, 0));
+    ASSERT_EQ('z', string_char_at(&huge, 2));
+    AetherString* sub = string_substring(&huge, 0, 2);
+    ASSERT_NOT_NULL(sub);
+    ASSERT_EQ(2, (int)aether_string_length(sub));
+    ASSERT_STREQ("xy", aether_string_data(sub));
+    string_release(sub);
+}
 #endif
 
 TEST_CATEGORY(string_char_at, TEST_CATEGORY_STDLIB) {

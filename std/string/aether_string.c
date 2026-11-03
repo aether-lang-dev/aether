@@ -252,7 +252,10 @@ int string_length(const void* str) {
 
 int string_char_at(const void* str, int index) {
     size_t len = str_len(str);
-    if (!str || index < 0 || index >= (int)len) return 0;
+    /* Compared as a size_t (#3523): `(int)len` of a string over 2 GiB is
+     * negative, and every index read as out of range. The index is the
+     * caller's int, so it always fits; the length is never cut. */
+    if (!str || index < 0 || (size_t)index >= len) return 0;
     /* Unsigned: a byte >= 0x80 used to come back sign-extended, so 0x85 read
      * as -123 and every binary parser written against this silently broke on
      * high bytes (#1516 found it through WebSocket framing). Returning int
@@ -407,7 +410,10 @@ AetherString* string_substring(const void* str, int start, int end) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
     if (start < 0) start = 0;
-    if (end > (int)slen) end = (int)slen;
+    /* Clamped as a size_t (#3523): `(int)slen` of a string over 2 GiB is
+     * negative, and every substring of one came back empty. An `end` past
+     * the length is past a length below INT_MAX, which then fits. */
+    if (end > 0 && (size_t)end > slen) end = (int)slen;
     if (start >= end) {
         char* empty = (char*)aether_caps_malloc(1);
         if (!empty) return NULL;
