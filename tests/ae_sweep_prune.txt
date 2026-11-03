@@ -349,3 +349,5 @@ tests/integration/abi_matrix/
 # #3419: plain.ae links shim.c and cross.ae is a library for cross_host.c;
 # test_step_word.sh builds and runs both.
 tests/integration/step_word/
+# host.ae is the helper the test_stunt_*.sh beside it build and drive.
+tests/integration/contrib_host_stunt/

@@ -1,0 +1,109 @@
+// contrib.host.stunt: the bridge to stunt, a test double for a hosted
+// language (README.md). It loads libstunt as the other bridges load their
+// interpreters and is driven the same way; its "script" is one line,
+// "<check> <expectation>", and running it runs that check from stunt's
+// catalogue and leaves one result line.
+//
+// Tier 1, the surface every contrib host shares (the line is printed):
+//
+//     worker = sandbox.new("worker") { grant_fs_read("/srv/data/*") }
+//     rc = stunt.run_sandboxed(worker, "open-etc-passwd refused")   // 0 when it matched
+//
+// Tier 2, the #904 surface: a persistent VM, host callbacks with typed
+// arguments and results, the shared map, an instruction limit.
+//
+//     @c_callback
+//     greet(vm: ptr) -> int {
+//         stunt.push_str(vm, "hello, ${stunt.arg_str(vm, 1)}")
+//         return 1
+//     }
+//
+//     vm = stunt.vm_new()
+//     stunt.vm_register(vm, "greet", greet)
+//     rc = stunt.vm_eval_sandboxed(vm, worker, "callback-greet succeed")
+//     println(stunt.vm_result(vm))
+//
+// libstunt is found through AETHER_STUNT_LIB (a path or a name), else by its
+// plain name (libstunt.so, libstunt.dylib, stunt.dll) on the loader's path.
+import std.sandbox // sandbox.Grants, the grant list the sandboxed runs take
+
+exports(
+    stunt_init, stunt_finalize, stunt_run, stunt_run_sandboxed, stunt_run_sandboxed_with_map,
+    stunt_vm_new, stunt_vm_free, stunt_vm_register, stunt_vm_set_map,
+    stunt_vm_eval, stunt_vm_eval_sandboxed, stunt_vm_result,
+    stunt_vm_set_instruction_limit, stunt_vm_cancel,
+    stunt_arg_count, stunt_arg_type, stunt_arg_str, stunt_arg_int,
+    stunt_push_str, stunt_push_int, stunt_push_nil, stunt_raise_error,
+    stunt_map_new, stunt_map_token, stunt_map_put, stunt_map_get, stunt_map_free,
+    stunt_map_freeze, stunt_map_guest_put, stunt_map_guest_get, stunt_map_guest_has,
+    stunt_catalogue_size, stunt_catalogue_name, stunt_catalogue_host_checked,
+    STUNT_TNIL, STUNT_TINT, STUNT_TSTR,
+    STUNT_PASS, STUNT_FAIL, STUNT_USAGE, STUNT_STOPPED
+)
+
+// Typed values (stunt.h's ST_T*).
+const STUNT_TNIL = 0
+const STUNT_TINT = 1
+const STUNT_TSTR = 2
+
+// What a run returns (stunt.h's ST_*; -1 when libstunt cannot be loaded).
+const STUNT_PASS = 0
+const STUNT_FAIL = 1
+const STUNT_USAGE = 2
+const STUNT_STOPPED = 3
+
+// --- Tier 1 ---------------------------------------------------------------
+extern stunt_init() -> int
+extern stunt_finalize()
+extern stunt_run(code: string) -> int
+extern stunt_run_sandboxed(perms: sandbox.Grants, code: string) -> int
+extern stunt_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
+
+// --- Tier 2 ---------------------------------------------------------------
+// Every VM has the host functions read_file and getenv, which check the
+// grants in force themselves.
+extern stunt_vm_new() -> ptr
+extern stunt_vm_free(vm: ptr)
+// Register an Aether `@c_callback` fn `(vm: ptr) -> int` under `name`.
+extern stunt_vm_register(vm: ptr, name: string, host_fn: ptr) -> int
+// The shared map behind `map_token`, its inputs frozen: aether_map_get and
+// aether_map_put become host functions of the VM.
+extern stunt_vm_set_map(vm: ptr, map_token: long)
+extern stunt_vm_eval(vm: ptr, code: string) -> int
+// The run with `perms` pushed as a level of this thread's sandbox, and the
+// engine's copy of the environment scrubbed to what they grant.
+extern stunt_vm_eval_sandboxed(vm: ptr, perms: sandbox.Grants, code: string) -> int
+extern stunt_vm_result(vm: ptr) -> string
+// Stop spin after `budget` instructions (<= 0 disarms).
+extern stunt_vm_set_instruction_limit(vm: ptr, budget: long)
+extern stunt_vm_cancel(vm: ptr)
+
+// --- Inside a host function: arguments are 1-based ------------------------
+extern stunt_arg_count(vm: ptr) -> int
+extern stunt_arg_type(vm: ptr, i: int) -> int
+extern stunt_arg_str(vm: ptr, i: int) -> string
+extern stunt_arg_int(vm: ptr, i: int) -> long
+extern stunt_push_str(vm: ptr, v: string)
+extern stunt_push_int(vm: ptr, v: long)
+extern stunt_push_nil(vm: ptr)
+// Return its value from the host function: the call fails with `msg`.
+extern stunt_raise_error(vm: ptr, msg: string) -> int
+
+// --- The shared map (runtime/aether_shared_map.h) -------------------------
+extern stunt_map_new() -> ptr
+extern stunt_map_token(map: ptr) -> long
+extern stunt_map_put(map: ptr, key: string, value: string)
+extern stunt_map_get(map: ptr, key: string) -> string
+extern stunt_map_free(map: ptr)
+// Freeze the keys put so far: a guest reads them and cannot overwrite them.
+extern stunt_map_freeze(map: ptr)
+// A guest's get and put, with a guest's rules (a frozen input refuses a put:
+// -1). For a host serving a guest in a child process.
+extern stunt_map_guest_put(map_token: long, key: string, value: string) -> int
+extern stunt_map_guest_get(map_token: long, key: string) -> string
+extern stunt_map_guest_has(map_token: long, key: string) -> int
+
+// --- The catalogue --------------------------------------------------------
+extern stunt_catalogue_size() -> int
+extern stunt_catalogue_name(i: int) -> string
+extern stunt_catalogue_host_checked(i: int) -> int

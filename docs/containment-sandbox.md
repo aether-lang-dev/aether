@@ -1564,6 +1564,15 @@ contrib/host/ruby/, import contrib.host.ruby     (CRuby 3.x)
 contrib/host/tcl/, import contrib.host.tcl      (Tcl 8.5+)
 ```
 
+`contrib/host/stunt` is a test double for these: not a language, but a C
+engine loaded the way a bridge loads an interpreter (or run as a child under
+`sandbox.spawn_socket`) that does, by name, each thing a hosted language can
+do that the sandbox has to hold: open, getenv, connect, exec, dlopen of libc,
+a raw syscall, a callback, the shared map, a loop that must be stopped. Its
+catalogue and tests (`tests/integration/contrib_host_stunt`) cover the rows
+of the tables below with no interpreter installed; see
+[`contrib/host/stunt/README.md`](../contrib/host/stunt/README.md).
+
 ### Two containment models
 
 | Model | How it works | Used by |
