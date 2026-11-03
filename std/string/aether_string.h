@@ -234,7 +234,9 @@ const char* aether_string_import(const void* s);
  * codegen emits (%d %i %u %x %o %ld %lld %llu %g %f %e %Lg %c %s %%). A %s
  * argument is the string as the program holds it, an AetherString* or a
  * plain char*, and is written by its length, so a NUL in it is kept;
- * vsnprintf stopped at the first NUL. Every other conversion is given to
+ * vsnprintf stopped at the first NUL. %D is no printf conversion: its
+ * argument is a duration, a long long count of nanoseconds, written as its
+ * text (`90s`, `1.5ms`, #3526). Every other conversion is given to
  * snprintf as written. Writes to `out` (at most `cap` bytes, NUL
  * terminated when cap > 0), or to `f` when `out` is NULL and `f` is set,
  * and returns the full length either way, so a caller sizes with

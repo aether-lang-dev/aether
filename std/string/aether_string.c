@@ -980,6 +980,33 @@ static void interp_put_signed(InterpSink* k, long long v) {
     else interp_put_decimal(k, (unsigned long long)v, 0);
 }
 
+/* #3526: `%D`, a duration (a signed count of nanoseconds) as its text: the
+ * largest unit it reaches, whole where it divides (`90s`, `-2h`, `0ns`),
+ * else to nine significant digits (`1.5s`), '.' for the radix whatever the
+ * locale. Written into the sink from the stack, so every duration of one
+ * format and of every thread at once has its own text; the generated
+ * helper this replaces handed out a ring of eight static buffers. */
+static void interp_put_duration(InterpSink* k, long long ns) {
+    static const struct { const char* suffix; long long scale; } units[] = {
+        {"d", 86400000000000LL}, {"h", 3600000000000LL}, {"m", 60000000000LL},
+        {"s", 1000000000LL}, {"ms", 1000000LL}, {"us", 1000LL}, {"ns", 1LL}
+    };
+    unsigned long long mag = ns < 0 ? 0ULL - (unsigned long long)ns : (unsigned long long)ns;
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {
+        if (mag < (unsigned long long)units[i].scale && units[i].scale != 1) continue;
+        if (ns % units[i].scale == 0) {
+            interp_put_signed(k, ns / units[i].scale);
+        } else {
+            char buf[64];
+            int n = aether_c_snprintf_double(buf, sizeof(buf), "%.9g",
+                                             (double)ns / (double)units[i].scale);
+            if (n > 0) interp_put(k, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+        }
+        interp_put(k, units[i].suffix, strlen(units[i].suffix));
+        return;
+    }
+}
+
 static void interp_put(InterpSink* k, const char* p, size_t n) {
     if (n == 0) return;
     if (k->f) {
@@ -1099,6 +1126,10 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
             case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
                 if (long_double) INTERP_LONG_DOUBLE();
                 else INTERP_DOUBLE();
+                break;
+            case 'D':
+                /* #3526: a duration, given as a long long. */
+                interp_put_duration(&k, va_arg(ap, long long));
                 break;
             default:
                 interp_put(&k, spec, sl);

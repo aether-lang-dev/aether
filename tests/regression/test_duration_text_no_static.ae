@@ -1,0 +1,75 @@
+// Regression (#3526): a duration's text is written by the interpolation
+// formatter, with no static storage.
+//
+// `_aether_duration_repr`, emitted into every program that interpolated a
+// duration, formatted into a ring of eight static buffers. A ninth duration
+// in one interpolation overwrote the first before the format read it, so
+// the line showed the ninth's text twice; and two actors formatting at once
+// shared the ring through a plain increment, so one could print the other's
+// text. Now `%D` in the format hands the formatter the nanosecond count and
+// it writes the text into the line itself, from the stack.
+//
+// Ten durations in one interpolation, as a value and printed, then two
+// actors formatting durations in a loop at the same time, each checking
+// every line it built.
+
+import std.string
+
+extern exit(code: int)
+
+message Run { base: int, n: int }
+message Get {}
+message Seen { bad: int }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3526: ${msg}")
+        exit(1)
+    }
+}
+
+actor Formatter {
+    state bad = 0
+    receive {
+        Run(base: b, n: n) -> {
+            i = 0
+            while i < n {
+                k = b + i % 7
+                d = 1ms * k
+                s = "[${d}|${d}]"
+                want = "[${k}ms|${k}ms]"
+                if s != want { bad = bad + 1 }
+                i = i + 1
+            }
+        }
+        Get() -> { reply Seen { bad: bad } }
+    }
+}
+
+main() {
+    a = 1ns
+    b = 2us
+    c = 3ms
+    d = 4s
+    e = 5m
+    f = 6h
+    g = 7ms
+    h = 1500ms
+    i = 250us
+    j = -2s
+    line = "${a} ${b} ${c} ${d} ${e} ${f} ${g} ${h} ${i} ${j}"
+    check(line == "1ns 2us 3ms 4s 5m 6h 7ms 1.5s 250us -2s", "ten in one interpolation: '${line}'")
+    println("${a} ${b} ${c} ${d} ${e} ${f} ${g} ${h} ${i} ${j}")
+    print(h)
+    print("\n")
+    println(j)
+
+    x = spawn(Formatter())
+    y = spawn(Formatter())
+    x ! Run { base: 10, n: 100000 }
+    y ! Run { base: 500, n: 100000 }
+    int bad_x = x ? Get {}
+    int bad_y = y ? Get {}
+    check(bad_x == 0 && bad_y == 0, "an actor's line held another's text: ${bad_x} ${bad_y}")
+    println("OK")
+}

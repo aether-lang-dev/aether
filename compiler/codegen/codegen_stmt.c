@@ -13462,7 +13462,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
                     } else if (arg_type->kind == TYPE_DURATION) {
-                        fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
+                        /* #3526: written by the formatter (%D). */
+                        fprintf(gen->output, "_aether_interp_print(\"%%D\", (long long)(");
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, "));\n");
                     } else if (arg_type->kind == TYPE_PTR) {
@@ -13528,7 +13529,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                     } else if (atype && atype->kind == TYPE_UINT32) {
                                         fprintf(gen->output, "%%u");
                                     } else if (atype && atype->kind == TYPE_DURATION) {
-                                        fprintf(gen->output, "%%s");
+                                        fprintf(gen->output, "%%D");   /* #3526 */
                                     } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {
                                         fprintf(gen->output, "%%s");
                                     } else if (atype && atype->kind == TYPE_BOOL) {
@@ -13564,7 +13565,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 fprintf(gen->output, "(long long)");
                                 generate_expression(gen, arg);
                             } else if (atype && atype->kind == TYPE_DURATION) {
-                                fprintf(gen->output, "_aether_duration_repr(");
+                                fprintf(gen->output, "(long long)(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
                             } else if (atype && atype->kind == TYPE_BOOL) {

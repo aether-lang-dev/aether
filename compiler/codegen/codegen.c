@@ -9918,36 +9918,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    aether_heap_str_free((void*)s);");
     print_line(gen, "    return _n;");
     print_line(gen, "}");
-    /* #927: multiple ${duration} interpolations can be live in a SINGLE
-     * printf/snprintf call (all args evaluate before the format runs), so a
-     * single shared static buffer would have every %%s slot show the last
-     * result. Hand out a small ring of buffers — one per call — so up to
-     * AE_DUR_BUFS distinct results coexist in one expression. */
-    print_line(gen, "#define AE_DUR_BUFS 8");
-    print_line(gen, "static inline const char* _aether_duration_repr(int64_t ns) {");
-    print_line(gen, "    static char _bufs[AE_DUR_BUFS][64];");
-    print_line(gen, "    static unsigned _slot = 0;");
-    print_line(gen, "    char* _buf = _bufs[_slot];");
-    print_line(gen, "    _slot = (_slot + 1) %% AE_DUR_BUFS;");
-    print_line(gen, "    int64_t abs_ns = ns < 0 ? -ns : ns;");
-    print_line(gen, "    struct _du { const char* suffix; int64_t scale; } units[] = {");
-    print_line(gen, "        {\"d\", 86400000000000LL}, {\"h\", 3600000000000LL},");
-    print_line(gen, "        {\"m\", 60000000000LL}, {\"s\", 1000000000LL},");
-    print_line(gen, "        {\"ms\", 1000000LL}, {\"us\", 1000LL}, {\"ns\", 1LL}");
-    print_line(gen, "    };");
-    print_line(gen, "    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {");
-    print_line(gen, "        if (abs_ns >= units[i].scale || units[i].scale == 1) {");
-    print_line(gen, "            if (ns %% units[i].scale == 0) {");
-    print_line(gen, "                snprintf(_buf, 64, \"%%lld%%s\", (long long)(ns / units[i].scale), units[i].suffix);");
-    print_line(gen, "            } else {");
-    print_line(gen, "                double v = (double)ns / (double)units[i].scale;");
-    print_line(gen, "                snprintf(_buf, 64, \"%%.9g%%s\", v, units[i].suffix);");
-    print_line(gen, "            }");
-    print_line(gen, "            return _buf;");
-    print_line(gen, "        }");
-    print_line(gen, "    }");
-    print_line(gen, "    return \"0ns\";");
-    print_line(gen, "}");
+    /* #3526: a duration in an interpolation or a print is the formatter's %D
+     * (aether_interp_format), written from the stack; the ring of eight
+     * static buffers it was formatted into here was shared by every thread
+     * and wrapped past eight durations in one interpolation. */
     // Built-in `sleep(ms)` lowers to aether_sleep_ms — a runtime helper
     // with a stable, prefixed name so user `extern sleep(...)` doesn't
     // conflict with libc's `unsigned int sleep(unsigned int)`. Issue #233.

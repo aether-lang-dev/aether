@@ -10225,7 +10225,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_DURATION) {
-                            fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
+                            /* #3526: written by the formatter (%D). */
+                            fprintf(gen->output, "_aether_interp_print(\"%%D\", (long long)(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
                         } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
@@ -10298,7 +10299,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
                                     else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
-                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
+                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%D");   /* #3526 */
                                     else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
                                     else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
                                     else fprintf(gen->output, "%%d");
@@ -10322,7 +10323,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             if (i > 1) fprintf(gen->output, ", ");
                             Type* atype = expr->children[i]->node_type;
                             if (atype && atype->kind == TYPE_INT64) { fprintf(gen->output, "(long long)"); generate_expression(gen, expr->children[i]); }
-                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "_aether_duration_repr("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
+                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "(long long)("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
                             else if (atype && atype->kind == TYPE_BOOL) { generate_expression(gen, expr->children[i]); fprintf(gen->output, " ? \"true\" : \"false\""); }
                             else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) { fprintf(gen->output, "_aether_safe_str("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
                             else generate_expression(gen, expr->children[i]);
@@ -10364,7 +10365,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_DURATION) {
-                            fprintf(gen->output, "printf(\"%%s\\n\", _aether_duration_repr(");
+                            /* #3526: written by the formatter (%D). */
+                            fprintf(gen->output, "_aether_interp_print(\"%%D\\n\", (long long)(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
                         } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
@@ -10451,7 +10453,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                     else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
                                     else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
                                     else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
-                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
+                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%D");   /* #3526 */
                                     else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
                                     else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
                                     else fprintf(gen->output, "%%d");
@@ -10475,7 +10477,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             if (i > 1) fprintf(gen->output, ", ");
                             Type* atype = expr->children[i]->node_type;
                             if (atype && atype->kind == TYPE_INT64) { fprintf(gen->output, "(long long)"); generate_expression(gen, expr->children[i]); }
-                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "_aether_duration_repr("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
+                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "(long long)("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
                             else if (atype && atype->kind == TYPE_BOOL) { generate_expression(gen, expr->children[i]); fprintf(gen->output, " ? \"true\" : \"false\""); }
                             else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) { fprintf(gen->output, "_aether_safe_str("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
                             else generate_expression(gen, expr->children[i]);
@@ -11935,7 +11937,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             case TYPE_INT64:  fprintf(gen->output, "%%lld"); break; \
                             case TYPE_UINT32: fprintf(gen->output, "%%u");  break; \
                             case TYPE_UINT64: fprintf(gen->output, "%%llu"); break; \
-                            case TYPE_DURATION: fprintf(gen->output, "%%s"); break; \
+                            case TYPE_DURATION: fprintf(gen->output, "%%D"); break; \
                             case TYPE_FLOAT:  fprintf(gen->output, "%%g");  break; \
                             case TYPE_FLOAT32: fprintf(gen->output, "%%g");  break; \
                             case TYPE_LONGDOUBLE: fprintf(gen->output, "%%Lg"); break; \
@@ -11984,7 +11986,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "(unsigned long long)"); \
                         interp_emit_segment(gen, ch, it_names[i]); \
                     } else if (tk == TYPE_DURATION) { \
-                        fprintf(gen->output, "_aether_duration_repr("); \
+                        /* #3526: the formatter writes its text (%D). */ \
+                        fprintf(gen->output, "(long long)("); \
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
                     } else { \
