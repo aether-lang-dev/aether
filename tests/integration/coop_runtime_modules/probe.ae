@@ -1,0 +1,31 @@
+// Reaches std.bytes, std.mem, std.strbuilder and std.sync, each through
+// the C it links. The driver builds this against only the files listed in
+// runtime/coop_runtime_sources.txt, the cooperative runtime of the wasm and
+// ESP32 builds; a module whose C is missing from the list fails the link.
+import std.bytes
+import std.mem
+import std.strbuilder
+import std.sync
+
+main() {
+    sb = strbuilder.new(0)
+    strbuilder.append(sb, "n=")
+    strbuilder.append_int(sb, 42)
+    text = strbuilder.finish(sb)
+
+    b = bytes.new(8)
+    bytes.set(b, 0, 7)
+    bytes.set_le32(b, 4, 1000)
+    p = bytes.data(b)
+    mem.set_uint8(p, 1, 9)
+    sum = bytes.get(b, 0) + bytes.get(b, 1) + bytes.get_le32(b, 4)
+    bytes.free(b)
+
+    cell = sync.atomic_new(5)
+    sync.atomic_add(cell, 2)
+    ok = sync.atomic_cas(cell, 7, 11)
+    now = sync.atomic_load(cell)
+    sync.atomic_free(cell)
+
+    println("coop modules: ${text} sum=${sum} cas=${ok} cell=${now}")
+}
