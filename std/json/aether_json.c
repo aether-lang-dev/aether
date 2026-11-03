@@ -185,6 +185,13 @@ typedef struct ArenaChunk {
 typedef struct Arena {
     ArenaChunk* head;
     ArenaChunk* tail;
+    /* Arenas this one destroys with itself (#3538): a document set into a
+     * container of this one moves in with its arena instead of being
+     * copied. `owner` is the arena that adopted this one, NULL for a
+     * document's own; `sibling` links the arenas one owner adopted. */
+    struct Arena* adopted;
+    struct Arena* sibling;
+    struct Arena* owner;
 } Arena;
 
 #define ARENA_ALIGN 8u
@@ -217,24 +224,65 @@ static ArenaChunk* arena_new_chunk(size_t cap) {
     return c;
 }
 
-static Arena* arena_create(void) {
+static Arena* arena_create_sized(size_t first_chunk) {
     Arena* a = (Arena*)aether_caps_malloc(sizeof(Arena));
     if (!a) return NULL;
-    a->head = arena_new_chunk(ARENA_INITIAL_CHUNK);
+    a->head = arena_new_chunk(first_chunk);
     if (!a->head) { aether_caps_free(a, sizeof(Arena)); return NULL; }
     a->tail = a->head;
+    a->adopted = NULL;
+    a->sibling = NULL;
+    a->owner = NULL;
     return a;
 }
 
+/* A parsed document's arena: big enough that a small document never grows. */
+static Arena* arena_create(void) {
+    return arena_create_sized(ARENA_INITIAL_CHUNK);
+}
+
+/* A built container's arena starts small (#3538): a set moves a document
+ * into its container with its arena, so a document built level by level
+ * keeps one arena a level, and each should hold about what it was given. */
+#define ARENA_BUILD_FIRST_CHUNK 512u
+
+/* `a` and every arena it adopted, however deep, without recursion: each
+ * arena's adopted ones join the list still to destroy, by their sibling
+ * links, before it goes. */
 static void arena_destroy(Arena* a) {
     if (!a) return;
-    ArenaChunk* c = a->head;
-    while (c) {
-        ArenaChunk* next = c->next;
-        aether_caps_free(c, sizeof(ArenaChunk) + c->cap);
-        c = next;
+    a->sibling = NULL;
+    while (a) {
+        Arena* rest = a->sibling;
+        for (Arena* c = a->adopted; c; ) {
+            Arena* next_c = c->sibling;
+            c->sibling = rest;
+            rest = c;
+            c = next_c;
+        }
+        ArenaChunk* c = a->head;
+        while (c) {
+            ArenaChunk* next = c->next;
+            aether_caps_free(c, sizeof(ArenaChunk) + c->cap);
+            c = next;
+        }
+        aether_caps_free(a, sizeof(Arena));
+        a = rest;
     }
-    aether_caps_free(a, sizeof(Arena));
+}
+
+/* `child`, a document's own arena, destroyed with `parent` from now on. */
+static void arena_adopt(Arena* parent, Arena* child) {
+    child->owner = parent;
+    child->sibling = parent->adopted;
+    parent->adopted = child;
+}
+
+/* Is `target` the arena `a` or one that, through adoptions, destroys it? */
+static int arena_within(const Arena* a, const Arena* target) {
+    for (const Arena* x = a; x; x = x->owner)
+        if (x == target) return 1;
+    return 0;
 }
 
 static void* arena_alloc(Arena* a, size_t n) {
@@ -532,6 +580,13 @@ typedef struct JsonObjBlock {
     const char** keys;
     uint32_t*    key_lens;
     JsonValue**  values;
+    /* An object set into enough keys is indexed (#3538): `index` is an
+     * open addressing table of `index_cap` slots (a power of two), each 0
+     * or a key's position plus one, the first of equal keys. NULL until
+     * then, and for an object made by the parser or by a copy, which a set
+     * indexes when it next adds to it. */
+    uint32_t*    index;
+    uint32_t     index_cap;
 } JsonObjBlock;
 
 struct JsonValue {
@@ -1164,6 +1219,8 @@ static int obj_reserve(JsonValue* obj, Arena* a, uint32_t needed) {
         blk->keys = NULL;
         blk->key_lens = NULL;
         blk->values = NULL;
+        blk->index = NULL;
+        blk->index_cap = 0;
         obj->data.obj.blk = blk;
     }
 
@@ -1190,6 +1247,81 @@ static int obj_reserve(JsonValue* obj, Arena* a, uint32_t needed) {
     blk->values   = gv;
     obj->data.obj.capacity = new_cap;
     return 1;
+}
+
+/* Objects up to this many keys are searched in order; a set that takes one
+ * past it indexes the object (#3538), so building an object of k keys is
+ * no longer O(k^2) in its key compares. */
+#define JSON_OBJ_INDEX_MIN 16u
+
+static uint32_t json_key_hash(const char* k, uint32_t n) {
+    uint32_t h = 2166136261u;   /* FNV-1a */
+    for (uint32_t i = 0; i < n; i++) {
+        h ^= (unsigned char)k[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* The position of the first key of `obj` equal to the `len` bytes at
+ * `key`, or UINT32_MAX for none. Through the index when there is one, else
+ * in order. Reads only, so a parsed document read from many threads is
+ * never written by a lookup. */
+static uint32_t obj_find(const JsonValue* obj, const char* key, uint32_t len) {
+    const JsonObjBlock* blk = obj->data.obj.blk;
+    uint32_t n = obj->data.obj.count;
+    if (!blk || !n) return UINT32_MAX;
+    if (blk->index) {
+        uint32_t mask = blk->index_cap - 1u;
+        for (uint32_t s = json_key_hash(key, len) & mask;; s = (s + 1u) & mask) {
+            uint32_t e = blk->index[s];
+            if (!e) return UINT32_MAX;
+            if (blk->key_lens[e - 1u] == len && memcmp(blk->keys[e - 1u], key, len) == 0)
+                return e - 1u;
+        }
+    }
+    for (uint32_t i = 0; i < n; i++)
+        if (blk->key_lens[i] == len && memcmp(blk->keys[i], key, len) == 0) return i;
+    return UINT32_MAX;
+}
+
+/* Key `i` into the index, unless an equal key is in it already: the first
+ * of equal keys (a parsed document may repeat one) is the one found. */
+static void obj_index_put(JsonObjBlock* blk, uint32_t i) {
+    uint32_t mask = blk->index_cap - 1u;
+    uint32_t s = json_key_hash(blk->keys[i], blk->key_lens[i]) & mask;
+    while (blk->index[s]) {
+        uint32_t j = blk->index[s] - 1u;
+        if (blk->key_lens[j] == blk->key_lens[i] &&
+            memcmp(blk->keys[j], blk->keys[i], blk->key_lens[i]) == 0) return;
+        s = (s + 1u) & mask;
+    }
+    blk->index[s] = i + 1u;
+}
+
+/* A set appended the object's last key: index the object once it is big
+ * enough, grow the index at half full, or add the one key to it. With no
+ * memory for an index the object is searched in order, as before. */
+static void obj_index_added(JsonValue* obj, Arena* a) {
+    JsonObjBlock* blk = obj->data.obj.blk;
+    uint32_t n = obj->data.obj.count;
+    if (n < JSON_OBJ_INDEX_MIN) return;
+    if (blk->index && n <= blk->index_cap / 2u) {
+        obj_index_put(blk, n - 1u);
+        return;
+    }
+    uint32_t cap = blk->index_cap ? blk->index_cap * 2u : 64u;
+    while (cap / 2u < n) cap *= 2u;
+    uint32_t* t = (uint32_t*)arena_alloc(a, sizeof(uint32_t) * cap);
+    if (!t) {
+        blk->index = NULL;
+        blk->index_cap = 0;
+        return;
+    }
+    memset(t, 0, sizeof(uint32_t) * cap);
+    blk->index = t;
+    blk->index_cap = cap;
+    for (uint32_t i = 0; i < n; i++) obj_index_put(blk, i);
 }
 
 static JsonValue* parse_array(Parser* s, int depth) {
@@ -1459,15 +1591,8 @@ JsonValue* json_object_get_raw(JsonValue* obj, const char* key) {
     size_t klen = 0;
     key = jv_bytes(key, &klen);
     if (klen > UINT32_MAX) return NULL;
-    uint32_t k32 = (uint32_t)klen;
-    const JsonObjBlock* blk = obj->data.obj.blk;
-    for (uint32_t i = 0; i < n; i++) {
-        if (blk->key_lens[i] == k32 &&
-            memcmp(blk->keys[i], key, k32) == 0) {
-            return blk->values[i];
-        }
-    }
-    return NULL;
+    uint32_t at = obj_find(obj, key, (uint32_t)klen);
+    return at == UINT32_MAX ? NULL : obj->data.obj.blk->values[at];
 }
 
 int json_object_has(JsonValue* obj, const char* key) {
@@ -1616,6 +1741,8 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
                 blk->keys = keys;
                 blk->key_lens = lens;
                 blk->values = vals;
+                blk->index = NULL;
+                blk->index_cap = 0;
                 out->data.obj.blk = blk;
             }
             out->data.obj.count = n;
@@ -1635,7 +1762,7 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
 // container IS the root of a new arena.
 static int ensure_container_arena(JsonValue* container) {
     if (container->arena) return 1;  // already rooted in an arena
-    Arena* a = arena_create();
+    Arena* a = arena_create_sized(ARENA_BUILD_FIRST_CHUNK);
     if (!a) return 0;
     // Deep-copy the container's contents into the new arena. We can't
     // simply point existing heap allocations into the arena — the arena
@@ -1730,19 +1857,51 @@ static void free_donated_value(JsonValue* value) {
     }
 }
 
+/* What a container keeps for the `value` set or added into it, the donation
+ * dealt with; NULL, with the donation untouched, when it cannot be kept.
+ *
+ * The container takes ownership of what it is given (std.json's set and
+ * push), and it used to deep copy every donation into its own arena and
+ * free the original: building a nested document copied each subtree once
+ * for every level above it, O(depth x size) (#3538). A document's root (its
+ * own arena, its own to give) moves instead: its arena is destroyed with the
+ * container's from now on, and the node is kept where it is, or in its
+ * arena if it was a builder's heap struct. Anything else is copied: a heap
+ * tree (a scalar, a string, a container nothing was set into: small), which
+ * is then freed, or a node inside another document, which that document
+ * owns. A root whose arena destroys the container's would own itself: that
+ * is a document set into its own descendant, which is refused. */
+static JsonValue* take_child(Arena* into, JsonValue* value) {
+    if (value->arena && (value->flags & JV_FLAG_ROOT)) {
+        Arena* a = value->arena;
+        if (arena_within(into, a)) return NULL;
+        JsonValue* node = value;
+        if (value->flags & JV_FLAG_HEAP_STRUCT) {
+            node = (JsonValue*)arena_alloc(a, sizeof(JsonValue));
+            if (!node) return NULL;
+            *node = *value;
+        }
+        node->flags &= (uint8_t)~(JV_FLAG_ROOT | JV_FLAG_HEAP_STRUCT);
+        arena_adopt(into, a);
+        if (node != value) aether_caps_free(value, sizeof(JsonValue));
+        return node;
+    }
+    JsonValue* copy = deep_copy_into_arena(value, into);
+    if (!copy) return NULL;
+    free_donated_value(value);
+    return copy;
+}
+
 int json_array_add_raw(JsonValue* arr, JsonValue* value) {
     if (!arr || arr->type != JSON_ARRAY || !value) return 0;
     if (!ensure_container_arena(arr)) return 0;
 
-    JsonValue* copy = deep_copy_into_arena(value, arr->arena);
-    if (!copy) return 0;
-
+    // Room first: once taken, the donation is the array's, so nothing may
+    // fail after it.
     if (!arr_reserve(arr, arr->arena, arr->data.arr.count + 1)) return 0;
-    arr->data.arr.items[arr->data.arr.count++] = copy;
-
-    // The caller passed ownership to us. Free the incoming tree.
-    free_donated_value(value);
-
+    JsonValue* kept = take_child(arr->arena, value);
+    if (!kept) return 0;
+    arr->data.arr.items[arr->data.arr.count++] = kept;
     return 1;
 }
 
@@ -1755,34 +1914,29 @@ int json_object_set_raw(JsonValue* obj, const char* key, JsonValue* value) {
     if (klen > UINT32_MAX) return 0;
     uint32_t k32 = (uint32_t)klen;
 
-    JsonValue* copy = deep_copy_into_arena(value, obj->arena);
-    if (!copy) return 0;
-
     // If the key already exists, replace the value pointer in place.
-    JsonObjBlock* blk = obj->data.obj.blk;
-    if (blk) {
-        for (uint32_t i = 0; i < obj->data.obj.count; i++) {
-            if (blk->key_lens[i] == k32 &&
-                memcmp(blk->keys[i], key, k32) == 0) {
-                blk->values[i] = copy;
-                free_donated_value(value);
-                return 1;
-            }
-        }
+    uint32_t at = obj_find(obj, key, k32);
+    if (at != UINT32_MAX) {
+        JsonValue* kept = take_child(obj->arena, value);
+        if (!kept) return 0;
+        obj->data.obj.blk->values[at] = kept;
+        return 1;
     }
 
-    // New key: grow arrays and append.
+    // New key: room and the key's copy first, before the donation is taken
+    // (the key's bytes may even lie inside it), so nothing fails after.
     if (!obj_reserve(obj, obj->arena, obj->data.obj.count + 1)) return 0;
     const char* key_copy = arena_copy_str(obj->arena, key, k32);
     if (!key_copy) return 0;
+    JsonValue* kept = take_child(obj->arena, value);
+    if (!kept) return 0;
 
     uint32_t idx = obj->data.obj.count++;
-    blk = obj->data.obj.blk;  // re-read; obj_reserve may have just allocated it
+    JsonObjBlock* blk = obj->data.obj.blk;  // obj_reserve may have just allocated it
     blk->keys[idx] = key_copy;
     blk->key_lens[idx] = k32;
-    blk->values[idx] = copy;
-
-    free_donated_value(value);
+    blk->values[idx] = kept;
+    obj_index_added(obj, obj->arena);
     return 1;
 }
 

@@ -1,0 +1,147 @@
+// Regression (#3538): a map keeps a counted key by a reference of its own
+// instead of copying it, and a JSON container keeps a document set into it
+// by taking its arena instead of copying the tree, with large objects
+// indexed by key. What a caller sees must not change: keys outlive the
+// strings that made them, NULs inside a key still count, a repeated set
+// replaces, a document nested 200 deep (the encoder stops at 256) encodes
+// whole, a parsed document set into another reads back and takes further
+// sets, the first of two equal parsed keys wins after the object is
+// indexed, and a document set into its own child is refused rather than
+// made to contain itself (which used to read freed memory).
+
+import std.map
+import std.json
+import std.string
+
+extern exit(code: int)
+
+make_key(i: int) -> string {
+    return "key-${i}"
+}
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+maps() -> int {
+    fails = 0
+    m = map.new()
+    i = 0
+    while i < 200 {
+        // The key is a temporary: it is released once the put returns.
+        map.put(m, make_key(i), "v")
+        i = i + 1
+    }
+    fails = fails + check(map.size(m) == 200, "200 keys")
+    fails = fails + check(map.has(m, "key-0") != 0 && map.has(m, "key-199") != 0,
+        "keys outlive their strings")
+    map.put(m, "key-7", "w")
+    fails = fails + check(map.size(m) == 200, "a repeated key replaces")
+    nul = string.from_char(0)
+    head = string.concat("a", nul)
+    k1 = string.concat(head, "x")
+    k2 = string.concat(head, "y")
+    map.put(m, k1, "1")
+    map.put(m, k2, "2")
+    fails = fails + check(map.size(m) == 202, "keys differing after a NUL are two")
+    map.put(m, "literal", "3")
+    fails = fails + check(map.has(m, "literal") != 0, "a literal key")
+    map.free(m)
+    return fails
+}
+
+nested() -> int {
+    fails = 0
+    inner = json.obj()
+    _ = json.set(inner, "leaf", json.str("x"))
+    d = 0
+    while d < 200 {
+        outer = json.obj()
+        _ = json.set(outer, "child", inner)
+        _ = json.set(outer, "n", json.num(1.0))
+        inner = outer
+        d = d + 1
+    }
+    out, err = json.encode(inner)
+    fails = fails + check(err == "", "the nested document encodes")
+    fails = fails + check(string.length(out) == 200 * 16 + 12, "all 200 levels are there: ${string.length(out)}")
+    fails = fails + check(string.contains(out, "{\"leaf\":\"x\"}") == 1, "the innermost leaf is there")
+    json.free(inner)
+    return fails
+}
+
+parsed_into() -> int {
+    fails = 0
+    doc, perr = json.parse("{\"a\":[1,2,3],\"b\":{\"c\":true}}")
+    fails = fails + check(perr == "", "parse")
+    box = json.obj()
+    _ = json.set(box, "doc", doc)
+    out, err = json.encode(box)
+    fails = fails + check(err == "" && out == "{\"doc\":{\"a\":[1,2,3],\"b\":{\"c\":true}}}",
+        "a parsed document set into another: ${out}")
+    moved, _ = json.object_get(box, "doc")
+    _ = json.set(moved, "z", json.num(9.0))
+    out2, err2 = json.encode(box)
+    fails = fails + check(err2 == "" && string.contains(out2, "\"z\":9") == 1,
+        "set into a moved document: ${out2}")
+    json.free(box)
+    return fails
+}
+
+wide() -> int {
+    fails = 0
+    w = json.obj()
+    i = 0
+    while i < 100 {
+        _ = json.set(w, "k${i}", json.num(i as float))
+        i = i + 1
+    }
+    _ = json.set(w, "k42", json.str("again"))
+    fails = fails + check(json.object_size(w) == 100, "a repeated key replaces in an indexed object")
+    v, _ = json.object_get(w, "k42")
+    fails = fails + check(json.type(v) == json.JSON_STRING, "the replaced value is read back")
+    last, _ = json.object_get(w, "k99")
+    fails = fails + check(json.get_int(last) == 99, "the last key is found")
+    absent, _ = json.object_get(w, "k100")
+    fails = fails + check(absent == null, "a missing key is missing")
+    json.free(w)
+
+    // A parsed object repeats a key: the first is the one found, before and
+    // after a set indexes the object.
+    src = "{\"dup\":1"
+    i = 0
+    while i < 20 {
+        src = "${src},\"f${i}\":${i}"
+        i = i + 1
+    }
+    src = "${src},\"dup\":2}"
+    p, perr = json.parse(src)
+    fails = fails + check(perr == "", "parse the repeated key")
+    first, _ = json.object_get(p, "dup")
+    fails = fails + check(json.get_int(first) == 1, "the first of two equal keys")
+    _ = json.set(p, "extra", json.num(0.0))
+    again, _ = json.object_get(p, "dup")
+    fails = fails + check(json.get_int(again) == 1, "the first of two equal keys, indexed")
+    json.free(p)
+    return fails
+}
+
+own_child() -> int {
+    parent = json.obj()
+    child = json.obj()
+    _ = json.set(child, "x", json.num(1.0))
+    _ = json.set(parent, "child", child)
+    c, _ = json.object_get(parent, "child")
+    // The parent into its own child would contain itself: refused, and the
+    // refused value (the whole document) is reclaimed.
+    err = json.set(c, "loop", parent)
+    return check(err != "", "a document set into its own child is refused")
+}
+
+main() {
+    fails = maps() + nested() + parsed_into() + wide() + own_child()
+    if fails > 0 { exit(1) }
+    println("PASS: keys and children kept by reference read back as before")
+}

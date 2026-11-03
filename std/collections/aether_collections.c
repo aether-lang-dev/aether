@@ -441,6 +441,12 @@ void list_free(ArrayList* list) {
 }
 
 #define HASHMAP_INITIAL_CAPACITY 16
+/* The capacity starts at a power of two and only ever doubles
+ * (hashmap_resize), so a bucket is the hash's low bits: a mask, where `%`
+ * was a division on every put, get and remove (#3538). */
+_Static_assert((HASHMAP_INITIAL_CAPACITY & (HASHMAP_INITIAL_CAPACITY - 1)) == 0,
+               "a map's capacity is a power of two");
+#define HASHMAP_SLOT(hash, capacity) ((hash) & ((unsigned int)(capacity) - 1u))
 // Load factor = 3/4; expressed as an integer comparison below so we
 // don't do FP arithmetic on every put.
 #define HASHMAP_LOAD_NUMERATOR   3
@@ -542,7 +548,7 @@ static void hashmap_resize(HashMap* map) {
         while (entry) {
             HashMapEntry* next = entry->next;
             // Use cached hash; avoid walking the key string again.
-            unsigned int index = entry->hash % (unsigned int)map->capacity;
+            unsigned int index = HASHMAP_SLOT(entry->hash, map->capacity);
             entry->next = map->buckets[index];
             map->buckets[index] = entry;
             entry = next;
@@ -568,7 +574,7 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = hash % (unsigned int)map->capacity;
+    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
@@ -589,8 +595,18 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
 
     HashMapEntry* new_entry = (HashMapEntry*)aether_caps_malloc(sizeof(HashMapEntry));
     if (!new_entry) return 0;
-    new_entry->key = string_new_with_length(kd, key_len);
-    if (!new_entry->key) { aether_caps_free(new_entry, sizeof(HashMapEntry)); return 0; }
+    /* A counted key is kept by a reference of the map's own (#3538), as a
+     * store keeps any value (R3), rather than copied for every new key;
+     * published, as an owned value is, since the map may be released on
+     * another thread than the one that made the key. A plain C string has
+     * no count to take, and is copied. */
+    if (is_aether_string(key)) {
+        string_retain_shared(key);
+        new_entry->key = (AetherString*)key;
+    } else {
+        new_entry->key = string_new_with_length(kd, key_len);
+        if (!new_entry->key) { aether_caps_free(new_entry, sizeof(HashMapEntry)); return 0; }
+    }
     new_entry->value       = value;
     new_entry->value_owned = 0;
     new_entry->hash        = hash;
@@ -612,8 +628,8 @@ const char* map_put(HashMap* map, const char* key, void* value) {
  * map_put_raw path. map_clear / map_free walk owned-string maps
  * and release each value before freeing the bucket entries.
  *
- * The key is always owned by the map (string_new'd at put time,
- * released at clear time) — unchanged from map_put_raw. The
+ * The map holds its own reference to the key (retained, or copied from a
+ * plain C string, at put time; released at clear time), as map_put_raw. The
  * value is what this variant adds heap-string tracking for.
  *
  * Codegen routes `map.put(m, k, heap_string_expr)` here when the
@@ -639,7 +655,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
         unsigned int key_len = 0;
         const char* kd = NULL;
         unsigned int hash = key_hash(key, &kd, &key_len);
-        unsigned int index = hash % (unsigned int)map->capacity;
+        unsigned int index = HASHMAP_SLOT(hash, map->capacity);
         HashMapEntry* entry = map->buckets[index];
         while (entry) {
             if (entry->hash == hash && key_equals(entry, kd, key_len)) {
@@ -660,7 +676,7 @@ int map_put_string_adopted(HashMap* map, const char* key, const void* value) {
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = hash % (unsigned int)map->capacity;
+    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
     HashMapEntry* head = map->buckets[index];
     if (head) head->value_owned = !is_pinned_string(value);
     return 1;
@@ -707,7 +723,7 @@ int map_put_closure_owned(HashMap* map, const char* key, void* box) {
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    HashMapEntry* entry = map->buckets[hash % (unsigned int)map->capacity];
+    HashMapEntry* entry = map->buckets[HASHMAP_SLOT(hash, map->capacity)];
     while (entry && !(entry->hash == hash && key_equals(entry, kd, key_len))) entry = entry->next;
     if (entry) entry->value_owned = 2;
     return 1;
@@ -719,7 +735,7 @@ void* map_get_raw(HashMap* map, const char* key) {
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = hash % (unsigned int)map->capacity;
+    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
     HashMapEntry* entry = map->buckets[index];
 
     while (entry) {
@@ -742,7 +758,7 @@ void map_remove(HashMap* map, const char* key) {
     unsigned int key_len = 0;
     const char* kd = NULL;
     unsigned int hash = key_hash(key, &kd, &key_len);
-    unsigned int index = hash % (unsigned int)map->capacity;
+    unsigned int index = HASHMAP_SLOT(hash, map->capacity);
     HashMapEntry* entry = map->buckets[index];
     HashMapEntry* prev = NULL;
 
