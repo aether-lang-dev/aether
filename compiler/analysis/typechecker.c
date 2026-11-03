@@ -6785,8 +6785,15 @@ static int pending_result_of_top(const PendingResults* p, ASTNode* top) {
     return -1;
 }
 
+/* #3524: the top-level declaration the second pass is checking, for
+ * tc_const_int: a name it binds (a local, a parameter) is not the
+ * program's constant of that name, as codegen reads it (ast_binds_name). */
+static ASTNode* g_tc_top = NULL;
+
 /* One top-level declaration through the second pass. */
 static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
+    ASTNode* saved_top = g_tc_top;
+    g_tc_top = top;
     g_tc_file = top ? top->source_file : NULL;
     /* #2614: a merged declaration (a module's function, actor or
      * constant) resolves qualified names against its own module's
@@ -6795,6 +6802,7 @@ static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
     typecheck_node(top, global_table);
     global_table->merged_from = NULL;
     warn_erased_result_closures();   /* #2484 */
+    g_tc_top = saved_top;
 }
 
 static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
@@ -18726,6 +18734,187 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
     return 1;
 }
 
+/* #3524: the width a constant integer expression computes in, from its
+ * checked type: 0 when it is no integer. */
+static int tc_const_width(const ASTNode* e, int* is_unsigned) {
+    if (!e || !e->node_type) return 0;
+    switch (e->node_type->kind) {
+        case TYPE_INT64: case TYPE_DURATION: *is_unsigned = 0; return 64;
+        case TYPE_UINT64: *is_unsigned = 1; return 64;
+        case TYPE_UINT32: *is_unsigned = 1; return 32;
+        case TYPE_INT: case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE:
+            *is_unsigned = 0; return 32;   /* the narrower ones compute in int */
+        default: return 0;
+    }
+}
+
+/* `v` as a value of `bits` bits, sign-extended unless unsigned. */
+static unsigned long long tc_const_in_width(unsigned long long v, int bits, int is_unsigned) {
+    if (bits == 64) return v;
+    return is_unsigned ? (unsigned long long)(uint32_t)v
+                       : (unsigned long long)(long long)(int32_t)(uint32_t)v;
+}
+
+/* #3524: the value of an integer constant expression the compiler computes:
+ * literals, the program's `const`s (not a name the declaration being
+ * checked binds, a local or a parameter), unary `-`, `+` and `~`, and the
+ * arithmetic, shift and bit operators, each in its operand's width with
+ * the runtime's rules (a shift count masked to the width, MIN / -1 wraps).
+ * 0 for anything else, and for an expression holding a division or
+ * remainder by zero: that one is refused where it is checked. `table` is
+ * NULL inside a constant's own initializer, whose names are the
+ * program's. */
+static int tc_const_int(ASTNode* e, SymbolTable* table, unsigned long long* out, int depth) {
+    if (!e || depth > 32) return 0;
+    int is_unsigned = 0;
+    int bits = tc_const_width(e, &is_unsigned);
+    if (!bits) return 0;
+    unsigned long long v = 0;
+    if (e->type == AST_LITERAL && e->value) {
+        char digits[72];
+        size_t k = 0;
+        for (const char* p = e->value; *p && k + 1 < sizeof(digits); p++)
+            if (*p != '_') digits[k++] = *p;
+        digits[k] = '\0';
+        const char* s = digits;
+        int neg = 0;
+        if (*s == '-' || *s == '+') neg = *s++ == '-';
+        int base = 10;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+        int digit = (*s >= '0' && *s <= '9') ||
+                    (base == 16 && ((*s >= 'a' && *s <= 'f') || (*s >= 'A' && *s <= 'F')));
+        if (!digit) return 0;
+        char* end = NULL;
+        errno = 0;
+        unsigned long long m = strtoull(s, &end, base);
+        while (end && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')) end++;
+        if (errno || !end || *end) return 0;
+        v = neg ? 0ULL - m : m;
+    } else if (e->type == AST_IDENTIFIER && e->value) {
+        if (table) {
+            /* Read where it is written: a name the declaration being
+             * checked binds is that binding (codegen reads it so), and
+             * outside the second pass that is not known. */
+            Symbol* s = lookup_symbol(table, e->value);
+            if (!s || !s->is_const || !g_tc_top) return 0;
+            if (g_tc_top->type != AST_CONST_DECLARATION && ast_binds_name(g_tc_top, e->value))
+                return 0;
+        }
+        ASTNode* d = tc_program_const(e->value);
+        if (!d || d->child_count == 0 ||
+            (d->annotation && strcmp(d->annotation, "array_const") == 0))
+            return 0;
+        if (!tc_const_int(d->children[0], NULL, &v, depth + 1)) return 0;
+    } else if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1) {
+        unsigned long long a;
+        if (!tc_const_int(e->children[0], table, &a, depth + 1)) return 0;
+        if (strcmp(e->value, "-") == 0) v = 0ULL - a;
+        else if (strcmp(e->value, "+") == 0) v = a;
+        else if (strcmp(e->value, "~") == 0) v = ~a;
+        else return 0;
+    } else if (e->type == AST_BINARY_EXPRESSION && e->value && e->child_count == 2) {
+        const char* op = e->value;
+        unsigned long long a, b;
+        if (!tc_const_int(e->children[0], table, &a, depth + 1) ||
+            !tc_const_int(e->children[1], table, &b, depth + 1))
+            return 0;
+        a = tc_const_in_width(a, bits, is_unsigned);
+        b = tc_const_in_width(b, bits, is_unsigned);
+        if (strcmp(op, "+") == 0) v = a + b;
+        else if (strcmp(op, "-") == 0) v = a - b;
+        else if (strcmp(op, "*") == 0) v = a * b;
+        else if (strcmp(op, "&") == 0) v = a & b;
+        else if (strcmp(op, "|") == 0) v = a | b;
+        else if (strcmp(op, "^") == 0) v = a ^ b;
+        else if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+            if (b == 0) return 0;
+            int quotient = op[0] == '/';
+            if (is_unsigned) {
+                v = quotient ? a / b : a % b;
+            } else if ((long long)b == -1) {
+                v = quotient ? 0ULL - a : 0;
+            } else {
+                v = (unsigned long long)(quotient ? (long long)a / (long long)b
+                                                  : (long long)a % (long long)b);
+            }
+        } else if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+            unsigned n = (unsigned)(b & (unsigned long long)(bits - 1));
+            if (op[0] == '<') v = a << n;
+            else if (is_unsigned || (long long)tc_const_in_width(a, bits, 0) >= 0) v = a >> n;
+            else v = ~(~a >> n);
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    *out = tc_const_in_width(v, bits, is_unsigned);
+    return 1;
+}
+
+/* The source spelling of a constant expression tc_const_int reads, with
+ * the parentheses its precedence needs. */
+static int tc_const_prec(const char* op) {
+    static const struct { const char* op; int prec; } p[] = {
+        { "*", 6 }, { "/", 6 }, { "%", 6 }, { "+", 5 }, { "-", 5 },
+        { "<<", 4 }, { ">>", 4 }, { "&", 3 }, { "^", 2 }, { "|", 1 },
+    };
+    for (size_t i = 0; op && i < sizeof(p) / sizeof(p[0]); i++)
+        if (strcmp(p[i].op, op) == 0) return p[i].prec;
+    return 0;
+}
+
+static void tc_const_spell(const ASTNode* e, char* buf, size_t cap, int parent, int right) {
+    size_t len = strlen(buf);
+    if (!e || len + 1 >= cap) return;
+    char* at = buf + len;
+    size_t room = cap - len;
+    if (e->type == AST_BINARY_EXPRESSION && e->child_count == 2) {
+        int prec = tc_const_prec(e->value);
+        int paren = prec < parent || (right && prec == parent);
+        if (paren) snprintf(at, room, "(");
+        tc_const_spell(e->children[0], buf, cap, prec, 0);
+        len = strlen(buf);
+        if (len + 1 < cap) snprintf(buf + len, cap - len, " %s ", e->value);
+        tc_const_spell(e->children[1], buf, cap, prec, 1);
+        len = strlen(buf);
+        if (paren && len + 1 < cap) snprintf(buf + len, cap - len, ")");
+    } else if (e->type == AST_UNARY_EXPRESSION && e->child_count == 1) {
+        snprintf(at, room, "%s", e->value ? e->value : "");
+        tc_const_spell(e->children[0], buf, cap, 7, 0);
+    } else {
+        snprintf(at, room, "%s", e->value ? e->value : "?");
+    }
+}
+
+/* #3524: an integer `/` or `%` the compiler computes, both operands
+ * constant, whose divisor is 0: it has no value, and C refuses it in a
+ * constant's initializer or folds it to anything. Refused here, naming
+ * the expression; a division by zero at run time panics instead. Returns
+ * 1 when it reported. */
+static int refuse_constant_division_by_zero(ASTNode* expr, SymbolTable* table) {
+    if (!expr->value || (strcmp(expr->value, "/") != 0 && strcmp(expr->value, "%") != 0) ||
+        expr->child_count != 2)
+        return 0;
+    unsigned long long l, r;
+    if (!tc_const_int(expr->children[0], table, &l, 0) ||
+        !tc_const_int(expr->children[1], table, &r, 0) || r != 0)
+        return 0;
+    char text[200] = "";
+    tc_const_spell(expr, text, sizeof(text), 0, 0);
+    char msg[320];
+    snprintf(msg, sizeof(msg), "%s by zero in the constant expression `%s`: it has no value",
+             expr->value[0] == '/' ? "division" : "remainder", text);
+    type_error_hint(msg,
+                    "the compiler computes a constant expression, so give it a divisor other "
+                    "than 0; a divisor known only at run time panics with division_by_zero "
+                    "when it is 0",
+                    expr->line, expr->column);
+    return 1;
+}
+
 int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr || expr->type != AST_BINARY_EXPRESSION || expr->child_count < 2) return 0;
     
@@ -18779,6 +18968,14 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     Type* right_type = infer_type(right, table);
 
     AeTokenType operator = get_token_type_from_string(expr->value);
+
+    /* #3524: `10 / 0`, `N % ZERO`: a constant division by zero. */
+    if ((operator == TOKEN_DIVIDE || operator == TOKEN_MODULO) &&
+        refuse_constant_division_by_zero(expr, table)) {
+        if (left_type) free_type(left_type);
+        if (right_type) free_type(right_type);
+        return 0;
+    }
 
     /* #3045: a number less a pointer is no value: C refuses `n - p`
      * ("invalid operands to binary -"), which it reached. */

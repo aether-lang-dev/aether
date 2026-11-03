@@ -3947,6 +3947,7 @@ and the cases C leaves undefined follow Java's rules, the same on every target
 | Case | Result |
 |---|---|
 | `x / 0`, `x % 0` (any integer type) | a panic with the category `division_by_zero` and the operation's source position, which a `catch` receives |
+| `/ 0`, `% 0` in a constant expression (both operands literals, `const`s or operators over them: `const B = 10 / 0`, `10 / (N - N)`) | a compile error naming the expression: the compiler computes it, and it has no value |
 | the most negative value `/ -1` (`int`, `long`) | the same value: `-2147483648 / -1` is `-2147483648` |
 | the most negative value `% -1` | `0` |
 | `x << n`, `x >> n` | the count is masked to the width the shift runs in: `n & 31` for `int`, `uint32` and the narrower types (which shift as an `int`), `n & 63` for `long` and `uint64`. So `1 << 33` is `2`, and a negative count takes its low bits |

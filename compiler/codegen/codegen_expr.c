@@ -7600,8 +7600,8 @@ static int int_edge_plan(CodeGenerator* gen, const char* op, Type* lt, ASTNode* 
         int minus_one = ie_signed(w) && cv == -1;
         if (is_const && cv != 0 && !minus_one) return 0;
         /* A static's initializer calls nothing. -1 is the wrap, or 0; a
-         * zero, or a divisor no constant gives, is left to C's compiler,
-         * which folds it or refuses the division. */
+         * zero never gets here, the checker refuses it (#3524), and a
+         * divisor no constant gives is left to C's compiler. */
         if (gen->in_const_init && (!is_const || !minus_one)) return 0;
     } else if (is_shr && is_const && c >= 0 && c < ie_bits(w)) {
         /* A right shift by a count inside the width is C's own. */
