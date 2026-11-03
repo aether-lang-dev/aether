@@ -29,6 +29,12 @@ INCS="$(printf '%s\n' "$FLAGS" | tr ' ' '\n' | awk '
     /^-idirafter$/ { getline d; print "-idirafter " d; next }
     /^-idirafter/ { print }' | tr '\n' ' ')"
 COOP="-DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING"
+# Windows system libraries the runtime links against (the Makefile's
+# WIN_LINK_LIBS, less -static); e.g. the TLS trust store needs crypt32.
+SYSLIBS="-pthread -lm"
+case "$(uname -s)" in
+    MINGW*|MSYS*|CYGWIN*) SYSLIBS="$SYSLIBS -lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp" ;;
+esac
 
 if ! AETHER_HOME="$ROOT" "$AETHERC" "$SCRIPT_DIR/probe.ae" "$TMP/probe.c" > "$TMP/aetherc.log" 2>&1; then
     echo "  [FAIL] $NAME: aetherc could not translate probe.ae"
@@ -46,7 +52,7 @@ sed -e '/^#/d' -e '/^[[:space:]]*$/d' "$ROOT/runtime/coop_runtime_sources.txt" |
 # shellcheck disable=SC2086
 if [ -s "$TMP/coop.failed" ] ||
    ! $CC -O1 $COOP $INCS -c "$TMP/probe.c" -o "$TMP/probe.o" >> "$TMP/coop.log" 2>&1 ||
-   ! $CC "$TMP/probe.o" "$TMP"/coop/*.o -o "$TMP/probe" -pthread -lm >> "$TMP/coop.log" 2>&1; then
+   ! $CC "$TMP/probe.o" "$TMP"/coop/*.o -o "$TMP/probe" $SYSLIBS >> "$TMP/coop.log" 2>&1; then
     echo "  [FAIL] $NAME: the program does not build against runtime/coop_runtime_sources.txt alone"
     [ -s "$TMP/coop.failed" ] && sed 's/^/        did not compile: /' "$TMP/coop.failed"
     grep -m 12 -iE 'error|undefined|_aether_' "$TMP/coop.log" | sed 's/^/        /'
