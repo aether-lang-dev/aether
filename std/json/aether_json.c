@@ -165,8 +165,10 @@ static void err_set_no_pos(const char* reason) {
 // ---------------------------------------------------------------------------
 // Arena allocator
 //
-// Chunked bump allocator. First chunk is sized generously (16 KB) so
-// tiny documents never grow the arena. Subsequent chunks double in
+// Chunked bump allocator. The first chunk is sized to what the arena
+// will hold: a parsed document's from its input length (at most 16 KB),
+// a built container's small (see ARENA_BUILT_INITIAL_CHUNK), since every
+// built container roots an arena of its own. Subsequent chunks double in
 // size, capped at 2 MB to avoid allocating absurd amounts on the first
 // big value. Allocations bigger than the current chunk's remaining
 // capacity spill to a dedicated oversized chunk (no growth doubling)
@@ -190,6 +192,19 @@ typedef struct Arena {
 #define ARENA_ALIGN 8u
 #define ARENA_INITIAL_CHUNK (16u * 1024u)
 #define ARENA_MAX_AUTO_CHUNK (2u * 1024u * 1024u)
+// First chunk of the arena a built container (json.obj/json.arr) gets when
+// its first member is added. Every such container roots its own arena, so
+// a program that builds many small objects (an interpreter's AST, records
+// in a map) paid ARENA_INITIAL_CHUNK each: 16 KB per object, and on an
+// ESP32 every one of those blocks fell past the internal-RAM threshold
+// into PSRAM. Chunks double from here as members are added.
+#define ARENA_BUILT_INITIAL_CHUNK 256u
+// A parsed document's first chunk: about 4 bytes of arena per input byte
+// covers the values, strings and member arrays of typical JSON, so a
+// small reply ("42", "{\"ok\":true}") no longer takes 16 KB; never more
+// than ARENA_INITIAL_CHUNK, the old fixed size, and larger documents grow
+// by doubling as before.
+#define ARENA_PARSE_MIN_CHUNK 256u
 
 // Starting capacity for the backing arrays of arrays and objects.
 // Realistic JSON objects almost always have more than 4 keys (API
@@ -217,10 +232,10 @@ static ArenaChunk* arena_new_chunk(size_t cap) {
     return c;
 }
 
-static Arena* arena_create(void) {
+static Arena* arena_create(size_t initial_cap) {
     Arena* a = (Arena*)aether_caps_malloc(sizeof(Arena));
     if (!a) return NULL;
-    a->head = arena_new_chunk(ARENA_INITIAL_CHUNK);
+    a->head = arena_new_chunk(initial_cap);
     if (!a->head) { aether_caps_free(a, sizeof(Arena)); return NULL; }
     a->tail = a->head;
     return a;
@@ -1328,7 +1343,9 @@ JsonValue* json_parse_raw_n(const char* data, size_t n) {
         return NULL;
     }
 
-    Arena* a = arena_create();
+    size_t first = n <= ARENA_INITIAL_CHUNK / 4u ? n * 4u : ARENA_INITIAL_CHUNK;
+    if (first < ARENA_PARSE_MIN_CHUNK) first = ARENA_PARSE_MIN_CHUNK;
+    Arena* a = arena_create(arena_align_up(first));
     if (!a) {
         err_set_no_pos("out of memory");
         return NULL;
@@ -1635,7 +1652,7 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
 // container IS the root of a new arena.
 static int ensure_container_arena(JsonValue* container) {
     if (container->arena) return 1;  // already rooted in an arena
-    Arena* a = arena_create();
+    Arena* a = arena_create(ARENA_BUILT_INITIAL_CHUNK);
     if (!a) return 0;
     // Deep-copy the container's contents into the new arena. We can't
     // simply point existing heap allocations into the arena — the arena

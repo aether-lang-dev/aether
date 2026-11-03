@@ -3741,6 +3741,15 @@ ci-coop: clean compiler ae
 		cat /tmp/ae_coop_out.txt | head -10; \
 		fail=$$((fail + 1)); \
 	fi; \
+	printf "  %-50s " "bytes, mem, strbuilder, sync link from the list"; \
+	if sh tests/integration/coop_runtime_modules/test_coop_runtime_modules.sh >/tmp/ae_coop_out.txt 2>&1; then \
+		echo "PASS"; \
+		pass=$$((pass + 1)); \
+	else \
+		echo "FAIL"; \
+		cat /tmp/ae_coop_out.txt | head -10; \
+		fail=$$((fail + 1)); \
+	fi; \
 	echo ""; \
 	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi

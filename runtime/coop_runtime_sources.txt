@@ -12,7 +12,9 @@
 # the modules a program reaches only from Aether (std.intarr, std.longarr,
 # std.floatarr, std.strarr, the StringList of std.collections) is here for
 # the same reason (#3383: ae listed floatarr and stringlist, this file did
-# not, and strarr was in neither). One path per line, from the repository
+# not, and strarr was in neither; std.bytes, std.mem, std.strbuilder and
+# std.sync were in neither until RexxAE's engine, which imports three of
+# them, did not link for the ESP32-S3). One path per line, from the repository
 # root; a line that starts with # is a comment.
 runtime/scheduler/aether_scheduler_coop.c
 runtime/scheduler/scheduler_optimizations.c
@@ -63,6 +65,10 @@ std/collections/aether_stringlist.c
 std/collections/aether_bits.c
 std/collections/aether_stringseq.c
 std/alloc/aether_alloc.c
+std/bytes/aether_bytes.c
+std/mem/aether_mem.c
+std/strbuilder/aether_strbuilder.c
+std/sync/aether_sync.c
 std/json/aether_json.c
 std/fs/aether_fs.c
 std/log/aether_log.c
