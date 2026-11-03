@@ -1,0 +1,63 @@
+// Regression (#3538): a map kept any counted key by a reference of its own,
+// so a key whose block is much bigger than its text kept the whole block. A
+// key from strbuilder.finish carries the builder's capacity: 5000 keys built
+// with strbuilder.new(4096) held about 20 MB where copies of them take about
+// 0.5 MB. Before the fix the growth below was about 4 KB a key.
+//
+// A map now keeps a key by reference only when its block is about as big as
+// its text, as a string built to its length is, and copies any other. The
+// check bounds the growth at 1 KB a key, and makes sure the copied keys and
+// the kept ones read back.
+
+import std.map
+import std.mem
+import std.strbuilder
+import std.string
+
+extern exit(code: int)
+
+const KEYS = 5000
+const BOUND_PER_KEY = 1024
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+// The key "key-<i>" in a block of `cap` bytes.
+built_key(i: int, cap: int) -> string {
+    sb = strbuilder.new(cap)
+    _ = strbuilder.append(sb, "key-${i}")
+    return strbuilder.finish(sb)
+}
+
+main() {
+    fails = 0
+    h0 = mem.heap_in_use()
+    m = map.new()
+    i = 0
+    while i < KEYS {
+        map.put(m, built_key(i, 4096), "v")
+        i = i + 1
+    }
+    h1 = mem.heap_in_use()
+    fails = fails + check(map.size(m) == KEYS, "${KEYS} keys")
+    fails = fails + check(map.has(m, "key-0") != 0 && map.has(m, "key-4999") != 0,
+        "keys copied out of their blocks read back")
+    // Keys built to their length are kept as they are, and read back too.
+    j = 0
+    while j < 10 {
+        map.put(m, "tight-${j}", "w")
+        j = j + 1
+    }
+    fails = fails + check(map.has(m, "tight-9") != 0 && map.size(m) == KEYS + 10,
+        "keys kept by reference read back")
+    map.free(m)
+    if h0 >= 0 && h1 >= 0 {
+        fails = fails + check(h1 - h0 < KEYS * BOUND_PER_KEY,
+            "${KEYS} keys grew the heap by ${h1 - h0} bytes")
+    }
+    if fails > 0 { exit(1) }
+    println("PASS: a map keeps only tight key blocks")
+}

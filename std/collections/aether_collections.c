@@ -510,6 +510,21 @@ static unsigned int key_hash(const char* key, const char** data, unsigned int* l
     return hash_cstr_len(key, len);
 }
 
+/* Is the block of the counted key `s` about as big as its text, so the map
+ * may keep the key by reference rather than copy it (#3538)? A copy takes
+ * length + 1 bytes after the header. A string built to its length (a
+ * string operation's, an interpolation's) has that, but one from
+ * strbuilder.finish carries the builder's whole capacity, and keeping it
+ * kept all of it: 5000 keys built with strbuilder.new(4096) held 20 MB
+ * where copies take 0.5 MB. Slack within a malloc granule and an eighth of
+ * the text is kept, more is copied. A pinned string is never freed, so
+ * keeping it costs nothing. */
+static int key_block_is_tight(const AetherString* s) {
+    if (s->ref_count == AETHER_STRING_PINNED_REFS) return 1;
+    size_t need = s->length + 1;
+    return s->capacity <= need + 16 + need / 8;
+}
+
 // Fast equality: cheap length compare first, memcmp only on match.
 static int key_equals(const HashMapEntry* e, const char* b, unsigned int b_len) {
     if (!e || !e->key || !b) return 0;
@@ -598,9 +613,10 @@ int map_put_raw(HashMap* map, const char* key, void* value) {
     /* A counted key is kept by a reference of the map's own (#3538), as a
      * store keeps any value (R3), rather than copied for every new key;
      * published, as an owned value is, since the map may be released on
-     * another thread than the one that made the key. A plain C string has
-     * no count to take, and is copied. */
-    if (is_aether_string(key)) {
+     * another thread than the one that made the key. That is when its block
+     * is tight (key_block_is_tight). A plain C string has no count to take,
+     * and is copied, as is a key in a block much bigger than it. */
+    if (is_aether_string(key) && key_block_is_tight((const AetherString*)key)) {
         string_retain_shared(key);
         new_entry->key = (AetherString*)key;
     } else {
@@ -628,8 +644,9 @@ const char* map_put(HashMap* map, const char* key, void* value) {
  * map_put_raw path. map_clear / map_free walk owned-string maps
  * and release each value before freeing the bucket entries.
  *
- * The map holds its own reference to the key (retained, or copied from a
- * plain C string, at put time; released at clear time), as map_put_raw. The
+ * The map holds its own reference to the key (retained when its block is
+ * tight, otherwise copied, at put time; released at clear time), as
+ * map_put_raw. The
  * value is what this variant adds heap-string tracking for.
  *
  * Codegen routes `map.put(m, k, heap_string_expr)` here when the
