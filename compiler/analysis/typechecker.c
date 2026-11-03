@@ -347,37 +347,26 @@ static const char* find_import_alias(const char* name);
  * type-checking against, or writing, the program's `n`. Only a file-scope
  * entry no walk added is hidden: the inference pass pushes a function's
  * locals onto the same flat table, stamped with its walk id
- * (aether-ui asks/aether-program-global-leaks-into-module-scope.md). */
-static const char** g_program_globals = NULL;
-static int g_program_global_count = 0;
+ * (aether-ui asks/aether-program-global-leaks-into-module-scope.md).
+ * #3537: a set, so a lookup is one probe, not a walk of every name. */
+static StrMap g_program_globals;
+
+static void reset_lookup_indexes(void);
 
 static int is_program_global_name(const char* name) {
-    for (int i = 0; i < g_program_global_count; i++)
-        if (strcmp(g_program_globals[i], name) == 0) return 1;
-    return 0;
+    return strmap_has(&g_program_globals, name);
 }
 
 static void note_program_globals(ASTNode* program) {
-    for (int i = 0; i < g_program_global_count; i++) free((char*)g_program_globals[i]);
-    free(g_program_globals);
-    g_program_globals = NULL;
-    g_program_global_count = 0;
+    reset_lookup_indexes();
+    strmap_free(&g_program_globals);
+    strmap_init(&g_program_globals);
     if (!program) return;
-    int n = 0;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
-            c->annotation && strcmp(c->annotation, "global_var") == 0) n++;
-    }
-    if (n == 0) return;
-    g_program_globals = malloc(sizeof(char*) * (size_t)n);
-    if (!g_program_globals) return;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
             c->annotation && strcmp(c->annotation, "global_var") == 0)
-            if ((g_program_globals[g_program_global_count] = strdup(c->value)))
-                g_program_global_count++;
+            strmap_put(&g_program_globals, c->value, NULL);
     }
 }
 
@@ -396,7 +385,21 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
  * itself is checked against its own declaration. */
 static ASTNode* g_typecheck_program;
 
-static ASTNode* own_extern_decl(const char* merged_from, const char* name) {
+/* #3537: each file's own externs by name, the program's (under "") and each
+ * module's (under its name), with the symbol made for one beside it. A
+ * scope's index is built the first time a lookup asks about it, in one walk
+ * of its top level; every lookup was that walk, and the symbols a list
+ * searched end to end and grown by one. */
+typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
+static StrMap g_extern_scopes;   /* scope name -> StrMap* of name -> OwnExtern* */
+
+static StrMap* extern_scope_index(const char* merged_from) {
+    const char* key = merged_from ? merged_from : "";
+    StrMap* idx = (StrMap*)strmap_get(&g_extern_scopes, key);
+    if (idx) return idx;
+    idx = (StrMap*)calloc(1, sizeof(StrMap));
+    if (!idx) return NULL;
+    strmap_init(idx);
     ASTNode* scope = NULL;
     if (merged_from) {
         AetherModule* m = module_find(merged_from);
@@ -407,42 +410,46 @@ static ASTNode* own_extern_decl(const char* merged_from, const char* name) {
     for (int i = 0; scope && i < scope->child_count; i++) {
         ASTNode* d = scope->children[i];
         if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value || strcmp(d->value, name) != 0)
-            continue;
-        /* The program's own, not a module's merged `@extern` clone. */
+        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value) continue;
+        /* The program's own, not a module's merged `@extern` clone; the
+         * first of a name, as the walk this replaces found. */
         if (!merged_from && d->origin_module) continue;
-        return d;
+        if (strmap_has(idx, d->value)) continue;
+        OwnExtern* e = (OwnExtern*)calloc(1, sizeof(OwnExtern));
+        if (!e) continue;
+        e->decl = d;
+        strmap_put(idx, d->value, e);
     }
-    return NULL;
+    strmap_put(&g_extern_scopes, key, idx);
+    return idx;
 }
 
-typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
-static OwnExtern* g_own_externs = NULL;
-static int g_own_extern_count = 0;
+static OwnExtern* own_extern_decl(const char* merged_from, const char* name) {
+    StrMap* idx = extern_scope_index(merged_from);
+    return idx ? (OwnExtern*)strmap_get(idx, name) : NULL;
+}
 
 /* The symbol of the extern `own` a file declares itself, kept in a table
  * of its own; NULL when it cannot be made. */
-static Symbol* own_extern_decl_symbol(ASTNode* own, const char* name) {
-    for (int i = 0; i < g_own_extern_count; i++)
-        if (g_own_externs[i].decl == own) return lookup_symbol_local(g_own_externs[i].table, name);
-    OwnExtern* grown = realloc(g_own_externs, sizeof(OwnExtern) * (size_t)(g_own_extern_count + 1));
-    if (!grown) return NULL;
-    g_own_externs = grown;
-    SymbolTable* t = create_symbol_table(NULL);
-    add_symbol(t, name, clone_type(own->node_type), 0, 1, 0);
-    Symbol* s = lookup_symbol_local(t, name);
-    if (!s) return NULL;
-    s->node = own;
-    g_own_externs[g_own_extern_count].decl = own;
-    g_own_externs[g_own_extern_count].table = t;
-    g_own_extern_count++;
-    return s;
+static Symbol* own_extern_decl_symbol(OwnExtern* own, const char* name) {
+    if (!own->table) {
+        SymbolTable* t = create_symbol_table(NULL);
+        add_symbol(t, name, clone_type(own->decl->node_type), 0, 1, 0);
+        Symbol* s = lookup_symbol_local(t, name);
+        if (!s) {
+            free_symbol_table(t);
+            return NULL;
+        }
+        s->node = own->decl;
+        own->table = t;
+    }
+    return lookup_symbol_local(own->table, name);
 }
 
 static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
     if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
-    ASTNode* own = own_extern_decl(merged_from, name);
-    if (!own || own == found->node) return found;
+    OwnExtern* own = own_extern_decl(merged_from, name);
+    if (!own || own->decl == found->node) return found;
     Symbol* s = own_extern_decl_symbol(own, name);
     return s ? s : found;
 }
@@ -472,16 +479,49 @@ static int is_program_own_decl(const Symbol* s) {
 /* #3088: does the module `module_name` declare `name` itself, at its top
  * level? A struct it declares identical to the program's is merged as the
  * program's one type (#2129), so its body names that type by its own
- * name. */
+ * name. #3537: each module's names in a set, built at its first question. */
+static StrMap g_module_decls;   /* module name -> StrMap* of the names it declares */
+
 static int module_declares(const char* module_name, const char* name) {
-    AetherModule* m = module_name ? module_find(module_name) : NULL;
-    for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
-        const ASTNode* d = m->ast->children[i];
-        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (d && d->value && strcmp(d->value, name) == 0 && d->type != AST_IMPORT_STATEMENT)
-            return 1;
+    if (!module_name) return 0;
+    StrMap* names = (StrMap*)strmap_get(&g_module_decls, module_name);
+    if (!names) {
+        names = (StrMap*)calloc(1, sizeof(StrMap));
+        if (!names) return 0;
+        strmap_init(names);
+        AetherModule* m = module_find(module_name);
+        for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
+            const ASTNode* d = m->ast->children[i];
+            if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+            if (d && d->value && d->type != AST_IMPORT_STATEMENT) strmap_put(names, d->value, NULL);
+        }
+        strmap_put(&g_module_decls, module_name, names);
     }
-    return 0;
+    return strmap_has(names, name);
+}
+
+/* #3537: the indexes above, dropped when a program's check begins: they
+ * name declarations of the tree being checked. */
+static void reset_lookup_indexes(void) {
+    for (int i = 0; i < strmap_count(&g_extern_scopes); i++) {
+        StrMap* idx = (StrMap*)strmap_value_at(&g_extern_scopes, i);
+        for (int j = 0; idx && j < strmap_count(idx); j++) {
+            OwnExtern* e = (OwnExtern*)strmap_value_at(idx, j);
+            if (e && e->table) free_symbol_table(e->table);
+            free(e);
+        }
+        if (idx) strmap_free(idx);
+        free(idx);
+    }
+    strmap_free(&g_extern_scopes);
+    strmap_init(&g_extern_scopes);
+    for (int i = 0; i < strmap_count(&g_module_decls); i++) {
+        StrMap* names = (StrMap*)strmap_value_at(&g_module_decls, i);
+        if (names) strmap_free(names);
+        free(names);
+    }
+    strmap_free(&g_module_decls);
+    strmap_init(&g_module_decls);
 }
 
 /* #3088: the newest symbol of `name` in the file scope `table` that is no
@@ -527,7 +567,7 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
         is_program_own_decl(symbol) && !module_declares(merged_from, name)) {
         symbol = lookup_file_symbol_for_module(table, name);
         if (!symbol) {
-            ASTNode* own = own_extern_decl(merged_from, name);
+            OwnExtern* own = own_extern_decl(merged_from, name);
             return own ? own_extern_decl_symbol(own, name) : NULL;
         }
     }
