@@ -428,14 +428,24 @@ static int slots_grow(void) {
  * entry: one table probe under the lock. With n blocks recorded, about
  * n / 2^18 of such frees take it (20,000 blocks: 8%).
  *
- * 32 KiB, the owning copy's only. */
-#define ACCT_FILTER_BITS  (1u << 18)
+ * 32 KiB, the owning copy's only. A small-RAM target sizes it down with
+ * -DAETHER_ACCT_FILTER_LOG2=<n> (2^n bits, 6..24): on an ESP32 with ~320 KB
+ * of internal DRAM the 32 KiB is a tenth of it whether or not a program
+ * ever uses an account; 14 makes it 2 KiB, at 16 times the false-positive
+ * rate above. */
+#ifndef AETHER_ACCT_FILTER_LOG2
+#define AETHER_ACCT_FILTER_LOG2 18
+#endif
+#if AETHER_ACCT_FILTER_LOG2 < 6 || AETHER_ACCT_FILTER_LOG2 > 24
+#error "AETHER_ACCT_FILTER_LOG2 must be between 6 and 24"
+#endif
+#define ACCT_FILTER_BITS  (1u << AETHER_ACCT_FILTER_LOG2)
 #define ACCT_FILTER_WORDS (ACCT_FILTER_BITS / 64)
 static _Atomic uint64_t g_filter[ACCT_FILTER_WORDS];
 static size_t g_filter_set = 0;   /* bits set, under the lock */
 
 static inline uint32_t filter_bit(const void* p) {
-    return (uint32_t)(((uint64_t)(uintptr_t)p * 0x9e3779b97f4a7c15ULL) >> (64 - 18));
+    return (uint32_t)(((uint64_t)(uintptr_t)p * 0x9e3779b97f4a7c15ULL) >> (64 - AETHER_ACCT_FILTER_LOG2));
 }
 
 static inline int filter_may_hold(const void* p) {
