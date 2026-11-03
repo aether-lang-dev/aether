@@ -71,6 +71,7 @@ extern char** environ;
 #include "../compiler/aether_lib_path.h"
 #include "../compiler/aether_lib_strings.h"   /* #3481: what a library value holds, read as codegen reads it */
 #include "../compiler/aether_source_text.h"
+#include "../compiler/aether_toolchain_asan.h"  /* #3539: the sweep leak-checks programs, not ae */
 
 #include "apkg/toml_parser.h"
 #include "ae_help.h"

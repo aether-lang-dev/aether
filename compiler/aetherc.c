@@ -31,6 +31,7 @@
 #include "aether_error.h"
 #include "aether_module.h"
 #include "aether_source_text.h"
+#include "aether_toolchain_asan.h"  // leak checks are the sweep's programs', not ours (#3539)
 
 /* #2297: --shared-runtime (with --emit=lib): recorded in the catalog. */
 static int g_lib_shared_runtime = 0;

@@ -101,7 +101,12 @@ case "$san" in
         # than exists to see the refusal gets NULL, as without ASan, instead
         # of ASan's own abort. LeakSanitizer reports at exit into the same
         # log, and its nonzero exit fails the test that ran the program.
-        ASAN_OPTIONS="detect_leaks=1:halt_on_error=1:allocator_may_return_null=1:log_exe_name=1:log_path=$reports/report"
+        # detect_leaks is left to each binary's default, not set here: on
+        # Linux a program reports its leaks, while aetherc and ae turn theirs
+        # off (compiler/aether_toolchain_asan.h), since aetherc's leaks are
+        # gated shape by shape in check_compiler_leaks.sh (#1667). Their
+        # memory errors still stop them.
+        ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:log_exe_name=1:log_path=$reports/report"
         export ASAN_OPTIONS
         ;;
 esac

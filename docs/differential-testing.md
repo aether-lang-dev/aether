@@ -172,7 +172,11 @@ and a block it never freed is reported when it exits; the reports go to
 `build/asan/reports/`, grouped by the first frame in this tree. Its canaries
 are `tests/asan/overflow.ae`, which writes one byte past an 8 byte block, and
 `tests/asan/leak.ae`, which drops the only pointer to one: each must be
-stopped with its report before the corpus counts. A test that asks for more
+stopped with its report before the corpus counts. aetherc and `ae` run
+instrumented too, so a memory error in them stops the build that hit it, but
+with leak detection off by default (`compiler/aether_toolchain_asan.h`): the
+compiler's own leaks are gated a program shape at a time by
+`tests/scripts/check_compiler_leaks.sh` (#1667). A test that asks for more
 memory than exists still gets NULL (`allocator_may_return_null`), and
 `mem.heap_in_use` counts the sanitizer allocator's live bytes, so the
 ownership tests' steady growth checks keep their meaning under it.
