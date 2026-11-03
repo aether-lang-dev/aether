@@ -6,9 +6,10 @@
  * instruction), or through the host (a registered function, the shared
  * map). The engine judges the outcome itself where it can: a refusal is
  * the error a sandbox gives (EACCES or EPERM from libc, the preload or the
- * kernel), or an error from a host function; anything else that fails is
- * reported as an error, never as a refusal, so a missing file or an
- * unreachable network cannot pass for a sandbox at work.
+ * kernel), or a host function's error that says so by starting "refused:";
+ * anything else that fails is reported as an error, never as a refusal, so
+ * a missing file, an unset variable or an unreachable network cannot pass
+ * for a sandbox at work.
  *
  * Built two ways from this one file: a shared library a bridge dlopens
  * (libstunt), and, with stunt_main.c, the stunt program a host spawns.
@@ -76,6 +77,8 @@ struct st_vm {
     int nfns;
     char** env;        /* the copy of the environment taken by st_new */
     int nenv;
+    char** hidden;     /* names kept from the copy: scrubbed, or withheld by the host */
+    int nhidden;
     int64_t budget;
     st_flag cancelled;
     st_interrupt_fn interrupt;
@@ -91,6 +94,27 @@ struct st_vm {
     char result[ST_LINE];
 };
 
+#define ST_WITHHELD "STUNT_WITHHELD"
+
+/* Records `name` as kept from the engine: by st_env_scrub, or by the host. */
+static void hide(st_vm* vm, const char* name) {
+    for (int i = 0; i < vm->nhidden; i++) {
+        if (strcmp(vm->hidden[i], name) == 0) return;
+    }
+    char** grown = (char**)realloc(vm->hidden, ((size_t)vm->nhidden + 1) * sizeof(char*));
+    if (!grown) return;
+    vm->hidden = grown;
+    char* copy = strdup(name);
+    if (copy) vm->hidden[vm->nhidden++] = copy;
+}
+
+static int hidden(st_vm* vm, const char* name) {
+    for (int i = 0; i < vm->nhidden; i++) {
+        if (strcmp(vm->hidden[i], name) == 0) return 1;
+    }
+    return 0;
+}
+
 st_vm* st_new(void) {
     st_vm* vm = (st_vm*)calloc(1, sizeof *vm);
     if (!vm) return NULL;
@@ -103,6 +127,24 @@ st_vm* st_new(void) {
         for (int i = 0; i < n; i++) {
             char* copy = strdup(env[i]);
             if (copy) vm->env[vm->nenv++] = copy;
+        }
+    }
+    /* A host that starts the engine in a child with less than its own
+     * environment names what it kept back in STUNT_WITHHELD, a comma list;
+     * that is how a missing variable is told from one the host never had. */
+    for (int i = 0; i < n; i++) {
+        if (strncmp(env[i], ST_WITHHELD "=", sizeof ST_WITHHELD) != 0) continue;
+        const char* p = env[i] + sizeof ST_WITHHELD;
+        while (*p) {
+            size_t len = strcspn(p, ",");
+            if (len > 0 && len < 256) {
+                char name[256];
+                memcpy(name, p, len);
+                name[len] = '\0';
+                hide(vm, name);
+            }
+            p += len;
+            if (*p == ',') p++;
         }
     }
     return vm;
@@ -125,6 +167,8 @@ void st_free(st_vm* vm) {
     for (int i = 0; i < vm->nfns; i++) free(vm->fns[i].name);
     for (int i = 0; i < vm->nenv; i++) free(vm->env[i]);
     free(vm->env);
+    for (int i = 0; i < vm->nhidden; i++) free(vm->hidden[i]);
+    free(vm->hidden);
     free(vm);
 }
 
@@ -162,7 +206,7 @@ void st_env_scrub(st_vm* vm, int (*keep)(const char* name)) {
         memcpy(name, e, n);
         name[n] = '\0';
         if (keep(name)) vm->env[w++] = e;
-        else free(e);
+        else { hide(vm, name); free(e); }
     }
     vm->nenv = w;
     if (vm->env) vm->env[w] = NULL;
@@ -278,6 +322,16 @@ static int by_errno(int e, char* d, size_t cap, const char* what) {
 #define FIXTURE "stunt-fixture.txt"
 #define WRITTEN "stunt-written.txt"
 
+/* A host function's error is a refusal only when the host says it is one:
+ * its reason starts "refused:" (the bridge's and host.ae's read_file and
+ * getenv do this when the grants say no). A missing file, a failed read or
+ * no such function is an error, never a refusal. */
+static int host_refused(const char* why) { return strncmp(why, "refused:", 8) == 0; }
+static int host_failed(const char* why, char* d, size_t cap) {
+    detail(d, cap, "%s", why);
+    return host_refused(why) ? OUT_REFUSED : OUT_ERROR;
+}
+
 static void first_line(const char* s, char* out, size_t cap) {
     size_t n = strcspn(s, "\r\n");
     if (n >= cap) n = cap - 1;
@@ -329,19 +383,37 @@ static int c_write_granted_file(st_vm* vm, char* d, size_t cap) {
 #endif
 }
 
-static int c_getenv_home(st_vm* vm, char* d, size_t cap) {
-    (void)vm;
-    const char* v = getenv("HOME");
-    if (!v) { detail(d, cap, "HOME is unset"); return OUT_REFUSED; }
-    detail(d, cap, "HOME=%s", v);
-    return OUT_SUCCEEDED;
+/* Whether `name` is in the process's environment, read past getenv (and
+ * so past any preload's getenv): how a getenv that says NULL for a variable
+ * that is there is told from one that is simply unset. */
+static int in_environ(const char* name) {
+    size_t n = strlen(name);
+    for (char** e = ST_ENVIRON; e && *e; e++) {
+        if (strncmp(*e, name, n) == 0 && (*e)[n] == '=') return 1;
+    }
+    return 0;
 }
 
+/* A NULL getenv is a refusal only with evidence of one: the variable is in
+ * the environment and getenv would not give it (the preload), or the host
+ * withheld it from this process. HOME simply unset is an error. */
+static int c_getenv_home(st_vm* vm, char* d, size_t cap) {
+    const char* v = getenv("HOME");
+    if (v) { detail(d, cap, "HOME=%s", v); return OUT_SUCCEEDED; }
+    if (in_environ("HOME")) { detail(d, cap, "getenv gave NULL; HOME is in the environment"); return OUT_REFUSED; }
+    if (hidden(vm, "HOME")) { detail(d, cap, "the host withheld HOME"); return OUT_REFUSED; }
+    detail(d, cap, "HOME is unset");
+    return OUT_ERROR;
+}
+
+/* HOME missing from the copy is a refusal when the scrub took it out or the
+ * host withheld it; when it was never there, an error. */
 static int c_env_cached(st_vm* vm, char* d, size_t cap) {
     const char* v = cached_env(vm, "HOME");
-    if (!v) { detail(d, cap, "HOME is not in the copy"); return OUT_REFUSED; }
-    detail(d, cap, "HOME=%s from the copy", v);
-    return OUT_SUCCEEDED;
+    if (v) { detail(d, cap, "HOME=%s from the copy", v); return OUT_SUCCEEDED; }
+    if (hidden(vm, "HOME")) { detail(d, cap, "HOME was kept from the copy"); return OUT_REFUSED; }
+    detail(d, cap, "HOME was never in the environment");
+    return OUT_ERROR;
 }
 
 #if !defined(_WIN32)
@@ -574,13 +646,13 @@ static int c_syscall_socket(st_vm* vm, char* d, size_t cap) {
 
 /* ---- the checks: through the host ---------------------------------------- */
 
-/* A host function's error is a refusal: a host that may not grant a thing
- * says so, and a guest cannot tell why. */
+/* A checked binding: refused when the host says "refused:", an error for
+ * any other failure, and an error when it answers nothing at all. */
 static int c_host_str(st_vm* vm, const char* fn, const char* arg, char* d, size_t cap) {
     st_val a = sval(arg);
     char why[256];
-    if (host_call(vm, fn, 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
-    if (vm->ret_type != ST_TSTR) { detail(d, cap, "%s(\"%s\") gave nothing", fn, arg); return OUT_REFUSED; }
+    if (host_call(vm, fn, 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
+    if (vm->ret_type != ST_TSTR) { detail(d, cap, "%s(\"%s\") gave nothing", fn, arg); return OUT_ERROR; }
     char line[96];
     first_line(vm->ret_s, line, sizeof line);
     detail(d, cap, "%s(\"%s\") = \"%s\"", fn, arg, line);
@@ -594,7 +666,7 @@ static int c_binding_getenv_home(st_vm* vm, char* d, size_t cap) { return c_host
 static int c_callback_greet(st_vm* vm, char* d, size_t cap) {
     st_val a = sval("stunt");
     char why[256];
-    if (host_call(vm, "greet", 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "greet", 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type != ST_TSTR) { detail(d, cap, "greet returned type %d, not a string", vm->ret_type); return OUT_ERROR; }
     if (strcmp(vm->ret_s, "hello, stunt") != 0) { detail(d, cap, "greet(\"stunt\") = \"%s\"", vm->ret_s); return OUT_ERROR; }
     detail(d, cap, "greet(\"stunt\") = \"hello, stunt\"");
@@ -604,16 +676,22 @@ static int c_callback_greet(st_vm* vm, char* d, size_t cap) {
 static int c_callback_add(st_vm* vm, char* d, size_t cap) {
     st_val a[2] = { ival(2), ival(40) };
     char why[256];
-    if (host_call(vm, "add", 2, a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "add", 2, a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type != ST_TINT) { detail(d, cap, "add returned type %d, not an int", vm->ret_type); return OUT_ERROR; }
     if (vm->ret_i != 42) { detail(d, cap, "add(2, 40) = %lld", (long long)vm->ret_i); return OUT_ERROR; }
     detail(d, cap, "add(2, 40) = 42");
     return OUT_SUCCEEDED;
 }
 
+/* The one host error this check counts as a refusal is the host's answer
+ * to a name it does not know, "no host function nope"; any other failure
+ * (a hang-up, a reply not understood) is an error. */
 static int c_callback_unregistered(st_vm* vm, char* d, size_t cap) {
     char why[256];
-    if (host_call(vm, "nope", 0, NULL, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "nope", 0, NULL, why, sizeof why) != 0) {
+        detail(d, cap, "%s", why);
+        return strcmp(why, "no host function nope") == 0 ? OUT_REFUSED : OUT_ERROR;
+    }
     detail(d, cap, "nope() answered");
     return OUT_SUCCEEDED;
 }
@@ -621,8 +699,8 @@ static int c_callback_unregistered(st_vm* vm, char* d, size_t cap) {
 static int c_map_get(st_vm* vm, char* d, size_t cap) {
     st_val a = sval("input");
     char why[256];
-    if (host_call(vm, "aether_map_get", 1, &a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
-    if (vm->ret_type != ST_TSTR) { detail(d, cap, "input is not in the map"); return OUT_REFUSED; }
+    if (host_call(vm, "aether_map_get", 1, &a, why, sizeof why) != 0) return host_failed(why, d, cap);
+    if (vm->ret_type != ST_TSTR) { detail(d, cap, "input is not in the map"); return OUT_ERROR; }
     if (strcmp(vm->ret_s, "stunt-in") != 0) { detail(d, cap, "input = \"%s\"", vm->ret_s); return OUT_ERROR; }
     detail(d, cap, "input = \"stunt-in\"");
     return OUT_SUCCEEDED;
@@ -631,13 +709,13 @@ static int c_map_get(st_vm* vm, char* d, size_t cap) {
 static int map_put(st_vm* vm, const char* key, const char* value, char* d, size_t cap) {
     st_val a[2] = { sval(key), sval(value) };
     char why[256];
-    if (host_call(vm, "aether_map_put", 2, a, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_REFUSED; }
+    if (host_call(vm, "aether_map_put", 2, a, why, sizeof why) != 0) return host_failed(why, d, cap);
     if (vm->ret_type == ST_TINT && vm->ret_i != 0) { detail(d, cap, "put %s: refused by the map", key); return OUT_REFUSED; }
     st_val k = sval(key);
     if (host_call(vm, "aether_map_get", 1, &k, why, sizeof why) != 0) { detail(d, cap, "%s", why); return OUT_ERROR; }
     if (vm->ret_type != ST_TSTR || strcmp(vm->ret_s, value) != 0) {
         detail(d, cap, "put %s, then read back %s", key, vm->ret_type == ST_TSTR ? vm->ret_s : "nothing");
-        return OUT_REFUSED;
+        return OUT_ERROR;
     }
     detail(d, cap, "%s = \"%s\", read back", key, value);
     return OUT_SUCCEEDED;

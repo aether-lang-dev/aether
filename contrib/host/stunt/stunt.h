@@ -66,7 +66,10 @@ void   st_set_interrupt_handler(st_vm* vm, st_interrupt_fn fn, void* ud);
 
 /* The engine copies the environment when it is made, as Python's os.environ
  * and Perl's %ENV do; env-cached reads that copy. A host entering a sandbox
- * scrubs it: entries `keep` returns 0 for are dropped, and stay dropped. */
+ * scrubs it: entries `keep` returns 0 for are dropped, and stay dropped;
+ * env-cached counts a dropped name as refused, and one that was never there
+ * as an error. A host starting the engine in a child with less than its own
+ * environment names what it kept back in STUNT_WITHHELD=NAME,... */
 void   st_env_scrub(st_vm* vm, int (*keep)(const char* name));
 
 /* The catalogue. `modes` is "in-process,child", "child" or "in-process";

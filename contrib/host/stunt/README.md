@@ -38,10 +38,16 @@ cannot take), and 3 when a host-checked check was stopped.
 The expectation lives in the test, which knows the grants it gave, so one
 catalogue runs under any number of policies. stunt judges an outcome itself
 wherever it can. A **refusal** is what a sandbox gives: `EACCES` or `EPERM`
-from libc, the preload library or the kernel, or an error from a host
-function. Anything else that goes wrong (a missing file, an unreachable
-network) is an **error**, never a refusal, so it cannot pass for a sandbox at
-work. A connect is non-blocking: refused at once, or let through.
+from libc, the preload library or the kernel, or a host function's error
+whose reason starts `refused:` (what `read_file` and `getenv` say when the
+grants say no). Anything else that goes wrong (a missing file, a failed
+read, an unset variable, an unreachable network, no such host function) is
+an **error**, never a refusal, so it cannot pass for a sandbox at work. A
+variable that is not there is a refusal only with evidence of one: it is in
+the environment and `getenv` will not give it (the preload), the bridge's
+scrub took it out of the engine's copy, or the host that started the child
+named it in `STUNT_WITHHELD`. A connect is non-blocking: refused at once, or
+let through.
 
 ## The catalogue
 
@@ -144,9 +150,11 @@ and `ipc.write_frame`; the child writes each message as one frame, except
 `half-frame`, which stops inside one on purpose.
 
 Every host function is the host's to answer, so `callback-*`, `map-*` and
-`binding-*` mean the same in both modes. The host passes the child only the
-environment the grants allow, so a copy taken at start (`env-cached`) is no
-wider than `getenv`.
+`binding-*` mean the same in both modes; an `ERR` is a refusal only when its
+reason starts `refused:`. The host passes the child only the environment the
+grants allow, so a copy taken at start (`env-cached`) is no wider than
+`getenv`, and names what it kept back in `STUNT_WITHHELD=NAME,...`, so the
+child can tell a withheld variable from one that was never set.
 
 ## The tests
 
