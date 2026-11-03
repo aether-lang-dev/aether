@@ -11410,6 +11410,24 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             cc, cv);
                                 } else if (is_set_shape) {
                                     fprintf(gen->output, "list_set_string_adopted(%s, %s, %s)", cc, ck, cv);
+                                } else if (is_fresh_heap_string_temp(gen, expr->children[1])) {
+                                    /* R3: the map keeps a key by a reference
+                                     * of its own (or a copy of a plain C
+                                     * string), so a key that is a fresh
+                                     * temporary is the caller's to release
+                                     * once the put returns, as the plain put
+                                     * releases it. Only the value is adopted;
+                                     * `map.put(m, "k${i}", v)` used to leak
+                                     * its key on every call (#3539). */
+                                    const char* cr = seq_let(gen, &s, is_wrapper ? "const char*" : "int",
+                                                             "_ae_cr");
+                                    fprintf(gen->output, "%s(%s, %s, %s)",
+                                            is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
+                                            cc, ck, cv);
+                                    seq_next(gen, &s);
+                                    fprintf(gen->output, "aether_heap_str_free(%s)", ck);
+                                    seq_next(gen, &s);
+                                    fprintf(gen->output, "%s", cr);
                                 } else {
                                     fprintf(gen->output, "%s(%s, %s, %s)",
                                             is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
