@@ -30,6 +30,9 @@ tests/regression/test_scheduler_idle_cpu.ae prints the CPU time an idle schedule
 # Process ids.
 tests/regression/test_stdlib_binary_safety_batch.ae prints its own pid
 
+# Temporary names.
+tests/regression/test_mutation_run_no_leak.ae std.mutation's report names the SUT and test in the temp directory the run makes
+
 # Thread interleaving.
 tests/syntax/test_coop_many_actors.ae ten actors print in the order the scheduler runs them
 tests/syntax/test_coop_self_send.ae two self-sending actors print their totals in either order
