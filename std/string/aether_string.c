@@ -960,20 +960,20 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
     k->len += n;
 }
 
-/* Formats one numeric argument of type T with the conversion `sub` and
- * offers it to the sink: on the stack when it fits, else on the heap, so
- * no conversion is ever cut short. */
-#define INTERP_NUM(T) do {                                                  \
+/* Formats one numeric argument of type T with the conversion `sub`, through
+ * PRINT (snprintf's arguments), and offers it to the sink: on the stack when
+ * it fits, else on the heap, so no conversion is ever cut short. */
+#define INTERP_CONV(T, PRINT) do {                                          \
         T v_ = va_arg(ap, T);                                               \
         char small_[64];                                                    \
-        int n_ = snprintf(small_, sizeof(small_), sub, v_);                 \
+        int n_ = PRINT(small_, sizeof(small_), sub, v_);                    \
         if (n_ < 0) break;                                                  \
         if ((size_t)n_ < sizeof(small_)) {                                  \
             interp_put(&k, small_, (size_t)n_);                             \
         } else {                                                            \
             char* big_ = (char*)malloc((size_t)n_ + 1);                     \
             if (big_) {                                                     \
-                snprintf(big_, (size_t)n_ + 1, sub, v_);                    \
+                PRINT(big_, (size_t)n_ + 1, sub, v_);                       \
                 interp_put(&k, big_, (size_t)n_);                           \
                 free(big_);                                                 \
             } else {                                                        \
@@ -987,6 +987,15 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
             }                                                               \
         }                                                                   \
     } while (0)
+
+#define INTERP_NUM(T) INTERP_CONV(T, snprintf)
+
+/* A double is machine text here, as string.from_float writes it: '.' for
+ * the radix whatever LC_NUMERIC the process is in (#3525). snprintf follows
+ * the locale, so in a host that called setlocale(LC_ALL, "de_DE.UTF-8")
+ * "${0.5}" was "0,5" and print(0.5) "0,500000", while string.from_float(0.5)
+ * was "0.5" (docs/locale-independent-float-text.md). */
+#define INTERP_DOUBLE() INTERP_CONV(double, aether_c_snprintf_double)
 
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
     InterpSink k = { out, cap, 0, f };
@@ -1057,7 +1066,7 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
                 break;
             case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
                 if (long_double) INTERP_NUM(long double);
-                else INTERP_NUM(double);
+                else INTERP_DOUBLE();
                 break;
             default:
                 interp_put(&k, spec, sl);
@@ -1070,6 +1079,8 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 }
 
 #undef INTERP_NUM
+#undef INTERP_DOUBLE
+#undef INTERP_CONV
 
 void* aether_interp_string(const char* fmt, va_list ap) {
     /* Most interpolations are short: format once into the stack and copy,

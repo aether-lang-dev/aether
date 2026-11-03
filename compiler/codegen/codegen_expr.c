@@ -10182,7 +10182,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
                         } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                            fprintf(gen->output, "printf(\"%%f\", ");
+                            /* The runtime formatter, '.' whatever the
+                             * process locale; printf follows LC_NUMERIC
+                             * (#3525). */
+                            fprintf(gen->output, "_aether_interp_print(\"%%f\", (double)");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_LONGDOUBLE) {
@@ -10227,9 +10230,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else if (expr->child_count >= 2 && expr->children[0]->type == AST_LITERAL &&
                                expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_STRING &&
                                expr->children[0]->value) {
-                        // Multi-arg with literal format string: auto-fix specifiers
+                        // Multi-arg with literal format string: auto-fix specifiers.
+                        // Written by the runtime formatter, whose %f is '.'
+                        // whatever the process locale (#3525).
                         const char* fmt = expr->children[0]->value;
-                        fprintf(gen->output, "printf(\"");
+                        fprintf(gen->output, "_aether_interp_print(\"");
                         int arg_idx = 1;
                         for (int fi = 0; fmt[fi]; fi++) {
                             if (fmt[fi] == '%' && fmt[fi + 1]) {
@@ -10316,7 +10321,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, "))");
                         } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                            fprintf(gen->output, "printf(\"%%f\\n\", ");
+                            /* The runtime formatter, '.' whatever the
+                             * process locale (#3525). */
+                            fprintf(gen->output, "_aether_interp_print(\"%%f\\n\", (double)");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_STRING) {
@@ -10377,9 +10384,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else if (expr->child_count >= 2 && expr->children[0]->type == AST_LITERAL &&
                                expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_STRING &&
                                expr->children[0]->value) {
-                        // Multi-arg with literal format: auto-fix specifiers + newline
+                        // Multi-arg with literal format: auto-fix specifiers + newline,
+                        // by the runtime formatter, as print's above (#3525).
                         const char* fmt = expr->children[0]->value;
-                        fprintf(gen->output, "printf(\"");
+                        fprintf(gen->output, "_aether_interp_print(\"");
                         int arg_idx = 1;
                         for (int fi = 0; fmt[fi]; fi++) {
                             if (fmt[fi] == '%' && fmt[fi + 1]) {

@@ -13382,7 +13382,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
                     } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                        fprintf(gen->output, "printf(\"%%f\", ");
+                        // The runtime formatter, '.' whatever the process
+                        // locale; printf follows LC_NUMERIC (#3525).
+                        fprintf(gen->output, "_aether_interp_print(\"%%f\", (double)");
                         generate_expression(gen, first_arg);
                         fprintf(gen->output, ");\n");
                     } else if (arg_type->kind == TYPE_LONGDOUBLE) {
@@ -13458,9 +13460,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     ASTNode* fmt_arg = stmt->children[0];
                     if (fmt_arg->type == AST_LITERAL && fmt_arg->node_type &&
                         fmt_arg->node_type->kind == TYPE_STRING && fmt_arg->value) {
-                        // Parse format string and replace specifiers with type-correct ones
+                        // Parse format string and replace specifiers with type-correct ones.
+                        // Written by the runtime formatter, whose %f is '.'
+                        // whatever the process locale (#3525).
                         const char* fmt = fmt_arg->value;
-                        fprintf(gen->output, "printf(\"");
+                        fprintf(gen->output, "_aether_interp_print(\"");
                         int arg_idx = 1;  // index into stmt->children for arguments
                         for (int fi = 0; fmt[fi]; fi++) {
                             if (fmt[fi] == '%' && fmt[fi + 1]) {

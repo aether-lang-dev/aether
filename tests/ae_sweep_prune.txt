@@ -351,3 +351,6 @@ tests/integration/abi_matrix/
 tests/integration/step_word/
 # host.ae is the helper the test_stunt_*.sh beside it build and drive.
 tests/integration/contrib_host_stunt/
+# #3525: print_float.ae is the program test_print_float_locale.sh builds,
+# runs and compares the output of.
+tests/integration/print_float_locale/
