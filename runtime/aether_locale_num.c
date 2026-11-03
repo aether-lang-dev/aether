@@ -26,6 +26,7 @@
 #include "config/aether_optimization_config.h"  // AETHER_HAS_THREADS / _ATOMICS
 
 #include <stdio.h>
+#include <stdarg.h>  // va_list: the emit core takes a double or a long double
 #include <stdlib.h>
 #include <string.h>
 #include <errno.h>
@@ -190,8 +191,9 @@ static int aether_replace_radix(char* buf, size_t len, const char* radix) {
 }
 
 // Every path must leave the thread's locale as it found it, including the two
-// that decline to switch.
-static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, double value) {
+// that decline to switch. `ap` carries the one value, a double or a long
+// double, and is read by exactly one vsnprintf on every path.
+static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, va_list ap) {
     int prev_mode = _configthreadlocale(_ENABLE_PER_THREAD_LOCALE);
     if (prev_mode == -1) {
         // No per-thread locale on this CRT (msvcrt, the MINGW64 build):
@@ -202,7 +204,7 @@ static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, do
         // back — exact for these conversions, no locale touched.
         const struct lconv* lc = localeconv();
         const char* radix = lc ? lc->decimal_point : NULL;
-        int written = snprintf(buf, n, fmt, value);
+        int written = vsnprintf(buf, n, fmt, ap);
         if (written < 0 || (size_t)written >= n) return written;
         return aether_replace_radix(buf, (size_t)written, radix);
     }
@@ -216,13 +218,13 @@ static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, do
         saved = (len < sizeof inline_name) ? inline_name : (char*)malloc(len + 1);
         if (!cur || !saved) {
             _configthreadlocale(prev_mode);
-            return snprintf(buf, n, fmt, value);
+            return vsnprintf(buf, n, fmt, ap);
         }
         memcpy(saved, cur, len + 1);
     }
 
     setlocale(LC_NUMERIC, "C");
-    int written = snprintf(buf, n, fmt, value);
+    int written = vsnprintf(buf, n, fmt, ap);
 
     if (saved) {
         setlocale(LC_NUMERIC, saved);
@@ -235,12 +237,16 @@ static int aether_win_snprintf_c_locale(char* buf, size_t n, const char* fmt, do
 }
 #endif
 
-int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value) {
+// The one value in `ap`, a double or a long double, formatted with '.' for
+// the radix. Every backend pins the locale around the call, not the value,
+// so both types share this (#3525): `ap` is read by exactly one vsnprintf
+// on every path.
+static int aether_c_vsnprintf_float(char* buf, size_t n, const char* fmt, va_list ap) {
     if (!buf || n == 0 || !fmt) return -1;
 
 #if !AETHER_HAS_LOCALE_CONV
     // Backend 3 — LC_NUMERIC is structurally "C" on this target.
-    return snprintf(buf, n, fmt, value);
+    return vsnprintf(buf, n, fmt, ap);
 
 #elif AETHER_LOCALE_WIN32
     // Backend 2 (Windows). The radix is the only locale-dependent element of
@@ -250,8 +256,8 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
         const struct lconv* lc = localeconv();
         const char* radix = lc ? lc->decimal_point : NULL;
         int written = (!radix || (radix[0] == '.' && radix[1] == '\0'))
-                      ? snprintf(buf, n, fmt, value)
-                      : aether_win_snprintf_c_locale(buf, n, fmt, value);
+                      ? vsnprintf(buf, n, fmt, ap)
+                      : aether_win_snprintf_c_locale(buf, n, fmt, ap);
 
         if (written < 0) {
             buf[0] = '\0';
@@ -269,8 +275,8 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     // Backend 1 (BSD/macOS). Locale BEFORE the format here.
     {
         aether_loc_t loc = aether_c_locale();
-        if (!loc) return snprintf(buf, n, fmt, value);
-        return snprintf_l(buf, n, loc, fmt, value);
+        if (!loc) return vsnprintf(buf, n, fmt, ap);
+        return vsnprintf_l(buf, n, loc, fmt, ap);
     }
 
 #else
@@ -279,11 +285,11 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
     // the embedding host are unaffected.
     {
         aether_loc_t loc = aether_c_locale();
-        if (!loc) return snprintf(buf, n, fmt, value);
+        if (!loc) return vsnprintf(buf, n, fmt, ap);
 
         int saved_errno = errno;
         locale_t previous = uselocale(loc);
-        int written = snprintf(buf, n, fmt, value);
+        int written = vsnprintf(buf, n, fmt, ap);
         // ALWAYS restore, on every path. `previous` is LC_GLOBAL_LOCALE (not
         // NULL) for a thread that never called uselocale itself — the common
         // case — so a `!= NULL` guard here would be wrong in intent and would
@@ -294,6 +300,22 @@ int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value)
         return written;
     }
 #endif
+}
+
+static int aether_c_snprintf_float(char* buf, size_t n, const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int written = aether_c_vsnprintf_float(buf, n, fmt, ap);
+    va_end(ap);
+    return written;
+}
+
+int aether_c_snprintf_double(char* buf, size_t n, const char* fmt, double value) {
+    return aether_c_snprintf_float(buf, n, fmt, value);
+}
+
+int aether_c_snprintf_long_double(char* buf, size_t n, const char* fmt, long double value) {
+    return aether_c_snprintf_float(buf, n, fmt, value);
 }
 
 // ---------------------------------------------------------------------------

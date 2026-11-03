@@ -112,8 +112,8 @@ cases but is fragile:
 | `std/json/aether_json.c` | float emit path (locate during impl) | emit | **no** |
 | `runtime/aether_runtime_types.c:82` | `snprintf("%f")` | emit | **no** |
 | `runtime/aether_runtime_types.c:98` | `atof` | parse | **no** |
-| `std/string/aether_string.c`, `aether_interp_format` | `snprintf` of a double in `${}` interpolation | emit | `aether_c_snprintf_double` since #3525 |
-| codegen of `print` / `println` | `printf("%f")` | emit | the runtime formatter since #3525 |
+| `std/string/aether_string.c`, `aether_interp_format` | `snprintf` of a double or long double in `${}` interpolation | emit | `aether_c_snprintf_double` and `aether_c_snprintf_long_double` since #3525 |
+| codegen of `print` / `println` | `printf("%f")`, `printf("%Lf")` | emit | the runtime formatter since #3525 |
 
 JSON is the most user-visible: RFC 8259 mandates `.` as the decimal separator. An Aether service
 running under a European system locale currently emits and rejects non-conforming JSON.

@@ -87,6 +87,19 @@ check_interp(value: float, expected: string, label: string) -> int {
     return 0
 }
 
+// A longdouble interpolates through %Lg, pinned the same way.
+to_ld(f: float) -> longdouble { return f }
+
+check_interp_ld(value: longdouble, expected: string, label: string) -> int {
+    text = "${value}"
+    if string.equals(text, expected) != 1 {
+        println("  FAIL ${label}: got \"${text}\", expected \"${expected}\"")
+        return 1
+    }
+    println("  PASS ${label}: ${text}")
+    return 0
+}
+
 // Parse `text` and assert it re-emits as `expected`. Re-emitting (rather than
 // only checking for an error) is what catches a parse that "succeeds" with the
 // wrong magnitude — bare strtod under a comma locale stops at the '.' and
@@ -247,6 +260,8 @@ main() {
     fails = fails + check_interp(0.5, "0.5", "interpolated 0.5")
     fails = fails + check_interp(-2.25, "-2.25", "interpolated -2.25")
     fails = fails + check_interp(1234.5, "1234.5", "interpolated 1234.5")
+    fails = fails + check_interp_ld(to_ld(0.5), "0.5", "interpolated longdouble 0.5")
+    fails = fails + check_interp_ld(to_ld(-2.25), "-2.25", "interpolated longdouble -2.25")
 
     // Parse side — this is the half that was entirely unprotected and which
     // FAILED outright before the fix.

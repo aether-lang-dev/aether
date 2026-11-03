@@ -49,6 +49,8 @@ pfmt 3.500000
 0.5
 -1.25
 1.500000
+2.250000
+2.25
 EOF
 if ! same_bytes "$tmp/want.txt" "$tmp/got.txt"; then
     echo "  [FAIL] print_float_locale: a float was printed by the process locale"

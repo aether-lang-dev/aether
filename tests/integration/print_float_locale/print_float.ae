@@ -17,6 +17,8 @@ select_comma_locale() -> int {
     return 0
 }
 
+to_ld(f: float) -> longdouble { return f }
+
 main() {
     if select_comma_locale() == 0 {
         println("SKIP")
@@ -32,4 +34,8 @@ main() {
     print("${-1.25}\n")
     f32 h = 1.5
     println(h)
+    ld = to_ld(2.25)
+    print(ld)
+    println("")
+    println("${ld}")
 }

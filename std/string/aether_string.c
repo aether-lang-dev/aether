@@ -994,8 +994,9 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
  * the radix whatever LC_NUMERIC the process is in (#3525). snprintf follows
  * the locale, so in a host that called setlocale(LC_ALL, "de_DE.UTF-8")
  * "${0.5}" was "0,5" and print(0.5) "0,500000", while string.from_float(0.5)
- * was "0.5" (docs/locale-independent-float-text.md). */
+ * was "0.5" (docs/locale-independent-float-text.md). A long double the same. */
 #define INTERP_DOUBLE() INTERP_CONV(double, aether_c_snprintf_double)
+#define INTERP_LONG_DOUBLE() INTERP_CONV(long double, aether_c_snprintf_long_double)
 
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
     InterpSink k = { out, cap, 0, f };
@@ -1065,7 +1066,7 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
                 else INTERP_NUM(unsigned int);
                 break;
             case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
-                if (long_double) INTERP_NUM(long double);
+                if (long_double) INTERP_LONG_DOUBLE();
                 else INTERP_DOUBLE();
                 break;
             default:
@@ -1080,6 +1081,7 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 
 #undef INTERP_NUM
 #undef INTERP_DOUBLE
+#undef INTERP_LONG_DOUBLE
 #undef INTERP_CONV
 
 void* aether_interp_string(const char* fmt, va_list ap) {

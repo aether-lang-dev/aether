@@ -10189,7 +10189,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_LONGDOUBLE) {
-                            fprintf(gen->output, "printf(\"%%Lf\", ");
+                            fprintf(gen->output, "_aether_interp_print(\"%%Lf\", (long double)");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
                         } else if (arg_type->kind == TYPE_STRING) {
