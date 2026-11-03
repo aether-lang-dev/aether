@@ -22,8 +22,9 @@
  * misconfigured shell `AETHER_LIB_DIR` can never crash a build. */
 #define AETHER_LIB_DIRS_MAX 8
 
-/* The default lib-search directory, used when neither a `--lib` flag nor
- * `$AETHER_LIB_DIR` is set. The compiler's import resolver
+/* The project's own lib-search directory, searched first whatever else is
+ * given: `--lib` flags and `$AETHER_LIB_DIR` add directories after it rather
+ * than replacing it (#3504). The compiler's import resolver
  * (`module_add_lib_dir` in aether_module.c) and the CLI's cache-key builder
  * (`compute_cache_key` in tools/ae.c) both reference this single definition, so
  * the value the compiler searches and the value the cache invalidates on can
@@ -87,6 +88,13 @@ static inline char* aether_lib_path_normalize(const char* in) {
 #endif
     while (n > 1 && (out[n - 1] == '/' || out[n - 1] == '\\') && out[n - 2] != ':') {
         out[--n] = '\0';
+    }
+    /* A leading `./` names the same directory without it, so `./lib`, `lib/`
+     * and `lib` dedup alike: the project's lib/, always first (#3504), is not
+     * searched twice when it is also named. `./` alone is `.`. */
+    while (out[0] == '.' && (out[1] == '/' || out[1] == '\\') && out[2]) {
+        memmove(out, out + 2, n - 1);
+        n -= 2;
     }
     return out;
 }

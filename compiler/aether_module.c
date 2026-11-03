@@ -234,7 +234,7 @@ void module_add_lib_dir(const char* dir) {
     for (int i = 0; i < global_module_registry->lib_dir_count; i++) {
         if (strcmp(global_module_registry->lib_dirs[i], norm) == 0) { free(norm); return; }
     }
-    if (global_module_registry->lib_dir_count >= AETHER_LIB_DIRS_MAX) {
+    if (global_module_registry->lib_dir_count >= AETHER_LIB_DIRS_MAX + 1) {
         fprintf(stderr,
             "warning: --lib search path is full (max %d entries); "
             "ignoring '%s'\n", AETHER_LIB_DIRS_MAX, norm);
@@ -283,17 +283,14 @@ static void module_clear_lib_dirs(void) {
 void module_set_lib_dir(const char* lib_dir) {
     module_registry_init();
     if (!lib_dir || !lib_dir[0]) return;
-    /* RESET — a fresh `--lib <path>` (or `AETHER_LIB_DIR=<path>`)
-     * replaces, doesn't append. The append-form is
+    /* A fresh `--lib <path>` (or `AETHER_LIB_DIR=<path>`) replaces the
+     * directories added before it, not the project's own `lib/`, which
+     * stays first (#3504): a program that imports a module of its lib/
+     * and one from elsewhere names only the other. The append-form is
      * `module_add_lib_dirs`. */
     module_clear_lib_dirs();
+    module_add_lib_dir(AETHER_DEFAULT_LIB_DIR);
     module_add_lib_dirs(lib_dir);
-    /* Defensive: an entirely-empty path (all separators, no
-     * segments) should fall back to the default so the toolchain
-     * still finds stdlib modules. */
-    if (global_module_registry->lib_dir_count == 0) {
-        module_add_lib_dir(AETHER_DEFAULT_LIB_DIR);
-    }
 }
 
 // Module management

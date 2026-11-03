@@ -1374,17 +1374,17 @@ unsigned long long compute_cache_key(const char* ae_file,
      * via `stat` (which follows; `lstat` would not). `stat` is the
      * right call here precisely because the symlink case (#623) needs
      * the target's content, not the link's. */
-    if (tc.lib_dir_count == 0) {
+    {
         key_append(&key, ":lib=(default)");
-        /* #1025 Bug A: with no --lib flag and no $AETHER_LIB_DIR, the compiler
-         * still searches the default lib dir (module_add_lib_dir(
-         * AETHER_DEFAULT_LIB_DIR) in aether_module.c) — the canonical
-         * src/main.ae + lib/<name>/module.ae package layout. Without this walk
-         * the key ignored that dir entirely, so editing a module under the
-         * default lib/ served a stale binary until `ae cache clear`. Walk it
-         * exactly as an explicit lib dir; no contribution when it's absent.
-         * Content walk only when no depfile — the depfile records the lib files
-         * actually read. */
+        /* #1025 Bug A: the compiler searches the default lib dir
+         * (module_add_lib_dir(AETHER_DEFAULT_LIB_DIR) in aether_module.c),
+         * the canonical src/main.ae + lib/<name>/module.ae package layout,
+         * and since #3504 it does so first with --lib and $AETHER_LIB_DIR
+         * too, which add to it. Without this walk the key ignored that dir,
+         * so editing a module under lib/ served a stale binary until
+         * `ae cache clear`. Walk it exactly as an explicit lib dir; no
+         * contribution when it's absent. Content walk only when no depfile,
+         * which records the lib files actually read. */
         if (!used_depfile && complete) {
             unsigned long long entry_hash = 0;
             int n = 0;

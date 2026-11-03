@@ -173,6 +173,8 @@ void remove_dsym_bundle(const char* exe_path);
 void gc_stale_cache_tmp(const char* dir);
 void init_cache_dir(void);
 void tc_lib_dir_append(const char* spec);
+/* #3504: lib/ then tc.lib_dirs, into `out` (AETHER_LIB_DIRS_MAX + 1); the count. */
+int  tc_lib_chain(const char** out);
 /* 0 means do not cache this build: the source cannot be read, memory ran
  * out (a NULL `extra_salt` included, #2546), or a source tree walk could not
  * see every file (#2538). */

@@ -7,6 +7,8 @@
 #   3. Multi-entry --lib via repeated flag (`--lib a --lib b`)
 #   4. AETHER_LIB_DIR env var with the same separator-string shape
 #   5. Precedence: left-most wins on module-name collisions
+#   8-9. #3504: --lib and AETHER_LIB_DIR add after the project's lib/,
+#        which stays first (they replaced it)
 #
 # All five fixtures live next to this script under dirA/ and dirB/:
 #   dirA/foo    foo_origin() -> "A"
@@ -128,9 +130,11 @@ run_case "trailing-slash normalised" \
 # could still inject a CR; we don't want this assertion to fail on
 # something that looks identical to a human eye. Apply the same
 # POSIX→Windows path normalisation ae uses when building `expected`
-# (no-op on POSIX) so the byte-comparison succeeds on every host.
+# (no-op on POSIX) so the byte-comparison succeeds on every host. The
+# project's `lib` comes first, the --lib entries after it (#3504).
 out=$("$AE" lib-path --lib "$SCRIPT_DIR/dirA${SEP}$SCRIPT_DIR/dirB" 2>&1 | tr -d '\r')
-expected="$(normalize_path "$SCRIPT_DIR/dirA")
+expected="lib
+$(normalize_path "$SCRIPT_DIR/dirA")
 $(normalize_path "$SCRIPT_DIR/dirB")"
 if [ "$out" = "$expected" ]; then
     echo "  [PASS] ae lib-path introspection"
@@ -143,6 +147,30 @@ else
     printf '      %s\n' "$out"
     fail=$((fail + 1))
 fi
+
+# Cases 8 and 9 (#3504): a program that imports a module of its own lib/
+# and one from elsewhere names only the other. --lib, and AETHER_LIB_DIR,
+# add to the search path after the project's lib/; they used to replace
+# it, and `greet` was not found.
+mkdir -p "$TMPDIR/proj/lib/greet" "$TMPDIR/proj/other"
+cat > "$TMPDIR/proj/lib/greet/module.ae" <<EOF
+exports(hi)
+
+hi() -> string {
+    return "hi"
+}
+EOF
+cat > "$TMPDIR/proj/main.ae" <<EOF
+import greet
+import foo
+main() { println("\${greet.hi()} foo=\${foo.foo_origin()}") }
+EOF
+run_case "--lib adds after the project's lib/" \
+    "hi foo=A" \
+    sh -c "cd '$TMPDIR/proj' && '$AE' run main.ae --lib '$SCRIPT_DIR/dirA'"
+run_case "AETHER_LIB_DIR adds after the project's lib/" \
+    "hi foo=A" \
+    sh -c "cd '$TMPDIR/proj' && AETHER_LIB_DIR='$SCRIPT_DIR/dirA' '$AE' run main.ae"
 
 echo
 echo "run_lib_path: $pass passed, $fail failed"

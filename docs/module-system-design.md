@@ -571,7 +571,7 @@ ae run main.ae --lib ./lib --lib ./vendor     # repeated flag
 AETHER_LIB_DIR=./lib:./vendor ae run main.ae  # env var
 ```
 
-Both forms can be mixed (`--lib a:b --lib c` → `[a, b, c]`). The default is the single entry `lib` (the legacy behaviour); supplying any explicit `--lib` or `AETHER_LIB_DIR` replaces the default with the given list. Up to 8 entries. Caching invalidates on lib-path changes, two builds of the same source with different `--lib` chains get distinct cache slots, and every entry's mtime feeds into the cache key so a `touch` in a vendored module reuses the right cache bucket.
+Both forms can be mixed (`--lib a:b --lib c` → `[lib, a, b, c]`). The project's `lib` always comes first: an explicit `--lib`, or `AETHER_LIB_DIR` when no `--lib` is given, adds its directories after it rather than replacing it, so a program that imports a module of its own `lib/` and one from elsewhere names only the other (#3504). `./lib`, `lib/` and `lib` are one entry. Up to 8 entries besides `lib`. Caching invalidates on lib-path changes, two builds of the same source with different `--lib` chains get distinct cache slots, and every entry's mtime feeds into the cache key so a `touch` in a vendored module reuses the right cache bucket.
 
 The shape matches Java `-cp`, Python `PYTHONPATH`, Ruby `-I` / `RUBYLIB`. Useful for layering project-local modules over a vendored stdlib, sharing a common lib root across two projects, or pinning a stdlib snapshot alongside HEAD-tracking deps.
 
@@ -583,18 +583,19 @@ Trailing slashes are normalised: `--lib ./lib/` and `--lib ./lib` register the s
 
 ```sh
 $ ae lib-path --lib ./lib:./vendor/stdlib
-./lib
-./vendor/stdlib
+lib
+vendor/stdlib
 
 $ AETHER_LIB_DIR=/usr/share/aether:./local ae lib-path
+lib
 /usr/share/aether
-./local
+local
 
 $ ae lib-path                          # defaults, single entry
 lib
 ```
 
-Inputs are merged in the same priority order the build path uses: explicit `--lib` flags first, then `AETHER_LIB_DIR`, then the default `lib`.
+The chain is built the same way the build path builds it: the project's `lib` first, then the explicit `--lib` flags, or `AETHER_LIB_DIR` when there are none, then the resolved dependencies.
 
 #### Dependencies resolve onto the search path
 

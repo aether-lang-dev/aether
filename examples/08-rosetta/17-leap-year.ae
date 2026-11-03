@@ -1,0 +1,27 @@
+// Leap year: whether a year of the Gregorian calendar is a leap year.
+//
+// A year is a leap year when 4 divides it, unless 100 does too, unless
+// 400 does as well: 1996 and 2024 are, 1900 and 2100 are not, and 2000
+// is. 1994 is not either, as 4 does not divide it.
+//
+// Run: ae run examples/08-rosetta/17-leap-year.ae
+// See: https://rosettacode.org/wiki/Leap_year
+
+leap(year: int) -> bool {
+    return year % 400 == 0 || year % 4 == 0 && year % 100 != 0
+}
+
+main() {
+    for year in [1900, 1994, 1996, 2000, 2024, 2100] {
+        kind = if leap(year) { "a leap year" } else { "not a leap year" }
+        println("${year} is ${kind}")
+    }
+}
+
+// Output:
+// 1900 is not a leap year
+// 1994 is not a leap year
+// 1996 is a leap year
+// 2000 is a leap year
+// 2024 is a leap year
+// 2100 is not a leap year
