@@ -962,7 +962,7 @@ static void interp_put_signed(InterpSink* k, long long v) {
 }
 
 /* #3526: `%D`, a duration (a signed count of nanoseconds) as its text: the
- * largest unit it reaches, whole where it divides (`90s`, `-2h`, `0ns`),
+ * largest unit it reaches, whole where it divides (`30s`, `-2h`, `0ns`),
  * else to nine significant digits (`1.5s`), '.' for the radix whatever the
  * locale. Written into the sink from the stack, so every duration of one
  * format and of every thread at once has its own text; the generated
