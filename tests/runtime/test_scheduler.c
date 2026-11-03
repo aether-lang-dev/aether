@@ -23,6 +23,7 @@
 #else
 #include <unistd.h>
 #include <sched.h>
+#include <sys/mman.h>   /* mprotect, for the #3521 guard */
 #define sleep_ms(ms) usleep((ms) * 1000)
 static long long get_time_ms(void) {
     struct timespec ts;
@@ -1654,6 +1655,64 @@ void test_scheduler_actor_thread_inbox_keeps_order(void) {
     scheduler_cleanup();
 }
 
+// Make the `len` bytes at `page` (page aligned) read-only, or writable again.
+static int protect_pages(void* page, size_t len, int read_only) {
+#ifdef _WIN32
+    DWORD old;
+    return VirtualProtect(page, len, read_only ? PAGE_READONLY : PAGE_READWRITE, &old) ? 0 : -1;
+#else
+    return mprotect(page, len, read_only ? PROT_READ : (PROT_READ | PROT_WRITE));
+#endif
+}
+
+static size_t system_page_size(void) {
+#ifdef _WIN32
+    SYSTEM_INFO si;
+    GetSystemInfo(&si);
+    return (size_t)si.dwPageSize;
+#else
+    return (size_t)sysconf(_SC_PAGESIZE);
+#endif
+}
+
+// #3521: scheduler_stop woke the cores by storing each foreign queue's tail
+// back into itself, for an MWAIT on that word that no core makes, and it did
+// so without foreign_lock: a send from a thread the scheduler does not own,
+// landing between the load and the store, had the tail moved back under it.
+// stop no longer writes that queue at all. The page holding each core's
+// foreign queue tail is read-only across the call, so a write there faults.
+// With two cores and nothing sent, nothing else on the page is written: it
+// holds only queues of senders that do not exist and the empty foreign queue.
+void test_scheduler_stop_leaves_foreign_queue_alone(void) {
+    scheduler_init(2);
+    scheduler_start();
+
+    size_t page = system_page_size();
+    void* pages[2];
+    int guarded = 1;
+    for (int i = 0; i < 2; i++) {
+        uintptr_t tail = (uintptr_t)&schedulers[i].from_queues[MAX_CORES].tail;
+        uintptr_t start = tail & ~(uintptr_t)(page - 1);
+        pages[i] = (void*)start;
+        // A page large enough to reach a field stop does write (`running`,
+        // past the queues) cannot be guarded this way.
+        if (start < (uintptr_t)&schedulers[i].from_queues[2] ||
+            start + page > (uintptr_t)&schedulers[i].foreign_lock) guarded = 0;
+    }
+    if (guarded) {
+        for (int i = 0; i < 2; i++) ASSERT_EQ(0, protect_pages(pages[i], page, 1));
+    }
+    scheduler_stop();
+    if (guarded) {
+        for (int i = 0; i < 2; i++) ASSERT_EQ(0, protect_pages(pages[i], page, 0));
+    } else {
+        printf("    (page of %zu bytes reaches past the queues: not guarded)\n", page);
+    }
+
+    scheduler_shutdown();
+    scheduler_cleanup();
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1665,6 +1724,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler actor table grows under readers", test_scheduler_actor_table_growth, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler frees released actors once no reader holds them", test_scheduler_release_churn, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown frees the live actors it spawned", test_scheduler_teardown_frees_live_actors, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler stop never writes a foreign queue", test_scheduler_stop_leaves_foreign_queue_alone, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown destroys the core locks", test_scheduler_teardown_destroys_core_locks, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler teardown with a live actor thread", test_scheduler_teardown_with_live_actor_thread, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread holds a released actor it sent to", test_scheduler_actor_thread_holds_released_actor, TEST_CATEGORY_RUNTIME);

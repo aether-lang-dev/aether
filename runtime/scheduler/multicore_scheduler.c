@@ -2667,18 +2667,19 @@ void scheduler_start(void) {
 }
 
 void scheduler_stop(void) {
-    // Set all running flags to 0 with release semantics
+    // Set all running flags to 0 with release semantics. `running` is the
+    // word a core that is spinning reads on every pass of its loop, so this
+    // store is what wakes it.
+    //
+    // It also rewrote each core's foreign queue tail with the value it had
+    // just loaded, for an MWAIT on that word that no core makes. That store
+    // took no foreign_lock, so a send from a thread the scheduler does not
+    // own landing between the load and the store had the tail moved back
+    // under it: its message lost, or slots past the tail delivered again
+    // (#3521). Nothing reads the tail as a wake signal, so nothing writes it
+    // here: taking the lock would have kept a store that wakes no one.
     for (int i = 0; i < num_cores; i++) {
         atomic_store_explicit(&schedulers[i].running, 0, memory_order_release);
-    }
-    
-    // Wake threads by writing to monitored addresses (wakes MWAIT)
-    // On non-MWAIT platforms, threads wake quickly from short sleep
-    for (int i = 0; i < num_cores; i++) {
-        // Touch the main-thread from_queue tail to trigger MWAIT wake
-        atomic_store_explicit(&schedulers[i].from_queues[MAX_CORES].tail,
-                            atomic_load_explicit(&schedulers[i].from_queues[MAX_CORES].tail, memory_order_relaxed),
-                            memory_order_release);
     }
 
     // And wake anyone parked on the condvar, or shutdown waits out their
