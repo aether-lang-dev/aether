@@ -162,6 +162,27 @@ the compiler, the runtime, std, `ae`, the Makefile or the sweep's scripts,
 every night on main, and by hand. It takes about 11 minutes (the sweep under
 UBSan is 1.75 times the plain one), which is why it is not on every PR.
 
+## Memory errors and leaks: the corpus under ASan and LSan
+
+`make test-asan-ae` (#3539) is the same run under AddressSanitizer with
+LeakSanitizer, through the same script (`tests/scripts/sanitizer_sweep.sh`,
+`SAN=asan`) and the same sanitizing compiler, `build/asan/bin/gcc`. A heap
+overflow, a use after free or a double free stops the program that made it,
+and a block it never freed is reported when it exits; the reports go to
+`build/asan/reports/`, grouped by the first frame in this tree. Its canaries
+are `tests/asan/overflow.ae`, which writes one byte past an 8 byte block, and
+`tests/asan/leak.ae`, which drops the only pointer to one: each must be
+stopped with its report before the corpus counts. A test that asks for more
+memory than exists still gets NULL (`allocator_may_return_null`), and
+`mem.heap_in_use` counts the sanitizer allocator's live bytes, so the
+ownership tests' steady growth checks keep their meaning under it.
+
+`make test-asan` is older and narrower: the C unit runner only. Before #3539
+that was all ASan, LSan and Valgrind ran on Linux, and the macOS leaks gate
+over `tests/regression` was the only leak check of generated code. CI runs
+the new target in `.github/workflows/asan.yml`, in two shards
+(`AE_SWEEP_SHARD`), on the same pull requests and nights as UBSan.
+
 ## Extending it
 
 The exe-vs-lib pair and the two optimisation levels are path comparisons; there

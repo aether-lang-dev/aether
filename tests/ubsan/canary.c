@@ -1,4 +1,4 @@
-/* The canary of `make test-ubsan` (#2488, tests/scripts/ubsan_sweep.sh).
+/* The canary of `make test-ubsan` (#2488, tests/scripts/sanitizer_sweep.sh).
  *
  * Undefined behaviour every UBSan build reports: a shift of a 32-bit int by
  * 32. The amount comes from the caller in another translation unit, so no

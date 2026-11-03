@@ -1,0 +1,73 @@
+name: ASan
+
+# The C unit tests and the `make test-ae` sweep (every .ae program and every
+# tests/integration shell test it runs) under AddressSanitizer and
+# LeakSanitizer, with aetherc, ae, libaether and every program they build
+# instrumented: `make test-asan-ae` (#3539, tests/scripts/sanitizer_sweep.sh).
+# A heap overflow, a use after free or a double free stops the program that
+# made it, a block it never freed is reported when it exits, and the job fails
+# on any test failure and on any report, which the step summary groups by
+# source location.
+#
+# Before this, ASan, LSan and Valgrind on Linux ran only the C unit runner
+# (memory-check.yml); the generated C of an Aether program was never run under
+# ASan, and the only leak check of .ae programs was the macOS leaks gate over
+# tests/regression. Two shards, as that gate has, for ASan's slowdown; the C
+# unit tests run in the first. Same triggers as ubsan.yml.
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'compiler/**'
+      - 'runtime/**'
+      - 'std/**'
+      - 'tools/**'
+      - 'include/**'
+      - 'lsp/**'
+      - 'Makefile'
+      - 'tests/asan/**'
+      - 'tests/scripts/sanitizer_sweep.sh'
+      - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/run_ae_test.sh'
+      - 'tests/scripts/run_ae_sh_dir.sh'
+      - 'tests/lib/sweep_timeout.sh'
+      - '.github/workflows/asan.yml'
+  schedule:
+    - cron: '41 6 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  asan:
+    name: Linux / GCC under ASan + LSan [${{ matrix.shard }}]
+    # The image and packages of ci.yml's Linux / GCC leg, so the sweep runs
+    # the same programs and shell tests.
+    runs-on: ubuntu-22.04
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ '1/2', '2/2' ]
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install toolchain
+      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+
+    - name: make test-asan-ae
+      run: AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)"
+
+    - name: Upload the ASan reports
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: asan-reports-${{ strategy.job-index }}
+        path: build/asan/reports/
+        if-no-files-found: ignore

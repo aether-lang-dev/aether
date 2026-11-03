@@ -3255,10 +3255,20 @@ test-ae-opt-diff: compiler ae stdlib
 # compile and link going through that sanitizing compiler. Fails on any test
 # failure and on any UBSan report (build/ubsan/reports). Linux or macOS: it
 # needs a UBSan runtime, which MinGW lacks. Not part of `ci`: ubsan.yml runs
-# it. See tests/scripts/ubsan_sweep.sh and docs/differential-testing.md.
+# it. See tests/scripts/sanitizer_sweep.sh and docs/differential-testing.md.
 .PHONY: test-ubsan
 test-ubsan:
-	@MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/ubsan_sweep.sh
+	@SAN=ubsan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
+
+# The same, under AddressSanitizer and LeakSanitizer (#3539): a heap overflow,
+# a use after free or a double free in libaether, std or the generated code of
+# any program the sweep builds stops that program, and a block it never freed
+# is reported when it exits (build/asan/reports). `test-asan` above runs only
+# the C unit runner; this one runs the .ae corpus too. AE_SWEEP_SHARD=k/n
+# splits the corpus (asan.yml runs it in shards). Linux or macOS.
+.PHONY: test-asan-ae
+test-asan-ae:
+	@SAN=asan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

@@ -3,7 +3,7 @@ name: UBSan
 # The C unit tests and the `make test-ae` sweep (every .ae program and every
 # tests/integration shell test it runs) under UndefinedBehaviorSanitizer, with
 # aetherc, ae, libaether and every program they build instrumented: `make
-# test-ubsan` (#2488, tests/scripts/ubsan_sweep.sh). It fails on any test
+# test-ubsan` (#2488, tests/scripts/sanitizer_sweep.sh). It fails on any test
 # failure and on any UBSan report, and puts the reports in the step summary
 # grouped by source location.
 #
@@ -28,7 +28,7 @@ on:
       - 'lsp/**'
       - 'Makefile'
       - 'tests/ubsan/**'
-      - 'tests/scripts/ubsan_sweep.sh'
+      - 'tests/scripts/sanitizer_sweep.sh'
       - 'tests/scripts/ae_sweep_list.sh'
       - 'tests/scripts/run_ae_test.sh'
       - 'tests/scripts/run_ae_sh_dir.sh'
