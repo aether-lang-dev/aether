@@ -1043,28 +1043,19 @@ static int stream_pump(struct HttpStream* s) {
     return s->pending_len - s->pending_pos;  /* n==0 -> whatever remains buffered */
 }
 
-/* Consume a CRLF (or bare LF, tolerated) at the current read position, pumping
- * if needed. Returns 1 on success, 0 if a line terminator can't be obtained
- * (malformed framing at EOF -> sets s->err). */
+/* Consume the CRLF that ends a chunk's data at the current read position,
+ * pumping if needed. Returns 1 on success, 0 on anything else, malformed
+ * framing or EOF (sets s->err). A bare LF or a bare CR is refused, as the
+ * buffered walk refuses it (http_chunked_walk, #3520): taking either for the
+ * end of the data is reading one body two ways. */
 static int stream_consume_crlf(struct HttpStream* s) {
     for (;;) {
         int avail = s->pending_len - s->pending_pos;
-        if (avail >= 1) {
-            char c = s->pending[s->pending_pos];
-            if (c == '\r') {
-                if (avail >= 2) {
-                    s->pending_pos += (s->pending[s->pending_pos + 1] == '\n') ? 2 : 1;
-                    return 1;
-                }
-                /* need the byte after '\r' */
-            } else if (c == '\n') {
-                s->pending_pos += 1;
-                return 1;
-            } else {
-                /* not a line terminator where one was expected */
-                s->err = 1;
-                return 0;
-            }
+        if (avail >= 1 && s->pending[s->pending_pos] != '\r') { s->err = 1; return 0; }
+        if (avail >= 2) {
+            if (s->pending[s->pending_pos + 1] != '\n') { s->err = 1; return 0; }
+            s->pending_pos += 2;
+            return 1;
         }
         int r = stream_pump(s);
         if (r < 0) return 0;
@@ -1075,6 +1066,40 @@ static int stream_consume_crlf(struct HttpStream* s) {
 /* The longest chunk-size line or trailer line read. One with no end in sight
  * is refused rather than waited on. */
 #define HTTP_CHUNK_LINE_MAX 1024
+
+/* The trailer section after the last chunk, read to the empty line that ends
+ * it, pumping as needed:
+ *
+ *     trailer-section = *( field-line CRLF ), then CRLF        RFC 9112 7.1
+ *
+ * by the buffered walk's rules (http_chunked_walk): each line at most
+ * HTTP_CHUNK_LINE_MAX bytes, ending in CRLF, with no other CR. The fields are
+ * not used, but where the section ends is where the body does. Returns 1 at
+ * its end, 0 on malformed framing or EOF (sets s->err). The stream reader
+ * used to take the CRLF after the last chunk and ignore the rest, so a
+ * trailer line read as malformed framing and a bare LF ended the body. */
+static int stream_read_trailers(struct HttpStream* s) {
+    for (;;) {
+        int start = s->pending_pos, avail = s->pending_len - s->pending_pos;
+        const char* line = avail > 0 ? s->pending + start : NULL;
+        const char* lf = line ? (const char*)memchr(line, '\n', (size_t)avail) : NULL;
+        if (lf) {
+            size_t n = (size_t)(lf - line);
+            if (n > HTTP_CHUNK_LINE_MAX || n == 0 || line[n - 1] != '\r' ||
+                memchr(line, '\r', n - 1)) {
+                s->err = 1;
+                return 0;
+            }
+            s->pending_pos = start + (int)n + 1;
+            if (n == 1) return 1;
+            continue;
+        }
+        if (avail > HTTP_CHUNK_LINE_MAX) { s->err = 1; return 0; }
+        int r = stream_pump(s);
+        if (r < 0) return 0;
+        if (r == avail) { s->err = 1; return 0; }  /* EOF inside the trailers */
+    }
+}
 
 /* The largest chunk size: one a size_t and a long long both hold. */
 #define HTTP_CHUNK_SIZE_MAX ((uint64_t)INT64_MAX)
@@ -1088,10 +1113,15 @@ static int http_chunk_ws(char c) { return c == ' ' || c == '\t'; }
  *     name = token, value = token / quoted-string
  *
  * 0 with the size in *size, or -1 for anything else (#3520). The client, its
- * stream reader and the server all read sizes here, so no two of them can
- * frame one body two ways. An extension is read to its end rather than
- * skipped to the LF, so a CR or a stray byte inside one is refused instead of
- * being somewhere a front end and this reader disagree about the line. */
+ * stream reader and the server all read sizes here. The client and the
+ * server walk the rest of a chunked body with http_chunked_walk, and the
+ * stream reader, which reads as the bytes arrive, keeps to the same rules
+ * (stream_consume_crlf, stream_read_trailers): a CRLF after each chunk's
+ * data, and trailer lines to the empty line, each at most
+ * HTTP_CHUNK_LINE_MAX bytes. So no two of them frame one body two ways. An
+ * extension is read to its end rather than skipped to the LF, so a CR or a
+ * stray byte inside one is refused instead of being somewhere a front end
+ * and this reader disagree about the line. */
 static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
     if (n == 0 || line[n - 1] != '\r') return -1;
     n--;
@@ -1274,9 +1304,9 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
         long long sz = 0;
         if (!stream_read_chunk_size(s, &sz)) return produced ? produced : -1;
         if (sz == 0) {
-            /* terminal chunk: consume the CRLF after "0" (trailers, if any,
-             * are ignored) and end the body. */
-            stream_consume_crlf(s);
+            /* terminal chunk: the trailer section, to the empty line that
+             * ends it, then the end of the body. */
+            if (!stream_read_trailers(s)) return produced ? produced : -1;
             s->eof = 1;
             break;
         }
