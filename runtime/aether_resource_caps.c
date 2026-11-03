@@ -82,6 +82,25 @@ static int64_t now_ns(void) {
     return (int64_t)aether_now_ns();
 }
 
+/* `ms` (> 0) milliseconds in nanoseconds, and `ms` from now as a time on
+ * now_ns's clock, each held at INT64_MAX past the end of what an int64_t
+ * counts: a time no clock reaches, so a deadline that far off never trips
+ * (#3528). `ms * 1000000LL` overflowed for anything past about 292 years,
+ * a host passing long.max to mean "no deadline" among them, and the
+ * runtime is not built with -fwrapv: in practice the sum landed in the
+ * past and the work stopped at once. */
+static int64_t ms_to_ns(int64_t ms) {
+    if (ms > INT64_MAX / 1000000LL) return INT64_MAX;
+    return ms * 1000000LL;
+}
+
+static int64_t ns_after_ms(int64_t ms) {
+    int64_t now = now_ns();
+    int64_t span = ms_to_ns(ms);
+    if (now > 0 && span > INT64_MAX - now) return INT64_MAX;
+    return now + span;
+}
+
 int aether_caps_check_alloc(size_t bytes) {
     /* Fast path: no cap set. One relaxed load + branch. */
     uint64_t cap = atomic_load_explicit(&g_mem_cap, memory_order_relaxed);
@@ -155,7 +174,7 @@ void aether_caps_set_deadline_ms(int64_t ms) {
     if (ms <= 0) {
         g_deadline_at_ns = 0;
     } else {
-        g_deadline_at_ns = now_ns() + ms * 1000000LL;
+        g_deadline_at_ns = ns_after_ms(ms);
     }
     /* Reset the sticky flag — a fresh deadline is a fresh chance. */
     g_tripped = 0;
@@ -190,7 +209,7 @@ void aether_caps_deadline_restore(const AetherDeadlineState* s) {
 
 AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms) {
     AetherDeadlineState s;
-    s.at_ns = ms > 0 ? now_ns() + ms * 1000000LL : 0;
+    s.at_ns = ms > 0 ? ns_after_ms(ms) : 0;
     s.tripped = 0;
     return s;
 }
@@ -700,9 +719,9 @@ static AetherExecAccount* own_new(const AetherExecLimits* limits) {
                                  ? AETHER_DEADLINE_ACTIVE : AETHER_DEADLINE_ELAPSED;
         if (limits->deadline_ms > 0) {
             if (a->deadline_counts == AETHER_DEADLINE_ACTIVE)
-                a->active_budget_ns = limits->deadline_ms * 1000000LL;
+                a->active_budget_ns = ms_to_ns(limits->deadline_ms);
             else
-                a->deadline_at_ns = now_ns() + limits->deadline_ms * 1000000LL;
+                a->deadline_at_ns = ns_after_ms(limits->deadline_ms);
             caps_arm();
         }
     }

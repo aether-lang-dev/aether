@@ -103,6 +103,37 @@ TEST_CATEGORY(caps_deadline_trips_on_schedule, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(0, aether_caps_deadline_tripped());
 }
 
+/* #3528: a deadline in milliseconds became nanoseconds as `ms * 1000000LL`,
+ * signed overflow past about 292 years. A host passing long.max to mean "no
+ * deadline" got a time in the past, and the work stopped at once; an ACTIVE
+ * budget came out negative. Each of the four conversions now saturates, so
+ * a deadline that far off never trips. */
+TEST_CATEGORY(caps_deadline_past_the_end_of_time, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    aether_caps_set_deadline_ms(INT64_MAX);
+    ASSERT_EQ(0, aether_caps_deadline_tripped());
+    /* The first count of milliseconds whose nanoseconds do not fit. */
+    aether_caps_set_deadline_ms(INT64_MAX / 1000000LL + 1);
+    ASSERT_EQ(0, aether_caps_deadline_tripped());
+    aether_caps_set_deadline_ms(0);
+
+    AetherDeadlineState s = aether_caps_deadline_for_ms(INT64_MAX);
+    ASSERT_TRUE(s.at_ns > aether_caps_now_ns());
+
+    AetherExecLimits lim = { 0, INT64_MAX, AETHER_DEADLINE_ELAPSED, NULL };
+    AetherExecAccount* a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_TRUE(a->deadline_at_ns > aether_caps_now_ns());
+    ASSERT_EQ(0, aether_exec_account_tripped(a));
+    aether_exec_account_free(a);
+
+    lim.deadline_counts = AETHER_DEADLINE_ACTIVE;
+    a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_TRUE(a->active_budget_ns > 0);
+    aether_exec_account_free(a);
+}
+
 TEST_CATEGORY(caps_explicit_abort_sticky, TEST_CATEGORY_STDLIB) {
     caps_reset();
     /* No deadline set, but explicit abort flips the sticky flag. */
