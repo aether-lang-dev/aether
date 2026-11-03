@@ -282,10 +282,18 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
     stunt.map_freeze(m)
     token = stunt.map_token(m)
 
+    // A host-checked check gets 500 ms before the CANCEL (the deadline),
+    // then `grace` to answer it. That covers the child starting, seeing the
+    // CANCEL and writing its RESULT, so it is generous: a loaded runner can
+    // be slow to start a process, and an answer that comes sooner ends the
+    // wait sooner. silent never answers, so its grace only sets how long it
+    // runs before the kill, and stays short.
     host_checked = 0
     if expect == "host" { host_checked = 1 }
     wait_ms = 20000
     if host_checked == 1 { wait_ms = 500 }
+    grace = 10000
+    if check == "silent" { grace = 1000 }
     cancelled = 0
     killed = 0
     refused = ""
@@ -298,7 +306,7 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
             if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES && cancelled == 0 {
                 ipc.write_frame(ch, "CANCEL")
                 cancelled = 1
-                wait_ms = 1000
+                wait_ms = grace
             } else if rerr == ipc.TIMED_OUT_BETWEEN_FRAMES {
                 os.kill(pid, 9)
                 killed = 1
