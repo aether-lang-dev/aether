@@ -84,6 +84,15 @@ void aether_string_publish(const void* str);
 /* A reference for a place other threads can reach (a container element, a
  * closure environment): the string is published, then retained. */
 void string_retain_shared(const void* str);
+/* #3522: a module-level string `var` is a place every thread reaches, so
+ * each has a lock of its own, a flag held for a few instructions. A take
+ * loads the var and retains what it holds under the lock, so no store can
+ * release the value between the two; a store publishes the new value,
+ * swaps it in under the lock and releases the old one after unlocking.
+ * `v` is a reference the store hands to the var. */
+#include <stdatomic.h>
+const char* aether_string_var_take(const char* const* place, atomic_flag* lock);
+void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);
 void string_free(const void* str);  // Alias for release
 
 // String operations — accept both AetherString* and plain char*.

@@ -480,6 +480,13 @@ int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char*
 int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
                         Type* result);
 int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t);
+/* #3522: a module-level string `var`'s lock, its one store, and whether `e`
+ * reads one (codegen_stmt.c, codegen_expr.c). */
+const char* module_string_var_lock(const char* name);
+void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
+                              const char* taken);
+int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
+Type* module_global_decl_type(CodeGenerator* gen, const char* name);   /* #2796 */
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),

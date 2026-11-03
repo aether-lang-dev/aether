@@ -7745,6 +7745,11 @@ static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) 
             continue;
         }
         const char* ctype = get_c_type(cd->node_type);
+        /* #3522: a string var has a lock of its own, held by every load
+         * that takes a reference and by every store. */
+        if (cd->node_type && cd->node_type->kind == TYPE_STRING)
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
+                    module_string_var_lock(cd->value));
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
         if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
             /* #2800: an optional's constant is its own struct: `none`
@@ -9435,6 +9440,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
+    /* #3522: a module-level string `var`'s locked take and store. */
+    print_line(gen, "extern const char* aether_string_var_take(const char* const* place, atomic_flag* lock);");
+    print_line(gen, "extern void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);");
     /* The header of a counted string, as the runtime lays it out. A string
      * no other thread can reach is counted here, inline; a shared one
      * (#2919) is counted atomically by the runtime, which also frees the

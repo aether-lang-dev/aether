@@ -234,6 +234,21 @@ optional took its strings plain). A message does not share: a send
 deep-copies its strings (#466), so it needs no publish. A value read from a
 published place carries the bit with it.
 
+**A module string `var` is locked (#3522).** Atomic counts make two
+threads' retains and releases of one string safe, not the place that holds
+it: two stores at once read the same old value and both released it, and a
+reader could take its reference after a store had released the value. Each
+module string `var` has a lock of its own, a flag held for a few
+instructions. A store publishes the value it takes, swaps it in under the
+lock and releases the old one after unlocking (aether_string_var_store, the
+one store every store site makes). A read takes a reference under the lock
+(aether_string_var_take) into a temporary of its statement, which the
+statement's block releases, as a read held for its statement is
+(order_hoist_operand): the read is a take (R3), and what the statement does
+with the value, a comparison or a borrowed argument included, is done with
+a value no other thread's store can free. Nothing is freed late: each
+release happens where R3 puts it.
+
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
 first parent, the same output from both, 21 runs each interleaved, the

@@ -6293,6 +6293,9 @@ static int td_continue_target(CodeGenerator* gen, ASTNode* stmt) {
 // emission so the panic surface still names the failed clause; the
 // runtime trip is observable to the test suite without aetherc
 // having to refuse the build.
+static void hoist_begin(CodeGenerator* gen);
+static void hoist_end(CodeGenerator* gen);
+
 static void emit_contract_check(CodeGenerator* gen,
                                 ASTNode* clause,
                                 const char* role,
@@ -6331,6 +6334,13 @@ static void emit_contract_check(CodeGenerator* gen,
         fprintf(gen->output, " */\n");
         return;
     }
+    /* #3522: the check is a statement of its own, in a block of its own,
+     * so what its predicate holds for it (a module string `var` read takes
+     * a reference) is declared ahead of it and released after it. */
+    print_indent(gen);
+    fprintf(gen->output, "{\n");
+    enter_scope(gen);
+    hoist_begin(gen);
     print_indent(gen);
     fprintf(gen->output, "if (!(");
     generate_expression(gen, predicate);
@@ -6351,6 +6361,10 @@ static void emit_contract_check(CodeGenerator* gen,
         fputc(*p, gen->output);
     }
     fprintf(gen->output, " in %s\");\n", fn_name ? fn_name : "<fn>");
+    exit_scope(gen);
+    hoist_end(gen);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
 }
 
 void emit_contract_preconditions(CodeGenerator* gen, ASTNode* func) {
@@ -7446,7 +7460,7 @@ static const char* opt_slot_text(const char* dst_c, Type* pt, int tmp_id, int j,
 }
 
 /* #2796: the type of the module-level `var` `name`, or NULL. */
-static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
+Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
     for (int i = 0; gen->program && name && i < gen->program->child_count; i++) {
         ASTNode* c = gen->program->children[i];
         if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
@@ -7456,6 +7470,28 @@ static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
             return c->node_type;
     }
     return NULL;
+}
+
+/* #3522: the lock of the module-level string `var` `name`, declared beside
+ * it (emit_module_global_vars). */
+const char* module_string_var_lock(const char* name) {
+    return cg_internf("_ae_lock_%s", name);
+}
+
+/* #3522: the one store into a module-level string `var` `name`, every
+ * store site's: the new value taken (`rhs`, or `taken`, C that is already
+ * the var's own reference, or NULL for none), then published and swapped in
+ * under the var's lock, and the old value released after the lock is let
+ * go (aether_string_var_store). Two threads storing at once each release
+ * the value they replaced, and a reader taking a reference under the lock
+ * never takes one a store has already released. The caller ends the
+ * statement. */
+void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
+                              const char* taken) {
+    fprintf(gen->output, "aether_string_var_store(&%s, &%s, ", name, module_string_var_lock(name));
+    if (rhs) emit_string_take(gen, rhs, name);
+    else fputs(taken ? taken : "NULL", gen->output);
+    fprintf(gen->output, ")");
 }
 
 /* A module-level `var` bound to a call with a trailing block, `g = vstack(0) {
@@ -7515,10 +7551,12 @@ static void emit_destructure_global_store(CodeGenerator* gen, const char* name, 
         return;
     }
     if (pt && pt->kind == TYPE_STRING) {
-        /* As `g = v` stores it: taken, published, the old one released. */
-        fprintf(gen->output, "{ const char* _ae_old = %s; %s = aether_uniform_heap_str(_tup%d._%d, %d); "
-                "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
-                name, name, tmp_id, j, owned ? 1 : 0, name);
+        /* As `g = v` stores it: taken, then swapped in under the var's
+         * lock and the old one released (#3522). */
+        emit_module_string_store(gen, name, NULL,
+                                 cg_internf("aether_uniform_heap_str(_tup%d._%d, %d)", tmp_id, j,
+                                            owned ? 1 : 0));
+        fprintf(gen->output, ";\n");
         return;
     }
     if (pt && own_type_owns(gen, pt) && pt->kind != TYPE_ARRAY) {
@@ -10146,14 +10184,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (grhs && grhs->node_type && grhs->node_type->kind == TYPE_STRING &&
                         !(gt && gt->kind == TYPE_PTR)) {
                         /* R3: a module `var` owns the string it holds, as a
-                         * local does: the store takes the new value, publishes
-                         * it since any thread may read the global (#2919), and
-                         * releases the one it replaces. */
-                        fprintf(gen->output, "{ const char* _ae_new = ");
-                        emit_string_take(gen, grhs, stmt->value);
-                        fprintf(gen->output, "; const char* _ae_old = %s; %s = _ae_new; "
-                                "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
-                                stmt->value, stmt->value, stmt->value);
+                         * local does: the store takes the new value and
+                         * releases the one it replaces, under the var's lock
+                         * (#3522, emit_module_string_store). */
+                        emit_module_string_store(gen, stmt->value, grhs, NULL);
+                        fprintf(gen->output, ";\n");
                         emit_global_rebind_trailing(gen, stmt);
                         break;
                     }

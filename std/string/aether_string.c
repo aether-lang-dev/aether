@@ -16,6 +16,7 @@
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
 #include "../../runtime/utils/aether_count.h"
 #include "../../runtime/actors/aether_panic.h"
+#include "../../runtime/utils/aether_compiler.h"  // AETHER_CPU_PAUSE
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -192,6 +193,36 @@ void aether_string_publish(const void* str) {
 void string_retain_shared(const void* str) {
     aether_string_publish(str);
     string_retain(str);
+}
+
+/* #3522: the lock of a module-level string `var` (aether_string.h). Held
+ * for a load and a retain, or for a swap: a few instructions, so a spin. */
+static void string_var_lock(atomic_flag* lock) {
+    while (atomic_flag_test_and_set_explicit(lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+}
+
+static void string_var_unlock(atomic_flag* lock) {
+    atomic_flag_clear_explicit(lock, memory_order_release);
+}
+
+const char* aether_string_var_take(const char* const* place, atomic_flag* lock) {
+    string_var_lock(lock);
+    const char* s = *place;
+    /* What a var holds was published by its store, so this counts
+     * atomically; a pinned literal is not counted. */
+    string_retain(s);
+    string_var_unlock(lock);
+    return s;
+}
+
+void aether_string_var_store(const char** place, atomic_flag* lock, const char* v) {
+    /* Published before it is reachable, so no reader counts it plainly. */
+    aether_string_publish(v);
+    string_var_lock(lock);
+    const char* old = *place;
+    *place = v;
+    string_var_unlock(lock);
+    string_release(old);
 }
 
 // String operations

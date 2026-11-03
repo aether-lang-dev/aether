@@ -480,6 +480,45 @@ static int reachable_place(CodeGenerator* gen, ASTNode* e) {
            is_module_global_var(gen, e->value);
 }
 
+/* #3522: is `e` a read of a module-level string `var` (no local, parameter
+ * or actor state of its name in scope)? Not in a file-scope initializer,
+ * where nothing runs yet. */
+int module_string_var_read(CodeGenerator* gen, const ASTNode* e) {
+    if (!e || e->type != AST_IDENTIFIER || !e->value || gen->in_const_init) return 0;
+    if (e->node_type && e->node_type->kind != TYPE_STRING && e->node_type->kind != TYPE_UNKNOWN)
+        return 0;
+    if (is_actor_state_var(gen, e->value) || is_var_declared(gen, e->value) ||
+        !is_module_global_var(gen, e->value))
+        return 0;
+    /* A read the checker left untyped (a contract's) is the var's type. */
+    if (e->node_type && e->node_type->kind == TYPE_STRING) return 1;
+    Type* gt = module_global_decl_type(gen, e->value);
+    return gt && gt->kind == TYPE_STRING;
+}
+
+/* #3522: a read of the module-level string `var` `name`. Any thread may
+ * store into the var while the value read is in use, and a store releases
+ * the value it replaces, so the read takes a reference of its own, under
+ * the var's lock (aether_string_var_take), into a temporary of the
+ * statement: what the statement does with the value (compares it, prints
+ * it, passes it to a call, takes it into a place) is done with a value no
+ * store can free. The statement's block releases the temporary on every
+ * exit, and a statement run again releases the one before, as for any
+ * string read held for its statement (order_hoist_operand). Where no
+ * statement is being emitted the var is read in place. */
+static void emit_module_string_read(CodeGenerator* gen, const char* name) {
+    if (!hoist_ready(gen)) {
+        fprintf(gen->output, "%s", name);
+        return;
+    }
+    const char* t = cg_internf("_eo%d", g_order_counter++);
+    hoist_declare_null(gen, "const char*", t);
+    fprintf(gen->output, "(aether_unwind_track_str_place((const void*)&%s, NULL), "
+            "aether_heap_str_free(%s), %s = aether_string_var_take(&%s, &%s))",
+            t, t, t, name, module_string_var_lock(name));
+    push_scoped_temp_free(gen, t);
+}
+
 /* Is `e` a string read from such a place: the place itself, or `o ?? d` /
  * `o!` over a `string?` one? */
 int string_reads_place(CodeGenerator* gen, ASTNode* e) {
@@ -490,6 +529,9 @@ int string_reads_place(CodeGenerator* gen, ASTNode* e) {
 }
 
 static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
+    /* #3522: a module string `var` read holds its value for its statement
+     * already, where a statement is being emitted (emit_module_string_read). */
+    if (module_string_var_read(gen, arg) && hoist_ready(gen)) return 0;
     return string_reads_place(gen, arg);
 }
 
@@ -1669,7 +1711,8 @@ static const char* order_c11_type(ASTNode* op) {
  * `_eoN = (op)`, then the separator. */
 static void order_hoist_operand(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
     const char* name = cg_internf("_eo%d", g_order_counter++);
-    if (hoist_ready(gen) && string_reads_place(gen, op)) {
+    if (hoist_ready(gen) && string_reads_place(gen, op) &&
+        !module_string_var_read(gen, op)) {   /* #3522: held by its own read */
         /* R3: a string read from a place a later operand can store into
          * holds a reference of its own until its statement is done, so
          * the store cannot free what it reads; a statement run again
@@ -8815,6 +8858,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "%s", safe_c_name(expr->value));
                 break;
             }
+            if (!gen->generating_lvalue && module_string_var_read(gen, expr)) {
+                emit_module_string_read(gen, expr->value);
+                break;
+            }
             if (gen->current_actor) {
                 int is_state_var = 0;
                 for (int i = 0; i < gen->state_var_count; i++) {
@@ -10561,9 +10608,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          expr->children[0]->node_type->kind == TYPE_STRING) {
                     /* R3: a module `var` owns its string as a local does:
                      * freed, it gives its reference back and is left empty,
-                     * so the next store finds nothing to release. */
-                    const char* g = expr->children[0]->value;
-                    fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)", g, g);
+                     * so the next store finds nothing to release. The empty
+                     * value is stored as any other is, under the var's lock
+                     * (#3522). */
+                    fprintf(gen->output, "(");
+                    emit_module_string_store(gen, expr->children[0]->value, NULL, NULL);
+                    fprintf(gen->output, ", (void)0)");
                 }
                 else if ((strcmp(func_name, "release") == 0 || strcmp(func_name, "free") == 0) &&
                          expr->child_count == 1) {
@@ -11987,7 +12037,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* R3: a string read from a place a later segment can store
                  * into is evaluated ahead holding a reference of its own,
                  * released once the interpolation has read it. */
-                int held = !heap && string_reads_place(gen, ch);
+                int held = !heap && string_reads_place(gen, ch) &&
+                           !(module_string_var_read(gen, ch) && hoist_ready(gen));   /* #3522 */
                 if (it_hoisted == 0) {
                     if (as_printf) fprintf(gen->output, "{ ");
                     else seq_open(gen, &it_seq);
