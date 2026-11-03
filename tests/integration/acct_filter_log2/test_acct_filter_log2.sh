@@ -4,8 +4,8 @@
 # by default, for a small-RAM target such as the ESP32.
 #
 #   1. a value outside 6..24 is refused at compile time (#error);
-#   2. where nm reports where the filter ends, -DAETHER_ACCT_FILTER_LOG2=8
-#      makes it a few dozen bytes and the default 32 KiB;
+#   2. -DAETHER_ACCT_FILTER_LOG2=8 makes the filter 32 bytes and the
+#      default 32 KiB, asserted with sizeof at compile time;
 #   3. a 32-byte filter, where most frees are false positives that take
 #      the lock to find no entry, changes no answer: the account and
 #      interrupt hosts of emit_lib_accounts and emit_lib_interrupt (their
@@ -60,36 +60,21 @@ for bad in 5 25; do
     fi
 done
 
-# 2. the filter's size, from the symbol table: the size nm -S prints for it
-# (ELF, COFF) or, where that is zero or absent (Mach-O), the distance to the
-# next symbol in address order. Skipped where neither is a positive number.
-filter_extent() {
-    nm -n -S "$1" 2>/dev/null | tr -d '\r' | awk '
-        function hex(h,   i, v) {
-            v = 0; h = tolower(h)
-            for (i = 1; i <= length(h); i++) v = v * 16 + index("0123456789abcdef", substr(h, i, 1)) - 1
-            return v
-        }
-        found { next_addr = hex($1); exit }
-        $NF ~ /(^|_)g_filter$/ {
-            found = 1; start = hex($1)
-            if (NF >= 4) size = hex($2)
-        }
-        END {
-            if (size > 0) print size
-            else if (found && next_addr > start) print next_addr - start
-        }'
-}
-small="$(filter_extent "$TMP/caps8.o")"
-large="$(filter_extent "$TMP/caps18.o")"
-if [ -n "$small" ] && [ -n "$large" ] && [ "$small" -ge 0 ] 2>/dev/null && [ "$large" -ge 0 ] 2>/dev/null; then
-    if [ "$small" -ge 4096 ] || [ "$large" -lt 32768 ]; then
-        fail "the filter is $small bytes with LOG2=8 (want under 4096) and $large by default (want 32768 or more)"
-    fi
-    size_note="$small bytes at LOG2=8, $large by default"
-else
-    size_note="size not read from nm here"
-fi
+# 2. the filter's size, checked by the compiler: a probe includes the file
+# (g_filter is static there) and asserts sizeof g_filter. Exact on every
+# platform; symbol tables are not (COFF objects give no sizes, and their
+# sections each start at address 0). 2^8 bits is 32 bytes; 2^18 is 32 KiB.
+cat > "$TMP/size_probe.c" <<'PROBE'
+#include "aether_resource_caps.c"
+_Static_assert(sizeof g_filter == EXPECT_BYTES, "g_filter is not EXPECT_BYTES bytes");
+PROBE
+# shellcheck disable=SC2086
+$CC -O1 $CFLAGS -DAETHER_ACCT_FILTER_LOG2=8 -DEXPECT_BYTES=32 -c "$TMP/size_probe.c" -o "$TMP/probe8.o" > "$TMP/probe8.log" 2>&1 ||
+    fail "the filter is not 32 bytes with LOG2=8" "$TMP/probe8.log"
+# shellcheck disable=SC2086
+$CC -O1 $CFLAGS -DEXPECT_BYTES=32768 -c "$TMP/size_probe.c" -o "$TMP/probe18.o" > "$TMP/probe18.log" 2>&1 ||
+    fail "the filter is not 32768 bytes by default" "$TMP/probe18.log"
+size_note="32 bytes at LOG2=8, 32768 by default"
 
 # 3. the hosts, with the default filter and with the small one.
 "$AETHERC" --emit=lib --with=extern "$ACC/accts.ae" "$TMP/accts.c" > "$TMP/accts.log" 2>&1 ||
