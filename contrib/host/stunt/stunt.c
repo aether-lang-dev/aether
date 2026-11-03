@@ -417,9 +417,12 @@ static int c_env_cached(st_vm* vm, char* d, size_t cap) {
 }
 
 #if !defined(_WIN32)
-/* A non-blocking connect: the sandbox refuses at once (EACCES from the
- * preload, EPERM from seccomp at socket()); anything else, EINPROGRESS or
- * a network error, means the call was let through. */
+/* A non-blocking connect: the sandbox refuses at once, with EACCES from the
+ * preload or Landlock at connect(), or EPERM from seccomp at socket(). EPERM
+ * at connect() is not the sandbox's: it is what a netfilter OUTPUT drop
+ * gives, so on a firewalled box it would let a sandbox that failed open read
+ * as refused; it is an error. Anything else, EINPROGRESS or a network error,
+ * means the call was let through. */
 static int connect_to(int family, const char* addr, char* d, size_t cap) {
     int s = socket(family, SOCK_STREAM, 0);
     if (s < 0) return by_errno(errno, d, cap, "socket");
@@ -444,7 +447,8 @@ static int connect_to(int family, const char* addr, char* d, size_t cap) {
     int e = errno;
     close(s);
     if (r == 0) { detail(d, cap, "connected"); return OUT_SUCCEEDED; }
-    if (e == EACCES || e == EPERM) return by_errno(e, d, cap, "connect");
+    if (e == EACCES) return by_errno(e, d, cap, "connect");
+    if (e == EPERM) { detail(d, cap, "connect: %s (a firewall's answer, not the sandbox's)", strerror(e)); return OUT_ERROR; }
     detail(d, cap, "let through: %s", strerror(e));
     return OUT_SUCCEEDED;
 }
