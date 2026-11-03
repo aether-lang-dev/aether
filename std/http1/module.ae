@@ -193,6 +193,38 @@ fn header_bytes(r: *HttpResponse, name: string) -> ptr {
     return null
 }
 
+// 1 when two headers named `name` carry different values. Two Content-Length
+// values that disagree have not said where the body ends (RFC 9112 6.3), and
+// picking one leaves the other's bytes to be read as something else (#3520).
+fn header_values_differ(r: *HttpResponse, name: string) -> int {
+    n = list_size(r.header_names)
+    ptr first = null
+    i = 0
+    while i < n {
+        if name_is(list.at(r.header_names, i), name) == 1 {
+            v = list.at(r.header_values, i)
+            if first == null {
+                first = v
+            } else {
+                if bytes_equal(first, v) == 0 { return 1 }
+            }
+        }
+        i = i + 1
+    }
+    return 0
+}
+
+fn bytes_equal(a: ptr, b: ptr) -> int {
+    n = bytes.length(a)
+    if bytes.length(b) != n { return 0 }
+    i = 0
+    while i < n {
+        if bytes.get(a, i) != bytes.get(b, i) { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
 // ---- byte scanning ----
 
 // Find the end of the header block: the byte offset just past the first
@@ -226,12 +258,6 @@ fn find_crlf(buf: byte[], off: int) -> int {
         i = i + 1
     }
     return -1
-}
-
-// Slice buf[from..to) into a fresh owned string.
-fn slice_str(buf: byte[], from: int, to: int) -> string {
-    if to <= from { return bytes.string_from_slice(buf[from..from]) }
-    return bytes.string_from_slice(buf[from..to])
 }
 
 // Slice buf[from..to) into a fresh owned bytes buffer.
@@ -273,12 +299,15 @@ parse_status_line(r: *HttpResponse, buf: byte[]) -> int {
         i = i + 1
     }
     if sp1 < 0 { return -1 }
-    // status code is buf[sp1+1 .. sp2) (or to eol if no reason).
+    // status code is buf[sp1+1 .. sp2) (or to eol if no reason): exactly
+    // three digits (RFC 9112 4), as the C client reads it (#3520). The
+    // reader this replaces skipped any byte that was not a digit and wrapped.
     code_end = sp2
     if code_end < 0 { code_end = eol }
-    code_str = slice_str(buf, sp1 + 1, code_end)
-    r.status = parse_uint(code_str)
-    string.free(code_str)
+    if code_end - (sp1 + 1) != 3 { return -1 }
+    code = parse_count(buf, sp1 + 1, code_end, 10, 999)
+    if code < 0 { return -1 }
+    r.status = code
     // reason phrase (optional): buf[sp2+1 .. eol)
     if sp2 >= 0 {
         rn = eol - (sp2 + 1)
@@ -505,20 +534,6 @@ fn chunk_size_line(buf: byte[], from: int, to: int) -> int {
     return sz
 }
 
-// Parse a decimal uint from a string, ignoring surrounding whitespace. Returns
-// 0 on empty / non-numeric.
-fn parse_uint(s: string) -> int {
-    n = string_length(s)
-    v = 0
-    i = 0
-    while i < n {
-        c = string_char_at_n(s, n, i) & 0xFF
-        if c >= 48 && c <= 57 { v = (v * 10) + (c - 48) }
-        i = i + 1
-    }
-    return v
-}
-
 // ---- top-level: parse a (possibly complete) response buffer ----
 //
 // Given a view of the accumulator's valid bytes, attempt to fully frame the response into
@@ -557,6 +572,7 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
         return berr
     }
     if cl != null {
+        if header_values_differ(r, "content-length") == 1 { return "conflicting content-length" }
         want = parse_content_length(cl)
         // Not a count of bytes, so no answer about where the body ends.
         if want < 0 { return "bad content-length" }

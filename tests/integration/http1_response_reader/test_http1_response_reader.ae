@@ -110,6 +110,20 @@ main() {
     ok = ok & refused("a CR inside a chunk extension", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5;a\rb\r\nhello\r\n0\r\n\r\n")
     ok = ok & refused("chunk data not followed by CRLF", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n3\r\nhelXY0\r\n\r\n")
 
+    // The status code is exactly three digits (RFC 9112 4), and two
+    // Content-Length headers that disagree have not said where the body ends
+    // (RFC 9112 6.3). The reader took 2000 and 2x0 (as 20) for statuses and
+    // framed the body by the first of two lengths.
+    ok = ok & refused("a four-digit status code", "HTTP/1.1 2000 OK\r\nContent-Length: 5\r\n\r\nhello")
+    ok = ok & refused("a status code with a letter in it", "HTTP/1.1 2x0 OK\r\nContent-Length: 5\r\n\r\nhello")
+    ok = ok & refused("two Content-Length headers that disagree", "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 6\r\n\r\nhello!")
+    r9 = http1.response_new()
+    m9 = sb("HTTP/1.1 204\r\nContent-Length: 5\r\ncontent-length: 5\r\n\r\nhello")
+    e9 = http1.feed(r9, bytes.view(m9), 0)
+    if string.equals(e9, "") == 1 && http1.status_code(r9) == 204 && string.equals(body_str(r9), "hello") == 1 { println("ok   agreeing duplicate lengths, a status line without a reason") } else { println("FAIL duplicates err='${e9}' status=${http1.status_code(r9)}"); ok = 0 }
+    http1.response_free(r9)
+    bytes.free(m9)
+
     // 8. Chunk extensions are read, then ignored (RFC 9112 7.1).
     r8 = http1.response_new()
     m8 = sb("HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n5 ; name=value\r\nhello\r\n6;q=\"a \\\" b\";flag\r\n world\r\n0;last\r\n\r\n")
