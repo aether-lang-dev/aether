@@ -482,6 +482,13 @@ int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char*
 int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
                         Type* result);
 int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t);
+/* #3524: `/` and `%` on integer lanes, with the same rules lane by lane
+ * (codegen_expr.c); emit_lane_int_div returns 0 having emitted nothing for
+ * a constant scalar divisor other than 0 and -1. */
+TypeKind lane_int_div_kind(const char* op, const Type* lt, const Type* rt);
+int lane_int_div_applies(CodeGenerator* gen, const char* op, TypeKind vk, ASTNode* r);
+int emit_lane_int_div(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                      TypeKind vk, ASTNode* r, const ASTNode* pos);
 /* #3522: a module-level string `var`'s lock, its one store, and whether `e`
  * reads one (codegen_stmt.c, codegen_expr.c). */
 const char* module_string_var_lock(const char* name);

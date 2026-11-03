@@ -11193,6 +11193,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     target = cg_internf("self->%s", stmt->value);
                 else if (is_promoted_capture(gen, stmt->value))
                     target = cg_internf("(*%s)", stmt->value);
+                /* #3524: `v /= w` and `v %= w` on integer lanes are `v = v op
+                 * w` with the scalar rules lane by lane (codegen_expr.c). */
+                if ((op[0] == '/' || op[0] == '%') && op[1] == '=' && !op[2]) {
+                    char lop[2] = { op[0], 0 };
+                    if (lane_int_div_applies(gen, lop, tk8, stmt->children[1])) {
+                        fprintf(gen->output, "%s = ", target);
+                        emit_lane_int_div(gen, lop, NULL, target, tk8, stmt->children[1], stmt);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
+                }
                 if (fn8) {
                     const char* pfx = tk8 == TYPE_F32X8 ? "f32x8" : "i32x8";
                     Type* rt = stmt->children[1]->node_type;

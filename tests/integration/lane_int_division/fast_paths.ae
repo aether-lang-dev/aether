@@ -1,0 +1,21 @@
+// The lane divisions that keep C's own operator (#3524), read by
+// test_lane_int_division.sh in the C aetherc writes for this file.
+
+import std.lanes
+
+cdiv(v: i32x4) -> i32x4 { return v / 4 }
+cmod16(v: i16x8) -> i16x8 { return v % 3 }
+cdiv64(v: i64x2) -> i64x2 { return v / 7 }
+cdiv8(v: i32x8) -> i32x8 { return v / 4 }
+vdiv(v: i32x4, w: i32x4) -> i32x4 { return v / w }
+sdiv(v: i32x4, n: int) -> i32x4 { return v / n }
+zdiv(v: i32x4) -> i32x4 { return v / 0 }
+mdiv(v: i64x2) -> i64x2 { return v / -1 }
+vmod8(v: i32x8, w: i32x8) -> i32x8 { return v % w }
+// 65536 is 0 in a 16-bit lane: the splat converts it there.
+wdiv16(v: i16x8) -> i16x8 { return v / 65536 }
+
+main() {
+    v = lanes.i32x4(40, -41, 42, 43)
+    println("${lanes.i32lane(cdiv(v), 1)} ${lanes.i32lane(vdiv(v, v), 0)} ${lanes.i32lane(sdiv(v, 2), 2)}")
+}

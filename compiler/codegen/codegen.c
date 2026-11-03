@@ -7847,6 +7847,49 @@ static void emit_windows_macro_undefs(CodeGenerator* gen) {
     print_line(gen, "#endif");
 }
 
+/* #3524: `/` and `%` on integer lanes, with the scalar rules lane by lane
+ * (emit_int_edge_helpers): a zero divisor in any lane panics with `where`,
+ * which names the category `division_by_zero` and the operation's source
+ * position; a lane's most negative value divided by -1 is itself, and its
+ * remainder 0. C leaves both undefined for a vector as for a scalar (x86
+ * traps). Plain code over the lanes, which every compiler that has the
+ * vector extensions takes, in the four-lane and in both eight-lane forms;
+ * x86 and NEON have no instruction that divides integer lanes, so the
+ * compiler split a vector division into one division per lane anyway.
+ * A constant scalar divisor other than 0 and -1 never comes here and keeps
+ * C's operator, which the compiler turns into a multiply per lane
+ * (lane_int_div_applies, codegen_expr.c). The eight-lane pair is in
+ * emit_lanes8_block. */
+static void emit_lane_int_div_helpers(CodeGenerator* gen) {
+    static const struct { const char* p; const char* v; const char* e; const char* u; int n; } k[] = {
+        { "i32x4", "AeI32x4", "int32_t", "uint32_t", 4 },
+        { "i64x2", "AeI64x2", "int64_t", "uint64_t", 2 },
+        { "i16x8", "AeI16x8", "int16_t", "uint16_t", 8 },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_%s_div_checked(%s a, %s b, const char* where) {\n"
+                "    %s r = a;\n"
+                "    for (int i = 0; i < %d; i++) {\n"
+                "        if (b[i] == 0) aether_panic(where);\n"
+                "        r[i] = b[i] == -1 ? (%s)((%s)0 - (%s)a[i]) : (%s)(a[i] / b[i]);\n"
+                "    }\n"
+                "    return r;\n"
+                "}\n",
+                k[i].v, k[i].p, k[i].v, k[i].v, k[i].v, k[i].n, k[i].e, k[i].u, k[i].u, k[i].e);
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_%s_mod_checked(%s a, %s b, const char* where) {\n"
+                "    %s r = a;\n"
+                "    for (int i = 0; i < %d; i++) {\n"
+                "        if (b[i] == 0) aether_panic(where);\n"
+                "        r[i] = b[i] == -1 ? (%s)0 : (%s)(a[i] %% b[i]);\n"
+                "    }\n"
+                "    return r;\n"
+                "}\n",
+                k[i].v, k[i].p, k[i].v, k[i].v, k[i].v, k[i].n, k[i].e, k[i].e);
+    }
+}
+
 /* #2428: the eight-lane types and every helper they are built from, one
    block. generate_program emits it once in the prelude, where
    AETHER_LANES8_NATIVE says what the build's flags give (AVX2: one 256-bit
@@ -7983,6 +8026,33 @@ static void emit_lanes8_block(CodeGenerator* gen) {
     print_line(gen, "    return a %% b;");
     print_line(gen, "#else");
     print_line(gen, "    return (AeI32x8){a.lo %% b.lo, a.hi %% b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    /* #3524: `/` and `%` with the scalar rules lane by lane, as the four-lane
+       helpers have them (emit_lane_int_div_helpers); the two above are what a
+       constant divisor other than 0 and -1 keeps. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_div_checked(AeI32x8 a, AeI32x8 b, const char* where) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeI32x8 r = a;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) {");
+    print_line(gen, "        if (b[i] == 0) aether_panic(where);");
+    print_line(gen, "        r[i] = b[i] == -1 ? (int32_t)((uint32_t)0 - (uint32_t)a[i]) : (int32_t)(a[i] / b[i]);");
+    print_line(gen, "    }");
+    print_line(gen, "    return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_i32x4_div_checked(a.lo, b.lo, where), _ae_i32x4_div_checked(a.hi, b.hi, where)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_mod_checked(AeI32x8 a, AeI32x8 b, const char* where) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeI32x8 r = a;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) {");
+    print_line(gen, "        if (b[i] == 0) aether_panic(where);");
+    print_line(gen, "        r[i] = b[i] == -1 ? (int32_t)0 : (int32_t)(a[i] %% b[i]);");
+    print_line(gen, "    }");
+    print_line(gen, "    return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_i32x4_mod_checked(a.lo, b.lo, where), _ae_i32x4_mod_checked(a.hi, b.hi, where)};");
     print_line(gen, "#endif");
     print_line(gen, "}");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_and(AeI32x8 a, AeI32x8 b) {");
@@ -8249,6 +8319,7 @@ static const char* const LANES8_NAMES[] = {
     "_ae_f32x8_load", "_ae_f32x8_store", "_ae_f32x8_lane", "_ae_i32x8_lane", "_ae_f32x8_sum",
     "_ae_f32x8_add", "_ae_f32x8_sub", "_ae_f32x8_mul", "_ae_f32x8_div",
     "_ae_i32x8_add", "_ae_i32x8_sub", "_ae_i32x8_mul", "_ae_i32x8_div", "_ae_i32x8_mod",
+    "_ae_i32x8_div_checked", "_ae_i32x8_mod_checked",
     "_ae_i32x8_and", "_ae_i32x8_or", "_ae_f32x8_neg", "_ae_i32x8_neg", "_ae_i32x8_not",
     "_ae_f32x8_lt", "_ae_i32x8_lt", "_ae_f32x8_le", "_ae_i32x8_le", "_ae_f32x8_gt", "_ae_i32x8_gt",
     "_ae_f32x8_ge", "_ae_i32x8_ge", "_ae_f32x8_eq", "_ae_i32x8_eq", "_ae_f32x8_ne", "_ae_i32x8_ne",
@@ -9306,6 +9377,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
+    emit_lane_int_div_helpers(gen);
     /* Saturating packs. i32x4 -> i16x8 packs two i32x4 vectors (a in the low
        four lanes, b in the high four) with signed saturation; i16x8 -> u8x16
        packs two i16x8 with unsigned saturation to bytes. These are the JPEG

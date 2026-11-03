@@ -7676,6 +7676,90 @@ int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char*
     return 1;
 }
 
+/* #3524: `/` and `%` on integer lanes (i32x4, i64x2, i16x8, i32x8) follow
+ * the scalar rules lane by lane: a zero divisor in any lane panics with the
+ * category `division_by_zero` and the operation's position, and a lane's
+ * most negative value divided by -1 is itself, its remainder 0. They go
+ * through the _ae_<lanes>_div_checked / _mod_checked helpers (codegen.c),
+ * except for a constant scalar divisor other than 0 and -1, which keeps
+ * C's operator (or the eight-lane _ae_i32x8_div / _mod): no lane can be 0
+ * or -1 there. */
+static const struct { TypeKind k; const char* p; const char* v; const char* e; int bits; }
+    lane_int_kinds[] = {
+        { TYPE_I32X4, "i32x4", "AeI32x4", "int32_t", 32 },
+        { TYPE_I64X2, "i64x2", "AeI64x2", "int64_t", 64 },
+        { TYPE_I16X8, "i16x8", "AeI16x8", "int16_t", 16 },
+        { TYPE_I32X8, "i32x8", "AeI32x8", "int32_t", 32 },
+    };
+
+static int lane_int_index(TypeKind k) {
+    for (int i = 0; i < (int)(sizeof(lane_int_kinds) / sizeof(lane_int_kinds[0])); i++)
+        if (lane_int_kinds[i].k == k) return i;
+    return -1;
+}
+
+/* The integer lane kind `l op r` divides in, for `/` and `%`: the kind of
+ * the operand that is an integer lane value. TYPE_UNKNOWN for anything else
+ * (a float lane, two scalars). */
+TypeKind lane_int_div_kind(const char* op, const Type* lt, const Type* rt) {
+    if (!op || (strcmp(op, "/") != 0 && strcmp(op, "%") != 0)) return TYPE_UNKNOWN;
+    if (lt && lane_int_index(lt->kind) >= 0) return lt->kind;
+    if (rt && lane_int_index(rt->kind) >= 0) return rt->kind;
+    return TYPE_UNKNOWN;
+}
+
+/* Does `op` (`/` or `%`) on lanes of kind `vk` by `r` need the checked
+ * helper? Not for a constant scalar divisor other than 0 and -1, read in
+ * the lane's width (a splat converts it there). */
+int lane_int_div_applies(CodeGenerator* gen, const char* op, TypeKind vk, ASTNode* r) {
+    int ki = lane_int_index(vk);
+    if (!op || (strcmp(op, "/") != 0 && strcmp(op, "%") != 0) || ki < 0 || !r) return 0;
+    if (r->node_type && r->node_type->kind == vk) return 1;
+    long long c = 0;
+    if (!ie_const_value(gen, r, &c, 0)) return 1;
+    int bits = lane_int_kinds[ki].bits;
+    long long cv = bits == 16 ? (long long)(int16_t)(uint16_t)(unsigned long long)c
+                 : bits == 32 ? (long long)(int32_t)(uint32_t)(unsigned long long)c
+                 : c;
+    return cv == 0 || cv == -1;
+}
+
+/* An operand of a lane division: a lane value as it is, a scalar splat. */
+static void lane_div_operand(CodeGenerator* gen, ASTNode* n, const char* text, int ki) {
+    if (text) {
+        fputs(text, gen->output);
+    } else if (n->node_type && n->node_type->kind == lane_int_kinds[ki].k) {
+        generate_expression(gen, n);
+    } else if (lane_int_kinds[ki].k == TYPE_I32X8) {
+        fprintf(gen->output, "_ae_i32x8_splat((int)(");
+        generate_expression(gen, n);
+        fprintf(gen->output, "))");
+    } else {
+        fprintf(gen->output, "((%s){0} + (%s)(", lane_int_kinds[ki].v, lane_int_kinds[ki].e);
+        generate_expression(gen, n);
+        fprintf(gen->output, "))");
+    }
+}
+
+/* Emits `l op r` on lanes of kind `vk` through the checked helper and
+ * returns 1, or returns 0 having emitted nothing when C's operator stays
+ * (lane_int_div_applies). `l_text` is the left operand's C when it has no
+ * node (a compound assignment's target); `pos` is the operation. */
+int emit_lane_int_div(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                      TypeKind vk, ASTNode* r, const ASTNode* pos) {
+    if (!lane_int_div_applies(gen, op, vk, r)) return 0;
+    int ki = lane_int_index(vk);
+    FILE* o = gen->output;
+    fprintf(o, "_ae_%s_%s_checked(", lane_int_kinds[ki].p, op[0] == '/' ? "div" : "mod");
+    lane_div_operand(gen, l, l_text, ki);
+    fprintf(o, ", ");
+    lane_div_operand(gen, r, NULL, ki);
+    fprintf(o, ", \"division_by_zero: division by zero at \" ");
+    emit_slice_diag_file(gen, pos);
+    fprintf(o, " \":%d:%d\")", pos ? pos->line : 0, pos ? pos->column : 0);
+    return 1;
+}
+
 /* #3524: the suffix of the helper a float converted to integer type `t`
  * saturates through, or NULL when `t` is no integer type. An `int8_t` or
  * `int16_t` (an int's kind) saturates at its own width. */
@@ -9352,6 +9436,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * helper is the operator. A scalar operand splats, as it does for
              * the four-lane types, which keep C's operators: their width is
              * native on every target. */
+            /* #3524: `/` and `%` on integer lanes take the scalar rules lane
+             * by lane, unless a constant scalar divisor keeps C's operator,
+             * which the paths below write. */
+            if (expr->child_count >= 2 && expr->value) {
+                TypeKind ldk = lane_int_div_kind(expr->value, expr->children[0]->node_type,
+                                                 expr->children[1]->node_type);
+                if (ldk != TYPE_UNKNOWN &&
+                    emit_lane_int_div(gen, expr->value, expr->children[0], NULL, ldk,
+                                      expr->children[1], expr))
+                    break;
+            }
             if (expr->child_count >= 2 && expr->value) {
                 static const char* const lane8_ops[11][2] = {
                     {"+", "add"}, {"-", "sub"}, {"*", "mul"}, {"/", "div"}, {"%", "mod"},

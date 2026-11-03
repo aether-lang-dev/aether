@@ -3957,6 +3957,12 @@ and the cases C leaves undefined follow Java's rules, the same on every target
 unsigned one a logical shift. The compound forms (`/=`, `%=`, `<<=`, `>>=`)
 follow the same rules.
 
+`/` and `%` on integer lanes (`i32x4`, `i64x2`, `i16x8`, `i32x8`) follow
+them lane by lane, with a lane value or a scalar on either side: a `0` in
+any lane of the divisor panics with `division_by_zero` and the position, and
+a lane's most negative value divided by `-1` is itself, its remainder `0`
+(`i16x8`: `-32768 / -1` is `-32768`). `v /= w` and `v %= w` too.
+
 None of this costs anything where an operand is a constant that keeps C
 defined: a divisor other than `0` and `-1`, a shift count inside the width,
 or a float constant inside the target's range is C's own operator. A
@@ -3964,6 +3970,11 @@ constant count outside the width is masked when the program is compiled
 (`x << 40` on an `int` is `x << 8`). Elsewhere the division is a call the C
 compiler inlines, which tests the divisor before dividing, and the shift
 count is masked, an `and` the shift instruction already performs on x86.
+On lanes a constant scalar divisor other than `0` and `-1` (`v / 4`) is C's
+own vector operator, which the C compiler turns into a multiply per lane;
+any other divisor tests each lane and divides lane by lane, as a vector
+division already ran on x86 and ARM NEON, which have no instruction that
+divides integer lanes.
 
 ### Comparison Operators
 
