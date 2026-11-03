@@ -4759,16 +4759,16 @@ static int ws_parse_url(const char* url, char* host, size_t host_sz,
         return -1;
     }
 
-    const char* slash = strchr(p, '/');
-    const char* hostend = slash ? slash : (p + strlen(p));
+    /* The authority ends at the path, the query or the fragment
+     * (aether_url_authority_len): "ws://h:9000?room=1" has port 9000. */
+    size_t alen = aether_url_authority_len(p);
 
     /* Optional :port, scanned inside the authority only so a path
      * containing ':' cannot be mistaken for one. An IPv6 host is bracketed
      * ("[::1]:8443") and comes back without the brackets. */
     const char* port_at = NULL;
     size_t plen = 0;
-    if (aether_addr_split_authority(p, (size_t)(hostend - p), host, host_sz,
-                                    &port_at, &plen) != 0) return -1;
+    if (aether_addr_split_authority(p, alen, host, host_sz, &port_at, &plen) != 0) return -1;
     if (host[0] == '\0') return -1;
 
     /* Default port follows the scheme, as RFC 6455 s3 specifies: 80 for ws,
@@ -4776,12 +4776,9 @@ static int ws_parse_url(const char* url, char* host, size_t host_sz,
     *port = *tls ? 443 : 80;
     if (port_at && (*port = http_parse_port(port_at, plen)) < 0) return -1;
 
-    if (slash) {
-        if (strlen(slash) >= path_sz) return -1;
-        snprintf(path, path_sz, "%s", slash);
-    } else {
-        snprintf(path, path_sz, "/");
-    }
+    /* The resource name: the path and the query, "/" for an empty path, and
+     * never a fragment, which is no part of a WebSocket URI (RFC 6455 3). */
+    if (!aether_url_request_target(path, path_sz, p + alen)) return -1;
     return 0;
 }
 

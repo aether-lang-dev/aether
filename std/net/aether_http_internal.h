@@ -157,11 +157,12 @@ int  http_exchange_recv(HttpExchange* x);
 /* Split a URL into the pieces a dial needs. Returns 0 when it is not one, or
  * when the host or the path does not fit its buffer: a piece is never cut
  * short, since a cut path is still a request, for the wrong thing (#2674).
- * `path` may be NULL for a caller that needs the host only. */
+ * `path` is the request target, the path and the query without the fragment,
+ * and may be NULL for a caller that needs the host only. */
 int parse_url(const char* url, char* host, size_t host_size,
               int* port, char* path, size_t path_size, int* use_tls);
 
-/* parse_url with the path allocated to fit (it is never longer than the URL):
+/* parse_url with the path allocated to fit (never more than the URL and a "/"):
  * *path_out is malloc'd and the caller frees it. Returns 0 on a URL that is
  * not one, a host that does not fit, or no memory, with *path_out NULL. */
 int parse_url_alloc(const char* url, char* host, size_t host_size,

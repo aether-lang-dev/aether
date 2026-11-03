@@ -361,23 +361,14 @@ static void http_init(void) {
 // URL parsing
 // -----------------------------------------------------------------
 
-// Parse `url` into (host, port, path, use_tls).
+// Parse `url` into (host, port, path, use_tls), `path` being the request
+// target: the path and the query, without the fragment.
 //   https://foo.example/bar  →  host="foo.example" port=443 path="/bar" use_tls=1
 //   http://foo:8080/         →  host="foo"         port=8080 path="/"   use_tls=0
-// Returns 1 on success, 0 on malformed input.
-/* A string copy that refuses rather than cuts: 1 when src fits in cap bytes
- * with its NUL, 0 (and nothing copied) when it does not. snprintf would bring
- * the whole formatting machinery with it, which parse_url paid for on a path
- * that runs once per proxied request; and it would cut. A path cut to the
- * buffer was sent anyway and answered for the wrong thing (#2674). */
-static int url_copy(char* dst, size_t cap, const char* src) {
-    size_t n = strlen(src);
-    if (n >= cap) return 0;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-    return 1;
-}
-
+//   http://foo:8080?q=1#f    →  host="foo"         port=8080 path="/?q=1"
+// Returns 1 on success, 0 on malformed input. The path is copied whole or
+// refused, never cut: a path cut to the buffer was sent anyway and answered
+// for the wrong thing (#2674).
 int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
     if (!url || !host || !port || !use_tls || host_size == 0 ||
@@ -398,12 +389,12 @@ int parse_url(const char* url, char* host, size_t host_size,
         *port = 80;
     }
 
-    /* The authority ends at the path. An IPv6 host is bracketed
-     * ("[::1]:8443") and comes back without the brackets; every user of
-     * `host` (the resolver, SNI, the sandbox resource, the Host header) wants
-     * it bare or brackets it again itself. */
-    const char* slash = strchr(start, '/');
-    size_t alen = slash ? (size_t)(slash - start) : strlen(start);
+    /* The authority ends at the path, the query or the fragment, whichever
+     * comes first. An IPv6 host is bracketed ("[::1]:8443") and comes back
+     * without the brackets; every user of `host` (the resolver, SNI, the
+     * sandbox resource, the Host header) wants it bare or brackets it again
+     * itself. */
+    size_t alen = aether_url_authority_len(start);
     const char* port_at = NULL;
     size_t port_len = 0;
     if (aether_addr_split_authority(start, alen, host, host_size, &port_at, &port_len) != 0)
@@ -412,7 +403,7 @@ int parse_url(const char* url, char* host, size_t host_size,
      * passed 65616 to a resolver that may keep only its low 16 bits, which
      * is port 80 again (#3520). */
     if (port_at && (*port = http_parse_port(port_at, port_len)) < 0) return 0;
-    if (path && !url_copy(path, path_size, slash ? slash : "/")) return 0;
+    if (path && !aether_url_request_target(path, path_size, start + alen)) return 0;
 
     return 1;
 }
@@ -422,7 +413,8 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
     if (!path_out) return 0;
     *path_out = NULL;
     if (!url) return 0;
-    /* The path is a tail of the URL, or "/" when it has none. */
+    /* The target is a tail of the URL, with a "/" before it when its path is
+     * empty: never more than the URL and one byte. */
     size_t cap = strlen(url) + 2;
     char* path = (char*)malloc(cap);
     if (!path) return 0;
@@ -1908,17 +1900,15 @@ static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, in
     if (strncmp(s, "http://", 7) == 0) s += 7;
     else if (strncmp(s, "https://", 8) == 0) s += 8; /* proxy-over-TLS not supported; treat as host */
     int pport = 3128;
-    const char* slash = strchr(s, '/');
-    const char* colon = strchr(s, ':');
-    size_t hlen;
-    if (colon && (!slash || colon < slash)) {
+    /* The authority ends at a path, a query or a fragment, as a target URL's
+     * does (aether_url_authority_len), so "http://proxy:3128?x" is port 3128
+     * rather than a port of "3128?x". */
+    size_t alen = aether_url_authority_len(s);
+    const char* colon = (const char*)memchr(s, ':', alen);
+    size_t hlen = alen;
+    if (colon) {
         hlen = (size_t)(colon - s);
-        const char* port_end = slash ? slash : colon + 1 + strlen(colon + 1);
-        pport = http_parse_port(colon + 1, (size_t)(port_end - (colon + 1)));
-    } else if (slash) {
-        hlen = (size_t)(slash - s);
-    } else {
-        hlen = strlen(s);
+        pport = http_parse_port(colon + 1, (size_t)(s + alen - (colon + 1)));
     }
     if (hlen == 0 || hlen >= phost_size || pport <= 0 || pport > 65535) {
         *err = "malformed proxy URL";
