@@ -11,3 +11,13 @@
   less (683 to 633 ns). C code that takes messages from a mailbox reads a
   typed payload with `aether_message_payload` and gives it back with
   `aether_message_free_payload`; the runtime ABI revision is 2.
+- **Migrating: a hand-written C step function reads a typed message through
+  `aether_message_payload` (#3534).** A message that fits now travels in
+  `Message` itself (`zerocopy.owned == AETHER_MSG_INLINE`), so its
+  `payload_ptr` holds the message's bytes, not a pointer to them. C code
+  that read `msg.payload_ptr` as the payload, or freed it (an actor step
+  handed to `http_server_set_actor_handler`, a host draining a mailbox),
+  calls `aether_message_payload(&msg)` and
+  `aether_message_free_payload(&msg)` instead. Generated code and every
+  shim in the tree do; a library built for runtime ABI revision 1 is
+  refused rather than misread.

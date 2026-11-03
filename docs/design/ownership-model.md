@@ -250,7 +250,14 @@ statement's block releases, as a read held for its statement is
 (order_hoist_operand): the read is a take (R3), and what the statement does
 with the value, a comparison or a borrowed argument included, is done with
 a value no other thread's store can free. Nothing is freed late: each
-release happens where R3 puts it.
+release happens where R3 puts it. The cost is the lock and the count on
+every read: one reader pays a few nanoseconds more (2.2 to 6.6 ns a read in
+a hot loop, 15% on 8M reads in a handler), and readers on several cores at
+once contend on the lock's line and the string's count (four actors reading
+one var, 8M reads in all, took about 345 ms where the unlocked read took
+25 ms). A value read that often from many actors
+is better given to each actor, or kept in a local, than read from a module
+`var` each time.
 
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its

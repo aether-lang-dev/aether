@@ -10,3 +10,8 @@
   value with no type at all is refused. An element read through a typed
   pointer (`p[0]` on a `*T`) has its element's type now, where it was left
   unresolved.
+- **Migrating: printing an actor ref, a bit set, a bitstruct or an optional
+  is a compile error (#3527).** `"${ref}"` or `print(flags)` of these kinds
+  went through `%d` and printed whatever the int read of the value gave.
+  Print what you mean: an actor's id or a field of its state, a bit set's
+  members, a bitstruct's fields, or an optional unwrapped (`if v != none`).
