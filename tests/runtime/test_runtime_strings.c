@@ -1,6 +1,7 @@
 #include "test_harness.h"
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_process_mem.h"
+#include "../../runtime/aether_resource_caps.h"   /* aether_caps_malloc */
 #include "../../runtime/actors/aether_panic.h"
 #include <string.h>
 #include <stdlib.h>
@@ -354,10 +355,21 @@ TEST_CATEGORY(string_layout_is_unambiguous, TEST_CATEGORY_STDLIB) {
         ASSERT_TRUE(s->data == (char*)(s + 1));
         ASSERT_EQ(22, (int)aether_string_length(s));
         AetherString* a = string_new_with_length("eleven char", 11);
-        AetherString* c = string_concat(a, a);   /* a 23-byte adopted payload */
+        /* A 23-byte payload adopted on its own, as a file read's is.
+         * string_concat used to make one; it writes one block now (#3530). */
+        char* buf = (char*)aether_caps_malloc(23);
+        ASSERT_NOT_NULL(buf);
+        memcpy(buf, "eleven chareleven char", 23);
+        AetherString* c = string_adopt_caps_buffer(buf, 22, 23);
         ASSERT_NOT_NULL(c);
         ASSERT_TRUE(c->data != (char*)(c + 1));
         ASSERT_STREQ("eleven chareleven char", aether_string_data(c));
+        AetherString* j = string_concat(a, a);
+        ASSERT_NOT_NULL(j);
+        ASSERT_TRUE(j->data == (char*)(j + 1));
+        ASSERT_EQ(22, (int)aether_string_length(j));
+        ASSERT_STREQ("eleven chareleven char", aether_string_data(j));
+        string_release(j);
         string_release(c);
         string_release(a);
         string_release(s);

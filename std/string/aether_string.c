@@ -122,9 +122,9 @@ AetherString* string_empty(void) {
  * WITHOUT copying. The buffer MUST have come from aether_caps_malloc —
  * string_release reclaims it via aether_caps_free(data, capacity). On
  * struct-alloc failure the buffer is freed and NULL returned. This is
- * the zero-copy mint the string ops (concat/substring/upper/lower/trim)
- * use so they yield magic AetherStrings without the extra copy
- * string_new_with_length would make. */
+ * the zero-copy mint for a buffer filled before its string existed (a
+ * file read, a process's output); the string ops, which know the length
+ * first, write into string_alloc_inline's one block instead (#3530). */
 AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     if (!buf) return NULL;
     AetherString* s = string_header_for(buf);
@@ -229,9 +229,11 @@ void aether_string_var_store(const char** place, atomic_flag* lock, const char* 
 // Returns a magic AetherString* (refcounted, length-aware) — the unified
 // owned-heap string representation. Freed via string_release (dispatched
 // by aether_heap_str_free on the magic header); binary-safe (embedded
-// NULs preserved via the stored length). One zero-copy direct mint:
-// allocate the data buffer with aether_caps_malloc, write both halves,
-// adopt into an AetherString (no intermediate copy).
+// NULs preserved via the stored length). Written straight into one
+// block, the header then the text (string_alloc_inline), as every string
+// whose length is known before it is written now is (#3530): a separate
+// buffer and header cost two allocations and two frees, and put the header
+// and the text on different cache lines.
 AetherString* string_concat(const void* a, const void* b) {
     if (!a || !b) return NULL;
     size_t la = str_len(a), lb = str_len(b);
@@ -239,12 +241,11 @@ AetherString* string_concat(const void* a, const void* b) {
     // adding 1 for the null terminator.
     if (la > SIZE_MAX - lb - 1) return NULL;
     size_t new_length = la + lb;
-    char* buf = (char*)aether_caps_malloc(new_length + 1);
-    if (!buf) return NULL;
-    if (la) memcpy(buf, str_data(a), la);
-    if (lb) memcpy(buf + la, str_data(b), lb);
-    buf[new_length] = '\0';
-    return string_adopt_caps_buffer(buf, new_length, new_length + 1);
+    AetherString* out = string_alloc_inline(new_length);
+    if (!out) return NULL;
+    if (la) memcpy(out->data, str_data(a), la);
+    if (lb) memcpy(out->data + la, str_data(b), lb);
+    return out;
 }
 
 // Length-bearing variant of string_concat. Returns an AetherString*
@@ -266,14 +267,12 @@ AetherString* string_concat_wrapped(const void* a, const void* b) {
     if (la > SIZE_MAX - lb - 1) return NULL;
     size_t new_length = la + lb;
 
-    char* joined = (char*)malloc(new_length + 1);
-    if (!joined) return NULL;
-    if (la) memcpy(joined, da, la);
-    if (lb) memcpy(joined + la, db, lb);
-    joined[new_length] = '\0';
-
-    AetherString* wrapped = string_new_with_length(joined, new_length);
-    free(joined);
+    /* Joined where it stays: it was joined into a scratch buffer and then
+     * copied a second time into the string (#3530). */
+    AetherString* wrapped = string_alloc_inline(new_length);
+    if (!wrapped) return NULL;
+    if (la) memcpy(wrapped->data, da, la);
+    if (lb) memcpy(wrapped->data + la, db, lb);
     return wrapped;
 }
 
@@ -445,19 +444,14 @@ AetherString* string_substring(const void* str, int start, int end) {
      * negative, and every substring of one came back empty. An `end` past
      * the length is past a length below INT_MAX, which then fits. */
     if (end > 0 && (size_t)end > slen) end = (int)slen;
-    if (start >= end) {
-        char* empty = (char*)aether_caps_malloc(1);
-        if (!empty) return NULL;
-        empty[0] = '\0';
-        return string_adopt_caps_buffer(empty, 0, 1);
-    }
+    if (start >= end) return string_alloc_inline(0);
 
+    /* One block (#3530), as string_concat. */
     size_t len = end - start;
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 /* Shared engine for string_replace / string_replace_all. Replaces up
@@ -501,8 +495,10 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
     }
 
     size_t out_len = slen + (size_t)hits * new_len - (size_t)hits * old_len;
-    char* result = (char*)aether_caps_malloc(out_len + 1);
-    if (!result) return NULL;
+    /* One block (#3530), as string_concat. */
+    AetherString* out = string_alloc_inline(out_len);
+    if (!out) return NULL;
+    char* result = out->data;
 
     size_t w = 0;
     long done = 0;
@@ -517,8 +513,7 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
             result[w++] = sdata[i++];
         }
     }
-    result[out_len] = '\0';
-    return string_adopt_caps_buffer(result, out_len, out_len + 1);
+    return out;
 }
 
 AetherString* string_replace(const void* str, const void* old_sub, const void* new_sub) {
@@ -561,19 +556,14 @@ AetherString* string_substring_n(const void* str, int str_len_bytes, int start, 
     const char* sdata = str_data(str);
     if (start < 0) start = 0;
     if (end > str_len_bytes) end = str_len_bytes;
-    if (start >= end) {
-        char* empty = (char*)aether_caps_malloc(1);
-        if (!empty) return NULL;
-        empty[0] = '\0';
-        return string_adopt_caps_buffer(empty, 0, 1);
-    }
+    if (start >= end) return string_alloc_inline(0);
 
+    /* One block (#3530), as string_concat. */
     size_t len = (size_t)(end - start);
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 /* Identity helper that documents intent: in code that receives a
@@ -635,13 +625,12 @@ AetherString* string_to_upper(const void* str) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
 
-    char* new_data = (char*)aether_caps_malloc(slen + 1);
-    if (!new_data) return NULL;
+    AetherString* out = string_alloc_inline(slen);   /* one block (#3530) */
+    if (!out) return NULL;
     for (size_t i = 0; i < slen; i++) {
-        new_data[i] = toupper((unsigned char)sdata[i]);
+        out->data[i] = toupper((unsigned char)sdata[i]);
     }
-    new_data[slen] = '\0';
-    return string_adopt_caps_buffer(new_data, slen, slen + 1);
+    return out;
 }
 
 AetherString* string_to_lower(const void* str) {
@@ -649,13 +638,12 @@ AetherString* string_to_lower(const void* str) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
 
-    char* new_data = (char*)aether_caps_malloc(slen + 1);
-    if (!new_data) return NULL;
+    AetherString* out = string_alloc_inline(slen);   /* one block (#3530) */
+    if (!out) return NULL;
     for (size_t i = 0; i < slen; i++) {
-        new_data[i] = tolower((unsigned char)sdata[i]);
+        out->data[i] = tolower((unsigned char)sdata[i]);
     }
-    new_data[slen] = '\0';
-    return string_adopt_caps_buffer(new_data, slen, slen + 1);
+    return out;
 }
 
 AetherString* string_trim(const void* str) {
@@ -670,11 +658,10 @@ AetherString* string_trim(const void* str) {
     while (end > start && isspace((unsigned char)sdata[end - 1])) end--;
 
     size_t len = end - start;
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);   /* one block (#3530) */
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 // Helper: free a partially-built array on OOM during split. Used on
@@ -857,9 +844,10 @@ void* string_join(struct StringSeq* seq, const void* sep) {
         cur = string_seq_tail(cur);
     }
     total += sep_len * (size_t)(n - 1);
-    /* One allocation (+1 for the NUL terminator string_adopt expects). */
-    char* buf = (char*)aether_caps_malloc(total + 1);
-    if (!buf) return NULL;
+    /* One allocation, header and text together (#3530). */
+    AetherString* out = string_alloc_inline(total);
+    if (!out) return NULL;
+    char* buf = out->data;
     /* Pass 2: copy elements, interleaving the separator. */
     size_t off = 0;
     cur = seq;
@@ -874,8 +862,11 @@ void* string_join(struct StringSeq* seq, const void* sep) {
         if (hl > 0) { memcpy(buf + off, str_data(h), hl); off += hl; }
         cur = string_seq_tail(cur);
     }
+    /* `off` is `total` but for a sequence shorter than it said; the block
+     * keeps its capacity, which is what freeing it counts. */
     buf[off] = '\0';
-    return string_adopt_caps_buffer(buf, off, total + 1);
+    out->length = off;
+    return out;
 }
 
 void* string_split_to_seq(const void* str, const void* delimiter) {
