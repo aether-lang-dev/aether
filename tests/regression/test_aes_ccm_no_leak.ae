@@ -1,0 +1,83 @@
+// Regression (#3539): AES-CCM frees every block its CBC-MAC makes.
+//
+// ccm_cbc_mac started the MAC with a zero block and then stored the first
+// MAC step's fresh block over it, and declared the AAD length prefix with a
+// zero-length buffer that both branches replaced. Neither replaced buffer
+// was freed: every ccm_seal and ccm_open leaked one 16-byte block, and one
+// more with AAD. LeakSanitizer found it in tests/integration/crypto_aead_modes.
+//
+// Seal and open round-trip with and without AAD, and the leak check runs
+// where the heap count is exact (mem.heap_in_use_exact): after a warm-up,
+// some window of the same work grows the heap by exactly 0.
+
+import std.mem
+import std.bytes
+import std.string
+import std.cryptography.aes
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+fn text(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    bytes.copy_from_string(b, 0, s, n)
+    bytes.set_length(b, n)
+    return b
+}
+
+// Seal `pt` under `aad` and open it again; 1 when the plaintext comes back.
+fn round_trip(key: ptr, nonce: ptr, aad: ptr, pt: ptr) -> int {
+    ptlen = bytes.length(pt)
+    ct, ctlen = aes.ccm_seal(bytes.view(key), bytes.view(nonce), bytes.view(aad), bytes.view(pt), 8)
+    if ctlen != ptlen + 8 {
+        bytes.free(ct)
+        return 0
+    }
+    back, backlen = aes.ccm_open(bytes.view(key), bytes.view(nonce), bytes.view(aad), bytes.view(ct)[0..ctlen], 8)
+    bytes.free(ct)
+    if back == null { return 0 }
+    ok = 0
+    if backlen == ptlen && bytes.to_string(back, backlen) == bytes.to_string(pt, ptlen) { ok = 1 }
+    bytes.free(back)
+    return ok
+}
+
+fn rounds(key: ptr, nonce: ptr, aad: ptr, noaad: ptr, pt: ptr, n: int) -> int {
+    good = 0
+    i = 0
+    while i < n {
+        good = good + round_trip(key, nonce, aad, pt) + round_trip(key, nonce, noaad, pt)
+        i = i + 1
+    }
+    return good
+}
+
+main() {
+    key = text("0123456789abcdef")
+    nonce = text("nonce-of-13by")
+    aad = text("the associated data")
+    noaad = bytes.new(0)
+    pt = text("a plaintext longer than one block of sixteen")
+
+    check(rounds(key, nonce, aad, noaad, pt, 1) == 2, "seal and open round-trip")
+    if mem.heap_in_use_exact() {
+        rounds(key, nonce, aad, noaad, pt, 20)
+        grown = mem.steady_growth(|| {
+                check(rounds(key, nonce, aad, noaad, pt, 10) == 20, "seal and open round-trip in a window")
+            }, 5)
+        check(grown == 0, "a window of 20 seals and opens grew the heap by ${grown} bytes in every run")
+    }
+    bytes.free(key)
+    bytes.free(nonce)
+    bytes.free(aad)
+    bytes.free(noaad)
+    bytes.free(pt)
+    println("PASS AES-CCM frees its CBC-MAC blocks")
+}
