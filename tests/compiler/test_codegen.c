@@ -1057,11 +1057,13 @@ TEST(codegen_emit_header_message_matches_generated_struct) {
 
 /* #3527: the kinds an interpolation, print or println writes as an int are
  * the ones that are ints in C on purpose (int, the types narrower than it,
- * an enum); every other kind has its own conversion or none. A kind with
- * none fell through to `%d`, which reads a pointer, a double or a 64-bit
- * count wrongly; it is a compile error now. */
+ * an enum) and an unresolved type, which codegen stores as a C int
+ * (get_c_type); every other kind has its own conversion or none. A kind
+ * with none fell through to `%d`, which reads a pointer, a double or a
+ * 64-bit count wrongly; it is a compile error now. */
 TEST(codegen_print_fmt_int_kinds_are_the_listed_ones) {
-    static const TypeKind ints[] = { TYPE_INT, TYPE_BYTE, TYPE_UINT8, TYPE_UINT16, TYPE_ENUM };
+    static const TypeKind ints[] = { TYPE_INT, TYPE_BYTE, TYPE_UINT8, TYPE_UINT16, TYPE_ENUM,
+                                     TYPE_UNKNOWN };
     for (size_t i = 0; i < sizeof(ints) / sizeof(ints[0]); i++) {
         Type* t = create_type(ints[i]);
         ASSERT_EQ(PF_INT, print_fmt_of(t));
@@ -1079,7 +1081,7 @@ TEST(codegen_print_fmt_int_kinds_are_the_listed_ones) {
         free_type(t);
     }
     static const TypeKind none[] = {
-        TYPE_UNKNOWN, TYPE_VOID, TYPE_STRUCT, TYPE_ARRAY, TYPE_TUPLE, TYPE_FUNCTION,
+        TYPE_VOID, TYPE_STRUCT, TYPE_ARRAY, TYPE_TUPLE, TYPE_FUNCTION,
         TYPE_OPTIONAL, TYPE_SUM, TYPE_ACTOR_REF, TYPE_MESSAGE, TYPE_BITSET, TYPE_BITSTRUCT,
         TYPE_F32X4, TYPE_I32X8,
     };
@@ -1091,16 +1093,27 @@ TEST(codegen_print_fmt_int_kinds_are_the_listed_ones) {
     ASSERT_EQ(PF_NONE, print_fmt_of(NULL));
 }
 
-/* #3527: a value whose type was never resolved is a reported error in an
+/* The node types of every identifier named `name` under `n`, dropped. */
+static void drop_identifier_types(ASTNode* n, const char* name) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, name) == 0 && n->node_type) {
+        free_type(n->node_type);
+        n->node_type = NULL;
+    }
+    for (int i = 0; i < n->child_count; i++) drop_identifier_types(n->children[i], name);
+}
+
+/* #3527: a value with no type at all is a reported error in an
  * interpolation, a println and a print, not a `%d` guess. The tree is
- * generated without the checker, so nothing typed the name. */
-TEST(codegen_unresolved_print_value_is_a_reported_error) {
+ * generated without the checker, and the name's type taken off. */
+TEST(codegen_untyped_print_value_is_a_reported_error) {
     aether_error_reset_counts();
     int count;
     Token** tokens = tokenize_source("main() { println(\"v ${q}\")\n println(q)\n print(q) }", &count);
     Parser* parser = create_parser(tokens, count);
     ASTNode* ast = parse_program(parser);
     ASSERT_NOT_NULL(ast);
+    drop_identifier_types(ast, "q");
     FILE* out = tmpfile();
     ASSERT_NOT_NULL(out);
     CodeGenerator* gen = create_code_generator(out);

@@ -7793,12 +7793,18 @@ int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNod
  * else has no conversion, PF_NONE, and the caller refuses it with
  * print_fmt_refuse: it fell through to `%d` before, and a value that is
  * really a pointer, a double or a 64-bit count read through `%d` is
- * undefined. `Isolated[T]` is its `T`. */
+ * undefined. `Isolated[T]` is its `T`. A type left unresolved by the checker
+ * (an untyped struct field, the result of a function that returns a call
+ * through an erased `fn`) is the C `int` get_c_type stores every such value
+ * as, the legacy default it warns of where the value is declared, so it is
+ * written as that int: the conversion follows the storage. A value with no
+ * type at all is refused. */
 PrintFmt print_fmt_of(const Type* t) {
     while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
     if (!t) return PF_NONE;
     switch (t->kind) {
         case TYPE_INT: case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_ENUM:
+        case TYPE_UNKNOWN:
             return PF_INT;
         case TYPE_UINT32: return PF_UINT;
         case TYPE_INT64: return PF_LONG;
@@ -7820,8 +7826,8 @@ void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what) {
     char msg[400];
     const Type* t = v ? v->node_type : NULL;
     while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
-    if (!t || t->kind == TYPE_UNKNOWN)
-        snprintf(msg, sizeof(msg), "%s cannot write this value: its type was never resolved", what);
+    if (!t)
+        snprintf(msg, sizeof(msg), "%s cannot write this value: it has no type", what);
     else
         snprintf(msg, sizeof(msg), "%s cannot write a value of type %s", what,
                  type_spelled((Type*)t));

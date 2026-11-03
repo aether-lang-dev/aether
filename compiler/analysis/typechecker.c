@@ -17885,6 +17885,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = create_type(TYPE_INT);
                 }
+                /* #3527: `p[i]` on a typed pointer `*T` is a `T`, as an
+                 * array's element is: it was left unresolved, so `x =
+                 * p[0].a` declared an untyped local and a read of it was
+                 * printed by codegen's default. */
+                if (arr_type && arr_type->kind == TYPE_PTR && arr_type->element_type &&
+                    arr_type->element_type->kind != TYPE_UNKNOWN &&
+                    (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN)) {
+                    if (expr->node_type) free_type(expr->node_type);
+                    expr->node_type = clone_type(arr_type->element_type);
+                }
 
                 // Indexing a bare `ptr` (void*, element_type == NULL) has no
                 // element type: it lowers to a C index on `void*` and leaks
