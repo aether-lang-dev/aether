@@ -2,10 +2,11 @@
 //
 // `import foo` looks for foo/module.ae or foo.ae in each directory of the
 // search path, left to right, and the first one found wins; every import
-// walks the path on its own. `--lib dir` adds a directory, and repeating
-// it, or giving one value with the platform's separator (`--lib
-// "lib:vendor"`, `;` on Windows), adds several; AETHER_LIB_DIR holds the
-// same list. With none, the path is lib/. Here foo is in both lib/ and
+// walks the path on its own. The project's lib/ always comes first, and
+// `--lib dir` adds a directory after it; repeating it, or giving one value
+// with the platform's separator (`--lib "lib:vendor"`, `;` on Windows),
+// adds several, and AETHER_LIB_DIR holds the same list when no `--lib` is
+// given. With none, the path is lib/ alone. Here foo is in both lib/ and
 // vendor/, so the order decides which one this program gets, and bar,
 // only in vendor/, is found there either way. Swap the two `--lib`s and
 // foo comes from vendor/. `ae lib-path --lib a --lib b` prints the path a

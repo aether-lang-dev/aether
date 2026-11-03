@@ -165,6 +165,19 @@ static void tc_lib_dir_append_one(const char* dir) {
     }
     tc.lib_dirs[tc.lib_dir_count++] = norm;
 }
+
+/* #3504: the module search chain as the compiler walks it: the project's
+ * lib/ first, then the --lib, AETHER_LIB_DIR and dependency directories
+ * (tc.lib_dirs), which add to it rather than replace it. Written to `out`,
+ * which holds AETHER_LIB_DIRS_MAX + 1; returns how many. */
+int tc_lib_chain(const char** out) {
+    int n = 0;
+    out[n++] = AETHER_DEFAULT_LIB_DIR;
+    for (int i = 0; i < tc.lib_dir_count; i++)
+        if (strcmp(tc.lib_dirs[i], AETHER_DEFAULT_LIB_DIR) != 0) out[n++] = tc.lib_dirs[i];
+    return n;
+}
+
 void tc_lib_dir_append(const char* spec) {
     if (!spec || !spec[0]) return;
     /* Split on the platform separator and append each piece. Empty
@@ -6132,11 +6145,13 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
 // --lib directory (#2543): a 1200-byte probe cut a longer one, and a source
 // module there was taken for absent, or for a binary import.
 static char* ae_source_module_path(const char* mod) {
-    const char* bases[2 + AETHER_LIB_DIRS_MAX];
+    const char* bases[3 + AETHER_LIB_DIRS_MAX];
     int nb = 0;
     bases[nb++] = ".";
     bases[nb++] = "src";
-    for (int i = 0; i < tc.lib_dir_count; i++) bases[nb++] = tc.lib_dirs[i];
+    const char* chain[AETHER_LIB_DIRS_MAX + 1];
+    int nc = tc_lib_chain(chain);   /* lib/ first, #3504 */
+    for (int i = 0; i < nc; i++) bases[nb++] = chain[i];
     for (int b = 0; b < nb; b++) {
         char* p = ae_path_printf("%s/%s.ae", bases[b], mod);
         if (path_exists(p)) return p;
@@ -6166,11 +6181,13 @@ static char* ae_find_binimport_so(const char* mod) {
         ".so", ".dylib"
 #endif
     };
-    const char* dirs[8 + 2];
+    const char* dirs[2 + AETHER_LIB_DIRS_MAX];
     int nd = 0;
     dirs[nd++] = ".";
-    for (int i = 0; i < tc.lib_dir_count && nd < (int)(sizeof(dirs)/sizeof(dirs[0])); i++) {
-        dirs[nd++] = tc.lib_dirs[i];
+    const char* chain[AETHER_LIB_DIRS_MAX + 1];
+    int nc = tc_lib_chain(chain);   /* lib/ first, #3504 */
+    for (int i = 0; i < nc; i++) {
+        dirs[nd++] = chain[i];
     }
     for (int d = 0; d < nd; d++) {
         for (size_t e = 0; e < sizeof(exts)/sizeof(exts[0]); e++) {
@@ -6767,12 +6784,14 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
     snprintf(rel, sizeof(rel), "%s", pkg);
     for (char* p = rel; *p; p++) if (*p == '.') *p = '/';
     AePkgModules mods = {0};
-    const char* roots[2 + AETHER_LIB_DIRS_MAX];
+    const char* roots[3 + AETHER_LIB_DIRS_MAX];
     int nr = 0;
     roots[nr++] = ".";
     roots[nr++] = "src";
-    for (int i = 0; i < tc.lib_dir_count && nr < (int)(sizeof(roots)/sizeof(roots[0])); i++)
-        roots[nr++] = tc.lib_dirs[i];
+    const char* chain[AETHER_LIB_DIRS_MAX + 1];
+    int nc = tc_lib_chain(chain);   /* lib/ first, #3504 */
+    for (int i = 0; i < nc; i++)
+        roots[nr++] = chain[i];
     const char* found_root = NULL;
     for (int r = 0; r < nr && !found_root; r++) {
         char* dir = ae_path_printf("%s/%s", roots[r], rel);
@@ -7169,7 +7188,8 @@ static void build_usage(FILE* out) {
     fprintf(out, "  --namespace <dir>  Build a namespace and its per-language SDKs\n");
     fprintf(out, "  --shared-runtime   Link against the shared runtime\n");
     fprintf(out, "  --extra <file.c>   Compile and link a C file too (repeatable)\n");
-    fprintf(out, "  --lib <dir>        Module search path (repeatable, or %c-separated)\n",
+    fprintf(out, "  --lib <dir>        Add to the module search path, after the project's lib/\n");
+    fprintf(out, "                     (repeatable, or %c-separated)\n",
             AETHER_LIB_PATH_SEP_CHAR);
     fprintf(out, "  --override <dep>=<path>  Use a local checkout for a dependency\n");
     fprintf(out, "  -D NAME            Declare a build symbol for `when defined(NAME)`\n");
@@ -7259,7 +7279,8 @@ static int print_command_help(const char* cmd) {
         printf("  Everything after `--` is passed to the program.\n");
         printf("\nOptions:\n");
         printf("  --extra <file.c>         Compile and link a C file too (repeatable)\n");
-        printf("  --lib <dir>              Module search path (repeatable, or %c-separated)\n",
+        printf("  --lib <dir>              Add to the module search path, after the project's lib/\n");
+        printf("                           (repeatable, or %c-separated)\n",
                AETHER_LIB_PATH_SEP_CHAR);
         printf("  --override <dep>=<path>  Use a local checkout for a dependency\n");
         printf("  --shared-runtime         Link against the shared runtime\n");
@@ -13049,12 +13070,14 @@ static void print_usage(void) {
     printf("  -v, --verbose        Show detailed output\n");
     printf("  -D NAME              Declare a build symbol for `when defined(NAME)` (run, build,\n");
     printf("                       check, test; adds to the manifest's [build] defines)\n");
-    printf("  --lib <dir>[%c<dir>...]  Module search path (PATH-style, left-to-right;\n",
+    printf("  --lib <dir>[%c<dir>...]  Add to the module search path, after the project's\n",
            AETHER_LIB_PATH_SEP_CHAR);
-    printf("                       repeated flag also accepted: --lib a --lib b)\n");
+    printf("                       lib/ (PATH-style, left-to-right; repeated flag also\n");
+    printf("                       accepted: --lib a --lib b)\n");
     printf("\nEnvironment:\n");
     printf("  AETHER_HOME          Aether installation directory\n");
-    printf("  AETHER_LIB_DIR       Same shape as --lib; PATH-style list of module search dirs\n");
+    printf("  AETHER_LIB_DIR       Same shape as --lib; PATH-style list of module search dirs,\n");
+    printf("                       searched after lib/ when no --lib is given\n");
     printf("  AETHER_NO_AEA=1      Parse installed std modules from source, ignoring their\n");
     printf("                       compiled artifacts in lib/aether/modules/\n");
     printf("  AETHER_AEA_TRACE=1   Say on stderr which modules came from a compiled artifact\n");
@@ -13092,10 +13115,9 @@ static void lib_path_usage(void) {
            AETHER_LIB_PATH_SEP_CHAR);
     printf("  Print the resolved module-search chain in order.\n");
     printf("  Useful for debugging \"why isn't my import resolving?\"\n");
-    printf("  Inputs (in priority order, highest first):\n");
-    printf("    1. --lib flags on this command line\n");
-    printf("    2. AETHER_LIB_DIR env var\n");
-    printf("    3. default: `lib`\n");
+    printf("  The project's `lib` comes first; --lib flags on this command line,\n");
+    printf("  or AETHER_LIB_DIR when there are none, and the resolved dependencies\n");
+    printf("  come after it, in that order (#3504).\n");
 }
 
 static int cmd_lib_path(int argc, char** argv) {
@@ -13114,10 +13136,11 @@ static int cmd_lib_path(int argc, char** argv) {
             return 2;
         }
     }
-    /* CLI --lib flags win; env var seeds the chain if no flags set it.
-     * Default = `lib` if neither. Walk the resolved array directly so
-     * the output matches what the real toolchain would see byte-for-
-     * byte (same normalisation, same dedup, same trailing-slash rule). */
+    /* CLI --lib flags win over the env var, which seeds the chain only
+     * when no flag set it; the project's `lib` comes first either way
+     * (#3504). Walk the resolved chain directly so the output matches what
+     * the real toolchain would see byte-for-byte (same normalisation, same
+     * dedup, same trailing-slash rule). */
     if (tc.lib_dir_count == 0) {
         const char* env = getenv("AETHER_LIB_DIR");
         if (env && *env) {
@@ -13147,12 +13170,10 @@ static int cmd_lib_path(int argc, char** argv) {
      * `--lib` an empty chain. */
     find_and_chdir_to_aether_toml(NULL);
     if (ae_resolve_dependencies() < 0) return 1;
-    if (tc.lib_dir_count == 0) {
-        fputs("lib\n", stdout);
-        return 0;
-    }
-    for (int i = 0; i < tc.lib_dir_count; i++) {
-        fputs(tc.lib_dirs[i], stdout);
+    const char* chain[AETHER_LIB_DIRS_MAX + 1];
+    int nc = tc_lib_chain(chain);
+    for (int i = 0; i < nc; i++) {
+        fputs(chain[i], stdout);
         fputc('\n', stdout);
     }
     return 0;

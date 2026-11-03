@@ -49,7 +49,7 @@ typedef struct {
     // a single entry, `"lib"`, populated at registry init. Each entry
     // is a heap copy of any length (#2539); the count tracks how many
     // slots are live.
-    char* lib_dirs[AETHER_LIB_DIRS_MAX];
+    char* lib_dirs[AETHER_LIB_DIRS_MAX + 1];   /* lib/ first, then up to AETHER_LIB_DIRS_MAX more (#3504) */
     int  lib_dir_count;
 } ModuleRegistry;
 
