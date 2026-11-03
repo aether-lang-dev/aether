@@ -5,6 +5,7 @@
 #define AETHER_ACTOR_STATE_MACHINE_H
 
 #include <stdint.h>
+#include <stddef.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
@@ -33,10 +34,69 @@ typedef struct {
     struct {
         void* data;     // Owned data pointer
         int size;       // Data size
-        int owned;      // 1 if we own and must free, 0 if borrowed
+        int owned;      // The payload's kind: AETHER_MSG_ZC_BORROWED, _OWNED or AETHER_MSG_INLINE
     } zerocopy;
     void* _reply_slot;  // ActorReplySlot* for ask messages, NULL for fire-and-forget
 } Message;
+
+/* #3534: what zerocopy.owned says of a message's payload. BORROWED and
+ * OWNED are the zero-copy buffer's (OWNED: zerocopy.data is the message's
+ * to free). INLINE: a typed message's struct travels in the message itself,
+ * its bytes from payload_int up to zerocopy.owned, so payload_ptr,
+ * zerocopy.data and zerocopy.size are payload there and nothing may read
+ * them as pointers or free them. Only a payload that fits is carried so
+ * (aether_send_message.c), with no heap copy. */
+#define AETHER_MSG_ZC_BORROWED 0
+#define AETHER_MSG_ZC_OWNED    1
+#define AETHER_MSG_INLINE      2
+
+/* The bytes an inline payload has: 28 on 64-bit targets, 16 on 32-bit. */
+#define AETHER_MSG_INLINE_BYTES (offsetof(Message, zerocopy.owned) - offsetof(Message, payload_int))
+
+/* An inline payload copied out of its message, where every field of the
+ * struct it holds is aligned (the bytes in the message are only aligned
+ * as payload_int is). A struct that fits has no field aligned wider than
+ * these members (one with a 16-byte field is 32 bytes or more), so the copy
+ * is aligned for each of its fields, and an actor holding a copy keeps the
+ * alignment it had. */
+typedef union {
+    long long ll;
+    double d;
+    void* p;
+    unsigned char bytes[AETHER_MSG_INLINE_BYTES];
+} AetherMsgInline;
+
+static inline int aether_message_is_inline(const Message* msg) {
+    return msg->zerocopy.owned == AETHER_MSG_INLINE;
+}
+
+/* The payload bytes of an inline message, in the message. */
+static inline void* aether_message_inline_bytes(Message* msg) {
+    return (void*)&msg->payload_int;
+}
+
+/* #3534: a typed message's payload, as C code that takes messages from a
+ * mailbox itself reads it (a generated actor's step uses the actor's own
+ * copy, aether_message_take_payload): an inline one in the message, which
+ * holds a struct whose fields are no wider than a pointer at their natural
+ * place; a heap one where payload_ptr points; NULL for none. */
+static inline void* aether_message_payload(Message* msg) {
+    return aether_message_is_inline(msg) ? aether_message_inline_bytes(msg) : msg->payload_ptr;
+}
+
+/* #3534: the payload's storage given back once its fields are released or
+ * taken: a heap payload freed through the runtime that allocated it, an
+ * inline one left with nothing to read. */
+void aether_free_message(void* msg_data);
+static inline void aether_message_free_payload(Message* msg) {
+    if (aether_message_is_inline(msg)) {
+        memset(aether_message_inline_bytes(msg), 0, AETHER_MSG_INLINE_BYTES);
+        msg->zerocopy.owned = AETHER_MSG_ZC_BORROWED;
+        return;
+    }
+    if (msg->payload_ptr) aether_free_message(msg->payload_ptr);
+    msg->payload_ptr = NULL;
+}
 
 // Ring buffer mailbox for actors (power-of-2 for fast masking)
 // 32 slots: large enough for typical burst patterns (skynet parents see ≤10
@@ -162,7 +222,7 @@ static inline Message message_create_zerocopy(int type, int sender_id, void* dat
     msg.sender_id = sender_id;
     msg.zerocopy.data = data;
     msg.zerocopy.size = size;
-    msg.zerocopy.owned = 1;
+    msg.zerocopy.owned = AETHER_MSG_ZC_OWNED;
     return msg;
 }
 
@@ -176,19 +236,23 @@ static inline Message message_create_simple(int type, int sender_id, intptr_t pa
 }
 
 static inline void message_free(Message* msg) {
-    if (msg->zerocopy.owned && msg->zerocopy.data) {
+    if (msg->zerocopy.owned == AETHER_MSG_ZC_OWNED && msg->zerocopy.data) {
         free(msg->zerocopy.data);
         msg->zerocopy.data = NULL;
         msg->zerocopy.size = 0;
-        msg->zerocopy.owned = 0;
+        msg->zerocopy.owned = AETHER_MSG_ZC_BORROWED;
     }
 }
 
 static inline void message_transfer(Message* dest, Message* src) {
     *dest = *src;
-    if (src->zerocopy.owned) {
-        src->zerocopy.owned = 0;  // Transfer ownership
+    if (src->zerocopy.owned == AETHER_MSG_ZC_OWNED) {
+        src->zerocopy.owned = AETHER_MSG_ZC_BORROWED;  // Transfer ownership
         src->zerocopy.data = NULL;
+    } else if (src->zerocopy.owned == AETHER_MSG_INLINE) {
+        /* #3534: the payload's bytes moved with the copy; the source keeps
+         * none of them, so none is read as a pointer there. */
+        aether_message_free_payload(src);
     }
 }
 

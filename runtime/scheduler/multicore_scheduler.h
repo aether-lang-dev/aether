@@ -160,6 +160,13 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_flag step_lock; \
     /* AETHER_EXIT_* bits (#2974). In the padding after step_lock. */ \
     _Atomic(unsigned char) exit_flags; \
+    /* #3534: 1 while step_payload is the actor's own copy of a payload \
+     * that travelled in its message (a generated actor's \
+     * _aether_step_inline, at the end of its struct), which the step \
+     * barrier reads but never frees; 0 while it is a heap copy. Written \
+     * and read only by the thread stepping the actor. In the padding after \
+     * exit_flags, so no field moves for it. */ \
+    unsigned char step_inline; \
     /* The mailbox bound (#2974, `@mailbox(bound: N)`): at most this many \
      * messages accepted for the actor and not yet taken by its step, 0 for \
      * none. Set by the generated spawn; read by every send. In the padding \
@@ -172,11 +179,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * end of each message's handling arm it, a message and the firing \
      * disarm it (the generated step function does all three). */ \
     uint64_t last_activity_ns; \
-    /* The heap payload of the message a handler is running on, and its \
-     * type: the generated step sets them around the handler call and \
-     * clears the payload after it. A panic out of the handler skips the \
-     * release that follows, so the step barrier drops the message (#3142). \
-     * NULL between handlers. */ \
+    /* The payload of the message a handler is running on (its heap copy, \
+     * or the actor's copy of one that travelled in the message, as \
+     * step_inline says), and its type: the generated step sets them around \
+     * the handler call and clears the payload after it. A panic out of the \
+     * handler skips the release that follows, so the step barrier drops \
+     * the message (#3142). NULL between handlers. */ \
     void* step_payload; \
     int step_type; \
     /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
@@ -256,6 +264,30 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS
 } ActorBase;
+
+/* #3534: the payload the handler of `msg` runs on, in a generated actor's
+ * step: one that travelled in the message copied to `copy` (the actor's
+ * _aether_step_inline, where its fields are aligned and a panic that
+ * unwinds the step still finds it), a heap one where payload_ptr points,
+ * NULL for none. step_inline says which, for the step barrier. One copy
+ * per actor is enough: an actor is never stepped inside its own step
+ * (#3391). */
+static inline void* aether_message_take_payload(ActorBase* actor, Message* msg,
+                                                AetherMsgInline* copy) {
+    if (aether_message_is_inline(msg)) {
+        memcpy(copy->bytes, aether_message_inline_bytes(msg), AETHER_MSG_INLINE_BYTES);
+        actor->step_inline = 1;
+        return copy->bytes;
+    }
+    actor->step_inline = 0;
+    return msg->payload_ptr;
+}
+
+/* #3534: once the handler is done and the message's fields released, a heap
+ * payload is freed; the actor's copy of an inline one is not. */
+static inline void aether_message_payload_done(void* payload, AetherMsgInline* copy) {
+    if (payload && payload != (void*)copy->bytes) aether_free_message(payload);
+}
 
 struct AetherWatch;  /* runtime/actors/aether_supervision.c */
 

@@ -35,7 +35,7 @@ void bench_actor_step(BenchActor* self) {
     Message msg;
     if (mailbox_receive(&self->mailbox, &msg)) {
         self->received_count++;
-        if (msg.zerocopy.owned && msg.zerocopy.data) {
+        if (msg.zerocopy.owned == AETHER_MSG_ZC_OWNED && msg.zerocopy.data) {
             self->total_bytes += msg.zerocopy.size;
             message_free(&msg);
         }

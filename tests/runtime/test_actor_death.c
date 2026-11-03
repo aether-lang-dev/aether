@@ -98,7 +98,7 @@ static void death_step(DeathActor* self) {
     aether_reply_slot_set(msg._reply_slot);
     if (msg.type == AETHER_MSG_DOWN) {
         if (aether_down_accept((ActorBase*)self, &msg)) {
-            AetherDownMsg* d = (AetherDownMsg*)msg.payload_ptr;
+            AetherDownMsg* d = (AetherDownMsg*)aether_message_payload(&msg);
             const char* text = aether_panic_reason_text(d->reason);
             strncpy(self->down_reason, text, sizeof self->down_reason - 1);
             atomic_fetch_add(&self->downs, 1);
@@ -106,8 +106,8 @@ static void death_step(DeathActor* self) {
         aether_message_drop((ActorBase*)self, &msg);
         return;
     }
-    DeathMsg m = *(DeathMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    DeathMsg m = *(DeathMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
     if (self->panic_first) aether_panic("first message");
     switch (m.type) {

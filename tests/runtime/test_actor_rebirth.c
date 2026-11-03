@@ -79,8 +79,8 @@ static void rb_target_step(RbTarget* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    RbMsg m = *(RbMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    RbMsg m = *(RbMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
     if (!self->ready) atomic_fetch_add(&g_not_ready, 1);
     int inc = atomic_load(&self->incarnation);
     if (inc > 0 && inc < RB_MAX_INC && m.seq <= g_snapshot[inc][m.sender])
@@ -147,8 +147,8 @@ static void rb_actor_step(RbActor* self) {
         if (ok) rb_try_restart(self);
         return;
     }
-    RbMsg m = *(RbMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    RbMsg m = *(RbMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
     if (m.type == RB_WATCH) {
         aether_actor_monitor(self->target);
     } else if (m.type == RB_RETRY) {
@@ -333,7 +333,7 @@ typedef struct {
 static void rb_blocker_step(RbBlocker* b) {
     Message msg;
     if (mailbox_receive(&b->mailbox, &msg)) {
-        aether_free_message(msg.payload_ptr);
+        aether_message_free_payload(&msg);
         atomic_store(&b->in_step, 1);
         for (int w = 0; w < 10000 && !atomic_load(&b->release); w++) rb_sleep_ms(1);
     }

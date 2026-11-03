@@ -24,10 +24,10 @@ static void worker_step(void* self) {
     Message msg;
     if (!mailbox_receive(&actor->mailbox, &msg)) return;
     int fd = -1;
-    if (msg.type == MSG_HTTP_CONNECTION && msg.payload_ptr) {
-        fd = ((HttpConnectionMessage*)msg.payload_ptr)->client_fd;
+    if (msg.type == MSG_HTTP_CONNECTION && aether_message_payload(&msg)) {
+        fd = ((HttpConnectionMessage*)aether_message_payload(&msg))->client_fd;
     }
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     if (fd >= 0) http_server_drain_connection(g_server, fd);
 }
 

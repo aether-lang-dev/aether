@@ -48,8 +48,8 @@ static void order_step(OrderActor* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    OrderMsg m = *(OrderMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    OrderMsg m = *(OrderMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
     if (m.type == ORDER_BLOCK) {
         order_sleep_ms(m.value);
     } else if (m.type == ORDER_EMIT) {

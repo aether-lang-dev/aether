@@ -89,8 +89,8 @@ static void bd_step(BdActor* self) {
     // What the generated step of a bounded actor does as it takes one.
     if (atomic_load(&self->mailbox_bound)) aether_mailbox_took((ActorBase*)self, msg.type);
     aether_reply_slot_set(msg._reply_slot);
-    BdMsg m = *(BdMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    BdMsg m = *(BdMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
 
     if (m.type == BD_NUMBER) {
         if (atomic_load(&self->got) == 0) {

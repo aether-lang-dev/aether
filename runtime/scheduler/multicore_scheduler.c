@@ -3277,7 +3277,7 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms) {
         msg.payload_ptr = payload;
         msg.zerocopy.data = NULL;
         msg.zerocopy.size = 0;
-        msg.zerocopy.owned = 0;
+        msg.zerocopy.owned = AETHER_MSG_ZC_BORROWED;
         msg._reply_slot = NULL;
 
         // One-shot: the backend auto-disables the fd after firing.

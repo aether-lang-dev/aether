@@ -31,7 +31,7 @@ static void wi_step(WiActor* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
     aether_panic("the actor ends");
 }

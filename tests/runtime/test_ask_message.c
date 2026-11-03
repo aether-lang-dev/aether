@@ -61,10 +61,18 @@ typedef struct {
     atomic_int done;
 } AmActor;
 
+/* Larger than the bytes a message carries its payload in (#3534), so the
+ * ask copies it to the heap, where the copy can be refused. */
+typedef struct {
+    int type;
+    int value;
+    char pad[AETHER_MSG_INLINE_BYTES];
+} AmBigMsg;
+
 static AmActor* g_failing;
 static void ask_refused(void) {
     AmActor* self = g_failing;
-    AmMsg q = { 1, 0 };
+    AmBigMsg q = { 1, 0, { 0 } };
     int status = 0;
     aether_test_fail_alloc_after(1);
     void* r = scheduler_ask_message_status(self->ask, &q, sizeof q, 3000, &status);
@@ -80,7 +88,7 @@ static void am_step(AmActor* self) {
     }
     aether_reply_slot_set(msg._reply_slot);
     if (msg._reply_slot) atomic_fetch_add(&self->slotted, 1);
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     int first = atomic_fetch_add(&self->got, 1) == 0;
 
     if (self->ask && first) {

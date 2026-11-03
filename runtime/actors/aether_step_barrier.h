@@ -296,7 +296,15 @@ static inline void aether_step_barrier(ActorBase* actor,
     Message held = {0};
     if (actor->step_payload) {
         held.type = actor->step_type;
-        held.payload_ptr = actor->step_payload;
+        if (actor->step_inline) {
+            /* #3534: the actor's own copy of a payload that travelled in
+             * its message: copied back into one, never freed. */
+            memcpy(aether_message_inline_bytes(&held), actor->step_payload,
+                   AETHER_MSG_INLINE_BYTES);
+            held.zerocopy.owned = AETHER_MSG_INLINE;
+        } else {
+            held.payload_ptr = actor->step_payload;
+        }
         actor->step_payload = NULL;
     }
     void* unanswered = g_current_reply_slot;
@@ -314,7 +322,7 @@ static inline void aether_step_barrier(ActorBase* actor,
      * run, so what the message owns and its payload go here, as a dropped
      * message's do; a drop function that panics is reported as the handler's
      * panic is. */
-    if (held.payload_ptr) {
+    if (held.payload_ptr || aether_message_is_inline(&held)) {
         const char* why = NULL;
         void (*why_release)(const void*) = NULL;
         if (aether_message_drop_contained(actor, &held, &why, &why_release)) {

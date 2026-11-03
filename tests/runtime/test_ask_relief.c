@@ -62,7 +62,7 @@ static void relief_step(ReliefActor* self) {
         return;
     }
     aether_reply_slot_set(msg._reply_slot);
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
 
     int value = 42;
@@ -275,8 +275,8 @@ static void ov_step(OvActor* self) {
         return;
     }
     aether_reply_slot_set(msg._reply_slot);
-    ReliefMsg m = *(ReliefMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    ReliefMsg m = *(ReliefMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
 
     if (m.type == OV_NUMBER) {
         if (atomic_load(&self->got) == 0) {

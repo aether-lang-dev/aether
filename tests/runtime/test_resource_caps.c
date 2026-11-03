@@ -440,7 +440,9 @@ static int g_released_type = -1;
 static void note_release(int type, void* payload) { (void)payload; g_released_type = type; }
 static ActorBase* g_oom_actor;
 static void send_refused(void) {
-    struct { int type; int value; } m = { 42, 7 };
+    /* Larger than the bytes a message carries its payload in (#3534), so
+     * the send copies it to the heap, where the copy can be refused. */
+    struct { int type; int value; char pad[AETHER_MSG_INLINE_BYTES]; } m = { 42, 7, { 0 } };
     aether_test_fail_alloc_after(1);
     aether_send_message(g_oom_actor, &m, sizeof(m));
 }

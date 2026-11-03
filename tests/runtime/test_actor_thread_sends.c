@@ -42,7 +42,7 @@ static void athread_step(AthreadActor* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
     for (int k = 0; k < 2; k++) {
         if (!self->to[k]) continue;
