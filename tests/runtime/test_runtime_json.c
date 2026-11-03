@@ -1,6 +1,9 @@
 #include "test_harness.h"
 #include "../../std/json/aether_json.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_resource_caps.h"
+#include <stdlib.h>
+#include <string.h>
 
 TEST_CATEGORY(json_parse_null, TEST_CATEGORY_STDLIB) {
     JsonValue* value = json_parse_raw("null");
@@ -162,4 +165,114 @@ TEST_CATEGORY(json_set_into_parsed_inner_containers, TEST_CATEGORY_STDLIB) {
 
     json_free(fields);   // borrowed: frees nothing
     json_free(root);
+}
+
+// An arena's first chunk is sized to what it will hold: a built container's
+// is small (256 bytes of payload), a parsed document's is about 4 bytes per
+// input byte, clamped to 256 B..16 KB. The arena's chunks are cap-aware
+// allocations, so the accounted bytes (aether_caps_used_bytes) before and
+// after read the first chunk directly, without timing or RSS. The bounds
+// leave room for the chunk and arena headers and the root value, and are
+// far below the 16 KB a built container used to take.
+#define ARENA_HDR_SLACK 192u
+
+static uint64_t json_accounted_for_parse(const char* text, JsonValue** out) {
+    uint64_t before = aether_caps_used_bytes();
+    *out = json_parse_raw(text);
+    return aether_caps_used_bytes() - before;
+}
+
+TEST_CATEGORY(json_built_container_first_chunk_is_small, TEST_CATEGORY_STDLIB) {
+    enum { N = 200 };
+    JsonValue* objs[N];
+    JsonValue* arrs[N];
+
+    uint64_t before = aether_caps_used_bytes();
+    for (int i = 0; i < N; i++) {
+        objs[i] = json_create_object();
+        ASSERT_NOT_NULL(objs[i]);
+        ASSERT_EQ(1, json_object_set_raw(objs[i], "k", json_create_int(i)));
+        arrs[i] = json_create_array();
+        ASSERT_NOT_NULL(arrs[i]);
+        ASSERT_EQ(1, json_array_add_raw(arrs[i], json_create_int(i)));
+    }
+    uint64_t total = aether_caps_used_bytes() - before;
+
+    // Each small container holds its first chunk (256 B) plus headers and
+    // one member array: well under 1 KB. With a 16 KB first chunk the 400
+    // containers took over 6 MB; now they must fit in 400 KB.
+    ASSERT_TRUE(total >= (uint64_t)(2 * N) * 256u);
+    ASSERT_TRUE(total < (uint64_t)(2 * N) * 1024u);
+
+    for (int i = 0; i < N; i++) {
+        ASSERT_EQ(i, json_get_int(json_object_get_raw(objs[i], "k")));
+        ASSERT_EQ(i, json_get_int(json_array_get_raw(arrs[i], 0)));
+        json_free(objs[i]);
+        json_free(arrs[i]);
+    }
+}
+
+TEST_CATEGORY(json_built_container_arena_still_grows, TEST_CATEGORY_STDLIB) {
+    // A small first chunk must not cap the container: members past it
+    // double the arena as before.
+    JsonValue* obj = json_create_object();
+    char key[32];
+    for (int i = 0; i < 500; i++) {
+        snprintf(key, sizeof key, "key_%d", i);
+        ASSERT_EQ(1, json_object_set_raw(obj, key, json_create_string("a value of some length")));
+    }
+    for (int i = 0; i < 500; i++) {
+        snprintf(key, sizeof key, "key_%d", i);
+        JsonValue* v = json_object_get_raw(obj, key);
+        ASSERT_NOT_NULL(v);
+        ASSERT_STREQ("a value of some length", json_get_string_raw(v));
+    }
+    json_free(obj);
+}
+
+TEST_CATEGORY(json_parsed_document_first_chunk_scales_with_input, TEST_CATEGORY_STDLIB) {
+    JsonValue* v = NULL;
+    uint64_t d;
+
+    // A tiny reply takes the 256-byte minimum, not 16 KB.
+    d = json_accounted_for_parse("42", &v);
+    ASSERT_NOT_NULL(v);
+    ASSERT_TRUE(d >= 256u);
+    ASSERT_TRUE(d < 256u + ARENA_HDR_SLACK);
+    json_free(v);
+
+    d = json_accounted_for_parse("{\"ok\":true}", &v);
+    ASSERT_NOT_NULL(v);
+    ASSERT_TRUE(d >= 256u);
+    ASSERT_TRUE(d < 256u + ARENA_HDR_SLACK);
+    json_free(v);
+
+    // A 1000-byte document (one long string, so the arena holds it all in
+    // the first chunk) gets about 4 bytes per input byte.
+    size_t n = 1000;
+    char* doc = (char*)malloc(n + 1);
+    memset(doc, 'x', n);
+    doc[0] = '"';
+    doc[n - 1] = '"';
+    doc[n] = 0;
+    d = json_accounted_for_parse(doc, &v);
+    ASSERT_NOT_NULL(v);
+    ASSERT_TRUE(d >= 4u * n);
+    ASSERT_TRUE(d < 4u * n + ARENA_HDR_SLACK);
+    json_free(v);
+    free(doc);
+
+    // Past 4 KB of input the first chunk is clamped at 16 KB.
+    n = 8000;
+    doc = (char*)malloc(n + 1);
+    memset(doc, 'x', n);
+    doc[0] = '"';
+    doc[n - 1] = '"';
+    doc[n] = 0;
+    d = json_accounted_for_parse(doc, &v);
+    ASSERT_NOT_NULL(v);
+    ASSERT_TRUE(d >= 16u * 1024u);
+    ASSERT_TRUE(d < 16u * 1024u + ARENA_HDR_SLACK);
+    json_free(v);
+    free(doc);
 }
