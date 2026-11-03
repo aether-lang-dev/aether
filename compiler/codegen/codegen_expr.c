@@ -484,16 +484,13 @@ static int reachable_place(CodeGenerator* gen, ASTNode* e) {
  * or actor state of its name in scope)? Not in a file-scope initializer,
  * where nothing runs yet. */
 int module_string_var_read(CodeGenerator* gen, const ASTNode* e) {
-    if (!e || e->type != AST_IDENTIFIER || !e->value || gen->in_const_init) return 0;
-    if (e->node_type && e->node_type->kind != TYPE_STRING && e->node_type->kind != TYPE_UNKNOWN)
-        return 0;
-    if (is_actor_state_var(gen, e->value) || is_var_declared(gen, e->value) ||
-        !is_module_global_var(gen, e->value))
-        return 0;
-    /* A read the checker left untyped (a contract's) is the var's type. */
-    if (e->node_type && e->node_type->kind == TYPE_STRING) return 1;
-    Type* gt = module_global_decl_type(gen, e->value);
-    return gt && gt->kind == TYPE_STRING;
+    /* By the var's declaration (is_module_string_var), not by how the read
+     * was typed: a `ptr` var holding a string reads as a string where one
+     * is wanted, and is the pointer it is (R4), with no lock; a contract's
+     * read is left untyped. */
+    return e && e->type == AST_IDENTIFIER && e->value && !gen->in_const_init &&
+           !is_actor_state_var(gen, e->value) && !is_var_declared(gen, e->value) &&
+           is_module_string_var(gen, e->value);
 }
 
 /* #3522: a read of the module-level string `var` `name`. Any thread may
@@ -10651,12 +10648,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          expr->children[0]->node_type->kind == TYPE_STRING) {
                     /* R3: a module `var` owns its string as a local does:
                      * freed, it gives its reference back and is left empty,
-                     * so the next store finds nothing to release. The empty
-                     * value is stored as any other is, under the var's lock
-                     * (#3522). */
-                    fprintf(gen->output, "(");
-                    emit_module_string_store(gen, expr->children[0]->value, NULL, NULL);
-                    fprintf(gen->output, ", (void)0)");
+                     * so the next store finds nothing to release. A `string`
+                     * var's empty value is stored as any other is, under its
+                     * lock (#3522); a `ptr` var holding a string has none. */
+                    const char* g = expr->children[0]->value;
+                    if (is_module_string_var(gen, g)) {
+                        fprintf(gen->output, "(");
+                        emit_module_string_store(gen, g, NULL, NULL);
+                        fprintf(gen->output, ", (void)0)");
+                    } else {
+                        fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)",
+                                g, g);
+                    }
                 }
                 else if ((strcmp(func_name, "release") == 0 || strcmp(func_name, "free") == 0) &&
                          expr->child_count == 1) {

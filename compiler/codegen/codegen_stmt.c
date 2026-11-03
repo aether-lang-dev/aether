@@ -7460,7 +7460,7 @@ static const char* opt_slot_text(const char* dst_c, Type* pt, int tmp_id, int j,
 }
 
 /* #2796: the type of the module-level `var` `name`, or NULL. */
-Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
+static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
     for (int i = 0; gen->program && name && i < gen->program->child_count; i++) {
         ASTNode* c = gen->program->children[i];
         if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
@@ -7550,13 +7550,21 @@ static void emit_destructure_global_store(CodeGenerator* gen, const char* name, 
                 name, tmp_id, j, owned ? 1 : 0);
         return;
     }
-    if (pt && pt->kind == TYPE_STRING) {
+    if (pt && pt->kind == TYPE_STRING && is_module_string_var(gen, name)) {
         /* As `g = v` stores it: taken, then swapped in under the var's
          * lock and the old one released (#3522). */
         emit_module_string_store(gen, name, NULL,
                                  cg_internf("aether_uniform_heap_str(_tup%d._%d, %d)", tmp_id, j,
                                             owned ? 1 : 0));
         fprintf(gen->output, ";\n");
+        return;
+    }
+    if (pt && pt->kind == TYPE_STRING) {
+        /* A var of no declared type of its own: taken, published, the old
+         * one released. */
+        fprintf(gen->output, "{ const char* _ae_old = %s; %s = aether_uniform_heap_str(_tup%d._%d, %d); "
+                "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
+                name, name, tmp_id, j, owned ? 1 : 0, name);
         return;
     }
     if (pt && own_type_owns(gen, pt) && pt->kind != TYPE_ARRAY) {
@@ -10185,10 +10193,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         !(gt && gt->kind == TYPE_PTR)) {
                         /* R3: a module `var` owns the string it holds, as a
                          * local does: the store takes the new value and
-                         * releases the one it replaces, under the var's lock
-                         * (#3522, emit_module_string_store). */
-                        emit_module_string_store(gen, stmt->value, grhs, NULL);
-                        fprintf(gen->output, ";\n");
+                         * releases the one it replaces, under a `string`
+                         * var's lock (#3522, emit_module_string_store). */
+                        if (is_module_string_var(gen, stmt->value)) {
+                            emit_module_string_store(gen, stmt->value, grhs, NULL);
+                            fprintf(gen->output, ";\n");
+                        } else {
+                            fprintf(gen->output, "{ const char* _ae_new = ");
+                            emit_string_take(gen, grhs, stmt->value);
+                            fprintf(gen->output, "; const char* _ae_old = %s; %s = _ae_new; "
+                                    "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
+                                    stmt->value, stmt->value, stmt->value);
+                        }
                         emit_global_rebind_trailing(gen, stmt);
                         break;
                     }

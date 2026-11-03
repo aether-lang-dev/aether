@@ -614,6 +614,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->declared_var_count = 0;
     gen->module_global_vars = NULL;
     gen->module_global_var_is_program = NULL;
+    gen->module_global_var_is_string = NULL;
     gen->module_global_var_count = 0;
     gen->current_origin_module = NULL;
     gen->generating_lvalue = 0;  // Not generating lvalue by default
@@ -1006,6 +1007,7 @@ void code_generator_release(CodeGenerator* gen) {
             }
             free(gen->module_global_vars);
             free(gen->module_global_var_is_program);
+            free(gen->module_global_var_is_string);
         }
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
@@ -1052,9 +1054,10 @@ int is_var_declared(CodeGenerator* gen, const char* var_name) {
     return strmap_get(&gen->declared_index, var_name) != NULL;
 }
 
-// #701: is `name` a module-level `var` global (a file-scope static)?
-int is_module_global_var(CodeGenerator* gen, const char* name) {
-    if (!name) return 0;
+// #701: is `name` a module-level `var` global (a file-scope static)? Its
+// index in the registry, or -1.
+static int module_global_var_index(CodeGenerator* gen, const char* name) {
+    if (!name) return -1;
     for (int i = 0; i < gen->module_global_var_count; i++) {
         if (strcmp(gen->module_global_vars[i], name) == 0) {
             /* The program's own globals are not a module's: in a function
@@ -1065,11 +1068,23 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
              * asks/aether-program-global-leaks-into-module-scope.md). */
             if (gen->module_global_var_is_program &&
                 gen->module_global_var_is_program[i] && gen->current_origin_module)
-                return 0;
-            return 1;
+                return -1;
+            return i;
         }
     }
-    return 0;
+    return -1;
+}
+
+int is_module_global_var(CodeGenerator* gen, const char* name) {
+    return module_global_var_index(gen, name) >= 0;
+}
+
+/* #3522: is `name` a module-level `var` declared `string`, the kind with a
+ * lock of its own? By its declaration, not by how a read of it is typed: a
+ * `ptr` var holding a string is the pointer it is (R4). */
+int is_module_string_var(CodeGenerator* gen, const char* name) {
+    int i = module_global_var_index(gen, name);
+    return i >= 0 && gen->module_global_var_is_string && gen->module_global_var_is_string[i];
 }
 
 // Is `name` a state field of the actor being generated? A bare `name` in
@@ -1084,7 +1099,8 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 }
 
 // #701: record a module-level `var` global name (deduped).
-void register_module_global_var(CodeGenerator* gen, const char* name, int is_program) {
+void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
+                                int is_string) {
     if (!name) return;
     for (int i = 0; i < gen->module_global_var_count; i++)
         if (strcmp(gen->module_global_vars[i], name) == 0) return;
@@ -1096,7 +1112,12 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
                                    (size_t)gen->module_global_var_count + 1);
     if (!flags) return;
     gen->module_global_var_is_program = flags;
+    unsigned char* strs = realloc(gen->module_global_var_is_string,
+                                  (size_t)gen->module_global_var_count + 1);
+    if (!strs) return;
+    gen->module_global_var_is_string = strs;
     flags[gen->module_global_var_count] = is_program ? 1 : 0;
+    strs[gen->module_global_var_count] = is_string ? 1 : 0;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
 }
 
@@ -10697,7 +10718,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // to a write to this static rather than a shadowing local.
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
-                register_module_global_var(gen, cd->value, cd->origin_module == NULL);
+                register_module_global_var(gen, cd->value, cd->origin_module == NULL,
+                                           cd->node_type && cd->node_type->kind == TYPE_STRING);
             } else if (fn_const_decl(cd)) {
                 /* #2648: emitted with the module vars, after the function
                  * prototypes and adapters (emit_module_global_vars). */

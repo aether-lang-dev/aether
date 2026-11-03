@@ -155,7 +155,9 @@ void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
-void register_module_global_var(CodeGenerator* gen, const char* name, int is_program);
+void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
+                                int is_string);
+int is_module_string_var(CodeGenerator* gen, const char* name);   /* #3522 */
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
@@ -486,7 +488,6 @@ const char* module_string_var_lock(const char* name);
 void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
                               const char* taken);
 int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
-Type* module_global_decl_type(CodeGenerator* gen, const char* name);   /* #2796 */
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
 /* #3527: the conversion an interpolation, print or println writes a value
  * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
