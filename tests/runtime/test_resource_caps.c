@@ -383,6 +383,32 @@ static int run_in_execution(void (*body)(void)) {
     return aether_last_outcome();
 }
 
+/* #3528: an ACTIVE account given INT64_MAX ms, "no deadline", does not
+ * stop the execution it times. Its budget saturates at INT64_MAX, and the
+ * deadline worked out from it added that to the time the thread began
+ * timing it, which wrapped to a time in the past: the work stopped at once
+ * (AETHER_DEADLINE), while the same account counting ELAPSED time ran. */
+static void spend_nothing(void) {}
+
+TEST_CATEGORY(caps_active_budget_past_the_end_of_time, TEST_CATEGORY_RUNTIME) {
+    caps_reset();
+    AetherExecLimits lim = { 0, INT64_MAX, AETHER_DEADLINE_ACTIVE, NULL };
+    AetherExecAccount* a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_EQ(0, aether_exec_use(a, NULL));
+    ASSERT_EQ(AETHER_OK, run_in_execution(spend_nothing));
+    aether_exec_use(NULL, NULL);
+    lim.deadline_counts = AETHER_DEADLINE_ELAPSED;
+    AetherExecAccount* e = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(e);
+    ASSERT_EQ(0, aether_exec_use(e, NULL));
+    ASSERT_EQ(AETHER_OK, run_in_execution(spend_nothing));
+    aether_exec_use(NULL, NULL);
+    aether_exec_account_free(a);
+    aether_exec_account_free(e);
+    caps_reset();
+}
+
 static void* g_alloc_result;
 static void alloc_past_cap(void) {
     aether_caps_set_memory_cap(aether_caps_used_bytes() + 16);

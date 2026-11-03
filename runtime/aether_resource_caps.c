@@ -708,9 +708,15 @@ static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, i
                 since = now;
             }
             /* What is left of it: its budget, less what it spent before and
-             * since this thread began timing it. */
-            if (x->active_budget_ns)
-                own = since + x->active_budget_ns - atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+             * since this thread began timing it. Added to `since` held at
+             * INT64_MAX: a budget of INT64_MAX (ms_to_ns of "no deadline")
+             * wrapped `since + budget` to a time in the past, and an ACTIVE
+             * account with no deadline stopped its work at once (#3528). */
+            if (x->active_budget_ns) {
+                int64_t left = x->active_budget_ns -
+                               atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+                own = (left > 0 && since > INT64_MAX - left) ? INT64_MAX : since + left;
+            }
         } else {
             own = x->deadline_at_ns;
         }
