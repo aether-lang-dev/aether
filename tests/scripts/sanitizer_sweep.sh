@@ -52,7 +52,9 @@ case "$san" in
         hook="__ubsan_handle_"
         ;;
     asan)
-        flags="-fsanitize=address -fno-omit-frame-pointer"
+        # -g: a report names file and line; without it each frame is an
+        # address in the program, which groups nothing.
+        flags="-fsanitize=address -fno-omit-frame-pointer -g"
         name="ASan + LSan"
         hook="__asan_report_"
         ;;
