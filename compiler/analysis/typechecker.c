@@ -18866,6 +18866,25 @@ static int tc_const_prec(const char* op) {
     return 0;
 }
 
+/* The name an identifier in a constant expression was written as: a
+ * constant merged in from a module is `<ns>_<name>` in the program, written
+ * `name` in its own module and `ns.name` elsewhere (ast_source_name). */
+static void tc_const_spell_name(const ASTNode* e, char* at, size_t room) {
+    const char* name = e->value ? e->value : "?";
+    ASTNode* d = e->type == AST_IDENTIFIER ? tc_program_const(name) : NULL;
+    if (d && d->origin_module) {
+        char src[256];
+        const char* written = ast_source_name(d, src, sizeof(src));
+        const char* dot = strrchr(written, '.');
+        if (dot && g_tc_top && g_tc_top->origin_module &&
+            strcmp(g_tc_top->origin_module, d->origin_module) == 0)
+            written = dot + 1;
+        snprintf(at, room, "%s", written);
+        return;
+    }
+    snprintf(at, room, "%s", name);
+}
+
 static void tc_const_spell(const ASTNode* e, char* buf, size_t cap, int parent, int right) {
     size_t len = strlen(buf);
     if (!e || len + 1 >= cap) return;
@@ -18885,19 +18904,38 @@ static void tc_const_spell(const ASTNode* e, char* buf, size_t cap, int parent, 
         snprintf(at, room, "%s", e->value ? e->value : "");
         tc_const_spell(e->children[0], buf, cap, 7, 0);
     } else {
-        snprintf(at, room, "%s", e->value ? e->value : "?");
+        tc_const_spell_name(e, at, room);
     }
 }
 
-/* #3524: an integer `/` or `%` the compiler computes, both operands
- * constant, whose divisor is 0: it has no value, and C refuses it in a
- * constant's initializer or folds it to anything. Refused here, naming
- * the expression; a division by zero at run time panics instead. Returns
- * 1 when it reported. */
+/* Is `target` in `n`'s subtree outside every function value (a closure, a
+ * quote), whose body is code, not the initializer itself? */
+static int tc_in_initializer(const ASTNode* n, const ASTNode* target) {
+    if (!n) return 0;
+    if (n == target) return 1;
+    if (ast_is_own_function(n)) return 0;
+    for (int i = 0; i < n->child_count; i++)
+        if (tc_in_initializer(n->children[i], target)) return 1;
+    return 0;
+}
+
+/* #3524: an integer `/` or `%` by zero in the initializer of a constant or
+ * a module `var`, both operands constant. That initializer is a C static's,
+ * which must be a constant expression, and a division by zero is none: C
+ * refused the program or folded it to anything. Refused here, naming the
+ * expression. Anywhere else such a division is code, which may be guarded
+ * or never run (`if D != 0 { ... 100 / D }`): as in Java, it is no
+ * constant expression, and it panics with division_by_zero if it runs.
+ * Returns 1 when it reported. */
 static int refuse_constant_division_by_zero(ASTNode* expr, SymbolTable* table) {
     if (!expr->value || (strcmp(expr->value, "/") != 0 && strcmp(expr->value, "%") != 0) ||
         expr->child_count != 2)
         return 0;
+    if (!g_tc_top || g_tc_top->type != AST_CONST_DECLARATION) return 0;
+    int in_init = 0;
+    for (int i = 0; i < g_tc_top->child_count && !in_init; i++)
+        in_init = tc_in_initializer(g_tc_top->children[i], expr);
+    if (!in_init) return 0;
     unsigned long long l, r;
     if (!tc_const_int(expr->children[0], table, &l, 0) ||
         !tc_const_int(expr->children[1], table, &r, 0) || r != 0)
@@ -18908,9 +18946,8 @@ static int refuse_constant_division_by_zero(ASTNode* expr, SymbolTable* table) {
     snprintf(msg, sizeof(msg), "%s by zero in the constant expression `%s`: it has no value",
              expr->value[0] == '/' ? "division" : "remainder", text);
     type_error_hint(msg,
-                    "the compiler computes a constant expression, so give it a divisor other "
-                    "than 0; a divisor known only at run time panics with division_by_zero "
-                    "when it is 0",
+                    "a constant's initializer is computed when the program is compiled, so "
+                    "give it a divisor other than 0",
                     expr->line, expr->column);
     return 1;
 }

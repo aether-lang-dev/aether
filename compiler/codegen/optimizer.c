@@ -132,8 +132,9 @@ static void report_const_overflow(ASTNode* node, const char* msg) {
 
 /* Fold `left op right` over two integer literals in the kind the runtime
  * would use: uint64 if either is, else long if either is, else int.
- * Returns NULL for a division by zero, which has no value: the checker
- * refuses one over constants before this runs (#3524). */
+ * Returns NULL for a division by zero, which has no value: it is left to
+ * the runtime, where it panics (#3524); in a constant's initializer the
+ * checker refused it before this runs. */
 static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right,
                                     LiteralKind lk, LiteralKind rk) {
     const char* op = node->value;
