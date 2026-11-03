@@ -42,7 +42,12 @@ set -u
 san=${SAN:-ubsan}
 case "$san" in
     ubsan)
-        flags="-fsanitize=${UBSAN_CHECKS:-undefined} -fno-sanitize-recover=${UBSAN_CHECKS:-undefined} -fno-omit-frame-pointer"
+        # The -fsanitize groups (the Makefile's UBSAN_CHECKS): gcc's
+        # `undefined` does not include float-cast-overflow, a float converted
+        # to an integer type it does not fit, which generated code saturates
+        # since #3524.
+        checks=${UBSAN_CHECKS:-undefined,float-cast-overflow}
+        flags="-fsanitize=$checks -fno-sanitize-recover=$checks -fno-omit-frame-pointer"
         name="UBSan"
         hook="__ubsan_handle_"
         ;;

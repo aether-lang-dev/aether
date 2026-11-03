@@ -1,0 +1,61 @@
+// Regression (#3524): the most negative value divided by -1 is itself, and
+// its remainder 0, for every signed width.
+//
+// `INT_MIN / -1` overflows, which C leaves undefined: x86 raised SIGFPE on
+// it, for `%` as well, though the remainder is 0. Java's rule now holds on
+// every target: the quotient wraps to the most negative value, as `-fwrapv`
+// already makes overflow wrap, and the remainder is 0. Checked for `int`
+// and `long`, through a variable divisor, a constant -1, and the compound
+// forms `/=` and `%=`.
+
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+div_int(a: int, b: int) -> int { return a / b }
+mod_int(a: int, b: int) -> int { return a % b }
+div_long(a: long, b: long) -> long { return a / b }
+mod_long(a: long, b: long) -> long { return a % b }
+
+main() {
+    // Read at run time, so no C compiler folds the divisions away.
+    int mn = string.to_int("-2147483648")!
+    long lmn = string.to_long("-9223372036854775808")!
+    m1 = string.to_int("-1")!
+    long lm1 = string.to_long("-1")!
+
+    check(div_int(mn, m1) == mn, "int: INT_MIN / -1")
+    check(mod_int(mn, m1) == 0, "int: INT_MIN % -1")
+    check(div_long(lmn, lm1) == lmn, "long: LONG_MIN / -1")
+    check(mod_long(lmn, lm1) == 0, "long: LONG_MIN % -1")
+
+    // A constant -1 divisor takes the same rule.
+    check(mn / -1 == mn, "int: INT_MIN / constant -1")
+    check(mn % -1 == 0, "int: INT_MIN % constant -1")
+    check(lmn / -1 == lmn, "long: LONG_MIN / constant -1")
+    check(lmn % -1 == 0, "long: LONG_MIN % constant -1")
+
+    // An int widened into a long division divides in 64 bits.
+    check(div_long(mn, lm1) == 2147483648, "int widened: INT_MIN / -1 as long")
+
+    int a = mn
+    a /= m1
+    check(a == mn, "int: /= -1")
+    a %= m1
+    check(a == 0, "int: %= -1")
+    long la = lmn
+    la /= lm1
+    check(la == lmn, "long: /= -1")
+
+    // Any other value divided by -1 is its negation.
+    check(div_int(5, m1) == -5 && mod_int(5, m1) == 0, "int: 5 / -1")
+    check(div_int(2147483647, m1) == -2147483647, "int: INT_MAX / -1")
+    println("int_min_div_minus_one: ok")
+}

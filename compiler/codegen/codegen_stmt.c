@@ -8116,6 +8116,8 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
                emit_int_ptr_bridged(gen, stmt->children[0],
                                     gen->current_func_return_type->kind)) {
         /* #2218: int <-> ptr return, cast emitted. */
+    } else if (emit_float_to_int(gen, stmt->children[0], gen->current_func_return_type)) {
+        /* #3524: a float returned as an integer saturates. */
     } else {
         generate_expression(gen, stmt->children[0]);
     }
@@ -10796,6 +10798,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 /* #2668: `a = b` likewise, and `b` keeps
                                  * releasing its own. */
                                 emit_closure_take(gen, stmt->children[0]);
+                            } else if (emit_float_to_int(gen, stmt->children[0], stmt->node_type)) {
+                                /* #3524: `int k = f` saturates, as `f as int`. */
                             } else {
                                 generate_expression(gen, stmt->children[0]);
                             }
@@ -11174,6 +11178,31 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_expression(gen, stmt->children[1]);
                     fprintf(gen->output, "));\n");
                     break;
+                }
+                /* #3524: `x /= y`, `x %= y`, `x <<= n` and `x >>= n` on an
+                 * integer are `x = x op y` with the operator's own rules.
+                 * The target is a name, an actor's state field or a cell,
+                 * so reading it twice reads one place. */
+                {
+                    char bop[4] = {0};
+                    size_t ol = strlen(op);
+                    if (ol >= 2 && ol <= 3 && op[ol - 1] == '=') memcpy(bop, op, ol - 1);
+                    if (bop[0] && int_edge_op_applies(gen, bop, stmt->node_type,
+                                                      stmt->children[1], NULL)) {
+                        fprintf(gen->output, "%s = ", target);
+                        emit_int_edge_op(gen, bop, NULL, target, stmt->node_type,
+                                         stmt->children[1], NULL, stmt);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
+                    /* A float into an integer target (`x *= 2.5`) saturates
+                     * as the conversion does. */
+                    if (bop[0] && !bop[1] &&
+                        emit_float_op_to_int(gen, target, bop[0], stmt->children[1],
+                                             stmt->node_type)) {
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
                 }
                 fprintf(gen->output, "%s %s ", target, op);
                 generate_expression(gen, stmt->children[1]);

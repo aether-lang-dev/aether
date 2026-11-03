@@ -5645,6 +5645,8 @@ void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* 
             fprintf(gen->output, "_aether_msg_str(");
             emit_message_field_init(gen, fdef, fi->children[0]);
             fprintf(gen->output, ", %d)", message_string_init_owned(gen, fi->children[0]));
+        } else if (emit_float_to_int(gen, fi->children[0], ft)) {
+            /* #3524: a float into an integer field saturates. */
         } else {
             emit_message_field_init(gen, fdef, fi->children[0]);
         }
@@ -7395,6 +7397,355 @@ static int is_literal_float_div_by_zero(const ASTNode* e) {
     return (lt && lt->kind == TYPE_FLOAT) || (rt && rt->kind == TYPE_FLOAT);
 }
 
+/* #3524: integer `/`, `%`, `<<` and `>>`, and a float converted to an
+ * integer type, follow Java's rules on every target, where C leaves them
+ * undefined (x86 traps on the first two, ARM64 gives 0):
+ *  - `x / 0` and `x % 0` panic with the category `division_by_zero`;
+ *  - the most negative value divided by -1 is itself, and its remainder 0;
+ *  - a shift count is masked to the width C shifts in (`& 31`, `& 63`),
+ *    and a left shift of a signed value runs in unsigned, so a bit shifted
+ *    into the sign is defined;
+ *  - a float converted to an integer saturates at the type's range, NaN 0.
+ * A constant operand that keeps C defined keeps C's own operator: a divisor
+ * other than 0 and -1, a count inside the width, a float inside the range.
+ * The helpers are in the prelude (emit_int_edge_helpers, codegen.c). */
+
+/* The width an integer operation runs in, as C's conversions give it. */
+typedef enum { AE_IW_NONE = 0, AE_IW_I32, AE_IW_U32, AE_IW_I64, AE_IW_U64 } AeIntWidth;
+
+static int ie_int_kind(const Type* t) {
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+        case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE: case TYPE_DURATION:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int ie_is_64(TypeKind k) {
+    return k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_DURATION;
+}
+
+/* The kind an operand computes in: its own, or a 64-bit result's when the
+ * operand is narrower (#697 widens it before the operation). */
+static TypeKind ie_effective(const Type* t, const Type* result) {
+    if (result && (result->kind == TYPE_INT64 || result->kind == TYPE_UINT64) &&
+        !ie_is_64(t->kind))
+        return result->kind;
+    return t->kind;
+}
+
+/* `/` and `%`: C's usual arithmetic conversions of both operands. */
+static AeIntWidth ie_arith_width(const Type* l, const Type* r, const Type* result) {
+    if (!ie_int_kind(l) || !ie_int_kind(r)) return AE_IW_NONE;
+    TypeKind a = ie_effective(l, result), b = ie_effective(r, result);
+    if (ie_is_64(a) || ie_is_64(b))
+        return (a == TYPE_UINT64 || b == TYPE_UINT64) ? AE_IW_U64 : AE_IW_I64;
+    return (a == TYPE_UINT32 || b == TYPE_UINT32) ? AE_IW_U32 : AE_IW_I32;
+}
+
+/* `<<` and `>>`: the promoted left operand. */
+static AeIntWidth ie_shift_width(const Type* l, const Type* r, const Type* result) {
+    if (!ie_int_kind(l) || !ie_int_kind(r)) return AE_IW_NONE;
+    TypeKind a = ie_effective(l, result);
+    if (a == TYPE_UINT64) return AE_IW_U64;
+    if (ie_is_64(a)) return AE_IW_I64;
+    return a == TYPE_UINT32 ? AE_IW_U32 : AE_IW_I32;
+}
+
+static const char* ie_c_type(AeIntWidth w) {
+    switch (w) {
+        case AE_IW_U32: return "uint32_t";
+        case AE_IW_I64: return "int64_t";
+        case AE_IW_U64: return "uint64_t";
+        default: return "int";
+    }
+}
+
+static const char* ie_suffix(AeIntWidth w) {
+    switch (w) {
+        case AE_IW_U32: return "u32";
+        case AE_IW_I64: return "i64";
+        case AE_IW_U64: return "u64";
+        default: return "i32";
+    }
+}
+
+static int ie_signed(AeIntWidth w) { return w == AE_IW_I32 || w == AE_IW_I64; }
+static int ie_bits(AeIntWidth w) { return (w == AE_IW_I64 || w == AE_IW_U64) ? 64 : 32; }
+
+/* An integer constant the compiler reads: a literal, negated or not, and in
+ * a file-scope constant's initializer, whose C must stay a constant
+ * expression, a constant it names. */
+static int ie_const_value(CodeGenerator* gen, const ASTNode* e, long long* out, int depth) {
+    if (!e || depth > 32) return 0;
+    if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1 &&
+        (strcmp(e->value, "-") == 0 || strcmp(e->value, "+") == 0)) {
+        long long v;
+        if (!ie_const_value(gen, e->children[0], &v, depth + 1)) return 0;
+        *out = e->value[0] == '-' ? (long long)(0ULL - (unsigned long long)v) : v;
+        return 1;
+    }
+    if (e->type == AST_LITERAL && e->value && ie_int_kind(e->node_type)) {
+        char digits[72];
+        size_t k = 0;
+        for (const char* p = e->value; *p && k + 1 < sizeof(digits); p++)
+            if (*p != '_') digits[k++] = *p;
+        digits[k] = '\0';
+        const char* s = digits;
+        int neg = 0;
+        if (*s == '-' || *s == '+') neg = *s++ == '-';
+        int base = 10;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+        if (!*s) return 0;
+        char* end = NULL;
+        errno = 0;
+        unsigned long long m = strtoull(s, &end, base);
+        while (end && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')) end++;
+        if (errno || !end || *end) return 0;
+        *out = (long long)(neg ? 0ULL - m : m);
+        return 1;
+    }
+    if (gen->in_const_init && e->type == AST_IDENTIFIER && e->value) {
+        ASTNode* cd = file_scope_value_const(gen->program, e->value);
+        if (cd && cd->child_count > 0) return ie_const_value(gen, cd->children[0], out, depth + 1);
+    }
+    return 0;
+}
+
+/* `v` read in width `w`, as C converts it there. */
+static long long ie_in_width(long long v, AeIntWidth w) {
+    switch (w) {
+        case AE_IW_I32: return (long long)(int)(unsigned int)(unsigned long long)v;
+        case AE_IW_U32: return (long long)(unsigned int)(unsigned long long)v;
+        default: return v;
+    }
+}
+
+static void ie_emit_operand(CodeGenerator* gen, ASTNode* n, const char* text) {
+    if (text) fputs(text, gen->output);
+    else generate_read(gen, n);
+}
+
+/* #3524: emits `l op r` for an integer `/`, `%`, `<<` or `>>` where C's own
+ * operator is not defined for every value, and returns 1. Returns 0 having
+ * emitted nothing where it is (a constant operand that keeps it so), or when
+ * the operands are no integers; the caller emits C's operator then. `l_text`
+ * is the left operand's C when it has no node (a compound assignment's
+ * target, read twice there as C's `x op= y` reads it). `result` is the
+ * operation's type, whose 64 bits widen a narrower operand (#697); NULL for
+ * a compound assignment, which C computes in its operands' own types. */
+/* What emit_int_edge_op makes of `l op r`: 0 when C's operator is left as
+ * it is, else 1, with the width, the constant divisor or count if there is
+ * one, and whether it is one. */
+static int int_edge_plan(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                         Type* result, AeIntWidth* w_out, long long* c_out, int* const_out) {
+    if (!op || !r) return 0;
+    int is_div = strcmp(op, "/") == 0, is_mod = strcmp(op, "%") == 0;
+    int is_shl = strcmp(op, "<<") == 0, is_shr = strcmp(op, ">>") == 0;
+    if (!is_div && !is_mod && !is_shl && !is_shr) return 0;
+    if (result && !ie_int_kind(result)) return 0;
+    Type* rt = r->node_type;
+    AeIntWidth w = (is_div || is_mod) ? ie_arith_width(lt, rt, result)
+                                      : ie_shift_width(lt, rt, result);
+    if (w == AE_IW_NONE) return 0;
+    long long c = 0;
+    int is_const = ie_const_value(gen, r, &c, 0);
+    if (is_div || is_mod) {
+        long long cv = ie_in_width(c, w);
+        int minus_one = ie_signed(w) && cv == -1;
+        if (is_const && cv != 0 && !minus_one) return 0;
+        /* A static's initializer calls nothing. -1 is the wrap, or 0; a
+         * zero, or a divisor no constant gives, is left to C's compiler,
+         * which folds it or refuses the division. */
+        if (gen->in_const_init && (!is_const || !minus_one)) return 0;
+    } else if (is_shr && is_const && c >= 0 && c < ie_bits(w)) {
+        /* A right shift by a count inside the width is C's own. */
+        return 0;
+    }
+    *w_out = w;
+    *c_out = c;
+    *const_out = is_const;
+    return 1;
+}
+
+int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                        Type* result) {
+    AeIntWidth w;
+    long long c;
+    int k;
+    return int_edge_plan(gen, op, lt, r, result, &w, &c, &k);
+}
+
+int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                     Type* lt, ASTNode* r, Type* result, const ASTNode* pos) {
+    AeIntWidth w = AE_IW_NONE;
+    long long c = 0;
+    int is_const = 0;
+    if (!int_edge_plan(gen, op, lt, r, result, &w, &c, &is_const)) return 0;
+    int is_div = strcmp(op, "/") == 0, is_mod = strcmp(op, "%") == 0;
+    int is_shl = strcmp(op, "<<") == 0;
+    const char* ct = ie_c_type(w);
+    FILE* o = gen->output;
+    if (is_div || is_mod) {
+        if (gen->in_const_init) {
+            if (is_mod) {
+                fprintf(o, "((%s)0)", ct);
+            } else {
+                fprintf(o, "((%s)(0%s - (%s)(", ct, ie_bits(w) == 64 ? "ULL" : "u",
+                        ie_bits(w) == 64 ? "uint64_t" : "unsigned int");
+                ie_emit_operand(gen, l, l_text);
+                fprintf(o, ")))");
+            }
+            return 1;
+        }
+        fprintf(o, "_ae_%s_%s(", is_div ? "div" : "mod", ie_suffix(w));
+        ie_emit_operand(gen, l, l_text);
+        fprintf(o, ", ");
+        generate_read(gen, r);
+        fprintf(o, ", \"division_by_zero: division by zero at \" ");
+        emit_slice_diag_file(gen, pos);
+        fprintf(o, " \":%d:%d\")", pos ? pos->line : 0, pos ? pos->column : 0);
+        return 1;
+    }
+    /* `((T)(((U)(l)) << n))` for a signed left shift, `(((T)(l)) op n)`
+     * otherwise; `n` is the count masked, or a constant one as it is. */
+    int bits = ie_bits(w);
+    int in_range = is_const && c >= 0 && c < bits;
+    int via_unsigned = is_shl && ie_signed(w);
+    if (via_unsigned)
+        fprintf(o, "((%s)(((%s)(", ct, bits == 64 ? "uint64_t" : "unsigned int");
+    else
+        fprintf(o, "(((%s)(", ct);
+    ie_emit_operand(gen, l, l_text);
+    fprintf(o, ")) %s ", is_shl ? "<<" : ">>");
+    if (in_range) {
+        generate_read(gen, r);
+    } else if (is_const) {
+        fprintf(o, "%lld", (long long)((unsigned long long)c & (unsigned long long)(bits - 1)));
+    } else {
+        fprintf(o, "((");
+        generate_read(gen, r);
+        fprintf(o, ") & %d)", bits - 1);
+    }
+    fprintf(o, via_unsigned ? "))" : ")");
+    return 1;
+}
+
+/* #3524: the suffix of the helper a float converted to integer type `t`
+ * saturates through, or NULL when `t` is no integer type. An `int8_t` or
+ * `int16_t` (an int's kind) saturates at its own width. */
+static const char* f2i_suffix(const Type* t) {
+    if (!t) return NULL;
+    if (t->c_alias && t->kind == TYPE_INT) {
+        if (strcmp(t->c_alias, "int8_t") == 0) return "i8";
+        if (strcmp(t->c_alias, "int16_t") == 0) return "i16";
+    }
+    switch (t->kind) {
+        case TYPE_INT: return "i32";
+        case TYPE_INT64: case TYPE_DURATION: return "i64";
+        case TYPE_UINT64: return "u64";
+        case TYPE_UINT32: return "u32";
+        case TYPE_UINT16: return "u16";
+        case TYPE_UINT8: case TYPE_BYTE: return "u8";
+        default: return NULL;
+    }
+}
+
+static int ie_float_kind(const Type* t) {
+    return t && (t->kind == TYPE_FLOAT || t->kind == TYPE_FLOAT32 || t->kind == TYPE_LONGDOUBLE);
+}
+
+/* A float constant the compiler reads: a literal, negated or not, and in a
+ * constant's initializer a constant it names. */
+static int f2i_const_value(CodeGenerator* gen, const ASTNode* e, double* out, int depth) {
+    if (!e || depth > 32) return 0;
+    if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1 &&
+        (strcmp(e->value, "-") == 0 || strcmp(e->value, "+") == 0)) {
+        if (!f2i_const_value(gen, e->children[0], out, depth + 1)) return 0;
+        if (e->value[0] == '-') *out = -*out;
+        return 1;
+    }
+    if (e->type == AST_LITERAL && e->value && ie_float_kind(e->node_type)) {
+        char* end = NULL;
+        double v = strtod(e->value, &end);
+        if (!end || end == e->value) return 0;
+        *out = v;
+        return 1;
+    }
+    if (gen->in_const_init && e->type == AST_IDENTIFIER && e->value) {
+        ASTNode* cd = file_scope_value_const(gen->program, e->value);
+        if (cd && cd->child_count > 0) return f2i_const_value(gen, cd->children[0], out, depth + 1);
+    }
+    return 0;
+}
+
+/* #3524: emits the float value `v` converted to the integer type `t`,
+ * saturating, and returns 1; returns 0 having emitted nothing when `v` is
+ * no float or `t` no integer type. A constant inside the range is C's cast,
+ * one outside it the limit it saturates at, so a static's initializer stays
+ * a constant expression. */
+int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t) {
+    if (!v || !ie_float_kind(v->node_type)) return 0;
+    const char* sfx = f2i_suffix(t);
+    if (!sfx) return 0;
+    static const struct { const char* sfx; double lo, hi; const char* min; const char* max; } r[] = {
+        { "i8",  -129.0, 128.0, "(-128)", "127" },
+        { "i16", -32769.0, 32768.0, "(-32768)", "32767" },
+        { "i32", -2147483649.0, 2147483648.0, "(-2147483647 - 1)", "2147483647" },
+        { "i64", -9223372036854775808.0, 9223372036854775808.0, "INT64_MIN", "INT64_MAX" },
+        { "u8",  -1.0, 256.0, "0", "255" },
+        { "u16", -1.0, 65536.0, "0", "65535" },
+        { "u32", -1.0, 4294967296.0, "0", "4294967295u" },
+        { "u64", -1.0, 18446744073709551616.0, "0", "UINT64_MAX" },
+    };
+    const char* ct = get_c_type(t);
+    double c = 0;
+    if (f2i_const_value(gen, v, &c, 0)) {
+        for (size_t i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
+            if (strcmp(r[i].sfx, sfx) != 0) continue;
+            if (c != c) { fprintf(gen->output, "((%s)0)", ct); return 1; }
+            if (c > r[i].lo && c < r[i].hi) break;
+            fprintf(gen->output, "((%s)%s)", ct, c <= r[i].lo ? r[i].min : r[i].max);
+            return 1;
+        }
+        fprintf(gen->output, "((%s)(", ct);
+        generate_read(gen, v);
+        fprintf(gen->output, "))");
+        return 1;
+    }
+    if (gen->in_const_init) {
+        /* No call in a static's initializer: C's compiler folds the cast. */
+        fprintf(gen->output, "((%s)(", ct);
+        generate_read(gen, v);
+        fprintf(gen->output, "))");
+        return 1;
+    }
+    fprintf(gen->output, "((%s)_ae_%s2%s(", ct,
+            v->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx);
+    generate_read(gen, v);
+    fprintf(gen->output, "))");
+    return 1;
+}
+
+/* #3524: `x op= r` with an integer target `x` (C `l_text`, of type `t`)
+ * and a float `r`: emits `x = x op r` with the float result converted into
+ * `x` saturating. Returns 0 having emitted nothing for other operands. */
+int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t) {
+    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/", op)) return 0;
+    const char* sfx = f2i_suffix(t);
+    if (!sfx) return 0;
+    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(%s %c (", l_text, get_c_type(t),
+            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx, l_text, op);
+    generate_read(gen, r);
+    fprintf(gen->output, ")))");
+    return 1;
+}
+
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
  * runtime's aether_slice_take, _lend, _drop, _set and _grow1). Returns 0
  * for a name that is none of them. */
@@ -8741,7 +9092,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * conversion. Emit a plain C cast to the target's machine type;
              * for a distinct target, node_type->kind is the base kind, so
              * get_c_type yields the base C type (no runtime cost). */
-            if (expr->child_count > 0 && expr->node_type) {
+            if (expr->child_count > 0 && expr->node_type &&
+                emit_float_to_int(gen, expr->children[0], expr->node_type)) {
+                /* #3524: a float into an integer type saturates. */
+            } else if (expr->child_count > 0 && expr->node_type) {
                 fprintf(gen->output, "((%s)(", get_c_type(expr->node_type));
                 /* #2304: `s as ptr` on a slice is its element pointer, as a
                  * slice passed to a `ptr` slot is; a C cast of the
@@ -9300,6 +9654,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "_AE_FDIV0(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ", %d)", neg ? -1 : 1);
+                } else if (!is_assignment &&
+                           emit_int_edge_op(gen, expr->value, expr->children[0], NULL,
+                                            expr->children[0]->node_type, expr->children[1],
+                                            expr->node_type, expr)) {
+                    /* #3524: an integer `/`, `%`, `<<` or `>>` C leaves
+                     * undefined for some values, with Java's rules. */
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
@@ -9454,6 +9814,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                needs_sum_coerce(expr->children[1], ltype)) {
                         /* #2985: a store into a sum place wraps a variant. */
                         emit_sum_coerced(gen, expr->children[1], ltype);
+                    } else if (is_assignment && emit_float_to_int(gen, expr->children[1], ltype)) {
+                        /* #3524: a float stored into an integer place
+                         * saturates, as `v as int` does. */
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         if (void_arith && rhs_void) fprintf(gen->output, "(char*)(");
@@ -11264,6 +11627,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* #914: a variant struct flowing into a sum
                              * parameter wraps into the tagged union. */
                             emit_sum_coerced(gen, arg, expected_type);
+                        } else if (emit_float_to_int(gen, arg,
+                                                     ext_name ? extern_param_t : expected_type)) {
+                            /* #3524: a float into an integer parameter
+                             * saturates, as `v as int` does. */
                         } else if (expected == TYPE_PTR && arg->node_type &&
                             arg->node_type->kind == TYPE_FUNCTION &&
                             !arg->node_type->is_fnptr) {
@@ -11798,6 +12165,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     continue;
                 const char* el_struct = struct_owning_strings(gen, el ? el->node_type : NULL);
                 if (el_struct && struct_take_shape(el)) emit_struct_take(gen, el, el_struct, NULL);
+                else if (at && at->kind == TYPE_ARRAY && emit_float_to_int(gen, el, at->element_type)) {
+                    /* #3524: a float element of an integer array saturates. */
+                }
                 else generate_expression(gen, el);
             }
             fprintf(gen->output, "}");
@@ -11876,6 +12246,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 } else if (fdecl && fdecl->kind == TYPE_STRING && fv && fv->node_type &&
                            fv->node_type->kind == TYPE_STRING) {
                     emit_string_take_owned(gen, fv, 0);
+                } else if (emit_float_to_int(gen, fv, fdecl)) {
+                    /* #3524: a float into an integer field saturates. */
                 } else if (struct_literal_field_takes_array(gen, expr->value, field_init)) {
                     fprintf(gen->output, "{0}");   /* #2688: filled below */
                 } else if (fdecl && fdecl->kind == TYPE_PTR && fn_value_into_ptr(gen, fv)) {

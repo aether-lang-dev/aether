@@ -1,0 +1,25 @@
+// The constant operands that keep C's own operators (#3524), read by
+// test_int_edge_fast_paths.sh in the C aetherc writes for this file.
+
+const NEG = -2147483647 - 1
+const WRAP = NEG / -1
+const REM = NEG % -1
+const SHIFTED = 1 << 40
+
+cdiv(a: int) -> int { return a / 7 }
+cmod(a: int) -> int { return a % 7 }
+cshl(a: int) -> int { return a << 3 }
+cshr(a: int) -> int { return a >> 3 }
+cfloat() -> int { return 2.5 as int }
+cbig() -> int { return 1.0e30 as int }
+vdiv(a: int, b: int) -> int { return a / b }
+vshl(a: int, n: int) -> int { return a << n }
+vfloat(f: float) -> int { return f as int }
+// Folded by the compiler: every operand is a literal once folded.
+lfold() -> long { return (0 - 9223372036854775807 - 1) / (0 - 1) }
+
+main() {
+    println("${cdiv(50)} ${cmod(50)} ${cshl(5)} ${cshr(-64)} ${cfloat()} ${cbig()}")
+    println("${vdiv(50, 7)} ${vshl(1, 33)} ${vfloat(-1.0e30)} ${lfold()}")
+    println("${WRAP} ${REM} ${SHIFTED}")
+}

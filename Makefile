@@ -3256,9 +3256,14 @@ test-ae-opt-diff: compiler ae stdlib
 # failure and on any UBSan report (build/ubsan/reports). Linux or macOS: it
 # needs a UBSan runtime, which MinGW lacks. Not part of `ci`: ubsan.yml runs
 # it. See tests/scripts/sanitizer_sweep.sh and docs/differential-testing.md.
+# UBSAN_CHECKS are the -fsanitize groups: gcc's `undefined` leaves out
+# float-cast-overflow, a float converted to an integer type it does not fit
+# (#3524), so it is named too.
+UBSAN_CHECKS ?= undefined,float-cast-overflow
 .PHONY: test-ubsan
 test-ubsan:
-	@SAN=ubsan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
+	@SAN=ubsan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" UBSAN_CHECKS="$(UBSAN_CHECKS)" \
+	    sh tests/scripts/sanitizer_sweep.sh
 
 # The same, under AddressSanitizer and LeakSanitizer (#3539): a heap overflow,
 # a use after free or a double free in libaether, std or the generated code of

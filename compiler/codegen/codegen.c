@@ -8698,6 +8698,64 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
     }
 }
 
+/* #3524: the helpers integer division and remainder, and a float converted
+ * to an integer type, go through (emit_int_edge_op and emit_float_to_int in
+ * codegen_expr.c), with Java's rules:
+ *  - a zero divisor panics with `where`, which names the category
+ *    `division_by_zero` and the operation's source position;
+ *  - the most negative value divided by -1 is itself (the negation wraps,
+ *    computed in unsigned), and its remainder 0;
+ *  - a float saturates at the type's range, and NaN is 0.
+ * Plain C99 with no builtin, so every compiler and target takes them: GCC,
+ * Clang, cl.exe, emcc and the ESP32 toolchain. A constant divisor other than
+ * 0 and -1, or a float constant, never reaches them. */
+static void emit_int_edge_helpers(CodeGenerator* gen) {
+    static const struct { const char* sfx; const char* t; const char* ut; int is_signed; } d[] = {
+        { "i32", "int", "unsigned int", 1 },
+        { "u32", "uint32_t", "uint32_t", 0 },
+        { "i64", "int64_t", "uint64_t", 1 },
+        { "u64", "uint64_t", "uint64_t", 0 },
+    };
+    for (size_t i = 0; i < sizeof(d) / sizeof(d[0]); i++) {
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_div_%s(%s a, %s b, const char* where) {\n"
+                "    if (b == 0) aether_panic(where);\n",
+                d[i].t, d[i].sfx, d[i].t, d[i].t);
+        if (d[i].is_signed)
+            fprintf(gen->output, "    return b == -1 ? (%s)((%s)0 - (%s)a) : a / b;\n}\n",
+                    d[i].t, d[i].ut, d[i].ut);
+        else
+            fprintf(gen->output, "    return a / b;\n}\n");
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_mod_%s(%s a, %s b, const char* where) {\n"
+                "    if (b == 0) aether_panic(where);\n"
+                "    return %s;\n}\n",
+                d[i].t, d[i].sfx, d[i].t, d[i].t, d[i].is_signed ? "b == -1 ? 0 : a % b" : "a % b");
+    }
+    /* The bounds are exact doubles: `v >= hi` reaches the maximum, where a
+     * 64-bit one (2^63, 2^64) is one past it. */
+    print_line(gen, "#define _AE_F2I(name, src, dst, lo, lo_v, hi, hi_v) \\");
+    print_line(gen, "    static inline AETHER_MAYBE_UNUSED dst name(src v) { \\");
+    print_line(gen, "        return v != v ? (dst)0 : v <= (lo) ? (dst)(lo_v) : v >= (hi) ? (dst)(hi_v) : (dst)v; }");
+    static const struct { const char* sfx; const char* t; const char* lo; const char* lo_v;
+                          const char* hi; const char* hi_v; } f[] = {
+        { "i8",  "int8_t",   "-128.0", "-128", "127.0", "127" },
+        { "i16", "int16_t",  "-32768.0", "-32768", "32767.0", "32767" },
+        { "i32", "int",      "-2147483648.0", "(-2147483647 - 1)", "2147483647.0", "2147483647" },
+        { "i64", "int64_t",  "-9223372036854775808.0", "INT64_MIN", "9223372036854775808.0", "INT64_MAX" },
+        { "u8",  "uint8_t",  "0.0", "0", "255.0", "255" },
+        { "u16", "uint16_t", "0.0", "0", "65535.0", "65535" },
+        { "u32", "uint32_t", "0.0", "0", "4294967295.0", "4294967295u" },
+        { "u64", "uint64_t", "0.0", "0", "18446744073709551616.0", "UINT64_MAX" },
+    };
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+        fprintf(gen->output, "_AE_F2I(_ae_f2%s, double, %s, %s, %s, %s, %s)\n",
+                f[i].sfx, f[i].t, f[i].lo, f[i].lo_v, f[i].hi, f[i].hi_v);
+        fprintf(gen->output, "_AE_F2I(_ae_ld2%s, long double, %s, %s, %s, %s, %s)\n",
+                f[i].sfx, f[i].t, f[i].lo, f[i].lo_v, f[i].hi, f[i].hi_v);
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -9306,6 +9364,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  define _AE_CLZ64(x) _ae_clz64((unsigned long long)(x))");
     print_line(gen, "#  define _AE_POPCOUNT64(x) _ae_popcount64((unsigned long long)(x))");
     print_line(gen, "#endif");
+    emit_int_edge_helpers(gen);
     /* #2607: whether a module imported at @target("avx2") is compiled for
        AVX2: GCC or Clang building for x86. Anywhere else (another compiler,
        the AETHER_GCC_COMPAT=0 path, ARM, and GCC on Win64 without

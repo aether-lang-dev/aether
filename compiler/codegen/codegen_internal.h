@@ -472,6 +472,15 @@ Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
 int is_fnptr_const_decl(const ASTNode* cd);                        /* #2648 */
 int fn_const_decl(const ASTNode* cd);                              /* #2648 */
 ASTNode* file_scope_value_const(ASTNode* program, const char* name);   /* #2799 */
+/* #3524: an integer `/`, `%`, `<<` or `>>` with Java's rules, and a float
+ * converted to an integer type, saturating (codegen_expr.c). Each returns 0
+ * having emitted nothing when C's own operator or conversion is defined. */
+int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                     Type* lt, ASTNode* r, Type* result, const ASTNode* pos);
+int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                        Type* result);
+int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t);
+int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the

@@ -1,0 +1,80 @@
+// Regression (#3524): a float converted to an integer type saturates at
+// the type's range, and NaN converts to 0.
+//
+// `f as int` was a plain C cast, and a float stored into an integer slot a
+// plain C conversion, both undefined for a value out of the target's range
+// or NaN: x86 gave the "integer indefinite" value (INT_MIN for every big
+// value, positive or not), ARM64 saturated, and an optimizer may assume it
+// never happens. Java's rule now holds on every target, for `as` into every
+// integer type, a float stored into an integer variable, field, parameter
+// or return value, and a compound assignment with a float operand. A value
+// inside the range truncates toward zero as before.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+struct P {
+    n: int
+}
+
+ret_int(f: float) -> int { return f }
+take_int(k: int) -> int { return k }
+
+main() {
+    big = 1.0e30
+    neg = -1.0e30
+    zero = 0.0
+    nan = zero / zero
+    inf = 1.0 / zero
+
+    check(big as int == 2147483647, "int: big")
+    check(neg as int == -2147483648, "int: -big")
+    check(nan as int == 0, "int: NaN")
+    check(inf as int == 2147483647, "int: inf")
+    check(big as long == 9223372036854775807, "long: big")
+    check(neg as long == -9223372036854775807 - 1, "long: -big")
+    check(nan as long == 0, "long: NaN")
+    check(big as uint32 == 4294967295, "uint32: big")
+    check(neg as uint32 == 0, "uint32: -big")
+    check(big as uint64 == 18446744073709551615, "uint64: big")
+    check(neg as uint64 == 0, "uint64: -big")
+    check(big as byte == 255, "byte: big")
+    check(neg as byte == 0, "byte: -big")
+    check(nan as byte == 0, "byte: NaN")
+
+    // A value at the edge of the range, and inside it, truncates.
+    edge = 2147483647.9
+    check(edge as int == 2147483647, "int: just under 2^31")
+    minus = -2.9
+    check(minus as int == -2, "int: -2.9 truncates toward zero")
+    check(minus as uint32 == 0, "uint32: -2.9")
+    half = 0.5
+    check(half as long == 0, "long: 0.5")
+    f32 small = 1.0e20
+    check(small as int == 2147483647, "f32: big into int")
+
+    // Stores into integer slots.
+    int k = big
+    check(k == 2147483647, "int local")
+    p = P { n: neg }
+    check(p.n == -2147483648, "struct field init")
+    p.n = nan
+    check(p.n == 0, "field store")
+    check(ret_int(big) == 2147483647, "return")
+    check(take_int(neg) == -2147483648, "parameter")
+    int c = 5
+    c *= big
+    check(c == 2147483647, "*= with a float")
+
+    // A constant out of range saturates when compiled.
+    check(1.0e30 as int == 2147483647, "constant big")
+    check((-1.0e30) as long == -9223372036854775807 - 1, "constant -big")
+    check(3.9 as int == 3, "constant inside the range")
+    println("float_to_int_saturates: ok")
+}

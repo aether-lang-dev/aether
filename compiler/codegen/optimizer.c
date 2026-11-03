@@ -132,8 +132,8 @@ static void report_const_overflow(ASTNode* node, const char* msg) {
 
 /* Fold `left op right` over two integer literals in the kind the runtime
  * would use: uint64 if either is, else long if either is, else int.
- * Returns NULL when the expression is left to the runtime — a division
- * by zero, or the one signed quotient C leaves undefined. */
+ * Returns NULL when the expression is left to the runtime: a division by
+ * zero, which panics there (#3524). */
 static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right,
                                     LiteralKind lk, LiteralKind rk) {
     const char* op = node->value;
@@ -161,8 +161,14 @@ static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right
             bits = quotient ? a / b : a % b;
         } else {
             long long sa = (long long)a, sb = (long long)b;
-            if (sa == LLONG_MIN && sb == -1) return NULL;
-            bits = (unsigned long long)(quotient ? sa / sb : sa % sb);
+            if (sa == LLONG_MIN && sb == -1) {
+                /* #3524: the quotient wraps to itself and the remainder
+                 * is 0, as the runtime computes them. */
+                bits = quotient ? a : 0;
+                overflow = quotient;
+            } else {
+                bits = (unsigned long long)(quotient ? sa / sb : sa % sb);
+            }
         }
     } else {
         return NULL;

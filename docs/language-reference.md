@@ -710,7 +710,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | `int` → `string` | `string.from_int(n)` (and `string.from_long(n)`, `string.from_float(f)`). |
 | C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or a `return` from a function declared `-> string`. The place takes the value as it takes any string: C's characters are copied into a counted string the place owns, and a counted string behind the pointer is retained. An extern declared `-> string @heap` hands over a string the caller adopts without a copy. |
 | `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). Spelled out with `as`, `b as int` widens a `byte` (always 0 to 255, it is unsigned) and `n as byte` keeps the low 8 bits, as for `uint8`. |
-| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix (the same rule as a 64-bit value into an inferred `int`), because the truncation was never chosen. |
+| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates toward zero, and saturates at the type's range, NaN giving 0, as `f as int` does ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)). Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix (the same rule as a 64-bit value into an inferred `int`), because the truncation was never chosen. |
 | `uint32` → `int` | Explicit slots convert as in C. Into an **inferred** `int` (`k = 5` then `k = some_uint32`) it is the same narrowing error: values past 2³¹ do not fit. Annotate `uint32 k = ...` to keep it unsigned. |
 | Reinterpret a raw `ptr` as a typed struct view, function pointer, or array | `expr as *StructName`, `expr as fn(...) -> R`, or `expr as T[]` (the only `as` forms for values). |
 
@@ -2367,6 +2367,7 @@ downstream triage match on it, so it does not change with the prose after it.
 | `forced_unwrap_none` | `x!` on an optional holding `none` |
 | `empty_closure_call` | a call through the empty closure (a closure slot or a `fn?` holding `null`) |
 | `null_function_call` | a call through a typed function pointer (`fn(int) -> int`, a `cfn` type) holding `null` |
+| `division_by_zero` | an integer `/` or `%` (or `/=`, `%=`) by zero ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)) |
 
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
@@ -3936,6 +3937,33 @@ and a `Down` is never refused.
 | `/` | Division | `a / b` |
 | `%` | Modulo | `a % b` |
 
+#### Integer edge cases: division, shifts and float conversion
+
+Integer arithmetic wraps on overflow (see [Constant-Expression Overflow](#constant-expression-overflow-w1003)),
+and the cases C leaves undefined follow Java's rules, the same on every target
+(#3524):
+
+| Case | Result |
+|---|---|
+| `x / 0`, `x % 0` (any integer type) | a panic with the category `division_by_zero` and the operation's source position, which a `catch` receives |
+| the most negative value `/ -1` (`int`, `long`) | the same value: `-2147483648 / -1` is `-2147483648` |
+| the most negative value `% -1` | `0` |
+| `x << n`, `x >> n` | the count is masked to the width the shift runs in: `n & 31` for `int`, `uint32` and the narrower types (which shift as an `int`), `n & 63` for `long` and `uint64`. So `1 << 33` is `2`, and a negative count takes its low bits |
+| `x << n` into the sign bit | wraps: `1 << 31` is `-2147483648` |
+| a float converted to an integer type (`f as int`, a float stored into an integer variable, field, parameter or return, `x *= 2.5` on an integer) | truncates toward zero, and saturates at the type's range: `1.0e30 as int` is `2147483647`, `-1.0e30 as uint32` is `0`. NaN is `0` |
+
+`>>` on a signed value is an arithmetic shift (the sign is kept), and on an
+unsigned one a logical shift. The compound forms (`/=`, `%=`, `<<=`, `>>=`)
+follow the same rules.
+
+None of this costs anything where an operand is a constant that keeps C
+defined: a divisor other than `0` and `-1`, a shift count inside the width,
+or a float constant inside the target's range is C's own operator. A
+constant count outside the width is masked when the program is compiled
+(`x << 40` on an `int` is `x << 8`). Elsewhere the division is a call the C
+compiler inlines, which tests the divisor before dividing, and the shift
+count is masked, an `and` the shift instruction already performs on x86.
+
 ### Comparison Operators
 
 | Operator | Description | Example |
@@ -3962,7 +3990,7 @@ and a `Down` is never refused.
 | `<<` | Left shift | `1 << 4` |
 | `>>` | Right shift | `n >> 2` |
 
-Bitwise operators work on `int` and `long` values and map directly to C operators (zero runtime cost).
+Bitwise operators work on `int` and `long` values and map directly to C operators (zero runtime cost). A shift count is masked to the width ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)).
 
 ```aether,fragment
 flags = 255
