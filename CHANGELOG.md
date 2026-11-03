@@ -14,6 +14,59 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.876.0]
+
+### Added
+
+- **Three more Rosetta Code tasks (#1191):** Roman numerals/Decode, Leap
+  year and Caesar cipher join `examples/08-rosetta/`, each with its output
+  checked. They waited for an `if` value whose condition ends in a call
+  (#3478) and for `c = s[i]` on a string (#3479), both fixed in 0.871.
+
+- **`-DAETHER_ACCT_FILTER_LOG2=<n>` sizes the execution-account address
+  filter (#3410) for small-RAM targets.** The filter is a fixed 32 KiB of
+  static memory (2^18 bits) in every program, used or not: on an ESP32-S3
+  that is about a tenth of the internal DRAM. A target can now build the
+  runtime with 2^n bits (6..24); 14 gives 2 KiB at 16 times the
+  false-positive rate (a false positive costs one table probe under the
+  lock). The default is unchanged.
+
+### Changed
+
+- **`--lib` and `AETHER_LIB_DIR` add to the module search path instead of
+  replacing the project's `lib/` (#3504).** A program that imports a module
+  of its own `lib/` and a library from elsewhere used to need both named
+  (`--lib lib --lib ../other`); it now names only the other. The project's
+  `lib/` is searched first, then the `--lib` directories (or
+  `AETHER_LIB_DIR` when no `--lib` is given), then the dependencies, the
+  same in `ae` and `aetherc`. `ae lib-path` prints that chain, `./lib`,
+  `lib/` and `lib` are one entry, and editing a module under `lib/` now
+  rebuilds a cached program that was built with `--lib` too.
+
+### Fixed
+
+- **A built std.json container no longer takes a 16 KB arena.** Every
+  `json.obj`/`json.arr` that gets a member roots an arena of its own, and
+  that arena's first chunk was the fixed 16 KB a parsed document gets, so a
+  program that builds many small objects (RexxAE's parsed program, values
+  and frames) made one 16 KB allocation per object: about 23,000 of them in
+  one run of RexxAE's ESP32-S3 lane, every one past ESP-IDF's
+  internal-RAM threshold and into PSRAM. A built container's arena now
+  starts at 256 bytes and a parsed document's at about four bytes per input
+  byte (256 bytes to 16 KB), both doubling as before. RexxAE's peak heap on
+  the ESP32-S3 fell from about 194 KB (76 KB internal, 118 KB PSRAM) to
+  87 KB, all internal RAM.
+
+- **The cooperative runtime list carries std.bytes, std.mem,
+  std.strbuilder and std.sync.** `runtime/coop_runtime_sources.txt`, which
+  `ae build --target=wasm`, ci-wasm and ci-esp32 link, is meant to be
+  closed under what a program can reach, but it did not list these four
+  modules' C, so a cooperative build of a program importing std.bytes,
+  std.strbuilder or std.sync (RexxAE's engine imports all three) failed to
+  link: `aether_strbuilder_new`, `aether_bytes_data`,
+  `aether_sync_atomic_new` and others undefined. None needs a library
+  beyond libc.
+
 ## [0.875.0]
 
 ### Fixed
