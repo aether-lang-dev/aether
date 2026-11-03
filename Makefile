@@ -1415,10 +1415,20 @@ fuzz-cbor: compiler ae stdlib
 
 .PHONY: fuzz-ipc-frames
 # Coverage-guided fuzzing of std.ipc's frame reader over a socket pair, checked
-# against a model of its contract (needs clang with libFuzzer; Linux only).
+# against a model of its contract (needs clang with libFuzzer, poll() and
+# os.socketpair; not Windows).
 # Not part of `make test` or CI; FUZZ_SECONDS sets the run time (default 60).
 fuzz-ipc-frames: compiler ae stdlib
 	@sh tests/fuzz/ipc_frames/run_fuzz_ipc_frames.sh
+
+.PHONY: fuzz-ipc-frames-corpus
+# Rewrite the frame-reader fuzzer's seed corpus from its generator
+# (tests/fuzz/ipc_frames/gen_corpus.ae); the seeds are committed, so this is
+# only for when the generator changes.
+fuzz-ipc-frames-corpus: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/fuzz
+	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/ipc_frames/gen_corpus.ae 	    -o $(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT)
+	@./$(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT) tests/fuzz/ipc_frames/corpus
 
 # Test .ae source files - compiles and runs each test file.
 #

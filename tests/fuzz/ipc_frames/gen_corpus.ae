@@ -1,0 +1,190 @@
+// Writes the seed corpus for the std.ipc frame-reader fuzz target into the
+// directory named on the command line (corpus/ beside this file, as
+// `make fuzz-ipc-frames-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is laid out as fuzz_ipc_frames.ae reads it: byte 0 = max / 16
+// (max = 1 + b0 * 16), byte 1 = chunks - 1 (its bits 3 and 4 stay clear:
+// the seeds deliver chunks before the read and end with read_frame; the
+// fuzzer flips them), then chunks - 1 cut bytes (fraction of the remaining
+// stream, out of 255), then the stream.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+// `hex` holds pairs of hex digits; each becomes one byte of `b`.
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+fn put_hex(b: ptr, hex: string) {
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: bad hex ${hex}\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+}
+
+fn put_be32(b: ptr, v: int) {
+    _a = strbuilder.append_byte(b, (v >> 24) & 255)
+    _b = strbuilder.append_byte(b, (v >> 16) & 255)
+    _c = strbuilder.append_byte(b, (v >> 8) & 255)
+    _d = strbuilder.append_byte(b, v & 255)
+}
+
+fn put_repeat(b: ptr, byte: int, count: int) {
+    i = 0
+    while i < count {
+        _a = strbuilder.append_byte(b, byte)
+        i = i + 1
+    }
+}
+
+// One frame: a 4-byte big-endian length, then `count` bytes of `byte`.
+fn frame_repeat(b: ptr, byte: int, count: int) {
+    put_be32(b, count)
+    put_repeat(b, byte, count)
+}
+
+// One frame whose payload is the bytes of `hex`.
+fn frame_hex(b: ptr, hex: string) {
+    put_be32(b, string.length(hex) / 2)
+    put_hex(b, hex)
+}
+
+// Write the seed `name`: the header bytes for `max_div16` and the cuts in
+// `cuts_hex` (one byte each, as hex pairs), then the stream built in `body`.
+fn seed(dir: string, name: string, max_div16: int, cuts_hex: string, body: ptr) {
+    cuts = string.length(cuts_hex) / 2
+    b = strbuilder.new(0)
+    _a = strbuilder.append_byte(b, max_div16 & 255)
+    _b = strbuilder.append_byte(b, cuts & 7)
+    put_hex(b, cuts_hex)
+    _c = strbuilder.append_slice(b, strbuilder.finish_with_length(body))
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+const CBOR_SMALL = "a201020304" // {1: 2, 3: 4}
+const CBOR_TEXT = "63616263" // "abc"
+const CBOR_BYTES_NUL = "4100" // h'00'
+const CBOR_INDEF = "9f0102ff" // [_ 1, 2]
+const CBOR_BAD = "ff" // a lone break
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    b = strbuilder.new(0)
+    seed(dir, "empty_stream", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_SMALL)
+    seed(dir, "one_frame_whole", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, "")
+    seed(dir, "one_frame_empty_payload", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_TEXT)
+    frame_hex(b, CBOR_INDEF)
+    seed(dir, "two_frames_whole", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, "6100620a63ff640d") // a NUL b LF c 0xff d CR
+    seed(dir, "frame_with_nul_and_newline", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_SMALL)
+    seed(dir, "split_in_header", 16, "64", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_SMALL)
+    seed(dir, "split_in_payload", 16, "b4", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_TEXT)
+    frame_hex(b, CBOR_TEXT)
+    seed(dir, "split_at_boundary", 16, "80", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_BYTES_NUL)
+    seed(dir, "split_every_byte", 16, "285078a0c8f0fa", b)
+
+    b = strbuilder.new(0)
+    put_be32(b, 3)
+    seed(dir, "header_only", 16, "", b)
+
+    b = strbuilder.new(0)
+    put_hex(b, "0000")
+    seed(dir, "header_short", 16, "", b)
+
+    b = strbuilder.new(0)
+    put_be32(b, 8)
+    put_hex(b, "616263")
+    seed(dir, "payload_short", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_repeat(b, 120, 2) // "xx"
+    frame_repeat(b, 121, 1) // "y"
+    seed(dir, "over_max_then_frame", 0, "", b)
+
+    b = strbuilder.new(0)
+    frame_repeat(b, 122, 17) // "z" * 17, max is 17
+    seed(dir, "exactly_max", 1, "", b)
+
+    b = strbuilder.new(0)
+    frame_repeat(b, 122, 18)
+    seed(dir, "one_over_max", 1, "", b)
+
+    b = strbuilder.new(0)
+    put_hex(b, "ffffffff68656c6c6f") // 2^32 - 1, "hello"
+    seed(dir, "huge_header", 16, "", b)
+
+    b = strbuilder.new(0)
+    put_hex(b, "7fffffff68656c6c6f") // 2^31 - 1, "hello"
+    seed(dir, "top_bit_header", 16, "", b)
+
+    b = strbuilder.new(0)
+    frame_hex(b, CBOR_BAD)
+    seed(dir, "bad_cbor_payload", 16, "", b)
+
+    b = strbuilder.new(0)
+    i = 0
+    while i < 40 {
+        frame_repeat(b, i, 1)
+        i = i + 1
+    }
+    seed(dir, "many_small_frames", 16, "4080c0", b)
+
+    b = strbuilder.new(0)
+    put_be32(b, 4001)
+    _a = strbuilder.append_byte(b, 64) // CBOR h'' head, then 4000 zeros
+    put_repeat(b, 0, 4000)
+    seed(dir, "max_frame_4096", 255, "", b)
+}

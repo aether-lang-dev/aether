@@ -7,7 +7,10 @@ set -e
 # Builds the harness with:
 #   clang -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 against $(ae cflags)
 # and runs it for FUZZ_SECONDS (default 60) on a copy of the seed corpus.
-# Linux only: the reader's timeout form needs poll() and os.socketpair.
+# Needs poll() and os.socketpair, so not Windows. Every chunk the harness
+# writes is under 8 KiB (-max_len bounds the whole input), the AF_UNIX
+# socket buffer on macOS, so no write blocks while the reader is not
+# reading.
 # Exits non-zero on a crash, leak, timeout or oracle failure, naming the
 # reproducer.
 
@@ -18,6 +21,7 @@ AE="$ROOT/build/ae"
 FUZZ_SECONDS="${FUZZ_SECONDS:-60}"
 CORPUS_DIR="$SCRIPT_DIR/corpus"
 DICT_FILE="$SCRIPT_DIR/ipc_frames.dict"
+READER_SRC="$ROOT/std/ipc/aether_ipc.c"
 
 if [ ! -x "$AE" ]; then
     echo "Error: $AE not built. Run 'make' first." >&2
@@ -58,17 +62,21 @@ mkdir -p "$OUT/corpus"
 
 echo "==> Building $OUT/fuzz_ipc_frames..."
 # The Aether side of the harness carries coverage and sanitizer
-# instrumentation; the reader itself is C in the prebuilt runtime, so the
-# fuzzer steers by the harness's model and by what the runtime returns. UBSan halts rather than
-# printing and carrying on, so undefined behaviour fails the run.
+# instrumentation, and so does the reader: the untouched std/ipc/aether_ipc.c
+# is compiled into the target with the same flags and linked ahead of the
+# copy in libaether, so libFuzzer steers by the reader's own branches and
+# UBSan watches them. It is the build prove_mutants.sh gives its edited
+# copies. UBSan halts rather than printing and carrying on, so undefined
+# behaviour fails the run.
 AE_CC="$CLANG -fsanitize=fuzzer-no-link,address,undefined -fno-sanitize-recover=undefined -g -O1" \
     "$AE" build "$SCRIPT_DIR/fuzz_ipc_frames.ae" --with=extern,os --emit=obj -o "$OUT/fuzz_ipc_frames_ae.o"
 
 AE_CFLAGS="$("$AE" cflags)"
 
 # shellcheck disable=SC2086
-"$CLANG" -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 \
-    "$SCRIPT_DIR/fuzz_ipc_frames.c" "$OUT/fuzz_ipc_frames_ae.o" \
+"$CLANG" -fsanitize=fuzzer,address,undefined -fno-sanitize-recover=undefined -g -O1 -pthread \
+    -DAETHER_HAS_FILESYSTEM=1 \
+    "$SCRIPT_DIR/fuzz_ipc_frames.c" "$OUT/fuzz_ipc_frames_ae.o" "$READER_SRC" \
     $AE_CFLAGS \
     -o "$OUT/fuzz_ipc_frames"
 
@@ -85,7 +93,7 @@ echo "==> Fuzzing for ${FUZZ_SECONDS}s..."
 set +e
 "$OUT/fuzz_ipc_frames" \
     -dict="$DICT_FILE" \
-    -max_len=16384 \
+    -max_len=8192 \
     -rss_limit_mb=2048 \
     -timeout=10 \
     -max_total_time="$FUZZ_SECONDS" \

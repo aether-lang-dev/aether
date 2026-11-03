@@ -89,31 +89,44 @@ nothing consumed when no byte of a frame is there; `TIMED_OUT_INSIDE_FRAME`
 with the part consumed when some of one is; "longer than max" with exactly
 the header consumed; and the three end-of-stream errors once the writer is
 gone. Each payload the reader hands back goes through `cbor.parse`, which
-may fail (a pass) but must not crash or leak. Linux only: the timeout form
-needs `poll()`.
+may fail (a pass) but must not crash or leak.
+
+A chunk is either queued before the reader is called or, when the input
+asks for it, written from a second thread while the reader already waits in
+`read_frame_timeout`, so the reader's read-some, wait, read-more path sees
+bytes arrive; the end of stream is read with either form. The reader itself
+(`std/ipc/aether_ipc.c`, untouched) is compiled into the target with the
+same coverage and sanitizer flags as the harness, so libFuzzer steers by its
+branches and UBSan watches them. Needs `poll()` and `os.socketpair`, so not
+Windows; every write stays under 8 KiB, the AF_UNIX socket buffer on macOS,
+so none blocks while the reader is not reading.
 
 ### Files
 
 - **`fuzz_ipc_frames.ae`**: the target, built `--emit=obj --with=extern,os`,
   exporting `fuzz_target(data: ptr, len: int)`. Byte 0 picks `max`
-  (1..4081), byte 1 the number of chunks (1..8), the next bytes the cut
-  offsets, and the rest is the stream. A disagreement with the model
-  `abort()`s.
-- **`fuzz_ipc_frames.c`**: `LLVMFuzzerTestOneInput`.
-- **`gen_corpus.py`** writes **`corpus/`**: whole, empty and split frames,
-  a frame split at every byte, short headers and payloads, frames at and one
-  over `max`, headers announcing 2^31 and 2^32 - 1 bytes, a payload that is
-  not CBOR, forty small frames, and a 4 KB frame. Edit the script, not the
-  files.
+  (1..4081 in steps of 16); byte 1's low three bits the number of chunks
+  (1..8), its bit 3 whether chunks arrive from the writer thread, its bit 4
+  whether the end of stream is read with the timeout form; the next bytes
+  are the cut offsets, and the rest is the stream. A disagreement with the
+  model `abort()`s.
+- **`fuzz_ipc_frames.c`**: `LLVMFuzzerTestOneInput` and the writer thread.
+- **`gen_corpus.ae`** writes **`corpus/`** (`make fuzz-ipc-frames-corpus`):
+  whole, empty and split frames, a frame split at every byte, short headers
+  and payloads, frames at and one over `max`, headers announcing 2^31 - 1
+  and 2^32 - 1 bytes, a payload that is not CBOR, forty small frames, and a
+  4 KB frame. Edit the generator, not the files.
 - **`ipc_frames.dict`**: frame headers at the lengths that matter and a few
   CBOR heads.
 - **`run_fuzz_ipc_frames.sh`**: builds and runs the harness under libFuzzer,
   ASan and UBSan for `FUZZ_SECONDS` (default 60).
 - **`prove_mutants.sh`**: compiles three one-line edits of a copy of
-  `std/ipc/aether_ipc.c` (the real file is untouched) and shows the model
-  catches each: **M1** the `max` check removed; **M2** a timeout inside a
-  frame reported as the between-frames one; **M3** an empty frame answered
-  as a timeout.
+  `std/ipc/aether_ipc.c` (the real file is untouched) the same way and shows
+  the model catches each: **M1** the `max` check removed; **M2** a timeout
+  inside a frame's header reported as the between-frames one; **M3** an
+  empty frame answered as a timeout. A mutant counts only when the model's
+  abort leaves a `crash-*` input, and that input is then replayed against
+  the clean build, which must accept it.
 
 ### Running
 
@@ -121,6 +134,7 @@ needs `poll()`.
 make fuzz-ipc-frames                                   # 60 seconds
 FUZZ_SECONDS=1800 sh tests/fuzz/ipc_frames/run_fuzz_ipc_frames.sh
 sh tests/fuzz/ipc_frames/prove_mutants.sh
+make fuzz-ipc-frames-corpus                            # after editing gen_corpus.ae
 ```
 
 Not part of `make test` or CI. Output stays in `build/fuzz/ipc_frames/`
