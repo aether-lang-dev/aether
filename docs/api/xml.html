@@ -31,6 +31,7 @@
     <li><a href="#error">error</a></li>
     <li><a href="#free">free</a></li>
     <li><a href="#writer">writer</a></li>
+    <li><a href="#writer_pretty">writer_pretty</a></li>
     <li><a href="#declaration">declaration</a></li>
     <li><a href="#start">start</a></li>
     <li><a href="#attribute">attribute</a></li>
@@ -40,6 +41,7 @@
     <li><a href="#finish">finish</a></li>
     <li><a href="#free_builder">free_builder</a></li>
     <li><a href="#escape">escape</a></li>
+    <li><a href="#pretty">pretty</a></li>
   </ul>
   <hr>
   <h2>Modules</h2>
@@ -228,6 +230,12 @@
       <pre class="usage"><code>writer() <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="doc">New XML builder/writer. Free with `xml.free_builder` after `finish`. (Named `writer` because `builder` is a reserved keyword in Aether.)</p>
     </div>
+    <div class="function" id="writer_pretty" data-name="writer_pretty">
+      <h3 class="function-name">writer_pretty <span class="kind">fn</span></h3>
+      <pre class="usage"><code>writer_pretty(indent) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">indent: int</span></p>
+      <p class="doc">New XML builder/writer configured for pretty-printed output. Elements and children are indented with `indent` spaces (0 to 16). Behaves identically to `writer`, but `finish` returns indented output.</p>
+    </div>
     <div class="function" id="declaration" data-name="declaration">
       <h3 class="function-name">declaration <span class="kind">fn</span></h3>
       <pre class="usage"><code>declaration(b)</code></pre>
@@ -281,6 +289,12 @@
       <pre class="usage"><code>escape(s) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">s: string</span></p>
       <p class="doc">Escape the five predefined entities (&amp; &lt; &gt; &quot; ') in `s`; returns an owned string. Rarely needed directly — `text` / `attribute` / `element` escape for you — but available for assembling markup by hand.</p>
+    </div>
+    <div class="function" id="pretty" data-name="pretty">
+      <h3 class="function-name">pretty <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pretty(src, indent) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">src: string, indent: int</span></p>
+      <p class="doc">Reformat `src` with `indent` spaces per level (0 to 16). Returns (formatted, error). On success, error is &quot;&quot;. On any well-formedness error or invalid indent, returns (&quot;&quot;, message). Never returns partial output.</p>
     </div>
   </div>
 </main>

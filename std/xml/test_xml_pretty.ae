@@ -1,0 +1,358 @@
+// Test suite for std.xml pretty-printing: xml.pretty and xml.writer_pretty.
+//
+// Covers all positive specifications, semantic event-stream equivalence,
+// idempotence, builder pretty mode, depth and scale, and negative error cases.
+
+import std.xml
+import std.string
+import std.bytes
+import std.time
+import std.strbuilder
+
+extern exit(code: int)
+
+// A string of the given bytes (e.g. for BOM or control characters).
+raw_bytes(b0: int, b1: int, b2: int, b3: int, n: int) -> string {
+    b = bytes.new(4)
+    bytes.set(b, 0, b0)
+    bytes.set(b, 1, b1)
+    bytes.set(b, 2, b2)
+    bytes.set(b, 3, b3)
+    return bytes.finish(b, n)
+}
+
+is_xml_ws(s: string) -> int {
+    n = string.length(s)
+    if n == 0 { return 1 }
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 32 || c == 9 || c == 10 || c == 13 {
+            // whitespace
+        } else {
+            return 0
+        }
+        i = i + 1
+    }
+    return 1
+}
+
+// Drain an XML document into a normalized event sequence string.
+// Ignores whitespace-only TEXT events between elements so that
+// input and pretty-printed output can be verified as semantically equivalent.
+drain_events(doc: string) -> string {
+    p = xml.parser(doc)
+    out = ""
+    done = 0
+    while done == 0 {
+        ev = xml.next(p)
+        if ev == xml.EVENT_EOF {
+            done = 1
+        } else if ev == xml.EVENT_ERROR {
+            xml.free(p)
+            return "ERROR"
+        } else if ev == xml.EVENT_START {
+            out = "${out}S:${xml.name(p)}["
+            ac = xml.attr_count(p)
+            i = 0
+            while i < ac {
+                k = xml.attr_name(p, i)
+                v = xml.attr_value(p, i)
+                out = "${out}${k}=${v};"
+                i = i + 1
+            }
+            out = "${out}]|"
+        } else if ev == xml.EVENT_END {
+            out = "${out}E:${xml.name(p)}|"
+        } else if ev == xml.EVENT_TEXT {
+            t = xml.text(p)
+            if is_xml_ws(t) == 0 {
+                out = "${out}T:${t}|"
+            }
+        }
+    }
+    xml.free(p)
+    return out
+}
+
+// Check that pretty(src, indent) == want, is idempotent, and preserves event semantics.
+check_pretty(name: string, src: string, indent: int, want: string) -> int {
+    got, err = xml.pretty(src, indent)
+    if err != "" {
+        println("  FAIL [${name}]: unexpected error: ${err}")
+        return 1
+    }
+    if got != want {
+        println("  FAIL [${name}]: output mismatch")
+        println("    got: [${got}]")
+        println("    want:[${want}]")
+        return 1
+    }
+
+    // Idempotence check: pretty(pretty(x, n), n) == pretty(x, n)
+    re, re_err = xml.pretty(got, indent)
+    if re_err != "" {
+        println("  FAIL [${name}]: idempotence re-format failed: ${re_err}")
+        return 1
+    }
+    if re != got {
+        println("  FAIL [${name}]: not idempotent")
+        println("    first: [${got}]")
+        println("    again: [${re}]")
+        return 1
+    }
+
+    // Semantic event-stream equivalence
+    ev_src = drain_events(src)
+    ev_got = drain_events(got)
+    if ev_src != ev_got {
+        println("  FAIL [${name}]: event stream mismatch")
+        println("    src: ${ev_src}")
+        println("    got: ${ev_got}")
+        return 1
+    }
+    return 0
+}
+
+// Check that pretty(src, indent) fails with error containing `want_err_substr`.
+check_refuse(name: string, src: string, indent: int, want_err_substr: string) -> int {
+    got, err = xml.pretty(src, indent)
+    if got != "" {
+        println("  FAIL [${name}]: expected empty output on error, got non-empty: [${got}]")
+        return 1
+    }
+    if err == "" {
+        println("  FAIL [${name}]: expected error containing '${want_err_substr}', got empty error")
+        return 1
+    }
+    if string.contains(err, want_err_substr) == 0 {
+        println("  FAIL [${name}]: error '${err}' does not contain '${want_err_substr}'")
+        return 1
+    }
+    return 0
+}
+
+make_scale_doc(count: int) -> string {
+    b = strbuilder.new(count * 65)
+    strbuilder.append(b, "<root>")
+    i = 0
+    while i < count {
+        strbuilder.append(b, "<item id=\"")
+        strbuilder.append(b, string.from_int(i))
+        strbuilder.append(b, "\"><name>Item Name</name><val>12345</val></item>")
+        i = i + 1
+    }
+    strbuilder.append(b, "</root>")
+    return strbuilder.finish(b)
+}
+
+main() {
+    println("=== test_xml_pretty ===")
+    fails = 0
+
+    // ---- 1. SOAP 1.1 and 1.2 envelopes ----
+    // SOAP 1.1 compact
+    soap11_src = "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\"><Header><Action xmlns=\"http://www.w3.org/2005/08/addressing\">urn:greet</Action><MessageID xmlns=\"http://www.w3.org/2005/08/addressing\">uuid:12345</MessageID><To xmlns=\"http://www.w3.org/2005/08/addressing\">http://localhost/service</To></Header><Body><Greet><Name>Servirtium</Name></Greet></Body></Envelope>"
+    soap11_want = "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\">\n  <Header>\n    <Action xmlns=\"http://www.w3.org/2005/08/addressing\">urn:greet</Action>\n    <MessageID xmlns=\"http://www.w3.org/2005/08/addressing\">uuid:12345</MessageID>\n    <To xmlns=\"http://www.w3.org/2005/08/addressing\">http://localhost/service</To>\n  </Header>\n  <Body>\n    <Greet>\n      <Name>Servirtium</Name>\n    </Greet>\n  </Body>\n</Envelope>\n"
+    fails = fails + check_pretty("soap11 compact", soap11_src, 2, soap11_want)
+
+    // SOAP 1.1 with CRLF and existing 4-space indentation
+    soap11_crlf_src = "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\">\r\n    <Header>\r\n        <Action xmlns=\"http://www.w3.org/2005/08/addressing\">urn:greet</Action>\r\n        <MessageID xmlns=\"http://www.w3.org/2005/08/addressing\">uuid:12345</MessageID>\r\n        <To xmlns=\"http://www.w3.org/2005/08/addressing\">http://localhost/service</To>\r\n    </Header>\r\n    <Body>\r\n        <Greet>\r\n            <Name>Servirtium</Name>\r\n        </Greet>\r\n    </Body>\r\n</Envelope>"
+    fails = fails + check_pretty("soap11 crlf 4space", soap11_crlf_src, 2, soap11_want)
+
+    // SOAP 1.1 with tabs
+    soap11_tabs_src = "<Envelope xmlns=\"http://schemas.xmlsoap.org/soap/envelope/\">\n\t<Header>\n\t\t<Action xmlns=\"http://www.w3.org/2005/08/addressing\">urn:greet</Action>\n\t\t<MessageID xmlns=\"http://www.w3.org/2005/08/addressing\">uuid:12345</MessageID>\n\t\t<To xmlns=\"http://www.w3.org/2005/08/addressing\">http://localhost/service</To>\n\t</Header>\n\t<Body>\n\t\t<Greet>\n\t\t\t<Name>Servirtium</Name>\n\t\t</Greet>\n\t</Body>\n</Envelope>"
+    fails = fails + check_pretty("soap11 tabs", soap11_tabs_src, 2, soap11_want)
+
+    // SOAP 1.2 envelope
+    soap12_src = "<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://www.w3.org/2005/08/addressing\"><soap:Header><wsa:Action>urn:greet</wsa:Action><wsa:MessageID>uuid:12345</wsa:MessageID><wsa:To>http://localhost/service</wsa:To></soap:Header><soap:Body><Greet xmlns=\"http://example.com\"><Name>Servirtium</Name></Greet></soap:Body></soap:Envelope>"
+    soap12_want = "<soap:Envelope xmlns:soap=\"http://www.w3.org/2003/05/soap-envelope\" xmlns:wsa=\"http://www.w3.org/2005/08/addressing\">\n  <soap:Header>\n    <wsa:Action>urn:greet</wsa:Action>\n    <wsa:MessageID>uuid:12345</wsa:MessageID>\n    <wsa:To>http://localhost/service</wsa:To>\n  </soap:Header>\n  <soap:Body>\n    <Greet xmlns=\"http://example.com\">\n      <Name>Servirtium</Name>\n    </Greet>\n  </soap:Body>\n</soap:Envelope>\n"
+    fails = fails + check_pretty("soap12 compact", soap12_src, 2, soap12_want)
+
+    // ---- 2. Default namespace plus prefixes; inner xmlns ----
+    ns_src = "<root xmlns=\"http://default.org\" xmlns:a=\"http://a.org\"><a:elem xmlns=\"http://inner.org\" xmlns:b=\"http://b.org\"><b:sub/></a:elem></root>"
+    ns_want = "<root xmlns=\"http://default.org\" xmlns:a=\"http://a.org\">\n  <a:elem xmlns=\"http://inner.org\" xmlns:b=\"http://b.org\">\n    <b:sub/>\n  </a:elem>\n</root>\n"
+    fails = fails + check_pretty("namespaces", ns_src, 2, ns_want)
+
+    // ---- 3. Self-closing vs explicit-empty elements ----
+    empty_src = "<root><a/><b x=\"1\"/><c></c><d y=\"2\"></d></root>"
+    empty_want = "<root>\n  <a/>\n  <b x=\"1\"/>\n  <c></c>\n  <d y=\"2\"></d>\n</root>\n"
+    fails = fails + check_pretty("empty elements", empty_src, 2, empty_want)
+
+    // ---- 4. Attributes with quotes, references, '>', newlines ----
+    attr_src = "<root a='single' b=\"double\" c=\"&quot;&lt;&gt;&amp;&#x41;\" d=\"val>with>gt\" e=\"line1\nline2\"/>"
+    attr_want = "<root a='single' b=\"double\" c=\"&quot;&lt;&gt;&amp;&#x41;\" d=\"val>with>gt\" e=\"line1\nline2\"/>\n"
+    fails = fails + check_pretty("attributes complex", attr_src, 2, attr_want)
+
+    // ---- 5. Text with entity and character references verbatim ----
+    refs_src = "<root><item>Hello &amp; &lt;tag&gt; &quot;quote&quot; &apos;apos&apos; &#x41;&#66;</item></root>"
+    refs_want = "<root>\n  <item>Hello &amp; &lt;tag&gt; &quot;quote&quot; &apos;apos&apos; &#x41;&#66;</item>\n</root>\n"
+    fails = fails + check_pretty("text references verbatim", refs_src, 2, refs_want)
+
+    // ---- 6. CDATA sections ----
+    cdata_src = "<root><c1><![CDATA[<not>&escaped</not>]]></c1><c2><![CDATA[]]]]><![CDATA[>]]></c2><c3><![CDATA[text with ]] adjacent]]></c3></root>"
+    cdata_want = "<root>\n  <c1><![CDATA[<not>&escaped</not>]]></c1>\n  <c2><![CDATA[]]]]><![CDATA[>]]></c2>\n  <c3><![CDATA[text with ]] adjacent]]></c3>\n</root>\n"
+    fails = fails + check_pretty("cdata sections", cdata_src, 2, cdata_want)
+
+    // CDATA-only element
+    cdata_elem_src = "<c><![CDATA[plain cdata]]></c>"
+    cdata_elem_want = "<c><![CDATA[plain cdata]]></c>\n"
+    fails = fails + check_pretty("cdata-only element", cdata_elem_src, 2, cdata_elem_want)
+
+    // ---- 7. Comments ----
+    comment_src = "<!-- pre root -->\n<root>\n  <!-- inside comment with <fake>tag</fake> -->\n  <item><!-- leaf comment -->value</item>\n</root>\n<!-- post root -->"
+    comment_want = "<!-- pre root -->\n<root>\n  <!-- inside comment with <fake>tag</fake> -->\n  <item><!-- leaf comment -->value</item>\n</root>\n<!-- post root -->\n"
+    fails = fails + check_pretty("comments", comment_src, 2, comment_want)
+
+    // ---- 8. XML declaration, PIs, DOCTYPE with internal subset ----
+    prolog_src = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<?pi-top instruction?>\n<!DOCTYPE doc SYSTEM \"doc.dtd\" [\n  <!ENTITY name \"value\">\n]>\n<doc>\n  <?pi-inside sub?>\n  <item>&name;</item>\n</doc>"
+    prolog_want = "<?xml version=\"1.0\" encoding=\"UTF-8\" standalone=\"yes\"?>\n<?pi-top instruction?>\n<!DOCTYPE doc SYSTEM \"doc.dtd\" [\n  <!ENTITY name \"value\">\n]>\n<doc>\n  <?pi-inside sub?>\n  <item>&name;</item>\n</doc>\n"
+    fails = fails + check_pretty("prolog and doctype", prolog_src, 2, prolog_want)
+
+    // ---- 9. Mixed content ----
+    mixed_src = "<root>\n  <p>Hello <b>world</b> and <i>everyone</i>!</p>\n</root>"
+    mixed_want = "<root>\n  <p>Hello <b>world</b> and <i>everyone</i>!</p>\n</root>\n"
+    fails = fails + check_pretty("mixed content", mixed_src, 2, mixed_want)
+
+    // ---- 10. xml:space="preserve" ----
+    space_src = "<root>\n  <code xml:space=\"preserve\">\n    line 1\n      <span xml:space=\"default\">nested default</span>\n  </code>\n</root>"
+    space_want = "<root>\n  <code xml:space=\"preserve\">\n    line 1\n      <span xml:space=\"default\">nested default</span>\n  </code>\n</root>\n"
+    fails = fails + check_pretty("xml space preserve", space_src, 2, space_want)
+
+    // ---- 11. Whitespace-only leaf & text-only leaf with spaces ----
+    ws_leaf_src = "<root><ws>   </ws><text>  hello world  </text></root>"
+    ws_leaf_want = "<root>\n  <ws>   </ws>\n  <text>  hello world  </text>\n</root>\n"
+    fails = fails + check_pretty("whitespace leaf and spaces", ws_leaf_src, 2, ws_leaf_want)
+
+    // ---- 12. UTF-8 BOM and non-ASCII / Unicode ----
+    bom_str = raw_bytes(239, 187, 191, 0, 3)
+    unicode_src = string.concat(bom_str, "<é:élément name=\"Café\">日本 🚀 🎉</é:élément>")
+    unicode_want = string.concat(bom_str, "<é:élément name=\"Café\">日本 🚀 🎉</é:élément>\n")
+    fails = fails + check_pretty("bom and unicode", unicode_src, 2, unicode_want)
+
+    // ---- 13. Indentation levels 0, 1, 4, 16 ----
+    ind0_src = "<root><a/><b/></root>"
+    ind0_want = "<root>\n<a/>\n<b/>\n</root>\n"
+    fails = fails + check_pretty("indent 0", ind0_src, 0, ind0_want)
+
+    ind1_want = "<root>\n <a/>\n <b/>\n</root>\n"
+    fails = fails + check_pretty("indent 1", ind0_src, 1, ind1_want)
+
+    ind4_want = "<root>\n    <a/>\n    <b/>\n</root>\n"
+    fails = fails + check_pretty("indent 4", ind0_src, 4, ind4_want)
+
+    ind16_want = "<root>\n                <a/>\n                <b/>\n</root>\n"
+    fails = fails + check_pretty("indent 16", ind0_src, 16, ind16_want)
+
+    // ---- 14. Depth: 500 nested elements ----
+    b_deep = strbuilder.new(12000)
+    d = 0
+    while d < 500 {
+        strbuilder.append(b_deep, "<a>")
+        d = d + 1
+    }
+    strbuilder.append(b_deep, "leaf")
+    d = 0
+    while d < 500 {
+        strbuilder.append(b_deep, "</a>")
+        d = d + 1
+    }
+    deep_src = strbuilder.finish(b_deep)
+    deep_out, deep_err = xml.pretty(deep_src, 1)
+    if deep_err != "" {
+        println("  FAIL [depth 500]: ${deep_err}")
+        fails = fails + 1
+    } else if string.length(deep_out) < 500000 {
+        println("  FAIL [depth 500]: output length unexpected: ${string.length(deep_out)}")
+        fails = fails + 1
+    }
+
+    // ---- 15. Scale: ~2 MB document and linear performance check ----
+    scale_1x = make_scale_doc(8000)   // ~500 KB
+    scale_4x = make_scale_doc(32000)  // ~2 MB
+    t0 = time.now_ms()
+    _out_1x, err_1x = xml.pretty(scale_1x, 2)
+    t1 = time.now_ms()
+    dur_1x = t1 - t0
+
+    t2 = time.now_ms()
+    _out_4x, err_4x = xml.pretty(scale_4x, 2)
+    t3 = time.now_ms()
+    dur_4x = t3 - t2
+
+    if err_1x != "" || err_4x != "" {
+        println("  FAIL [scale ~2MB]: error formatting scale doc")
+        fails = fails + 1
+    } else {
+        println("  INFO: scale 1x (~500KB) took ${dur_1x} ms, 4x (~2MB) took ${dur_4x} ms")
+        // In quadratic behavior, 4x input would take ~16x longer.
+        // We assert dur_4x <= dur_1x * 12 + 1000 ms to confirm linear / O(N) scaling.
+        bound = (dur_1x * 12) + 1000
+        if dur_4x > bound {
+            println("  FAIL [scale timing]: potential quadratic behavior, 4x took ${dur_4x} ms vs 1x ${dur_1x} ms")
+            fails = fails + 1
+        }
+    }
+
+    // ---- 16. Builder pretty mode ----
+    // Build SOAP 1.1 with writer_pretty(2) and compare with pretty(writer(), 2)
+    wb = xml.writer()
+    xml.declaration(wb)
+    xml.start(wb, "Envelope")
+    xml.attribute(wb, "xmlns", "http://schemas.xmlsoap.org/soap/envelope/")
+    xml.start(wb, "Body")
+    xml.start(wb, "Greet")
+    xml.element(wb, "Name", "Servirtium")
+    xml.end(wb, "Greet")
+    xml.end(wb, "Body")
+    xml.end(wb, "Envelope")
+    plain_built = xml.finish(wb)
+    xml.free_builder(wb)
+
+    pretty_from_plain, _ = xml.pretty(plain_built, 2)
+
+    wp = xml.writer_pretty(2)
+    xml.declaration(wp)
+    xml.start(wp, "Envelope")
+    xml.attribute(wp, "xmlns", "http://schemas.xmlsoap.org/soap/envelope/")
+    xml.start(wp, "Body")
+    xml.start(wp, "Greet")
+    xml.element(wp, "Name", "Servirtium")
+    xml.end(wp, "Greet")
+    xml.end(wp, "Body")
+    xml.end(wp, "Envelope")
+    pretty_built = xml.finish(wp)
+    xml.free_builder(wp)
+
+    if pretty_built != pretty_from_plain {
+        println("  FAIL [builder writer_pretty]: output mismatch")
+        println("    pretty_built:      [${pretty_built}]")
+        println("    pretty_from_plain: [${pretty_from_plain}]")
+        fails = fails + 1
+    }
+
+    // ---- 17. Negative cases ----
+    fails = fails + check_refuse("empty string", "", 2, "no root element (line 1, column 1, byte 0)")
+    fails = fails + check_refuse("whitespace only", "   \n\t  ", 2, "no root element")
+    fails = fails + check_refuse("text only", "plain text", 2, "text outside the root element (line 1, column 1, byte 0)")
+    fails = fails + check_refuse("two roots", "<a/><b/>", 2, "second root element <b>: a document has one (line 1, column 5, byte 4)")
+    fails = fails + check_refuse("unclosed element", "<root><item>", 2, "<item> is not closed (line 1, column 13, byte 12)")
+    fails = fails + check_refuse("mismatched end tag", "<a><b></a>", 2, "end tag </a> does not match the open <b> (line 1, column 7, byte 6)")
+    fails = fails + check_refuse("duplicate attribute", "<a x=\"1\" x=\"2\"/>", 2, "attribute x appears twice in one tag (line 1, column 10, byte 9)")
+    fails = fails + check_refuse("undeclared entity", "<a>&foo;</a>", 2, "reference to undeclared entity &foo; (only &amp; &lt; &gt; &quot; &apos; are predefined)")
+    fails = fails + check_refuse("bad char ref &#0;", "<a>&#0;</a>", 2, "character reference to a character XML does not allow")
+    fails = fails + check_refuse("bad char ref surrogate", "<a>&#xD800;</a>", 2, "character reference to a character XML does not allow")
+    fails = fails + check_refuse("raw control character", string.concat("<a>", string.concat(raw_bytes(1, 0, 0, 0, 1), "</a>")), 2, "control character 0x01, which XML does not allow")
+    fails = fails + check_refuse("unterminated comment", "<a><!-- unclosed</a>", 2, "unterminated comment")
+    fails = fails + check_refuse("unterminated CDATA", "<a><![CDATA[ unclosed</a>", 2, "unterminated CDATA")
+    fails = fails + check_refuse("unterminated PI", "<a><?pi unclosed</a>", 2, "unterminated processing instruction")
+    fails = fails + check_refuse("CDATA outside root", "<![CDATA[x]]><a/>", 2, "CDATA outside the root element (line 1, column 1, byte 0)")
+    fails = fails + check_refuse("indent -1", "<a/>", -1, "indent must be 0 to 16, got -1")
+    fails = fails + check_refuse("indent 17", "<a/>", 17, "indent must be 0 to 16, got 17")
+
+    if fails > 0 {
+        println("FAIL: ${fails} checks failed")
+        exit(1)
+    }
+    println("=== test_xml_pretty passed ===")
+}

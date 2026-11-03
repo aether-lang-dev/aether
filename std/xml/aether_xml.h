@@ -100,9 +100,30 @@ void xml_builder_element(XmlBuilder* b, const char* name, const char* text);
  * Returns NULL on allocation failure. */
 char* xml_builder_finish(XmlBuilder* b);
 
+/* Pretty mode builder: behaves like xml_builder_new, but xml_builder_finish
+ * formats the accumulated XML with `indent` spaces (0 to 16). */
+XmlBuilder* xml_builder_pretty_new(int indent);
+
 /* Escape the five predefined entities (& < > " ') in `s` into a fresh
  * counted AetherString (cast to char*) the caller releases with
  * string_release. NULL on alloc failure. */
 char* xml_escape(const char* s);
+
+/* ---- Pretty printing ---------------------------------------------- */
+
+/* Reformat XML document `data` (of length `len`) with `indent` spaces
+ * per level (0 to 16).
+ * On success, returns an allocated AetherString* (cast to char*) with
+ * the formatted XML, and sets *out_err to NULL.
+ * On error, returns NULL and sets *out_err to a freshly allocated error
+ * message string (caller frees with free()) ending in
+ * "(line L, column C, byte N)".
+ * When out_err is NULL, error messages are not returned. */
+char* xml_pretty(const char* data, size_t len, int indent, char** out_err);
+char* xml_pretty_str(const char* s, int indent, char** out_err);
+
+/* Aether extern binding helpers: pretty printer returns (formatted, error) */
+typedef struct { const char* _0; const char* _1; } _tuple_string_string;
+_tuple_string_string xml_pretty_tuple(const char* s, int indent);
 
 #endif /* AETHER_XML_H */
