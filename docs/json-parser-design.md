@@ -87,9 +87,21 @@ built container something was set into) is not copied (#3538): its arena
 is adopted by the container's, destroyed with it from then on, and the
 node is kept where it is. Copying it made a document built level by level
 cost O(depth x size). Only a node inside another document, which that
-document owns, and a small heap tree are still copied. A container an
-arena is made for starts it at 512 bytes, so a document of many adopted
-arenas holds about what it was given.
+document owns, and a small heap tree are still copied whole.
+
+An arena is adopted only when at least a third of its own space is in
+use, so an adopted arena holds at most three times what it uses, and a
+document of many adopted arenas at most three times what its parts use.
+A parse gives every document a 16 KB first chunk, which a small document
+leaves nearly empty: adopting 2000 parsed `{"id":N,"ok":true}` into one
+array held 32 MB, where copies take 0.5 MB. Such a document is copied
+instead, the nodes of its own arena only: the arenas it adopted are handed
+over to the container's, with the nodes in them kept where they are. So a
+copy never takes more than a third of the donor's own arena, and never
+what it adopted. A container an arena is made for starts it at 512 bytes,
+and an arena that grows by doubling is a third used or more once it is past
+its first chunk, so a document built level by level copies little at each
+level.
 
 Objects past 16 keys get a hash index (open addressing over the key
 positions, in the object's arena) when a set adds to them, so building an

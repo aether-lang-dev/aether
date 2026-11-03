@@ -243,7 +243,8 @@ static Arena* arena_create(void) {
 
 /* A built container's arena starts small (#3538): a set moves a document
  * into its container with its arena, so a document built level by level
- * keeps one arena a level, and each should hold about what it was given. */
+ * keeps one arena a level, and a small first chunk keeps each of them small
+ * and well enough used to be adopted (arena_worth_adopting). */
 #define ARENA_BUILD_FIRST_CHUNK 512u
 
 /* `a` and every arena it adopted, however deep, without recursion: each
@@ -276,6 +277,33 @@ static void arena_adopt(Arena* parent, Arena* child) {
     child->owner = parent;
     child->sibling = parent->adopted;
     parent->adopted = child;
+}
+
+/* Every arena `from` adopted, destroyed with `to` from now on instead. */
+static void arena_hand_over_adopted(Arena* to, Arena* from) {
+    for (Arena* c = from->adopted; c; ) {
+        Arena* next = c->sibling;
+        arena_adopt(to, c);
+        c = next;
+    }
+    from->adopted = NULL;
+}
+
+/* Is enough of `a`'s own space in use for a container to adopt it whole
+ * (#3538)? At least a third: a parse gives every document a 16 KB first
+ * chunk, and adopting a small one kept all of it, so 2000 parsed
+ * {"id":N,"ok":true} pushed into one array held 32 MB where their copies
+ * take 0.5 MB. An arena that grew by doubling, as every one here does, is
+ * about half full or more once past its first chunk, and a builder's first
+ * chunk is small, so a document built level by level is still adopted at
+ * each level. An adopted arena holds at most three times what it uses. */
+static int arena_worth_adopting(const Arena* a) {
+    size_t used = 0, cap = 0;
+    for (const ArenaChunk* c = a->head; c; c = c->next) {
+        used += c->used;
+        cap += c->cap;
+    }
+    return used >= cap / 3u;
 }
 
 /* Is `target` the arena `a` or one that, through adoptions, destroys it? */
@@ -570,7 +598,12 @@ enum {
     // consumers expecting a plain integer count (e.g. byte-totals, IDs).
     // Sourced from `stdlib-json-integer-value-ask.md` (fbs-core /metrics
     // handler).
-    JV_FLAG_INTEGER     = 0x04u
+    JV_FLAG_INTEGER     = 0x04u,
+    // Marks the node of a document that a container's arena adopted
+    // (take_child): it lives in that document's arena, which the container's
+    // destroys with itself. A copy of the container's own nodes stops here
+    // and keeps the pointer, since what is under it is not in that arena.
+    JV_FLAG_ADOPTED     = 0x08u
 };
 
 // Parallel arrays for an object's (key, key_len, value) triples.
@@ -1663,9 +1696,6 @@ int json_array_size(JsonValue* arr) {
 // the parent if it doesn't have one yet. This unifies the free path.
 // ---------------------------------------------------------------------------
 
-// Forward decl for deep_copy which is mutually recursive.
-static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena);
-
 // Copy a byte range into dst_arena as a null-terminated string.
 static const char* arena_copy_str(Arena* a, const char* src, uint32_t len) {
     char* dst = (char*)arena_alloc(a, (size_t)len + 1);
@@ -1675,8 +1705,13 @@ static const char* arena_copy_str(Arena* a, const char* src, uint32_t len) {
     return dst;
 }
 
-static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
+/* `src` and its subtree, copied into dst_arena. With keep_adopted, a node
+ * under `src` that an arena adopted (JV_FLAG_ADOPTED) is kept as it is
+ * rather than copied, so only the nodes of src's own arena are: the caller
+ * then hands the adopted arenas over too (take_child). */
+static JsonValue* copy_into_arena(JsonValue* src, Arena* dst_arena, int keep_adopted) {
     if (!src) return NULL;
+    if (keep_adopted && (src->flags & JV_FLAG_ADOPTED)) return src;
     JsonValue* out = (JsonValue*)arena_alloc(dst_arena, sizeof(JsonValue));
     if (!out) return NULL;
     memset(out, 0, sizeof(JsonValue));
@@ -1708,7 +1743,7 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
                     dst_arena, sizeof(JsonValue*) * n);
                 if (!items) return NULL;
                 for (uint32_t i = 0; i < n; i++) {
-                    items[i] = deep_copy_into_arena(src->data.arr.items[i], dst_arena);
+                    items[i] = copy_into_arena(src->data.arr.items[i], dst_arena, keep_adopted);
                     if (!items[i]) return NULL;
                 }
                 out->data.arr.items = items;
@@ -1735,7 +1770,7 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
                     keys[i] = arena_copy_str(dst_arena, src_blk->keys[i], kl);
                     if (!keys[i]) return NULL;
                     lens[i] = kl;
-                    vals[i] = deep_copy_into_arena(src_blk->values[i], dst_arena);
+                    vals[i] = copy_into_arena(src_blk->values[i], dst_arena, keep_adopted);
                     if (!vals[i]) return NULL;
                 }
                 blk->keys = keys;
@@ -1754,6 +1789,11 @@ static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
     // parsed document's do (#2719).
     if (out->type == JSON_ARRAY || out->type == JSON_OBJECT) out->arena = dst_arena;
     return out;
+}
+
+/* `src` and its whole subtree, copied into dst_arena. */
+static JsonValue* deep_copy_into_arena(JsonValue* src, Arena* dst_arena) {
+    return copy_into_arena(src, dst_arena, 0);
 }
 
 // Make sure `container` has an arena it can own. If it doesn't, promote
@@ -1866,22 +1906,36 @@ static void free_donated_value(JsonValue* value) {
  * for every level above it, O(depth x size) (#3538). A document's root (its
  * own arena, its own to give) moves instead: its arena is destroyed with the
  * container's from now on, and the node is kept where it is, or in its
- * arena if it was a builder's heap struct. Anything else is copied: a heap
- * tree (a scalar, a string, a container nothing was set into: small), which
- * is then freed, or a node inside another document, which that document
- * owns. A root whose arena destroys the container's would own itself: that
- * is a document set into its own descendant, which is refused. */
+ * arena if it was a builder's heap struct. That is when enough of the
+ * arena is in use (arena_worth_adopting). When it is mostly empty, as a
+ * small parsed document's is, the nodes in it are copied, the arenas it
+ * adopted are handed over with the nodes adopted into them kept as they
+ * are, and it is freed: a copy of what it holds of its own, never of what
+ * it adopted. Anything else is copied whole: a
+ * heap tree (a scalar, a string, a container nothing was set into: small),
+ * which is then freed, or a node inside another document, which that
+ * document owns. A root whose arena destroys the container's would own
+ * itself: that is a document set into its own descendant, which is
+ * refused. */
 static JsonValue* take_child(Arena* into, JsonValue* value) {
     if (value->arena && (value->flags & JV_FLAG_ROOT)) {
         Arena* a = value->arena;
         if (arena_within(into, a)) return NULL;
+        if (!arena_worth_adopting(a)) {
+            JsonValue* copy = copy_into_arena(value, into, 1);
+            if (!copy) return NULL;
+            arena_hand_over_adopted(into, a);
+            free_donated_value(value);
+            return copy;
+        }
         JsonValue* node = value;
         if (value->flags & JV_FLAG_HEAP_STRUCT) {
             node = (JsonValue*)arena_alloc(a, sizeof(JsonValue));
             if (!node) return NULL;
             *node = *value;
         }
-        node->flags &= (uint8_t)~(JV_FLAG_ROOT | JV_FLAG_HEAP_STRUCT);
+        node->flags = (uint8_t)((node->flags & ~(JV_FLAG_ROOT | JV_FLAG_HEAP_STRUCT)) |
+                                JV_FLAG_ADOPTED);
         arena_adopt(into, a);
         if (node != value) aether_caps_free(value, sizeof(JsonValue));
         return node;
