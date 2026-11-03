@@ -2087,7 +2087,7 @@ else
 STUNT_LIB := $(STUNT_DIR)/libstunt.so
 STUNT_SHARED := -shared -fPIC
 endif
-STUNT_LIBS := $(if $(filter Linux,$(shell uname -s)),-ldl,)
+STUNT_LIBS := $(if $(filter Linux,$(DETECTED_OS)),-ldl,)
 .PHONY: stunt
 stunt: $(STUNT_LIB) $(STUNT_DIR)/stunt$(EXE_EXT)
 $(STUNT_LIB): contrib/host/stunt/stunt.c contrib/host/stunt/stunt.h

@@ -18,8 +18,12 @@
   bridge must handle: grant checks, the preload, Landlock and seccomp rows,
   nested levels, typed callbacks, the shared map, the cached environment,
   the instruction limit and cancel, an oversize frame. No interpreter
-  package; runs on every POSIX lane. Tests in
-  `tests/integration/contrib_host_stunt`. See its README.
+  package. Tests in `tests/integration/contrib_host_stunt`, run on the Linux
+  and macOS lanes (and Windows, for the in-process rows that are not POSIX
+  calls). See its README.
+- [ ] Run stunt on FreeBSD. Its FreeBSD branches (the preload in process,
+  the uncontained child, `libc.so.7`/`libm.so.5`, `syscall()`) are written
+  but have never run: untested there.
 - [ ] A hosts repository with the real bridges and more languages, each held
   to stunt's catalogue by name; then the real bridges here move out, with a
   transition.

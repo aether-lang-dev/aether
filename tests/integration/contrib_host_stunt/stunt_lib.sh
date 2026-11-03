@@ -6,7 +6,8 @@
 #                                   that applies here; stop at the first
 #                                   mismatch
 #
-# The modes, as host.ae runs them:
+# The modes, as host.ae runs them (the FreeBSD branches have never been run:
+# untested there):
 #   inproc    libstunt loaded by the bridge, under libaether_sandbox.so where
 #             the preload works (Linux, FreeBSD)
 #   child     the stunt program under sandbox.spawn_socket (Linux)

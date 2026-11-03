@@ -184,7 +184,8 @@ script with nothing to run here builds nothing more. It runs each check in
 every mode that applies, chosen by check name: in-process everywhere (the libc rows under the preload, on Linux
 and FreeBSD); the contained child on Linux with Landlock; the uncontained
 child (`sandbox.spawn_socket_uncontained`) on macOS and FreeBSD, where the
-contained spawn refuses, for the rows that are about the host. Windows has
+contained spawn refuses, for the rows that are about the host. The FreeBSD
+branches are written and have not been run yet: untested. Windows has
 the in-process rows that are not POSIX calls or POSIX paths (callbacks, the
 map, the environment, spin): there is no socket channel there.
 
