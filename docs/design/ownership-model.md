@@ -231,8 +231,11 @@ or shared cell, a container element (list, map, string sequence, strarr:
 slice or an actor's reference, by one rule for every store (#3398: only
 the string fields were, and a struct, an element, a whole array or a nested
 optional took its strings plain). A message does not share: a send
-deep-copies its strings (#466), so it needs no publish. A value read from a
-published place carries the bit with it.
+deep-copies its strings (#466), so it needs no publish, except a temporary
+held by nothing else (an owned call or interpolation result whose count is
+1, not pinned), which the message takes as it is: a dying temporary moves
+(#3535, `_aether_msg_str`). A value read from a published place carries the
+bit with it.
 
 **A module string `var` is locked (#3522).** Atomic counts make two
 threads' retains and releases of one string safe, not the place that holds

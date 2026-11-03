@@ -1,0 +1,76 @@
+// Regression (#3535): a send moves a string field that nothing else holds
+// into the message, where the ownership model says a dying temporary moves.
+//
+// `_aether_msg_str` made the message's own copy of every string field, and
+// freed the sender's temporary right after copying it: a fresh string built
+// for the send (a call's result, an interpolation) was allocated, copied
+// and freed on every send. A counted string whose count is 1 and that is no
+// literal is now handed to the message as it is. A string something else
+// holds is still copied, so no other thread ever counts what the sender
+// keeps: a local, and a call's result another place shares.
+//
+// The receiver compares the bytes it got with the ones the sender made,
+// one send at a time (an ask after each send orders them).
+
+extern exit(code: int)
+extern aether_string_raw_ptr(s: string) -> ptr
+
+var made: ptr = null
+var keeper = ""
+
+// A fresh string, its bytes' address recorded.
+fresh(n: int) -> string {
+    s = "value-${n}"
+    made = aether_string_raw_ptr(s)
+    return s
+}
+
+// A fresh string that a module var holds too, so its count is 2.
+share(n: int) -> string {
+    s = "shared-${n}"
+    keeper = s
+    made = aether_string_raw_ptr(s)
+    return s
+}
+
+message Take { text: string, want: string }
+message Get {}
+message Seen { same: int }
+
+actor Sink {
+    state same = 0
+    state bad = 0
+    receive {
+        Take(text, want) -> {
+            if aether_string_raw_ptr(text) == made { same = same + 1 }
+            if text != want { bad = bad + 1 }
+        }
+        Get() -> { reply Seen { same: same * 1000 + bad } }
+    }
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3535: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    sink = spawn(Sink())
+    i = 0
+    while i < 5 {
+        sink ! Take { text: fresh(i), want: "value-${i}" }
+        int seen = sink ? Get {}
+        check(seen == (i + 1) * 1000, "a fresh string was not moved (or not whole): ${seen}")
+        i = i + 1
+    }
+    kept = fresh(7)
+    sink ! Take { text: kept, want: "value-7" }
+    int after_local = sink ? Get {}
+    check(after_local == 5000, "a local's string was moved: ${after_local}")
+    sink ! Take { text: share(8), want: "shared-8" }
+    int after_shared = sink ? Get {}
+    check(after_shared == 5000, "a shared string was moved: ${after_shared}")
+    println("OK")
+}

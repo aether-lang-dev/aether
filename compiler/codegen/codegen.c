@@ -9830,13 +9830,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * where size_t is 32 bits (wasm32, ESP32), whose linker then traps the
      * call. */
     print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
-    /* A message's own copy of a string field, which the receiver releases
-     * (#466): nothing the sender holds, so no other thread counts it. An
-     * `owned` value is the sender's temporary, freed once copied. An
-     * expression, so the ask that C without statement expressions builds as
-     * one takes it the same way. */
+    /* A message's own string field, which the receiver releases (#466):
+     * nothing the sender holds, so no other thread counts it. An `owned`
+     * value is the sender's temporary. Held by nothing else (a counted
+     * string whose count is 1, not pinned), it is the message's as it is:
+     * a dying temporary moves (R3, #3535), and no thread but the receiver's
+     * ever reaches it. Anything else is copied, and an owned temporary
+     * freed once copied. An expression, so the ask that C without statement
+     * expressions builds as one takes it the same way. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED const char* _aether_msg_str(const char* s, int owned) {");
     print_line(gen, "    if (!s) return s;");
+    print_line(gen, "    if (owned && aether_str_is_counted(s)) {");
+    print_line(gen, "        int _rc = ((const struct _AeStrHdr*)(const void*)s)->ref_count;");
+    print_line(gen, "        if (_rc != 0x%X && (_rc & 0x%X) == 1) return s;",
+               (unsigned)AETHER_STRING_PINNED_REFS, (unsigned)AETHER_STRING_COUNT_MASK);
+    print_line(gen, "    }");
     print_line(gen, "    const char* c = string_new_with_length((void*)aether_string_data(s), aether_string_length(s));");
     print_line(gen, "    if (owned) aether_heap_str_free(s);");
     print_line(gen, "    return c;");
