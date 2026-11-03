@@ -1446,6 +1446,11 @@ fuzz-cbor: compiler ae stdlib
 # printf'd into a temp dir: doing the latter pushed this recipe past the 8 KB
 # command line mingw32-make hands to sh -c, and the truncated tail broke
 # `make test-ae` outright on Windows. See tests/scripts/run_ae_test.sh.
+#
+# AE_SWEEP_EXTRA_PRUNE's entries are fixed substrings of a path, where a
+# trailing slash pins a directory (as in tests/ae_sweep_prune.txt). The shell
+# test directories are matched with a slash appended: dirname prints none, so
+# a pinned directory matched no shell test (#3539).
 ifdef WINDOWS_NATIVE
 test-ae: compiler ae stdlib
 	@echo ===================================
@@ -1479,8 +1484,9 @@ test-ae: compiler ae stdlib
 	else \
 	  : > "$$tmpdir/shprune.txt"; \
 	fi; \
-	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
+	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u | sed 's|$$|/|' \
 	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
+	    | sed 's|/$$||' \
 	    | { if [ -n "$(AE_SWEEP_OPTIONAL)" ]; then cat; else \
 	          while read -r d; do [ -f "$$d/NEEDS_EXTERNAL_TOOLCHAIN" ] || echo "$$d"; done; fi; } \
 	    > "$$tmpdir/shdirs.txt"; \
