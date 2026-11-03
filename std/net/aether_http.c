@@ -3682,6 +3682,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     if (!reused) {
         if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
                                &serv_addr_resolved)) {
+            free(path);
             response->error = string_new(via_proxy ? "could not resolve proxy host"
                                                    : "could not resolve host");
             return response;
@@ -3689,6 +3690,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
         char* dial_err = NULL;
         if (http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
+            free(path);
             response->error = string_new(dial_err ? dial_err : "connection failed");
             free(dial_err);
             return response;
