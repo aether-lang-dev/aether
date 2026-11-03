@@ -169,7 +169,15 @@ LeakSanitizer, through the same script (`tests/scripts/sanitizer_sweep.sh`,
 `SAN=asan`) and the same sanitizing compiler, `build/asan/bin/gcc`. A heap
 overflow, a use after free or a double free stops the program that made it,
 and a block it never freed is reported when it exits; the reports go to
-`build/asan/reports/`, grouped by the first frame in this tree. Its canaries
+`build/asan/reports/`, grouped by the first frame that is not the
+sanitizer's or an allocator's. An error fails the run. A leak fails it only
+with `SAN_LEAKS=fail`: until the test programs that never free what they
+make are fixed (#3547), leaks are listed in the summary and the run passes
+on them. A fault stays the signal it is (`handle_segv=0`), so a program's
+own fault-to-panic handler and `ae run`'s crash report behave as without
+ASan, and the few tests that check what ASan replaces (FORTIFY, an
+address-space limit, Valgrind, two runtime copies in one process) read
+`AETHER_SANITIZER` and take another path. Its canaries
 are `tests/asan/overflow.ae`, which writes one byte past an 8 byte block, and
 `tests/asan/leak.ae`, which drops the only pointer to one: each must be
 stopped with its report before the corpus counts. aetherc and `ae` run

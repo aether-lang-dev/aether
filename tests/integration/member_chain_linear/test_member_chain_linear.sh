@@ -33,7 +33,10 @@ trap cleanup EXIT
 
 fail=0
 LIMIT_KB=1048576
-if (ulimit -v "$LIMIT_KB") 2>/dev/null; then
+# An AddressSanitizer build reserves terabytes of address space for its
+# shadow memory and cannot start under an address-space limit (#3539), so
+# under ASan the test takes its no-limit path.
+if [ "${AETHER_SANITIZER:-}" != asan ] && (ulimit -v "$LIMIT_KB") 2>/dev/null; then
     LINKS=99    # the parser's postfix limit is 100 operations
     RING=30
 else
@@ -44,6 +47,7 @@ fi
 
 # capped CMD...: CMD under the address-space limit, where it can be set.
 capped() {
+    if [ "${AETHER_SANITIZER:-}" = asan ]; then "$@"; return; fi
     (ulimit -v "$LIMIT_KB" 2>/dev/null; "$@")
 }
 

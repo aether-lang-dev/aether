@@ -35,9 +35,11 @@ main() {
 
     // Build a wrapped AetherString via string.copy. string.copy
     // routes through string_new which returns AetherString*.
-    wrapped = string.copy("AB")
-    if string.length(wrapped) != 2 {
-        println("FAIL setup: wrapped length=${string.length(wrapped)}, want 2")
+    // Three bytes, so the shim's four byte read stays inside the string
+    // with its NUL (two bytes and a NUL was a read past the end, #3539).
+    wrapped = string.copy("ABC")
+    if string.length(wrapped) != 3 {
+        println("FAIL setup: wrapped length=${string.length(wrapped)}, want 3")
         exit(1)
     }
 
@@ -47,7 +49,7 @@ main() {
     // and `ffi_check_first4` is module-imported.
     v = ffi_check_first4(wrapped)
 
-    // Bytes "AB\0\0" little-endian → 'A' (0x41) | 'B'<<8 (0x42) = 0x4241 = 16961.
+    // Bytes "ABC\0" little-endian, low half 'A' (0x41) | 'B'<<8 (0x42) = 0x4241 = 16961.
     // Pre-fix this would be 0xC0DE = 49374 (the AetherString magic, low half).
     if (v & 0xFFFF) != 16961 {
         println("FAIL: read_first4 saw bytes=${v & 0xFFFF}, want 16961 (\"AB\\0\\0\")")

@@ -25,16 +25,17 @@ extern exit(code: int)
 
 main() {
     // Case 1: AetherString* from string_concat_wrapped — first 4
-    // bytes the C side sees should be 'A','B','0','0' (the second
-    // two are the malloc'd buffer's tail past the payload — could
-    // be anything, but the FIRST two MUST be the payload).
-    wrapped = string_concat_wrapped("AB", "")
-    if string.length(wrapped) != 2 {
-        println("FAIL: wrapped length=${string.length(wrapped)}, want 2")
+    // bytes the C side sees should be 'A','B','C',NUL. The payload is
+    // three bytes so the shim's four byte read stays inside the string
+    // with its NUL (two bytes and a NUL was a read past the end, #3539);
+    // the FIRST two are what tells payload from header.
+    wrapped = string_concat_wrapped("AB", "C")
+    if string.length(wrapped) != 3 {
+        println("FAIL: wrapped length=${string.length(wrapped)}, want 3")
         exit(1)
     }
     v = read_first4_as_int(wrapped)
-    /* Bytes "AB\0\0" little-endian → 0x00004241 = 16961 */
+    /* Bytes "ABC\0" little-endian, low half 0x4241 = 16961 */
     if (v & 0xFFFF) != 16961 {
         println("FAIL: read_first4 saw bytes=${v & 0xFFFF}, want 16961 (\"AB\\0\\0\")")
         println("      (pre-fix this would be 0xC0DE = 49374, the AetherString magic)")
@@ -66,7 +67,7 @@ main() {
     }
 
     // Case 3: plain string literal — must still pass through correctly.
-    v3 = read_first4_as_int("AB")
+    v3 = read_first4_as_int("ABC")
     if (v3 & 0xFFFF) != 16961 {
         println("FAIL: literal read=${v3 & 0xFFFF}, want 16961")
         exit(1)

@@ -91,7 +91,16 @@ if [ ! -x "$bin/$base_cc" ]; then
 fi
 CC="$bin/$base_cc"
 PATH="$bin:$PATH"
-export CC PATH
+# Which sanitizer the programs run under, for the few tests that check
+# something the sanitizer replaces (FORTIFY's abort, an address-space
+# limit, Valgrind): they say so and take another path or skip.
+AETHER_SANITIZER="$san"
+export CC PATH AETHER_SANITIZER
+# SAN_LEAKS=fail makes a leak fail the run (ASan); report, the default for
+# now, lists the leaks in the summary without failing (#3539: the std leaks
+# are fixed, the test programs' own are #3547).
+leaks_fail=0
+[ "${SAN_LEAKS:-report}" = fail ] && leaks_fail=1
 case "$san" in
     ubsan)
         UBSAN_OPTIONS="print_stacktrace=1:report_error_type=1:log_exe_name=1:log_path=$reports/report"
@@ -101,15 +110,20 @@ case "$san" in
         # halt_on_error: the first error stops the program, as a UBSan report
         # does. allocator_may_return_null: a test that asks for more memory
         # than exists to see the refusal gets NULL, as without ASan, instead
-        # of ASan's own abort. LeakSanitizer reports at exit into the same
-        # log, and its nonzero exit fails the test that ran the program.
+        # of ASan's own abort (it writes a WARNING, which is not a report).
+        # handle_segv/sigbus/sigfpe=0: a fault stays the signal it is, so a
+        # program's own fault-to-panic handler and `ae run`'s crash report
+        # see what they see without ASan; ASan's errors are found at the
+        # access, not by catching the fault.
         # detect_leaks is left to each binary's default, not set here: on
         # Linux a program reports its leaks, while aetherc and ae turn theirs
         # off (compiler/aether_toolchain_asan.h), since aetherc's leaks are
         # gated shape by shape in check_compiler_leaks.sh (#1667). Their
-        # memory errors still stop them.
-        ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:log_exe_name=1:log_path=$reports/report"
-        export ASAN_OPTIONS
+        # memory errors still stop them. With leaks only reported,
+        # LeakSanitizer's exit code is 0, so a leak alone fails no test.
+        ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:log_exe_name=1:log_path=$reports/report"
+        LSAN_OPTIONS="exitcode=$([ $leaks_fail = 1 ] && echo 23 || echo 0)"
+        export ASAN_OPTIONS LSAN_OPTIONS
         ;;
 esac
 
@@ -141,7 +155,9 @@ canary() {
     fi
     case "$san" in
         ubsan) UBSAN_OPTIONS="print_stacktrace=1:log_exe_name=1:log_path=$c.report" "$c" > "$c.out" 2>&1 ;;
-        asan) ASAN_OPTIONS="detect_leaks=1:log_exe_name=1:log_path=$c.report" "$c" > "$c.out" 2>&1 ;;
+        # The leak canary must fail by its leak, whatever SAN_LEAKS says.
+        asan) ASAN_OPTIONS="detect_leaks=1:log_exe_name=1:log_path=$c.report" LSAN_OPTIONS="exitcode=23" \
+                  "$c" > "$c.out" 2>&1 ;;
     esac
     crc=$?
     if [ "$crc" -eq 0 ] || ! grep -q "$2" "$c".report.* 2>/dev/null; then
@@ -169,54 +185,87 @@ esac
 echo "== test-$san: the .ae corpus (make test-ae${AE_SWEEP_SHARD:+, shard $AE_SWEEP_SHARD})"
 "$make_cmd" test-ae CC="$CC" NPROC="$nproc" || status=1
 
-# The reports, grouped by the source location of the first frame in this
-# tree (ASan, LSan) or of the report line itself (UBSan).
-n=$(ls "$reports" | wc -l | tr -d ' ')
+# Which report files are errors and which are leaks. A file holding only a
+# WARNING (allocator_may_return_null's note on an impossible request) is
+# neither.
+errors=""
+leaks=""
+for f in "$reports"/report.*; do
+    [ -f "$f" ] || continue
+    if [ "$san" = ubsan ]; then
+        grep -q 'runtime error:' "$f" && errors="$errors $f"
+    elif grep -q 'ERROR: AddressSanitizer' "$f"; then
+        errors="$errors $f"
+    elif grep -q 'ERROR: LeakSanitizer' "$f"; then
+        leaks="$leaks $f"
+    fi
+done
+
+# table FILES...: the reports grouped by where they happened: the report
+# line itself (UBSan), or the first stack frame that is not the sanitizer's,
+# an allocator's or the generated program's own prelude (ASan, LSan).
+table() {
+    echo "| programs | where | what | programs, up to 4 |"
+    echo "|---|---|---|---|"
+    for f in "$@"; do
+        exe=${f#"$reports"/report.}
+        exe=${exe%.*}
+        if [ "$san" = ubsan ]; then
+            grep 'runtime error:' "$f" | head -1 | while IFS= read -r line; do
+                loc=${line%%: runtime error:*}
+                printf '%s\t%s\t%s\n' "$exe" "$loc" "${line#*: runtime error: }"
+            done
+        else
+            what=$(grep -m1 -E 'ERROR: (Address|Leak)Sanitizer' "$f" | sed 's/^.*Sanitizer: //; s/ on address.*//')
+            loc=$(grep -E '^ *#[0-9]+ .* in ' "$f" | sed 's/^ *#[0-9]* 0x[0-9a-f]* in //' |
+                  grep -v -E 'libsanitizer|/usr/include/|libc\.so|aether_resource_caps\.c|_aether_alloc|string_alloc_inline|^(malloc|calloc|realloc|strdup) ' |
+                  grep -v -E ' (/tmp/[^ ]*|build/[^ ]*)\.c:' | head -1)
+            [ -n "$loc" ] || loc=$(grep -m1 -E '^ *#[0-9]+ ' "$f" | sed 's/^.* in //')
+            printf '%s\t%s\t%s\n' "$exe" "$loc" "$what"
+        fi
+    done | awk -F'\t' -v root="$root/" '{
+            loc = $2
+            gsub(root, "", loc)
+            msg = $3; gsub(/\|/, "/", msg)
+            if (!((loc, $1) in seen)) {
+                seen[loc, $1] = 1; c[loc]++
+                if (c[loc] <= 4) ex[loc] = ex[loc] " " $1
+            }
+            if (!(loc in first)) first[loc] = msg
+        }
+        END { for (l in c) printf "| %d | %s | %s |%s |\n", c[l], l, first[l], ex[l] }' |
+        sort -t'|' -k2,2nr
+}
+
+ne=$(printf '%s\n' $errors | grep -c . || true)
+nl=$(printf '%s\n' $leaks | grep -c . || true)
 {
     echo "## The C unit tests and the .ae corpus under $name"
     echo
-    echo "$n report file(s), one per program run that was stopped or leaked."
-    if [ "$n" -gt 0 ]; then
+    echo "$ne program run(s) stopped by $name."
+    if [ "$ne" -gt 0 ]; then echo; table $errors; fi
+    if [ "$san" = asan ]; then
         echo
-        echo "| programs | where | what | programs, up to 4 |"
-        echo "|---|---|---|---|"
-        for f in "$reports"/report.*; do
-            exe=${f#"$reports"/report.}
-            exe=${exe%.*}
-            if [ "$san" = ubsan ]; then
-                grep 'runtime error:' "$f" | head -1 | while IFS= read -r line; do
-                    loc=${line%%: runtime error:*}
-                    printf '%s\t%s\t%s\n' "$exe" "$loc" "${line#*: runtime error: }"
-                done
-            else
-                what=$(grep -m1 -E 'ERROR: (Address|Leak)Sanitizer' "$f" | sed 's/^.*Sanitizer: //; s/ on address.*//')
-                loc=$(grep -E '^ *#[0-9]+ ' "$f" | grep -F "$root/" | grep -v -e '/tests/' | head -1 |
-                      sed 's/^.* in [^ ]* //')
-                [ -n "$loc" ] || loc=$(grep -m1 -E '^ *#[0-9]+ ' "$f" | sed 's/^.* in //')
-                printf '%s\t%s\t%s\n' "$exe" "$loc" "$what"
-            fi
-        done | awk -F'\t' -v root="$root/" '{
-                loc = $2
-                if (index(loc, root) == 1) loc = substr(loc, length(root) + 1)
-                msg = $3; gsub(/\|/, "/", msg)
-                if (!((loc, $1) in seen)) {
-                    seen[loc, $1] = 1; c[loc]++
-                    if (c[loc] <= 4) ex[loc] = ex[loc] " " $1
-                }
-                if (!(loc in first)) first[loc] = msg
-            }
-            END { for (l in c) printf "| %d | %s | %s |%s |\n", c[l], l, first[l], ex[l] }' |
-            sort -t'|' -k2,2nr
+        if [ "$leaks_fail" = 1 ]; then
+            echo "$nl program run(s) that leaked, which fails the run."
+        else
+            echo "$nl program run(s) that leaked, listed only (SAN_LEAKS=report)."
+        fi
+        if [ "$nl" -gt 0 ]; then echo; table $leaks; fi
     fi
 } > "$dir/summary.md"
 cat "$dir/summary.md"
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
-if [ "$n" -gt 0 ]; then
-    for f in $(ls "$reports"/report.* | head -20); do
+if [ "$ne" -gt 0 ]; then
+    for f in $(printf '%s\n' $errors | head -20); do
         echo "=== $f"
         head -40 "$f"
     done
-    echo "test-$san: $n program run(s) were stopped or leaked; the reports are in build/$san/reports" >&2
+    echo "test-$san: $ne program run(s) were stopped by $name; the reports are in build/$san/reports" >&2
+    status=1
+fi
+if [ "$nl" -gt 0 ] && [ "$leaks_fail" = 1 ]; then
+    echo "test-$san: $nl program run(s) leaked; the reports are in build/$san/reports" >&2
     status=1
 fi
 exit "$status"

@@ -6,8 +6,11 @@ name: ASan
 # instrumented: `make test-asan-ae` (#3539, tests/scripts/sanitizer_sweep.sh).
 # A heap overflow, a use after free or a double free stops the program that
 # made it, a block it never freed is reported when it exits, and the job fails
-# on any test failure and on any report, which the step summary groups by
-# source location.
+# on any test failure and on any ASan error, which the step summary groups by
+# source location. Leaks are listed in the summary but do not fail the run
+# yet (SAN_LEAKS=report): the std and runtime leaks the first runs found are
+# fixed, and the test programs that do not free what they make are #3547,
+# after which this sets SAN_LEAKS=fail.
 #
 # Before this, ASan, LSan and Valgrind on Linux ran only the C unit runner
 # (memory-check.yml); the generated C of an Aether program was never run under
