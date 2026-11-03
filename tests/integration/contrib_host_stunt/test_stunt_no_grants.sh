@@ -25,6 +25,9 @@ stunt exec-bin-sh refused
 stunt fork refused
 stunt dlopen-libc-by-name refused
 stunt dlopen-libc-by-path refused
+# The control: a library that is not libc loads, so the two refusals above
+# are about libc, not a preload that refuses every dlopen.
+stunt dlopen-libm succeed
 stunt syscall-fn-openat refused
 stunt syscall-openat refused
 stunt syscall-socket refused

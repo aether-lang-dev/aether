@@ -182,7 +182,8 @@ map, the environment, spin): there is no socket channel there.
 
 The policies: no grants, one file granted, a directory granted for writing,
 the network to one address and to another, a native grant, `/bin/sh` and
-fork, nested (`"<outer>|<inner>"`: the bridge called inside an `enforce`
+fork, fork without exec (so `exec-bin-sh refused` is the execve's refusal,
+not the fork's), nested (`"<outer>|<inner>"`: the bridge called inside an `enforce`
 block, with the depth checked after every run) and the host-checked rows.
 
 They catch what the real bridges' tests catch. Each of these was reverted on
