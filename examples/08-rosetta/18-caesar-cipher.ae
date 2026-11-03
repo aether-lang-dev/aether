@@ -1,0 +1,36 @@
+// Caesar cipher: each letter moved a fixed number of places along the alphabet.
+//
+// Encoding moves each letter `key` places on, from Z round to A, and
+// keeps its case; anything else is left as it is. Decoding is encoding
+// with the key that completes the round, 26 - key. The task takes any key
+// from 1 to 25; here 11, and the phrase comes back whole.
+//
+// Run: ae run examples/08-rosetta/18-caesar-cipher.ae
+// See: https://rosettacode.org/wiki/Caesar_cipher
+
+import std.string
+
+caesar(text: string, key: int) -> string {
+    out = ""
+    for i in 0..string.length(text) {
+        c = text[i]
+        moved = match c {
+            65..=90 -> 65 + (c - 65 + key) % 26 // A-Z
+            97..=122 -> 97 + (c - 97 + key) % 26 // a-z
+            _ -> c
+        }
+        out = "${out}${string.from_char(moved)}"
+    }
+    return out
+}
+
+main() {
+    plain = "The quick brown fox jumps over the lazy dog."
+    secret = caesar(plain, 11)
+    println(secret)
+    println(caesar(secret, 26 - 11))
+}
+
+// Output:
+// Esp bftnv mczhy qzi ufxad zgpc esp wlkj ozr.
+// The quick brown fox jumps over the lazy dog.

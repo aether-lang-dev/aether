@@ -164,10 +164,13 @@ reversal is `input()[::-1]`), so the counts compare length, not like for like.
 | [09-reverse-string.ae](08-rosetta/09-reverse-string.ae) | [Reverse a string](https://rosettacode.org/wiki/Reverse_a_string) | 13, 63, 1 |
 | [10-palindrome.ae](08-rosetta/10-palindrome.ae) | [Palindrome detection](https://rosettacode.org/wiki/Palindrome_detection) | 26, 11, 2 |
 | [11-roman-encode.ae](08-rosetta/11-roman-encode.ae) | [Roman numerals/Encode](https://rosettacode.org/wiki/Roman_numerals/Encode) | 17, 32, 2 |
+| [12-roman-decode.ae](08-rosetta/12-roman-decode.ae) | [Roman numerals/Decode](https://rosettacode.org/wiki/Roman_numerals/Decode) | 27, 72, 10 |
 | [13-binary-digits.ae](08-rosetta/13-binary-digits.ae) | [Binary digits](https://rosettacode.org/wiki/Binary_digits) | 7, 9, 17 |
 | [14-quicksort.ae](08-rosetta/14-quicksort.ae) | [Sorting algorithms/Quicksort](https://rosettacode.org/wiki/Sorting_algorithms/Quicksort) | 36, 66, 19 |
 | [15-binary-search.ae](08-rosetta/15-binary-search.ae) | [Binary search](https://rosettacode.org/wiki/Binary_search) | 20, 12, 9 |
 | [16-hailstone.ae](08-rosetta/16-hailstone.ae) | [Hailstone sequence](https://rosettacode.org/wiki/Hailstone_sequence) | 23, 29, 14 |
+| [17-leap-year.ae](08-rosetta/17-leap-year.ae) | [Leap year](https://rosettacode.org/wiki/Leap_year) | 9, 3, 2 |
+| [18-caesar-cipher.ae](08-rosetta/18-caesar-cipher.ae) | [Caesar cipher](https://rosettacode.org/wiki/Caesar_cipher) | 20, 53, 10 |
 | [19-levenshtein.ae](08-rosetta/19-levenshtein.ae) | [Levenshtein distance](https://rosettacode.org/wiki/Levenshtein_distance) | 26, 34, 17 |
 | [20-happy-numbers.ae](08-rosetta/20-happy-numbers.ae) | [Happy numbers](https://rosettacode.org/wiki/Happy_numbers) | 16, 26, 10 |
 | [21-perfect-numbers.ae](08-rosetta/21-perfect-numbers.ae) | [Perfect numbers](https://rosettacode.org/wiki/Perfect_numbers) | 18, 29, 6 |
@@ -176,10 +179,7 @@ reversal is `input()[::-1]`), so the counts compare length, not like for like.
 | [24-pascals-triangle.ae](08-rosetta/24-pascals-triangle.ae) | [Pascal's triangle](https://rosettacode.org/wiki/Pascal's_triangle) | 20, 35, 9 |
 | [25-prime-decomposition.ae](08-rosetta/25-prime-decomposition.ae) | [Prime decomposition](https://rosettacode.org/wiki/Prime_decomposition) | 34, 35, 52 |
 
-Over these 22 tasks: Aether 450 lines, Go 642, Python 233. Three tasks of
-the tranche wait for compiler fixes and are left out rather than written
-around them: Roman numerals/Decode and Leap year (#3478, an `if` value
-whose condition ends in a call) and Caesar cipher (#3479, `c = s[i]`).
+Over these 25 tasks: Aether 506 lines, Go 770, Python 255.
 
 ## Writing an example
 

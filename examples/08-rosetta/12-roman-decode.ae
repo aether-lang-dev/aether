@@ -1,0 +1,49 @@
+// Roman numerals/Decode: a Roman numeral read back as a positive integer.
+//
+// The task decodes MCMXC (1990), MMVIII (2008) and MDCLXVI (1666). Each
+// symbol is worth its value, except one written before a larger one,
+// which is taken away instead (the C of CM, the X of XC): so the sum adds
+// a symbol's worth, or subtracts it when the next one is worth more.
+// MMXXVI and MMMCMXCIX are read too.
+//
+// Run: ae run examples/08-rosetta/12-roman-decode.ae
+// See: https://rosettacode.org/wiki/Roman_numerals/Decode
+
+import std.string
+
+// The worth of the symbol at `i` of `roman`, 0 for anything else.
+worth(roman: string, i: int) -> int {
+    return match roman[i] {
+        77 -> 1000 // M
+        68 -> 500 // D
+        67 -> 100 // C
+        76 -> 50 // L
+        88 -> 10 // X
+        86 -> 5 // V
+        73 -> 1 // I
+        _ -> 0
+    }
+}
+
+decode(roman: string) -> int {
+    n = string.length(roman)
+    total = 0
+    for i in 0..n {
+        v = worth(roman, i)
+        total += if i + 1 < n && v < worth(roman, i + 1) { -v } else { v }
+    }
+    return total
+}
+
+main() {
+    for r in ["MCMXC", "MMVIII", "MDCLXVI", "MMXXVI", "MMMCMXCIX"] {
+        println("${r} = ${decode(r)}")
+    }
+}
+
+// Output:
+// MCMXC = 1990
+// MMVIII = 2008
+// MDCLXVI = 1666
+// MMXXVI = 2026
+// MMMCMXCIX = 3999
