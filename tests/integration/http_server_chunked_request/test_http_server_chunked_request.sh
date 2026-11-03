@@ -145,6 +145,37 @@ expect_400 "a negative Content-Length" \
 expect_400 "a Content-Length that is not a number" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5abc\r\nConnection: close\r\n\r\nhello'
 
+# A Content-Length is read whole (#3520). The head check copied each value
+# into a 256 byte buffer and parsed what fit, so 300 zeros and a 5 read as an
+# empty body here and as five bytes to anything reading the whole value. More
+# digits than any length this server takes is refused, padding or not.
+ZEROS=$(head -c 300 /dev/zero | tr '\0' '0')
+expect_400 "a Content-Length of 300 zeros and a 5" \
+    "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: ${ZEROS}5\r\nConnection: close\r\n\r\nhello"
+
+# A chunk size is hex digits and nothing else, read by the same walk that
+# frames the body and decodes it (#3520). The framing check read sizes with
+# strtoll and the decoder with a loop of its own, so "0x5" framed as five
+# bytes and decoded as the last chunk, and a size padded past 16 digits was
+# one thing to strtoll and another to the decoder.
+expect_400 "a chunk size written 0x5" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n0x5\r\nhello\r\n0\r\n\r\n'
+expect_400 "a chunk size with more digits than a size has" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n000000000000000000005\r\nhello\r\n0\r\n\r\n'
+expect_400 "a chunk size with a sign" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n+5\r\nhello\r\n0\r\n\r\n'
+expect_400 "a chunk-size line ended by a bare LF" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\nhello\r\n0\r\n\r\n'
+expect_400 "a CR inside a chunk extension" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5;a\rb\r\nhello\r\n0\r\n\r\n'
+expect_400 "an unterminated quoted chunk extension" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5;a="b\r\nhello\r\n0\r\n\r\n'
+# Extensions are chunk-size [ chunk-ext ] CRLF (RFC 9112 7.1): read, then
+# ignored, the payload untouched.
+expect_body "a chunked body with extensions did not arrive intact" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5 ; name=value\r\nhello\r\n6;q="a \\" b";flag\r\n world\r\n0;last\r\n\r\n' \
+    'len=11 body=\[hello world\]'
+
 # A header value mentioning another header is not that header. A search that
 # is not anchored to the start of a line reads this as the framing.
 expect_body "a Content-Length inside another header's value was read as framing" \

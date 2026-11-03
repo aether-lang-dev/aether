@@ -94,6 +94,44 @@ int http_header_value_ok(const char* value) {
     return 1;
 }
 
+/* The one reader for the numbers std.net takes off the wire or out of a URL
+ * (#3520): Content-Length, a chunk size, a port. Each reader it replaces
+ * accepted something the others did not: strtoll a sign, leading spaces and
+ * "0x", atoi any tail at all, and the decoder's own loop wrapped past 16
+ * digits. Two readings of one number are two answers about where a message
+ * ends, which is what request smuggling is built from.
+ *
+ * More digits than `max` itself has are refused even when the extra ones are
+ * leading zeros. No sender pads a length that far, and a reader that stops
+ * part way into a padded value, as the request head check did when it copied
+ * a value into a 256 byte buffer, reads a different number from one that
+ * does not. */
+int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* out) {
+    if (!s || !out || n == 0 || (base != 10 && base != 16)) return -1;
+    size_t digits = 1;
+    for (uint64_t m = max; m >= (uint64_t)base; m /= (uint64_t)base) digits++;
+    if (n > digits) return -1;
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        uint64_t d;
+        if (c >= '0' && c <= '9') d = (uint64_t)(c - '0');
+        else if (base == 16 && c >= 'a' && c <= 'f') d = (uint64_t)(c - 'a' + 10);
+        else if (base == 16 && c >= 'A' && c <= 'F') d = (uint64_t)(c - 'A' + 10);
+        else return -1;
+        if (d > max || v > (max - d) / (uint64_t)base) return -1;
+        v = v * (uint64_t)base + d;
+    }
+    *out = v;
+    return 0;
+}
+
+int http_parse_port(const char* s, size_t n) {
+    uint64_t v = 0;
+    if (http_parse_count(s, n, 10, 65535, &v) != 0 || v == 0) return -1;
+    return (int)v;
+}
+
 #if !AETHER_HAS_NETWORKING
 HttpResponse* http_get_raw(const char* u) { (void)u; return NULL; }
 HttpResponse* http_get_with_timeout_ns_raw(const char* u, int64_t ns) { (void)u; (void)ns; return NULL; }
@@ -370,7 +408,10 @@ int parse_url(const char* url, char* host, size_t host_size,
     size_t port_len = 0;
     if (aether_addr_split_authority(start, alen, host, host_size, &port_at, &port_len) != 0)
         return 0;
-    if (port_at) *port = atoi(port_at);
+    /* The whole port, digits only, in 1..65535: atoi read "80abc" as 80 and
+     * passed 65616 to a resolver that may keep only its low 16 bits, which
+     * is port 80 again (#3520). */
+    if (port_at && (*port = http_parse_port(port_at, port_len)) < 0) return 0;
     if (path && !url_copy(path, path_size, slash ? slash : "/")) return 0;
 
     return 1;
@@ -1039,33 +1080,143 @@ static int stream_consume_crlf(struct HttpStream* s) {
     }
 }
 
-/* Parse a chunk-size line ("<hex>[;ext]\r\n"), pumping until the CRLF is
- * available. Sets *out to the parsed size and advances past the line.
- * Returns 1 on success, 0 on malformed framing / EOF (sets s->err). */
+/* The longest chunk-size line or trailer line read. One with no end in sight
+ * is refused rather than waited on. */
+#define HTTP_CHUNK_LINE_MAX 1024
+
+/* The largest chunk size: one a size_t and a long long both hold. */
+#define HTTP_CHUNK_SIZE_MAX ((uint64_t)INT64_MAX)
+
+static int http_chunk_ws(char c) { return c == ' ' || c == '\t'; }
+
+/* One chunk-size line, `n` bytes up to (not counting) its LF:
+ *
+ *     chunk-size [ chunk-ext ] CRLF                          RFC 9112 7.1
+ *     chunk-ext  = *( BWS ";" BWS name [ BWS "=" BWS value ] )
+ *     name = token, value = token / quoted-string
+ *
+ * 0 with the size in *size, or -1 for anything else (#3520). The client, its
+ * stream reader and the server all read sizes here, so no two of them can
+ * frame one body two ways. An extension is read to its end rather than
+ * skipped to the LF, so a CR or a stray byte inside one is refused instead of
+ * being somewhere a front end and this reader disagree about the line. */
+static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
+    if (n == 0 || line[n - 1] != '\r') return -1;
+    n--;
+    size_t i = 0;
+    while (i < n && isxdigit((unsigned char)line[i])) i++;
+    if (http_parse_count(line, i, 16, HTTP_CHUNK_SIZE_MAX, size) != 0) return -1;
+    while (i < n) {
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i == n || line[i] != ';') return -1;
+        i++;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        size_t name_at = i;
+        while (i < n && http_tchar[(unsigned char)line[i]]) i++;
+        if (i == name_at) return -1;
+        size_t after_name = i;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i == n || line[i] != '=') { i = after_name; continue; }
+        i++;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i < n && line[i] == '"') {
+            /* quoted-string: qdtext / quoted-pair, then the closing quote. */
+            i++;
+            for (;;) {
+                if (i == n) return -1;
+                unsigned char c = (unsigned char)line[i];
+                if (c == '"') { i++; break; }
+                if (c == '\\') {
+                    if (++i == n) return -1;
+                    c = (unsigned char)line[i];
+                    if (c != '\t' && (c < 0x20 || c == 0x7f)) return -1;
+                } else if (c != '\t' && (c < 0x20 || c == 0x7f)) {
+                    return -1;
+                }
+                i++;
+            }
+        } else {
+            size_t value_at = i;
+            while (i < n && http_tchar[(unsigned char)line[i]]) i++;
+            if (i == value_at) return -1;
+        }
+    }
+    return 0;
+}
+
+/* The chunked body at `buf`, `len` bytes of it read so far, walked with the
+ * one grammar. 1 when all of it is there, with *frame_len the bytes it takes
+ * (its trailer section and the CRLF that ends it included); 0 when more has
+ * to arrive; -1 when it is not chunked framing. With `out`, the data of each
+ * chunk is copied there as well and *out_len is the payload's length.
+ *
+ * Framing and decoding are this one walk, so the length a server buffers and
+ * the bytes it then decodes cannot disagree: they did, when the framing check
+ * read sizes with strtoll and the decoder with a loop of its own, and "0x5"
+ * framed as five bytes decoded as the last chunk (#3520). */
+static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
+                             char* out, size_t* out_len) {
+    size_t off = 0, oi = 0;
+    for (;;) {
+        const char* lf = (const char*)memchr(buf + off, '\n', len - off);
+        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        size_t line_len = (size_t)(lf - (buf + off));
+        uint64_t size = 0;
+        if (line_len > HTTP_CHUNK_LINE_MAX ||
+            http_chunk_size_line(buf + off, line_len, &size) != 0) return -1;
+        off += line_len + 1;
+        if (size == 0) break;
+        if ((uint64_t)(len - off) < size + 2) {
+            /* What is there of the CRLF after the data has to be one. */
+            if ((uint64_t)(len - off) > size && buf[off + size] != '\r') return -1;
+            return 0;
+        }
+        if (out) memcpy(out + oi, buf + off, (size_t)size);
+        oi += (size_t)size;
+        off += (size_t)size;
+        if (buf[off] != '\r' || buf[off + 1] != '\n') return -1;
+        off += 2;
+    }
+    /* trailer-section = *( field-line CRLF ), then the CRLF that ends it. The
+     * fields are not used, but where the section ends is framing, so each
+     * line ends in CRLF and carries no CR of its own. */
+    for (;;) {
+        const char* lf = (const char*)memchr(buf + off, '\n', len - off);
+        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        size_t line_len = (size_t)(lf - (buf + off));
+        if (line_len > HTTP_CHUNK_LINE_MAX || line_len == 0 ||
+            buf[off + line_len - 1] != '\r' ||
+            memchr(buf + off, '\r', line_len - 1)) return -1;
+        off += line_len + 1;
+        if (line_len == 1) break;
+    }
+    *frame_len = off;
+    if (out_len) *out_len = oi;
+    return 1;
+}
+
+/* Parse a chunk-size line, pumping until its LF is available. Sets *out to
+ * the parsed size and advances past the line. Returns 1 on success, 0 on
+ * malformed framing / EOF (sets s->err). */
 static int stream_read_chunk_size(struct HttpStream* s, long long* out) {
     for (;;) {
-        /* find CRLF in the unconsumed region */
+        /* find the LF in the unconsumed region */
         int start = s->pending_pos, end = s->pending_len, nl = -1;
         for (int i = start; i < end; i++) {
             if (s->pending[i] == '\n') { nl = i; break; }
         }
         if (nl >= 0) {
-            long long sz = 0; int any = 0;
-            for (int i = start; i < nl; i++) {
-                char c = s->pending[i];
-                int d;
-                if (c >= '0' && c <= '9') d = c - '0';
-                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-                else break;  /* end of hex digits (CR, ';', or ext) */
-                sz = sz * 16 + d;
-                any = 1;
+            uint64_t sz = 0;
+            if (nl - start > HTTP_CHUNK_LINE_MAX ||
+                http_chunk_size_line(s->pending + start, (size_t)(nl - start), &sz) != 0) {
+                s->err = 1;
+                return 0;
             }
             s->pending_pos = nl + 1;  /* consume through the LF */
-            if (!any) { s->err = 1; return 0; }
-            *out = sz;
+            *out = (long long)sz;
             return 1;
         }
+        if (end - start > HTTP_CHUNK_LINE_MAX) { s->err = 1; return 0; }
         int prev = s->pending_len - s->pending_pos;
         int r = stream_pump(s);
         if (r < 0) return 0;
@@ -1599,48 +1750,20 @@ static int http_value_has_chunked(const char* v);
 static int http_value_has_chunked_n(const char* v, size_t len);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
-/* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
- * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
- * which can appear inside chunk data. */
-/* How many bytes does the complete chunked body at `buf` occupy, counting its
- * framing and trailers, or 0 when it is not complete yet? A complete body is
- * never zero-length (the terminal chunk alone is five bytes), so 0 is an
- * unambiguous "not yet".
+/* Has the whole chunked body at `buf` arrived? 1 when it has, with
+ * *frame_len the bytes it occupies, framing and trailers included; 0 when
+ * more has to arrive; -1 when it is not chunked framing, which no amount of
+ * further reading mends. Walks chunk headers rather than searching for
+ * "0\r\n\r\n", which can appear inside chunk data.
  *
  * The length matters as much as the fact: anything after it belongs to
  * whatever the peer sent next, and a caller that assumes the body runs to the
  * end of what it has read would swallow a pipelined message. */
-size_t http_chunked_frame_len(const char* buf, size_t len) {
-    size_t off = 0;
-    for (;;) {
-        const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
-        if (!line_end) return 0;
-        size_t size_len = (size_t)(line_end - (buf + off));
-        char size_buf[32];
-        if (size_len >= sizeof(size_buf)) return 0;
-        memcpy(size_buf, buf + off, size_len);
-        size_buf[size_len] = '\0';
-        long long chunk = strtoll(size_buf, NULL, 16);
-        if (chunk < 0) return 0;
-        off = (size_t)(line_end - buf) + 1;
-        if (chunk == 0) {
-            /* Trailer section: header lines until an empty one ends it. */
-            for (;;) {
-                const char* le = (const char*)memchr(buf + off, '\n', len - off);
-                if (!le) return 0;
-                size_t line_len = (size_t)(le - (buf + off));
-                int empty = line_len == 0 || (line_len == 1 && buf[off] == '\r');
-                off = (size_t)(le - buf) + 1;
-                if (empty) return off;
-            }
-        }
-        off += (size_t)chunk + 2;   /* payload + its trailing CRLF */
-        if (off > len) return 0;
-    }
-}
-
-int http_chunked_complete(const char* buf, size_t len) {
-    return http_chunked_frame_len(buf, len) > 0;
+int http_chunked_frame(const char* buf, size_t len, size_t* frame_len) {
+    size_t n = 0;
+    int rc = http_chunked_walk(buf, len, &n, NULL, NULL);
+    if (frame_len) *frame_len = rc == 1 ? n : 0;
+    return rc;
 }
 
 static void http_socket_set_nonblocking(int fd, int on);
@@ -1790,7 +1913,8 @@ static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, in
     size_t hlen;
     if (colon && (!slash || colon < slash)) {
         hlen = (size_t)(colon - s);
-        pport = atoi(colon + 1);
+        const char* port_end = slash ? slash : colon + 1 + strlen(colon + 1);
+        pport = http_parse_port(colon + 1, (size_t)(port_end - (colon + 1)));
     } else if (slash) {
         hlen = (size_t)(slash - s);
     } else {
@@ -2696,20 +2820,22 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
              * next request. */
             char cl[64];
             int differing = 0;
-            int count = http_find_header_in_block(buf, hend, "Content-Length",
-                                                  cl, sizeof(cl), &differing);
+            const char* clv = NULL;
+            size_t clv_len = 0;
+            int count = http_find_header_span(buf, hend, "Content-Length",
+                                              cl, sizeof(cl), &differing,
+                                              &clv, &clv_len);
             if (count > 0) {
-                if (differing) {
+                /* The whole value where it lies, read strictly: the copy in
+                 * `cl` stops at 63 bytes, and strtoll took a sign (#3520). */
+                uint64_t declared = 0;
+                if (differing ||
+                    http_parse_count(clv, clv_len, 10, (uint64_t)(SIZE_MAX / 2),
+                                     &declared) != 0) {
                     f->invalid = 1;
                 } else {
-                    char* endp = NULL;
-                    long long declared = strtoll(cl, &endp, 10);
-                    if (endp && *endp == '\0' && endp != cl && declared >= 0) {
-                        f->body_target = f->header_bytes + (size_t)declared;
-                        f->definite = 1;
-                    } else {
-                        f->invalid = 1;
-                    }
+                    f->body_target = f->header_bytes + (size_t)declared;
+                    f->definite = 1;
                 }
             }
         }
@@ -2721,8 +2847,13 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     }
     if (f->invalid) return 1;      /* stop reading; the driver reports it */
     if (!f->definite) return 0;
-    if (f->chunked)
-        return http_chunked_complete(buf + f->header_bytes, len - f->header_bytes);
+    if (f->chunked) {
+        int rc = http_chunked_frame(buf + f->header_bytes, len - f->header_bytes, NULL);
+        /* Framing that is not chunked framing has not said where the body
+         * ends either: reading on would wait for an end that never comes. */
+        if (rc < 0) f->invalid = 1;
+        return rc != 0;
+    }
     return len >= f->body_target;
 }
 
@@ -3691,7 +3822,22 @@ send_request:
         free(te);
         if (!is_chunked) {
             char* cl = http_extract_response_header(hb, "Content-Length");
-            if (cl) { clen = strtoll(cl, NULL, 10); free(cl); }
+            if (cl) {
+                /* Read as the buffered path reads it (#3520): strtoll took
+                 * "5abc" as 5 and a negative length as read-until-close. */
+                uint64_t declared = 0;
+                int ok = http_parse_count(cl, strlen(cl), 10, (uint64_t)INT64_MAX,
+                                          &declared) == 0;
+                free(cl);
+                if (!ok) {
+                    free(hb);
+                    transport_close(&t);
+                    response->error = string_new(
+                        "response framing is ambiguous: the declared body length is not usable");
+                    return response;
+                }
+                clen = (long long)declared;
+            }
         }
 
         struct HttpStream* st = (struct HttpStream*)calloc(1, sizeof(struct HttpStream));
@@ -4026,47 +4172,23 @@ static int http_value_has_chunked(const char* v) {
     return v ? http_value_has_chunked_n(v, strlen(v)) : 0;
 }
 
-/* Decode HTTP/1.1 chunked transfer-encoding (RFC 7230 §4.1). `in` /
+/* Decode HTTP/1.1 chunked transfer-encoding (RFC 9112 7.1). `in` /
  * `in_len` is the raw chunk-framed body; writes the decoded length to
  * *out_len and returns a malloc'd buffer (NUL-terminated for
- * convenience; *out_len excludes the NUL). Returns NULL on malformed
- * framing so the caller can fall back to the raw bytes. Binary-safe:
- * the payload is copied by length, never scanned for NUL. Chunk
- * extensions (`<size>;name=val`) are skipped; trailing trailers after
- * the terminating `0` chunk are ignored. */
+ * convenience; *out_len excludes the NUL). Returns NULL on malformed or
+ * incomplete framing so the caller can fall back to the raw bytes.
+ * Binary-safe: the payload is copied by length, never scanned for NUL.
+ * The walk is http_chunked_frame's own, so a body that frames decodes, and
+ * one that does not frame does not decode either (#3520). Bytes after the
+ * body's end are not part of it and are ignored. */
 char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
     if (!in || !out_len) return NULL;
     char* out = (char*)malloc(in_len + 1);   /* decoded payload <= input */
     if (!out) return NULL;
-    size_t oi = 0;
-    size_t i = 0;
-    while (i < in_len) {
-        size_t sz = 0;
-        int saw_hex = 0;
-        while (i < in_len) {
-            char c = in[i];
-            int d;
-            if (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else break;
-            sz = sz * 16u + (size_t)d;
-            saw_hex = 1;
-            i++;
-        }
-        if (!saw_hex) { free(out); return NULL; }   /* expected a hex size */
-        /* Skip the rest of the size line (chunk extensions) to the LF. */
-        while (i < in_len && in[i] != '\n') i++;
-        if (i >= in_len) { free(out); return NULL; } /* no CRLF after size */
-        i++;                                          /* consume the '\n' */
-        if (sz == 0) break;                           /* terminating chunk */
-        if (sz > in_len - i) { free(out); return NULL; } /* truncated chunk */
-        memcpy(out + oi, in + i, sz);
-        oi += sz;
-        i += sz;
-        /* Consume the CRLF (or bare LF) that follows the chunk data. */
-        if (i < in_len && in[i] == '\r') i++;
-        if (i < in_len && in[i] == '\n') i++;
+    size_t frame_len = 0, oi = 0;
+    if (http_chunked_walk(in, in_len, &frame_len, out, &oi) != 1) {
+        free(out);
+        return NULL;
     }
     out[oi] = '\0';
     *out_len = oi;
