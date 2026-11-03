@@ -504,14 +504,16 @@ static int c_dlopen_libm(st_vm* vm, char* d, size_t cap) {
 #endif
 }
 
-/* libc's own syscall(): what ctypes, Perl's syscall and Ruby's Fiddle reach. */
+/* libc's own syscall(): what ctypes, Perl's syscall and Ruby's Fiddle reach.
+ * Only EPERM or EACCES is a refusal. ENOSYS is not: the preload's syscall()
+ * gives EPERM while its sandbox is active and ENOSYS while it is not, so
+ * ENOSYS means a preload whose grants never applied. */
 static int c_syscall_fn_openat(st_vm* vm, char* d, size_t cap) {
     (void)vm;
 #if (defined(__linux__) || defined(__FreeBSD__)) && defined(SYS_openat)
     errno = 0;
     long r = syscall(SYS_openat, (long)AT_FDCWD, "/etc/passwd", (long)O_RDONLY, 0L);
     if (r >= 0) { close((int)r); detail(d, cap, "opened /etc/passwd"); return OUT_SUCCEEDED; }
-    if (errno == ENOSYS) { detail(d, cap, "syscall(): %s", strerror(errno)); return OUT_REFUSED; }
     return by_errno(errno, d, cap, "syscall()");
 #else
     detail(d, cap, "no syscall() here");
