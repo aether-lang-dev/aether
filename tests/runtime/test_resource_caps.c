@@ -7,6 +7,7 @@
 
 #include "test_harness.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_thread.h"   /* pthread_create, for #3529 */
 #include "../../std/bytes/aether_bytes.h"
 #include "../../std/os/aether_os.h"
 #include "../../std/fs/aether_fs.h"
@@ -67,6 +68,57 @@ TEST_CATEGORY(caps_current_usage_not_highwater, TEST_CATEGORY_STDLIB) {
     for (int i = 0; i < 50; i++) aether_caps_account_free(8 * 1024);
     ASSERT_EQ((uint64_t)0, aether_caps_used_bytes());
     aether_caps_set_memory_cap(0);
+}
+
+/* #3529: without a cap each thread counts on a slot of its own, summed on
+ * demand, where every allocation of every thread used to count on one
+ * atomic. Blocks made on four threads and half of them freed on another
+ * still add up, and a cap set afterwards checks against all of them: it
+ * moves the slots into the counter it is checked against. */
+#define CAPS_SPLIT_THREADS 4
+#define CAPS_SPLIT_BLOCKS  500
+static void* caps_split_blocks[CAPS_SPLIT_THREADS][CAPS_SPLIT_BLOCKS];
+static void* caps_split_worker(void* arg) {
+    void** mine = (void**)arg;
+    for (int i = 0; i < CAPS_SPLIT_BLOCKS; i++) mine[i] = aether_caps_malloc(64);
+    return NULL;
+}
+
+TEST_CATEGORY(caps_split_count_across_threads, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    pthread_t t[CAPS_SPLIT_THREADS];
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        ASSERT_EQ(0, pthread_create(&t[i], NULL, caps_split_worker, caps_split_blocks[i]));
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++) pthread_join(t[i], NULL);
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = 0; j < CAPS_SPLIT_BLOCKS; j++) ASSERT_NOT_NULL(caps_split_blocks[i][j]);
+    uint64_t all = (uint64_t)CAPS_SPLIT_THREADS * CAPS_SPLIT_BLOCKS * 64;
+    ASSERT_TRUE(aether_caps_used_bytes() == before + all);
+
+    /* Half freed here, on a thread that made none of them. */
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = 0; j < CAPS_SPLIT_BLOCKS / 2; j++) {
+            aether_caps_free(caps_split_blocks[i][j], 64);
+            caps_split_blocks[i][j] = NULL;
+        }
+    uint64_t held = before + all / 2;
+    ASSERT_TRUE(aether_caps_used_bytes() == held);
+
+    /* A cap set now sees what is held: 100 bytes of room, not more. */
+    aether_caps_set_memory_cap(held + 100);
+    ASSERT_TRUE(aether_caps_used_bytes() == held);
+    void* refused = aether_caps_malloc(200);
+    ASSERT_TRUE(refused == NULL);
+    void* fits = aether_caps_malloc(64);
+    ASSERT_NOT_NULL(fits);
+    aether_caps_free(fits, 64);
+    aether_caps_set_memory_cap(0);
+
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = CAPS_SPLIT_BLOCKS / 2; j < CAPS_SPLIT_BLOCKS; j++)
+            aether_caps_free(caps_split_blocks[i][j], 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
 }
 
 TEST_CATEGORY(caps_saturating_decrement, TEST_CATEGORY_STDLIB) {
