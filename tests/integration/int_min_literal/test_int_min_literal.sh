@@ -46,8 +46,11 @@ if ! "$AETHERC" "$SCRIPT_DIR/int_min.ae" "$TMP/int_min.c" >"$TMP/aetherc.log" 2>
     exit 1
 fi
 
-# No bare minimum literal anywhere in the C (the expected strings aside).
-bare=$(grep -nE -- '(^|[^"0-9])-(9223372036854775808|2147483648)([^"0-9]|$)' "$TMP/int_min.c")
+# No bare minimum integer literal anywhere in the C (the expected strings
+# aside). A float literal with those digits, like the saturation bounds of
+# the float to int helpers (#3524, `-2147483648.0`), is a double, not the
+# unsigned or wider integer a bare minimum literal turns into.
+bare=$(grep -nE -- '(^|[^"0-9])-(9223372036854775808|2147483648)([^"0-9.eE]|$)' "$TMP/int_min.c")
 if [ -n "$bare" ]; then
     echo "  [FAIL] int_min_literal: the C has a bare minimum literal:"
     echo "$bare" | head -10 | sed 's/^/          /'
