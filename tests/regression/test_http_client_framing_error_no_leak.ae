@@ -1,0 +1,124 @@
+// Regression (#3539): a response the client refuses for its framing frees
+// the request head the client built.
+//
+// http_request_internal keeps the request head until it knows whether a
+// connection from the pool has to be dialled again and the request resent.
+// The two returns inside the receive, a response whose framing is ambiguous
+// and running out of memory while reading one, came before the head was
+// freed and did not free it. Every response with two different
+// Content-Length headers leaked the head. LeakSanitizer found it in
+// tests/integration/http_client_response_framing.
+//
+// An actor serves the responses on loopback: it reads each request and
+// answers with two disagreeing lengths. An ask after each window waits until
+// it has served them, so the heap is read with no connection in flight. The
+// leak check runs where the heap count is exact (mem.heap_in_use_exact).
+
+import std.mem
+import std.string
+import std.tcp
+import std.http.client
+
+extern exit(code: int)
+
+message Listen { srv: ptr }
+message Serve { n: int }
+message Served {}
+message Count { n: int }
+
+actor Upstream {
+    state served = 0
+    state srv: ptr = null
+
+    receive {
+        Listen(srv: s) -> {
+            srv = s
+        }
+        Serve(n: n) -> {
+            i = 0
+            while i < n {
+                sock, aerr = tcp.accept(srv)
+                if aerr == "" {
+                    seen = ""
+                    going = 1
+                    while going == 1 {
+                        got, rerr = tcp.read(sock, 4096)
+                        if rerr != "" {
+                            going = 0
+                        } else {
+                            seen = string.concat(seen, got)
+                            if string.contains(seen, "\r\n\r\n") == 1 { going = 0 }
+                        }
+                    }
+                    _n, _werr = tcp.write(sock, "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nContent-Length: 11\r\n\r\nhello world")
+                    tcp.close(sock)
+                    served = served + 1
+                }
+                i = i + 1
+            }
+        }
+        Served() -> {
+            reply Count { n: served }
+        }
+    }
+}
+
+// One request to `url`, which the client must refuse for its framing.
+// 1 when it did.
+fn refused(url: string) -> int {
+    req = client.request("GET", url)
+    client.set_timeout(req, 5s)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if resp != null {
+        client.response_free(resp)
+        return 0
+    }
+    if string.contains(err, "framing") != 1 { return 0 }
+    return 1
+}
+
+// `n` requests, served by `up`; the number that were not refused.
+fn window(up: actor_ref[Upstream], url: string, n: int) -> int {
+    up ! Serve { n: n }
+    bad = 0
+    i = 0
+    while i < n {
+        if refused(url) != 1 { bad = bad + 1 }
+        i = i + 1
+    }
+    int _served = up ? Served {}
+    return bad
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    url = "http://127.0.0.1:${tcp.server_port(srv)}/"
+    up = spawn(Upstream())
+    up ! Listen { srv: srv }
+
+    fails = window(up, url, 3)
+    if fails > 0 {
+        println("FAIL a response with two body lengths was not refused")
+        exit(1)
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                fails = fails + window(up, url, 3)
+            }, 5)
+        if grown != 0 {
+            println("FAIL three refused responses grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+        if fails > 0 {
+            println("FAIL a response with two body lengths was not refused")
+            exit(1)
+        }
+    }
+    tcp.server_close(srv)
+    println("PASS a response refused for its framing frees the request head")
+}

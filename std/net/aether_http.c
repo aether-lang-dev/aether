@@ -3913,6 +3913,7 @@ send_request:
          * pooled connection they would be read as the head of the next
          * response. */
         if (rx.framing.invalid) {
+            aether_caps_free(hdr, hdr_cap);
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
@@ -3920,6 +3921,7 @@ send_request:
             return response;
         }
         if (rx.oom) {
+            aether_caps_free(hdr, hdr_cap);
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new("out of memory reading response");
