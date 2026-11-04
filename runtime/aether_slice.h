@@ -355,6 +355,16 @@ static inline AetherSlice aether_slice_lend(AetherSlice s) {
     return s;
 }
 
+/* #3549: the slice at `p`, a cell a closure may still read, handed to the
+ * caller with the buffer it owns; the cell keeps a loan of it, so its
+ * readers see what they did and its release frees nothing the caller now
+ * owns. */
+static inline AetherSlice aether_slice_give(AetherSlice* p) {
+    AetherSlice s = *p;
+    *p = aether_slice_lend(s);
+    return s;
+}
+
 /* The drop of an owning place: the buffer it owns, if it owns one, is
  * released, its elements first (`drop`, each element's own release, or
  * NULL when they own nothing), and the place is left empty. A view, the

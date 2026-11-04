@@ -189,6 +189,10 @@ void own_collect_types(CodeGenerator* gen, ASTNode* node) {
     if (node->type == AST_FUNCTION_CALL && type_is_slice(node->node_type) &&
         annotation_has_marker(node->annotation, "slice_temp"))
         own_register_sdrop(gen, node->node_type);
+    /* #3549: and a cell that owns its slice drops it through the same. */
+    if (node->type == AST_VARIABLE_DECLARATION && type_is_slice(node->node_type) &&
+        annotation_has_marker(node->annotation, "slice_cell"))
+        own_register_sdrop(gen, node->node_type);
     for (int i = 0; i < node->child_count; i++) own_collect_types(gen, node->children[i]);
 }
 

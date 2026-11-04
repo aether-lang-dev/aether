@@ -49,8 +49,9 @@ constant) and the containers and `ptr` slots (strings and closures only):
 a sum is a composite that owns what its variants own (R1).
 
 The slice kind `KM` (the buffer `make([]int, 3)` hands out) is crossed with
-the temporary only (P17), passed to a function that reads it and returned:
-a slice local, field or element is slice ownership's, which
+the temporary (P17), passed to a function that reads it and returned, and
+with a closure's shared cell (P9W), stored and left, overwritten and
+returned: a slice local, field or element is slice ownership's, which
 `tests/integration/slice_own` measures. The transfers `T17` to `T19` are a
 temporary's too (#3549): a fresh string given straight to builtins lowered by
 name, to an extern's `string` parameter and to a comparison, each borrowed
