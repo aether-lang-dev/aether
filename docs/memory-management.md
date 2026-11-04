@@ -313,6 +313,9 @@ as `free` gives it back). A program writes no `free` for it.
   #3570): the string stays while any place holds a view of it, and is
   released with the last, as a `make` buffer is. A literal's bytes are
   static, and held by nothing.
+- **A call's result used in place is the statement's** (`f().len`,
+  `f()[0]`, `for x in f()`): it is released on its block's every exit. A
+  view of it that is bound, returned or passed on takes its reference over.
 - **Not counted**: a slice local a pattern binds (a list pattern's tail, a
   match arm's binding) views what it was bound from, which holds the
   reference; a slice of C memory (`p as T[]`, a `T[]` an extern returns) is

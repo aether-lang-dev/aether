@@ -8602,6 +8602,17 @@ void hoist_append_text(CodeGenerator* gen, const char* text) {
     hoist_append(gen, text);
 }
 
+/* #3568: the release of a slice statement temporary (emit_slice_stmt_temp)
+ * at its block's every exit. */
+void push_scoped_slice_free(CodeGenerator* gen, const char* name) {
+    ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, 0, 0);
+    if (!carrier) return;
+    if (carrier->annotation) free(carrier->annotation);
+    carrier->annotation = heap_strf("scoped_slice_free:%s", name);
+    codegen_own_node(gen, carrier);
+    push_defer(gen, carrier);
+}
+
 void push_scoped_temp_free(CodeGenerator* gen, const char* name) {
     ASTNode* carrier = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, 0, 0);
     if (!carrier) return;
@@ -12171,11 +12182,25 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_expression(gen, match_expr);
                     fprintf(gen->output, ";\n");
                 } else if (uses_list_patterns && type_is_slice(match_expr->node_type)) {
-                    /* #1286: a slice carries its own length. */
+                    /* #1286: a slice carries its own length. #3568: the
+                     * subject is evaluated once, into `_match_subj`, which
+                     * every arm reads. A call there ran once per read (its
+                     * length, its elements, its tail), and each read of a
+                     * result its statement holds released the one before,
+                     * under the arm's bindings. */
                     print_indent(gen);
-                    fprintf(gen->output, "int %s = (int)aether_slice_len(", len_name);
+                    fprintf(gen->output, "AetherSlice _match_subj = ");
                     generate_expression(gen, match_expr);
-                    fprintf(gen->output, ");\n");
+                    fprintf(gen->output, ";\n");
+                    print_line(gen, "int %s = (int)aether_slice_len(_match_subj);", len_name);
+                    ASTNode* subj = create_ast_node(AST_IDENTIFIER, "_match_subj", match_expr->line,
+                                                    match_expr->column);
+                    if (subj) {
+                        subj->node_type = clone_type(match_expr->node_type);
+                        codegen_own_node(gen, subj);
+                        mark_var_declared_typed(gen, "_match_subj", subj->node_type);
+                        match_expr = subj;
+                    }
                 } else if (uses_list_patterns && type_is_sized_array(match_expr->node_type) &&
                            match_expr->node_type->array_size > 0) {
                     /* #2995: a `T[N]` has its length when it is compiled.

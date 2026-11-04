@@ -1169,6 +1169,98 @@ static int view_of_fresh(ASTNode* e) {
            strncmp(e->value, "__slice_", 8) != 0;
 }
 
+/* The arms' values of the `match` values being rewritten (rewrite_match_value):
+ * each is the match's value, not a statement's, so none is read in place
+ * (mark_in_place). A stack, for a `match` in an arm's statements. */
+static ASTNode** g_arm_values = NULL;
+static int g_arm_values_n = 0, g_arm_values_cap = 0;
+
+static int is_arm_value(const ASTNode* e) {
+    for (int i = 0; i < g_arm_values_n; i++)
+        if (g_arm_values[i] == e) return 1;
+    return 0;
+}
+
+static void push_arm_values(ASTNode* m) {
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* nested = NULL;
+        ASTNode** slot = m->children[i] ? match_arm_value_slot(m->children[i], &nested) : NULL;
+        if (nested) {
+            push_arm_values(nested);
+            continue;
+        }
+        if (!slot || !*slot) continue;
+        if (g_arm_values_n == g_arm_values_cap) {
+            g_arm_values_cap = g_arm_values_cap ? g_arm_values_cap * 2 : 16;
+            g_arm_values = (ASTNode**)realloc(g_arm_values,
+                                              (size_t)g_arm_values_cap * sizeof(ASTNode*));
+        }
+        g_arm_values[g_arm_values_n++] = *slot;
+    }
+}
+
+/* What a `match` arm's value, its parts rewritten, gives the place the
+ * `match` moves into: a local, a place or a view of one is copied, a call's
+ * result is the reference it hands over, as is a view of one. */
+static void move_rewritten(ASTNode** slot);
+
+static void move_arm_values(ASTNode* m) {
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* nested = NULL;
+        ASTNode** slot = m->children[i] ? match_arm_value_slot(m->children[i], &nested) : NULL;
+        if (nested) move_arm_values(nested);
+        else if (slot && *slot) move_rewritten(slot);
+    }
+}
+
+static void move_rewritten(ASTNode** slot) {
+    ASTNode* e = *slot;
+    if (!e || !type_is_slice(e->node_type)) return;
+    switch (e->type) {
+        case AST_IDENTIFIER:
+            /* Copied, a local that owns too: the move checks (E0906) read
+             * a `match` arm's local as borrowed, so the local stays whole
+             * for its later reads. */
+            wrap(slot, "__slice_copy");
+            return;
+        case AST_SLICE_EXPR:
+            if (!view_of_fresh(e)) wrap(slot, "__slice_copy");
+            return;
+        case AST_IF_EXPRESSION:
+            for (int i = 1; i < e->child_count; i++) move_rewritten(&e->children[i]);
+            return;
+        case AST_MATCH_STATEMENT:
+            move_arm_values(e);
+            return;
+        case AST_FUNCTION_CALL: case AST_SEND_ASK: case AST_NULL_LITERAL: case AST_ARRAY_LITERAL:
+        case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST:
+            return;
+        default:
+            wrap(slot, "__slice_copy");
+            return;
+    }
+}
+
+/* #3568: a `match` whose value moves into a place gives it what each arm
+ * gives, arm by arm, as an `if`'s branches do: an arm's call hands its
+ * reference over, an arm's place is copied. The whole `match` copied held
+ * an arm's call result twice, which leaked (`vs = match k { 0 -> mk(4) _ ->
+ * xs }`), and nested the `match` in the copy, where codegen lowered it as a
+ * statement expression. */
+static void rewrite_match_value(Ctx* c, Frame* f, ASTNode* m) {
+    int mark = g_arm_values_n;
+    push_arm_values(m);
+    ASTNode* slot = m;
+    rewrite(c, f, &slot);
+    g_arm_values_n = mark;
+    if (mark == 0) {
+        free(g_arm_values);
+        g_arm_values = NULL;
+        g_arm_values_cap = 0;
+    }
+    move_arm_values(m);
+}
+
 /* A slice moved into a place gives the place one reference (#3568): taken
  * out of a local that owns it (which is left empty), and copied, with a
  * reference of its own, out of any other place (a parameter, a view, a
@@ -1204,6 +1296,13 @@ static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
             /* Each branch is the value, going where the `if` goes. */
             if (e->child_count > 0) rewrite(c, f, &e->children[0]);
             for (int i = 1; i < e->child_count; i++) rewrite_value(c, f, &e->children[i], use);
+            return;
+        case AST_MATCH_STATEMENT:
+            if (use == C_MOVE) {
+                rewrite_match_value(c, f, e);
+                return;
+            }
+            rewrite(c, f, slot);
             return;
         case AST_FUNCTION_CALL: case AST_SEND_ASK: case AST_NULL_LITERAL: case AST_ARRAY_LITERAL:
         case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST:
@@ -1441,6 +1540,26 @@ static void rewrite_binding(Ctx* c, Frame* f, ASTNode* n) {
                               place, v);
 }
 
+/* A call's fresh slice read in place, which nothing binds (`f().len`,
+ * `f()[i]`, `for x in f()`, `f()[1..].len`, `f()` as a statement): the
+ * reference it hands over is the statement's, released at its end (codegen
+ * holds it in a temporary, `slice_stmt_temp`), where it used to leak. */
+static void mark_in_place(ASTNode* e) {
+    /* A view of the result used in place leaves it in place too. A view
+     * moved somewhere takes the result's reference over (view_of_fresh),
+     * so the base of a view is judged by how the view is used, never here
+     * for the view's own sake (rewrite's default loop). A `match` arm's
+     * value is the match's (rewrite_match_value). */
+    if (e && is_arm_value(e)) return;
+    while (e && e->type == AST_SLICE_EXPR && e->child_count > 0) e = e->children[0];
+    if (!e || e->type != AST_FUNCTION_CALL || !type_is_slice(e->node_type) || !e->value ||
+        strncmp(e->value, "__slice_", 8) == 0 ||
+        annotation_has_marker(e->annotation, "slice_temp") ||
+        annotation_has_marker(e->annotation, "slice_stmt_temp"))
+        return;
+    e->annotation = annotation_add_marker(e->annotation, "slice_stmt_temp");
+}
+
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
     ASTNode* n = *slot;
     if (!n || is_frame(n) || is_opaque(n)) return;
@@ -1530,8 +1649,12 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
         default:
             break;
     }
-    for (int i = 0; i < n->child_count; i++)
-        if (n->children[i]) rewrite_value(c, f, &n->children[i], child_use(n, i));
+    for (int i = 0; i < n->child_count; i++) {
+        if (!n->children[i]) continue;
+        Use u = child_use(n, i);
+        if (u == C_BORROW && n->type != AST_SLICE_EXPR) mark_in_place(n->children[i]);
+        rewrite_value(c, f, &n->children[i], u);
+    }
 }
 
 /* ---- one frame ---- */

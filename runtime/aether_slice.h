@@ -274,7 +274,12 @@ static inline AetherSlice aether_slice_alloc(int64_t count, size_t elem_size,
     }
     if (elem_size && (uint64_t)count > (SIZE_MAX - AETHER_SLICE_HEAD) / elem_size)
         aether_out_of_memory("make([]T, n): out of memory");
-    AetherSliceBuf* h = (AetherSliceBuf*)calloc(1, AETHER_SLICE_HEAD + (size_t)count * elem_size);
+    /* At least one byte past the header: the slice's `ptr` then points into
+     * the block, not one past its end, so a leak checker that follows the
+     * pointers a program holds (LeakSanitizer) finds an empty buffer a
+     * module `var` or a row still holds. */
+    size_t body = (size_t)count * elem_size;
+    AetherSliceBuf* h = (AetherSliceBuf*)calloc(1, AETHER_SLICE_HEAD + (body ? body : 1));
     if (!h) aether_out_of_memory("make([]T, n): out of memory");
     h->refs = 1;
     h->len = (uint64_t)count;
@@ -467,6 +472,26 @@ static inline uint64_t aether_slice_grown_cap(uint64_t len) {
     return c;
 }
 
+/* Why `append` cannot grow `s`, or NULL: a view of unknown length, a
+ * read-only one, a view of part of a buffer or of an array, memory the
+ * program did not make. */
+static inline const char* aether_slice_grow_refusal(AetherSlice s) {
+    if (s.len == AETHER_SLICE_UNBOUNDED)
+        return "append to a view of unknown length, which owns nothing";
+    if (s.flags & AETHER_SLICE_READONLY)
+        return "append to a read-only view of a string, which owns nothing";
+    if (s.flags & AETHER_SLICE_BORROWED)
+        return "append to a view of elements another slice or an array holds, which owns nothing";
+    if (s.ptr == NULL && s.len == 0) return NULL;
+    if (!(s.flags & AETHER_SLICE_MADE))
+        return "append to a view of memory the program did not make (make([]T, n) or append), "
+               "which it cannot grow";
+    AetherSliceBuf* h = aether_slice_buf(s);
+    if (aether_slice_off(s) != 0 || s.len != h->len)
+        return "append to a view of elements another slice or an array holds, which owns nothing";
+    return NULL;
+}
+
 /* `append(s, v)`, its first half: `s` one element longer, the new last
  * element zeroed for the generated code to store `v` into (a store that
  * takes the value, as `s[i] = v` does). `s` must hold the whole buffer: one
@@ -480,37 +505,37 @@ static inline uint64_t aether_slice_grown_cap(uint64_t len) {
  * part of a buffer (a sub-slice), an array, a string's bytes or C memory is
  * no buffer's own slice, so growing it is a named panic. */
 static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
-                                             const AetherSliceOps* ops,
+                                             const AetherSliceOps* ops, int taken,
                                              const char* file, int line) {
-    if (s.len == AETHER_SLICE_UNBOUNDED)
-        aether_slice_panicf("%s:%d: append to a view of unknown length, which owns nothing",
-                            file, line);
-    if (s.flags & AETHER_SLICE_READONLY)
-        aether_slice_panicf("%s:%d: append to a read-only view of a string, which owns nothing",
-                            file, line);
-    if (s.flags & AETHER_SLICE_BORROWED)
-        aether_slice_panicf("%s:%d: append to a view of elements another slice or an array "
-                            "holds, which owns nothing", file, line);
+    /* `taken`: `s` holds a reference `append` was given (a slice moved out
+     * of its place, a call's fresh result), which a refusal gives back
+     * before it panics (#3568: it was lost with the panic). */
+    const char* why = aether_slice_grow_refusal(s);
+    if (why) {
+        if (taken) aether_slice_unref(s);
+        aether_slice_panicf("%s:%d: %s", file, line, why);
+    }
     int empty = s.ptr == NULL && s.len == 0;
-    if (!empty && !(s.flags & AETHER_SLICE_MADE))
-        aether_slice_panicf("%s:%d: append to a view of memory the program did not make "
-                            "(make([]T, n) or append), which it cannot grow", file, line);
     AetherSliceBuf* h = empty ? NULL : aether_slice_buf(s);
-    if (h && (aether_slice_off(s) != 0 || s.len != h->len))
-        aether_slice_panicf("%s:%d: append to a view of elements another slice or an array "
-                            "holds, which owns nothing", file, line);
     uint64_t len = empty ? 0 : s.len;
     int shared = h && (h->refs & AETHER_SLICE_COUNT_MASK) != 1;
     int grown = !empty && (s.flags & AETHER_SLICE_GROWN);
     if (shared || !grown || len == aether_slice_grown_cap(len)) {
         uint64_t cap = aether_slice_grown_cap(len + 1);
-        if (cap > (SIZE_MAX - AETHER_SLICE_HEAD) / (elem_size ? elem_size : 1))
-            aether_slice_panicf("%s:%d: append: out of memory", file, line);
         size_t bytes = AETHER_SLICE_HEAD + (size_t)cap * elem_size;
-        AetherSliceBuf* n;
-        if (!shared) {
+        AetherSliceBuf* n = NULL;
+        if (cap > (SIZE_MAX - AETHER_SLICE_HEAD) / (elem_size ? elem_size : 1)) {
+            bytes = 0;   /* no allocation takes it */
+        } else if (!shared) {
             n = (AetherSliceBuf*)realloc(h, bytes);
-            if (!n) aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        } else {
+            n = (AetherSliceBuf*)malloc(bytes);
+        }
+        if (!n) {
+            if (taken) aether_slice_unref(s);
+            aether_slice_panicf("%s:%d: append: out of memory", file, line);
+        }
+        if (!shared) {
             if (!h) {
                 memset(n, 0, AETHER_SLICE_HEAD);
                 n->refs = 1;
@@ -518,8 +543,9 @@ static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
                 n->ops = ops;
             }
         } else {
-            n = (AetherSliceBuf*)malloc(bytes);
-            if (!n) aether_slice_panicf("%s:%d: append: out of memory", file, line);
+            /* Another place holds the buffer too: it keeps it, and `s`
+             * goes on in storage of its own, each element a copy that holds
+             * what it held. */
             memcpy(n, h, AETHER_SLICE_HEAD + (size_t)len * elem_size);
             n->refs = 1;
             if (n->ops && n->ops->copy) {

@@ -630,6 +630,9 @@ static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
 int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
     if (!e || e->type == AST_CLOSURE) return 0;
     if (e->type == AST_FUNCTION_CALL && call_returns_view(e) && e->child_count > 0) return 1;
+    /* #3568: a fresh slice read in place, held to the statement's end. */
+    if (e->type == AST_FUNCTION_CALL && annotation_has_marker(e->annotation, "slice_stmt_temp"))
+        return 1;
     if (string_reads_place(gen, e)) return 1;
     for (int i = 0; i < e->child_count; i++)
         if (value_holds_statement_temps(gen, e->children[i])) return 1;
@@ -8312,6 +8315,29 @@ const char* print_fmt_arg_cast(PrintFmt f) {
     }
 }
 
+/* #3568: the call a statement temporary is being made for, emitted as the
+ * call itself inside it. */
+static ASTNode* g_slice_stmt_inner = NULL;
+
+/* A call's fresh slice read in place (slice_own.c's `slice_stmt_temp`): the
+ * reference it hands over is held in a temporary declared ahead of the
+ * statement, which gives back the one before when the statement runs again
+ * and is released at its block's every exit, as a temporary string a view
+ * may point into is (push_scoped_temp_free). */
+static void emit_slice_stmt_temp(CodeGenerator* gen, ASTNode* call) {
+    static int seq = 0;
+    const char* t = cg_internf("_ae_sst%d", seq++);
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
+    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
+            "aether_slice_release(&%s), %s = (", t, t, t);
+    ASTNode* saved = g_slice_stmt_inner;
+    g_slice_stmt_inner = call;
+    generate_expression(gen, call);
+    g_slice_stmt_inner = saved;
+    fprintf(gen->output, "))");
+    push_scoped_slice_free(gen, t);
+}
+
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
  * runtime's aether_slice_take, _copy, _release, _set and _grow1). Returns 0
  * for a name that is none of them. */
@@ -8372,7 +8398,7 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         generate_expression(gen, a);
         fprintf(o, ")");
         seq_next(gen, &s);
-        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, ", p, p, ect,
+        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, 0, ", p, p, ect,
                 own_slice_ops(gen, st));
         emit_slice_diag_file(gen, expr);
         fprintf(o, ", %d)", expr->line);
@@ -8391,6 +8417,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
      * read (generate_read). */
     if (gen->generating_lvalue && expr->type == AST_FUNCTION_CALL) {
         generate_read(gen, expr);
+        return;
+    }
+
+    /* #3568: a call's fresh slice read in place is held to its statement's
+     * end (slice_own.c's `slice_stmt_temp`). */
+    if (expr->type == AST_FUNCTION_CALL && expr != g_slice_stmt_inner &&
+        annotation_has_marker(expr->annotation, "slice_stmt_temp") && hoist_ready(gen)) {
+        emit_slice_stmt_temp(gen, expr);
         return;
     }
 
@@ -10728,7 +10762,16 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else {
                         generate_expression(gen, expr->children[0]);
                     }
-                    fprintf(gen->output, ", sizeof(%s), %s, ", ect, own_slice_ops(gen, expr->node_type));
+                    /* #3568: whether the slice holds a reference `append`
+                     * was given (moved out of its place, or a call's fresh
+                     * result), which a refusal gives back. */
+                    ASTNode* grown_from = expr->children[0];
+                    int taken = annotation_has_marker(expr->annotation, "slice_consumes") ||
+                                (grown_from && grown_from->type == AST_FUNCTION_CALL &&
+                                 grown_from->value &&
+                                 strncmp(grown_from->value, "__slice_", 8) != 0);
+                    fprintf(gen->output, ", sizeof(%s), %s, %d, ", ect,
+                            own_slice_ops(gen, expr->node_type), taken);
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                     seq_next(gen, &s);

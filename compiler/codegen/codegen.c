@@ -1699,6 +1699,21 @@ static int try_emit_scoped_temp_free(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
+/* #3568: a slice statement temporary (emit_slice_stmt_temp) released at its
+ * block's every exit, and left empty for the next time the block runs.
+ * Annotation: "scoped_slice_free:<name>". */
+static int try_emit_scoped_slice_free(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "scoped_slice_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* name = deferred->annotation + plen;
+    print_indent(gen);
+    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+            "aether_slice_release(&%s);\n", name, name);
+    return 1;
+}
+
 static int try_emit_handover_exit_free(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation) return 0;
     const char* prefix = "handover_exit_free:";
@@ -1854,6 +1869,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_scoped_temp_free(gen, deferred) &&
+        !try_emit_scoped_slice_free(gen, deferred) &&     /* #3568 */
         !try_emit_owned_exit_drop(gen, deferred) &&        /* #3142 */
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_cell_release(gen, deferred) &&

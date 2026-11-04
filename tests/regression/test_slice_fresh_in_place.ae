@@ -1,0 +1,253 @@
+// Regression (#3568): a slice a call hands over is released where it is
+// used in place, and an `append` that panics gives back what it was handed.
+//
+// A call's slice result holds a reference of its own (a `make` buffer, or a
+// view of one the callee was given). Bound to a local, the local's scope
+// exit gives that reference back; used only in place (`mk(3).len`,
+// `mk(4)[0]`, `"${mk(6).len}"`, a `for` over it, a sub-slice of it, a
+// `while` condition, a statement of its own, an element read out of it) it
+// was never given back, and every such use leaked the buffer: the
+// sanitizer run reported it from `${fresh().len}` and `${from_buffer().len}`
+// (tests/integration/slice_escape). The statement now holds the result in a
+// temporary its block releases on every exit (a panic's unwinding too).
+// What is read out of the result (a string, a struct, a row) holds a
+// reference of its own, and a view of it bound, returned or given to a
+// call takes the result's over, so each still reads its values after a
+// churn of same-sized buffers filled with -7 (a buffer freed under a reader
+// would come back holding the filler). An `append` to a call's result that
+// panics (a view that may not grow) released nothing either: the panic now
+// gives back the result it was handed. A call as a list pattern's subject
+// ran once per read of it (its length, its elements, its tail): it runs
+// once, and its result is the statement's until the match is done.
+//
+// Each shape reads back its values, and where the heap count is exact
+// (mem.heap_in_use_exact) rounds of them leave the heap as they found it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    xs[0] = n
+    return xs
+}
+
+words(n: int) -> string[] {
+    out = make([]string, n)
+    for i in 0..n {
+        out[i] = string.concat("w", "${i}")
+    }
+    return out
+}
+
+// A view of the caller's buffer, handed back with a reference of its own.
+same(xs: int[]) -> int[] {
+    return xs
+}
+
+// A closure's result, a buffer the closure made.
+fresh() -> int[] {
+    get = || {
+        return make([]int, 3)
+    }
+    return call(get)
+}
+
+struct Named {
+    name: string
+    n: int
+}
+
+nameds(n: int) -> Named[] {
+    out = make([]Named, n)
+    for i in 0..n {
+        out[i] = Named { name: string.concat("n", "${i}"), n: i }
+    }
+    return out
+}
+
+rows() -> int[][] {
+    g = make([]int[], 2)
+    r = make([]int, 3)
+    r[1] = 42
+    g[1] = r
+    return g
+}
+
+total(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+// A view of a call's result, returned: it takes the result's reference.
+tail_of() -> int[] {
+    return seq(5)[1..]
+}
+
+seq(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+// Same-sized buffers and strings, filled: one freed under a reader comes
+// back holding the filler.
+churn() -> int {
+    keep = make([]int[], 0)
+    words = make([]string, 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            b = make([]int, n)
+            for i in 0..n {
+                b[i] = -7
+            }
+            keep = append(keep, b)
+        }
+        words = append(words, string.concat("z", "${r}"))
+        words = append(words, string.concat("zz", "${r % 10}"))
+    }
+    return keep.len + words.len
+}
+
+// What is read out of a call's result, and views of one moved on, outlive
+// the statement that gives the result back.
+read_out() -> int {
+    first = words(3)[1]
+    nm = nameds(3)[2]
+    row = rows()[1]
+    v = seq(4)[1..]
+    t = tail_of()
+    k = total(seq(5)[1..])
+    churn()
+    check(string.equals(first, "w1") != 0, "a string read out of a call's result")
+    check(string.equals(nm.name, "n2") != 0 && nm.n == 2, "a struct read out of a call's result")
+    check(row.len == 3 && row[1] == 42, "a row read out of a call's result")
+    check(v.len == 3 && v[0] == 11 && v[2] == 13, "a bound view of a call's result")
+    check(t.len == 4 && t[0] == 11 && t[3] == 14, "a returned view of a call's result")
+    check(k == 11 + 12 + 13 + 14, "a view of a call's result given to a call")
+    return nm.n + row[1] + v.len + t.len + k
+}
+
+grow_view(xs: @keep int[]) -> int[] {
+    return append(xs, 1)
+}
+
+refused(xs: @keep int[]) -> int {
+    try {
+        ys = grow_view(xs)
+        return ys.len
+    } catch e {
+        return -1
+    }
+}
+
+in_place() -> int {
+    t = mk(3).len + mk(4)[0]
+    for x in mk(2) {
+        t = t + x
+    }
+    t = t + mk(5)[1..].len
+    s = "${mk(6).len} ${fresh().len}"
+    t = t + string.length(s)
+    i = 0
+    while mk(1).len > i {
+        i = i + 1
+    }
+    mk(7)
+    first = words(3)[1]
+    t = t + string.length(first)
+    xs = make([]int, 6)
+    t = t + same(xs).len + same(xs)[0]
+    return t + i
+}
+
+grow_refused() -> int {
+    owner = make([]int, 4)
+    return refused(owner[1..3])
+}
+
+var calls = 0
+
+counted(n: int) -> int[] {
+    calls = calls + 1
+    return seq(n)
+}
+
+// A call is the subject: it runs once, and its result outlives the arm.
+subject_call() -> int {
+    match counted(4) {
+        [h | t] -> {
+            churn()
+            return h + t[0] + t.len
+        }
+        _ -> {
+            return 0
+        }
+    }
+}
+
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    // .len 3, [0] 4, the for 2, the sub-slice 4, "6 3", "w1", same 6, the while 1
+    check(in_place() == 3 + 4 + 2 + 4 + 3 + 2 + 6 + 1, "the values read in place")
+    check(grow_refused() == -1, "an append to a view panics")
+    calls = 0
+    check(subject_call() == 10 + 11 + 3, "a call's result matched")
+    check(calls == 1, "the subject is evaluated once (${calls} times)")
+    steady("a call matched", || {
+            n = 0
+            while n < 50 {
+                _v = subject_call()
+                n = n + 1
+            }
+        })
+    check(read_out() == 2 + 42 + 3 + 4 + 50, "what is read out of a call's result")
+    steady("what is read out of a call's result", || {
+            n = 0
+            while n < 50 {
+                _v = read_out()
+                n = n + 1
+            }
+        })
+    steady("results used in place", || {
+            n = 0
+            while n < 50 {
+                _v = in_place()
+                n = n + 1
+            }
+        })
+    steady("an append that panics", || {
+            n = 0
+            while n < 50 {
+                _v = grow_refused()
+                n = n + 1
+            }
+        })
+    println("ok")
+}

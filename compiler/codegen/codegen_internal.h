@@ -67,6 +67,7 @@ void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name);
 void hoist_declare_null(CodeGenerator* gen, const char* ctype, const char* name);
 void hoist_append_text(CodeGenerator* gen, const char* text);
 void push_scoped_temp_free(CodeGenerator* gen, const char* name);
+void push_scoped_slice_free(CodeGenerator* gen, const char* name);   /* #3568 */
 /* Where declarations go ahead of a statement, judged by the `n` bytes of C
  * before it: 0 there, 1 after a null statement (a label precedes), 2 in a
  * block with the statement (an unbraced body). */

@@ -466,6 +466,7 @@ A buffer `make([]T, n)` hands out, or `push` or `append` grows, is counted (#356
 | `v = p` (a parameter), `v = s.f` (a field), `v = rows[i]` (an element), `v = g` (a `var`) | `v` takes a reference of its own, which its scope's exit releases. A copy of a whole buffer can grow: the buffer being shared, `append` moves the copy to storage of its own. |
 | A buffer in a field, an element, a module-level `var`, a tuple, an optional, a sum, a fixed-size array, a closure, a cell, actor state or a message | Released with what holds it, as a string part is: a struct's destroy, a store over it, the message's end. `free(s.f)` releases it early and leaves the field empty. A struct allocated by hand starts zeroed (`calloc`, `heap.new`). |
 | A local a pattern binds (a list pattern's tail, a match arm's binding) | A view of what it was bound from, which holds the reference; `free` of it is the named panic a view gets. |
+| `f().len`, `f()[0]`, `f()[1..].len`, `for x in f()`, `"${f().len}"`, `f()` as a statement | The call's result is a temporary of the statement, released on its block's every exit. A view of it that is bound, returned or passed on takes its reference over. |
 
 ```aether,run
 total(xs: int[]) -> int {           // borrows: never releases xs

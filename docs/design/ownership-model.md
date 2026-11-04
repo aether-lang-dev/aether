@@ -779,7 +779,10 @@ memory) carries no AETHER_SLICE_MADE mark, and nothing is read before its
 `ptr`. A view of a counted string's characters (`string.bytes(s)`, #3570)
 holds the string by the same rule: it is marked AETHER_SLICE_STRING, the 56
 bits that carry a buffer's offset carry the string's header, and its
-retain and release are the string's.
+retain and release are the string's. A call's slice result used only in
+place (`f().len`, `f()[0]`, a `for` over it) is a temporary of its
+statement, released on its block's every exit as a string temporary is; a
+view of it that is bound, returned or passed on takes its reference over.
 
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's

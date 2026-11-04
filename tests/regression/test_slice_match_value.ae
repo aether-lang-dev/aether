@@ -1,0 +1,175 @@
+// Regression (#3568): a `match` whose value is a slice gives the place it
+// goes into what each arm gives, arm by arm.
+//
+// Slice ownership copied the whole `match` into the place it was bound,
+// assigned, stored or returned to: `vs = match k { 0 -> mk(4) _ -> xs }`
+// held the arm's fresh buffer twice (the reference the call handed over,
+// and the copy's), and leaked it each time that arm ran. The copy also
+// nested the `match` in a call, where codegen lowered it as a GNU statement
+// expression, which the non-GCC path (AETHER_GCC_COMPAT 0, what MSVC
+// compiles) may not hold. Each arm's value now goes into the place as an
+// `if` branch's does: a call's result hands its reference over, a local or
+// another place is copied. An arm whose value ends a block is the
+// match's, never a statement's own temporary.
+//
+// Each shape reads back its values after a churn of kept, filled buffers (a
+// buffer freed under a reader would come back holding the filler), and
+// where the heap count is exact (mem.heap_in_use_exact) rounds of them leave
+// the heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Holder {
+    data: int[]
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            b = make([]int, n)
+            for i in 0..n {
+                b[i] = -7
+            }
+            keep = append(keep, b)
+        }
+    }
+    return keep.len
+}
+
+pick(c: bool, xs: int[]) -> int[] {
+    return match c {
+        true -> xs
+        false -> mk(2)
+    }
+}
+
+// Bound: an empty arm, an array's view, a place, a call.
+bound(k: int) -> int {
+    xs = mk(3)
+    let a: int[3] = [1, 2, 3]
+    let ws: int[] = match k {
+        0 -> []
+        1 -> a
+        _ -> xs
+    }
+    let vs: int[] = match k {
+        0 -> mk(4)
+        _ -> xs
+    }
+    xs = mk(1)
+    churn()
+    if k == 2 {
+        check(ws[2] == 12 && vs[0] == 10, "bound, the arm's place")
+    }
+    if k == 0 {
+        check(vs[3] == 13, "bound, the arm's call")
+    }
+    return ws.len + vs.len
+}
+
+// Bound again, stored into a field and an element, returned.
+stored(k: int) -> int {
+    xs = mk(3)
+    ys = mk(1)
+    ys = match k {
+        0 -> xs
+        _ -> mk(5)
+    }
+    h = Holder { data: mk(1) }
+    h.data = match k {
+        0 -> mk(4)
+        _ -> xs
+    }
+    rows = make([]int[], 2)
+    rows[1] = match k {
+        0 -> mk(2)
+        _ -> xs
+    }
+    p = pick(k == 0, xs)
+    xs = mk(1)
+    churn()
+    if k == 0 {
+        check(ys[2] == 12 && h.data[3] == 13 && rows[1][1] == 11 && p[2] == 12, "stored, k 0")
+    } else {
+        check(ys[4] == 14 && h.data[2] == 12 && rows[1][2] == 12 && p[1] == 11, "stored, k 1")
+    }
+    return ys.len + h.data.len + rows[1].len + p.len
+}
+
+// An arm whose value ends a block.
+blocks(k: int) -> int {
+    let vs: int[] = match k {
+        0 -> {
+            n = 4
+            mk(n)
+        }
+        _ -> {
+            mk(2)
+        }
+    }
+    churn()
+    check(vs[1] == 11, "a block arm's value")
+    return vs.len
+}
+
+fn steady(what: string, round: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(round)
+        i = i + 1
+    }
+    grown = mem.steady_growth(round, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(bound(0) == 0 + 4, "bound, k 0")
+    check(bound(1) == 3 + 3, "bound, k 1")
+    check(bound(2) == 3 + 3, "bound, k 2")
+    check(stored(0) == 3 + 4 + 2 + 3, "stored, k 0")
+    check(stored(1) == 5 + 3 + 3 + 2, "stored, k 1")
+    check(blocks(0) == 4 && blocks(1) == 2, "block arms")
+    steady("a bound match", || {
+            i = 0
+            while i < 60 {
+                _a = bound(i % 3)
+                i = i + 1
+            }
+        })
+    steady("a stored match", || {
+            i = 0
+            while i < 60 {
+                _a = stored(i % 2)
+                i = i + 1
+            }
+        })
+    steady("block arms", || {
+            i = 0
+            while i < 60 {
+                _a = blocks(i % 2)
+                i = i + 1
+            }
+        })
+    println("ok")
+}
