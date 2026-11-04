@@ -60,6 +60,7 @@ struct Local {
     int destructured;   /* declared by a tuple destructure (#3568) */
     ASTNode* arm;       /* bound by the pattern of this match arm, whose body is a block */
     int written;        /* a pattern's binding its scope binds again or pushes into */
+    int hold;           /* takes a reference of its own where its body starts (classify) */
     int pidx;           /* a parameter: its position, else -1 */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
@@ -662,13 +663,19 @@ static void classify(Frame* f) {
         else if (strmap_has(&f->promoted, l->name)) l->kind = K_CELL;
         else if (l->param) l->kind = l->keep ? K_KEEP : K_PARAM;
         else if (l->destructured) l->kind = K_VIEW;
-        else if (l->pattern && l->arm) l->kind = K_VIEW;   /* rewrite's AST_MATCH_ARM */
-        /* A receive arm's field its body binds again or pushes into takes
-         * a reference of its own where the body starts (check_frame): it
-         * was a copy of the message's field, which the message releases. */
-        else if (l->pattern && l->written && !l->block && f->owner &&
-                 (f->owner->type == AST_RECEIVE_ARM || f->owner->type == AST_TIMEOUT_ARM))
+        /* A binding of a match arm's pattern takes a reference of its own
+         * where the arm's body starts (rewrite's AST_MATCH_ARM), and so does
+         * a receive arm's field its body binds again or pushes into
+         * (check_frame): each is a copy of what was matched, or of the
+         * message's field, which the message releases. `hold` stays
+         * whatever kind the fixpoint below gives it: one an owner is moved
+         * into is still a copy until the hold makes it its own. */
+        else if (l->pattern && (l->arm || (l->written && !l->block && f->owner &&
+                                           (f->owner->type == AST_RECEIVE_ARM ||
+                                            f->owner->type == AST_TIMEOUT_ARM)))) {
             l->kind = K_VIEW;
+            l->hold = 1;
+        }
         else if (l->pattern || !l->block) l->kind = K_OTHER;
         else if (l->fresh || l->target) l->kind = K_OWNER;
         else l->kind = K_VIEW;
@@ -1846,7 +1853,7 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
             if (!body || body->type != AST_BLOCK) return;
             for (int k = f->nlocals - 1; k >= 0; k--) {
                 Local* l = f->locals[k];
-                if (l->arm == n && l->kind == K_VIEW) insert_hold(l, body);
+                if (l->arm == n && l->hold) insert_hold(l, body);
             }
             return;
         }
@@ -1962,7 +1969,7 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
              * its own for the body (classify). */
             for (int i = f.nlocals - 1; i >= 0; i--) {
                 Local* l = f.locals[i];
-                if (l->pattern && !l->arm && !l->block && l->kind == K_VIEW) insert_hold(l, body);
+                if (l->hold && !l->arm) insert_hold(l, body);
             }
         }
     }
