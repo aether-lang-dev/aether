@@ -412,12 +412,6 @@ slice_skip(kid: string, pid: string, t: string) -> string {
     if pid == "P15" {
         return "a fixed-size array of slices is no parameter type the parser takes (`p: int[][2]`)"
     }
-    if kid == "KB" && pid == "P6" {
-        // The string the view is made of is a temporary that lives to the
-        // end of its statement (a view may point into it), and a `return`
-        // of a tuple literal leaves before that end: it leaks once a call.
-        return "a tuple returned with a view of a temporary string leaks the temporary (reported, not #3570's)"
-    }
     return ""
 }
 

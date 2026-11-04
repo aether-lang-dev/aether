@@ -1,0 +1,92 @@
+// Regression (#3570): a tuple returned with a view of a string the
+// statement made gives the string back once the view holds it.
+//
+// `return string.bytes(string.concat(w, "#a")), 7` views a string that
+// lives to the end of its statement, and a view of a string's bytes holds
+// the string (#3570). The statement's temporaries were kept, not freed, at
+// a `return` whose value may point into them, so the string leaked once a
+// call (the grid's KB-P6 cells, skipped until now). The return now gives
+// each temporary back where every slice it returns holds what it views (a
+// counted buffer or string) or is empty, and keeps it only where one might
+// view it uncounted. A single slice returned is judged the same way.
+//
+// Each shape reads back its bytes after a churn of strings, and where the
+// heap count is exact (mem.heap_in_use_exact) rounds of them leave the heap
+// as they found it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3570: ${what}")
+        exit(1)
+    }
+}
+
+pair_of(w: string) -> (byte[], int) {
+    return string.bytes(string.concat(w, "#a")), 7
+}
+
+two_of(w: string) -> (byte[], byte[]) {
+    return string.bytes(string.concat(w, "#b")), string.bytes(string.concat("c#", w))
+}
+
+one_of(w: string) -> byte[] {
+    return string.bytes(string.concat(w, "#d"))
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    words = make([]string, 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            b = make([]int, n)
+            for i in 0..n {
+                b[i] = -7
+            }
+            keep = append(keep, b)
+        }
+        words = append(words, string.concat("z", "${r}"))
+        words = append(words, string.concat("zz", "${r % 10}"))
+    }
+    return keep.len + words.len
+}
+
+shape() -> int {
+    p, k = pair_of("w")
+    a, b = two_of("x")
+    o = one_of("y")
+    churn()
+    check(p.len == 3 && p[0] == 119 && p[2] == 97 && k == 7, "the tuple's view reads its string")
+    check(a.len == 3 && a[2] == 98 && b.len == 3 && b[0] == 99, "both views of the tuple read theirs")
+    check(o.len == 3 && o[0] == 121 && o[2] == 100, "a single view reads its string")
+    return p.len + a.len + b.len + o.len + k
+}
+
+fn steady(what: string, round: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(round)
+        i = i + 1
+    }
+    grown = mem.steady_growth(round, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(shape() == 19, "the shapes")
+    steady("views of a returned statement's strings", || {
+            n = 0
+            while n < 50 {
+                _v = shape()
+                n = n + 1
+            }
+        })
+    println("ok")
+}

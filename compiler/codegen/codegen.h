@@ -198,6 +198,11 @@ typedef struct {
      * DEFER_EXIT_RUNTIME — the conditional defers are then emitted under a
      * runtime test on it. NULL otherwise. Borrowed; not owned. */
     const char* defer_err_slot;
+    /* #3570: while a return's defers are emitted, the C condition that its
+     * slice results hold what they view (aether_slice_holds_or_empty): a
+     * temporary string the statement holds is released only then, kept when
+     * a result is an uncounted view that may point into it. NULL otherwise. */
+    const char* scoped_free_guard;
     int defer_count;
     int* scope_defer_start;  // defer_count at scope entry
     int scope_cap;

@@ -1694,8 +1694,16 @@ static int try_emit_scoped_temp_free(CodeGenerator* gen, ASTNode* deferred) {
     if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
     const char* name = deferred->annotation + plen;
     print_indent(gen);
-    fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
+    /* #3570: at a return whose slice results may be views of it, released
+     * only when each holds what it views (a counted view); an uncounted one
+     * keeps it, as before, so it never dangles. */
+    if (gen->scoped_free_guard)
+        fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+                "if (%s) aether_heap_str_free(%s); %s = NULL;\n", name, gen->scoped_free_guard,
+                name, name);
+    else
+        fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+                "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
     return 1;
 }
 

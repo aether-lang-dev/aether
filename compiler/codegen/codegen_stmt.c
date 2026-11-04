@@ -9284,17 +9284,32 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
 }
 
 /* Does a `return`'s value hold a temporary for its statement
- * (value_holds_statement_temps), which its exit drain must release? Not a
- * value that is a slice: it may be a view of that very temporary, and the
- * caller would be left a dangling view. */
+ * (value_holds_statement_temps), which its exit drain must release? A value
+ * that is a slice may be a view of that very temporary: the drain then
+ * releases a temporary string only when every slice result holds what it
+ * views (return_slices_guard, #3570), where a slice result used to keep the
+ * temporary for good, so `return string.bytes(t), 7` leaked `t`. */
 static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
     if (!hoist_ready(gen)) return 0;
     for (int i = 0; i < stmt->child_count; i++) {
         ASTNode* v = stmt->children[i];
-        if (v && v->type != AST_PRINT_STATEMENT && !type_is_slice(v->node_type) &&
-            value_holds_statement_temps(gen, v)) return 1;
+        if (v && v->type != AST_PRINT_STATEMENT && value_holds_statement_temps(gen, v)) return 1;
     }
     return 0;
+}
+
+/* #3570: the C condition that every slice result of the multi-value return
+ * `stmt`, written into `ret`'s positions, holds what it views or views
+ * nothing (aether_slice_holds_or_empty), or NULL when none is a slice. */
+static const char* return_slices_guard(ASTNode* stmt, const char* ret) {
+    const char* guard = NULL;
+    for (int j = 0; j < stmt->child_count; j++) {
+        ASTNode* v = stmt->children[j];
+        if (!v || !type_is_slice(v->node_type)) continue;
+        const char* one = cg_internf("aether_slice_holds_or_empty(%s._%d)", ret, j);
+        guard = guard ? cg_internf("%s && %s", guard, one) : one;
+    }
+    return guard;
 }
 
 /* The value `print(...)` written as a statement is lowered to (no `;`).
@@ -12913,11 +12928,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                  stmt->child_count - 1);
                         DeferExit prev_exit = gen->defer_exit;
                         const char* prev_slot = gen->defer_err_slot;
+                        const char* prev_guard = gen->scoped_free_guard;
                         gen->defer_exit = DEFER_EXIT_RUNTIME;
                         gen->defer_err_slot = errslot;
+                        gen->scoped_free_guard = return_slices_guard(stmt, "_builder_ret");
                         emit_all_defers(gen);
                         gen->defer_exit = prev_exit;
                         gen->defer_err_slot = prev_slot;
+                        gen->scoped_free_guard = prev_guard;
                     }
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);
@@ -12985,9 +13003,13 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * and it is known statically, so no runtime guard. */
                     {
                         DeferExit prev_exit = gen->defer_exit;
+                        const char* prev_guard = gen->scoped_free_guard;
                         gen->defer_exit = DEFER_EXIT_SUCCESS;
+                        if (type_is_slice(ret_type))
+                            gen->scoped_free_guard = "aether_slice_holds_or_empty(_builder_ret)";
                         emit_all_defers(gen);
                         gen->defer_exit = prev_exit;
+                        gen->scoped_free_guard = prev_guard;
                     }
                     /* Issue #501: drain try frames. */
                     emit_try_pops_for_nonlocal_exit(gen);

@@ -311,6 +311,13 @@ static inline AetherSlice aether_slice_string_view(AetherSlice v, const void* he
     return aether_slice_with_off(v, h);
 }
 
+/* Does `s` hold what it views (a counted buffer or string), or view nothing?
+ * A return's temporary string is released only then (#3570): an uncounted
+ * view may point into it. */
+static inline int aether_slice_holds_or_empty(AetherSlice s) {
+    return (s.flags & (AETHER_SLICE_MADE | AETHER_SLICE_STRING)) != 0 || s.ptr == NULL;
+}
+
 /* `string.bytes(s)` (#3025, #3570): `v`, the bounded view of `s`'s
  * characters, read-only, and holding `s` when `s` is a counted string. A
  * literal and a plain C string are not counted: the view holds nothing, as
