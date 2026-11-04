@@ -49,7 +49,10 @@ main() {
     // Mount script.so at /gateway/* via the in-process gateway.
     ok, kind, msg = script_gateway.mount(s, "/gateway", so_path)
     if kind != script_gateway.KIND_OK {
+        // The refusals the driver expects (a missing .so, no entrypoint, an
+        // own-runtime script) end here: the server goes before the exit.
         println("FAIL: mount kind=${kind} msg=${msg}")
+        http.server_free(s)
         exit(1)
     }
 
