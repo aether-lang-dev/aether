@@ -37,6 +37,12 @@
 #   keep_name:     a parameter given to a `@keep` function of a 300-character
 #                  name, called qualified: the ownership check cut the name
 #                  to 256 bytes, found no definition, and did not refuse it.
+#   view_chain:    41 views, each of the one before (and, in view_chain_freed,
+#                  of a buffer freed after them, the last read): binding a
+#                  view, the free check held the entries of its source and
+#                  root across the growth of its locals, and read them from
+#                  the array the growth had freed (heap-use-after-free under
+#                  ASan; a realloc that always moves crashed the compile).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -299,6 +305,30 @@ main() {
 }
 AE
 refused keep_name "cannot give 's' to 'qm.kxxxxxxxx"
+
+mkdir -p "$TMP/view_chain_freed"
+awk 'BEGIN {
+    print "churn() -> int {"
+    print "    buf = make([]int, 4)"
+    print "    v0 = buf[0..4]"
+    for (i = 1; i <= 40; i++) printf "    v%d = v%d[0..4]\n", i, i - 1
+    print "    free(buf)"
+    print "    return v40[0]"
+    print "}"
+    print "main() { println(churn()) }"
+}' > "$TMP/view_chain_freed/main.ae"
+refused view_chain_freed "'v40' views the storage of 'buf', which was freed"
+
+mkdir -p "$TMP/view_chain"
+awk 'BEGIN {
+    print "main() {"
+    print "    let a: int[4] = [1, 2, 3, 4]"
+    print "    v0 = a[1..4]"
+    for (i = 1; i <= 40; i++) printf "    v%d = v%d[0..3]\n", i, i - 1
+    print "    println(v40[0] + v40[2])"
+    print "}"
+}' > "$TMP/view_chain/main.ae"
+runs view_chain 6
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] $NAME: locals, @frees parameters, protocol references, arms, matches, helpers, paths, loop heads and long names past every old cap"

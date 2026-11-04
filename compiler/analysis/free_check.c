@@ -348,11 +348,10 @@ static const char* view_root(Walk* w, FState* s, ASTNode* init) {
 static void bind(Walk* w, FState* s, const char* name, ASTNode* init) {
     if (!name) return;
     const char* root = view_root(w, s, init);
-    FVar* r = root ? find(s, root) : NULL;
-    FVar* from = NULL;
+    const char* from_name = NULL;
     if (init && root) {
         ASTNode* b = init->child_count > 0 ? arg_place(init->children[0]) : NULL;
-        if (b && b->type == AST_IDENTIFIER && b->value) from = find(s, b->value);
+        if (b && b->type == AST_IDENTIFIER && b->value) from_name = b->value;
     }
     /* Views of what `name` held view storage it no longer names. */
     for (int i = 0; i < s->n; i++)
@@ -362,6 +361,10 @@ static void bind(Walk* w, FState* s, const char* name, ASTNode* init) {
         }
     FVar* v = get(s, name);
     if (!v) return;
+    /* Found by name past get, which may move the variables (#3574): found
+     * before it, they pointed into the array get had freed. */
+    FVar* r = root ? find(s, root) : NULL;
+    FVar* from = from_name ? find(s, from_name) : NULL;
     int was_frees = 0;
     for (int i = 0; i < w->c->frees_count; i++)
         if (strcmp(w->c->frees_params[i], name) == 0) was_frees = 1;
