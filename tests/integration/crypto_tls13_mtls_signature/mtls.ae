@@ -24,7 +24,7 @@ main() {
         println("FAIL: read the pair: ${cerr}${kerr}")
         exit(1)
     }
-    chain, _lens = tls13_server.parse_cert_chain_pem(cert_pem)
+    chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
     if chain == null || list.size(chain) < 1 {
         println("FAIL: the client certificate does not parse")
         exit(1)
@@ -34,11 +34,13 @@ main() {
     scalar = tls13_server.parse_ec_private_key_pem(key_pem)
     if scalar == null || bytes.length(scalar) != 32 {
         println("FAIL: the client key is not a P-256 key")
+        tls13_server.free_cert_chain(chain, lens)
         exit(1)
     }
     xpriv, rerr = cryptography.random_buffer(32)
     if rerr != "" {
         println("FAIL: ${rerr}")
+        tls13_server.free_cert_chain(chain, lens)
         exit(1)
     }
     conn, err = tls13_client.connect_mtls("localhost", atoi(os.getenv("PORT")), xpriv, cert, bytes.length(cert), scalar)
@@ -46,6 +48,7 @@ main() {
     bytes.wipe_free(scalar)
     if err != "" {
         println("REFUSED: ${err}")
+        tls13_server.free_cert_chain(chain, lens)
         exit(0)
     }
     req = "GET / HTTP/1.0\r\n\r\n"
@@ -53,6 +56,7 @@ main() {
     if serr != "" {
         println("RECVERR: send: ${serr}")
         tls13_client.close_conn(conn)
+        tls13_server.free_cert_chain(chain, lens)
         exit(0)
     }
     buf, n, rerr2 = tls13_client.conn_recv(conn)
@@ -71,4 +75,6 @@ main() {
         bytes.free(buf)
     }
     tls13_client.close_conn(conn)
+    // The certificate the connection was given lives in the chain.
+    tls13_server.free_cert_chain(chain, lens)
 }

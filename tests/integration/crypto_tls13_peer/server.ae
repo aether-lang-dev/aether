@@ -26,6 +26,7 @@ main() {
     sock, aerr = tcp.accept(srv)
     if aerr != "" {
         println("FAIL: ${aerr}")
+        tcp.server_close(srv)
         exit(1)
     }
     // SERVER_CERT and SERVER_KEY name PEM files to serve instead (#3357).
@@ -52,6 +53,8 @@ main() {
     if err != "" {
         println("REFUSED: ${err}")
         tcp.close(sock)
+        tls13_server.free_cert_chain(chain, lens)
+        tcp.server_close(srv)
         exit(0)
     }
     println("ACCEPTED")
@@ -77,6 +80,8 @@ main() {
         }
     }
     tls13_server.close_conn(conn)
+    tls13_server.free_cert_chain(chain, lens)
+    tcp.server_close(srv)
     exit(0)
 }
 
