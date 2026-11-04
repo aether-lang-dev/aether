@@ -47,7 +47,11 @@ fn ptr_global(p: string) {
     check(see(gp) == 6 && seen_is("ab-lit") == 1, "a ptr module var's `gp = t`")
     s = string.concat(p, "-str")
     gp = s
-    gp = string.concat(p, "-call")
+    // A string built in the statement has nothing else to own it: the
+    // global, a `ptr`, owns nothing, so it is handed a reference of its own
+    // with string.keep and given it back with string.release_kept (#3547).
+    gp = string.keep(string.concat(p, "-call"))
+    string.release_kept(gp)
     gp = null
 }
 

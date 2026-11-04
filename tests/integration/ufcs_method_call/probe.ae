@@ -53,4 +53,5 @@ main() {
     c.bump()
     c.bump()
     println("count ${c.n}")
+    heap.free(c)
 }
