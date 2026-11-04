@@ -2823,12 +2823,36 @@ const char* http_find_header_end(const char* buf, size_t len) {
     return NULL;
 }
 
+/* Whether a response's header section, the `n` bytes at `buf` up to and
+ * including the empty line that ends it, holds no NUL and no CR that is not
+ * followed by LF. A recipient has to refuse either or put a space in its
+ * place (RFC 9110 5.5, RFC 9112 2.2), and refusing is the answer nothing can
+ * read two ways (#3556). The client found the end of the section with
+ * strstr, which stops at a NUL, and read its fields as C strings: a NUL hid
+ * the section and handed the whole response back as a status-0 body, and a
+ * bare CR in a Location went out inside the request line of the redirect. */
+static int http_head_section_ok(const char* buf, size_t n) {
+    if (memchr(buf, '\0', n)) return 0;
+    const char* end = buf + n;
+    for (const char* p = buf; (p = (const char*)memchr(p, '\r', (size_t)(end - p))) != NULL; p += 2) {
+        if (p + 1 >= end || p[1] != '\n') return 0;
+    }
+    return 1;
+}
+
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
         char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
+        if (!http_head_section_ok(buf, f->header_bytes)) {
+            /* Stop reading: the driver reports it, and the connection,
+             * framed by fields nobody can read one way, is not kept. */
+            f->bad_head = 1;
+            f->invalid = 1;
+            return 1;
+        }
 
         /* Read Transfer-Encoding where it lies. Copying it out meant an
          * allocation and a free per response, and any buffer it was copied
@@ -3046,12 +3070,19 @@ char* http_build_request_head_into(const HttpReqHead* p,
  */
 void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
-    char* header_end = strstr(buf, "\r\n\r\n");
+    /* Found as the framing found it, past any NUL (#3556): strstr stopped at
+     * one, and the whole response came back as the body of a status-0
+     * response with no error. */
+    char* header_end = (char*)http_find_header_end(buf, len);
     if (!header_end) {
         response->body = string_new_with_length(buf, len);
         return;
     }
     size_t header_bytes = (size_t)((header_end + 4) - buf);
+    if (!http_head_section_ok(buf, header_bytes)) {
+        if (!response->error) response->error = string_new("malformed response header section");
+        return;
+    }
     size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
     *header_end = '\0';
     char* status_line = buf;
@@ -3822,9 +3853,10 @@ send_request:
             memcpy(hb + hlen, sbuf, (size_t)sn);
             hlen += (size_t)sn;
             hb[hlen] = '\0';
-            /* The header terminator is NUL-free ASCII and precedes any body
-             * byte, so strstr finds it before any body NUL. */
-            hend = strstr(hb, "\r\n\r\n");
+            /* Found past any NUL, as the buffered reader finds it (#3556):
+             * strstr stopped at a NUL in the header section, and this kept
+             * reading for an end it had already been sent. */
+            hend = (char*)http_find_header_end(hb, hlen);
             if (hend) break;
         }
         if (sn < 0) serr = 1;
@@ -3839,6 +3871,12 @@ send_request:
 
         size_t header_bytes = (size_t)((hend + 4) - hb);
         size_t over_len     = hlen - header_bytes;   /* body bytes already read */
+        if (!http_head_section_ok(hb, header_bytes)) {
+            free(hb);
+            transport_close(&t);
+            response->error = string_new("malformed response header section");
+            return response;
+        }
         *hend = '\0';                                 /* isolate the header block */
 
         response->status_code = response_status_of(hb);
@@ -3957,7 +3995,9 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
-                "response framing is ambiguous: the declared body length is not usable");
+                rx.framing.bad_head
+                    ? "malformed response header section"
+                    : "response framing is ambiguous: the declared body length is not usable");
             return response;
         }
         if (rx.oom) {
@@ -4041,8 +4081,8 @@ send_request:
         recv_err = 1;
     }
 
-    // Zero-byte response: still need a valid empty string so strstr
-    // below is safe. Tiny allocation, done only on the empty path.
+    // Zero-byte response: still need a valid empty string for the readers
+    // below. Tiny allocation, done only on the empty path.
     if (!full_response) {
         full_response = (char*)aether_caps_malloc(1);
         if (!full_response) {
@@ -4078,7 +4118,7 @@ send_request:
      * header block, this was a timeout / I/O error mid-recv. Tell the
      * caller — otherwise they'd see status=0 + empty body and not
      * know whether the request even reached the server. */
-    char* header_end = strstr(full_response, "\r\n\r\n");
+    const char* header_end = http_find_header_end(full_response, total_len);
     /* A response framed by the close (no Content-Length, no chunked) that
      * the deadline cut off is NOT complete: `truncated` cannot see it
      * (nothing declared a length) and its headers did arrive, so without
@@ -4370,6 +4410,13 @@ static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_
     HttpUriParts b, r;
     if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme ||
         http_uri_split(ref, &r) != 0) return NULL;
+    /* No URI reference holds a control byte (RFC 3986 2), and one in a
+     * Location would be written into the next hop's request line as it is
+     * (#3556). The response reader refuses a NUL and a bare CR in the
+     * header section; a TAB or any other control byte is refused here. */
+    for (const unsigned char* c = (const unsigned char*)ref; *c; c++) {
+        if (*c < 0x20 || *c == 0x7f) return NULL;
+    }
 
     /* T's parts, by 5.2.2: which of the two each comes from, and the path
      * built in `path`. A merged path, its dot segments removed, fits in the

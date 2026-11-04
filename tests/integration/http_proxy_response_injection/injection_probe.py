@@ -13,23 +13,33 @@
 #   upstream <portfile>  bind port 0, write the port, answer as the upstream
 #   client <proxy_port>  drive the requests and check the bytes that come back
 #
-# One hostile header per response, on purpose. A bare CR ends the header scan
-# on both paths, so a response carrying both would never reach the check that
-# rejects a value holding a bare LF, and removing that check would not fail
-# this test.
+# One hostile header per response, on purpose. A bare CR refuses the whole
+# response on both paths, so a response carrying both would never reach the
+# check that rejects a value holding a bare LF, and removing that check would
+# not fail this test.
+#
+# A bare CR makes the response invalid, not only its field (#3556): a
+# recipient has to refuse it or put a space in its place (RFC 9112 2.2), and
+# the client's response reader, which the proxy reads upstreams with,
+# refuses it. A proxy that gets an invalid response from its upstream answers
+# 502 (RFC 9110 15.6.3), as nginx does, so nothing of that upstream's head
+# reaches the client. The proxy used to forward the 200 with the field
+# dropped. A bare LF ends a line, so that case is still the dropped header.
 
 import os
 import socket
 import sys
 import threading
 
+# (label, hostile header, its name, the header it tries to inject, whether
+# the proxy answers 502 rather than the upstream's response)
 CASES = [
     ("bare CR",
      b"X-Evil-CR: before\rX-Injected-A: yes\r\n",
-     b"X-Evil-CR", b"X-Injected-A"),
+     b"X-Evil-CR", b"X-Injected-A", True),
     ("bare LF",
      b"X-Evil-LF: before\nX-Injected-B: yes\r\n",
-     b"X-Evil-LF", b"X-Injected-B"),
+     b"X-Evil-LF", b"X-Injected-B", False),
 ]
 
 
@@ -116,7 +126,7 @@ def fetch(proxy_port, path):
 
 
 def run_client(proxy_port):
-    for i, (label, _evil, evil_name, injected) in enumerate(CASES):
+    for i, (label, _evil, evil_name, injected, refused) in enumerate(CASES):
         buf = fetch(proxy_port, b"/case%d" % i)
 
         if b"\r\n\r\n" not in buf:
@@ -135,6 +145,17 @@ def run_client(proxy_port):
             print("%s: header carrying a bare line ending was forwarded: %r"
                   % (label, head))
             return 1
+
+        if refused:
+            if (not head.startswith(b"HTTP/1.1 502 ") or
+                    b"X-Aether-Proxy-Error: upstream_transport" not in head):
+                print("%s: the proxy did not answer 502 to an invalid upstream response: %r"
+                      % (label, head))
+                return 1
+            if b"X-Case:" in head:
+                print("%s: a header of the invalid response was forwarded: %r" % (label, head))
+                return 1
+            continue
 
         if b"X-Case: %d" % i not in head:
             print("%s: the proxy answered from a different case: %r" % (label, head))

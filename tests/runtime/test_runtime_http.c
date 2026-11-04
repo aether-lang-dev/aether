@@ -815,3 +815,59 @@ TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(-1, http_parse_proxy_url("http://proxy:70000", host, sizeof host, &port));
     ASSERT_EQ(-1, http_parse_proxy_url("http://::1:3128", host, sizeof host, &port));
 }
+
+/* A NUL or a bare CR in a response's header section (#3556). The buffered
+ * reader found the end of the section with strstr, which stops at a NUL, and
+ * a bare CR stayed inside a field value, so a Location carrying one went out
+ * in the request line of the redirect. The section is now found past any NUL
+ * and refused when it holds either; a NUL in the body is body. */
+static HttpResponse* filled(const char* bytes, size_t n) {
+    HttpResponse* resp = http_response_alloc_empty();
+    char* buf = (char*)malloc(n + 1);
+    memcpy(buf, bytes, n);
+    buf[n] = '\0';
+    http_response_fill_from_bytes(resp, buf, n);
+    free(buf);
+    return resp;
+}
+
+TEST_CATEGORY(http_response_head_refuses_nul_and_bare_cr, TEST_CATEGORY_NETWORK) {
+    static const char nul_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\0y\r\n\r\n";
+    HttpResponse* r = filled(nul_head, sizeof nul_head - 1);
+    ASSERT_NOT_NULL(r->error);
+    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
+    ASSERT_EQ(0, r->status_code);
+    ASSERT_NULL(r->headers);
+    http_response_free(r);
+
+    static const char cr_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\rX-Injected: y\r\n\r\n";
+    r = filled(cr_head, sizeof cr_head - 1);
+    ASSERT_NOT_NULL(r->error);
+    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
+    ASSERT_NULL(r->headers);
+    http_response_free(r);
+
+    /* A CR right before the empty line that is not followed by LF. */
+    static const char cr_end[] = "HTTP/1.1 200 OK\r\nA: b\r\r\n\r\n";
+    r = filled(cr_end, sizeof cr_end - 1);
+    ASSERT_NOT_NULL(r->error);
+    http_response_free(r);
+
+    /* A NUL in the body is the body's. */
+    static const char nul_body[] = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\na\0b";
+    r = filled(nul_body, sizeof nul_body - 1);
+    ASSERT_NULL(r->error);
+    ASSERT_EQ(200, r->status_code);
+    ASSERT_EQ(3, http_response_body_length(r));
+    http_response_free(r);
+}
+
+TEST_CATEGORY(http_uri_resolve_refuses_control_bytes, TEST_CATEGORY_NETWORK) {
+    static const char* const refs[] = { "/x\ty", "/x\x01y", "/x\ry", "/x\ny", "/x\x7fy", "\t" };
+    for (size_t i = 0; i < sizeof refs / sizeof refs[0]; i++) {
+        char* got = http_uri_resolve("http://h/a", refs[i]);
+        if (got) fprintf(stderr, "  resolved a control byte: '%s'\n", got);
+        ASSERT_NULL(got);
+    }
+    ASSERT_NULL(http_resolve_location("http://h/a", "/x\ty"));
+}
