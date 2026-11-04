@@ -1,0 +1,179 @@
+// Regression (#3552): the client rebuilt and split URLs by hand in three
+// places, and lost their shape:
+//
+//   - a redirect's target was rebuilt from parse_url's host, which has no
+//     IPv6 brackets: Location /b from http://[::1]:P/a went to
+//     http://::1:P/b, which parse_url refused ("malformed URL");
+//   - a relative Location joined at the last '/' of the base's path and
+//     query together: Location c from /a/b?x=/y asked for /a/b?x=/c;
+//   - the proxy URL was split at its first ':', so
+//     use_http_proxy("http://[::1]:P") was refused as malformed.
+//
+// References are now resolved by RFC 3986 5.2 on the parsed parts (the
+// authority kept as written), and the proxy URL is split by the rule a target
+// URL's authority is. The same resolution gives three more answers checked
+// here: a Location that is not an http or https URL ("g:h") stops the hop
+// with the 3xx kept (it was followed as the relative path /e/g:h); a space
+// in a Location is sent percent-encoded (it went out raw, splitting the
+// request line); and a Location without a fragment keeps the request's
+// (RFC 9110 10.2.2). The test's server records each request target it is
+// asked for, so a hop taken or not taken is seen, not inferred. The cases
+// over ::1 run where this host can listen there.
+
+import std.string
+import std.tcp
+import std.http.client
+
+extern exit(code: int)
+
+message Listen { v6: int, srv: ptr }
+message Serve { v6: int, n: int }
+message Log {}
+message Targets { text: string }
+
+// The answer for each request target.
+fn route(target: string) -> string {
+    close = "Content-Length: 0\r\nConnection: close\r\n\r\n"
+    if target == "/a" { return "HTTP/1.1 302 Found\r\nLocation: /b\r\n${close}" }
+    if target == "/a/b?x=/y" { return "HTTP/1.1 302 Found\r\nLocation: c\r\n${close}" }
+    if target == "/e/f" { return "HTTP/1.1 302 Found\r\nLocation: g:h\r\n${close}" }
+    if target == "/sp" { return "HTTP/1.1 302 Found\r\nLocation: a b\r\n${close}" }
+    if target == "/frag" { return "HTTP/1.1 302 Found\r\nLocation: /b\r\n${close}" }
+    body = "missing ${target}"
+    if target == "/b" { body = "at b" }
+    if target == "/a/c" { body = "at c" }
+    if target == "/a%20b" { body = "encoded" }
+    if string.starts_with(target, "http://") == 1 { body = "proxied ${target}" }
+    return "HTTP/1.1 200 OK\r\nContent-Length: ${string.length(body)}\r\nConnection: close\r\n\r\n${body}"
+}
+
+// Serves up to n connections, one request each, and records each request's
+// target. A connection that does not come within 3 s ends the round, so a
+// client that makes fewer than asked for cannot hang the test.
+actor Upstream {
+    state log = ""
+    state srv4: ptr = null
+    state srv6: ptr = null
+
+    receive {
+        Listen(v6: v6, srv: s) -> {
+            if v6 == 1 { srv6 = s } else { srv4 = s }
+        }
+        Serve(v6: v6, n: n) -> {
+            srv = srv4
+            if v6 == 1 { srv = srv6 }
+            i = 0
+            while i < n {
+                i = i + 1
+                if tcp.server_poll(srv, 3000) != 1 {
+                    i = n
+                } else {
+                    sock, aerr = tcp.accept(srv)
+                    if aerr == "" {
+                        seen = ""
+                        going = 1
+                        while going == 1 {
+                            got, rerr = tcp.read(sock, 4096)
+                            if rerr != "" {
+                                going = 0
+                            } else {
+                                seen = string.concat(seen, got)
+                                if string.contains(seen, "\r\n\r\n") == 1 { going = 0 }
+                            }
+                        }
+                        // The request line: METHOD SP target SP version.
+                        sp1 = string.index_of(seen, " ")
+                        rest = string.substring(seen, sp1 + 1, string.length(seen))
+                        target = string.substring(rest, 0, string.index_of(rest, " "))
+                        log = "${log}${target},"
+                        _n, _werr = tcp.write(sock, route(target))
+                        tcp.close(sock)
+                    }
+                }
+            }
+        }
+        Log() -> {
+            reply Targets { text: log }
+            log = ""
+        }
+    }
+}
+
+// GET `url` following up to 3 redirects, through `proxy` when it is not "",
+// the server asked to take `conns` connections, on ::1 for `v6`. Gives what
+// the client answered and the targets the server saw, on one line.
+fn fetch(up: actor_ref[Upstream], v6: int, conns: int, url: string, proxy: string) -> string {
+    up ! Serve { v6: v6, n: conns }
+    req = client.request("GET", url)
+    client.set_timeout(req, 2s)
+    _f = client.set_follow_redirects(req, 3)
+    out = ""
+    if proxy != "" {
+        perr = client.use_http_proxy(req, proxy)
+        if perr != "" { out = "proxy error: ${perr}" }
+    }
+    if out == "" {
+        r, err = client.send_request(req)
+        if err != "" {
+            out = "error: ${err}"
+        } else {
+            out = "${client.response_status(r)} '${client.response_body(r)}' url=${client.response_url(r)} redirect_error='${client.response_redirect_error(r)}'"
+            client.response_free(r)
+        }
+    }
+    client.request_free(req)
+    string seen = up ? Log {}
+    return "${out} seen=${seen}"
+}
+
+fn expect(what: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL: ${what}:\n  got  ${got}\n  want ${want}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    base = "http://127.0.0.1:${tcp.server_port(srv)}"
+    up = spawn(Upstream())
+    up ! Listen { v6: 0, srv: srv }
+
+    fails = 0
+    fails = fails + expect("Location c from /a/b?x=/y",
+        fetch(up, 0, 2, "${base}/a/b?x=/y", ""),
+        "200 'at c' url=${base}/a/c redirect_error='' seen=/a/b?x=/y,/a/c,")
+    fails = fails + expect("Location g:h, not an http URL",
+        fetch(up, 0, 1, "${base}/e/f", ""),
+        "302 '' url=${base}/e/f redirect_error='redirect rejected: the target is not an http or https URL' seen=/e/f,")
+    fails = fails + expect("Location with a space",
+        fetch(up, 0, 2, "${base}/sp", ""),
+        "200 'encoded' url=${base}/a%20b redirect_error='' seen=/sp,/a%20b,")
+    fails = fails + expect("Location without a fragment",
+        fetch(up, 0, 2, "${base}/frag#top", ""),
+        "200 'at b' url=${base}/b#top redirect_error='' seen=/frag,/b,")
+
+    srv6, lerr6 = tcp.listen_on("::1", 0)
+    if lerr6 != "" {
+        println("note: no listener on ::1 (${lerr6}), the IPv6 cases did not run")
+    } else {
+        up ! Listen { v6: 1, srv: srv6 }
+        base6 = "http://[::1]:${tcp.server_port(srv6)}"
+        fails = fails + expect("Location /b from an IPv6 host",
+            fetch(up, 1, 2, "${base6}/a", ""),
+            "200 'at b' url=${base6}/b redirect_error='' seen=/a,/b,")
+        fails = fails + expect("a proxy at an IPv6 host",
+            fetch(up, 1, 1, "http://example.invalid/x", base6),
+            "200 'proxied http://example.invalid/x' url=http://example.invalid/x redirect_error='' seen=http://example.invalid/x,")
+        tcp.server_close(srv6)
+    }
+
+    tcp.server_close(srv)
+    if fails > 0 { exit(1) }
+    println("PASS: redirects and proxy URLs keep their shape")
+}

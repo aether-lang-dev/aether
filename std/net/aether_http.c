@@ -1892,6 +1892,30 @@ static int host_in_no_proxy(const char* target_host, const char* no_proxy) {
     return 0;
 }
 
+/* A proxy URL, [http://]host[:port], in `host` and *port; 3128 when it names
+ * no port. An https:// one is read the same way: this client does not speak
+ * TLS to its proxy, so the scheme names nothing more. The authority is split
+ * by the rule a target URL's is (aether_url_authority_len, then
+ * aether_addr_split_authority), so "http://proxy:3128?x" is port 3128 and an
+ * IPv6 host comes back without its brackets, as parse_url gives one: split at
+ * its first ':', "http://[::1]:3128" was refused as malformed (#3552). 0, or
+ * -1 for a URL that is not one or a host that does not fit. */
+int http_parse_proxy_url(const char* url, char* host, size_t host_size, int* port) {
+    if (!url || !host || host_size == 0 || !port) return -1;
+    const char* s = url;
+    if (strncmp(s, "http://", 7) == 0) s += 7;
+    else if (strncmp(s, "https://", 8) == 0) s += 8;
+    size_t alen = aether_url_authority_len(s);
+    const char* port_at = NULL;
+    size_t port_len = 0;
+    if (aether_addr_split_authority(s, alen, host, host_size, &port_at, &port_len) != 0 ||
+        host[0] == '\0') return -1;
+    int p = 3128;
+    if (port_at && (p = http_parse_port(port_at, port_len)) < 0) return -1;
+    *port = p;
+    return 0;
+}
+
 /* Resolve the effective proxy for a request+target, applying the precedence
  * ladder and all guards. On "use a proxy" writes proxy_host/proxy_port and
  * returns 1; returns 0 for a direct connection; returns -1 with *err set on a
@@ -1925,27 +1949,11 @@ static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, in
         if (!proxy_url) return 0;
     }
 
-    /* Parse proxy URL: [http://]host[:port]. Default port 3128. */
-    const char* s = proxy_url;
-    if (strncmp(s, "http://", 7) == 0) s += 7;
-    else if (strncmp(s, "https://", 8) == 0) s += 8; /* proxy-over-TLS not supported; treat as host */
-    int pport = 3128;
-    /* The authority ends at a path, a query or a fragment, as a target URL's
-     * does (aether_url_authority_len), so "http://proxy:3128?x" is port 3128
-     * rather than a port of "3128?x". */
-    size_t alen = aether_url_authority_len(s);
-    const char* colon = (const char*)memchr(s, ':', alen);
-    size_t hlen = alen;
-    if (colon) {
-        hlen = (size_t)(colon - s);
-        pport = http_parse_port(colon + 1, (size_t)(s + alen - (colon + 1)));
-    }
-    if (hlen == 0 || hlen >= phost_size || pport <= 0 || pport > 65535) {
+    int pport = 0;
+    if (http_parse_proxy_url(proxy_url, proxy_host, phost_size, &pport) != 0) {
         *err = "malformed proxy URL";
         return -1;
     }
-    memcpy(proxy_host, s, hlen);
-    proxy_host[hlen] = '\0';
 
     /* SSRF guard applies to the ENV path (untrusted); an explicit
      * use_http_proxy is a code-visible grant, so it is trusted as-is. */
@@ -4231,69 +4239,242 @@ char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
     return out;
 }
 
-/* Resolve a Location-header value against a base URL. The Location
- * may be absolute (`http://other.host/x`), scheme-relative
- * (`//other.host/x`), root-relative (`/x`), or relative
- * (`x`). Returns a malloc'd absolute URL on success, NULL on
- * malformed input. */
-static char* http_resolve_location(const char* base_url, const char* location) {
-    if (!base_url || !location || !*location) return NULL;
-    /* Absolute URL — Location starts with a scheme. */
-    if (strstr(location, "://")) return strdup(location);
-    /* Need to extract scheme + host[:port] from base_url.
-     * parse_url returns 1 on success, 0 on failure — bail when it
-     * fails. The earlier round-1 implementation had the check
-     * inverted, which produced a bogus "malformed Location header"
-     * for every well-formed base URL. Caught by the cases-8-10
-     * end-to-end test in test_http_client_v2.ae. */
-    /* Both paths are sized to fit: fixed 1024-byte buffers failed a redirect
-     * from, or to, a long path (#2674). */
-    char base_host[256];
-    char* base_path = NULL;
-    int base_port = 0, base_use_tls = 0;
-    if (parse_url_alloc(base_url, base_host, sizeof(base_host),
-                        &base_port, &base_path, &base_use_tls) == 0) {
-        return NULL;
+/* A URI reference split into its parts (RFC 3986 3, by the regular
+ * expression of its Appendix B):
+ *
+ *     [ scheme ":" ] [ "//" authority ] path [ "?" query ] [ "#" fragment ]
+ *
+ * Each part is a span of the string it came from, so an authority keeps its
+ * brackets ("[::1]:8080") and its port as written. An absent part differs
+ * from an empty one ("x?" has an empty query, "x" none), so each optional
+ * part says whether it is there. */
+typedef struct {
+    const char* scheme;    size_t scheme_len;    int has_scheme;
+    const char* authority; size_t authority_len; int has_authority;
+    const char* path;      size_t path_len;
+    const char* query;     size_t query_len;     int has_query;
+    const char* fragment;  size_t fragment_len;  int has_fragment;
+} HttpUriParts;
+
+/* scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )        RFC 3986 3.1 */
+static int http_uri_scheme_ok(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        int alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (!alpha && (i == 0 || !((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')))
+            return 0;
     }
-    const char* scheme = base_use_tls ? "https" : "http";
-    char* out = NULL;
-    /* Scheme-relative: //host/x → keep base scheme. */
-    if (location[0] == '/' && location[1] == '/') {
-        size_t need = strlen(scheme) + 1 + strlen(location) + 1;
-        out = (char*)malloc(need);
-        if (out) snprintf(out, need, "%s:%s", scheme, location);
-        free(base_path);
-        return out;
+    return n > 0;
+}
+
+/* Split `s` into `u`. 0, or -1 when its first segment holds a ':' that does
+ * not end a scheme: "1a:b" is neither a URI nor a relative reference (RFC
+ * 3986 4.2), and reading it as a path would ask for something else. */
+static int http_uri_split(const char* s, HttpUriParts* u) {
+    memset(u, 0, sizeof *u);
+    const char* p = s;
+    size_t lead = strcspn(p, ":/?#");
+    if (p[lead] == ':') {
+        if (!http_uri_scheme_ok(p, lead)) return -1;
+        u->scheme = p;
+        u->scheme_len = lead;
+        u->has_scheme = 1;
+        p += lead + 1;
     }
-    /* Root-relative: /x → keep base scheme + host[:port]; a relative path
-     * replaces the last segment of base_path. */
-    char* joined_path = NULL;
-    const char* tail = location;
-    if (location[0] != '/') {
-        char* last_slash = strrchr(base_path, '/');
-        size_t prefix_len = last_slash ? (size_t)(last_slash - base_path) + 1 : 0;
-        joined_path = (char*)malloc(prefix_len + strlen(location) + 2);
-        if (!joined_path) { free(base_path); return NULL; }
-        if (last_slash) {
-            memcpy(joined_path, base_path, prefix_len);
-            strcpy(joined_path + prefix_len, location);
-        } else {
-            joined_path[0] = '/';
-            strcpy(joined_path + 1, location);
+    if (p[0] == '/' && p[1] == '/') {
+        p += 2;
+        u->authority = p;
+        u->authority_len = aether_url_authority_len(p);
+        u->has_authority = 1;
+        p += u->authority_len;
+    }
+    u->path = p;
+    u->path_len = strcspn(p, "?#");
+    p += u->path_len;
+    if (*p == '?') {
+        p++;
+        u->query = p;
+        u->query_len = strcspn(p, "#");
+        u->has_query = 1;
+        p += u->query_len;
+    }
+    if (*p == '#') {
+        p++;
+        u->fragment = p;
+        u->fragment_len = strlen(p);
+        u->has_fragment = 1;
+    }
+    return 0;
+}
+
+/* remove_dot_segments (RFC 3986 5.2.4) over the `n` bytes at `in`, which it
+ * may overwrite, into `out` (at least n + 1 bytes). Returns the output's
+ * length. */
+static size_t http_uri_remove_dots(char* in, size_t n, char* out) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        const char* r = in + i;
+        size_t rest = n - i;
+        /* A: a "../" or "./" prefix goes. */
+        if (rest >= 3 && memcmp(r, "../", 3) == 0) { i += 3; continue; }
+        if (rest >= 2 && memcmp(r, "./", 2) == 0) { i += 2; continue; }
+        /* B: "/./" and a final "/." become "/". */
+        if (rest >= 3 && memcmp(r, "/./", 3) == 0) { i += 2; continue; }
+        if (rest == 2 && memcmp(r, "/.", 2) == 0) { i += 1; in[i] = '/'; continue; }
+        /* C: "/../" and a final "/.." become "/", and the last segment of
+         * the output goes, with the "/" before it. */
+        if ((rest >= 4 && memcmp(r, "/../", 4) == 0) || (rest == 3 && memcmp(r, "/..", 3) == 0)) {
+            if (rest == 3) { i += 2; in[i] = '/'; } else { i += 3; }
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+            continue;
         }
-        tail = joined_path;
+        /* D: a lone "." or ".." goes. */
+        if ((rest == 1 && r[0] == '.') || (rest == 2 && memcmp(r, "..", 2) == 0)) break;
+        /* E: the first segment moves over, with its leading "/", up to the
+         * next "/". */
+        size_t k = r[0] == '/' ? 1 : 0;
+        while (k < rest && r[k] != '/') k++;
+        memcpy(out + o, r, k);
+        o += k;
+        i += k;
     }
-    size_t need = strlen(scheme) + 3 + strlen(base_host) + 16 + strlen(tail) + 1;
-    out = (char*)malloc(need);
+    out[o] = '\0';
+    return o;
+}
+
+/* Append the `n` bytes at `s` to `out` at *o. With `escape`, a space and
+ * every byte past ASCII are written percent-encoded: a URI holds neither
+ * (RFC 3986 2.1), and a space would split the request line of the next hop.
+ * Browsers and curl encode them the same way. A '%' already there stays. */
+static void http_uri_put(char* out, size_t* o, const char* s, size_t n, int escape) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (escape && (c == ' ' || c >= 0x80)) {
+            out[(*o)++] = '%';
+            out[(*o)++] = hex[c >> 4];
+            out[(*o)++] = hex[c & 15];
+        } else {
+            out[(*o)++] = (char)c;
+        }
+    }
+}
+
+/* Resolve `ref` against the absolute URI `base` (RFC 3986 5.2.2), with the
+ * merge of 5.2.3, then recompose it (5.3) with the scheme in lower case
+ * (3.1). With `inherit_fragment`, a reference without a fragment takes the
+ * base's, as a redirect does (RFC 9110 10.2.2). A malloc'd string, or NULL
+ * when either does not split, the base has no scheme, or no memory. */
+static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_fragment) {
+    HttpUriParts b, r;
+    if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme ||
+        http_uri_split(ref, &r) != 0) return NULL;
+
+    /* T's parts, by 5.2.2: which of the two each comes from, and the path
+     * built in `path`. A merged path, its dot segments removed, fits in the
+     * two inputs together. */
+    const HttpUriParts* from = &r;   /* the scheme's */
+    const HttpUriParts* auth = &r;   /* the authority's */
+    const HttpUriParts* query = &r;  /* the query's */
+    size_t cap = strlen(base) + strlen(ref) + 2;
+    char* merged = (char*)malloc(cap);
+    char* path = (char*)malloc(cap);
+    if (!merged || !path) { free(merged); free(path); return NULL; }
+    size_t mlen = 0;
+    const char* tpath = path;
+    size_t tpath_len = 0;
+    if (r.has_scheme || r.has_authority) {
+        /* An absolute reference, or a network-path one ("//g"): its own
+         * path, the base's scheme for the second. */
+        if (!r.has_scheme) from = &b;
+        memcpy(merged, r.path, r.path_len);
+        mlen = r.path_len;
+        tpath_len = http_uri_remove_dots(merged, mlen, path);
+    } else if (r.path_len == 0) {
+        /* The base's path as it is, and its query unless the reference
+         * has one. */
+        from = auth = &b;
+        tpath = b.path;
+        tpath_len = b.path_len;
+        if (!r.has_query) query = &b;
+    } else {
+        from = auth = &b;
+        if (r.path[0] != '/') {
+            /* 5.2.3: the base's path up to its last "/", or "/" for a base
+             * with an authority and an empty path, then the reference's. */
+            if (b.has_authority && b.path_len == 0) {
+                merged[mlen++] = '/';
+            } else {
+                size_t keep = b.path_len;
+                while (keep > 0 && b.path[keep - 1] != '/') keep--;
+                memcpy(merged, b.path, keep);
+                mlen = keep;
+            }
+        }
+        memcpy(merged + mlen, r.path, r.path_len);
+        mlen += r.path_len;
+        tpath_len = http_uri_remove_dots(merged, mlen, path);
+    }
+    const HttpUriParts* frag = &r;
+    if (inherit_fragment && !r.has_fragment) frag = &b;
+
+    /* 5.3. Escaping can triple the path, the query and the fragment. */
+    size_t need = from->scheme_len + 1 + 2 + auth->authority_len +
+                  3 * (tpath_len + query->query_len + frag->fragment_len) + 3;
+    char* out = (char*)malloc(need);
     if (out) {
-        if ((base_use_tls && base_port == 443) || (!base_use_tls && base_port == 80)) {
-            snprintf(out, need, "%s://%s%s", scheme, base_host, tail);
-        } else {
-            snprintf(out, need, "%s://%s:%d%s", scheme, base_host, base_port, tail);
+        size_t o = 0;
+        for (size_t i = 0; i < from->scheme_len; i++) {
+            unsigned char c = (unsigned char)from->scheme[i];
+            out[o++] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
         }
+        out[o++] = ':';
+        if (auth->has_authority) {
+            out[o++] = '/';
+            out[o++] = '/';
+            http_uri_put(out, &o, auth->authority, auth->authority_len, 0);
+        }
+        http_uri_put(out, &o, tpath, tpath_len, 1);
+        if (query->has_query) {
+            out[o++] = '?';
+            http_uri_put(out, &o, query->query, query->query_len, 1);
+        }
+        if (frag->has_fragment) {
+            out[o++] = '#';
+            http_uri_put(out, &o, frag->fragment, frag->fragment_len, 1);
+        }
+        out[o] = '\0';
     }
-    free(joined_path);
-    free(base_path);
+    free(merged);
+    free(path);
+    return out;
+}
+
+char* http_uri_resolve(const char* base, const char* ref) {
+    return http_uri_resolve_ex(base, ref, 0);
+}
+
+/* The URL a redirect's Location names, resolved against the URL that was
+ * asked for (#3552). The base is read the way parse_url reads a request URL:
+ * one that starts with neither http:// nor https:// is http, with its
+ * authority first. The reference is resolved on the base's parts (RFC 3986
+ * 5.2), so the authority keeps its form, brackets of an IPv6 host included:
+ * rebuilt from parse_url's host, http://[::1]:8080/a with Location /b went to
+ * http://::1:8080/b, which parse_url refuses. And a relative reference
+ * replaces the last segment of the base's path, not of its path and query:
+ * http://h/a/b?x=/y with Location c went to /a/b?x=/c instead of /a/c. */
+char* http_resolve_location(const char* base_url, const char* location) {
+    if (!base_url || !location) return NULL;
+    if (strncmp(base_url, "http://", 7) == 0 || strncmp(base_url, "https://", 8) == 0)
+        return http_uri_resolve_ex(base_url, location, 1);
+    size_t n = strlen(base_url);
+    char* base = (char*)malloc(n + 8);
+    if (!base) return NULL;
+    memcpy(base, "http://", 7);
+    memcpy(base + 7, base_url, n + 1);
+    char* out = http_uri_resolve_ex(base, location, 1);
+    free(base);
     return out;
 }
 
@@ -4379,9 +4560,21 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
             break;
         }
 
+        /* Only an http or https URL is followed (the resolver writes the
+         * scheme in lower case). Followed, any other ("ftp://x", "g:h") was
+         * a request parse_url refused, and the 3xx was lost behind a
+         * "malformed URL" error; it is kept now, as for any hop not taken. */
+        int next_https = strncmp(next_url, "https://", 8) == 0;
+        if (!next_https && strncmp(next_url, "http://", 7) != 0) {
+            if (resp->redirect_error) string_release(resp->redirect_error);
+            resp->redirect_error = string_new(
+                "redirect rejected: the target is not an http or https URL");
+            free(next_url);
+            break;
+        }
+
         /* Reject scheme downgrade: HTTPS origin → HTTP target. */
         int curr_https = strncmp(current_url, "https://", 8) == 0;
-        int next_https = strncmp(next_url, "https://", 8) == 0;
         if (curr_https && !next_https) {
             if (resp->redirect_error) string_release(resp->redirect_error);
             resp->redirect_error = string_new(

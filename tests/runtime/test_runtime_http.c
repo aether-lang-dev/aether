@@ -1,6 +1,8 @@
 #include "test_harness.h"
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
+/* The URL resolver and the proxy URL parser (#3552), on every platform. */
+#include "../../std/net/aether_http_internal.h"
 /* The connect-completion contract below is exercised only where the driver
  * that depends on it is built. That driver needs a poller and a pipe, so it
  * is POSIX-only, and on Windows http_upstream_connected has no caller. */
@@ -676,4 +678,140 @@ TEST_CATEGORY(http_ci_eq_matches_strncasecmp, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(1, http_ci_eq("server", "Server", 6));
     ASSERT_EQ(0, http_ci_eq("servel", "Server", 6));
     ASSERT_EQ(1, http_ci_eq("anything", "anything", 0));
+}
+
+/* Reference resolution (#3552). The redirect path resolved a Location by
+ * hand: from parse_url's host, which has no IPv6 brackets, and from the last
+ * '/' of the base's path and query together. It now resolves by RFC 3986 5.2
+ * on the parsed parts. These are RFC 3986 5.4's examples, normal (5.4.1) and
+ * abnormal (5.4.2), against its base, then the two shapes of the issue. Each
+ * miss is printed, so one run names every one. */
+static int uri_resolve_misses(const char* base, const char* const (*cases)[2], int n) {
+    int misses = 0;
+    for (int i = 0; i < n; i++) {
+        char* got = http_uri_resolve(base, cases[i][0]);
+        if (!got || strcmp(got, cases[i][1]) != 0) {
+            fprintf(stderr, "  resolve '%s' against '%s': got '%s', want '%s'\n",
+                    cases[i][0], base, got ? got : "(null)", cases[i][1]);
+            misses++;
+        }
+        free(got);
+    }
+    return misses;
+}
+
+TEST_CATEGORY(http_uri_resolve_rfc3986_examples, TEST_CATEGORY_NETWORK) {
+    static const char* const normal[][2] = {
+        { "g:h", "g:h" },           { "g", "http://a/b/c/g" },
+        { "./g", "http://a/b/c/g" }, { "g/", "http://a/b/c/g/" },
+        { "/g", "http://a/g" },     { "//g", "http://g" },
+        { "?y", "http://a/b/c/d;p?y" }, { "g?y", "http://a/b/c/g?y" },
+        { "#s", "http://a/b/c/d;p?q#s" }, { "g#s", "http://a/b/c/g#s" },
+        { "g?y#s", "http://a/b/c/g?y#s" }, { ";x", "http://a/b/c/;x" },
+        { "g;x", "http://a/b/c/g;x" }, { "g;x?y#s", "http://a/b/c/g;x?y#s" },
+        { "", "http://a/b/c/d;p?q" }, { ".", "http://a/b/c/" },
+        { "./", "http://a/b/c/" },  { "..", "http://a/b/" },
+        { "../", "http://a/b/" },   { "../g", "http://a/b/g" },
+        { "../..", "http://a/" },   { "../../", "http://a/" },
+        { "../../g", "http://a/g" },
+    };
+    static const char* const abnormal[][2] = {
+        { "../../../g", "http://a/g" }, { "../../../../g", "http://a/g" },
+        { "/./g", "http://a/g" },   { "/../g", "http://a/g" },
+        { "g.", "http://a/b/c/g." }, { ".g", "http://a/b/c/.g" },
+        { "g..", "http://a/b/c/g.." }, { "..g", "http://a/b/c/..g" },
+        { "./../g", "http://a/b/g" }, { "./g/.", "http://a/b/c/g/" },
+        { "g/./h", "http://a/b/c/g/h" }, { "g/../h", "http://a/b/c/h" },
+        { "g;x=1/./y", "http://a/b/c/g;x=1/y" }, { "g;x=1/../y", "http://a/b/c/y" },
+        { "g?y/./x", "http://a/b/c/g?y/./x" }, { "g?y/../x", "http://a/b/c/g?y/../x" },
+        { "g#s/./x", "http://a/b/c/g#s/./x" }, { "g#s/../x", "http://a/b/c/g#s/../x" },
+        { "http:g", "http:g" },
+    };
+    int misses = uri_resolve_misses("http://a/b/c/d;p?q", normal,
+                                    (int)(sizeof normal / sizeof normal[0]));
+    misses += uri_resolve_misses("http://a/b/c/d;p?q", abnormal,
+                                 (int)(sizeof abnormal / sizeof abnormal[0]));
+    ASSERT_EQ(0, misses);
+}
+
+TEST_CATEGORY(http_uri_resolve_keeps_shapes, TEST_CATEGORY_NETWORK) {
+    /* An IPv6 authority keeps its brackets and its port. */
+    static const char* const v6[][2] = {
+        { "/b", "http://[::1]:8080/b" }, { "b?x", "http://[::1]:8080/b?x" },
+        { "//[::2]/c", "http://[::2]/c" },
+    };
+    int misses = uri_resolve_misses("http://[::1]:8080/a", v6, (int)(sizeof v6 / sizeof v6[0]));
+    /* A relative path merges with the base's path, not its query. */
+    static const char* const q[][2] = {
+        { "c", "http://h/a/c" }, { "?z", "http://h/a/b?z" }, { "", "http://h/a/b?x=/y" },
+    };
+    misses += uri_resolve_misses("http://h/a/b?x=/y", q, (int)(sizeof q / sizeof q[0]));
+    /* A base with an authority and an empty path merges under "/". */
+    static const char* const empty[][2] = { { "g", "http://h:81/g" } };
+    misses += uri_resolve_misses("http://h:81", empty, 1);
+    /* The scheme comes out in lower case; a space and bytes past ASCII come
+     * out percent-encoded in the path, the query and the fragment, and a
+     * '%' already there stays. */
+    static const char* const enc[][2] = {
+        { "HTTPS://H/x", "https://H/x" }, { "a b", "http://h/d/a%20b" },
+        { "/\xc3\xa9?q=\xc3\xa9#\xc3\xa9 ", "http://h/%C3%A9?q=%C3%A9#%C3%A9%20" },
+        { "x%20y", "http://h/d/x%20y" },
+    };
+    misses += uri_resolve_misses("http://h/d/e", enc, (int)(sizeof enc / sizeof enc[0]));
+    ASSERT_EQ(0, misses);
+
+    /* Not a URI reference: a first segment with a ':' that ends no scheme,
+     * and a base without a scheme. */
+    ASSERT_NULL(http_uri_resolve("http://h/", "1a:b"));
+    ASSERT_NULL(http_uri_resolve("http://h/", ":b"));
+    ASSERT_NULL(http_uri_resolve("/a/b", "c"));
+}
+
+TEST_CATEGORY(http_resolve_location_redirect_rules, TEST_CATEGORY_NETWORK) {
+    /* A base without a scheme is http, as parse_url reads it. */
+    char* got = http_resolve_location("h:8080/a/b", "c");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h:8080/a/c", got);
+    free(got);
+    /* A Location without a fragment keeps the request's (RFC 9110 10.2.2);
+     * one with a fragment has its own. */
+    got = http_resolve_location("http://h/a#top", "/b");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/b#top", got);
+    free(got);
+    got = http_resolve_location("http://h/a#top", "/b#end");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/b#end", got);
+    free(got);
+    /* A query naming a URL is no scheme: "x?u=http://y" is relative. */
+    got = http_resolve_location("http://h/a/b", "x?u=http://y");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/a/x?u=http://y", got);
+    free(got);
+}
+
+TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
+    char host[256];
+    int port = 0;
+    ASSERT_EQ(0, http_parse_proxy_url("http://[::1]:3129", host, sizeof host, &port));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(3129, port);
+    ASSERT_EQ(0, http_parse_proxy_url("[::1]", host, sizeof host, &port));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(3128, port);
+    ASSERT_EQ(0, http_parse_proxy_url("http://proxy:8080?x", host, sizeof host, &port));
+    ASSERT_STREQ("proxy", host);
+    ASSERT_EQ(8080, port);
+    ASSERT_EQ(0, http_parse_proxy_url("https://proxy/", host, sizeof host, &port));
+    ASSERT_STREQ("proxy", host);
+    ASSERT_EQ(3128, port);
+    /* An unclosed bracket, anything but a port after the closing one, an
+     * empty host, an empty or bad port, and an IPv6 host without brackets. */
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[::1", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[::1]x", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://:3128", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[]:3128", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://proxy:", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://proxy:70000", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://::1:3128", host, sizeof host, &port));
 }
