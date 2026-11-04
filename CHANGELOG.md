@@ -14,6 +14,504 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.881.0]
+
+### Added
+
+- **`make bench-core` measures what a change costs, against the merge base
+  (#3518).** `benchmarks/core` times sends (one int, two ints, a string
+  field), asks, a ping-pong beside 100k idle actors, std.string, std.map,
+  std.json, allocation from 8 actors at once, `ae run` on a warm cache and a
+  cold `ae build`, and runs the `benchmarks/ownership` programs, which had no
+  runner. `make bench-core-compare BASE=<tree>` builds and runs a second tree
+  beside this one, their runs interleaved, best of 5, and prints the change
+  per row; pull requests that touch the runtime, std, compiler or tools get
+  the same table in their checks. `aetherc --time-phases` prints how long
+  lexing, parsing, module merging, type checking, analysis and code
+  generation took, on the wall clock and in CPU time. The `bench-dispatch`, `bench-prefetch` and `pgo-*` targets
+  and `benchmarks/baseline.json`, which pointed at files that no longer
+  exist, are gone.
+
+- **`make test-asan-ae` runs the C unit tests and the whole `.ae` corpus
+  under AddressSanitizer and LeakSanitizer (#3539).** On Linux, ASan, LSan
+  and Valgrind ran only the C unit runner, so the generated C of an Aether
+  program was never run under ASan, and the only leak check of `.ae`
+  programs was the macOS leaks gate over `tests/regression`. The new target
+  instruments aetherc, ae, libaether and every program the sweep builds,
+  stops a program at its first heap overflow, use after free or double free,
+  reports the blocks a program never freed, and fails with the reports
+  grouped by source location. Two canaries, a one byte overflow and a
+  dropped block, must be caught before the corpus counts. CI runs it in two
+  shards on the pull requests UBSan runs on and every night.
+  `tests/scripts/ubsan_sweep.sh` is now `sanitizer_sweep.sh`, shared by both.
+
+### Fixed
+
+- **Stopping the scheduler no longer rewrites the queue that threads it does
+  not own send through (#3521).** To wake the cores, `scheduler_stop` stored
+  each core's foreign queue tail back into itself, for an MWAIT on that word
+  that no core makes, and without the lock every other writer of the queue
+  takes. A send from an HTTP pool worker or a host thread landing between
+  the load and the store had the tail moved back under it: the message was
+  lost and its payload leaked, or stale slots were delivered again. The
+  cores wake on their own `running` flag and the park broadcast, so the
+  store is gone.
+
+- **Integer division by zero, the most negative value divided by -1, wide
+  shifts and a float converted to an integer now give the same result on
+  every target (#3524).** They went straight to C, where each is undefined:
+  x86 crashed on `x / 0` and on `INT_MIN / -1`, ARM64 gave 0, a shift by 32
+  or more depended on the CPU, and `1.0e30 as int` gave `INT_MIN` on x86.
+  Java's rules hold now: `x / 0` and `x % 0` panic with the category
+  `division_by_zero` and the source position, which a `catch` receives;
+  `INT_MIN / -1` is `INT_MIN` and `INT_MIN % -1` is 0, for `int` and `long`;
+  a shift count is masked to the width (`& 31`, `& 63`) and a left shift
+  into the sign bit wraps; a float converted to an integer type (with `as`,
+  or stored into an integer variable, field, parameter or return value)
+  saturates at the type's range and NaN gives 0. The compound forms follow
+  the same rules. A constant divisor other than 0 and -1, a constant count
+  inside the width or a float constant inside the range still compiles to
+  C's own operator. `make test-ubsan` checks `float-cast-overflow` too.
+
+- **The length-aware string functions no longer read past the end of a
+  string given a longer length (#3523).** `string.substring_n`, `char_at_n`
+  and `index_of_from_n`, `strbuilder.append_n` and `bytes.copy_from_string`
+  took the caller's length on trust even when the string carried its own,
+  so `bytes.copy_from_string(b, 0, "abc", 4096)` copied 4096 bytes out of a
+  three byte string. A heap or counted string's length is exact, so the
+  length given is now cut to it, and embedded NULs inside it still count; a
+  plain C string handed to C directly keeps the length it is given.
+  `strbuilder.append_n` now passes its string to C with its header, so the C
+  side can see that length. `string.length` of a string over 2 GiB panics
+  instead of returning a negative length.
+
+- **`string.char_at` and `string.substring` work on strings over 2 GiB
+  (#3523).** Both compared the caller's position with the length cut to an
+  int, which is negative for such a string, so every byte read as out of
+  range and every substring came back empty. The length is now compared as
+  it is stored; the positions are ints and always fit.
+
+- **Float interpolation and `print` write `.` whatever the process locale
+  (#3525).** `"${x}"` formatted a float with plain `snprintf` and `print(x)`
+  emitted `printf("%f")`, so in a host that had called
+  `setlocale(LC_ALL, "de_DE.UTF-8")` they wrote `0,5` and `0,500000` while
+  `string.from_float(0.5)` wrote `0.5`. Interpolation now formats a float
+  through the locale independent formatter `string.from_float` uses, and
+  `print` and `println` of a float, or with a format string, go through the
+  same runtime formatter as an interpolation. Output in the C locale is
+  unchanged.
+
+- **A module-level string `var` stored and read from two actors at once no
+  longer frees a string twice or reads a freed one (#3522).** The counts of
+  a shared string were atomic, but the var itself was not guarded: two
+  stores at once both released the value they read and one new value
+  leaked, and a reader could use a string a store on another thread had just
+  freed. Each string `var` now has a small lock of its own: a store swaps
+  the new value in under it and releases the old one after, and a read takes
+  a reference of its own under it, which its statement gives back.
+  A read pays for the lock and the count: a few nanoseconds for one reader,
+  and readers on several cores at once contend (four actors reading one var,
+  8M reads in all, took about 345 ms where the unlocked read took 25 ms).
+  Give such a value to each actor, or keep it in a local, rather than
+  reading the `var` in a hot loop.
+
+- **A `longdouble` interpolates and prints with `.` whatever the process
+  locale, as a float now does (#3525).** `"${x}"` of a `longdouble` used
+  plain `snprintf("%Lg")` and `print(x)` emitted `printf("%Lf")`, so under a
+  comma-decimal locale they wrote `0,5`. The runtime's locale independent
+  formatter takes a long double too, and both go through it.
+
+- **A deadline too far off to count in nanoseconds no longer stops the work
+  at once (#3528).** The runtime turned a millisecond deadline into
+  nanoseconds with `ms * 1000000LL`, which overflows past about 292 years,
+  so a host passing `long.max` to mean "no deadline" got a deadline in the
+  past, and an ACTIVE budget came out negative. The process deadline, a
+  scoped deadline, and an execution account's budget and deadline now
+  saturate, and a deadline past the end of time never trips.
+
+- **A duration interpolated or printed shows its own text, however many share
+  a line and whichever thread prints it (#3526).** Durations were formatted
+  into a ring of eight static buffers in the generated program, so a ninth
+  duration in one interpolation showed another's text, and two actors
+  printing durations at once could print each other's. The interpolation
+  formatter now writes a duration's text itself, from the stack, and its
+  fraction uses '.' whatever the locale.
+
+- **A value an interpolation, `print` or `println` has no conversion for is
+  a compile error naming its type, and a long double or a uint64 prints as
+  itself on every path (#3527).** Each print path ended its list of kinds
+  with `%d`, so a kind it had not learned was read as an int: `println(x)`
+  of a `longdouble` printed garbage, and `print(u)` of a `uint64` and a
+  `uint64` in a literal print format printed -1. The int conversion is now
+  used only for the kinds that are ints on purpose (`int`, `byte`, `uint8`,
+  `uint16` and enums) and for a type the checker leaves unresolved, which
+  the compiler stores as an `int`; every other kind uses its own, and a
+  value with no type at all is refused. An element read through a typed
+  pointer (`p[0]` on a `*T`) has its element's type now, where it was left
+  unresolved.
+- **Migrating: printing an actor ref, a bit set, a bitstruct or an optional
+  is a compile error (#3527).** `"${ref}"` or `print(flags)` of these kinds
+  went through `%d` and printed whatever the int read of the value gave.
+  Print what you mean: an actor's id or a field of its state, a bit set's
+  members, a bitstruct's fields, or an optional unwrapped (`if v != none`).
+
+- **A request that cannot connect no longer leaks a copy of its URL path.**
+  `std.http`'s client copies the path out of the URL and frees it once the
+  request head is built, but a host that did not resolve and a dial that
+  failed returned before that, so every request to a server that was down
+  leaked the path. LeakSanitizer found it in the client's own tests.
+
+- **A response refused for its framing no longer leaks the request head.**
+  `std.http`'s client keeps the head it sent until it knows whether a pooled
+  connection must be dialled again, but the returns for a response whose
+  framing is ambiguous and for running out of memory while reading one came
+  before it was freed. Every response with two different Content-Length
+  headers leaked the head; LeakSanitizer found it in the client's framing test.
+
+- **Hash, MAC and DRBG contexts give back their algorithm name when freed.**
+  The contexts of `std.cryptography.hmac`, `drbg`, `ascon`, `dstu7564`,
+  `gost3411_2012` and `sparkle` keep a reference to the name they were made
+  with, and were freed with `free`, which releases no field, so a name that
+  was not a literal leaked once per context. `tls13_client` builds its hash
+  name at run time, so every resumed connection leaked it.
+
+- **AES-CCM no longer leaks a block on every seal and open.** The CBC-MAC
+  started from a zero block and stored the first step's result over it, and
+  declared the AAD length prefix with an empty buffer that both branches
+  replaced; neither replaced buffer was freed. Every `aes.ccm_seal` and
+  `aes.ccm_open` leaked one block, and one more when there was AAD.
+
+- **`asn1.encode_oid` no longer leaks when it refuses a string.** It builds
+  the content bytes while it reads the arcs, and each refusal (an empty arc,
+  an arc out of range, a non-digit, a single arc) returned null without
+  freeing them, so every string that was not an OID leaked the buffer.
+
+- **A thread that ran Aether code no longer leaks its unwind journal when it
+  ends.** Only the scheduler's threads gave back the per-thread allocation
+  journal and teardown queue. A host thread calling into an `--emit=lib`
+  library, a `std.worker` thread or an HTTP server pool thread left both
+  behind, about 1 to 3 KB per thread. The first growth of either now sets a
+  thread-exit hook that frees them.
+
+- **A `std.mutation` run no longer leaks its argument lists and counters.**
+  Each mutant's oracle built three argument lists for `os.run_full`, which
+  borrows them, and nothing freed them; `run` kept its counts in three ref
+  cells and the survivors in a list, freed on no return. A mutation run
+  leaked all of them, and more with every mutant.
+
+- **`tls13_server.free_cert_chain(chain, lens)` frees a loaded certificate
+  chain.** `parse_cert_chain_pem` hands its caller a list of DER buffers and
+  a second list, but the function that frees them was private to the module,
+  so a program that loaded a chain for `accept` had no way to give it back
+  and leaked it.
+
+- **Integer lane division by zero and a lane's most negative value divided
+  by -1 now follow the scalar rules (#3524).** `/` and `%` on `i32x4`,
+  `i64x2`, `i16x8` and `i32x8` went straight to C's vector operator, where
+  both are undefined, so a zero lane in the divisor stopped the program on
+  x86. A zero in any lane of the divisor now panics with the category
+  `division_by_zero` and the source position, and the most negative value
+  divided by -1 is itself, its remainder 0, lane by lane, with a lane value
+  or a scalar on either side and for `/=` and `%=`. A constant scalar
+  divisor other than 0 and -1 still compiles to C's vector operator.
+
+- **An integer division or remainder by zero in a constant's initializer is
+  a compile error that names the expression (#3524).** `const B = 10 / 0`
+  reached the C compiler, which refused the static's initializer or folded
+  it to anything. The compiler computes the initializer of a `const` or a
+  module `var` (literals, `const`s and the operators over them, in their own
+  width with the runtime's rules) and refuses one that divides by 0:
+  "division by zero in the constant expression `10 / D`", with each name as
+  it was written, a module's constant included. The same division in code,
+  guarded or never run (`if D != 0 { println(100 / D) }`), compiles as in
+  Java, and panics with `division_by_zero` if it runs.
+
+- **A lane shift's count is masked to the lane width, as a scalar shift's is
+  (#3524).** `lanes.i32shl`, `i32shr`, `i32shr_u`, `i16shl` and `i16shr`
+  passed the count to C's vector shift as it was, where a count of the lane
+  width or more is undefined (x86 gave 0). The count is now `n & 31` for
+  `i32x4` and `n & 15` for `i16x8`, so `lanes.i32shl(a, 32)` is `a`, and a
+  left shift into the sign bit wraps. A constant count inside the width is
+  still the plain shift instruction.
+
+- **A JSON container no longer keeps the whole arena of a small parsed
+  document given to it (#3538).** A parse gives every document a 16 KB
+  first chunk, and `json.push` or `json.set` of a parsed document adopted
+  all of it, so 2000 parsed `{"id":N,"ok":true}` pushed into one array held
+  32 MB where copies take 0.5 MB, and setting one key to a parsed document
+  again and again kept each arena. A container now adopts an arena only when
+  a third of it or more is in use; a mostly empty one is copied, its own
+  nodes only, with what it adopted handed over as it is. Building a document
+  level by level stays fast: best of 5, a 300 deep document builds in 0.09
+  ms (0.92 ms before #3538) and an object of 5000 keys in 0.72 ms (11.8 ms).
+
+- **A map no longer keeps the whole spare capacity of a string key
+  (#3538).** `map.put` kept any counted key by reference, so a key from
+  `strbuilder.finish` kept the builder's whole block: 5000 keys built with
+  `strbuilder.new(4096)` held 20 MB where copies take 0.5 MB. A key is now
+  kept by reference only when its block is about as big as its text, as a
+  string built to its length is, and copied otherwise. `map.put` keeps its
+  gain: best of 5, 111 ns against 142 ns before #3538.
+
+- **A URL with a query or a fragment right after its port works again
+  (#3520).** The HTTP client ended a URL's authority only at a `/`, so the
+  strict port reader took `8080?x=1` for the port and refused
+  `http://127.0.0.1:8080?x=1` and `http://127.0.0.1:8080#f` as malformed,
+  where before it sent `GET /` and dropped the query. The authority now ends
+  at the first `/`, `?` or `#` (RFC 3986), the request target keeps the
+  query, with an empty path sent as `/`, and the fragment is never sent,
+  which it was after a path (`/p#f` went out as is). A forward proxy URL
+  and a `ws://` URL are split the same way.
+
+- **`std.http1` no longer reads a body after a 1xx, 204 or 304 response,
+  or after a response to HEAD (#3520).** RFC 9110 says such a response ends
+  at its header section whatever its headers say, and `std.net` reads it
+  that way, but the reader took `HTTP/1.1 204` with `Content-Length: 5` to
+  have a body of five bytes, and waited for the body of a 304 or of a HEAD
+  response, or for the connection to close. It now completes them with an
+  empty body. The reader cannot tell a response to HEAD from the bytes, so
+  `http1.response_new_for(method)` makes a reader that knows the request's
+  method.
+
+- **`map.put` with a key built for the call (`map.put(m, "k${i}", v)`,
+  `map.put(m, key_of(x), v)`) no longer leaks the key (#3539).** The put
+  that hands a string value to the map gave only the value to it, and the
+  key the call computed was never released; one string leaked per put.
+  LeakSanitizer and the macOS leaks gate found it. A local or a literal key
+  is untouched, as before.
+
+- **The runtime's headers compile under `-std=c11 -pedantic -Werror` (#3548).**
+  `AetherOptFlags` ended in `AETHER_OPT_ALL = 0xFFFFFFFF`, which does not fit
+  in an `int`, the type of an enumerator before C23, so a host building with
+  strict C11 had `aether_optimization_config.h` refused, and with it every
+  actor runtime header that includes it. `AETHER_OPT_ALL` is now `INT_MAX`:
+  every flag bit an enumerator can hold, those of flags added later too.
+
+- **A streamed response to HEAD, a 204 or a 304 ends at its headers
+  (#3551).** `send_stream` framed a response by its `Content-Length` and
+  `Transfer-Encoding` alone, so a streamed HEAD answered with a length, or a
+  304 with one, had `response_read` wait for a body until the request's
+  timeout, and a 204 without a length waited for the connection to close.
+  The stream reader now keeps the rule the buffered reader has: a response
+  to HEAD, a 1xx, a 204 and a 304 carry no body (RFC 9110).
+
+- **Redirects from an IPv6 host, relative redirects from a URL with a query,
+  and a proxy at an IPv6 address work (#3552).** A redirect target was
+  rebuilt from the host without its brackets, so `Location: /b` from
+  `http://[::1]:8080/a` went to `http://::1:8080/b` and failed as a
+  malformed URL; a relative `Location: c` from `http://h/a/b?x=/y` asked for
+  `/a/b?x=/c`; and `use_http_proxy("http://[::1]:3128")` was refused. A
+  `Location` is now resolved by RFC 3986 5.2 against the request's URL, its
+  authority kept as written, and the proxy URL is split as a target URL is.
+  The same resolution stops a redirect to a URL that is not `http` or
+  `https` with the 3xx kept (it was followed as a relative path, or lost to
+  a "malformed URL" error), sends a space or a byte past ASCII in a
+  `Location` percent-encoded rather than raw in the request line, and keeps
+  the request URL's fragment when the `Location` has none (RFC 9110
+  10.2.2).
+
+- **An https request through a forward proxy reads the proxy's CONNECT reply
+  strictly, and keeps the bytes after it for the tunnel (#3557).** The reply
+  was read with one `recv` into 1024 bytes and everything past its head was
+  dropped, so bytes a proxy sent behind its 200 never reached the TLS
+  handshake; and its status was read with `atoi`, which took `2000` and `20`,
+  and a reply that was not HTTP at all, without a word. The client now takes
+  the head and nothing more (the rest stays in the socket for the
+  handshake), and refuses a reply whose status line is not `HTTP/1.` with a
+  three-digit status, whose head holds a NUL or a bare CR, or whose head runs
+  past 4096 bytes, with "proxy CONNECT: malformed reply from the proxy" or
+  saying which.
+
+- **A value made for one use and given straight to a builtin, an extern or a
+  comparison is released once it has been read (#3549).** `atoi(os.getenv(k))`,
+  `char_at(f(), 0)`, `str_eq(f(), s)`, `print("%s", f())`,
+  `spawn_sandboxed(g, os.argv0(), a)`, `os.getenv(k) != null`, an ask's reply
+  given to `println`, and a buffer `make` handed out for an argument
+  (`total(make([]int, 3))`) each leaked the temporary on every evaluation;
+  LeakSanitizer found them in the corpus. A parameter borrows, so the caller
+  releases a fresh argument after the call: every call lowered by name (a
+  builtin, a container store's key, a named function or extern) and every
+  comparison now goes through that one rule, which takes over only where the
+  callee keeps or ends the value (a free, `isolate`, `box_closure`, a
+  container's adopted element, a `@keep` slice).
+
+- **aetherc and aether-lsp run the compiler on a stack of their own, so a deeply nested program compiles whatever stack the process was given.** Every pass walks the tree recursively, and the depth the parser accepts (a chain of 1000 operators) needed the main thread's 8 MB: Windows got it from a link flag, `aether-lsp` on Windows had 1 MB, a smaller `ulimit -s` was not enough, and under AddressSanitizer the compiler overflowed. Both now run on a thread with a 64 MB reservation, started with the main thread's floating point control (#3539).
+
+- **`fs` block device info no longer resolves a sysfs path into a 512 byte buffer.** On Linux it called `realpath` with a 512 byte array, and `realpath` writes up to `PATH_MAX` (4096) bytes, so a long resolved path overflowed the stack; it now lets `realpath` allocate the answer and frees it (#3558).
+
+### Security
+
+- **std.net reads every framing number and URL port whole and strictly
+  (#3520).** The server parsed a Content-Length from the first 255 bytes of
+  its value, so 300 zeros and a 5 meant an empty body here and five bytes to
+  a front end; it now refuses a value with more digits than any length it
+  takes. Chunk sizes had two grammars: the framing check used `strtoll`
+  (a sign, spaces, `0x`) and the decoder a loop that wrapped past 16 digits,
+  so `0x5` framed as five bytes and decoded as the last chunk. Framing,
+  decoding and the streaming client now walk one grammar, `chunk-size
+  [ chunk-ext ] CRLF` (RFC 9112 7.1), and refuse anything else with 400. The
+  client reads a response's Content-Length from the whole value too. A URL
+  port, a proxy port and a WebSocket port are digits only in 1..65535:
+  `host:80abc` dialled port 80, and `host:65616` reached a resolver that may
+  keep only its low 16 bits.
+
+- **std.http1 refuses a Content-Length or chunk size that is not a plain
+  count (#3520).** The pure-Aether response reader skipped every byte of a
+  Content-Length that was not a digit, so `5abc9` framed 59 bytes, and read
+  a chunk size up to the first byte that was not hex, so `0x5` was the last
+  chunk; both wrapped past the largest int. They now follow std.net's rules:
+  digits of the base only, no more digits than the largest value has, and
+  chunk-size lines are `chunk-size [ chunk-ext ]` with the extensions read to
+  their end. Chunk data must also be followed by its CRLF.
+
+- **std.http1 refuses a status code that is not three digits and two
+  Content-Length headers that disagree (#3520).** The status code reader
+  skipped any byte that was not a digit, so `2x0` was status 20 and `2000`
+  was accepted, where the C client requires exactly three digits (RFC 9112
+  4). Two different lengths were resolved by taking the first, which leaves
+  the bytes of the other to be read as something else; the reader now
+  refuses them, as the server does (RFC 9112 6.3). Duplicates that agree are
+  still read.
+
+- **The HTTP client's stream reader frames a chunked body by the same
+  rules as its buffered reader (#3520).** A streamed response
+  (`client.send_stream`) took a bare LF or a bare CR for the CRLF that ends
+  a chunk's data, and after the last chunk read one CRLF and gave up on any
+  trailer lines, while the buffered reader refuses the first two and reads
+  the trailers: two readers of one body that disagree about where it ends
+  are what request smuggling is built from. The stream reader now needs a
+  CRLF after each chunk's data and reads trailer lines to the empty line,
+  each ending in CRLF and at most 1024 bytes, as the buffered one does.
+
+- **A response whose header section holds a NUL or a bare CR is refused, and
+  a redirect's `Location` with a control byte is not followed (#3556).** The
+  client found the end of a header section with `strstr`, which stops at a
+  NUL, and read its fields as C strings. A bare CR stayed inside a field
+  value, so `Location: /x\rX-Injected: y` sent `GET /x\rX-Injected: y` to the
+  next hop, a header of the server's choosing in the client's request; a NUL
+  hid the section, and the whole response came back as the body of a
+  status-0 response with no error (the streamed reader waited for an end it
+  had already been sent). Both readers now find the section's end past any
+  NUL and refuse a section holding either with "malformed response header
+  section" (RFC 9110 5.5, RFC 9112 2.2), and a `Location` holding a TAB or
+  any other control byte stops the hop with a `redirect_error`, the 3xx kept.
+- **Migrating:** the reverse proxy reads its upstreams with the same reader,
+  so an upstream response with a bare CR in a header, which it forwarded
+  with that field dropped, is now answered 502 (`upstream_transport`), as an
+  invalid response from an upstream is (RFC 9110 15.6.3).
+
+### Performance
+
+- **Allocating from many threads no longer fights over one counter
+  (#3529).** Every cap-aware allocation and free of every thread counted
+  its bytes on one global atomic, even with no memory cap set, so building
+  strings on eight actors took 95 ns a string against 65 on one. Without a
+  cap each thread now counts on a cache line of its own, summed when the
+  total is asked for; eight workers take 12.9 ns a string (best of 5, this
+  machine), one worker is unchanged. Setting a cap moves the threads'
+  counts into the one counter the capped path checks exactly, so a cap set
+  later still sees the memory already in use.
+
+- **Concatenated, sliced, cased, trimmed, replaced and joined strings are
+  one allocation instead of two (#3530).** Each wrote its text into a
+  buffer of its own and then allocated a separate header for it: two
+  mallocs, two frees, and the header and text on different cache lines.
+  Their length is known before they are written, so they are now built in
+  the one block, header then text, that string literals and interpolations
+  already used, and `string.concat_wrapped` no longer copies its result a
+  second time. Best of 5 on this machine: `string.concat` 61.8 to 34.3 ns,
+  `string.substring` 59.4 to 31.8 ns, the ownership `concat` program 205
+  to 125 ms.
+
+- **`string.index_of`, `split` and `replace` look for a needle with
+  memchr instead of comparing at every byte (#3531).** They called memcmp
+  at each offset of the text, a libc call per byte for a one byte
+  separator. One search now finds each place the needle's first byte
+  occurs and compares the rest only there, and the `_from` and `_n` forms
+  share it. Best of 5 on this machine: `index_of` over 256 KiB 438 to 57
+  us, splitting 2000 fields 130 to 104 us. A match past 2 GiB panics, as
+  `string.length` does, instead of coming back as a negative position.
+
+- **An ask reuses its thread's reply slot instead of building a new one
+  (#3533).** Every ask allocated a reply slot and created a mutex and a
+  condition variable for it, then destroyed and freed all three when it
+  returned. Slots are now made once and lent: an ask takes its thread's
+  last slot when both sides have let go of it, and another when a timed
+  out ask's slot is still held by the actor. An ask between two actors on
+  one core went from 210 to 190 ns on this machine (best of 5); across
+  threads the wake up dominates and the change is within noise.
+
+- **Sending a message with a string built for the send no longer copies the
+  string (#3535).** A string field's value was always copied into the
+  message, and a temporary made for the send (`a ! Log { text: "${n}" }`,
+  a call's result) was freed right after the copy. A temporary nothing else
+  holds is now moved into the message, as the ownership model says a dying
+  temporary is; a string the sender keeps is still copied. A send of a
+  freshly built string field takes about 27% less time (154 to 112 ns per
+  message on the core send benchmark).
+
+- **A map keeps a string key by reference and a JSON container keeps a
+  document set into it whole (#3538).** `map.put` copied every new key,
+  although a key is a counted string the map can hold a reference to; it
+  now retains it (a plain C string is still copied), and finds a bucket by
+  masking where it divided. `json.set` and `json.push` deep copied the child
+  into the parent, so a document built level by level cost O(depth x size),
+  and `json.set` found a key by a linear scan, O(k^2) for an object of k
+  keys. A document's root now moves in with its arena, a node of another
+  document is still copied, and objects past 16 keys are indexed. A
+  document set into its own child is refused instead of reading freed
+  memory. Best of 5 on this machine: `map.put` 139 to 111 ns, `map.get` 75
+  to 64 ns, an object of 5000 keys 11.7 to 0.71 ms, a 300 deep document 0.91
+  to 0.09 ms.
+
+- **Type checking a module with thousands of externs or vars no longer
+  slows with the square of its size (#3537).** Each call in a module body
+  that resolved to an extern walked the module's top level for the file's
+  own declaration and searched a list of the symbols made for them, each
+  read of a var walked the program's vars, and each question of what a
+  module declares walked the module. They are indexes now, built once per
+  check: on a module of 4000 externs, vars and functions the type check
+  takes 119 ms instead of 1025 ms.
+
+- **A warm `ae run` or `ae build` starts about twice as fast (#3532).** On a
+  cache hit `ae` re-read every file of the cache key, aetherc, ae,
+  libaether.a, the C compiler and, in a source tree, every runtime and std
+  header, about 18 MB one byte at a time, and listed the whole cache
+  directory for stale temporaries on every command. It now remembers each
+  file's content hash beside its size, modification time and identity
+  (`filehash.v1` in the cache directory) and reads a file again only when
+  one of those changed, hashes eight bytes at a time, sweeps temporaries with
+  the size-cap scan at most every ten minutes, and starts `gcc --version`
+  directly instead of through cmd.exe. On a Windows machine whose cache had
+  grown to 140,000 entries a warm `ae run` of hello world went from 183 ms to
+  93 ms; with an empty cache, from 138 ms to 96 ms. The key still holds
+  content hashes, so no build that used to be rebuilt is served from the
+  cache now.
+
+- **A typed message whose fields fit in the runtime's `Message` travels in
+  it, with no heap copy (#3534).** Only a message of no field or one scalar
+  travelled inline; every other send copied its struct to the heap and the
+  receiver freed it, though a message of two ints, an int and a string, or a
+  `Down` fits the 28 bytes (16 on 32-bit targets) `Message` carries anyway.
+  Such a message is now copied into the message (`zerocopy.owned` is
+  `AETHER_MSG_INLINE`), every path that handles, drops or records a queued
+  message reads it there, and a send of one cannot fail for want of memory.
+  A two-int send takes 25% less time (61 to 46 ns per message on the core
+  send benchmark), a forwarded string 9% less (93 to 85 ns) and an ask 7%
+  less (683 to 633 ns). C code that takes messages from a mailbox reads a
+  typed payload with `aether_message_payload` and gives it back with
+  `aether_message_free_payload`; the runtime ABI revision is 2.
+- **Migrating: a hand-written C step function reads a typed message through
+  `aether_message_payload` (#3534).** A message that fits now travels in
+  `Message` itself (`zerocopy.owned == AETHER_MSG_INLINE`), so its
+  `payload_ptr` holds the message's bytes, not a pointer to them. C code
+  that read `msg.payload_ptr` as the payload, or freed it (an actor step
+  handed to `http_server_set_actor_handler`, a host draining a mailbox),
+  calls `aether_message_payload(&msg)` and
+  `aether_message_free_payload(&msg)` instead. Generated code and every
+  shim in the tree do; a library built for runtime ABI revision 1 is
+  refused rather than misread.
+
 ## [0.880.0]
 
 ### Removed

@@ -1,1 +1,0 @@
-- **`fs` block device info no longer resolves a sysfs path into a 512 byte buffer.** On Linux it called `realpath` with a 512 byte array, and `realpath` writes up to `PATH_MAX` (4096) bytes, so a long resolved path overflowed the stack; it now lets `realpath` allocate the answer and frees it (#3558).
