@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.882.0]
+
+### Fixed
+
+- Release the compiler-transferred string reference when a list add or map put fails, including allocation refusal, without changing container runtime contracts.
+
 ## [0.881.0]
 
 ### Added
