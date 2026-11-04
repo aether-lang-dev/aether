@@ -187,6 +187,14 @@ char* http_resolve_location(const char* base_url, const char* location);
  * or -1 for a URL that is not one. */
 int http_parse_proxy_url(const char* url, char* host, size_t host_size, int* port);
 
+/* A forward proxy's reply to CONNECT on the socket `fd`, read to the end of
+ * its head and no further, so the bytes after it stay for the tunnel's first
+ * read. The status, or 0 with *why set when the reply ended or the read
+ * failed before its head did, the head is longer than 4096 bytes, or it is
+ * malformed (no "HTTP/1." status line with a three-digit status, a NUL or a
+ * bare CR). */
+int http_connect_reply_read(int fd, const char** why);
+
 /* Accessors a driver needs from an outbound request it did not build. The
  * request itself stays opaque: these are what it takes to put it on a wire. */
 const char* http_request_method_of(const HttpClientRequest* req);

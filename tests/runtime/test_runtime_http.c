@@ -1,4 +1,16 @@
 #include "test_harness.h"
+/* The loopback socket pair of the CONNECT reply test (#3557), on every
+ * platform; winsock2.h ahead of anything that pulls in windows.h. */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
+#include <pthread.h>
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
 /* The URL resolver and the proxy URL parser (#3552), on every platform. */
@@ -870,4 +882,175 @@ TEST_CATEGORY(http_uri_resolve_refuses_control_bytes, TEST_CATEGORY_NETWORK) {
         ASSERT_NULL(got);
     }
     ASSERT_NULL(http_resolve_location("http://h/a", "/x\ty"));
+}
+
+/* A forward proxy's reply to CONNECT (#3557). The client read it with one
+ * recv into 1024 bytes and kept nothing past the head, so bytes the proxy
+ * sent behind its 200 were lost to the tunnel; and it read the status with
+ * atoi, which took "2000" and "20" and a reply that was no HTTP at all. The
+ * reader now takes the head and nothing more, and reads the status by the
+ * strict rule. Each case runs over a loopback TCP pair: fds[1] is the proxy,
+ * fds[0] the client. */
+#ifdef _WIN32
+#define T_CLOSE(s) closesocket((SOCKET)(s))
+#define T_NAP_MS(ms) Sleep(ms)
+#else
+#define T_CLOSE(s) close(s)
+#define T_NAP_MS(ms) usleep((ms) * 1000)
+#endif
+
+static int tcp_loopback_pair(int fds[2]) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+#endif
+    int l = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (l < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    socklen_t alen = sizeof a;
+    if (bind(l, (struct sockaddr*)&a, sizeof a) != 0 || listen(l, 1) != 0 ||
+        getsockname(l, (struct sockaddr*)&a, &alen) != 0) {
+        T_CLOSE(l);
+        return -1;
+    }
+    int c = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr*)&a, sizeof a) != 0) {
+        if (c >= 0) T_CLOSE(c);
+        T_CLOSE(l);
+        return -1;
+    }
+    int s = (int)accept(l, NULL, NULL);
+    T_CLOSE(l);
+    if (s < 0) {
+        T_CLOSE(c);
+        return -1;
+    }
+    fds[0] = c;
+    fds[1] = s;
+    return 0;
+}
+
+/* Send `n` bytes of `reply` as the proxy, read the reply as the client, and
+ * close the proxy's end first when `then_close`. The status read, and *why. */
+static int connect_reply_of(int fds[2], const char* reply, size_t n, int then_close,
+                            const char** why) {
+    if (n > 0) send(fds[1], reply, (int)n, 0);
+    if (then_close) {
+        T_CLOSE(fds[1]);
+        fds[1] = -1;
+    }
+    *why = NULL;
+    return http_connect_reply_read(fds[0], why);
+}
+
+/* What the client reads next: `want` bytes, or fewer if the proxy stops. */
+static size_t tunnel_read(int fd, char* buf, size_t want) {
+    size_t got = 0;
+    while (got < want) {
+        int r = (int)recv(fd, buf + got, (int)(want - got), 0);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    return got;
+}
+
+typedef struct {
+    int fd;
+    const char* first;
+    const char* second;
+} SplitReply;
+
+/* The proxy's reply in two writes, the empty line split across them. */
+static void* split_reply_writer(void* arg) {
+    SplitReply* w = (SplitReply*)arg;
+    send(w->fd, w->first, (int)strlen(w->first), 0);
+    T_NAP_MS(50);
+    send(w->fd, w->second, (int)strlen(w->second), 0);
+    return NULL;
+}
+
+TEST_CATEGORY(http_connect_reply_keeps_tunnel_bytes, TEST_CATEGORY_NETWORK) {
+    int fds[2];
+    const char* why = NULL;
+    char got[64];
+
+    /* The tunnel's first bytes in the same write as the 200. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* r1 = "HTTP/1.1 200 Connection established\r\nProxy-Agent: t\r\n\r\nTUNNEL";
+    ASSERT_EQ(200, connect_reply_of(fds, r1, strlen(r1), 0, &why));
+    ASSERT_EQ(6, (int)tunnel_read(fds[0], got, 6));
+    ASSERT_STREQ("TUNNEL", got);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* The empty line split across two writes, the tunnel's bytes behind it. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    SplitReply w = { fds[1], "HTTP/1.1 200 OK\r\n\r", "\nTUNNEL" };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, split_reply_writer, &w));
+    int status = http_connect_reply_read(fds[0], &why);
+    pthread_join(th, NULL);
+    ASSERT_EQ(200, status);
+    ASSERT_EQ(6, (int)tunnel_read(fds[0], got, 6));
+    ASSERT_STREQ("TUNNEL", got);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* A refusal is a status the dial refuses on. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* r3 = "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n";
+    ASSERT_EQ(407, connect_reply_of(fds, r3, strlen(r3), 0, &why));
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+}
+
+TEST_CATEGORY(http_connect_reply_refuses_malformed, TEST_CATEGORY_NETWORK) {
+    static const char nul_head[] = "HTTP/1.1 200 OK\r\nX: a\0b\r\n\r\n";
+    struct { const char* bytes; size_t n; const char* why; } cases[] = {
+        { "HTTP/1.1 2000 OK\r\n\r\n", 0, "malformed" },
+        { "HTTP/1.1 20 OK\r\n\r\n", 0, "malformed" },
+        { "SSH-2.0-OpenSSH_9.6\r\n\r\n", 0, "malformed" },
+        { "HTTP/1.1 200 OK\r\nX: a\rb\r\n\r\n", 0, "malformed" },
+        { nul_head, sizeof nul_head - 1, "malformed" },
+    };
+    int misses = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int fds[2];
+        ASSERT_EQ(0, tcp_loopback_pair(fds));
+        size_t n = cases[i].n ? cases[i].n : strlen(cases[i].bytes);
+        const char* why = NULL;
+        int status = connect_reply_of(fds, cases[i].bytes, n, 0, &why);
+        if (status != 0 || !why || !strstr(why, cases[i].why)) {
+            fprintf(stderr, "  case %d: status %d, why '%s'\n", (int)i, status, why ? why : "(none)");
+            misses++;
+        }
+        T_CLOSE(fds[0]);
+        T_CLOSE(fds[1]);
+    }
+    ASSERT_EQ(0, misses);
+
+    /* The proxy closes before the head ends. */
+    int fds[2];
+    const char* why = NULL;
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(0, connect_reply_of(fds, "HTTP/1.1 200 OK\r\n", 17, 1, &why));
+    ASSERT_NOT_NULL(why);
+    ASSERT_TRUE(strstr(why, "no response") != NULL);
+    T_CLOSE(fds[0]);
+
+    /* A head with no end within 4096 bytes. */
+    static char longhead[5000];
+    memcpy(longhead, "HTTP/1.1 200 OK\r\nX: ", 20);
+    memset(longhead + 20, 'a', sizeof longhead - 20);
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(0, connect_reply_of(fds, longhead, sizeof longhead, 0, &why));
+    ASSERT_NOT_NULL(why);
+    ASSERT_TRUE(strstr(why, "longer than 4096") != NULL);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
 }

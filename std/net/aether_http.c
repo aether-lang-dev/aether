@@ -1814,6 +1814,23 @@ static int no_body_expected(int status, const char* method) {
     return status == 204 || status == 304;
 }
 
+/* Whether a response's header section, the `n` bytes at `buf` up to and
+ * including the empty line that ends it, holds no NUL and no CR that is not
+ * followed by LF. A recipient has to refuse either or put a space in its
+ * place (RFC 9110 5.5, RFC 9112 2.2), and refusing is the answer nothing can
+ * read two ways (#3556). The client found the end of the section with
+ * strstr, which stops at a NUL, and read its fields as C strings: a NUL hid
+ * the section and handed the whole response back as a status-0 body, and a
+ * bare CR in a Location went out inside the request line of the redirect. */
+static int http_head_section_ok(const char* buf, size_t n) {
+    if (memchr(buf, '\0', n)) return 0;
+    const char* end = buf + n;
+    for (const char* p = buf; (p = (const char*)memchr(p, '\r', (size_t)(end - p))) != NULL; p += 2) {
+        if (p + 1 >= end || p[1] != '\n') return 0;
+    }
+    return 1;
+}
+
 // -----------------------------------------------------------------
 // Forward-proxy resolution (aether#1012 part 2)
 // -----------------------------------------------------------------
@@ -2446,6 +2463,61 @@ static const char* http_tls_backend_missing(const HttpClientRequest* req) {
 #endif
 }
 
+/* The longest head a CONNECT reply may have. */
+#define HTTP_CONNECT_REPLY_MAX 4096
+
+/* The reply to a CONNECT on `fd`, read to the empty line that ends its head
+ * and not a byte further (#3557). What follows the head is the tunnel's: the
+ * TLS handshake reads it from the socket. The reader took whatever one recv
+ * gave and dropped what came after the head, so bytes a proxy sent behind
+ * its 200 were lost to the handshake. Each round peeks at what has arrived
+ * and takes only what belongs to the head, so the socket keeps the rest.
+ *
+ * The status is read by the strict rule every response's is
+ * (response_status_of: exactly three digits), from a status line that starts
+ * "HTTP/1.", in a head with no NUL and no bare CR (http_head_section_ok).
+ * atoi took "2000" for 2000 and "20x" for 20, and a reply that was no HTTP
+ * at all for status 0. Returns the status, or 0 with *why set: a reply that
+ * ended, or a read that failed or timed out, before its head did; a head
+ * longer than HTTP_CONNECT_REPLY_MAX; or a malformed one. */
+int http_connect_reply_read(int fd, const char** why) {
+    char head[HTTP_CONNECT_REPLY_MAX + 1];
+    size_t len = 0;
+    for (;;) {
+        if (len == HTTP_CONNECT_REPLY_MAX) {
+            *why = "proxy CONNECT: the reply's head is longer than 4096 bytes";
+            return 0;
+        }
+        int n = (int)recv(fd, head + len, (int)(HTTP_CONNECT_REPLY_MAX - len), MSG_PEEK);
+        if (n <= 0) {
+            *why = "proxy CONNECT: no response from proxy";
+            return 0;
+        }
+        /* The empty line may have begun in what was taken already. */
+        size_t from = len >= 3 ? len - 3 : 0;
+        const char* end = http_find_header_end(head + from, len + (size_t)n - from);
+        size_t take = end ? (size_t)(end + 4 - (head + len)) : (size_t)n;
+        for (size_t got = 0; got < take; ) {
+            int r = (int)recv(fd, head + len + got, (int)(take - got), 0);
+            if (r <= 0) {
+                *why = "proxy CONNECT: no response from proxy";
+                return 0;
+            }
+            got += (size_t)r;
+        }
+        len += take;
+        if (end) break;
+    }
+    head[len] = '\0';
+    int status = 0;
+    if (strncmp(head, "HTTP/1.", 7) != 0 || !http_head_section_ok(head, len) ||
+        (status = response_status_of(head)) == 0) {
+        *why = "proxy CONNECT: malformed reply from the proxy";
+        return 0;
+    }
+    return status;
+}
+
 static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
                      const char* dial_host, int dial_port,
                      const char* host, int port, int use_tls, int via_proxy,
@@ -2507,27 +2579,14 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             ae_set_err(out_err, "proxy CONNECT: send failed");
             return -1;
         }
-        /* Read the proxy's response headers up to the terminating CRLFCRLF.
+        /* The proxy's reply, to the end of its head and not a byte further.
          * A 2xx means the tunnel is open; anything else is a proxy refusal. */
-        char cbuf[1024];
-        size_t clen = 0;
-        int saw_end = 0;
-        while (clen < sizeof(cbuf) - 1) {
-            ssize_t rn = recv(sockfd, cbuf + clen, sizeof(cbuf) - 1 - clen, 0);
-            if (rn <= 0) break;
-            clen += (size_t)rn;
-            cbuf[clen] = '\0';
-            if (strstr(cbuf, "\r\n\r\n")) { saw_end = 1; break; }
-        }
-        if (!saw_end) {
+        int pstatus = http_connect_reply_read(sockfd, &why);
+        if (pstatus == 0) {
             close(sockfd);
-            ae_set_err(out_err, "proxy CONNECT: no response from proxy");
+            ae_set_err(out_err, why);
             return -1;
         }
-        /* Parse "HTTP/1.x NNN ..." status. */
-        int pstatus = 0;
-        const char* sp = strchr(cbuf, ' ');
-        if (sp) pstatus = atoi(sp + 1);
         if (pstatus < 200 || pstatus >= 300) {
             close(sockfd);
             char emsg[128];
@@ -2821,23 +2880,6 @@ const char* http_find_header_end(const char* buf, size_t len) {
         p = cr + 1;
     }
     return NULL;
-}
-
-/* Whether a response's header section, the `n` bytes at `buf` up to and
- * including the empty line that ends it, holds no NUL and no CR that is not
- * followed by LF. A recipient has to refuse either or put a space in its
- * place (RFC 9110 5.5, RFC 9112 2.2), and refusing is the answer nothing can
- * read two ways (#3556). The client found the end of the section with
- * strstr, which stops at a NUL, and read its fields as C strings: a NUL hid
- * the section and handed the whole response back as a status-0 body, and a
- * bare CR in a Location went out inside the request line of the redirect. */
-static int http_head_section_ok(const char* buf, size_t n) {
-    if (memchr(buf, '\0', n)) return 0;
-    const char* end = buf + n;
-    for (const char* p = buf; (p = (const char*)memchr(p, '\r', (size_t)(end - p))) != NULL; p += 2) {
-        if (p + 1 >= end || p[1] != '\n') return 0;
-    }
-    return 1;
 }
 
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
