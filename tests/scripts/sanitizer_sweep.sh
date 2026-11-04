@@ -8,7 +8,8 @@
 #
 # SAN=ubsan is UndefinedBehaviorSanitizer; SAN=asan is AddressSanitizer with
 # LeakSanitizer, so a heap overflow, a use after free or a double free stops
-# the program, and a leak is reported when it exits.
+# the program, and a block it never freed is reported when it exits and
+# fails the run (SAN_LEAKS=report lists it without failing).
 #
 # Every compile and link goes through the sanitizing compiler: build/<san>/bin
 # holds a `gcc` and a `cc` that run the real ones with the sanitizer's flags,
@@ -96,11 +97,12 @@ PATH="$bin:$PATH"
 # limit, Valgrind): they say so and take another path or skip.
 AETHER_SANITIZER="$san"
 export CC PATH AETHER_SANITIZER
-# SAN_LEAKS=fail makes a leak fail the run (ASan); report, the default for
-# now, lists the leaks in the summary without failing (#3539: the std leaks
-# are fixed, the test programs' own are #3547).
-leaks_fail=0
-[ "${SAN_LEAKS:-report}" = fail ] && leaks_fail=1
+# A leak fails the run (ASan), as an error does: the std and runtime leaks
+# the first runs found are fixed (#3539), and so are the test programs that
+# did not free what they made (#3547). SAN_LEAKS=report lists the leaks in
+# the summary without failing, for a run that only surveys them.
+leaks_fail=1
+[ "${SAN_LEAKS:-fail}" = report ] && leaks_fail=0
 case "$san" in
     ubsan)
         UBSAN_OPTIONS="print_stacktrace=1:report_error_type=1:log_exe_name=1:log_path=$reports/report"
@@ -126,8 +128,9 @@ case "$san" in
         # Linux a program reports its leaks, while aetherc and ae turn theirs
         # off (compiler/aether_toolchain_asan.h), since aetherc's leaks are
         # gated shape by shape in check_compiler_leaks.sh (#1667). Their
-        # memory errors still stop them. With leaks only reported,
-        # LeakSanitizer's exit code is 0, so a leak alone fails no test.
+        # memory errors still stop them. A program that leaks exits 23, so
+        # the test that ran it fails; with SAN_LEAKS=report LeakSanitizer's
+        # exit code is 0, and a leak alone fails no test.
         ASAN_OPTIONS="halt_on_error=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:detect_odr_violation=0:verify_asan_link_order=0:log_exe_name=1:log_path=$reports/report"
         LSAN_OPTIONS="exitcode=$([ $leaks_fail = 1 ] && echo 23 || echo 0)"
         export ASAN_OPTIONS LSAN_OPTIONS

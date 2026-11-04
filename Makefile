@@ -3268,12 +3268,14 @@ test-ubsan:
 # The same, under AddressSanitizer and LeakSanitizer (#3539): a heap overflow,
 # a use after free or a double free in libaether, std or the generated code of
 # any program the sweep builds stops that program, and a block it never freed
-# is reported when it exits (build/asan/reports). `test-asan` above runs only
-# the C unit runner; this one runs the .ae corpus too. AE_SWEEP_SHARD=k/n
+# is reported when it exits (build/asan/reports) and fails the run (#3547);
+# SAN_LEAKS=report lists the leaks without failing. `test-asan` above runs
+# only the C unit runner; this one runs the .ae corpus too. AE_SWEEP_SHARD=k/n
 # splits the corpus (asan.yml runs it in shards). Linux or macOS.
+SAN_LEAKS ?= fail
 .PHONY: test-asan-ae
 test-asan-ae:
-	@SAN=asan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
+	@SAN=asan SAN_LEAKS="$(SAN_LEAKS)" MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check
