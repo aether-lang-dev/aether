@@ -2,10 +2,10 @@
 //
 // Run: ae run tests/examples/fixture/contrib_bare.ae
 
-import contrib.host.lua
+import contrib.host.tcl
 
 main() {
-    lua.run("print('hi')")
+    tcl.run("puts hi")
 }
 
 // Output:

@@ -1,6 +1,6 @@
 // contrib.host.go — Go Language Host Module
 //
-// Unlike Lua/Python/Ruby/Tcl which embed an interpreter in the Aether
+// Unlike Python/Ruby/Tcl which embed an interpreter in the Aether
 // process, Go has its own runtime and scheduler that can't share a
 // process with another runtime. Following the contrib/host/aether
 // pattern: the Go host module runs Go code as a separate subprocess

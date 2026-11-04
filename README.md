@@ -22,7 +22,7 @@ The load-bearing features:
 
 - **Actor concurrency**, scheduled across cores by the runtime: lock-free messaging, locality-aware spawning, work stealing. See [Actor Concurrency](docs/actor-concurrency.md).
 - **Config IS code**: library APIs double as typed, sandboxable configuration DSLs via trailing-block closures, so operators run real Aether instead of YAML. See [Config IS Code](docs/config-is-code.md).
-- **Polyglot host, both directions**: run Lua / Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
+- **Polyglot host, both directions**: run Python / Perl / Ruby / Tcl / JS in-process under the same grant list, or embed Aether into Python, Java, and Ruby through `--emit=lib` typed SDKs with per-guest memory and deadline caps. See [Embedding & emit=lib](docs/emit-lib.md).
 - **Networking in the stdlib**: an HTTP server with TLS, HTTP/2, WebSocket, SSE, and zero-copy `sendfile(2)`, plus a reverse proxy with load balancing, health checks, caching and a circuit breaker. See [HTTP Server](docs/http-server.md) and [Reverse Proxy](docs/http-reverse-proxy.md).
 - **Deterministic memory, no garbage collector**: strings, closures and the structs, tuples and optionals built from them are reference counted by the compiler and released at a point the source shows; containers and C resources are freed with `defer`. Each meaningful combination of value kind, place and transfer is a cell of the ownership grid, which CI runs on every pull request to catch leaks, double frees and use after free. See [Memory Management](docs/memory-management.md).
 - **Ergonomics**: type inference, `(value, err)` multi-value returns, optionals and sum types checked at compile time, named and default arguments, `requires`/`ensures` contracts, `@derive(eq)` and `@derive(schema)`, and a single `ae` command for build, run, test, fmt and packages. See [Language Reference](docs/language-reference.md).
@@ -70,7 +70,7 @@ cd aether
 ./install.sh
 ```
 
-Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`. Add `--contrib-too` (`./install.sh --contrib-too`) to also build and install the native contrib modules (sqlite, embedded Python/Lua/…) whose dev libraries your machine has.
+Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`. Add `--contrib-too` (`./install.sh --contrib-too`) to also build and install the native contrib modules (sqlite, embedded Python/Tcl/…) whose dev libraries your machine has.
 
 **Windows, download and run:**
 
@@ -279,7 +279,7 @@ aether/
 │   ├── parsers/        # xml_expat (SAX XML via libexpat)
 │   ├── templating/     # liquid (Shopify-Liquid port) + native emitter DSL
 │   ├── tinyweb/        # Server-side request/response DSL
-│   └── host/<lang>/    # Embed js, lua, perl, python, ruby, tcl, duktape,
+│   └── host/<lang>/    # Embed js, perl, python, ruby, tcl, duktape,
 │                       #   tinygo, go, java, factor, racket, rhombus in-process
 ├── tools/              # Developer tools
 │   ├── ae.c            # Unified CLI tool (ae command)

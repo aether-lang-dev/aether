@@ -1,5 +1,5 @@
 // Integration tests for contrib.host.stunt, co-located with the bridge like
-// the Lua and Ruby ones: driven through the import, so they cover
+// the Python and Ruby ones: driven through the import, so they cover
 // module.ae's declarations and the contrib-link plumbing too. The sandbox
 // rows of the catalogue are in tests/integration/contrib_host_stunt; these
 // are the bridge's own surface.

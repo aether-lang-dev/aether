@@ -18,7 +18,7 @@
 #
 # Examples:
 #   MODULES=python                    # build only host_python; fail if it can't
-#   MODULES=python,lua                # build python AND lua; fail if either can't
+#   MODULES=python,tcl                # build python AND tcl; fail if either can't
 #   (unset)                           # build-all, tolerate skips
 #
 # Writes build/contrib/MANIFEST listing one line per built archive:
@@ -225,7 +225,7 @@ build_vendored_sqlite() {
 # The earlier vendored-fallback path
 # (`/opt/aether/include/<lang>/` populated from
 # hosted-language-headers) was removed when ctr_notes.md Bug 6 proved
-# pyconfig.h / luaconf.h / perl.h are distro-generated multiarch
+# pyconfig.h / perl.h are distro-generated multiarch
 # dispatchers that can't be portably vendored. The aether-build image
 # now apt-installs the matching -dev kit per `--with=<lang>` layer.
 
@@ -272,16 +272,6 @@ probe_avcodec() {
         pkg-config --cflags-only-I libavcodec libavformat libavutil libswscale libswresample
         return 0
     fi
-    return 1
-}
-
-probe_lua() {
-    for v in lua5.4 lua5.3 lua; do
-        if pkg-config --exists "$v" 2>/dev/null; then
-            pkg-config --cflags-only-I "$v"
-            return 0
-        fi
-    done
     return 1
 }
 
@@ -391,7 +381,7 @@ probe_quickjs() {
 }
 
 probe_factor() {
-    # The bridge .c loads libfactor purely via dlopen (mirrors host/lua,
+    # The bridge .c loads libfactor purely via dlopen (mirrors host/tcl,
     # host/python after their dlopen rewrites) — it needs NO Factor dev
     # lib at COMPILE time. The aether-lang-dev/factor-language fork's
     # libfactor + bootstrapped factor.image are only required at RUNTIME
@@ -465,9 +455,8 @@ cross_class() {   # <module-name> -> echoes the class token
         # RUNTIME ("dlopen, not -l<x>") but #include the language headers at
         # COMPILE time. Contrib archives are .o-only (no link), so the sysroot
         # needs only the headers — the `tier3:<hdr>:` form (empty lib) checks
-        # for the header alone. aether-crossbuild recipes/{lua,duktape}.sh stage
-        # them. Cross-buildable; the target dlopen's its own liblua/libduktape.
-        host_lua)              echo "tier3:lua.h:" ;;
+        # for the header alone. aether-crossbuild recipes/duktape.sh stages
+        # it. Cross-buildable; the target dlopen's its own libduktape.
         host_duktape)          echo "tier3:duktape.h:" ;;
         # stunt's bridge has no dependency at all: it compiles like core.
         host_stunt)            echo "tier1" ;;
@@ -583,7 +572,6 @@ CATALOGUE=(
     "sqlite|sqlite       contrib/sqlite/aether_sqlite.c           AETHER_HAS_SQLITE  probe_sqlite"
     "avcodec|avcodec     contrib/avcodec/aether_avcodec.c         AETHER_HAS_AVCODEC probe_avcodec"
     "python|host_python  contrib/host/python/aether_host_python.c AETHER_HAS_PYTHON  probe_python"
-    "lua|host_lua        contrib/host/lua/aether_host_lua.c       AETHER_HAS_LUA     probe_lua"
     "perl|host_perl      contrib/host/perl/aether_host_perl.c     AETHER_HAS_PERL    probe_perl"
     "ruby|host_ruby      contrib/host/ruby/aether_host_ruby.c     AETHER_HAS_RUBY    probe_ruby"
     "duktape|host_duktape  contrib/host/duktape/aether_host_duktape.c  AETHER_HAS_DUKTAPE  probe_duktape"

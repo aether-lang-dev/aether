@@ -27,7 +27,7 @@ reimplementation note" boxes.
 | Surface syntax | Go-ish: braces, `func name(x: int) -> int` | Python-ish: indentation **+** statement `;` terminators |
 | Concurrency | Erlang-style actors (`send`/`receive`) | None visible in the wild, single-threaded model |
 | Capability story | `--emit=lib` + `--with=fs,net,os`; `hide`/`seal except` per-block; `LD_PRELOAD` libc-call gate | None, Flint is a host-trust language |
-| Sandboxed embedding | `contrib.host.<lang>.run_sandboxed(perms, code)` for Lua/Python/Perl/Ruby/Tcl/JS | None |
+| Sandboxed embedding | `contrib.host.<lang>.run_sandboxed(perms, code)` for Python/Perl/Ruby/Tcl/JS | None |
 | C interop | `extern "C"` declarations; user writes the C, Aether sees signatures | **FIP** (Flint Interop Protocol): out-of-process bindings generator that auto-derives `.ft` stubs from C headers via per-language modules |
 | Sum types | (no native) | `variant V: i32, f32, bool;` + tagged variants |
 | Errors | Go-style `(value, err string)`; empty string = ok | First-class `error ErrFoo: A, B;` hierarchies, `throw`/`catch`, error sets in signatures, `type_id`/`value_id`/`message` |
@@ -823,7 +823,7 @@ it shouldn't lose ground while porting features in.
 - **`libaether_sandbox.so`** LD_PRELOAD libc-call gate, runtime sandbox at
   the syscall layer. Flint has nothing here.
 - **In-process embedded interpreters** with `contrib.host.<lang>.run_sandboxed(perms, code)`
-  for Lua/Python/Perl/Ruby/Tcl/JS. Flint has no equivalent, and the
+  for Python/Perl/Ruby/Tcl/JS. Flint has no equivalent, and the
   direction is genuinely opposite, not just absent:
 
   | | Aether `contrib.host.<lang>` | Flint FIP |

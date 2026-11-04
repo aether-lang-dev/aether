@@ -3,7 +3,7 @@
 # aether-sandbox.jar that contrib.host.java needs, capture it,
 # purge the JDK. Layer cost: ~50 KB (the JAR) instead of ~250 MB.
 #
-# Unlike the in-process C-bridge hosts (python/lua/perl/ruby/js),
+# Unlike the in-process C-bridge hosts (python/perl/ruby/js),
 # contrib.host.java spawns `java` as a subprocess from end-user
 # programs. So:
 #   - BUILD-TIME (here): javac + jar to produce aether-sandbox.jar

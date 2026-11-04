@@ -683,7 +683,7 @@ contract `AETHER_<LANG>_LDFLAGS` / `AETHER_<LANG>_CFLAGS` so the
 existing `${VAR}` allowlist accepts it without code changes here.
 
 For bridges that **dlopen** their host library at runtime (python and,
-in due course, lua/perl/ruby), users should NOT need to set
+in due course, perl/ruby), users should NOT need to set
 `${AETHER_<LANG>_LDFLAGS}` at all, `ae build` adds nothing
 libpython-related to the link line, and the bridge dlopens
 `libpython3.so` / etc. at first call. See `contrib/host/python/README.md`

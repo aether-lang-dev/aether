@@ -32,54 +32,6 @@ echo "  Shared Map Tests — All Host Modules"
 echo "============================================"
 echo ""
 
-# --- Lua ---
-echo "=== Lua ==="
-if [ $LUA_AVAILABLE -eq 0 ]; then skip "Lua"; else
-LUA_OUT=$(gcc -o $AE_TMP/test_map_lua \
-    "$ROOT/contrib/host/lua/aether_host_lua.c" \
-    "$ROOT/runtime/aether_sandbox.c" \
-    "$ROOT/runtime/aether_shared_map.c" \
-    $LUA_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_LUA -DAETHER_HAS_SANDBOX \
-    -L"$ROOT/build" -laether $LUA_LIBS -ldl -lm -lrt \
-    -Wno-discarded-qualifiers \
-    -xc - 2>/dev/null << 'CEOF'
-#include <stdio.h>
-#include <stdint.h>
-#include "aether_shared_map.h"
-extern void* list_new(void); extern void list_add(void*, void*); extern void list_free(void*);
-extern int lua_run_sandboxed_with_map(void*, const char*, uint64_t);
-extern void lua_finalize(void);
-void aether_args_init(int a, char** v){(void)a;(void)v;}
-void* _aether_ctx_stack[64]; int _aether_ctx_depth = 0;
-int main() {
-    void* p = list_new();
-    list_add(p,"env"); list_add(p,"*");
-    list_add(p,"fs_read"); list_add(p,"/usr/*");
-    list_add(p,"fs_read"); list_add(p,"/etc/*");
-    uint64_t t; AetherSharedMap* m = aether_shared_map_new(&t);
-    aether_shared_map_put(m, "name", "Alice");
-    aether_shared_map_put(m, "age", "30");
-    lua_run_sandboxed_with_map(p,
-        "local n = aether_map_get('name')\n"
-        "local a = aether_map_get('age')\n"
-        "local s = aether_map_get('secret')\n"
-        "aether_map_put('greeting', 'hello ' .. n)\n"
-        "aether_map_put('name', 'TAMPERED')\n"
-        "print('lua:name=' .. n .. ',age=' .. a .. ',secret=' .. (s or 'nil'))\n"
-    , t);
-    aether_shared_map_revoke_token(t);
-    printf("lua:result=%s\n", aether_shared_map_get(m, "greeting"));
-    printf("lua:untampered=%s\n", aether_shared_map_get(m, "name"));
-    aether_shared_map_free(m); lua_finalize(); list_free(p);
-    return 0;
-}
-CEOF
-LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_lua 2>/dev/null)
-check "Lua read" "lua:name=Alice,age=30,secret=nil" "$LUA_OUT"
-check "Lua write" "lua:result=hello Alice" "$LUA_OUT"
-check "Lua frozen" "lua:untampered=Alice" "$LUA_OUT"
-fi
-
 # --- JS (Duktape) ---
 echo ""
 echo "=== JS (Duktape) ==="
@@ -391,5 +343,5 @@ echo "============================================"
 echo "  $PASS passed, $FAIL failed"
 echo "============================================"
 
-rm -f $AE_TMP/test_map_lua $AE_TMP/test_map_js $AE_TMP/test_map_py $AE_TMP/test_map_perl $AE_TMP/test_map_ruby $AE_TMP/test_map_java $AE_TMP/test_map_factor
+rm -f $AE_TMP/test_map_js $AE_TMP/test_map_py $AE_TMP/test_map_perl $AE_TMP/test_map_ruby $AE_TMP/test_map_java $AE_TMP/test_map_factor
 exit $FAIL

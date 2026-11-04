@@ -141,7 +141,7 @@ that aren't link-suitable:
   source because `make install` does NOT also build/install
   `libaether_host_<lang>.a` only `make install-contrib` does
   that, and it's a separate opt-in step (because each bridge
-  needs the matching dev library: `python3-dev`, `liblua5.4-dev`,
+  needs the matching dev library: `python3-dev`, `tcl-dev`,
   etc.). Downstream apps that `import contrib.host.<lang>` from a
   plain `make install` tree compile the bridge as source into
   their own build. The matching `libaether_<X>.a` archives carry

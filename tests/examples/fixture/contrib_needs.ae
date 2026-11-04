@@ -1,10 +1,10 @@
 // Imports a contrib bridge and says what it needs: type-checked only.
 //
 // Run: ae run tests/examples/fixture/contrib_needs.ae
-// Needs: Lua development files
+// Needs: Tcl development files
 
-import contrib.host.lua
+import contrib.host.tcl
 
 main() {
-    lua.run("print('hi')")
+    tcl.run("puts hi")
 }

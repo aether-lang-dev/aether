@@ -2650,7 +2650,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #
 # Modules covered (v1):
 #   - sqlite                    (-lsqlite3)
-#   - host/{python,lua,perl,ruby,duktape,tcl,tinygo}
+#   - host/{python,perl,ruby,duktape,tcl,tinygo}
 #   - host/factor               (dlopen libfactor; archive builds bare,
 #                                runtime needs the factor-language fork)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
@@ -3325,7 +3325,7 @@ test-ubsan:
 # has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
 # the Racket VM), so it is not listed here (the check SKIPs missing-bridge
 # dirs). `stunt` is the test double (contrib/host/stunt/README.md).
-CONTRIB_HOST_LANGS = js lua perl python ruby tcl go tinygo factor aether racket quickjs stunt
+CONTRIB_HOST_LANGS = js perl python ruby tcl go tinygo factor aether racket quickjs stunt
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.
@@ -3605,8 +3605,6 @@ contrib-host-check: compiler ae stdlib stunt
 	    python) command -v python3 >/dev/null 2>&1 && { \
 	      AETHER_PYTHON_SONAME="$$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"; \
 	      export AETHER_PYTHON_SONAME; }; ;; \
-	    lua) for so in /usr/lib/*/liblua5.4.so /usr/lib/*/liblua5.3.so /usr/lib/liblua5.4.so; do \
-	      [ -f "$$so" ] && { AETHER_LUA_SONAME="$$so"; export AETHER_LUA_SONAME; break; }; done; ;; \
 	    perl) command -v perl >/dev/null 2>&1 && { \
 	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
 	      export AETHER_PERL_SONAME; }; ;; \

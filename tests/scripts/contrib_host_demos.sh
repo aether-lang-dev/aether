@@ -37,17 +37,6 @@ trap 'rm -rf "$tmpdir"' EXIT
 # available: "-I<path>" on line 1, "-L<path> -l<lib> ..." on line 2.
 # Exits 0 if available, 1 if not. Never prints to stderr.
 
-probe_lua() {
-    for v in lua5.4 lua5.3 lua; do
-        if pkg-config --exists "$v" 2>/dev/null; then
-            pkg-config --cflags-only-I "$v"
-            pkg-config --libs "$v"
-            return 0
-        fi
-    done
-    return 1
-}
-
 probe_python() {
     if command -v python3-config >/dev/null 2>&1; then
         python3-config --includes
@@ -194,11 +183,10 @@ CC="${CC:-cc}"
 printf "  using CC=%s\n" "$CC"
 printf "\n"
 
-for lang in duktape lua perl python ruby tcl go tinygo; do
+for lang in duktape perl python ruby tcl go tinygo; do
     flag=""
     case "$lang" in
         duktape) flag="AETHER_HAS_DUKTAPE" ;;
-        lua)     flag="AETHER_HAS_LUA" ;;
         perl)    flag="AETHER_HAS_PERL" ;;
         python)  flag="AETHER_HAS_PYTHON" ;;
         ruby)    flag="AETHER_HAS_RUBY" ;;

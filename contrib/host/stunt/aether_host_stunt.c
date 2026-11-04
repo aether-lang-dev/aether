@@ -1,6 +1,6 @@
 // aether_host_stunt.c: the bridge to stunt, the test double (README.md).
 //
-// Loads libstunt the way contrib/host/lua loads liblua: dlopen at the first
+// Loads libstunt the way contrib/host/tcl loads libtcl: dlopen at the first
 // call, every engine function resolved with dlsym, nothing to link. What it
 // does with it is what every in-process bridge must do with an interpreter:
 //

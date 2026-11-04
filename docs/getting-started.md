@@ -17,7 +17,7 @@ cd aether
 
 This builds the compiler, CLI tool, and standard library, then installs everything to `~/.aether`. After restarting your terminal (or running `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`), the `ae` command is available globally.
 
-To also build the native contrib modules (sqlite, embedded Python/Lua/…)
+To also build the native contrib modules (sqlite, embedded Python/Tcl/…)
 whose dev libraries your machine has:
 
 ```bash

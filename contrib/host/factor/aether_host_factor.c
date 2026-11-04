@@ -12,7 +12,7 @@
 // VM is reused across calls, so state persists between evals — which is
 // what makes the k-v map (set/get) work.
 //
-// LOADING MODEL: dlopen, mirroring contrib/host/lua and friends — symbols
+// LOADING MODEL: dlopen, mirroring contrib/host/tcl and friends — symbols
 // resolved via dlsym at first call, so the bridge .a has no unresolved
 // Factor symbols at link time and end-user binaries carry no DT_NEEDED
 // libfactor.
@@ -165,7 +165,7 @@ int factor_run_sandboxed(void* perms, const char* code) {
 // (e.g. a word-frequency map-reduce). Aether enumerates with map.keys(); no
 // host-side key-enumeration call is needed.
 //
-// Mechanism (mirrors contrib/host/lua's map_token bindings): the bridge
+// Mechanism (mirrors contrib/host/tcl's map_token bindings): the bridge
 // registers C callbacks into the fork via factor_embed_map_set_hooks; those
 // callbacks read/write the shared map by token. A small Factor FFI prelude
 // (LIBRARY: factor + FUNCTION:) is prepended to the user code so the script
