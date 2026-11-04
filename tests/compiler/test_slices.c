@@ -409,6 +409,47 @@ TEST(slices_string_view_holds_its_header_or_copies) {
     aether_slice_release(&c);
 }
 
+/* #3568: a buffer of struct elements carries a publish for what each holds,
+ * and a store into a slice's element publishes what it stores, as a string
+ * store there does (#3398): memory reached through a slice is memory
+ * another actor can reach. */
+TEST(slices_codegen_publishes_elements) {
+    ASTNode* ast = parse_source(
+        "struct Item { data: int[] }\n"
+        "main() { items = make([]Item, 2)\n  rows = make([]int[], 1)\n"
+        "  r = make([]int, 2)\n  rows[0] = r\n  println(\"${items.len} ${rows[0].len}\") }");
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(1, typecheck_program(ast));
+    char* c = generate_c(ast);
+    ASSERT_NOT_NULL(strstr(c, "static AETHER_MAYBE_UNUSED void _ae_spub_"));
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_set_shared((AetherSlice*)&("));
+    free(c);
+    free_ast_node(ast);
+}
+
+/* #3568: publishing a buffer makes what its elements hold count atomically
+ * too, the rows of a slice of slices here: another thread reaches them
+ * through it. The bit was set on the outer header alone, so two threads
+ * copying a row counted it plainly. A row stored after the publish is
+ * published by its store (aether_slice_set_shared), and publishing again
+ * walks nothing. */
+TEST(slices_publish_reaches_rows) {
+    AetherSlice outer = aether_slice_alloc(2, sizeof(AetherSlice), aether_slice_row_ops());
+    ((AetherSlice*)outer.ptr)[0] = aether_slice_alloc(3, sizeof(int), NULL);
+    ((AetherSlice*)outer.ptr)[1] = aether_slice_alloc(1, sizeof(int), NULL);
+    AetherSlice r0 = ((AetherSlice*)outer.ptr)[0];
+    AetherSlice r1 = ((AetherSlice*)outer.ptr)[1];
+    ASSERT_EQ(0, aether_slice_buf(r0)->refs & AETHER_SLICE_SHARED_BIT);
+    aether_slice_publish(outer);
+    ASSERT_TRUE((aether_slice_buf(outer)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_TRUE((aether_slice_buf(r0)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_TRUE((aether_slice_buf(r1)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_EQ(1, aether_slice_buf(r0)->refs & AETHER_SLICE_COUNT_MASK);
+    aether_slice_publish(outer);
+    ASSERT_EQ(1, aether_slice_buf(r1)->refs & AETHER_SLICE_COUNT_MASK);
+    aether_slice_release(&outer);   /* the rows with it */
+}
+
 /* #3568: the copy a header with its top byte set forces (a target whose heap
  * pointers carry a tag there, Android on aarch64) is a read-only view as the
  * string's own view is, so `free` of it is the same named panic everywhere.

@@ -31,9 +31,10 @@ typedef struct {
 
 /* #3568: a counted slice buffer whose elements own something (strings,
  * closures, structs or composites that hold them) carries its element
- * type's drop and copy in its header, `_ae_sops_<M>` (own_slice_ops), one
- * static table per element type `<M>`, generated with the element copy
- * `_ae_scopy_<M>(p)`. A slice of slices uses the runtime's own
+ * type's drop, copy and publish in its header, `_ae_sops_<M>`
+ * (own_slice_ops), one static table per element type `<M>`, generated with
+ * the element copy `_ae_scopy_<M>(p)` and publish `_ae_spub_<M>(p)`. A
+ * slice of slices uses the runtime's own
  * (aether_slice_row_ops): each row carries its element type itself. */
 static Type** g_sops_types = NULL;
 static int g_sops_count = 0;
@@ -480,8 +481,15 @@ static void emit_slice_ops(CodeGenerator* gen) {
         fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_scopy_%s(void* p) {\n", m);
         own_emit_part(gen, et, cg_internf("(*(%s*)p)", get_c_type(et)), OWN_RETAIN);
         fprintf(o, "}\n");
-        fprintf(o, "static AETHER_MAYBE_UNUSED const AetherSliceOps _ae_sops_%s = {%s, _ae_scopy_%s};\n",
-                m, own_unwind_fn(gen, et), m);
+        /* #3568: what the element holds, made atomic with the buffer when
+         * the buffer is published (aether_slice_publish). */
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_spub_%s(void* p) {\n", m);
+        fprintf(o, "    (void)p;\n");
+        own_emit_part(gen, et, cg_internf("(*(%s*)p)", get_c_type(et)), OWN_PUBLISH);
+        fprintf(o, "}\n");
+        fprintf(o, "static AETHER_MAYBE_UNUSED const AetherSliceOps _ae_sops_%s = "
+                   "{%s, _ae_scopy_%s, _ae_spub_%s};\n",
+                m, own_unwind_fn(gen, et), m, m);
     }
 }
 

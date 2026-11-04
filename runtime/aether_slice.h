@@ -118,6 +118,7 @@ typedef struct AetherSlice {
 typedef struct AetherSliceOps {
     void (*drop)(const void* elem);   /* give back what the element holds, empty it */
     void (*copy)(void* elem);         /* take a reference to what it holds, in place */
+    void (*publish)(void* elem);      /* make what it holds count atomically (#3568) */
 } AetherSliceOps;
 
 typedef struct AetherSliceBuf {
@@ -219,8 +220,12 @@ static inline void aether_slice_unref(AetherSlice s) {
 }
 
 /* `s` is reachable from other threads from here on (a module `var`, a
- * closure, a message, an actor's state): its count is atomic. Only the
- * thread that holds it alone sets the bit. */
+ * closure, a message, an actor's state): its count is atomic, and so is the
+ * count of everything its elements hold (a row of a slice of slices, a
+ * struct element's slices and strings), which another thread reaches
+ * through it. The bit is set atomically, and the elements are published by
+ * whoever set it, once: a buffer already published was walked then, and an
+ * element stored into it since was published by its store (#3568). */
 static inline void aether_slice_publish(AetherSlice s) {
     if (s.flags & AETHER_SLICE_STRING) {
         aether_string_publish(aether_slice_string_of(s));
@@ -228,7 +233,12 @@ static inline void aether_slice_publish(AetherSlice s) {
     }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
-    if (!(h->refs & AETHER_SLICE_SHARED_BIT)) h->refs |= AETHER_SLICE_SHARED_BIT;
+    if (h->refs & AETHER_SLICE_SHARED_BIT) return;
+    if (aether_count_or(&h->refs, AETHER_SLICE_SHARED_BIT) & AETHER_SLICE_SHARED_BIT) return;
+    if (h->ops && h->ops->publish) {
+        char* e = (char*)h + AETHER_SLICE_HEAD;
+        for (uint64_t i = 0; i < h->len; i++) h->ops->publish(e + i * h->elem_size);
+    }
 }
 
 /* #3025: `s` as a read-only view: the same elements, a store through it a
@@ -631,10 +641,16 @@ static inline void aether_slice_retain_at(void* p) {
     aether_slice_retain(*(AetherSlice*)p);
 }
 
+/* The publish of the slice at `p`, a row of a published slice of slices. */
+static inline void aether_slice_publish_at(void* p) {
+    aether_slice_publish(*(AetherSlice*)p);
+}
+
 /* The element ops of a slice of slices: each row is a counted slice of its
  * own, which carries its element type in its own header. */
 static inline const AetherSliceOps* aether_slice_row_ops(void) {
-    static const AetherSliceOps ops = {aether_slice_release_at, aether_slice_retain_at};
+    static const AetherSliceOps ops = {aether_slice_release_at, aether_slice_retain_at,
+                                       aether_slice_publish_at};
     return &ops;
 }
 

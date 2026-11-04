@@ -1692,11 +1692,21 @@ static int c_field(Ctx* c, ASTNode* lhs) {
 }
 
 /* Is `place` one other threads may read: a module-level `var`, an actor's
- * state field? A store there publishes what it stores. */
+ * state field, or a place reached through a pointer, an actor's reference
+ * or a slice's element? A store there publishes what it stores. */
 static int shared_place(Ctx* c, ASTNode* place) {
     while (place && (place->type == AST_MEMBER_ACCESS || place->type == AST_ARRAY_ACCESS) &&
-           place->child_count > 0)
+           place->child_count > 0) {
+        /* #3568: the rule a string store follows (#3398, codegen's
+         * store_publishes): a place reached through a pointer, an actor's
+         * reference or a slice's element is memory another actor can reach,
+         * so what is stored there counts atomically from then on. */
+        Type* ht = place->children[0] ? place->children[0]->node_type : NULL;
+        if (ht && (ht->kind == TYPE_PTR || ht->kind == TYPE_ACTOR_REF ||
+                   (place->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
+            return 1;
         place = place->children[0];
+    }
     return place && place->type == AST_IDENTIFIER && place->value &&
            (strmap_has(&c->globals, place->value) || strmap_has(&c->state, place->value));
 }

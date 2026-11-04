@@ -8447,6 +8447,14 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         fprintf(o, ", %d)", expr->line);
         seq_next(gen, &s);
         fprintf(o, "((%s*)%s->ptr)[%s->len - 1] = %s", ect, p, p, v);
+        /* #3568: a store into the slice's element publishes what it stores
+         * (shared_place in slice_own.c, store_publishes for a string). */
+        const char* pub = own_publish_call(gen, et, cg_internf("((%s*)%s->ptr)[%s->len - 1]",
+                                                               ect, p, p));
+        if (pub) {
+            seq_next(gen, &s);
+            fprintf(o, "%s", pub);
+        }
         seq_close(gen, &s);
         return 1;
     }
@@ -10823,6 +10831,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, ", %d)", expr->line);
                     seq_next(gen, &s);
                     fprintf(gen->output, "((%s*)%s.ptr)[%s.len - 1] = %s", ect, g, g, v);
+                    /* #3568: an element store, which publishes what it
+                     * stores as a store into a slice's element does. */
+                    const char* pub = own_publish_call(
+                        gen, et, cg_internf("((%s*)%s.ptr)[%s.len - 1]", ect, g, g));
+                    if (pub) {
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "%s", pub);
+                    }
                     seq_next(gen, &s);
                     fprintf(gen->output, "%s", g);
                     seq_close(gen, &s);
