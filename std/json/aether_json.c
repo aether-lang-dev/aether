@@ -610,7 +610,10 @@ enum {
     // (take_child): it lives in that document's arena, which the container's
     // destroys with itself. A copy of the container's own nodes stops here
     // and keeps the pointer, since what is under it is not in that arena.
-    JV_FLAG_ADOPTED     = 0x08u
+    JV_FLAG_ADOPTED     = 0x08u,
+    // Marks a JSON_OBJECT that is indexed (#3538): its key lengths'
+    // allocation goes on past `capacity` with the index (obj_index_table).
+    JV_FLAG_OBJ_INDEX   = 0x10u
 };
 
 // Parallel arrays for an object's (key, key_len, value) triples.
@@ -620,13 +623,6 @@ typedef struct JsonObjBlock {
     const char** keys;
     uint32_t*    key_lens;
     JsonValue**  values;
-    /* An object set into enough keys is indexed (#3538): `index` is an
-     * open addressing table of `index_cap` slots (a power of two), each 0
-     * or a key's position plus one, the first of equal keys. NULL until
-     * then, and for an object made by the parser or by a copy, which a set
-     * indexes when it next adds to it. */
-    uint32_t*    index;
-    uint32_t     index_cap;
 } JsonObjBlock;
 
 struct JsonValue {
@@ -1243,6 +1239,64 @@ static int arr_reserve(JsonValue* arr, Arena* a, uint32_t needed) {
     return 1;
 }
 
+/* Objects up to this many keys are searched in order; a set that takes one
+ * past it indexes the object (#3538), so building an object of k keys is
+ * no longer O(k^2) in its key compares. An object of more key slots than
+ * JSON_OBJ_INDEX_MAX_CAP is searched in order, so an index's size never
+ * overflows.
+ *
+ * The index costs an object below that size nothing: it is an open
+ * addressing table of obj_index_slots(capacity) slots, each 0 or a key's
+ * position plus one (the first of equal keys), held in the key lengths'
+ * allocation after its `capacity` lengths, and JV_FLAG_OBJ_INDEX says it is
+ * there. An object made by the parser or by a copy has none until a set
+ * adds to it. */
+#define JSON_OBJ_INDEX_MIN 16u
+#define JSON_OBJ_INDEX_MAX_CAP (1u << 28)
+
+static uint32_t json_key_hash(const char* k, uint32_t n) {
+    uint32_t h = 2166136261u;   /* FNV-1a */
+    for (uint32_t i = 0; i < n; i++) {
+        h ^= (unsigned char)k[i];
+        h *= 16777619u;
+    }
+    return h;
+}
+
+/* A power of two at least twice `capacity`, so the index is never more
+ * than half full. */
+static uint32_t obj_index_slots(uint32_t capacity) {
+    uint32_t s = 32u;
+    while (s < 2u * capacity) s *= 2u;
+    return s;
+}
+
+static uint32_t* obj_index_table(const JsonValue* obj) {
+    return obj->data.obj.blk->key_lens + obj->data.obj.capacity;
+}
+
+/* Key `i` into the index, unless an equal key is in it already: the first
+ * of equal keys (a parsed document may repeat one) is the one found. */
+static void obj_index_put(JsonValue* obj, uint32_t i) {
+    const JsonObjBlock* blk = obj->data.obj.blk;
+    uint32_t* t = obj_index_table(obj);
+    uint32_t mask = obj_index_slots(obj->data.obj.capacity) - 1u;
+    uint32_t s = json_key_hash(blk->keys[i], blk->key_lens[i]) & mask;
+    while (t[s]) {
+        uint32_t j = t[s] - 1u;
+        if (blk->key_lens[j] == blk->key_lens[i] &&
+            memcmp(blk->keys[j], blk->keys[i], blk->key_lens[i]) == 0) return;
+        s = (s + 1u) & mask;
+    }
+    t[s] = i + 1u;
+}
+
+static void obj_index_rebuild(JsonValue* obj) {
+    memset(obj_index_table(obj), 0,
+           sizeof(uint32_t) * obj_index_slots(obj->data.obj.capacity));
+    for (uint32_t i = 0; i < obj->data.obj.count; i++) obj_index_put(obj, i);
+}
+
 // Analogous for objects — the three parallel arrays grow together,
 // reachable through a single JsonObjBlock pointer hanging off the value.
 // First reserve allocates the block; subsequent reserves grow the arrays.
@@ -1259,10 +1313,11 @@ static int obj_reserve(JsonValue* obj, Arena* a, uint32_t needed) {
         blk->keys = NULL;
         blk->key_lens = NULL;
         blk->values = NULL;
-        blk->index = NULL;
-        blk->index_cap = 0;
         obj->data.obj.blk = blk;
     }
+    /* An indexed object keeps its index, sized to the new capacity, unless
+     * that capacity is past what is indexed. */
+    int indexed = (obj->flags & JV_FLAG_OBJ_INDEX) && new_cap <= JSON_OBJ_INDEX_MAX_CAP;
 
     const char** gk = (const char**)arena_grow(
         a, blk->keys,
@@ -1270,10 +1325,12 @@ static int obj_reserve(JsonValue* obj, Arena* a, uint32_t needed) {
         sizeof(const char*) * new_cap);
     if (!gk) return 0;
 
+    /* Only the lengths are copied: the old index is rebuilt for the new
+     * capacity. */
     uint32_t* gl = (uint32_t*)arena_grow(
         a, blk->key_lens,
         sizeof(uint32_t) * old_cap,
-        sizeof(uint32_t) * new_cap);
+        sizeof(uint32_t) * ((size_t)new_cap + (indexed ? obj_index_slots(new_cap) : 0u)));
     if (!gl) return 0;
 
     JsonValue** gv = (JsonValue**)arena_grow(
@@ -1286,21 +1343,9 @@ static int obj_reserve(JsonValue* obj, Arena* a, uint32_t needed) {
     blk->key_lens = gl;
     blk->values   = gv;
     obj->data.obj.capacity = new_cap;
+    if (indexed) obj_index_rebuild(obj);
+    else obj->flags &= (uint8_t)~JV_FLAG_OBJ_INDEX;
     return 1;
-}
-
-/* Objects up to this many keys are searched in order; a set that takes one
- * past it indexes the object (#3538), so building an object of k keys is
- * no longer O(k^2) in its key compares. */
-#define JSON_OBJ_INDEX_MIN 16u
-
-static uint32_t json_key_hash(const char* k, uint32_t n) {
-    uint32_t h = 2166136261u;   /* FNV-1a */
-    for (uint32_t i = 0; i < n; i++) {
-        h ^= (unsigned char)k[i];
-        h *= 16777619u;
-    }
-    return h;
 }
 
 /* The position of the first key of `obj` equal to the `len` bytes at
@@ -1311,10 +1356,11 @@ static uint32_t obj_find(const JsonValue* obj, const char* key, uint32_t len) {
     const JsonObjBlock* blk = obj->data.obj.blk;
     uint32_t n = obj->data.obj.count;
     if (!blk || !n) return UINT32_MAX;
-    if (blk->index) {
-        uint32_t mask = blk->index_cap - 1u;
+    if (obj->flags & JV_FLAG_OBJ_INDEX) {
+        const uint32_t* t = obj_index_table(obj);
+        uint32_t mask = obj_index_slots(obj->data.obj.capacity) - 1u;
         for (uint32_t s = json_key_hash(key, len) & mask;; s = (s + 1u) & mask) {
-            uint32_t e = blk->index[s];
+            uint32_t e = t[s];
             if (!e) return UINT32_MAX;
             if (blk->key_lens[e - 1u] == len && memcmp(blk->keys[e - 1u], key, len) == 0)
                 return e - 1u;
@@ -1325,43 +1371,28 @@ static uint32_t obj_find(const JsonValue* obj, const char* key, uint32_t len) {
     return UINT32_MAX;
 }
 
-/* Key `i` into the index, unless an equal key is in it already: the first
- * of equal keys (a parsed document may repeat one) is the one found. */
-static void obj_index_put(JsonObjBlock* blk, uint32_t i) {
-    uint32_t mask = blk->index_cap - 1u;
-    uint32_t s = json_key_hash(blk->keys[i], blk->key_lens[i]) & mask;
-    while (blk->index[s]) {
-        uint32_t j = blk->index[s] - 1u;
-        if (blk->key_lens[j] == blk->key_lens[i] &&
-            memcmp(blk->keys[j], blk->keys[i], blk->key_lens[i]) == 0) return;
-        s = (s + 1u) & mask;
-    }
-    blk->index[s] = i + 1u;
-}
-
 /* A set appended the object's last key: index the object once it is big
- * enough, grow the index at half full, or add the one key to it. With no
- * memory for an index the object is searched in order, as before. */
+ * enough, or add the one key to its index (obj_reserve resized the index
+ * with the capacity, so it is at most half full). With no memory for an
+ * index the object is searched in order, as before. */
 static void obj_index_added(JsonValue* obj, Arena* a) {
-    JsonObjBlock* blk = obj->data.obj.blk;
     uint32_t n = obj->data.obj.count;
     if (n < JSON_OBJ_INDEX_MIN) return;
-    if (blk->index && n <= blk->index_cap / 2u) {
-        obj_index_put(blk, n - 1u);
+    if (obj->flags & JV_FLAG_OBJ_INDEX) {
+        obj_index_put(obj, n - 1u);
         return;
     }
-    uint32_t cap = blk->index_cap ? blk->index_cap * 2u : 64u;
-    while (cap / 2u < n) cap *= 2u;
-    uint32_t* t = (uint32_t*)arena_alloc(a, sizeof(uint32_t) * cap);
-    if (!t) {
-        blk->index = NULL;
-        blk->index_cap = 0;
-        return;
-    }
-    memset(t, 0, sizeof(uint32_t) * cap);
-    blk->index = t;
-    blk->index_cap = cap;
-    for (uint32_t i = 0; i < n; i++) obj_index_put(blk, i);
+    uint32_t cap = obj->data.obj.capacity;
+    if (cap > JSON_OBJ_INDEX_MAX_CAP) return;
+    JsonObjBlock* blk = obj->data.obj.blk;
+    uint32_t* gl = (uint32_t*)arena_grow(
+        a, blk->key_lens,
+        sizeof(uint32_t) * cap,
+        sizeof(uint32_t) * ((size_t)cap + obj_index_slots(cap)));
+    if (!gl) return;
+    blk->key_lens = gl;
+    obj->flags |= JV_FLAG_OBJ_INDEX;
+    obj_index_rebuild(obj);
 }
 
 static JsonValue* parse_array(Parser* s, int depth) {
@@ -1785,8 +1816,6 @@ static JsonValue* copy_into_arena(JsonValue* src, Arena* dst_arena, int keep_ado
                 blk->keys = keys;
                 blk->key_lens = lens;
                 blk->values = vals;
-                blk->index = NULL;
-                blk->index_cap = 0;
                 out->data.obj.blk = blk;
             }
             out->data.obj.count = n;
@@ -1822,7 +1851,8 @@ static int ensure_container_arena(JsonValue* container) {
     // stays valid.
     container->type = copy->type;
     container->data = copy->data;
-    container->flags |= JV_FLAG_ROOT;
+    /* The copy's arrays carry no index (JV_FLAG_OBJ_INDEX is the arrays'). */
+    container->flags = (uint8_t)((container->flags & ~JV_FLAG_OBJ_INDEX) | JV_FLAG_ROOT);
     container->arena = a;
     return 1;
 }
