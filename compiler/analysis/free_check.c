@@ -274,20 +274,20 @@ static ASTNode* arg_place(ASTNode* a) {
 static void use(Walk* w, FState* s, ASTNode* id) {
     FVar* v = find(s, id->value);
     if (!v || v->unknown) return;
-    char msg[400], help[400];
+    const char* msg = ""; const char* help = "";
     if (v->freed == FC_FREED) {
-        snprintf(msg, sizeof msg, "'%s' is used after it was freed%s at line %d", v->name,
+        msg = aether_internf("'%s' is used after it was freed%s at line %d", v->name,
                  w->carried ? " on the loop's previous turn" : "", node_line(v->freed_at));
-        snprintf(help, sizeof help,
+        help = aether_internf(
                  "use it before the free, or bind '%s' to a fresh value first", v->name);
         report(w, id, AETHER_ERR_USE_AFTER_FREE, msg, help);
         v->freed = FC_MAYBE;   /* once per path */
     } else if (v->root && v->gone == FC_FREED) {
-        snprintf(msg, sizeof msg,
+        msg = aether_internf(
                  "'%s' views the storage of '%s', which %s%s at line %d", v->name, v->root,
                  v->gone_moved ? "may have moved" : "was freed",
                  w->carried ? " on the loop's previous turn" : "", node_line(v->gone_at));
-        snprintf(help, sizeof help,
+        help = aether_internf(
                  "%s: take the view again after that call",
                  v->gone_moved ? "a call that can grow a buffer may move its storage, so a view "
                                  "taken before it no longer points at it"
@@ -397,11 +397,11 @@ static void bind(Walk* w, FState* s, const char* name, ASTNode* init) {
 static void free_call_check(Walk* w, FState* s, ASTNode* id) {
     FVar* v = get(s, id->value);
     if (!v || v->unknown) return;
-    char msg[400], help[400];
+    const char* msg = ""; const char* help = "";
     if (v->freed == FC_FREED) {
-        snprintf(msg, sizeof msg, "'%s' is freed again: it was freed%s at line %d", v->name,
+        msg = aether_internf("'%s' is freed again: it was freed%s at line %d", v->name,
                  w->carried ? " on the loop's previous turn" : "", node_line(v->freed_at));
-        snprintf(help, sizeof help,
+        help = aether_internf(
                  w->carried ? "bind '%s' to a fresh value each turn before freeing it, or free it "
                               "once after the loop"
                             : "free '%s' once",
@@ -478,17 +478,17 @@ static void check_exit(Walk* w, FState* s, ASTNode* at) {
         FVar* v = find(s, c->frees_params[i]);
         int ok = v && v->released && !v->rebound;
         if (ok || (v && v->unknown)) continue;
-        char msg[400], help[400];
+        const char* msg = ""; const char* help = "";
         if (v && v->rebound)
-            snprintf(msg, sizeof msg,
+            msg = aether_internf(
                      "'%s' is declared `@frees`, but it is bound to something else before it is "
                      "freed on a path to here",
                      c->frees_params[i]);
         else
-            snprintf(msg, sizeof msg,
+            msg = aether_internf(
                      "'%s' is declared `@frees`, but a path reaches here without freeing it",
                      c->frees_params[i]);
-        snprintf(help, sizeof help,
+        help = aether_internf(
                  "free it on every path (a null one need not be), or drop `@frees`: a caller "
                  "takes it as freed after the call");
         AetherError e = { at ? at->source_file : NULL, NULL, at ? at->line : 0,
@@ -671,8 +671,8 @@ static void loop_walk(Walk* w, FState* s, ASTNode* node, ASTNode* init, ASTNode*
     /* The walk that reports, from the head. */
     w->report = reporting;
     if (unsettled) {
-        char msg[200];
-        snprintf(msg, sizeof msg,
+        const char* msg = "";
+        msg = aether_internf(
                  "the free check found no settled state for this loop in %d passes",
                  FC_VAR_RISES * (next->n + 1));
         report(w, node, AETHER_ERR_USE_AFTER_FREE, msg,
@@ -1045,8 +1045,8 @@ static void check_body(Ctx* c, ASTNode* fn, ASTNode* body) {
         if (strstr(p->annotation, "frees_param"))
             c->frees_params[c->frees_count++] = p->value;
         if (strstr(p->annotation, "moves_param") && !passes_to_mover(c, body, p->value)) {
-            char msg[400];
-            snprintf(msg, sizeof msg,
+            const char* msg = "";
+            msg = aether_internf(
                      "'%s' is declared `@moves`, but no call here may move or free what it "
                      "points at",
                      p->value);

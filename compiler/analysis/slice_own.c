@@ -832,7 +832,8 @@ static void flow(Flow* w, ASTNode* n, State* s, Use use);
 
 static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
     ASTNode* at = s->at[l->idx];
-    char msg[512], hint[400], howbuf[240];
+    char howbuf[240];
+    const char* msg = ""; const char* hint = "";
     const char* how = "it was moved";
     if (at && is_free(at)) how = "it was freed";
     else if (at && is_append(w->c, at)) how = "`append` consumed it";
@@ -840,15 +841,15 @@ static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
         snprintf(howbuf, sizeof(howbuf), "it was given to '%s', which keeps it", at->value);
         how = howbuf;
     }
-    snprintf(msg, sizeof(msg), "'%s' is used after %s%s (line %d): an owned slice has one owner",
+    msg = aether_internf("'%s' is used after %s%s (line %d): an owned slice has one owner",
              l->name, s->st[l->idx] == S_MAYBE ? "a path where " : "", how, node_line(at));
     if (at && is_append(w->c, at))
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "use the slice `append` returned (`%s = append(%s, v)`), or grow it in place "
                  "with `%s.push(v)`",
                  l->name, l->name, l->name);
     else
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "use the slice that holds it now, take a view first (`v = %s[..]`), or bind "
                  "'%s' again before this",
                  l->name, l->name);
@@ -874,11 +875,11 @@ static void move_local(Flow* w, ASTNode* id, ASTNode* at, State* s) {
 static void borrowed_param_error(Flow* w, ASTNode* id, const char* what) {
     Local* l = pm_get(&w->f->uses, id);
     if (!l || l->kind != K_PARAM) return;
-    char msg[400], hint[400];
-    snprintf(msg, sizeof(msg),
+    const char* msg = ""; const char* hint = "";
+    msg = aether_internf(
              "cannot %s '%s': it is a parameter, which borrows the caller's slice", what,
              l->name);
-    snprintf(hint, sizeof(hint),
+    hint = aether_internf(
              "declare it `%s: @keep %s` to take the caller's buffer (the caller gives it up), "
              "or copy the elements into a buffer of the function's own",
              l->name, type_spelled(l->type));
@@ -926,12 +927,12 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         if (keeps_arg(c, n, i) && a && a->type == AST_IDENTIFIER) {
             Local* l = pm_get(&w->f->uses, a);
             if (l && l->kind == K_PARAM) {
-                char msg[400], hint[300];
-                snprintf(msg, sizeof(msg),
+                const char* msg = ""; const char* hint = "";
+                msg = aether_internf(
                          "cannot give '%s' to '%s', which keeps it (`@keep`): '%s' is a "
                          "parameter, which borrows the caller's slice",
                          l->name, n->value, l->name);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "declare it `%s: @keep %s` too, so the buffer passes through",
                          l->name, type_spelled(l->type));
                 report(c, w->f, a, AETHER_ERR_FREES_BORROWED, msg, hint);

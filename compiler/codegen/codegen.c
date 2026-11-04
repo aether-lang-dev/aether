@@ -3033,8 +3033,8 @@ const char* get_c_type(Type* type) {
             return "int";
         }
         default: {
-            char wbuf[128];
-            snprintf(wbuf, sizeof(wbuf), "internal: unknown type kind %d in codegen, defaulting to void", type->kind);
+            const char* wbuf = "";
+            wbuf = aether_internf("internal: unknown type kind %d in codegen, defaulting to void", type->kind);
             AetherError w = {codegen_diag_file(), NULL, g_diag_line, g_diag_column, wbuf,
                              "this is a compiler bug, please report it",
                              codegen_diag_context(), AETHER_ERR_NONE};
@@ -3687,8 +3687,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char** param_casts = sig.casts;
         int param_count = sig.count;
         if (!ok && strcmp(why, "param") == 0) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%s' has a parameter type that isn't representable in the --emit=lib ABI; skipping alias stub",
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
@@ -3715,8 +3715,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                                                                     : get_abi_type(result);
         int returns_value = result != NULL;
         if (!ok) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%s' returns a tuple; --emit=lib alias stub skipped (tuples aren't part of the public ABI)",
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
@@ -3846,8 +3846,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             if (c->type != AST_VARIABLE_DECLARATION && c->type != AST_PATTERN_VARIABLE) { ok = 0; break; }
         }
         if (!ok) {
-            char msg[384];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "builder '%s' in package module '%s' has a pattern parameter; "
                      "it is not exported by the package library", base, m->name);
             AetherError w = {NULL, NULL, b->line, b->column, msg,
@@ -4557,8 +4557,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (lib_struct_recordable(st_all[i], &why)) {
             structs[struct_count++] = st_all[i];
         } else {
-            char msg[384];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "struct '%s' is left out of the --emit=lib catalog: %s",
                      st_all[i]->value, why);
             AetherError w = {NULL, NULL, st_all[i]->line, st_all[i]->column, msg,
@@ -5477,8 +5477,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         break;
     }
     if (!fn) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: no top-level function named '%s' in this translation unit",
                  target, target);
         AetherError e = {NULL, NULL, 0, 0, msg,
@@ -5500,8 +5500,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         }
     }
     if (param_count != 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: target function takes %d parameter(s); the shim entry must be zero-arg",
                  target, param_count);
         AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -5530,8 +5530,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         returns_void = 1;
     }
     if (!returns_int && !returns_void) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: target function's return type isn't int / int32 / int64 / void; can't be forwarded as a process exit code",
                  target);
         AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -6159,8 +6159,8 @@ static void report_actor_spawn_collisions(ASTNode* program) {
             if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
             if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value || fn->is_imported ||
                 strcmp(fn->value, spawn) != 0) continue;
-            char msg[512];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%.200s' takes the name of the spawn function of actor '%.200s'",
                      fn->value, a->value);
             AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -6195,8 +6195,8 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
         if (strcmp(sym, "aether_main") != 0 && strcmp(sym, "aether_main_exit") != 0) continue;
         /* sym is "aether_main" or "aether_main_exit" here; the precision
          * bounds keep gcc's -Wformat-truncation provably satisfied. */
-        char msg[512];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "function '%.200s' would be exported as '%.32s', which --emit=lib reserves "
                  "for this program's main() (aether_main / aether_main_exit)",
                  fn->value, sym);
@@ -8594,8 +8594,8 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
             const char* ct = decl_lane_target(callee);
             int same = (!ct && !target) || (ct && target && strcmp(ct, target) == 0);
             if (!same && sig_holds_lanes8(gen, program, callee)) {
-                char msg[512];
-                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values between a module imported at @target(\"%s\") and the build's own code",
+                const char* msg = "";
+                msg = aether_internf("'%s' passes eight-lane values between a module imported at @target(\"%s\") and the build's own code",
                          node->value, ct ? ct : target);
                 lane_region_error(node, msg,
                                   "an f32x8 is one register in the @target copy and two halves outside it: call across with scalars, pointers or the plain copy's own functions");
@@ -8603,8 +8603,8 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
         } else if (target) {
             ASTNode* ext = find_extern_declaration_by_name(program, cname);
             if (ext && !extern_is_lanes8_helper(ext) && sig_holds_lanes8(gen, program, ext)) {
-                char msg[512];
-                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values to C from a module imported at @target(\"%s\")",
+                const char* msg = "";
+                msg = aether_internf("'%s' passes eight-lane values to C from a module imported at @target(\"%s\")",
                          node->value, target);
                 lane_region_error(node, msg, "C compiled apart takes the build's form of an f32x8, not the target copy's");
             }

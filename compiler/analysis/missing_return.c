@@ -580,17 +580,17 @@ static int check_definition(Flow* f, ASTNode* fn) {
     if (!written && !returns_value(body)) return 0;
     if (!completes(f, body)) return 0;
 
-    char message[400];
+    const char* message = "";
     char shown[160];
     /* `fn`'s name as a caller writes it, not its merged C name. */
     const char* name = ast_source_name(fn, shown, sizeof shown);
     const char* what = is_clause(f->program, fn) ? "this clause of " : "";
     if (has_value_type(fn->node_type)) {
-        snprintf(message, sizeof message,
+        message = aether_internf(
                  "missing return: control can reach the end of %s'%s', whose result is %s",
                  what, name, type_spelled(fn->node_type));
     } else {
-        snprintf(message, sizeof message,
+        message = aether_internf(
                  "missing return: control can reach the end of %s'%s', which returns a "
                  "value on another path", what, name);
     }

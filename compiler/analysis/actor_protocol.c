@@ -167,10 +167,10 @@ static ASTNode* find_top(ASTNode* program, ASTNodeType type, const char* name) {
 static void check_protocol(Ctx* c, Proto* p) {
     ASTNode* d = p->node;
     if (!d->value) return;
-    char msg[512];
+    const char* msg = "";
     /* One protocol per name. */
     if (proto_named(d->value) != p) {
-        snprintf(msg, sizeof msg, "protocol '%s' is declared twice", d->value);
+        msg = aether_internf("protocol '%s' is declared twice", d->value);
         report(c, d, msg, "rename one of them");
         return;
     }
@@ -178,12 +178,12 @@ static void check_protocol(Ctx* c, Proto* p) {
     if (find_top(c->program, AST_ACTOR_DEFINITION, d->value) ||
         find_top(c->program, AST_MESSAGE_DEFINITION, d->value) ||
         find_top(c->program, AST_STRUCT_DEFINITION, d->value)) {
-        snprintf(msg, sizeof msg, "protocol '%s' has the name of another declaration", d->value);
+        msg = aether_internf("protocol '%s' has the name of another declaration", d->value);
         report(c, d, msg, "a protocol's name is a type name of its own: rename it");
         return;
     }
     if (d->child_count == 0) {
-        snprintf(msg, sizeof msg, "protocol '%s' has no transitions", d->value);
+        msg = aether_internf("protocol '%s' has no transitions", d->value);
         report(c, d, msg, "write one `state -> Message -> state` line for each message it allows");
         return;
     }
@@ -193,13 +193,13 @@ static void check_protocol(Ctx* c, Proto* p) {
         ASTNode* from = transition_from(t);
         ASTNode* to = transition_to(t);
         if (!from || !to || state_index(p, from->value) < 0 || state_index(p, to->value) < 0) {
-            snprintf(msg, sizeof msg, "protocol '%s' has more than %d states", d->value,
+            msg = aether_internf("protocol '%s' has more than %d states", d->value,
                      PROTO_MAX_STATES);
             report(c, t, msg, "split it into protocols with fewer states");
             return;
         }
         if (!find_top(c->program, AST_MESSAGE_DEFINITION, t->value)) {
-            snprintf(msg, sizeof msg, "protocol '%s' names '%s', which is not a declared message",
+            msg = aether_internf("protocol '%s' names '%s', which is not a declared message",
                      d->value, t->value);
             report(c, t, msg, "declare it with `message`, or correct the name");
         }
@@ -209,7 +209,7 @@ static void check_protocol(Ctx* c, Proto* p) {
             if (!u || u->type != AST_PROTOCOL_TRANSITION || !u->value) continue;
             ASTNode* ufrom = transition_from(u);
             if (strcmp(u->value, t->value) == 0 && ufrom && strcmp(ufrom->value, from->value) == 0) {
-                snprintf(msg, sizeof msg,
+                msg = aether_internf(
                          "protocol '%s' has a second transition for '%s' in state '%s'; the "
                          "first is at line %d",
                          d->value, t->value, from->value, u->line);
@@ -246,10 +246,10 @@ static int actor_names_message(ASTNode* actor, const char* msg) {
 static void check_implements(Ctx* c, ASTNode* actor) {
     const char* pname = aether_actor_protocol_name(actor);
     if (!pname) return;
-    char msg[512];
+    const char* msg = "";
     Proto* p = proto_named(pname);
     if (!p) {
-        snprintf(msg, sizeof msg, "actor '%s' implements '%s', which is not a declared protocol",
+        msg = aether_internf("actor '%s' implements '%s', which is not a declared protocol",
                  actor->value, pname);
         report(c, actor, msg, "declare it with `protocol`, or correct the name");
         return;
@@ -263,11 +263,11 @@ static void check_implements(Ctx* c, ASTNode* actor) {
             seen = u && u->value && strcmp(u->value, t->value) == 0;
         }
         if (seen || actor_names_message(actor, t->value)) continue;
-        char help[256];
-        snprintf(msg, sizeof msg,
+        const char* help = "";
+        msg = aether_internf(
                  "actor '%s' implements protocol '%s' but has no receive arm for '%s'",
                  actor->value, pname, t->value);
-        snprintf(help, sizeof help, "add a `%s` arm: a `_` arm does not count for a protocol's messages",
+        help = aether_internf("add a `%s` arm: a `_` arm does not count for a protocol's messages",
                  t->value);
         report(c, actor, msg, help);
     }
@@ -524,11 +524,11 @@ static AP_NOINLINE void transition(Walk* w, PVar* v, ASTNode* message) {
         /* Through a reference typed `actor_ref[P]` the type checker has
          * said so already; this is one to an actor that implements P. */
         if (w->report) {
-            char msgbuf[400], help[400];
-            snprintf(msgbuf, sizeof msgbuf,
+            const char* msgbuf = ""; const char* help = "";
+            msgbuf = aether_internf(
                      "protocol '%s' has no message '%s', and '%s' follows it",
                      p->node->value, msg, v->name);
-            snprintf(help, sizeof help,
+            help = aether_internf(
                      "add '%s' to the protocol, or send it through a bare `actor_ref` "
                      "(a parameter typed so), which follows none",
                      msg);
@@ -562,22 +562,24 @@ static AP_NOINLINE void transition(Walk* w, PVar* v, ASTNode* message) {
         return;
     }
     if (bad && w->report) {
-        char states[256], msgbuf[600], help[600];
+        char states[256];
+        const char* msgbuf = "";
         names_list(p, bad, states, sizeof states);
         int several = 0;
         for (int i = 0; i < p->state_count; i++)
             if (v->mask & ((uint64_t)1 << i)) several++;
-        snprintf(msgbuf, sizeof msgbuf,
+        msgbuf = aether_internf(
                  "protocol '%s' does not allow '%s' here: '%s' %s in state %s",
                  p->node->value, msg, v->name, several > 1 ? "may be" : "is", states);
-        help[0] = '\0';
+        /* As long as the states make it (#3574): 600 bytes cut a long
+         * state's name and what it takes. */
+        const char* help = "";
         for (int st = 0; st < p->state_count; st++) {
             if (!(bad & ((uint64_t)1 << st))) continue;
             char takes[256];
             allowed_in(p, st, takes, sizeof takes);
-            size_t len = strlen(help);
-            snprintf(help + len, sizeof help - len, "%sin '%s' it takes %s", len ? "; " : "",
-                     p->states[st], takes);
+            help = aether_internf("%s%sin '%s' it takes %s", help, help[0] ? "; " : "",
+                                  p->states[st], takes);
         }
         report(w->c, message, msgbuf, help);
     }
@@ -744,8 +746,8 @@ static void loop_walk(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode*
     /* The walk that reports, from the states at the head. */
     w->report = reporting;
     if (unsettled && reporting) {
-        char msg[200];
-        snprintf(msg, sizeof msg,
+        const char* msg = "";
+        msg = aether_internf(
                  "the protocol check found no settled state for this loop in %d passes",
                  PROTO_REF_RISES * (next->n + 1));
         report(w->c, node, msg, "this is a fault in the compiler: please report it with this loop");

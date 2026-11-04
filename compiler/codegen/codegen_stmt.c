@@ -5308,8 +5308,8 @@ static int emit_cell_array_store(CodeGenerator* gen, ASTNode* stmt) {
     }
     if (!lit || lit->type != AST_ARRAY_LITERAL) return 0;
     if (lit->child_count > at->array_size) {
-        char msg[300];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "array literal of %d elements assigned to '%s', which holds %d: an array keeps the size of its first binding",
                  lit->child_count, stmt->value, at->array_size);
         AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,
@@ -5453,8 +5453,8 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
             else
                 fprintf(gen->output, " memcpy(*%s, %s, sizeof(*%s));", name, init_text, name);
         } else if (lit && lit->type == AST_ARRAY_LITERAL && lit->child_count > arr_len) {
-            char msg[300];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "array literal of %d elements initialises '%s', which holds %d",
                      lit->child_count, name, arr_len);
             AetherError e = { lit->source_file, NULL, line, column, msg,
@@ -10498,8 +10498,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         (!is_type_compatible(here, hoisted) ||
                          (here->kind == TYPE_PTR && rebind_is_number(hoisted->kind)) ||
                          (rebind_is_number(here->kind) && hoisted->kind == TYPE_PTR))) {
-                        char msg[400];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "cannot bind '%s' as %s: it is bound as %s in another branch or "
                                  "loop body of this function, and a local first bound inside a "
                                  "branch or loop body is one variable for the whole function. Use "
@@ -10558,8 +10558,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         hoisted && hoisted->kind == TYPE_ARRAY && hoisted->array_size > 0) {
                         ASTNode* lit = stmt->children[0];
                         if (lit->child_count > hoisted->array_size) {
-                            char msg[300];
-                            snprintf(msg, sizeof(msg),
+                            const char* msg = "";
+                            msg = aether_internf(
                                      "array literal of %d elements assigned to '%s', which holds %d: an array keeps the size of its first binding",
                                      lit->child_count, stmt->value, hoisted->array_size);
                             AetherError e = { stmt->source_file, NULL, stmt->line, stmt->column, msg,

@@ -209,8 +209,8 @@ static int reject_none_binding(Parser* parser, const Token* token, const char* w
     if (!token || token->type != TOKEN_IDENTIFIER || !token->value ||
         strcmp(token->value, "none") != 0) return 0;
     if (!parser->suppress_errors) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
             "'none' is the empty-optional literal and cannot be used as a %s: every "
             "later use of it would read as the literal, not the binding", what);
         aether_error_full(msg, token->line, token->column,
@@ -280,12 +280,12 @@ static int c_abi_alias_kind(const char* name, TypeKind* out_kind) {
 Token* expect_token(Parser* parser, AeTokenType expected) {
     Token* token = peek_token(parser);
     if (!token || token->type != expected) {
-        char error_msg[256];
+        const char* error_msg = "";
         if (expected == TOKEN_IDENTIFIER && token_is_reserved_keyword(token)) {
             // User picked a reserved keyword as an identifier name —
             // point at the keyword and suggest a rename so they don't
             // have to guess which grammar slot was wanted.
-            snprintf(error_msg, sizeof(error_msg),
+            error_msg = aether_internf(
                 "'%s' is a reserved keyword and cannot be used as an identifier; "
                 "rename it (e.g. '%s_' or 'msg'), or escape it as `%s` to use the "
                 "name verbatim",
@@ -305,7 +305,7 @@ Token* expect_token(Parser* parser, AeTokenType expected) {
             }
             return NULL;
         }
-        snprintf(error_msg, sizeof(error_msg),
+        error_msg = aether_internf(
             "Expected %s, got %s",
             token_type_to_string(expected),
             token ? token_type_to_string(token->type) : "EOF");
@@ -420,9 +420,9 @@ static void missing_operand(Parser* parser, Token* after, int errors_before,
     else
         snprintf(seen, sizeof(seen), "%s", token_type_to_string(found->type));
     const char* op = (after && after->value) ? after->value : "?";
-    char msg[256], help[256];
-    snprintf(msg, sizeof(msg), "expected %s after `%s`, found %s", what, op, seen);
-    snprintf(help, sizeof(help), "write %s after `%s`", what, op);
+    const char* msg = ""; const char* help = "";
+    msg = aether_internf("expected %s after `%s`, found %s", what, op, seen);
+    help = aether_internf("write %s after `%s`", what, op);
     int line = after ? after->line : (found ? found->line : 0);
     int column = after ? after->column : (found ? found->column : 0);
     aether_error_full(msg, line, column, help, NULL, AETHER_ERR_SYNTAX);
@@ -659,16 +659,16 @@ static int parse_array_length(Parser* parser) {
     ConstEval ce = { parser, parser->current_token, NULL, NULL };
     long long v = 0;
     int ok = ce_shift(&ce, &v);
-    char msg[256];
+    const char* msg = "";
     if (!ok || ce.pos == parser->current_token) {
         if (ce.fail && strcmp(ce.fail, "zero") == 0) {
             parser_error_at(parser, ce.fail_at, "division by zero in an array length");
         } else if (ce.fail && strcmp(ce.fail, "range") == 0) {
-            snprintf(msg, sizeof msg, "an array length must be from 1 to %d; this one "
+            msg = aether_internf("an array length must be from 1 to %d; this one "
                      "reaches a value outside that", INT_MAX);
             parser_error_at(parser, ce.fail_at, msg);
         } else if (ce.fail) {
-            snprintf(msg, sizeof msg,
+            msg = aether_internf(
                 "array length '%s' is not an integer constant of this file: a length is "
                 "a number, a `const` of the file holding one, or an expression over those",
                 ce.fail_at->value);
@@ -681,7 +681,7 @@ static int parse_array_length(Parser* parser) {
         return 0;
     }
     if (v < 1 || v > INT_MAX) {
-        snprintf(msg, sizeof msg, "an array length must be from 1 to %d, but this one is %lld",
+        msg = aether_internf("an array length must be from 1 to %d, but this one is %lld",
                  INT_MAX, v);
         parser_error_at(parser, start, msg);
         return 0;
@@ -1808,8 +1808,8 @@ static int parse_depth_enter(Parser* parser) {
     if (parser->depth >= AETHER_MAX_PARSE_DEPTH) {
         if (!parser->depth_exceeded) {
             parser->depth_exceeded = 1;
-            char msg[160];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "nested too deeply (limit %d); simplify the expression or "
                      "split the block into smaller functions",
                      AETHER_MAX_PARSE_DEPTH);
@@ -2675,8 +2675,8 @@ static int expr_chain_too_long(Parser* parser, int links, Token* at, const char*
     if (!parser->depth_exceeded) {
         parser->depth_exceeded = 1;
         if (!parser->suppress_errors && at) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "%s chains more than %d operations, the limit",
+            const char* msg = "";
+            msg = aether_internf("%s chains more than %d operations, the limit",
                      what, AETHER_MAX_EXPR_CHAIN);
             aether_error_full(msg, at->line, at->column,
                               "split it with intermediate locals", NULL, AETHER_ERR_SYNTAX);
@@ -4043,12 +4043,12 @@ static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw)
         return 0;
     if (!parser->suppress_errors) {
         Token* stray = peek_token(parser);
-        char msg[256];
-        snprintf(msg, sizeof(msg), "`%s %s` binds nothing: expected `= <expression>`",
+        const char* msg = "";
+        msg = aether_internf("`%s %s` binds nothing: expected `= <expression>`",
                  kw, decl->value ? decl->value : "?");
         if (stray && stray->type == TOKEN_IDENTIFIER && stray->value) {
-            char hint[320];
-            snprintf(hint, sizeof(hint),
+            const char* hint = "";
+            hint = aether_internf(
                      "a typed declaration is written without `%s` (`%s %s = ...`); "
                      "an inferred one names only the variable (`%s %s = ...`)",
                      kw, decl->value ? decl->value : "?", stray->value, kw, stray->value);
@@ -5918,12 +5918,12 @@ ASTNode* parse_block(Parser* parser) {
                 !token_is_value_ident(head) &&
                 (after->type == TOKEN_ASSIGN || after->type == TOKEN_PLUS_ASSIGN ||
                  after->type == TOKEN_MINUS_ASSIGN)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "'%s' is a reserved keyword and cannot be used as an identifier; rename it (e.g. '%s_' or 'msg')",
                     head->value, head->value);
-                char hint[128];
-                snprintf(hint, sizeof(hint), "rename to '%s_' or another identifier", head->value);
+                const char* hint = "";
+                hint = aether_internf("rename to '%s_' or another identifier", head->value);
                 if (!parser->suppress_errors) {
                     aether_error_full(msg, head->line, head->column, hint, NULL, AETHER_ERR_SYNTAX);
                 }
@@ -5970,8 +5970,8 @@ ASTNode* parse_block(Parser* parser) {
             // that leaves users guessing.
             Token* stmt_head = peek_token(parser);
             if (stmt_head && token_is_reserved_keyword(stmt_head)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "'%s' is a reserved keyword and cannot be used as an identifier; rename it (e.g. '%s_' or 'msg')",
                     stmt_head->value, stmt_head->value);
                 char hint[128];
@@ -6128,8 +6128,8 @@ ASTNode* parse_actor_definition(Parser* parser) {
             } else {
                 Token* tok = peek_token(parser);
                 if (tok && aether_error_count() == body_errors) {
-                    char msg[128];
-                    snprintf(msg, sizeof(msg), "Unexpected token in actor body: '%.60s'",
+                    const char* msg = "";
+                    msg = aether_internf("Unexpected token in actor body: '%.60s'",
                              tok->value ? tok->value : "?");
                     parser_error(parser, msg);
                 }
@@ -6892,12 +6892,13 @@ ASTNode* parse_function_definition(Parser* parser) {
                 // keyword and teach the backtick escape instead (#867).
                 Token* pk = peek_token(parser);
                 if (pk && token_is_reserved_keyword(pk) && !parser->suppress_errors) {
-                    char emsg[256], hint[160];
+                    char emsg[256];
+                    const char* hint = "";
                     snprintf(emsg, sizeof(emsg),
                         "'%s' is a reserved keyword and cannot be used as a parameter "
                         "name; rename it (e.g. '%s_'), or escape it as `%s` to use the "
                         "name verbatim", pk->value, pk->value, pk->value);
-                    snprintf(hint, sizeof(hint),
+                    hint = aether_internf(
                         "rename to '%s_', or write `%s` to keep the name",
                         pk->value, pk->value);
                     aether_error_full(emsg, pk->line, pk->column, hint, NULL, AETHER_ERR_SYNTAX);
@@ -7888,8 +7889,8 @@ static ASTNode* parse_bitstruct_definition(Parser* parser) {
             return NULL;
         }
         if (lo < 0 || hi >= total_bits) {
-            char msg[192];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "bitstruct field bits %d..=%d do not fit in the %d-bit backing type",
                      lo, hi, total_bits);
             parser_error(parser, msg);
@@ -8978,8 +8979,8 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 if (token_is_reserved_keyword(token)) {
                     Token* nxt = peek_ahead(parser, 1);
                     if (nxt && nxt->type == TOKEN_LEFT_PAREN) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "'%s' is a reserved keyword and cannot be used as a function name; rename it (e.g. '%s_' or 'do_%s')",
                             token->value, token->value, token->value);
                         char hint[128];

@@ -235,8 +235,8 @@ int module_check_source_directives(ASTNode* ast) {
         char* path = module_resolve_source_directive(c);
         if (!path) continue;
         if (access(path, F_OK) != 0) {
-            char msg[1200];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "@source(\"%s\"): no such file (looked for %s, relative to the "
                      "directory of the file that names it)", c->value, path);
             AetherError e = { c->source_file, NULL, c->line, c->column, msg,
@@ -1684,9 +1684,18 @@ static void msg_append_dir(char* msg, size_t size, const char* here, const char*
 static void report_unresolved_import(ASTNode* import_node) {
     const char* name = import_node && import_node->value ? import_node->value : "?";
     if (import_is_compiler_builtin(name)) return;
-    char msg[2048];
+    /* As long as the name and the directories make it (#3574): 2048 bytes
+     * cut a long name's message before what it says was searched. */
+    size_t cap = 256 + strlen(name) + 1024;
+    for (int i = 0; global_module_registry && i < global_module_registry->lib_dir_count; i++)
+        cap += 1024 + strlen(global_module_registry->lib_dirs[i]) + 32;
+    if (global_module_registry && global_module_registry->source_dir)
+        cap += 1024 + strlen(global_module_registry->source_dir) + 64;
+    cap += 4 * 1024;
+    char* msg = (char*)malloc(cap);
+    if (!msg) return;
     if (strncmp(name, "std.", 4) == 0 || strncmp(name, "contrib.", 8) == 0) {
-        snprintf(msg, sizeof(msg),
+        snprintf(msg, cap,
                  "unresolved import '%s': no module of that name was found in %s", name,
                  name[0] == 's' ? "the standard library" : "contrib");
     } else {
@@ -1702,23 +1711,24 @@ static void report_unresolved_import(ASTNode* import_node) {
         if (!getcwd(here, sizeof(here))) snprintf(here, sizeof(here), ".");
 #endif
         for (char* q = here; *q; q++) if (*q == '\\') *q = '/';
-        snprintf(msg, sizeof(msg),
+        snprintf(msg, cap,
                  "unresolved import '%s': no module of that name was found in ", name);
         const char* src_dir = global_module_registry ? global_module_registry->source_dir : NULL;
         int has_src_dir = src_dir && src_dir[0];
         int beside_first = global_module_registry && global_module_registry->source_is_module;
         if (beside_first && has_src_dir)
-            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside this module)");
+            msg_append_dir(msg, cap, here, src_dir, " (beside this module)");
         for (int i = 0; global_module_registry && i < global_module_registry->lib_dir_count; i++)
-            msg_append_dir(msg, sizeof(msg), here, global_module_registry->lib_dirs[i], "");
-        msg_append_dir(msg, sizeof(msg), here, "src", "");
-        msg_append_dir(msg, sizeof(msg), here, ".", " (where the compile ran)");
+            msg_append_dir(msg, cap, here, global_module_registry->lib_dirs[i], "");
+        msg_append_dir(msg, cap, here, "src", "");
+        msg_append_dir(msg, cap, here, ".", " (where the compile ran)");
         if (!beside_first && has_src_dir)
-            msg_append_dir(msg, sizeof(msg), here, src_dir, " (beside the importing file)");
-        msg_append(msg, sizeof(msg), "and the installed packages");
+            msg_append_dir(msg, cap, here, src_dir, " (beside the importing file)");
+        msg_append(msg, cap, "and the installed packages");
     }
     aether_error_simple(msg, import_node ? import_node->line : 0,
                         import_node ? import_node->column : 0);
+    free(msg);
 }
 
 static char* resolve_import_path(ASTNode* import_node) {
@@ -1895,8 +1905,8 @@ static int check_selective_import_exports(ASTNode* import_child,
         /* A per-symbol alias (`import m (name as local)`) keeps the
          * exported name in value; the alias is only the local spelling. */
         if (module_exports_symbol(mod, sel->value)) continue;
-        char msg[512];
-        snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'",
+        const char* msg = "";
+        msg = aether_internf("'%s' is not exported from module '%s'",
                  sel->value, import_child->value);
         /* `import std.io (println)`: the name is a builtin, which no
          * module exports and nothing needs to import. Say that, rather
@@ -2000,12 +2010,12 @@ static int check_export_short_names(ASTNode* ast, const char* leaf, const char* 
             strmap_put(&shorts, si, names[i]);
             continue;
         }
-        char msg[1024], hint[1024];
-        snprintf(msg, sizeof(msg),
+        const char* msg = ""; const char* hint = "";
+        msg = aether_internf(
                  "module '%s' exports '%s' and '%s', two names that answer to "
                  "one short name, '%s.%s'",
                  module_name, first->value, names[i]->value, leaf, si);
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "export one name per operation: drop the duplicate from exports(...), "
                  "or give a raw extern a name of its own, `@extern(\"<c name>\") %s_raw(...)`",
                  si);
@@ -2175,8 +2185,8 @@ static int module_bind_target_import(ASTNode* imp, const char* importer_file) {
         else selection = 1;
     }
     if (!alias || selection) {
-        char msg[512];
-        snprintf(msg, sizeof(msg), "@target(\"%s\") import %s %s", target, imp->value,
+        const char* msg = "";
+        msg = aether_internf("@target(\"%s\") import %s %s", target, imp->value,
                  !alias ? "has no `as` name" : "selects names");
         AetherError e = { importer_file, NULL, imp->line, imp->column, msg,
                           !alias ? "a module imported at a target is a second copy of it, called through its own name: `@target(\"avx2\") import m as m_avx2`"
@@ -3511,11 +3521,11 @@ static int definition_already_merged(ASTNode* program, ASTNode* decl, const char
         strcmp(existing->source_file, decl->source_file) == 0 &&
         existing->line == decl->line) return 1;
     if (ast_defs_equal(existing, decl)) return 1;
-    char msg[900];
+    const char* msg = "";
     const char* here = decl->source_file ? decl->source_file : "<module>";
     const char* there = existing->source_file ? existing->source_file : "<program>";
     if (decl->type == AST_ACTOR_DEFINITION) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s '%s' is defined in two modules: %s and %s. Actor names are one "
                  "namespace across modules, so `spawn(%s())` in either would build the "
                  "same actor; rename one of them",
@@ -3527,7 +3537,7 @@ static int definition_already_merged(ASTNode* program, ASTNode* decl, const char
         char have[256], want[256];
         struct_fields_summary(existing, have, sizeof(have));
         struct_fields_summary(decl, want, sizeof(want));
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "struct '%s' is defined differently in two modules: %s in %s and %s in %s. "
                  "In an --emit=lib build a struct its module exports keeps its plain C "
                  "name, the library's ABI, so both would be one C type; rename one of "
@@ -3537,7 +3547,7 @@ static int definition_already_merged(ASTNode* program, ASTNode* decl, const char
         char have[256], want[256];
         struct_fields_summary(existing, have, sizeof(have));
         struct_fields_summary(decl, want, sizeof(want));
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s '%s' is defined differently in two modules: %s in %s and %s in %s. "
                  "%s names are one namespace across modules, so both would share "
                  "one layout; rename one of them (or make the definitions identical)",
@@ -4353,8 +4363,9 @@ static void ss_report_ambiguous(const SsScope* sc, const char* name, ScopedStruc
         off += (size_t)snprintf(where + off, sizeof(where) - off, "%s'%s'",
                                 i == 0 ? "" : (i == ncand - 1 ? " and " : ", "), mn);
     }
-    char msg[900], hint[600];
-    snprintf(msg, sizeof(msg),
+    char hint[600];
+    const char* msg = "";
+    msg = aether_internf(
              "struct '%s' is ambiguous here: %s modules %s each define one",
              name, via_imports ? "the imported" : "the", where);
     off = 0;

@@ -50,10 +50,11 @@ static int slice_elements_agree(ASTNode* e, const Type* target) {
         e->node_type->element_type = clone_type(want);
         return 1;
     }
-    char want_s[64], have_s[64], msg[512];
+    char want_s[64], have_s[64];
+    const char* msg = "";
     snprintf(want_s, sizeof want_s, "%s", type_spelled(want));
     snprintf(have_s, sizeof have_s, "%s", type_spelled(have));
-    snprintf(msg, sizeof msg,
+    msg = aether_internf(
              "cannot view %s elements as %s[]: a slice reads the array's own memory, "
              "so its element type must be exactly %s. Build a %s array from them "
              "instead (an array literal converts on its own)",

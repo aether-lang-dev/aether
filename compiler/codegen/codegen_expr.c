@@ -4458,8 +4458,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                 const char* why = captured
                     ? arm_closure_state_read_refusal(gen, closure, state_decls[n]) : NULL;
                 if (!why) continue;
-                char rmsg[512];
-                snprintf(rmsg, sizeof(rmsg),
+                const char* rmsg = "";
+                rmsg = aether_internf(
                     "closure inside actor '%s' handler reads state field '%s' (%s): "
                     "not supported, the closure copies the field when it is made and %s, "
                     "so a later store into the state would free what it reads",
@@ -4467,8 +4467,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                     state_decls[n]->node_type ? type_to_string(state_decls[n]->node_type)
                                               : "unknown",
                     why);
-                char rsug[256];
-                snprintf(rsug, sizeof(rsug),
+                const char* rsug = "";
+                rsug = aether_internf(
                     "read what the closure needs out of '%s' into arm locals first "
                     "(an element `f = %s[0]`, a field `name = %s[0].name`) and use those",
                     state_names[n], state_names[n], state_names[n]);
@@ -4478,15 +4478,14 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                 continue;
             }
             // Report error. Location: closure node.
-            char msg[512];
+            const char* msg = "";
             const char* actor_name = actor->value ? actor->value : "actor";
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "closure inside actor '%s' handler writes state field '%s': "
                 "not supported (closures can't mutate actor state; the "
                 "closure has no access to self)",
                 actor_name, state_names[n]);
-            char suggestion[256];
-            snprintf(suggestion, sizeof(suggestion),
+            const char* suggestion = aether_internf(
                 "copy '%s' into an arm-local, mutate the local, then write "
                 "back. See tests/syntax/README_closure_actor_state_limitation.md "
                 "for the workaround pattern.",
@@ -8212,13 +8211,13 @@ PrintFmt print_fmt_of(const Type* t) {
  * type. The caller emits a placeholder; the build stops at the error. */
 void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what) {
     (void)gen;
-    char msg[400];
+    const char* msg = "";
     const Type* t = v ? v->node_type : NULL;
     while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
     if (!t)
-        snprintf(msg, sizeof(msg), "%s cannot write this value: it has no type", what);
+        msg = aether_internf("%s cannot write this value: it has no type", what);
     else
-        snprintf(msg, sizeof(msg), "%s cannot write a value of type %s", what,
+        msg = aether_internf("%s cannot write a value of type %s", what,
                  type_spelled((Type*)t));
     aether_error_full(msg, v ? v->line : 0, v ? v->column : 0,
                       "it writes numbers, bool, string, ptr, enums and durations; convert the "

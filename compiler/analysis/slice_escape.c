@@ -549,19 +549,20 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
      * (Frame.shown, 160 each) and the description (what, 200) beside the
      * text, so no message is cut short (and gcc's -Wformat-truncation,
      * an error under -Werror on Linux, has nothing to report). */
-    char what[200], msg[1024];
+    char what[200];
+    const char* msg = "";
     describe(f, value, what, sizeof(what));
     /* A closure storing a view of the frame it is written in: the storage
      * is that frame's. */
     if (f->parent && how != LEAVES_BY_RETURN && g_store_outer_only) {
         Frame* p = f->parent;
         if (how == LEAVES_TO_GLOBAL)
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "the module-level `%s` is given by this closure a slice of the storage of %s "
                      "(%s), which ends when %s returns, while `%s` lasts as long as the program",
                      target, p->shown, what, p->shown, target);
         else
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "a field of `%s`, which may outlive %s, is given by this closure a slice of "
                      "the storage of %s (%s): the storage ends when %s returns, so the slice "
                      "would view memory that is gone",
@@ -572,20 +573,20 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
     switch (how) {
         case LEAVES_TO_OUTER: {
             Frame* o = outer_frame_of(f, target);
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "`%s`, a variable of %s, is given by this closure a slice of its own storage "
                      "(%s): the storage ends when the closure returns, while `%s` lives on",
                      target, o ? o->shown : "the frame it is written in", what, target);
             break;
         }
         case LEAVES_BY_RETURN:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "%s returns a slice of its own storage (%s): the storage ends when %s "
                      "returns, so the slice would view memory that is gone",
                      f->shown, what, f->shown);
             break;
         case LEAVES_TO_GLOBAL:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "the module-level `%s` is given a slice of the storage of %s (%s), which "
                      "ends when %s returns, while `%s` lasts as long as the program",
                      target, f->shown, what, f->shown, target);
@@ -593,13 +594,13 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
         case LEAVES_TO_FIELD:
         default:
             if (target)
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "a field of `%s`, which outlives %s, is given a slice of its own "
                          "storage (%s): the storage ends when %s returns, so the slice would "
                          "view memory that is gone",
                          target, f->shown, what, f->shown);
             else
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "a field that outlives %s is given a slice of its own storage (%s): "
                          "the storage ends when %s returns, so the slice would view memory "
                          "that is gone",

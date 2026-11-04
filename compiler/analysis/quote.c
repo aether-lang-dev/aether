@@ -260,14 +260,14 @@ static void lerror(Lower* L, ASTNode* at, AetherErrorCode code, const char* msg,
 
 /* A construct the tree has no node for. */
 static QNode* reject(Lower* L, ASTNode* at, const char* what, const char* why) {
-    char msg[320], hint[320];
+    const char* msg = ""; const char* hint = "";
     if (L->helper) {
-        snprintf(msg, sizeof msg, "%s can't be in a @quotable function", what);
-        snprintf(hint, sizeof hint,
+        msg = aether_internf("%s can't be in a @quotable function", what);
+        hint = aether_internf(
                  "its body becomes a tree, as a quote's does; %s", why);
     } else {
-        snprintf(msg, sizeof msg, "%s can't be quoted", what);
-        snprintf(hint, sizeof hint,
+        msg = aether_internf("%s can't be quoted", what);
+        hint = aether_internf(
                  "a quote becomes a tree for a library to read; %s", why);
     }
     lerror(L, at, AETHER_ERR_QUOTE_SUBSET, msg, hint);
@@ -346,8 +346,8 @@ static int names_capture(Lower* L, ASTNode* target) {
 }
 
 static void capture_write_error(Lower* L, ASTNode* at, const char* name, const char* how) {
-    char msg[320];
-    snprintf(msg, sizeof msg, "a quote can't %s '%s', a variable it captures", how, name);
+    const char* msg = "";
+    msg = aether_internf("a quote can't %s '%s', a variable it captures", how, name);
     lerror(L, at, AETHER_ERR_QUOTE_CAPTURE, msg,
            "the captured variable's cell is shared with the program; a quote reads it. "
            "Copy it into a local of the quote and change that");
@@ -365,8 +365,8 @@ static const char* node_type_name(ASTNode* e) {
  * of the program, and the uniforms stay the quote's own captures. The one
  * place that rule lives; drop the call in lower_identifier to lift it. */
 static QNode* helper_reads_outer(Lower* L, ASTNode* e, const char* name) {
-    char msg[320];
-    snprintf(msg, sizeof msg, "@quotable function '%s' reads '%s', a variable outside it",
+    const char* msg = "";
+    msg = aether_internf("@quotable function '%s' reads '%s', a variable outside it",
              L->helper->def->value, name);
     lerror(L, e, AETHER_ERR_QUOTE_HELPER_READ, msg,
            "a @quotable function is emitted as a function of its own; pass the value "
@@ -912,8 +912,8 @@ static int recursion_dfs(QHelper* h, QHelper** stack, int depth, QuoteErrorFn re
         }
         size_t len = strlen(path);
         snprintf(path + len, sizeof path - len, "%s", h->def->value);
-        char msg[640];
-        snprintf(msg, sizeof msg, "@quotable function '%s' reaches itself: %s",
+        const char* msg = "";
+        msg = aether_internf("@quotable function '%s' reaches itself: %s",
                  h->def->value, path);
         if (report) report(msg, "GLSL and MSL have no recursion, so a quote's helpers can't "
                            "either; write the repetition as a loop",
