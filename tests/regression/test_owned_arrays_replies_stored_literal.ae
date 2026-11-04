@@ -111,6 +111,13 @@ stored_literal(p: string) -> int {
 }
 
 replies(g: ptr) -> int {
+    // A reply nobody asked for (a send, not an ask) has no taker: the
+    // replier releases what it owns, as it does when the asker timed out.
+    // It is sent ahead of the asks: the actor takes its mailbox in order,
+    // so by the time the asks below are answered the replier has released
+    // it, and a window never ends with it still on its way (a slower run,
+    // under ASan, measured that one reply as growth in every window).
+    g ! Unasked {}
     f = g ? GetBoth {}
     int r = call(f)
     check(r == 3, "a reply's closure field runs")
@@ -118,9 +125,6 @@ replies(g: ptr) -> int {
     check(string.length(note) == 6, "a reply's string field is taken")
     cb = g ? GetCb {}
     check(call(cb) == 3, "an expression reply's closure runs")
-    // A reply nobody asked for (a send, not an ask) has no taker: the
-    // replier releases what it owns, as it does when the asker timed out.
-    g ! Unasked {}
     return r
 }
 
