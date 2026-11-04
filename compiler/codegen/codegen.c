@@ -678,6 +678,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->extern_registry = NULL;
     gen->extern_registry_count = 0;
     gen->extern_registry_capacity = 0;
+    strmap_init(&gen->extern_registry_index);
     // MSVC compat: counter for ask-operator temp variables
     gen->ask_temp_counter = 0;
     // Counter for message-send array hoist variables
@@ -1033,6 +1034,7 @@ void code_generator_release(CodeGenerator* gen) {
                 free(gen->extern_registry[i].param_full);
             }
             free(gen->extern_registry);
+            strmap_free(&gen->extern_registry_index);
         }
         if (gen->reply_type_map) {
             for (int i = 0; i < gen->reply_type_count; i++) {
@@ -1369,6 +1371,10 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             if (!ix->main_fn) ix->main_fn = c;
         } else if (c->type == AST_EXTERN_FUNCTION) {
             program_index_add_extern(ix, c);
+            if (c->value && !strmap_has(&ix->program_externs, c->value))
+                strmap_put(&ix->program_externs, c->value, c);
+            if (c->value && !c->origin_module && !strmap_has(&ix->unmerged_externs, c->value))
+                strmap_put(&ix->unmerged_externs, c->value, c);
         } else if (c->type == AST_IMPORT_STATEMENT && c->value) {
             /* Imported modules' externs land as declarations in this TU too;
                they stay in the module's own AST (aether_module.c), so they
@@ -1377,7 +1383,11 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
             if (!mod_ast) continue;
             for (int j = 0; j < mod_ast->child_count; j++) {
-                program_index_add_extern(ix, mod_ast->children[j]);
+                ASTNode* d = mod_ast->children[j];
+                program_index_add_extern(ix, d);
+                if (d && d->type == AST_EXTERN_FUNCTION && d->value &&
+                    !strmap_has(&ix->import_externs, d->value))
+                    strmap_put(&ix->import_externs, d->value, d);
             }
         }
     }
@@ -1410,6 +1420,9 @@ void program_index_reset(void) {
     }
     strmap_free(&ix->defs);
     strmap_free(&ix->externs);
+    strmap_free(&ix->program_externs);
+    strmap_free(&ix->unmerged_externs);
+    strmap_free(&ix->import_externs);
     strmap_free(&ix->c_callbacks);
     strmap_free(&ix->clause_scopes);
     strmap_free(&ix->def_children);

@@ -356,6 +356,8 @@ AetherModule* module_create(const char* name, const char* file_path) {
     return module;
 }
 
+static void decl_index_drop(const ASTNode* ast);   /* defined below (#3546) */
+
 void module_free(AetherModule* module) {
     if (!module) return;
 
@@ -364,9 +366,12 @@ void module_free(AetherModule* module) {
     free(module->ns);
     free(module->lane_target);
     free(module->func_names.names);
+    strmap_free(&module->func_names.index);
     free(module->const_names.names);
+    strmap_free(&module->const_names.index);
 
     if (module->ast) {
+        decl_index_drop(module->ast);
         free_ast_node(module->ast);
     }
     
@@ -1905,30 +1910,37 @@ static int check_export_short_names(ASTNode* ast, const char* leaf, const char* 
             export_names_add(&names, &n, &cap, child);
     }
     int ok = 1;
-    for (int i = 1; i < n; i++) {
-        int repeat = 0;   /* a name listed twice is one name */
-        for (int j = 0; j < i && !repeat; j++)
-            repeat = strcmp(names[i]->value, names[j]->value) == 0;
-        if (repeat) continue;
+    /* #3546: the names seen and the short names they answer to, each the
+     * first name that does, so each later name is two probes: compared with
+     * every earlier one, a module of n exports cost n squared. */
+    StrMap seen = {0};
+    StrMap shorts = {0};
+    for (int i = 0; i < n; i++) {
+        /* A name listed twice is one name. */
+        if (strmap_has(&seen, names[i]->value)) continue;
+        strmap_put(&seen, names[i]->value, (void*)1);
         const char* si = export_short_name(leaf, names[i]->value);
-        for (int j = 0; j < i; j++) {
-            if (strcmp(si, export_short_name(leaf, names[j]->value)) != 0) continue;
-            char msg[1024], hint[1024];
-            snprintf(msg, sizeof(msg),
-                     "module '%s' exports '%s' and '%s', two names that answer to "
-                     "one short name, '%s.%s'",
-                     module_name, names[j]->value, names[i]->value, leaf, si);
-            snprintf(hint, sizeof(hint),
-                     "export one name per operation: drop the duplicate from exports(...), "
-                     "or give a raw extern a name of its own, `@extern(\"<c name>\") %s_raw(...)`",
-                     si);
-            AetherError e = { path, NULL, names[i]->line, names[i]->column, msg, hint, NULL,
-                              AETHER_ERR_EXPORT_SHORT_NAME };
-            aether_error_report(&e);
-            ok = 0;
-            break;
+        ASTNode* first = strmap_get(&shorts, si);
+        if (!first) {
+            strmap_put(&shorts, si, names[i]);
+            continue;
         }
+        char msg[1024], hint[1024];
+        snprintf(msg, sizeof(msg),
+                 "module '%s' exports '%s' and '%s', two names that answer to "
+                 "one short name, '%s.%s'",
+                 module_name, first->value, names[i]->value, leaf, si);
+        snprintf(hint, sizeof(hint),
+                 "export one name per operation: drop the duplicate from exports(...), "
+                 "or give a raw extern a name of its own, `@extern(\"<c name>\") %s_raw(...)`",
+                 si);
+        AetherError e = { path, NULL, names[i]->line, names[i]->column, msg, hint, NULL,
+                          AETHER_ERR_EXPORT_SHORT_NAME };
+        aether_error_report(&e);
+        ok = 0;
     }
+    strmap_free(&seen);
+    strmap_free(&shorts);
     free(names);
     return ok;
 }
@@ -2465,7 +2477,8 @@ void module_unwrap_entry_exports(ASTNode* program) {
     }
 }
 
-/* #3545: `name` added to `l`, which grows to hold it. */
+/* #3545: `name` added to `l`, which grows to hold it, and to its index
+ * (#3546). */
 static void names_add(ModuleNames* l, const char* name) {
     if (l->count == l->cap) {
         int cap = l->cap ? l->cap * 2 : 64;
@@ -2478,12 +2491,25 @@ static void names_add(ModuleNames* l, const char* name) {
         l->cap = cap;
     }
     l->names[l->count++] = name;
+    strmap_put(&l->index, name, (void*)1);
+}
+
+/* #3546: is `name` one of `l`'s? One probe, where a walk of the list made
+ * the rename of a merged body cost its identifiers times the module's names. */
+static int names_has(const ModuleNames* l, const char* name) {
+    return l && name && l->count > 0 && strmap_has(&l->index, name);
+}
+
+static void names_clear(ModuleNames* l) {
+    l->count = 0;
+    strmap_free(&l->index);
 }
 
 static void names_free(ModuleNames* l) {
     free(l->names);
     l->names = NULL;
     l->count = l->cap = 0;
+    strmap_free(&l->index);
 }
 
 /* The function names and the constant names `m` declares (#3545): read
@@ -2495,8 +2521,8 @@ static void names_free(ModuleNames* l) {
 static void module_collect_names(AetherModule* m) {
     if (!m || !m->ast) return;
     if (m->names_ast == m->ast && m->names_children == m->ast->child_count) return;
-    m->func_names.count = 0;
-    m->const_names.count = 0;
+    names_clear(&m->func_names);
+    names_clear(&m->const_names);
     for (int i = 0; i < m->ast->child_count; i++) {
         ASTNode* decl = unwrap_export(m->ast->children[i]);
         if (!decl) continue;
@@ -2526,6 +2552,234 @@ static const ModuleNames* module_const_names(AetherModule* m) {
     return &m->const_names;
 }
 
+/* ---- #3546: an AST's top-level declarations by name ----
+ *
+ * The merge asks of a program or a module "is a function (a constant, a
+ * module `var`, an extern, a fault member) of this name declared here?" for
+ * every declaration it merges and for every reference it renames, and "which
+ * modules does it import?" for every declaration it clones. Each question
+ * walked the whole top level, so merging a module of n declarations cost n
+ * squared. An index per AST answers each in one probe. It is built the first
+ * time an AST is asked about and kept up to date by insert_child_at, the one
+ * way the merge adds a declaration; a top level that changed any other way
+ * (its count is not the indexed one) is indexed again. A module's goes with
+ * the module (module_free), the program's when the merge ends. */
+enum {
+    DECL_FN = 1,            /* a function or builder definition */
+    DECL_CONST = 2,         /* a constant or a module `var` */
+    DECL_VAR = 4,           /* a module `var` (annotation global_var) */
+    DECL_EXTERN = 8,
+    DECL_FAULT_MEMBER = 16  /* a member of a fault definition */
+};
+
+typedef struct {
+    int kinds;
+    int fn_count;           /* function and builder definitions of the name */
+    int first_fn;           /* position of the first, -1 for none */
+    int first_csym_extern;  /* position of the first extern `@extern("sym")` binds */
+    ASTNode* first_extern;  /* the first extern of the name (unwrapped) */
+} DeclEntry;
+
+typedef struct {
+    const ASTNode* ast;
+    int indexed;            /* the top-level children indexed */
+    StrMap names;           /* name -> DeclEntry* */
+    StrMap c_symbols;       /* the C symbol an extern binds -> (void*)1 */
+    StrMap typed;           /* `<node kind>:<name>` -> the first definition (unwrapped) */
+    ASTNode** imports;      /* the AST_IMPORT_STATEMENTs, in order */
+    int import_count, import_cap;
+} DeclIndex;
+
+static DeclIndex** g_decl_indexes = NULL;
+static int g_decl_index_count = 0;
+static int g_decl_index_cap = 0;
+
+static void decl_index_clear(DeclIndex* ix) {
+    for (int i = 0; i < strmap_count(&ix->names); i++) free(strmap_value_at(&ix->names, i));
+    strmap_free(&ix->names);
+    strmap_free(&ix->c_symbols);
+    strmap_free(&ix->typed);
+    free(ix->imports);
+    ix->imports = NULL;
+    ix->import_count = ix->import_cap = 0;
+    ix->indexed = 0;
+}
+
+static DeclEntry* decl_entry(DeclIndex* ix, const char* name) {
+    DeclEntry* e = strmap_get(&ix->names, name);
+    if (!e) {
+        e = calloc(1, sizeof(DeclEntry));
+        if (!e) {
+            fprintf(stderr, "Fatal: out of memory\n");
+            exit(1);
+        }
+        e->first_fn = -1;
+        e->first_csym_extern = -1;
+        strmap_put(&ix->names, name, e);
+    }
+    return e;
+}
+
+/* Note in `ix` the C symbol extern `decl` binds: its own name, or c_name
+ * for `@extern("c_name") name(...)` (annotation `c_symbol:c_name`, with an
+ * optional `;varargs`). */
+static void decl_index_add_c_symbol(DeclIndex* ix, const ASTNode* decl) {
+    if (decl->annotation && strncmp(decl->annotation, "c_symbol:", 9) == 0) {
+        const char* s = decl->annotation + 9;
+        const char* semi = strchr(s, ';');
+        size_t n = semi ? (size_t)(semi - s) : strlen(s);
+        char* sym = malloc(n + 1);
+        if (!sym) {
+            fprintf(stderr, "Fatal: out of memory\n");
+            exit(1);
+        }
+        memcpy(sym, s, n);
+        sym[n] = '\0';
+        strmap_put(&ix->c_symbols, sym, (void*)1);
+        free(sym);
+        return;
+    }
+    strmap_put(&ix->c_symbols, decl->value, (void*)1);
+}
+
+/* The key of definition `name` of node kind `type` in DeclIndex.typed. */
+static char* decl_typed_key(int type, const char* name) {
+    size_t n = strlen(name) + 16;
+    char* key = malloc(n);
+    if (!key) {
+        fprintf(stderr, "Fatal: out of memory\n");
+        exit(1);
+    }
+    snprintf(key, n, "%d:%s", type, name);
+    return key;
+}
+
+/* `child`, the top-level declaration at position `pos`, into the index. */
+static void decl_index_add(DeclIndex* ix, ASTNode* child, int pos) {
+    if (!child) return;
+    if (child->type == AST_IMPORT_STATEMENT) {
+        if (ix->import_count == ix->import_cap) {
+            int cap = ix->import_cap ? ix->import_cap * 2 : 16;
+            ASTNode** grown = realloc(ix->imports, sizeof(*grown) * (size_t)cap);
+            if (!grown) {
+                fprintf(stderr, "Fatal: out of memory\n");
+                exit(1);
+            }
+            ix->imports = grown;
+            ix->import_cap = cap;
+        }
+        ix->imports[ix->import_count++] = child;
+        return;
+    }
+    ASTNode* decl = unwrap_export(child);
+    if (!decl) return;
+    if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
+        DeclEntry* e = decl_entry(ix, decl->value);
+        e->kinds |= DECL_FN;
+        if (e->fn_count++ == 0) e->first_fn = pos;
+    } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
+        DeclEntry* e = decl_entry(ix, decl->value);
+        e->kinds |= DECL_CONST;
+        if (decl->annotation && strcmp(decl->annotation, "global_var") == 0) e->kinds |= DECL_VAR;
+    } else if (decl->type == AST_EXTERN_FUNCTION && decl->value) {
+        DeclEntry* e = decl_entry(ix, decl->value);
+        e->kinds |= DECL_EXTERN;
+        if (!e->first_extern) e->first_extern = decl;
+        if (e->first_csym_extern < 0 && decl->annotation &&
+            strncmp(decl->annotation, "c_symbol:", 9) == 0)
+            e->first_csym_extern = pos;
+        decl_index_add_c_symbol(ix, decl);
+    } else if (decl->type == AST_FAULT_DEFINITION) {
+        for (int k = 0; k < decl->child_count; k++) {
+            ASTNode* mem = decl->children[k];
+            if (mem && mem->value) decl_entry(ix, mem->value)->kinds |= DECL_FAULT_MEMBER;
+        }
+    }
+    /* Every named definition by its node kind as well, the first one kept
+     * (program_find_def). */
+    if (decl->value) {
+        char* key = decl_typed_key((int)decl->type, decl->value);
+        if (!strmap_has(&ix->typed, key)) strmap_put(&ix->typed, key, decl);
+        free(key);
+    }
+}
+
+/* The index of `ast`, built or brought up to date. */
+static DeclIndex* decl_index(const ASTNode* ast) {
+    if (!ast) return NULL;
+    DeclIndex* ix = NULL;
+    for (int i = 0; i < g_decl_index_count; i++) {
+        if (g_decl_indexes[i]->ast == ast) {
+            ix = g_decl_indexes[i];
+            break;
+        }
+    }
+    if (!ix) {
+        if (g_decl_index_count == g_decl_index_cap) {
+            int cap = g_decl_index_cap ? g_decl_index_cap * 2 : 32;
+            DeclIndex** grown = realloc(g_decl_indexes, sizeof(*grown) * (size_t)cap);
+            if (!grown) {
+                fprintf(stderr, "Fatal: out of memory\n");
+                exit(1);
+            }
+            g_decl_indexes = grown;
+            g_decl_index_cap = cap;
+        }
+        ix = calloc(1, sizeof(DeclIndex));
+        if (!ix) {
+            fprintf(stderr, "Fatal: out of memory\n");
+            exit(1);
+        }
+        ix->ast = ast;
+        g_decl_indexes[g_decl_index_count++] = ix;
+        ix->indexed = -1;
+    }
+    if (ix->indexed != ast->child_count) {
+        decl_index_clear(ix);
+        for (int i = 0; i < ast->child_count; i++) decl_index_add(ix, ast->children[i], i);
+        ix->indexed = ast->child_count;
+    }
+    return ix;
+}
+
+/* What `ast` declares under `name`: DECL_* bits, 0 for nothing. */
+static int ast_decl_kinds(const ASTNode* ast, const char* name) {
+    if (!ast || !name) return 0;
+    DeclEntry* e = strmap_get(&decl_index(ast)->names, name);
+    return e ? e->kinds : 0;
+}
+
+/* `child`, just inserted into `parent`'s children (insert_child_at), into
+ * an index of `parent` that was current before it. */
+static void decl_index_note_insert(const ASTNode* parent, ASTNode* child, int pos) {
+    for (int i = 0; i < g_decl_index_count; i++) {
+        DeclIndex* ix = g_decl_indexes[i];
+        if (ix->ast != parent) continue;
+        if (ix->indexed == parent->child_count - 1) {
+            decl_index_add(ix, child, pos);
+            ix->indexed++;
+        }
+        return;
+    }
+}
+
+ASTNode* module_ast_extern_named(const ASTNode* ast, const char* name) {
+    if (!ast || !name) return NULL;
+    DeclEntry* e = strmap_get(&decl_index(ast)->names, name);
+    return e ? e->first_extern : NULL;
+}
+
+/* Forget the index of `ast`, whose AST is about to be freed or done with. */
+static void decl_index_drop(const ASTNode* ast) {
+    for (int i = 0; i < g_decl_index_count; i++) {
+        if (g_decl_indexes[i]->ast != ast) continue;
+        decl_index_clear(g_decl_indexes[i]);
+        free(g_decl_indexes[i]);
+        g_decl_indexes[i] = g_decl_indexes[--g_decl_index_count];
+        return;
+    }
+}
+
 /* #937: is `name` a MUTABLE module-level `var` (annotation "global_var",
  * introduced by #701) in the module identified by namespace `ns`? Distinct
  * from a plain `const`: a `var` is a real lvalue (file-scope static) whose
@@ -2542,28 +2796,12 @@ static int name_is_module_global_var(const char* ns, const char* name) {
      * sharing a last segment resolve to the right one). */
     AetherModule* m = module_find_by_namespace(ns);
     if (!m || !m->ast) return 0;
-    for (int i = 0; i < m->ast->child_count; i++) {
-        ASTNode* decl = unwrap_export(m->ast->children[i]);
-        if (decl && decl->type == AST_CONST_DECLARATION && decl->value &&
-            decl->annotation && strcmp(decl->annotation, "global_var") == 0 &&
-            strcmp(decl->value, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return (ast_decl_kinds(m->ast, name) & DECL_VAR) != 0;
 }
 
 // Does the module declare an extern C function with this exact name?
 static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
-    if (!mod_ast || !name) return 0;
-    for (int i = 0; i < mod_ast->child_count; i++) {
-        ASTNode* decl = unwrap_export(mod_ast->children[i]);
-        if (decl && decl->type == AST_EXTERN_FUNCTION && decl->value &&
-            strcmp(decl->value, name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return (ast_decl_kinds(mod_ast, name) & DECL_EXTERN) != 0;
 }
 
 /* #2978: the C name the merge gives function (or builder) `name` of the
@@ -2587,36 +2825,14 @@ static int module_has_extern_named(ASTNode* mod_ast, const char* name) {
  * the entry file's function colliding with an extern becomes `ae_<name>`
  * (#1366). */
 static int module_defines_function(ASTNode* mod_ast, const char* name) {
-    if (!mod_ast || !name) return 0;
-    for (int i = 0; i < mod_ast->child_count; i++) {
-        ASTNode* decl = unwrap_export(mod_ast->children[i]);
-        if (decl && decl->value && strcmp(decl->value, name) == 0 &&
-            (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION))
-            return 1;
-    }
-    return 0;
+    return (ast_decl_kinds(mod_ast, name) & DECL_FN) != 0;
 }
 
-/* Does `decl`, an extern, bind the C symbol `sym`? A bare extern binds its
- * own name; `@extern("c_name") name(...)` binds c_name (its annotation,
- * `c_symbol:c_name` with an optional `;varargs`). */
-static int extern_binds_c_symbol(const ASTNode* decl, const char* sym) {
-    if (!decl || decl->type != AST_EXTERN_FUNCTION || !decl->value) return 0;
-    if (decl->annotation && strncmp(decl->annotation, "c_symbol:", 9) == 0) {
-        const char* s = decl->annotation + 9;
-        const char* semi = strchr(s, ';');
-        size_t n = semi ? (size_t)(semi - s) : strlen(s);
-        return strlen(sym) == n && strncmp(s, sym, n) == 0;
-    }
-    return strcmp(decl->value, sym) == 0;
-}
-
+/* Does an extern of `mod_ast` bind the C symbol `sym`? A bare extern binds
+ * its own name; `@extern("c_name") name(...)` binds c_name. */
 static int ast_binds_c_symbol(const ASTNode* mod_ast, const char* sym) {
-    if (!mod_ast) return 0;
-    for (int i = 0; i < mod_ast->child_count; i++) {
-        if (extern_binds_c_symbol(unwrap_export(mod_ast->children[i]), sym)) return 1;
-    }
-    return 0;
+    if (!mod_ast || !sym) return 0;
+    return strmap_has(&decl_index(mod_ast)->c_symbols, sym);
 }
 
 /* Is the C symbol `sym` one an extern of the build binds: the module's own
@@ -2666,18 +2882,21 @@ int module_function_c_name(const char* ns, const char* name, char* buf, size_t c
     if (!ns || !name || !buf || cap == 0) return 0;
     AetherModule* m = module_find_by_namespace(ns);
     if (!m || !m->ast) return 0;
-    for (int i = 0; i < m->ast->child_count; i++) {
-        ASTNode* decl = unwrap_export(m->ast->children[i]);
-        if (!decl || !decl->value || strcmp(decl->value, name) != 0) continue;
-        if (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) {
-            merged_function_name(m->ns ? m->ns : ns, m->ast, name, buf, cap);
-            return 1;
-        }
-        if (decl->type == AST_EXTERN_FUNCTION && decl->annotation &&
-            strncmp(decl->annotation, "c_symbol:", 9) == 0) {
-            snprintf(buf, cap, "%s_%s", m->ns ? m->ns : ns, name);
-            return 1;
-        }
+    /* #3546: the first function (or builder) of the name, or the first
+     * extern `@extern("sym")` binds to it, whichever the module declares
+     * first: from the index, where a walk of the module made every
+     * qualified call of a large module's function cost its size. */
+    DeclEntry* e = strmap_get(&decl_index(m->ast)->names, name);
+    if (!e) return 0;
+    int fn = e->first_fn;
+    int ext = e->first_csym_extern;
+    if (fn >= 0 && (ext < 0 || fn < ext)) {
+        merged_function_name(m->ns ? m->ns : ns, m->ast, name, buf, cap);
+        return 1;
+    }
+    if (ext >= 0) {
+        snprintf(buf, cap, "%s_%s", m->ns ? m->ns : ns, name);
+        return 1;
     }
     return 0;
 }
@@ -2686,15 +2905,7 @@ int module_function_c_name(const char* ns, const char* name, char* buf, size_t c
  * constant or extern of its own)? Such a name shadows the same name one of
  * its glob imports would bind. */
 static int module_defines_own_name(ASTNode* mod_ast, const char* name) {
-    if (!mod_ast || !name) return 0;
-    for (int i = 0; i < mod_ast->child_count; i++) {
-        ASTNode* decl = unwrap_export(mod_ast->children[i]);
-        if (!decl || !decl->value || strcmp(decl->value, name) != 0) continue;
-        if (decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION ||
-            decl->type == AST_CONST_DECLARATION || decl->type == AST_EXTERN_FUNCTION)
-            return 1;
-    }
-    return 0;
+    return (ast_decl_kinds(mod_ast, name) & (DECL_FN | DECL_CONST | DECL_EXTERN)) != 0;
 }
 
 /* Reject user-function-vs-imported-export symbol collisions.
@@ -2843,12 +3054,12 @@ typedef struct {
 } BoundNames;
 
 static void rename_refs_before_binding(ASTNode* node, const char* prefix,
-                                       const char** func_names, int func_count,
+                                       const ModuleNames* funcs,
                                        const char** local_names, int local_count,
                                        BoundNames* bound) {
     if (!node || node->type == AST_OFFSETOF) return;
     for (int i = 0; i < node->child_count; i++) {
-        rename_refs_before_binding(node->children[i], prefix, func_names, func_count,
+        rename_refs_before_binding(node->children[i], prefix, funcs,
                                    local_names, local_count, bound);
     }
     if (!node->value) return;
@@ -2871,7 +3082,7 @@ static void rename_refs_before_binding(ASTNode* node, const char* prefix,
     /* Functions only. A local named after a module const, read before its
      * binding (a loop's, from the previous pass), is the local to the
      * checker, which passes over such a local only for a function. */
-    if (!name_in_list(node->value, func_names, func_count)) return;
+    if (!names_has(funcs, node->value)) return;
     char prefixed[512];
     merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
     free(node->value);
@@ -2879,11 +3090,11 @@ static void rename_refs_before_binding(ASTNode* node, const char* prefix,
 }
 
 static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
-                                          const char** func_names, int func_count,
+                                          const ModuleNames* funcs,
                                           const char** local_names, int local_count) {
-    if (local_count == 0 || func_count == 0) return;
+    if (local_count == 0 || !funcs || funcs->count == 0) return;
     BoundNames bound = {NULL, 0, 0};
-    rename_refs_before_binding(scope, prefix, func_names, func_count, local_names, local_count,
+    rename_refs_before_binding(scope, prefix, funcs, local_names, local_count,
                                &bound);
     free((void*)bound.names);
 }
@@ -2891,8 +3102,8 @@ static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
 // Recursively rename intra-module function calls and constant references in a cloned AST.
 // local_names/local_count: names bound in the enclosing function (params + locals) that shadow constants.
 static void rename_intra_module_refs(ASTNode* node, const char* prefix,
-                                      const char** func_names, int func_count,
-                                      const char** const_names, int const_count,
+                                      const ModuleNames* funcs,
+                                      const ModuleNames* consts,
                                       const char** local_names, int local_count) {
     if (!node) return;
 
@@ -2909,8 +3120,8 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * and stays one. */
     if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->children[0] &&
         node->children[0]->type == AST_IDENTIFIER && node->children[0]->value &&
-        name_in_list(node->children[0]->value, func_names, func_count) &&
-        !name_in_list(node->children[0]->value, const_names, const_count) &&
+        names_has(funcs, node->children[0]->value) &&
+        !names_has(consts, node->children[0]->value) &&
         !name_is_module_global_var(prefix, node->children[0]->value) &&
         !name_in_list(node->children[0]->value, local_names, local_count)) {
         AetherModule* self = module_find_by_namespace(prefix);
@@ -2929,21 +3140,18 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * matters more now that a glob binds an imported module's whole
          * extern surface (`trim`, `length`, ...) in a merged module. */
         int renamed = name_in_list(node->value, local_names, local_count);
-        for (int i = 0; !renamed && i < func_count; i++) {
-            if (strcmp(node->value, func_names[i]) == 0) {
-                /* #3116: the module's own `free` taking one argument. The
-                 * checker gives a slice argument to the builtin instead,
-                 * once its type is known (typecheck_function_call_inner). */
-                int own_free = strcmp(node->value, "free") == 0 &&
-                               node->child_count == 1 && !node->annotation;
-                char prefixed[256];
-                merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
-                free(node->value);
-                node->value = strdup(prefixed);
-                if (own_free) node->annotation = strdup("own_free");
-                renamed = 1;
-                break;
-            }
+        if (!renamed && names_has(funcs, node->value)) {
+            /* #3116: the module's own `free` taking one argument. The
+             * checker gives a slice argument to the builtin instead, once
+             * its type is known (typecheck_function_call_inner). */
+            int own_free = strcmp(node->value, "free") == 0 &&
+                           node->child_count == 1 && !node->annotation;
+            char prefixed[256];
+            merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
+            free(node->value);
+            node->value = strdup(prefixed);
+            if (own_free) node->annotation = strdup("own_free");
+            renamed = 1;
         }
         /* #2200: a call THROUGH a module-level `var` holding a function
          * pointer (`gen_buffers(1, ids)` where `var gen_buffers: GenBuffers`
@@ -3011,16 +3219,12 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * "undefined reference to mkfac" at link time even though the
      * builder itself was renamed to `<ns>_<builder>` correctly.
      * Filed in aether/new_aevg_asks.md ASK 1 from the AeVG port. */
-    if (node->type == AST_BUILDER_FUNCTION && node->annotation) {
-        for (int i = 0; i < func_count; i++) {
-            if (strcmp(node->annotation, func_names[i]) == 0) {
-                char prefixed[256];
-                merged_function_name_ns(prefix, node->annotation, prefixed, sizeof(prefixed));
-                free(node->annotation);
-                node->annotation = strdup(prefixed);
-                break;
-            }
-        }
+    if (node->type == AST_BUILDER_FUNCTION && node->annotation &&
+        names_has(funcs, node->annotation)) {
+        char prefixed[256];
+        merged_function_name_ns(prefix, node->annotation, prefixed, sizeof(prefixed));
+        free(node->annotation);
+        node->annotation = strdup(prefixed);
     }
 
     if (node->type == AST_IDENTIFIER && node->value) {
@@ -3028,15 +3232,12 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         // shadowed by a local variable or parameter in the enclosing function
         if (!name_in_list(node->value, local_names, local_count)) {
             int renamed = 0;
-            for (int i = 0; i < const_count; i++) {
-                if (strcmp(node->value, const_names[i]) == 0) {
-                    char prefixed[256];
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
-                    free(node->value);
-                    node->value = strdup(prefixed);
-                    renamed = 1;
-                    break;
-                }
+            if (names_has(consts, node->value)) {
+                char prefixed[256];
+                snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+                free(node->value);
+                node->value = strdup(prefixed);
+                renamed = 1;
             }
             // Also rewrite identifier-as-value references to module
             // functions (e.g. `my_handler` passed as a `ptr` argument
@@ -3045,16 +3246,11 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             // fails with "undeclared identifier" — see #235. The
             // call-site rewrite above only catches AST_FUNCTION_CALL,
             // not value-position AST_IDENTIFIER.
-            if (!renamed) {
-                for (int i = 0; i < func_count; i++) {
-                    if (strcmp(node->value, func_names[i]) == 0) {
-                        char prefixed[256];
-                        merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
-                        free(node->value);
-                        node->value = strdup(prefixed);
-                        break;
-                    }
-                }
+            if (!renamed && names_has(funcs, node->value)) {
+                char prefixed[256];
+                merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
+                free(node->value);
+                node->value = strdup(prefixed);
             }
         }
     }
@@ -3090,7 +3286,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
                     own[own_count++] = clo_locals[i];
                 }
             }
-            rename_refs_before_binding_in(node, prefix, func_names, func_count, own, own_count);
+            rename_refs_before_binding_in(node, prefix, funcs, own, own_count);
         }
         for (int i = 0; i < local_count && clo_local_count < 128; i++) {
             if (!name_in_list(local_names[i], clo_locals, clo_local_count)) {
@@ -3105,8 +3301,8 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         }
         clo_local_count = kept_c;
         for (int i = 0; i < node->child_count; i++) {
-            rename_intra_module_refs(node->children[i], prefix, func_names, func_count,
-                                     const_names, const_count, clo_locals, clo_local_count);
+            rename_intra_module_refs(node->children[i], prefix, funcs,
+                                     consts, clo_locals, clo_local_count);
         }
         return;
     }
@@ -3139,33 +3335,24 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             }
         }
         nested_local_count = kept;
-        rename_refs_before_binding_in(node, prefix, func_names, func_count, nested_locals,
+        rename_refs_before_binding_in(node, prefix, funcs, nested_locals,
                                       nested_local_count);
         for (int i = 0; i < node->child_count; i++) {
-            rename_intra_module_refs(node->children[i], prefix, func_names, func_count,
-                                     const_names, const_count, nested_locals, nested_local_count);
+            rename_intra_module_refs(node->children[i], prefix, funcs,
+                                     consts, nested_locals, nested_local_count);
         }
         return;
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        rename_intra_module_refs(node->children[i], prefix, func_names, func_count,
-                                 const_names, const_count, local_names, local_count);
+        rename_intra_module_refs(node->children[i], prefix, funcs,
+                                 consts, local_names, local_count);
     }
 }
 
 // Is a function with the given (already-prefixed) name present in the program?
 static int program_has_function(ASTNode* program, const char* prefixed_name) {
-    if (!program || !prefixed_name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (existing && (existing->type == AST_FUNCTION_DEFINITION ||
-            existing->type == AST_BUILDER_FUNCTION) &&
-            existing->value && strcmp(existing->value, prefixed_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return (ast_decl_kinds(program, prefixed_name) & DECL_FN) != 0;
 }
 
 /* #2643: the definitions one module's merge pass has cloned so far. A
@@ -3175,28 +3362,20 @@ static int program_has_function(ASTNode* program, const char* prefixed_name) {
  * program held before the pass (its own, an earlier import of the module,
  * a revisit) makes the module's one a duplicate. program_has_function alone
  * skipped every clause after the first, and an imported clause set kept
- * only its first clause. */
+ * only its first clause. #3546: counted by name, so the question is two
+ * probes, not a walk of the program and of the pass. */
 typedef struct {
-    ASTNode** nodes;
-    int count;
-    int cap;
+    StrMap merged;   /* name -> (intptr_t) definitions of it this pass merged */
 } MergePass;
 
 static void merge_pass_add(MergePass* pass, ASTNode* clone) {
-    if (pass->count == pass->cap) {
-        int cap = pass->cap ? pass->cap * 2 : 16;
-        ASTNode** nn = realloc(pass->nodes, sizeof(ASTNode*) * (size_t)cap);
-        if (!nn) return;   /* OOM: a later clause is then taken as a duplicate */
-        pass->nodes = nn;
-        pass->cap = cap;
-    }
-    pass->nodes[pass->count++] = clone;
+    if (!clone || !clone->value) return;
+    intptr_t n = (intptr_t)strmap_get(&pass->merged, clone->value);
+    strmap_put(&pass->merged, clone->value, (void*)(n + 1));
 }
 
-static int merge_pass_has(const MergePass* pass, const ASTNode* node) {
-    for (int i = 0; i < pass->count; i++)
-        if (pass->nodes[i] == node) return 1;
-    return 0;
+static void merge_pass_free(MergePass* pass) {
+    strmap_free(&pass->merged);
 }
 
 /* Is a function of the given prefixed name in the program, other than one
@@ -3204,16 +3383,9 @@ static int merge_pass_has(const MergePass* pass, const ASTNode* node) {
 static int program_has_function_before(ASTNode* program, const char* prefixed_name,
                                        const MergePass* pass) {
     if (!program || !prefixed_name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (existing && (existing->type == AST_FUNCTION_DEFINITION ||
-            existing->type == AST_BUILDER_FUNCTION) &&
-            existing->value && strcmp(existing->value, prefixed_name) == 0 &&
-            !merge_pass_has(pass, existing)) {
-            return 1;
-        }
-    }
-    return 0;
+    DeclEntry* e = strmap_get(&decl_index(program)->names, prefixed_name);
+    intptr_t merged = (intptr_t)strmap_get(&pass->merged, prefixed_name);
+    return e && e->fn_count > merged;
 }
 
 // Is a constant with the given prefixed name already a top-level child of
@@ -3222,15 +3394,7 @@ static int program_has_function_before(ASTNode* program, const char* prefixed_na
 // re-cloning a module's consts without this guard emits a duplicate C
 // definition (`redefinition of 'sha2_K256'`).
 static int program_has_const(ASTNode* program, const char* prefixed_name) {
-    if (!program || !prefixed_name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (existing && existing->type == AST_CONST_DECLARATION &&
-            existing->value && strcmp(existing->value, prefixed_name) == 0) {
-            return 1;
-        }
-    }
-    return 0;
+    return (ast_decl_kinds(program, prefixed_name) & DECL_CONST) != 0;
 }
 
 /* Is a fault member with the given (already-prefixed) C symbol name already
@@ -3238,18 +3402,7 @@ static int program_has_const(ASTNode* program, const char* prefixed_name) {
  * more than once — without it the member's `static const char` would be
  * emitted twice (duplicate C definition). */
 static int program_has_fault_member(ASTNode* program, const char* prefixed_name) {
-    if (!program || !prefixed_name) return 0;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (!existing || existing->type != AST_FAULT_DEFINITION) continue;
-        for (int k = 0; k < existing->child_count; k++) {
-            ASTNode* mem = existing->children[k];
-            if (mem && mem->value && strcmp(mem->value, prefixed_name) == 0) {
-                return 1;
-            }
-        }
-    }
-    return 0;
+    return (ast_decl_kinds(program, prefixed_name) & DECL_FAULT_MEMBER) != 0;
 }
 
 // The definition of kind `node_type` named `name` among `program`'s top-level
@@ -3258,16 +3411,10 @@ static int program_has_fault_member(ASTNode* program, const char* prefixed_name)
 // kinds by the name they were written with.
 static ASTNode* program_find_def(ASTNode* program, ASTNodeType node_type, const char* name) {
     if (!program || !name) return NULL;
-    for (int m = 0; m < program->child_count; m++) {
-        ASTNode* existing = program->children[m];
-        if (!existing) continue;
-        ASTNode* unwrapped = unwrap_export(existing);
-        if (unwrapped && unwrapped->type == node_type &&
-            unwrapped->value && strcmp(unwrapped->value, name) == 0) {
-            return unwrapped;
-        }
-    }
-    return NULL;
+    char* key = decl_typed_key((int)node_type, name);
+    ASTNode* def = strmap_get(&decl_index(program)->typed, key);
+    free(key);
+    return def;
 }
 
 /* Structural equality of two definitions: node kind, name, annotation,
@@ -3691,8 +3838,13 @@ typedef struct {
 static void import_prefixes_collect(ImportPrefixes* ip, ASTNode* scope_ast,
                                     const char* self_name) {
     ip->n = 0;
-    for (int i = 0; scope_ast && i < scope_ast->child_count && ip->n < REWRITE_MAX_IMPORTS; i++) {
-        ASTNode* imp = scope_ast->children[i];
+    /* #3546: a module's imports from its index (a module's top level does
+     * not change while it merges); the program's, which the merge inserts
+     * into, are read in program order. */
+    DeclIndex* dix = self_name && scope_ast ? decl_index(scope_ast) : NULL;
+    int n = dix ? dix->import_count : scope_ast ? scope_ast->child_count : 0;
+    for (int i = 0; i < n && ip->n < REWRITE_MAX_IMPORTS; i++) {
+        ASTNode* imp = dix ? dix->imports[i] : scope_ast->children[i];
         if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
         if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
         const char* written = import_written_prefix(imp);
@@ -3752,14 +3904,17 @@ static AetherModule* module_owning_ast(ASTNode* mod_ast) {
  * (std.http's `extern http_server_create` is `server_create`). */
 static int module_extern_short_name(ASTNode* sub_ast, const char* sub_ns, const char* name) {
     if (!sub_ast || !sub_ns || !name || !*name || name[0] == '_') return 0;
-    size_t sub_ns_len = strlen(sub_ns);
-    for (int j = 0; j < sub_ast->child_count; j++) {
-        ASTNode* ext = unwrap_export(sub_ast->children[j]);
-        if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->value) continue;
-        if (strncmp(ext->value, sub_ns, sub_ns_len) == 0 && ext->value[sub_ns_len] == '_' &&
-            strcmp(ext->value + sub_ns_len + 1, name) == 0) return 1;
+    /* #3546: one probe of the module's index for `<sub_ns>_<name>`. */
+    size_t n = strlen(sub_ns) + strlen(name) + 2;
+    char* full = malloc(n);
+    if (!full) {
+        fprintf(stderr, "Fatal: out of memory\n");
+        exit(1);
     }
-    return 0;
+    snprintf(full, n, "%s_%s", sub_ns, name);
+    int found = (ast_decl_kinds(sub_ast, full) & DECL_EXTERN) != 0;
+    free(full);
+    return found;
 }
 
 static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) {
@@ -3769,9 +3924,13 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
     AetherModule* owner = module_owning_ast(mod_ast);
     rewrite_import_prefixes(clone, mod_ast, owner ? owner->name : NULL);
 
-    for (int i = 0; i < mod_ast->child_count; i++) {
-        ASTNode* imp = mod_ast->children[i];
-        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
+    /* #3546: the module's imports from its index, where a walk of its
+     * whole top level for each declaration cloned out of it made the merge
+     * of a large module grow with the square of its size. */
+    DeclIndex* dix = decl_index(mod_ast);
+    for (int ii = 0; ii < dix->import_count; ii++) {
+        ASTNode* imp = dix->imports[ii];
+        if (!imp->value) continue;
 
         // #896: a glob import (`import M (*)`) brings every exported name of M
         // into the module's bare scope. Its selection list is NOT on the AST
@@ -3849,7 +4008,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 const char* tail = ext->value + sub_ns_len + 1;
                 if (!*tail || tail[0] == '_') continue;
                 if (module_defines_own_name(mod_ast, tail)) continue;
-                if (name_in_list(tail, sel_funcs.names, sel_funcs.count)) continue;
+                if (names_has(&sel_funcs, tail)) continue;
                 names_add(&sel_funcs, tail);
             }
         } else {
@@ -3865,7 +4024,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 if (sel->annotation &&
                     strncmp(sel->annotation, "select_alias:", 13) == 0) {
                     char prefixed[256];
-                    int is_const = name_in_list(sel->value, sub_const_names, sub_const_count);
+                    int is_const = names_has(sub_consts, sel->value);
                     if (is_const)
                         snprintf(prefixed, sizeof(prefixed), "%s_%s", sub_ns, sel->value);
                     else
@@ -3874,7 +4033,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                     rename_aliased_import_refs(clone, sel->annotation + 13, prefixed, is_const);
                     continue;
                 }
-                if (name_in_list(sel->value, sub_func_names, sub_func_count)) {
+                if (names_has(sub_funcs, sel->value)) {
                     names_add(&sel_funcs, sel->value);
                 } else if (module_extern_short_name(sub_mod->ast, sub_ns, sel->value) &&
                            !module_defines_own_name(mod_ast, sel->value)) {
@@ -3882,7 +4041,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                      * for `extern http_server_create`): renamed to the extern,
                      * as the glob form does since #2637. */
                     names_add(&sel_funcs, sel->value);
-                } else if (name_in_list(sel->value, sub_const_names, sub_const_count)) {
+                } else if (names_has(sub_consts, sel->value)) {
                     names_add(&sel_consts, sel->value);
                 }
             }
@@ -3890,9 +4049,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
 
         if (sel_funcs.count > 0 || sel_consts.count > 0)
             rename_intra_module_refs(clone, sub_ns,
-                                     sel_funcs.names, sel_funcs.count,
-                                     sel_consts.names, sel_consts.count,
-                                     NULL, 0);
+                                     &sel_funcs, &sel_consts, NULL, 0);
         names_free(&sel_funcs);
         names_free(&sel_consts);
     }
@@ -3911,6 +4068,7 @@ static void insert_child_at(ASTNode* parent, ASTNode* child, int index) {
     }
     parent->children[index] = child;
     parent->child_count++;
+    decl_index_note_insert(parent, child, index);   /* #3546 */
 }
 
 /* #2614: record the module a merged declaration was written in, so the
@@ -4420,6 +4578,7 @@ static ASTNode* ss_clone_struct(ASTNode* program, ASTNode* decl, AetherModule* m
 
 void module_merge_into_program(ASTNode* program) {
     if (!program || !global_module_registry) return;
+    decl_index_drop(program);   /* #3546: indexed afresh for this merge */
 
     /* Module-scoped structs: name each struct of each module, then resolve
      * the struct names the program's own code writes, and those of the
@@ -4502,13 +4661,6 @@ void module_merge_into_program(ASTNode* program) {
         ASTNode* mod_ast = mod->ast;
         const char* ns = module_get_namespace(module_path);
 
-        // The function and constant names for intra-module renaming,
-        // as many as the module declares (#3545).
-        const char** func_names = module_func_names(mod)->names;
-        int func_count = module_func_names(mod)->count;
-        const char** const_names = module_const_names(mod)->names;
-        int const_count = module_const_names(mod)->count;
-
         /* #2613: a selective import (`import m (a, b)`) merges the whole
          * module like a bare one. The selection decides which names the
          * importing file may write bare (the second pass below and the
@@ -4555,8 +4707,8 @@ void module_merge_into_program(ASTNode* program) {
                 stamp_written_name(clone, ns, decl->value);   /* #2978 */
 
                 // Rename intra-module function calls and constant refs within the cloned body
-                rename_intra_module_refs(clone, ns, func_names, func_count,
-                                         const_names, const_count, NULL, 0);
+                rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                         module_const_names(mod), NULL, 0);
                 // Also rewrite bare-name calls to selectively-imported
                 // names from M's own `import X (a, b)` statements — see
                 // apply_inherited_selective_imports comment for why.
@@ -4624,8 +4776,8 @@ void module_merge_into_program(ASTNode* program) {
                 stamp_origin(clone, mod);
 
                 // Rename references to other module constants in the value expression
-                rename_intra_module_refs(clone, ns, func_names, func_count,
-                                         const_names, const_count, NULL, 0);
+                rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                         module_const_names(mod), NULL, 0);
                 apply_inherited_selective_imports(clone, mod_ast);
                 ss_scope_node(clone, mod);
 
@@ -4807,15 +4959,15 @@ void module_merge_into_program(ASTNode* program) {
                 // call module-local functions or read module constants, which
                 // were cloned above under their `<ns>_` prefixed names. Rewrite
                 // those references so they resolve, exactly as function bodies do.
-                rename_intra_module_refs(clone, ns, func_names, func_count,
-                                         const_names, const_count, NULL, 0);
+                rename_intra_module_refs(clone, ns, module_func_names(mod),
+                                         module_const_names(mod), NULL, 0);
                 apply_inherited_selective_imports(clone, mod_ast);
                 ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
             }
             // Skip AST_MAIN_FUNCTION, AST_IMPORT_STATEMENT, etc.
         }
-        free(pass.nodes);
+        merge_pass_free(&pass);
     }
 
     // Transitive cross-module merge (#243). When user code does
@@ -4906,11 +5058,6 @@ void module_merge_into_program(ASTNode* program) {
             ASTNode* mod_ast = dep_mod->ast;
             const char* ns = module_get_namespace(dep_path);
 
-            const char** func_names = module_func_names(dep_mod)->names;
-            int func_count = module_func_names(dep_mod)->count;
-            const char** const_names = module_const_names(dep_mod)->names;
-            int const_count = module_const_names(dep_mod)->count;
-
             // Add a synthetic AST_IMPORT_STATEMENT for this transitive
             // dep so the typechecker's namespace-registration pass
             // picks it up. Without this, qualified calls to the dep's
@@ -4969,8 +5116,8 @@ void module_merge_into_program(ASTNode* program) {
                     stamp_origin(clone, dep_mod);
                     stamp_written_name(clone, ns, decl->value);   /* #2978 */
 
-                    rename_intra_module_refs(clone, ns, func_names, func_count,
-                                             const_names, const_count, NULL, 0);
+                    rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
+                                             module_const_names(dep_mod), NULL, 0);
                     apply_inherited_selective_imports(clone, mod_ast);
                     ss_scope_node(clone, dep_mod);
 
@@ -4991,8 +5138,8 @@ void module_merge_into_program(ASTNode* program) {
                     clone->value = strdup(prefixed);
                     stamp_origin(clone, dep_mod);
 
-                    rename_intra_module_refs(clone, ns, func_names, func_count,
-                                             const_names, const_count, NULL, 0);
+                    rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
+                                             module_const_names(dep_mod), NULL, 0);
                     apply_inherited_selective_imports(clone, mod_ast);
                     ss_scope_node(clone, dep_mod);
 
@@ -5043,7 +5190,7 @@ void module_merge_into_program(ASTNode* program) {
                     insert_child_at(program, clone, insert_idx++);
                 }
             }
-            free(pass.nodes);
+            merge_pass_free(&pass);
         }
     }
 
@@ -5069,8 +5216,6 @@ void module_merge_into_program(ASTNode* program) {
         ModuleNames sel_funcs = {0};
         ModuleNames sel_consts = {0};
 
-        const char** mod_func_names = module_func_names(mod)->names;
-        int mod_func_count = module_func_names(mod)->count;
         const char** mod_const_names = module_const_names(mod)->names;
         int mod_const_count = module_const_names(mod)->count;
 
@@ -5108,16 +5253,16 @@ void module_merge_into_program(ASTNode* program) {
              * exists to avoid. */
             if (sel->annotation &&
                 strncmp(sel->annotation, "select_alias:", 13) == 0) {
-                if (name_in_list(sel->value, mod_func_names, mod_func_count) ||
-                    name_in_list(sel->value, mod_const_names, mod_const_count)) {
+                if (names_has(module_func_names(mod), sel->value) ||
+                    names_has(module_const_names(mod), sel->value)) {
                     names_add(&alias_from, sel->annotation + 13);
                     names_add(&alias_to, sel->value);
                 }
                 continue;
             }
-            if (name_in_list(sel->value, mod_func_names, mod_func_count)) {
+            if (names_has(module_func_names(mod), sel->value)) {
                 names_add(&sel_funcs, sel->value);
-            } else if (name_in_list(sel->value, mod_const_names, mod_const_count)) {
+            } else if (names_has(module_const_names(mod), sel->value)) {
                 names_add(&sel_consts, sel->value);
             }
         }
@@ -5129,11 +5274,10 @@ void module_merge_into_program(ASTNode* program) {
             if (!top) continue;
             if (top->type == AST_IMPORT_STATEMENT) continue;
             if (top->is_imported) continue;
-            rename_intra_module_refs(top, ns, sel_funcs.names, sel_funcs.count,
-                                     sel_consts.names, sel_consts.count, NULL, 0);
+            rename_intra_module_refs(top, ns, &sel_funcs, &sel_consts, NULL, 0);
             for (int a = 0; a < alias_to.count; a++) {
                 char prefixed[256];
-                int is_const = name_in_list(alias_to.names[a], mod_const_names, mod_const_count);
+                int is_const = names_has(module_const_names(mod), alias_to.names[a]);
                 if (is_const)
                     snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to.names[a]);
                 else
@@ -5176,10 +5320,6 @@ void module_merge_into_program(ASTNode* program) {
             merged_function_name(ons, origin->ast, sym, fn_name, sizeof(fn_name));
             if (program_has_function(program, fn_name)) continue;
 
-            const char** of_names = module_func_names(origin)->names;
-            int of_count = module_func_names(origin)->count;
-            const char** oc_names = module_const_names(origin)->names;
-            int oc_count = module_const_names(origin)->count;
 
             for (int j = 0; j < origin->ast->child_count; j++) {
                 ASTNode* decl = unwrap_export(origin->ast->children[j]);
@@ -5193,8 +5333,8 @@ void module_merge_into_program(ASTNode* program) {
                     clone->is_imported = 1;
                     stamp_origin(clone, origin);
                     stamp_written_name(clone, ons, sym);   /* #2978 */
-                    rename_intra_module_refs(clone, ons, of_names, of_count,
-                                             oc_names, oc_count, NULL, 0);
+                    rename_intra_module_refs(clone, ons, module_func_names(origin),
+                                             module_const_names(origin), NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
                     ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
@@ -5208,8 +5348,8 @@ void module_merge_into_program(ASTNode* program) {
                     free(clone->value);
                     clone->value = strdup(prefixed);
                     stamp_origin(clone, origin);
-                    rename_intra_module_refs(clone, ons, of_names, of_count,
-                                             oc_names, oc_count, NULL, 0);
+                    rename_intra_module_refs(clone, ons, module_func_names(origin),
+                                             module_const_names(origin), NULL, 0);
                     apply_inherited_selective_imports(clone, origin->ast);
                     ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
@@ -5218,6 +5358,9 @@ void module_merge_into_program(ASTNode* program) {
             }
         }
     }
+    /* #3546: the program's index goes with the merge: what comes after it
+     * rewrites the top level in place (the prune, the renames off C names). */
+    decl_index_drop(program);
 }
 
 // ----------------------------------------------------------------------------

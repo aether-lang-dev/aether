@@ -1562,41 +1562,24 @@ ASTNode* find_function_definition_by_name(ASTNode* program,
 
 // Sibling of find_function_definition_by_name for AST_EXTERN_FUNCTION
 // nodes. Used by is_heap_string_expr to consult the `@heap` annotation
-// on extern returns. Two-step scan because externs don't get cloned
+// on extern returns. Two steps because externs don't get cloned
 // into the program AST by module_merge_into_program — they stay in
 // their owning module's AST (see compiler/aether_module.c:1283-1284).
 // Same traversal pattern as codegen_diagnose_ownership at line 4142.
 ASTNode* find_extern_declaration_by_name(ASTNode* program,
                                                 const char* name) {
     if (!program || !name) return NULL;
-    /* Pass 1 — direct extern declarations in the program AST (the
-     * shape user code uses for non-module C bindings). */
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (c && c->type == AST_EXTERN_FUNCTION &&
-            c->value && strcmp(c->value, name) == 0) {
-            return c;
-        }
-    }
-    /* Pass 2 — externs reachable through `import` statements. The
-     * stdlib's `extern http_request_body(...)` lives in std.http's
-     * module AST; without this pass, call sites in the consuming
-     * program never resolve to the annotated declaration. */
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (!c || c->type != AST_IMPORT_STATEMENT || !c->value) continue;
-        AetherModule* mod_entry = module_find(c->value);
-        ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
-        if (!mod_ast) continue;
-        for (int j = 0; j < mod_ast->child_count; j++) {
-            ASTNode* decl = mod_ast->children[j];
-            if (decl && decl->type == AST_EXTERN_FUNCTION &&
-                decl->value && strcmp(decl->value, name) == 0) {
-                return decl;
-            }
-        }
-    }
-    return NULL;
+    /* Direct extern declarations in the program AST (the shape user code
+     * uses for non-module C bindings) first, then the externs reachable
+     * through `import` statements: the stdlib's `extern
+     * http_request_body(...)` lives in std.http's module AST, and call sites
+     * in the consuming program resolve to its annotated declaration. #3546:
+     * both from the program's index, where two walks of the program per
+     * call made writing a program's extern calls quadratic. */
+    ProgramIndex* ix = program_index(program);
+    if (!ix) return NULL;
+    ASTNode* own = strmap_get(&ix->program_externs, name);
+    return own ? own : strmap_get(&ix->import_externs, name);
 }
 
 /* The extern a call in the function being generated names: the declaration
@@ -1605,22 +1588,15 @@ ASTNode* find_extern_declaration_by_name(ASTNode* program,
  * as the typechecker checked them; else the first one anywhere. */
 ASTNode* find_extern_declaration_in_scope(CodeGenerator* gen, const char* name) {
     if (!gen || !name) return NULL;
-    ASTNode* scope = NULL;
+    ASTNode* d = NULL;
     if (gen->current_origin_module) {
         AetherModule* m = module_find(gen->current_origin_module);
-        scope = m ? m->ast : NULL;
-    } else {
-        scope = gen->program;
+        d = m && m->ast ? module_ast_extern_named(m->ast, name) : NULL;
+    } else if (gen->program) {
+        ProgramIndex* ix = program_index(gen->program);
+        d = ix ? strmap_get(&ix->unmerged_externs, name) : NULL;
     }
-    for (int i = 0; scope && i < scope->child_count; i++) {
-        ASTNode* d = scope->children[i];
-        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value || strcmp(d->value, name) != 0)
-            continue;
-        if (!gen->current_origin_module && d->origin_module) continue;
-        return d;
-    }
-    return find_extern_declaration_by_name(gen->program, name);
+    return d ? d : find_extern_declaration_by_name(gen->program, name);
 }
 
 // Does an extern declaration carry a `@heap` return annotation, parsed
