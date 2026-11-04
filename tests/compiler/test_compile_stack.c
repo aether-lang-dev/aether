@@ -56,16 +56,20 @@ static int entry_x87(int argc, char** argv) {
  * other thread at 53: the compile thread keeps the caller's, so a long
  * double the compiler computes (a duration literal) is the same as it was
  * on the main thread. Set to something no thread starts with, to tell a
- * copy from a default. */
+ * copy from a default, and compared with what the caller then reads back:
+ * Valgrind keeps the rounding it is given but reports 64 bit precision
+ * whatever was set. */
 TEST_CATEGORY(compile_stack_keeps_the_callers_x87_control, TEST_CATEGORY_COMPILER) {
     unsigned short saved = x87_cw();
     unsigned short want = (unsigned short)((saved & ~0x0300u) | 0x0200u);  /* 53 bit precision */
     want = (unsigned short)((want & ~0x0C00u) | 0x0400u);                  /* round down */
     __asm__ volatile("fldcw %0" : : "m"(want));
+    unsigned short callers = x87_cw();
     char a0[] = "aetherc";
     char* argv[] = { a0, NULL };
     int got = aether_run_on_compile_stack(entry_x87, 1, argv);
     __asm__ volatile("fldcw %0" : : "m"(saved));
-    ASSERT_EQ((int)want, got);
+    ASSERT_TRUE((callers & 0x0C00u) == 0x0400u);   /* the rounding took, so a default is told apart */
+    ASSERT_EQ((int)callers, got);
 }
 #endif
