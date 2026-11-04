@@ -422,7 +422,9 @@ TEST(slices_codegen_publishes_elements) {
     ASSERT_EQ(1, typecheck_program(ast));
     char* c = generate_c(ast);
     ASSERT_NOT_NULL(strstr(c, "static AETHER_MAYBE_UNUSED void _ae_spub_"));
-    ASSERT_NOT_NULL(strstr(c, "aether_slice_set_shared((AetherSlice*)&("));
+    /* The row's place is taken first, its bounds checked, then the store
+     * publishes the row it takes. */
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_set_shared(_ae_ssp"));
     free(c);
     free_ast_node(ast);
 }

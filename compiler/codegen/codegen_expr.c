@@ -8398,6 +8398,15 @@ static void emit_slice_stmt_temp(CodeGenerator* gen, ASTNode* call) {
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
  * runtime's aether_slice_take, _copy, _release, _set and _grow1). Returns 0
  * for a name that is none of them. */
+/* Does the place `a` index a slice or an array on its way (`rows[k]`,
+ * `hs[k].tags`), a bounds check that may panic? */
+static int place_has_index(const ASTNode* a) {
+    for (; a && (a->type == AST_MEMBER_ACCESS || a->type == AST_ARRAY_ACCESS) && a->child_count > 0;
+         a = a->children[0])
+        if (a->type == AST_ARRAY_ACCESS) return 1;
+    return 0;
+}
+
 /* The place `a` an intrinsic takes the address of, as the place it is: a
  * module-level slice `var` named there is the var itself, not a read of it
  * (emit_module_slice_read). */
@@ -8457,7 +8466,27 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     }
     if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0) &&
         expr->child_count == 2) {
-        fprintf(o, "%s((AetherSlice*)&(", strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared");
+        const char* set = strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared";
+        if (hoist_ready(gen) && place_has_index(a)) {
+            /* #3568: the element's place first, its bounds checked, then
+             * the value, as a string or a struct element's store does: C
+             * orders a call's arguments as it likes, and a value made
+             * before the check panicked was held by nothing (a leak of
+             * `rows[k] = mk(2)` on a slice too short). */
+            TempSeq s;
+            seq_open(gen, &s);
+            const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
+            fprintf(o, "(AetherSlice*)&(");
+            emit_slice_place(gen, a);
+            fprintf(o, ")");
+            seq_next(gen, &s);
+            fprintf(o, "%s(%s, ", set, p);
+            generate_expression(gen, expr->children[1]);
+            fprintf(o, ")");
+            seq_close(gen, &s);
+            return 1;
+        }
+        fprintf(o, "%s((AetherSlice*)&(", set);
         emit_slice_place(gen, a);
         fprintf(o, "), ");
         generate_expression(gen, expr->children[1]);
