@@ -130,6 +130,7 @@ main() {
         }
         child.done(h, 0)
     }
+    child.free(h)                                // the Host and what it holds
     exit(0)
 }
 ```
@@ -146,6 +147,7 @@ runs `h.source`. Everything else is a call the engine makes:
 | ends | `done(h, code)` or `error(h, why)` |
 | looks for a cancel | `poll(h)`, without waiting: `""`, or the reason, also in `h.cancel` |
 | sets up | `h.source`, `mount_count(h)`, `mount_at(h, i)` (name and arity), `is_mounted(h, name)`, `h.probe`, `h.log_level` |
+| is done with the Host | `free(h)`: the Host, its mounts and its strings; the channel stays open |
 
 Two kinds of engine meet the cancel two ways. One that runs a script in
 steps calls `poll` between them. One that runs it to the end in a single

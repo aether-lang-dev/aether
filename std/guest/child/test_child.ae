@@ -9,6 +9,7 @@ import std.spec
 import std.fs
 import std.io
 import std.ipc
+import std.mem
 import std.os
 import std.string
 import std.guest.child
@@ -36,6 +37,20 @@ main() {
             v, r = child.split_verb("PROBE")
             spec.assert_str_eq("${v}|${r}", "PROBE|", "a bare verb")
         }
+        spec.it("gives a Host back with what it holds") callback {
+            // A Host is the worker's: free gives back the Host, its mounts
+            // and its strings, and leaves the channel open. Where the heap
+            // count is exact, attaching and freeing leaves it as it was.
+            if mem.heap_in_use_exact() {
+                grown = mem.steady_growth(|| {
+                        h = child.attach(-1, string.concat("sp", "ec"))
+                        h.source = string.concat("say ", "hi")
+                        child.free(h)
+                    }, 4)
+                spec.assert_true(grown == 0, "a Host attached and freed grows the heap by nothing")
+            }
+            child.free(null)
+        }
         spec.it("writes a JSON string literal") callback {
             spec.assert_str_eq(child.json_string("a\"b\\c\nd\x01"), "\"a\\\"b\\\\c\\nd\\u0001\"", "escaped")
             spec.assert_str_eq(child.json_string(""), "\"\"", "empty")
@@ -60,6 +75,7 @@ main() {
                 spec.assert_true(child.is_mounted(h, "GREET"), "mounted")
                 spec.assert_false(child.is_mounted(h, "GREE"), "a prefix is not")
                 spec.assert_false(child.is_mounted(h, "greet"), "compared exactly")
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -75,6 +91,7 @@ main() {
                     h = child.attach(ch, "spec")
                     spec.assert_str_eq(child.read_script(h), want[i], cases[i])
                     spec.assert_str_eq(heard(host), "ERROR ${want[i]}", "the host is told")
+                    child.free(h)
                     io.fd_close(host)
                     io.fd_close(ch)
                     i = i + 1
@@ -98,6 +115,7 @@ main() {
                 spec.assert_str_eq(heard(host), "DONE 7", "DONE")
                 spec.assert_str_eq(heard(host), "ERROR boom", "ERROR")
                 spec.assert_eq(waiting(host), 0, "nothing else")
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -113,6 +131,7 @@ main() {
                 spec.assert_str_eq(child.poll(h), "time is up", "the cancel, behind a LOGLEVEL")
                 spec.assert_eq(h.log_level, 0, "that applied too")
                 spec.assert_str_eq(child.poll(h), "time is up", "and it stays")
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -129,6 +148,9 @@ main() {
                 k = child.attach(e, "spec")
                 ipc.write_frame(d, "CANCEL")
                 spec.assert_str_eq(child.poll(k), "no reason given", "a CANCEL with no reason still cancels")
+                child.free(h)
+                child.free(g)
+                child.free(k)
                 io.fd_close(host)
                 io.fd_close(ch)
                 io.fd_close(b)
@@ -165,6 +187,7 @@ main() {
                 r = child.call_host(h, "F", "[]")
                 spec.assert_str_eq("${r.kind} ${r.text}", "CANCEL enough", "after a cancel, nothing more is sent")
                 spec.assert_eq(waiting(host), 0, "no CALL went")
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -177,6 +200,7 @@ main() {
                 r = child.call_host(h, "F", "[]")
                 spec.assert_str_eq("${r.kind} ${r.text}", "CANCEL protocol: LOGLEVEL wants -1 (off) or 0..5, got '9'", "cancelled")
                 spec.assert_eq(waiting(ch), 1, "the reply was taken, the next frame is still there")
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -197,6 +221,7 @@ main() {
                 r = child.call_host(h, "REQUEST", "[\"x\"]")
                 spec.assert_str_eq("${r.kind} ${r.text}", "VALUE {\"granted\":false,\"why\":\"no descriptor came with FILE\"}", "a FILE with no descriptor is a refusal")
                 fs.delete(path)
+                child.free(h)
                 io.fd_close(host)
                 io.fd_close(ch)
             }
@@ -206,6 +231,7 @@ main() {
                     spec.assert_str_eq(err, "spec: no socket channel to a host; a host starts this with guest.launch", "no channel")
                     spec.assert_eq(h.ch, -1, "and no descriptor")
                 }
+                child.free(h)
             }
         }
     }

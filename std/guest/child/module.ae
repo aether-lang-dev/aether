@@ -38,10 +38,13 @@
 //           // r.kind VALUE (r.text is JSON), FAIL, or CANCEL
 //           child.done(h, 0)
 //       }
+//       child.free(h)
 //       exit(0)
 //   }
+//
+// The Host is the worker's: free gives it back, with what it holds.
 
-exports(Host, Reply, open, attach, read_script, run, poll, call_host, say, log, audit,
+exports(Host, Reply, open, attach, free, read_script, run, poll, call_host, say, log, audit,
     report_refusals, done, error, mount_count, mount_at, is_mounted,
     json_string, split_verb, MAX_FRAME, MAX_FILE)
 
@@ -108,6 +111,15 @@ attach(ch: int, name: string) -> *Host {
     h.cancel = ""
     h.mounts = list.new()
     return h
+}
+
+// Give back a Host that open or attach made, and what it holds: its mounts,
+// its name, the script and the cancel reason. The channel stays open: the
+// socket given to attach is its caller's, the inherited one the process's.
+free(h: @frees *Host) {
+    if h == null { return }
+    list.free(h.mounts)
+    heap.free(h)
 }
 
 // What the host sends before the script: MOUNT, PROBE and LOGLEVEL, up to
