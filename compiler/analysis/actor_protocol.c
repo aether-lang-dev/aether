@@ -498,7 +498,9 @@ static AP_NOINLINE void transition(Walk* w, PVar* v, ASTNode* message) {
         v->top = 1;
         return;
     }
-    uint64_t to = 0, bad = 0, from_mask = v->top ? ~(uint64_t)0 : v->mask;
+    /* In no state: a send before was wrong on every path (#3575). */
+    int lost = !v->top && v->mask == 0;
+    uint64_t to = 0, bad = 0, from_mask = (v->top || lost) ? ~(uint64_t)0 : v->mask;
     for (int st = 0; st < p->state_count; st++) {
         if (!(from_mask & ((uint64_t)1 << st))) continue;
         int found = 0;
@@ -513,9 +515,10 @@ static AP_NOINLINE void transition(Walk* w, PVar* v, ASTNode* message) {
         }
         if (!found) bad |= (uint64_t)1 << st;
     }
-    if (v->top) {
-        /* Not known before; a message the protocol has leads somewhere it
-         * says (one it does not have is the type checker's to report). */
+    if (v->top || lost) {
+        /* Not known before, or lost; a message the protocol has leads
+         * somewhere it says (one it does not have is the type checker's to
+         * report). */
         if (to) { v->top = 0; v->mask = to; }
         return;
     }
@@ -539,8 +542,12 @@ static AP_NOINLINE void transition(Walk* w, PVar* v, ASTNode* message) {
         }
         report(w->c, message, msgbuf, help);
     }
-    if (to) v->mask = to;
-    else v->top = 1;   /* every path was wrong: not followed on from here */
+    /* Every path was wrong: lost, in no state, so the next send is not
+     * refused for it and leads where the protocol says, as from unknown.
+     * A join keeps what the other paths reach. It went unknown (`top`)
+     * before, so in a loop the head joined to unknown and the walk that
+     * reports, from it, refused nothing (#3575). */
+    v->mask = to;
 }
 
 static Loop* loop_target(Walk* w, const char* label, int for_continue) {
