@@ -284,7 +284,6 @@ main() {
         println("  FAIL [scale ~2MB]: error formatting scale doc")
         fails = fails + 1
     } else {
-        println("  INFO: scale 1x (~500KB) took ${dur_1x} ms, 4x (~2MB) took ${dur_4x} ms")
         // In quadratic behavior, 4x input would take ~16x longer.
         // We assert dur_4x <= dur_1x * 12 + 1000 ms to confirm linear / O(N) scaling.
         bound = (dur_1x * 12) + 1000
