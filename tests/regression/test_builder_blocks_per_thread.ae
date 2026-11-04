@@ -1,0 +1,85 @@
+// Each thread's builder blocks are its own, and a thread that went deep
+// leaves no stack behind (#3574).
+//
+// 1. Builder blocks on four scheduler threads at once. The stack of the
+//    blocks was one for the process: a block read the depth of the blocks
+//    the other threads had open, its calls set the config of another
+//    thread's block, and two threads growing the stack at once lost a block
+//    (LeakSanitizer reported it).
+// 2. Each block 100 deep, past the 64 a thread holds in place: the deeper
+//    part of the stack is on the heap only while the blocks are that deep,
+//    so the threads end holding none of it (LeakSanitizer reads that).
+
+import std.map
+import std.sync
+
+message Walk { rounds: int, done: ptr }
+
+extern exit(code: int)
+
+var g_wrong: ptr = null
+
+builder node(depth: int) {
+    if _builder != null {
+        if map_size(_builder) != 1 {
+            sync.atomic_add(g_wrong, 1)
+        }
+        map_free(_builder)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+walk(d: int) {
+    node(d) {
+        set_opt("k", "v")
+        if builder_depth() != d {
+            sync.atomic_add(g_wrong, 1)
+        }
+        if d < 100 {
+            walk(d + 1)
+        }
+    }
+}
+
+actor Walker {
+    receive {
+        Walk(rounds, done) -> {
+            i = 0
+            while i < rounds {
+                walk(1)
+                i = i + 1
+            }
+            if builder_depth() != 0 {
+                sync.atomic_add(g_wrong, 1)
+            }
+            sync.atomic_add(done, 1)
+        }
+    }
+}
+
+main() {
+    g_wrong = sync.atomic_new(0)
+    done = sync.atomic_new(0)
+    a = spawn(Walker(), core: 0)
+    b = spawn(Walker(), core: 1 % num_cores)
+    c = spawn(Walker(), core: 2 % num_cores)
+    d = spawn(Walker(), core: 3 % num_cores)
+    a ! Walk { rounds: 1000, done: done }
+    b ! Walk { rounds: 1000, done: done }
+    c ! Walk { rounds: 1000, done: done }
+    d ! Walk { rounds: 1000, done: done }
+    wait_for_idle()
+    walk(1)
+    wrong = sync.atomic_load(g_wrong)
+    walked = sync.atomic_load(done)
+    sync.atomic_free(g_wrong)
+    sync.atomic_free(done)
+    if walked != 4 || wrong != 0 || builder_depth() != 0 {
+        println("FAIL: ${walked} of 4 threads walked, ${wrong} blocks saw another's depth or config")
+        exit(1)
+    }
+    println("PASS: four threads, 100 blocks deep, each its own")
+}

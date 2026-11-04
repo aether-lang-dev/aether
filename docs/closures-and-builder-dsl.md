@@ -855,10 +855,14 @@ Closures compile to C as:
 - Heap-allocated environment structs for captured variables
 - NULL environment for zero-capture closures
 
-The builder context stack is a simple C array:
+The builder context stack is each thread's own C array:
 - `_aether_ctx_push(void*)` / `_aether_ctx_pop()` / `_aether_ctx_get()`
-- Maximum nesting depth: 64 levels
-- Zero overhead when not used (the stack is static, no allocation)
+- Blocks on different threads (actors on different scheduler threads) never
+  see each other's contexts, and `builder_depth()` counts the thread's own
+- The first 64 levels are the thread's own storage, with no allocation; a
+  deeper stack goes on the heap until the blocks are half that deep again,
+  so nesting has no fixed limit and a thread whose blocks have all ended
+  holds no heap for it
 
 Trailing blocks (parameterless `{ }`) are inlined at the call site, no closure
 allocation, no function pointer overhead. They are pure syntactic sugar for

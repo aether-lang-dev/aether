@@ -10398,14 +10398,41 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* As deep as the blocks nest (#3574): 64 slots dropped the push of a
      * block 65 deep (a builder call recursing inside its own block), and
      * that block's calls then worked on an outer block's config. */
+    /* Each thread's own (#3574): a builder block runs on the thread that
+     * entered it, and one stack the scheduler threads shared mixed their
+     * blocks' configs, and two of them growing it at once lost a block. The
+     * first _AE_CTX_INLINE entries are the thread's own storage; past them
+     * the stack is on the heap, given back once the blocks are half that
+     * deep again (half, so blocks going in and out at the edge do not
+     * allocate each time), so a thread whose blocks have all ended holds
+     * none of it. */
+    print_line(gen, "#if defined(AETHER_NO_THREADING)");
+    print_line(gen, "#  define _AE_CTX_TLS");
+    print_line(gen, "#elif defined(_MSC_VER)");
+    print_line(gen, "#  define _AE_CTX_TLS __declspec(thread)");
+    print_line(gen, "#elif defined(__GNUC__) && !defined(_WIN32) && !defined(__APPLE__)");
+    print_line(gen, "#  define _AE_CTX_TLS __thread __attribute__((tls_model(\"global-dynamic\")))");
+    print_line(gen, "#elif defined(__GNUC__)");
+    print_line(gen, "#  define _AE_CTX_TLS __thread");
+    print_line(gen, "#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+    print_line(gen, "#  define _AE_CTX_TLS _Thread_local");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_CTX_TLS");
+    print_line(gen, "#endif");
+    print_line(gen, "#define _AE_CTX_INLINE 64");
     print_line(gen, "typedef void (*_aether_ctx_release_fn)(void*);");
-    print_line(gen, "static void** _aether_ctx_stack = 0;");
-    print_line(gen, "static int _aether_ctx_depth = 0;");
-    print_line(gen, "static int _aether_ctx_cap = 0;");
-    print_line(gen, "static _aether_ctx_release_fn* _aether_ctx_release = 0;");
-    print_line(gen, "static inline void _aether_ctx_grow(void) { int cap = _aether_ctx_cap ? _aether_ctx_cap * 2 : 64; void** s = (void**)realloc(_aether_ctx_stack, sizeof(void*) * (size_t)cap); if (!s) aether_panic(\"builder blocks nest deeper than memory allows\"); _aether_ctx_stack = s; _aether_ctx_release_fn* r = (_aether_ctx_release_fn*)realloc(_aether_ctx_release, sizeof(_aether_ctx_release_fn) * (size_t)cap); if (!r) aether_panic(\"builder blocks nest deeper than memory allows\"); _aether_ctx_release = r; _aether_ctx_cap = cap; }");
-    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth == _aether_ctx_cap) _aether_ctx_grow(); _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
-    print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
+    print_line(gen, "static _AE_CTX_TLS void* _aether_ctx_inline[_AE_CTX_INLINE];");
+    print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn _aether_ctx_release_inline[_AE_CTX_INLINE];");
+    print_line(gen, "static _AE_CTX_TLS void** _aether_ctx_heap = 0;");
+    print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn* _aether_ctx_release_heap = 0;");
+    print_line(gen, "static _AE_CTX_TLS int _aether_ctx_depth = 0;");
+    print_line(gen, "static _AE_CTX_TLS int _aether_ctx_cap = 0;");
+    print_line(gen, "#define _aether_ctx_stack (_aether_ctx_heap ? _aether_ctx_heap : _aether_ctx_inline)");
+    print_line(gen, "#define _aether_ctx_release (_aether_ctx_release_heap ? _aether_ctx_release_heap : _aether_ctx_release_inline)");
+    print_line(gen, "static inline void _aether_ctx_grow(void) { int cap = _aether_ctx_heap ? _aether_ctx_cap * 2 : _AE_CTX_INLINE * 2; void** s = (void**)malloc(sizeof(void*) * (size_t)cap); _aether_ctx_release_fn* r = (_aether_ctx_release_fn*)malloc(sizeof(_aether_ctx_release_fn) * (size_t)cap); if (!s || !r) aether_panic(\"builder blocks nest deeper than memory allows\"); memcpy(s, _aether_ctx_stack, sizeof(void*) * (size_t)_aether_ctx_depth); memcpy(r, _aether_ctx_release, sizeof(_aether_ctx_release_fn) * (size_t)_aether_ctx_depth); free(_aether_ctx_heap); free((void*)_aether_ctx_release_heap); _aether_ctx_heap = s; _aether_ctx_release_heap = r; _aether_ctx_cap = cap; }");
+    print_line(gen, "static inline void _aether_ctx_fit(void) { if (!_aether_ctx_heap || _aether_ctx_depth > _AE_CTX_INLINE / 2) return; memcpy(_aether_ctx_inline, _aether_ctx_heap, sizeof(void*) * (size_t)_aether_ctx_depth); memcpy(_aether_ctx_release_inline, _aether_ctx_release_heap, sizeof(_aether_ctx_release_fn) * (size_t)_aether_ctx_depth); free(_aether_ctx_heap); free((void*)_aether_ctx_release_heap); _aether_ctx_heap = 0; _aether_ctx_release_heap = 0; _aether_ctx_cap = 0; }");
+    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth == (_aether_ctx_heap ? _aether_ctx_cap : _AE_CTX_INLINE)) _aether_ctx_grow(); _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
+    print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; _aether_ctx_fit(); }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
     /* #2810: a builder call's config is released by its call only on a way
      * out of the block the call compiles (#2791); a panic leaves the block
@@ -10414,7 +10441,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * puts the stack back to its depth at the try and releases the configs
      * of the blocks the panic abandoned. */
     print_line(gen, "static inline void _aether_ctx_own(void* ctx, void (*release)(void*)) { if (_aether_ctx_depth > 0 && _aether_ctx_stack[_aether_ctx_depth-1] == ctx) _aether_ctx_release[_aether_ctx_depth-1] = release; }");
-    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } }");
+    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } _aether_ctx_fit(); }");
     /* #1704: the sandbox permission stack is SEPARATE from the builder
      * context stack above. They used to be the same array, so entering any
      * trailing block pushed that builder's config object onto the stack the
