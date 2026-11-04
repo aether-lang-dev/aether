@@ -1244,7 +1244,16 @@ void aether_string_release_captured(const char* s) {
  *
  * Shards keyed by the pointer spread the lock; each is an open-addressing
  * table with linear probing and backward-shift deletion, grown at half
- * full and shrunk at an eighth, never below its first size. */
+ * full and shrunk at an eighth, never below its first size.
+ *
+ * Every shard's first table is one block, made at the first record and
+ * kept, so the registry's footprint is fixed from the first keep (#3567).
+ * Each shard made its own at its own first record, and the shard is the
+ * string's address: on a heap that does not hand the same blocks back, a
+ * round of keeps and give-backs reached a shard for the first time and the
+ * heap grew by its table, so a program whose keeps were all given back
+ * failed a steady-heap check. A table grown past the first size is its
+ * own, freed when it shrinks back into the block. */
 #define GIVEN_SHARDS 16
 #define GIVEN_MIN_SLOTS 16
 
@@ -1264,6 +1273,43 @@ typedef struct {
 static GivenShard g_given[GIVEN_SHARDS];
 /* Entries across every shard: a reader that finds none skips the locks. */
 static atomic_size_t g_given_live;
+/* Every shard's first table, GIVEN_MIN_SLOTS slots each, in one block. */
+static GivenRef* g_given_block;
+/* 0: not made, 1: being made, 2: made. */
+static atomic_int g_given_made;
+
+/* Shard `sh`'s part of the block. */
+static GivenRef* given_first_table(const GivenShard* sh) {
+    return g_given_block + (size_t)(sh - g_given) * GIVEN_MIN_SLOTS;
+}
+
+/* Make every shard's first table, once; 0 when the block cannot be had
+ * (a later record tries again). */
+static int given_tables(void) {
+    int made = atomic_load_explicit(&g_given_made, memory_order_acquire);
+    while (made != 2) {
+        int expect = 0;
+        if (atomic_compare_exchange_strong_explicit(&g_given_made, &expect, 1,
+                                                    memory_order_acq_rel, memory_order_acquire)) {
+            GivenRef* block = (GivenRef*)calloc((size_t)GIVEN_SHARDS * GIVEN_MIN_SLOTS,
+                                                sizeof(GivenRef));
+            if (!block) {
+                atomic_store_explicit(&g_given_made, 0, memory_order_release);
+                return 0;
+            }
+            g_given_block = block;
+            for (int i = 0; i < GIVEN_SHARDS; i++) {
+                g_given[i].slots = given_first_table(&g_given[i]);
+                g_given[i].cap = GIVEN_MIN_SLOTS;
+            }
+            atomic_store_explicit(&g_given_made, 2, memory_order_release);
+            return 1;
+        }
+        AETHER_CPU_PAUSE();
+        made = atomic_load_explicit(&g_given_made, memory_order_acquire);
+    }
+    return 1;
+}
 
 static uint64_t given_hash(const char* data) {
     uint64_t h = (uint64_t)(uintptr_t)data;
@@ -1293,10 +1339,19 @@ static size_t given_probe(const GivenShard* sh, const char* data, uint64_t h) {
     return i;
 }
 
-/* Rehash into `cap` slots; 0 when the table cannot be had, the old kept. */
+/* Rehash into `cap` slots; 0 when the table cannot be had, the old kept.
+ * The first size is the shard's part of the block, which is never freed:
+ * a table shrinking to it goes back there. */
 static int given_resize(GivenShard* sh, size_t cap) {
-    GivenRef* slots = (GivenRef*)calloc(cap, sizeof(GivenRef));
-    if (!slots) return 0;
+    GivenRef* first = given_first_table(sh);
+    GivenRef* slots;
+    if (cap == GIVEN_MIN_SLOTS) {
+        slots = first;
+        memset(slots, 0, sizeof(GivenRef) * GIVEN_MIN_SLOTS);
+    } else {
+        slots = (GivenRef*)calloc(cap, sizeof(GivenRef));
+        if (!slots) return 0;
+    }
     GivenRef* old = sh->slots;
     size_t old_cap = sh->cap;
     sh->slots = slots;
@@ -1305,7 +1360,7 @@ static int given_resize(GivenShard* sh, size_t cap) {
         if (!old[i].data) continue;
         sh->slots[given_probe(sh, old[i].data, given_hash(old[i].data))] = old[i];
     }
-    free(old);
+    if (old != first) free(old);
     return 1;
 }
 
@@ -1314,21 +1369,20 @@ static int given_resize(GivenShard* sh, size_t cap) {
  * given back, so the string lives on (a leak, never a dangling read). */
 static void given_record(AetherString* s) {
     aether_string_publish(s);
+    if (!given_tables()) return;
     uint64_t h = given_hash(s->data);
     GivenShard* sh = given_shard(h);
     given_lock(sh);
-    if (sh->cap) {
-        size_t i = given_probe(sh, s->data, h);
-        if (sh->slots[i].data) {
-            sh->slots[i].count++;
-            given_unlock(sh);
-            return;
-        }
+    size_t i = given_probe(sh, s->data, h);
+    if (sh->slots[i].data) {
+        sh->slots[i].count++;
+        given_unlock(sh);
+        return;
     }
     /* A new entry: grown at half full. A table that cannot grow still takes
      * it while one slot stays empty, which every probe stops at. */
-    if ((sh->used + 1) * 2 > sh->cap &&
-        !given_resize(sh, sh->cap ? sh->cap * 2 : GIVEN_MIN_SLOTS) && sh->used + 1 >= sh->cap) {
+    if ((sh->used + 1) * 2 > sh->cap && !given_resize(sh, sh->cap * 2) &&
+        sh->used + 1 >= sh->cap) {
         given_unlock(sh);
         return;
     }
