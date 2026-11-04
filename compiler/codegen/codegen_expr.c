@@ -341,23 +341,33 @@ static void arg_drain_truncate(int target_count) {
  * are hoisted into `_ad_N` temps and freed after the call, and what the
  * wrap yields. A named call and a closure call (`call(f, ...)`, `f(...)` on
  * a closure local) share it; the closure call used to pass a heap-string
- * argument straight through, so nothing freed it (#2493). */
+ * argument straight through, so nothing freed it (#2493).
+ *
+ * As many hoisted arguments as the call has (#3574): 16 slots left the
+ * fresh arguments past the 16th unhoisted, and nothing freed them. The
+ * arrays start in the wrap's own ARG_DRAIN_INLINE slots and move to the
+ * heap past them (arg_drain_room); arg_drain_close gives those back. */
+#define ARG_DRAIN_INLINE 16
 typedef struct ArgDrainWrap {
     int saved_count;    /* registry depth to truncate back to */
     int count;          /* hoisted arguments */
-    int idx[16];        /* their child indices in the call node */
-    int closure[16];    /* 1 = an owned closure (#2507), released through its env;
+    int cap;            /* slots in each array below */
+    int* idx;           /* their child indices in the call node */
+    int* closure;       /* 1 = an owned closure (#2507), released through its env;
                          * 2 = a closure cell's value, held for the call (#2755):
                          * retained into the temp, released the same way;
                          * 3 = a slice that owns its buffer (#3549), dropped
                          * through drop[] */
-    const char* drop[16]; /* a slice's release (aether_slice_release_at, #3568) */
-    int scoped[16];     /* 1 = lives to its scope's exit: the call returns a view, which
+    const char** drop;  /* a slice's release (aether_slice_release_at, #3568) */
+    int* scoped;        /* 1 = lives to its scope's exit: the call returns a view, which
                          * may point into it (call_returns_view) */
-    int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
+    int* held;          /* 1 = a string read from a place the callee can rewrite, taken
                          * for the call (string_arg_held) */
-    int taken[16];      /* 1 = an `if` giving a fresh string or closure, taken branch by
+    int* taken;         /* 1 = an `if` giving a fresh string or closure, taken branch by
                          * branch (branch_value_has_fresh, #3006) */
+    int idx_in[ARG_DRAIN_INLINE], closure_in[ARG_DRAIN_INLINE], scoped_in[ARG_DRAIN_INLINE],
+        held_in[ARG_DRAIN_INLINE], taken_in[ARG_DRAIN_INLINE];
+    const char* drop_in[ARG_DRAIN_INLINE];
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
     const char* ret_ct;
@@ -626,18 +636,60 @@ int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
     return 0;
 }
 
+/* Room for one more hoisted argument: the slots double onto the heap once
+ * the wrap's own are full. */
+static void arg_drain_room(ArgDrainWrap* w) {
+    if (w->count < w->cap) return;
+    int cap = w->cap * 2;
+    int inl = w->idx == w->idx_in;
+    int** ints[] = { &w->idx, &w->closure, &w->scoped, &w->held, &w->taken };
+    for (size_t k = 0; k < sizeof(ints) / sizeof(ints[0]); k++) {
+        int* grown = (int*)aether_xrealloc(inl ? NULL : *ints[k], sizeof(int) * (size_t)cap);
+        if (inl) memcpy(grown, *ints[k], sizeof(int) * (size_t)w->count);
+        memset(grown + w->count, 0, sizeof(int) * (size_t)(cap - w->count));
+        *ints[k] = grown;
+    }
+    const char** drop = (const char**)aether_xrealloc(inl ? NULL : (void*)w->drop,
+                                                      sizeof(char*) * (size_t)cap);
+    if (inl) memcpy(drop, w->drop, sizeof(char*) * (size_t)w->count);
+    memset(drop + w->count, 0, sizeof(char*) * (size_t)(cap - w->count));
+    w->drop = drop;
+    w->cap = cap;
+}
+
+/* The slots arg_drain_room moved to the heap, given back. */
+static void arg_drain_slots_free(ArgDrainWrap* w) {
+    if (!w->idx || w->idx == w->idx_in) return;
+    free(w->idx);
+    free(w->closure);
+    free(w->scoped);
+    free(w->held);
+    free(w->taken);
+    free((void*)w->drop);
+    w->idx = NULL;
+}
+
 static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                              const char* func_name, ASTNode* closure, int is_void,
                              ArgDrainWrap* w, ArgSelMode mode) {
     w->saved_count = g_arg_drain_count;
     w->count = 0;
-    memset(w->scoped, 0, sizeof(w->scoped));
-    memset(w->held, 0, sizeof(w->held));
-    memset(w->taken, 0, sizeof(w->taken));
-    memset(w->drop, 0, sizeof(w->drop));
+    w->cap = ARG_DRAIN_INLINE;
+    w->idx = w->idx_in;
+    w->closure = w->closure_in;
+    w->drop = w->drop_in;
+    w->scoped = w->scoped_in;
+    w->held = w->held_in;
+    w->taken = w->taken_in;
+    memset(w->closure_in, 0, sizeof(w->closure_in));
+    memset(w->scoped_in, 0, sizeof(w->scoped_in));
+    memset(w->held_in, 0, sizeof(w->held_in));
+    memset(w->taken_in, 0, sizeof(w->taken_in));
+    memset(w->drop_in, 0, sizeof(w->drop_in));
     if (!w->have_value && !is_void) return;
     int store_idx = mode == ARG_SEL_CALL && func_name ? container_store_value_index(gen, expr) : -1;
-    for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
+    for (int ai = first_arg; ai < expr->child_count; ai++) {
+        arg_drain_room(w);
         ASTNode* arg = expr->children[ai];
         if (!arg) continue;
         int borrowed = call_arg_borrowed(gen, expr, func_name, ai, mode, store_idx);
@@ -760,7 +812,7 @@ static int closure_callee_is_path(ASTNode* e) {
 
 static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
-    char* names[16] = {0};
+    char** names = (char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)w->count);
     seq_open(gen, &w->seq);
     /* Pre-mint all temp names BEFORE recursing into generate_expression:
      * the recursion may itself open inner wraps and mint their own temps,
@@ -831,6 +883,7 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     for (int h = 0; h < w->count; h++) {
         arg_drain_bind(expr->children[w->idx[h]], names[h]);
     }
+    free(names);
     /* A void parent emits the call bare (no _ad_r); the wrap yields void
      * through the final free in arg_drain_close. */
     w->r = NULL;
@@ -871,6 +924,7 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
      * yields void. */
     seq_close(gen, &w->seq);
     arg_drain_truncate(w->saved_count);
+    arg_drain_slots_free(w);
 }
 
 /* #3549: `node` lowered by `emit` as the builtin `name` with no value (a
@@ -1681,6 +1735,50 @@ static int order_hoist_set(CodeGenerator* gen, ASTNode** ops, int n, int* hoist)
 
 #define ORDER_MAX_OPERANDS 32
 
+/* Room for the operands order_operands or ctl_operands lists for `e`, and
+ * whether each is hoisted (#3574): ORDER_MAX_OPERANDS of them in the
+ * struct, the heap past them. With only those, a call of more arguments, a
+ * struct or message of more fields or a list of more elements was left in
+ * C's unspecified order, so `f(i++, ..., i)` read `i` in either order. */
+typedef struct {
+    ASTNode** ops;
+    int* hoist;
+    int cap;
+    ASTNode* ops_in[ORDER_MAX_OPERANDS];
+    int hoist_in[ORDER_MAX_OPERANDS];
+} OrderOps;
+
+/* An upper bound of the operands either list holds for `e`: its children,
+ * a send's message fields, an assignment target's indexes, and two. */
+static int order_operand_room(const ASTNode* e) {
+    if (!e) return 2;
+    int n = 2 + e->child_count;
+    if ((e->type == AST_SEND_FIRE_FORGET || e->type == AST_SEND_ASK) && e->child_count > 1 &&
+        e->children[1])
+        n += e->children[1]->child_count;
+    if (e->type == AST_BINARY_EXPRESSION && e->child_count > 0)
+        for (const ASTNode* t = e->children[0]; t && t->child_count > 0; t = t->children[0]) n++;
+    return n;
+}
+
+static void order_ops_init(OrderOps* o, int room) {
+    if (room <= ORDER_MAX_OPERANDS) {
+        o->ops = o->ops_in;
+        o->hoist = o->hoist_in;
+        o->cap = ORDER_MAX_OPERANDS;
+        return;
+    }
+    o->ops = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)room);
+    o->hoist = (int*)aether_xrealloc(NULL, sizeof(int) * (size_t)room);
+    o->cap = room;
+}
+
+static void order_ops_free(OrderOps* o) {
+    if (o->ops == o->ops_in) return;
+    free(o->ops);
+    free(o->hoist);
+}
+
 /* The indexes an assignment's target evaluates before the store, in source
  * order (`a[i][j] = v` reads `i` then `j`), appended to `ops` (#2516). */
 static int order_target_operands(ASTNode* lhs, ASTNode** ops, int n, int cap) {
@@ -1924,8 +2022,10 @@ void order_prelude_end(int depth) {
  * or NULL: an element that reads it is evaluated before the first store,
  * so `a = [a[1], a[0]]` swaps. */
 void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target) {
-    if (!items || n < 1 || n > ORDER_MAX_OPERANDS) return;
-    int hoist[ORDER_MAX_OPERANDS];
+    if (!items || n < 1) return;
+    OrderOps room;
+    order_ops_init(&room, n);
+    int* hoist = room.hoist;
     int any = n >= 2 ? order_hoist_set(gen, items, n, hoist) : 0;
     if (n < 2) hoist[0] = 0;
     for (int k = 0; target && k < n; k++) {
@@ -1935,7 +2035,10 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
             any = 1;
         }
     }
-    if (!any) return;
+    if (!any) {
+        order_ops_free(&room);
+        return;
+    }
     /* Statements, ahead of the one the list belongs to: `T _eoN = (op);`,
      * T inferred (__auto_type) where the compiler can, and the operand's
      * own type elsewhere (#2765). */
@@ -1949,6 +2052,7 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
         fprintf(gen->output, "); ");
         order_bind(items[k], name);
     }
+    order_ops_free(&room);
 }
 
 /* Emit `expr` with the operands a later one conflicts with evaluated first,
@@ -1956,11 +2060,9 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
  *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })     GCC-compatible
  *     (_eo0 = (i++), f(_eo0, i))                       any other compiler
  * Returns 0, emitting nothing, when no operand needs it. */
-static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int hoist[ORDER_MAX_OPERANDS];
-    if (order_bound(expr)) return 0;   /* emitted as the temp that holds it */
-    int n = order_operands(expr, ops, ORDER_MAX_OPERANDS);
+static int emit_in_operand_order_in(CodeGenerator* gen, ASTNode* expr, ASTNode** ops, int* hoist,
+                                     int room) {
+    int n = order_operands(expr, ops, room);
     if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
     int saved = g_order_count;
     if (expr->type == AST_SEND_FIRE_FORGET) {
@@ -2006,6 +2108,15 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     seq_close(gen, &s);
     order_prelude_end(saved);
     return 1;
+}
+
+static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
+    if (order_bound(expr)) return 0;   /* emitted as the temp that holds it */
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(expr));
+    int done = emit_in_operand_order_in(gen, expr, room.ops, room.hoist, room.cap);
+    order_ops_free(&room);
+    return done;
 }
 
 /* Index of the last child that must be evaluated into a temp to keep the
@@ -4298,23 +4409,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
         // AST_VARIABLE_DECLARATION children of the actor with
         // annotation marking them as state vars. Actors typically list
         // state decls as top-level children of AST_ACTOR_DEFINITION.
-        const char* state_names[64];
-        ASTNode* state_decls[64];
-        int state_count = 0;
-        for (int j = 0; j < actor->child_count && state_count < 64; j++) {
-            ASTNode* c = actor->children[j];
-            if (!c || !c->value) continue;
-            if (c->type == AST_STATE_DECLARATION ||
-                (c->type == AST_VARIABLE_DECLARATION && c->annotation &&
-                 strcmp(c->annotation, "state") == 0)) {
-                state_decls[state_count] = c;
-                state_names[state_count++] = c->value;
-            }
-        }
-        if (state_count == 0) continue;
-
-        // Walk the closure body looking for assignments to any of the
-        // state field names.
+        // Every one (#3574): 64 slots left a write to a state field past
+        // the 64th unrefused, and the closure wrote a stale local.
         ASTNode* closure = gen->closures[ci].closure_node;
         ASTNode* body = NULL;
         for (int k = closure->child_count - 1; k >= 0; k--) {
@@ -4324,7 +4420,28 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
             }
         }
         if (!body) continue;
+        size_t slots = (size_t)(actor->child_count > 0 ? actor->child_count : 1);
+        const char** state_names = (const char**)aether_xrealloc(NULL, sizeof(char*) * slots);
+        ASTNode** state_decls = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * slots);
+        int state_count = 0;
+        for (int j = 0; j < actor->child_count; j++) {
+            ASTNode* c = actor->children[j];
+            if (!c || !c->value) continue;
+            if (c->type == AST_STATE_DECLARATION ||
+                (c->type == AST_VARIABLE_DECLARATION && c->annotation &&
+                 strcmp(c->annotation, "state") == 0)) {
+                state_decls[state_count] = c;
+                state_names[state_count++] = c->value;
+            }
+        }
+        if (state_count == 0) {
+            free(state_names);
+            free(state_decls);
+            continue;
+        }
 
+        // Walk the closure body looking for assignments to any of the
+        // state field names.
         for (int n = 0; n < state_count; n++) {
             /* An element or field write (`hist[i] = v`, `pos.x += 1`)
              * writes the state field as much as `hist = ...` does. A state
@@ -4379,6 +4496,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                               AETHER_ERR_ACTOR_ERROR);
             ok = 0;
         }
+        free(state_names);
+        free(state_decls);
     }
     return ok;
 }
@@ -5514,10 +5633,13 @@ MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name) {
 // The msg_arr_id_for_field map is stored on the gen state as a sparse
 // per-send table (reset via `reset_msg_arr_map`).
 
-#define MAX_MSG_ARR_FIELDS 16
-static int msg_arr_ids[MAX_MSG_ARR_FIELDS];
-static const char* msg_arr_field_names[MAX_MSG_ARR_FIELDS];
+/* Every array field of the message (#3574): 16 slots left a field past
+ * them unrecorded, and its init a compound literal the receiver read
+ * after the send's block had ended. */
+static int* msg_arr_ids = NULL;
+static const char** msg_arr_field_names = NULL;
 static int msg_arr_count = 0;
+static int msg_arr_cap = 0;
 
 static void reset_msg_arr_map(void) {
     msg_arr_count = 0;
@@ -5565,11 +5687,15 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
         }
         fprintf(gen->output, "}; ");
 
-        if (msg_arr_count < MAX_MSG_ARR_FIELDS) {
-            msg_arr_ids[msg_arr_count] = id;
-            msg_arr_field_names[msg_arr_count] = field_init->value;
-            msg_arr_count++;
+        if (msg_arr_count == msg_arr_cap) {
+            msg_arr_cap = msg_arr_cap ? msg_arr_cap * 2 : 16;
+            msg_arr_ids = (int*)aether_xrealloc(msg_arr_ids, sizeof(int) * (size_t)msg_arr_cap);
+            msg_arr_field_names = (const char**)aether_xrealloc(
+                (void*)msg_arr_field_names, sizeof(char*) * (size_t)msg_arr_cap);
         }
+        msg_arr_ids[msg_arr_count] = id;
+        msg_arr_field_names[msg_arr_count] = field_init->value;
+        msg_arr_count++;
     }
 }
 
@@ -6649,14 +6775,15 @@ int is_control_value(CodeGenerator* gen, ASTNode* e) {
          * arguments evaluated in order, its result taken as owned or
          * copied, a statement's struct temporary) is left as it is: the
          * wrap reads what the call does inside it. */
-        ASTNode* ops[ORDER_MAX_OPERANDS];
-        int hoist[ORDER_MAX_OPERANDS];
-        int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
+        OrderOps room;
+        order_ops_init(&room, order_operand_room(e));
+        int n = order_operands(e, room.ops, room.cap);
         /* A builder's lowering orders its arguments itself, after its
          * block (ctl_builder_args). */
-        if (n >= 2 && !(e->value && is_builder_func_reg(gen, e->value)) &&
-            order_hoist_set(gen, ops, n, hoist))
-            return 0;
+        int ordered = n >= 2 && !(e->value && is_builder_func_reg(gen, e->value)) &&
+                      order_hoist_set(gen, room.ops, n, room.hoist);
+        order_ops_free(&room);
+        if (ordered) return 0;
         return !call_returns_view_of_temp(gen, e) &&
                !call_returns_tuple_view_of_temp(gen, e) && !expr_is_c_view_of_slice(gen, e) &&
                !stmt_struct_temp_of(e);
@@ -7026,9 +7153,12 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
          * its lowering (emit_trailing_call_expression). */
         if (e->type == AST_FUNCTION_CALL) {
             if (!trailing_call_is_builder(gen, e)) {
-                ASTNode* ops[ORDER_MAX_OPERANDS];
-                int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
-                if (n > 0 && !ctl_linearize_ops(gen, e, ops, n)) return 0;
+                OrderOps room;
+                order_ops_init(&room, order_operand_room(e));
+                int n = order_operands(e, room.ops, room.cap);
+                int ran = n <= 0 || ctl_linearize_ops(gen, e, room.ops, n);
+                order_ops_free(&room);
+                if (!ran) return 0;
             }
         } else if (e->child_count > 0 && !ctl_linearize(gen, e->children[0], 0)) {
             return 0;
@@ -7061,12 +7191,15 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
     }
     int cond = ctl_conditional(gen, e);
     if (cond >= 0) return cond;
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int n = ctl_operands(gen, e, ops, ORDER_MAX_OPERANDS);
-    if (n < 0) return 0;
-    for (int i = 0; i < e->child_count; i++)
-        if (ctl_unreached(gen, e->children[i], ops, n)) return 0;
-    if (!ctl_linearize_ops(gen, e, ops, n)) return 0;
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(e));
+    int n = ctl_operands(gen, e, room.ops, room.cap);
+    int ran = n >= 0;
+    for (int i = 0; ran && i < e->child_count; i++)
+        if (ctl_unreached(gen, e->children[i], room.ops, n)) ran = 0;
+    if (ran && !ctl_linearize_ops(gen, e, room.ops, n)) ran = 0;
+    order_ops_free(&room);
+    if (!ran) return 0;
     /* A call with a trailing block whose arguments kept it from running
      * ahead (is_control_value: their order needed a wrap) may now, with
      * them evaluated. Not a builder's, whose block runs before them. */
@@ -7090,17 +7223,17 @@ int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded) {
  * right. */
 void ctl_builder_args(CodeGenerator* gen, ASTNode* call) {
     if (!hoist_ready(gen)) return;
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int hoist[ORDER_MAX_OPERANDS];
-    int n = order_operands(call, ops, ORDER_MAX_OPERANDS);
-    if (n <= 0) return;
-    int need = n >= 2 && order_hoist_set(gen, ops, n, hoist);
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(call));
+    ASTNode** ops = room.ops;
+    int n = order_operands(call, ops, room.cap);
+    int need = n >= 2 && order_hoist_set(gen, ops, n, room.hoist);
     for (int i = 0; i < n && !need; i++) need = ctl_contains(gen, ops[i]);
-    if (!need) return;
-    for (int i = 0; i < n; i++) {
-        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return;
-        if (i < n - 1 && !ctl_hoist(gen, ops[i])) return;
+    for (int i = 0; need && i < n; i++) {
+        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) break;
+        if (i < n - 1 && !ctl_hoist(gen, ops[i])) break;
     }
+    order_ops_free(&room);
 }
 
 /* `call(args) { block }` where the value is used inside an expression:
@@ -7272,11 +7405,9 @@ static int erased_call_args(ASTNode* call, ASTNode** out, int cap) {
  * coerced, writes `((f.fn == sym) ? <its call> : ` and returns 1. A call
  * whose value is not used (`is_void`) takes any result, each branch cast
  * to void; one whose value is used, only the C type it reads. */
-static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
-                                  const char* ret, int is_void, const char* sym, Type** ps,
-                                  int np, const char* rc) {
-    ASTNode* args[16];
-    int na = erased_call_args(call, args, 16);
+static int erased_dispatch_branch_in(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                     const char* ret, int is_void, const char* sym, Type** ps,
+                                     int np, const char* rc, ASTNode** args, int na) {
     if (na < 0 || na != np || !rc) return 0;
     if (!is_void && strcmp(rc, ret) != 0) return 0;
     int coerced = 0;
@@ -7310,6 +7441,20 @@ static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
     return 1;
 }
 
+/* Every argument and parameter, however many (#3574): 16 slots left a
+ * target of more parameters undispatched, so its arguments reached it
+ * uncoerced (an int read as a float). */
+static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                  const char* ret, int is_void, const char* sym, Type** ps,
+                                  int np, const char* rc) {
+    ASTNode** args = (ASTNode**)aether_xrealloc(
+        NULL, sizeof(ASTNode*) * (size_t)(call->child_count > 0 ? call->child_count : 1));
+    int na = erased_call_args(call, args, call->child_count);
+    int opened = erased_dispatch_branch_in(gen, call, f, ret, is_void, sym, ps, np, rc, args, na);
+    free(args);
+    return opened;
+}
+
 static const char* resolve_closure_return_type(CodeGenerator* gen, int ci);
 
 /* The branches of the erased call `call` for every closure literal and
@@ -7324,18 +7469,21 @@ static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode*
     while (base && base->type == AST_MEMBER_ACCESS && base->child_count > 0) base = base->children[0];
     if (!arg_drain_lookup(f) && (!base || base->type != AST_IDENTIFIER)) return 0;
     int n = 0;
+    Type** ps = NULL;
+    int ps_cap = 0;
     for (int cj = 0; cj < gen->closure_count; cj++) {
         ASTNode* lit = gen->closures[cj].closure_node;
         if (!lit || lit->type != AST_CLOSURE) continue;
-        Type* ps[16];
-        int np = 0, over = 0;
+        if (lit->child_count > ps_cap) {
+            ps_cap = lit->child_count;
+            ps = (Type**)aether_xrealloc(ps, sizeof(Type*) * (size_t)ps_cap);
+        }
+        int np = 0;
         for (int k = 0; k < lit->child_count; k++) {
             ASTNode* p = lit->children[k];
             if (!p || p->type != AST_CLOSURE_PARAM) continue;
-            if (np >= 16) { over = 1; break; }
             ps[np++] = p->node_type;
         }
-        if (over) continue;
         const char* sym = cg_internf("_closure_fn_%d", gen->closures[cj].id);
         n += erased_dispatch_branch(gen, call, f, ret, is_void, sym, ps, np,
                                     cg_intern(resolve_closure_return_type(gen, cj)));
@@ -7345,14 +7493,17 @@ static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode*
         ASTNode* fdef = find_function_definition_by_name(gen->program, name);
         if (!fdef) continue;
         int np = fn_param_count(fdef);
-        if (np > 16) continue;
-        Type* ps[16];
+        if (np > ps_cap) {
+            ps_cap = np;
+            ps = (Type**)aether_xrealloc(ps, sizeof(Type*) * (size_t)ps_cap);
+        }
         for (int k = 0; k < np; k++) ps[k] = fn_param_type_at(gen, fdef, k);
         Type* rt = fn_result_type(gen, fdef);
         n += erased_dispatch_branch(gen, call, f, ret, is_void,
                                     cg_internf("_aether_bare_adapter_%s", name), ps, np,
                                     cg_intern(rt ? get_c_type(rt) : "void"));
     }
+    free(ps);
     return n;
 }
 
@@ -11421,13 +11572,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * reads below (`.fn`, `.env`) name instead of
                          * evaluating the callee twice, and released after
                          * the call. */
-                        if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                        arg_drain_room(&ad);
+                        if (closure_arg && !arg_drain_lookup(closure_arg) &&
                             ((closure_arg->type == AST_CLOSURE &&
                               !(closure_arg->value && strcmp(closure_arg->value, "trailing") == 0)) ||
                              call_returns_owned_closure(gen, closure_arg))) {
                             ad.closure[ad.count] = 1;
                             ad.idx[ad.count++] = 0;
-                        } else if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                        } else if (closure_arg && !arg_drain_lookup(closure_arg) &&
                                    (is_closure_cell_read(gen, closure_arg) ||
                                     !closure_callee_is_path(closure_arg))) {
                             /* #2755: a closure a cell holds is held for its

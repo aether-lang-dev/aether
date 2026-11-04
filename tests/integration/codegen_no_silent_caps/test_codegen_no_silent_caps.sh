@@ -36,6 +36,21 @@
 #                    structs holding lanes: 512 were remapped to the copy's
 #                    own, and the rest kept the build's, so the C did not
 #                    compile.
+#   wide_args:       a call of 20 fresh string arguments: 16 were hoisted into
+#                    temporaries and freed after the call, and the rest
+#                    leaked.
+#   order_args:      a call of 40 arguments, the first bumping what the last
+#                    reads: 32 operands were ordered, and past them the call
+#                    was left in C's order, which read the last first.
+#   state_fields:    a closure in a handler of an actor of 70 state fields
+#                    writing the 70th: 64 were checked, and the write, which
+#                    goes to a stale local, was not refused.
+#   erased_args:     a closure of 17 float parameters called through a bare
+#                    `fn` with ints: targets of more than 16 parameters got
+#                    no dispatch, and the ints were read as floats.
+#   message_arrays:  a message of 20 array fields sent with array literals:
+#                    16 were recorded as hoisted, and the rest were compound
+#                    literals the receiver read after the send's block ended.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -302,6 +317,120 @@ main() { println("structs ${m8.count()} ${many.count()}") }
 AE
 runs lane_structs "structs 520 520"
 
+# --- wide_args ----------------------------------------------------------------
+mkdir -p "$TMP/wide_args"
+awk 'BEGIN {
+    print "import std.mem"
+    print "import std.string"
+    print "mk(w: string, i: int) -> string { return string.concat(w, \"${i}\") }"
+    printf "take("
+    for (i = 0; i < 20; i++) printf "%sa%d: string", (i ? ", " : ""), i
+    printf ") -> int { return string.length(a0)"
+    for (i = 1; i < 20; i++) printf " + string.length(a%d)", i
+    print " }"
+    print "round(w: string) -> int {"
+    printf "    return take("
+    for (i = 0; i < 20; i++) printf "%smk(w, %d)", (i ? ", " : ""), i
+    print ")"
+    print "}"
+    print "main() {"
+    print "    w = string.concat(\"ab\", \"c\")"
+    print "    println(\"len ${round(w)}\")"
+    print "    long grown = 0"
+    print "    if mem.heap_in_use_exact() {"
+    print "        grown = mem.steady_growth(|| { round(w) }, 4)"
+    print "    }"
+    print "    println(\"grown ${grown}\")"
+    print "}"
+}' > "$TMP/wide_args/main.ae"
+runs wide_args "len 90
+grown 0"
+
+# --- order_args ---------------------------------------------------------------
+mkdir -p "$TMP/order_args"
+awk 'BEGIN {
+    print "var g_count = 0"
+    print "bump() -> int {"
+    print "    g_count = g_count + 1"
+    print "    return g_count"
+    print "}"
+    printf "last("
+    for (i = 0; i < 40; i++) printf "%sa%d: int", (i ? ", " : ""), i
+    print ") -> int { return a0 * 10 + a39 }"
+    printf "main() { println(\"order ${last(bump()"
+    for (i = 1; i < 39; i++) printf ", 0"
+    print ", g_count)}\") }"
+}' > "$TMP/order_args/main.ae"
+runs order_args "order 11"
+
+# --- state_fields -------------------------------------------------------------
+mkdir -p "$TMP/state_fields"
+awk 'BEGIN {
+    print "message Go {}"
+    print "actor A {"
+    for (i = 0; i < 70; i++) printf "    state s%d = 0\n", i
+    print "    receive {"
+    print "        Go() -> {"
+    print "            f = || { s69 = 1 }"
+    print "            f()"
+    print "        }"
+    print "    }"
+    print "}"
+    print "main() {"
+    print "    a = spawn(A())"
+    print "    a ! Go {}"
+    print "    wait_for_idle()"
+    print "}"
+}' > "$TMP/state_fields/main.ae"
+refused state_fields "closure inside actor 'A' handler writes state field 's69'"
+
+# --- erased_args --------------------------------------------------------------
+mkdir -p "$TMP/erased_args"
+awk 'BEGIN {
+    printf "applyw(f: fn) -> float { return call(f"
+    for (i = 1; i <= 17; i++) printf ", %d", i
+    print ") }"
+    print "main() {"
+    printf "    w = |"
+    for (i = 0; i < 17; i++) printf "%sx%d: float", (i ? ", " : ""), i
+    print "| { return x0 + x16 }"
+    print "    println(\"erased ${applyw(w)}\")"
+    print "}"
+}' > "$TMP/erased_args/main.ae"
+runs erased_args "erased 18"
+
+# --- message_arrays -----------------------------------------------------------
+# What the receiver reads past the send's block is undefined, so the case
+# reads the C: every array field's init is the static it was hoisted to.
+mkdir -p "$TMP/message_arrays"
+awk 'BEGIN {
+    printf "message Many { "
+    for (i = 0; i < 20; i++) printf "%sf%d: int[]", (i ? ", " : ""), i
+    print " }"
+    print "actor R {"
+    print "    state total = 0"
+    print "    receive {"
+    printf "        Many("
+    for (i = 0; i < 20; i++) printf "%sf%d", (i ? ", " : ""), i
+    printf ") -> { total = f0[0]"
+    for (i = 1; i < 20; i++) printf " + f%d[2]", i
+    print " }"
+    print "    }"
+    print "}"
+    print "main() {"
+    print "    r = spawn(R())"
+    printf "    r ! Many { "
+    for (i = 0; i < 20; i++) printf "%sf%d: [1, 2, 3]", (i ? ", " : ""), i
+    print " }"
+    print "    wait_for_idle()"
+    print "    println(\"total ${r.total}\")"
+    print "}"
+}' > "$TMP/message_arrays/main.ae"
+runs message_arrays "total 58"
+(cd "$TMP/message_arrays" && AETHER_HOME="" "$AETHERC" main.ae main.c >/dev/null 2>&1)
+n=$(grep -o 'aether_slice_make(_aether_arr_' "$TMP/message_arrays/main.c" 2>/dev/null | wc -l | tr -d ' ')
+[ "$n" = "20" ] || fail "message_arrays: $n of the 20 array fields read their hoisted static"
+
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lane crossings and lane structs past every old cap"
+echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lanes, call arguments, actor state and message arrays past every old cap"
 exit 0
