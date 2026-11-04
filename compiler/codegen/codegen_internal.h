@@ -82,6 +82,10 @@ int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
  * their depth, so that no stretch of an expression's C nests past what C
  * compilers take (codegen_expr.c). */
 void codegen_mark_depth(CodeGenerator* gen, ASTNode* program);
+/* #3574: is `e` an `if` expression a consumer takes branch by branch, and
+ * not one already evaluated ahead of its statement into a temporary, which
+ * is read as any value is (codegen_expr.c)? */
+int if_takes_by_branch(ASTNode* e);
 /* #2798: the same anywhere in a statement: does `e` hold one, and run the
  * ones a value or a list of operands holds, with what is evaluated before
  * them, ahead of the statement (1 when every one is bound). */

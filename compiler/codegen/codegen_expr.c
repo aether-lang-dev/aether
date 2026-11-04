@@ -7026,6 +7026,35 @@ static int if_chain_links(const ASTNode* e) {
     return n;
 }
 
+/* The value types of an `if` expression whose chain ctl_if_chain writes
+ * flat into one temporary: a number, a bool or an enum, which a consumer
+ * reads as it is. A string, an optional, a struct, a closure, a tuple or a
+ * slice its consumers take branch by branch (a fresh value moved in, a
+ * borrowed one retained or copied, each arm wrapped), which one temporary
+ * holding whichever branch ran cannot say. */
+static int if_chain_flat_type(const Type* t) {
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+        case TYPE_UINT8: case TYPE_BYTE: case TYPE_BOOL: case TYPE_FLOAT: case TYPE_FLOAT32:
+        case TYPE_ENUM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* #3574: does a consumer take `if` expression `e` branch by branch (each
+ * arm wrapped, taken or coerced on its own)? Not one evaluated ahead of its
+ * statement already (ctl_if_chain, an operand evaluated ahead in order): its
+ * temporary holds the value of the branch that ran, and is read as any value
+ * is. Taken branch by branch, its chain was written again inline: every
+ * condition ran twice. */
+int if_takes_by_branch(ASTNode* e) {
+    return e && e->type == AST_IF_EXPRESSION && e->child_count >= 3 && !order_bound(e);
+}
+
 /* A node a temporary of its statement can hold in its place: one whose
  * value is a scalar, a pointer or a string made fresh (an interpolation, a
  * call returning a string of its own), and that is no construct of its own
@@ -7116,7 +7145,8 @@ static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, i
             depth_walk(gen, n->children[i], 0, 0, 0, depth_place_child(n, i));
         return;
     }
-    if (!in_chain && n->type == AST_IF_EXPRESSION && if_chain_links(n) > IF_CHAIN_LINKS) {
+    if (!in_chain && n->type == AST_IF_EXPRESSION && if_chain_links(n) > IF_CHAIN_LINKS &&
+        if_chain_flat_type(n->node_type)) {
         depth_put(n);
         in_chain = 1;
     }
@@ -8214,7 +8244,7 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
  * emitted as a bare `{3, 4}`, which C refused (#3071). So is an `if` giving
  * arrays (#3006): the temporary is filled from the branch taken. */
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg) {
-    int branches = arg->type == AST_IF_EXPRESSION && arg->child_count >= 3;
+    int branches = if_takes_by_branch(arg);
     if ((arg->type != AST_ARRAY_LITERAL && !branches) || !type_is_sized_array(arg->node_type) ||
         !hoist_ready(gen)) return 0;
     Type* at = arg->node_type;

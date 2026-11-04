@@ -1,0 +1,52 @@
+// An `if` expression of more than 16 `else if` links is evaluated ahead of
+// its statement, flat, into one temporary (#3574), and a consumer that
+// takes an `if` branch by branch (into an optional, for one) must read that
+// temporary: written branch by branch again, the chain ran every condition
+// a second time and took a later branch. Each chain here has 20 links whose
+// conditions count their calls; the first to hold is the 7th, so each must
+// run 7 conditions and give the 7th value. A string chain, which its
+// consumers take branch by branch, is not written flat, and runs once too.
+
+extern exit(code: int)
+
+var g_calls = 0
+var g_label = ""
+
+struct P { v: int }
+
+next() -> int {
+    g_calls = g_calls + 1
+    return g_calls
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    fails = 0
+    g_calls = 0
+    let o: int? = if next() >= 7 { 10 } else if next() >= 7 { 20 } else if next() >= 7 { 30 } else if next() >= 7 { 40 } else if next() >= 7 { 50 } else if next() >= 7 { 60 } else if next() >= 7 { 70 } else if next() >= 7 { 80 } else if next() >= 7 { 90 } else if next() >= 7 { 100 } else if next() >= 7 { 110 } else if next() >= 7 { 120 } else if next() >= 7 { 130 } else if next() >= 7 { 140 } else if next() >= 7 { 150 } else if next() >= 7 { 160 } else if next() >= 7 { 170 } else if next() >= 7 { 180 } else if next() >= 7 { 190 } else if next() >= 7 { 200 } else { -1 }
+    fails = fails + check("an int? target: ${o!} after ${g_calls} conditions", o! == 70 && g_calls == 7)
+    g_calls = 0
+    p = P { v: 0 }
+    p.v = if next() >= 7 { 1 } else if next() >= 7 { 2 } else if next() >= 7 { 3 } else if next() >= 7 { 4 } else if next() >= 7 { 5 } else if next() >= 7 { 6 } else if next() >= 7 { 7 } else if next() >= 7 { 8 } else if next() >= 7 { 9 } else if next() >= 7 { 10 } else if next() >= 7 { 11 } else if next() >= 7 { 12 } else if next() >= 7 { 13 } else if next() >= 7 { 14 } else if next() >= 7 { 15 } else if next() >= 7 { 16 } else if next() >= 7 { 17 } else if next() >= 7 { 18 } else if next() >= 7 { 19 } else if next() >= 7 { 20 } else { -1 }
+    fails = fails + check("a field store: ${p.v} after ${g_calls}", p.v == 7 && g_calls == 7)
+    g_calls = 0
+    x = 1
+    x = if next() >= 7 { 1 } else if next() >= 7 { 2 } else if next() >= 7 { 3 } else if next() >= 7 { 4 } else if next() >= 7 { 5 } else if next() >= 7 { 6 } else if next() >= 7 { 7 } else if next() >= 7 { 8 } else if next() >= 7 { 9 } else if next() >= 7 { 10 } else if next() >= 7 { 11 } else if next() >= 7 { 12 } else if next() >= 7 { 13 } else if next() >= 7 { 14 } else if next() >= 7 { 15 } else if next() >= 7 { 16 } else if next() >= 7 { 17 } else if next() >= 7 { 18 } else if next() >= 7 { 19 } else if next() >= 7 { 20 } else { -1 }
+    fails = fails + check("a rebind: ${x} after ${g_calls}", x == 7 && g_calls == 7)
+    g_calls = 0
+    k = 42
+    g_label = if next() >= 7 { "s1" } else if next() >= 7 { "s2" } else if next() >= 7 { "s3" } else if next() >= 7 { "s4" } else if next() >= 7 { "s5" } else if next() >= 7 { "s6" } else if next() >= 7 { "s7" } else if next() >= 7 { "s8" } else if next() >= 7 { "s9" } else if next() >= 7 { "s10" } else if next() >= 7 { "s11" } else if next() >= 7 { "s12" } else if next() >= 7 { "s13" } else if next() >= 7 { "s14" } else if next() >= 7 { "s15" } else if next() >= 7 { "s16" } else if next() >= 7 { "s17" } else if next() >= 7 { "s18" } else if next() >= 7 { "s19" } else if next() >= 7 { "s20" } else { "${k}" }
+    fails = fails + check("a module string: ${g_label} after ${g_calls}", g_label == "s7" && g_calls == 7)
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("PASS: long if chains run once into every consumer")
+}

@@ -797,7 +797,7 @@ static int is_captured_string(CodeGenerator* gen, ASTNode* e) {
 
 int string_take_kind(CodeGenerator* gen, ASTNode* e) {
     if (!e) return STR_TAKE_BORROW;
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         return string_take_join(string_take_kind(gen, e->children[1]),
                                 string_take_kind(gen, e->children[2]));
     }
@@ -869,7 +869,7 @@ void emit_string_take(CodeGenerator* gen, ASTNode* e, const char* target) {
         seq_close(gen, &s);
         return;
     }
-    if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
         fprintf(gen->output, ") ? ");
@@ -1685,7 +1685,7 @@ void emit_seq_take(CodeGenerator* gen, ASTNode* e) {
         if (e->node_type) free_type(e->node_type);
         e->node_type = make_string_seq_ptr_type();
     }
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
         fprintf(gen->output, ") ? ");
@@ -3617,7 +3617,7 @@ void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
      * value it gives is (a tuple literal's parts taken, a call's result
      * moved in). Copied whole, a fresh string in a branch's tuple was
      * retained and its own reference leaked. */
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
         fprintf(gen->output, ") ? ");
@@ -3684,7 +3684,7 @@ void emit_value_take(CodeGenerator* gen, ASTNode* e, Type* t) {
 void emit_array_fill(CodeGenerator* gen, const char* dst, ASTNode* e, Type* at) {
     /* #3006: an `if` fills from the branch it takes, each as it would on
      * its own; C has no array value for it to choose. */
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
         fprintf(gen->output, ") ? (void)(");
@@ -7143,7 +7143,7 @@ static int struct_local_owns(CodeGenerator* gen, const char* name) {
 
 void emit_struct_take(CodeGenerator* gen, ASTNode* e, const char* sname,
                       const char* target) {
-    if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
         fprintf(gen->output, ") ? ");
@@ -7191,7 +7191,7 @@ int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
         ASTNode* ext = find_extern_declaration_in_scope(gen, codegen_normalise_callee(e->value));
         return ext && ext->annotation && annotation_has_marker(ext->annotation, "heap_return");
     }
-    if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+    if (if_takes_by_branch(e)) {
         return closure_value_is_fresh(gen, e->children[1]) &&
                closure_value_is_fresh(gen, e->children[2]);
     }
@@ -7208,7 +7208,7 @@ int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
  * named function has no env: nothing to retain. An `if` over values takes
  * each branch on its own. */
 void emit_closure_take(CodeGenerator* gen, ASTNode* e) {
-    if (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3 &&
+    if (if_takes_by_branch(e) &&
         !closure_value_is_fresh(gen, e)) {
         fprintf(gen->output, "((");
         generate_expression(gen, e->children[0]);
@@ -7259,7 +7259,7 @@ static int value_is_fresh(CodeGenerator* gen, ASTNode* e) {
  * does (a fresh value moved in, any other retained or copied) and is
  * released once the call is done, as a call's result passed on is. */
 int branch_value_has_fresh(CodeGenerator* gen, ASTNode* e) {
-    if (!e || e->type != AST_IF_EXPRESSION || e->child_count < 3) return 0;
+    if (!if_takes_by_branch(e)) return 0;
     for (int i = 1; i <= 2; i++) {
         ASTNode* b = e->children[i];
         if (!b) continue;
@@ -7426,7 +7426,7 @@ void emit_optional_coerced(CodeGenerator* gen, ASTNode* value, Type* target) {
      * does: each arm wrapped (a tuple literal as its compound literal),
      * `none` the empty optional, an optional arm as it is. Wrapped whole,
      * `if c { 3 } else { none }` was `.val = (c ? 3 : {0})`. */
-    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3) {
+    if (if_takes_by_branch(value)) {
         fprintf(gen->output, "((");
         generate_expression(gen, value->children[0]);
         fprintf(gen->output, ") ? ");
@@ -7894,7 +7894,7 @@ static void emit_opt_string_return(CodeGenerator* gen, ASTNode* v, Type* rt) {
         fprintf(gen->output, "(%s){0}", tc);
         return;
     }
-    if (v->type == AST_IF_EXPRESSION && v->child_count >= 3) {
+    if (if_takes_by_branch(v)) {
         /* Each arm as a return of its own. */
         fprintf(gen->output, "((");
         generate_expression(gen, v->children[0]);
@@ -8223,7 +8223,7 @@ int needs_optional_coerce(ASTNode* value, Type* target) {
     if (value->type == AST_NONE_LITERAL) return 1;
     /* #2845: an if-expression goes in arm by arm, so it needs the coercion
      * when either arm does, whatever type the then arm gave it. */
-    if (value->type == AST_IF_EXPRESSION && value->child_count >= 3)
+    if (if_takes_by_branch(value))
         return needs_optional_coerce(value->children[1], target) ||
                needs_optional_coerce(value->children[2], target);
     if (value->node_type && value->node_type->kind == TYPE_OPTIONAL) return 0;
