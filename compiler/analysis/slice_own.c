@@ -22,7 +22,14 @@ typedef enum {
     /* An owner a view of whose buffer may outlive it (escape analysis,
      * below): never dropped, as before ownership. */
     K_LOCALVIEW, /* the views stay in the function: a `return` still moves it */
-    K_PINNED     /* a view may leave the function: every copy is a loan */
+    K_PINNED,    /* a view may leave the function: every copy is a loan */
+    /* #3549: a local a closure assigns, so a cell the frame and its
+     * closures share (codegen promotes it): the cell owns what it holds.
+     * Every store into it, in the frame or a closure, drops what it held;
+     * the cell's last release drops what it holds then; a `return` of it
+     * gives the buffer to the caller and leaves the cell a loan of it.
+     * Only where nothing else can reach the buffer (cell_classify). */
+    K_CELL
 } Kind;
 
 typedef struct Local Local;
@@ -33,6 +40,7 @@ struct Local {
     int hoisted;        /* codegen declares it ahead of where it is bound */
     ASTNode* anchor;    /* hoisted: the statement of `block` it is declared
                          * before (NULL: the start of `block`) */
+    ASTNode* first;     /* hoisted: the binding codegen declares it from */
     Type* type;
     int idx;
     int is_slice;
@@ -130,6 +138,8 @@ typedef struct {
     PtrMap sums;        /* function definition -> its Summary */
     int final;          /* the pass that reports and rewrites */
     int changed;        /* a summary grew in this pass */
+    StrMap cells;       /* #3549: the cell locals (K_CELL) of the frames a closure being
+                         * checked is written in: name -> their Type* */
 } Ctx;
 
 /* What a function does with its slice parameters, as the escape analysis
@@ -197,6 +207,7 @@ static Local* new_hoisted(Frame* f, Scope* s, ASTNode* first, ASTNode* block, AS
     l->block = block;
     l->hoisted = 1;
     l->anchor = anchor;
+    l->first = first;
     l->type = hoist_decl_type(first);
     if (!l->type) l->type = first->node_type;
     l->is_slice = type_is_slice(l->type);
@@ -999,6 +1010,9 @@ static void rewrite_value_at(Ctx* c, Frame* f, ASTNode** slot, Use use, int ret)
         case AST_IDENTIFIER: {
             Local* l = pm_get(&f->uses, e);
             if (owns(l)) wrap(slot, "__slice_take");
+            /* #3549: a cell's buffer goes to the caller; the cell, which a
+             * closure may still read, keeps a loan of it. */
+            else if (ret == 1 && l && l->kind == K_CELL) wrap(slot, "__slice_give");
             else if (l && l->kind == K_VIEW) return;
             /* Returned, a buffer left to the program goes to the caller as
              * it did before ownership, unless a view of it may outlive the
@@ -1146,10 +1160,20 @@ static void insert_child(ASTNode* block, int at, ASTNode* child) {
     block->children[at] = child;
 }
 
+static int cell_store(Ctx* c, ASTNode* n);
+static void wrap_cell_store(Ctx* c, Frame* f, ASTNode* n);
+
 static void rewrite_binding(Ctx* c, Frame* f, ASTNode* n) {
-    if (n->child_count > 0) rewrite_value(c, f, &n->children[0], C_MOVE);
     Local* l = pm_get(&f->binds, n);
-    if (!owns(l) || n == l->decl || n->child_count == 0) return;
+    /* #3549: a closure's store into a cell of the frame it is written in. */
+    if (!l && cell_store(c, n)) {
+        wrap_cell_store(c, f, n);
+        return;
+    }
+    if (n->child_count > 0) rewrite_value(c, f, &n->children[0], C_MOVE);
+    /* A store into a local that owns, or into a cell that owns (#3549). */
+    int owning = owns(l) || (l && l->kind == K_CELL);
+    if (!owning || n == l->decl || n->child_count == 0) return;
     /* A store into a local that owns: what it held is dropped, unless the
      * value is `append(x, v)` of that very local, which consumed it. */
     ASTNode* v = n->children[0];
@@ -1365,18 +1389,32 @@ static void deep_roots(Esc* e, ASTNode* x, unsigned char* out) {
     roots_of(e, x, out);
 }
 
-static void frame_names_roots(Esc* e, ASTNode* n, unsigned char* out) {
+/* The names a closure stores into without declaring them (`v = x`, an
+ * inferred binding): the locals of the frame it is written in that codegen
+ * promotes to cells the frame and the closure share (#3549). */
+static void closure_stored_names(ASTNode* n, StrMap* out) {
+    if (!n) return;
+    if (n->type == AST_VARIABLE_DECLARATION && n->type_inferred && n->value && n->child_count > 0)
+        strmap_put(out, n->value, (void*)1);
+    for (int i = 0; i < n->child_count; i++) closure_stored_names(n->children[i], out);
+}
+
+/* What a closure holds: a view of every local of the frame it names, and
+ * what each holds. A local it stores into (`stored`) it holds as the cell
+ * they share, not as a view of the buffer the cell holds (#3549); a
+ * parameter is the caller's buffer, which it views either way. */
+static void frame_names_roots(Esc* e, ASTNode* n, const StrMap* stored, unsigned char* out) {
     if (!n) return;
     if (n->type == AST_IDENTIFIER && n->value) {
         for (int i = 0; i < e->f->nlocals; i++) {
             Local* l = e->f->locals[i];
             if (strcmp(l->name, n->value) == 0) {
-                out[l->idx] = 1;
+                if (l->param || !strmap_has(stored, l->name)) out[l->idx] = 1;
                 set_or(e, out, l->roots);
             }
         }
     }
-    for (int i = 0; i < n->child_count; i++) frame_names_roots(e, n->children[i], out);
+    for (int i = 0; i < n->child_count; i++) frame_names_roots(e, n->children[i], stored, out);
 }
 
 /* Is `call` one whose callee the analysis cannot see (a closure value)? */
@@ -1387,7 +1425,11 @@ static int unknown_callee(ASTNode* call) {
 static void roots_of(Esc* e, ASTNode* x, unsigned char* out) {
     if (!x || is_opaque(x)) return;
     if (x->type == AST_CLOSURE) {
-        frame_names_roots(e, x, out);
+        StrMap stored;
+        strmap_init(&stored);
+        closure_stored_names(x, &stored);
+        frame_names_roots(e, x, &stored, out);
+        strmap_free(&stored);
         return;
     }
     if (is_frame(x)) return;
@@ -1733,6 +1775,200 @@ static void escape_frame(Ctx* c, Frame* f) {
     }
 }
 
+/* ---- #3549: cells the frame and its closures share ----
+ *
+ * A slice local a closure assigns (`v = xs` in `set = || { ... }`) is
+ * promoted by codegen to a cell the frame and every closure that captures
+ * it share, and was left to the program: a store into it from the closure
+ * dropped nothing it replaced, and the cell's release freed the cell and
+ * leaked what it held. Under R2 a cell is a place that holds one reference,
+ * so the cell owns its slice: a store drops what it held, the cell's last
+ * release drops what it holds then, and a `return` of the local gives the
+ * buffer to the caller and leaves the cell a loan of it (__slice_give).
+ *
+ * That is safe only where nothing else holds the buffer the cell owns, so a
+ * local becomes a cell owner only when every use of it is one of these: in
+ * the frame, a borrow (an index, `.len`, an argument to a parameter that
+ * does not keep it), a store into it, or a `return` of it, with no view of
+ * its buffer bound or escaping (the escape analysis' flags); in a closure
+ * that captures it, a store into it, an index or `.len`, nothing else; and
+ * each such closure bound to a local of the frame that is only called. A
+ * use anywhere else (`w = v`, passing the closure on) leaves it to the
+ * program, as before. */
+
+typedef struct {
+    Ctx* c;
+    Frame* f;
+    Local* l;
+    int ok;
+    int assigned;    /* a closure stores into it */
+} CellCheck;
+
+/* The local of the frame a closure literal is bound to, from the binding
+ * `cl = || {...}`. */
+static Local* closure_binding(CellCheck* k, ASTNode* parent, ASTNode* closure) {
+    if (!parent || parent->type != AST_VARIABLE_DECLARATION || parent->child_count < 1 ||
+        parent->children[0] != closure)
+        return NULL;
+    return pm_get(&k->f->binds, parent);
+}
+
+/* A use of the cell's name inside a closure (or a closure inside it): a
+ * store into it, an index or `.len`, nothing else. */
+static void cell_check_closure(CellCheck* k, ASTNode* n, ASTNode* parent) {
+    if (!n || !k->ok || is_opaque(n)) return;
+    const char* name = k->l->name;
+    if (n->value && strcmp(n->value, name) == 0) {
+        switch (n->type) {
+            case AST_VARIABLE_DECLARATION:
+                if (!n->type_inferred) {
+                    k->ok = 0;   /* the closure's own local of the name */
+                    return;
+                }
+                k->assigned = 1;
+                break;
+            case AST_IDENTIFIER:
+                if (!parent || !((parent->type == AST_MEMBER_ACCESS ||
+                                  parent->type == AST_ARRAY_ACCESS) &&
+                                 parent->child_count > 0 && parent->children[0] == n))
+                    k->ok = 0;
+                return;
+            case AST_FUNCTION_CALL:
+                break;
+            default:
+                k->ok = 0;   /* a parameter, a pattern or a catch of the name */
+                return;
+        }
+    }
+    for (int i = 0; i < n->child_count && k->ok; i++) {
+        ASTNode* ch = n->children[i];
+        /* A closure inside the closure would carry the cell on past it. */
+        if (ch && ch->type == AST_CLOSURE && is_frame(ch)) {
+            StrMap names;
+            strmap_init(&names);
+            collect_names(ch, &names);
+            if (strmap_has(&names, name)) k->ok = 0;
+            strmap_free(&names);
+            continue;
+        }
+        cell_check_closure(k, ch, n);
+    }
+}
+
+/* Does closure `closure` name the cell's local? */
+static int closure_names(ASTNode* closure, const char* name) {
+    StrMap names;
+    strmap_init(&names);
+    collect_names(closure, &names);
+    int has = strmap_has(&names, name);
+    strmap_free(&names);
+    return has;
+}
+
+/* Is every use of `cl`, a closure local of the frame, a call of it? */
+static int closure_local_only_called(CellCheck* k, ASTNode* n, ASTNode* parent, Local* cl) {
+    if (!n || is_opaque(n) || is_frame(n)) return 1;
+    if (n->type == AST_IDENTIFIER && pm_get(&k->f->uses, n) == cl) {
+        return parent && parent->type == AST_FUNCTION_CALL && parent->value &&
+               strcmp(parent->value, "call") == 0 && parent->child_count > 0 &&
+               parent->children[0] == n;
+    }
+    for (int i = 0; i < n->child_count; i++)
+        if (!closure_local_only_called(k, n->children[i], n, cl)) return 0;
+    return 1;
+}
+
+/* The frame's own uses of the cell's local (its closures checked as they
+ * are met). */
+static void cell_check_frame(CellCheck* k, ASTNode* n, ASTNode* parent, int idx) {
+    if (!n || !k->ok || is_opaque(n)) return;
+    if (is_frame(n)) {
+        if (n->type != AST_CLOSURE || !closure_names(n, k->l->name)) return;
+        Local* cl = closure_binding(k, parent, n);
+        if (!cl || cl->captured || cl->addr_taken ||
+            !closure_local_only_called(k, k->f->body, NULL, cl)) {
+            k->ok = 0;
+            return;
+        }
+        for (int i = 0; i < n->child_count && k->ok; i++) cell_check_closure(k, n->children[i], n);
+        return;
+    }
+    if (n->type == AST_IDENTIFIER && pm_get(&k->f->uses, n) == k->l) {
+        if (!parent) {
+            k->ok = 0;
+        } else if (parent->type == AST_RETURN_STATEMENT) {
+            /* given to the caller */
+        } else if (parent->type == AST_FUNCTION_CALL) {
+            /* Lent to a parameter that keeps nothing: a `@keep` one, a
+             * free, an append or a push takes it, and a closure value's
+             * parameter is not seen through. */
+            if (is_free(parent) || is_append(k->c, parent) || is_push(parent) ||
+                unknown_callee(parent) || keeps_arg(k->c, parent, idx))
+                k->ok = 0;
+        } else if (child_use(parent, idx) == C_MOVE) {
+            k->ok = 0;   /* copied into another place */
+        }
+        return;
+    }
+    for (int i = 0; i < n->child_count && k->ok; i++) cell_check_frame(k, n->children[i], n, i);
+}
+
+/* After the escape analysis: the frame's locals that are cell owners. */
+static void cell_classify(Ctx* c, Frame* f) {
+    ASTNode* owner = f->owner;
+    if (owner->type != AST_FUNCTION_DEFINITION && owner->type != AST_BUILDER_FUNCTION &&
+        owner->type != AST_MAIN_FUNCTION)
+        return;
+    for (int i = 0; i < f->nlocals; i++) {
+        Local* l = f->locals[i];
+        /* Its declaration, or the binding a hoisted cell is declared from
+         * ahead of it (every binding of which is a store), says where the
+         * cell begins to own. */
+        ASTNode* mark = l->hoisted ? l->first : l->decl;
+        if (l->kind != K_OTHER || !l->is_slice || !l->captured || l->param || l->pattern ||
+            l->addr_taken || !mark || !l->block || l->target || l->pinned || l->scoped_out ||
+            l->viewed || mark->annotation)
+            continue;
+        CellCheck k = {c, f, l, 1, 0};
+        cell_check_frame(&k, f->body, NULL, 0);
+        if (!k.ok || !k.assigned) continue;
+        l->kind = K_CELL;
+        mark->annotation = annotation_add_marker(mark->annotation, "slice_cell");
+    }
+}
+
+/* A store `name = v` in a closure into a cell of a frame it is written in
+ * (Ctx.cells): what the cell held is dropped, as a store into an owning
+ * local drops it. `v` is first what any slice moved into a place is: taken
+ * out of a local that owns it, lent from any other place. */
+static int cell_store(Ctx* c, ASTNode* n) {
+    return n && n->type == AST_VARIABLE_DECLARATION && n->type_inferred && n->value &&
+           n->child_count > 0 && strmap_has(&c->cells, n->value);
+}
+
+static void wrap_cell_store(Ctx* c, Frame* f, ASTNode* n) {
+    rewrite_value(c, f, &n->children[0], C_MOVE);
+    Type* t = (Type*)strmap_get(&c->cells, n->value);
+    ASTNode* v = n->children[0];
+    ASTNode* set = mk_call("__slice_set", t, v);
+    ASTNode* id = create_ast_node(AST_IDENTIFIER, n->value, n->line, n->column);
+    id->node_type = clone_type(t);
+    if (n->source_file) id->source_file = strdup(n->source_file);
+    add_child(set, id);
+    add_child(set, v);
+    n->children[0] = set;
+}
+
+/* The cell stores of a closure whose own locals need no rewrite. */
+static void rewrite_cell_stores(Ctx* c, Frame* f, ASTNode* n) {
+    if (!n || is_frame(n) || is_opaque(n)) return;
+    if (cell_store(c, n) && !pm_get(&f->binds, n)) {
+        wrap_cell_store(c, f, n);
+        return;
+    }
+    for (int i = 0; i < n->child_count; i++) rewrite_cell_stores(c, f, n->children[i]);
+}
+
 /* ---- one frame ---- */
 
 static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer);
@@ -1787,13 +2023,16 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
     escape_frame(c, &f);
     if (!c->final) goto done;
     mark_slice_temps(c, body);
+    cell_classify(c, &f);
 
     int any = 0;
     for (int i = 0; i < f.nlocals; i++)
         if (f.locals[i]->kind != K_NONE) any = 1;
-    for (int i = 0; i < f.uses.cap; i++)
-        if (f.uses.keys[i] && owns(f.uses.vals[i]))
-            pm_put(&g_owner_idents, f.uses.keys[i], f.uses.vals[i]);
+    /* A view of a buffer a local or a cell (#3549) owns is the frame's. */
+    for (int i = 0; i < f.uses.cap; i++) {
+        Local* u = f.uses.keys[i] ? f.uses.vals[i] : NULL;
+        if (owns(u) || (u && u->kind == K_CELL)) pm_put(&g_owner_idents, f.uses.keys[i], u);
+    }
     if (any) {
         int before = c->errors;
         Flow w = {c, &f, f.nlocals, NULL};
@@ -1809,16 +2048,27 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
                 if (f.locals[i]->kind == K_KEEP)
                     insert_child(body, 0, mk_drop_defer(f.locals[i], body));
         }
+    } else if (strmap_count(&c->cells) > 0) {
+        /* A closure with no slice locals of its own may still store into
+         * a cell of the frame it is written in (#3549). */
+        rewrite_cell_stores(c, &f, body);
     }
 
-    /* The closures written here, each a frame of its own. */
+    /* The closures written here, each a frame of its own, with this
+     * frame's cells (#3549). */
     StrMap names;
     strmap_init(&names);
     if (outer)
         for (int i = 0; i < strmap_count(outer); i++)
             strmap_put(&names, strmap_key_at(outer, i), (void*)1);
     for (int i = 0; i < f.nlocals; i++) strmap_put(&names, f.locals[i]->name, (void*)1);
+    StrMap saved_cells = c->cells;
+    strmap_init(&c->cells);
+    for (int i = 0; i < f.nlocals; i++)
+        if (f.locals[i]->kind == K_CELL) strmap_put(&c->cells, f.locals[i]->name, f.locals[i]->type);
     for (int i = 0; i < body->child_count; i++) frame_nested(c, body->children[i], &names);
+    strmap_free(&c->cells);
+    c->cells = saved_cells;
     strmap_free(&names);
 
 done:
@@ -1907,6 +2157,7 @@ int check_slice_ownership(ASTNode* program) {
     strmap_free(&c.globals);
     strmap_free(&c.state);
     strmap_free(&c.fns);
+    strmap_free(&c.cells);
     pm_free(&c.reported);
     return c.errors;
 }

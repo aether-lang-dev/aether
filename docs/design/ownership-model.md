@@ -755,6 +755,19 @@ dropped after the call when slice ownership's summary of the callee says it
 neither stores the parameter nor hands a view of it back (the `slice_temp`
 marker), as the owning local it would otherwise be bound to is dropped.
 
+A closure cell holds one reference (R2) to a slice as to anything else
+(#3549): a slice local a closure assigns, the cell the frame and the closure
+share, owns the buffer it holds. A store into it, in the frame or the
+closure, drops what it held; its last release drops what it holds then; a
+`return` of it gives the buffer to the caller and leaves the cell a loan, so
+a closure that still reads the cell sees what it did. The cell owns only
+where nothing else reaches the buffer (no view of it bound or escaping, the
+closures bound to locals that are only called, and in them only stores,
+indexes and `.len`); anywhere else the local is left to the program, as
+slice ownership leaves a view whose owner it cannot follow
+(compiler/analysis/slice_own.h). A buffer a view keeps past its owner leaks
+by that rule until a `make` buffer carries a count of its own.
+
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's
 retained. This holds for a `string` and for a closure; the std externs that

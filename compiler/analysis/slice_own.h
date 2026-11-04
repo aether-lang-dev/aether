@@ -40,14 +40,29 @@
  * slice_own.c, with a summary per function of what it does with its slice
  * parameters, to a fixed point over the calls).
  *
- * Left to the program, as before: a slice local a closure captures, or
- * whose address is taken, or that a pattern or a destructure binds, and
- * the buffers held by fields, module-level `var`s, tuples and messages.
+ * A slice local a closure assigns is a cell the frame and its closures
+ * share (codegen promotes it), and the cell owns what it holds (#3549)
+ * where nothing else can reach the buffer: every use of the local in the
+ * frame borrows it, stores into it or returns it, with no view of its
+ * buffer bound or escaping, and every closure that captures it is bound to
+ * a local only called and only stores into it, indexes it or reads its
+ * length. Then every store into it, in the frame or the closure, drops
+ * what it held (`__slice_set`), the cell's last release drops what it
+ * holds then, and a `return` of it gives the buffer to the caller and
+ * leaves the cell a loan (`__slice_give`). A closure holds the cell it
+ * stores into, not a view of the buffer in it.
+ *
+ * Left to the program, as before: any other slice local a closure
+ * captures, or whose address is taken, or that a pattern or a destructure
+ * binds, and the buffers held by fields, module-level `var`s, tuples and
+ * messages.
  *
  * The pass runs over the type-checked program (before the escape check,
  * slice_escape.c, which counts a view of a buffer a local owns as the
  * frame's own storage) and rewrites it for codegen with the intrinsics
- * `__slice_take`, `__slice_lend`, `__slice_drop` and `__slice_set`.
+ * `__slice_take`, `__slice_lend`, `__slice_drop`, `__slice_set` and
+ * `__slice_give`, and the markers `slice_temp` (a buffer made for a call,
+ * which the call drops) and `slice_cell` (a cell owner's declaration).
  * Returns the number of errors reported. */
 
 #ifndef AETHER_SLICE_OWN_H
@@ -57,9 +72,9 @@
 
 int check_slice_ownership(ASTNode* program);
 
-/* Does the identifier `n` name a local that owns its buffer (as the last
- * check_slice_ownership found)? A view of that buffer is storage of the
- * frame, which the escape check keeps in it. */
+/* Does the identifier `n` name a local or a cell (#3549) that owns its
+ * buffer (as the last check_slice_ownership found)? A view of that buffer
+ * is storage of the frame, which the escape check keeps in it. */
 int slice_own_owner_ident(const ASTNode* n);
 
 #endif

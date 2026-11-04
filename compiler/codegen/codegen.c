@@ -9725,6 +9725,24 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) free(h);");
     print_line(gen, "}");
+    /* #3549: a slice cell holds, after its slice, the drop of a slice of
+     * its type when the cell owns what it holds (slice ownership's cell
+     * owner, set where the local is declared by _aether_slice_cell_own),
+     * NULL when the slice is the program's to free. Its last release drops
+     * what it holds then; a store into it drops what it replaces
+     * (aether_slice_set), and a return gives the buffer away first
+     * (aether_slice_give). */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_slice_cell_own(void* cell, void (*drop)(const void*)) {");
+    print_line(gen, "    if (cell) *(void (**)(const void*))(void*)((char*)cell + sizeof(AetherSlice)) = drop;");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_slice(const void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    void (*drop)(const void*) = *(void (* const*)(const void*))(const void*)((const char*)cell + sizeof(AetherSlice));");
+    print_line(gen, "    if (drop) drop(cell);");
+    print_line(gen, "    free(h);");
+    print_line(gen, "}");
     /* String-valued capture cell: the cell OWNS the heap string it holds, so
      * the last releaser frees that string before freeing the cell. Used for a
      * promoted capture whose C type is `const char*` — a closure that writes a

@@ -5369,6 +5369,8 @@ const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
     if (c_type && strcmp(c_type, "_AeClosure") == 0) return "_aether_cell_release_closure";
     /* #2921: and a string sequence cell to its sequence. */
     if (c_type && strcmp(c_type, "StringSeq*") == 0) return "_aether_cell_release_seq";
+    /* #3549: a slice cell drops what it holds when it owns it. */
+    if (c_type && strcmp(c_type, "AetherSlice") == 0) return "_aether_cell_release_slice";
     /* #2921: a tuple, optional or array that owns drops its parts; a string
      * array cell owns every element (#2474). */
     const char* composite = own_cell_release_fn(c_type);
@@ -5378,6 +5380,19 @@ const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
                         : NULL;
     if (sdef && struct_owns_heap_strings(gen, sdef)) return cg_internf("_aether_cell_drop_%s", c_type);
     return "_aether_cell_release";
+}
+
+/* #3549: a slice cell that owns what it holds (slice ownership's cell
+ * owner: its declaration, or the binding a hoisted cell is declared from,
+ * is marked `slice_cell`) says so once the cell holds its first value or,
+ * hoisted, once it exists: from there on its stores and its last release
+ * drop what it held. */
+static void emit_slice_cell_own(CodeGenerator* gen, const ASTNode* decl, const char* name,
+                                Type* t) {
+    if (!decl || !name || !annotation_has_marker(decl->annotation, "slice_cell") ||
+        !type_is_slice(t) || !is_promoted_capture(gen, name))
+        return;
+    print_line(gen, "_aether_slice_cell_own((void*)%s, %s);", name, own_slice_elem_drop_fn(gen, t));
 }
 
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
@@ -5392,9 +5407,12 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     const char* cell_type = promoted_cell_pointer(c_type, NULL);
     const char* elem = "";
     /* #2797: a `ptr` cell has a second slot, for the string a string store
-     * gives it (_aether_ptr_cell_set_str); zeroed, it holds none. */
-    fprintf(gen->output, "%s = (%s)_aether_cell_new(%ssizeof(%s));",
-            cell_decl, cell_type, strcmp(c_type, "void*") == 0 ? "2 * " : "", c_type);
+     * gives it (_aether_ptr_cell_set_str); zeroed, it holds none. #3549: a
+     * slice cell has one after its slice, for its drop when it owns what it
+     * holds (_aether_slice_cell_own); zeroed, it owns nothing. */
+    fprintf(gen->output, "%s = (%s)_aether_cell_new(%ssizeof(%s)%s);",
+            cell_decl, cell_type, strcmp(c_type, "void*") == 0 ? "2 * " : "", c_type,
+            strcmp(c_type, "AetherSlice") == 0 ? " + sizeof(void (*)(const void*))" : "");
     int arr_len = promoted_cell_array_len(c_type, &elem);
     /* No initialiser is the hoisted shape (#2024): the cell is declared
      * ahead of the loop or branch that first assigns it, and the
@@ -5811,6 +5829,7 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
             emit_promoted_cell_declaration(gen, n, get_c_type(var_type), var_type, NULL, NULL,
                                            decl ? decl->line : stmt->line,
                                            decl ? decl->column : stmt->column);
+            emit_slice_cell_own(gen, decl, n, var_type);
             if (joined) free_type(joined);
             continue;
         }
@@ -5857,6 +5876,7 @@ static void hoist_loop_var(ASTNode* child, void* user) {
         if (is_promoted_capture(gen, child->value)) {
             emit_promoted_cell_declaration(gen, child->value, c_type, var_type, NULL, NULL,
                                            child->line, child->column);
+            emit_slice_cell_own(gen, child, child->value, var_type);
             if (joined) free_type(joined);
             return;
         }
@@ -9177,6 +9197,8 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
         bsaved = builder_cfg_begin(gen, bcall, cfg);
     }
     generate_statement_body(gen, stmt);
+    if (stmt->type == AST_VARIABLE_DECLARATION)
+        emit_slice_cell_own(gen, stmt, stmt->value, stmt->node_type);
     if (builder_stmt) builder_cfg_end(gen, bsaved);
     if (g_ctl_deferred == stmt) g_ctl_deferred = NULL;
     control_prelude_end(ctl_depth);

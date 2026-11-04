@@ -3524,6 +3524,7 @@ static int is_builtin_name(const char* name) {
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
         "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
         "__slice_take", "__slice_lend", "__slice_drop", "__slice_set", "__slice_push",
+        "__slice_give",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -8171,6 +8172,13 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         fprintf(o, "aether_slice_lend(");
         generate_expression(gen, a);
         fprintf(o, ")");
+        return 1;
+    }
+    if (strcmp(f, "__slice_give") == 0 && expr->child_count == 1) {
+        /* #3549: a cell's slice given to the caller, the cell left a loan. */
+        fprintf(o, "aether_slice_give((AetherSlice*)&(");
+        generate_expression(gen, a);
+        fprintf(o, "))");
         return 1;
     }
     if (!et) return 0;

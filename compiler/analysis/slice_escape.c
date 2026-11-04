@@ -300,6 +300,15 @@ static int outer_holds(Frame* f, const char* path) {
     return 0;
 }
 
+/* Is `e` one of slice ownership's intrinsics (slice_own.c) that give the
+ * slice they are handed: a move, a loan, a store, a cell's buffer given
+ * to the caller (#3549)? The slice is its last argument. */
+static int slice_own_gives(const ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
+           (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
+            strcmp(e->value, "__slice_set") == 0 || strcmp(e->value, "__slice_give") == 0);
+}
+
 /* Is `e` storage of the frame: a non-empty array literal (it lives in the
  * frame as the array it is), or one of the frame's own fixed-size arrays? */
 static int frame_storage(Frame* f, ASTNode* e) {
@@ -410,13 +419,7 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
         case AST_EXPRESSION_STATEMENT:
             return e->child_count > 0 && frame_view(f, v, e->children[0]);
         case AST_FUNCTION_CALL:
-            /* Slice ownership's intrinsics (slice_own.c) give the slice
-             * they are handed: a move, a loan, a store. */
-            if (e->value && (strcmp(e->value, "__slice_take") == 0 ||
-                             strcmp(e->value, "__slice_lend") == 0 ||
-                             strcmp(e->value, "__slice_set") == 0) &&
-                e->child_count > 0)
-                return frame_view(f, v, e->children[e->child_count - 1]);
+            if (slice_own_gives(e)) return frame_view(f, v, e->children[e->child_count - 1]);
             return closure_call_view(f, v, e);
         case AST_IF_EXPRESSION:
             return (e->child_count > 1 && frame_view(f, v, e->children[1])) ||
@@ -460,11 +463,7 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
 /* What the value that leaves is, for the message. */
 static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
     if (!e) { snprintf(out, cap, "a slice of it"); return; }
-    /* Slice ownership's move, loan and store give what they are handed. */
-    while (e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
-           (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
-            strcmp(e->value, "__slice_set") == 0))
-        e = e->children[e->child_count - 1];
+    while (slice_own_gives(e)) e = e->children[e->child_count - 1];
     switch (e->type) {
         case AST_SLICE_FROM_ARRAY:
         case AST_SLICE_EXPR: {

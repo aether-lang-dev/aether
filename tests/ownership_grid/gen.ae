@@ -381,19 +381,33 @@ sum_transfers() -> string {
 }
 
 // The slice kind (#3549): a buffer `make` hands out, given straight to a
-// function that only reads it, or returned. A slice local, field or element
-// is slice ownership's (tests/integration/slice_own); the grid measures the
-// temporary, which nothing but the call it is made for holds.
+// function that only reads it, or returned (P17), and held in a cell a
+// closure rebinds (P9W): stored and left, overwritten, returned. A slice
+// local, field or element is slice ownership's
+// (tests/integration/slice_own); the grid measures the temporary, which
+// nothing but the call it is made for holds, and the cell, which the frame
+// and the closure share.
 is_slice_kind(kid: string) -> bool {
     return kid == "KM"
 }
 
 slice_places() -> string {
-    return "P17"
+    return "P9W P17"
 }
 
 slice_transfers() -> string {
-    return "T6 T9"
+    return "T1 T2 T6 T9"
+}
+
+// Why the slice kind does not take a place's transfer; "" when it does.
+slice_skip(pid: string, t: string) -> string {
+    if pid == "P17" && !in_words("T6 T9", t) {
+        return "a temporary buffer is measured passed to a reader and returned"
+    }
+    if pid == "P9W" && !in_words("T1 T2 T9", t) {
+        return "a cell's buffer is measured stored and left, overwritten and returned"
+    }
+    return ""
 }
 
 producer_class(kid: string) -> string {
@@ -1905,6 +1919,12 @@ captured_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         gen_decl(g, "fn keep", "// Keeps the closure in a module var.\nkeep(h: @keep fn) {\n    kept = h\n}")
         body = lines_cat(bound, "keep(f)")
         round_lines = "shape(w, k)\nint n = call(kept)\ncheck(n == 1, \"the kept closure, after the scope ended\")"
+    } else if t == "T9" && is_slice_kind(kid) {
+        // #3549: the cell's buffer returned: the caller owns it, and the
+        // closure, which the frame drops, kept a loan of it.
+        ret = kind_ty(kid)
+        body = lines_cat3(bound, call_f, "return x")
+        round_lines = lines_cat(bind_local(kid, "v", "shape(w, k)"), kind_check(g, kid, "v", "b", "the returned value"))
     } else if t == "T9" || t == "T10" {
         ret = "fn"
         r = "f"
@@ -2472,6 +2492,12 @@ cell_or_reason(kid: string, pid: string, t: string) -> string {
     res = ""
     if in_words("T17 T18 T19", t) && pid != "P17" {
         return "a transfer of a temporary, given straight to what reads it: P17 only"
+    }
+    if is_slice_kind(kid) {
+        skip = slice_skip(pid, t)
+        if skip != "" {
+            return skip
+        }
     }
     if pid == "P9" || pid == "P9W" {
         if !in_words("T1 T2 T3 T4 T5 T6 T7 T9 T10 T11 T12 T14", t) {
