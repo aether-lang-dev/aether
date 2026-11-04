@@ -1794,7 +1794,8 @@ static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
-/* Builder-context pop carrier. Annotation: "builder_ctx_pop".
+/* Builder-context pop carrier. Annotation: "builder_ctx_pop:<mark>", the
+ * block's journaled depth (#3574).
  * emit_trailing_block_body pushes one as the first defer of every trailing
  * block's scope, right after the call site pushed the block's builder
  * context. Riding the defer stack means every way out of the block pops
@@ -1803,12 +1804,17 @@ static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
  * labeled or unlabeled break/continue to a loop outside it. A return used
  * to leave without popping, so a function returning from inside a block
  * leaked one context per call; at the stack's cap of 64 later pushes were
- * dropped and builder calls attached to a stale parent. */
+ * dropped and builder calls attached to a stale parent. Each way out also
+ * takes the block's entry out of the unwind journal, which only a panic
+ * past the block drains. */
 static int try_emit_builder_ctx_pop(CodeGenerator* gen, ASTNode* deferred) {
-    if (!deferred || !deferred->annotation) return 0;
-    if (strcmp(deferred->annotation, "builder_ctx_pop") != 0) return 0;
+    static const char prefix[] = "builder_ctx_pop:";
+    if (!deferred || !deferred->annotation ||
+        strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
+        return 0;
     print_indent(gen);
-    fprintf(gen->output, "_aether_ctx_pop();\n");
+    fprintf(gen->output, "aether_unwind_forget((const void*)&%s); _aether_ctx_pop();\n",
+            deferred->annotation + sizeof(prefix) - 1);
     return 1;
 }
 
@@ -10442,6 +10448,14 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * of the blocks the panic abandoned. */
     print_line(gen, "static inline void _aether_ctx_own(void* ctx, void (*release)(void*)) { if (_aether_ctx_depth > 0 && _aether_ctx_stack[_aether_ctx_depth-1] == ctx) _aether_ctx_release[_aether_ctx_depth-1] = release; }");
     print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } _aether_ctx_fit(); }");
+    /* #3574: any panic past a block, caught by a `try` or by the barrier of
+     * an actor's step, which no `try` of the program's unwinds: each block
+     * journals the depth below its entry (emit_trailing_block_body), and a
+     * drain puts the stack back to it, releasing the block's config. A
+     * handler that panicked inside blocks used to leave its thread's stack
+     * that deep, so the next handler on the thread worked on the dead
+     * blocks' configs, which nothing released. */
+    print_line(gen, "static inline void _aether_ctx_unwind_at(const void* depth) { _aether_ctx_unwind(*(const int*)depth); }");
     /* #1704: the sandbox permission stack is SEPARATE from the builder
      * context stack above. They used to be the same array, so entering any
      * trailing block pushed that builder's config object onto the stack the

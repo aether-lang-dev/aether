@@ -627,12 +627,15 @@ named otherwise has no release the compiler can find, and an early exit
 leaves its object unreleased (#2802), so pair a custom factory with its
 `_free`.
 
-A panic that leaves the block skips the builder too. When a `try` catches
-it, the catch puts the builder context stack back to its depth at the `try`
-and releases, with the same function, the configs of the blocks the panic
-abandoned; a block after the `try` fills its own call's config. Before
-(#2810), each caught panic left an entry on the stack, and after 64 of them
-a block's setters filled the config of a call a panic had abandoned.
+A panic that leaves the block skips the builder too. Whatever catches it, a
+`try` or the barrier of an actor's step when the handler has none, the
+builder context stack is put back to its depth where the panic is caught,
+and the configs of the blocks the panic abandoned are released with the
+same function; a block after the `try`, or the next handler on the actor's
+thread, fills its own call's config. Before (#2810), each caught panic left
+an entry on the stack, and after 64 of them a block's setters filled the
+config of a call a panic had abandoned; until #3574 a handler that panicked
+inside blocks left them on its thread's stack, unreleased.
 
 ### Generated code
 

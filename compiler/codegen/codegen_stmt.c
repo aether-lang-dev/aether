@@ -4820,12 +4820,22 @@ void emit_trailing_block_body(CodeGenerator* gen, ASTNode* body) {
      * here. Its pop is the scope's first defer, so it runs after the
      * block's own defers on every exit: the fall-through end below, a
      * return, a break/continue out of the block (see try_emit_builder_ctx_pop
-     * in codegen.c). Callers do not emit the pop themselves. */
+     * in codegen.c). Callers do not emit the pop themselves.
+     * #3574: a panic leaves by none of those. The depth below the block's
+     * entry is journaled where the block begins, as a defer is, and a
+     * drain of the journal puts the stack back to it (_aether_ctx_unwind_at):
+     * whatever catches the panic, a `try` or an actor's step, the thread's
+     * blocks are its live ones again. Every exit above forgets it. */
     ASTNode* ctx_pop = create_ast_node(AST_EXPRESSION_STATEMENT, NULL,
                                        body->line, body->column);
     if (ctx_pop) {
+        static int mark_counter = 0;
+        const char* mark = cg_internf("_ae_ctxd%d", mark_counter++);
+        print_line(gen, "int %s = _aether_ctx_depth - 1; "
+                        "aether_unwind_track((const void*)&%s, _aether_ctx_unwind_at);",
+                   mark, mark);
         if (ctx_pop->annotation) free(ctx_pop->annotation);
-        ctx_pop->annotation = strdup("builder_ctx_pop");
+        ctx_pop->annotation = heap_strf("builder_ctx_pop:%s", mark);
         codegen_own_node(gen, ctx_pop);
         push_defer(gen, ctx_pop);
     }
