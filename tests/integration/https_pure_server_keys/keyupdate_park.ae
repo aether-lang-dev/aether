@@ -113,4 +113,5 @@ main() {
         tls13_client.close_conn(list.at(held, k) as ptr)
         k = k + 1
     }
+    list.free(held)
 }

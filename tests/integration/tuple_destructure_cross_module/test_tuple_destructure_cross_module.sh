@@ -77,6 +77,7 @@ main() {
     _e = map.put(m, "module", "mod-A")
     container.image(m) {
     }
+    map.free(m)
 }
 AE
 

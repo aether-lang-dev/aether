@@ -1374,6 +1374,11 @@ emit_module(path: string, api: string, extensions: string) {
     werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
     println("vkgen: wrote ${path}")
+    // The module's own list and maps, and the strings they hold; the
+    // globals the other emitters read stay.
+    list.free(blocks)
+    map.free(emitted)
+    map.free(done)
 }
 
 // The Aether expression for the size of one ctype, "" when it has none.
