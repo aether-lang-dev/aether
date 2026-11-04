@@ -13,6 +13,18 @@
 
 #define MAX_INFERENCE_ITERATIONS 100
 
+/* `name` with each `.` as `_`, interned and as long as it is: the C name a
+ * qualified call merges to (#3569). */
+static const char* infer_dotted_as_c_name(const char* name) {
+    size_t n = strlen(name);
+    char* s = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++) s[i] = name[i] == '.' ? '_' : name[i];
+    s[n] = '\0';
+    const char* r = aether_intern_n(s, n);
+    free(s);
+    return r;
+}
+
 // Create inference context
 InferenceContext* create_inference_context(SymbolTable* table) {
     InferenceContext* ctx = (InferenceContext*)malloc(sizeof(InferenceContext));
@@ -567,9 +579,8 @@ static Symbol* dsl_block_callee(InferenceContext* ctx, const char* name) {
     for (int d = ctx->dsl_depth - 1; d >= 0; d--) {
         for (Symbol* s = from; s && s != ctx->dsl_heads[d]; s = s->next)
             if (s->name && strcmp(s->name, name) == 0) return NULL;
-        char rewritten[512];
-        snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", ctx->dsl_receivers[d], name);
-        Symbol* f = lookup_symbol(ctx->symbols, rewritten);
+        /* As long as the two names are (#3569). */
+        Symbol* f = lookup_symbol(ctx->symbols, aether_internf("%s_%s", ctx->dsl_receivers[d], name));
         if (f && f->is_function) return f;
         from = ctx->dsl_heads[d];
     }
@@ -895,10 +906,9 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                  * does (#333): typed by the program's function of the same
                  * name instead, a `return note(n)` there gave the function
                  * around it a result its checked returns do not have. */
-                char recv[256];
                 const char* r = (ast_is_trailing_block(arg) && ctx->symbols &&
                                  ctx->dsl_depth < INFER_MAX_DSL_BLOCKS)
-                    ? dsl_receiver_of_call(node, ctx->symbols, recv, sizeof(recv)) : NULL;
+                    ? dsl_receiver_of_call(node, ctx->symbols) : NULL;
                 if (r) {
                     ctx->dsl_receivers[ctx->dsl_depth] = strdup(r);
                     ctx->dsl_heads[ctx->dsl_depth] = ctx->symbols->symbols;
@@ -1201,11 +1211,7 @@ static Type* resolve_local_var_type(const char* name, ASTNode* block, int before
                 if (rhs && rhs->type == AST_FUNCTION_CALL && rhs->value && symbols) {
                     Symbol* func_sym = lookup_symbol(symbols, rhs->value);
                     if (!func_sym && strchr(rhs->value, '.')) {
-                        char mangled[256];
-                        strncpy(mangled, rhs->value, sizeof(mangled) - 1);
-                        mangled[sizeof(mangled) - 1] = '\0';
-                        for (char* p = mangled; *p; p++) { if (*p == '.') *p = '_'; }
-                        func_sym = lookup_symbol(symbols, mangled);
+                        func_sym = lookup_symbol(symbols, infer_dotted_as_c_name(rhs->value));
                     }
                     if (func_sym && func_sym->type &&
                         func_sym->type->kind == TYPE_TUPLE &&
@@ -1916,14 +1922,11 @@ static int call_index_collect(CallIndex* ix, ASTNode* tree, int top_index) {
     if (tree->type == AST_FUNCTION_CALL && tree->value) {
         if (!call_index_add(ix, tree, tree->value, top_index)) return 0;
         /* A qualified call `mymath.double_it` also matches the definition
-         * `mymath_double_it`, so it is indexed under both spellings. The
-         * 512-byte cap and its truncation match what the linear scan did. */
+         * `mymath_double_it`, so it is indexed under both spellings, the
+         * second as long as the first: a 512-byte copy cut a longer one
+         * (#3569). */
         if (strchr(tree->value, '.')) {
-            char mangled[512];
-            strncpy(mangled, tree->value, sizeof(mangled) - 1);
-            mangled[sizeof(mangled) - 1] = '\0';
-            for (char* p = mangled; *p; p++) { if (*p == '.') *p = '_'; }
-            char* copy = strdup(mangled);
+            char* copy = strdup(infer_dotted_as_c_name(tree->value));
             if (!copy) return 0;
             if (!call_index_own(ix, copy)) { free(copy); return 0; }
             if (!call_index_add(ix, tree, copy, top_index)) return 0;

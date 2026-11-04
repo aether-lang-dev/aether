@@ -132,11 +132,11 @@ int module_exports_symbol(AetherModule* module, const char* name);
  * transitively). NULL when `module` itself is the definer. */
 AetherModule* module_resolve_reexport(AetherModule* module, const char* symbol);
 /* #2978: when the module whose namespace is `ns` defines a function, a
- * builder or an `@extern` whose Aether name is `name`, write the C name the
- * merge gives it into `buf` and return 1: `<ns>_<name>`, or `ae_<ns>_<name>`
- * for a function whose `<ns>_<name>` is one of the module's bare externs.
- * 0 when the module defines no such name. */
-int module_function_c_name(const char* ns, const char* name, char* buf, size_t cap);
+ * builder or an `@extern` whose Aether name is `name`, the C name the merge
+ * gives it, malloc'd for the caller to free: `<ns>_<name>`, or
+ * `ae_<ns>_<name>` for a function whose `<ns>_<name>` is one of the module's
+ * bare externs. NULL when the module defines no such name. */
+char* module_function_c_name_dup(const char* ns, const char* name);
 /* #2614: may code written in the module registered as `module_name` qualify
  * a name with namespace `ns`? Its own namespace and the namespaces of the
  * modules it imports, in any form; not a module some other module of the

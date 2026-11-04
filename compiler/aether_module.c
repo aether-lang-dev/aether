@@ -2945,30 +2945,25 @@ static char* merged_function_name_ns(const char* ns, const char* name) {
     return merged_function_name(ns, m ? m->ast : NULL, name);
 }
 
-/* The C name into `buf`, or 0 when it is no function of the module or does
- * not fit in `cap` bytes: a name cut to fit would be another name (#3545). */
-int module_function_c_name(const char* ns, const char* name, char* buf, size_t cap) {
-    if (!ns || !name || !buf || cap == 0) return 0;
+/* The C name, malloc'd and as long as it is, or NULL when it is no function
+ * of the module. It wrote into its caller's buffer, and a name past the
+ * buffer named nothing (#3545, #3569). */
+char* module_function_c_name_dup(const char* ns, const char* name) {
+    if (!ns || !name) return NULL;
     AetherModule* m = module_find_by_namespace(ns);
-    if (!m || !m->ast) return 0;
+    if (!m || !m->ast) return NULL;
     /* #3546: the first function (or builder) of the name, or the first
      * extern `@extern("sym")` binds to it, whichever the module declares
      * first: from the index, where a walk of the module made every
      * qualified call of a large module's function cost its size. */
     DeclEntry* e = strmap_get(&decl_index(m->ast)->names, name);
-    if (!e) return 0;
+    if (!e) return NULL;
     int fn = e->first_fn;
     int ext = e->first_csym_extern;
-    char* c_name = NULL;
     if (fn >= 0 && (ext < 0 || fn < ext))
-        c_name = merged_function_name(m->ns ? m->ns : ns, m->ast, name);
-    else if (ext >= 0)
-        c_name = mod_strf("%s_%s", m->ns ? m->ns : ns, name);
-    if (!c_name) return 0;
-    int fits = strlen(c_name) < cap;
-    if (fits) memcpy(buf, c_name, strlen(c_name) + 1);
-    free(c_name);
-    return fits;
+        return merged_function_name(m->ns ? m->ns : ns, m->ast, name);
+    if (ext >= 0) return mod_strf("%s_%s", m->ns ? m->ns : ns, name);
+    return NULL;
 }
 
 /* #2632: does the module define `name` itself (a function, builder,

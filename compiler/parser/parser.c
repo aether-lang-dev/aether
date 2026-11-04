@@ -14,6 +14,29 @@ static int  parse_define_cond(Parser* parser, int* ok);
 static void skip_braced_region(Parser* parser);
 #include "lexer.h"
 #include "../aether_error.h"
+#include <stdarg.h>
+
+/* #3569: `fmt` formatted into a string as long as it needs, malloc'd for the
+ * caller: a name the parser joins is as long as its parts. Fixed buffers cut
+ * a longer one to a name nothing defines. Out of memory ends the compile, as
+ * aether_xrealloc does. */
+static char* parser_strf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+static char* parser_strf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    char* s = (char*)aether_xrealloc(NULL, (size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
 
 Parser* create_parser(Token** tokens, int token_count) {
     Parser* parser = malloc(sizeof(Parser));
@@ -418,9 +441,9 @@ static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw)
  * `T`, `*T` and `as *T`. */
 static Type* parse_struct_type_name(Parser* parser, Token* first) {
     const char* type_name = first->value;
-    char path[512];
-    size_t plen = 0;
-    path[0] = '\0';
+    /* The module path, as long as it is (#3569): 512 bytes cut a longer
+     * one to another module's. */
+    const char* path = NULL;
     while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT) {
         advance_token(parser);  // consume '.'
         Token* seg = peek_token(parser);
@@ -432,14 +455,12 @@ static Type* parse_struct_type_name(Parser* parser, Token* first) {
         }
         advance_token(parser);  // consume the segment
         /* the segment before this one joins the module path */
-        int n = snprintf(path + plen, sizeof(path) - plen, "%s%s",
-                         plen ? "." : "", type_name);
-        if (n > 0 && (size_t)n < sizeof(path) - plen) plen += (size_t)n;
+        path = path ? aether_internf("%s.%s", path, type_name) : aether_intern(type_name);
         type_name = seg->value; // last segment is the type
     }
     Type* type = create_type(TYPE_STRUCT);
     type->struct_name = strdup(type_name);
-    if (plen) type->qualifier = aether_intern(path);
+    if (path) type->qualifier = path;
     return type;
 }
 
@@ -815,15 +836,13 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         }
         /* Compute the unqualified C spelling, then prefix `const `. */
         const char* base = NULL;
-        char ptr_buf[128];
         if (inner->c_alias) {
             base = inner->c_alias;
         } else if (inner->kind == TYPE_PTR && inner->element_type &&
                    inner->element_type->kind == TYPE_STRUCT &&
                    inner->element_type->struct_name) {
-            snprintf(ptr_buf, sizeof(ptr_buf), "%s*",
-                     inner->element_type->struct_name);
-            base = ptr_buf;
+            /* As long as the struct's name (#3569): 128 bytes cut it. */
+            base = aether_internf("%s*", inner->element_type->struct_name);
         } else if (inner->kind == TYPE_PTR) {
             base = "void*";
         } else if (inner->kind == TYPE_STRING) {
@@ -2480,10 +2499,9 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
 
             // Internal representation: AST_FUNCTION_CALL with spawn_ActorName
-            char func_name[256];
-            snprintf(func_name, sizeof(func_name), "spawn_%s", actor_name->value);
-
+            char* func_name = parser_strf("spawn_%s", actor_name->value);
             ASTNode* spawn_call = create_ast_node(AST_FUNCTION_CALL, func_name, line, column);
+            free(func_name);
 
             // Optional core placement hint: spawn(Actor(), core: N)
             Token* next = peek_token(parser);
@@ -2985,10 +3003,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 // (the receiver MIGHT be a value, not a module — the
                 // typechecker tries qualified resolution first and only
                 // falls back to UFCS, shape (b), if that fails.)
-                char qualified_name[256];
-                snprintf(qualified_name, sizeof(qualified_name), "%s.%s",
-                         expr->children[0]->value, expr->value);
-                func_name = strdup(qualified_name);
+                // As long as the two names are (#3569): a 256-byte buffer
+                // cut a longer one to a name nothing defines.
+                func_name = parser_strf("%s.%s", expr->children[0]->value, expr->value);
             } else if (expr && expr->type == AST_MEMBER_ACCESS && expr->value &&
                        expr->child_count > 0 && expr->children[0]) {
                 // #928 UFCS shape (a): receiver is not a bare identifier, so
@@ -4867,14 +4884,13 @@ ASTNode* parse_module_declaration(Parser* parser) {
     if (!name_token) return NULL;
     
     // Build full module name (handle dotted notation)
-    char module_name[256] = {0};
-    strncpy(module_name, name_token->value, sizeof(module_name) - 1);
+    /* As long as its parts (#3569): 256 bytes cut it to another name. */
+    const char* module_name = aether_intern(name_token->value);
     
     while (match_token(parser, TOKEN_DOT)) {
         Token* part = expect_token(parser, TOKEN_IDENTIFIER);
         if (!part) break;
-        strncat(module_name, ".", sizeof(module_name) - strlen(module_name) - 1);
-        strncat(module_name, part->value, sizeof(module_name) - strlen(module_name) - 1);
+        module_name = aether_internf("%s.%s", module_name, part->value);
     }
     
     ASTNode* module_decl = create_ast_node(AST_MODULE_DECLARATION, module_name, 
@@ -4927,15 +4943,14 @@ ASTNode* parse_import_statement(Parser* parser) {
     advance_token(parser);  // consume name
 
     // Build module name (handle dotted notation)
-    char module_name[256] = {0};
-    strncpy(module_name, name_token->value, sizeof(module_name) - 1);
+    /* As long as its parts (#3569): 256 bytes cut it to another name. */
+    const char* module_name = aether_intern(name_token->value);
 
     while (match_token(parser, TOKEN_DOT)) {
         Token* part = peek_token(parser);
         if (!is_module_name_token(part)) break;
         advance_token(parser);  // consume the part
-        strncat(module_name, ".", sizeof(module_name) - strlen(module_name) - 1);
-        strncat(module_name, part->value, sizeof(module_name) - strlen(module_name) - 1);
+        module_name = aether_internf("%s.%s", module_name, part->value);
     }
     
     ASTNode* import_stmt = create_ast_node(AST_IMPORT_STATEMENT, module_name,
@@ -4977,9 +4992,8 @@ ASTNode* parse_import_statement(Parser* parser) {
                     advance_token(parser);  // consume 'as'
                     Token* alias = expect_token(parser, TOKEN_IDENTIFIER);
                     if (!alias) break;
-                    char ann[160];
-                    snprintf(ann, sizeof(ann), "select_alias:%s", alias->value);
-                    symbol_node->annotation = strdup(ann);
+                    /* As long as the alias (#3569): 160 bytes cut it. */
+                    symbol_node->annotation = parser_strf("select_alias:%s", alias->value);
                 }
                 add_child(import_stmt, symbol_node);
             } while (match_token(parser, TOKEN_COMMA));
@@ -8103,21 +8117,19 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser);                   // consume 'drop'
                     Token* fn = expect_token(parser, TOKEN_IDENTIFIER);
                     if (!fn) { free_type(base); return NULL; }
-                    char qname[256];
-                    snprintf(qname, sizeof(qname), "%s", fn->value);
+                    /* The drop function's name, as long as it is (#3569):
+                     * 256 bytes cut a qualified one to another name. */
+                    const char* qname = aether_intern(fn->value);
                     while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT &&
                            peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER) {
                         advance_token(parser);
                         Token* part = expect_token(parser, TOKEN_IDENTIFIER);
-                        size_t used = strlen(qname);
-                        snprintf(qname + used, sizeof(qname) - used, ".%s", part->value);
+                        qname = aether_internf("%s.%s", qname, part->value);
                     }
                     ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
                                                  name->value, name->line, name->column);
                     d->node_type = base;
-                    size_t n = strlen(qname) + sizeof("owned_drop:");
-                    d->annotation = malloc(n);
-                    if (d->annotation) snprintf(d->annotation, n, "owned_drop:%s", qname);
+                    d->annotation = parser_strf("owned_drop:%s", qname);
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }
@@ -8470,19 +8482,14 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser);  // consume 'derive'
                     if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
                     // Parse the comma-separated derive list.
-                    char tag[256];
-                    snprintf(tag, sizeof(tag), "derive:");
-                    size_t tag_len = strlen(tag);
+                    /* As long as the list (#3569): one past 256 bytes
+                     * stopped the list there. */
+                    const char* tag = "derive:";
                     int first = 1;
                     while (1) {
                         Token* d = expect_token(parser, TOKEN_IDENTIFIER);
                         if (!d || !d->value) break;
-                        size_t dlen = strlen(d->value);
-                        if (tag_len + dlen + 2 >= sizeof(tag)) break;
-                        if (!first) { tag[tag_len++] = ','; }
-                        memcpy(tag + tag_len, d->value, dlen);
-                        tag_len += dlen;
-                        tag[tag_len] = '\0';
+                        tag = aether_internf("%s%s%s", tag, first ? "" : ",", d->value);
                         first = 0;
                         if (!match_token(parser, TOKEN_COMMA)) break;
                     }
@@ -8533,11 +8540,9 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         //                       falls back to fdef->value
                         //                       (post-merge namespace-
                         //                       prefixed when imported).
-                        char tag[256];
-                        snprintf(tag, sizeof(tag), "c_callback:%s",
-                                 explicit_sym ? explicit_sym : "");
                         if (fdef->annotation) free(fdef->annotation);
-                        fdef->annotation = strdup(tag);
+                        fdef->annotation =
+                            parser_strf("c_callback:%s", explicit_sym ? explicit_sym : "");
                     }
                     if (explicit_sym) free(explicit_sym);
                     node = fdef;
@@ -8644,9 +8649,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 // Stash the C symbol name with a recognizable prefix so
                 // codegen can detect it without colliding with other
                 // annotation users (e.g. defer factories).
-                char tag[256];
-                snprintf(tag, sizeof(tag), "c_symbol:%s", sym->value);
-                ext->annotation = strdup(tag);
+                ext->annotation = parser_strf("c_symbol:%s", sym->value);   /* #3569: whole */
 
                 if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
                     do {

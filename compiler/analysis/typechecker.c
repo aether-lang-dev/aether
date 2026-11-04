@@ -622,14 +622,9 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
     // on its scope — natural outer→inner shadowing without explicit
     // stack management.
     if (table->dsl_receiver && table->dsl_receiver[0] && name[0]) {
-        /* Bounded snprintf via precision spec — caps each component
-         * at 250 bytes regardless of strlen, which keeps GCC's
-         * format-truncation analyzer happy on -Werror builds.
-         * Identifiers above 250 bytes don't occur in practice
-         * (longest stdlib symbol is <40 chars). */
-        char rewritten[512];
-        snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s",
-                 table->dsl_receiver, name);
+        /* Interned, as long as the two names are: each was cut at 250
+         * bytes, and a longer one reached another name (#3569). */
+        const char* rewritten = aether_internf("%s_%s", table->dsl_receiver, name);
         for (SymbolTable* t = table; t; t = t->parent) {
             if (t != table &&
                 (scope_name_is_hidden(t, name) ||
@@ -822,8 +817,7 @@ int is_imported_namespace(const char* name);
  * merges the module's functions as `<ns>_<name>` and its own `m.a()` calls
  * resolve to them, as a module sees itself (module_sees_namespace); checked
  * on its own, the file used to know no namespace at all, so `ae check`
- * rejected a call `ae build` accepted. NULL for a program. */
-static char g_entry_self_ns_buf[256];
+ * rejected a call `ae build` accepted. NULL for a program. Interned. */
 static const char* g_entry_self_ns = NULL;
 
 /* The program's own (not merged) top-level definition named `name` that a
@@ -877,9 +871,7 @@ static int entry_self_reference(const char* prefix, const char* name) {
 static int entry_export_blocked(const char* name) {
     ASTNode* program = aether_typecheck_program_node();
     if (!program || !name) return 0;
-    char prefixed[512];
-    snprintf(prefixed, sizeof(prefixed), "%s_%s",
-             g_entry_self_ns ? g_entry_self_ns : "", name);
+    const char* prefixed = aether_internf("%s_%s", g_entry_self_ns ? g_entry_self_ns : "", name);
     int has_list = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* list = program->children[i];
@@ -1025,17 +1017,35 @@ int is_imported_namespace(const char* name) {
  * `<ns>_<name>`, which a module may list a name as: an Aether function so
  * named (std.md5's `md5_hex`, merged as `md5_md5_hex`) as much as an
  * extern, whose C name is that joined spelling. `md5.hex` built a C name,
- * `md5_hex`, and so reached the extern form only (#2976). */
-static void qualified_c_name(const char* ns, const char* name, char* buf, size_t cap) {
+ * `md5_hex`, and so reached the extern form only (#2976). Interned, as long
+ * as it is: a fixed buffer cut a longer name, which then named nothing
+ * (#3569). */
+static const char* qualified_c_name(const char* ns, const char* name) {
     if (global_module_registry) {
-        if (module_function_c_name(ns, name, buf, cap)) return;
-        char prefixed[512];
-        if (snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, name) < (int)sizeof(prefixed) &&
-            module_function_c_name(ns, prefixed, buf, cap))
-            return;
+        char* c = module_function_c_name_dup(ns, name);
+        if (!c) {
+            const char* prefixed = aether_internf("%s_%s", ns, name);
+            c = module_function_c_name_dup(ns, prefixed);
+        }
+        if (c) {
+            const char* r = aether_intern(c);
+            free(c);
+            return r;
+        }
     }
-    /* A name too long for `buf` names nothing. */
-    if (snprintf(buf, cap, "%s_%s", ns, name) >= (int)cap) buf[0] = '\0';
+    return aether_internf("%s_%s", ns, name);
+}
+
+/* `name` with each `.` as `_`, interned and as long as it is: the C name a
+ * dotted path merges to (#3569). */
+static const char* dotted_as_c_name(const char* name) {
+    size_t n = strlen(name);
+    char* s = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++) s[i] = name[i] == '.' ? '_' : name[i];
+    s[n] = '\0';
+    const char* r = aether_intern_n(s, n);
+    free(s);
+    return r;
 }
 
 Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) {
@@ -1076,9 +1086,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         Symbol* alias_sym = resolve_module_alias(table, prefix);
         if (alias_sym && alias_sym->alias_target) {
             // Reconstruct with actual module name
-            char resolved_name[512];
-            snprintf(resolved_name, sizeof(resolved_name), "%s.%s",
-                    alias_sym->alias_target, suffix);
+            const char* resolved_name = aether_internf("%s.%s", alias_sym->alias_target, suffix);
             if (name_heap) free(name_copy);
             return lookup_symbol(table, resolved_name);
         }
@@ -1098,8 +1106,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
             // #878: no selective-import gate here — the qualified `X.fn()`
             // surface is available whenever the namespace is visible, in any
             // import form. (export visibility + hide/seal above still apply.)
-            char c_func_name[512];
-            qualified_c_name(prefix, suffix, c_func_name, sizeof(c_func_name));   /* #2978 */
+            const char* c_func_name = qualified_c_name(prefix, suffix);   /* #2978 */
             Symbol* sym = lookup_member_symbol(table, c_func_name);
             /* #924 re-export: `hub.fn()` where hub re-exports an imported
              * `fn`. No local `hub_fn` symbol exists; redirect to the
@@ -1108,10 +1115,8 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                 AetherModule* hub = module_find_by_namespace(prefix);
                 AetherModule* origin = module_resolve_reexport(hub, suffix);
                 if (origin && origin->name) {
-                    char c_origin[512];
-                    qualified_c_name(module_namespace_of(origin->name), suffix, c_origin,
-                                     sizeof(c_origin));
-                    sym = lookup_member_symbol(table, c_origin);
+                    sym = lookup_member_symbol(
+                        table, qualified_c_name(module_namespace_of(origin->name), suffix));
                 }
             }
             /* #1035: exports that don't carry the module-name prefix —
@@ -1722,16 +1727,25 @@ static const char* type_name(Type* t) {
      * "closure" it was named after the other representation, the one it
      * cannot hold (#2634). */
     if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) {
-        char buf[256];
-        size_t n = (size_t)snprintf(buf, sizeof(buf), "fn(");
-        for (int i = 0; i < t->param_count && t->param_types && n < sizeof(buf); i++)
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i ? ", " : "",
-                                  type_name(t->param_types[i]));
-        if (n < sizeof(buf))
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, ")");
-        if (n < sizeof(buf) && t->return_type && t->return_type->kind != TYPE_VOID)
-            snprintf(buf + n, sizeof(buf) - n, " -> %s", type_name(t->return_type));
-        return aether_internf("%s", buf);
+        /* Grown to fit (#3569): 256 bytes cut a long signature's name. */
+        size_t cap = 64, len = 0;
+        char* buf = (char*)aether_xrealloc(NULL, cap);
+        int pc = t->param_types ? t->param_count : 0;
+        for (int i = -1; i <= pc; i++) {
+            const char* lead = i < 0 ? "fn(" : i == pc ? ")" : i ? ", " : "";
+            const char* piece = (i >= 0 && i < pc) ? type_name(t->param_types[i]) : "";
+            if (i == pc && t->return_type && t->return_type->kind != TYPE_VOID)
+                piece = aether_internf(" -> %s", type_name(t->return_type));
+            size_t need = len + strlen(lead) + strlen(piece) + 1;
+            if (need > cap) {
+                while (cap < need) cap *= 2;
+                buf = (char*)aether_xrealloc(buf, cap);
+            }
+            len += (size_t)sprintf(buf + len, "%s%s", lead, piece);
+        }
+        const char* r = aether_intern_n(buf, len);
+        free(buf);
+        return r;
     }
     /* #2980: a closure's type with a parameter's mode, as it is written. */
     if (t && t->kind == TYPE_FUNCTION && fn_type_has_modes(t)) return type_spelled(t);
@@ -2262,11 +2276,10 @@ static int is_const_expr_call(ASTNode* expr) {
     static const char* const whitelist[] = {
         "from_int", "from_long", "from_float", "concat"
     };
+    /* `string.<name>` or `string_<name>`, compared in place. */
+    if (strncmp(name, "string", 6) != 0 || (name[6] != '.' && name[6] != '_')) return 0;
     for (size_t i = 0; i < sizeof(whitelist) / sizeof(whitelist[0]); i++) {
-        char dotted[64], under[64];
-        snprintf(dotted, sizeof(dotted), "string.%s", whitelist[i]);
-        snprintf(under,  sizeof(under),  "string_%s", whitelist[i]);
-        if (strcmp(name, dotted) == 0 || strcmp(name, under) == 0) {
+        if (strcmp(name + 7, whitelist[i]) == 0) {
             /* Arguments must themselves be const-expressions — guards
              * `string.from_int(rand())` and the like. */
             for (int a = 0; a < expr->child_count; a++) {
@@ -4046,16 +4059,14 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
     if (expr->child_count > 0 && expr->children[0] &&
         expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
         is_visible_namespace(expr->children[0]->value, table) && expr->value) {
-        char qualified[512];
-        snprintf(qualified, sizeof(qualified), "%s_%s",
-                 expr->children[0]->value, expr->value);
+        const char* qualified = aether_internf("%s_%s", expr->children[0]->value, expr->value);
         Symbol* sym = lookup_symbol(table, qualified);
         /* #2631: the checked module file's own constant, which a
          * build merges as `<ns>_<name>`: the bare one it carries. */
         if ((!sym || !sym->type) && !(table && table->merged_from) &&
             entry_self_reference(expr->children[0]->value, expr->value)) {
             sym = entry_self_symbol(table, expr->value);
-            snprintf(qualified, sizeof(qualified), "%s", expr->value);
+            qualified = aether_intern(expr->value);
         }
         if (sym && sym->type) {
             // Rewrite node in-place for codegen
@@ -4769,11 +4780,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->value && (!symbol || !symbol->is_function)) {
                 const char* dot = strrchr(expr->value, '.');
                 size_t rlen = dot ? (size_t)(dot - expr->value) : 0;
-                if (dot && rlen > 0 && rlen < 200 &&
-                    !memchr(expr->value, '.', rlen)) {
-                    char recv[200];
-                    memcpy(recv, expr->value, rlen);
-                    recv[rlen] = '\0';
+                if (dot && rlen > 0 && !memchr(expr->value, '.', rlen)) {
+                    const char* recv = aether_intern_n(expr->value, rlen);
                     Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
                     if (fsig && fsig->return_type) {
                         return clone_type(fsig->return_type);
@@ -5372,11 +5380,8 @@ static void collect_references(ASTNode* node, TrackedVars* t) {
     if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
         strncmp(node->annotation, "fnfield_", 8) == 0) {
         const char* dot = strchr(node->value, '.');
-        char recv[256];
-        if (dot && dot > node->value && dot - node->value < (ptrdiff_t)sizeof(recv)) {
-            snprintf(recv, sizeof(recv), "%.*s", (int)(dot - node->value), node->value);
-            mark_used(t, recv);
-        }
+        if (dot && dot > node->value)
+            mark_used(t, aether_intern_n(node->value, (size_t)(dot - node->value)));
     }
 
     // Match statements with list patterns implicitly reference <expr>_len variables
@@ -5389,9 +5394,7 @@ static void collect_references(ASTNode* node, TrackedVars* t) {
         Type* mt = match_expr ? match_expr->node_type : NULL;
         if (match_expr && match_expr->type == AST_IDENTIFIER && match_expr->value &&
             !(mt && mt->kind == TYPE_ARRAY) && !is_string_seq_ptr_type(mt)) {
-            char len_name[256];
-            snprintf(len_name, sizeof(len_name), "%s_len", match_expr->value);
-            mark_used(t, len_name);
+            mark_used(t, aether_internf("%s_len", match_expr->value));
         }
     }
 
@@ -6095,8 +6098,7 @@ static int coerce_bare_enum_member(ASTNode* expr, Type* expected, SymbolTable* t
     if (expr->node_type && expr->node_type->kind == TYPE_ENUM) return 0;
     if (!enum_has_member(expected->struct_name, expr->value)) return 0;
     if (table && lookup_symbol(table, expr->value)) return 0;  // a real binding wins
-    char qualified[512];
-    snprintf(qualified, sizeof(qualified), "%s_%s", expected->struct_name, expr->value);
+    const char* qualified = aether_internf("%s_%s", expected->struct_name, expr->value);
     free(expr->value);
     expr->value = strdup(qualified);
     if (expr->node_type) free_type(expr->node_type);
@@ -6152,16 +6154,17 @@ static ASTNode* c_struct_def_node(const char* name) {
 static Type* c_struct_field_decl_type(const char* sname, const char* field) {
     ASTNode* def = c_struct_def_node(sname);
     if (!def || !field) return NULL;
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s", field);
-    char* seg = buf;
+    /* Each segment compared in place: a copy into 256 bytes cut a longer
+     * chain (#3569). */
+    const char* seg = field;
     while (seg && *seg) {
-        char* dot = strchr(seg, '.');
-        if (dot) *dot = '\0';
+        const char* dot = strchr(seg, '.');
+        size_t seg_len = dot ? (size_t)(dot - seg) : strlen(seg);
         ASTNode* fnode = NULL;
         for (int i = 0; i < def->child_count; i++) {
             ASTNode* f = def->children[i];
-            if (f && f->type == AST_STRUCT_FIELD && f->value && strcmp(f->value, seg) == 0) {
+            if (f && f->type == AST_STRUCT_FIELD && f->value &&
+                strncmp(f->value, seg, seg_len) == 0 && f->value[seg_len] == '\0') {
                 fnode = f; break;
             }
         }
@@ -6216,9 +6219,7 @@ static Type* const_initializer_type(ASTNode* e, SymbolTable* table) {
             if (!ns || ns->type != AST_IDENTIFIER || !ns->value || !e->value ||
                 value_hides_namespace(table, ns->value) || !is_visible_namespace(ns->value, table))
                 return create_type(TYPE_UNKNOWN);
-            char qualified[512];
-            snprintf(qualified, sizeof(qualified), "%s_%s", ns->value, e->value);
-            Symbol* s = lookup_symbol(table, qualified);
+            Symbol* s = lookup_symbol(table, aether_internf("%s_%s", ns->value, e->value));
             return (s && !s->is_function && s->type) ? clone_type(s->type)
                                                      : create_type(TYPE_UNKNOWN);
         }
@@ -6308,14 +6309,12 @@ static void const_order_visit(ConstOrder* co, int k);
 static void const_order_deps(ConstOrder* co, ASTNode* n) {
     if (!n || co->reported) return;
     const char* name = NULL;
-    char qualified[512];
     if (n->type == AST_IDENTIFIER && n->value) {
         name = n->value;
     } else if (n->type == AST_MEMBER_ACCESS && n->value && n->child_count > 0 &&
                n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
                n->children[0]->value) {
-        snprintf(qualified, sizeof(qualified), "%s_%s", n->children[0]->value, n->value);
-        name = qualified;
+        name = aether_internf("%s_%s", n->children[0]->value, n->value);
     }
     if (name) {
         void* hit = strmap_get(&co->index, name);
@@ -7036,10 +7035,13 @@ int typecheck_program(ASTNode* program) {
     g_entry_self_ns = NULL;
     for (int i = 0; i < program->child_count; i++) {
         if (program->children[i] && program->children[i]->type == AST_EXPORTS_LIST) {
-            if (module_leaf_of_file(program->source_file, g_entry_self_ns_buf,
-                                    sizeof(g_entry_self_ns_buf))[0]) {
-                g_entry_self_ns = g_entry_self_ns_buf;
-            }
+            /* Room for any leaf of the path or of its full path, as the
+             * merge sizes it (#3545): 256 bytes left a longer leaf none. */
+            size_t cap = (program->source_file ? strlen(program->source_file) : 0) + 4096;
+            char* leaf = (char*)aether_xrealloc(NULL, cap);
+            if (module_leaf_of_file(program->source_file, leaf, cap)[0])
+                g_entry_self_ns = aether_intern(leaf);
+            free(leaf);
             break;
         }
     }
@@ -7274,23 +7276,18 @@ int typecheck_program(ASTNode* program) {
                 
                 // Add generated spawn_ActorName() function - returns pointer to actor
                 // Use TYPE_ACTOR_REF to represent pointer type
-                char spawn_name[256];
-                snprintf(spawn_name, sizeof(spawn_name), "spawn_%s", child->value);
                 Type* spawn_return_type = create_type(TYPE_ACTOR_REF);
                 spawn_return_type->element_type = clone_type(actor_type);
-                add_symbol(global_table, spawn_name, spawn_return_type, 0, 1, 0);
-                
+                add_symbol(global_table, aether_internf("spawn_%s", child->value),
+                           spawn_return_type, 0, 1, 0);
+
                 // Add generated send_ActorName() function - returns void
-                char send_name[256];
-                snprintf(send_name, sizeof(send_name), "send_%s", child->value);
                 Type* send_type = create_type(TYPE_VOID);
-                add_symbol(global_table, send_name, send_type, 0, 1, 0);
-                
+                add_symbol(global_table, aether_internf("send_%s", child->value), send_type, 0, 1, 0);
+
                 // Add generated ActorName_step() function - returns void
-                char step_name[256];
-                snprintf(step_name, sizeof(step_name), "%s_step", child->value);
                 Type* step_type = create_type(TYPE_VOID);
-                add_symbol(global_table, step_name, step_type, 0, 1, 0);
+                add_symbol(global_table, aether_internf("%s_step", child->value), step_type, 0, 1, 0);
                 break;
             }
             case AST_BUILDER_FUNCTION:
@@ -7425,8 +7422,7 @@ int typecheck_program(ASTNode* program) {
                 for (int mi = 0; mi < child->child_count; mi++) {
                     ASTNode* m = child->children[mi];
                     if (!m || m->type != AST_ENUM_MEMBER || !m->value) continue;
-                    char qname[512];
-                    snprintf(qname, sizeof(qname), "%s_%s", child->value, m->value);
+                    const char* qname = aether_internf("%s_%s", child->value, m->value);
                     Type* mt = create_type(TYPE_ENUM);
                     mt->struct_name = strdup(child->value);
                     add_symbol(global_table, qname, mt, 0, 0, 0);
@@ -7763,8 +7759,7 @@ int typecheck_program(ASTNode* program) {
 
             // Build the full C name: namespace_shortname (#2978: as
             // `ns.short` reaches it)
-            char full_name[256];
-            qualified_c_name(ns, short_name, full_name, sizeof(full_name));
+            const char* full_name = qualified_c_name(ns, short_name);
 
             Symbol* full_sym = lookup_symbol(global_table, full_name);
             if (full_sym) {
@@ -7796,9 +7791,7 @@ int typecheck_program(ASTNode* program) {
                 // Only register when the prefixed symbol exists — otherwise
                 // we'd rewrite calls to externs (which keep their bare
                 // names) into nonexistent `ns_extern` forms.
-                char dotted[256];
-                snprintf(dotted, sizeof(dotted), "%s.%s", ns, short_name);
-                add_import_alias(local_name, dotted);
+                add_import_alias(local_name, aether_internf("%s.%s", ns, short_name));
             }
         }
         free((void*)glob_names);
@@ -7848,16 +7841,12 @@ int typecheck_program(ASTNode* program) {
         const char* dotted = (const char*)strmap_value_at(&import_aliases, a);
         // The full C name the dotted alias reaches ("fs.list_dir" ->
         // "fs_list_dir", #2978: as a qualified call reaches it).
-        char full_name[256];
-        snprintf(full_name, sizeof(full_name), "%s", dotted);
-        char* adot = strchr(full_name, '.');
-        if (adot && adot == strrchr(full_name, '.')) {
-            char ns_part[256];
-            snprintf(ns_part, sizeof(ns_part), "%.*s", (int)(adot - full_name), full_name);
-            qualified_c_name(ns_part, dotted + (adot - full_name) + 1, full_name,
-                             sizeof(full_name));
+        const char* full_name;
+        const char* adot = strchr(dotted, '.');
+        if (adot && adot == strrchr(dotted, '.')) {
+            full_name = qualified_c_name(aether_intern_n(dotted, (size_t)(adot - dotted)), adot + 1);
         } else {
-            for (char* p = full_name; *p; p++) { if (*p == '.') *p = '_'; }
+            full_name = dotted_as_c_name(dotted);
         }
 
         Symbol* full_sym = lookup_symbol(global_table, full_name);
@@ -9902,14 +9891,7 @@ static ASTNode* call_param_of(ASTNode* def, ASTNode* call, int i) {
  * function). */
 static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
     if (!program || !name) return NULL;
-    char merged[256];
-    size_t n = strlen(name);
-    int dotted = strchr(name, '.') != NULL && n < sizeof(merged);
-    if (dotted) {
-        for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
-        merged[n] = '\0';
-    }
-    return tc_first_extern(program, name, dotted ? merged : NULL);
+    return tc_first_extern(program, name, strchr(name, '.') ? dotted_as_c_name(name) : NULL);
 }
 
 /* The declaration a call is checked against: an Aether function, or an
@@ -11878,15 +11860,10 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
     if (!name) return NULL;
     const char* dot = strchr(name, '.');
     if (!dot) return effect_find_func(program, name);
-    char merged[256];
-    size_t n = strlen(name);
-    if (n >= sizeof(merged)) return NULL;
-    for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
-    merged[n] = '\0';
     /* Only a merged module function: `value.method()` (UFCS on a local) is
      * also spelled `a.b` here, and must not be read as the program's own
      * `a_b` if one happens to exist. */
-    ASTNode* def = effect_find_func(program, merged);
+    ASTNode* def = effect_find_func(program, dotted_as_c_name(name));
     return (def && def->is_imported) ? def : NULL;
 }
 
@@ -11910,16 +11887,11 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
-            size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                const char* cap = effect_call_capability(ns);
-                if (cap && strstr(forbid, cap)) {
-                    snprintf(outcall, outsz, "%s", node->value);
-                    return cap;
-                }
+            const char* cap =
+                effect_call_capability(aether_intern_n(node->value, (size_t)(dot - node->value)));
+            if (cap && strstr(forbid, cap)) {
+                snprintf(outcall, outsz, "%s", node->value);
+                return cap;
             }
         }
         {
@@ -12057,13 +12029,8 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
-            size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                if (effect_call_capability(ns)) return 1;  /* fs/net/os → impure */
-            }
+            if (effect_call_capability(aether_intern_n(node->value, (size_t)(dot - node->value))))
+                return 1;  /* fs/net/os → impure */
         }
         {
             int seen = 0;
@@ -12145,39 +12112,30 @@ static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
             size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                const char* cap = effect_call_capability(ns);
-                if (cap) {
-                    if (!strcmp(cap, "fs"))  set->reach_fs = 1;
-                    else if (!strcmp(cap, "net")) set->reach_net = 1;
-                    else if (!strcmp(cap, "os"))  set->reach_os = 1;
-                } else {
-                    /* Not a capability namespace — a call into an imported
-                       user module. After module merge the callee lives under
-                       its underscore-merged name (`osmod.do_exec` →
-                       `osmod_do_exec`), so follow that edge to keep the
-                       reachability whole-program across import boundaries. */
-                    char merged[256];
-                    snprintf(merged, sizeof(merged), "%.*s_%s",
-                             (int)l, node->value, dot + 1);
-                    int seen = 0;
-                    for (int i = 0; i < *nvisited; i++)
-                        if (strcmp(visited[i], merged) == 0) { seen = 1; break; }
-                    if (!seen && *nvisited < 512) {
-                        ASTNode* def = effect_find_func(program, merged);
-                        if (def && def->child_count > 0) {
-                            /* visited[] holds borrowed pointers; this name is
-                               stack-local, so search by value above is fine,
-                               but we must store a stable pointer. Use the
-                               def's own name (lives in the AST). */
-                            visited[(*nvisited)++] = def->value ? def->value : merged;
-                            effect_collect(program, def->children[def->child_count - 1],
-                                           set, visited, nvisited, depth + 1);
-                        }
+            const char* cap = effect_call_capability(aether_intern_n(node->value, l));
+            if (cap) {
+                if (!strcmp(cap, "fs"))  set->reach_fs = 1;
+                else if (!strcmp(cap, "net")) set->reach_net = 1;
+                else if (!strcmp(cap, "os"))  set->reach_os = 1;
+            } else {
+                /* Not a capability namespace: a call into an imported
+                   user module. After module merge the callee lives under
+                   its underscore-merged name (`osmod.do_exec` →
+                   `osmod_do_exec`), so follow that edge to keep the
+                   reachability whole-program across import boundaries.
+                   Interned, as long as it is (#3569): a namespace of 64
+                   bytes or more was not followed. */
+                const char* merged = aether_internf("%.*s_%s", (int)l, node->value, dot + 1);
+                int seen = 0;
+                for (int i = 0; i < *nvisited; i++)
+                    if (strcmp(visited[i], merged) == 0) { seen = 1; break; }
+                if (!seen && *nvisited < 512) {
+                    ASTNode* def = effect_find_func(program, merged);
+                    if (def && def->child_count > 0) {
+                        visited[(*nvisited)++] = def->value ? def->value : merged;
+                        effect_collect(program, def->children[def->child_count - 1],
+                                       set, visited, nvisited, depth + 1);
                     }
                 }
             }
@@ -12533,21 +12491,20 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
 /* A qualified enum member is lowered to one identifier before lexical scopes
  * are checked. Preserve the prefix the source wrote so hide/seal decisions use
  * `Color`, not the generated `Color_Red` constant name. */
-static int enum_member_source_prefix(const ASTNode* nd, char* out, size_t outsz) {
+static const char* enum_member_source_prefix(const ASTNode* nd) {
     static const char marker[] = "enum_prefix:";
-    if (!nd || !nd->annotation || !out || outsz == 0) return 0;
+    if (!nd || !nd->annotation) return NULL;
     size_t marker_len = sizeof(marker) - 1;
     for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
         if (p != nd->annotation && p[-1] != ';') continue;
         const char* value = p + marker_len;
         const char* end = strchr(value, ';');
         size_t len = end ? (size_t)(end - value) : strlen(value);
-        if (len == 0 || len >= outsz) return 0;
-        memcpy(out, value, len);
-        out[len] = '\0';
-        return 1;
+        /* Interned, as long as it is: one past 512 bytes was no prefix at
+         * all, and its hide / seal went unchecked (#3569). */
+        return len ? aether_intern_n(value, len) : NULL;
     }
-    return 0;
+    return NULL;
 }
 
 // #1044: rewrite `EnumName.Member` member-access nodes into a plain identifier
@@ -12567,11 +12524,9 @@ static void enum_rewrite_member_access(ASTNode* nd) {
                      nd->value, ename);
             type_error(msg, nd->line, nd->column);
         } else {
-            char qualified[512];
-            snprintf(qualified, sizeof(qualified), "%s_%s", ename, nd->value);
-            char marker[512];
-            snprintf(marker, sizeof(marker), "enum_prefix:%s", ename);
-            nd->annotation = annotation_add_marker(nd->annotation, marker);
+            const char* qualified = aether_internf("%s_%s", ename, nd->value);
+            nd->annotation = annotation_add_marker(nd->annotation,
+                                                   aether_internf("enum_prefix:%s", ename));
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -14218,9 +14173,7 @@ static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
                e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
                is_visible_namespace(e->children[0]->value, table)) {
         /* `ns.name` reaches the C name the merge gave it, as a call does. */
-        char cname[512];
-        qualified_c_name(e->children[0]->value, e->value, cname, sizeof(cname));
-        if (cname[0]) sym = lookup_symbol(table, cname);
+        sym = lookup_symbol(table, qualified_c_name(e->children[0]->value, e->value));
         snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
     }
     if (!sym || !sym->is_function) return 0;
@@ -16199,9 +16152,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             if (bare) {
                                 // Lower the bare member to the enum constant so
                                 // codegen compares against `Enum_Member`.
-                                char qualified[512];
-                                snprintf(qualified, sizeof(qualified), "%s_%s",
-                                         enum_name, mem);
+                                const char* qualified = aether_internf("%s_%s", enum_name, mem);
                                 free(el->value);
                                 el->value = strdup(qualified);
                                 if (el->node_type) free_type(el->node_type);
@@ -16607,13 +16558,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count > 0) {
                 /* #3022: a qualified operand as written (`Color.Red`,
                  * `mod.K`), which checking rewrites to its C name. */
-                char written[256];
-                written[0] = '\0';
+                const char* written = NULL;
                 ASTNode* c0 = expr->children[0];
                 if (is_step_operator(expr) && c0 && c0->type == AST_MEMBER_ACCESS && c0->value &&
                     c0->child_count > 0 && c0->children[0] &&
                     c0->children[0]->type == AST_IDENTIFIER && c0->children[0]->value)
-                    snprintf(written, sizeof(written), "%s.%s", c0->children[0]->value, c0->value);
+                    written = aether_internf("%s.%s", c0->children[0]->value, c0->value);
                 int operand_ok = typecheck_expression(expr->children[0], table);
                 /* An operand of what gives no value, `-g()` with g
                  * returning nothing (refuse_valueless). */
@@ -16625,7 +16575,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (is_step_operator(expr) &&
                     !(is_step_operator(expr->children[0]) && !operand_ok) &&
                     reject_step_operand(expr, table,
-                                        written[0] && expr->children[0]->type == AST_IDENTIFIER
+                                        written && expr->children[0]->type == AST_IDENTIFIER
                                             ? written : NULL))
                     return 0;
                 /* `~` flips bits, which a float lane does not have in any
@@ -16953,9 +16903,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return typecheck_function_call(expr, table);
             
         case AST_IDENTIFIER: {
-            char enum_prefix[512];
-            int qualified_enum = enum_member_source_prefix(expr, enum_prefix,
-                                                            sizeof(enum_prefix));
+            const char* enum_prefix = enum_member_source_prefix(expr);
+            int qualified_enum = enum_prefix != NULL;
             if (qualified_enum && qualified_prefix_blocked(table, enum_prefix)) {
                 char error_msg[640];
                 snprintf(error_msg, sizeof(error_msg),
@@ -18123,9 +18072,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
-                char qualified[512];
-                snprintf(qualified, sizeof(qualified), "%s_%s",
-                         expr->children[0]->value, expr->value);
+                const char* qualified =
+                    aether_internf("%s_%s", expr->children[0]->value, expr->value);
                 Symbol* sym = lookup_symbol(table, qualified);
                 /* #924 re-export: `hub.X` where hub lists X in `exports` but
                  * imports it from another module. The local `hub_X` symbol
@@ -18135,8 +18083,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     AetherModule* hub = module_find_by_namespace(expr->children[0]->value);
                     AetherModule* origin = module_resolve_reexport(hub, expr->value);
                     if (origin && origin->name) {
-                        snprintf(qualified, sizeof(qualified), "%s_%s",
-                                 module_namespace_of(origin->name), expr->value);
+                        qualified = aether_internf("%s_%s", module_namespace_of(origin->name),
+                                                   expr->value);
                         sym = lookup_symbol(table, qualified);
                     }
                 }
@@ -18145,7 +18093,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if ((!sym || !sym->type) && !table->merged_from &&
                     entry_self_reference(expr->children[0]->value, expr->value)) {
                     sym = entry_self_symbol(table, expr->value);
-                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
+                    qualified = aether_intern(expr->value);
                 }
                 if (sym && sym->type) {
                     // Rewrite node in-place
@@ -19496,8 +19444,7 @@ static char* ufcs_resolve(const char* method, Type* rtype, SymbolTable* table) {
         const char* ns = m->name;
         if (!is_visible_namespace(ns, table)) continue;
         if (!module_is_exported(m, method)) continue;
-        char qualified[512];
-        snprintf(qualified, sizeof(qualified), "%s.%s", ns, method);
+        const char* qualified = aether_internf("%s.%s", ns, method);
         Symbol* qs = lookup_qualified_symbol(table, qualified);
         if (qs && qs->is_function && qs->node &&
             ufcs_first_param_matches(qs->node, rtype)) {
@@ -19933,37 +19880,34 @@ static ASTNode* tc_closure_body(ASTNode* closure) {
 
 /* Issue #333: the receiver of a member-access call's trailing block
  * (typechecker.h). */
-const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, size_t cap) {
-    if (!call || !call->value || !buf || cap == 0) return NULL;
+const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table) {
+    if (!call || !call->value) return NULL;
     const char* dot = strchr(call->value, '.');
-    if (!dot) return NULL;
-    size_t prefix_len = (size_t)(dot - call->value);
-    if (prefix_len == 0 || prefix_len >= cap) return NULL;
-    memcpy(buf, call->value, prefix_len);
-    buf[prefix_len] = '\0';
+    if (!dot || dot == call->value) return NULL;
+    /* Interned, as long as it is: a prefix or a type name of 256 bytes or
+     * more named no receiver (#3569). */
+    const char* prefix = aether_intern_n(call->value, (size_t)(dot - call->value));
     /* Namespace receiver: directly visible. */
-    if (is_visible_namespace(buf, table)) return buf;
+    if (is_visible_namespace(prefix, table)) return prefix;
     /* Typed-value receiver: the prefix is a local variable; its struct
      * type's name. */
-    Symbol* recv_sym = lookup_symbol(table, buf);
+    Symbol* recv_sym = lookup_symbol(table, prefix);
     if (!recv_sym || !recv_sym->type) return NULL;
     const char* tn = base_type_name(recv_sym->type);
-    if (!tn || tn[0] == '\0' || strlen(tn) >= cap ||
+    if (!tn || tn[0] == '\0' ||
         strcmp(tn, "unknown") == 0 || strcmp(tn, "int") == 0 ||
         strcmp(tn, "long") == 0 || strcmp(tn, "float") == 0 ||
         strcmp(tn, "double") == 0 || strcmp(tn, "bool") == 0 ||
         strcmp(tn, "string") == 0) return NULL;
-    memmove(buf, tn, strlen(tn) + 1);
-    return buf;
+    return aether_intern(tn);
 }
 
 /* The receiver trailing block `block` of `call` resolves bare calls
  * through: the one the checker stamped on it, else the call's. */
-static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table,
-                                        char* buf, size_t cap) {
+static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table) {
     if (block->annotation && strncmp(block->annotation, "dsl_recv:", 9) == 0)
         return block->annotation[9] ? block->annotation + 9 : NULL;
-    return dsl_receiver_of_call(call, table, buf, cap);
+    return dsl_receiver_of_call(call, table);
 }
 
 static void tc_collect_locals(ASTNode* n, StrMap* locals);
@@ -19996,8 +19940,7 @@ static int tc_receiver_resolves(SymbolTable* table, const char* name) {
     for (SymbolTable* t = table; t; t = t->parent) {
         if (lookup_symbol_local(t, name)) return 0;
         if (t->dsl_receiver && t->dsl_receiver[0]) {
-            char rewritten[512];
-            snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", t->dsl_receiver, name);
+            const char* rewritten = aether_internf("%s_%s", t->dsl_receiver, name);
             for (SymbolTable* u = t; u; u = u->parent)
                 if (lookup_symbol_local(u, rewritten)) return 1;
         }
@@ -20019,8 +19962,7 @@ static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* c = node->children[i];
         if (node->type == AST_FUNCTION_CALL && ast_is_trailing_block(c) && table) {
-            char buf[256];
-            const char* recv = tc_trailing_receiver(node, c, table, buf, sizeof(buf));
+            const char* recv = tc_trailing_receiver(node, c, table);
             if (recv) {
                 /* The block's scope, as the checker builds it: the
                  * receiver, and the names the block binds (its own, ahead
@@ -20140,17 +20082,12 @@ static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int
      * was rewritten already, or carries the field's type. */
     const char* dot = strchr(call->value, '.');
     if (locals && dot && dot != call->value && !strchr(dot + 1, '.')) {
-        char recv[200];
-        size_t rlen = (size_t)(dot - call->value);
-        if (rlen < sizeof(recv)) {
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
-            if (strmap_has(locals, recv) && !is_visible_namespace(recv, table)) {
-                Symbol* rs = table ? lookup_symbol(table, recv) : NULL;
-                int y = tc_method_call_yields(recv, dot + 1, rs ? rs->type : NULL, table,
-                                              depth);
-                if (y >= 0) return y;
-            }
+        const char* recv = aether_intern_n(call->value, (size_t)(dot - call->value));
+        if (strmap_has(locals, recv) && !is_visible_namespace(recv, table)) {
+            Symbol* rs = table ? lookup_symbol(table, recv) : NULL;
+            int y = tc_method_call_yields(recv, dot + 1, rs ? rs->type : NULL, table,
+                                          depth);
+            if (y >= 0) return y;
         }
     }
     /* A call through a function-pointer field, checked: the field's
@@ -20158,14 +20095,9 @@ static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int
     if (!locals && table && call->annotation &&
         (strcmp(call->annotation, "fnfield_ptr") == 0 ||
          strcmp(call->annotation, "fnfield_val") == 0) && dot) {
-        char recv[200];
-        size_t rlen = (size_t)(dot - call->value);
-        if (rlen < sizeof(recv)) {
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
-            Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
-            if (fsig) return tc_fn_type_yields(fsig);
-        }
+        Type* fsig = resolve_fnptr_struct_field(
+            table, aether_intern_n(call->value, (size_t)(dot - call->value)), dot + 1, NULL);
+        if (fsig) return tc_fn_type_yields(fsig);
     }
     Symbol* sym = table ? lookup_qualified_symbol(table, call->value) : NULL;
     if (sym && sym->node && sym->node->value &&
@@ -20751,8 +20683,7 @@ static void note_short_name(ASTNode* call, SymbolTable* table) {
     if (call->annotation && strcmp(call->annotation, "ufcs") == 0) return;
     const char* dot = strchr(call->value, '.');
     if (!dot || dot != strrchr(call->value, '.')) return;
-    char prefix[256];
-    snprintf(prefix, sizeof(prefix), "%.*s", (int)(dot - call->value), call->value);
+    const char* prefix = aether_intern_n(call->value, (size_t)(dot - call->value));
     const char* suffix = dot + 1;
     /* The module's namespace as the call carries it, or the last segment
      * of its name, which a source writes when two modules share it. */
@@ -20770,8 +20701,7 @@ static void note_short_name(ASTNode* call, SymbolTable* table) {
         if (!lexes_as_identifier(short_name)) return;
         for (int i = 0; i < g_sn_count; i++)
             if (g_sn_edits[i].line == call->line && g_sn_edits[i].column == call->column) return;
-        char shortq[512];
-        snprintf(shortq, sizeof(shortq), "%s.%s", prefix, short_name);
+        const char* shortq = aether_internf("%s.%s", prefix, short_name);
         if (!same_declaration(lookup_qualified_symbol(table, call->value),
                               lookup_qualified_symbol(table, shortq))) return;
         if (g_sn_count == g_sn_cap) {
@@ -21405,21 +21335,13 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if (symbol && call->value && global_module_registry) {
         char* dot = strchr(call->value, '.');
         if (dot && dot != call->value && !strchr(dot + 1, '.')) {
-            char hubname[256];
-            size_t hl = (size_t)(dot - call->value);
-            if (hl < sizeof(hubname)) {
-                memcpy(hubname, call->value, hl);
-                hubname[hl] = '\0';
-                AetherModule* hub = module_find(hubname);
-                AetherModule* origin = module_resolve_reexport(hub, dot + 1);
-                if (origin && origin->name &&
-                    strcmp(origin->name, hubname) != 0) {
-                    char rewritten[512];
-                    snprintf(rewritten, sizeof(rewritten), "%s.%s",
-                             origin->name, dot + 1);
-                    free(call->value);
-                    call->value = strdup(rewritten);
-                }
+            const char* hubname = aether_intern_n(call->value, (size_t)(dot - call->value));
+            AetherModule* hub = module_find(hubname);
+            AetherModule* origin = module_resolve_reexport(hub, dot + 1);
+            if (origin && origin->name && strcmp(origin->name, hubname) != 0) {
+                const char* rewritten = aether_internf("%s.%s", origin->name, dot + 1);
+                free(call->value);
+                call->value = strdup(rewritten);
             }
         }
     }
@@ -21498,9 +21420,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
          symbol->node->type == AST_BUILDER_FUNCTION) && symbol->node->value) {
         const char* dot = strchr(call->value, '.');
         if (dot && dot == strrchr(call->value, '.')) {
-            char joined[512];
-            snprintf(joined, sizeof(joined), "%.*s_%s", (int)(dot - call->value), call->value,
-                     dot + 1);
+            const char* joined =
+                aether_internf("%.*s_%s", (int)(dot - call->value), call->value, dot + 1);
             if (strcmp(joined, symbol->node->value) != 0) {
                 free(call->value);
                 call->value = strdup(symbol->node->value);
@@ -21597,10 +21518,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if ((!symbol || !symbol->is_function) && call->value) {
         char* dot = strrchr(call->value, '.');
         size_t rlen = dot ? (size_t)(dot - call->value) : 0;
-        if (dot && rlen > 0 && rlen < 200 && !memchr(call->value, '.', rlen)) {
-            char recv[200];
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
+        if (dot && rlen > 0 && !memchr(call->value, '.', rlen)) {
+            const char* recv = aether_intern_n(call->value, rlen);
             int is_ptr = 0;
             Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, &is_ptr);
             if (fsig) {
@@ -22158,9 +22077,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     // (none today on AST_CLOSURE; `defer` factory annotations live
     // on AST_VARIABLE_DECLARATION) are preserved.
     {
-        char recv_buf[256];
-        const char* dsl_recv_name = dsl_receiver_of_call(call, table, recv_buf,
-                                                         sizeof(recv_buf));
+        const char* dsl_recv_name = dsl_receiver_of_call(call, table);
         if (dsl_recv_name) {
             for (int i = 0; i < call->child_count; i++) {
                 ASTNode* child = call->children[i];
