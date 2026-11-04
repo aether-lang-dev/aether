@@ -1,0 +1,152 @@
+// Regression (#3551): the client's stream reader framed a response by its
+// headers alone. A response to HEAD, a 1xx, a 204 and a 304 carry no body
+// whatever their Content-Length or Transfer-Encoding say (RFC 9110), and the
+// buffered reader ends them at the header section (no_body_expected), but the
+// stream reader did not ask. A streamed HEAD answered 200 with
+// `Content-Length: 1234`, or a streamed 304 with a length, had response_read
+// wait for a body until the request's timeout, and a streamed 204 without a
+// length waited for the connection to close. Before the fix each case below
+// read an error (the timeout) from the stream reader.
+//
+// The stream reader now asks no_body_expected with the request's method, as
+// the buffered reader does. The server below keeps each connection open
+// until the client is done with it, so a reader that waits for a body gets
+// to its timeout instead of to the end of the connection. Each response is
+// read both ways, and both readers must end it at its header section.
+
+import std.string
+import std.tcp
+import std.http.client
+
+extern exit(code: int)
+
+message Listen { srv: ptr }
+message Serve { resp: string }
+message Release {}
+message Count { n: int }
+
+// Answers one connection with the response it is given, and keeps the
+// connection open until Release.
+actor Upstream {
+    state served = 0
+    state srv: ptr = null
+    state held: ptr = null
+
+    receive {
+        Listen(srv: s) -> {
+            srv = s
+        }
+        Serve(resp: resp) -> {
+            sock, aerr = tcp.accept(srv)
+            if aerr == "" {
+                seen = ""
+                going = 1
+                while going == 1 {
+                    got, rerr = tcp.read(sock, 4096)
+                    if rerr != "" {
+                        going = 0
+                    } else {
+                        seen = string.concat(seen, got)
+                        if string.contains(seen, "\r\n\r\n") == 1 { going = 0 }
+                    }
+                }
+                _n, _werr = tcp.write(sock, resp)
+                held = sock
+                served = served + 1
+            }
+        }
+        Release() -> {
+            if held != null {
+                tcp.close(held)
+                held = null
+            }
+            reply Count { n: served }
+        }
+    }
+}
+
+// What the stream reader makes of `resp`: "<status> '<body>'", or the error.
+fn streamed(up: actor_ref[Upstream], url: string, method: string, resp: string) -> string {
+    up ! Serve { resp: resp }
+    req = client.request(method, url)
+    client.set_timeout(req, 2s)
+    r, err = client.send_stream(req)
+    client.request_free(req)
+    out = "error: ${err}"
+    if err == "" {
+        acc = ""
+        done = 0
+        while done == 0 {
+            ch = client.response_read(r, 4096)
+            if string.length(ch) == 0 { done = 1 } else { acc = string.concat(acc, ch) }
+        }
+        rerr = client.response_error(r)
+        if rerr == "" {
+            out = "${client.response_status(r)} '${acc}'"
+        } else {
+            out = "error: ${rerr}"
+        }
+        client.response_free(r)
+    }
+    int _s = up ? Release {}
+    return out
+}
+
+// What the buffered reader makes of `resp`, in the same form.
+fn buffered(up: actor_ref[Upstream], url: string, method: string, resp: string) -> string {
+    up ! Serve { resp: resp }
+    req = client.request(method, url)
+    client.set_timeout(req, 2s)
+    r, err = client.send_request(req)
+    client.request_free(req)
+    out = "error: ${err}"
+    if err == "" {
+        out = "${client.response_status(r)} '${client.response_body(r)}'"
+        client.response_free(r)
+    }
+    int _s = up ? Release {}
+    return out
+}
+
+fn expect(up: actor_ref[Upstream], url: string, what: string, method: string, resp: string, want: string) -> int {
+    fails = 0
+    s = streamed(up, url, method, resp)
+    if s != want {
+        println("FAIL: ${what}: the stream reader gave ${s}, want ${want}")
+        fails = fails + 1
+    }
+    b = buffered(up, url, method, resp)
+    if b != want {
+        println("FAIL: ${what}: the buffered reader gave ${b}, want ${want}")
+        fails = fails + 1
+    }
+    return fails
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    url = "http://127.0.0.1:${tcp.server_port(srv)}/"
+    up = spawn(Upstream())
+    up ! Listen { srv: srv }
+
+    fails = 0
+    fails = fails + expect(up, url, "HEAD answered 200 with a Content-Length", "HEAD",
+        "HTTP/1.1 200 OK\r\nContent-Length: 1234\r\nConnection: close\r\n\r\n", "200 ''")
+    fails = fails + expect(up, url, "HEAD answered 200 chunked", "HEAD",
+        "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n", "200 ''")
+    fails = fails + expect(up, url, "a 304 with a Content-Length", "GET",
+        "HTTP/1.1 304 Not Modified\r\nContent-Length: 1234\r\nConnection: close\r\n\r\n", "304 ''")
+    fails = fails + expect(up, url, "a 204 without a length", "GET",
+        "HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n", "204 ''")
+    // A response with a body is still read to its length.
+    fails = fails + expect(up, url, "a 200 with a body", "GET",
+        "HTTP/1.1 200 OK\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello", "200 'hello'")
+
+    tcp.server_close(srv)
+    if fails > 0 { exit(1) }
+    println("PASS: a streamed response with no body ends at its header section")
+}

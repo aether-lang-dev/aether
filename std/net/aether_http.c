@@ -3836,7 +3836,15 @@ send_request:
         response->status_code = response_status_of(hb);
         response->headers = string_new(hb);
 
-        /* Framing: chunked wins over Content-Length; neither => read-until-close. */
+        /* Framing: chunked wins over Content-Length; neither => read-until-close.
+         * A response that carries no body (one to HEAD, a 1xx, a 204, a 304)
+         * ends here whatever those say, by the rule the buffered reader keeps
+         * (http_response_is_complete, #3551): read by its headers, a HEAD
+         * answered with a Content-Length waited for a body until the timeout,
+         * and a 204 without one for the connection to close. A declared length
+         * the reader cannot use is still refused, as the buffered reader
+         * refuses it. */
+        int no_body = no_body_expected(response->status_code, method);
         int       is_chunked = 0;
         long long clen = -1;
         char* te = http_extract_response_header(hb, "Transfer-Encoding");
@@ -3870,8 +3878,12 @@ send_request:
             return response;
         }
         st->t = t;                 /* transfer ownership of the open transport */
-        st->chunked = is_chunked;
-        if (is_chunked) {
+        if (no_body) {
+            /* Bytes past the header section are not this response's body. */
+            st->eof = 1;
+            over_len = 0;
+        } else if (is_chunked) {
+            st->chunked = 1;
             st->chunk_state = 0;   /* start by reading a chunk-size line */
         } else if (clen >= 0) {
             st->content_remaining = clen;
