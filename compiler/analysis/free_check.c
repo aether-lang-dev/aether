@@ -16,7 +16,6 @@
 #include "typechecker.h"
 #include "../aether_error.h"
 
-#define FC_MAX_VARS 128
 #define FC_MAX_PASSES 256
 
 enum { FC_CLEAN = 0, FC_FREED = 1, FC_MAYBE = 2 };
@@ -36,9 +35,14 @@ typedef struct {
     int rebound;            /* bound to something else on some path */
 } FVar;
 
+/* Every local the function binds (#3574): 128 slots left the rest
+ * unfollowed, so a use after their free or a second free compiled. The
+ * variables are on the heap: a state is copied with fs_set and released
+ * with fs_release. */
 typedef struct {
-    FVar v[FC_MAX_VARS];
+    FVar* v;
     int n;
+    int cap;
     int dead;               /* no path reaches this point */
 } FState;
 
@@ -49,7 +53,7 @@ typedef struct {
     int reported_n, reported_cap;
     /* The function walked: its `@frees` parameters' names and its node. */
     ASTNode* fn;
-    const char* frees_params[16];
+    const char** frees_params;   /* every one (#3574): past 16 one went unchecked */
     int frees_count;
     int frees_reported;
 } Ctx;
@@ -77,12 +81,18 @@ static FVar* find(FState* s, const char* name) {
     return NULL;
 }
 
-/* The entry for `name`, made clean when there is none; NULL past the limit
- * (such a local is not followed). */
+/* The entry for `name`, made clean when there is none. */
 static FVar* get(FState* s, const char* name) {
     FVar* v = find(s, name);
     if (v) return v;
-    if (s->n >= FC_MAX_VARS) return NULL;
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->v = (FVar*)realloc(s->v, sizeof(FVar) * (size_t)s->cap);
+        if (!s->v) {
+            fprintf(stderr, "aetherc: out of memory in the free check\n");
+            exit(1);
+        }
+    }
     v = &s->v[s->n++];
     memset(v, 0, sizeof *v);
     v->name = name;
@@ -108,9 +118,25 @@ static void join_var(FVar* a, const FVar* b) {
 
 /* The facts of every path through `a` and `b`. A local missing from one is
  * clean there. */
+/* `dst` becomes a copy of `src`: its own variables, the same facts. */
+static void fs_set(FState* dst, const FState* src) {
+    if (dst == src) return;
+    if (dst->cap < src->n) {
+        dst->cap = src->n;
+        dst->v = (FVar*)realloc(dst->v, sizeof(FVar) * (size_t)dst->cap);
+        if (!dst->v) {
+            fprintf(stderr, "aetherc: out of memory in the free check\n");
+            exit(1);
+        }
+    }
+    if (src->n) memcpy(dst->v, src->v, sizeof(FVar) * (size_t)src->n);
+    dst->n = src->n;
+    dst->dead = src->dead;
+}
+
 static void join(FState* a, const FState* b) {
     if (b->dead) return;
-    if (a->dead) { *a = *b; return; }
+    if (a->dead) { fs_set(a, b); return; }
     FVar clean;
     memset(&clean, 0, sizeof clean);
     for (int i = 0; i < a->n; i++) {
@@ -459,12 +485,12 @@ static ContractTri decide(Walk* w, ASTNode* cond) {
  * chain of 1000 `+ 1` is 1000 frames), and a frame holding even one state
  * overflowed the stack there. */
 static FState* fs_new(const FState* src) {
-    FState* d = (FState*)malloc(sizeof *d);
+    FState* d = (FState*)calloc(1, sizeof *d);
     if (!d) {
         fprintf(stderr, "aetherc: out of memory in the free check\n");
         exit(1);
     }
-    *d = *src;
+    fs_set(d, src);
     return d;
 }
 
@@ -476,6 +502,13 @@ static FState* fs_dead(void) {
     }
     d->dead = 1;
     return d;
+}
+
+/* A state fs_new or fs_dead made, and its variables. */
+static void fs_release(FState* s) {
+    if (!s) return;
+    free(s->v);
+    free(s);
 }
 
 static Loop* loop_push(Walk* w, const char* label, int is_switch) {
@@ -493,9 +526,16 @@ static Loop* loop_push(Walk* w, const char* label, int is_switch) {
     return l;
 }
 
+/* A Loop and the states it holds by value. */
+static void loop_free(Loop* l) {
+    free(l->brk.v);
+    free(l->cont.v);
+    free(l);
+}
+
 static void loop_pop(Walk* w, Loop* l) {
     w->loops = l->up;
-    free(l);
+    loop_free(l);
 }
 
 /* One turn of a loop from `st`: its condition, body and step. The state at
@@ -508,9 +548,9 @@ static void loop_turn(Walk* w, ASTNode* node, ASTNode* cond, ASTNode* body, ASTN
     walk(w, body, in);
     join(in, &l->cont);
     walk(w, step, in);
-    *back = *in;
-    if (brk) *brk = l->brk;
-    free(in);
+    fs_set(back, in);
+    if (brk) fs_set(brk, &l->brk);
+    fs_release(in);
     loop_pop(w, l);
 }
 
@@ -525,39 +565,39 @@ static void loop(Walk* w, FState* s, ASTNode* node, ASTNode* init, ASTNode* cond
     FState* next = fs_new(s);
     for (int pass = 0; ; pass++) {
         w->report = 0;
-        *st = *head;
+        fs_set(st, head);
         loop_turn(w, node, cond, body, step, st, back, NULL);
-        *next = *head;
+        fs_set(next, head);
         join(next, back);
         if (same(next, head) || pass >= FC_MAX_PASSES) {
             if (pass >= FC_MAX_PASSES)
                 for (int i = 0; i < next->n; i++) next->v[i].unknown = 1;
-            *head = *next;
+            fs_set(head, next);
             break;
         }
-        *head = *next;
+        fs_set(head, next);
     }
     /* The walk that reports, from the head. */
     w->report = report;
     FState* brk = fs_dead();
-    *st = *head;
+    fs_set(st, head);
     loop_turn(w, node, cond, body, step, st, back, brk);
     /* The next turn, from what this one leaves: a free it repeats. */
     if (report && !back->dead) {
         w->carried = 1;
-        *next = *back;
+        fs_set(next, back);
         loop_turn(w, node, cond, body, step, next, head, NULL);
         w->carried = carried;
     }
     /* Out of the loop: the condition is false, or a `break` left. */
     if (decide(w, cond) == CONTRACT_TRUE) st->dead = 1;
     join(st, brk);
-    *s = *st;
-    free(head);
-    free(st);
-    free(back);
-    free(next);
-    free(brk);
+    fs_set(s, st);
+    fs_release(head);
+    fs_release(st);
+    fs_release(back);
+    fs_release(next);
+    fs_release(brk);
 }
 
 static ASTNode* closure_body(ASTNode* closure) {
@@ -627,7 +667,7 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
                 FState* r = fs_new(s);
                 walk(w, n->children[1], r);
                 join(s, r);
-                free(r);
+                fs_release(r);
                 return;
             }
             break;
@@ -654,10 +694,10 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
             }
             walk(w, n->child_count > 1 ? n->children[1] : NULL, t);
             walk(w, n->child_count > 2 ? n->children[2] : NULL, e);
-            *s = *t;
+            fs_set(s, t);
             join(s, e);
-            free(t);
-            free(e);
+            fs_release(t);
+            fs_release(e);
             return;
         }
         case AST_WHILE_LOOP:
@@ -679,13 +719,13 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
             for (int i = 1; i < n->child_count; i++) {
                 ASTNode* arm = n->children[i];
                 if (!arm || arm->type != AST_MATCH_ARM) continue;
-                *a = *s;
+                fs_set(a, s);
                 for (int k = 1; k < arm->child_count; k++) walk(w, arm->children[k], a);
                 join(out, a);
             }
-            *s = *out;
-            free(out);
-            free(a);
+            fs_set(s, out);
+            fs_release(out);
+            fs_release(a);
             return;
         }
         case AST_SWITCH_STATEMENT: {
@@ -699,7 +739,7 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
                 if (!cs || cs->type != AST_CASE_STATEMENT) continue;
                 int is_default = cs->value && strcmp(cs->value, "default") == 0;
                 if (is_default) out->dead = 1;
-                *a = *s;
+                fs_set(a, s);
                 for (int k = is_default ? 0 : 1; k < cs->child_count; k++) walk(w, cs->children[k], a);
                 join(out, a);
             }
@@ -709,10 +749,10 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
                 Loop* t = loop_target(w, NULL, 1);
                 if (t) join(&t->cont, &l->cont);
             }
-            free(l);
-            *s = *out;
-            free(out);
-            free(a);
+            loop_free(l);
+            fs_set(s, out);
+            fs_release(out);
+            fs_release(a);
             return;
         }
         case AST_RETURN_STATEMENT:
@@ -761,12 +801,12 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
             for (int i = 1; i < n->child_count; i++) {
                 ASTNode* cc = n->children[i];
                 if (!cc || cc->type != AST_CATCH_CLAUSE) continue;
-                *a = *mid;
+                fs_set(a, mid);
                 for (int k = 0; k < cc->child_count; k++) walk(w, cc->children[k], a);
                 join(s, a);
             }
-            free(mid);
-            free(a);
+            fs_release(mid);
+            fs_release(a);
             return;
         }
         case AST_OR_ELSE: {
@@ -775,7 +815,7 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
             FState* h = fs_new(s);
             for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], h);
             join(s, h);
-            free(h);
+            fs_release(h);
             return;
         }
         case AST_NULL_COALESCE: {
@@ -784,7 +824,7 @@ static void walk(Walk* w, ASTNode* n, FState* s) {
             FState* r = fs_new(s);
             for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], r);
             join(s, r);
-            free(r);
+            fs_release(r);
             return;
         }
         default:
@@ -819,16 +859,20 @@ static void check_body(Ctx* c, ASTNode* fn, ASTNode* body) {
     /* The function's own `@frees` parameters, kept for the walk; a closure
      * walked inside it has its own. */
     ASTNode* saved_fn = c->fn;
-    const char* saved_params[16];
+    const char** saved_params = c->frees_params;
     int saved_count = c->frees_count, saved_reported = c->frees_reported;
-    memcpy(saved_params, c->frees_params, sizeof saved_params);
+    c->frees_params = (const char**)calloc((size_t)(fn ? fn->child_count : 0) + 1, sizeof(char*));
+    if (!c->frees_params) {
+        fprintf(stderr, "aetherc: out of memory in the free check\n");
+        exit(1);
+    }
     c->fn = fn;
     c->frees_count = 0;
     c->frees_reported = 0;
     for (int i = 0; fn && i < fn->child_count; i++) {
         ASTNode* p = fn->children[i];
         if (!is_param_node(p) || p == body || !p->value || !p->annotation) continue;
-        if (strstr(p->annotation, "frees_param") && c->frees_count < 16)
+        if (strstr(p->annotation, "frees_param"))
             c->frees_params[c->frees_count++] = p->value;
         if (strstr(p->annotation, "moves_param") && !passes_to_mover(c, body, p->value)) {
             char msg[400];
@@ -855,11 +899,12 @@ static void check_body(Ctx* c, ASTNode* fn, ASTNode* body) {
     at.line = end_line;
     at.column = body->end_line > 0 ? body->end_column : 1;
     check_exit(&w, s, &at);
-    free(s);
+    fs_release(s);
     c->fn = saved_fn;
     c->frees_count = saved_count;
     c->frees_reported = saved_reported;
-    memcpy(c->frees_params, saved_params, sizeof saved_params);
+    free(c->frees_params);
+    c->frees_params = saved_params;
 }
 
 static ASTNode* unwrap_export(ASTNode* n) {

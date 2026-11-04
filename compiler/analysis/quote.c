@@ -157,10 +157,14 @@ static const char* helper_tree_name(ASTNode* def) {
     size_t n = strlen(ns);
     const char* fn = def->value;
     if (strncmp(fn, ns, n) == 0 && fn[n] == '_' && fn[n + 1]) fn += n + 1;
-    char buf[512];
-    snprintf(buf, sizeof buf, "%s_%s", def->origin_module, fn);
+    /* As long as it is (#3574): 512 bytes cut it, and two helpers took one
+     * tree name. */
+    char* buf = strdup(aether_internf("%s_%s", def->origin_module, fn));
+    if (!buf) { fprintf(stderr, "aetherc: out of memory registering a @quotable function\n"); exit(1); }
     for (char* c = buf; *c; c++) if (*c == '.') *c = '_';
-    return aether_intern(buf);
+    const char* r = aether_intern(buf);
+    free(buf);
+    return r;
 }
 
 void quote_register_helper(ASTNode* def) {
@@ -189,14 +193,18 @@ QHelper* quote_helper_at(int index) {
  * written (`shaderlib.luma`, which is `shaderlib_luma` merged). */
 static QHelper* helper_named(const char* name) {
     if (!name || !*name) return NULL;
-    char flat[256];
-    snprintf(flat, sizeof flat, "%s", name);
+    /* As long as the name (#3574): 256 bytes cut it, and the helper was not
+     * found. */
+    char* flat = strdup(name);
+    if (!flat) { fprintf(stderr, "aetherc: out of memory lowering a quote\n"); exit(1); }
     for (char* c = flat; *c; c++) if (*c == '.') *c = '_';
-    for (int i = 0; i < g_helper_count; i++) {
+    QHelper* found = NULL;
+    for (int i = 0; i < g_helper_count && !found; i++) {
         if (strcmp(g_helpers[i]->c_name, name) == 0 || strcmp(g_helpers[i]->c_name, flat) == 0)
-            return g_helpers[i];
+            found = g_helpers[i];
     }
-    return NULL;
+    free(flat);
+    return found;
 }
 
 static void note_call(Lower* L, QHelper* h) {
@@ -916,18 +924,23 @@ static int recursion_dfs(QHelper* h, QHelper** stack, int depth, QuoteErrorFn re
     h->mark = 1;
     stack[depth] = h;
     int errors = 0;
-    for (int i = 0; i < h->ncallees && depth + 1 < 256; i++)
+    for (int i = 0; i < h->ncallees; i++)
         errors += recursion_dfs(h->callees[i], stack, depth + 1, report);
     h->mark = 2;
     return errors;
 }
 
 int quote_check_recursion(QuoteErrorFn report) {
-    QHelper* stack[256];
+    /* A path holds each helper once, so it is never longer than the helpers
+     * (#3574): 256 slots stopped following past them, and a cycle deeper
+     * than that went unreported. */
+    QHelper** stack = (QHelper**)aether_xrealloc(NULL, sizeof(QHelper*) *
+                                                           (size_t)(g_helper_count + 1));
     int errors = 0;
     for (int i = 0; i < g_helper_count; i++) g_helpers[i]->mark = 0;
     for (int i = 0; i < g_helper_count; i++)
         if (g_helpers[i]->mark == 0) errors += recursion_dfs(g_helpers[i], stack, 0, report);
+    free(stack);
     return errors;
 }
 

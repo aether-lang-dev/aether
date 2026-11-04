@@ -38,7 +38,6 @@
 #include "../aether_error.h"
 
 #define PROTO_MAX_STATES 64
-#define PROTO_MAX_VARS 64
 #define PROTO_MAX_LOOP_PASSES 256
 
 typedef struct {
@@ -277,9 +276,14 @@ typedef struct {
     int top;            /* its state is not known */
 } PVar;
 
+/* Every reference the function follows (#3574): 64 slots left the rest
+ * unfollowed, so a message its protocol does not allow went unrefused. The
+ * variables are on the heap: a state is copied with ps_set and released
+ * with ps_release. */
 typedef struct {
-    PVar v[PROTO_MAX_VARS];
+    PVar* v;
     int n;
+    int cap;
     int dead;           /* no path reaches this point */
 } PState;
 
@@ -301,7 +305,14 @@ static void var_forget(PState* s, const char* name) {
 static void var_set(PState* s, const char* name, Proto* p, uint64_t mask, int top) {
     PVar* v = var_find(s, name);
     if (!v) {
-        if (s->n >= PROTO_MAX_VARS) return;   /* past the limit, not followed */
+        if (s->n == s->cap) {
+            s->cap = s->cap ? s->cap * 2 : 16;
+            s->v = (PVar*)realloc(s->v, sizeof(PVar) * (size_t)s->cap);
+            if (!s->v) {
+                fprintf(stderr, "aetherc: out of memory in the protocol check\n");
+                exit(1);
+            }
+        }
         v = &s->v[s->n++];
         v->name = name;
     }
@@ -310,10 +321,26 @@ static void var_set(PState* s, const char* name, Proto* p, uint64_t mask, int to
     v->top = top;
 }
 
+/* `dst` becomes a copy of `src`: its own variables, the same states. */
+static void ps_set(PState* dst, const PState* src) {
+    if (dst == src) return;
+    if (dst->cap < src->n) {
+        dst->cap = src->n;
+        dst->v = (PVar*)realloc(dst->v, sizeof(PVar) * (size_t)dst->cap);
+        if (!dst->v) {
+            fprintf(stderr, "aetherc: out of memory in the protocol check\n");
+            exit(1);
+        }
+    }
+    if (src->n) memcpy(dst->v, src->v, sizeof(PVar) * (size_t)src->n);
+    dst->n = src->n;
+    dst->dead = src->dead;
+}
+
 /* The states of every path through `a` and `b`. */
 static void join(PState* a, const PState* b) {
     if (b->dead) return;
-    if (a->dead) { *a = *b; return; }
+    if (a->dead) { ps_set(a, b); return; }
     for (int i = 0; i < b->n; i++) {
         const PVar* bv = &b->v[i];
         PVar* av = var_find(a, bv->name);
@@ -544,8 +571,22 @@ static void* ps_alloc(size_t n) {
 
 static PState* ps_new(const PState* src) {
     PState* d = (PState*)ps_alloc(sizeof *d);
-    *d = *src;
+    ps_set(d, src);
     return d;
+}
+
+/* A state ps_new or ps_alloc made, and its variables. */
+static void ps_release(PState* s) {
+    if (!s) return;
+    free(s->v);
+    free(s);
+}
+
+/* A Loop and the states it holds by value. */
+static void loop_free(Loop* l) {
+    free(l->brk.v);
+    free(l->cont.v);
+    free(l);
 }
 
 static Loop* loop_push(Walk* w, const char* label, int is_switch) {
@@ -567,8 +608,8 @@ static void loop_turn(Walk* w, ASTNode* node, ASTNode* body, ASTNode* step, PSta
     w->loops = l->up;
     join(st, &l->cont);
     walk(w, step, st);
-    if (brk) *brk = l->brk;
-    free(l);
+    if (brk) ps_set(brk, &l->brk);
+    loop_free(l);
 }
 
 /* A loop: `init` once, then `cond`, `body`, `step` while it runs. */
@@ -583,21 +624,21 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
     for (int pass = 0; ; pass++) {
         int last = pass >= PROTO_MAX_LOOP_PASSES;
         w->report = 0;
-        *st = *head;
+        ps_set(st, head);
         walk(w, cond, st);
         loop_turn(w, node, body, step, st, NULL);
-        *next = *head;
+        ps_set(next, head);
         join(next, st);
         if (same(next, head) || last) {
             if (last) for (int i = 0; i < next->n; i++) next->v[i].top = 1;
-            *head = *next;
+            ps_set(head, next);
             break;
         }
-        *head = *next;
+        ps_set(head, next);
     }
     /* The walk that reports, from the states at the head. */
     w->report = report;
-    *st = *head;
+    ps_set(st, head);
     walk(w, cond, st);
     PState* out = ps_new(st);                  /* the condition is false */
     if (always_true(w, cond)) out->dead = 1;
@@ -605,12 +646,12 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
     brk->dead = 1;
     loop_turn(w, node, body, step, st, brk);
     join(out, brk);
-    *s = *out;
-    free(head);
-    free(st);
-    free(next);
-    free(out);
-    free(brk);
+    ps_set(s, out);
+    ps_release(head);
+    ps_release(st);
+    ps_release(next);
+    ps_release(out);
+    ps_release(brk);
 }
 
 static ASTNode* closure_body(ASTNode* closure) {
@@ -689,10 +730,10 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             if (known == CONTRACT_TRUE) e->dead = 1;
             walk(w, n->child_count > 1 ? n->children[1] : NULL, t);
             walk(w, n->child_count > 2 ? n->children[2] : NULL, e);
-            *s = *t;
+            ps_set(s, t);
             join(s, e);
-            free(t);
-            free(e);
+            ps_release(t);
+            ps_release(e);
             return;
         }
         case AST_WHILE_LOOP:
@@ -714,13 +755,13 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             for (int i = 1; i < n->child_count; i++) {
                 ASTNode* arm = n->children[i];
                 if (!arm || arm->type != AST_MATCH_ARM) continue;
-                *a = *s;
+                ps_set(a, s);
                 for (int k = 1; k < arm->child_count; k++) walk(w, arm->children[k], a);
                 join(out, a);
             }
-            *s = *out;
-            free(out);
-            free(a);
+            ps_set(s, out);
+            ps_release(out);
+            ps_release(a);
             return;
         }
         case AST_SWITCH_STATEMENT: {
@@ -734,7 +775,7 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
                 if (!cs || cs->type != AST_CASE_STATEMENT) continue;
                 int is_default = cs->value && strcmp(cs->value, "default") == 0;
                 if (is_default) out->dead = 1;
-                *a = *s;
+                ps_set(a, s);
                 for (int k = is_default ? 0 : 1; k < cs->child_count; k++) walk(w, cs->children[k], a);
                 join(out, a);
             }
@@ -745,10 +786,10 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
                 Loop* t = loop_target(w, NULL, 1);
                 if (t) join(&t->cont, &l->cont);
             }
-            free(l);
-            *s = *out;
-            free(out);
-            free(a);
+            loop_free(l);
+            ps_set(s, out);
+            ps_release(out);
+            ps_release(a);
             return;
         }
         case AST_RETURN_STATEMENT:
@@ -798,12 +839,12 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             for (int i = 1; i < n->child_count; i++) {
                 ASTNode* cc = n->children[i];
                 if (!cc || cc->type != AST_CATCH_CLAUSE) continue;
-                *a = *entry;
+                ps_set(a, entry);
                 for (int k = 0; k < cc->child_count; k++) walk(w, cc->children[k], a);
                 join(s, a);
             }
-            free(entry);
-            free(a);
+            ps_release(entry);
+            ps_release(a);
             return;
         }
         case AST_OR_ELSE: {
@@ -812,7 +853,7 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             PState* h = ps_new(s);
             for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], h);
             join(s, h);
-            free(h);
+            ps_release(h);
             return;
         }
         case AST_BINARY_EXPRESSION:
@@ -823,7 +864,7 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
                 PState* r = ps_new(s);
                 walk(w, n->children[1], r);
                 join(s, r);
-                free(r);
+                ps_release(r);
                 return;
             }
             break;
@@ -833,7 +874,7 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             PState* r = ps_new(s);
             for (int i = 1; i < n->child_count; i++) walk(w, n->children[i], r);
             join(s, r);
-            free(r);
+            ps_release(r);
             return;
         }
         default:
@@ -861,7 +902,7 @@ static void check_body(Ctx* c, ASTNode* body, ASTNode* params_owner) {
         if (proto) var_set(s, p->value, proto, 0, 1);
     }
     walk(&w, body, s);
-    free(s);
+    ps_release(s);
 }
 
 static ASTNode* last_block(ASTNode* n) {

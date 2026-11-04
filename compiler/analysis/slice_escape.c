@@ -1046,13 +1046,23 @@ static int closure_call_view(Frame* f, const Views* v, ASTNode* call) {
  *   (or before the bind), which a `try` around the call starts its handler
  *   from (the `try` case of flow joins every statement's state). */
 
-#define CLOSURE_PATH_MAX 256
+/* A chain of nodes, as long as the tree is deep (#3574): 256 slots stopped
+ * the search past them, and a closure called that deep in an expression
+ * was not followed. */
+typedef struct {
+    ASTNode** v;
+    int cap;
+} NodePath;
 
 /* The chain of nodes from `n` down to `target`, `n` first, into `path`;
  * its length, or 0 when `target` is not under `n`. */
-static int path_to(ASTNode* n, ASTNode* target, ASTNode** path, int depth) {
-    if (!n || depth >= CLOSURE_PATH_MAX) return 0;
-    path[depth] = n;
+static int path_to(ASTNode* n, ASTNode* target, NodePath* path, int depth) {
+    if (!n) return 0;
+    if (depth >= path->cap) {
+        path->cap = path->cap ? path->cap * 2 : 64;
+        path->v = (ASTNode**)aether_xrealloc(path->v, sizeof(ASTNode*) * (size_t)path->cap);
+    }
+    path->v[depth] = n;
     if (n == target) return depth + 1;
     for (int i = 0; i < n->child_count; i++) {
         int len = path_to(n->children[i], target, path, depth + 1);
@@ -1252,16 +1262,21 @@ static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
     if (!lit || seen != 1) return;
     ASTNode* decl = binding_of(body, lit);
     ASTNode* lit_body = frame_body(lit);
-    ASTNode* cpath[CLOSURE_PATH_MAX];
-    ASTNode* dpath[CLOSURE_PATH_MAX];
-    int clen = path_to(body, call, cpath, 0);
-    int dlen = decl ? path_to(body, decl, dpath, 0) : 0;
-    if (!decl || !lit_body || !clen || !dlen || !runs_after(cpath, clen, decl)) return;
+    NodePath cpath = { NULL, 0 }, dpath = { NULL, 0 };
+    int clen = path_to(body, call, &cpath, 0);
+    int dlen = decl ? path_to(body, decl, &dpath, 0) : 0;
+    if (!decl || !lit_body || !clen || !dlen || !runs_after(cpath.v, clen, decl)) {
+        free(cpath.v);
+        free(dpath.v);
+        return;
+    }
     StrMap scope, own, bound;
     strmap_init(&scope);
     strmap_init(&own);
     strmap_init(&bound);
-    names_in_scope(dpath, dlen, &scope);
+    names_in_scope(dpath.v, dlen, &scope);
+    free(cpath.v);
+    free(dpath.v);
     for (int i = 0; i < strmap_count(&f->params); i++)
         if (!strmap_has(&scope, strmap_key_at(&f->params, i)))
             strmap_put(&scope, strmap_key_at(&f->params, i), strmap_value_at(&f->params, i));
