@@ -12507,7 +12507,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 seq_next(gen, &s);
                                 if (is_list_shape) {
                                     fprintf(gen->output, "%s(%s, %s)",
-                                            is_wrapper ? "_aether_list_add_adopted" : "list_add_string_adopted",
+                                            is_wrapper ? "_aether_list_add_adopted" : "_aether_list_add_take",
                                             cc, cv);
                                 } else if (is_set_shape) {
                                     fprintf(gen->output, "list_set_string_adopted(%s, %s, %s)", cc, ck, cv);
@@ -12518,7 +12518,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                      * is the call's argument temporary,
                                      * released after the put (#3549). */
                                     fprintf(gen->output, "%s(%s, %s, %s)",
-                                            is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
+                                            is_wrapper ? "_aether_map_put_adopted" : "_aether_map_put_take",
                                             cc, ck, cv);
                                 }
                                 seq_close(gen, &s);

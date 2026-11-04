@@ -27,9 +27,6 @@ tests/integration/string_substring_n_no_leak/
 # SANDBOX
 tests/integration/sandbox_
 tests/integration/contrib_host_stunt/
-# The guest runs under sandbox.spawn_socket, whose preload the ASan runtime
-# refuses to start behind ("ASan runtime does not come first in initial
-# library list").
 tests/integration/std_guest/
 
 # CODE-SHAPE

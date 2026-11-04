@@ -10200,11 +10200,26 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #2810, #2923: the container owns an adopted string from here. The
      * journal knows the place it came from, whose flag the move cleared, so
      * a panic after the adoption leaves it to the container. */
+    /* The emitted store has already moved or retained its reference. Add
+     * and put leave it with their caller on failure; release that reference
+     * here before the next interruption poll can unwind the caller. Keep the
+     * hand-callable runtime contracts (and list.set, which already consumes
+     * its argument even on failure) unchanged. */
+    print_line(gen, "static inline int _aether_list_add_take(void* list, void* item) {");
+    print_line(gen, "    int ok = list_add_string_adopted(list, item);");
+    print_line(gen, "    if (!ok) aether_heap_str_free((const char*)item);");
+    print_line(gen, "    return ok;");
+    print_line(gen, "}");
+    print_line(gen, "static inline int _aether_map_put_take(void* map, const char* key, void* value) {");
+    print_line(gen, "    int ok = map_put_string_adopted(map, key, value);");
+    print_line(gen, "    if (!ok) aether_heap_str_free((const char*)value);");
+    print_line(gen, "    return ok;");
+    print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_list_add_adopted(void* list, void* item) {");
-    print_line(gen, "    return list_add_string_adopted(list, item) ? \"\" : \"list.add failed\";");
+    print_line(gen, "    return _aether_list_add_take(list, item) ? \"\" : \"list.add failed\";");
     print_line(gen, "}");
     print_line(gen, "static inline const char* _aether_map_put_adopted(void* map, const char* key, void* value) {");
-    print_line(gen, "    return map_put_string_adopted(map, key, value) ? \"\" : \"map.put failed\";");
+    print_line(gen, "    return _aether_map_put_take(map, key, value) ? \"\" : \"map.put failed\";");
     print_line(gen, "}");
     /* #2497: the owning entries, for a value the container must hold its
      * own reference to (a struct field it only views: a refcounted string
