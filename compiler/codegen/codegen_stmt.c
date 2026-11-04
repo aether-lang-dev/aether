@@ -11600,6 +11600,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         fprintf(gen->output, ";\n");
                         break;
                     }
+                    /* #3577: `x %= y` on a float target is `x = fmod(x, y)`,
+                     * C having no `%` on floating types. */
+                    if (strcmp(op, "%=") == 0 && float_rem_macro(stmt->node_type)) {
+                        fprintf(gen->output, "%s = ", target);
+                        emit_float_rem(gen, NULL, target, stmt->children[1], stmt->node_type);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
                     /* A float into an integer target (`x *= 2.5`) saturates
                      * as the conversion does. */
                     if (bop[0] && !bop[1] &&

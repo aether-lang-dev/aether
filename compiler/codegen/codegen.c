@@ -9644,6 +9644,20 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  include <math.h>");
     print_line(gen, "#  define _AE_FDIV0(a, s) ((a) * (s) > 0 ? (double)INFINITY : (a) * (s) < 0 ? -(double)INFINITY : (double)NAN)");
     print_line(gen, "#endif");
+    /* A float `%` is the IEEE remainder of a truncated quotient, as Java's
+       (the rules of #3524): C's fmod, the sign of the dividend, NaN for a
+       zero divisor. C has no `%` on floating types, so `a % b` on doubles
+       did not compile. The builtin needs no <math.h>, which the GCC path
+       leaves out. */
+    print_line(gen, "#if AETHER_GCC_COMPAT");
+    print_line(gen, "#  define _AE_FMOD(a, b) __builtin_fmod((a), (b))");
+    print_line(gen, "#  define _AE_FMODF(a, b) __builtin_fmodf((a), (b))");
+    print_line(gen, "#  define _AE_FMODL(a, b) __builtin_fmodl((a), (b))");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_FMOD(a, b) fmod((a), (b))");
+    print_line(gen, "#  define _AE_FMODF(a, b) fmodf((a), (b))");
+    print_line(gen, "#  define _AE_FMODL(a, b) fmodl((a), (b))");
+    print_line(gen, "#endif");
     print_line(gen, "#if AETHER_GCC_COMPAT");
     print_line(gen, "#  define _AE_MEMCPY(d, s, n) __builtin_memcpy((d), (s), (n))");
     print_line(gen, "#  define _AE_CLZ32(x) __builtin_clz(x)");

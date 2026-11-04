@@ -8666,13 +8666,54 @@ int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t) {
  * and a float `r`: emits `x = x op r` with the float result converted into
  * `x` saturating. Returns 0 having emitted nothing for other operands. */
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t) {
-    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/", op)) return 0;
+    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/%", op)) return 0;
     const char* sfx = f2i_suffix(t);
     if (!sfx) return 0;
-    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(%s %c (", l_text, get_c_type(t),
-            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx, l_text, op);
+    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(", l_text, get_c_type(t),
+            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx);
+    if (op == '%') {
+        /* The float remainder (emit_float_rem), of the target read as a
+         * float. */
+        fprintf(gen->output, "%s((%s)%s, ", float_rem_macro(r->node_type),
+                get_c_type(r->node_type), l_text);
+        generate_read(gen, r);
+        fprintf(gen->output, ")))");
+        return 1;
+    }
+    fprintf(gen->output, "%s %c (", l_text, op);
     generate_read(gen, r);
     fprintf(gen->output, ")))");
+    return 1;
+}
+
+/* The macro computing a float `%` in type `t` (codegen.c's prelude), NULL
+ * for any other type. */
+const char* float_rem_macro(const Type* t) {
+    if (!t) return NULL;
+    switch (t->kind) {
+        case TYPE_FLOAT: return "_AE_FMOD";
+        case TYPE_FLOAT32: return "_AE_FMODF";
+        case TYPE_LONGDOUBLE: return "_AE_FMODL";
+        default: return NULL;
+    }
+}
+
+/* `l % r` of floating type `t`: the remainder of the quotient truncated
+ * toward zero, with the sign of `l`, as Java's `%` on floats, which is C's
+ * fmod: `-7.5 % 2.0` is -1.5, a zero divisor gives NaN and no panic (a
+ * float division by zero is no error either). C has no `%` on floating
+ * types: the C of one did not compile. `l_text` is the left operand's C
+ * when it has no node (a compound assignment's target). Returns 0, having
+ * emitted nothing, for any other type. */
+int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* r, const Type* t) {
+    const char* m = float_rem_macro(t);
+    if (!m || !r || (!l && !l_text)) return 0;
+    fprintf(gen->output, "%s(", m);
+    if (l_text) fputs(l_text, gen->output);
+    else generate_expression(gen, l);
+    fprintf(gen->output, ", ");
+    generate_expression(gen, r);
+    fprintf(gen->output, ")");
     return 1;
 }
 
@@ -10847,6 +10888,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             expr->node_type, expr)) {
                     /* #3524: an integer `/`, `%`, `<<` or `>>` C leaves
                      * undefined for some values, with Java's rules. */
+                } else if (!is_assignment && expr->value && strcmp(expr->value, "%") == 0 &&
+                           emit_float_rem(gen, expr->children[0], NULL, expr->children[1],
+                                          expr->node_type)) {
+                    /* #3577: a float `%`, which C has no operator for. */
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 

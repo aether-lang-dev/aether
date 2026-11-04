@@ -514,6 +514,10 @@ int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
 int module_slice_var_read(CodeGenerator* gen, const ASTNode* e);
 void emit_module_slice_store(CodeGenerator* gen, const char* name, ASTNode* v);
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
+/* #3577: a float `%` (Java's, C's fmod), and the prelude macro computing
+ * one in a floating type, NULL for any other type (codegen_expr.c). */
+int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* r, const Type* t);
+const char* float_rem_macro(const Type* t);
 /* #3527: the conversion an interpolation, print or println writes a value
  * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
  * print_fmt_refuse reports as a compile error naming it. */

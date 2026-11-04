@@ -1,0 +1,63 @@
+// `%` on floats is the remainder of the quotient truncated toward zero, with
+// the sign of the dividend, as Java's (#3524's rules), which is C's fmod: a
+// zero divisor gives NaN, and no panic, as a float division by zero is no
+// error either (#3577). The checker took `%` on floats and the code
+// generator wrote C's `%`, which C has no form of on floating types: the C
+// did not compile. `%=` too, on a float local, field or element, and on an
+// int with a float on the right (the result converted as `x *= 2.5`'s is),
+// in f32 and longdouble as in float; a constant `7.5 % 2.0` is folded to
+// the same value.
+
+extern exit(code: int)
+
+struct P { v: float }
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    fails = 0
+    let f: float[6] = [7.5, 2.0, 0.0, -2.0, 1.0e308, 0.0]
+    inf = f[4] * 10.0
+
+    fails = fails + check("7.5 % 2.0 is 1.5", f[0] % f[1] == 1.5)
+    fails = fails + check("-7.5 % 2.0 is -1.5", -f[0] % f[1] == -1.5)
+    fails = fails + check("7.5 % -2.0 is 1.5", f[0] % f[3] == 1.5)
+    r0 = f[0] % f[2]
+    fails = fails + check("7.5 % 0.0 is NaN", r0 != r0)
+    fails = fails + check("7.5 % inf is 7.5", f[0] % inf == 7.5)
+    ri = inf % f[1]
+    fails = fails + check("inf % 2.0 is NaN", ri != ri)
+    fails = fails + check("7 % 2.0 is 1.0", 7 % f[1] == 1.0)
+    fails = fails + check("a constant 7.5 % 2.0 is 1.5", 7.5 % 2.0 == 1.5)
+
+    z = f[0]
+    z %= f[1]
+    fails = fails + check("z %= 2.0 is 1.5", z == 1.5)
+    p = P { v: 9.25 }
+    p.v %= f[1]
+    fails = fails + check("p.v %= 2.0 is 1.25", p.v == 1.25)
+    let g: float[2] = [5.5, 1.5]
+    g[0] %= f[1]
+    fails = fails + check("g[0] %= 2.0 is 1.5", g[0] == 1.5)
+    int k = 17
+    k %= f[1]
+    fails = fails + check("int k %= 2.0 is 1", k == 1)
+
+    let h: f32 = 7.5
+    hh = h % (2.0 as f32)
+    fails = fails + check("f32 7.5 % 2.0 is 1.5", hh == (1.5 as f32))
+    ld = (7 as longdouble) % (2 as longdouble)
+    fails = fails + check("longdouble 7 % 2 is 1", ld == (1 as longdouble))
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("PASS: float remainders")
+}

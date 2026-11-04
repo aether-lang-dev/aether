@@ -3958,6 +3958,13 @@ and the cases C leaves undefined follow Java's rules, the same on every target
 unsigned one a logical shift. The compound forms (`/=`, `%=`, `<<=`, `>>=`)
 follow the same rules.
 
+`%` on `float`, `f32` and `longdouble` (and on an integer beside one, which
+makes it a float) is, as Java's, the remainder of the quotient truncated
+toward zero, with the sign of the dividend: C's `fmod`. `7.5 % 2.0` is `1.5`,
+`-7.5 % 2.0` is `-1.5`, and a zero divisor gives NaN, not a panic, as a
+float division by zero gives infinity (#3577). `x %= y` is the same, and on
+an integer `x` with a float `y` converts the result as `x *= 2.5` does.
+
 `/` and `%` on integer lanes (`i32x4`, `i64x2`, `i16x8`, `i32x8`) follow
 them lane by lane, with a lane value or a scalar on either side: a `0` in
 any lane of the divisor panics with `division_by_zero` and the position, and
