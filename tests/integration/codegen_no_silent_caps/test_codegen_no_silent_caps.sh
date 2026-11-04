@@ -51,6 +51,10 @@
 #   message_arrays:  a message of 20 array fields sent with array literals:
 #                    16 were recorded as hoisted, and the rest were compound
 #                    literals the receiver read after the send's block ended.
+#   bare_adapter:    a function of 20 parameters used as a `fn` value: its
+#                    adapter took 16, and the C did not compile.
+#   view_params:     a function indexing 10 slice parameters: the copy run
+#                    when they are unbounded views was chosen on 8 of them.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -431,6 +435,40 @@ runs message_arrays "total 58"
 n=$(grep -o 'aether_slice_make(_aether_arr_' "$TMP/message_arrays/main.c" 2>/dev/null | wc -l | tr -d ' ')
 [ "$n" = "20" ] || fail "message_arrays: $n of the 20 array fields read their hoisted static"
 
+# --- bare_adapter -------------------------------------------------------------
+mkdir -p "$TMP/bare_adapter"
+awk 'BEGIN {
+    printf "wide("
+    for (i = 0; i < 20; i++) printf "%sa%d: int", (i ? ", " : ""), i
+    print ") -> int { return a0 + a19 }"
+    printf "apply(f: fn) -> int { return call(f"
+    for (i = 1; i <= 20; i++) printf ", %d", i
+    print ") }"
+    print "main() { println(\"adapter ${apply(wide)}\") }"
+}' > "$TMP/bare_adapter/main.ae"
+runs bare_adapter "adapter 21"
+
+# --- view_params --------------------------------------------------------------
+mkdir -p "$TMP/view_params"
+awk 'BEGIN {
+    printf "first_of("
+    for (i = 0; i < 10; i++) printf "%sa%d: int[]", (i ? ", " : ""), i
+    printf ") -> int { return a0[0]"
+    for (i = 1; i < 10; i++) printf " + a%d[0]", i
+    print " }"
+    print "main() {"
+    print "    let x: int[1] = [2]"
+    print "    s = x[0..1]"
+    printf "    println(\"views ${first_of(s"
+    for (i = 1; i < 10; i++) printf ", s"
+    print ")}\")"
+    print "}"
+}' > "$TMP/view_params/main.ae"
+runs view_params "views 20"
+(cd "$TMP/view_params" && AETHER_HOME="" "$AETHERC" main.ae main.c >/dev/null 2>&1)
+n=$(grep 'if (a0.len == AETHER_SLICE_UNBOUNDED' "$TMP/view_params/main.c" 2>/dev/null | grep -o 'AETHER_SLICE_UNBOUNDED' | wc -l | tr -d ' ')
+[ "$n" = "10" ] || fail "view_params: the view copy is chosen on $n of the 10 parameters"
+
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lanes, call arguments, actor state and message arrays past every old cap"
+echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lanes, call arguments, actor state, message arrays, adapters and views past every old cap"
 exit 0

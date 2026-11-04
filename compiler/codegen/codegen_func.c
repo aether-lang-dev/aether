@@ -410,12 +410,11 @@ int register_bare_fn_adapter(CodeGenerator* gen, const char* bare_fn_name) {
 
 /* Resolve a registered bare-fn name to its definition and emit the adapter
  * signature `static R _aether_bare_adapter_<name>(void* _env, P0 _a0, ...)`.
- * Returns the resolved fdef (and fills params/param_count/ret_c) so the
+ * Returns the resolved fdef (and fills param_count/ret_c) so the
  * caller can either terminate with `;` (forward decl) or `{ ... }` (body).
  * Returns NULL when the bare fn can't be resolved (caller skips it). */
 static ASTNode* emit_bare_fn_adapter_signature(CodeGenerator* gen,
                                                const char* fname,
-                                               ASTNode** params,
                                                int* param_count,
                                                const char** ret_c_out) {
     ASTNode* fdef = NULL;
@@ -430,9 +429,10 @@ static ASTNode* emit_bare_fn_adapter_signature(CodeGenerator* gen,
     }
     if (!fdef) return NULL;
     /* The parameters and result as the function's prototype spells them,
-     * a clause set's decided over its clauses (#2644, #2645). */
-    int pc = 0;
-    for (int k = 0; k < fn_param_count(fdef) && pc < 16; k++) params[pc++] = fn_param_at(fdef, k);
+     * a clause set's decided over its clauses (#2644, #2645): every one
+     * (#3574), as 16 slots cut the adapter of a wider function, which then
+     * forwarded too few arguments. */
+    int pc = fn_param_count(fdef);
     *param_count = pc;
     Type* rt = fn_result_type(gen, fdef);
     const char* ret_c = rt ? get_c_type(rt) : "void";
@@ -493,9 +493,11 @@ static void fnval_add(const char* name) {
 /* The parameters in scope during the walk: a function's or a closure's
  * parameter shadows a function of its name in that body (std.mem's
  * `steady_growth(round: fn, ...)` names no user function `round`). */
-#define FNVAL_SHADOW_MAX 256
-static const char* g_fnval_shadow[FNVAL_SHADOW_MAX];
+/* Every one in scope, however deep (#3574): 256 slots left the rest
+ * unrecorded, and a parameter past them did not shadow its function. */
+static const char** g_fnval_shadow = NULL;
 static int g_fnval_shadow_count = 0;
+static int g_fnval_shadow_cap = 0;
 
 static int fnval_shadowed(const char* name) {
     for (int i = g_fnval_shadow_count - 1; i >= 0; i--)
@@ -518,9 +520,14 @@ static void discover_fn_values_walk(CodeGenerator* gen, ASTNode* n) {
         n->type == AST_CLOSURE) {
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* p = n->children[i];
-            if (p && p->value && g_fnval_shadow_count < FNVAL_SHADOW_MAX &&
+            if (p && p->value &&
                 (p->type == AST_PATTERN_VARIABLE || p->type == AST_CLOSURE_PARAM ||
                  (p->type == AST_VARIABLE_DECLARATION && n->type != AST_CLOSURE))) {
+                if (g_fnval_shadow_count == g_fnval_shadow_cap) {
+                    g_fnval_shadow_cap = g_fnval_shadow_cap ? g_fnval_shadow_cap * 2 : 64;
+                    g_fnval_shadow = (const char**)aether_xrealloc(
+                        (void*)g_fnval_shadow, sizeof(char*) * (size_t)g_fnval_shadow_cap);
+                }
                 g_fnval_shadow[g_fnval_shadow_count++] = p->value;
                 pushed++;
             }
@@ -555,11 +562,10 @@ void emit_bare_fn_adapter_decls(CodeGenerator* gen) {
     if (!gen || gen->bare_fn_adapter_count == 0 || !gen->program) return;
     print_line(gen, "// Bare-fn adapter forward declarations (closures may call them)");
     for (int i = 0; i < gen->bare_fn_adapter_count; i++) {
-        ASTNode* params[16];
         int param_count = 0;
         const char* ret_c = "void";
-        if (emit_bare_fn_adapter_signature(gen, gen->bare_fn_adapter_names[i],
-                                           params, &param_count, &ret_c)) {
+        if (emit_bare_fn_adapter_signature(gen, gen->bare_fn_adapter_names[i], &param_count,
+                                           &ret_c)) {
             fprintf(gen->output, ";\n");
         }
     }
@@ -581,11 +587,9 @@ void emit_bare_fn_adapters(CodeGenerator* gen) {
     print_line(gen, "// Bare-fn → fn-typed-slot env-ignoring adapters (ASK 3)");
     for (int i = 0; i < gen->bare_fn_adapter_count; i++) {
         const char* fname = gen->bare_fn_adapter_names[i];
-        ASTNode* params[16];
         int param_count = 0;
         const char* ret_c = "void";
-        ASTNode* fdef = emit_bare_fn_adapter_signature(gen, fname, params,
-                                                       &param_count, &ret_c);
+        ASTNode* fdef = emit_bare_fn_adapter_signature(gen, fname, &param_count, &ret_c);
         if (!fdef) continue;  /* Shouldn't happen; registration gate
                                * already confirmed existence. */
         Type* rt = fn_result_type(gen, fdef);
@@ -2437,8 +2441,11 @@ static int slice_view_params(CodeGenerator* gen, ASTNode* func, const char** out
 }
 
 void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
-    const char* views[8];
-    int nviews = slice_view_params(gen, func, views, 8);
+    /* Every slice parameter the body indexes (#3574): 8 slots versioned
+     * the first 8 and left the rest to the plain copy. */
+    const char** views = (const char**)aether_xrealloc(
+        NULL, sizeof(char*) * (size_t)(func && func->child_count > 0 ? func->child_count : 1));
+    int nviews = slice_view_params(gen, func, views, func ? func->child_count : 0);
     if (nviews > 0) {
         gen->slice_view_names = views;
         gen->slice_view_count = nviews;
@@ -2457,8 +2464,10 @@ void generate_function_definition(CodeGenerator* gen, ASTNode* func) {
         emit_function(gen, func, NULL);
         gen->slice_view_dispatch = NULL;
         gen->slice_view_dispatch_count = 0;
+        free(views);
         return;
     }
+    free(views);
     emit_function(gen, func, NULL);
 }
 
