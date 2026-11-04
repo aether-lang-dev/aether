@@ -464,6 +464,11 @@ then
     exit 1
 fi
 
+# CPython's own allocations outlive Py_Finalize; libpython.supp drops them
+# from the leak report of this program's run (see the file for its scope).
+LSAN_OPTIONS="${LSAN_OPTIONS:+$LSAN_OPTIONS:}suppressions=$SCRIPT_DIR/libpython.supp"
+export LSAN_OPTIONS
+
 # A broken instruction limit hangs, so the run is bounded: it fails rather
 # than stalling CI.
 if command -v timeout >/dev/null 2>&1; then

@@ -1,0 +1,12 @@
+# LeakSanitizer suppressions for this test alone (its driver passes the file
+# in LSAN_OPTIONS for the run of its own program, nothing else).
+#
+# CPython does not give back its own allocations at Py_Finalize: interned
+# objects, type caches and arenas outlive the interpreter by design, so
+# every program that embeds it leaks them, Aether's or not. A suppression
+# matches any frame of an allocation's stack, so this is as tight as
+# LeakSanitizer allows: what is reported with a libpython frame (CPython's
+# own, and anything allocated inside a call that came through it) is
+# dropped, and every other allocation of the harness, the runtime and the
+# Aether code it calls is still checked.
+leak:libpython

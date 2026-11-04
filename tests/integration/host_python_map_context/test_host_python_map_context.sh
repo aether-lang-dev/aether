@@ -160,4 +160,7 @@ then
     exit 1
 fi
 
-"$TMPDIR/test_python_map_context"
+# CPython's own allocations outlive Py_Finalize; libpython.supp drops them
+# from the leak report of this program's run (see the file for its scope).
+LSAN_OPTIONS="${LSAN_OPTIONS:+$LSAN_OPTIONS:}suppressions=$SCRIPT_DIR/libpython.supp" \
+    "$TMPDIR/test_python_map_context"
