@@ -138,7 +138,20 @@ if [ "$(comm -3 "$TMP/ucrt.txt" "$TMP/msvcrt.txt" | wc -l | tr -d ' ')" -eq 0 ];
 fi
 
 # Symbols in neither come from libmingwex / libmingw32 / the Win32 DLLs and are
-# CRT independent by construction.
+# CRT independent by construction. So is a symbol libmingwex.a implements
+# itself, even when one CRT's import library also names it: every MinGW link
+# takes libmingwex, so it resolves there whichever CRT is linked. mingw-w64
+# moves functions there over time. From 14.0.0.r598 `ldexp` is no longer in
+# libucrt.a, only in libmingwex.a, while libmsvcrt.a keeps an alias for it,
+# which made a portable archive look msvcrt-only. Only real code counts
+# (T, D, B, R, W), not import thunks (I).
+LIBMINGWEX=$("$CC_WIN" -print-file-name=libmingwex.a 2>/dev/null)
+if [ -f "$LIBMINGWEX" ]; then
+    "$NM_WIN" --defined-only "$LIBMINGWEX" 2>/dev/null \
+        | awk '$2 ~ /^[TDBRW]$/ {print $3}' | sort -u > "$TMP/mingwex.txt"
+    comm -23 "$TMP/external.txt" "$TMP/mingwex.txt" > "$TMP/external.crt.txt"
+    mv "$TMP/external.crt.txt" "$TMP/external.txt"
+fi
 only_msvcrt=$(comm -12 "$TMP/external.txt" "$TMP/msvcrt.txt" | comm -23 - "$TMP/ucrt.txt")
 only_ucrt=$(comm -12 "$TMP/external.txt" "$TMP/ucrt.txt" | comm -23 - "$TMP/msvcrt.txt")
 
