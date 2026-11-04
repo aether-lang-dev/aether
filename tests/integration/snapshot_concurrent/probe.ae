@@ -37,10 +37,10 @@ unbox(p: ptr) -> int {
     return mem.get_int(p, 0)
 }
 
-// One atomic increment of the cell via a CAS retry loop — the pattern a
+// One atomic increment of the cell via a CAS retry loop, the pattern a
 // concurrent single-writer-per-op user runs. Retries until it wins; frees its
-// own rejected box on a lost race (the box never entered the cell, so no reader
-// can hold it — free it eagerly). On success it returns the displaced box,
+// own rejected box on a lost race (the box never entered the cell and no
+// reader can hold it, so it is freed at once). On success it returns the displaced box,
 // which is not freed while any job runs: a reader may still hold it, and with
 // many writers a freed address handed out again would let a stale CAS succeed
 // (ABA, see std.snapshot's reclamation contract). Reclamation timing is
