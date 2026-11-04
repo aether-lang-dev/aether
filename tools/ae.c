@@ -5700,6 +5700,21 @@ static void ae_emit_string_export(FILE* out, const char* kind, const char* csym,
 }
 
 /* #2956: a function export, its call followed by the outcome check. */
+/* #3547: the attribute an export's result takes in the stub. A closure an
+ * export returns is the reference the export's return hands over (R3), not
+ * a C function's lent one (R4): `@heap` says the caller owns it, so the
+ * program gives it back. Without it the program took the closure as lent,
+ * retained it once more, and the library's reference was never released. A
+ * bare `fn`, or a closure type with a parameter's mode (`fn(@keep ptr)`), is
+ * a closure; `fn(T) -> R` is a typed C function pointer, which owns
+ * nothing. */
+static const char* ae_result_attr(const char* ret) {
+    if (!ret) return "";
+    if (strcmp(ret, "fn") == 0) return " @heap";
+    if (strncmp(ret, "fn(", 3) == 0 && strchr(ret, '@')) return " @heap";
+    return "";
+}
+
 static void ae_emit_checked_export(FILE* out, const char* csym, const char* name,
                                    const char* params, const char* ret) {
     char args[700];
@@ -5709,7 +5724,8 @@ static void ae_emit_checked_export(FILE* out, const char* csym, const char* name
         fprintf(out, "@extern(\"%s\") __aex_%s(%s)\n", csym, name, params);
         fprintf(out, "%s(%s) {\n    __aex_%s(%s)\n    __aeo_check()\n}\n", name, params, name, args);
     } else {
-        fprintf(out, "@extern(\"%s\") __aex_%s(%s) -> %s\n", csym, name, params, ret);
+        fprintf(out, "@extern(\"%s\") __aex_%s(%s) -> %s%s\n", csym, name, params, ret,
+                ae_result_attr(ret));
         fprintf(out, "%s(%s) -> %s {\n    _aex_r = __aex_%s(%s)\n    __aeo_check()\n    return _aex_r\n}\n",
                 name, params, ret, name, args);
     }
@@ -6032,8 +6048,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
                     fprintf(out, "@extern(\"%s\") %s(%.*s)\n",
                             f->c_symbol, f->aether_name, plen, ssig + 1);
                 } else {
-                    fprintf(out, "@extern(\"%s\") %s(%.*s) -> %s\n",
-                            f->c_symbol, f->aether_name, plen, ssig + 1, rt);
+                    fprintf(out, "@extern(\"%s\") %s(%.*s) -> %s%s\n",
+                            f->c_symbol, f->aether_name, plen, ssig + 1, rt, ae_result_attr(rt));
                 }
                 continue;
             }
@@ -6048,8 +6064,8 @@ static int ae_generate_binimport_stub(const char* so_path, const char* module, F
         } else if (strcmp(ret, "void") == 0) {
             fprintf(out, "@extern(\"%s\") %s(%s)\n", f->c_symbol, f->aether_name, params);
         } else {
-            fprintf(out, "@extern(\"%s\") %s(%s) -> %s\n",
-                    f->c_symbol, f->aether_name, params, ret);
+            fprintf(out, "@extern(\"%s\") %s(%s) -> %s%s\n",
+                    f->c_symbol, f->aether_name, params, ret, ae_result_attr(ret));
         }
     }
 

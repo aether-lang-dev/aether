@@ -2,6 +2,7 @@
 
 import engine
 import script
+import std.mem
 
 extern exit(code: int)
 
@@ -38,6 +39,18 @@ main() {
     add5 = engine.make_adder(5)
     int added = call(add5, 10)
     check(added == 15, "the host calls a closure the library made")
+    // The closure is the program's: the export hands over the reference
+    // its return gives, and the program gives it back at the end of its
+    // scope (#3547). Taken as lent, it was retained once more and the
+    // library's reference never released. Where the heap count is exact,
+    // making and dropping one leaves the heap as it was.
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                add = engine.make_adder(3)
+                int _got = call(add, 1)
+            }, 4)
+        check(grown == 0, "a closure the library made is given back (${grown} bytes a round)")
+    }
 
     // A second binary library passing the struct through.
     w = script.scaled(v, 2.0)

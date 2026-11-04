@@ -6447,11 +6447,13 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
 /* Trailing `@`-attributes on an extern signature, shared by the bare
  * `extern name(...)` form and the `@extern("c_sym") name(...)` form:
  *
- *   @heap     the `-> string` return is a malloc'd buffer the caller owns.
- *             Recorded as "heap_return", read by is_heap_string_expr in
- *             codegen_stmt.c. Only meaningful on `-> string`; anything else
- *             is a parse error since integers and pointers aren't heap-
- *             tracked and void has nothing to own.
+ *   @heap     the `-> string` return is a malloc'd buffer the caller owns,
+ *             and a `-> fn` result a reference the caller owns (#3547).
+ *             Recorded as "heap_return", read by is_heap_string_expr and
+ *             closure_value_is_fresh in codegen_stmt.c. Only meaningful on
+ *             `-> string`, `-> ptr` and `-> fn`; anything else is a parse
+ *             error since integers aren't heap-tracked and void has
+ *             nothing to own.
  *   @fresh    the `-> ptr` result is memory the call allocates, which nothing
  *             else holds (#3086): std's list and map constructors. A
  *             container bound from one is a holder (`@holds`) that keeps
@@ -6485,11 +6487,16 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
             /* A `ptr` result is a counted string returned untyped
              * (string.from_int and the like) or a `*StringSeq`: `@heap`
              * says the caller owns a reference, as for a `string` result
-             * (R1). */
+             * (R1). So does a closure (`-> fn`), an Aether library's
+             * export handing its caller the reference its return gives
+             * (#3547): a C function's closure is lent (R4). A typed C
+             * function pointer holds no reference. */
+            int closure_result = ext->node_type && ext->node_type->kind == TYPE_FUNCTION &&
+                                 !ext->node_type->is_fnptr;
             if (!ext->node_type || (ext->node_type->kind != TYPE_STRING &&
-                                    ext->node_type->kind != TYPE_PTR)) {
+                                    ext->node_type->kind != TYPE_PTR && !closure_result)) {
                 parser_error(parser,
-                    "@heap on extern return is only valid on `-> string` or `-> ptr`");
+                    "@heap on extern return is only valid on `-> string`, `-> ptr` or `-> fn`");
             } else {
                 ext->annotation =
                     annotation_add_marker(ext->annotation, "heap_return");

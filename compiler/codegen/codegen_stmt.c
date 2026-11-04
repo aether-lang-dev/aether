@@ -1619,10 +1619,15 @@ ASTNode* find_extern_declaration_in_scope(CodeGenerator* gen, const char* name) 
 // `@extern("name")` form, or any future tags) — the same combine-
 // dedupe pattern the per-param annotation handler uses at
 // parser.c:2800-2813.
+// A `-> fn @heap` result is a closure handed over (closure_value_is_fresh),
+// no string: only a `string` or `ptr` result counts here (#3547).
 static int extern_returns_heap_string(ASTNode* ext) {
     if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->annotation) {
         return 0;
     }
+    if (ext->node_type && ext->node_type->kind != TYPE_STRING &&
+        ext->node_type->kind != TYPE_PTR)
+        return 0;
     return annotation_has_marker(ext->annotation, "heap_return");
 }
 
@@ -7158,8 +7163,16 @@ int closure_value_is_fresh(CodeGenerator* gen, ASTNode* e) {
     if (env_scan_is_real_closure(e)) return 1;
     /* #2528: a reply's closure was taken for the asker. */
     if (e->type == AST_SEND_ASK) return 1;
-    /* R3: every call hands its closure over, but a C function's. */
-    if (e->type == AST_FUNCTION_CALL) return !call_is_extern(gen, e);
+    /* R3: every call hands its closure over, but a C function's, which
+     * lends it (R4), unless its extern says `-> fn @heap`: an Aether
+     * library's export, handing over the reference its return gives
+     * (#3547). Taken as lent, that reference was retained once more and
+     * the library's own was never given back. */
+    if (e->type == AST_FUNCTION_CALL) {
+        if (!call_is_extern(gen, e)) return 1;
+        ASTNode* ext = find_extern_declaration_in_scope(gen, codegen_normalise_callee(e->value));
+        return ext && ext->annotation && annotation_has_marker(ext->annotation, "heap_return");
+    }
     if (e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
         return closure_value_is_fresh(gen, e->children[1]) &&
                closure_value_is_fresh(gen, e->children[2]);
