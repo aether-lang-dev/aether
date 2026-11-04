@@ -11279,6 +11279,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_bare_fn_adapters(gen);
     fflush(gen->output);
     gen->defer_proto_pos = ftell(gen->output);   /* #2923: emit_defer_thunks */
+    /* #3574: the nodes held ahead of their statements for their depth,
+     * found before any function body is written. */
+    codegen_mark_depth(gen, program);
 
     // Pre-pass: build request->reply type map from actor receive handlers.
     // This lets the ? operator know the reply message type at codegen time.

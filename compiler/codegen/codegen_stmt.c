@@ -8873,6 +8873,76 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
     free(ops);
 }
 
+/* #3574: `else if` links past which a chain is written flat. */
+#define ELSE_IF_FLAT_LINKS 16
+
+/* The `else if` links after `stmt`: its else an `if` statement, whose else
+ * is one, and so on. */
+static int else_if_links(const ASTNode* stmt) {
+    int n = 0;
+    while (stmt && stmt->type == AST_IF_STATEMENT && stmt->child_count > 2 && stmt->children[2] &&
+           stmt->children[2]->type == AST_IF_STATEMENT) {
+        n++;
+        stmt = stmt->children[2];
+    }
+    return n;
+}
+
+/* The link emit_else_if_flat is writing, whose branch sets the chain's flag
+ * when it is taken. */
+static ASTNode* g_else_if_link = NULL;
+static const char* g_else_if_taken = NULL;
+
+/* #3574: the rest of an `else if` chain whose `if (c1) { taken = 1;` is
+ * written:
+ *         <then 1>
+ *     }
+ *     if (!taken) { <c2's constructs> if (c2) { taken = 1; <then 2> } }
+ *     ...
+ *     if (!taken) { <the else> }
+ *     }
+ * Each condition is evaluated only when no branch before it was taken, as
+ * the nested `else { if (c2) ... else { ... } }` evaluates it, at one depth
+ * whatever the chain's length: the nested form was a block deeper a link,
+ * and C compilers refuse blocks nested past a fixed depth (Clang 256). */
+static void emit_else_if_flat(CodeGenerator* gen, ASTNode* stmt, const char* taken) {
+    int saved_var_count = gen->declared_var_count;
+    indent(gen);
+    if (stmt->child_count > 1) generate_statement(gen, stmt->children[1]);
+    unindent(gen);
+    truncate_declared_vars(gen, saved_var_count);
+    print_line(gen, "}");
+    ASTNode* link = stmt->children[2];
+    while (link && link->type == AST_IF_STATEMENT) {
+        ASTNode* next = link->child_count > 2 ? link->children[2] : NULL;
+        int count = link->child_count;
+        if (count > 2) link->child_count = 2;   /* its else is the next link */
+        codegen_maybe_emit_line(gen, link);
+        print_line(gen, "if (!%s) {", taken);
+        indent(gen);
+        g_else_if_link = link;
+        g_else_if_taken = taken;
+        generate_statement(gen, link);
+        g_else_if_link = NULL;
+        unindent(gen);
+        print_line(gen, "}");
+        truncate_declared_vars(gen, saved_var_count);
+        link->child_count = count;
+        link = next;
+    }
+    if (link) {
+        codegen_maybe_emit_line(gen, link);
+        print_line(gen, "if (!%s) {", taken);
+        indent(gen);
+        generate_statement(gen, link);
+        unindent(gen);
+        print_line(gen, "}");
+        truncate_declared_vars(gen, saved_var_count);
+    }
+    unindent(gen);
+    print_line(gen, "}");
+}
+
 static void stmt_control_prelude(CodeGenerator* gen, ASTNode* stmt) {
     stmt_control_run(gen, stmt, 0);
 }
@@ -11555,6 +11625,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             // item #2.
             hoist_common_vars(gen, stmt);
 
+            /* #3574: a long `else if` chain, flat (else_if_links). Its
+             * links' `taken` flag, declared in a block of the chain's own. */
+            const char* if_taken = NULL;
+            if (else_if_links(stmt) > ELSE_IF_FLAT_LINKS) {
+                static int taken_seq = 0;
+                if_taken = cg_internf("_ae_eit%d", taken_seq++);
+                fprintf(gen->output, "{\n");
+                indent(gen);
+                print_line(gen, "int %s = 0;", if_taken);
+                print_indent(gen);
+            }
+
             /* #2798: a condition holding a construct that runs statements
              * and struct results it keeps in temporaries, evaluated ahead. */
             const char* if_cv = NULL;
@@ -11567,6 +11649,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             if (if_cv) fprintf(gen->output, "%s", if_cv);
             else if (stmt->child_count > 0) emit_condition(gen, stmt->children[0]);   /* #2582 */
             fprintf(gen->output, ") {\n");
+            if (if_taken || g_else_if_link == stmt) {
+                /* The chain's flag: this branch was taken, so no later one is. */
+                indent(gen);
+                print_line(gen, "%s = 1;", if_taken ? if_taken : g_else_if_taken);
+                unindent(gen);
+                if (g_else_if_link == stmt) g_else_if_link = NULL;
+            }
+            if (if_taken) {
+                emit_else_if_flat(gen, stmt, if_taken);
+                break;
+            }
 
             {
                 // Save declared_var_count before if-body.  Variables declared

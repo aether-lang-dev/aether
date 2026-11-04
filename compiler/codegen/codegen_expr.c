@@ -6922,10 +6922,216 @@ static Type* match_operand_type(ASTNode* m) {
     return t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID ? t : NULL;
 }
 
+/* --- Depth (#3574) ----------------------------------------------------------
+ *
+ * C compilers refuse an expression nested past a fixed depth (Clang 256
+ * brackets), and an expression's C nests about as its tree does: a call in
+ * a call, a cast of a cast, `!` of `!`, a segment of an interpolation in an
+ * interpolation, each one to four brackets deeper. The parser takes trees
+ * far deeper (AETHER_MAX_PARSE_DEPTH), and some it builds a link a token
+ * (`x.f().f()`, `x as int as long`), whatever the depth.
+ *
+ * So every DEPTH_STEP levels of a statement's expression a node is run
+ * ahead of the statement into a temporary, the way a construct that runs
+ * statements is (ctl_linearize: what the statement evaluates before it
+ * first, a part that runs on a test under that test), and the statement
+ * reads the temporary: no stretch of the C is deeper than DEPTH_STEP
+ * levels. A left chain of one operator, which C writes flat or
+ * emit_chain_by_links writes link by link, counts as one level, and so
+ * does an `else if` chain of an `if` expression, which ctl_if_chain writes
+ * flat. The nodes are found once, before the program is written
+ * (codegen_mark_depth). */
+#define DEPTH_STEP 24
+/* Links of an `if` expression's `else if` chain past which it is written
+ * flat, ahead of its statement (ctl_if_chain). */
+#define IF_CHAIN_LINKS 16
+
+static const void** g_depth_keys = NULL;
+static int g_depth_cap = 0;
+static int g_depth_count = 0;
+
+static unsigned depth_hash(const void* p) {
+    uintptr_t x = (uintptr_t)p;
+    x ^= x >> 17;
+    x *= (uintptr_t)0x9E3779B97F4A7C15ULL;
+    x ^= x >> 29;
+    return (unsigned)x;
+}
+
+static void depth_put(const void* p);
+
+static void depth_grow(void) {
+    const void** old = g_depth_keys;
+    int old_cap = g_depth_cap;
+    g_depth_cap = old_cap ? old_cap * 2 : 64;
+    g_depth_keys = (const void**)calloc((size_t)g_depth_cap, sizeof(void*));
+    if (!g_depth_keys) {
+        fprintf(stderr, "Fatal: out of memory marking deep expressions\n");
+        exit(1);
+    }
+    g_depth_count = 0;
+    for (int i = 0; i < old_cap; i++)
+        if (old[i]) depth_put(old[i]);
+    free(old);
+}
+
+static void depth_put(const void* p) {
+    if ((g_depth_count + 1) * 2 > g_depth_cap) depth_grow();
+    unsigned m = (unsigned)g_depth_cap - 1;
+    unsigned i = depth_hash(p) & m;
+    while (g_depth_keys[i] && g_depth_keys[i] != p) i = (i + 1) & m;
+    if (!g_depth_keys[i]) {
+        g_depth_keys[i] = p;
+        g_depth_count++;
+    }
+}
+
+static int depth_marked(const ASTNode* p) {
+    if (!g_depth_count || !p) return 0;
+    unsigned m = (unsigned)g_depth_cap - 1;
+    unsigned i = depth_hash(p) & m;
+    while (g_depth_keys[i]) {
+        if (g_depth_keys[i] == p) return 1;
+        i = (i + 1) & m;
+    }
+    return 0;
+}
+
+/* A node of an expression: its children are a level deeper. Anything else
+ * (a statement, a block, a closure's body, a `match` operand's arms) starts
+ * its children afresh. */
+static int depth_expr_node(const ASTNode* n) {
+    switch (n->type) {
+        case AST_FUNCTION_CALL: case AST_BINARY_EXPRESSION: case AST_UNARY_EXPRESSION:
+        case AST_TUPLE_UNWRAP: case AST_ARRAY_LITERAL: case AST_TUPLE_LITERAL:
+        case AST_ARRAY_ACCESS: case AST_MEMBER_ACCESS: case AST_STRUCT_LITERAL:
+        case AST_STRING_INTERP: case AST_PTR_AS_STRUCT_CAST: case AST_SLICE_EXPR:
+        case AST_SLICE_FROM_ARRAY: case AST_SLICE_TO_PTR: case AST_PTR_AS_ARRAY_CAST:
+        case AST_PTR_AS_FN_CAST: case AST_IF_EXPRESSION: case AST_VALUE_CAST:
+        case AST_NULL_COALESCE: case AST_OPTIONAL_CHAIN: case AST_OR_ELSE:
+        case AST_MESSAGE_CONSTRUCTOR: case AST_FIELD_INIT: case AST_SEND_ASK: case AST_NAMED_ARG:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int if_chain_links(const ASTNode* e) {
+    int n = 0;
+    while (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        n++;
+        e = e->children[2];
+    }
+    return n;
+}
+
+/* A node a temporary of its statement can hold in its place: one whose
+ * value is a scalar, a pointer or a string made fresh (an interpolation, a
+ * call returning a string of its own), and that is no construct of its own
+ * (a store, `&&`, `||`, `++`, a call with a trailing block, a slice
+ * ownership intrinsic). */
+static int depth_holdable(CodeGenerator* gen, ASTNode* n) {
+    switch (n->type) {
+        case AST_FUNCTION_CALL:
+            if (!n->value || strcmp(n->value, "select") == 0 ||
+                strncmp(n->value, "__slice_", 8) == 0 || trailing_dsl_block(gen, n))
+                return 0;
+            for (int i = 0; i < n->child_count; i++)
+                if (n->children[i] && n->children[i]->type == AST_CLOSURE &&
+                    n->children[i]->value && strcmp(n->children[i]->value, "trailing") == 0)
+                    return 0;
+            break;
+        case AST_BINARY_EXPRESSION:
+            if (!n->value || is_assignment_op(n->value) || strcmp(n->value, "&&") == 0 ||
+                strcmp(n->value, "||") == 0)
+                return 0;
+            break;
+        case AST_UNARY_EXPRESSION:
+            if (!n->value || strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0) return 0;
+            break;
+        case AST_VALUE_CAST: case AST_STRING_INTERP: case AST_ARRAY_ACCESS: case AST_MEMBER_ACCESS:
+            break;
+        default:
+            return 0;
+    }
+    Type* t = n->node_type;
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+        case TYPE_UINT8: case TYPE_BYTE: case TYPE_BOOL: case TYPE_FLOAT: case TYPE_ENUM:
+        case TYPE_PTR:
+            break;
+        case TYPE_STRING:
+            /* A string a place holds may be replaced before the statement
+             * reads it; only a fresh one is held. */
+            if (n->type == AST_STRING_INTERP) break;
+            if (n->type == AST_FUNCTION_CALL && is_heap_string_expr(gen, n) &&
+                !string_reads_place(gen, n))
+                break;
+            return 0;
+        default:
+            return 0;
+    }
+    return order_c11_type(n) != NULL;
+}
+
+/* `n` at `depth` levels into its statement's expression; `pending`, the
+ * next node that can be held is; `in_chain`, `n` is a link of an `if`
+ * expression's `else if` chain written flat, each of whose conditions and
+ * values is a statement of its own there. */
+static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, int in_chain) {
+    if (!n) return;
+    if (!depth_expr_node(n)) {
+        for (int i = 0; i < n->child_count; i++) depth_walk(gen, n->children[i], 0, 0, 0);
+        return;
+    }
+    if (!in_chain && n->type == AST_IF_EXPRESSION && if_chain_links(n) > IF_CHAIN_LINKS) {
+        depth_put(n);
+        in_chain = 1;
+    }
+    if (!in_chain && pending && depth_holdable(gen, n)) {
+        depth_put(n);
+        pending = 0;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (!c) continue;
+        if (in_chain) {
+            if (i == 2 && c->type == AST_IF_EXPRESSION && c->child_count >= 3)
+                depth_walk(gen, c, depth, 0, 1);
+            else
+                depth_walk(gen, c, 0, 0, 0);
+            continue;
+        }
+        /* A left chain of an operator, an `if` expression's `else if`
+         * chain: one level whatever their length. */
+        int same = (n->type == AST_BINARY_EXPRESSION && i == 0 && c->type == AST_BINARY_EXPRESSION) ||
+                   (n->type == AST_IF_EXPRESSION && i == 2 && c->type == AST_IF_EXPRESSION);
+        int d = same ? depth : depth + 1;
+        depth_walk(gen, c, d, pending || (!same && d % DEPTH_STEP == 0), 0);
+    }
+}
+
+void codegen_mark_depth(CodeGenerator* gen, ASTNode* program) {
+    free(g_depth_keys);
+    g_depth_keys = NULL;
+    g_depth_cap = 0;
+    g_depth_count = 0;
+    depth_walk(gen, program, 0, 0, 0);
+}
+
 /* Is `e` one of the three constructs, in the form that runs statements, and
  * one emit_control_prelude can run ahead of its statement? A `match` used
- * as an operand (#2993) is a fourth: it is a statement whatever its form. */
+ * as an operand (#2993) is a fourth: it is a statement whatever its form.
+ * is_control_value: that, or a node held ahead of its statement for its
+ * depth (#3574). */
+static int is_control_construct(CodeGenerator* gen, ASTNode* e);
+
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
+    return is_control_construct(gen, e) || depth_marked(e);
+}
+
+static int is_control_construct(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     /* #2974: try_send(ref, Msg { ... }), a send written as statements. */
     if (e->type == AST_SEND_FIRE_FORGET)
@@ -7050,7 +7256,7 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
  * other node or when temporaries cannot be declared ahead of the
  * statement. */
 int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
-    if (!hoist_ready(gen) || !is_control_value(gen, e)) return 0;
+    if (!hoist_ready(gen) || !is_control_construct(gen, e)) return 0;
     int mark = g_ctl_count;
     const ASTNode* saved = g_ctl_emitting;
     g_ctl_emitting = e;
@@ -7270,6 +7476,86 @@ static int ctl_guarded(CodeGenerator* gen, const char* test, ASTNode* c) {
     return ok;
 }
 
+/* Branch `br` of an `if` expression of type `vt` into temporary `v`: its
+ * constructs first, then its value, coerced as the ternary coerces it. */
+static void ctl_if_branch(CodeGenerator* gen, ASTNode* br, Type* vt, const char* v) {
+    ctl_linearize(gen, br, 0);
+    print_indent(gen);
+    fprintf(gen->output, "%s = ", v);
+    if (vt->kind == TYPE_SUM && needs_sum_coerce(br, vt)) {
+        emit_sum_coerced(gen, br, vt);
+    } else if (signed_join_of_unsigned(vt, br->node_type)) {
+        fprintf(gen->output, "(%s)(", get_c_type(vt));
+        generate_expression(gen, br);
+        fprintf(gen->output, ")");
+    } else {
+        generate_expression(gen, br);
+    }
+    fprintf(gen->output, ";\n");
+}
+
+/* #3574: an `if` expression whose `else if` chain has more than
+ * IF_CHAIN_LINKS links (depth_walk marks its first), run ahead of its
+ * statement flat:
+ *     _ae_ict = 0;
+ *     <c1's constructs> if (c1) { <v1's> _ae_icv = v1; _ae_ict = 1; }
+ *     if (!_ae_ict) { <c2's> if (c2) { <v2's> _ae_icv = v2; _ae_ict = 1; } }
+ *     ...
+ *     if (!_ae_ict) { <the else's> _ae_icv = else; }
+ * Each condition is evaluated only when none before it held and each value
+ * only when its condition did, as the ternaries `c1 ? v1 : c2 ? v2 : ...`
+ * evaluate them, at one depth whatever the chain's length: the ternaries
+ * nested two brackets a link. */
+static int ctl_if_chain(CodeGenerator* gen, ASTNode* e) {
+    Type* vt = e->node_type;
+    if (!vt || vt->kind == TYPE_VOID || vt->kind == TYPE_UNKNOWN ||
+        (vt->kind == TYPE_OPTIONAL && needs_optional_coerce(e, vt)))
+        return 0;
+    const char* ct = order_c11_type(e);
+    if (!ct) return 0;
+    const char* v = cg_internf("_ae_icv%d", g_order_counter++);
+    const char* taken = cg_internf("_ae_ict%d", g_order_counter++);
+    hoist_declare(gen, ct, v);
+    hoist_declare(gen, "int", taken);
+    print_indent(gen);
+    fprintf(gen->output, "%s = (%s){0}; %s = 0;\n", v, ct, taken);
+    ASTNode* link = e;
+    for (int first = 1; link && link->type == AST_IF_EXPRESSION && link->child_count >= 3;
+         link = link->children[2], first = 0) {
+        if (!first) {
+            print_indent(gen);
+            fprintf(gen->output, "if (!%s) {\n", taken);
+            gen->indent_level++;
+        }
+        ctl_linearize(gen, link->children[0], 0);
+        print_indent(gen);
+        fprintf(gen->output, "if (");
+        generate_expression(gen, link->children[0]);
+        fprintf(gen->output, ") {\n");
+        gen->indent_level++;
+        ctl_if_branch(gen, link->children[1], vt, v);
+        print_indent(gen);
+        fprintf(gen->output, "%s = 1;\n", taken);
+        gen->indent_level--;
+        print_indent(gen);
+        fprintf(gen->output, "}\n");
+        if (!first) {
+            gen->indent_level--;
+            print_indent(gen);
+            fprintf(gen->output, "}\n");
+        }
+    }
+    print_indent(gen);
+    fprintf(gen->output, "if (!%s) {\n", taken);
+    gen->indent_level++;
+    ctl_if_branch(gen, link, vt, v);
+    gen->indent_level--;
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    order_bind(e, v);
+    return 1;
+}
+
 /* The conditional parts of `e` that hold a construct, run each under the
  * test that selects it: the branches of an `if` expression, the default of
  * `??` and an `or` handler that is an expression. -1 when `e` is none of
@@ -7346,7 +7632,7 @@ static int ctl_short_circuit(ASTNode* e) {
  * `discarded`: the statement throws `e`'s value away. */
 static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
     if (!e || !ctl_contains(gen, e)) return 1;
-    if (is_control_value(gen, e)) {
+    if (is_control_construct(gen, e)) {
         /* What the construct evaluates first: the tuple an `or` or a `!`
          * tests, the arguments of a call whose trailing block runs after
          * it. A builder's block runs first, and its arguments after it, in
@@ -7364,6 +7650,21 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
             return 0;
         }
         return emit_control_prelude(gen, e, discarded);
+    }
+    /* #3574: a node held ahead for its depth: what it evaluates first, and
+     * the deeper ones it holds, then its value into a temporary. An `if`
+     * expression's long `else if` chain, written flat. */
+    if (depth_marked(e)) {
+        if (e->type == AST_IF_EXPRESSION) return ctl_if_chain(gen, e);
+        OrderOps room;
+        order_ops_init(&room, order_operand_room(e));
+        int n = ctl_operands(gen, e, room.ops, room.cap);
+        int ran = n >= 0;
+        for (int i = 0; ran && i < e->child_count; i++)
+            if (ctl_unreached(gen, e->children[i], room.ops, n)) ran = 0;
+        if (ran && !ctl_linearize_ops(gen, e, room.ops, n)) ran = 0;
+        order_ops_free(&room);
+        return ran && ctl_emit_hoist(gen, e);
     }
     if (ctl_short_circuit(e)) {
         ASTNode* l = e->children[0];
@@ -7404,7 +7705,7 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
      * ahead (is_control_value: their order needed a wrap) may now, with
      * them evaluated. Not a builder's, whose block runs before them. */
     if (e->type == AST_FUNCTION_CALL && !trailing_call_is_builder(gen, e) &&
-        is_control_value(gen, e))
+        is_control_construct(gen, e))
         return emit_control_prelude(gen, e, discarded);
     return 1;
 }

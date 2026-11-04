@@ -78,6 +78,10 @@ int codegen_hoist_site(const char* s, size_t n);
  * (codegen_expr.c). */
 int is_control_value(CodeGenerator* gen, ASTNode* e);
 int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
+/* #3574: find the nodes of `program` run ahead of their statements for
+ * their depth, so that no stretch of an expression's C nests past what C
+ * compilers take (codegen_expr.c). */
+void codegen_mark_depth(CodeGenerator* gen, ASTNode* program);
 /* #2798: the same anywhere in a statement: does `e` hold one, and run the
  * ones a value or a list of operands holds, with what is evaluated before
  * them, ahead of the statement (1 when every one is bound). */
