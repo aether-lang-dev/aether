@@ -1,0 +1,201 @@
+// An https request through a forward proxy, end to end (#3557): the client
+// sends CONNECT to the proxy, reads its reply, and runs TLS through the
+// tunnel to the origin. Driven by test_http_client_connect_proxy.sh, which
+// makes the certificate (CERT_PATH, KEY_PATH; the client pins it as its CA).
+//
+// The proxy here is a CONNECT relay over std.tcp: it reads the request
+// head, records the request line, answers as its round's mode says, and
+// for "ok" dials the origin and relays bytes both ways until a side
+// closes. The origin is a std.http server with TLS. Three rounds:
+//
+//   ok     200, then the tunnel: the request reaches the origin through it
+//   407    a refusal: the client reports the proxy's status
+//   2000   a status of four digits: the client refuses the reply as
+//          malformed (it was read with atoi as status 2000)
+//
+// Before #3557 the reply was read into 1024 bytes with strstr and atoi;
+// what reached the handshake after it was whatever one recv had left.
+
+import std.bytes
+import std.string
+import std.tcp
+import std.http
+import std.http.client
+import std.os
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+
+message Listen { srv: ptr, origin_port: int }
+message Serve { mode: string }
+message Log {}
+message Seen { text: string }
+
+handle_root(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_header(res, "Content-Type", "text/plain")
+    http.response_set_body(res, "tunnelled-ok")
+}
+
+// Bytes from `from` to `to` while both are open; 0 when `from` closed.
+fn pass(from: ptr, to: ptr, buf: ptr) -> int {
+    n, err = tcp.read_into(from, bytes.view(buf)[0..16384])
+    if err != "" || n <= 0 { return 0 }
+    _w, werr = tcp.write_all(to, bytes.view(buf)[0..n])
+    if werr != "" { return 0 }
+    return 1
+}
+
+// The CONNECT proxy: one connection a round, answered by the round's mode.
+actor Proxy {
+    state srv: ptr = null
+    state origin_port = 0
+    state log = ""
+
+    receive {
+        Listen(srv: s, origin_port: p) -> {
+            srv = s
+            origin_port = p
+        }
+        Serve(mode: mode) -> {
+            if tcp.server_poll(srv, 5000) == 1 {
+                sock, aerr = tcp.accept(srv)
+                if aerr == "" {
+                    head = ""
+                    going = 1
+                    while going == 1 {
+                        got, rerr = tcp.read(sock, 4096)
+                        if rerr != "" {
+                            going = 0
+                        } else {
+                            head = string.concat(head, got)
+                            if string.contains(head, "\r\n\r\n") == 1 { going = 0 }
+                        }
+                    }
+                    line_end = string.index_of(head, "\r\n")
+                    if line_end > 0 { log = "${log}${string.substring(head, 0, line_end)}|" }
+                    if mode == "ok" {
+                        up, derr = tcp.connect("127.0.0.1", origin_port)
+                        if derr == "" {
+                            _w1, _e1 = tcp.write(sock, "HTTP/1.1 200 Connection established\r\n\r\n")
+                            buf = bytes.new(16384)
+                            bytes.set(buf, 16383, 0)
+                            open = 1
+                            while open == 1 {
+                                a_ready, b_ready, perr = tcp.poll2(sock, up, 2000)
+                                if perr != "" {
+                                    open = 0
+                                } else if a_ready {
+                                    open = pass(sock, up, buf)
+                                } else if b_ready {
+                                    open = pass(up, sock, buf)
+                                }
+                            }
+                            bytes.free(buf)
+                            tcp.close(up)
+                        }
+                    } else if mode == "407" {
+                        _w2, _e2 = tcp.write(sock, "HTTP/1.1 407 Proxy Authentication Required\r\nContent-Length: 0\r\n\r\n")
+                    } else {
+                        _w3, _e3 = tcp.write(sock, "HTTP/1.1 2000 OK\r\n\r\n")
+                    }
+                    tcp.close(sock)
+                }
+            }
+        }
+        Log() -> {
+            reply Seen { text: log }
+            log = ""
+        }
+    }
+}
+
+// GET `url` through the proxy at `proxy`, the certificate pinned: the
+// status and body, or the error.
+fn fetch(px: actor_ref[Proxy], mode: string, url: string, proxy: string, ca: string) -> string {
+    px ! Serve { mode: mode }
+    req = client.request("GET", url)
+    client.set_timeout(req, 10s)
+    _ce = client.set_cafile(req, ca)
+    // Not kept for the next round: each round dials, and the relay ends when
+    // the client closes.
+    _he = client.set_header(req, "Connection", "close")
+    out = ""
+    perr = client.use_http_proxy(req, proxy)
+    if perr != "" {
+        out = "proxy error: ${perr}"
+    } else {
+        r, err = client.send_request(req)
+        if err != "" {
+            out = "error: ${err}"
+        } else {
+            out = "${client.response_status(r)} ${client.response_body(r)}"
+            client.response_free(r)
+        }
+    }
+    client.request_free(req)
+    string seen = px ? Log {}
+    return "${out} seen=${seen}"
+}
+
+fn expect(what: string, got: string, want: string) -> int {
+    if string.contains(got, want) != 1 {
+        println("FAIL: ${what}:\n  got  ${got}\n  want ${want}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    cert = os.getenv("CERT_PATH")
+    key = os.getenv("KEY_PATH")
+    if cert == "" || key == "" {
+        println("FAIL: CERT_PATH and KEY_PATH must be set")
+        exit(1)
+    }
+    origin = http.server_create(0)
+    http.server_set_host(origin, "127.0.0.1")
+    terr = http.server_set_tls(origin, cert, key)
+    if terr != "" {
+        println("SKIP: the origin cannot serve TLS here: ${terr}")
+        http.server_free(origin)
+        exit(0)
+    }
+    http.server_get(origin, "/", handle_root, 0)
+    if http.server_bind(origin, "127.0.0.1", 0) != "" {
+        println("FAIL: bind the origin")
+        exit(1)
+    }
+    serr = http.server_start_background(origin)
+    if serr != "" {
+        println("FAIL: start the origin: ${serr}")
+        exit(1)
+    }
+    oport = http.server_port(origin)
+
+    psrv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    proxy = "http://127.0.0.1:${tcp.server_port(psrv)}"
+    px = spawn(Proxy())
+    px ! Listen { srv: psrv, origin_port: oport }
+
+    url = "https://127.0.0.1:${oport}/"
+    connect = "CONNECT 127.0.0.1:${oport} HTTP/1.1|"
+    fails = 0
+    fails = fails + expect("through the tunnel", fetch(px, "ok", url, proxy, cert),
+        "200 tunnelled-ok seen=${connect}")
+    fails = fails + expect("a refusal", fetch(px, "407", url, proxy, cert),
+        "error: proxy CONNECT refused (status 407) seen=${connect}")
+    fails = fails + expect("a four-digit status", fetch(px, "2000", url, proxy, cert),
+        "error: proxy CONNECT: malformed reply from the proxy seen=${connect}")
+
+    tcp.server_close(psrv)
+    http.server_stop(origin)
+    http.server_free(origin)
+    if fails > 0 { exit(1) }
+    println("PASS: https through a CONNECT proxy, its refusals and a malformed reply")
+}
