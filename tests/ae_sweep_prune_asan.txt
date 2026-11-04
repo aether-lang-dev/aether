@@ -27,6 +27,7 @@ tests/integration/string_substring_n_no_leak/
 # SANDBOX
 tests/integration/sandbox_
 tests/integration/contrib_host_stunt/
+tests/integration/std_guest/
 
 # CODE-SHAPE
 tests/integration/build_profile_flag/
