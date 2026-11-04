@@ -408,3 +408,28 @@ TEST(slices_string_view_holds_its_header_or_copies) {
     ASSERT_EQ(1, aether_slice_buf(c)->refs);
     aether_slice_release(&c);
 }
+
+/* #3568: the copy a header with its top byte set forces (a target whose heap
+ * pointers carry a tag there, Android on aarch64) is a read-only view as the
+ * string's own view is, so `free` of it is the same named panic everywhere.
+ * It gave back the copy's buffer instead, where every other target panics. */
+static void free_string_copy(void* arg) {
+    aether_slice_free(*(AetherSlice*)arg, "copy.ae", 3);
+}
+
+TEST(slices_string_view_copy_is_freed_as_the_view_is) {
+    if (sizeof(void*) < 8) return;   /* a 32-bit address always fits */
+    static char text[8] = "abcd";
+    AetherSlice v = aether_slice_make(text, 4);
+    const void* high = (const void*)(uintptr_t)((uint64_t)1 << 63 | 0x1000u);
+    AetherSlice c = aether_slice_string_view(v, high);
+    const char* reason = NULL;
+    void (*release)(const void*) = NULL;
+    int panicked = aether_contain(free_string_copy, &c, &reason, &release);
+    ASSERT_EQ(1, panicked);
+    ASSERT_NOT_NULL(strstr(aether_panic_reason_text(reason),
+                           "copy.ae:3: free of a read-only view of a string"));
+    if (release) release(reason);
+    ASSERT_EQ(1, aether_slice_buf(c)->refs);   /* the copy still holds it */
+    aether_slice_release(&c);
+}

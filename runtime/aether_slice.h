@@ -669,15 +669,18 @@ static inline AetherSlice aether_slice_set_shared(AetherSlice* p, AetherSlice v)
  * R2): `free` of a read-only one (string.bytes) or of one of an array's
  * elements is a named panic, where the allocator was given a pointer it never
  * handed out (heap corruption) or one its owner still holds (a double free
- * later). The element type's drop comes from the buffer. */
+ * later). The element type's drop comes from the buffer. A string's bytes
+ * are read-only whether the view holds the string or, where the string's
+ * header does not fit its offset bits, a counted copy of them: `free` of
+ * either is the same named panic on every target. */
 static inline void aether_slice_free(AetherSlice s, const char* file, int line) {
+    if (s.flags & AETHER_SLICE_READONLY)
+        aether_slice_panicf("%s:%d: free of a read-only view of a string, which owns nothing",
+                            file, line);
     if (s.flags & AETHER_SLICE_MADE) {
         aether_slice_unref(s);
         return;
     }
-    if (s.flags & AETHER_SLICE_READONLY)
-        aether_slice_panicf("%s:%d: free of a read-only view of a string, which owns nothing",
-                            file, line);
     if (s.flags & AETHER_SLICE_BORROWED)
         aether_slice_panicf("%s:%d: free of a view of elements another slice or an array "
                             "holds, which owns nothing", file, line);
