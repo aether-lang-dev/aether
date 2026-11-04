@@ -68,6 +68,8 @@ main() {
         fail("fn-typed param path lost the value")
     }
     println("  PASS: fn-typed param boxes and round-trips")
+    // The box the call site made is the holder's to give back.
+    release_closure(h2.cb)
     heap.free(h2)
 
     // 3. Explicit box_closure on a bare function, the fix the panic
@@ -78,6 +80,7 @@ main() {
         fail("box_closure(bare fn) lost the value")
     }
     println("  PASS: box_closure accepts a bare function")
+    release_closure(b)
 
     println("=== test_unbox_unboxed_fn_panics passed ===")
 }

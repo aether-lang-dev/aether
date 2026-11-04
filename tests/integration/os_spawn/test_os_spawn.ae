@@ -79,6 +79,7 @@ main() {
     _ = list.add(argv_slow, "30")
 
     slow, _ = os.spawn_proc("sleep", argv_slow, null) // spawned first, finishes last
+    list.free(argv_slow)
     fast, _ = os.spawn_proc("true", null, null) // spawned second, finishes first
 
     toks = list.new()
@@ -104,6 +105,7 @@ main() {
     _ = list.add(argv_hung, "30")
 
     hung, _ = os.spawn_proc("sleep", argv_hung, null)
+    list.free(argv_hung)
     short, _ = os.spawn_proc("true", null, null)
 
     ttoks = list.new()
@@ -126,6 +128,8 @@ main() {
     _k = os.kill(hung, 9)
     hc, herr = os.wait(hung)
     fails = fails + check("killed child reaps 137 (128+SIGKILL)", hc == 137 && herr == "")
+    list.free(toks)
+    list.free(ttoks)
 
     if fails == 0 {
         println("ALL PASS")

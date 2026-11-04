@@ -53,10 +53,12 @@ main() {
     if os.run("/bin/true", argv, null) != 0 { fail("/bin/true should return 0") }
 
     // 2. /bin/false should exit 1
+    list.free(argv)
     argv = list.new()
     if os.run("/bin/false", argv, null) != 1 { fail("/bin/false should return 1") }
 
     // 3. /bin/echo with arguments, captured stdout
+    list.free(argv)
     argv = list.new()
     _a1 = list.add(argv, "hello")
     _a2 = list.add(argv, "world")
@@ -65,6 +67,7 @@ main() {
     }
 
     // 4. Special shell metacharacters in argv MUST NOT be interpreted.
+    list.free(argv)
     argv = list.new()
     _a3 = list.add(argv, "$HOME")
     _a4 = list.add(argv, "|")
@@ -76,6 +79,7 @@ main() {
     }
 
     // 5. Arguments containing spaces, no shell quoting needed.
+    list.free(argv)
     argv = list.new()
     _a8 = list.add(argv, "two words")
     _a9 = list.add(argv, "and another two")
@@ -84,6 +88,7 @@ main() {
     }
 
     // 6. Custom env with explicit KEY=VALUE entries.
+    list.free(argv)
     argv = list.new()
     env = list.new()
     _e1 = list.add(env, "FOO=bar")
@@ -91,23 +96,28 @@ main() {
     out = capture("/usr/bin/env", argv, env)
     if string.contains(out, "FOO=bar") == 0 { fail("FOO=bar not in env output") }
     if string.contains(out, "BAZ=qux") == 0 { fail("BAZ=qux not in env output") }
+    list.free(env)
 
     // 7. A null env inherits the parent's environment.
+    list.free(argv)
     argv = list.new()
     if string.contains(capture("/usr/bin/env", argv, null), "PATH=") == 0 {
         fail("inherited env should include PATH")
     }
 
     // 8. PATH-resolved program name (no leading slash).
+    list.free(argv)
     argv = list.new()
     if os.run("true", argv, null) != 0 { fail("PATH-resolved 'true' should return 0") }
 
     // 9. A program that cannot start is -1, never an exit status, and one
     // that ran and exited 127 is 127 (#3170). POSIX used to give 127 for
     // both.
+    list.free(argv)
     argv = list.new()
     missing = os.run("/this/program/definitely/does/not/exist", argv, null)
     if missing != -1 { fail("missing program: os.run returned ${missing}, expected -1") }
+    list.free(argv)
     argv = list.new()
     _b1 = list.add(argv, "-c")
     _b2 = list.add(argv, "exit 127")
@@ -115,6 +125,7 @@ main() {
     if ran127 != 127 { fail("sh -c 'exit 127': os.run returned ${ran127}, expected 127") }
 
     // 10. Large captured output, which forces several reallocs.
+    list.free(argv)
     argv = list.new()
     _a10 = list.add(argv, "1")
     _a11 = list.add(argv, "2000")
@@ -124,5 +135,6 @@ main() {
         fail("seq output missing terminal '2000\\n'")
     }
 
+    list.free(argv)
     println("PASS os_run")
 }

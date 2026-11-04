@@ -2,6 +2,7 @@ import raw
 import arr
 
 extern malloc(n: long) -> ptr
+extern free(p: ptr)
 extern memcmp(a: ptr, b: ptr, n: long) -> int
 
 main() {
@@ -11,4 +12,6 @@ main() {
     arr.copy3(p, xs)
     raw.copy12(q, p)
     println("${memcmp(p, q, 12)}")
+    free(p)
+    free(q)
 }

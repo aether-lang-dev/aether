@@ -11,6 +11,7 @@ import bld
 
 extern exit(code: int)
 extern list_remove(_ctx: ptr, index: int)
+extern list_free(list: @frees ptr)
 
 main() {
     b = bld.new() {
@@ -31,5 +32,8 @@ main() {
         println("FAIL: after the extern setter the builder has ${bld.count(c)} entries, want 2")
         exit(1)
     }
+    // bld.new makes each builder a list, the program's to free.
+    list_free(b)
+    list_free(c)
     println("PASS: a where-contracted setter and an extern setter got the block's _ctx")
 }

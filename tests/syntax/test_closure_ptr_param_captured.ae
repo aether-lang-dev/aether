@@ -25,6 +25,8 @@ main() {
     call(h)
     v = ref_get(r)
     if v != 3 { println("FAIL: expected 3"); exit(1) }
+    // The box was the program's to give back; h holds a reference of its own.
+    release_closure(boxed)
     ref_free(r)
     println("ok")
 }

@@ -70,6 +70,8 @@ actor Dier {
         Boom() -> {
             nothing = sandbox.new("nothing") {
             }
+            // The block panics, so a free after it would never run.
+            defer sandbox.free(nothing)
             sandbox.enforce(nothing) callback {
                 panic("inside the block")
             }

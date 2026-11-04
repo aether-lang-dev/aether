@@ -21,6 +21,7 @@
 import std.snapshot
 import std.mem
 import std.worker
+import std.sync
 
 extern malloc(n: int) -> ptr
 extern free(p: ptr)
@@ -39,18 +40,21 @@ unbox(p: ptr) -> int {
 // One atomic increment of the cell via a CAS retry loop — the pattern a
 // concurrent single-writer-per-op user runs. Retries until it wins; frees its
 // own rejected box on a lost race (the box never entered the cell, so no reader
-// can hold it — free it eagerly, NOT via a retire list). Leaks the displaced box
-// on success (a reader may still hold it; a real user retires it a generation
-// late — reclamation timing is orthogonal to the lost-update property under test).
-cas_increment(cell: ptr) {
+// can hold it — free it eagerly). On success it returns the displaced box,
+// which is not freed while any job runs: a reader may still hold it, and with
+// many writers a freed address handed out again would let a stale CAS succeed
+// (ABA, see std.snapshot's reclamation contract). Reclamation timing is
+// orthogonal to the lost-update property under test.
+cas_increment(cell: ptr) -> ptr {
     while 1 == 1 {
         exp = snapshot.load(cell)
         next = box(unbox(exp) + 1)
         if snapshot.cas(cell, exp, next) == 1 {
-            return
+            return exp
         }
         free(next) // lost the race: our box was rejected, free it and retry
     }
+    return null
 }
 
 // Block until every submitted worker job has finished (drain completions + block
@@ -58,6 +62,24 @@ cas_increment(cell: ptr) {
 // A drain-poll loop can observe a transient pending==0 and return before all jobs
 // have run; worker.wait() does not.
 await_all() { worker.wait() }
+
+// The displaced boxes, one slot a writer: each writer takes the next slot,
+// and the slots are freed once every job has finished (reclaim_slots).
+fn retire(slots: ptr, next: ptr, b: ptr) {
+    k = sync.atomic_add(next, 1) - 1
+    mem.set_ptr(slots, (k as int) * 8, b)
+}
+
+fn reclaim_slots(slots: ptr, next: ptr) {
+    n = sync.atomic_load(next) as int
+    k = 0
+    while k < n {
+        free(mem.get_ptr(slots, k * 8))
+        k = k + 1
+    }
+    free(slots)
+    sync.atomic_free(next)
+}
 
 main() {
     passing = 0
@@ -67,10 +89,15 @@ main() {
     // updates). This is the whole point: a broken CAS loop loses updates here.
     n = 500
     cell = snapshot.new(box(0))
+    slots = malloc(n * 8)
+    next = sync.atomic_new(0)
     i = 0
     while i < n {
         _ok = worker.run(
-            || { cas_increment(cell) return null },
+            || {
+                retire(slots, next, cas_increment(cell))
+                return null
+            },
             | r: ptr | {}
         )
         i = i + 1
@@ -84,19 +111,28 @@ main() {
         println("  [1] FAIL expected ${n}, got ${got} (CAS lost updates under contention)")
         failing = failing + 1
     }
+    reclaim_slots(slots, next)
+    free(snapshot.load(cell))
+    snapshot.free(cell)
 
     // Case 2: concurrent readers alongside writers never see a torn/garbage value
     // — every lock-free load returns a value in [0, n2] (a real published box),
     // never junk. Reads race writes; each read is checked in-range.
     n2 = 300
     cell2 = snapshot.new(box(0))
+    slots2 = malloc(n2 * 8)
+    next2 = sync.atomic_new(0)
     j = 0
     while j < n2 {
         _okw = worker.run(
-            || { cas_increment(cell2) return null },
+            || {
+                retire(slots2, next2, cas_increment(cell2))
+                return null
+            },
             | r: ptr | {}
         )
-        // interleave a reader that validates the loaded value is a real box
+        // interleave a reader that validates the loaded value is a real box;
+        // its own box goes back with its completion
         _okr = worker.run(
             || {
                 v = unbox(snapshot.load(cell2))
@@ -104,7 +140,7 @@ main() {
                 if v >= 0 { if v <= 300 { mem.set_int(p, 0, 1) } } // 1 = in range
                 return p
             },
-            | r: ptr | {}
+            | r: ptr | { free(r) }
         )
         j = j + 1
     }
@@ -117,6 +153,9 @@ main() {
         println("  [2] FAIL expected ${n2}, got ${got2} (writers lost updates under read contention)")
         failing = failing + 1
     }
+    reclaim_slots(slots2, next2)
+    free(snapshot.load(cell2))
+    snapshot.free(cell2)
 
     println("")
     println("snapshot_concurrent: ${passing} passing, ${failing} failing")

@@ -140,12 +140,18 @@ items(b: ptr) -> int {
     return bb.items
 }
 
-// A builder written as clauses gets its config like a single builder.
+// A builder written as clauses gets its config like a single builder, and
+// frees it as one does.
 builder tally(0) with new_bag -> int {
+    bag = _builder as *Bag
+    heap.free(bag)
     return 100
 }
 builder tally(want: int) with new_bag -> int {
-    return items(_builder) + want
+    n = items(_builder) + want
+    bag = _builder as *Bag
+    heap.free(bag)
+    return n
 }
 
 // A function returning nothing, written as one clause with a literal

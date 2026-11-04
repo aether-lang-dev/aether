@@ -11,6 +11,8 @@ set_opt(_ctx: ptr, key: string, value: string) {
 }
 
 builder process(label: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     mode = "default"
     if _builder != null {
         if map_has(_builder, "mode") == 1 {

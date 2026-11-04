@@ -15,6 +15,7 @@ import std.io
 struct Holder { s: string }
 
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 main() {
     h = malloc(sizeof(Holder)) as *Holder
@@ -27,4 +28,9 @@ main() {
         i = i + 1
     }
     println("done: ${h.s}")
+    // The last value is released by hand like the others, then the box.
+    last = h.s
+    h.s = ""
+    string.release(last)
+    free(h as ptr)
 }

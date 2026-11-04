@@ -12,6 +12,8 @@ set_opt(_ctx: ptr, key: string, value: string) {
 // --- 1. Nested builder blocks ---
 
 builder outer_task(label: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     inner_mode = ""
     outer_mode = ""
     if _builder != null {
@@ -22,6 +24,8 @@ builder outer_task(label: string) {
 }
 
 builder inner_task(label: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     mode = ""
     if _builder != null {
         if map_has(_builder, "mode") == 1 { mode, _ = map.get_string(_builder, "mode") }
@@ -32,6 +36,8 @@ builder inner_task(label: string) {
 // --- 2. Builder with early return ---
 
 builder check_config(label: string): int {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     if _builder == null {
         println("check: ${label} no config")
         return 0
@@ -48,6 +54,8 @@ builder check_config(label: string): int {
 // --- 3. Builder returning from middle of logic ---
 
 builder validate(name: string): string {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     if _builder == null { return "none" }
     if map_has(_builder, "mode") == 0 { return "default" }
     m, _ = map.get(_builder, "mode")

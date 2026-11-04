@@ -383,7 +383,15 @@ main() {
 AE
 if (cd "$TMP" && AETHER_HOME="$ROOT" "$AE" build grow.ae -o grow >/dev/null 2>&1); then
     owned=$("$TMP/grow" | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
-    leaked=$("$TMP/grow" leak | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    # The control leaks on purpose. Under ASan (the sweep's AETHER_SANITIZER
+    # =asan run) LeakSanitizer is told so for that one run, whose leak is the
+    # point; the run that releases what it makes is still checked by it.
+    if [ "${AETHER_SANITIZER:-}" = asan ]; then
+        leaked=$(ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0" "$TMP/grow" leak \
+            | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    else
+        leaked=$("$TMP/grow" leak | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    fi
     if [ -z "$owned" ] || [ "$owned" -gt 8 ]; then
         echo "  [FAIL] grow: the heap grew by ${owned:-?} MB over 200 rounds that release what they make"
         fails=$((fails + 1))

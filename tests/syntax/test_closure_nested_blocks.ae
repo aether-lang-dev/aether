@@ -70,6 +70,12 @@ main() {
     // Simulate pressing: 7, 8, +, 7, =
     // The trailing blocks ran inline, so let's just verify structure
     println("root children: ${list.size(root)}")
+    // The panels root holds are lists of their own, which list.free(root)
+    // leaves to the program.
+    first, _ = list.get(root, 0)
+    second, _ = list.get(root, 1)
+    list.free(first)
+    list.free(second)
     list.free(root)
     println("nested blocks ok")
 }

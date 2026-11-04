@@ -35,6 +35,7 @@ child(mode: string) -> int {
         av = list.new()
         list.add(av, "sleep30")
         _token, err = os.spawn_proc(os.args_get(0), av, null)
+        list.free(av)
         if err != "" { return 9 }
         return 0
     }

@@ -8,6 +8,7 @@
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 struct Holder {
     value: int,
@@ -31,5 +32,6 @@ main() {
         println("FAIL: the trailing block ran ${h.ran} times, want 1")
         exit(1)
     }
+    free(h as ptr)
     println("ok")
 }

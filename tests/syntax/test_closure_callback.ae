@@ -64,6 +64,12 @@ main() {
     simulate_click(cancel_action)
     simulate_click(save_action)
 
+    // The panels root holds are lists of their own, which list.free(root)
+    // leaves to the program.
+    first, _ = list.get(root, 0)
+    second, _ = list.get(root, 1)
+    list.free(first)
+    list.free(second)
     list.free(root)
     println("callback ok")
 }

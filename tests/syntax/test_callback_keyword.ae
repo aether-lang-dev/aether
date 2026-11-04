@@ -56,4 +56,9 @@ main() {
     println(ref_get(counter))
 
     println("callback ok")
+    // The registry's two lists are elements of it, which list.free(reg)
+    // leaves; the handlers list releases the boxes it holds.
+    names, _ = list.get(reg, 0)
+    list.free(names)
+    list.free(handlers)
 }

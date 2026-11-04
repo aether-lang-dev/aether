@@ -10,6 +10,7 @@
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 struct Box {
     n: int
@@ -74,5 +75,6 @@ main() {
     check(show(q.n, down(p, 3)) == 1002, "a write down a recursion through the set")
     p.n = 1
     check(show(q.n, via(p, 3)) == 1002, "a write in a set reached through another function")
+    free(p as ptr)
     println("ok")
 }

@@ -51,11 +51,12 @@ k_env(n: int) -> int {
 // A closure kept in a list: its box.
 k_box(n: int) -> int {
     l = list.new()
+    // The injected failure ends the call early, so the list is freed by defer.
+    defer list.free(l)
     f = || { return 1 }
     aether_test_fail_alloc_after(1)
     _ = list.add(l, f)
     s = list.size(l)
-    list.free(l)
     return s + n
 }
 

@@ -72,5 +72,14 @@ main() {
     }
     b3.s = "maybe"
     println("survived maybe: ${b3.s}")
+    // Each box is freed the way it was made: b3 by the branch that made it.
+    if b.p0 == 2 {
+        heap.free(b3)
+    } else {
+        c_free(b3 as ptr)
+    }
+    c_free(b as ptr)
+    heap.free(h)
+    c_free(b2 as ptr)
     return 0
 }
