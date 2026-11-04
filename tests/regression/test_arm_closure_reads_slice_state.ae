@@ -1,0 +1,137 @@
+// Regression (#3568): a closure made in a receive arm may read a state
+// field of a slice type.
+//
+// The closure copies each state field it reads when it is made, and the
+// copy must hold what it reads, since the next store into the state
+// releases what the field held (#2890). A slice could not be held, so
+// reading one was refused (E0600, "a slice is not judged here"). A slice
+// buffer is counted now: the closure's copy takes a reference of its own,
+// which its environment gives back, so the copy stays whole however often
+// the state is stored over. Each closure here is kept in a global, the
+// state is stored over (whole, and an element of it), buffers of the same
+// size are made and filled in between (a buffer freed under the copy would
+// come back holding the filler), and the closure is run after: it reads the
+// values it was made with. The copy views the buffer the field held, as
+// any copy of a slice does, so an element stored before the field is bound
+// again is seen through it. A closure made and run within one arm, over a
+// field it reads after a store, reads the state as it was when the closure
+// was made.
+
+import std.string
+
+extern exit(code: int)
+
+message Make {}
+
+message Change {
+    n: int
+}
+
+message Run {}
+
+message Within {}
+
+var kept: fn = null
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3568: ${msg}")
+        exit(1)
+    }
+}
+
+filled(n: int, base: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = base + i
+    }
+    return xs
+}
+
+named(n: int, w: string) -> string[] {
+    out = make([]string, n)
+    for i in 0..n {
+        out[i] = string.concat(w, "${i}")
+    }
+    return out
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    words = make([]string, 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            b = make([]int, n)
+            for i in 0..n {
+                b[i] = -7
+            }
+            keep = append(keep, b)
+        }
+        words = append(words, string.concat("z", "${r}"))
+        words = append(words, string.concat("zz", "${r % 10}"))
+    }
+    return keep.len + words.len
+}
+
+sum(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+actor Box {
+    state nums = filled(3, 10)
+    state words = named(2, "w")
+    state rows = make([]int[], 0)
+
+    receive {
+        Make() -> {
+            rows = make([]int[], 2)
+            rows[0] = filled(2, 40)
+            rows[1] = filled(4, 50)
+            kept = || {
+                int a = sum(nums) + nums.len * 1000
+                int b = string.length(words[1]) * 100 + words.len
+                int c = rows[1][3] + rows.len * 100
+                return a + b * 10000 + c * 1000000
+            }
+        }
+        Change(n) -> {
+            nums[0] = n
+            nums = filled(4, n)
+            words = named(3, "xyz")
+            rows[0] = filled(2, n)
+            rows = make([]int[], 0)
+            churn()
+        }
+        Run() -> {
+            int v = call(kept)
+            // nums 1 11 12 (sum 24, len 3: the first store into nums[0]
+            // went into the buffer the copy views), words "w1" and 2,
+            // rows[1][3] 53 and 2 rows.
+            check(v == 24 + 3000 + (200 + 2) * 10000 + (53 + 200) * 1000000,
+                "a kept closure reads the slices it was made with (${v})")
+        }
+        Within() -> {
+            nums = filled(2, 70)
+            f = || { return sum(nums) * 10 + nums.len }
+            nums = filled(5, 80)
+            churn()
+            int r = call(f)
+            check(r == (70 + 71) * 10 + 2, "a closure run in its arm reads the state it was made with (${r})")
+        }
+    }
+}
+
+main() {
+    b = spawn(Box())
+    b ! Make {}
+    b ! Change { n: 1 }
+    b ! Change { n: 2 }
+    b ! Run {}
+    b ! Within {}
+    wait_for_idle()
+    println("ok")
+}

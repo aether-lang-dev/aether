@@ -560,10 +560,13 @@ holds that value, not the field's later ones. The copy must hold what it
 reads, because the next store into the state releases what the field
 held, so the copy takes a reference of its own to everything it holds:
 scalars, enums, bitsets and handles (`ptr`, actor references) are values;
-a string or a closure is retained; a struct, a tuple, an optional and a
-fixed-size array take a reference to each part they own (#2921). A sum or
-a slice is refused at compile time, naming the field: read what the
-closure needs into arm locals first and use those.
+a string or a closure is retained; a struct, a tuple, an optional, a sum
+and a fixed-size array take a reference to each part they own (#2921,
+#3005); a slice takes one to its buffer, which is counted, so a store into
+the state after the closure was made leaves the closure's copy whole
+(#3568). Anything else (a fixed-size array of slices) is refused at
+compile time, naming the field: read what the closure needs into arm
+locals first and use those.
 
 **Proper fix:** thread `self` through the closure's env so state
 writes compile to `self->field = ...`. Medium-sized codegen change;

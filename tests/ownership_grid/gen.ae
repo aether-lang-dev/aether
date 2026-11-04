@@ -406,9 +406,6 @@ slice_skip(kid: string, pid: string, t: string) -> string {
     if (pid == "P12D" || pid == "P12K") && t == "T12" {
         return "a slice moves into the message it is sent in: reading it after the send is E0906"
     }
-    if pid == "P11" && t == "T16" {
-        return "a closure in a handler reads no state field of a slice type (E0600)"
-    }
     if pid == "P15" {
         return "a fixed-size array of slices is no parameter type the parser takes (`p: int[][2]`)"
     }

@@ -4351,8 +4351,10 @@ static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node) {
  *   - a struct is copied, by `_aether_copy_<Name>` when it owns strings, closures
  *     or arrays (#2504), so the copy holds its own;
  *   - a tuple, an optional, a sum and a fixed-size array are copied with a
- *     reference taken to each part they own (capture_take, #2921, #3005).
- * A slice is not judged here and is refused. */
+ *     reference taken to each part they own (capture_take, #2921, #3005);
+ *   - a slice's buffer is counted (#3568): the copy takes a reference of
+ *     its own to it (capture_take), which the environment gives back.
+ * A fixed-size array of slices is not judged here and is refused. */
 static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* closure,
                                                   ASTNode* sd) {
     Type* t = sd ? sd->node_type : NULL;
@@ -4367,7 +4369,8 @@ static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* c
             return NULL;
         case TYPE_ARRAY: {
             Type* e = t->element_type;
-            if (t->array_size <= 0 || !e) return "a slice is not judged here";
+            if (!e) return "its element type is not known here";
+            if (t->array_size <= 0) return NULL;   /* a slice, counted (#3568) */
             switch (e->kind) {
                 case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
                 case TYPE_UINT16: case TYPE_UINT8: case TYPE_DURATION: case TYPE_FLOAT:
