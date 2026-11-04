@@ -1498,6 +1498,26 @@ static int match_gives_fresh(ASTNode* m) {
     return m->child_count > 1;
 }
 
+/* Does the parameter argument `i` of `call` is given wrap it (an optional, a
+ * tuple)? Codegen gives a value there that is no place (a call's result, a
+ * view, an `if`) an argument temporary of the parameter's type, which drops
+ * what it holds after the call (fresh_composite_arg_type,
+ * emit_composite_arg_temp); a place it passes as it is, borrowed. */
+static int wraps_arg(Ctx* c, ASTNode* call, int i) {
+    ASTNode* d = call_def(c, call);
+    if (!d) return 0;
+    int k = 0;
+    for (int j = 0; j < d->child_count; j++) {
+        ASTNode* p = d->children[j];
+        if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION))
+            continue;
+        if (k++ == i)
+            return p->node_type && (p->node_type->kind == TYPE_OPTIONAL ||
+                                    p->node_type->kind == TYPE_TUPLE);
+    }
+    return 0;
+}
+
 static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
     ASTNode* a = call->children[i];
     /* An `if` that gives the slice holds the reference its branch gave
@@ -1519,22 +1539,18 @@ static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
         Type* t = call->node_type;
         return t && t->kind != TYPE_PTR && !type_is_slice(t) && t->kind != TYPE_STRING;
     }
-    int k = 0, first = 1;
     for (int j = 0; j < d->child_count; j++) {
         ASTNode* p = d->children[j];
         if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION))
             continue;
-        if (first && p->value && strcmp(p->value, "_ctx") == 0) return 0;
-        first = 0;
-        /* A parameter that wraps the slice (an optional, a tuple) is given
-         * an argument temporary of its own, which holds the reference and
-         * drops it after the call (codegen's emit_composite_arg_temp), as
-         * a string there is: released here too, it was given back twice. */
-        if (k++ == i)
-            return !(p->node_type && (p->node_type->kind == TYPE_OPTIONAL ||
-                                      p->node_type->kind == TYPE_TUPLE));
+        if (p->value && strcmp(p->value, "_ctx") == 0) return 0;
+        break;
     }
-    return 1;
+    /* A parameter that wraps the slice (an optional, a tuple) is given an
+     * argument temporary of its own, which holds the reference and drops it
+     * after the call (wraps_arg), as a string there is: released here too,
+     * it was given back twice. */
+    return !wraps_arg(c, call, i);
 }
 
 /* Is `e` a field of a struct parameter (`b.items`, `b.inner.items`)? The
@@ -1641,6 +1657,22 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
          * moved out of a local that owns, or a copy of its own. */
         if (keeps_arg(c, n, i)) {
             rewrite_value(c, f, slot, C_MOVE);
+            continue;
+        }
+        /* #3568: given to a parameter that wraps it (an optional, a tuple),
+         * a value that is no place goes into an argument temporary, which
+         * drops what it holds after the call (wraps_arg): it takes a
+         * reference of its own, a view or a branch's place a copy, a call's
+         * result the one it hands over. A view (`count(xs[1..])`) or an
+         * `if` (`count(if c { xs } else { mk(2) })`) was put there as it
+         * stood, and the drop gave back the buffer's reference it never
+         * took. */
+        ASTNode* av = *slot;
+        if (wraps_arg(c, n, i) && type_is_slice(av->node_type) &&
+            av->type != AST_IDENTIFIER && av->type != AST_MEMBER_ACCESS &&
+            av->type != AST_ARRAY_ACCESS && av->type != AST_TUPLE_UNWRAP) {
+            rewrite(c, f, slot);
+            move_rewritten(slot);
             continue;
         }
         if (slice_temp_arg(c, n, i)) {

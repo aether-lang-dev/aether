@@ -1,0 +1,62 @@
+// Regression (#3568): a view or an `if` given to an optional parameter is
+// held by the argument's temporary it is wrapped in.
+//
+// A value given to an optional parameter that is no place goes into an
+// argument temporary of the optional's type, which drops what it holds
+// after the call. `count(xs[1..])` and `count(if c { xs } else { mk(2) })`
+// put the view, or the branch's place, in it as it stood, with no reference
+// of its own, and the drop gave back the reference `xs` holds: the buffer
+// was freed under `xs`. Such a value now takes a reference of its own for
+// the temporary (a view or a place a copy, a call's result the one it
+// hands over).
+//
+// `xs` is read back after the calls, and where the heap count is exact
+// (mem.heap_in_use_exact) rounds of them leave the heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+count(o: int[]?) -> int {
+    return match o {
+        some(v) -> v.len
+        none -> 0
+    }
+}
+
+shape(c: bool) -> int {
+    xs = mk(3)
+    a = count(xs[1..])
+    b = count(if c { xs } else { mk(2) })
+    check(xs.len == 3 && xs[2] == 12, "the slice after the calls")
+    return a + b
+}
+
+main() {
+    check(shape(true) == 2 + 3, "c true")
+    check(shape(false) == 2 + 2, "c false")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                for i in 0..50 {
+                    _a = shape(i % 2 == 0)
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}
