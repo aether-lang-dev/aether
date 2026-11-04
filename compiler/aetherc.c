@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <time.h>
 #ifdef _WIN32
 #include <process.h>
@@ -325,6 +326,53 @@ static double phase_cpu_ms(void) {
 // Helper to check file existence
 int compiler_file_exists(const char* path) {
     return access(path, F_OK) == 0;
+}
+
+/* #3574: a file this compile writes, opened as fopen opens it, or NULL with
+ * errno set. On Windows another process can hold a file it has just seen
+ * written, without sharing it for writing: a virus scanner reading it after
+ * it was closed, an indexer, an editor. Opening it then fails with a sharing
+ * or lock violation, which msvcrt reports as EACCES ("Permission denied"),
+ * and a sweep that wrote one output path a program after another lost one
+ * compile in about a thousand to it, though the compile itself is the same
+ * every run. Such a hold is released within moments, so those two errors
+ * are retried for up to about two seconds; anything else (a missing
+ * directory, a read-only file) fails at once, as on every other platform,
+ * where a file is not held this way. */
+static FILE* open_output_file(const char* path, const char* mode) {
+    FILE* f = fopen(path, mode);
+#ifdef _WIN32
+    for (int wait_ms = 10, waited = 0; !f && waited < 2000; waited += wait_ms, wait_ms *= 2) {
+        DWORD why = GetLastError();
+        int held = why == ERROR_SHARING_VIOLATION || why == ERROR_LOCK_VIOLATION ||
+                   why == ERROR_USER_MAPPED_FILE;
+        if (why == ERROR_ACCESS_DENIED) {
+            /* A file being deleted while a handle to it stays open refuses
+             * every open until the handle goes; a read-only one, or a
+             * directory, refuses for good. */
+            DWORD attrs = GetFileAttributesA(path);
+            held = attrs != INVALID_FILE_ATTRIBUTES &&
+                   !(attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY));
+            SetLastError(why);   /* the open's error, for the report */
+        }
+        if (!held) break;
+        Sleep((DWORD)wait_ms);
+        f = fopen(path, mode);
+    }
+#endif
+    return f;
+}
+
+/* Why `path` could not be opened for writing, on stderr. */
+static void report_output_open_failure(const char* path) {
+    int err = errno;
+#ifdef _WIN32
+    DWORD why = GetLastError();
+    fprintf(stderr, "Error opening output file '%s': %s (Windows error %lu)\n", path,
+            strerror(err), (unsigned long)why);
+#else
+    fprintf(stderr, "Error opening output file '%s': %s\n", path, strerror(err));
+#endif
 }
 
 // Derive header filename from output path (output.c -> output.h)
@@ -1572,9 +1620,9 @@ int compile_source(const char* input_path, const char* output_path) {
     // C file with the embedded AetherNamespaceManifest + aether_describe()
     // stub. Output path is `output_path` (the second positional argument).
     if (emit_namespace_describe) {
-        FILE* out = fopen(output_path, "w");
+        FILE* out = open_output_file(output_path, "w");
         if (!out) {
-            perror("Error opening output file");
+            report_output_open_failure(output_path);
             free_ast_node(program);
             free_tokens(tokens, token_count);
             free_parser(parser);
@@ -1940,10 +1988,10 @@ int compile_source(const char* input_path, const char* output_path) {
      * text stream on Windows does not take. A path that cannot be opened so
      * (a write-only device) is written as before, and codegen keeps its
      * temporaries in statement expressions there. */
-    FILE *output = fopen(output_path, "w+b");
-    if (!output) output = fopen(output_path, "w");
+    FILE *output = open_output_file(output_path, "w+b");
+    if (!output) output = open_output_file(output_path, "w");
     if (!output) {
-        perror("Error opening output file");
+        report_output_open_failure(output_path);
         // Cleanup
         module_registry_shutdown();
         free_ast_node(program);
@@ -1962,7 +2010,7 @@ int compile_source(const char* input_path, const char* output_path) {
         } else {
             header_path = strdup(emit_header_path);
         }
-        header_output = fopen(header_path, "w");
+        header_output = open_output_file(header_path, "w");
         if (!header_output) {
             fprintf(stderr, "Warning: Could not open header file %s\n", header_path);
         }
@@ -1985,7 +2033,7 @@ int compile_source(const char* input_path, const char* output_path) {
     // pre-existing --header (header_output) path above.
     FILE* csrc_header = NULL;
     if (csrc_header_path) {
-        csrc_header = fopen(csrc_header_path, "w");
+        csrc_header = open_output_file(csrc_header_path, "w");
         if (!csrc_header) {
             fprintf(stderr, "Error: cannot open --emit-header path '%s'\n", csrc_header_path);
             fclose(output);
@@ -1999,7 +2047,7 @@ int compile_source(const char* input_path, const char* output_path) {
     FILE* csrc_catalog = NULL;
     char csrc_cap_buf[64];
     if (csrc_catalog_path) {
-        csrc_catalog = fopen(csrc_catalog_path, "w");
+        csrc_catalog = open_output_file(csrc_catalog_path, "w");
         if (!csrc_catalog) {
             fprintf(stderr, "Error: cannot open --emit-catalog-json path '%s'\n", csrc_catalog_path);
             if (csrc_header) fclose(csrc_header);
@@ -2257,7 +2305,7 @@ static int do_concat_ae(char** inputs, int input_count, const char* output_path)
         return 1;
     }
 
-    FILE* out = fopen(output_path, "w");
+    FILE* out = open_output_file(output_path, "w");
     if (!out) {
         fprintf(stderr, "Error: --concat-ae: cannot write '%s'\n", output_path);
         for (int i = 0; i < input_count; i++) free(bodies[i]);
@@ -2418,7 +2466,7 @@ static int emit_aea(const char* input, const char* output) {
     size_t tmp_cap = strlen(output) + 32;
     char* tmp = (char*)aether_xrealloc(NULL, tmp_cap);
     snprintf(tmp, tmp_cap, "%s.tmp.%d", output, (int)getpid());
-    FILE* f = fopen(tmp, "wb");
+    FILE* f = open_output_file(tmp, "wb");
     int ok = f && fwrite(data, 1, len, f) == len;
     if (f && fclose(f) != 0) ok = 0;
     free(data);
