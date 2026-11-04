@@ -12,6 +12,12 @@
 # vars. The check (aetherc --time-phases, its typecheck phase) is timed at
 # 1000 and at 4000: four times the declarations must cost less than eight
 # times the time (linear is four, the walks made it twelve).
+#
+# The time is the CPU time aetherc spent, summed over three runs of each
+# size taken in turn, not the wall clock: the sweep runs this beside other
+# tests, many of them running a scheduler on every core, and the wall clock
+# of the longer compile counted the time it waited for a core. A linear
+# check read 8.9x on a busy Windows runner and 4.8x alone.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -53,7 +59,8 @@ program() {
     }' > "$d/main.ae"
 }
 
-# check_ms <n>: compile the program of n; its typecheck phase in whole ms in $MS.
+# check_ms <n>: compile the program of n; its typecheck phase's CPU time in
+# whole ms in $MS.
 check_ms() {
     d="$TMPDIR/p$1"
     (cd "$d" && "$AETHERC" --time-phases main.ae out.c) > "$d/aetherc.log" 2>&1
@@ -63,7 +70,7 @@ check_ms() {
         tail -5 "$d/aetherc.log" | sed 's/^/    /'
         exit 1
     fi
-    MS=$(sed -n 's/^phase typecheck \([0-9]*\)\..*$/\1/p' "$d/aetherc.log")
+    MS=$(sed -n 's/^phase typecheck [0-9.]* \([0-9]*\)\.[0-9]*$/\1/p' "$d/aetherc.log")
     if [ -z "$MS" ]; then
         echo "  [FAIL] $NAME: no typecheck phase in aetherc's --time-phases output"
         exit 1
@@ -72,22 +79,21 @@ check_ms() {
 
 program 1000
 program 4000
-# The best of three of each, taken in turn, so a moment the runner is busy
-# slows one run, not the comparison.
-small=""
-large=""
+small=0
+large=0
 for run in 1 2 3; do
     check_ms 1000
-    if [ -z "$small" ] || [ "$MS" -lt "$small" ]; then small=$MS; fi
+    small=$(( small + MS ))
     check_ms 4000
-    if [ -z "$large" ] || [ "$MS" -lt "$large" ]; then large=$MS; fi
+    large=$(( large + MS ))
 done
 
-# Below 20 ms the timer's grain decides.
-[ "$small" -lt 20 ] && small=20
+# Below 30 ms a run the clock's grain decides: Windows charges CPU time a
+# clock tick, about 15.6 ms, at a time.
+[ "$small" -lt 90 ] && small=90
 if [ "$large" -ge $(( small * 8 )) ]; then
-    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms, 4000 in ${large} ms: four times the declarations cost $(( large / small ))x the time (linear is 4x)"
+    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms of CPU, 4000 in ${large} ms (three runs each): four times the declarations cost $(( large / small ))x the time (linear is 4x)"
     exit 1
 fi
-echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms, 4000 in ${large} ms"
+echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms of CPU, 4000 in ${large} ms (three runs each)"
 exit 0

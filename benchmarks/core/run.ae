@@ -129,7 +129,8 @@ record_rows(t: ptr, best: ptr, out: string) {
     string.array_free(lines)
 }
 
-// `phase <name> <ms>` lines from aetherc --time-phases.
+// `phase <name> <ms> <cpu ms>` lines from aetherc --time-phases: the wall
+// clock is the one recorded (a base tree's aetherc may print no CPU time).
 record_phases(t: ptr, best: ptr, out: string) {
     lines = string.split(out, "\n")
     n = string.array_size(lines)
@@ -138,7 +139,7 @@ record_phases(t: ptr, best: ptr, out: string) {
         line = string.trim(string.array_get(lines, i))
         if string.starts_with(line, "phase ") != 0 {
             parts = string.split(line, " ")
-            if string.array_size(parts) == 3 {
+            if string.array_size(parts) >= 3 {
                 v, err = string.to_double(string.array_get(parts, 2))
                 if err == "" {
                     record(t, best, "compile_phase_${string.array_get(parts, 1)}", "ms", v)

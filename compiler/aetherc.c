@@ -52,12 +52,17 @@ static int g_lib_actors = 0;
 static bool verbose_mode = false;
 
 /* --time-phases (#3518): how long each phase of a compile took, written to
- * stderr as `phase <name> <ms>` lines as each one ends, for
- * benchmarks/core/run.ae. The clock is the runtime's monotonic one, which
- * aetherc links (runtime/aether_resource_caps.c). */
+ * stderr as `phase <name> <ms> <cpu ms>` lines as each one ends. The first
+ * is the wall clock, the runtime's monotonic one, which aetherc links
+ * (runtime/aether_resource_caps.c): what benchmarks/core/run.ae reports.
+ * The second is the process's CPU time (phase_cpu_ms), which a busy machine
+ * does not stretch the way it stretches the wall clock: what a test of how
+ * a phase scales compares (lookup_index_scaling). */
 int64_t aether_caps_now_ns(void);
+static double phase_cpu_ms(void);
 static bool time_phases = false;
 static double phase_started_ms = 0;
+static double phase_started_cpu_ms = 0;
 
 static double phase_clock_ms(void) {
     return (double)aether_caps_now_ns() / 1000000.0;
@@ -67,8 +72,12 @@ static double phase_clock_ms(void) {
 static void phase_mark(const char* name) {
     if (!time_phases) return;
     double now = phase_clock_ms();
-    if (name) fprintf(stderr, "phase %s %.3f\n", name, now - phase_started_ms);
+    double cpu = phase_cpu_ms();
+    if (name)
+        fprintf(stderr, "phase %s %.3f %.3f\n", name, now - phase_started_ms,
+                cpu - phase_started_cpu_ms);
     phase_started_ms = now;
+    phase_started_cpu_ms = cpu;
 }
 static bool dump_ast_mode = false;
 static bool emit_c_mode = false;
@@ -290,6 +299,25 @@ static bool emit_aea_mode = false;
     #include <unistd.h>
     #define PATH_SEP '/'
 #endif
+
+/* The process's CPU time in ms, for --time-phases. Windows charges CPU time
+ * a clock tick (about 15.6 ms) at a time, so a phase shorter than a few
+ * ticks reads coarse there; POSIX's clock() counts it in microseconds.
+ * (Windows' clock() is the wall clock, so it is not used there.) */
+static double phase_cpu_ms(void) {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime;
+    k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime;
+    u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) / 10000.0;
+#else
+    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+#endif
+}
 
 // Helper to check file existence
 int compiler_file_exists(const char* path) {
@@ -2319,7 +2347,7 @@ void print_help(const char* program_name) {
     printf("Options:\n");
     printf("  --version, -v                    Show version information\n");
     printf("  --verbose                        Show detailed compilation phases and timing\n");
-    printf("  --time-phases                    Print `phase <name> <ms>` to stderr as each phase ends\n");
+    printf("  --time-phases                    Print `phase <name> <ms> <cpu ms>` to stderr as each phase ends\n");
     printf("  --emit-c                         Print generated C code to stdout\n");
     printf("  --emit-header [path]             Generate C header for embedding (default: auto)\n");
     printf("  --emit-deps=<path>              Write the resolver dependency manifest (files read +\n");

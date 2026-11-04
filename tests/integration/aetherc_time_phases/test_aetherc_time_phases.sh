@@ -1,7 +1,8 @@
 #!/bin/sh
-# #3518: `aetherc --time-phases` writes one `phase <name> <ms>` line to stderr
-# for each phase of the compile, in order, and the compile itself is the same
-# as without the flag. benchmarks/core/run.ae reads these lines.
+# #3518: `aetherc --time-phases` writes one `phase <name> <ms> <cpu ms>` line
+# to stderr for each phase of the compile, in order, and the compile itself is
+# the same as without the flag. benchmarks/core/run.ae reads the wall clock,
+# lookup_index_scaling the CPU time.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -26,7 +27,7 @@ if ! "$AETHERC" --time-phases "$TMP/hello.ae" "$TMP/timed.c" 2> "$TMP/err.txt"; 
 fi
 "$AETHERC" "$TMP/hello.ae" "$TMP/plain.c" 2> /dev/null
 
-names=$(sed -n 's/^phase \([a-z]*\) [0-9][0-9]*\.[0-9][0-9]*$/\1/p' "$TMP/err.txt" | tr '\n' ' ')
+names=$(sed -n 's/^phase \([a-z]*\) [0-9][0-9]*\.[0-9][0-9]* [0-9][0-9]*\.[0-9][0-9]*$/\1/p' "$TMP/err.txt" | tr '\n' ' ')
 want="lex parse merge typecheck analysis codegen "
 if [ "$names" != "$want" ]; then
     echo "  [FAIL] aetherc_time_phases: phases '$names', want '$want'"
