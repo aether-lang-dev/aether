@@ -310,12 +310,13 @@ three brackets a level, and the parser takes them up to 512 levels deep
 | Clang (Apple's, emcc and zig cc included) | 256 brackets, parentheses and braces nested, unless `-fbracket-depth=N` raises it | passes `-fbracket-depth=2048` (`AETHER_C_BRACKET_DEPTH`, four a level of the parser's limit) on every compile of generated C: `ae run`, `ae build`, `ae build --target=<triple>` and the wasm backend. A native compiler is asked once per run whether it takes the option, so `$AE_CC` / `$CC` naming Clang anywhere gets it too |
 | MSVC (`cl.exe`) | compound statements, loops and selections nested about 100 to 110 deep (C1061, "blocks nested too deeply"); no option raises it | nothing it can do: a program nesting blocks deeper does not build with MSVC |
 
-A build system that compiles `aetherc` output with Clang itself passes the same
-option:
+`ae cflags` prints the option too when the compiler `ae` drives (`$AE_CC`,
+`$CC`, else `gcc`, else `cc`) takes it, so a build that compiles `aetherc`
+output itself with that compiler gets it with the include flags:
 
 ```bash
 aetherc app.ae app.c
-clang app.c $(ae cflags) -fbracket-depth=2048 -o app
+cc app.c $(ae cflags) -o app        # -fbracket-depth=2048 where cc is Clang
 ```
 
 ## Binary Hardening

@@ -3634,6 +3634,19 @@ static const char* bracket_depth_flags(const char* cc) {
     return answer;
 }
 
+#ifndef _WIN32
+/* The C compiler a POSIX build drives (build_gcc_cmd chooses it the same
+ * way, and says why): $AE_CC, then $CC, else gcc, else cc; NULL for none.
+ * For `ae cflags`, which names no compiler of its own. */
+static const char* posix_driven_cc(void) {
+    const char* cc = c_backend_env_override();
+    if (cc) return cc;
+    if (system("command -v gcc >/dev/null 2>&1") == 0) return "gcc";
+    if (system("command -v cc >/dev/null 2>&1") == 0) return "cc";
+    return NULL;
+}
+#endif
+
 // --------------------------------------------------------------------------
 // Windows: auto-install bundled GCC (WinLibs) if none found on PATH
 // --------------------------------------------------------------------------
@@ -12991,6 +13004,15 @@ static int cmd_cflags(int argc, char** argv) {
          * Asked of a gcc already installed; a flags query never downloads
          * one. */
         if (find_gcc_windows(false)) fputs(win_avx_stack_flags(get_cflags()), stdout);
+#endif
+        /* #3574: the bracket depth every `ae` build gives a Clang
+         * (bracket_depth_flags), for a build that compiles aetherc output
+         * itself with the compiler `ae` would drive: Clang refuses the C of
+         * blocks nested past 256 brackets otherwise. */
+#if defined(_WIN32)
+        if (find_gcc_windows(false)) fputs(bracket_depth_flags(s_gcc_cmd), stdout);
+#else
+        fputs(bracket_depth_flags(posix_driven_cc()), stdout);
 #endif
     }
 
