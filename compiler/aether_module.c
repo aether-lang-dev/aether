@@ -782,6 +782,27 @@ AetherModule* module_resolve_reexport(AetherModule* module, const char* symbol) 
     return resolve_reexport_rec(module, symbol, 0);
 }
 
+/* The next line of `file` into `*buf` (grown as it must, its newline kept
+ * when it has one); 0 at the end of the file. */
+static int module_read_line(FILE* file, char** buf, size_t* cap) {
+    size_t len = 0;
+    for (;;) {
+        if (*cap - len < 2 || !*buf) {
+            size_t ncap = *cap ? *cap * 2 : 256;
+            char* grown = (char*)realloc(*buf, ncap);
+            if (!grown) return len > 0;
+            *buf = grown;
+            *cap = ncap;
+        }
+        if (!fgets(*buf + len, (int)(*cap - len), file)) {
+            (*buf)[len] = '\0';
+            return len > 0;
+        }
+        len += strlen(*buf + len);
+        if (len > 0 && (*buf)[len - 1] == '\n') return 1;
+    }
+}
+
 // Package manifest (aether.toml)
 PackageManifest* package_manifest_load(const char* path) {
     FILE* file = fopen(path, "r");
@@ -797,9 +818,12 @@ PackageManifest* package_manifest_load(const char* path) {
     manifest->dependencies = NULL;
     manifest->dependency_count = 0;
     
-    // Simple TOML parser (basic implementation)
-    char line[1024];
-    while (fgets(line, sizeof(line), file)) {
+    // Simple TOML parser (basic implementation). A line is read whole
+    // (#3574): 1024 bytes cut a longer one, and its rest was read as a line
+    // of its own.
+    char* line = NULL;
+    size_t line_cap = 0;
+    while (module_read_line(file, &line, &line_cap)) {
         // Remove newline
         line[strcspn(line, "\n")] = 0;
         
@@ -833,7 +857,8 @@ PackageManifest* package_manifest_load(const char* path) {
             }
         }
     }
-    
+    free(line);
+
     fclose(file);
     return manifest;
 }
@@ -1523,7 +1548,7 @@ char* module_build_artifact(const char* source_path, const char* source_rel,
          * artifact would not compile the same as the source. */
         *err = "the module parses with warnings";
     } else if (aether_define_query_overflowed()) {
-        *err = "the module tests more build symbols than an artifact records";
+        *err = "out of memory recording the build symbols the module tests";
     } else {
         int n = aether_define_query_count();
         AeaDefine* defines = n ? calloc((size_t)n, sizeof(AeaDefine)) : NULL;
@@ -5798,15 +5823,18 @@ AetherModule* module_lib_package_module_of(const ASTNode* decl) {
     if (!g_lib_package || !decl || !decl->source_file) return NULL;
     /* Consecutive declarations nearly always share a file, and the lookup
      * compares files by identity (a stat per module): remember the last. */
-    static char last_file[2048] = "";
+    /* The whole path (#3574): one cut at 2048 bytes matched no declaration
+     * of its file, and every one asked the registry again. */
+    static char* last_file = NULL;
     static AetherModule* last_module = NULL;
     static ModuleRegistry* last_registry = NULL;
-    if (last_registry == global_module_registry && last_file[0] &&
+    if (last_registry == global_module_registry && last_file &&
         strcmp(last_file, decl->source_file) == 0) {
         return module_in_lib_package(last_module) ? last_module : NULL;
     }
     AetherModule* m = module_find_by_file(decl->source_file);
-    snprintf(last_file, sizeof(last_file), "%s", decl->source_file);
+    free(last_file);
+    last_file = strdup(decl->source_file);
     last_module = m;
     last_registry = global_module_registry;
     return module_in_lib_package(m) ? m : NULL;

@@ -427,18 +427,18 @@ static int parse_hex64(const char* s, uint64_t* out) {
     return 1;
 }
 
-ASTNode* aea_decode(const char* data, size_t len, const AeaConsumer* co,
-                    const char** why) {
+static ASTNode* aea_decode_in(const char* data, size_t len, const AeaConsumer* co,
+                              const char** why, char* val, size_t vcap) {
     static const char* unused;
     if (!why) why = &unused;
     *why = NULL;
     if (!data || !co) { *why = "nothing to decode"; return NULL; }
 
     Cursor c = { data, data + len, 0 };
-    char key[64], val[512];
+    char key[64];   /* a key is one of the codec's own words: a longer one is none */
     char magic[32];
     snprintf(magic, sizeof(magic), "%d", AEA_FORMAT_VERSION);
-    if (!header_line(&c, key, sizeof(key), val, sizeof(val)) || strcmp(key, "AEA") != 0) {
+    if (!header_line(&c, key, sizeof(key), val, vcap) || strcmp(key, "AEA") != 0) {
         *why = "not an artifact";
         return NULL;
     }
@@ -449,7 +449,7 @@ ASTNode* aea_decode(const char* data, size_t len, const AeaConsumer* co,
     uint64_t payload_hash = 0;
     const char* fe = co->frontend_id;
     for (;;) {
-        if (!header_line(&c, key, sizeof(key), val, sizeof(val))) {
+        if (!header_line(&c, key, sizeof(key), val, vcap)) {
             *why = "artifact header is malformed";
             return NULL;
         }
@@ -525,6 +525,23 @@ ASTNode* aea_decode(const char* data, size_t len, const AeaConsumer* co,
         *why = "artifact payload is malformed";
         return NULL;
     }
+    return ast;
+}
+
+/* A header value is as long as its line (#3574): 512 bytes refused the
+ * artifact of a longer source path or build symbol as malformed, every
+ * time it was read, so that module was never reused. */
+ASTNode* aea_decode(const char* data, size_t len, const AeaConsumer* co,
+                    const char** why) {
+    char* val = (char*)malloc(len + 1);
+    if (!val) {
+        static const char* unused;
+        if (!why) why = &unused;
+        *why = "out of memory";
+        return NULL;
+    }
+    ASTNode* ast = aea_decode_in(data, len, co, why, val, len + 1);
+    free(val);
     return ast;
 }
 

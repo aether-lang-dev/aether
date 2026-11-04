@@ -50,6 +50,30 @@ static int display_same(const char* a, const char* b) {
 #endif
 }
 
+/* `here` relative to `base` into `buf`, their components split into `hp`
+ * and `bp`; 0 when it cannot be (another drive, no room in `buf`). */
+static int display_relative(char* here, char* base, char** hp, int hcap, char** bp, int bcap,
+                            char* buf, size_t cap) {
+    int hn = display_split(here, hp, hcap);
+    int bn = display_split(base, bp, bcap);
+    if (hn == 0 || bn == 0 || !display_same(hp[0], bp[0])) return 0;   /* another drive */
+    int common = 0;
+    while (common < hn - 1 && common < bn && display_same(hp[common], bp[common])) common++;
+    size_t used = 0;
+    buf[0] = '\0';
+    for (int i = common; i < bn; i++) {
+        int w = snprintf(buf + used, cap - used, "../");
+        if (w < 0 || (size_t)w >= cap - used) return 0;
+        used += (size_t)w;
+    }
+    for (int i = common; i < hn; i++) {
+        int w = snprintf(buf + used, cap - used, "%s%s", hp[i], i + 1 < hn ? "/" : "");
+        if (w < 0 || (size_t)w >= cap - used) return 0;
+        used += (size_t)w;
+    }
+    return 1;
+}
+
 /* `path` as the user should see it (#3215): relative to the directory the
  * command was typed in, which `ae` puts in AETHER_DISPLAY_FROM when it has
  * entered a project elsewhere to compile it (a walk-up to aether.toml, or a
@@ -62,37 +86,39 @@ const char* aether_display_path(const char* path, char* buf, size_t cap) {
     if (!path || !path[0] || !from || !from[0] || !buf || cap == 0) return path;
     if (path[0] == '/' || path[0] == '\\' || (isalpha((unsigned char)path[0]) && path[1] == ':'))
         return path;
-    char cwd[4096];
+    char cwd[4096];   /* a longer one getcwd refuses: the path is shown as it is */
 #ifdef _WIN32
     if (!_getcwd(cwd, (int)sizeof cwd)) return path;
 #else
     if (!getcwd(cwd, sizeof cwd)) return path;
 #endif
-    char here[8192], base[4096];
-    snprintf(here, sizeof here, "%s/%s", cwd, path);
-    snprintf(base, sizeof base, "%s", from);
+    /* Each as long as it is, and every component (#3574): 8192 bytes cut
+     * the path and 256 slots dropped the components of a deeper one, and
+     * the diagnostic named another file, or a directory above it. */
+    size_t hlen = strlen(cwd) + 1 + strlen(path) + 1;
+    char* here = (char*)malloc(hlen);
+    char* base = (char*)malloc(strlen(from) + 1);
+    if (!here || !base) {
+        free(here);
+        free(base);
+        return path;
+    }
+    snprintf(here, hlen, "%s/%s", cwd, path);
+    strcpy(base, from);
     for (char* q = here; *q; q++) if (*q == '\\') *q = '/';
     for (char* q = base; *q; q++) if (*q == '\\') *q = '/';
-    char* hp[256];
-    char* bp[256];
-    int hn = display_split(here, hp, 256);
-    int bn = display_split(base, bp, 256);
-    if (hn == 0 || bn == 0 || !display_same(hp[0], bp[0])) return path;   /* another drive */
-    int common = 0;
-    while (common < hn - 1 && common < bn && display_same(hp[common], bp[common])) common++;
-    size_t used = 0;
-    buf[0] = '\0';
-    for (int i = common; i < bn; i++) {
-        int w = snprintf(buf + used, cap - used, "../");
-        if (w < 0 || (size_t)w >= cap - used) return path;
-        used += (size_t)w;
-    }
-    for (int i = common; i < hn; i++) {
-        int w = snprintf(buf + used, cap - used, "%s%s", hp[i], i + 1 < hn ? "/" : "");
-        if (w < 0 || (size_t)w >= cap - used) return path;
-        used += (size_t)w;
-    }
-    return buf;
+    int hcap = 1, bcap = 1;
+    for (const char* q = here; *q; q++) hcap += *q == '/';
+    for (const char* q = base; *q; q++) bcap += *q == '/';
+    char** hp = (char**)malloc(sizeof(char*) * (size_t)hcap);
+    char** bp = (char**)malloc(sizeof(char*) * (size_t)bcap);
+    const char* shown = path;
+    if (hp && bp && display_relative(here, base, hp, hcap, bp, bcap, buf, cap)) shown = buf;
+    free(hp);
+    free(bp);
+    free(here);
+    free(base);
+    return shown;
 }
 
 // Color support: respect NO_COLOR (https://no-color.org/) and non-tty stderr

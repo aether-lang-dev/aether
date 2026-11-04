@@ -132,8 +132,10 @@ static bool with_extern = false;
 // directories holding the modules ae generated for binary imports. Those
 // stubs bind another Aether library's exports with externs, so the extern
 // gate treats a module under one of them like a toolchain module.
-#define AETHERC_STUB_DIRS_MAX 8
-static const char* binimport_stub_dirs[AETHERC_STUB_DIRS_MAX];
+// Every one ae names (#3574): 8 slots dropped the rest, and a stub past
+// them was gated as the program's own externs.
+static const char** binimport_stub_dirs = NULL;
+static int binimport_stub_dir_cap = 0;
 static int binimport_stub_dir_count = 0;
 
 // --emit-namespace-manifest: walk a manifest.ae's AST, extract the
@@ -732,8 +734,9 @@ static char* resolve_callee_name(const char* callee,
     if (!dot) return NULL;
 
     size_t prefix_len = (size_t)(dot - callee);
-    char prefix_buf[128];
-    if (prefix_len >= sizeof(prefix_buf)) return NULL;
+    /* As long as it is (#3574): 128 bytes left a longer alias unresolved,
+     * and the call went out as written. */
+    char* prefix_buf = (char*)aether_xrealloc(NULL, prefix_len + 1);
     memcpy(prefix_buf, callee, prefix_len);
     prefix_buf[prefix_len] = '\0';
     const char* suffix = dot + 1;
@@ -762,8 +765,8 @@ static char* resolve_callee_name(const char* callee,
 
     size_t out_len = strlen(short_ns) + 1 + strlen(suffix) + 1;
     char* resolved = malloc(out_len);
-    if (!resolved) return NULL;
-    snprintf(resolved, out_len, "%s_%s", short_ns, suffix);
+    if (resolved) snprintf(resolved, out_len, "%s_%s", short_ns, suffix);
+    free(prefix_buf);
     return resolved;
 }
 
@@ -807,16 +810,17 @@ static void emit_ast_json(FILE* out, ASTNode* program) {
     // Collect import aliases up-front so qualified call sites can be
     // canonicalised — `o.system` post `import std.os as o` becomes
     // `os_system` on the wire (which is what aeb's veto rules match
-    // against). Cap at 128 — pathological programs with more aliases
-    // get the tail dropped; aeb sees the as-written spelling for
-    // those and can decide.
-    EmitAlias aliases[128];
-    int alias_count = collect_import_aliases(program, aliases, 128);
+    // against). Every alias (#3574): 128 slots dropped the rest, and their
+    // calls went out as written.
+    EmitAlias* aliases = (EmitAlias*)aether_xrealloc(
+        NULL, sizeof(EmitAlias) * (size_t)(program->child_count > 0 ? program->child_count : 1));
+    int alias_count = collect_import_aliases(program, aliases, program->child_count);
 
     fputs("{\"nodes\":[", out);
     int first = 1;
     emit_ast_node_recursive(out, program, &first, aliases, alias_count);
     fputs("]}\n", out);
+    free(aliases);
 }
 
 // Returns 1 if the call node's `value` looks like a function-pointer
@@ -1090,18 +1094,16 @@ static const char* inspect_type_name(Type* t) {
 
 // Render a function/extern return type, expanding a tuple into
 // "(T1, T2, ...)". Writes into `buf`.
-static void inspect_return_type(Type* t, char* buf, size_t cap) {
+/* Written out whole (#3574): through a 256-byte buffer a long tuple was cut,
+ * and the offset past a cut ran beyond the buffer. */
+static void inspect_print_return_type(FILE* out, Type* t) {
     if (t && t->kind == TYPE_TUPLE && t->tuple_count > 0) {
-        size_t pos = 0;
-        pos += (size_t)snprintf(buf + pos, cap - pos, "(");
-        for (int i = 0; i < t->tuple_count && pos < cap; i++) {
-            pos += (size_t)snprintf(buf + pos, cap - pos, "%s%s",
-                                    i ? ", " : "",
-                                    inspect_type_name(t->tuple_types[i]));
-        }
-        snprintf(buf + pos, cap - pos, ")");
+        fputc('(', out);
+        for (int i = 0; i < t->tuple_count; i++)
+            fprintf(out, "%s%s", i ? ", " : "", inspect_type_name(t->tuple_types[i]));
+        fputc(')', out);
     } else {
-        snprintf(buf, cap, "%s", inspect_type_name(t));
+        fputs(inspect_type_name(t), out);
     }
 }
 
@@ -1297,11 +1299,11 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* c = program->children[i];
             if (!inspect_is_local(c, path) || c->type != AST_FUNCTION_DEFINITION || !c->value) continue;
-            char ret[256];
-            inspect_return_type(c->node_type, ret, sizeof(ret));
             fprintf(out, "    %s", c->value);
             inspect_print_params(out, c);
-            fprintf(out, " -> %s\n", ret);
+            fputs(" -> ", out);
+            inspect_print_return_type(out, c->node_type);
+            fputc('\n', out);
         }
     }
     if (n_builder) {
@@ -2397,21 +2399,25 @@ void print_help(const char* program_name) {
  * Written to a temporary name and renamed, so a concurrent reader never sees
  * half an artifact. Returns the process exit status. */
 static int emit_aea(const char* input, const char* output) {
-    char rel[4096];
+    /* The paths as long as they are (#3574): 4096 bytes cut a longer one,
+     * and the artifact recorded, or was written to, another path. */
     const char* in = input;
     while (in[0] == '.' && (in[1] == '/' || in[1] == '\\')) in += 2;
-    snprintf(rel, sizeof(rel), "%s", in);
+    char* rel = (char*)aether_xrealloc(NULL, strlen(in) + 1);
+    strcpy(rel, in);
     for (char* p = rel; *p; p++) if (*p == '\\') *p = '/';
 
     size_t len = 0;
     const char* err = NULL;
     char* data = module_build_artifact(input, rel, &len, &err);
+    free(rel);
     if (!data) {
         fprintf(stderr, "aetherc: no artifact for %s: %s\n", input, err ? err : "unknown error");
         return 1;
     }
-    char tmp[4200];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", output, (int)getpid());
+    size_t tmp_cap = strlen(output) + 32;
+    char* tmp = (char*)aether_xrealloc(NULL, tmp_cap);
+    snprintf(tmp, tmp_cap, "%s.tmp.%d", output, (int)getpid());
     FILE* f = fopen(tmp, "wb");
     int ok = f && fwrite(data, 1, len, f) == len;
     if (f && fclose(f) != 0) ok = 0;
@@ -2420,8 +2426,9 @@ static int emit_aea(const char* input, const char* output) {
         remove(output);   /* rename() does not replace on Windows */
         ok = rename(tmp, output) == 0;
     }
+    if (!ok) remove(tmp);
+    free(tmp);
     if (!ok) {
-        remove(tmp);
         fprintf(stderr, "aetherc: cannot write %s\n", output);
         return 1;
     }
@@ -2499,7 +2506,7 @@ static int aetherc_main(int argc, char *argv[]) {
                 return 1;
             }
             if (!aether_define_add(name)) {
-                fprintf(stderr, "Error: too many -D symbols to add '%s'\n", name);
+                fprintf(stderr, "Error: out of memory adding the -D symbol '%s'\n", name);
                 return 1;
             }
             arg_offset++;
@@ -2524,8 +2531,12 @@ static int aetherc_main(int argc, char *argv[]) {
             csrc_catalog_path = argv[arg_offset] + 20;
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--binimport-stub-dir=", 21) == 0) {
-            if (binimport_stub_dir_count < AETHERC_STUB_DIRS_MAX)
-                binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
+            if (binimport_stub_dir_count == binimport_stub_dir_cap) {
+                binimport_stub_dir_cap = binimport_stub_dir_cap ? binimport_stub_dir_cap * 2 : 8;
+                binimport_stub_dirs = (const char**)aether_xrealloc(
+                    (void*)binimport_stub_dirs, sizeof(char*) * (size_t)binimport_stub_dir_cap);
+            }
+            binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--target-os=", 12) == 0 ||
                    strncmp(argv[arg_offset], "--target-arch=", 14) == 0) {

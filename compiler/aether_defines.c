@@ -3,11 +3,30 @@
 #include <stdlib.h>
 #include <string.h>
 
-#define AETHER_MAX_DEFINES 128
-#define AETHER_MAX_DEFINE_LEN 128
-
-static char g_defines[AETHER_MAX_DEFINES][AETHER_MAX_DEFINE_LEN];
+/* Every symbol and every name asked, as long as it is (#3574): 128 names of
+ * 127 bytes refused a longer -D name as "too many -D symbols", and a module
+ * asking about more than 128 names got no artifact. Names are copies the
+ * tables own; aether_defines_clear and a new recording give them back. */
+static char** g_defines = NULL;
 static int  g_define_count = 0;
+static int  g_define_cap = 0;
+
+/* A copy of `name` at the end of `*names`, grown as it must; 0 out of
+ * memory. */
+static int names_push(char*** names, int* count, int* cap, const char* name) {
+    if (*count == *cap) {
+        int ncap = *cap ? *cap * 2 : 16;
+        char** grown = (char**)realloc(*names, sizeof(char*) * (size_t)ncap);
+        if (!grown) return 0;
+        *names = grown;
+        *cap = ncap;
+    }
+    char* copy = (char*)malloc(strlen(name) + 1);
+    if (!copy) return 0;
+    strcpy(copy, name);
+    (*names)[(*count)++] = copy;
+    return 1;
+}
 
 /* Build symbols are matched by `defined(NAME)`, where NAME is an identifier,
  * so anything that could not be written there is rejected rather than stored.
@@ -28,36 +47,36 @@ int aether_define_is_valid_name(const char* name) {
 
 int aether_define_add(const char* name) {
     if (!aether_define_is_valid_name(name)) return 0;
-    if (strlen(name) >= AETHER_MAX_DEFINE_LEN) return 0;
     if (aether_define_is_set(name)) return 1;
-    if (g_define_count >= AETHER_MAX_DEFINES) return 0;
-    /* strncpy with an explicit terminator: the length is checked above, so
-     * this cannot truncate, and the terminator keeps it true if that check
-     * ever moves. */
-    strncpy(g_defines[g_define_count], name, AETHER_MAX_DEFINE_LEN - 1);
-    g_defines[g_define_count][AETHER_MAX_DEFINE_LEN - 1] = '\0';
-    g_define_count++;
-    return 1;
+    return names_push(&g_defines, &g_define_count, &g_define_cap, name);
 }
 
 static int  g_recording = 0;
-static int  g_query_overflow = 0;
+static int  g_query_overflow = 0;   /* out of memory: the log is incomplete */
 static int  g_query_count = 0;
-static char g_query_names[AETHER_MAX_DEFINES][AETHER_MAX_DEFINE_LEN];
-static int  g_query_values[AETHER_MAX_DEFINES];
+static int  g_query_cap = 0;
+static char** g_query_names = NULL;
+static int* g_query_values = NULL;
 
 static void record_query(const char* name, int value) {
     for (int i = 0; i < g_query_count; i++) {
         if (strcmp(g_query_names[i], name) == 0) return;
     }
-    if (g_query_count >= AETHER_MAX_DEFINES || strlen(name) >= AETHER_MAX_DEFINE_LEN) {
+    int cap = g_query_cap;
+    if (!names_push(&g_query_names, &g_query_count, &g_query_cap, name)) {
         g_query_overflow = 1;
         return;
     }
-    strncpy(g_query_names[g_query_count], name, AETHER_MAX_DEFINE_LEN - 1);
-    g_query_names[g_query_count][AETHER_MAX_DEFINE_LEN - 1] = '\0';
-    g_query_values[g_query_count] = value;
-    g_query_count++;
+    if (g_query_cap != cap) {
+        int* grown = (int*)realloc(g_query_values, sizeof(int) * (size_t)g_query_cap);
+        if (!grown) {
+            free(g_query_names[--g_query_count]);
+            g_query_overflow = 1;
+            return;
+        }
+        g_query_values = grown;
+    }
+    g_query_values[g_query_count - 1] = value;
 }
 
 int aether_define_is_set(const char* name) {
@@ -73,6 +92,7 @@ int aether_define_is_set(const char* name) {
 void aether_define_record_queries(int on) {
     g_recording = on ? 1 : 0;
     if (on) {
+        for (int i = 0; i < g_query_count; i++) free(g_query_names[i]);
         g_query_count = 0;
         g_query_overflow = 0;
     }
@@ -99,4 +119,7 @@ const char* aether_define_at(int index) {
     return g_defines[index];
 }
 
-void aether_defines_clear(void) { g_define_count = 0; }
+void aether_defines_clear(void) {
+    for (int i = 0; i < g_define_count; i++) free(g_defines[i]);
+    g_define_count = 0;
+}
