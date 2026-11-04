@@ -14,6 +14,40 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.877.0]
+
+### Added
+
+- **`std.xml` pretty-prints.** `xml.pretty(src, indent)` returns
+  `(formatted, err)`: the document re-indented with `indent` spaces per level
+  (0 to 16), or `""` and a well-formedness error with its line, column and
+  byte. It changes only whitespace between elements: text, attribute values,
+  references, CDATA, comments and processing instructions are copied as
+  written, mixed content and `xml:space="preserve"` stay as they are, and
+  formatting its own output gives the same output. `xml.writer_pretty(indent)`
+  is a builder whose `finish` returns the document indented; an unfinished
+  one comes back as written. For reading and recording (Servirtium's SOAP
+  tapes), not for signed XML: changing whitespace breaks XML signatures.
+
+- **`std.guest` and `std.guest.child`: a guest in a sandboxed child process,
+  and the protocol to it, in the standard library.** A host starts a worker
+  (one binary with an engine for some language compiled in) under
+  `sandbox.spawn_socket`, failing closed, or uncontained by name
+  (`guest.launch_uncontained`); mounts the functions its script may call;
+  sends the script; and answers each `CALL` with a JSON value, a failure, or
+  a file handed over as an open descriptor. Every exchange has a deadline,
+  then a `CANCEL`, then a kill after a grace; every spawn, grant, deny,
+  timeout and kill goes to one audit log, with what the worker reports.
+  `std.guest.child` is the worker's half: it reads the mounts and the
+  script, enters `sandbox.enforce` with no grants before the first step,
+  and gives the engine `say`, `log`, `call_host`, `poll` (for a cancel,
+  between steps or from an interrupt hook), `done` and `error`, so a
+  worker is its engine and the glue between the two. The protocol (text
+  verbs with JSON arguments over `std.ipc` frames) is documented once, in
+  `std/guest/README.md`. It was RexxAE's `worker/rexxworker`, which already
+  drove two engines (RexxAE and a MicroQuickJS worker) with nothing
+  Rexx-specific in it.
+
 ## [0.876.0]
 
 ### Added
