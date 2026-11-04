@@ -55,6 +55,7 @@ int main(void) {
     printf("ok: %s %d %d %s outcome %d\n", aether_string_data(ok), okn, okp.a, aether_string_data(okp.s),
            aether_last_outcome());
     aether_results_string_release(ok);
+    aether_results_string_release(okp.s);
     fflush(stdout);
     return 0;
 }

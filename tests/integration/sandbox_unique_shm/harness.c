@@ -14,6 +14,7 @@
 extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);
 extern void* list_new(void);
 extern int list_add_raw(void* list, void* item);
+extern void list_free(void* list);
 
 static pthread_barrier_t fork_barrier;
 static char collision_name[128];
@@ -128,6 +129,7 @@ int main(int argc, char** argv) {
     pthread_join(thread_a, NULL);
     pthread_join(thread_b, NULL);
     pthread_barrier_destroy(&fork_barrier);
+    list_free(grants);
 
     if (a.rc != 0 || b.rc != 0) {
         fprintf(stderr, "FAIL concurrent spawns returned %d and %d\n", a.rc, b.rc);

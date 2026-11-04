@@ -102,7 +102,9 @@ fn grants(spec: string) -> sandbox.Grants {
 
 // ---- in-process ------------------------------------------------------------
 
-fn finish_inproc(vm: ptr, g: sandbox.Grants, check: string, expect: string) {
+// The map the VM reads is given back before the process ends with the
+// check's answer.
+fn finish_inproc(vm: ptr, m: ptr, g: sandbox.Grants, check: string, expect: string) {
     before = aether_sandbox_depth()
     rc = stunt.vm_eval_sandboxed(vm, g, "${check} ${expect}")
     after = aether_sandbox_depth()
@@ -114,12 +116,14 @@ fn finish_inproc(vm: ptr, g: sandbox.Grants, check: string, expect: string) {
     if check == "spin" {
         if rc == stunt.STUNT_STOPPED && string.contains(line, "instruction limit") == 1 {
             println("spin: stopped at the instruction limit - host-checked: PASS")
+            stunt.map_free(m)
             exit(0)
         }
         println("spin: ${line} - host-checked: FAIL")
         exit(1)
     }
     println(line)
+    stunt.map_free(m)
     exit(rc)
 }
 
@@ -138,7 +142,7 @@ fn run_inproc(spec: string, check: string, expect: string) {
 
     bar = string.index_of(spec, "|")
     if bar < 0 {
-        finish_inproc(vm, grants(spec), check, expect)
+        finish_inproc(vm, m, grants(spec), check, expect)
         return
     }
     outer = grants(string.substring(spec, 0, bar))
@@ -148,7 +152,7 @@ fn run_inproc(spec: string, check: string, expect: string) {
             println("host: the enforce block is not one level deep")
             exit(1)
         }
-        finish_inproc(vm, inner, check, expect)
+        finish_inproc(vm, m, inner, check, expect)
     }
 }
 
@@ -177,6 +181,7 @@ fn guarded_read(g: sandbox.Grants, path: string) -> string {
         }
     }
     out, _e = list.get_string(box, 0)
+    list.free(box)
     return out
 }
 
@@ -196,6 +201,7 @@ fn guarded_getenv(g: sandbox.Grants, name: string) -> string {
         }
     }
     out, _e = list.get_string(box, 0)
+    list.free(box)
     return out
 }
 
@@ -272,6 +278,8 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
     } else {
         ch, pid, err = sandbox.spawn_socket_uncontained(g, exe, argv, env)
     }
+    list.free(argv)
+    list.free(env)
     if err != "" {
         println("host: spawn: ${err}")
         exit(1)
@@ -336,6 +344,7 @@ fn run_child(spec: string, check: string, expect: string, contained: int) {
     }
     io.fd_close(ch)
     code, werr = os.wait_pid(pid)
+    stunt.map_free(m)
 
     if check == "spin" {
         if cancelled == 1 && rc == stunt.STUNT_STOPPED && string.contains(line, "cancelled") == 1 {

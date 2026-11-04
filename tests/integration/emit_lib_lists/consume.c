@@ -80,6 +80,11 @@ int main(int argc, char** argv) {
     if (aether_config_list_get_string(w, 99) != NULL)  FAIL("OOR string didn't return NULL");
     if (aether_config_list_get_int(p, -1, 42) != 42)   FAIL("negative index didn't return default");
 
+    /* Each list a call returns is the host's to free. */
+    aether_config_free(p);
+    aether_config_free(w);
+    aether_config_free(e);
+
     lib_close(h);
     printf("OK: list returns round-tripped\n");
     return 0;

@@ -35,6 +35,7 @@ extern char* aether_host_capture_sandboxed(void* perms, const char* binary_path)
 extern int go_run_sandboxed(void* perms, const char* binary_path);
 extern void* list_new(void);
 extern int list_add_raw(void* list, void* item);
+extern void list_free(void* list);
 
 static pid_t harness_pid;
 
@@ -116,6 +117,7 @@ int main(int argc, char** argv) {
     fails += expect("the Aether host's binary that is not there",
                     aether_host_run_sandboxed(all, "/no/such/aether_binary_3170"), -1);
 
+    list_free(all);
     if (fails) return 1;
     printf("PASS: the process hosts' children call only async-signal-safe functions\n");
     return 0;
