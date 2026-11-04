@@ -13,6 +13,7 @@
 #include <string.h>
 #include <ctype.h>
 #include <stdio.h>
+#include <stdarg.h>
 
 #ifdef _WIN32
     #include <io.h>
@@ -34,6 +35,70 @@
 #endif
 
 ModuleRegistry* global_module_registry = NULL;
+
+/* #3545: `fmt` formatted into a string as long as it needs (malloc'd; the
+ * caller frees it). A name or a path the merge builds is never cut to a
+ * buffer's size, where a cut name is another name and a cut path another
+ * file. */
+static char* mod_strf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+static char* mod_strf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char* s = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (!s) {
+        fprintf(stderr, "Fatal: out of memory\n");
+        exit(1);
+    }
+    va_start(ap, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
+
+static void names_add(ModuleNames* l, const char* name);
+static int names_has(const ModuleNames* l, const char* name);
+static void names_free(ModuleNames* l);
+
+/* #3545: the path `fmt` names, malloc'd, when a module file is there, else
+ * NULL. Built as long as it is: cut to a buffer's size it named another
+ * file, which a probe could then find. */
+static char* probe_pathf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+static char* probe_pathf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    char* s = n >= 0 ? malloc((size_t)n + 1) : NULL;
+    if (!s) {
+        fprintf(stderr, "Fatal: out of memory\n");
+        exit(1);
+    }
+    va_start(ap, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    if (module_probe(s)) return s;
+    free(s);
+    return NULL;
+}
+
+/* A module path with its dots made slashes (`std.http.client` ->
+ * `std/http/client`), malloc'd, as long as it is. */
+static char* dots_to_slashes(const char* module_path) {
+    char* s = mod_strf("%s", module_path);
+    for (char* p = s; *p; p++)
+        if (*p == '.') *p = '/';
+    return s;
+}
 
 /* --- Dependency recording (#1882) -------------------------------------------
  * A build launched with --emit-deps records, in first-seen order, every path
@@ -658,11 +723,10 @@ int module_exports_symbol(AetherModule* module, const char* name) {
     if (!module || !name) return 0;
     if (module_is_exported(module, name)) return 1;
     if (!module->name) return 0;
-    char prefixed[512];
-    int n = snprintf(prefixed, sizeof(prefixed), "%s_%s",
-                     module_last_segment(module->name), name);
-    if (n < 0 || (size_t)n >= sizeof(prefixed)) return 0;
-    return module_is_exported(module, prefixed);
+    char* prefixed = mod_strf("%s_%s", module_last_segment(module->name), name);
+    int exported = module_is_exported(module, prefixed);
+    free(prefixed);
+    return exported;
 }
 
 /* #924 re-export resolution. A module may list, in its `exports`, a symbol
@@ -990,12 +1054,12 @@ static int get_exe_directory(char* buf, size_t bufsz) {
     size_t fb_len = bufsz;
     if (sysctl(mib, 4, buf, &fb_len, NULL, 0) != 0 || fb_len <= 1) {
         ssize_t pn = readlink("/proc/curproc/file", buf, bufsz - 1);
-        if (pn <= 0) return 0;
+        if (pn <= 0 || (size_t)pn >= bufsz - 1) return 0;
         buf[pn] = '\0';
     }
 #elif defined(__linux__)
     ssize_t n = readlink("/proc/self/exe", buf, bufsz - 1);
-    if (n <= 0) return 0;
+    if (n <= 0 || (size_t)n >= bufsz - 1) return 0;   /* #3545: filled, it may be cut */
     buf[n] = '\0';
 #else
     return 0;
@@ -1019,19 +1083,16 @@ static int get_exe_directory(char* buf, size_t bufsz) {
 // ~/.aether → /usr/local. Factored out of module_resolve_stdlib_path
 // so contrib resolves the same way.
 static char* resolve_pkg_path(const char* root, const char* converted) {
-    char path[4096];
+    char* hit_path = NULL;
 
     // Try 1: Local development path (relative to CWD)
-    snprintf(path, sizeof(path), "%s/%s/module.ae", root, converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("%s/%s/module.ae", root, converted))) return hit_path;
 
     // Try 2: Installed path via AETHER_HOME
     const char* aether_home = getenv("AETHER_HOME");
     if (aether_home && aether_home[0]) {
-        snprintf(path, sizeof(path), "%s/share/aether/%s/%s/module.ae", aether_home, root, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/%s/%s/module.ae", aether_home, root, converted);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/share/aether/%s/%s/module.ae", aether_home, root, converted))) return hit_path;
+        if ((hit_path = probe_pathf("%s/%s/%s/module.ae", aether_home, root, converted))) return hit_path;
     }
 
     // Try 3: Relative to the running aetherc binary. This is the
@@ -1040,27 +1101,22 @@ static char* resolve_pkg_path(const char* root, const char* converted) {
     // points at the install prefix and ../share/aether/<root>/
     // finds the module.ae regardless of which prefix was used at
     // install time.
-    char exe_dir[512];
+    char exe_dir[4096];   /* the OS bounds it; a path past it is refused (get_exe_directory) */
     if (get_exe_directory(exe_dir, sizeof(exe_dir))) {
-        snprintf(path, sizeof(path), "%s/../share/aether/%s/%s/module.ae", exe_dir, root, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/../%s/%s/module.ae", exe_dir, root, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/../lib/%s/%s/module.ae", exe_dir, root, converted);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/../share/aether/%s/%s/module.ae", exe_dir, root, converted))) return hit_path;
+        if ((hit_path = probe_pathf("%s/../%s/%s/module.ae", exe_dir, root, converted))) return hit_path;
+        if ((hit_path = probe_pathf("%s/../lib/%s/%s/module.ae", exe_dir, root, converted))) return hit_path;
     }
 
     // Try 4: User home directory (~/.aether)
     const char* home = get_user_home_dir();
     if (home && home[0]) {
-        snprintf(path, sizeof(path), "%s/.aether/share/aether/%s/%s/module.ae", home, root, converted);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/.aether/share/aether/%s/%s/module.ae", home, root, converted))) return hit_path;
     }
 
 #ifndef _WIN32
     // Try 5: System install locations (POSIX only)
-    snprintf(path, sizeof(path), "/usr/local/share/aether/%s/%s/module.ae", root, converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("/usr/local/share/aether/%s/%s/module.ae", root, converted))) return hit_path;
 #endif
 
     return NULL;
@@ -1074,29 +1130,21 @@ char* module_resolve_stdlib_path(const char* module_name) {
     // this, only single-component stdlib modules (`std.fs`, `std.io`)
     // resolved; nested ones like `std.http.client` failed even when
     // the file was present at the expected path.
-    char converted[512];
-    strncpy(converted, module_name, sizeof(converted) - 1);
-    converted[sizeof(converted) - 1] = '\0';
-    for (char* p = converted; *p; p++) {
-        if (*p == '.') *p = '/';
-    }
-    return resolve_pkg_path("std", converted);
+    char* converted = dots_to_slashes(module_name);
+    char* found = resolve_pkg_path("std", converted);
+    free(converted);
+    return found;
 }
 
 char* module_resolve_contrib_path(const char* module_name) {
     // Same dot-to-slash conversion as the stdlib resolver — required
     // for nested contrib modules like `contrib.host.python` →
     // `contrib/host/python/module.ae`.
-    char converted[512];
-    strncpy(converted, module_name, sizeof(converted) - 1);
-    converted[sizeof(converted) - 1] = '\0';
-    for (char* p = converted; *p; p++) {
-        if (*p == '.') *p = '/';
-    }
-    return resolve_pkg_path("contrib", converted);
+    char* converted = dots_to_slashes(module_name);
+    char* found = resolve_pkg_path("contrib", converted);
+    free(converted);
+    return found;
 }
-
-#define PKG_MAX_MATCHES 16
 
 /* Order matches by full path. Every match shares the same
  * ~/.aether/packages prefix, so this orders by "<host>/<owner>"
@@ -1112,23 +1160,16 @@ static int pkg_match_cmp(const void* a, const void* b) {
  * or NULL when the import names the package itself. Returns a
  * malloc'd path on a hit, NULL otherwise. */
 static char* pkg_probe_root(const char* root, const char* sub_path) {
-    char path[4096];
+    char* hit_path = NULL;
     if (sub_path) {
-        snprintf(path, sizeof(path), "%s/src%s/module.ae", root, sub_path);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/src%s.ae", root, sub_path);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/lib%s/module.ae", root, sub_path);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s%s/module.ae", root, sub_path);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s%s.ae", root, sub_path);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/src%s/module.ae", root, sub_path))) return hit_path;
+        if ((hit_path = probe_pathf("%s/src%s.ae", root, sub_path))) return hit_path;
+        if ((hit_path = probe_pathf("%s/lib%s/module.ae", root, sub_path))) return hit_path;
+        if ((hit_path = probe_pathf("%s%s/module.ae", root, sub_path))) return hit_path;
+        if ((hit_path = probe_pathf("%s%s.ae", root, sub_path))) return hit_path;
     } else {
-        snprintf(path, sizeof(path), "%s/src/module.ae", root);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/module.ae", root);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/src/module.ae", root))) return hit_path;
+        if ((hit_path = probe_pathf("%s/module.ae", root))) return hit_path;
     }
     return NULL;
 }
@@ -1138,35 +1179,31 @@ static char* pkg_probe_root(const char* root, const char* sub_path) {
  * file's directory with its trailing slash, in the shapes and the lib path
  * order the CWD-relative probes use (Issue #413). */
 static char* resolve_under_source_dir(const char* base, const char* converted) {
-    char path[4096];
+    char* hit_path = NULL;
     for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
         const char* lib = global_module_registry->lib_dirs[li];
-        snprintf(path, sizeof(path), "%s%s/%s/module.ae", base, lib, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s%s/%s.ae", base, lib, converted);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s%s/%s/module.ae", base, lib, converted))) return hit_path;
+        if ((hit_path = probe_pathf("%s%s/%s.ae", base, lib, converted))) return hit_path;
     }
-    snprintf(path, sizeof(path), "%ssrc/%s/module.ae", base, converted);
-    if (module_probe(path)) return strdup(path);
-    snprintf(path, sizeof(path), "%ssrc/%s.ae", base, converted);
-    if (module_probe(path)) return strdup(path);
-    snprintf(path, sizeof(path), "%s%s/module.ae", base, converted);
-    if (module_probe(path)) return strdup(path);
-    snprintf(path, sizeof(path), "%s%s.ae", base, converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("%ssrc/%s/module.ae", base, converted))) return hit_path;
+    if ((hit_path = probe_pathf("%ssrc/%s.ae", base, converted))) return hit_path;
+    if ((hit_path = probe_pathf("%s%s/module.ae", base, converted))) return hit_path;
+    if ((hit_path = probe_pathf("%s%s.ae", base, converted))) return hit_path;
     return NULL;
 }
 
-char* module_resolve_local_path(const char* module_path) {
-    char converted[512];
-    char path[4096];
+static char* resolve_local_converted(const char* converted);
 
-    // Convert dots to slashes
-    strncpy(converted, module_path, sizeof(converted) - 1);
-    converted[sizeof(converted) - 1] = '\0';
-    for (char* p = converted; *p; p++) {
-        if (*p == '.') *p = '/';
-    }
+char* module_resolve_local_path(const char* module_path) {
+    char* converted = dots_to_slashes(module_path);
+    char* found = resolve_local_converted(converted);
+    free(converted);
+    return found;
+}
+
+/* The local module whose path, its dots made slashes, is `converted`. */
+static char* resolve_local_converted(const char* converted) {
+    char* hit_path = NULL;
 
     /* #3103: a module's own import names a file beside it first. Tried after
      * the CWD, std.jsonpath's `import parser` found contrib/jq/parser.ae
@@ -1187,27 +1224,21 @@ char* module_resolve_local_path(const char* module_path) {
      * Issue #413. */
     for (int li = 0; li < global_module_registry->lib_dir_count; li++) {
         const char* lib = global_module_registry->lib_dirs[li];
-        snprintf(path, sizeof(path), "%s/%s/module.ae", lib, converted);
-        if (module_probe(path)) return strdup(path);
-        snprintf(path, sizeof(path), "%s/%s.ae", lib, converted);
-        if (module_probe(path)) return strdup(path);
+        if ((hit_path = probe_pathf("%s/%s/module.ae", lib, converted))) return hit_path;
+        if ((hit_path = probe_pathf("%s/%s.ae", lib, converted))) return hit_path;
     }
 
     // Try 3: src/module_path/module.ae
-    snprintf(path, sizeof(path), "src/%s/module.ae", converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("src/%s/module.ae", converted))) return hit_path;
 
     // Try 4: src/module_path.ae
-    snprintf(path, sizeof(path), "src/%s.ae", converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("src/%s.ae", converted))) return hit_path;
 
     // Try 5: module_path/module.ae (project root)
-    snprintf(path, sizeof(path), "%s/module.ae", converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("%s/module.ae", converted))) return hit_path;
 
     // Try 6: module_path.ae (single file in root)
-    snprintf(path, sizeof(path), "%s.ae", converted);
-    if (module_probe(path)) return strdup(path);
+    if ((hit_path = probe_pathf("%s.ae", converted))) return hit_path;
 
     // Try 6b: Search relative to source file directory
     if (src_dir && src_dir[0] && !global_module_registry->source_is_module) {
@@ -1222,24 +1253,28 @@ char* module_resolve_local_path(const char* module_path) {
         const char* home = getenv("HOME");
         if (!home) home = getenv("USERPROFILE");  // Windows
         if (home) {
-            // Extract the package name (first component of module path)
-            char pkg_name[128];
-            strncpy(pkg_name, converted, sizeof(pkg_name) - 1);
-            pkg_name[sizeof(pkg_name) - 1] = '\0';
-            char* slash = strchr(pkg_name, '/');
-            if (slash) *slash = '\0';
+            /* The package name (the first component of the module path) and
+             * every path under the package directory, as long as they are
+             * (#3545: they were cut to fixed buffers, so a long name probed
+             * another package's path). */
+            const char* slash0 = strchr(converted, '/');
+            char* pkg_name = slash0 ? mod_strf("%.*s", (int)(slash0 - converted), converted)
+                                    : mod_strf("%s", converted);
 
             // The sub-path within the package (everything after package name)
             const char* sub_path = strchr(converted, '/');
 
-            char pkg_base[512];
-            snprintf(pkg_base, sizeof(pkg_base), "%s/.aether/packages", home);
+            char* pkg_base = mod_strf("%s/.aether/packages", home);
 
             // Flat layout: ~/.aether/packages/<pkg_name>/
-            char root[2048];
-            snprintf(root, sizeof(root), "%s/%s", pkg_base, pkg_name);
+            char* root = mod_strf("%s/%s", pkg_base, pkg_name);
             char* hit = pkg_probe_root(root, sub_path);
-            if (hit) return hit;
+            free(root);
+            if (hit) {
+                free(pkg_name);
+                free(pkg_base);
+                return hit;
+            }
 
             /* Host-nested layout: ~/.aether/packages/<host>/<owner>/<pkg_name>/,
              * which is what `ae add <host>/<owner>/<repo>` and `apkg install`
@@ -1251,10 +1286,10 @@ char* module_resolve_local_path(const char* module_path) {
              * no guarantee), so returning the first hit would let the same
              * source resolve to a different package on another machine. We
              * sort by "<host>/<owner>" for a reproducible result and refuse
-             * to guess when two owners ship the same package name. */
-            char* matches[PKG_MAX_MATCHES];
-            int match_count = 0;
-            int match_overflow = 0;
+             * to guess when two owners ship the same package name. Every
+             * match is kept, however many (#3545: 16 were). */
+            char** matches = NULL;
+            int match_count = 0, match_cap = 0;
             size_t base_len = strlen(pkg_base);
 
             DIR* d_host = opendir(pkg_base);
@@ -1262,25 +1297,27 @@ char* module_resolve_local_path(const char* module_path) {
                 struct dirent* e_host;
                 while ((e_host = readdir(d_host)) != NULL) {
                     if (e_host->d_name[0] == '.') continue;
-                    char host_dir[1024];
-                    snprintf(host_dir, sizeof(host_dir), "%s/%s", pkg_base, e_host->d_name);
+                    char* host_dir = mod_strf("%s/%s", pkg_base, e_host->d_name);
                     DIR* d_owner = opendir(host_dir);
-                    if (!d_owner) continue;
+                    if (!d_owner) {
+                        free(host_dir);
+                        continue;
+                    }
                     struct dirent* e_owner;
                     while ((e_owner = readdir(d_owner)) != NULL) {
                         if (e_owner->d_name[0] == '.') continue;
-                        snprintf(root, sizeof(root), "%s/%s/%s",
-                                 host_dir, e_owner->d_name, pkg_name);
-                        char* found = pkg_probe_root(root, sub_path);
+                        char* owner_root = mod_strf("%s/%s/%s", host_dir, e_owner->d_name, pkg_name);
+                        char* found = pkg_probe_root(owner_root, sub_path);
+                        free(owner_root);
                         if (!found) continue;
-                        if (match_count < PKG_MAX_MATCHES) {
-                            matches[match_count++] = found;
-                        } else {
-                            match_overflow = 1;
-                            free(found);
+                        if (match_count == match_cap) {
+                            match_cap = match_cap ? match_cap * 2 : 4;
+                            matches = aether_xrealloc(matches, (size_t)match_cap * sizeof(*matches));
                         }
+                        matches[match_count++] = found;
                     }
                     closedir(d_owner);
+                    free(host_dir);
                 }
                 closedir(d_host);
             }
@@ -1293,30 +1330,39 @@ char* module_resolve_local_path(const char* module_path) {
                     /* Two owners ship a package with this name. Picking one
                      * silently would link against an arbitrary dependency, so
                      * report it and let the user disambiguate. Each owner is
-                     * printed straight out of its match path, no copy. */
-                    char msg[512];
-                    int off = snprintf(msg, sizeof(msg),
-                                       "ambiguous package import '%s': installed under ",
-                                       pkg_name);
-                    for (int m = 0; m < match_count && off < (int)sizeof(msg) - 64; m++) {
+                     * printed straight out of its match path. */
+                    char* msg = mod_strf("ambiguous package import '%s': installed under ",
+                                         pkg_name);
+                    for (int m = 0; m < match_count; m++) {
                         const char* rel = matches[m] + base_len + 1;
                         const char* host_end = strchr(rel, '/');
                         const char* owner_end = host_end ? strchr(host_end + 1, '/') : NULL;
                         int owner_len = owner_end ? (int)(owner_end - rel)
                                                   : (int)strlen(rel);
-                        off += snprintf(msg + off, sizeof(msg) - off,
-                                        "%s%.*s", (m ? ", " : ""), owner_len, rel);
+                        char* longer = mod_strf("%s%s%.*s", msg, (m ? ", " : ""), owner_len, rel);
+                        free(msg);
+                        msg = longer;
                     }
-                    snprintf(msg + off, sizeof(msg) - off,
-                             "%s. Remove the duplicate from ~/.aether/packages.",
-                             match_overflow ? ", ..." : "");
-                    aether_error_simple(msg, 0, 0);
+                    char* whole = mod_strf("%s. Remove the duplicate from ~/.aether/packages.", msg);
+                    aether_error_simple(whole, 0, 0);
+                    free(whole);
+                    free(msg);
                     for (int m = 0; m < match_count; m++) free(matches[m]);
+                    free(matches);
+                    free(pkg_name);
+                    free(pkg_base);
                     return NULL;
                 }
 
-                return matches[0];
+                char* only = matches[0];
+                free(matches);
+                free(pkg_name);
+                free(pkg_base);
+                return only;
             }
+            free(matches);
+            free(pkg_name);
+            free(pkg_base);
         }
     }
 
@@ -1675,12 +1721,12 @@ static char* resolve_import_path(ASTNode* import_node) {
     if (!last_dot) return NULL;
 
     int prefix_len = (int)(last_dot - module_path);
-    if (prefix_len <= 0 || prefix_len >= 512) return NULL;
-    char prefix[512];
-    memcpy(prefix, module_path, prefix_len);
-    prefix[prefix_len] = '\0';
+    if (prefix_len <= 0) return NULL;
     const char* symbol = last_dot + 1;
     if (!*symbol) return NULL;
+    /* The path before the symbol, however long (#3545: past 511 bytes the
+     * import was refused as unresolved). */
+    char* prefix = mod_strf("%.*s", prefix_len, module_path);
 
     if (strncmp(prefix, "std.", 4) == 0) {
         file_path = module_resolve_stdlib_path(prefix + 4);
@@ -1689,7 +1735,10 @@ static char* resolve_import_path(ASTNode* import_node) {
     } else {
         file_path = module_resolve_local_path(prefix);
     }
-    if (!file_path) return NULL;
+    if (!file_path) {
+        free(prefix);
+        return NULL;
+    }
 
     ASTNode* sym_node = create_ast_node(AST_IDENTIFIER, symbol,
                                         import_node->line, import_node->column);
@@ -1705,7 +1754,7 @@ static char* resolve_import_path(ASTNode* import_node) {
     import_node->child_count++;
 
     free(import_node->value);
-    import_node->value = strdup(prefix);
+    import_node->value = prefix;
 
     return file_path;
 }
@@ -1724,13 +1773,16 @@ static int check_selective_import_shadow(ASTNode* ast,
                                           const char* ctx_label,
                                           const char* ctx_path) {
     if (!ast) return 1;
-    const char* selected_names[256];
-    const char* selected_from[256];
-    int selected_count = 0;
-    for (int i = 0; i < ast->child_count && selected_count < 256; i++) {
+    /* Every name the imports select, with the import it comes from, as many
+     * as there are (#3545: they were read into 256 slots, and a local
+     * function shadowing a name past them was not refused), the first
+     * import of each name kept. */
+    ModuleNames selected = {0};
+    StrMap selected_from = {0};
+    for (int i = 0; i < ast->child_count; i++) {
         ASTNode* child = ast->children[i];
         if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
-        for (int sk = 0; sk < child->child_count && selected_count < 256; sk++) {
+        for (int sk = 0; sk < child->child_count; sk++) {
             ASTNode* sel = child->children[sk];
             if (!sel || sel->type != AST_IDENTIFIER || !sel->value) continue;
             if (sel->annotation &&
@@ -1739,18 +1791,17 @@ static int check_selective_import_shadow(ASTNode* ast,
              * the alias, not the exported name (`import vg (path as
              * vgpath)` frees up `path` for local use; a local `vgpath`
              * is now the collision). */
-            if (sel->annotation &&
-                strncmp(sel->annotation, "select_alias:", 13) == 0) {
-                selected_names[selected_count] = sel->annotation + 13;
-            } else {
-                selected_names[selected_count] = sel->value;
-            }
-            selected_from[selected_count] = child->value;
-            selected_count++;
+            const char* local = sel->annotation &&
+                                        strncmp(sel->annotation, "select_alias:", 13) == 0
+                                    ? sel->annotation + 13
+                                    : sel->value;
+            if (names_has(&selected, local)) continue;
+            names_add(&selected, local);
+            strmap_put(&selected_from, local, (void*)child->value);
         }
     }
-    if (selected_count == 0) return 1;  /* Fast path. */
-    for (int i = 0; i < ast->child_count; i++) {
+    int ok = 1;
+    for (int i = 0; ok && selected.count > 0 && i < ast->child_count; i++) {
         ASTNode* child = ast->children[i];
         if (!child) continue;
         const char* fn_name = NULL;
@@ -1768,37 +1819,36 @@ static int check_selective_import_shadow(ASTNode* ast,
                 fn_line = inner->line; fn_col = inner->column;
             }
         }
-        if (!fn_name) continue;
-        for (int s = 0; s < selected_count; s++) {
-            if (strcmp(fn_name, selected_names[s]) == 0) {
-                fprintf(stderr,
-                    "error[E1000]: %s%s%s%s defines local function '%s' "
-                    "(%d:%d) but also selectively imports '%s' from '%s'\n",
-                    ctx_label,
-                    ctx_path ? " (" : "",
-                    ctx_path ? ctx_path : "",
-                    ctx_path ? ")" : "",
-                    fn_name, fn_line, fn_col,
-                    selected_names[s], selected_from[s]);
-                fprintf(stderr,
-                    "  the local def silently shadows the import, so a "
-                    "bare call to '%s(...)' inside the local body would\n"
-                    "  recurse into the local rather than forward to the "
-                    "imported symbol, at runtime this is a stack\n"
-                    "  overflow with no compile-time signal.\n", fn_name);
-                fprintf(stderr,
-                    "  fix one of:\n"
-                    "    - rename the local function\n"
-                    "    - drop the selective import: `import %s` (then "
-                    "call via the qualified form)\n"
-                    "    - keep both but call the imported version "
-                    "qualified inside the local body\n",
-                    selected_from[s]);
-                return 0;
-            }
-        }
+        if (!fn_name || !names_has(&selected, fn_name)) continue;
+        const char* from = (const char*)strmap_get(&selected_from, fn_name);
+        fprintf(stderr,
+            "error[E1000]: %s%s%s%s defines local function '%s' "
+            "(%d:%d) but also selectively imports '%s' from '%s'\n",
+            ctx_label,
+            ctx_path ? " (" : "",
+            ctx_path ? ctx_path : "",
+            ctx_path ? ")" : "",
+            fn_name, fn_line, fn_col,
+            fn_name, from);
+        fprintf(stderr,
+            "  the local def silently shadows the import, so a "
+            "bare call to '%s(...)' inside the local body would\n"
+            "  recurse into the local rather than forward to the "
+            "imported symbol, at runtime this is a stack\n"
+            "  overflow with no compile-time signal.\n", fn_name);
+        fprintf(stderr,
+            "  fix one of:\n"
+            "    - rename the local function\n"
+            "    - drop the selective import: `import %s` (then "
+            "call via the qualified form)\n"
+            "    - keep both but call the imported version "
+            "qualified inside the local body\n",
+            from);
+        ok = 0;
     }
-    return 1;
+    names_free(&selected);
+    strmap_free(&selected_from);
+    return ok;
 }
 
 /* #2172: every name a selective import picks must be one the module exports.
@@ -2024,14 +2074,17 @@ static int import_is_sibling(const char* importer_file, const char* import_path,
     if (bslash && (!slash || bslash > slash)) slash = bslash;
 #endif
     size_t dir_len = slash ? (size_t)(slash - importer_file) + 1 : 0;
-    char converted[512];
-    snprintf(converted, sizeof(converted), "%s", import_path);
-    for (char* p = converted; *p; p++) if (*p == '.') *p = '/';
-    char cand[4096];
-    snprintf(cand, sizeof(cand), "%.*s%s.ae", (int)dir_len, importer_file, converted);
-    if (module_same_file(resolved, cand)) return 1;
-    snprintf(cand, sizeof(cand), "%.*s%s/module.ae", (int)dir_len, importer_file, converted);
-    return module_same_file(resolved, cand);
+    char* converted = dots_to_slashes(import_path);
+    char* cand = mod_strf("%.*s%s.ae", (int)dir_len, importer_file, converted);
+    int same = module_same_file(resolved, cand);
+    free(cand);
+    if (!same) {
+        cand = mod_strf("%.*s%s/module.ae", (int)dir_len, importer_file, converted);
+        same = module_same_file(resolved, cand);
+        free(cand);
+    }
+    free(converted);
+    return same;
 }
 
 /* The dotted path a package's own files are named under: the module's
@@ -2254,9 +2307,10 @@ static int orchestrate_module(const char* module_name, const char* file_path,
      * body becomes self-recursive, runtime stack overflows. Caught
      * here BEFORE the merger runs. Helper extracted so the same
      * check applies to the main program AST in module_orchestrate. */
-    char ctx[300];
-    snprintf(ctx, sizeof(ctx), "module '%s'", module_name);
-    if (!check_selective_import_shadow(ast, ctx, file_path)) return 0;
+    char* ctx = mod_strf("module '%s'", module_name);
+    int shadow_ok = check_selective_import_shadow(ast, ctx, file_path);
+    free(ctx);
+    if (!shadow_ok) return 0;
     if (!check_export_short_names(ast, module_last_segment(module_name), module_name, file_path, 1))
         return 0;
     /* #2125: the C files this module ships must exist, and they are
@@ -2346,11 +2400,19 @@ int module_orchestrate(ASTNode* program) {
     /* #2976: a module file built or checked on its own (`ae check
      * lib/m/module.ae`, `--emit=lib`) is held to the rule its importers
      * hold it to, under the namespace a build gives it. */
-    {
-        char leaf[256];
-        if (program && module_leaf_of_file(program->source_file, leaf, sizeof(leaf))[0] &&
-            !check_export_short_names(program, leaf, leaf, program->source_file, 0))
-            return 0;
+    if (program && program->source_file) {
+        /* Room for any leaf of the path or of its full path (#3545: 256
+         * bytes, and a longer leaf left the check undone). */
+        size_t cap = strlen(program->source_file) + 4096;
+        char* leaf = malloc(cap);
+        if (!leaf) {
+            fprintf(stderr, "Fatal: out of memory\n");
+            exit(1);
+        }
+        int ok = !module_leaf_of_file(program->source_file, leaf, cap)[0] ||
+                 check_export_short_names(program, leaf, leaf, program->source_file, 0);
+        free(leaf);
+        if (!ok) return 0;
     }
 
     DependencyGraph* graph = dependency_graph_create();
@@ -2851,20 +2913,25 @@ static int c_symbol_bound_by_extern(ASTNode* mod_ast, const char* sym) {
     return 0;
 }
 
-static void merged_function_name(const char* ns, ASTNode* mod_ast, const char* name,
-                                 char* buf, size_t cap) {
-    snprintf(buf, cap, "%s_%s", ns, name);
+/* The merged C name (malloc'd: as long as it is, #3545; cut to a buffer,
+ * two long names became one). */
+static char* merged_function_name(const char* ns, ASTNode* mod_ast, const char* name) {
+    char* joined = mod_strf("%s_%s", ns, name);
     if (module_defines_function(mod_ast, name) &&
-        (module_has_extern_named(mod_ast, buf) || c_symbol_bound_by_extern(mod_ast, buf)))
-        snprintf(buf, cap, "ae_%s_%s", ns, name);
+        (module_has_extern_named(mod_ast, joined) || c_symbol_bound_by_extern(mod_ast, joined))) {
+        free(joined);
+        return mod_strf("ae_%s_%s", ns, name);
+    }
+    return joined;
 }
 
 /* A merged function whose C name is not `<ns>_<name>` keeps the name it was
  * written with, for diagnostics (ast_source_name). */
 static void stamp_written_name(ASTNode* clone, const char* ns, const char* name) {
-    char joined[512];
-    snprintf(joined, sizeof(joined), "%s_%s", ns, name);
-    if (!clone->value || strcmp(clone->value, joined) == 0) return;
+    char* joined = mod_strf("%s_%s", ns, name);
+    int same = !clone->value || strcmp(clone->value, joined) == 0;
+    free(joined);
+    if (same) return;
     free(clone->source_name);
     clone->source_name = strdup(name);
 }
@@ -2873,11 +2940,13 @@ static void stamp_written_name(ASTNode* clone, const char* ns, const char* name)
  * found by it (a rename inside a merged body knows only that). A name the
  * module binds to one of its externs (`length` for std.string's
  * `string_length`, from a glob) is that extern's `<ns>_<name>`. */
-static void merged_function_name_ns(const char* ns, const char* name, char* buf, size_t cap) {
+static char* merged_function_name_ns(const char* ns, const char* name) {
     AetherModule* m = module_find_by_namespace(ns);
-    merged_function_name(ns, m ? m->ast : NULL, name, buf, cap);
+    return merged_function_name(ns, m ? m->ast : NULL, name);
 }
 
+/* The C name into `buf`, or 0 when it is no function of the module or does
+ * not fit in `cap` bytes: a name cut to fit would be another name (#3545). */
 int module_function_c_name(const char* ns, const char* name, char* buf, size_t cap) {
     if (!ns || !name || !buf || cap == 0) return 0;
     AetherModule* m = module_find_by_namespace(ns);
@@ -2890,15 +2959,16 @@ int module_function_c_name(const char* ns, const char* name, char* buf, size_t c
     if (!e) return 0;
     int fn = e->first_fn;
     int ext = e->first_csym_extern;
-    if (fn >= 0 && (ext < 0 || fn < ext)) {
-        merged_function_name(m->ns ? m->ns : ns, m->ast, name, buf, cap);
-        return 1;
-    }
-    if (ext >= 0) {
-        snprintf(buf, cap, "%s_%s", m->ns ? m->ns : ns, name);
-        return 1;
-    }
-    return 0;
+    char* c_name = NULL;
+    if (fn >= 0 && (ext < 0 || fn < ext))
+        c_name = merged_function_name(m->ns ? m->ns : ns, m->ast, name);
+    else if (ext >= 0)
+        c_name = mod_strf("%s_%s", m->ns ? m->ns : ns, name);
+    if (!c_name) return 0;
+    int fits = strlen(c_name) < cap;
+    if (fits) memcpy(buf, c_name, strlen(c_name) + 1);
+    free(c_name);
+    return fits;
 }
 
 /* #2632: does the module define `name` itself (a function, builder,
@@ -2928,26 +2998,20 @@ static int module_defines_own_name(ASTNode* mod_ast, const char* name) {
 static int check_namespace_prefix_collision(ASTNode* program) {
     if (!program) return 1;
 
-    // User (pre-merge, top-level) function / builder / extern symbols.
-    enum { MAX_USER = 4096 };
-    const char* user_names[MAX_USER];
-    int user_line[MAX_USER], user_col[MAX_USER];
-    int un = 0;
-    for (int i = 0; i < program->child_count && un < MAX_USER; i++) {
+    /* User (pre-merge, top-level) function / builder / extern symbols, each
+     * name's first declaration, however many (#3545: 4096 were read, and a
+     * collision past them was not refused). */
+    StrMap user = {0};
+    for (int i = 0; i < program->child_count; i++) {
         ASTNode* d = unwrap_export(program->children[i]);
         if (!d || !d->value) continue;
-        if (d->type == AST_FUNCTION_DEFINITION ||
-            d->type == AST_BUILDER_FUNCTION ||
-            d->type == AST_EXTERN_FUNCTION) {
-            user_names[un] = d->value;
-            user_line[un] = d->line;
-            user_col[un]  = d->column;
-            un++;
-        }
+        if ((d->type == AST_FUNCTION_DEFINITION ||
+             d->type == AST_BUILDER_FUNCTION ||
+             d->type == AST_EXTERN_FUNCTION) && !strmap_has(&user, d->value))
+            strmap_put(&user, d->value, d);
     }
-    if (un == 0) return 1;
-
-    for (int i = 0; i < program->child_count; i++) {
+    int ok = 1;
+    for (int i = 0; ok && strmap_count(&user) > 0 && i < program->child_count; i++) {
         ASTNode* child = program->children[i];
         if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
         AetherModule* mod = module_find(child->value);
@@ -2955,7 +3019,7 @@ static int check_namespace_prefix_collision(ASTNode* program) {
         const char* ns = module_get_namespace(child->value);
         if (!ns) continue;
 
-        for (int j = 0; j < mod->ast->child_count; j++) {
+        for (int j = 0; ok && j < mod->ast->child_count; j++) {
             ASTNode* decl = unwrap_export(mod->ast->children[j]);
             if (!decl || !decl->value) continue;
             // Only entities the merge prefixes into a callable `ns_name`
@@ -2967,17 +3031,15 @@ static int check_namespace_prefix_collision(ASTNode* program) {
                             (decl->type == AST_EXTERN_FUNCTION && decl->annotation &&
                              strncmp(decl->annotation, "c_symbol:", 9) == 0));
             if (!callable) continue;
-            char prefixed[256];
-            if (decl->type == AST_EXTERN_FUNCTION)
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
-            else
-                merged_function_name(ns, mod->ast, decl->value, prefixed, sizeof(prefixed));
-            for (int u = 0; u < un; u++) {
-                if (strcmp(user_names[u], prefixed) != 0) continue;
+            char* prefixed = decl->type == AST_EXTERN_FUNCTION
+                                 ? mod_strf("%s_%s", ns, decl->value)
+                                 : merged_function_name(ns, mod->ast, decl->value);
+            ASTNode* u = strmap_get(&user, prefixed);
+            if (u) {
                 fprintf(stderr,
                     "error[E1001]: local function '%s' (%d:%d) collides with "
                     "imported '%s.%s' from '%s'\n",
-                    prefixed, user_line[u], user_col[u], ns, decl->value, child->value);
+                    prefixed, u->line, u->column, ns, decl->value, child->value);
                 fprintf(stderr,
                     "  an import mangles '%s.%s' to the flat C symbol '%s', the\n"
                     "  same symbol your local function emits. Every '%s.%s(...)'\n"
@@ -2989,11 +3051,13 @@ static int check_namespace_prefix_collision(ASTNode* program) {
                     "    - rename the local function so it isn't '%s_<name>'\n"
                     "    - drop the local and call '%s.%s(...)' directly\n",
                     ns, ns, decl->value);
-                return 0;
+                ok = 0;
             }
+            free(prefixed);
         }
     }
-    return 1;
+    strmap_free(&user);
+    return ok;
 }
 
 // Check if a name is in a string array
@@ -3006,8 +3070,8 @@ static int name_in_list(const char* name, const char** list, int count) {
 
 // Collect all names that are locally bound in a function (params + local variable declarations).
 // Recursively walks blocks to find all AST_VARIABLE_DECLARATION and AST_CONST_DECLARATION names.
-static void collect_local_names(ASTNode* node, const char** names, int* count, int max) {
-    if (!node || *count >= max) return;
+static void collect_local_names(ASTNode* node, ModuleNames* names) {
+    if (!node) return;
     /* #1606: AST_CLOSURE_PARAM belongs here alongside AST_PATTERN_VARIABLE.
        A closure parameter binds a name exactly as a function parameter does,
        so it must shadow a same-named module function or const. Without it,
@@ -3018,9 +3082,7 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
     if ((node->type == AST_PATTERN_VARIABLE || node->type == AST_VARIABLE_DECLARATION ||
          node->type == AST_CONST_DECLARATION || node->type == AST_CLOSURE_PARAM) &&
         node->value) {
-        if (!name_in_list(node->value, names, *count)) {
-            names[(*count)++] = node->value;
-        }
+        if (!names_has(names, node->value)) names_add(names, node->value);
     }
     for (int i = 0; i < node->child_count; i++) {
         // Don't recurse into nested function definitions (they have their own scope)
@@ -3032,7 +3094,7 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
          * whose parameter is `item` was taken for the parameter (#2637). */
         if (node->children[i] && (node->children[i]->type == AST_CLOSURE ||
                                   node->children[i]->type == AST_QUOTE)) continue;
-        collect_local_names(node->children[i], names, count, max);
+        collect_local_names(node->children[i], names);
     }
 }
 
@@ -3048,55 +3110,39 @@ static void collect_local_names(ASTNode* node, const char** names, int* count, i
  * Children are visited before their node, so an initializer comes before its
  * binding; a binding lasts to the end of the body (a closure's or a match
  * arm's included), which errs toward leaving a reference as it was. */
-typedef struct {
-    const char** names;  /* borrowed from binding nodes, which this pass never renames */
-    int count, cap;
-} BoundNames;
-
 static void rename_refs_before_binding(ASTNode* node, const char* prefix,
                                        const ModuleNames* funcs,
-                                       const char** local_names, int local_count,
-                                       BoundNames* bound) {
+                                       const ModuleNames* locals,
+                                       ModuleNames* bound) {
     if (!node || node->type == AST_OFFSETOF) return;
     for (int i = 0; i < node->child_count; i++) {
-        rename_refs_before_binding(node->children[i], prefix, funcs,
-                                   local_names, local_count, bound);
+        rename_refs_before_binding(node->children[i], prefix, funcs, locals, bound);
     }
     if (!node->value) return;
     if (node->type == AST_VARIABLE_DECLARATION || node->type == AST_PATTERN_VARIABLE ||
         node->type == AST_CONST_DECLARATION || node->type == AST_CLOSURE_PARAM) {
-        if (!name_in_list(node->value, bound->names, bound->count)) {
-            if (bound->count == bound->cap) {
-                bound->cap = bound->cap ? bound->cap * 2 : 16;
-                bound->names = (const char**)realloc((void*)bound->names,
-                                                     (size_t)bound->cap * sizeof(*bound->names));
-                if (!bound->names) { fprintf(stderr, "out of memory\n"); exit(1); }
-            }
-            bound->names[bound->count++] = node->value;
-        }
+        /* Borrowed from binding nodes, which this pass never renames. */
+        if (!names_has(bound, node->value)) names_add(bound, node->value);
         return;
     }
     if (node->type != AST_FUNCTION_CALL && node->type != AST_IDENTIFIER) return;
-    if (!name_in_list(node->value, local_names, local_count) ||
-        name_in_list(node->value, bound->names, bound->count)) return;
+    if (!names_has(locals, node->value) || names_has(bound, node->value)) return;
     /* Functions only. A local named after a module const, read before its
      * binding (a loop's, from the previous pass), is the local to the
      * checker, which passes over such a local only for a function. */
     if (!names_has(funcs, node->value)) return;
-    char prefixed[512];
-    merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
+    char* prefixed = merged_function_name_ns(prefix, node->value);
     free(node->value);
-    node->value = strdup(prefixed);
+    node->value = prefixed;
 }
 
 static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
                                           const ModuleNames* funcs,
-                                          const char** local_names, int local_count) {
-    if (local_count == 0 || !funcs || funcs->count == 0) return;
-    BoundNames bound = {NULL, 0, 0};
-    rename_refs_before_binding(scope, prefix, funcs, local_names, local_count,
-                               &bound);
-    free((void*)bound.names);
+                                          const ModuleNames* locals) {
+    if (!locals || locals->count == 0 || !funcs || funcs->count == 0) return;
+    ModuleNames bound = {0};
+    rename_refs_before_binding(scope, prefix, funcs, locals, &bound);
+    names_free(&bound);
 }
 
 // Recursively rename intra-module function calls and constant references in a cloned AST.
@@ -3104,7 +3150,7 @@ static void rename_refs_before_binding_in(ASTNode* scope, const char* prefix,
 static void rename_intra_module_refs(ASTNode* node, const char* prefix,
                                       const ModuleNames* funcs,
                                       const ModuleNames* consts,
-                                      const char** local_names, int local_count) {
+                                      const ModuleNames* locals) {
     if (!node) return;
 
     /* #2320: `offsetof(T, f)` names `f` as a member of T, never as a
@@ -3123,7 +3169,7 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
         names_has(funcs, node->children[0]->value) &&
         !names_has(consts, node->children[0]->value) &&
         !name_is_module_global_var(prefix, node->children[0]->value) &&
-        !name_in_list(node->children[0]->value, local_names, local_count)) {
+        !names_has(locals, node->children[0]->value)) {
         AetherModule* self = module_find_by_namespace(prefix);
         if (self && self->name && module_sees_namespace(self->name, node->children[0]->value) &&
             strcmp(module_namespace_of(self->name), node->children[0]->value) != 0)
@@ -3139,17 +3185,16 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * `ae check` of the module and a plain program ran the closure. It
          * matters more now that a glob binds an imported module's whole
          * extern surface (`trim`, `length`, ...) in a merged module. */
-        int renamed = name_in_list(node->value, local_names, local_count);
+        int renamed = names_has(locals, node->value);
         if (!renamed && names_has(funcs, node->value)) {
             /* #3116: the module's own `free` taking one argument. The
              * checker gives a slice argument to the builtin instead, once
              * its type is known (typecheck_function_call_inner). */
             int own_free = strcmp(node->value, "free") == 0 &&
                            node->child_count == 1 && !node->annotation;
-            char prefixed[256];
-            merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
+            char* prefixed = merged_function_name_ns(prefix, node->value);
             free(node->value);
-            node->value = strdup(prefixed);
+            node->value = prefixed;
             if (own_free) node->annotation = strdup("own_free");
             renamed = 1;
         }
@@ -3159,12 +3204,11 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * `<prefix>_gen_buffers` and its reads and writes are renamed below
          * and above, but the call kept the bare name and the checker then
          * reported "Undefined function". A local of that name shadows it. */
-        if (!renamed && !name_in_list(node->value, local_names, local_count) &&
+        if (!renamed && !names_has(locals, node->value) &&
             name_is_module_global_var(prefix, node->value)) {
-            char prefixed[256];
-            snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+            char* prefixed = mod_strf("%s_%s", prefix, node->value);
             free(node->value);
-            node->value = strdup(prefixed);
+            node->value = prefixed;
             renamed = 1;
         }
         /* A method called on a module-level `var` (`views.push(h)`, a
@@ -3175,19 +3219,13 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * longer path is a module's. */
         const char* dot = renamed ? NULL : strchr(node->value, '.');
         if (dot && dot != node->value && !strchr(dot + 1, '.')) {
-            size_t rlen = (size_t)(dot - node->value);
-            char recv[200];
-            if (rlen < sizeof(recv)) {
-                memcpy(recv, node->value, rlen);
-                recv[rlen] = '\0';
-                if (!name_in_list(recv, local_names, local_count) &&
-                    name_is_module_global_var(prefix, recv)) {
-                    char prefixed[256];
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s%s", prefix, recv, dot);
-                    free(node->value);
-                    node->value = strdup(prefixed);
-                }
+            char* recv = mod_strf("%.*s", (int)(dot - node->value), node->value);
+            if (!names_has(locals, recv) && name_is_module_global_var(prefix, recv)) {
+                char* prefixed = mod_strf("%s_%s%s", prefix, recv, dot);
+                free(node->value);
+                node->value = prefixed;
             }
+            free(recv);
         }
     }
 
@@ -3203,10 +3241,9 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * shadowing local that must stay local. */
     if ((node->type == AST_VARIABLE_DECLARATION || node->type == AST_ASSIGNMENT) &&
         node->value && name_is_module_global_var(prefix, node->value)) {
-        char prefixed[256];
-        snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+        char* prefixed = mod_strf("%s_%s", prefix, node->value);
         free(node->value);
-        node->value = strdup(prefixed);
+        node->value = prefixed;
     }
 
     /* `builder name(...) with <factory>` carries the factory name in
@@ -3221,22 +3258,20 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * Filed in aether/new_aevg_asks.md ASK 1 from the AeVG port. */
     if (node->type == AST_BUILDER_FUNCTION && node->annotation &&
         names_has(funcs, node->annotation)) {
-        char prefixed[256];
-        merged_function_name_ns(prefix, node->annotation, prefixed, sizeof(prefixed));
+        char* prefixed = merged_function_name_ns(prefix, node->annotation);
         free(node->annotation);
-        node->annotation = strdup(prefixed);
+        node->annotation = prefixed;
     }
 
     if (node->type == AST_IDENTIFIER && node->value) {
         // Only rename if this identifier matches a module constant AND is not
         // shadowed by a local variable or parameter in the enclosing function
-        if (!name_in_list(node->value, local_names, local_count)) {
+        if (!names_has(locals, node->value)) {
             int renamed = 0;
             if (names_has(consts, node->value)) {
-                char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", prefix, node->value);
+                char* prefixed = mod_strf("%s_%s", prefix, node->value);
                 free(node->value);
-                node->value = strdup(prefixed);
+                node->value = prefixed;
                 renamed = 1;
             }
             // Also rewrite identifier-as-value references to module
@@ -3247,10 +3282,9 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
             // call-site rewrite above only catches AST_FUNCTION_CALL,
             // not value-position AST_IDENTIFIER.
             if (!renamed && names_has(funcs, node->value)) {
-                char prefixed[256];
-                merged_function_name_ns(prefix, node->value, prefixed, sizeof(prefixed));
+                char* prefixed = merged_function_name_ns(prefix, node->value);
                 free(node->value);
-                node->value = strdup(prefixed);
+                node->value = prefixed;
             }
         }
     }
@@ -3267,48 +3301,40 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
        body-locals of the closure are appended to whatever the enclosing
        function already contributed. */
     if (node->type == AST_CLOSURE || node->type == AST_QUOTE) {
-        const char* clo_locals[128];
-        int clo_local_count = 0;
-        /* The closure's OWN bindings go in first. The list is capped, and if
-           a large enclosing scope filled it the parameters would be the names
-           dropped — which is precisely the bug this branch exists to prevent.
-           Enclosing names are appended after, and merely losing one of those
-           costs a missed rename-suppression, not a wrong symbol. */
-        collect_local_names(node, clo_locals, &clo_local_count, 128);
+        /* The closure's own bindings, then the enclosing scope's, as many
+         * as there are (#3545: they were capped at 128, and a local past the
+         * cap was taken for a same-named module function). */
+        ModuleNames clo = {0};
+        collect_local_names(node, &clo);
         /* #2683 inside the closure: its own names, where the enclosing body
          * binds none of them (that body's walk has placed those). */
         {
-            const char* own[128];
-            int own_count = 0;
-            for (int i = 0; i < clo_local_count; i++) {
-                if (!name_in_list(clo_locals[i], local_names, local_count) &&
-                    !name_is_module_global_var(prefix, clo_locals[i])) {
-                    own[own_count++] = clo_locals[i];
-                }
+            ModuleNames own = {0};
+            for (int i = 0; i < clo.count; i++) {
+                if (!names_has(locals, clo.names[i]) &&
+                    !name_is_module_global_var(prefix, clo.names[i]))
+                    names_add(&own, clo.names[i]);
             }
-            rename_refs_before_binding_in(node, prefix, funcs, own, own_count);
+            rename_refs_before_binding_in(node, prefix, funcs, &own);
+            names_free(&own);
         }
-        for (int i = 0; i < local_count && clo_local_count < 128; i++) {
-            if (!name_in_list(local_names[i], clo_locals, clo_local_count)) {
-                clo_locals[clo_local_count++] = local_names[i];
-            }
+        for (int i = 0; locals && i < locals->count; i++) {
+            if (!names_has(&clo, locals->names[i])) names_add(&clo, locals->names[i]);
         }
-        int kept_c = 0;
-        for (int i = 0; i < clo_local_count; i++) {
-            if (!name_is_module_global_var(prefix, clo_locals[i])) {
-                clo_locals[kept_c++] = clo_locals[i];
-            }
+        ModuleNames kept = {0};
+        for (int i = 0; i < clo.count; i++) {
+            if (!name_is_module_global_var(prefix, clo.names[i])) names_add(&kept, clo.names[i]);
         }
-        clo_local_count = kept_c;
+        names_free(&clo);
         for (int i = 0; i < node->child_count; i++) {
-            rename_intra_module_refs(node->children[i], prefix, funcs,
-                                     consts, clo_locals, clo_local_count);
+            rename_intra_module_refs(node->children[i], prefix, funcs, consts, &kept);
         }
+        names_free(&kept);
         return;
     }
 
-    // When entering a function definition, collect its local names for shadowing checks.
-    // Limit: 128 locals per function — excess names won't shadow module constants.
+    // When entering a function definition, collect its local names for shadowing checks,
+    // every one of them (#3545).
     /* A builder body is a function body: its parameters and locals shadow
      * a same-named module function exactly as a plain function's do.
      * Without AST_BUILDER_FUNCTION here a builder entered no scope, so
@@ -3317,9 +3343,8 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
      * setter's ADDRESS interpolated, compared with 1, or passed as an int
      * (aeb asks/builder-local-resolves-to-module-function.md). */
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION) {
-        const char* nested_locals[128];
-        int nested_local_count = 0;
-        collect_local_names(node, nested_locals, &nested_local_count, 128);
+        ModuleNames nested = {0};
+        collect_local_names(node, &nested);
         /* #937: collect_local_names counts a bare `var = expr` write as a
          * local (it's shaped as an AST_VARIABLE_DECLARATION). For a module
          * `global_var` that's wrong — the write is to the shared global, and
@@ -3328,25 +3353,21 @@ static void rename_intra_module_refs(ASTNode* node, const char* prefix,
          * codegen's shadowing local). Drop global_var names so reads and the
          * write target both rename. A real local shadowing a `const` is NOT a
          * global_var, so it's correctly retained. */
-        int kept = 0;
-        for (int i = 0; i < nested_local_count; i++) {
-            if (!name_is_module_global_var(prefix, nested_locals[i])) {
-                nested_locals[kept++] = nested_locals[i];
-            }
+        ModuleNames kept = {0};
+        for (int i = 0; i < nested.count; i++) {
+            if (!name_is_module_global_var(prefix, nested.names[i])) names_add(&kept, nested.names[i]);
         }
-        nested_local_count = kept;
-        rename_refs_before_binding_in(node, prefix, funcs, nested_locals,
-                                      nested_local_count);
+        names_free(&nested);
+        rename_refs_before_binding_in(node, prefix, funcs, &kept);
         for (int i = 0; i < node->child_count; i++) {
-            rename_intra_module_refs(node->children[i], prefix, funcs,
-                                     consts, nested_locals, nested_local_count);
+            rename_intra_module_refs(node->children[i], prefix, funcs, consts, &kept);
         }
+        names_free(&kept);
         return;
     }
 
     for (int i = 0; i < node->child_count; i++) {
-        rename_intra_module_refs(node->children[i], prefix, funcs,
-                                 consts, local_names, local_count);
+        rename_intra_module_refs(node->children[i], prefix, funcs, consts, locals);
     }
 }
 
@@ -3638,6 +3659,16 @@ static void rename_aliased_import_refs(ASTNode* node, const char* alias,
     }
 }
 
+/* Does the scope `node` (a function, a closure) bind `name`, as a
+ * parameter, a local or a constant of its own (collect_local_names)? */
+static int scope_binds_name(ASTNode* node, const char* name) {
+    ModuleNames bound = {0};
+    collect_local_names(node, &bound);
+    int has = names_has(&bound, name);
+    names_free(&bound);
+    return has;
+}
+
 /* #2209: rewrite the qualified prefix a scope WROTE for an import to the
  * namespace the import's symbols actually carry after the merge.
  *
@@ -3673,7 +3704,7 @@ static void rename_aliased_import_refs(ASTNode* node, const char* alias,
  * collision-driven rename now needs exactly this call rewritten, and used
  * to skip it, leaving `region.` unrewritten and misresolved. */
 static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char* to,
-                                     const char** local_names, int local_count) {
+                                     int shadowed) {
     if (!node) return;
     size_t from_len = strlen(from);
 
@@ -3690,7 +3721,6 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
     }
     if (node->type == AST_MEMBER_ACCESS && node->child_count > 0 && node->value) {
         ASTNode* base = node->children[0];
-        int shadowed = name_in_list(from, local_names, local_count);
         int target_exports_it = shadowed &&
             module_exports_symbol(module_find_by_namespace(to), node->value);
         if (base && base->type == AST_IDENTIFIER && base->value &&
@@ -3702,21 +3732,17 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
 
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
         node->type == AST_CLOSURE || node->type == AST_QUOTE) {
-        const char* scope_locals[128];
-        int scope_count = 0;
-        collect_local_names(node, scope_locals, &scope_count, 128);
-        for (int i = 0; i < local_count && scope_count < 128; i++) {
-            if (!name_in_list(local_names[i], scope_locals, scope_count))
-                scope_locals[scope_count++] = local_names[i];
-        }
+        /* #3545: whether the scope binds `from`, however many names it binds
+         * (its locals were read into 128 slots, and one past them was not
+         * seen to shadow the module). */
+        int here = shadowed || scope_binds_name(node, from);
         for (int i = 0; i < node->child_count; i++) {
-            rewrite_qualified_prefix(node->children[i], from, to,
-                                     scope_locals, scope_count);
+            rewrite_qualified_prefix(node->children[i], from, to, here);
         }
         return;
     }
     for (int i = 0; i < node->child_count; i++) {
-        rewrite_qualified_prefix(node->children[i], from, to, local_names, local_count);
+        rewrite_qualified_prefix(node->children[i], from, to, shadowed);
     }
 }
 
@@ -3735,7 +3761,7 @@ static void rewrite_qualified_prefix(ASTNode* node, const char* from, const char
  * its diagnostic rather than one silently swapped in for it. */
 static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
                                                AetherModule** candidates, int ncandidates,
-                                               const char** local_names, int local_count) {
+                                               int shadowed) {
     if (!node) return;
     size_t from_len = strlen(from);
 
@@ -3764,7 +3790,6 @@ static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
         ASTNode* base = node->children[0];
         if (base && base->type == AST_IDENTIFIER && base->value &&
             strcmp(base->value, from) == 0) {
-            int shadowed = name_in_list(from, local_names, local_count);
             for (int i = 0; i < ncandidates; i++) {
                 if (!candidates[i]) continue;
                 if (shadowed && !module_exports_symbol(candidates[i], node->value)) continue;
@@ -3781,22 +3806,19 @@ static void rewrite_qualified_prefix_ambiguous(ASTNode* node, const char* from,
 
     if (node->type == AST_FUNCTION_DEFINITION || node->type == AST_BUILDER_FUNCTION ||
         node->type == AST_CLOSURE || node->type == AST_QUOTE) {
-        const char* scope_locals[128];
-        int scope_count = 0;
-        collect_local_names(node, scope_locals, &scope_count, 128);
-        for (int i = 0; i < local_count && scope_count < 128; i++) {
-            if (!name_in_list(local_names[i], scope_locals, scope_count))
-                scope_locals[scope_count++] = local_names[i];
-        }
+        /* #3545: whether the scope binds `from`, however many names it binds
+         * (its locals were read into 128 slots, and one past them was not
+         * seen to shadow the module). */
+        int here = shadowed || scope_binds_name(node, from);
         for (int i = 0; i < node->child_count; i++) {
             rewrite_qualified_prefix_ambiguous(node->children[i], from, candidates, ncandidates,
-                                               scope_locals, scope_count);
+                                               here);
         }
         return;
     }
     for (int i = 0; i < node->child_count; i++) {
         rewrite_qualified_prefix_ambiguous(node->children[i], from, candidates, ncandidates,
-                                           local_names, local_count);
+                                           shadowed);
     }
 }
 
@@ -3828,22 +3850,34 @@ static const char* import_written_prefix(ASTNode* imp) {
  * rewrite_qualified_prefix_ambiguous. The imports are collected once per
  * scope (#3499): collected again for each of a program's top-level nodes,
  * the merge grew with the square of the program. */
-#define REWRITE_MAX_IMPORTS 64
 typedef struct {
-    const char* writtens[REWRITE_MAX_IMPORTS];
-    AetherModule* mods[REWRITE_MAX_IMPORTS];
-    int n;
+    /* One entry per import whose written prefix is not its namespace, as
+     * many as the scope has (#3545: they were capped at 64, and an import
+     * past the cap kept a prefix nothing binds). */
+    const char** writtens;
+    AetherModule** mods;
+    int n, cap;
 } ImportPrefixes;
+
+static void import_prefixes_free(ImportPrefixes* ip) {
+    free(ip->writtens);
+    free(ip->mods);
+    ip->writtens = NULL;
+    ip->mods = NULL;
+    ip->n = ip->cap = 0;
+}
 
 static void import_prefixes_collect(ImportPrefixes* ip, ASTNode* scope_ast,
                                     const char* self_name) {
-    ip->n = 0;
+    ip->writtens = NULL;
+    ip->mods = NULL;
+    ip->n = ip->cap = 0;
     /* #3546: a module's imports from its index (a module's top level does
      * not change while it merges); the program's, which the merge inserts
      * into, are read in program order. */
     DeclIndex* dix = self_name && scope_ast ? decl_index(scope_ast) : NULL;
     int n = dix ? dix->import_count : scope_ast ? scope_ast->child_count : 0;
-    for (int i = 0; i < n && ip->n < REWRITE_MAX_IMPORTS; i++) {
+    for (int i = 0; i < n; i++) {
         ASTNode* imp = dix ? dix->imports[i] : scope_ast->children[i];
         if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value) continue;
         if (imp->annotation && strcmp(imp->annotation, "synthetic") == 0) continue;
@@ -3851,6 +3885,11 @@ static void import_prefixes_collect(ImportPrefixes* ip, ASTNode* scope_ast,
         const char* ns = module_namespace_of(imp->value);
         if (strcmp(written, ns) == 0) continue;
         if (self_name && strcmp(written, module_last_segment(self_name)) == 0) continue;
+        if (ip->n == ip->cap) {
+            ip->cap = ip->cap ? ip->cap * 2 : 16;
+            ip->writtens = aether_xrealloc(ip->writtens, (size_t)ip->cap * sizeof(*ip->writtens));
+            ip->mods = aether_xrealloc(ip->mods, (size_t)ip->cap * sizeof(*ip->mods));
+        }
         ip->writtens[ip->n] = written;
         ip->mods[ip->n] = module_find(imp->value);
         ip->n++;
@@ -3858,11 +3897,15 @@ static void import_prefixes_collect(ImportPrefixes* ip, ASTNode* scope_ast,
 }
 
 static void import_prefixes_rewrite(const ImportPrefixes* ip, ASTNode* body) {
-    if (!body) return;
-    int done[REWRITE_MAX_IMPORTS] = {0};
+    if (!body || ip->n == 0) return;
+    int* done = calloc((size_t)ip->n, sizeof(int));
+    AetherModule** candidates = malloc((size_t)ip->n * sizeof(*candidates));
+    if (!done || !candidates) {
+        fprintf(stderr, "Fatal: out of memory\n");
+        exit(1);
+    }
     for (int i = 0; i < ip->n; i++) {
         if (done[i]) continue;
-        AetherModule* candidates[REWRITE_MAX_IMPORTS];
         int ncand = 0;
         candidates[ncand++] = ip->mods[i];
         done[i] = 1;
@@ -3873,13 +3916,14 @@ static void import_prefixes_rewrite(const ImportPrefixes* ip, ASTNode* body) {
             }
         }
         if (ncand == 1) {
-            if (ip->mods[i]) rewrite_qualified_prefix(body, ip->writtens[i], module_namespace_of(ip->mods[i]->name), NULL, 0);
+            if (ip->mods[i]) rewrite_qualified_prefix(body, ip->writtens[i], module_namespace_of(ip->mods[i]->name), 0);
         } else {
-            rewrite_qualified_prefix_ambiguous(body, ip->writtens[i], candidates, ncand, NULL, 0);
+            rewrite_qualified_prefix_ambiguous(body, ip->writtens[i], candidates, ncand, 0);
         }
     }
+    free(done);
+    free(candidates);
 }
-#undef REWRITE_MAX_IMPORTS
 
 static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
                                     const char* self_name) {
@@ -3887,6 +3931,7 @@ static void rewrite_import_prefixes(ASTNode* body, ASTNode* scope_ast,
     ImportPrefixes ip;
     import_prefixes_collect(&ip, scope_ast, self_name);
     import_prefixes_rewrite(&ip, body);
+    import_prefixes_free(&ip);
 }
 
 /* The registered module whose parsed AST is `mod_ast`, or NULL. */
@@ -4023,14 +4068,11 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                  * so aliased entries get a dedicated pass here). */
                 if (sel->annotation &&
                     strncmp(sel->annotation, "select_alias:", 13) == 0) {
-                    char prefixed[256];
                     int is_const = names_has(sub_consts, sel->value);
-                    if (is_const)
-                        snprintf(prefixed, sizeof(prefixed), "%s_%s", sub_ns, sel->value);
-                    else
-                        merged_function_name(sub_ns, sub_mod->ast, sel->value, prefixed,
-                                             sizeof(prefixed));
+                    char* prefixed = is_const ? mod_strf("%s_%s", sub_ns, sel->value)
+                                              : merged_function_name(sub_ns, sub_mod->ast, sel->value);
                     rename_aliased_import_refs(clone, sel->annotation + 13, prefixed, is_const);
+                    free(prefixed);
                     continue;
                 }
                 if (names_has(sub_funcs, sel->value)) {
@@ -4049,7 +4091,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
 
         if (sel_funcs.count > 0 || sel_consts.count > 0)
             rename_intra_module_refs(clone, sub_ns,
-                                     &sel_funcs, &sel_consts, NULL, 0);
+                                     &sel_funcs, &sel_consts, NULL);
         names_free(&sel_funcs);
         names_free(&sel_consts);
     }
@@ -4268,22 +4310,21 @@ typedef struct {
     const char* file;      /* for diagnostics */
 } SsScope;
 
-/* One ambiguity report per name and line. */
-static const char* g_ss_reported[64];
-static int g_ss_reported_line[64];
-static int g_ss_reported_count = 0;
+/* One ambiguity report per name and line, however many there are (#3545:
+ * 64 were remembered, and a report past them could be repeated). Keyed
+ * `<line>:<name>`. */
+static StrMap g_ss_reported = {0};
 
 static int g_ss_quiet = 0;   /* resolving to compare, not for a use: report nothing */
 
 static void ss_report_ambiguous(const SsScope* sc, const char* name, ScopedStruct** cands,
                                 int ncand, int line, int column, int via_imports) {
     if (g_ss_quiet) return;
-    for (int i = 0; i < g_ss_reported_count; i++)
-        if (g_ss_reported_line[i] == line && strcmp(g_ss_reported[i], name) == 0) return;
-    if (g_ss_reported_count < 64) {
-        g_ss_reported[g_ss_reported_count] = aether_intern(name);
-        g_ss_reported_line[g_ss_reported_count++] = line;
-    }
+    char* key = mod_strf("%d:%s", line, name);
+    int seen = strmap_has(&g_ss_reported, key);
+    if (!seen) strmap_put(&g_ss_reported, key, (void*)1);
+    free(key);
+    if (seen) return;
     char where[400];
     size_t off = 0;
     where[0] = '\0';
@@ -4310,6 +4351,17 @@ static void ss_report_ambiguous(const SsScope* sc, const char* name, ScopedStruc
     aether_error_report(&e);
 }
 
+/* `s` added to the candidate list `*v` (a struct reached twice is one). */
+static void ss_cand_add(ScopedStruct*** v, int* n, int* cap, ScopedStruct* s) {
+    for (int k = 0; k < *n; k++)
+        if ((*v)[k]->cname == s->cname) return;
+    if (*n == *cap) {
+        *cap = *cap ? *cap * 2 : 8;
+        *v = aether_xrealloc(*v, (size_t)*cap * sizeof(**v));
+    }
+    (*v)[(*n)++] = s;
+}
+
 /* The struct a name written in `sc` resolves to, or NULL when it is no
  * module-scoped struct (then the name is left as written). */
 static ScopedStruct* ss_resolve(const SsScope* sc, const char* name, const char* qualifier,
@@ -4325,8 +4377,10 @@ static ScopedStruct* ss_resolve(const SsScope* sc, const char* name, const char*
 
     /* The modules the file imports. A selective import naming `name` picks
      * that module outright. */
-    ScopedStruct* cands[16];
-    int ncand = 0;
+    /* The candidates, as many as there are (#3545: 16 were kept, and the
+     * ambiguity report named only those). */
+    ScopedStruct** cands = NULL;
+    int ncand = 0, cand_cap = 0;
     int other = 0;   /* an import defines an enum, sum, ... of that name */
     for (int i = 0; sc->scope_ast && i < sc->scope_ast->child_count; i++) {
         ASTNode* imp = sc->scope_ast->children[i];
@@ -4342,33 +4396,31 @@ static ScopedStruct* ss_resolve(const SsScope* sc, const char* name, const char*
             ASTNode* sel = imp->children[k];
             if (sel && sel->type == AST_IDENTIFIER && sel->value &&
                 !(sel->annotation && strcmp(sel->annotation, "module_alias") == 0) &&
-                strcmp(sel->value, name) == 0)
+                strcmp(sel->value, name) == 0) {
+                free(cands);
                 return s;
+            }
         }
-        int dup = 0;
-        for (int k = 0; k < ncand; k++) dup |= cands[k]->cname == s->cname;
-        if (!dup && ncand < 16) cands[ncand++] = s;
+        ss_cand_add(&cands, &ncand, &cand_cap, s);
     }
-    if (ncand == 1) return cands[0];
-    if (ncand > 1) {
+    ScopedStruct* found = NULL;
+    if (ncand == 1) {
+        found = cands[0];
+    } else if (ncand > 1) {
         ss_report_ambiguous(sc, name, cands, ncand, line, column, 1);
-        return NULL;
+    } else if (!other) {
+        /* None imported: the one struct of that name in the build, as when
+         * struct names were global (a module's body may name a struct of a
+         * module it reaches only transitively). */
+        for (int i = 0; i < g_ss_count; i++) {
+            ScopedStruct* s = &g_ss[i];
+            if (strcmp(s->name, name) == 0) ss_cand_add(&cands, &ncand, &cand_cap, s);
+        }
+        if (ncand == 1) found = cands[0];
+        else if (ncand > 1) ss_report_ambiguous(sc, name, cands, ncand, line, column, 0);
     }
-    if (other) return NULL;
-
-    /* None imported: the one struct of that name in the build, as when
-     * struct names were global (a module's body may name a struct of a
-     * module it reaches only transitively). */
-    for (int i = 0; i < g_ss_count; i++) {
-        ScopedStruct* s = &g_ss[i];
-        if (strcmp(s->name, name) != 0) continue;
-        int dup = 0;
-        for (int k = 0; k < ncand; k++) dup |= cands[k]->cname == s->cname;
-        if (!dup && ncand < 16) cands[ncand++] = s;
-    }
-    if (ncand == 1) return cands[0];
-    if (ncand > 1) ss_report_ambiguous(sc, name, cands, ncand, line, column, 0);
-    return NULL;
+    free(cands);
+    return found;
 }
 
 static void ss_rename(char** slot, const ScopedStruct* s) {
@@ -4489,7 +4541,7 @@ static int ss_same_definition(const ScopedStruct* a, const ScopedStruct* b) {
 static void ss_build_table(ASTNode* program) {
     ss_reset();
     ast_struct_names_reset();
-    g_ss_reported_count = 0;
+    strmap_free(&g_ss_reported);
     g_ss_program = program;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* d = unwrap_export(program->children[i]);
@@ -4510,9 +4562,9 @@ static void ss_build_table(ASTNode* program) {
             if (keep_plain) {
                 ss_add(m, d, d->value);
             } else {
-                char cname[512];
-                snprintf(cname, sizeof(cname), "%s_%s", ns, d->value);
+                char* cname = mod_strf("%s_%s", ns, d->value);
                 ss_add(m, d, cname);
+                free(cname);
             }
         }
     }
@@ -4609,6 +4661,7 @@ void module_merge_into_program(ASTNode* program) {
         if (!child || child->type == AST_IMPORT_STATEMENT) continue;
         import_prefixes_rewrite(&prog_imports, child);
     }
+    import_prefixes_free(&prog_imports);
 
     // Find insertion point: just before AST_MAIN_FUNCTION
     int insert_idx = program->child_count;
@@ -4686,16 +4739,18 @@ void module_merge_into_program(ASTNode* program) {
             if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
                 // Build prefixed name: "double_it" -> "mymath_double_it",
                 // apart from an extern of the module (#2978).
-                char prefixed[256];
-                merged_function_name(ns, mod_ast, decl->value, prefixed, sizeof(prefixed));
+                char* prefixed = merged_function_name(ns, mod_ast, decl->value);
 
                 // Skip if already merged (e.g. from a prior non-selective
                 // import); every clause of a set is merged (#2643).
-                if (program_has_function_before(program, prefixed, &pass)) continue;
+                if (program_has_function_before(program, prefixed, &pass)) {
+                    free(prefixed);
+                    continue;
+                }
 
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
-                clone->value = strdup(prefixed);
+                clone->value = prefixed;
                 // Mark as imported so codegen emits this function with the
                 // C `static` storage class. Each translation unit that
                 // imports the same module gets its own private copy, and
@@ -4708,7 +4763,7 @@ void module_merge_into_program(ASTNode* program) {
 
                 // Rename intra-module function calls and constant refs within the cloned body
                 rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL, 0);
+                                         module_const_names(mod), NULL);
                 // Also rewrite bare-name calls to selectively-imported
                 // names from M's own `import X (a, b)` statements — see
                 // apply_inherited_selective_imports comment for why.
@@ -4732,25 +4787,19 @@ void module_merge_into_program(ASTNode* program) {
                 // `@extern` (e.g. std.strbuilder's `append_format`)
                 // reachable cross-module — an ordinary wrapper cannot
                 // forward a `...` tail.
-                char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
+                char* prefixed = mod_strf("%s_%s", ns, decl->value);
 
                 // Dedup — a module imported twice must not clone the
                 // extern twice (duplicate registry entries / prototypes).
-                int already = 0;
-                for (int p = 0; p < program->child_count; p++) {
-                    ASTNode* pc = program->children[p];
-                    if (pc && pc->type == AST_EXTERN_FUNCTION && pc->value &&
-                        strcmp(pc->value, prefixed) == 0) {
-                        already = 1;
-                        break;
-                    }
+                // #3546: from the program's index.
+                if (ast_decl_kinds(program, prefixed) & DECL_EXTERN) {
+                    free(prefixed);
+                    continue;
                 }
-                if (already) continue;
 
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
-                clone->value = strdup(prefixed);
+                clone->value = prefixed;
                 /* Merged, not the program's own (#2632 reads the mark). */
                 stamp_origin(clone, mod);
                 ss_scope_node(clone, mod);
@@ -4765,19 +4814,21 @@ void module_merge_into_program(ASTNode* program) {
                 // Skip if already merged (e.g. from a prior import of the same
                 // module, or a synthetic revisit — aether#1009). Without this
                 // the const is cloned twice → duplicate C definition.
-                char prefixed[256];
-                snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
-                if (program_has_const(program, prefixed)) continue;
+                char* prefixed = mod_strf("%s_%s", ns, decl->value);
+                if (program_has_const(program, prefixed)) {
+                    free(prefixed);
+                    continue;
+                }
 
                 // Clone and rename constants too
                 ASTNode* clone = clone_ast_node(decl);
                 free(clone->value);
-                clone->value = strdup(prefixed);
+                clone->value = prefixed;
                 stamp_origin(clone, mod);
 
                 // Rename references to other module constants in the value expression
                 rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL, 0);
+                                         module_const_names(mod), NULL);
                 apply_inherited_selective_imports(clone, mod_ast);
                 ss_scope_node(clone, mod);
 
@@ -4804,14 +4855,13 @@ void module_merge_into_program(ASTNode* program) {
                     }
                     /* Every member, whatever a selective import names: the
                      * module's own functions may return any of them (#2613). */
-                    char sym[256];
-                    snprintf(sym, sizeof(sym), "%s_%s", ns, mem->value);
+                    char* sym = mod_strf("%s_%s", ns, mem->value);
                     if (program_has_fault_member(program, sym)) {
+                        free(sym);
                         free_ast_node(mem);
                         continue;
                     }
-                    char qualified[512];
-                    snprintf(qualified, sizeof(qualified), "%s.%s", ns, mem->value);
+                    char* qualified = mod_strf("%s.%s", ns, mem->value);
                     /* Rewrite the interned content (children[0], an
                      * AST_LITERAL) to the qualified name, then the symbol. */
                     if (mem->child_count > 0 && mem->children[0] &&
@@ -4819,8 +4869,9 @@ void module_merge_into_program(ASTNode* program) {
                         free(mem->children[0]->value);
                         mem->children[0]->value = strdup(qualified);
                     }
+                    free(qualified);
                     free(mem->value);
-                    mem->value = strdup(sym);
+                    mem->value = sym;
                     /* Compact surviving members down over filtered/duped ones. */
                     clone->children[kept++] = mem;
                 }
@@ -4960,7 +5011,7 @@ void module_merge_into_program(ASTNode* program) {
                 // were cloned above under their `<ns>_` prefixed names. Rewrite
                 // those references so they resolve, exactly as function bodies do.
                 rename_intra_module_refs(clone, ns, module_func_names(mod),
-                                         module_const_names(mod), NULL, 0);
+                                         module_const_names(mod), NULL);
                 apply_inherited_selective_imports(clone, mod_ast);
                 ss_scope_node(clone, mod);
                 insert_child_at(program, clone, insert_idx++);
@@ -4994,48 +5045,36 @@ void module_merge_into_program(ASTNode* program) {
     // `json.stringify` from their own code — only the merged
     // `client_post_json` body can, which is exactly what we want.
     {
-        // Collect direct imports as the BFS frontier.
-        const char* visited[256];
-        int visited_count = 0;
-        const char* queue[256];
-        int q_head = 0, q_tail = 0;
+        // Collect direct imports as the BFS frontier. The list is the queue
+        // too, read from `q_head` on, and as long as the modules reached
+        // (#3545: it held 256, and a module past them was never merged).
+        ModuleNames visited = {0};
+        int q_head = 0;
 
         for (int i = 0; i < orig_count; i++) {
             ASTNode* child = program->children[i];
             if (!child || child->type != AST_IMPORT_STATEMENT || !child->value) continue;
-            if (visited_count >= 256) break;
-            visited[visited_count++] = child->value;
-            if (q_tail < 256) queue[q_tail++] = child->value;
+            if (!names_has(&visited, child->value)) names_add(&visited, child->value);
         }
 
         // BFS: for each enqueued module, look at its `imports` list and
         // enqueue any not yet visited.
-        while (q_head < q_tail) {
-            const char* mod_path = queue[q_head++];
+        while (q_head < visited.count) {
+            const char* mod_path = visited.names[q_head++];
             AetherModule* mod = module_find(mod_path);
             if (!mod) continue;
 
             for (int i = 0; i < mod->import_count; i++) {
                 const char* dep = mod->imports[i];
-                if (!dep) continue;
-                int seen = 0;
-                for (int v = 0; v < visited_count; v++) {
-                    if (strcmp(visited[v], dep) == 0) {
-                        seen = 1;
-                        break;
-                    }
-                }
-                if (seen) continue;
-                if (visited_count >= 256) break;
-                visited[visited_count++] = dep;
-                if (q_tail < 256) queue[q_tail++] = dep;
+                if (!dep || names_has(&visited, dep)) continue;
+                names_add(&visited, dep);
             }
         }
 
         // For each transitively-reachable module, merge its exported functions
         // and constants the same way the main loop merged direct imports.
-        for (int v = 0; v < visited_count; v++) {
-            const char* dep_path = visited[v];
+        for (int v = 0; v < visited.count; v++) {
+            const char* dep_path = visited.names[v];
 
             // Skip the program's direct imports: the main loop merged every
             // declaration of each, selective or not (#2613). Before that a
@@ -5104,42 +5143,46 @@ void module_merge_into_program(ASTNode* program) {
 
                 if (decl->type == AST_FUNCTION_DEFINITION ||
                     decl->type == AST_BUILDER_FUNCTION) {
-                    char prefixed[256];
-                    merged_function_name(ns, mod_ast, decl->value, prefixed, sizeof(prefixed));
+                    char* prefixed = merged_function_name(ns, mod_ast, decl->value);
                     /* Every clause of a set (#2643). */
-                    if (program_has_function_before(program, prefixed, &pass)) continue;
+                    if (program_has_function_before(program, prefixed, &pass)) {
+                        free(prefixed);
+                        continue;
+                    }
 
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
-                    clone->value = strdup(prefixed);
+                    clone->value = prefixed;
                     clone->is_imported = 1;
                     stamp_origin(clone, dep_mod);
                     stamp_written_name(clone, ns, decl->value);   /* #2978 */
 
                     rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
-                                             module_const_names(dep_mod), NULL, 0);
+                                             module_const_names(dep_mod), NULL);
                     apply_inherited_selective_imports(clone, mod_ast);
                     ss_scope_node(clone, dep_mod);
 
                     insert_child_at(program, clone, insert_idx++);
                     merge_pass_add(&pass, clone);
                 } else if (decl->type == AST_CONST_DECLARATION) {
-                    char prefixed[256];
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, decl->value);
+                    char* prefixed = mod_strf("%s_%s", ns, decl->value);
 
                     // Dedup against existing CONSTS (not functions — the old
                     // program_has_function guard here never matched a const, so
                     // a revisited module re-cloned it: aether#1009 exposed this
                     // as `redefinition of 'sha2_K256'`).
-                    if (program_has_const(program, prefixed)) continue;
+                    if (program_has_const(program, prefixed)) {
+                        free(prefixed);
+                        continue;
+                    }
 
                     ASTNode* clone = clone_ast_node(decl);
                     free(clone->value);
-                    clone->value = strdup(prefixed);
+                    clone->value = prefixed;
                     stamp_origin(clone, dep_mod);
 
                     rename_intra_module_refs(clone, ns, module_func_names(dep_mod),
-                                             module_const_names(dep_mod), NULL, 0);
+                                             module_const_names(dep_mod), NULL);
                     apply_inherited_selective_imports(clone, mod_ast);
                     ss_scope_node(clone, dep_mod);
 
@@ -5192,6 +5235,7 @@ void module_merge_into_program(ASTNode* program) {
             }
             merge_pass_free(&pass);
         }
+        names_free(&visited);
     }
 
     // Second pass: for each selective import (either the parenthesised
@@ -5274,15 +5318,13 @@ void module_merge_into_program(ASTNode* program) {
             if (!top) continue;
             if (top->type == AST_IMPORT_STATEMENT) continue;
             if (top->is_imported) continue;
-            rename_intra_module_refs(top, ns, &sel_funcs, &sel_consts, NULL, 0);
+            rename_intra_module_refs(top, ns, &sel_funcs, &sel_consts, NULL);
             for (int a = 0; a < alias_to.count; a++) {
-                char prefixed[256];
                 int is_const = names_has(module_const_names(mod), alias_to.names[a]);
-                if (is_const)
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to.names[a]);
-                else
-                    merged_function_name_ns(ns, alias_to.names[a], prefixed, sizeof(prefixed));
+                char* prefixed = is_const ? mod_strf("%s_%s", ns, alias_to.names[a])
+                                          : merged_function_name_ns(ns, alias_to.names[a]);
                 rename_aliased_import_refs(top, alias_from.names[a], prefixed, is_const);
+                free(prefixed);
             }
         }
         names_free(&sel_funcs);
@@ -5314,12 +5356,14 @@ void module_merge_into_program(ASTNode* program) {
             if (!origin || !origin->ast || !origin->name) continue;
 
             const char* ons = module_get_namespace(origin->name);
-            char prefixed[256];
-            snprintf(prefixed, sizeof(prefixed), "%s_%s", ons, sym);
-            char fn_name[256];   /* a function's, apart from an extern (#2978) */
-            merged_function_name(ons, origin->ast, sym, fn_name, sizeof(fn_name));
-            if (program_has_function(program, fn_name)) continue;
-
+            char* prefixed = mod_strf("%s_%s", ons, sym);
+            /* A function's, apart from an extern (#2978). */
+            char* fn_name = merged_function_name(ons, origin->ast, sym);
+            if (program_has_function(program, fn_name)) {
+                free(prefixed);
+                free(fn_name);
+                continue;
+            }
 
             for (int j = 0; j < origin->ast->child_count; j++) {
                 ASTNode* decl = unwrap_export(origin->ast->children[j]);
@@ -5334,7 +5378,7 @@ void module_merge_into_program(ASTNode* program) {
                     stamp_origin(clone, origin);
                     stamp_written_name(clone, ons, sym);   /* #2978 */
                     rename_intra_module_refs(clone, ons, module_func_names(origin),
-                                             module_const_names(origin), NULL, 0);
+                                             module_const_names(origin), NULL);
                     apply_inherited_selective_imports(clone, origin->ast);
                     ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
@@ -5349,13 +5393,15 @@ void module_merge_into_program(ASTNode* program) {
                     clone->value = strdup(prefixed);
                     stamp_origin(clone, origin);
                     rename_intra_module_refs(clone, ons, module_func_names(origin),
-                                             module_const_names(origin), NULL, 0);
+                                             module_const_names(origin), NULL);
                     apply_inherited_selective_imports(clone, origin->ast);
                     ss_scope_node(clone, origin);
                     insert_child_at(program, clone, insert_idx++);
                 }
                 break;
             }
+            free(prefixed);
+            free(fn_name);
         }
     }
     /* #3546: the program's index goes with the merge: what comes after it
@@ -5416,13 +5462,17 @@ void module_merge_into_program(ASTNode* program) {
  * structures take the same key. */
 typedef StrMap NameSet;
 
-static const char* prune_normalise(const char* name, char* buf, size_t bufsz) {
+/* `name` with its dots made underscores, malloc'd when it has any (as long
+ * as it is, #3545: cut to 255 bytes, a long name filed under another and
+ * its function was pruned); `name` itself, in `*owned` NULL, otherwise. */
+static const char* prune_normalise(const char* name, char** owned) {
+    *owned = NULL;
     if (!strchr(name, '.')) return name;
-    size_t n = strlen(name);
-    if (n >= bufsz) n = bufsz - 1;
-    for (size_t i = 0; i < n; i++) buf[i] = (name[i] == '.') ? '_' : name[i];
-    buf[n] = '\0';
-    return buf;
+    char* s = mod_strf("%s", name);
+    for (char* p = s; *p; p++)
+        if (*p == '.') *p = '_';
+    *owned = s;
+    return s;
 }
 
 static int nameset_contains(const NameSet* s, const char* name) {
@@ -5432,11 +5482,12 @@ static int nameset_contains(const NameSet* s, const char* name) {
 /* Adds the normalised name; returns 1 when it was new. */
 static int nameset_add(NameSet* s, const char* name) {
     if (!name) return 0;
-    char buf[256];
-    const char* key = prune_normalise(name, buf, sizeof(buf));
-    if (strmap_has(s, key)) return 0;
-    strmap_put(s, key, NULL);
-    return 1;
+    char* owned;
+    const char* key = prune_normalise(name, &owned);
+    int fresh = !strmap_has(s, key);
+    if (fresh) strmap_put(s, key, NULL);
+    free(owned);
+    return fresh;
 }
 
 static void nameset_free(NameSet* s) {
@@ -5454,16 +5505,19 @@ typedef struct {
 
 static void namestack_push(NameStack* s, const char* name) {
     if (!name) return;
-    char buf[256];
-    const char* key = prune_normalise(name, buf, sizeof(buf));
+    char* owned;
+    const char* key = prune_normalise(name, &owned);
     if (s->count >= s->capacity) {
         int new_cap = s->capacity ? s->capacity * 2 : 64;
         char** nn = realloc(s->names, sizeof(char*) * new_cap);
-        if (!nn) return;
+        if (!nn) {
+            free(owned);
+            return;
+        }
         s->names = nn;
         s->capacity = new_cap;
     }
-    s->names[s->count++] = strdup(key);
+    s->names[s->count++] = owned ? owned : strdup(key);
 }
 
 /* #2007: what the worklist drain asks of the program, indexed once.
@@ -5542,9 +5596,9 @@ static void prune_seed_ufcs_method(const char* method, NameSet* seen,
         AetherModule* m = global_module_registry->modules[mi];
         if (!m || !m->name) continue;
         if (!module_is_exported(m, method)) continue;
-        char q[256];
-        snprintf(q, sizeof(q), "%s.%s", m->name, method);
+        char* q = mod_strf("%s.%s", m->name, method);
         if (nameset_add(seen, q)) namestack_push(worklist, q);
+        free(q);
     }
 }
 
@@ -5636,17 +5690,15 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
          * the reachability sweep doesn't prune the re-exported body. */
         char* dot = strchr(node->value, '.');
         if (dot && dot != node->value && !strchr(dot + 1, '.')) {
-            char hubname[256];
-            size_t hl = (size_t)(dot - node->value);
-            if (hl < sizeof(hubname)) {
-                memcpy(hubname, node->value, hl);
-                hubname[hl] = '\0';
+            {
+                char* hubname = mod_strf("%.*s", (int)(dot - node->value), node->value);
                 AetherModule* hub = module_find(hubname);
+                free(hubname);
                 AetherModule* origin = module_resolve_reexport(hub, dot + 1);
                 if (origin && origin->name) {
-                    char oq[256];
-                    snprintf(oq, sizeof(oq), "%s.%s", origin->name, dot + 1);
+                    char* oq = mod_strf("%s.%s", origin->name, dot + 1);
                     if (nameset_add(seen, oq)) namestack_push(worklist, oq);
+                    free(oq);
                 }
                 /* #934 shape (b): `value.method(...)` where the receiver is
                  * not a module — keep every imported `mod.method` candidate
@@ -5681,21 +5733,20 @@ static void prune_collect_calls_in(ASTNode* node, NameSet* seen, NameStack* work
     if (node->type == AST_MEMBER_ACCESS && node->value &&
         node->child_count > 0 && node->children[0] &&
         node->children[0]->type == AST_IDENTIFIER && node->children[0]->value) {
-        char qualified[256];
-        snprintf(qualified, sizeof(qualified), "%s.%s",
-                 node->children[0]->value, node->value);
+        char* qualified = mod_strf("%s.%s", node->children[0]->value, node->value);
         if (nameset_add(seen, qualified)) {
             namestack_push(worklist, qualified);
         }
+        free(qualified);
         /* #924 re-export: `hub.X` is cloned under the DEFINING module's
          * name (`<origin>_X`), not `hub_X`. Seed the origin form too so the
          * reachability sweep keeps the re-exported definition. */
         AetherModule* hub = module_find(node->children[0]->value);
         AetherModule* origin = module_resolve_reexport(hub, node->value);
         if (origin && origin->name) {
-            char oq[256];
-            snprintf(oq, sizeof(oq), "%s.%s", origin->name, node->value);
+            char* oq = mod_strf("%s.%s", origin->name, node->value);
             if (nameset_add(seen, oq)) namestack_push(worklist, oq);
+            free(oq);
         }
     }
     /* `builder name(...) with <factory>` carries the factory name in
