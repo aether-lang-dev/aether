@@ -855,6 +855,13 @@ typedef struct {
     ASTNode* main_fn;          /* the AST_MAIN_FUNCTION, or NULL */
     StrMap defs;               /* name -> DefClauses* */
     StrMap externs;            /* name -> ASTNode* (own or imported AST_EXTERN_FUNCTION) */
+    /* #3546: the externs find_extern_declaration_by_name and _in_scope find,
+     * the first of each name: the program's own top-level ones, those of
+     * them no module was merged from (origin_module NULL), and those of the
+     * modules it imports, in import order. */
+    StrMap program_externs;
+    StrMap unmerged_externs;
+    StrMap import_externs;
     StrMap c_callbacks;        /* name -> const char* C symbol */
     StrMap clause_scopes;      /* `__clause_<ptr>` -> its clause (#2644, fn_scope_name) */
     StrMap def_children;       /* `<ptr>` of a definition's child (its body, a

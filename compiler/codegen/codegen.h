@@ -349,6 +349,9 @@ typedef struct {
     }* extern_registry;
     int extern_registry_count;
     int extern_registry_capacity;
+    /* #3546: name -> registry index + 1, of the first entry of each name,
+     * filled as entries are registered (find_extern_registry_index). */
+    StrMap extern_registry_index;
 
     // MSVC compat: counter for ask-operator temp variables (_ask_result_N)
     int ask_temp_counter;

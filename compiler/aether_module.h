@@ -3,15 +3,18 @@
 
 #include "ast.h"
 #include "aether_lib_path.h"  /* AETHER_LIB_DIRS_MAX, AETHER_LIB_PATH_SEP_CHAR */
+#include "aether_strmap.h"
 
 // Module system for Aether
 // Supports: import/export, package management
 
-// #3545: a list of names, as long as what it lists needs.
+// #3545: a list of names, as long as what it lists needs. #3546: with an
+// index of them, so asking whether a name is listed is one probe.
 typedef struct {
     const char** names;
     int count;
     int cap;
+    StrMap index;
 } ModuleNames;
 
 // Module structure
@@ -93,6 +96,10 @@ AetherModule* module_find(const char* name);
  * — last — its bare last segment (the first such match), which is what a
  * qualified `ns.name` use carries. */
 void module_assign_namespaces(void);
+/* #3546: the first extern named `name` among a module AST's top-level
+ * declarations (an export unwrapped), or NULL; from the AST's index, so a
+ * lookup per call does not walk the module. */
+ASTNode* module_ast_extern_named(const ASTNode* ast, const char* name);
 const char* module_namespace_of(const char* module_path);
 AetherModule* module_find_by_namespace(const char* ns);
 /* The registered module whose source is `file_path` (compared as files, not

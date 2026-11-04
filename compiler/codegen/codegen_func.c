@@ -161,6 +161,9 @@ void register_extern_func(CodeGenerator* gen, ASTNode* ext) {
 
     int idx = gen->extern_registry_count++;
     gen->extern_registry[idx].name = strdup(ext->value);
+    /* #3546: the first entry of a name is the one a lookup finds. */
+    if (!strmap_has(&gen->extern_registry_index, ext->value))
+        strmap_put(&gen->extern_registry_index, ext->value, (void*)(intptr_t)(idx + 1));
     gen->extern_registry[idx].c_name = NULL;
     // @extern("c_symbol") rebinds the call-site emission to a chosen
     // C symbol while keeping the Aether-side name in the namespace.
@@ -638,23 +641,19 @@ const char* get_builder_factory(CodeGenerator* gen, const char* func_name) {
 // `string`-typed args. Inline `extern` declarations in the same
 // .ae file matched fine because the call site's name and the
 // registered name are identical.
+/* #3546: by the registry's index, one probe a name, where a walk of the
+ * whole registry for each of the several lookups a call makes (is it an
+ * extern, its C name, each parameter's kind) made writing a program's
+ * extern calls grow with its externs times its calls. */
 static int find_extern_registry_index(CodeGenerator* gen, const char* func_name) {
     if (!gen || !func_name) return -1;
-    for (int i = 0; i < gen->extern_registry_count; i++) {
-        if (gen->extern_registry[i].name && strcmp(gen->extern_registry[i].name, func_name) == 0) {
-            return i;
-        }
-    }
+    intptr_t at = (intptr_t)strmap_get(&gen->extern_registry_index, func_name);
+    if (at > 0) return (int)at - 1;
     /* Try the dot-normalised form: "ns.fn" → "ns_fn", whole however
      * long the name (#2539). */
     if (strchr(func_name, '.')) {
-        const char* norm = codegen_normalise_callee(func_name);
-        for (int i = 0; i < gen->extern_registry_count; i++) {
-            if (gen->extern_registry[i].name &&
-                strcmp(gen->extern_registry[i].name, norm) == 0) {
-                return i;
-            }
-        }
+        at = (intptr_t)strmap_get(&gen->extern_registry_index, codegen_normalise_callee(func_name));
+        if (at > 0) return (int)at - 1;
     }
     return -1;
 }
