@@ -1491,12 +1491,20 @@ static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
         Type* t = call->node_type;
         return t && t->kind != TYPE_PTR && !type_is_slice(t) && t->kind != TYPE_STRING;
     }
+    int k = 0, first = 1;
     for (int j = 0; j < d->child_count; j++) {
         ASTNode* p = d->children[j];
-        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION)) {
-            if (p->value && strcmp(p->value, "_ctx") == 0) return 0;
-            break;
-        }
+        if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION))
+            continue;
+        if (first && p->value && strcmp(p->value, "_ctx") == 0) return 0;
+        first = 0;
+        /* A parameter that wraps the slice (an optional, a tuple) is given
+         * an argument temporary of its own, which holds the reference and
+         * drops it after the call (codegen's emit_composite_arg_temp), as
+         * a string there is: released here too, it was given back twice. */
+        if (k++ == i)
+            return !(p->node_type && (p->node_type->kind == TYPE_OPTIONAL ||
+                                      p->node_type->kind == TYPE_TUPLE));
     }
     return 1;
 }
