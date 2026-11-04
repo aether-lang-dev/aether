@@ -965,13 +965,26 @@ static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
 
 static void use_local(Flow* w, ASTNode* id, State* s) {
     Local* l = pm_get(&w->f->uses, id);
-    if (!owns(l) || s->dead) return;
+    if (!l || s->dead) return;   /* a local consume_local left empty too */
     if (s->st[l->idx] != S_LIVE) moved_message(w, l, id, s);
 }
 
 static void move_local(Flow* w, ASTNode* id, ASTNode* at, State* s) {
     Local* l = pm_get(&w->f->uses, id);
     if (!owns(l) || s->dead) return;
+    use_local(w, id, s);
+    s->st[l->idx] = S_MOVED;
+    s->at[l->idx] = at;
+}
+
+/* `free(xs)` and `append(xs, v)` consume the local `xs` that holds a
+ * reference: it is left empty (rewrite_call's `__slice_take`,
+ * `slice_consumes`), so reading it before it is bound again is E0906,
+ * whether or not a view of it was taken or it was given to a function
+ * (`viewed`, which makes a move elsewhere a copy). */
+static void consume_local(Flow* w, ASTNode* id, ASTNode* at, State* s) {
+    Local* l = pm_get(&w->f->uses, id);
+    if (!l || !holds(l) || s->dead) return;
     use_local(w, id, s);
     s->st[l->idx] = S_MOVED;
     s->at[l->idx] = at;
@@ -1012,7 +1025,7 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         if (xs && xs->type == AST_IDENTIFIER) {
             borrowed_param_error(w, xs, is_push(n) ? "push to" : "append to");
             if (is_push(n)) use_local(w, xs, s);
-            else move_local(w, xs, n, s);
+            else consume_local(w, xs, n, s);
         } else {
             flow(w, xs, s, C_BORROW);
         }
@@ -1022,7 +1035,7 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         ASTNode* xs = n->children[0];
         if (xs && xs->type == AST_IDENTIFIER) {
             borrowed_param_error(w, xs, "free");
-            move_local(w, xs, n, s);
+            consume_local(w, xs, n, s);
         } else {
             flow(w, xs, s, C_BORROW);
         }

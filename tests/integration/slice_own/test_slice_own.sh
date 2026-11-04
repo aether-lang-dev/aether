@@ -75,6 +75,31 @@ main() {
 }
 AE
 
+# #3568: given to a function first (a view of it may be held there, so a
+# move elsewhere would copy it), `append` and `free` still consume it.
+refused use_after_viewed_append E0906 "'xs' is used after \`append\` consumed it (line 8)" 9:16 <<'AE'
+total(xs: int[]) -> int {
+    return xs.len
+}
+
+main() {
+    xs = make([]int, 2)
+    total(xs)
+    ys = append(xs, 5)
+    println("${xs.len} ${ys.len}")
+}
+AE
+
+refused use_after_viewed_free E0906 "'xs' is used after it was freed (line 5)" 6:16 <<'AE'
+main() {
+    xs = make([]int, 2)
+    v = xs[0..1]
+    println("${v.len}")
+    free(xs)
+    println("${xs.len}")
+}
+AE
+
 refused use_after_keep E0906 "'xs' is used after it was given to 'take_all', which keeps it (line 7)" 8:16 <<'AE'
 take_all(v: @keep int[]) -> int {
     return v.len
