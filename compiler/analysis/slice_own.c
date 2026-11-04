@@ -1196,10 +1196,21 @@ static ASTNode* mk_call(const char* name, Type* t, ASTNode* at) {
     return c;
 }
 
+/* A `match` bound, assigned or returned is its statement's, lowered with the
+ * statement; one an intrinsic takes is an operand of it, which codegen runs
+ * ahead of the statement into a temporary (emit_match_operand) the
+ * intrinsic reads. Not marked, it was a statement expression, which only a
+ * GCC-compatible compiler takes (#3568). */
+static void own_operand(ASTNode* v) {
+    if (v && v->type == AST_MATCH_STATEMENT && !ast_match_is_operand(v))
+        v->annotation = annotation_add_marker(v->annotation, "operand");
+}
+
 /* *slot becomes `name(*slot)`, of *slot's type. */
 static void wrap(ASTNode** slot, const char* name) {
     ASTNode* e = *slot;
     ASTNode* c = mk_call(name, e->node_type, e);
+    own_operand(e);
     add_child(c, e);
     *slot = c;
 }
@@ -1207,6 +1218,7 @@ static void wrap(ASTNode** slot, const char* name) {
 /* `name(place, v)`, of `t`: the store of `v` into `place`, which gives back
  * the reference `place` held. */
 static ASTNode* mk_store(const char* name, Type* t, ASTNode* place, ASTNode* v) {
+    own_operand(v);
     ASTNode* set = mk_call(name, t, v);
     add_child(set, place);
     add_child(set, v);

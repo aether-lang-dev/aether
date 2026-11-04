@@ -6971,6 +6971,21 @@ static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
     return 1;
 }
 
+/* The operand of slice ownership's intrinsic `call` (slice_own.c) that is a
+ * value: what `__slice_copy` and `__slice_lend` read, and what `__slice_set`,
+ * `__slice_set_shared` and `__slice_push` store. NULL for the others, whose
+ * operand is a place (`__slice_take`, `__slice_drop`, `__slice_hold`). */
+static ASTNode* slice_intrinsic_value(ASTNode* call) {
+    const char* f = call->value;
+    if ((strcmp(f, "__slice_copy") == 0 || strcmp(f, "__slice_lend") == 0) &&
+        call->child_count == 1)
+        return call->children[0];
+    if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0 ||
+         strcmp(f, "__slice_push") == 0) && call->child_count == 2)
+        return call->children[1];
+    return NULL;
+}
+
 /* The operands `e` evaluates unconditionally, in source order, into `ops`:
  * an operation whose C spelling leaves their order open (order_operands),
  * and the ones C orders or that have one: a unary operation's, a field's
@@ -6981,6 +6996,17 @@ static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
 static int ctl_operands(CodeGenerator* gen, ASTNode* e, ASTNode** ops, int cap) {
     (void)gen;
     int n = 0;
+    if (e->type == AST_FUNCTION_CALL && e->value && strncmp(e->value, "__slice_", 8) == 0) {
+        /* #3568: slice ownership's intrinsics order their operands
+         * themselves (order_operands lists none), and the place one names
+         * is no value to read into a temporary; the value one copies,
+         * lends, stores or pushes is its operand here. A `match` there (`ws
+         * = match c { ... }`, copied) was a statement expression. */
+        ASTNode* v = slice_intrinsic_value(e);
+        if (!v) return -1;
+        ops[0] = v;
+        return 1;
+    }
     if (e->type == AST_BINARY_EXPRESSION && e->child_count == 2 && e->value &&
         is_assignment_op(e->value)) {
         /* The target's indexes, then the value: a target with none
