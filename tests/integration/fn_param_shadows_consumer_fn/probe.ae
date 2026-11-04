@@ -14,4 +14,6 @@ main() {
     }
     c = unbox_closure(boxed)
     c()
+    // btn hands back a box, the program's to give back; c holds its own.
+    release_closure(boxed)
 }

@@ -20,6 +20,7 @@ import std.list
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 struct Item { name: string }
 
@@ -38,8 +39,10 @@ main() {
     a = take() callback {
         inner = take() callback { seen_top = top }
         fire(inner)
+        release_closure(inner)
     }
     fire(a)
+    release_closure(a)
     if string.compare(seen_top, "TOP") != 0 {
         println("FAIL: outer-function local not captured through a closure")
         exit(1)
@@ -51,8 +54,10 @@ main() {
         mid = "MID"
         inner = take() callback { seen_mid = mid }
         fire(inner)
+        release_closure(inner)
     }
     fire(b)
+    release_closure(b)
     if string.compare(seen_mid, "MID") != 0 {
         println("FAIL: enclosing-closure local not captured")
         exit(1)
@@ -70,6 +75,7 @@ main() {
             rows = string.concat(rows, ";")
         }
         fire(row)
+        release_closure(row)
     }
     items = list.new()
     list.add(items, mk("alpha"))
@@ -82,6 +88,14 @@ main() {
         invoke2(r, it, i)
         i = i + 1
     }
+    release_closure(render)
+    i = 0
+    while i < n {
+        it, _ = list.get(items, i)
+        free(it)
+        i = i + 1
+    }
+    list.free(items)
     if string.compare(rows, "alpha@0;beta@1;") != 0 {
         println("FAIL: closure params/locals not captured by nested closure")
         println(rows)
@@ -98,10 +112,13 @@ main() {
                 deep = string.concat(x, y)
             }
             fire(l3)
+            release_closure(l3)
         }
         fire(l2)
+        release_closure(l2)
     }
     fire(l1)
+    release_closure(l1)
     if string.compare(deep, "AB") != 0 {
         println("FAIL: capture does not chain through three closure levels")
         exit(1)
@@ -115,9 +132,11 @@ main() {
         k = 10
         bump = take() callback { k = k + 5 }
         fire(bump)
+        release_closure(bump)
         bumped = k
     }
     fire(m)
+    release_closure(m)
     if bumped != 15 {
         println("FAIL: inner closure's write to an enclosing-closure local was lost")
         exit(1)
@@ -131,6 +150,7 @@ main() {
         nm = string.concat("item", string.from_int(j))
         h = take() callback { joined = string.concat(joined, string.concat(nm, ";")) }
         fire(h)
+        release_closure(h)
         j = j + 1
     }
     if string.compare(joined, "item0;item1;") != 0 {

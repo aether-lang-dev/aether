@@ -5,19 +5,22 @@
 
 extern exit(code: int)
 
-make_counter() {
+// The counter's cell is handed back beside the closure that uses it: it
+// outlives this call, and the caller frees it when the closure is done.
+make_counter() -> (ptr, fn) {
     count = ref(0)
-    return || { ref_set(count, ref_get(count) + 1); return ref_get(count) }
-    // No ref_free — caller inherits the cell. Intentional mini-leak.
+    return count, || { ref_set(count, ref_get(count) + 1); return ref_get(count) }
 }
 
 main() {
-    c = make_counter()
+    cell, c = make_counter()
     a = call(c)
     if a != 1 { println("FAIL: first"); exit(1) }
     b = call(c)
     if b != 2 { println("FAIL: second"); exit(1) }
     d = call(c)
     if d != 3 { println("FAIL: third"); exit(1) }
+    if ref_get(cell) != 3 { println("FAIL: the cell the closure counts in"); exit(1) }
+    ref_free(cell)
     println("ok")
 }

@@ -15,6 +15,7 @@ extern parse_int_safe(s: string) -> (int, string)
 extern echo_bytes(s: string, len: int) -> (ptr, int, string)
 
 extern exit(code: int)
+extern free(p: ptr)
 
 main() {
     // Case 1: (int, int)
@@ -60,6 +61,8 @@ main() {
         println("FAIL: echo_bytes n=${n}, want 5")
         exit(1)
     }
+    // The buffer echo_bytes allocated is the caller's.
+    free(bytes)
 
     println("OK")
 }

@@ -107,17 +107,21 @@ for shape in list map field cell branch; do
         list)     keeper='kept = list.new()
     keep = | s: string | { list.add(kept, s) }'
                   reader='v, _ = list.get_string(kept, 0)
-    println(v)' ;;
+    println(v)'
+                  freer='list.free(kept)' ;;
         map)      keeper='kept = map.new()
     keep = | s: string | { map.put(kept, "k", s) }'
                   reader='v, _ = map.get_string(kept, "k")
-    println(v)' ;;
+    println(v)'
+                  freer='map.free(kept)' ;;
         field)    keeper='hb = heap.new(Holder)
     keep = | s: string | { hb.name = s }'
-                  reader='println(hb.name)' ;;
+                  reader='println(hb.name)'
+                  freer='heap.free(hb)' ;;
         cell)     keeper='last = ""
     keep = | s: string | { last = s }'
-                  reader='println(last)' ;;
+                  reader='println(last)'
+                  freer='' ;;
         branch)   keeper='kept = list.new()
     keep = | s: string | {
         if true {
@@ -125,7 +129,8 @@ for shape in list map field cell branch; do
         }
     }'
                   reader='v, _ = list.get_string(kept, 0)
-    println(v)' ;;
+    println(v)'
+                  freer='list.free(kept)' ;;
     esac
     cat > "$tmp/kept_$shape.ae" <<AE
 import std.string
@@ -150,6 +155,7 @@ main() {
     junk = mk("zzzzzzzzzzzzzzzz")
     $reader
     println(junk)
+    $freer
 }
 AE
     run "kept_$shape" "k!

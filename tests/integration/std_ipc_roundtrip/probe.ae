@@ -51,6 +51,7 @@ build_child(bin: string) -> string {
     list.add(argv, "-o")
     list.add(argv, bin)
     out, exit_code, err = os.run_capture("build/ae", argv, null)
+    list.free(argv)
     if err != "" { return "spawn error: ${err}" }
     if exit_code != 0 {
         return "ae build exit ${exit_code}: ${out}"
@@ -79,6 +80,7 @@ main() {
     {
         argv = list.new()
         payload, exit_code, err = os.run_pipe_drain_and_wait(child_bin, argv, null)
+        list.free(argv)
         if err != "" {
             println("  [1] FAIL run_pipe_drain_and_wait: err=${err}")
             failed = failed + 1
@@ -119,6 +121,7 @@ main() {
     {
         argv2 = list.new()
         read_fd, child_pid, err2 = os.run_pipe(child_bin, argv2, null)
+        list.free(argv2)
         if err2 != "" {
             println("  [2] FAIL run_pipe: err=${err2}")
             failed = failed + 1
@@ -158,6 +161,7 @@ main() {
     {
         argv3 = list.new()
         out3, exit3, err3 = os.run_capture(child_bin, argv3, null)
+        list.free(argv3)
         if err3 != "" {
             println("  [3] FAIL run_capture (no-channel): err=${err3}")
             failed = failed + 1
@@ -182,6 +186,7 @@ main() {
     {
         argv4 = list.new()
         fd4, pid4, err4 = os.run_pipe("/no/such/program_3170", argv4, null)
+        list.free(argv4)
         if fd4 != -1 || pid4 != -1 || err4 != "program not found" {
             println("  [4] FAIL run_pipe missing program: (${fd4}, ${pid4}, '${err4}'), expected (-1, -1, 'program not found')")
             failed = failed + 1
@@ -195,6 +200,7 @@ main() {
     {
         argv5 = list.new()
         _p5, code5, err5 = os.run_pipe_drain_and_wait("/no/such/program_3170", argv5, null)
+        list.free(argv5)
         if code5 != -1 || err5 != "program not found" {
             println("  [5] FAIL run_pipe_drain_and_wait missing program: exit=${code5} err='${err5}', expected -1 'program not found'")
             failed = failed + 1
@@ -210,6 +216,7 @@ main() {
         list.add(argv6, "-c")
         list.add(argv6, "exit 127")
         _p6, code6, err6 = os.run_pipe_drain_and_wait("/bin/sh", argv6, null)
+        list.free(argv6)
         if code6 != 127 || err6 != "" {
             println("  [6] FAIL run_pipe_drain_and_wait sh 'exit 127': exit=${code6} err='${err6}', expected 127 and no err")
             failed = failed + 1
@@ -229,6 +236,8 @@ main() {
         list.add(env7, "A=1")
         list.add(env7, "AETHER_IPC_FD=9")
         p7, code7, err7 = os.run_pipe_drain_and_wait("/bin/sh", argv7, env7)
+        list.free(argv7)
+        list.free(env7)
         if err7 != "" || code7 != 0 || p7 != "1 3" {
             println("  [7] FAIL run_pipe with env: payload='${p7}' exit=${code7} err='${err7}', expected '1 3', 0 and no err")
             failed = failed + 1
@@ -243,6 +252,7 @@ main() {
         os.setenv("AETHER_IPC_FD", "9")
         argv8 = list.new()
         payload8, code8, err8 = os.run_pipe_drain_and_wait(child_bin, argv8, null)
+        list.free(argv8)
         os.unsetenv("AETHER_IPC_FD")
         if err8 != "" || code8 != 0 || string_equals(payload8, EXPECTED_PAYLOAD) == 0 {
             println("  [8] FAIL with AETHER_IPC_FD=9 here: exit=${code8} err='${err8}' payload=${payload8}")

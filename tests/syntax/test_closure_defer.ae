@@ -20,6 +20,8 @@ set_werror(_ctx: ptr) {
 // --- Builder function: block configures, then this executes ---
 
 builder compile(src: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     // _builder is the config map filled by the trailing block
     rel = ""
     lint_level = ""
@@ -43,6 +45,8 @@ builder compile(src: string) {
 // --- Another builder function without trailing block (zero-config) ---
 
 builder build_jar(name: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     has_cfg = 0
     if _builder != null {
         has_cfg = 1

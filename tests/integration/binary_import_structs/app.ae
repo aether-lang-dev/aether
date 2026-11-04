@@ -27,6 +27,9 @@ main() {
     m.scale = 2.5
     check(m.scale == 2.5, "the importer writes a field the library declared")
     check(engine.KIND_MESH == 3, "a constant")
+    // The model is the importer's once model_new hands it over; the two
+    // share one runtime, so the importer frees it.
+    heap.free(m)
 
     // Closures cross by value, captures included.
     base = 100

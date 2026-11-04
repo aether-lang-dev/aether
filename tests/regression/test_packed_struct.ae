@@ -14,6 +14,7 @@
 import std.mem
 extern exit(code: int)
 extern malloc(n: long) -> ptr
+extern free(p: ptr)
 
 extern struct sdshdr16 @packed { len: uint16 alloc: uint16 flags: byte }
 extern struct unpacked16 { len: uint16 alloc: uint16 flags: byte }
@@ -44,6 +45,7 @@ main() {
     if h.len != 300 { println("FAIL: overlay len round-trip"); exit(1) }
     if h.alloc != 512 { println("FAIL: overlay alloc round-trip"); exit(1) }
     if h.flags != 7 { println("FAIL: overlay flags round-trip"); exit(1) }
+    free(h as ptr)
 
     println("  PASS: @packed struct layout (sizeof/offsetof + overlay round-trip)")
     println("OK")

@@ -49,4 +49,7 @@ main() {
     inner_call(w0, 7)
     w1, _e3 = map.get(m, "k2")
     inner_call(w1, 8)
+    list.free(l)
+    map.free(m)
+    heap.free(fh)
 }

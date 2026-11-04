@@ -145,6 +145,7 @@ main() {
     map.put(m, "k", "hello")
     v, _ = map.get_string(m, "k")
     println("value ${v}")
+    map.free(m)
 }
 EOF
 if "$AE" build "$TMP/ptr_ok.ae" -o "$TMP/ptr_ok.bin" >"$TMP/ptr_ok.log" 2>&1 &&

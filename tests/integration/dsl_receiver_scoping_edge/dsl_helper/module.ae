@@ -16,6 +16,8 @@ exports(run, script, tag)
 import std.map
 
 builder run(label: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     sval = "<unset>"
     tval = "<unset>"
     if _builder != null {

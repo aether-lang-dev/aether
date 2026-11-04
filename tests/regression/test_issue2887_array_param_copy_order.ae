@@ -12,6 +12,7 @@
 
 extern exit(code: int)
 extern malloc(size: int) -> ptr
+extern free(p: ptr)
 
 struct Box {
     n: int
@@ -66,5 +67,6 @@ main() {
     p.n = 1
     check(q.n + poke_box(p, 3) == 1, "a read ahead of a write through a pointer")
     check(poke_box(p, 4) + q.n == 4, "a read after a write through a pointer")
+    free(p as ptr)
     println("ok")
 }

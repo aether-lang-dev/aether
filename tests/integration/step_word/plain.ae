@@ -54,7 +54,9 @@ actor Confined {
             }
             sandbox.free(nothing)
             seen = looker ? Seen {}
-            reply ref_get(inside) * 10 + seen
+            answer = ref_get(inside) * 10 + seen
+            ref_free(inside)
+            reply answer
         }
     }
 }

@@ -39,6 +39,7 @@ main() {
     // val is a void* pointing to the C text "blue": a ptr has no rendering
     // (#3018), so it is read as the text it holds
     println(string_from_cstr(val))
+    map.free(pair)
     println("PASS")
 
     // Test 4: module function return used in expression

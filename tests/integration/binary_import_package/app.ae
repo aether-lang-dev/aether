@@ -24,9 +24,12 @@ main() {
     check(e.id == 1, "a field of a package struct through *Entity")
     p = core.position_of(e)
     check(p.x == 3.0 && p.y == 3.0, "core uses math inside the library")
-    core.create(0.0, 0.0)
+    e2 = core.create(0.0, 0.0)
     check(core.count() == 2, "core's module state lives in the library")
     check(core.MAX_ENTITIES == 64, "an exported constant of core")
+    // The entities are the host's once create hands them over.
+    heap.free(e)
+    heap.free(e2)
     tag = core.label("hud") {
     }
     check(tag == "hud", "a package module's builder, driven by a trailing block")

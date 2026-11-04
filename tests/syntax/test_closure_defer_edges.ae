@@ -23,6 +23,8 @@ add_item(_ctx: ptr, value: string) {
 // --- 1. Builder with no explicit parameters (only hidden _builder) ---
 
 builder run_task() {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     has_cfg = 0
     if _builder != null { has_cfg = 1 }
     println("run_task: has_config=${has_cfg}")
@@ -31,6 +33,8 @@ builder run_task() {
 // --- 2. Builder function that returns a value ---
 
 builder make_greeting(name: string): string {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     prefix = "Hello"
     if _builder != null {
         if map_has(_builder, "prefix") == 1 {
@@ -51,6 +55,8 @@ setup(label: string) {
 // --- 4. Builder with a list instead of a map ---
 
 builder process_items(label: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     count = 0
     if _builder != null {
         if map_has(_builder, "item0") == 1 { count = count + 1 }
@@ -67,6 +73,8 @@ builder process_items(label: string) {
 // --- 5. Builder function used from inside a regular trailing block ---
 
 builder deploy(target: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     mode = "default"
     if _builder != null {
         if map_has(_builder, "mode") == 1 {
@@ -79,6 +87,8 @@ builder deploy(target: string) {
 // --- 6. Builder that returns int ---
 
 builder count_config(): int {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     n = 0
     if _builder != null {
         if map_has(_builder, "a") == 1 { n = n + 1 }

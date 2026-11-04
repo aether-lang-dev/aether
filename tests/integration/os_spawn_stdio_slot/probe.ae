@@ -33,6 +33,7 @@ main() {
     list.add(argv, "-c")
     list.add(argv, "sleep 3")
     tok, serr = os.spawn_proc("/bin/sh", argv, null)
+    list.free(argv)
     kept = stdio_slot_child_kept(read_fd)
     if serr != "" {
         println("FAIL: spawn: ${serr}")
