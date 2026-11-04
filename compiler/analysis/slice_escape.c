@@ -43,6 +43,7 @@ typedef struct Frame {
     StrMap sticky;    /* paths a closure written here may give a view, from where it is written on */
     StrMap ever;      /* paths that held a view at some point of the walk */
     Views* try_states; /* in a `try` body: what held a view after any statement of it */
+    struct EscMemo* memo; /* the loops walked, by what they start from (flow_loop) */
 } Frame;
 
 /* ---- the path sets ---- */
@@ -228,7 +229,10 @@ static void frame_init(Esc* esc, Frame* f, ASTNode* owner, Frame* parent) {
     collect_locals(esc, f, body);
 }
 
+static void esc_memo_free(struct EscMemo* m);
+
 static void frame_free(Frame* f) {
+    esc_memo_free(f->memo);
     strmap_free(&f->typed);
     strmap_free(&f->locals);
     strmap_free(&f->params);
@@ -728,7 +732,7 @@ static void flow_branches(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int
 /* A loop: its body runs any number of times, so what holds a view at its
  * top is what held one before it or at the end of any pass, or where a
  * `continue` left; after it, also what held one where a `break` left. */
-static void flow_loop(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
+static void flow_loop_walk(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
     LoopExits lx;
     strmap_init(&lx.exits);
     strmap_init(&lx.next);
@@ -1301,6 +1305,83 @@ static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
     strmap_free(&bound);
     strmap_free(&own);
     strmap_free(&scope);
+}
+
+/* A loop walked from `entry`, which left `exit`, in the frame and the
+ * checking context it was walked in (flow_loop). */
+typedef struct EscMemo {
+    ASTNode* node;
+    int rep;
+    Views* try_states;
+    int ever, sticky;
+    int with_outer, store_outer_only, judging_call;
+    Views entry, exit;
+    struct EscMemo* next;
+} EscMemo;
+
+static int views_live(const Views* v) {
+    int n = 0;
+    for (int i = 0; i < strmap_count(v); i++)
+        if (strmap_value_at(v, i)) n++;
+    return n;
+}
+
+/* The same paths hold a view in both. */
+static int views_same(const Views* a, const Views* b) {
+    if (views_live(a) != views_live(b)) return 0;
+    for (int i = 0; i < strmap_count(a); i++)
+        if (strmap_value_at(a, i) && !strmap_get(b, strmap_key_at(a, i))) return 0;
+    return 1;
+}
+
+static void esc_memo_free(EscMemo* m) {
+    while (m) {
+        EscMemo* next = m->next;
+        strmap_free(&m->entry);
+        strmap_free(&m->exit);
+        free(m);
+        m = next;
+    }
+}
+
+/* A loop's walk from `v`. A loop walked once already from the same views,
+ * reporting or not, in the same `try` and with nothing added since to what
+ * the frame's walk has seen held (`ever`, `sticky`: they only grow), leaves
+ * the same views, has reported what it reports and made the joins it makes
+ * into the `try`'s states, so that walk is reused (#3574): a loop's walk
+ * walks its body at least twice, each walking the loops inside, and loops
+ * nested 20 deep took a second, doubling with each level. Its breaks and
+ * continues join only its own exits. */
+static void flow_loop(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
+    int ever = strmap_count(&f->ever), sticky = strmap_count(&f->sticky);
+    for (EscMemo* m = f->memo; m; m = m->next) {
+        if (m->node != n || m->rep != rep || m->try_states != f->try_states ||
+            m->ever != ever || m->sticky != sticky || m->with_outer != g_with_outer ||
+            m->store_outer_only != g_store_outer_only || m->judging_call != g_judging_call ||
+            !views_same(&m->entry, v))
+            continue;
+        strmap_free(v);
+        views_copy(v, &m->exit);
+        return;
+    }
+    EscMemo* m = (EscMemo*)calloc(1, sizeof *m);
+    if (!m) {
+        fprintf(stderr, "aetherc: out of memory in the escape check\n");
+        exit(1);
+    }
+    m->node = n;
+    m->rep = rep;
+    m->try_states = f->try_states;
+    m->ever = ever;
+    m->sticky = sticky;
+    m->with_outer = g_with_outer;
+    m->store_outer_only = g_store_outer_only;
+    m->judging_call = g_judging_call;
+    views_copy(&m->entry, v);
+    flow_loop_walk(esc, f, n, v, rep);
+    views_copy(&m->exit, v);
+    m->next = f->memo;
+    f->memo = m;
 }
 
 static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {

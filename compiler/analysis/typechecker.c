@@ -8870,11 +8870,21 @@ static void iso_take(IsoSet* dst, IsoSet* src) {
     src->count = src->cap = 0;
 }
 
+/* A loop body walked from `moved_in` and `iso_in`, with `rebound` names
+ * rebound so far, which left `moved_out` and `iso_out` (iso_loop_body). */
+typedef struct IsoMemo {
+    ASTNode* body;
+    int rebound;
+    IsoSet moved_in, iso_in, moved_out, iso_out;
+    struct IsoMemo* next;
+} IsoMemo;
+
 typedef struct {
     ASTNode* fn;
     NameSet rebound;
     int in_closure;
     ASTNode* closure;
+    IsoMemo* memo;      /* the loop bodies walked, by what they start from */
 } IsoContext;
 
 static int iso_has(const IsoSet* s, const char* n) {
@@ -9003,6 +9013,62 @@ static int iso_diverges(ASTNode* n) {
     return n && !stmt_can_complete(g_typecheck_program, n);
 }
 
+static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx);
+
+static int iso_same(const IsoSet* a, const IsoSet* b) {
+    if (a->count != b->count) return 0;
+    for (int i = 0; i < a->count; i++) {
+        const IsoItem* x = &a->items[i];
+        const IsoItem* y = &b->items[i];
+        if (x->line != y->line || (x->name == NULL) != (y->name == NULL) ||
+            (x->name && strcmp(x->name, y->name) != 0))
+            return 0;
+    }
+    return 1;
+}
+
+static void iso_memo_free(IsoMemo* m) {
+    while (m) {
+        IsoMemo* next = m->next;
+        iso_free(&m->moved_in);
+        iso_free(&m->iso_in);
+        iso_free(&m->moved_out);
+        iso_free(&m->iso_out);
+        free(m);
+        m = next;
+    }
+}
+
+/* A loop body's walk from `moved` and `iso`. The body is walked twice, so a
+ * move late in it meets a use early in it; walked once already from the
+ * same sets, with no name rebound since (`rebound` only grows), it leaves
+ * the same sets and has refused what it refuses, so that walk is reused
+ * (#3574): each walk of a loop walked the loops inside it twice, and loops
+ * nested 24 deep took seconds, doubling with each level. */
+static void iso_loop_body(ASTNode* body, IsoSet* moved, IsoSet* iso, IsoContext* ctx) {
+    for (IsoMemo* m = ctx->memo; m; m = m->next) {
+        if (m->body != body || m->rebound != ctx->rebound.count || !iso_same(&m->moved_in, moved) ||
+            !iso_same(&m->iso_in, iso))
+            continue;
+        iso_free(moved);
+        iso_free(iso);
+        iso_copy(moved, &m->moved_out);
+        iso_copy(iso, &m->iso_out);
+        return;
+    }
+    IsoMemo* m = (IsoMemo*)aether_xrealloc(NULL, sizeof(IsoMemo));
+    memset(m, 0, sizeof *m);
+    m->body = body;
+    m->rebound = ctx->rebound.count;
+    iso_copy(&m->moved_in, moved);
+    iso_copy(&m->iso_in, iso);
+    iso_check(body, moved, iso, ctx);
+    iso_copy(&m->moved_out, moved);
+    iso_copy(&m->iso_out, iso);
+    m->next = ctx->memo;
+    ctx->memo = m;
+}
+
 static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx) {
     if (!node) return;
     switch (node->type) {
@@ -9039,12 +9105,14 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
             cl_ctx.rebound = (NameSet){ NULL, 0, 0 };
             cl_ctx.in_closure = 1;
             cl_ctx.closure = node;
+            cl_ctx.memo = NULL;
             IsoSet cl_moved = { NULL, 0, 0 };
             IsoSet cl_iso = { NULL, 0, 0 };
             if (cl_body) iso_check(cl_body, &cl_moved, &cl_iso, &cl_ctx);
             iso_free(&cl_moved);
             iso_free(&cl_iso);
             free(cl_ctx.rebound.names);
+            iso_memo_free(cl_ctx.memo);
             return;
         }
 
@@ -9236,8 +9304,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
             for (int i = 0; i < body_idx; i++)          /* init/cond/incr once */
                 iso_check(node->children[i], moved, iso, ctx);
             if (body_idx >= 0) {                          /* body twice */
-                iso_check(node->children[body_idx], moved, iso, ctx);
-                iso_check(node->children[body_idx], moved, iso, ctx);
+                iso_loop_body(node->children[body_idx], moved, iso, ctx);
+                iso_loop_body(node->children[body_idx], moved, iso, ctx);
             }
             return;
         }
@@ -9269,6 +9337,7 @@ static void iso_check_function(ASTNode* fn, ASTNode* body) {
     ctx.rebound = (NameSet){ NULL, 0, 0 };
     ctx.in_closure = 0;
     ctx.closure = NULL;
+    ctx.memo = NULL;
 
     if (fn) {
         for (int i = 0; i < fn->child_count; i++) {
@@ -9283,6 +9352,7 @@ static void iso_check_function(ASTNode* fn, ASTNode* body) {
     iso_free(&moved);
     iso_free(&iso);
     free(ctx.rebound.names);
+    iso_memo_free(ctx.memo);
 }
 
 /* Entry point: register Isolated-typed parameters, then walk the body. */

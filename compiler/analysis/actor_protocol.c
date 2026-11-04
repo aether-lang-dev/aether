@@ -280,6 +280,8 @@ typedef struct {
     Proto* proto;
     uint64_t mask;      /* the states it may be in; meaningful when !top */
     int top;            /* its state is not known */
+    int dropped;        /* its protocol differs between the paths that reach here:
+                         * followed on none, which a join keeps (#3574) */
 } PVar;
 
 /* Every reference the function follows (#3574): 64 slots left the rest
@@ -325,6 +327,7 @@ static void var_set(PState* s, const char* name, Proto* p, uint64_t mask, int to
     v->proto = p;
     v->mask = mask;
     v->top = top;
+    v->dropped = 0;
 }
 
 /* `dst` becomes a copy of `src`: its own variables, the same states. */
@@ -352,8 +355,13 @@ static void join(PState* a, const PState* b) {
         PVar* av = var_find(a, bv->name);
         if (!av) {
             var_set(a, bv->name, bv->proto, bv->mask, bv->top);
-        } else if (av->proto != bv->proto) {
-            var_forget(a, bv->name);
+            var_find(a, bv->name)->dropped = bv->dropped;
+        } else if (av->dropped || bv->dropped || av->proto != bv->proto) {
+            /* Under two protocols, or one already: followed on no path. A
+             * drop forgot it, and a later join brought it back under the
+             * other, so a loop's head never settled and joins in another
+             * order gave another answer. */
+            av->dropped = 1;
         } else {
             av->top = av->top || bv->top;
             av->mask |= bv->mask;
@@ -366,7 +374,9 @@ static int same(const PState* a, const PState* b) {
     for (int i = 0; i < a->n; i++) {
         PState* bm = (PState*)b;
         PVar* bv = var_find(bm, a->v[i].name);
-        if (!bv || bv->proto != a->v[i].proto || bv->top != a->v[i].top ||
+        if (!bv || bv->dropped != a->v[i].dropped) return 0;
+        if (bv->dropped) continue;
+        if (bv->proto != a->v[i].proto || bv->top != a->v[i].top ||
             (!bv->top && bv->mask != a->v[i].mask))
             return 0;
     }
@@ -383,10 +393,39 @@ typedef struct Loop {
     struct Loop* up;
 } Loop;
 
+/* A join a loop's walk made into a loop or switch around it (a `break` or
+ * `continue` leaving it): `up` places past the innermost one around the
+ * loop, into its `cont` or its `brk`, the joins into one place joined. */
+typedef struct {
+    int up;
+    int to_cont;
+    PState st;
+} Escape;
+
+/* A loop walked from `entry`, which left `exit` and made `esc` (loop()). */
+typedef struct LoopMemo {
+    ASTNode* node;
+    int report;
+    PState entry, exit;
+    Escape* esc;
+    int esc_n, esc_cap;
+    struct LoopMemo* next;
+} LoopMemo;
+
+/* A loop's walk being recorded: the loops around it at its start, and the
+ * memo its escapes go into. */
+typedef struct Rec {
+    Loop* base;
+    LoopMemo* m;
+    struct Rec* up;
+} Rec;
+
 typedef struct {
     Ctx* c;
     int report;         /* report errors on this walk (a loop's last one) */
     Loop* loops;
+    LoopMemo* memo;     /* the loops walked, by entry state */
+    Rec* rec;           /* the loop walks being recorded, innermost first */
 } Walk;
 
 static void walk(Walk* w, ASTNode* n, PState* s);
@@ -561,6 +600,52 @@ static Loop* loop_target(Walk* w, const char* label, int for_continue) {
     return NULL;
 }
 
+/* A join into the loop or switch `t` from inside a loop being recorded and
+ * leaving it: the recording keeps it, by how far up from the loops around
+ * the recorded loop `t` is, to make again when its walk is reused. A join
+ * into a loop inside the recorded one is none of its business. */
+static void escape_note(Walk* w, Loop* t, int to_cont, const PState* st) {
+    for (Rec* r = w->rec; r; r = r->up) {
+        int up = 0;
+        Loop* l = r->base;
+        while (l && l != t) {
+            l = l->up;
+            up++;
+        }
+        if (!l) continue;
+        LoopMemo* m = r->m;
+        /* One per place, its joins joined (join is a join: in any order, and
+         * once or again, it gives one answer): a list of them grew with
+         * every walk reused inside, by as many again at each level up. */
+        Escape* same_place = NULL;
+        for (int i = 0; i < m->esc_n && !same_place; i++)
+            if (m->esc[i].up == up && m->esc[i].to_cont == to_cont) same_place = &m->esc[i];
+        if (same_place) {
+            join(&same_place->st, st);
+            continue;
+        }
+        if (m->esc_n == m->esc_cap) {
+            m->esc_cap = m->esc_cap ? m->esc_cap * 2 : 4;
+            m->esc = (Escape*)realloc(m->esc, sizeof(Escape) * (size_t)m->esc_cap);
+            if (!m->esc) {
+                fprintf(stderr, "aetherc: out of memory in the protocol check\n");
+                exit(1);
+            }
+        }
+        Escape* e = &m->esc[m->esc_n++];
+        memset(e, 0, sizeof *e);
+        e->up = up;
+        e->to_cont = to_cont;
+        ps_set(&e->st, st);
+    }
+}
+
+/* `st` joined into `t`'s `cont` or `brk`, and noted (escape_note). */
+static void loop_join(Walk* w, Loop* t, int to_cont, const PState* st) {
+    join(to_cont ? &t->cont : &t->brk, st);
+    escape_note(w, t, to_cont, st);
+}
+
 static int always_true(Walk* w, ASTNode* cond) {
     if (!cond) return 1;
     ContractEnv env;
@@ -626,21 +711,15 @@ static void loop_turn(Walk* w, ASTNode* node, ASTNode* body, ASTNode* step, PSta
 }
 
 /* A loop: `init` once, then `cond`, `body`, `step` while it runs. */
-static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond,
-                 ASTNode* body, ASTNode* step) {
+static void loop_walk(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond,
+                      ASTNode* body, ASTNode* step) {
     walk(w, init, s);
     if (s->dead) return;
     int reporting = w->report;
     PState* head = ps_new(s);
     PState* st = ps_new(s);
     PState* next = ps_new(s);
-    /* The references dropped at the head, which stay dropped (#3574): one
-     * that a turn leaves under another protocol than the head's is dropped,
-     * and the next turn's end brought it back under that one, so the head
-     * went round for good, and past 256 passes no reference in the loop was
-     * followed. It may hold either, so it is followed on no turn. */
-    const char** dropped = NULL;
-    int dropped_n = 0, dropped_cap = 0, unsettled = 0;
+    int unsettled = 0;
     for (int pass = 0; ; pass++) {
         w->report = 0;
         ps_set(st, head);
@@ -648,24 +727,11 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
         loop_turn(w, node, body, step, st, NULL);
         ps_set(next, head);
         join(next, st);
-        for (int i = 0; i < head->n; i++) {
-            if (var_find(next, head->v[i].name)) continue;
-            if (dropped_n == dropped_cap) {
-                dropped_cap = dropped_cap ? dropped_cap * 2 : 8;
-                dropped = (const char**)realloc(dropped, sizeof(char*) * (size_t)dropped_cap);
-                if (!dropped) {
-                    fprintf(stderr, "aetherc: out of memory in the protocol check\n");
-                    exit(1);
-                }
-            }
-            dropped[dropped_n++] = head->v[i].name;
-        }
-        for (int i = 0; i < dropped_n; i++) var_forget(next, dropped[i]);
         if (same(next, head)) {
             ps_set(head, next);
             break;
         }
-        if (pass >= PROTO_REF_RISES * (next->n + dropped_n + 1)) {
+        if (pass >= PROTO_REF_RISES * (next->n + 1)) {
             /* More rises than the states have: a fault in the count above.
              * The loop is refused below, not passed unchecked. */
             unsettled = 1;
@@ -681,10 +747,9 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
         char msg[200];
         snprintf(msg, sizeof msg,
                  "the protocol check found no settled state for this loop in %d passes",
-                 PROTO_REF_RISES * (next->n + dropped_n + 1));
+                 PROTO_REF_RISES * (next->n + 1));
         report(w->c, node, msg, "this is a fault in the compiler: please report it with this loop");
     }
-    free(dropped);
     ps_set(st, head);
     walk(w, cond, st);
     PState* out = ps_new(st);                  /* the condition is false */
@@ -699,6 +764,65 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
     ps_release(next);
     ps_release(out);
     ps_release(brk);
+}
+
+/* Two states alike in every fact of every reference, in the same order. */
+static int ps_alike(const PState* a, const PState* b) {
+    if (a->dead != b->dead || a->n != b->n) return 0;
+    for (int i = 0; i < a->n; i++) {
+        const PVar* x = &a->v[i];
+        const PVar* y = &b->v[i];
+        if (strcmp(x->name, y->name) != 0 || x->proto != y->proto || x->mask != y->mask ||
+            x->top != y->top || x->dropped != y->dropped)
+            return 0;
+    }
+    return 1;
+}
+
+/* A loop's walk from `s`. A loop walked once already from the same states,
+ * reporting or not, gives the same answer and makes the same joins into the
+ * loops around it, so that walk is reused (#3574): a loop's walk walks its
+ * body at least twice (its passes and the walk that reports), each walking
+ * the loops inside, and loops nested 24 deep took seconds, doubling with
+ * each level. Every walk that is not reused is kept (LoopMemo, freed with
+ * the function's walk). */
+static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond,
+                 ASTNode* body, ASTNode* step) {
+    for (LoopMemo* m = w->memo; m; m = m->next) {
+        if (m->node != node || m->report != w->report || !ps_alike(&m->entry, s)) continue;
+        for (int i = 0; i < m->esc_n; i++) {
+            const Escape* e = &m->esc[i];
+            Loop* t = w->loops;
+            for (int k = 0; k < e->up && t; k++) t = t->up;
+            if (t) loop_join(w, t, e->to_cont, &e->st);
+        }
+        ps_set(s, &m->exit);
+        return;
+    }
+    LoopMemo* m = (LoopMemo*)ps_alloc(sizeof *m);
+    m->node = node;
+    m->report = w->report;
+    ps_set(&m->entry, s);
+    Rec r = { w->loops, m, w->rec };
+    w->rec = &r;
+    loop_walk(w, s, node, init, cond, body, step);
+    w->rec = r.up;
+    ps_set(&m->exit, s);
+    m->next = w->memo;
+    w->memo = m;
+}
+
+/* The loops a function's walk kept. */
+static void loop_memo_free(LoopMemo* m) {
+    while (m) {
+        LoopMemo* next = m->next;
+        free(m->entry.v);
+        free(m->exit.v);
+        for (int i = 0; i < m->esc_n; i++) free(m->esc[i].st.v);
+        free(m->esc);
+        free(m);
+        m = next;
+    }
 }
 
 static ASTNode* closure_body(ASTNode* closure) {
@@ -737,7 +861,8 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             if (s->dead) return;
             PVar* v = (target && target->type == AST_IDENTIFIER && target->value)
                           ? var_find(s, target->value) : NULL;
-            if (v && message && message->type == AST_MESSAGE_CONSTRUCTOR && message->value)
+            if (v && !v->dropped && message && message->type == AST_MESSAGE_CONSTRUCTOR &&
+                message->value)
                 transition(w, v, message);
             else
                 walk(w, target, s);
@@ -831,7 +956,7 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             /* A `continue` inside a switch belongs to the loop around it. */
             if (!l->cont.dead) {
                 Loop* t = loop_target(w, NULL, 1);
-                if (t) join(&t->cont, &l->cont);
+                if (t) loop_join(w, t, 1, &l->cont);
             }
             loop_free(l);
             ps_set(s, out);
@@ -846,13 +971,13 @@ static void walk(Walk* w, ASTNode* n, PState* s) {
             return;
         case AST_BREAK_STATEMENT: {
             Loop* t = loop_target(w, n->value, 0);
-            if (t) join(&t->brk, s);
+            if (t) loop_join(w, t, 0, s);
             s->dead = 1;
             return;
         }
         case AST_CONTINUE_STATEMENT: {
             Loop* t = loop_target(w, n->value, 1);
-            if (t) join(&t->cont, s);
+            if (t) loop_join(w, t, 1, s);
             s->dead = 1;
             return;
         }
@@ -950,6 +1075,7 @@ static void check_body(Ctx* c, ASTNode* body, ASTNode* params_owner) {
     }
     walk(&w, body, s);
     ps_release(s);
+    loop_memo_free(w.memo);
 }
 
 static ASTNode* last_block(ASTNode* n) {

@@ -773,11 +773,20 @@ typedef struct Loop {
     struct Loop* up;
 } Loop;
 
+/* A loop walked from `entry`, which left `exit` (flow_loop). */
+typedef struct FlowMemo {
+    ASTNode* body;
+    ASTNode* cond;
+    State entry, exit;
+    struct FlowMemo* next;
+} FlowMemo;
+
 typedef struct {
     Ctx* c;
     Frame* f;
     int n;
     Loop* loop;
+    FlowMemo* memo;     /* the loops walked, by entry state */
 } Flow;
 
 static void st_init(Flow* w, State* s) {
@@ -934,7 +943,7 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
     }
 }
 
-static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
+static void flow_loop_walk(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
     Loop lp;
     st_init(w, &lp.brk);
     st_init(w, &lp.cont);
@@ -965,6 +974,47 @@ static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, Stat
     st_free(&exits);
     st_free(&lp.brk);
     st_free(&lp.cont);
+}
+
+/* A loop's walk from `s`. A loop walked once already from the same state
+ * gives the same state after it, and has reported what it reports, so that
+ * walk is reused (#3574): each walk walks the body twice, each walking the
+ * loops inside, and loops nested 20 deep took a second, doubling with each
+ * level. The breaks and continues of a loop join only its own (the innermost
+ * loop), so a walk makes no join outside itself to make again. */
+static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
+    size_t n = (size_t)w->n;
+    for (FlowMemo* m = w->memo; m; m = m->next) {
+        if (m->body != body || m->cond != cond || m->entry.dead != s->dead ||
+            memcmp(m->entry.st, s->st, n) != 0 ||
+            memcmp(m->entry.at, s->at, n * sizeof(ASTNode*)) != 0)
+            continue;
+        st_copy(w, s, &m->exit);
+        return;
+    }
+    FlowMemo* m = (FlowMemo*)calloc(1, sizeof *m);
+    if (!m) {
+        fprintf(stderr, "aetherc: out of memory in the slice ownership check\n");
+        exit(1);
+    }
+    m->body = body;
+    m->cond = cond;
+    m->entry = st_clone(w, s);
+    flow_loop_walk(w, cond, body, step, s);
+    m->exit = st_clone(w, s);
+    m->next = w->memo;
+    w->memo = m;
+}
+
+/* The loops a frame's walk kept. */
+static void flow_memo_free(FlowMemo* m) {
+    while (m) {
+        FlowMemo* next = m->next;
+        st_free(&m->entry);
+        st_free(&m->exit);
+        free(m);
+        m = next;
+    }
 }
 
 static void flow(Flow* w, ASTNode* n, State* s, Use use) {
@@ -1539,11 +1589,12 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
 
     {
         int before = c->errors;
-        Flow w = {c, &f, f.nlocals, NULL};
+        Flow w = {c, &f, f.nlocals, NULL, NULL};
         State s;
         st_init(&w, &s);
         flow(&w, body, &s, C_BORROW);
         st_free(&s);
+        flow_memo_free(w.memo);
         if (c->errors == before) {
             ASTNode* b = body;
             rewrite(c, &f, &b);
