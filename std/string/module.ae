@@ -775,7 +775,8 @@ extern aether_string_raw_ptr(s: ptr) -> ptr
 // keeps (#2926): a `string` reaches one only this way, since the slot keeps
 // it past the call while its owner frees it. The string is published (a kept
 // pointer may be read from any thread) and retained, or copied when it is a
-// plain C string. Give the reference back with `release_kept`.
+// plain C string. Give the reference back with `release_kept`; it is
+// recorded, so a give-back releases only what was handed over (#3567).
 extern aether_string_keep(s: string) -> ptr
 extern aether_string_release_kept(p: ptr)
 
@@ -783,7 +784,11 @@ keep(s: string) -> ptr {
     return aether_string_keep(s)
 }
 
-// Give back a reference `keep` handed over.
+// Give back one reference `keep` handed over, or one a header-defined
+// struct's string field (`extern struct ... @c_import`) was given by a
+// store (#3567): `p` is the string or the characters the field holds. A
+// pointer nothing handed over (a literal, a copy, C's own characters, one
+// given back already) is left alone.
 release_kept(p: ptr) {
     aether_string_release_kept(p)
 }

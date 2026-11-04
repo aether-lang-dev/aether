@@ -12537,18 +12537,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 Type* fdecl = c_imported ? NULL
                               : struct_literal_field_type(gen, expr->value, field_init->value);
                 if (c_imported) {
-                    /* NULL stays NULL, as in the field store, and C's field
-                     * is given a reference of its own (R4). */
+                    /* As in the field store: C's field is given a reference
+                     * of its own (R4), recorded for string.release_kept
+                     * (#3567), and NULL stays NULL. */
                     if (fv && fv->node_type && fv->node_type->kind == TYPE_STRING) {
-                        TempSeq cs_seq;
-                        seq_open(gen, &cs_seq);
-                        const char* cs = seq_let(gen, &cs_seq, "const void*", "_ae_cs");
-                        fprintf(gen->output, "(const void*)(");
-                        emit_string_take_owned(gen, fv, 0);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &cs_seq);
-                        fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
-                        seq_close(gen, &cs_seq);
+                        emit_c_import_string_give(gen, fv);
                     } else {
                         generate_expression(gen, fv);
                     }

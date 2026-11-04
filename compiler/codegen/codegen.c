@@ -9556,15 +9556,22 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #3522: a module-level string `var`'s locked take and store. */
     print_line(gen, "extern const char* aether_string_var_take(const char* const* place, atomic_flag* lock);");
     print_line(gen, "extern void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);");
+    /* #3567: a header-defined struct's string field is given a recorded
+     * reference, and characters C holds read back as the string they were
+     * given from (std/string/aether_string.h). */
+    print_line(gen, "extern const char* aether_string_give_c(const void* s);");
+    print_line(gen, "extern const char* aether_string_from_c(const char* s);");
     /* The header of a counted string, as the runtime lays it out. A string
      * no other thread can reach is counted here, inline; a shared one
      * (#2919) is counted atomically by the runtime, which also frees the
      * last reference. Same rules as string_retain and string_release. */
     print_line(gen, "struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
     /* A take (R3): a counted string is retained (strings are immutable once
-     * made) and a pinned one, a literal, handed over as it is; only a plain
-     * C string is copied. The magic is read byte by byte to stay ASan-clean
-     * on short literal allocations. */
+     * made) and a pinned one, a literal, handed over as it is; a plain C
+     * string is the string a C place was given it from, retained, or else a
+     * copy (aether_string_from_c, #3567), so a field read back and given
+     * back returns the reference the field was given. The magic is read
+     * byte by byte to stay ASan-clean on short literal allocations. */
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
@@ -9578,7 +9585,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return string_new_with_length((void*)s, strlen(s));");
+    print_line(gen, "    return aether_string_from_c(s);");
     print_line(gen, "}");
     /* A string handed out as a `ptr` result: a pinned string (a literal, a
      * fault's name) is its C characters, as a literal used as a `ptr` is

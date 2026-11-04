@@ -379,15 +379,20 @@ t.hashFunction = my_hash        // checked against fn(ptr) -> int
 
 ### String fields of a header-defined struct
 
-A `string` field of an `extern struct ... @c_import` is the header's `const char*`. The header's layout has no room for an ownership flag, so the struct never releases what it holds. A string stored there (`s.field = v`, or in a literal) is given a reference of its own, which nothing in the program releases: it stays valid for as long as C reads it, and it is C's from then on. The local it came from keeps and releases its own reference, as any local does.
+A `string` field of an `extern struct ... @c_import` is the header's `const char*`. The header's layout has no room for an ownership flag, and Aether cannot see what C keeps, so nothing releases what the field holds behind C's back: not a store over it, not the end of a scope. A string stored there (`s.field = v`, or in a literal) is given a reference of its own, recorded by the characters the field holds, and the program gives it back with `string.release_kept(s.field)` once C is done with it (#3567). The local it came from keeps and releases its own reference, as any local does.
 
 ```aether,fragment
 app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
-app.pApplicationName = "viewer"          // a literal: pinned, never freed
-app.pEngineName = "viewer ${version}"    // given a reference that C keeps
+app.pApplicationName = "viewer"          // a literal: pinned, never recorded
+app.pEngineName = "viewer ${version}"    // given a recorded reference
+// ... C reads app ...
+string.release_kept(app.pEngineName)     // the reference given back
+free(app)
 ```
 
-- Each string stored into such a field stays allocated until the program exits, so a program that stores many over time should store them once, or keep them in memory it frees itself.
+- A field read back is the string it was given, so a field updated over time gives each old value back: `old = s.field`, `s.field = next`, `string.release_kept(old)`.
+- The same string stored into two fields is two references, each given back once. A pinned literal's characters, a plain C string and a pointer already given back are not recorded, and `string.release_kept` of them does nothing.
+- A string stored and never given back stays allocated until the program exits.
 - A field of an Aether-defined struct is different: it owns its string, and a store over it or the struct's drop releases it.
 
 ### A header's union: `extern union ... @c_import`

@@ -698,6 +698,9 @@ void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, AST
 Type* match_value_type(ASTNode* m);
 int struct_param_written(ASTNode* n, const char* pname);
 void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
+/* #3567: `v` given to a header-defined struct's string field, its reference
+ * recorded for string.release_kept. */
+void emit_c_import_string_give(CodeGenerator* gen, ASTNode* v);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);
 void emit_own_ops(CodeGenerator* gen);
 const char* own_fn(CodeGenerator* gen, Type* t, const char* op);

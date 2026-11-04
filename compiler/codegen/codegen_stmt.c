@@ -908,6 +908,16 @@ void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell) {
     if (cell) fprintf(gen->output, ", 1)");
 }
 
+/* #3567: `v` as a header-defined struct's string field takes it: the value
+ * taken (emit_string_take_owned) and its reference given to C, recorded by
+ * the characters the field holds (aether_string_give_c), for the program to
+ * give back with string.release_kept. NULL stays NULL. */
+void emit_c_import_string_give(CodeGenerator* gen, ASTNode* v) {
+    fprintf(gen->output, "aether_string_give_c((const void*)(");
+    emit_string_take_owned(gen, v, 0);
+    fprintf(gen->output, "))");
+}
+
 /* `name = v` for a string local: the new value taken, then the one the
  * local held released. */
 static void emit_string_take_rebind(CodeGenerator* gen, const char* name, ASTNode* rhs) {
@@ -2876,11 +2886,15 @@ static int emit_nested_field_heap_assign(CodeGenerator* gen, ASTNode* lhs,
 /* A `string` field of a header-defined struct (`extern struct ... @c_import`)
  * is the header's `const char*`, read by C. An Aether string may be a wrapped
  * AetherString (interpolation, substring and the like build one), whose
- * header would reach C in place of the characters, so the store takes the
- * payload with aether_string_data, as a call to a C extern does. Any spelling
- * of the object: a value (`v.f`), a pointer (`p.f`), a nested path
- * (`t.inner.f`). C's field keeps what it is given, so it is given a
- * reference of its own (R4), which nothing in the program releases. */
+ * header would reach C in place of the characters, so the field holds the
+ * payload, as a call to a C extern is given. Any spelling of the object: a
+ * value (`v.f`), a pointer (`p.f`), a nested path (`t.inner.f`). C's field
+ * keeps what it is given, so it is given a reference of its own (R4) that
+ * nothing releases behind C's back: the store takes the value (a dying local
+ * moved, a live one retained) and aether_string_give_c records that
+ * reference by the characters the field holds, which the program gives back
+ * with string.release_kept when C is done with them (#3567). Dropping the
+ * header left that reference with no way back. */
 static int emit_c_import_string_field_store(CodeGenerator* gen, ASTNode* lhs, ASTNode* rhs) {
     if (lhs->type != AST_MEMBER_ACCESS || lhs->child_count != 1 || !lhs->children[0]) return 0;
     if (!lhs->node_type || lhs->node_type->kind != TYPE_STRING) return 0;
@@ -2894,18 +2908,9 @@ static int emit_c_import_string_field_store(CodeGenerator* gen, ASTNode* lhs, AS
     gen->generating_lvalue = 1;
     generate_expression(gen, lhs);
     gen->generating_lvalue = 0;
-    /* NULL stays NULL: aether_string_data maps it to "", and a C field told
-     * apart from an empty string by being NULL must stay so. */
+    /* NULL stays NULL, a C field told apart from an empty string by it. */
     fprintf(gen->output, " = ");
-    TempSeq s;
-    seq_open(gen, &s);
-    const char* cs = seq_let(gen, &s, "const void*", "_ae_cs");
-    fprintf(gen->output, "(const void*)(");
-    emit_string_take_owned(gen, rhs, 0);
-    fprintf(gen->output, ")");
-    seq_next(gen, &s);
-    fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
-    seq_close(gen, &s);
+    emit_c_import_string_give(gen, rhs);
     fprintf(gen->output, ";\n");
     return 1;
 }

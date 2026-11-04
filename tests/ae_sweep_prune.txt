@@ -47,6 +47,7 @@ tests/integration/c_import_extern_proto/
 tests/integration/c_import_struct/
 tests/integration/c_import_struct_no_typedef/
 tests/integration/c_import_struct_string_field/
+tests/integration/c_import_string_field_given_back/
 tests/integration/c_import_union/
 tests/integration/c_qualified_ptr/
 tests/integration/c_static_inline/

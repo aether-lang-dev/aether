@@ -775,10 +775,25 @@ keep a closure (observe, worker jobs and the main-thread poster, the http and
 net server handlers, the QuickJS function binding) are declared so, and they
 release what they keep through the closure's own destructor.
 
-**C's places are given a reference (R4).** A string stored into a
-header-defined struct's field or into a slice over C memory is given a
-reference of its own, which nothing in the program releases; the local it
-came from keeps its own and releases it as any local does.
+**C's places are given a reference (R4, decided 2026-11-04 by the owner,
+#3567).** A header-defined struct's string field (`extern struct ...
+@c_import`) is given a recorded reference the program gives back with
+`string.release_kept`. Aether cannot see what C keeps, so nothing releases
+that reference behind C's back: not an overwrite of the field, not the end
+of a scope. The store takes the value as any store does (a dying local
+moved, a live one retained) and the runtime records the reference by the
+characters the field holds, with a count per string, since the same string
+given to two places is two references; a pinned literal's characters and a
+plain C string are not recorded. A field read back is the string it was
+given, retained, not a copy, so `old = p.text`, the store of a new value
+and `string.release_kept(old)` hand the old reference back.
+`string.release_kept(p)` gives back one recorded reference, given the
+characters or the string, and is a no-op for a pointer the record does not
+hold; `string.keep(s)` records the reference it hands over the same way, so
+a give-back never releases what was not handed over. Dropping the header
+into the field left the reference with no way back, and every store leaked
+a string. A `string[]` view of C memory borrows under #2979's E0902 rules
+(below): the string keeps its own reference while C reads the characters.
 
 **A closure in a `ptr` slot (#2926, decided 2026-10-15).** A `ptr` slot owns
 nothing, as for strings: a closure kept in one goes in a box holding a

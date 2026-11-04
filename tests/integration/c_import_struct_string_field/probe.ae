@@ -1,8 +1,12 @@
-// A string stored into a `@c_import` struct's string field is a plain store:
-// the header's layout has no `_heap_<field>` companion to record ownership
-// in, and the field borrows the string, as the C API that declares it
-// expects. Each form of store is exercised: through a pointer, in a struct
-// literal, and into a field of a nested struct.
+// A string stored into a `@c_import` struct's string field: the header's
+// layout has no `_heap_<field>` companion to record ownership in, and C's
+// field holds the characters. C keeps what it is given, so the field is
+// given a reference of its own (R4), recorded by those characters, and the
+// program gives it back with string.release_kept(p) once C is done with it
+// (#3567): each old value before the field is overwritten, the last ones
+// before the struct is freed. Each form of store is exercised: through a
+// pointer, in a struct literal, into a field of a nested struct, and
+// returned from a function.
 
 import std.string
 
@@ -21,8 +25,8 @@ extern calloc(n: int, size: int) -> ptr
 extern free(p: ptr)
 
 // A literal built from a string this function made, and returned: the field
-// borrows, so the string must outlive the function rather than be freed at
-// its exit under the struct that still points at it.
+// holds a reference of its own, so the string outlives the function rather
+// than be freed at its exit under the struct that still points at it.
 build_one(n: int) -> label {
     s = "val ${n}"
     return label { text: s, size: n }
@@ -30,17 +34,20 @@ build_one(n: int) -> label {
 
 main() {
     // Through a pointer, with a literal and with a string built at runtime.
+    // A literal is pinned and never recorded: giving it back does nothing.
     l = calloc(1, sizeof(label)) as *label
     l.text = "hello"
     l.size = 5
     println("pointer: ${l.text} ${l.size}")
     name = string.concat("wor", "ld")
+    string.release_kept(l.text)
     l.text = name
     println("pointer, runtime string: ${l.text}")
 
     // Strings built at runtime are wrapped AetherStrings on the Aether side;
     // C must see their characters, through a pointer store and a literal.
     part = string.substring("hello world", 0, 5)
+    string.release_kept(l.text)
     l.text = part
     println("C sees: ${label_c_length(l as ptr)}")
     built = "n=${l.size}"
@@ -48,6 +55,7 @@ main() {
     lp = calloc(1, sizeof(label)) as *label
     lp.text = lit.text
     println("C sees in a literal: ${label_c_length(lp as ptr)}")
+    string.release_kept(lp.text)
     free(lp)
 
     // A struct literal: spelled `(struct label){...}`, no trackers.
@@ -70,7 +78,12 @@ main() {
     }
     println("returned: ${r.text} ${r.size}")
 
-    // The fields borrowed `name`; it is still the caller's to free.
+    // Every reference given to C, given back; `name` is still the caller's.
+    string.release_kept(r.text)
+    string.release_kept(t.label.text)
+    string.release_kept(v.text)
+    string.release_kept(lit.text)
+    string.release_kept(l.text)
     free(t)
     free(l)
     string.free(name)

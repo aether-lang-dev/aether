@@ -190,9 +190,13 @@ string is adopted at the call, and the caller owns it. Any other string an
 extern returns is C's and is copied when a place takes it.
 
 A string stored into a header-defined struct's field (`extern struct ...
-@c_import`) is given a reference of its own, which nothing in the program
-releases: it is C's from then on. One stored into C memory viewed as
-`string[]` is given no reference (see `ptr` slots, below).
+@c_import`) is given a reference of its own, recorded by the characters the
+field holds; nothing releases it behind C's back, and the program gives it
+back with `string.release_kept(s.field)` when C is done with it (#3567). A
+field read back is the string it was given, so `old = s.field`, a store of
+the next value and `string.release_kept(old)` give the old one back. One
+stored into C memory viewed as `string[]` is given no reference (see `ptr`
+slots, below).
 
 ### `ptr` slots
 

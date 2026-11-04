@@ -948,7 +948,7 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
 - `string.keep(s)` → `ptr` - A reference of its own to `s`, as a `ptr`, for a `@keep ptr` parameter or a `ptr` field that holds the string past the call (E0902)
-- `string.release_kept(p)` - Gives back what `string.keep` took
+- `string.release_kept(p)` - Gives back one reference `string.keep` handed over, or one a header-defined struct's string field was given (`p` the string or the characters the field holds, #3567); a no-op for a pointer nothing handed over
 - `string.from_ptr(p)` → `(string, string)` - The string a `ptr` holds, typed as one: `(null, "not a string")` when `p` points at something else (a bare `ptr` given to a `string` local is refused, E0202)
 
 ### Building strings incrementally (avoiding quadratic cost)

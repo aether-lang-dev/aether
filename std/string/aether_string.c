@@ -1218,12 +1218,213 @@ void aether_string_release_captured(const char* s) {
     if (s) string_release(s);
 }
 
+/* #3567: the references C's places hold (R4). Aether cannot see what C keeps,
+ * so nothing releases such a reference on its own: the program gives it back
+ * with string.release_kept(p) when C is done with it. Each reference is
+ * recorded here by the string's characters, the pointer a header-defined
+ * struct's `const char*` field holds, with a count per string: the same
+ * string given to two places is two references. A reference string.keep
+ * hands over is recorded the same way, by the characters of the string its
+ * pointer heads, so release_kept gives back only what was handed over and
+ * is a no-op for any pointer nothing recorded (a pinned literal's
+ * characters, a copy, C's own chars, a reference already given back).
+ *
+ * A string is published before it is recorded: a field's characters may be
+ * read back as the string on any thread (aether_string_from_c), and every
+ * count of it is then atomic. A lookup retains the string under its shard's
+ * lock, so no give-back can free it between the two.
+ *
+ * Shards keyed by the pointer spread the lock; each is an open-addressing
+ * table with linear probing and backward-shift deletion, grown at half
+ * full and shrunk at an eighth, never below its first size. */
+#define GIVEN_SHARDS 16
+#define GIVEN_MIN_SLOTS 16
+
+typedef struct {
+    const char* data;   /* the key: the characters C holds; NULL is empty */
+    AetherString* s;
+    size_t count;       /* references recorded and not yet given back */
+} GivenRef;
+
+typedef struct {
+    atomic_int lock;
+    GivenRef* slots;
+    size_t cap;         /* a power of two, or 0 before the first record */
+    size_t used;
+} GivenShard;
+
+static GivenShard g_given[GIVEN_SHARDS];
+/* Entries across every shard: a reader that finds none skips the locks. */
+static atomic_size_t g_given_live;
+
+static uint64_t given_hash(const char* data) {
+    uint64_t h = (uint64_t)(uintptr_t)data;
+    h ^= h >> 33;
+    h *= 0xff51afd7ed558ccdULL;
+    h ^= h >> 33;
+    return h;
+}
+
+static GivenShard* given_shard(uint64_t h) {
+    return &g_given[h & (GIVEN_SHARDS - 1)];
+}
+
+static void given_lock(GivenShard* sh) {
+    while (atomic_exchange_explicit(&sh->lock, 1, memory_order_acquire)) AETHER_CPU_PAUSE();
+}
+
+static void given_unlock(GivenShard* sh) {
+    atomic_store_explicit(&sh->lock, 0, memory_order_release);
+}
+
+/* The slot holding `data`, or the empty slot where it would go. */
+static size_t given_probe(const GivenShard* sh, const char* data, uint64_t h) {
+    size_t mask = sh->cap - 1;
+    size_t i = (size_t)(h >> 4) & mask;
+    while (sh->slots[i].data && sh->slots[i].data != data) i = (i + 1) & mask;
+    return i;
+}
+
+/* Rehash into `cap` slots; 0 when the table cannot be had, the old kept. */
+static int given_resize(GivenShard* sh, size_t cap) {
+    GivenRef* slots = (GivenRef*)calloc(cap, sizeof(GivenRef));
+    if (!slots) return 0;
+    GivenRef* old = sh->slots;
+    size_t old_cap = sh->cap;
+    sh->slots = slots;
+    sh->cap = cap;
+    for (size_t i = 0; i < old_cap; i++) {
+        if (!old[i].data) continue;
+        sh->slots[given_probe(sh, old[i].data, given_hash(old[i].data))] = old[i];
+    }
+    free(old);
+    return 1;
+}
+
+/* Record one reference to `s`, a counted string the caller hands over. Out
+ * of memory for the table, the reference stays C's, unrecorded: it is never
+ * given back, so the string lives on (a leak, never a dangling read). */
+static void given_record(AetherString* s) {
+    aether_string_publish(s);
+    uint64_t h = given_hash(s->data);
+    GivenShard* sh = given_shard(h);
+    given_lock(sh);
+    if (sh->cap) {
+        size_t i = given_probe(sh, s->data, h);
+        if (sh->slots[i].data) {
+            sh->slots[i].count++;
+            given_unlock(sh);
+            return;
+        }
+    }
+    /* A new entry: grown at half full. A table that cannot grow still takes
+     * it while one slot stays empty, which every probe stops at. */
+    if ((sh->used + 1) * 2 > sh->cap &&
+        !given_resize(sh, sh->cap ? sh->cap * 2 : GIVEN_MIN_SLOTS) && sh->used + 1 >= sh->cap) {
+        given_unlock(sh);
+        return;
+    }
+    sh->slots[given_probe(sh, s->data, h)] = (GivenRef){ s->data, s, 1 };
+    sh->used++;
+    atomic_fetch_add_explicit(&g_given_live, 1, memory_order_release);
+    given_unlock(sh);
+}
+
+/* Empty slot `i` and close the gap: linear probing's backward shift, each
+ * later entry of the run moved into the hole unless its home slot lies
+ * cyclically in (hole, entry]. */
+static void given_remove_at(GivenShard* sh, size_t i) {
+    size_t mask = sh->cap - 1;
+    size_t j = i;
+    for (;;) {
+        j = (j + 1) & mask;
+        if (!sh->slots[j].data) break;
+        size_t home = (size_t)(given_hash(sh->slots[j].data) >> 4) & mask;
+        int stays = i <= j ? (i < home && home <= j) : (i < home || home <= j);
+        if (stays) continue;
+        sh->slots[i] = sh->slots[j];
+        i = j;
+    }
+    sh->slots[i] = (GivenRef){ NULL, NULL, 0 };
+    sh->used--;
+    atomic_fetch_sub_explicit(&g_given_live, 1, memory_order_release);
+    if (sh->cap > GIVEN_MIN_SLOTS && sh->used * 8 < sh->cap) given_resize(sh, sh->cap / 2);
+}
+
+/* Give back one reference recorded under `data`: the string whose reference
+ * the caller now holds and releases, or NULL when nothing is recorded. */
+static AetherString* given_take(const char* data) {
+    if (atomic_load_explicit(&g_given_live, memory_order_acquire) == 0) return NULL;
+    uint64_t h = given_hash(data);
+    GivenShard* sh = given_shard(h);
+    given_lock(sh);
+    AetherString* s = NULL;
+    if (sh->cap) {
+        size_t i = given_probe(sh, data, h);
+        if (sh->slots[i].data) {
+            s = sh->slots[i].s;
+            if (--sh->slots[i].count == 0) given_remove_at(sh, i);
+        }
+    }
+    given_unlock(sh);
+    return s;
+}
+
+/* The string recorded under `data`, retained for the caller, or NULL. */
+static AetherString* given_find_retained(const char* data) {
+    if (atomic_load_explicit(&g_given_live, memory_order_acquire) == 0) return NULL;
+    uint64_t h = given_hash(data);
+    GivenShard* sh = given_shard(h);
+    given_lock(sh);
+    AetherString* s = NULL;
+    if (sh->cap) {
+        size_t i = given_probe(sh, data, h);
+        if (sh->slots[i].data) {
+            s = sh->slots[i].s;
+            string_retain(s);   /* published at its record: counted atomically */
+        }
+    }
+    given_unlock(sh);
+    return s;
+}
+
+/* A counted string, not pinned, as the record of a reference keeps it:
+ * NULL for anything nothing records (NULL, a plain C string, a literal). */
+static AetherString* given_counted(const void* s) {
+    if (!s || !is_aether_string(s)) return NULL;
+    AetherString* h = (AetherString*)s;
+    return h->ref_count == AETHER_STRING_PINNED_REFS ? NULL : h;
+}
+
+const char* aether_string_give_c(const void* s) {
+    if (!s) return NULL;
+    if (!is_aether_string(s)) return (const char*)s;   /* C's own chars: nothing to give */
+    AetherString* h = given_counted(s);
+    if (h) given_record(h);   /* the reference the caller handed over */
+    return ((const AetherString*)s)->data;
+}
+
+const char* aether_string_from_c(const char* s) {
+    if (!s) return NULL;
+    AetherString* given = given_find_retained(s);
+    if (given) return (const char*)given;
+    return (const char*)string_new_with_length(s, strlen(s));
+}
+
 void* aether_string_keep(const void* s) {
-    return (void*)aether_string_capture_owned((const char*)s);
+    const char* k = aether_string_capture_owned((const char*)s);
+    AetherString* h = given_counted(k);
+    if (h) given_record(h);
+    return (void*)k;
 }
 
 void aether_string_release_kept(void* p) {
-    aether_string_release_captured((const char*)p);
+    if (!p) return;
+    /* The pointer C holds first, the characters themselves: they may begin
+     * with the bytes of the magic. Then the string a pointer heads. */
+    AetherString* s = given_take((const char*)p);
+    if (!s && is_aether_string(p)) s = given_take(((const AetherString*)p)->data);
+    if (s) string_release(s);
 }
 
 int aether_string_is_string(const void* p) {
