@@ -1,0 +1,75 @@
+// A message on its way to an actor when the actor is killed is dropped
+// where a core meets it, and a panic in its field's drop is contained there.
+//
+// The bug: a message sent to a live actor and still in a core's queue when
+// the actor was killed was dropped by the core that found its target dead
+// (scheduler_drop_dead_message), its release run bare. A release is the
+// program's code for a field of an owned type, and a drop that panicked on
+// a core's thread met no frame and ended the program ("panic outside any
+// try/catch or actor"). The finalize's own drain of the mailbox was already
+// contained (#3401); this was the same drop, found after that drain. It made
+// tests/integration/emit_lib_actor_step_context flaky (about 1 run in 100
+// under load), whose killed Fuse's one message was sometimes still on its
+// way.
+//
+// Pre-fix this program aborted in most runs: thousands of messages are on
+// their way at each kill. Now each drop that panics is reported through the
+// death hook and the program goes on; every message is dropped once.
+
+import std.actors
+import std.bytes
+import std.sync
+
+extern exit(code: int)
+
+const ROUNDS = 4
+const SENDS = 2000
+
+var g_live: ptr = null // 1 once the round's kill is near: drops panic
+var g_drops: ptr = null // drops run, panicking or not
+
+fn bomb_drop(p: @frees ptr) {
+    bytes.free(p)
+    sync.atomic_add(g_drops, 1)
+    if sync.atomic_load(g_live) == 0 {
+        return
+    }
+    panic("the bomb went off in its drop")
+}
+
+type Bomb = owned ptr drop bomb_drop
+
+message Arm { b: Bomb }
+
+actor Fuse {
+    receive {
+        Arm() -> {}
+    }
+}
+
+main() {
+    g_live = sync.atomic_new(0)
+    g_drops = sync.atomic_new(0)
+    r = 0
+    while r < ROUNDS {
+        // Off while sending: a handler's drop that panicked would end the
+        // Fuse, and the sends after it would be dropped on this thread.
+        sync.atomic_store(g_live, 0)
+        fuse = spawn(Fuse())
+        i = 0
+        while i < SENDS {
+            fuse ! Arm { b: bytes.new(4) as Bomb }
+            i = i + 1
+        }
+        sync.atomic_store(g_live, 1)
+        actors.kill(fuse)
+        r = r + 1
+    }
+    wait_for_idle()
+    drops = sync.atomic_load(g_drops)
+    if drops != ROUNDS * SENDS {
+        println("drops: ${drops}, want ${ROUNDS * SENDS}")
+        exit(1)
+    }
+    println("every message dropped once, the program past each panicking drop")
+}

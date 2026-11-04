@@ -1864,7 +1864,15 @@ static inline int has_pending_cross_core(Scheduler* sched) {
  * in-flight messages to a panicking actor leaves sent > processed forever
  * and parks wait_for_idle. */
 static void scheduler_drop_dead_message(Scheduler* sched, ActorBase* actor, Message* msg) {
-    release_undelivered(actor, msg);
+    /* Its target ended with it on its way: it is what the end left
+     * undelivered, as the finalize's drain of the mailbox is, but found on
+     * a core's queue after that drain, by whichever thread meets it there (a
+     * core's loop, a flush, an ask's relief). The release is the program's
+     * code (a field's drop) and runs contained, as the drain's does (#3401):
+     * run bare on a core's thread it met no frame, and a drop that panicked
+     * ended the program; met on a relief, it would have been the stepping
+     * actor's panic. */
+    release_undelivered_at_end(actor, msg);
     atomic_fetch_add_explicit(&sched->messages_processed, 1, memory_order_release);
     // On its way when its target died (#2974); a released target's are its
     // own count's. Counted by the caller's finding, the target dead: a
