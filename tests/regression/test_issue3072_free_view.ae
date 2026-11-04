@@ -11,8 +11,10 @@
 // #3568: a `make` buffer is counted, so a view of one given to a `@keep`
 // parameter is a reference the parameter holds: `free` gives that reference
 // back, and the buffer stays for the slice that holds it. Views of memory no
-// count covers (a string's bytes, an array) and a pattern's tail (which
-// holds no reference of its own) are still refused by name.
+// count covers (a string's bytes, an array) and a clause's tail (which, as a
+// parameter, holds no reference of its own) are still refused by name. A
+// match arm's tail takes a reference of its own where the arm starts, so
+// `free` gives that back, as a `@keep` parameter's does.
 
 import std.mem
 import std.string
@@ -69,10 +71,8 @@ refused(what: string, how: int, b: @keep byte[], xs: @keep int[], want: string) 
             drop(b)
         } else if how == 1 {
             drop_ints(xs)
-        } else if how == 2 {
-            drop_tail(xs)
         } else {
-            drop_match_tail(xs)
+            drop_tail(xs)
         }
         println("FAIL: ${what}: no panic")
         exit(1)
@@ -93,6 +93,9 @@ round() -> int {
     total = total + owned[1]
     free(owned)
     free(nothing())
+    c = make([]int, 2)
+    total = total + drop_match_tail(c)
+    free(c)
     return total
 }
 
@@ -112,7 +115,10 @@ main() {
     arr = [1, 2, 3]
     refused("an array viewed as a slice", 1, b[..], arr, view)
     refused("a clause's list tail", 2, b[..], xs[..], view)
-    refused("a match's list tail", 3, b[..], xs[..], view)
+    xs[0] = 7
+    check(drop_match_tail(xs) == 7 && xs.len == 3 && xs[1] == 0,
+        "a match's list tail, freed, leaves the buffer")
+    xs[0] = 0
     h = Holder { buf: b[2..] }
     drop(h.buf)
     check(b[0] == 0 && xs.len == 3, "the buffers the views were made of are intact")

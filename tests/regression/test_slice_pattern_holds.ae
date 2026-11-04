@@ -1,0 +1,165 @@
+// Regression (#3568): a slice a `match` arm's pattern binds holds a
+// reference of its own while the arm runs.
+//
+// A list pattern's tail (`[h | t]`), an element of a list of slices
+// (`[a, c]`) and a struct pattern's slice field (`Box { xs: s }`) viewed
+// what the match was given and held nothing: an arm that bound the subject
+// again (`xs = mk(2)`) freed the buffer under the binding, which then read
+// freed memory, and an arm that bound its tail again leaked a buffer each
+// time. A struct pattern's slice field was not bound at all (the generated
+// C named an undeclared `s`): ownership read `field: name` as a store. Each
+// such binding now takes a reference where the arm's body starts and gives
+// it back at the body's every exit, as any slice place does; the tail
+// derives from the subject's buffer, so the reference holds that buffer.
+//
+// Each shape reads back its values after a churn of same-sized buffers
+// filled with -7 (a buffer freed under a binding would come back holding
+// the filler), and where the heap count is exact (mem.heap_in_use_exact)
+// rounds of them leave the heap as they found it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Box {
+    xs: int[]
+    n: int
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    words = make([]string, 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            b = make([]int, n)
+            for i in 0..n {
+                b[i] = -7
+            }
+            keep = append(keep, b)
+        }
+        words = append(words, string.concat("z", "${r}"))
+        words = append(words, string.concat("zz", "${r % 10}"))
+    }
+    return keep.len + words.len
+}
+
+// The arm binds the subject again while its pattern's tail is bound.
+tail_kept() -> int {
+    xs = mk(4)
+    match xs {
+        [h | t] -> {
+            xs = mk(2)
+            churn()
+            return h + t[0] + t.len + xs.len
+        }
+        _ -> {
+            return 0
+        }
+    }
+}
+
+// The arm binds its tail again.
+tail_rebound() -> int {
+    xs = mk(4)
+    match xs {
+        [h | t] -> {
+            a = t[0]
+            t = mk(2)
+            t = append(t, 5)
+            return h + a + t.len + t[2]
+        }
+        _ -> {
+            return 0
+        }
+    }
+}
+
+// The match's value is the tail, and the subject is bound again after.
+tail_out() -> int {
+    xs = mk(4)
+    r = match xs {
+        [h | t] -> t
+        _ -> xs
+    }
+    xs = mk(2)
+    churn()
+    return r[0] + r.len
+}
+
+// A struct pattern binds a slice field, and the arm binds the struct again.
+field_kept() -> int {
+    b = Box { xs: mk(3), n: 1 }
+    match b {
+        Box { xs: s, n: k } -> {
+            b = Box { xs: mk(1), n: 2 }
+            churn()
+            return s[2] + s.len + k + b.n
+        }
+    }
+}
+
+// A list pattern binds slices out of a list of them, bound again in the arm.
+elems_kept() -> int {
+    m = make([]int[], 2)
+    m[0] = mk(2)
+    m[1] = mk(3)
+    match m {
+        [a, c] -> {
+            m = make([]int[], 0)
+            churn()
+            return a[1] + c[2] + m.len
+        }
+        _ -> {
+            return 0
+        }
+    }
+}
+
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(tail_kept() == 10 + 11 + 3 + 2, "a tail read after the arm binds the subject again")
+    check(tail_rebound() == 10 + 11 + 3 + 5, "a tail the arm binds again")
+    check(tail_out() == 11 + 3, "a tail that is the match's value, read after the subject is bound again")
+    check(field_kept() == 12 + 3 + 1 + 2, "a struct pattern's slice, read after the arm binds the struct again")
+    check(elems_kept() == 11 + 12, "a list pattern's slices, read after the arm binds the list again")
+    steady("the pattern shapes", || {
+            n = 0
+            while n < 50 {
+                _a = tail_kept()
+                _b = tail_rebound()
+                _c = tail_out()
+                _d = field_kept()
+                _e = elems_kept()
+                n = n + 1
+            }
+        })
+    println("ok")
+}

@@ -306,9 +306,9 @@ as `free` gives it back). A program writes no `free` for it.
   so the scope exit releases nothing twice, and neither does `defer
   free(xs)`. `free` of a view a place holds releases that view's reference;
   the buffer stays for the others. `free` of a view no place holds
-  (`free(xs[1..])`, a pattern's tail) and of a view of memory no count covers
-  (an array viewed as a slice) is a named panic, as is `free` of a string's
-  bytes, which are read-only.
+  (`free(xs[1..])`, a clause's list tail) and of a view of memory no count
+  covers (an array viewed as a slice) is a named panic, as is `free` of a
+  string's bytes, which are read-only.
 - **A view of a string's bytes holds the string** (`string.bytes(s)`,
   #3570): the string stays while any place holds a view of it, and is
   released with the last, as a `make` buffer is. A literal's bytes are
@@ -316,10 +316,14 @@ as `free` gives it back). A program writes no `free` for it.
 - **A call's result used in place is the statement's** (`f().len`,
   `f()[0]`, `for x in f()`): it is released on its block's every exit. A
   view of it that is bound, returned or passed on takes its reference over.
-- **Not counted**: a slice local a pattern binds (a list pattern's tail, a
-  match arm's binding) views what it was bound from, which holds the
-  reference; a slice of C memory (`p as T[]`, a `T[]` an extern returns) is
-  not counted, and the program frees it as before.
+- **A slice a `match` arm's pattern binds takes a reference of its own**
+  (a list pattern's tail, a slice a list pattern binds out of a list of
+  slices, a struct pattern's slice field) where the arm's block starts, and
+  gives it back on the block's every exit, so the arm may bind the subject
+  again or `free` the binding. A clause's list tail borrows, as a parameter
+  does.
+- **Not counted**: a slice of C memory (`p as T[]`, a `T[]` an extern
+  returns) is not counted, and the program frees it as before.
 
 The rules, with an example, are in the language reference
 ([Slice ownership](language-reference.md#slice-ownership)).

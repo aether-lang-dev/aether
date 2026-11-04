@@ -782,7 +782,11 @@ bits that carry a buffer's offset carry the string's header, and its
 retain and release are the string's. A call's slice result used only in
 place (`f().len`, `f()[0]`, a `for` over it) is a temporary of its
 statement, released on its block's every exit as a string temporary is; a
-view of it that is bound, returned or passed on takes its reference over.
+view of it that is bound, returned or passed on takes its reference over. A
+slice a `match` arm's pattern binds (a list pattern's tail or element, a
+struct pattern's field) takes a reference where the arm's block starts and
+drops it on the block's every exit, since the arm may bind the subject
+again; a clause's pattern borrows, as a parameter does.
 
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's

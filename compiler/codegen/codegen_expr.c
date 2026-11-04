@@ -3641,7 +3641,7 @@ static int is_builtin_name(const char* name) {
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
         "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
         "__slice_take", "__slice_lend", "__slice_drop", "__slice_set", "__slice_push",
-        "__slice_copy", "__slice_set_shared",
+        "__slice_copy", "__slice_set_shared", "__slice_hold",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -8363,6 +8363,13 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     /* #3568: a copy for a place to hold, with a reference of its own. */
     if (strcmp(f, "__slice_copy") == 0 && expr->child_count == 1) {
         fprintf(o, "aether_slice_copy(");
+        generate_expression(gen, a);
+        fprintf(o, ")");
+        return 1;
+    }
+    /* #3568: a pattern's slice taking a reference of its own, in place. */
+    if (strcmp(f, "__slice_hold") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_retain(");
         generate_expression(gen, a);
         fprintf(o, ")");
         return 1;

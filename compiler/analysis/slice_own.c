@@ -58,6 +58,7 @@ struct Local {
     int target;         /* `free`, `append` or `push` is applied to it */
     int viewed;         /* a view of what it holds may be taken (views_of) */
     int destructured;   /* declared by a tuple destructure (#3568) */
+    ASTNode* arm;       /* bound by the pattern of this match arm, whose body is a block */
     int pidx;           /* a parameter: its position, else -1 */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
@@ -236,7 +237,8 @@ static int is_push(ASTNode* n) {
 static int is_intrinsic(ASTNode* n) {
     return is_call(n, "__slice_take") || is_call(n, "__slice_lend") ||
            is_call(n, "__slice_copy") || is_call(n, "__slice_drop") ||
-           is_call(n, "__slice_set") || is_call(n, "__slice_set_shared");
+           is_call(n, "__slice_set") || is_call(n, "__slice_set_shared") ||
+           is_call(n, "__slice_hold");
 }
 
 /* A place read the same way twice: a name, a field of one, an element at
@@ -399,6 +401,8 @@ static void note_source(Frame* f, Local* l, ASTNode* e) {
 typedef struct {
     Ctx* c;
     Frame* f;
+    ASTNode* arm;      /* the match arm whose pattern is being resolved (#3568) */
+    ASTNode* subject;  /* the value the innermost match matches */
 } R;
 
 static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block);
@@ -526,6 +530,7 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
             if (n->value) {
                 Local* l = new_local(r->f, s, n, NULL);
                 l->pattern = 1;
+                l->arm = r->arm;
             }
             resolve_children(r, s, n);
             return;
@@ -542,12 +547,62 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
             strmap_free(&in.names);
             return;
         }
-        case AST_MATCH_ARM: case AST_FOR_LOOP: case AST_CASE_STATEMENT:
+        case AST_MATCH_STATEMENT: {
+            ASTNode* saved_subject = r->subject;
+            r->subject = n->child_count > 0 ? n->children[0] : NULL;
+            resolve_children(r, s, n);
+            r->subject = saved_subject;
+            return;
+        }
+        case AST_MATCH_ARM: {
+            /* #3568: a slice its pattern binds views what the match was
+             * given, which the arm's body may let go (bind again, free):
+             * where the body is a block, the local takes a reference of its
+             * own there (rewrite's AST_MATCH_ARM). */
+            ASTNode* saved = r->arm;
+            r->arm = n->child_count > 1 && n->children[1] && n->children[1]->type == AST_BLOCK
+                         ? n : NULL;
+            Scope in;
+            strmap_init(&in.names);
+            in.up = s;
+            in.depth = s ? s->depth + 1 : 1;
+            for (int i = 0; i < n->child_count; i++) {
+                if (i == 1) r->arm = saved;   /* the body's own patterns are its own */
+                resolve(r, &in, n->children[i], NULL);
+            }
+            r->arm = saved;
+            /* A list pattern's tail is a slice of the subject's type, and
+             * each element it names one of the subject's element type, as
+             * the checker types them in the arm's table alone. */
+            ASTNode* p = n->child_count > 0 ? n->children[0] : NULL;
+            Type* st = r->subject ? r->subject->node_type : NULL;
+            if (p && (p->type == AST_PATTERN_CONS || p->type == AST_PATTERN_LIST) &&
+                type_is_slice(st)) {
+                for (int k = 0; k < p->child_count; k++) {
+                    int tail = p->type == AST_PATTERN_CONS && k == 1;
+                    Type* t = tail ? st : st->element_type;
+                    Local* pl = p->children[k] ? pm_get(&r->f->binds, p->children[k]) : NULL;
+                    if (pl && !pl->is_slice && type_is_slice(t)) {
+                        pl->type = t;
+                        pl->is_slice = 1;
+                    }
+                }
+            }
+            strmap_free(&in.names);
+            return;
+        }
+        case AST_FOR_LOOP: case AST_CASE_STATEMENT:
             resolve_scoped(r, s, n);
             return;
         case AST_IDENTIFIER: {
             Local* l = n->value ? scope_lookup(s, n->value) : NULL;
             if (l) pm_put(&r->f->uses, n, l);
+            /* A pattern's name carries no type of its own (the checker
+             * types it in the arm's table): its uses do. */
+            if (l && l->pattern && !l->type && n->node_type) {
+                l->type = n->node_type;
+                l->is_slice = type_is_slice(n->node_type);
+            }
             return;
         }
         case AST_FUNCTION_CALL:
@@ -572,6 +627,7 @@ static void classify(Frame* f) {
         else if (strmap_has(&f->promoted, l->name) && !l->keep) l->kind = K_CELL;
         else if (l->param) l->kind = l->keep ? K_KEEP : K_PARAM;
         else if (l->destructured) l->kind = K_VIEW;
+        else if (l->pattern && l->arm) l->kind = K_VIEW;   /* rewrite's AST_MATCH_ARM */
         else if (l->pattern || !l->block) l->kind = K_OTHER;
         else if (l->fresh || l->target) l->kind = K_OWNER;
         else l->kind = K_VIEW;
@@ -1159,6 +1215,14 @@ static ASTNode* mk_store(const char* name, Type* t, ASTNode* place, ASTNode* v) 
 
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot);
 
+/* A pattern binds names and holds no value to own: a struct pattern's
+ * `field: name` is no store. */
+static int is_pattern(const ASTNode* n) {
+    return n->type == AST_PATTERN_VARIABLE || n->type == AST_PATTERN_STRUCT ||
+           n->type == AST_PATTERN_LIST || n->type == AST_PATTERN_CONS ||
+           n->type == AST_PATTERN_LITERAL;
+}
+
 /* Is `e` a view (`f()[a..b]`, `string.bytes(s)[1..]`, one of one) of a call's
  * result, which holds the reference the call handed over and nothing else
  * does? The view takes that reference over (#3568, #3570). */
@@ -1268,7 +1332,7 @@ static void rewrite_match_value(Ctx* c, Frame* f, ASTNode* m) {
  * one. A call's result is the reference it hands over. */
 static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
     ASTNode* e = *slot;
-    if (!e) return;
+    if (!e || is_pattern(e)) return;
     if (use == C_BORROW || !type_is_slice(e->node_type)) {
         rewrite(c, f, slot);
         return;
@@ -1562,7 +1626,7 @@ static void mark_in_place(ASTNode* e) {
 
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
     ASTNode* n = *slot;
-    if (!n || is_frame(n) || is_opaque(n)) return;
+    if (!n || is_frame(n) || is_opaque(n) || is_pattern(n)) return;
     switch (n->type) {
         case AST_BLOCK:
             /* A hoisted local that holds a reference is declared here, where
@@ -1619,6 +1683,28 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
             /* Read where it stands (rewrite_value takes a moved one). */
             for (int i = 0; i < n->child_count; i++) rewrite(c, f, &n->children[i]);
             return;
+        case AST_MATCH_ARM: {
+            for (int i = 0; i < n->child_count; i++)
+                if (n->children[i]) rewrite_value(c, f, &n->children[i], child_use(n, i));
+            /* #3568: each slice the pattern binds takes a reference of its
+             * own where the body starts, given back at the body's every
+             * exit: the body may let go of what the match was given. */
+            ASTNode* body = n->child_count > 1 ? n->children[1] : NULL;
+            if (!body || body->type != AST_BLOCK) return;
+            for (int k = f->nlocals - 1; k >= 0; k--) {
+                Local* l = f->locals[k];
+                if (l->arm != n || l->kind != K_VIEW) continue;
+                insert_child(body, 0, mk_drop_defer(l, body));
+                ASTNode* hold = mk_call("__slice_hold", NULL, body);
+                add_child(hold, mk_ident(l, body));
+                ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, hold->line,
+                                              hold->column);
+                add_child(es, hold);
+                if (body->source_file) es->source_file = strdup(body->source_file);
+                insert_child(body, 0, es);
+            }
+            return;
+        }
         case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL: case AST_MESSAGE_CONSTRUCTOR:
             for (int i = 0; i < n->child_count; i++) {
                 ASTNode** slot2 = &n->children[i];
@@ -1684,7 +1770,7 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
     top.up = NULL;
     top.depth = 0;
     int npar = 0;
-    R r = {c, &f};
+    R r = {c, &f, NULL, NULL};
     /* The parameters, and a receive arm's pattern. */
     for (int i = 0; i < owner->child_count; i++) {
         ASTNode* p = owner->children[i];
