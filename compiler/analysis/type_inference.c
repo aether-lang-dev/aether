@@ -1096,6 +1096,11 @@ void collect_expression_constraints(ASTNode* node, InferenceContext* ctx) {
                      * `int` from 0 to 255. */
                     free_type(node->node_type);
                     node->node_type = create_type(TYPE_INT);
+                } else if (array_type && array_type->kind == TYPE_PTR && array_type->element_type &&
+                           array_type->element_type->kind != TYPE_UNKNOWN) {
+                    /* #3527: `p[i]` on a typed pointer `*T` is a `T`. */
+                    free_type(node->node_type);
+                    node->node_type = clone_type(array_type->element_type);
                 }
             }
             break;

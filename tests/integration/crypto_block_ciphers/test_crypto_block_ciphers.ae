@@ -21,7 +21,8 @@ main() {
     sct = sm4.process_block(se, spt)
     fails = fails + ck("sm4 ecb block", bh(sct), "681edf34d206965e86b3e94f536e4246")
     sd = sm4.new_decryptor(bytes.view(sk)[0..16])
-    if bh(sm4.process_block(sd, sct)) == "0123456789abcdeffedcba9876543210" { println("ok   sm4 decrypt roundtrip") } else { println("FAIL sm4 decrypt"); fails = fails + 1 }
+    spt2 = sm4.process_block(sd, sct)
+    if bh(spt2) == "0123456789abcdeffedcba9876543210" { println("ok   sm4 decrypt roundtrip") } else { println("FAIL sm4 decrypt"); fails = fails + 1 }
 
     // --- 3DES (TDEA) 3-key KAT (BC DesEdeTest) ---
     dk = hb("0123456789abcdef0123456789abcdef0123456789abcdef")
@@ -43,6 +44,13 @@ main() {
     sd2 = sm4.new_decryptor(bytes.view(sk)[0..16])
     dec = sm4.cbc_decrypt(sd2, iv, enc)
     if bh(dec) == bh(msg) { println("ok   sm4 cbc roundtrip") } else { println("FAIL sm4 cbc roundtrip"); fails = fails + 1 }
+
+    // The contexts and every block above are this program's to free.
+    sm4.free(se); sm4.free(sd); sm4.free(se2); sm4.free(sd2)
+    des3.free(de); des3.free(dd)
+    bytes.free(sk); bytes.free(spt); bytes.free(sct); bytes.free(spt2)
+    bytes.free(dk); bytes.free(dpt); bytes.free(b0); bytes.free(dct0); bytes.free(rt)
+    bytes.free(iv); bytes.free(msg); bytes.free(enc); bytes.free(dec)
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

@@ -202,9 +202,11 @@ main() {
     i = 0
     while i < 9 {
         http.server_stop(servers[i])
+        http.server_free(servers[i])
         i = i + 1
     }
     http.server_stop(upstream)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

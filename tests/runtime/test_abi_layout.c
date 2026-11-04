@@ -1,6 +1,6 @@
 /**
  * The layouts a shipped library and its host rely on, as recorded at host
- * ABI level 1, catalog schema 1.11 and runtime ABI revision 1 (#2957,
+ * ABI level 1, catalog schema 1.11 and runtime ABI revision 2 (#2957,
  * docs/abi-policy.md).
  *
  * Each recorded layout is a copy of the type as it stands at that level,
@@ -265,7 +265,7 @@ TEST_CATEGORY(abi_rv_mark_finds_the_program, TEST_CATEGORY_RUNTIME) {
 /* ---- The runtime ABI ---- */
 
 TEST_CATEGORY(abi_runtime_identity, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(1, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(2, AETHER_RUNTIME_ABI_REV);
     /* The runtime reports what it was built with, and what generated C
      * compiled with these headers compares it with. */
     ASSERT_STREQ(AETHER_RUNTIME_ABI_ID, aether_runtime_abi());

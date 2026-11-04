@@ -38,7 +38,8 @@ cache_count() { "$AE" cache | sed -n 's/^Cache: \([0-9]*\) build.*/\1/p'; }
 # re-run can compute a new key and miss while the slot under test is still
 # on disk. That race failed this test on a slow macOS runner (#2358).
 slots_by_age() {
-    ls -t "$tmp/cache" | grep -v -e '\.deps$' -e '\.tmp\.' -e '^gc\.stamp$' -e '^latest_release$'
+    ls -t "$tmp/cache" | grep -v -e '\.deps$' -e '\.tmp\.' -e '^gc\.stamp$' -e '^latest_release$' \
+        -e '^filehash\.v1$'
 }
 newest_slot() { slots_by_age | head -1; }
 
@@ -51,7 +52,7 @@ if [ "$n" != "3" ]; then
     echo "  [FAIL] cache_size_limit: with AETHER_CACHE_MAX_MB=0 expected 3 builds, got '$n'"
     fail=1
 fi
-one="$(ls -l "$tmp/cache" | awk '$5 > 1000 {s=$5} END{print s}')"
+one="$(wc -c < "$tmp/cache/$(newest_slot)" | tr -d ' ')"
 [ -n "$one" ] && [ "$one" -gt 0 ] || { echo "  [FAIL] cache_size_limit: could not size a cached build"; exit 1; }
 N=$(( 1024 * 1024 / one + 3 ))
 i=4

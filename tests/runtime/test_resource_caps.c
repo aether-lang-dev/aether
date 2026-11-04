@@ -7,6 +7,7 @@
 
 #include "test_harness.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_thread.h"   /* pthread_create, for #3529 */
 #include "../../std/bytes/aether_bytes.h"
 #include "../../std/os/aether_os.h"
 #include "../../std/fs/aether_fs.h"
@@ -69,6 +70,57 @@ TEST_CATEGORY(caps_current_usage_not_highwater, TEST_CATEGORY_STDLIB) {
     aether_caps_set_memory_cap(0);
 }
 
+/* #3529: without a cap each thread counts on a slot of its own, summed on
+ * demand, where every allocation of every thread used to count on one
+ * atomic. Blocks made on four threads and half of them freed on another
+ * still add up, and a cap set afterwards checks against all of them: it
+ * moves the slots into the counter it is checked against. */
+#define CAPS_SPLIT_THREADS 4
+#define CAPS_SPLIT_BLOCKS  500
+static void* caps_split_blocks[CAPS_SPLIT_THREADS][CAPS_SPLIT_BLOCKS];
+static void* caps_split_worker(void* arg) {
+    void** mine = (void**)arg;
+    for (int i = 0; i < CAPS_SPLIT_BLOCKS; i++) mine[i] = aether_caps_malloc(64);
+    return NULL;
+}
+
+TEST_CATEGORY(caps_split_count_across_threads, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    uint64_t before = aether_caps_used_bytes();
+    pthread_t t[CAPS_SPLIT_THREADS];
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        ASSERT_EQ(0, pthread_create(&t[i], NULL, caps_split_worker, caps_split_blocks[i]));
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++) pthread_join(t[i], NULL);
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = 0; j < CAPS_SPLIT_BLOCKS; j++) ASSERT_NOT_NULL(caps_split_blocks[i][j]);
+    uint64_t all = (uint64_t)CAPS_SPLIT_THREADS * CAPS_SPLIT_BLOCKS * 64;
+    ASSERT_TRUE(aether_caps_used_bytes() == before + all);
+
+    /* Half freed here, on a thread that made none of them. */
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = 0; j < CAPS_SPLIT_BLOCKS / 2; j++) {
+            aether_caps_free(caps_split_blocks[i][j], 64);
+            caps_split_blocks[i][j] = NULL;
+        }
+    uint64_t held = before + all / 2;
+    ASSERT_TRUE(aether_caps_used_bytes() == held);
+
+    /* A cap set now sees what is held: 100 bytes of room, not more. */
+    aether_caps_set_memory_cap(held + 100);
+    ASSERT_TRUE(aether_caps_used_bytes() == held);
+    void* refused = aether_caps_malloc(200);
+    ASSERT_TRUE(refused == NULL);
+    void* fits = aether_caps_malloc(64);
+    ASSERT_NOT_NULL(fits);
+    aether_caps_free(fits, 64);
+    aether_caps_set_memory_cap(0);
+
+    for (int i = 0; i < CAPS_SPLIT_THREADS; i++)
+        for (int j = CAPS_SPLIT_BLOCKS / 2; j < CAPS_SPLIT_BLOCKS; j++)
+            aether_caps_free(caps_split_blocks[i][j], 64);
+    ASSERT_TRUE(aether_caps_used_bytes() == before);
+}
+
 TEST_CATEGORY(caps_saturating_decrement, TEST_CATEGORY_STDLIB) {
     /* Free more than we allocated → counter saturates at 0 in
      * release. (Debug builds would assert; this test only runs the
@@ -101,6 +153,37 @@ TEST_CATEGORY(caps_deadline_trips_on_schedule, TEST_CATEGORY_STDLIB) {
     /* Reset clears the flag. */
     aether_caps_set_deadline_ms(0);
     ASSERT_EQ(0, aether_caps_deadline_tripped());
+}
+
+/* #3528: a deadline in milliseconds became nanoseconds as `ms * 1000000LL`,
+ * signed overflow past about 292 years. A host passing long.max to mean "no
+ * deadline" got a time in the past, and the work stopped at once; an ACTIVE
+ * budget came out negative. Each of the four conversions now saturates, so
+ * a deadline that far off never trips. */
+TEST_CATEGORY(caps_deadline_past_the_end_of_time, TEST_CATEGORY_STDLIB) {
+    caps_reset();
+    aether_caps_set_deadline_ms(INT64_MAX);
+    ASSERT_EQ(0, aether_caps_deadline_tripped());
+    /* The first count of milliseconds whose nanoseconds do not fit. */
+    aether_caps_set_deadline_ms(INT64_MAX / 1000000LL + 1);
+    ASSERT_EQ(0, aether_caps_deadline_tripped());
+    aether_caps_set_deadline_ms(0);
+
+    AetherDeadlineState s = aether_caps_deadline_for_ms(INT64_MAX);
+    ASSERT_TRUE(s.at_ns > aether_caps_now_ns());
+
+    AetherExecLimits lim = { 0, INT64_MAX, AETHER_DEADLINE_ELAPSED, NULL };
+    AetherExecAccount* a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_TRUE(a->deadline_at_ns > aether_caps_now_ns());
+    ASSERT_EQ(0, aether_exec_account_tripped(a));
+    aether_exec_account_free(a);
+
+    lim.deadline_counts = AETHER_DEADLINE_ACTIVE;
+    a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_TRUE(a->active_budget_ns > 0);
+    aether_exec_account_free(a);
 }
 
 TEST_CATEGORY(caps_explicit_abort_sticky, TEST_CATEGORY_STDLIB) {
@@ -300,6 +383,32 @@ static int run_in_execution(void (*body)(void)) {
     return aether_last_outcome();
 }
 
+/* #3528: an ACTIVE account given INT64_MAX ms, "no deadline", does not
+ * stop the execution it times. Its budget saturates at INT64_MAX, and the
+ * deadline worked out from it added that to the time the thread began
+ * timing it, which wrapped to a time in the past: the work stopped at once
+ * (AETHER_DEADLINE), while the same account counting ELAPSED time ran. */
+static void spend_nothing(void) {}
+
+TEST_CATEGORY(caps_active_budget_past_the_end_of_time, TEST_CATEGORY_RUNTIME) {
+    caps_reset();
+    AetherExecLimits lim = { 0, INT64_MAX, AETHER_DEADLINE_ACTIVE, NULL };
+    AetherExecAccount* a = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(a);
+    ASSERT_EQ(0, aether_exec_use(a, NULL));
+    ASSERT_EQ(AETHER_OK, run_in_execution(spend_nothing));
+    aether_exec_use(NULL, NULL);
+    lim.deadline_counts = AETHER_DEADLINE_ELAPSED;
+    AetherExecAccount* e = aether_exec_account_new(&lim);
+    ASSERT_NOT_NULL(e);
+    ASSERT_EQ(0, aether_exec_use(e, NULL));
+    ASSERT_EQ(AETHER_OK, run_in_execution(spend_nothing));
+    aether_exec_use(NULL, NULL);
+    aether_exec_account_free(a);
+    aether_exec_account_free(e);
+    caps_reset();
+}
+
 static void* g_alloc_result;
 static void alloc_past_cap(void) {
     aether_caps_set_memory_cap(aether_caps_used_bytes() + 16);
@@ -357,7 +466,9 @@ static int g_released_type = -1;
 static void note_release(int type, void* payload) { (void)payload; g_released_type = type; }
 static ActorBase* g_oom_actor;
 static void send_refused(void) {
-    struct { int type; int value; } m = { 42, 7 };
+    /* Larger than the bytes a message carries its payload in (#3534), so
+     * the send copies it to the heap, where the copy can be refused. */
+    struct { int type; int value; char pad[AETHER_MSG_INLINE_BYTES]; } m = { 42, 7, { 0 } };
     aether_test_fail_alloc_after(1);
     aether_send_message(g_oom_actor, &m, sizeof(m));
 }

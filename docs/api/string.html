@@ -277,6 +277,7 @@
       <h3 class="function-name">length <span class="kind">extern</span></h3>
       <pre class="usage"><code>length(str) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">str: string</span></p>
+      <p class="doc">The length in bytes. A string longer than an int can count (2 GiB) panics rather than reporting a negative or cut length.</p>
     </div>
     <div class="function" id="char_at" data-name="char_at">
       <h3 class="function-name">char_at <span class="kind">extern</span></h3>
@@ -342,7 +343,7 @@
       <h3 class="function-name">substring_n <span class="kind">extern</span></h3>
       <pre class="usage"><code>substring_n(str, str_len_bytes, start, end) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">str: string, str_len_bytes: int, start: int, end: int</span></p>
-      <p class="doc">Length-aware sibling — caller supplies the source length explicitly. Reach for this when `str` arrives as a `string` parameter at a function boundary (where #297's auto-unwrap may have stripped the AetherString header) AND the content may contain embedded NULs. The plain string_substring would call str_len() on the unwrapped data and fall through to strlen, truncating at the first NUL. Trusts the caller's `str_len_bytes` parameter — does NOT consult the AetherString header even if one happens to be present. start / end are clamped to [0, str_len_bytes].</p>
+      <p class="doc">Length-aware sibling: the caller supplies the source length explicitly. Reach for this when `str` arrives as a `string` parameter at a function boundary (where #297's auto-unwrap may have stripped the AetherString header) AND the content may contain embedded NULs. The plain string_substring would call str_len() on the unwrapped data and fall through to strlen, truncating at the first NUL. The caller's `str_len_bytes` is cut to the string's stored length when it has one (a heap or counted string), so a larger value never reads past the end; a plain C string's is trusted. start / end are clamped to [0, str_len_bytes].</p>
     </div>
     <div class="function" id="length_n" data-name="length_n">
       <h3 class="function-name">length_n <span class="kind">extern</span></h3>
@@ -354,13 +355,13 @@
       <h3 class="function-name">char_at_n <span class="kind">extern</span></h3>
       <pre class="usage"><code>char_at_n(str, known_length, index) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">str: string, known_length: int, index: int</span></p>
-      <p class="doc">Length-aware sibling of string_char_at. Caller supplies the haystack length explicitly so the bounds check skips the per-call strlen that string_char_at pays when `str` arrives as a plain `const char*` (the auto-unwrap at function-parameter boundary strips the AetherString header). Returns the byte at `index` as an int 0..255, or 0 on out-of-range. Reach for this in hot iterator-walk loops over a multi-KB body whose length the caller has already cached. Filed in string-length-aware-accessors.md after avn's bench profile showed __strlen_avx2 dominating CPU.</p>
+      <p class="doc">Length-aware sibling of string_char_at. Caller supplies the haystack length explicitly so the bounds check skips the per-call strlen that string_char_at pays when `str` arrives as a plain `const char*` (the auto-unwrap at function-parameter boundary strips the AetherString header). Returns the byte at `index` as an int 0..255, or 0 on out-of-range. Reach for this in hot iterator-walk loops over a multi-KB body whose length the caller has already cached. Filed in string-length-aware-accessors.md after avn's bench profile showed __strlen_avx2 dominating CPU. A `known_length` past a counted string's stored length is cut to it.</p>
     </div>
     <div class="function" id="index_of_from_n" data-name="index_of_from_n">
       <h3 class="function-name">index_of_from_n <span class="kind">extern</span></h3>
       <pre class="usage"><code>index_of_from_n(str, known_length, substring, start) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">str: string, known_length: int, substring: string, start: int</span></p>
-      <p class="doc">Length-aware sibling of string_index_of_from. Same motivation as string_char_at_n — caller has already cached the haystack length. Needle is still strlen'd (small / fixed). Returns the absolute offset of the first match at or after `start`, or -1 on miss. `start` clamped to [0, known_length]; needle longer than the searchable range returns -1.</p>
+      <p class="doc">Length-aware sibling of string_index_of_from. Same motivation as string_char_at_n: the caller has already cached the haystack length. Needle is still strlen'd (small / fixed). Returns the absolute offset of the first match at or after `start`, or -1 on miss. `start` clamped to [0, known_length]; needle longer than the searchable range returns -1. A `known_length` past a counted string's stored length is cut to it.</p>
     </div>
     <div class="function" id="from_char" data-name="from_char">
       <h3 class="function-name">from_char <span class="kind">extern</span></h3>

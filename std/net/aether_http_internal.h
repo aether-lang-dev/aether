@@ -79,6 +79,7 @@ typedef struct {
     int    chunked;
     int    definite;
     int    invalid;    /* the response did not say where its body ends */
+    int    bad_head;   /* ... because its header section holds a NUL or a bare CR */
 } HttpRespFraming;
 
 typedef struct {
@@ -157,15 +158,42 @@ int  http_exchange_recv(HttpExchange* x);
 /* Split a URL into the pieces a dial needs. Returns 0 when it is not one, or
  * when the host or the path does not fit its buffer: a piece is never cut
  * short, since a cut path is still a request, for the wrong thing (#2674).
- * `path` may be NULL for a caller that needs the host only. */
+ * `path` is the request target, the path and the query without the fragment,
+ * and may be NULL for a caller that needs the host only. */
 int parse_url(const char* url, char* host, size_t host_size,
               int* port, char* path, size_t path_size, int* use_tls);
 
-/* parse_url with the path allocated to fit (it is never longer than the URL):
+/* parse_url with the path allocated to fit (never more than the URL and a "/"):
  * *path_out is malloc'd and the caller frees it. Returns 0 on a URL that is
  * not one, a host that does not fit, or no memory, with *path_out NULL. */
 int parse_url_alloc(const char* url, char* host, size_t host_size,
                     int* port, char** path_out, int* use_tls);
+
+/* The URI reference `ref` resolved against the absolute URI `base` (RFC 3986
+ * 5.2), recomposed with its scheme in lower case and a space or a byte past
+ * ASCII in its path, query or fragment percent-encoded. malloc'd; NULL when
+ * either is not a URI reference (a reference holding a control byte is
+ * not), the base has no scheme, or no memory. */
+char* http_uri_resolve(const char* base, const char* ref);
+
+/* The URL a redirect's Location names: http_uri_resolve against the URL that
+ * was asked for, read as parse_url reads it (no http:// or https:// is
+ * http), the base's fragment kept when the Location has none (RFC 9110
+ * 10.2.2). malloc'd, or NULL. */
+char* http_resolve_location(const char* base_url, const char* location);
+
+/* A proxy URL, [http://]host[:port], split as a target URL's authority is: an
+ * IPv6 host in brackets comes back bare. *port is 3128 when none is named. 0,
+ * or -1 for a URL that is not one. */
+int http_parse_proxy_url(const char* url, char* host, size_t host_size, int* port);
+
+/* A forward proxy's reply to CONNECT on the socket `fd`, read to the end of
+ * its head and no further, so the bytes after it stay for the tunnel's first
+ * read. The status, or 0 with *why set when the reply ended or the read
+ * failed before its head did, the head is longer than 4096 bytes, or it is
+ * malformed (no "HTTP/1." status line with a three-digit status, a NUL or a
+ * bare CR). */
+int http_connect_reply_read(int fd, const char** why);
 
 /* Accessors a driver needs from an outbound request it did not build. The
  * request itself stays opaque: these are what it takes to put it on a wire. */

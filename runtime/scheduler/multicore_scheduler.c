@@ -2675,18 +2675,19 @@ void scheduler_start(void) {
 }
 
 void scheduler_stop(void) {
-    // Set all running flags to 0 with release semantics
+    // Set all running flags to 0 with release semantics. `running` is the
+    // word a core that is spinning reads on every pass of its loop, so this
+    // store is what wakes it.
+    //
+    // It also rewrote each core's foreign queue tail with the value it had
+    // just loaded, for an MWAIT on that word that no core makes. That store
+    // took no foreign_lock, so a send from a thread the scheduler does not
+    // own landing between the load and the store had the tail moved back
+    // under it: its message lost, or slots past the tail delivered again
+    // (#3521). Nothing reads the tail as a wake signal, so nothing writes it
+    // here: taking the lock would have kept a store that wakes no one.
     for (int i = 0; i < num_cores; i++) {
         atomic_store_explicit(&schedulers[i].running, 0, memory_order_release);
-    }
-    
-    // Wake threads by writing to monitored addresses (wakes MWAIT)
-    // On non-MWAIT platforms, threads wake quickly from short sleep
-    for (int i = 0; i < num_cores; i++) {
-        // Touch the main-thread from_queue tail to trigger MWAIT wake
-        atomic_store_explicit(&schedulers[i].from_queues[MAX_CORES].tail,
-                            atomic_load_explicit(&schedulers[i].from_queues[MAX_CORES].tail, memory_order_relaxed),
-                            memory_order_release);
     }
 
     // And wake anyone parked on the condvar, or shutdown waits out their
@@ -3284,7 +3285,7 @@ static int scheduler_io_poll(Scheduler* sched, int timeout_ms) {
         msg.payload_ptr = payload;
         msg.zerocopy.data = NULL;
         msg.zerocopy.size = 0;
-        msg.zerocopy.owned = 0;
+        msg.zerocopy.owned = AETHER_MSG_ZC_BORROWED;
         msg._reply_slot = NULL;
 
         // One-shot: the backend auto-disables the fd after firing.
@@ -4032,12 +4033,61 @@ void scheduler_actor_thread_exit(ActorBase* actor) {
 // g_current_reply_slot after mailbox_receive, so scheduler_reply can find it.
 AETHER_TLS void* g_current_reply_slot = NULL;
 
+/* The reply slots (#3533). Every ask used to calloc one, build its mutex and
+ * condition variable, and destroy and free all of it on the way out. They
+ * are made once now and lent: an ask takes one whose count is 0 (nobody
+ * holds it) by setting the count to 2, the asker and the actor side, and
+ * the last of the two to let go puts it back to 0. The asking thread's last
+ * slot is tried first, so a thread that asks again and again uses one slot
+ * and touches no shared word; a slot a timed out ask left with the actor is
+ * still held, and the next ask takes another until the reply comes and lets
+ * it go. They live for the process, on g_reply_slots, as the reclaim
+ * readers do: a thread can end without anything telling the runtime, and a
+ * slot on the list is still reachable for whoever asks next. */
+static _Atomic(ActorReplySlot*) g_reply_slots = NULL;
+static AETHER_TLS ActorReplySlot* t_reply_slot = NULL;
+
+static int reply_slot_take(ActorReplySlot* slot) {
+    int none = 0;
+    if (!atomic_compare_exchange_strong_explicit(&slot->refcount, &none, 2,
+                                                 memory_order_acquire, memory_order_relaxed))
+        return 0;
+    /* Free means both sides are done with the last ask's fields. */
+    slot->reply_data = NULL;
+    slot->reply_size = 0;
+    slot->reply_ready = 0;
+    slot->timed_out = 0;
+    slot->failed = 0;
+    slot->deadline_ns = 0;
+    t_reply_slot = slot;
+    return 1;
+}
+
+/* A slot for an ask, its count 2; NULL when none is free and no memory is
+ * left for another. */
+static ActorReplySlot* reply_slot_lend(void) {
+    ActorReplySlot* mine = t_reply_slot;
+    if (mine && reply_slot_take(mine)) return mine;
+    for (ActorReplySlot* s = atomic_load_explicit(&g_reply_slots, memory_order_acquire); s; s = s->all_next)
+        if (s != mine && reply_slot_take(s)) return s;
+    ActorReplySlot* slot = (ActorReplySlot*)calloc(1, sizeof(ActorReplySlot));
+    if (!slot) return NULL;
+    pthread_mutex_init(&slot->mutex, NULL);
+    pthread_cond_init(&slot->cond, NULL);
+    atomic_init(&slot->refcount, 2);  // asker + actor handler
+    ActorReplySlot* head = atomic_load_explicit(&g_reply_slots, memory_order_relaxed);
+    do {
+        slot->all_next = head;
+    } while (!atomic_compare_exchange_weak_explicit(&g_reply_slots, &head, slot,
+                                                    memory_order_release, memory_order_relaxed));
+    t_reply_slot = slot;
+    return slot;
+}
+
+/* One side lets go. At zero the slot is free for the next ask: nothing of
+ * it may be touched after this by the side that let go. */
 static void reply_slot_decref(ActorReplySlot* slot) {
-    if (atomic_fetch_sub_explicit(&slot->refcount, 1, memory_order_acq_rel) == 1) {
-        pthread_cond_destroy(&slot->cond);
-        pthread_mutex_destroy(&slot->mutex);
-        free(slot);
-    }
+    atomic_fetch_sub_explicit(&slot->refcount, 1, memory_order_acq_rel);
 }
 
 /* An ask that can get no reply (#3151): its message was dropped (a dead or
@@ -4282,7 +4332,7 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     /* A dead actor answers nothing: no message, no wait (#3151). */
     if (atomic_load_explicit(&target->dead, memory_order_acquire)) return NULL;
 
-    ActorReplySlot* slot = (ActorReplySlot*)calloc(1, sizeof(ActorReplySlot));
+    ActorReplySlot* slot = reply_slot_lend();
     if (!slot) {
         /* The script gets the error; a library call ends at its next safe
          * point with AETHER_OUT_OF_MEMORY (#2956). */
@@ -4298,15 +4348,12 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
      * the slot set for every later send. */
     Message ask_msg;
     if (!aether_ask_message(target, msg_data, msg_size, slot, &ask_msg)) {
-        free(slot);
+        /* Nobody else has seen it: both references go back at once. */
+        atomic_store_explicit(&slot->refcount, 0, memory_order_release);
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         *status = AETHER_ASK_NO_MEMORY;
         return NULL;
     }
-
-    pthread_mutex_init(&slot->mutex, NULL);
-    pthread_cond_init(&slot->cond, NULL);
-    atomic_init(&slot->refcount, 2);  // asker + actor handler
 
     /* An ask blocks this thread until the reply. Made by a handler, this is
      * a core's scheduler thread, which then steps nothing else (#3196,
@@ -4461,10 +4508,10 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
 
     /* The replier lets go of the slot just after it wakes this thread, from
      * its own thread. Answered or failed, the ask waits for that, a few
-     * instructions, and frees the slot here: what an ask allocated is gone
-     * when it returns, whatever the other thread's timing (#3245). A timed
-     * out ask does not wait; its replier frees the slot when it comes, and
-     * neither does one its killed asker gave up. */
+     * instructions, and lets go of the slot here, which is then free for
+     * this thread's next ask (#3245, #3533). A timed out ask does not wait;
+     * its replier lets the slot go when it comes, and neither does one its
+     * killed asker gave up: until then the next ask takes another. */
     if (*status != AETHER_ASK_TIMED_OUT && *status != AETHER_ASK_KILLED) {
         int spins = 0;
         while (atomic_load_explicit(&slot->refcount, memory_order_acquire) > 1) {

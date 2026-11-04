@@ -45,7 +45,9 @@ extern aether_strbuilder_new(cap_hint: int) -> ptr
 // embedded NUL survives; a plain literal still arrives as a `char*` and
 // is measured with strlen, as before.
 extern aether_strbuilder_append(b: ptr, s: @aether string) -> int
-extern aether_strbuilder_append_n(b: ptr, s: string, n: int) -> int
+// The same for append_n (#3523): the C side sees the string's own length
+// and appends no more than it holds.
+extern aether_strbuilder_append_string_n(b: ptr, s: @aether string, n: int) -> int
 extern aether_strbuilder_append_bytes(b: ptr, data: ptr, n: int) -> int
 extern aether_strbuilder_append_byte(b: ptr, c: int) -> int
 extern aether_strbuilder_append_int(b: ptr, v: int) -> int
@@ -79,10 +81,12 @@ append(b: ptr, s: string) -> int {
     return aether_strbuilder_append(b, s)
 }
 
-// Append exactly `n` bytes from `s`. Binary-safe — embedded NULs
-// round-trip cleanly. Returns 1 on success, 0 on failure.
+// Append exactly `n` bytes from `s`. Binary-safe: embedded NULs
+// round-trip cleanly. A heap or counted string never gives more bytes
+// than it holds: a larger `n` is cut to its length. Returns 1 on
+// success, 0 on failure.
 append_n(b: ptr, s: string, n: int) -> int {
-    return aether_strbuilder_append_n(b, s, n)
+    return aether_strbuilder_append_string_n(b, s, n)
 }
 
 // Append a `byte[]` slice's bytes, binary-safe: the length travels with the

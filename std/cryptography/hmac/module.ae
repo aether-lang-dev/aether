@@ -45,7 +45,9 @@ exports(
 //
 // We keep the inner sha2 ctx already primed with (K0 ^ ipad), plus the
 // opad block (K0 ^ 0x5c) so finalization can run the outer hash. The
-// algo string lets the outer/inner hashes pick the same core.
+// algo string lets the outer/inner hashes pick the same core. The context
+// holds a reference to it, so every path that frees the context stores ""
+// over it first: `free` alone does not release a field (#3539).
 struct HmacCtx {
     inner: ptr // sha2 ctx, already fed (K0 ^ ipad)
     opad: ptr // std.bytes buffer, B bytes: K0 ^ 0x5c
@@ -185,6 +187,7 @@ final_bytes(ctx: ptr) -> ptr {
     if oerr != "" {
         bytes.wipe_free(inner_digest)
         bytes.wipe_free(c.opad)
+        c.algo = ""
         mem.wipe(ctx, sizeof(HmacCtx))
         free(ctx)
         return null
@@ -196,6 +199,7 @@ final_bytes(ctx: ptr) -> ptr {
 
     bytes.wipe_free(c.opad)
     c.opad = null
+    c.algo = ""
     mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
     return result
@@ -226,6 +230,7 @@ free_ctx(ctx: ptr) {
         bytes.wipe_free(c.opad)
         c.opad = null
     }
+    c.algo = ""
     mem.wipe(ctx, sizeof(HmacCtx))
     free(ctx)
 }

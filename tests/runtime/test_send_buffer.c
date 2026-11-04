@@ -150,7 +150,7 @@ static void buf_step(BufActor* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     if (msg.type == BUF_GO) {
         int core = send_buffer_here()->core_id;
         int next[2] = { 0, 0 };

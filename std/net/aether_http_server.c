@@ -4759,36 +4759,26 @@ static int ws_parse_url(const char* url, char* host, size_t host_sz,
         return -1;
     }
 
-    const char* slash = strchr(p, '/');
-    const char* hostend = slash ? slash : (p + strlen(p));
+    /* The authority ends at the path, the query or the fragment
+     * (aether_url_authority_len): "ws://h:9000?room=1" has port 9000. */
+    size_t alen = aether_url_authority_len(p);
 
     /* Optional :port, scanned inside the authority only so a path
      * containing ':' cannot be mistaken for one. An IPv6 host is bracketed
      * ("[::1]:8443") and comes back without the brackets. */
     const char* port_at = NULL;
     size_t plen = 0;
-    if (aether_addr_split_authority(p, (size_t)(hostend - p), host, host_sz,
-                                    &port_at, &plen) != 0) return -1;
+    if (aether_addr_split_authority(p, alen, host, host_sz, &port_at, &plen) != 0) return -1;
     if (host[0] == '\0') return -1;
 
     /* Default port follows the scheme, as RFC 6455 s3 specifies: 80 for ws,
      * 443 for wss. An explicit :port always wins. */
     *port = *tls ? 443 : 80;
-    if (port_at) {
-        char portbuf[16];
-        if (plen == 0 || plen >= sizeof(portbuf)) return -1;
-        memcpy(portbuf, port_at, plen);
-        portbuf[plen] = '\0';
-        *port = atoi(portbuf);
-        if (*port <= 0 || *port > 65535) return -1;
-    }
+    if (port_at && (*port = http_parse_port(port_at, plen)) < 0) return -1;
 
-    if (slash) {
-        if (strlen(slash) >= path_sz) return -1;
-        snprintf(path, path_sz, "%s", slash);
-    } else {
-        snprintf(path, path_sz, "/");
-    }
+    /* The resource name: the path and the query, "/" for an empty path, and
+     * never a fragment, which is no part of a WebSocket URI (RFC 6455 3). */
+    if (!aether_url_request_target(path, path_sz, p + alen)) return -1;
     return 0;
 }
 
@@ -5671,39 +5661,24 @@ void http_request_copy_conn_meta(HttpRequest* req, HttpConn* conn) {
     req->is_tls = (conn->ssl != NULL || conn->pure_tls != NULL) ? 1 : 0;
 }
 
-/* Content-Length is a plain count of digits. Anything else, a sign, a spelled
- * number, a value that will not fit, has no length in it, and RFC 9112 6.3
- * calls that unrecoverable rather than something to guess at. */
-static int conn_parse_content_length(const char* text, long* out) {
-    if (!text || !*text) return -1;
-    long value = 0;
-    for (const unsigned char* c = (const unsigned char*)text; *c; c++) {
-        if (*c < '0' || *c > '9') return -1;
-        if (value > (LONG_MAX - (*c - '0')) / 10) return -1;
-        value = value * 10 + (*c - '0');
-    }
-    *out = value;
-    return 0;
-}
-
 /* `line` (`line_len` bytes, no line ending) names header `name`
- * (`name_len` bytes, compared without case) and its value, with the
- * whitespace around it trimmed, goes into `out` (`cap` bytes, cut short to
- * fit): http_find_header_span's reading of a line, which the head check
- * makes itself as it walks the lines. */
+ * (`name_len` bytes, compared without case), and *value / *value_len are its
+ * value where it lies, the whitespace around it trimmed:
+ * http_find_header_span's reading of a line, which the head check makes
+ * itself as it walks the lines. Where it lies, not a copy: a copy into a
+ * 256 byte buffer was cut there, and a Content-Length read from its first
+ * 255 bytes is a different number from the one the sender wrote (#3520). */
 static int head_line_value(const char* line, size_t line_len,
                            const char* name, size_t name_len,
-                           char* out, size_t cap) {
+                           const char** value, size_t* value_len) {
     if (line_len <= name_len || line[name_len] != ':' ||
         strncasecmp(line, name, name_len) != 0) return 0;
     const char* v = line + name_len + 1;
     const char* v_end = line + line_len;
     while (v < v_end && (*v == ' ' || *v == '\t')) v++;
     while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
-    size_t n = (size_t)(v_end - v);
-    if (n > cap - 1) n = cap - 1;
-    memcpy(out, v, n);
-    out[n] = '\0';
+    *value = v;
+    *value_len = (size_t)(v_end - v);
     return 1;
 }
 
@@ -5747,9 +5722,11 @@ int http_request_head_check(const char* head, const char* hdr_end,
     size_t rl_len = rl_end ? (size_t)(rl_end - head) : (size_t)(hdr_end - head);
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
 
-    /* As large as a line's `value`: a copy cut short could read a longer
-     * duplicate Content-Length as the same one. */
-    char cl_value[256] = "";
+    /* The first Content-Length where it lies in the head, compared whole
+     * with any later one. Transfer-Encoding is copied: a copy cut short can
+     * only lose the word "chunked", which refuses the request. */
+    const char* cl_value = NULL;
+    size_t cl_len = 0;
     char te_value[256] = "";
     int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
     for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
@@ -5776,18 +5753,23 @@ int http_request_head_check(const char* head, const char* hdr_end,
             name[name_len] = '\0';
             if (!http_header_name_ok(name)) return HTTP_HEAD_BAD_FRAMING;
 
-            char value[256];
-            if (head_line_value(line, line_len, "Content-Length", 14, value, sizeof value)) {
-                /* The first value, and whether a later one disagrees, as
-                 * http_find_header_in_block reported them. */
+            const char* value = NULL;
+            size_t value_len = 0;
+            if (head_line_value(line, line_len, "Content-Length", 14, &value, &value_len)) {
+                /* The first value, and whether a later one disagrees. */
                 if (cl_count++ == 0) {
-                    snprintf(cl_value, sizeof cl_value, "%s", value);
-                } else if (strcmp(cl_value, value) != 0) {
+                    cl_value = value;
+                    cl_len = value_len;
+                } else if (value_len != cl_len || memcmp(cl_value, value, cl_len) != 0) {
                     cl_differing = 1;
                 }
             } else if (head_line_value(line, line_len, "Transfer-Encoding", 17,
-                                       value, sizeof value)) {
-                if (te_count++ == 0) snprintf(te_value, sizeof te_value, "%s", value);
+                                       &value, &value_len)) {
+                if (te_count++ == 0) {
+                    size_t n = value_len < sizeof te_value - 1 ? value_len : sizeof te_value - 1;
+                    memcpy(te_value, value, n);
+                    te_value[n] = '\0';
+                }
             }
         }
         if (!eol) break;
@@ -5799,9 +5781,15 @@ int http_request_head_check(const char* head, const char* hdr_end,
          * message ends, and a value that is not a count of bytes leaves none
          * either. Both are unrecoverable rather than something to pick from
          * (RFC 9112 6.3): guessing is what lets a front end and this server
-         * disagree about where one request stops and the next begins. */
-        if (cl_differing || conn_parse_content_length(cl_value, content_length) != 0)
+         * disagree about where one request stops and the next begins. A
+         * Content-Length is a plain count of digits, read whole by the one
+         * reader std.net has for it: a sign, a spelled number, or a value
+         * that does not fit has no length in it. */
+        uint64_t declared = 0;
+        if (cl_differing ||
+            http_parse_count(cl_value, cl_len, 10, (uint64_t)LONG_MAX, &declared) != 0)
             return HTTP_HEAD_BAD_FRAMING;
+        *content_length = (long)declared;
     }
 
     /* Transfer-Encoding decides where the body ends, and when it is present
@@ -6111,9 +6099,14 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         for (;;) {
             int have = conn->write_pos - conn->read_pos - header_size;
             if (have > 0) {
-                frame_len = http_chunked_frame_len(
-                    conn->buf + conn->read_pos + header_size, (size_t)have);
-                if (frame_len > 0) break;
+                int framed = http_chunked_frame(
+                    conn->buf + conn->read_pos + header_size, (size_t)have, &frame_len);
+                if (framed > 0) break;
+                /* Not chunked framing: more bytes will not make it so. */
+                if (framed < 0) {
+                    conn_send_bad_framing(conn);
+                    return 0;
+                }
                 /* A chunked body declares no length up front, so the only
                  * bound on it is the one this server imposes. Without one, a
                  * sender that never emits the terminal chunk grows this

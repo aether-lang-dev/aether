@@ -139,6 +139,8 @@ main() {
 
     http.server_stop(gateway)
     http.server_stop(upstream)
+    http.server_free(gateway)
+    http.server_free(upstream)
     bad = 0
     if waited != "saw 8" {
         println("  FAIL the handler saw the eight proxied requests while it waited: '${waited}'")

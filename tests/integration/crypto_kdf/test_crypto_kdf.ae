@@ -36,6 +36,9 @@ main() {
     fails = fails + check("pbkdf2 sha256 c=4096", bh(dk2),
         "c5e478d59288c841aa530db6845c4c8d962893a001ce4e11a4963873aa98134a")
 
+    bytes.free(ikm); bytes.free(salt); bytes.free(info); bytes.free(okm)
+    bytes.free(pw); bytes.free(sp); bytes.free(dk1); bytes.free(dk2)
+
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
 }

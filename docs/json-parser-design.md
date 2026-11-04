@@ -82,6 +82,33 @@ When a standalone value is handed to `json_array_add_raw` or
 original. After insertion the entire tree is arena-owned; a single
 `json_free` at the root tears everything down.
 
+A value that is the root of an arena of its own (a parsed document, or a
+built container something was set into) is not copied (#3538): its arena
+is adopted by the container's, destroyed with it from then on, and the
+node is kept where it is. Copying it made a document built level by level
+cost O(depth x size). Only a node inside another document, which that
+document owns, and a small heap tree are still copied whole.
+
+An arena is adopted only when at least a third of its own space is in
+use, so an adopted arena holds at most three times what it uses, and a
+document of many adopted arenas at most three times what its parts use.
+A parse gives every document a 16 KB first chunk, which a small document
+leaves nearly empty: adopting 2000 parsed `{"id":N,"ok":true}` into one
+array held 32 MB, where copies take 0.5 MB. Such a document is copied
+instead, the nodes of its own arena only: the arenas it adopted are handed
+over to the container's, with the nodes in them kept where they are. So a
+copy never takes more than a third of the donor's own arena, and never
+what it adopted. A container an arena is made for starts it at 512 bytes,
+and an arena that grows by doubling is a third used or more once it is past
+its first chunk, so a document built level by level copies little at each
+level.
+
+Objects past 16 keys get a hash index (open addressing over the key
+positions, in the object's arena) when a set adds to them, so building an
+object of k keys is not O(k^2) in key compares. A lookup uses the index
+when there is one and never builds it, so a parsed document read from many
+threads is never written.
+
 This double-path (arena for parse, heap for create, deep-copy on merge)
 is the only real complexity cost of preserving the mutation API. The
 parse path is a tight loop with no branching on allocation mode; the

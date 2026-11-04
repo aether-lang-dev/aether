@@ -16,7 +16,7 @@ void test_zerocopy_message_creation(void) {
     ASSERT_EQ(msg1.payload_int, 42);
     ASSERT_TRUE(msg1.zerocopy.data == NULL);
     ASSERT_EQ(msg1.zerocopy.size, 0);
-    ASSERT_EQ(msg1.zerocopy.owned, 0);
+    ASSERT_EQ(msg1.zerocopy.owned, AETHER_MSG_ZC_BORROWED);
     
     // Test large message (zero-copy)
     int large_size = 512;
@@ -28,7 +28,7 @@ void test_zerocopy_message_creation(void) {
     ASSERT_EQ(msg2.sender_id, 2);
     ASSERT_TRUE(msg2.zerocopy.data == large_data);
     ASSERT_EQ(msg2.zerocopy.size, large_size);
-    ASSERT_EQ(msg2.zerocopy.owned, 1);
+    ASSERT_EQ(msg2.zerocopy.owned, AETHER_MSG_ZC_OWNED);
     
     // Clean up
     message_free(&msg2);
@@ -50,10 +50,10 @@ void test_zerocopy_message_transfer(void) {
     ASSERT_EQ(dest.sender_id, 5);
     ASSERT_TRUE(dest.zerocopy.data == data);
     ASSERT_EQ(dest.zerocopy.size, size);
-    ASSERT_EQ(dest.zerocopy.owned, 1);
+    ASSERT_EQ(dest.zerocopy.owned, AETHER_MSG_ZC_OWNED);
     
     // Source should no longer own the data
-    ASSERT_EQ(src.zerocopy.owned, 0);
+    ASSERT_EQ(src.zerocopy.owned, AETHER_MSG_ZC_BORROWED);
     
     // Clean up
     message_free(&dest);
@@ -84,7 +84,7 @@ void test_zerocopy_mailbox_operations(void) {
     int count = 0;
     while (mailbox_receive(&mbox, &received)) {
         count++;
-        if (received.zerocopy.owned && received.zerocopy.data) {
+        if (received.zerocopy.owned == AETHER_MSG_ZC_OWNED && received.zerocopy.data) {
             ASSERT_EQ(received.zerocopy.size, 512);
             message_free(&received);
         }
@@ -104,7 +104,7 @@ void test_zerocopy_threshold(void) {
     Message large = message_create_zerocopy(MSG_USER_START, 1, data, ZEROCOPY_THRESHOLD + 1);
     ASSERT_TRUE(large.zerocopy.data != NULL);
     ASSERT_EQ(large.zerocopy.size, ZEROCOPY_THRESHOLD + 1);
-    ASSERT_EQ(large.zerocopy.owned, 1);
+    ASSERT_EQ(large.zerocopy.owned, AETHER_MSG_ZC_OWNED);
     
     message_free(&large);
 }
@@ -140,7 +140,7 @@ void test_zerocopy_batch_operations(void) {
     // Verify and clean up
     int zerocopy_count = 0;
     for (int i = 0; i < recv_count; i++) {
-        if (received[i].zerocopy.owned && received[i].zerocopy.data) {
+        if (received[i].zerocopy.owned == AETHER_MSG_ZC_OWNED && received[i].zerocopy.data) {
             zerocopy_count++;
             message_free(&received[i]);
         }
@@ -156,9 +156,9 @@ void test_zerocopy_message_free(void) {
     // Test freeing owned zero-copy message
     void* data = malloc(512);
     Message msg2 = message_create_zerocopy(MSG_USER_START, 1, data, 512);
-    ASSERT_EQ(msg2.zerocopy.owned, 1);
+    ASSERT_EQ(msg2.zerocopy.owned, AETHER_MSG_ZC_OWNED);
     message_free(&msg2);
-    ASSERT_EQ(msg2.zerocopy.owned, 0);
+    ASSERT_EQ(msg2.zerocopy.owned, AETHER_MSG_ZC_BORROWED);
     ASSERT_TRUE(msg2.zerocopy.data == NULL);
 }
 

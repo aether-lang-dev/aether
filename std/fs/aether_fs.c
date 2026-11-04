@@ -1683,8 +1683,10 @@ int fs_try_block_info(const char* dev) {
     char parent[128];
     snprintf(parent, sizeof(parent), "%s", name);
     snprintf(path, sizeof(path), "/sys/class/block/%s", name);
-    char real[512];
-    if (realpath(path, real)) {
+    /* realpath writes up to PATH_MAX bytes into a caller's buffer, more
+     * than any fixed one here held (#3558): it allocates the answer. */
+    char* real = realpath(path, NULL);
+    if (real) {
         char* blk = strstr(real, "/block/");
         if (blk) {
             blk += 7;
@@ -1700,6 +1702,7 @@ int fs_try_block_info(const char* dev) {
         else if (strstr(real, "/virtio")) snprintf(s_blk_transport, sizeof(s_blk_transport), "virtio");
         else if (strstr(real, "/mmc"))    snprintf(s_blk_transport, sizeof(s_blk_transport), "mmc");
         else if (strstr(real, "/ata"))    snprintf(s_blk_transport, sizeof(s_blk_transport), "sata");
+        free(real);
     }
     snprintf(path, sizeof(path), "/sys/class/block/%s/removable", parent);
     if (fs_read_sysfs_line(path, buf, sizeof(buf))) {

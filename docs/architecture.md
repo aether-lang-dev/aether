@@ -219,7 +219,7 @@ rejects timestamp macros outright.
        int count;                       // the actor's own state follows
    } CounterActor;
    ```
-   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `step_inline`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c
@@ -231,8 +231,9 @@ rejects timestamp macros outright.
        struct {
            void* data;
            int size;
-           int owned;
+           int owned;   // AETHER_MSG_ZC_BORROWED, _OWNED, or AETHER_MSG_INLINE (#3534)
        } zerocopy;
+       void* _reply_slot;
    } Message;
    ```
 
@@ -358,7 +359,8 @@ On Windows `aether_thread.h` implements pthreads with Win32 primitives and inclu
 ### Memory Management
 
 **Message Payloads:**
-- A typed message's payload is a heap copy made by the send
+- A typed message whose struct fits the bytes from `payload_int` up to `zerocopy.owned` (28 on 64-bit targets) travels in the message, marked `AETHER_MSG_INLINE`, with no heap copy (#3534)
+- Any other typed message's payload is a heap copy made by the send
 - `aether_free_message` frees it (`free()`) once the message is handled or dropped
 - No payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374)
 

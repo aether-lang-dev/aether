@@ -814,16 +814,19 @@ ccm_cbc_mac(enc: ptr, nonce: byte[], aad: byte[], data: byte[], taglen: int) -> 
         count = count + 1
     }
 
-    x = bytes.new(16)
+    // X1 = E(0 XOR B0). The zero block is this step's alone: the step
+    // returns a fresh X, so the zero block is freed here, not replaced.
+    zero = bytes.new(16)
     z = 0
-    while z < 16 { bytes.set(x, z, 0); z = z + 1 }
-    x = ccm_mac_block(enc, x, b0)
+    while z < 16 { bytes.set(zero, z, 0); z = z + 1 }
+    x = ccm_mac_block(enc, zero, b0)
+    bytes.wipe_free(zero)
     bytes.wipe_free(b0)
 
     // AAD: length-prefix then AAD bytes, zero-padded to a block boundary.
     if aadlen > 0 {
         hdr_extra = 0
-        prefix = bytes.new(0)
+        var prefix: ptr = null
         if aadlen < ((1 << 16) - (1 << 8)) {
             prefix = bytes.new(2)
             bytes.set(prefix, 0, bits.lsr64(aadlen, 8) & 0xFF)

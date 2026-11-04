@@ -710,7 +710,7 @@ After `as` the parser also accepts a primitive **value cast**: `n as int` and ot
 | `int` → `string` | `string.from_int(n)` (and `string.from_long(n)`, `string.from_float(f)`). |
 | C `const char*` → Aether `string` | Assignment to a `string`-typed variable, or a `return` from a function declared `-> string`. The place takes the value as it takes any string: C's characters are copied into a counted string the place owns, and a counted string behind the pointer is retained. An extern declared `-> string @heap` hands over a string the caller adopts without a copy. |
 | `int` ↔ `int64` / `byte` ↔ `int` | Implicit safe widenings (`byte → int`, `int → int64`). The narrowing direction (`int → byte`) requires a literal-range check and truncates non-literals at runtime. See [§ `byte`](#byte-unsigned-8-bit). Spelled out with `as`, `b as int` widens a `byte` (always 0 to 255, it is unsigned) and `n as byte` keeps the low 8 bits, as for `uint8`. |
-| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates, as in C. Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix (the same rule as a 64-bit value into an inferred `int`), because the truncation was never chosen. |
+| `float` → `int` | Into an **explicitly** typed slot (`int k = 4.5`, an `int` parameter or field, an element of `int[N] xs`) the value truncates toward zero, and saturates at the type's range, NaN giving 0, as `f as int` does ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)). Into a slot whose `int` type was **inferred** (`r = 0` then `r = 2.5`; `xs = [1, 2]` then `xs[0] = 7.5`) it is a compile error naming the fix (the same rule as a 64-bit value into an inferred `int`), because the truncation was never chosen. |
 | `uint32` → `int` | Explicit slots convert as in C. Into an **inferred** `int` (`k = 5` then `k = some_uint32`) it is the same narrowing error: values past 2³¹ do not fit. Annotate `uint32 k = ...` to keep it unsigned. |
 | Reinterpret a raw `ptr` as a typed struct view, function pointer, or array | `expr as *StructName`, `expr as fn(...) -> R`, or `expr as T[]` (the only `as` forms for values). |
 
@@ -812,6 +812,7 @@ next_rand() -> uint64 {
 - The **initializer must be a compile-time constant expression**, the same restriction as `const` (and for the same underlying reason, C requires a `static`'s initializer to be constant). Initialize to a constant and compute the live value from a function at startup if you need more.
 - An **optional** `var` takes a constant of its inner type, `none`, or no initializer at all, which is `none` (#2800): `var limit: int? = 3`, `var name: string? = none`, `var origin: Point? = Point { x: 0, y: 0 }`, `var cache: string?`. A function writes it with `name = value` or a tuple destructure slot, a bare value wrapped as for a local. A `string?` var owns the string it holds, as a `string` var does: a re-bind takes the new string and releases the one it held, and what a reader took out of it (`v = name ?? ""`, `v = name!`, a `some(v)` binding) holds a reference of its own, so it outlives the re-bind. A call that may re-bind the var is given a reference held for the call, so an argument read from it stays valid inside the call. The var's last value lives as long as the program.
 - Globals are **module-private** and **non-atomic**, matching the C statics they replace. They are not shared across modules and carry no built-in synchronization; guard concurrent access yourself (or keep such state on an [actor](actor-concurrency.md)).
+- A **`string`** `var` is the exception, since a string is freed when its last owner lets it go: each one has a small lock of its own (#3522). A store takes the new string and swaps it in under the lock, and releases the one it replaced after it; a read takes a reference of its own under the lock, which the statement that reads it gives back. So two actors storing into the var and reading it at once each see a whole string one of them stored, and no store frees a string a reader still uses. What the var holds after two racing stores is whichever came last.
 
 ---
 
@@ -2367,6 +2368,7 @@ downstream triage match on it, so it does not change with the prose after it.
 | `forced_unwrap_none` | `x!` on an optional holding `none` |
 | `empty_closure_call` | a call through the empty closure (a closure slot or a `fn?` holding `null`) |
 | `null_function_call` | a call through a typed function pointer (`fn(int) -> int`, a `cfn` type) holding `null` |
+| `division_by_zero` | an integer `/` or `%` (or `/=`, `%=`) by zero ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)) |
 
 A failure that forwards an existing error value (`expr!` on a fallible) prints
 that error's own message rather than a category, because the message came from
@@ -3936,6 +3938,48 @@ and a `Down` is never refused.
 | `/` | Division | `a / b` |
 | `%` | Modulo | `a % b` |
 
+#### Integer edge cases: division, shifts and float conversion
+
+Integer arithmetic wraps on overflow (see [Constant-Expression Overflow](#constant-expression-overflow-w1003)),
+and the cases C leaves undefined follow Java's rules, the same on every target
+(#3524):
+
+| Case | Result |
+|---|---|
+| `x / 0`, `x % 0` (any integer type) | a panic with the category `division_by_zero` and the operation's source position, which a `catch` receives |
+| `/ 0`, `% 0` in the initializer of a `const` or a module `var` (both operands literals, `const`s or operators over them: `const B = 10 / 0`, `const C = 10 / (N - N)`) | a compile error naming the expression: the initializer is computed when the program is compiled, and this one has no value. In code the same division is left to run time, as in Java, so `if D != 0 { println(100 / D) }` compiles and a division that runs panics |
+| the most negative value `/ -1` (`int`, `long`) | the same value: `-2147483648 / -1` is `-2147483648` |
+| the most negative value `% -1` | `0` |
+| `x << n`, `x >> n` | the count is masked to the width the shift runs in: `n & 31` for `int`, `uint32` and the narrower types (which shift as an `int`), `n & 63` for `long` and `uint64`. So `1 << 33` is `2`, and a negative count takes its low bits |
+| `x << n` into the sign bit | wraps: `1 << 31` is `-2147483648` |
+| a float converted to an integer type (`f as int`, a float stored into an integer variable, field, parameter or return, `x *= 2.5` on an integer) | truncates toward zero, and saturates at the type's range: `1.0e30 as int` is `2147483647`, `-1.0e30 as uint32` is `0`. NaN is `0` |
+
+`>>` on a signed value is an arithmetic shift (the sign is kept), and on an
+unsigned one a logical shift. The compound forms (`/=`, `%=`, `<<=`, `>>=`)
+follow the same rules.
+
+`/` and `%` on integer lanes (`i32x4`, `i64x2`, `i16x8`, `i32x8`) follow
+them lane by lane, with a lane value or a scalar on either side: a `0` in
+any lane of the divisor panics with `division_by_zero` and the position, and
+a lane's most negative value divided by `-1` is itself, its remainder `0`
+(`i16x8`: `-32768 / -1` is `-32768`). `v /= w` and `v %= w` too. The lane
+shifts (`lanes.i32shl`, `i32shr`, `i32shr_u`, `i16shl`, `i16shr`) mask their
+count to the lane width, `n & 31` and `n & 15`, and a left shift into the
+sign bit wraps.
+
+None of this costs anything where an operand is a constant that keeps C
+defined: a divisor other than `0` and `-1`, a shift count inside the width,
+or a float constant inside the target's range is C's own operator. A
+constant count outside the width is masked when the program is compiled
+(`x << 40` on an `int` is `x << 8`). Elsewhere the division is a call the C
+compiler inlines, which tests the divisor before dividing, and the shift
+count is masked, an `and` the shift instruction already performs on x86.
+On lanes a constant scalar divisor other than `0` and `-1` (`v / 4`) is C's
+own vector operator, which the C compiler turns into a multiply per lane;
+any other divisor tests each lane and divides lane by lane, as a vector
+division already ran on x86 and ARM NEON, which have no instruction that
+divides integer lanes.
+
 ### Comparison Operators
 
 | Operator | Description | Example |
@@ -3962,7 +4006,7 @@ and a `Down` is never refused.
 | `<<` | Left shift | `1 << 4` |
 | `>>` | Right shift | `n >> 2` |
 
-Bitwise operators work on `int` and `long` values and map directly to C operators (zero runtime cost).
+Bitwise operators work on `int` and `long` values and map directly to C operators (zero runtime cost). A shift count is masked to the width ([Integer edge cases](#integer-edge-cases-division-shifts-and-float-conversion)).
 
 ```aether,fragment
 flags = 255
@@ -4956,7 +5000,7 @@ age = 30
 println("Hello, ${name}! You are ${age} years old.")
 ```
 
-**What renders.** A value has a string rendering when it is a number (every width, signed or not, and `float`), a `bool`, a `string`, a `duration` or an enum member (its numeric value). One rule decides it for every place that renders a value: a `${...}` segment, each argument of `println` and `print`, and the arguments of `print`'s format form. Anything else is error E0200 before C, with the spelling that renders it: a struct (render a field, `${p.x}`), a tuple (destructure it first, `a, b = t`), a call returning several values, a sum (`match` on it), an optional (give it a value, `${v ?? 0}`), an array (an element), a function (call it), and a `ptr`, which may point at anything (a list, a buffer, a struct): one that holds an Aether string is read as one with `string.from_ptr(p)`, one that holds C text is copied with `string.from_cstr(p)`, and a container's string is read with its typed getter (`list.get_string`, `map.get_string`), as in [A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202). Every std function that makes a string returns a `string` (`string.from_int`, `string.pad_start`, `string.new_with_length` and the rest), so none of them needs a conversion.
+**What renders.** A value has a string rendering when it is a number (every width, signed or not, and `float`), a `bool`, a `string`, a `duration` or an enum member (its numeric value). One rule decides it for every place that renders a value: a `${...}` segment, each argument of `println` and `print`, and the arguments of `print`'s format form. Anything else is error E0200 before C, with the spelling that renders it: a struct (render a field, `${p.x}`), a tuple (destructure it first, `a, b = t`), a call returning several values, a sum (`match` on it), an optional (give it a value, `${v ?? 0}`), an array (an element), a function (call it), and a `ptr`, which may point at anything (a list, a buffer, a struct): one that holds an Aether string is read as one with `string.from_ptr(p)`, one that holds C text is copied with `string.from_cstr(p)`, and a container's string is read with its typed getter (`list.get_string`, `map.get_string`), as in [A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202). Every std function that makes a string returns a `string` (`string.from_int`, `string.pad_start`, `string.new_with_length` and the rest), so none of them needs a conversion. Each renderable kind is written by a conversion of its own (a `uint64` unsigned, a `longdouble` at its own precision, a `duration` as its text); the int conversion is used only for the kinds that are ints on purpose: `int`, `byte`, `uint8`, `uint16` and an enum, and for a value whose type the checker left unresolved (an untyped struct field, the result of a function that returns a call through an erased `fn`), which the compiler stores as an `int` and warns of where it is declared. A value the compiler has no type for at all is a compile error, never a guess (#3527).
 
 The text around the `${expr}` parts takes the same escapes as a plain string literal, with the same meaning wherever they sit: `"a\\0b ${n}"` holds a backslash followed by `0b`, `"a\0b ${n}"` holds a NUL byte that the result keeps, and `\${` writes a literal `${` rather than starting an interpolation. A `${s}` segment writes the string `s` by its length, so a value holding a NUL goes in whole; `print` and `println` write a string value the same way.
 

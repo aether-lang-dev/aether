@@ -857,29 +857,22 @@ OBJ_DIR = $(BUILD_DIR)/obj
 # aren't auto-linked — we add the import libs explicitly so std.net TLS
 # and std.cryptography work in Windows release binaries.
 WIN_LINK_LIBS = -static -lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp
-# The compiler's passes walk the tree recursively, and a chain of operators
-# (`a + b + ...`) is as deep as it is long. A Windows executable reserves a
-# 2 MB stack where Linux and macOS give the main thread 8 MB, so aetherc
-# overflowed on Windows at about 600 chained operators, inside the limit the
-# parser enforces everywhere (AETHER_MAX_EXPR_CHAIN, #2907). The compiler gets
-# the main-thread stack it has on the other platforms.
-AETHERC_STACK_LDFLAGS =
+# The compiler's stack is its own on every platform: aetherc and aether-lsp
+# run on a thread whose stack the compiler sizes (compiler/
+# aether_compile_stack.h, #3539), not on the main thread's, which on Windows
+# was 2 MB and overflowed at about 600 chained operators (#2907).
 ifdef WINDOWS_NATIVE
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
-    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring MINGW,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
-    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
-    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 else ifneq ($(findstring CYGWIN,$(DETECTED_OS)),)
     AETHER_REQUIRED_LDFLAGS += $(WIN_LINK_LIBS)
-    AETHERC_STACK_LDFLAGS = -Wl,--stack,8388608
 endif
 
-COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
-COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
+COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c compiler/aether_compile_stack.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
+COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c compiler/aether_compile_stack.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_spawn.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/aether_sandbox_kernel_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_exec.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/actors/aether_supervision.c runtime/aether_callbacks.c
 STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_tls_trust.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/quote/aether_quote.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
@@ -998,6 +991,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/compiler/test_lexer_comprehensive.c \
            tests/compiler/test_parser.c \
            tests/compiler/test_aea.c \
+           tests/compiler/test_compile_stack.c \
            tests/compiler/test_parser_comprehensive.c \
            tests/compiler/test_type_inference_comprehensive.c \
            tests/compiler/test_pattern_matching_comprehensive.c \
@@ -1241,7 +1235,7 @@ AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds): the same sources and
@@ -1257,7 +1251,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(AETHERC_STACK_LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1446,6 +1440,11 @@ fuzz-cbor: compiler ae stdlib
 # printf'd into a temp dir: doing the latter pushed this recipe past the 8 KB
 # command line mingw32-make hands to sh -c, and the truncated tail broke
 # `make test-ae` outright on Windows. See tests/scripts/run_ae_test.sh.
+#
+# AE_SWEEP_EXTRA_PRUNE's entries are fixed substrings of a path, where a
+# trailing slash pins a directory (as in tests/ae_sweep_prune.txt). The shell
+# test directories are matched with a slash appended: dirname prints none, so
+# a pinned directory matched no shell test (#3539).
 ifdef WINDOWS_NATIVE
 test-ae: compiler ae stdlib
 	@echo ===================================
@@ -1479,8 +1478,9 @@ test-ae: compiler ae stdlib
 	else \
 	  : > "$$tmpdir/shprune.txt"; \
 	fi; \
-	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u \
+	find tests/integration -name 'test_*.sh' 2>/dev/null | xargs -n1 dirname | sort -u | sed 's|$$|/|' \
 	    | { if [ -s "$$tmpdir/shprune.txt" ]; then grep -v -F -f "$$tmpdir/shprune.txt"; else cat; fi; } \
+	    | sed 's|/$$||' \
 	    | { if [ -n "$(AE_SWEEP_OPTIONAL)" ]; then cat; else \
 	          while read -r d; do [ -f "$$d/NEEDS_EXTERNAL_TOOLCHAIN" ] || echo "$$d"; done; fi; } \
 	    > "$$tmpdir/shdirs.txt"; \
@@ -1716,6 +1716,29 @@ test-all: test test-ae check-standalone
 
 # Benchmark presets: full (10M), medium (1M), low (100K), stress (100M)
 BENCHMARK_PRESET ?= low
+
+# ---- Core benchmarks (#3518): sends, asks, strings, maps, JSON, ae ----
+#
+# bench-core                 runs benchmarks/core with this tree, best of
+#                            BENCH_RUNS (default 5)
+# bench-core-compare BASE=d  the same with the tree at d (built at the merge
+#                            base) beside it, runs interleaved, change per row
+#
+# BENCH_ONLY=send,strings picks programs; the table also goes to
+# build/bench-core.tsv. See benchmarks/core/run.ae.
+.PHONY: bench-core bench-core-compare
+bench-core: compiler ae stdlib
+	@AETHER_HOME= ./$(BUILD_DIR)/ae run benchmarks/core/run.ae
+
+bench-core-compare: compiler ae stdlib
+ifndef BASE
+	@echo "make bench-core-compare: set BASE to a tree built at the merge base"
+	@echo "  e.g. git worktree add ../base \$$(git merge-base HEAD origin/main)"
+	@echo "       make -C ../base compiler ae stdlib"
+	@echo "       make bench-core-compare BASE=../base"
+	@exit 1
+endif
+	@AETHER_HOME= BENCH_BASE="$(BASE)" ./$(BUILD_DIR)/ae run benchmarks/core/run.ae
 
 # ---- JSON parser benchmark (standalone; no actor runtime needed) ----
 #
@@ -2770,63 +2793,6 @@ endif
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(BUILD_DIR)/$(OUTPUT).c $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC) -o $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
 	@echo "✓ Built: $(BUILD_DIR)/$(OUTPUT)$(EXE_EXT)"
 
-# Benchmark computed goto dispatch
-bench-dispatch:
-	@echo "Building computed goto benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_computed_goto.c -o $(BUILD_DIR)/bench_computed_goto$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running benchmark..."
-	@./$(BUILD_DIR)/bench_computed_goto$(EXE_EXT)
-
-# Benchmark manual prefetch hints
-bench-prefetch:
-	@echo "Building prefetch benchmark..."
-	@$(CC) -O3 experiments/concurrency/bench_prefetch.c -o $(BUILD_DIR)/bench_prefetch$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running benchmark..."
-	@./$(BUILD_DIR)/bench_prefetch$(EXE_EXT)
-
-# Profile-Guided Optimization (PGO) - train the compiler's inliner and
-# branch-placement heuristics using a recorded workload. Run-time
-# improvement is workload-dependent; measure before and after.
-pgo-generate:
-	@echo "==================================="
-	@echo "PGO Step 1: Building with instrumentation..."
-	@echo "==================================="
-	@$(CC) -O3 -fprofile-generate experiments/concurrency/pgo_workload.c -o $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Running workload to collect profile data..."
-	@./$(BUILD_DIR)/pgo_workload$(EXE_EXT)
-	@echo "Profile data collected in *.gcda files"
-
-pgo-build:
-	@echo "==================================="
-	@echo "PGO Step 2: Building with profile data..."
-	@echo "==================================="
-	@$(CC) -O3 -fprofile-use -D__PGO__ experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "PGO-optimized benchmark built"
-
-pgo-baseline:
-	@echo "Building baseline (no PGO)..."
-	@$(CC) -O3 experiments/concurrency/bench_pgo.c -o $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
-	@echo "Baseline benchmark built"
-
-pgo-benchmark: pgo-baseline pgo-generate pgo-build
-	@echo "==================================="
-	@echo "PGO BENCHMARK COMPARISON"
-	@echo "==================================="
-	@echo ""
-	@echo "Baseline (no PGO):"
-	@./$(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT)
-	@echo ""
-	@echo "-----------------------------------"
-	@echo ""
-	@echo "PGO-Optimized:"
-	@./$(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT)
-
-pgo-clean:
-	@echo "Cleaning PGO profile data..."
-	@$(RM) *.gcda *.gcno 2>/dev/null || true
-	@$(RM) $(BUILD_DIR)/pgo_workload$(EXE_EXT) $(BUILD_DIR)/bench_pgo_baseline$(EXE_EXT) $(BUILD_DIR)/bench_pgo_optimized$(EXE_EXT) 2>/dev/null || true
-	@echo "✓ PGO data cleaned"
-
 # Interactive REPL — integrated into ae CLI, no external dependencies
 repl: ae
 	@./$(BUILD_DIR)/ae$(EXE_EXT) repl
@@ -3289,10 +3255,25 @@ test-ae-opt-diff: compiler ae stdlib
 # compile and link going through that sanitizing compiler. Fails on any test
 # failure and on any UBSan report (build/ubsan/reports). Linux or macOS: it
 # needs a UBSan runtime, which MinGW lacks. Not part of `ci`: ubsan.yml runs
-# it. See tests/scripts/ubsan_sweep.sh and docs/differential-testing.md.
+# it. See tests/scripts/sanitizer_sweep.sh and docs/differential-testing.md.
+# UBSAN_CHECKS are the -fsanitize groups: gcc's `undefined` leaves out
+# float-cast-overflow, a float converted to an integer type it does not fit
+# (#3524), so it is named too.
+UBSAN_CHECKS ?= undefined,float-cast-overflow
 .PHONY: test-ubsan
 test-ubsan:
-	@MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/ubsan_sweep.sh
+	@SAN=ubsan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" UBSAN_CHECKS="$(UBSAN_CHECKS)" \
+	    sh tests/scripts/sanitizer_sweep.sh
+
+# The same, under AddressSanitizer and LeakSanitizer (#3539): a heap overflow,
+# a use after free or a double free in libaether, std or the generated code of
+# any program the sweep builds stops that program, and a block it never freed
+# is reported when it exits (build/asan/reports). `test-asan` above runs only
+# the C unit runner; this one runs the .ae corpus too. AE_SWEEP_SHARD=k/n
+# splits the corpus (asan.yml runs it in shards). Linux or macOS.
+.PHONY: test-asan-ae
+test-asan-ae:
+	@SAN=asan MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

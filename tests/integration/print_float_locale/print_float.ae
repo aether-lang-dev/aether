@@ -1,0 +1,41 @@
+// Prints floats every way print and println can, after putting the process
+// in a comma-decimal locale as an embedding host does. The driver compares
+// the output: each must be written with '.', as string.from_float is (#3525).
+// Prints "SKIP" alone when no such locale is installed.
+
+// Sets the process-global locale (test-only; runtime/aether_locale_num.h).
+// Returns 1 if applied, 0 if that locale is not installed on this machine.
+extern aether_test_setlocale(name: string) -> int
+
+select_comma_locale() -> int {
+    if aether_test_setlocale("de_DE.UTF-8") == 1 { return 1 }
+    if aether_test_setlocale("de_DE.utf8") == 1 { return 1 }
+    if aether_test_setlocale("fr_FR.UTF-8") == 1 { return 1 }
+    if aether_test_setlocale("de-DE") == 1 { return 1 }
+    if aether_test_setlocale("German_Germany.utf8") == 1 { return 1 }
+    if aether_test_setlocale("German_Germany.1252") == 1 { return 1 }
+    return 0
+}
+
+to_ld(f: float) -> longdouble { return f }
+
+main() {
+    if select_comma_locale() == 0 {
+        println("SKIP")
+        return
+    }
+    x = 0.5
+    println(x)
+    print(0.25)
+    println("")
+    println("fmt %f", 2.5)
+    print("pfmt %f\n", 3.5)
+    println("${x}")
+    print("${-1.25}\n")
+    f32 h = 1.5
+    println(h)
+    ld = to_ld(2.25)
+    print(ld)
+    println("")
+    println("${ld}")
+}

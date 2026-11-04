@@ -1,10 +1,14 @@
 #include "test_harness.h"
 #include "../../std/string/aether_string.h"
 #include "../../runtime/aether_process_mem.h"
+#include "../../runtime/aether_resource_caps.h"   /* aether_caps_malloc */
+#include "../../runtime/actors/aether_panic.h"
 #include <string.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <stdint.h>
+#include <stdio.h>
 
 TEST_CATEGORY(string_concat_basic, TEST_CATEGORY_STDLIB) {
     AetherString* s1 = string_from_cstr("Hello");
@@ -52,6 +56,61 @@ TEST_CATEGORY(string_length, TEST_CATEGORY_STDLIB) {
     ASSERT_EQ(5, string_length(s));
     string_free(s);
 }
+
+/* #3523: string_length returned (int) of a size_t, so a string over 2 GiB
+ * read as a negative length and a loop over it quietly did nothing. It
+ * panics instead. A header claiming 2 GiB and ten bytes is enough:
+ * string_length reads the header, not the bytes. */
+#if SIZE_MAX > INT_MAX && !defined(__wasi__)
+static volatile int g_huge_length = 0;
+TEST_CATEGORY(string_length_past_int_panics, TEST_CATEGORY_STDLIB) {
+    static char bytes[1] = "";
+    AetherString huge;
+    memset(&huge, 0, sizeof huge);
+    huge.magic = AETHER_STRING_MAGIC;
+    huge.ref_count = AETHER_STRING_PINNED_REFS;
+    huge.length = (size_t)INT_MAX + 10;
+    huge.capacity = huge.length + 1;
+    huge.data = bytes;
+
+    char caught[96] = "";
+    g_huge_length = 0;
+    AetherJmpFrame* f = aether_try_push();
+    if (AETHER_SIGSETJMP(f->buf, 1) == 0) {
+        g_huge_length = string_length(&huge);
+    }
+    snprintf(caught, sizeof caught, "%s", f->reason ? f->reason : "");
+    aether_try_pop();
+
+    ASSERT_EQ(0, g_huge_length);
+    ASSERT_STREQ("string: a length or position past 2 GiB does not fit an int", caught);
+}
+
+/* #3523: string_char_at compared the index with `(int)len` and
+ * string_substring clamped `end` to `(int)slen`, both negative for a string
+ * over 2 GiB, so every byte read as out of range and every substring came
+ * back empty. The positions are the caller's ints and always fit; the
+ * length is compared as a size_t. Only the first bytes are read, so the
+ * header can claim the length over a short buffer. */
+TEST_CATEGORY(string_positions_in_a_string_past_int, TEST_CATEGORY_STDLIB) {
+    static char bytes[4] = "xyz";
+    AetherString huge;
+    memset(&huge, 0, sizeof huge);
+    huge.magic = AETHER_STRING_MAGIC;
+    huge.ref_count = AETHER_STRING_PINNED_REFS;
+    huge.length = (size_t)INT_MAX + 10;
+    huge.capacity = huge.length + 1;
+    huge.data = bytes;
+
+    ASSERT_EQ('x', string_char_at(&huge, 0));
+    ASSERT_EQ('z', string_char_at(&huge, 2));
+    AetherString* sub = string_substring(&huge, 0, 2);
+    ASSERT_NOT_NULL(sub);
+    ASSERT_EQ(2, (int)aether_string_length(sub));
+    ASSERT_STREQ("xy", aether_string_data(sub));
+    string_release(sub);
+}
+#endif
 
 TEST_CATEGORY(string_char_at, TEST_CATEGORY_STDLIB) {
     AetherString* s = string_from_cstr("Hello");
@@ -296,10 +355,21 @@ TEST_CATEGORY(string_layout_is_unambiguous, TEST_CATEGORY_STDLIB) {
         ASSERT_TRUE(s->data == (char*)(s + 1));
         ASSERT_EQ(22, (int)aether_string_length(s));
         AetherString* a = string_new_with_length("eleven char", 11);
-        AetherString* c = string_concat(a, a);   /* a 23-byte adopted payload */
+        /* A 23-byte payload adopted on its own, as a file read's is.
+         * string_concat used to make one; it writes one block now (#3530). */
+        char* buf = (char*)aether_caps_malloc(23);
+        ASSERT_NOT_NULL(buf);
+        memcpy(buf, "eleven chareleven char", 23);
+        AetherString* c = string_adopt_caps_buffer(buf, 22, 23);
         ASSERT_NOT_NULL(c);
         ASSERT_TRUE(c->data != (char*)(c + 1));
         ASSERT_STREQ("eleven chareleven char", aether_string_data(c));
+        AetherString* j = string_concat(a, a);
+        ASSERT_NOT_NULL(j);
+        ASSERT_TRUE(j->data == (char*)(j + 1));
+        ASSERT_EQ(22, (int)aether_string_length(j));
+        ASSERT_STREQ("eleven chareleven char", aether_string_data(j));
+        string_release(j);
         string_release(c);
         string_release(a);
         string_release(s);

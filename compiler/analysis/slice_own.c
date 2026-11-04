@@ -1027,6 +1027,60 @@ static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
     rewrite_value_at(c, f, slot, use, 0);
 }
 
+static Summary* summary_of(Ctx* c, ASTNode* def);
+static int may_view(Type* t);
+static int unknown_callee(ASTNode* call);
+
+/* #3549: is `a`, argument `i` of `call`, a buffer made for the call and
+ * only lent to it? `a` is a call's slice, which may own the buffer it
+ * holds (`make`, `append`, a function's result, as a local bound to it
+ * would), given to a parameter that does not keep it (`@keep`) and that
+ * the callee's Summary says it neither stores nor hands a view of back.
+ * The call then drops it once it returns (codegen's argument temporaries,
+ * through the `slice_temp` marker), as the owning local it would otherwise
+ * be bound to is dropped: a view or a buffer the program did not make is
+ * left alone by the drop. A call through a closure value is not seen
+ * through, and neither is an extern's or a builtin's result that may view
+ * memory (a slice, a pointer), nor a call whose positions do not map onto
+ * the parameters one for one (a builder's `_ctx`, named arguments). */
+static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
+    ASTNode* a = call->children[i];
+    if (!a || a->type != AST_FUNCTION_CALL || !type_is_slice(a->node_type) || !a->value ||
+        strncmp(a->value, "__slice_", 8) == 0)
+        return 0;
+    if (unknown_callee(call) || keeps_arg(c, call, i)) return 0;
+    for (int k = 0; k < call->child_count; k++)
+        if (call->children[k] && call->children[k]->type == AST_NAMED_ARG) return 0;
+    ASTNode* d = call_def(c, call);
+    if (!d) {
+        Type* t = call->node_type;
+        return t && t->kind != TYPE_PTR && !may_view(t);
+    }
+    for (int j = 0; j < d->child_count; j++) {
+        ASTNode* p = d->children[j];
+        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION)) {
+            if (p->value && strcmp(p->value, "_ctx") == 0) return 0;
+            break;
+        }
+    }
+    Summary* sm = summary_of(c, d);
+    return sm && sm->n == call->child_count && !sm->res[i] && !sm->res_deep[i] && !sm->store[i];
+}
+
+/* Mark each buffer of `n` made for a call and only lent to it
+ * (slice_temp_arg). A nested frame is marked by its own walk. */
+static void mark_slice_temps(Ctx* c, ASTNode* n) {
+    if (!n || is_frame(n) || is_opaque(n)) return;
+    if (n->type == AST_FUNCTION_CALL && !is_intrinsic(n) && !is_append(c, n) && !is_push(n) &&
+        !is_free(n)) {
+        for (int i = 0; i < n->child_count; i++)
+            if (slice_temp_arg(c, n, i))
+                n->children[i]->annotation =
+                    annotation_add_marker(n->children[i]->annotation, "slice_temp");
+    }
+    for (int i = 0; i < n->child_count; i++) mark_slice_temps(c, n->children[i]);
+}
+
 static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
     if (is_intrinsic(n)) return;
     if (is_append(c, n) || is_push(n) || is_free(n)) {
@@ -1732,6 +1786,7 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
     classify(&f);
     escape_frame(c, &f);
     if (!c->final) goto done;
+    mark_slice_temps(c, body);
 
     int any = 0;
     for (int i = 0; i < f.nlocals; i++)

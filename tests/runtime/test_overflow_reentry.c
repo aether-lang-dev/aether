@@ -46,8 +46,8 @@ static void reentry_step(ReentryActor* self) {
         atomic_store_explicit(&self->active, 0, memory_order_relaxed);
         return;
     }
-    ReentryMsg m = *(ReentryMsg*)msg.payload_ptr;
-    aether_free_message(msg.payload_ptr);
+    ReentryMsg m = *(ReentryMsg*)aether_message_payload(&msg);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
     int n = m.type == REENTRY_GO ? self->burst : 1;
     for (int i = 0; self->to && i < n; i++) {

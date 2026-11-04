@@ -614,6 +614,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->declared_var_count = 0;
     gen->module_global_vars = NULL;
     gen->module_global_var_is_program = NULL;
+    gen->module_global_var_is_string = NULL;
     gen->module_global_var_count = 0;
     gen->current_origin_module = NULL;
     gen->generating_lvalue = 0;  // Not generating lvalue by default
@@ -1006,6 +1007,7 @@ void code_generator_release(CodeGenerator* gen) {
             }
             free(gen->module_global_vars);
             free(gen->module_global_var_is_program);
+            free(gen->module_global_var_is_string);
         }
         clear_heap_string_vars(gen);
         clear_captured_string_params(gen);
@@ -1052,9 +1054,10 @@ int is_var_declared(CodeGenerator* gen, const char* var_name) {
     return strmap_get(&gen->declared_index, var_name) != NULL;
 }
 
-// #701: is `name` a module-level `var` global (a file-scope static)?
-int is_module_global_var(CodeGenerator* gen, const char* name) {
-    if (!name) return 0;
+// #701: is `name` a module-level `var` global (a file-scope static)? Its
+// index in the registry, or -1.
+static int module_global_var_index(CodeGenerator* gen, const char* name) {
+    if (!name) return -1;
     for (int i = 0; i < gen->module_global_var_count; i++) {
         if (strcmp(gen->module_global_vars[i], name) == 0) {
             /* The program's own globals are not a module's: in a function
@@ -1065,11 +1068,23 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
              * asks/aether-program-global-leaks-into-module-scope.md). */
             if (gen->module_global_var_is_program &&
                 gen->module_global_var_is_program[i] && gen->current_origin_module)
-                return 0;
-            return 1;
+                return -1;
+            return i;
         }
     }
-    return 0;
+    return -1;
+}
+
+int is_module_global_var(CodeGenerator* gen, const char* name) {
+    return module_global_var_index(gen, name) >= 0;
+}
+
+/* #3522: is `name` a module-level `var` declared `string`, the kind with a
+ * lock of its own? By its declaration, not by how a read of it is typed: a
+ * `ptr` var holding a string is the pointer it is (R4). */
+int is_module_string_var(CodeGenerator* gen, const char* name) {
+    int i = module_global_var_index(gen, name);
+    return i >= 0 && gen->module_global_var_is_string && gen->module_global_var_is_string[i];
 }
 
 // Is `name` a state field of the actor being generated? A bare `name` in
@@ -1084,7 +1099,8 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 }
 
 // #701: record a module-level `var` global name (deduped).
-void register_module_global_var(CodeGenerator* gen, const char* name, int is_program) {
+void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
+                                int is_string) {
     if (!name) return;
     for (int i = 0; i < gen->module_global_var_count; i++)
         if (strcmp(gen->module_global_vars[i], name) == 0) return;
@@ -1096,7 +1112,12 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
                                    (size_t)gen->module_global_var_count + 1);
     if (!flags) return;
     gen->module_global_var_is_program = flags;
+    unsigned char* strs = realloc(gen->module_global_var_is_string,
+                                  (size_t)gen->module_global_var_count + 1);
+    if (!strs) return;
+    gen->module_global_var_is_string = strs;
     flags[gen->module_global_var_count] = is_program ? 1 : 0;
+    strs[gen->module_global_var_count] = is_string ? 1 : 0;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
 }
 
@@ -7745,6 +7766,11 @@ static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) 
             continue;
         }
         const char* ctype = get_c_type(cd->node_type);
+        /* #3522: a string var has a lock of its own, held by every load
+         * that takes a reference and by every store. */
+        if (cd->node_type && cd->node_type->kind == TYPE_STRING)
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
+                    module_string_var_lock(cd->value));
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
         if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
             /* #2800: an optional's constant is its own struct: `none`
@@ -7819,6 +7845,49 @@ static void emit_windows_macro_undefs(CodeGenerator* gen) {
     print_line(gen, "#undef min");
     print_line(gen, "#undef max");
     print_line(gen, "#endif");
+}
+
+/* #3524: `/` and `%` on integer lanes, with the scalar rules lane by lane
+ * (emit_int_edge_helpers): a zero divisor in any lane panics with `where`,
+ * which names the category `division_by_zero` and the operation's source
+ * position; a lane's most negative value divided by -1 is itself, and its
+ * remainder 0. C leaves both undefined for a vector as for a scalar (x86
+ * traps). Plain code over the lanes, which every compiler that has the
+ * vector extensions takes, in the four-lane and in both eight-lane forms;
+ * x86 and NEON have no instruction that divides integer lanes, so the
+ * compiler split a vector division into one division per lane anyway.
+ * A constant scalar divisor other than 0 and -1 never comes here and keeps
+ * C's operator, which the compiler turns into a multiply per lane
+ * (lane_int_div_applies, codegen_expr.c). The eight-lane pair is in
+ * emit_lanes8_block. */
+static void emit_lane_int_div_helpers(CodeGenerator* gen) {
+    static const struct { const char* p; const char* v; const char* e; const char* u; int n; } k[] = {
+        { "i32x4", "AeI32x4", "int32_t", "uint32_t", 4 },
+        { "i64x2", "AeI64x2", "int64_t", "uint64_t", 2 },
+        { "i16x8", "AeI16x8", "int16_t", "uint16_t", 8 },
+    };
+    for (size_t i = 0; i < sizeof(k) / sizeof(k[0]); i++) {
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_%s_div_checked(%s a, %s b, const char* where) {\n"
+                "    %s r = a;\n"
+                "    for (int i = 0; i < %d; i++) {\n"
+                "        if (b[i] == 0) aether_panic(where);\n"
+                "        r[i] = b[i] == -1 ? (%s)((%s)0 - (%s)a[i]) : (%s)(a[i] / b[i]);\n"
+                "    }\n"
+                "    return r;\n"
+                "}\n",
+                k[i].v, k[i].p, k[i].v, k[i].v, k[i].v, k[i].n, k[i].e, k[i].u, k[i].u, k[i].e);
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_%s_mod_checked(%s a, %s b, const char* where) {\n"
+                "    %s r = a;\n"
+                "    for (int i = 0; i < %d; i++) {\n"
+                "        if (b[i] == 0) aether_panic(where);\n"
+                "        r[i] = b[i] == -1 ? (%s)0 : (%s)(a[i] %% b[i]);\n"
+                "    }\n"
+                "    return r;\n"
+                "}\n",
+                k[i].v, k[i].p, k[i].v, k[i].v, k[i].v, k[i].n, k[i].e, k[i].e);
+    }
 }
 
 /* #2428: the eight-lane types and every helper they are built from, one
@@ -7957,6 +8026,33 @@ static void emit_lanes8_block(CodeGenerator* gen) {
     print_line(gen, "    return a %% b;");
     print_line(gen, "#else");
     print_line(gen, "    return (AeI32x8){a.lo %% b.lo, a.hi %% b.hi};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    /* #3524: `/` and `%` with the scalar rules lane by lane, as the four-lane
+       helpers have them (emit_lane_int_div_helpers); the two above are what a
+       constant divisor other than 0 and -1 keeps. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_div_checked(AeI32x8 a, AeI32x8 b, const char* where) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeI32x8 r = a;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) {");
+    print_line(gen, "        if (b[i] == 0) aether_panic(where);");
+    print_line(gen, "        r[i] = b[i] == -1 ? (int32_t)((uint32_t)0 - (uint32_t)a[i]) : (int32_t)(a[i] / b[i]);");
+    print_line(gen, "    }");
+    print_line(gen, "    return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_i32x4_div_checked(a.lo, b.lo, where), _ae_i32x4_div_checked(a.hi, b.hi, where)};");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_mod_checked(AeI32x8 a, AeI32x8 b, const char* where) {");
+    print_line(gen, "#if AETHER_LANES8_NATIVE");
+    print_line(gen, "    AeI32x8 r = a;");
+    print_line(gen, "    for (int i = 0; i < 8; i++) {");
+    print_line(gen, "        if (b[i] == 0) aether_panic(where);");
+    print_line(gen, "        r[i] = b[i] == -1 ? (int32_t)0 : (int32_t)(a[i] %% b[i]);");
+    print_line(gen, "    }");
+    print_line(gen, "    return r;");
+    print_line(gen, "#else");
+    print_line(gen, "    return (AeI32x8){_ae_i32x4_mod_checked(a.lo, b.lo, where), _ae_i32x4_mod_checked(a.hi, b.hi, where)};");
     print_line(gen, "#endif");
     print_line(gen, "}");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x8 _ae_i32x8_and(AeI32x8 a, AeI32x8 b) {");
@@ -8223,6 +8319,7 @@ static const char* const LANES8_NAMES[] = {
     "_ae_f32x8_load", "_ae_f32x8_store", "_ae_f32x8_lane", "_ae_i32x8_lane", "_ae_f32x8_sum",
     "_ae_f32x8_add", "_ae_f32x8_sub", "_ae_f32x8_mul", "_ae_f32x8_div",
     "_ae_i32x8_add", "_ae_i32x8_sub", "_ae_i32x8_mul", "_ae_i32x8_div", "_ae_i32x8_mod",
+    "_ae_i32x8_div_checked", "_ae_i32x8_mod_checked",
     "_ae_i32x8_and", "_ae_i32x8_or", "_ae_f32x8_neg", "_ae_i32x8_neg", "_ae_i32x8_not",
     "_ae_f32x8_lt", "_ae_i32x8_lt", "_ae_f32x8_le", "_ae_i32x8_le", "_ae_f32x8_gt", "_ae_i32x8_gt",
     "_ae_f32x8_ge", "_ae_i32x8_ge", "_ae_f32x8_eq", "_ae_i32x8_eq", "_ae_f32x8_ne", "_ae_i32x8_ne",
@@ -8698,6 +8795,64 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
     }
 }
 
+/* #3524: the helpers integer division and remainder, and a float converted
+ * to an integer type, go through (emit_int_edge_op and emit_float_to_int in
+ * codegen_expr.c), with Java's rules:
+ *  - a zero divisor panics with `where`, which names the category
+ *    `division_by_zero` and the operation's source position;
+ *  - the most negative value divided by -1 is itself (the negation wraps,
+ *    computed in unsigned), and its remainder 0;
+ *  - a float saturates at the type's range, and NaN is 0.
+ * Plain C99 with no builtin, so every compiler and target takes them: GCC,
+ * Clang, cl.exe, emcc and the ESP32 toolchain. A constant divisor other than
+ * 0 and -1, or a float constant, never reaches them. */
+static void emit_int_edge_helpers(CodeGenerator* gen) {
+    static const struct { const char* sfx; const char* t; const char* ut; int is_signed; } d[] = {
+        { "i32", "int", "unsigned int", 1 },
+        { "u32", "uint32_t", "uint32_t", 0 },
+        { "i64", "int64_t", "uint64_t", 1 },
+        { "u64", "uint64_t", "uint64_t", 0 },
+    };
+    for (size_t i = 0; i < sizeof(d) / sizeof(d[0]); i++) {
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_div_%s(%s a, %s b, const char* where) {\n"
+                "    if (b == 0) aether_panic(where);\n",
+                d[i].t, d[i].sfx, d[i].t, d[i].t);
+        if (d[i].is_signed)
+            fprintf(gen->output, "    return b == -1 ? (%s)((%s)0 - (%s)a) : a / b;\n}\n",
+                    d[i].t, d[i].ut, d[i].ut);
+        else
+            fprintf(gen->output, "    return a / b;\n}\n");
+        fprintf(gen->output,
+                "static inline AETHER_MAYBE_UNUSED %s _ae_mod_%s(%s a, %s b, const char* where) {\n"
+                "    if (b == 0) aether_panic(where);\n"
+                "    return %s;\n}\n",
+                d[i].t, d[i].sfx, d[i].t, d[i].t, d[i].is_signed ? "b == -1 ? 0 : a % b" : "a % b");
+    }
+    /* The bounds are exact doubles: `v >= hi` reaches the maximum, where a
+     * 64-bit one (2^63, 2^64) is one past it. */
+    print_line(gen, "#define _AE_F2I(name, src, dst, lo, lo_v, hi, hi_v) \\");
+    print_line(gen, "    static inline AETHER_MAYBE_UNUSED dst name(src v) { \\");
+    print_line(gen, "        return v != v ? (dst)0 : v <= (lo) ? (dst)(lo_v) : v >= (hi) ? (dst)(hi_v) : (dst)v; }");
+    static const struct { const char* sfx; const char* t; const char* lo; const char* lo_v;
+                          const char* hi; const char* hi_v; } f[] = {
+        { "i8",  "int8_t",   "-128.0", "-128", "127.0", "127" },
+        { "i16", "int16_t",  "-32768.0", "-32768", "32767.0", "32767" },
+        { "i32", "int",      "-2147483648.0", "(-2147483647 - 1)", "2147483647.0", "2147483647" },
+        { "i64", "int64_t",  "-9223372036854775808.0", "INT64_MIN", "9223372036854775808.0", "INT64_MAX" },
+        { "u8",  "uint8_t",  "0.0", "0", "255.0", "255" },
+        { "u16", "uint16_t", "0.0", "0", "65535.0", "65535" },
+        { "u32", "uint32_t", "0.0", "0", "4294967295.0", "4294967295u" },
+        { "u64", "uint64_t", "0.0", "0", "18446744073709551616.0", "UINT64_MAX" },
+    };
+    for (size_t i = 0; i < sizeof(f) / sizeof(f[0]); i++) {
+        fprintf(gen->output, "_AE_F2I(_ae_f2%s, double, %s, %s, %s, %s, %s)\n",
+                f[i].sfx, f[i].t, f[i].lo, f[i].lo_v, f[i].hi, f[i].hi_v);
+        fprintf(gen->output, "_AE_F2I(_ae_ld2%s, long double, %s, %s, %s, %s, %s)\n",
+                f[i].sfx, f[i].t, f[i].lo, f[i].lo_v, f[i].hi, f[i].hi_v);
+    }
+}
+
 void generate_program(CodeGenerator* gen, ASTNode* program) {
     if (!program || program->type != AST_PROGRAM) return;
     gen->program = program;
@@ -9016,6 +9171,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "typedef int64_t AeI64x2 __attribute__((vector_size(16)));");
     print_line(gen, "typedef int16_t AeI16x8 __attribute__((vector_size(16)));");
     print_line(gen, "typedef uint32_t AeU32x4 __attribute__((vector_size(16)));");
+    print_line(gen, "typedef uint16_t AeU16x8 __attribute__((vector_size(16)));");   /* #3524: i16x8's left shift */
     /* #2428: eight lanes, 32 bytes. With AVX2 an f32x8 is one 256-bit
        register and each operation one instruction. Without it the type is
        a struct of two four-lane halves. A plain 32-byte vector would compile
@@ -9202,10 +9358,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_mul(AeI32x4 a, AeI32x4 b) { return a * b; }");
     /* Shifts by a compile-time-or-runtime constant count; the count is the
        same for every lane (a vector-scalar shift), which is what the hardware
-       shift-immediate/GPR-count forms provide. */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { return a << (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)n; AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+       shift-immediate/GPR-count forms provide. #3524: the count is masked to
+       the lane's width (& 31 here, & 15 for 16-bit lanes), as a scalar
+       shift's is, where C leaves a count of the width or more undefined
+       (x86 gives 0, a scalar shift on ARM64 masks), and a left shift runs
+       in unsigned, so a bit shifted into the sign is defined. Inlined, a
+       constant count inside the width folds the mask away: the plain
+       shift-immediate instruction. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shl(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u << (uint32_t)(n & 31); AeI32x4 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr(AeI32x4 a, int64_t n) { return a >> (int32_t)(n & 31); }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_shr_u(AeI32x4 a, int64_t n) { AeU32x4 u; memcpy(&u, &a, 16); u = u >> (uint32_t)(n & 31); AeI32x4 r; memcpy(&r, &u, 16); return r; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_min(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a < b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI32x4 _ae_i32x4_max(AeI32x4 a, AeI32x4 b) { AeI32x4 m = a > b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED int64_t _ae_i32x4_sum(AeI32x4 v) { return (int64_t)v[0] + v[1] + v[2] + v[3]; }");
@@ -9218,10 +9380,11 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_add(AeI16x8 a, AeI16x8 b) { return a + b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_sub(AeI16x8 a, AeI16x8 b) { return a - b; }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_mul(AeI16x8 a, AeI16x8 b) { return a * b; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { return a << (int16_t)n; }");
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)n; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shl(AeI16x8 a, int64_t n) { AeU16x8 u; memcpy(&u, &a, 16); u = u << (uint16_t)(n & 15); AeI16x8 r; memcpy(&r, &u, 16); return r; }");
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_shr(AeI16x8 a, int64_t n) { return a >> (int16_t)(n & 15); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_min(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a < b; return (m & a) | (~m & b); }");
     print_line(gen, "static inline AETHER_MAYBE_UNUSED AeI16x8 _ae_i16x8_max(AeI16x8 a, AeI16x8 b) { AeI16x8 m = a > b; return (m & a) | (~m & b); }");
+    emit_lane_int_div_helpers(gen);
     /* Saturating packs. i32x4 -> i16x8 packs two i32x4 vectors (a in the low
        four lanes, b in the high four) with signed saturation; i16x8 -> u8x16
        packs two i16x8 with unsigned saturation to bytes. These are the JPEG
@@ -9306,6 +9469,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  define _AE_CLZ64(x) _ae_clz64((unsigned long long)(x))");
     print_line(gen, "#  define _AE_POPCOUNT64(x) _ae_popcount64((unsigned long long)(x))");
     print_line(gen, "#endif");
+    emit_int_edge_helpers(gen);
     /* #2607: whether a module imported at @target("avx2") is compiled for
        AVX2: GCC or Clang building for x86. Anywhere else (another compiler,
        the AETHER_GCC_COMPAT=0 path, ARM, and GCC on Win64 without
@@ -9376,6 +9540,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
     print_line(gen, "extern void string_retain(const char*);");
     print_line(gen, "extern void aether_string_publish(const void*);");
+    /* #3522: a module-level string `var`'s locked take and store. */
+    print_line(gen, "extern const char* aether_string_var_take(const char* const* place, atomic_flag* lock);");
+    print_line(gen, "extern void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);");
     /* The header of a counted string, as the runtime lays it out. A string
      * no other thread can reach is counted here, inline; a shared one
      * (#2919) is counted atomically by the runtime, which also frees the
@@ -9742,13 +9909,21 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * where size_t is 32 bits (wasm32, ESP32), whose linker then traps the
      * call. */
     print_line(gen, "extern const char* string_new_with_length(void* data, size_t length);");
-    /* A message's own copy of a string field, which the receiver releases
-     * (#466): nothing the sender holds, so no other thread counts it. An
-     * `owned` value is the sender's temporary, freed once copied. An
-     * expression, so the ask that C without statement expressions builds as
-     * one takes it the same way. */
+    /* A message's own string field, which the receiver releases (#466):
+     * nothing the sender holds, so no other thread counts it. An `owned`
+     * value is the sender's temporary. Held by nothing else (a counted
+     * string whose count is 1, not pinned), it is the message's as it is:
+     * a dying temporary moves (R3, #3535), and no thread but the receiver's
+     * ever reaches it. Anything else is copied, and an owned temporary
+     * freed once copied. An expression, so the ask that C without statement
+     * expressions builds as one takes it the same way. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED const char* _aether_msg_str(const char* s, int owned) {");
     print_line(gen, "    if (!s) return s;");
+    print_line(gen, "    if (owned && aether_str_is_counted(s)) {");
+    print_line(gen, "        int _rc = ((const struct _AeStrHdr*)(const void*)s)->ref_count;");
+    print_line(gen, "        if (_rc != 0x%X && (_rc & 0x%X) == 1) return s;",
+               (unsigned)AETHER_STRING_PINNED_REFS, (unsigned)AETHER_STRING_COUNT_MASK);
+    print_line(gen, "    }");
     print_line(gen, "    const char* c = string_new_with_length((void*)aether_string_data(s), aether_string_length(s));");
     print_line(gen, "    if (owned) aether_heap_str_free(s);");
     print_line(gen, "    return c;");
@@ -9841,46 +10016,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline int _aether_println_str(const void* s) {");
     print_line(gen, "    return (int)aether_print_string(stdout, s, 1);");
     print_line(gen, "}");
-    print_line(gen, "static inline int _aether_println_owned(const char* s) {");
-    print_line(gen, "    int _n = _aether_println_str(s);");
-    print_line(gen, "    aether_heap_str_free((void*)s);");
-    print_line(gen, "    return _n;");
-    print_line(gen, "}");
-    print_line(gen, "static inline int _aether_print_owned(const char* s) {");
-    print_line(gen, "    int _n = _aether_print_str(s);");
-    print_line(gen, "    aether_heap_str_free((void*)s);");
-    print_line(gen, "    return _n;");
-    print_line(gen, "}");
-    /* #927: multiple ${duration} interpolations can be live in a SINGLE
-     * printf/snprintf call (all args evaluate before the format runs), so a
-     * single shared static buffer would have every %%s slot show the last
-     * result. Hand out a small ring of buffers — one per call — so up to
-     * AE_DUR_BUFS distinct results coexist in one expression. */
-    print_line(gen, "#define AE_DUR_BUFS 8");
-    print_line(gen, "static inline const char* _aether_duration_repr(int64_t ns) {");
-    print_line(gen, "    static char _bufs[AE_DUR_BUFS][64];");
-    print_line(gen, "    static unsigned _slot = 0;");
-    print_line(gen, "    char* _buf = _bufs[_slot];");
-    print_line(gen, "    _slot = (_slot + 1) %% AE_DUR_BUFS;");
-    print_line(gen, "    int64_t abs_ns = ns < 0 ? -ns : ns;");
-    print_line(gen, "    struct _du { const char* suffix; int64_t scale; } units[] = {");
-    print_line(gen, "        {\"d\", 86400000000000LL}, {\"h\", 3600000000000LL},");
-    print_line(gen, "        {\"m\", 60000000000LL}, {\"s\", 1000000000LL},");
-    print_line(gen, "        {\"ms\", 1000000LL}, {\"us\", 1000LL}, {\"ns\", 1LL}");
-    print_line(gen, "    };");
-    print_line(gen, "    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {");
-    print_line(gen, "        if (abs_ns >= units[i].scale || units[i].scale == 1) {");
-    print_line(gen, "            if (ns %% units[i].scale == 0) {");
-    print_line(gen, "                snprintf(_buf, 64, \"%%lld%%s\", (long long)(ns / units[i].scale), units[i].suffix);");
-    print_line(gen, "            } else {");
-    print_line(gen, "                double v = (double)ns / (double)units[i].scale;");
-    print_line(gen, "                snprintf(_buf, 64, \"%%.9g%%s\", v, units[i].suffix);");
-    print_line(gen, "            }");
-    print_line(gen, "            return _buf;");
-    print_line(gen, "        }");
-    print_line(gen, "    }");
-    print_line(gen, "    return \"0ns\";");
-    print_line(gen, "}");
+    /* #3526: a duration in an interpolation or a print is the formatter's %D
+     * (aether_interp_format), written from the stack; the ring of eight
+     * static buffers it was formatted into here was shared by every thread
+     * and wrapped past eight durations in one interpolation. */
     // Built-in `sleep(ms)` lowers to aether_sleep_ms — a runtime helper
     // with a stable, prefixed name so user `extern sleep(...)` doesn't
     // conflict with libc's `unsigned int sleep(unsigned int)`. Issue #233.
@@ -10656,7 +10795,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // to a write to this static rather than a shadowing local.
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
-                register_module_global_var(gen, cd->value, cd->origin_module == NULL);
+                register_module_global_var(gen, cd->value, cd->origin_module == NULL,
+                                           cd->node_type && cd->node_type->kind == TYPE_STRING);
             } else if (fn_const_decl(cd)) {
                 /* #2648: emitted with the module vars, after the function
                  * prototypes and adapters (emit_module_global_vars). */

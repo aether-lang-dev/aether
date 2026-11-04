@@ -155,7 +155,9 @@ void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
-void register_module_global_var(CodeGenerator* gen, const char* name, int is_program);
+void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
+                                int is_string);
+int is_module_string_var(CodeGenerator* gen, const char* name);   /* #3522 */
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
@@ -187,6 +189,10 @@ int ask_timeout_ms(ASTNode* ask);
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
 int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
+/* #3549: `node` lowered by `emit` as the builtin `name`, yielding nothing,
+ * with its arguments borrowed as a call's are (codegen_expr.c). */
+void emit_with_builtin_args(CodeGenerator* gen, ASTNode* node, const char* name,
+                            void (*emit)(CodeGenerator* gen, ASTNode* node));
 
 /* Does evaluating the expression have a side effect (a call, a send, a
  * va_* op)? Defined in codegen_expr.c. Gates the series-collapse
@@ -472,6 +478,41 @@ Type* lookup_fnptr_global(CodeGenerator* gen, const char* name);   /* #2200 */
 int is_fnptr_const_decl(const ASTNode* cd);                        /* #2648 */
 int fn_const_decl(const ASTNode* cd);                              /* #2648 */
 ASTNode* file_scope_value_const(ASTNode* program, const char* name);   /* #2799 */
+/* #3524: an integer `/`, `%`, `<<` or `>>` with Java's rules, and a float
+ * converted to an integer type, saturating (codegen_expr.c). Each returns 0
+ * having emitted nothing when C's own operator or conversion is defined. */
+int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                     Type* lt, ASTNode* r, Type* result, const ASTNode* pos);
+int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                        Type* result);
+int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t);
+/* #3524: `/` and `%` on integer lanes, with the same rules lane by lane
+ * (codegen_expr.c); emit_lane_int_div returns 0 having emitted nothing for
+ * a constant scalar divisor other than 0 and -1. */
+TypeKind lane_int_div_kind(const char* op, const Type* lt, const Type* rt);
+int lane_int_div_applies(CodeGenerator* gen, const char* op, TypeKind vk, ASTNode* r);
+int emit_lane_int_div(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                      TypeKind vk, ASTNode* r, const ASTNode* pos);
+/* #3522: a module-level string `var`'s lock, its one store, and whether `e`
+ * reads one (codegen_stmt.c, codegen_expr.c). */
+const char* module_string_var_lock(const char* name);
+void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
+                              const char* taken);
+int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
+int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
+/* #3527: the conversion an interpolation, print or println writes a value
+ * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
+ * print_fmt_refuse reports as a compile error naming it. */
+typedef enum {
+    PF_NONE = 0, PF_INT, PF_UINT, PF_LONG, PF_ULONG, PF_DURATION,
+    PF_DOUBLE, PF_LDOUBLE, PF_BOOL, PF_STRING
+} PrintFmt;
+PrintFmt print_fmt_of(const Type* t);
+void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what);
+const char* print_fmt_arg_cast(PrintFmt f);
+void emit_print_scalar(CodeGenerator* gen, ASTNode* v, int newline);
+void emit_print_format_spec(CodeGenerator* gen, ASTNode* v);
+void emit_print_format_arg(CodeGenerator* gen, ASTNode* v);
 TypeKind lookup_extern_param_kind(CodeGenerator* gen, const char* func_name, int param_idx);
 /* Full Type* for an extern's parameter (borrowed from the extern's AST),
  * or NULL. The kind alone can't drive tuple-param emission — packing the

@@ -1,0 +1,178 @@
+// Regression (#3524): `/` and `%` on integer lanes follow the scalar rules
+// lane by lane.
+//
+// A lane division went straight to C's vector operator, where a zero lane in
+// the divisor and a lane's most negative value divided by -1 are undefined,
+// as for a scalar: x86 stopped the program (the scalar's #3524 fix did not
+// reach lanes). Each now panics with the category `division_by_zero` and the
+// operation's source position when any lane of the divisor is 0, and the most
+// negative value divided by -1 is itself, its remainder 0, for i32x4, i64x2,
+// i16x8 and i32x8, with a lane value or a scalar on either side, and for
+// `/=` and `%=` on a variable and on a field. A constant scalar divisor
+// other than 0 and -1 divides as before.
+
+import std.lanes
+import std.string
+
+extern exit(code: int)
+
+struct Box {
+    v: i32x4
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+fn check_panic(e: string, line: string, what: string) {
+    check(string.starts_with(e, "division_by_zero: division by zero at "),
+        "${what}: category, got '${e}'")
+    check(string.contains(e, "test_lane_int_division.ae:${line}:"),
+        "${what}: position ${line}, got '${e}'")
+}
+
+div4(a: i32x4, b: i32x4) -> string {
+    try {
+        q = a / b
+        println("no panic ${lanes.i32lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod4_scalar(a: i32x4, n: int) -> string {
+    try {
+        q = a % n
+        println("no panic ${lanes.i32lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+scalar_by4(n: int, b: i32x4) -> string {
+    try {
+        q = n / b
+        println("no panic ${lanes.i32lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div16(a: i16x8, b: i16x8) -> string {
+    try {
+        q = a / b
+        println("no panic ${lanes.i16lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod64(a: i64x2, b: i64x2) -> string {
+    try {
+        q = a % b
+        println("no panic ${lanes.mask2_lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div8(a: i32x8, b: i32x8) -> string {
+    try {
+        q = a / b
+        println("no panic ${lanes.mask8_lane(q, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div_assign(b: i32x4) -> string {
+    v = lanes.i32x4(1, 2, 3, 4)
+    try {
+        v /= b
+        println("no panic ${lanes.i32lane(v, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod_assign_field(b: i32x4) -> string {
+    box = Box { v: lanes.i32x4(1, 2, 3, 4) }
+    try {
+        box.v %= b
+        println("no panic ${lanes.i32lane(box.v, 0)}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+main() {
+    zero = 0
+    min32 = -2147483647 - 1
+    a = lanes.i32x4(7, -7, 9, min32)
+    one_zero = lanes.i32x4(1, 1, 0, 1)
+    check_panic(div4(a, one_zero), "39", "i32x4 /")
+    check_panic(mod4_scalar(a, zero), "49", "i32x4 % scalar")
+    check_panic(scalar_by4(5, one_zero), "59", "scalar / i32x4")
+    check_panic(div16(lanes.i16x8(1, 2, 3, 4, 5, 6, 7, 8), lanes.i16x8(1, 1, 1, 1, 1, 1, 1, 0)),
+        "69", "i16x8 /")
+    // An f64x2 comparison yields an i64x2 of -1 (held) and 0 lanes.
+    m = lanes.lt2(lanes.f64x2(1.0, 2.0), lanes.f64x2(2.0, 1.0))
+    check_panic(mod64(m, m), "79", "i64x2 %")
+    // An f32x8 comparison yields an i32x8 of -1 and 0 lanes.
+    e = lanes.lt8(lanes.f32x8(1.0, 3.0, 1.0, 3.0, 1.0, 3.0, 1.0, 3.0), lanes.splat8(2.0))
+    check_panic(div8(e, e), "89", "i32x8 /")
+    check_panic(div_assign(one_zero), "100", "/=")
+    check_panic(mod_assign_field(one_zero), "111", "field %=")
+
+    // The most negative value divided by -1 is itself, its remainder 0, in
+    // a lane of every width, by a -1 lane and by a -1 scalar.
+    b = lanes.i32x4(2, 2, 3, -1)
+    q = a / b
+    r = a % b
+    check(lanes.i32lane(q, 0) == 3 && lanes.i32lane(q, 1) == -3 && lanes.i32lane(q, 2) == 3,
+        "i32x4 / divides each lane")
+    check(lanes.i32lane(q, 3) == min32 && lanes.i32lane(r, 3) == 0, "i32x4 MIN / -1")
+    check(lanes.i32lane(r, 0) == 1 && lanes.i32lane(r, 1) == -1, "i32x4 % keeps the sign")
+    m1 = -1
+    w = a / m1
+    check(lanes.i32lane(w, 0) == -7 && lanes.i32lane(w, 3) == min32, "i32x4 / a -1 scalar")
+    check(lanes.i32lane(a % -1, 3) == 0, "i32x4 % a -1 constant")
+    h = lanes.i16x8(7, -7, 9, -32768, 1, 2, 3, 4)
+    hq = h / -1
+    check(lanes.i16lane(hq, 3) == -32768 && lanes.i16lane(hq, 0) == -7, "i16x8 MIN / -1")
+    check(lanes.i16lane(h % lanes.i16splat(-1), 3) == 0, "i16x8 MIN % -1")
+    big = m * 9223372036854775807 - 1 // lanes MIN, -1
+    bq = big / -1
+    check(lanes.mask2_lane(bq, 0) == 0 - 9223372036854775807 - 1 && lanes.mask2_lane(bq, 1) == 1,
+        "i64x2 MIN / -1")
+    check(lanes.mask2_lane(big % m1, 0) == 0, "i64x2 MIN % -1")
+    a8 = e * 2147483647 - 1 // lanes MIN, -1, MIN, -1, ...
+    q8 = a8 / -1
+    check(lanes.mask8_lane(q8, 0) == min32 && lanes.mask8_lane(q8, 7) == 1, "i32x8 MIN / -1")
+    r8 = a8 % (e - 2) // divisors -3 and -2
+    check(lanes.mask8_lane(r8, 0) == -2 && lanes.mask8_lane(r8, 1) == -1, "i32x8 %")
+    c = a
+    c /= b
+    check(lanes.i32lane(c, 3) == min32, "/= MIN / -1")
+    box = Box { v: a }
+    box.v %= b
+    check(lanes.i32lane(box.v, 3) == 0 && lanes.i32lane(box.v, 0) == 1, "field %=")
+
+    // A constant divisor other than 0 and -1 divides as before.
+    s = a / 2
+    check(lanes.i32lane(s, 0) == 3 && lanes.i32lane(s, 1) == -3, "constant divisor")
+    check(lanes.i32lane(a % 4, 1) == -3, "constant remainder")
+    check(lanes.mask8_lane(a8 / 2, 0) == -1073741824, "i32x8 constant divisor")
+    println("lane division: ok")
+}

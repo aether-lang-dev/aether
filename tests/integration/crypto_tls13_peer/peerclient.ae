@@ -194,6 +194,9 @@ main() {
         ch = tls13_hs.client_hello_full(rnd, bytes.view(sid)[0..32], tls13_hs.GROUP_SECP256R1, bytes.view(qpt)[0..65], 0, bytes.view(empty)[0..0], 0, bytes.view(empty)[0..0], "peer.example")
         bytes.free(qpt)
     }
+    bytes.free(rnd)
+    bytes.free(sid)
+    bytes.free(p384pt)
     peer_early = os.getenv("PEER_EARLY") == "1"
     if peer_early {
         ch2 = with_early_data(ch)
@@ -292,9 +295,14 @@ main() {
             exit(1)
         }
     }
+    // What the ClientHellos were made from is done with.
+    bytes.free(ch)
+    bytes.free(pub)
+    bytes.free(empty)
     shl = bytes.length(shrec) - 5
     sh = bytes.new(shl)
     bytes.copy_from_bytes(sh, 0, shrec, 5, shl)
+    bytes.free(shrec)
     shp = tls13_hs.ShParsed { version: 0, cipher_suite: 0, group: 0, key_share: null, key_share_len: 0, is_hello_retry: 0, psk_accepted: 0, alert: 0 }
     serr = tls13_hs.parse_server_hello(bytes.view(sh)[0..shl], &shp)
     want_ks = 32
@@ -304,6 +312,7 @@ main() {
         exit(1)
     }
     tls13_client.transcript_add(tr, bytes.view(sh)[0..shl])
+    bytes.free(sh)
     aead, klen, algo, hl = suite_params(shp.cipher_suite)
     shared = null
     if p256_priv != null {
@@ -318,13 +327,20 @@ main() {
         xs, _aerr = x25519.agree(priv, shp.key_share)
         shared = xs
     }
+    bytes.wipe_free(priv)
+    bytes.wipe_free(p256_priv)
+    bytes.free(shp.key_share)
     th = tls13_client.transcript_hash_algo(tr, algo)
     early = tls13_ks.early_secret(algo)
     hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..32])
+    tls13_ks.free_secret(early)
+    bytes.wipe_free(shared)
     c_hs = tls13_ks.traffic_secret(algo, hsec, "c hs traffic", bytes.view(th)[0..hl])
     s_hs = tls13_ks.traffic_secret(algo, hsec, "s hs traffic", bytes.view(th)[0..hl])
+    bytes.free(th)
     srv_ctx = ctx_for(algo, hl, aead, klen, s_hs)
     cli_ctx = ctx_for(algo, hl, aead, klen, c_hs)
+    tls13_ks.free_secret(s_hs)
 
     // The server's flight, through its Finished, into the transcript.
     fl = bytes.new(4096)
@@ -360,12 +376,16 @@ main() {
         bytes.free(rec)
     }
     tls13_client.transcript_add(tr, bytes.view(fl)[0..fll])
+    bytes.free(fl)
     th_sf = tls13_client.transcript_hash_algo(tr, algo)
+    tls13_client.transcript_free(tr)
     ms = tls13_ks.master_secret(algo, hsec)
+    tls13_ks.free_secret(hsec)
     s_ap = tls13_ks.traffic_secret(algo, ms, "s ap traffic", bytes.view(th_sf)[0..hl])
     app_ctx = ctx_for(algo, hl, aead, klen, s_ap)
 
     cvd = tls13_client.finished_verify_data_algo(c_hs, bytes.view(th_sf)[0..hl], algo, hl)
+    tls13_ks.free_secret(c_hs)
     how = os.getenv("PEER_CF")
     n = 4 + hl
     if how == "short" { n = 4 + hl - 1 }
@@ -406,16 +426,34 @@ main() {
     } else {
         send_sealed(sock, cli_ctx, 22, fin, 0, n)
     }
+    bytes.free(fin)
+    bytes.wipe_free(cvd)
+    tls13_record.free_ctx(cli_ctx)
     post = os.getenv("PEER_POST")
     if post != "" && how == "ok" {
         c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
         k = Keys { algo: algo, hl: hl, aead: aead, klen: klen, c_sec: c_ap, s_sec: s_ap, c_ctx: ctx_for(algo, hl, aead, klen, c_ap), s_ctx: app_ctx }
         post_session(sock, &r, &k, post)
         tcp.close(sock)
+        // The secrets and contexts the KeyUpdates moved to, app_ctx's among them.
+        tls13_ks.free_secret(k.c_sec)
+        tls13_ks.free_secret(k.s_sec)
+        tls13_record.free_ctx(k.c_ctx)
+        tls13_record.free_ctx(k.s_ctx)
+        tls13_record.free_ctx(srv_ctx)
+        tls13_ks.free_secret(ms)
+        bytes.free(th_sf)
+        bytes.free(r.buf)
         exit(0)
     }
     println(answer(&r, app_ctx, srv_ctx))
     tcp.close(sock)
+    tls13_record.free_ctx(app_ctx)
+    tls13_record.free_ctx(srv_ctx)
+    tls13_ks.free_secret(s_ap)
+    tls13_ks.free_secret(ms)
+    bytes.free(th_sf)
+    bytes.free(r.buf)
     exit(0)
 }
 

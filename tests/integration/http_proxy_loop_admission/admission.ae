@@ -339,6 +339,9 @@ main() {
     http.server_stop(worker_gw)
     http.server_stop(loop_gw)
     http.server_stop(upstream)
+    http.server_free(worker_gw)
+    http.server_free(loop_gw)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

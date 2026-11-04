@@ -4,6 +4,7 @@
 #include "../analysis/contract_eval.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
+#include "../analysis/typechecker.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
 #include "../../std/string/aether_string_abi.h"
@@ -347,7 +348,10 @@ typedef struct ArgDrainWrap {
     int idx[16];        /* their child indices in the call node */
     int closure[16];    /* 1 = an owned closure (#2507), released through its env;
                          * 2 = a closure cell's value, held for the call (#2755):
-                         * retained into the temp, released the same way */
+                         * retained into the temp, released the same way;
+                         * 3 = a slice that owns its buffer (#3549), dropped
+                         * through drop[] */
+    const char* drop[16]; /* a slice's drop (own_slice_elem_drop_fn of its type) */
     int scoped[16];     /* 1 = lives to its scope's exit: the call returns a view, which
                          * may point into it (call_returns_view) */
     int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
@@ -370,6 +374,77 @@ typedef struct ArgDrainWrap {
 static int arg_taken_by_call(CodeGenerator* gen, const char* func_name, int ai) {
     return func_name && (is_retain_extern_param(gen, func_name, ai) ||
                          call_frees_arg(gen, codegen_normalise_callee(func_name)));
+}
+
+/* How a call's arguments are chosen for its temporaries (arg_drain_select).
+ * The rule is the same for every callee (R3: a fresh value given to a
+ * parameter that borrows is the caller's, released after the call); what
+ * differs is what the callee can do while it runs. An Aether function, a
+ * closure or a typed function pointer may store into a place the argument
+ * was read from, so such a read is held for the call. A builtin lowered by
+ * name is C, and C rewrites no Aether place (a call into C is left alone,
+ * docs/design/ownership-model.md). A comparison borrows its operands as a
+ * call does; only its string operands are chosen, since a closure or an
+ * optional operand is read by the comparison's own temporary, which gives
+ * it back once it is read. */
+typedef enum {
+    ARG_SEL_CALL,
+    ARG_SEL_BUILTIN,
+    ARG_SEL_OPERATOR
+} ArgSelMode;
+
+/* Is `call` a builtin the by-name chain of generate_expression lowers, at
+ * its argument count (the typechecker's table of them, the slice ownership
+ * intrinsics, `make` and the builtin `append`)? */
+static int call_is_builtin(CodeGenerator* gen, ASTNode* call) {
+    const char* fn = call ? call->value : NULL;
+    if (!fn) return 0;
+    if (strncmp(fn, "__slice_", 8) == 0) return 1;
+    if (strcmp(fn, "make") == 0 && call->node_type && call->node_type->kind == TYPE_ARRAY) return 1;
+    if (strcmp(fn, "append") == 0 && call->child_count == 2 && type_is_slice(call->node_type) &&
+        !find_function_definition_by_name(gen->program, "append")) return 1;
+    if (strcmp(fn, "atoi") == 0)
+        return call->child_count == 1 && !find_function_definition_by_name(gen->program, "atoi");
+    return is_builtin_call_name(fn, call->child_count);
+}
+
+/* #3549: does the builtin `fn` take argument `ai` of `call` over? Every
+ * other argument of a builtin is borrowed for the call (R3). The frees end
+ * the value's life; `isolate`, `consume` and `select` are the identity, so
+ * their value is the argument; `box_closure`, `lazy`, `ref` and `ref_set`
+ * keep it in the box, thunk or cell they make; `append` and the slice
+ * ownership intrinsics move a slice and store a value. An interpolation
+ * that is print's or println's only argument is written straight to the
+ * stream: it makes no string, so there is no temporary to give back. */
+static int builtin_takes_arg(const char* fn, ASTNode* call, int ai) {
+    static const char* const takers[] = {
+        "isolate", "consume", "select", "release", "free", "string_free", "string_release",
+        "string_seq_free", "ref", "ref_free", "lazy", "thunk_free", "box_closure",
+        "release_closure", "append", NULL
+    };
+    if (!fn || strncmp(fn, "__slice_", 8) == 0) return 1;
+    if (strcmp(fn, "ref_set") == 0) return ai == 1;
+    for (int i = 0; takers[i]; i++)
+        if (strcmp(fn, takers[i]) == 0) return 1;
+    if ((strcmp(fn, "print") == 0 || strcmp(fn, "println") == 0) && call->child_count == 1 &&
+        call->children[0] && call->children[0]->type == AST_STRING_INTERP)
+        return 1;
+    return 0;
+}
+
+static int container_store_value_index(CodeGenerator* gen, ASTNode* call);
+
+/* Is argument `ai` of `call` (to `func_name`) given to a parameter that
+ * borrows it? Not when the callee takes it over (arg_taken_by_call, a
+ * builtin's own, builtin_takes_arg), and not the value a container store
+ * puts into its container (`store_idx`, container_store_value_index),
+ * which adopts a fresh string and takes a reference of its own to a
+ * closure (emit_closure_container_store). */
+static int call_arg_borrowed(CodeGenerator* gen, ASTNode* call, const char* func_name, int ai,
+                             ArgSelMode mode, int store_idx) {
+    if (mode == ARG_SEL_OPERATOR) return 1;
+    if (mode == ARG_SEL_BUILTIN) return !builtin_takes_arg(func_name, call, ai);
+    return ai != store_idx && !arg_taken_by_call(gen, func_name, ai);
 }
 
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
@@ -480,6 +555,42 @@ static int reachable_place(CodeGenerator* gen, ASTNode* e) {
            is_module_global_var(gen, e->value);
 }
 
+/* #3522: is `e` a read of a module-level string `var` (no local, parameter
+ * or actor state of its name in scope)? Not in a file-scope initializer,
+ * where nothing runs yet. */
+int module_string_var_read(CodeGenerator* gen, const ASTNode* e) {
+    /* By the var's declaration (is_module_string_var), not by how the read
+     * was typed: a `ptr` var holding a string reads as a string where one
+     * is wanted, and is the pointer it is (R4), with no lock; a contract's
+     * read is left untyped. */
+    return e && e->type == AST_IDENTIFIER && e->value && !gen->in_const_init &&
+           !is_actor_state_var(gen, e->value) && !is_var_declared(gen, e->value) &&
+           is_module_string_var(gen, e->value);
+}
+
+/* #3522: a read of the module-level string `var` `name`. Any thread may
+ * store into the var while the value read is in use, and a store releases
+ * the value it replaces, so the read takes a reference of its own, under
+ * the var's lock (aether_string_var_take), into a temporary of the
+ * statement: what the statement does with the value (compares it, prints
+ * it, passes it to a call, takes it into a place) is done with a value no
+ * store can free. The statement's block releases the temporary on every
+ * exit, and a statement run again releases the one before, as for any
+ * string read held for its statement (order_hoist_operand). Where no
+ * statement is being emitted the var is read in place. */
+static void emit_module_string_read(CodeGenerator* gen, const char* name) {
+    if (!hoist_ready(gen)) {
+        fprintf(gen->output, "%s", name);
+        return;
+    }
+    const char* t = cg_internf("_eo%d", g_order_counter++);
+    hoist_declare_null(gen, "const char*", t);
+    fprintf(gen->output, "(aether_unwind_track_str_place((const void*)&%s, NULL), "
+            "aether_heap_str_free(%s), %s = aether_string_var_take(&%s, &%s))",
+            t, t, t, name, module_string_var_lock(name));
+    push_scoped_temp_free(gen, t);
+}
+
 /* Is `e` a string read from such a place: the place itself, or `o ?? d` /
  * `o!` over a `string?` one? */
 int string_reads_place(CodeGenerator* gen, ASTNode* e) {
@@ -490,6 +601,9 @@ int string_reads_place(CodeGenerator* gen, ASTNode* e) {
 }
 
 static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
+    /* #3522: a module string `var` read holds its value for its statement
+     * already, where a statement is being emitted (emit_module_string_read). */
+    if (module_string_var_read(gen, arg) && hoist_ready(gen)) return 0;
     return string_reads_place(gen, arg);
 }
 
@@ -514,16 +628,19 @@ int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
 
 static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                              const char* func_name, ASTNode* closure, int is_void,
-                             ArgDrainWrap* w) {
+                             ArgDrainWrap* w, ArgSelMode mode) {
     w->saved_count = g_arg_drain_count;
     w->count = 0;
     memset(w->scoped, 0, sizeof(w->scoped));
     memset(w->held, 0, sizeof(w->held));
     memset(w->taken, 0, sizeof(w->taken));
+    memset(w->drop, 0, sizeof(w->drop));
     if (!w->have_value && !is_void) return;
+    int store_idx = mode == ARG_SEL_CALL && func_name ? container_store_value_index(gen, expr) : -1;
     for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
         ASTNode* arg = expr->children[ai];
         if (!arg) continue;
+        int borrowed = call_arg_borrowed(gen, expr, func_name, ai, mode, store_idx);
         /* Arg-temp wrapping fires on heap-classified subexpressions:
          * function calls, AST_STRING_INTERP (`_aether_interp(...)`
          * allocates a heap buffer the caller is expected to own; inline as
@@ -534,7 +651,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         /* #2755: a closure cell's value lent to the call is held for it:
          * the call may rebind the cell (the closure it runs replacing
          * itself), and the store gives back the cell's reference. */
-        if (is_closure_cell_read(gen, arg)) {
+        if (mode == ARG_SEL_CALL && is_closure_cell_read(gen, arg)) {
             if (!arg_drain_lookup(arg)) {
                 w->closure[w->count] = 2;
                 w->idx[w->count++] = ai;
@@ -543,7 +660,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         }
         /* A callee that frees or keeps its argument takes the place's own
          * reference, so a hold of it would be what it takes instead. */
-        if (string_arg_held(gen, arg) && !arg_taken_by_call(gen, func_name, ai)) {
+        if (mode == ARG_SEL_CALL && string_arg_held(gen, arg) && borrowed) {
             if (!arg_drain_lookup(arg)) {
                 w->closure[w->count] = 0;
                 w->held[w->count] = 1;
@@ -562,11 +679,11 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             Type* at = arg->node_type;
             TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
             if (arg_drain_lookup(arg) || pk == TYPE_OPTIONAL || pk == TYPE_TUPLE) continue;
-            if (at->kind == TYPE_STRING && !arg_taken_by_call(gen, func_name, ai)) {
+            if (at->kind == TYPE_STRING && borrowed) {
                 w->closure[w->count] = 0;
                 w->scoped[w->count] = call_returns_view(expr) && hoist_ready(gen);
-            } else if (at->kind == TYPE_FUNCTION && !at->is_fnptr &&
-                       owned_closure_arg_drainable(gen, expr, func_name, ai)) {
+            } else if (mode != ARG_SEL_OPERATOR && borrowed && at->kind == TYPE_FUNCTION &&
+                       !at->is_fnptr && owned_closure_arg_drainable(gen, expr, func_name, ai)) {
                 w->closure[w->count] = 1;
             } else {
                 continue;
@@ -575,6 +692,24 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             w->idx[w->count++] = ai;
             continue;
         }
+        /* #3549: a slice that owns the buffer it holds, made for the call:
+         * slice ownership marks the arguments it gives the call to drop (a
+         * fresh buffer given to a parameter that neither keeps it nor hands
+         * a view of it back, slice_own.c), and the call drops it as the
+         * owning local it would have been bound to would be. */
+        if (arg->type == AST_FUNCTION_CALL && type_is_slice(arg->node_type) &&
+            annotation_has_marker(arg->annotation, "slice_temp")) {
+            if (mode != ARG_SEL_OPERATOR && borrowed && !arg_drain_lookup(arg)) {
+                w->closure[w->count] = 3;
+                w->drop[w->count] = own_slice_elem_drop_fn(gen, arg->node_type);
+                w->idx[w->count++] = ai;
+            }
+            continue;
+        }
+        /* An operand of any other type is read by the comparison's own
+         * code: a closure against `null`, an optional, a number. */
+        if (mode == ARG_SEL_OPERATOR && !(arg->node_type && arg->node_type->kind == TYPE_STRING))
+            continue;
         /* #2518: a capturing closure literal, as #2507 does a handed-over
          * closure: its only reference is the argument (a list that stores
          * it takes its own). */
@@ -590,13 +725,14 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * passed on as an argument anywhere in an expression: dead after
          * the call when the parameter keeps nothing. */
         if (literal_arg || call_returns_owned_closure(gen, arg)) {
-            if (owned_closure_arg_drainable(gen, expr, func_name, ai)) {
+            if (mode != ARG_SEL_OPERATOR && borrowed &&
+                owned_closure_arg_drainable(gen, expr, func_name, ai)) {
                 w->closure[w->count] = 1;
                 w->idx[w->count++] = ai;
             }
             continue;
         }
-        if (!is_heap_string_expr(gen, arg) || arg_taken_by_call(gen, func_name, ai)) continue;
+        if (!is_heap_string_expr(gen, arg) || !borrowed) continue;
         /* Wrapped into an optional or a tuple parameter, the string is that
          * argument's temporary's (emit_composite_arg_temp). */
         TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
@@ -641,7 +777,10 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * -Wincompatible-pointer-types-discards-qualifiers from a `const
          * char*` temp. The value is a fresh heap string this wrap owns and
          * frees, so there is nothing const about it. */
-        if (w->closure[h]) {
+        if (w->closure[h] == 3) {
+            seq_let_named(gen, &w->seq, "AetherSlice", names[h]);
+            generate_expression(gen, arg);
+        } else if (w->closure[h]) {
             seq_let_named(gen, &w->seq, "_AeClosure", names[h]);
             if (w->taken[h]) {
                 emit_closure_take(gen, arg);
@@ -672,7 +811,9 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
         }
         seq_next(gen, &w->seq);
         /* #2923: journaled for the call, which may panic. */
-        if (w->closure[h])
+        if (w->closure[h] == 3)
+            fprintf(gen->output, "aether_unwind_track((const void*)&%s, %s)", names[h], w->drop[h]);
+        else if (w->closure[h])
             fprintf(gen->output, "aether_unwind_track((const void*)&%s, _aether_closure_drop_unwind)",
                     names[h]);
         else if (!w->scoped[h])
@@ -707,7 +848,9 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         seq_next(gen, &w->seq);
         fprintf(gen->output, "aether_unwind_forget((const void*)&%s)", nm);
         seq_next(gen, &w->seq);
-        if (w->closure[h]) {
+        if (w->closure[h] == 3) {
+            fprintf(gen->output, "%s((const void*)&%s)", w->drop[h], nm);
+        } else if (w->closure[h]) {
             fprintf(gen->output, "_aether_closure_env_release(%s.env)", nm);
         } else {
             fprintf(gen->output, "aether_heap_str_free(%s)", nm);
@@ -725,6 +868,21 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
      * yields void. */
     seq_close(gen, &w->seq);
     arg_drain_truncate(w->saved_count);
+}
+
+/* #3549: `node` lowered by `emit` as the builtin `name` with no value (a
+ * statement's `print`), its arguments borrowed as every builtin's are: a
+ * fresh one is held in a temporary and released once the lowering has
+ * read it (arg_drain_select). */
+void emit_with_builtin_args(CodeGenerator* gen, ASTNode* node, const char* name,
+                            void (*emit)(CodeGenerator* gen, ASTNode* node)) {
+    ArgDrainWrap w;
+    memset(&w, 0, sizeof(w));
+    w.discarded = 1;
+    arg_drain_select(gen, node, 0, name, NULL, 1, &w, ARG_SEL_BUILTIN);
+    arg_drain_open(gen, node, &w);
+    emit(gen, node);
+    arg_drain_close(gen, node, &w);
 }
 
 /* Returns 1 if the expression has any side effects (function calls, sends).
@@ -1669,7 +1827,8 @@ static const char* order_c11_type(ASTNode* op) {
  * `_eoN = (op)`, then the separator. */
 static void order_hoist_operand(CodeGenerator* gen, TempSeq* s, ASTNode* op) {
     const char* name = cg_internf("_eo%d", g_order_counter++);
-    if (hoist_ready(gen) && string_reads_place(gen, op)) {
+    if (hoist_ready(gen) && string_reads_place(gen, op) &&
+        !module_string_var_read(gen, op)) {   /* #3522: held by its own read */
         /* R3: a string read from a place a later operand can store into
          * holds a reference of its own until its statement is done, so
          * the store cannot free what it reads; a statement run again
@@ -2045,7 +2204,7 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     ad.ret_type = NULL;
     ad.have_value = strcmp(ret_c, "void") != 0;
     ad.discarded = discarded;
-    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad, ARG_SEL_CALL);
     arg_drain_open(gen, call, &ad);
     int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
@@ -2072,7 +2231,7 @@ static void generate_fnptr_value_call(CodeGenerator* gen, ASTNode* call, int dis
     ad.ret_type = NULL;
     ad.have_value = strcmp(ret_c, "void") != 0;
     ad.discarded = discarded;
-    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad, ARG_SEL_CALL);
     arg_drain_open(gen, call, &ad);
     int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
@@ -5531,6 +5690,16 @@ static const ClosureStoreEntry* closure_store_entry(CodeGenerator* gen, ASTNode*
     return NULL;
 }
 
+/* The argument a container store (a list add or set, a map put, their raw
+ * and owned forms: the entries above, which the string routing below lowers
+ * too) puts into its container, or -1 when `call` is none. The container
+ * adopts a fresh string given there and takes a reference of its own to a
+ * closure, so that argument is no temporary the call borrows (#3549). */
+static int container_store_value_index(CodeGenerator* gen, ASTNode* call) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    return e ? e->val_idx : -1;
+}
+
 /* #2518: is `call` a list add or set, or a map put, that stores a closure
  * VALUE (`fn`-typed, not a raw fn-ptr)? Then the container takes a
  * reference of its own to the closure's env and releases it when the
@@ -5645,6 +5814,8 @@ void emit_message_field_inits(CodeGenerator* gen, ASTNode* message, MessageDef* 
             fprintf(gen->output, "_aether_msg_str(");
             emit_message_field_init(gen, fdef, fi->children[0]);
             fprintf(gen->output, ", %d)", message_string_init_owned(gen, fi->children[0]));
+        } else if (emit_float_to_int(gen, fi->children[0], ft)) {
+            /* #3524: a float into an integer field saturates. */
         } else {
             emit_message_field_init(gen, fdef, fi->children[0]);
         }
@@ -6319,6 +6490,20 @@ int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
 static const ASTNode* g_slice_view_wrapping = NULL;
 /* The enforce call whose site tag is being emitted (see AST_FUNCTION_CALL). */
 static const ASTNode* g_sandbox_site_wrapping = NULL;
+/* The comparison whose operand temporaries are open (see
+ * AST_BINARY_EXPRESSION): it is generated once more inside them. */
+static const ASTNode* g_operand_temps_wrapping = NULL;
+
+/* #3549: is `e` a comparison? It borrows its operands as a call borrows its
+ * arguments: a fresh string compared (`f() == "x"`, `os.getenv(k) != null`)
+ * is released once the comparison has read it. */
+static int is_comparison(const ASTNode* e) {
+    static const char* const ops[] = { "==", "!=", "<", "<=", ">", ">=", NULL };
+    if (!e || e->type != AST_BINARY_EXPRESSION || e->child_count != 2 || !e->value) return 0;
+    for (int i = 0; ops[i]; i++)
+        if (strcmp(e->value, ops[i]) == 0) return 1;
+    return 0;
+}
 
 /* The block of a call's trailing DSL closure, or NULL. A closure the
  * function declares a `fn` parameter for, where the block sits, is an
@@ -7395,6 +7580,577 @@ static int is_literal_float_div_by_zero(const ASTNode* e) {
     return (lt && lt->kind == TYPE_FLOAT) || (rt && rt->kind == TYPE_FLOAT);
 }
 
+/* #3524: integer `/`, `%`, `<<` and `>>`, and a float converted to an
+ * integer type, follow Java's rules on every target, where C leaves them
+ * undefined (x86 traps on the first two, ARM64 gives 0):
+ *  - `x / 0` and `x % 0` panic with the category `division_by_zero`;
+ *  - the most negative value divided by -1 is itself, and its remainder 0;
+ *  - a shift count is masked to the width C shifts in (`& 31`, `& 63`),
+ *    and a left shift of a signed value runs in unsigned, so a bit shifted
+ *    into the sign is defined;
+ *  - a float converted to an integer saturates at the type's range, NaN 0.
+ * A constant operand that keeps C defined keeps C's own operator: a divisor
+ * other than 0 and -1, a count inside the width, a float inside the range.
+ * The helpers are in the prelude (emit_int_edge_helpers, codegen.c). */
+
+/* The width an integer operation runs in, as C's conversions give it. */
+typedef enum { AE_IW_NONE = 0, AE_IW_I32, AE_IW_U32, AE_IW_I64, AE_IW_U64 } AeIntWidth;
+
+static int ie_int_kind(const Type* t) {
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
+        case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE: case TYPE_DURATION:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int ie_is_64(TypeKind k) {
+    return k == TYPE_INT64 || k == TYPE_UINT64 || k == TYPE_DURATION;
+}
+
+/* The kind an operand computes in: its own, or a 64-bit result's when the
+ * operand is narrower (#697 widens it before the operation). */
+static TypeKind ie_effective(const Type* t, const Type* result) {
+    if (result && (result->kind == TYPE_INT64 || result->kind == TYPE_UINT64) &&
+        !ie_is_64(t->kind))
+        return result->kind;
+    return t->kind;
+}
+
+/* `/` and `%`: C's usual arithmetic conversions of both operands. */
+static AeIntWidth ie_arith_width(const Type* l, const Type* r, const Type* result) {
+    if (!ie_int_kind(l) || !ie_int_kind(r)) return AE_IW_NONE;
+    TypeKind a = ie_effective(l, result), b = ie_effective(r, result);
+    if (ie_is_64(a) || ie_is_64(b))
+        return (a == TYPE_UINT64 || b == TYPE_UINT64) ? AE_IW_U64 : AE_IW_I64;
+    return (a == TYPE_UINT32 || b == TYPE_UINT32) ? AE_IW_U32 : AE_IW_I32;
+}
+
+/* `<<` and `>>`: the promoted left operand. */
+static AeIntWidth ie_shift_width(const Type* l, const Type* r, const Type* result) {
+    if (!ie_int_kind(l) || !ie_int_kind(r)) return AE_IW_NONE;
+    TypeKind a = ie_effective(l, result);
+    if (a == TYPE_UINT64) return AE_IW_U64;
+    if (ie_is_64(a)) return AE_IW_I64;
+    return a == TYPE_UINT32 ? AE_IW_U32 : AE_IW_I32;
+}
+
+static const char* ie_c_type(AeIntWidth w) {
+    switch (w) {
+        case AE_IW_U32: return "uint32_t";
+        case AE_IW_I64: return "int64_t";
+        case AE_IW_U64: return "uint64_t";
+        default: return "int";
+    }
+}
+
+static const char* ie_suffix(AeIntWidth w) {
+    switch (w) {
+        case AE_IW_U32: return "u32";
+        case AE_IW_I64: return "i64";
+        case AE_IW_U64: return "u64";
+        default: return "i32";
+    }
+}
+
+static int ie_signed(AeIntWidth w) { return w == AE_IW_I32 || w == AE_IW_I64; }
+static int ie_bits(AeIntWidth w) { return (w == AE_IW_I64 || w == AE_IW_U64) ? 64 : 32; }
+
+/* An integer constant the compiler reads: a literal, negated or not, and in
+ * a file-scope constant's initializer, whose C must stay a constant
+ * expression, a constant it names. */
+static int ie_const_value(CodeGenerator* gen, const ASTNode* e, long long* out, int depth) {
+    if (!e || depth > 32) return 0;
+    if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1 &&
+        (strcmp(e->value, "-") == 0 || strcmp(e->value, "+") == 0)) {
+        long long v;
+        if (!ie_const_value(gen, e->children[0], &v, depth + 1)) return 0;
+        *out = e->value[0] == '-' ? (long long)(0ULL - (unsigned long long)v) : v;
+        return 1;
+    }
+    if (e->type == AST_LITERAL && e->value && ie_int_kind(e->node_type)) {
+        char digits[72];
+        size_t k = 0;
+        for (const char* p = e->value; *p && k + 1 < sizeof(digits); p++)
+            if (*p != '_') digits[k++] = *p;
+        digits[k] = '\0';
+        const char* s = digits;
+        int neg = 0;
+        if (*s == '-' || *s == '+') neg = *s++ == '-';
+        int base = 10;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+        if (!*s) return 0;
+        char* end = NULL;
+        errno = 0;
+        unsigned long long m = strtoull(s, &end, base);
+        while (end && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')) end++;
+        if (errno || !end || *end) return 0;
+        *out = (long long)(neg ? 0ULL - m : m);
+        return 1;
+    }
+    if (gen->in_const_init && e->type == AST_IDENTIFIER && e->value) {
+        ASTNode* cd = file_scope_value_const(gen->program, e->value);
+        if (cd && cd->child_count > 0) return ie_const_value(gen, cd->children[0], out, depth + 1);
+    }
+    return 0;
+}
+
+/* `v` read in width `w`, as C converts it there. */
+static long long ie_in_width(long long v, AeIntWidth w) {
+    switch (w) {
+        case AE_IW_I32: return (long long)(int)(unsigned int)(unsigned long long)v;
+        case AE_IW_U32: return (long long)(unsigned int)(unsigned long long)v;
+        default: return v;
+    }
+}
+
+static void ie_emit_operand(CodeGenerator* gen, ASTNode* n, const char* text) {
+    if (text) fputs(text, gen->output);
+    else generate_read(gen, n);
+}
+
+/* #3524: emits `l op r` for an integer `/`, `%`, `<<` or `>>` where C's own
+ * operator is not defined for every value, and returns 1. Returns 0 having
+ * emitted nothing where it is (a constant operand that keeps it so), or when
+ * the operands are no integers; the caller emits C's operator then. `l_text`
+ * is the left operand's C when it has no node (a compound assignment's
+ * target, read twice there as C's `x op= y` reads it). `result` is the
+ * operation's type, whose 64 bits widen a narrower operand (#697); NULL for
+ * a compound assignment, which C computes in its operands' own types. */
+/* What emit_int_edge_op makes of `l op r`: 0 when C's operator is left as
+ * it is, else 1, with the width, the constant divisor or count if there is
+ * one, and whether it is one. */
+static int int_edge_plan(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                         Type* result, AeIntWidth* w_out, long long* c_out, int* const_out) {
+    if (!op || !r) return 0;
+    int is_div = strcmp(op, "/") == 0, is_mod = strcmp(op, "%") == 0;
+    int is_shl = strcmp(op, "<<") == 0, is_shr = strcmp(op, ">>") == 0;
+    if (!is_div && !is_mod && !is_shl && !is_shr) return 0;
+    if (result && !ie_int_kind(result)) return 0;
+    Type* rt = r->node_type;
+    AeIntWidth w = (is_div || is_mod) ? ie_arith_width(lt, rt, result)
+                                      : ie_shift_width(lt, rt, result);
+    if (w == AE_IW_NONE) return 0;
+    long long c = 0;
+    int is_const = ie_const_value(gen, r, &c, 0);
+    if (is_div || is_mod) {
+        long long cv = ie_in_width(c, w);
+        int minus_one = ie_signed(w) && cv == -1;
+        if (is_const && cv != 0 && !minus_one) return 0;
+        /* A static's initializer calls nothing. -1 is the wrap, or 0; a
+         * zero never gets here, the checker refuses it (#3524), and a
+         * divisor no constant gives is left to C's compiler. */
+        if (gen->in_const_init && (!is_const || !minus_one)) return 0;
+    } else if (is_shr && is_const && c >= 0 && c < ie_bits(w)) {
+        /* A right shift by a count inside the width is C's own. */
+        return 0;
+    }
+    *w_out = w;
+    *c_out = c;
+    *const_out = is_const;
+    return 1;
+}
+
+int int_edge_op_applies(CodeGenerator* gen, const char* op, Type* lt, ASTNode* r,
+                        Type* result) {
+    AeIntWidth w;
+    long long c;
+    int k;
+    return int_edge_plan(gen, op, lt, r, result, &w, &c, &k);
+}
+
+int emit_int_edge_op(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                     Type* lt, ASTNode* r, Type* result, const ASTNode* pos) {
+    AeIntWidth w = AE_IW_NONE;
+    long long c = 0;
+    int is_const = 0;
+    if (!int_edge_plan(gen, op, lt, r, result, &w, &c, &is_const)) return 0;
+    int is_div = strcmp(op, "/") == 0, is_mod = strcmp(op, "%") == 0;
+    int is_shl = strcmp(op, "<<") == 0;
+    const char* ct = ie_c_type(w);
+    FILE* o = gen->output;
+    if (is_div || is_mod) {
+        if (gen->in_const_init) {
+            if (is_mod) {
+                fprintf(o, "((%s)0)", ct);
+            } else {
+                fprintf(o, "((%s)(0%s - (%s)(", ct, ie_bits(w) == 64 ? "ULL" : "u",
+                        ie_bits(w) == 64 ? "uint64_t" : "unsigned int");
+                ie_emit_operand(gen, l, l_text);
+                fprintf(o, ")))");
+            }
+            return 1;
+        }
+        fprintf(o, "_ae_%s_%s(", is_div ? "div" : "mod", ie_suffix(w));
+        ie_emit_operand(gen, l, l_text);
+        fprintf(o, ", ");
+        generate_read(gen, r);
+        fprintf(o, ", \"division_by_zero: division by zero at \" ");
+        emit_slice_diag_file(gen, pos);
+        fprintf(o, " \":%d:%d\")", pos ? pos->line : 0, pos ? pos->column : 0);
+        return 1;
+    }
+    /* `((T)(((U)(l)) << n))` for a signed left shift, `(((T)(l)) op n)`
+     * otherwise; `n` is the count masked, or a constant one as it is. */
+    int bits = ie_bits(w);
+    int in_range = is_const && c >= 0 && c < bits;
+    int via_unsigned = is_shl && ie_signed(w);
+    if (via_unsigned)
+        fprintf(o, "((%s)(((%s)(", ct, bits == 64 ? "uint64_t" : "unsigned int");
+    else
+        fprintf(o, "(((%s)(", ct);
+    ie_emit_operand(gen, l, l_text);
+    fprintf(o, ")) %s ", is_shl ? "<<" : ">>");
+    if (in_range) {
+        generate_read(gen, r);
+    } else if (is_const) {
+        fprintf(o, "%lld", (long long)((unsigned long long)c & (unsigned long long)(bits - 1)));
+    } else {
+        fprintf(o, "((");
+        generate_read(gen, r);
+        fprintf(o, ") & %d)", bits - 1);
+    }
+    fprintf(o, via_unsigned ? "))" : ")");
+    return 1;
+}
+
+/* #3524: `/` and `%` on integer lanes (i32x4, i64x2, i16x8, i32x8) follow
+ * the scalar rules lane by lane: a zero divisor in any lane panics with the
+ * category `division_by_zero` and the operation's position, and a lane's
+ * most negative value divided by -1 is itself, its remainder 0. They go
+ * through the _ae_<lanes>_div_checked / _mod_checked helpers (codegen.c),
+ * except for a constant scalar divisor other than 0 and -1, which keeps
+ * C's operator (or the eight-lane _ae_i32x8_div / _mod): no lane can be 0
+ * or -1 there. */
+static const struct { TypeKind k; const char* p; const char* v; const char* e; int bits; }
+    lane_int_kinds[] = {
+        { TYPE_I32X4, "i32x4", "AeI32x4", "int32_t", 32 },
+        { TYPE_I64X2, "i64x2", "AeI64x2", "int64_t", 64 },
+        { TYPE_I16X8, "i16x8", "AeI16x8", "int16_t", 16 },
+        { TYPE_I32X8, "i32x8", "AeI32x8", "int32_t", 32 },
+    };
+
+static int lane_int_index(TypeKind k) {
+    for (int i = 0; i < (int)(sizeof(lane_int_kinds) / sizeof(lane_int_kinds[0])); i++)
+        if (lane_int_kinds[i].k == k) return i;
+    return -1;
+}
+
+/* The integer lane kind `l op r` divides in, for `/` and `%`: the kind of
+ * the operand that is an integer lane value. TYPE_UNKNOWN for anything else
+ * (a float lane, two scalars). */
+TypeKind lane_int_div_kind(const char* op, const Type* lt, const Type* rt) {
+    if (!op || (strcmp(op, "/") != 0 && strcmp(op, "%") != 0)) return TYPE_UNKNOWN;
+    if (lt && lane_int_index(lt->kind) >= 0) return lt->kind;
+    if (rt && lane_int_index(rt->kind) >= 0) return rt->kind;
+    return TYPE_UNKNOWN;
+}
+
+/* Does `op` (`/` or `%`) on lanes of kind `vk` by `r` need the checked
+ * helper? Not for a constant scalar divisor other than 0 and -1, read in
+ * the lane's width (a splat converts it there). */
+int lane_int_div_applies(CodeGenerator* gen, const char* op, TypeKind vk, ASTNode* r) {
+    int ki = lane_int_index(vk);
+    if (!op || (strcmp(op, "/") != 0 && strcmp(op, "%") != 0) || ki < 0 || !r) return 0;
+    if (r->node_type && r->node_type->kind == vk) return 1;
+    long long c = 0;
+    if (!ie_const_value(gen, r, &c, 0)) return 1;
+    int bits = lane_int_kinds[ki].bits;
+    long long cv = bits == 16 ? (long long)(int16_t)(uint16_t)(unsigned long long)c
+                 : bits == 32 ? (long long)(int32_t)(uint32_t)(unsigned long long)c
+                 : c;
+    return cv == 0 || cv == -1;
+}
+
+/* An operand of a lane division: a lane value as it is, a scalar splat. */
+static void lane_div_operand(CodeGenerator* gen, ASTNode* n, const char* text, int ki) {
+    if (text) {
+        fputs(text, gen->output);
+    } else if (n->node_type && n->node_type->kind == lane_int_kinds[ki].k) {
+        generate_expression(gen, n);
+    } else if (lane_int_kinds[ki].k == TYPE_I32X8) {
+        fprintf(gen->output, "_ae_i32x8_splat((int)(");
+        generate_expression(gen, n);
+        fprintf(gen->output, "))");
+    } else {
+        fprintf(gen->output, "((%s){0} + (%s)(", lane_int_kinds[ki].v, lane_int_kinds[ki].e);
+        generate_expression(gen, n);
+        fprintf(gen->output, "))");
+    }
+}
+
+/* Emits `l op r` on lanes of kind `vk` through the checked helper and
+ * returns 1, or returns 0 having emitted nothing when C's operator stays
+ * (lane_int_div_applies). `l_text` is the left operand's C when it has no
+ * node (a compound assignment's target); `pos` is the operation. */
+int emit_lane_int_div(CodeGenerator* gen, const char* op, ASTNode* l, const char* l_text,
+                      TypeKind vk, ASTNode* r, const ASTNode* pos) {
+    if (!lane_int_div_applies(gen, op, vk, r)) return 0;
+    int ki = lane_int_index(vk);
+    FILE* o = gen->output;
+    fprintf(o, "_ae_%s_%s_checked(", lane_int_kinds[ki].p, op[0] == '/' ? "div" : "mod");
+    lane_div_operand(gen, l, l_text, ki);
+    fprintf(o, ", ");
+    lane_div_operand(gen, r, NULL, ki);
+    fprintf(o, ", \"division_by_zero: division by zero at \" ");
+    emit_slice_diag_file(gen, pos);
+    fprintf(o, " \":%d:%d\")", pos ? pos->line : 0, pos ? pos->column : 0);
+    return 1;
+}
+
+/* #3524: the suffix of the helper a float converted to integer type `t`
+ * saturates through, or NULL when `t` is no integer type. An `int8_t` or
+ * `int16_t` (an int's kind) saturates at its own width. */
+static const char* f2i_suffix(const Type* t) {
+    if (!t) return NULL;
+    if (t->c_alias && t->kind == TYPE_INT) {
+        if (strcmp(t->c_alias, "int8_t") == 0) return "i8";
+        if (strcmp(t->c_alias, "int16_t") == 0) return "i16";
+    }
+    switch (t->kind) {
+        case TYPE_INT: return "i32";
+        case TYPE_INT64: case TYPE_DURATION: return "i64";
+        case TYPE_UINT64: return "u64";
+        case TYPE_UINT32: return "u32";
+        case TYPE_UINT16: return "u16";
+        case TYPE_UINT8: case TYPE_BYTE: return "u8";
+        default: return NULL;
+    }
+}
+
+static int ie_float_kind(const Type* t) {
+    return t && (t->kind == TYPE_FLOAT || t->kind == TYPE_FLOAT32 || t->kind == TYPE_LONGDOUBLE);
+}
+
+/* A float constant the compiler reads: a literal, negated or not, and in a
+ * constant's initializer a constant it names. */
+static int f2i_const_value(CodeGenerator* gen, const ASTNode* e, double* out, int depth) {
+    if (!e || depth > 32) return 0;
+    if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1 &&
+        (strcmp(e->value, "-") == 0 || strcmp(e->value, "+") == 0)) {
+        if (!f2i_const_value(gen, e->children[0], out, depth + 1)) return 0;
+        if (e->value[0] == '-') *out = -*out;
+        return 1;
+    }
+    if (e->type == AST_LITERAL && e->value && ie_float_kind(e->node_type)) {
+        char* end = NULL;
+        double v = strtod(e->value, &end);
+        if (!end || end == e->value) return 0;
+        *out = v;
+        return 1;
+    }
+    if (gen->in_const_init && e->type == AST_IDENTIFIER && e->value) {
+        ASTNode* cd = file_scope_value_const(gen->program, e->value);
+        if (cd && cd->child_count > 0) return f2i_const_value(gen, cd->children[0], out, depth + 1);
+    }
+    return 0;
+}
+
+/* #3524: emits the float value `v` converted to the integer type `t`,
+ * saturating, and returns 1; returns 0 having emitted nothing when `v` is
+ * no float or `t` no integer type. A constant inside the range is C's cast,
+ * one outside it the limit it saturates at, so a static's initializer stays
+ * a constant expression. */
+int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t) {
+    if (!v || !ie_float_kind(v->node_type)) return 0;
+    const char* sfx = f2i_suffix(t);
+    if (!sfx) return 0;
+    static const struct { const char* sfx; double lo, hi; const char* min; const char* max; } r[] = {
+        { "i8",  -129.0, 128.0, "(-128)", "127" },
+        { "i16", -32769.0, 32768.0, "(-32768)", "32767" },
+        { "i32", -2147483649.0, 2147483648.0, "(-2147483647 - 1)", "2147483647" },
+        { "i64", -9223372036854775808.0, 9223372036854775808.0, "INT64_MIN", "INT64_MAX" },
+        { "u8",  -1.0, 256.0, "0", "255" },
+        { "u16", -1.0, 65536.0, "0", "65535" },
+        { "u32", -1.0, 4294967296.0, "0", "4294967295u" },
+        { "u64", -1.0, 18446744073709551616.0, "0", "UINT64_MAX" },
+    };
+    const char* ct = get_c_type(t);
+    double c = 0;
+    if (f2i_const_value(gen, v, &c, 0)) {
+        for (size_t i = 0; i < sizeof(r) / sizeof(r[0]); i++) {
+            if (strcmp(r[i].sfx, sfx) != 0) continue;
+            if (c != c) { fprintf(gen->output, "((%s)0)", ct); return 1; }
+            if (c > r[i].lo && c < r[i].hi) break;
+            fprintf(gen->output, "((%s)%s)", ct, c <= r[i].lo ? r[i].min : r[i].max);
+            return 1;
+        }
+        fprintf(gen->output, "((%s)(", ct);
+        generate_read(gen, v);
+        fprintf(gen->output, "))");
+        return 1;
+    }
+    if (gen->in_const_init) {
+        /* No call in a static's initializer: C's compiler folds the cast. */
+        fprintf(gen->output, "((%s)(", ct);
+        generate_read(gen, v);
+        fprintf(gen->output, "))");
+        return 1;
+    }
+    fprintf(gen->output, "((%s)_ae_%s2%s(", ct,
+            v->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx);
+    generate_read(gen, v);
+    fprintf(gen->output, "))");
+    return 1;
+}
+
+/* #3524: `x op= r` with an integer target `x` (C `l_text`, of type `t`)
+ * and a float `r`: emits `x = x op r` with the float result converted into
+ * `x` saturating. Returns 0 having emitted nothing for other operands. */
+int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t) {
+    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/", op)) return 0;
+    const char* sfx = f2i_suffix(t);
+    if (!sfx) return 0;
+    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(%s %c (", l_text, get_c_type(t),
+            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx, l_text, op);
+    generate_read(gen, r);
+    fprintf(gen->output, ")))");
+    return 1;
+}
+
+/* #3527: how a value of type `t` is written by an interpolation, print or
+ * println. Each kind names its conversion, and the int ones are int on
+ * purpose: `int` itself, the types narrower than it (`byte`, `uint8`,
+ * `uint16`, which C promotes to an int) and an enum (an int in C). Anything
+ * else has no conversion, PF_NONE, and the caller refuses it with
+ * print_fmt_refuse: it fell through to `%d` before, and a value that is
+ * really a pointer, a double or a 64-bit count read through `%d` is
+ * undefined. `Isolated[T]` is its `T`. A type left unresolved by the checker
+ * (an untyped struct field, the result of a function that returns a call
+ * through an erased `fn`) is the C `int` get_c_type stores every such value
+ * as, the legacy default it warns of where the value is declared, so it is
+ * written as that int: the conversion follows the storage. A value with no
+ * type at all is refused. */
+PrintFmt print_fmt_of(const Type* t) {
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t) return PF_NONE;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_ENUM:
+        case TYPE_UNKNOWN:
+            return PF_INT;
+        case TYPE_UINT32: return PF_UINT;
+        case TYPE_INT64: return PF_LONG;
+        case TYPE_UINT64: return PF_ULONG;
+        case TYPE_DURATION: return PF_DURATION;
+        case TYPE_FLOAT: case TYPE_FLOAT32: return PF_DOUBLE;
+        case TYPE_LONGDOUBLE: return PF_LDOUBLE;
+        case TYPE_BOOL: return PF_BOOL;
+        case TYPE_STRING: case TYPE_PTR: return PF_STRING;
+        default: return PF_NONE;
+    }
+}
+
+/* #3527: report that `v`, a value `what` writes (an interpolation, print,
+ * println), has a type no conversion writes: a compile error naming the
+ * type. The caller emits a placeholder; the build stops at the error. */
+void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what) {
+    (void)gen;
+    char msg[400];
+    const Type* t = v ? v->node_type : NULL;
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t)
+        snprintf(msg, sizeof(msg), "%s cannot write this value: it has no type", what);
+    else
+        snprintf(msg, sizeof(msg), "%s cannot write a value of type %s", what,
+                 type_spelled((Type*)t));
+    aether_error_full(msg, v ? v->line : 0, v ? v->column : 0,
+                      "it writes numbers, bool, string, ptr, enums and durations; convert the "
+                      "value to one of those first (a field of it, or `string.from_int(n)`)",
+                      what, AETHER_ERR_TYPE_MISMATCH);
+}
+
+/* #3527: `print(v)` / `println(v)` (`newline`) of one value that is no
+ * string or ptr, written with its kind's conversion; a kind with none is
+ * the compile error print_fmt_refuse reports, and `(void)0` stands in. */
+void emit_print_scalar(CodeGenerator* gen, ASTNode* v, int newline) {
+    PrintFmt pf = print_fmt_of(v->node_type);
+    const char* nl = newline ? "\\n" : "";
+    const char* call = "printf";
+    const char* conv = "%d";
+    switch (pf) {
+        case PF_INT: break;
+        case PF_UINT: conv = "%u"; break;
+        case PF_LONG: conv = "%lld"; break;
+        case PF_ULONG: conv = "%llu"; break;
+        /* The runtime formatter: a duration's text (#3526), and '.' for a
+         * float's radix whatever the process locale (#3525). */
+        case PF_DURATION: call = "_aether_interp_print"; conv = "%D"; break;
+        case PF_DOUBLE: call = "_aether_interp_print"; conv = "%f"; break;
+        case PF_LDOUBLE: call = "_aether_interp_print"; conv = "%Lf"; break;
+        case PF_BOOL:
+            fprintf(gen->output, "printf(\"%%s%s\", (", nl);
+            generate_expression(gen, v);
+            fprintf(gen->output, ") ? \"true\" : \"false\")");
+            return;
+        case PF_STRING: case PF_NONE:
+            print_fmt_refuse(gen, v, newline ? "println" : "print");
+            fprintf(gen->output, "(void)0");
+            return;
+    }
+    fprintf(gen->output, "%s(\"%s%s\", %s(", call, conv, nl, print_fmt_arg_cast(pf));
+    generate_expression(gen, v);
+    fprintf(gen->output, "))");
+}
+
+/* #3527: in `print("...%s...", v)` (a literal format), the conversion the
+ * format gets for `v`, whatever the program wrote, and `v` as it reads it.
+ * A kind with no conversion is refused, and `0` stands in for it. */
+void emit_print_format_spec(CodeGenerator* gen, ASTNode* v) {
+    switch (print_fmt_of(v->node_type)) {
+        case PF_INT: fprintf(gen->output, "%%d"); break;
+        case PF_UINT: fprintf(gen->output, "%%u"); break;
+        case PF_LONG: fprintf(gen->output, "%%lld"); break;
+        case PF_ULONG: fprintf(gen->output, "%%llu"); break;
+        case PF_DURATION: fprintf(gen->output, "%%D"); break;
+        case PF_DOUBLE: fprintf(gen->output, "%%f"); break;
+        case PF_LDOUBLE: fprintf(gen->output, "%%Lf"); break;
+        case PF_BOOL: case PF_STRING: fprintf(gen->output, "%%s"); break;
+        case PF_NONE:
+            print_fmt_refuse(gen, v, "a print format");
+            fprintf(gen->output, "%%d");
+            break;
+    }
+}
+
+void emit_print_format_arg(CodeGenerator* gen, ASTNode* v) {
+    PrintFmt pf = print_fmt_of(v->node_type);
+    if (pf == PF_BOOL) {
+        fprintf(gen->output, "(");
+        generate_expression(gen, v);
+        fprintf(gen->output, ") ? \"true\" : \"false\"");
+    } else if (pf == PF_STRING) {
+        fprintf(gen->output, "_aether_safe_str(");
+        generate_expression(gen, v);
+        fprintf(gen->output, ")");
+    } else if (pf == PF_NONE) {
+        fprintf(gen->output, "0");
+    } else {
+        fprintf(gen->output, "%s(", print_fmt_arg_cast(pf));
+        generate_expression(gen, v);
+        fprintf(gen->output, ")");
+    }
+}
+
+/* The `(T)` a value written with conversion `f` is passed as: the type the
+ * conversion reads, so a value stored wider (a single-scalar message field
+ * rides an intptr_t payload slot) or narrower is read as it. */
+const char* print_fmt_arg_cast(PrintFmt f) {
+    switch (f) {
+        case PF_INT: return "(int)";
+        case PF_UINT: return "(unsigned int)";
+        case PF_LONG: case PF_DURATION: return "(long long)";
+        case PF_ULONG: return "(unsigned long long)";
+        case PF_DOUBLE: return "(double)";
+        case PF_LDOUBLE: return "(long double)";
+        default: return "";
+    }
+}
+
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
  * runtime's aether_slice_take, _lend, _drop, _set and _grow1). Returns 0
  * for a name that is none of them. */
@@ -8464,6 +9220,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 fprintf(gen->output, "%s", safe_c_name(expr->value));
                 break;
             }
+            if (!gen->generating_lvalue && module_string_var_read(gen, expr)) {
+                emit_module_string_read(gen, expr->value);
+                break;
+            }
             if (gen->current_actor) {
                 int is_state_var = 0;
                 for (int i = 0; i < gen->state_var_count; i++) {
@@ -8741,7 +9501,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * conversion. Emit a plain C cast to the target's machine type;
              * for a distinct target, node_type->kind is the base kind, so
              * get_c_type yields the base C type (no runtime cost). */
-            if (expr->child_count > 0 && expr->node_type) {
+            if (expr->child_count > 0 && expr->node_type &&
+                emit_float_to_int(gen, expr->children[0], expr->node_type)) {
+                /* #3524: a float into an integer type saturates. */
+            } else if (expr->child_count > 0 && expr->node_type) {
                 fprintf(gen->output, "((%s)(", get_c_type(expr->node_type));
                 /* #2304: `s as ptr` on a slice is its element pointer, as a
                  * slice passed to a `ptr` slot is; a C cast of the
@@ -8774,6 +9537,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_BINARY_EXPRESSION:
+            /* #3549: a comparison borrows its operands (R3), as a call its
+             * arguments, by the same rule (arg_drain_select): a fresh string
+             * operand is held in a temporary while the comparison reads it
+             * and released after, whichever comparison it is (by bytes,
+             * against `null`, an optional against a value). The comparison
+             * is then generated inside, reading the temporaries. */
+            if (expr != g_operand_temps_wrapping && is_comparison(expr)) {
+                ArgDrainWrap ow;
+                memset(&ow, 0, sizeof(ow));
+                ow.have_value = 1;
+                ow.ret_ct = "int";
+                arg_drain_select(gen, expr, 0, NULL, NULL, 0, &ow, ARG_SEL_OPERATOR);
+                if (ow.count > 0) {
+                    const ASTNode* saved_cmp = g_operand_temps_wrapping;
+                    g_operand_temps_wrapping = expr;
+                    gen->in_condition = 0;
+                    arg_drain_open(gen, expr, &ow);
+                    generate_expression(gen, expr);
+                    arg_drain_close(gen, expr, &ow);
+                    g_operand_temps_wrapping = saved_cmp;
+                    break;
+                }
+            }
             if (expr->child_count >= 2 &&
                 ((expr->node_type && expr->node_type->kind == TYPE_FLOAT32) ||
                  (expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_FLOAT32) ||
@@ -8816,6 +9602,17 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
              * helper is the operator. A scalar operand splats, as it does for
              * the four-lane types, which keep C's operators: their width is
              * native on every target. */
+            /* #3524: `/` and `%` on integer lanes take the scalar rules lane
+             * by lane, unless a constant scalar divisor keeps C's operator,
+             * which the paths below write. */
+            if (expr->child_count >= 2 && expr->value) {
+                TypeKind ldk = lane_int_div_kind(expr->value, expr->children[0]->node_type,
+                                                 expr->children[1]->node_type);
+                if (ldk != TYPE_UNKNOWN &&
+                    emit_lane_int_div(gen, expr->value, expr->children[0], NULL, ldk,
+                                      expr->children[1], expr))
+                    break;
+            }
             if (expr->child_count >= 2 && expr->value) {
                 static const char* const lane8_ops[11][2] = {
                     {"+", "add"}, {"-", "sub"}, {"*", "mul"}, {"/", "div"}, {"%", "mod"},
@@ -9075,9 +9872,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * value wrapped into the optional would (`lo == 3` as
                          * `lo == some(3)`): equal when present with an equal
                          * value, a string? by its contents. Both operands are
-                         * evaluated, in source order, and a fresh string
-                         * operand (or an owned string? call's) is freed once
-                         * compared, as a string comparison frees it. */
+                         * evaluated, in source order. An owned string? call's
+                         * string is freed once compared; a fresh string
+                         * operand is the comparison's temporary, released by
+                         * the operand rule at the top of this case (#3549). */
                         ASTNode* opt = l_opt ? L : R;
                         ASTNode* bare = l_opt ? R : L;
                         Type* elem = opt->node_type->element_type;
@@ -9116,7 +9914,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int str_val = elem && elem->kind == TYPE_STRING;
                         Type* bt = bare->node_type && bare->node_type->kind != TYPE_UNKNOWN
                                    ? bare->node_type : elem;
-                        int drain_bare = str_val && is_fresh_heap_string_temp(gen, bare);
                         int drain_opt = str_val && is_owned_opt_string_call(gen, opt);
                         const char* o = NULL;
                         const char* v = NULL;
@@ -9146,10 +9943,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
                                     o, o);
                         }
-                        if (drain_bare) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free((void*)%s)", v);
-                        }
                         seq_next(gen, &s);
                         fprintf(gen->output, "%s", res);
                         seq_close(gen, &s);
@@ -9170,66 +9963,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 int is_string_cmp = binary_is_string_compare(expr);
 
                 if (is_string_cmp) {
-                    /* Operand drain — the binary-operator analogue of the
-                     * call-argument drain (ArgDrainSub). A heap-returning
-                     * string expression used directly as a comparison
-                     * operand (`string.substring(s, i, j) == "lit"`,
-                     * `a.concat(b) != c`, an interpolation) is an anonymous
-                     * allocation with no owner: evaluated, read by
-                     * _aether_safe_str, then leaked. Inside a loop this is
-                     * one leak per iteration (observed in test_fs_realpath's
-                     * substring-scan). Capture each such operand in a temp,
-                     * run the compare, then free it. Gated exactly like the
-                     * arg-drain: only AST_FUNCTION_CALL / AST_STRING_INTERP
-                     * operands that is_heap_string_expr classifies as
-                     * fresh heap — never a tracked local (it owns its own
-                     * lifetime), a borrowed return (string.to_cstr), or a
-                     * literal. So no double-free is possible. */
-                    ASTNode* cl = expr->children[0];
-                    ASTNode* cr = expr->children[1];
-                    /* An `or` over a heap value slot is one too: compared in
-                     * place (`(f() or { "d" }) == "d"`), it leaked. */
-                    int drain_l = is_fresh_heap_string_temp(gen, cl);
-                    int drain_r = is_fresh_heap_string_temp(gen, cr);
-                    if (drain_l || drain_r) {
-                        if (!skip_parens) fprintf(gen->output, "(");
-                        TempSeq s;
-                        seq_open(gen, &s);
-                        const char* sl = seq_let(gen, &s, "const char*", "_se_l");
-                        fprintf(gen->output, "(const char*)(");
-                        generate_expression(gen, cl);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &s);
-                        const char* sr = seq_let(gen, &s, "const char*", "_se_r");
-                        fprintf(gen->output, "(const char*)(");
-                        generate_expression(gen, cr);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &s);
-                        const char* sv = seq_let(gen, &s, "int", "_se_v");
-                        emit_string_compare_open(gen, expr->value);
-                        fprintf(gen->output, "%s, %s", sl, sr);
-                        emit_string_compare_close(gen, expr->value);
-                        if (drain_l) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free(%s)", sl);
-                        }
-                        if (drain_r) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free(%s)", sr);
-                        }
-                        seq_next(gen, &s);
-                        fprintf(gen->output, "%s", sv);
-                        seq_close(gen, &s);
-                        if (!skip_parens) fprintf(gen->output, ")");
-                    } else {
-                        if (!skip_parens) fprintf(gen->output, "(");
-                        emit_string_compare_open(gen, expr->value);
-                        generate_expression(gen, expr->children[0]);
-                        fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[1]);
-                        emit_string_compare_close(gen, expr->value);
-                        if (!skip_parens) fprintf(gen->output, ")");
-                    }
+                    /* A fresh string operand (`string.substring(s, i, j) ==
+                     * "lit"`, an interpolation, an `or` over a heap value
+                     * slot) is the comparison's temporary, held and released
+                     * by the operand rule at the top of this case (#3549):
+                     * here it is read by name. */
+                    if (!skip_parens) fprintf(gen->output, "(");
+                    emit_string_compare_open(gen, expr->value);
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", ");
+                    generate_expression(gen, expr->children[1]);
+                    emit_string_compare_close(gen, expr->value);
+                    if (!skip_parens) fprintf(gen->output, ")");
                 } else if (is_assignment && expr->children[0] &&
                            expr->children[0]->type == AST_MEMBER_ACCESS &&
                            aether_c_struct_overlay_lhs(expr->children[0])) {
@@ -9300,6 +10045,12 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "_AE_FDIV0(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ", %d)", neg ? -1 : 1);
+                } else if (!is_assignment &&
+                           emit_int_edge_op(gen, expr->value, expr->children[0], NULL,
+                                            expr->children[0]->node_type, expr->children[1],
+                                            expr->node_type, expr)) {
+                    /* #3524: an integer `/`, `%`, `<<` or `>>` C leaves
+                     * undefined for some values, with Java's rules. */
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
@@ -9454,6 +10205,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                needs_sum_coerce(expr->children[1], ltype)) {
                         /* #2985: a store into a sum place wraps a variant. */
                         emit_sum_coerced(gen, expr->children[1], ltype);
+                    } else if (is_assignment && emit_float_to_int(gen, expr->children[1], ltype)) {
+                        /* #3524: a float stored into an integer place
+                         * saturates, as `v as int` does. */
                     } else {
                         if (wide_cast && AE_IS_NARROW_INT(rtype)) fprintf(gen->output, "%s", wide_cast);
                         if (void_arith && rhs_void) fprintf(gen->output, "(char*)(");
@@ -9643,7 +10397,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fad.have_value = fad.ret_ct && strcmp(fad.ret_ct, "void") != 0;
                     fad.discarded = gen->discard_call_node == expr && !stmt_struct_temp_of(expr);
                     arg_drain_select(gen, expr, 0, NULL, NULL,
-                                     !fad.have_value || fad.discarded, &fad);
+                                     !fad.have_value || fad.discarded, &fad, ARG_SEL_CALL);
                     arg_drain_open(gen, expr, &fad);
                     int took = emit_fnptr_take_open(gen, expr);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
@@ -9697,6 +10451,50 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fnptr_sig->is_fnptr) {
                     generate_fnptr_local_call(gen, fnptr_sig, func_name, expr, ad_call_discarded);
                     break;
+                }
+
+                /* The argument temporaries of every call lowered by name
+                 * (#3549): a builtin, a container store, an actor's spawn
+                 * and a named function or extern alike. R3: a parameter
+                 * borrows, so a fresh value given straight to one (a call's
+                 * string, an interpolation, an ask's reply, a closure
+                 * literal, a buffer made for the call) is held in a
+                 * temporary, journaled while the call runs and released
+                 * once it returns; one the callee takes over (a free, a
+                 * keep, a container's adopted value) moves in instead
+                 * (arg_drain_select, call_arg_borrowed). The temporaries
+                 * are bound before the lowering below runs, so whichever
+                 * branch writes the call reads them by name; a call
+                 * through a closure value (`call`) picks its own, from the
+                 * closure's parameters. The wrap holds the call's value in
+                 * a temporary of its type: the type checker's, or, for an
+                 * unannotated callee, the C type its definition is emitted
+                 * with (#2519); with neither it drains only a call whose
+                 * value is discarded. */
+                ArgDrainWrap nad;
+                memset(&nad, 0, sizeof(nad));
+                nad.have_value = expr->node_type &&
+                                 expr->node_type->kind != TYPE_VOID &&
+                                 expr->node_type->kind != TYPE_UNKNOWN;
+                nad.ret_ct = NULL;
+                nad.ret_type = expr->node_type;
+                nad.discarded = ad_call_discarded;
+                int nad_is_void = (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
+                                  ad_call_discarded;
+                if (!nad.have_value && !nad_is_void) {
+                    const char* rct = NULL;
+                    int shape = callee_result_shape(gen, func_name, &rct);
+                    if (shape > 0) {
+                        nad.have_value = 1;
+                        nad.ret_ct = rct;
+                    } else if (shape == 0) {
+                        nad_is_void = 1;
+                    }
+                }
+                if (strcmp(func_name, "call") != 0) {
+                    arg_drain_select(gen, expr, 0, func_name, NULL, nad_is_void, &nad,
+                                     call_is_builtin(gen, expr) ? ARG_SEL_BUILTIN : ARG_SEL_CALL);
+                    arg_drain_open(gen, expr, &nad);
                 }
 
                 /* Slice ownership (slice_own.c puts these in the tree):
@@ -9795,38 +10593,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ASTNode* arg = expr->children[0];
                         Type* arg_type = arg->node_type;
 
-                        if (arg_type->kind == TYPE_INT) {
-                            fprintf(gen->output, "printf(\"%%d\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_UINT32) {
-                            /* A uint32 through %d prints values past 2^31 as
-                             * negative; uint32_t is unsigned int on every
-                             * target, so %u is its conversion. */
-                            fprintf(gen->output, "printf(\"%%u\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_INT64) {
-                            fprintf(gen->output, "printf(\"%%lld\", (long long)");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_UINT64) {
-                            fprintf(gen->output, "printf(\"%%llu\", (unsigned long long)");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_DURATION) {
-                            fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, "))");
-                        } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                            fprintf(gen->output, "printf(\"%%f\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_LONGDOUBLE) {
-                            fprintf(gen->output, "printf(\"%%Lf\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_STRING) {
+                        /* #3527: a string or a pointer by length, anything
+                         * else by its kind's conversion (emit_print_scalar),
+                         * a kind with none refused. */
+                        if (arg_type->kind == TYPE_STRING) {
                             if (arg->type == AST_LITERAL) {
                                 // String literal — never NULL, use printf directly
                                 fprintf(gen->output, "printf(");
@@ -9843,30 +10613,26 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "_aether_print_str(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_BOOL) {
-                            fprintf(gen->output, "printf(\"%%s\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, " ? \"true\" : \"false\")");
                         } else {
-                            fprintf(gen->output, "printf(\"%%d\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
+                            emit_print_scalar(gen, arg, 0);
                         }
                     } else if (expr->child_count == 1) {
                         ASTNode* a = expr->children[0];
                         if (a->type == AST_LITERAL && a->node_type && a->node_type->kind == TYPE_STRING) {
                             emit_print_literal_format(gen, a);
                         } else {
-                            fprintf(gen->output, "printf(\"%%d\", ");
-                            generate_expression(gen, a);
-                            fprintf(gen->output, ")");
+                            /* #3527: no type to write it by. */
+                            print_fmt_refuse(gen, a, "print");
+                            fprintf(gen->output, "(void)0");
                         }
                     } else if (expr->child_count >= 2 && expr->children[0]->type == AST_LITERAL &&
                                expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_STRING &&
                                expr->children[0]->value) {
-                        // Multi-arg with literal format string: auto-fix specifiers
+                        // Multi-arg with literal format string: auto-fix specifiers.
+                        // Written by the runtime formatter, whose %f is '.'
+                        // whatever the process locale (#3525).
                         const char* fmt = expr->children[0]->value;
-                        fprintf(gen->output, "printf(\"");
+                        fprintf(gen->output, "_aether_interp_print(\"");
                         int arg_idx = 1;
                         for (int fi = 0; fmt[fi]; fi++) {
                             if (fmt[fi] == '%' && fmt[fi + 1]) {
@@ -9878,15 +10644,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (fmt[fi] == '%') {
                                     fprintf(gen->output, "%%%%");
                                 } else if (arg_idx < expr->child_count) {
-                                    Type* atype = expr->children[arg_idx]->node_type;
-                                    if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
-                                    else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
-                                    else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
-                                    else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
-                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
-                                    else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
-                                    else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
-                                    else fprintf(gen->output, "%%d");
+                                    /* #3527: the argument's own conversion. */
+                                    emit_print_format_spec(gen, expr->children[arg_idx]);
                                     arg_idx++;
                                 } else {
                                     fprintf(gen->output, "%%%c", fmt[fi]);
@@ -9905,12 +10664,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "\", ");
                         for (int i = 1; i < expr->child_count; i++) {
                             if (i > 1) fprintf(gen->output, ", ");
-                            Type* atype = expr->children[i]->node_type;
-                            if (atype && atype->kind == TYPE_INT64) { fprintf(gen->output, "(long long)"); generate_expression(gen, expr->children[i]); }
-                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "_aether_duration_repr("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
-                            else if (atype && atype->kind == TYPE_BOOL) { generate_expression(gen, expr->children[i]); fprintf(gen->output, " ? \"true\" : \"false\""); }
-                            else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) { fprintf(gen->output, "_aether_safe_str("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
-                            else generate_expression(gen, expr->children[i]);
+                            emit_print_format_arg(gen, expr->children[i]);   /* #3527 */
                         }
                         fprintf(gen->output, ")");
                     } else {
@@ -9932,31 +10686,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     if (expr->child_count == 1 && expr->children[0]->node_type) {
                         ASTNode* arg = expr->children[0];
                         Type* arg_type = arg->node_type;
-                        if (arg_type->kind == TYPE_INT) {
-                            fprintf(gen->output, "printf(\"%%d\\n\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_UINT32) {
-                            fprintf(gen->output, "printf(\"%%u\\n\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_INT64) {
-                            fprintf(gen->output, "printf(\"%%lld\\n\", (long long)");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_UINT64) {
-                            fprintf(gen->output, "printf(\"%%llu\\n\", (unsigned long long)");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_DURATION) {
-                            fprintf(gen->output, "printf(\"%%s\\n\", _aether_duration_repr(");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, "))");
-                        } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                            fprintf(gen->output, "printf(\"%%f\\n\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_STRING) {
+                        /* #3527: a string or a pointer by length, anything
+                         * else by its kind's conversion (emit_print_scalar),
+                         * a long double included, which fell through to
+                         * `%d`; a kind with none refused. */
+                        if (arg_type->kind == TYPE_STRING) {
                             if (arg->type == AST_LITERAL && arg->value_len > 0) {
                                 /* Every byte, NULs included (#2520), and
                                  * the newline in the same write (#2521). */
@@ -9966,19 +10700,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "puts(");
                                 emit_string_literal_chars(gen, arg);
                                 fprintf(gen->output, ")");
-                            } else if (arg->type == AST_FUNCTION_CALL &&
-                                       is_heap_string_expr(gen, arg)) {
-                                /* Heap-producing call in bare argument
-                                 * position: the temporary is owned by no
-                                 * binding, print-and-free via the owned
-                                 * helper or it leaks per call (#1331
-                                 * review). Identifiers stay on the plain
-                                 * path; scope exit owns their free. */
-                                fprintf(gen->output, "_aether_println_owned(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
                             } else {
-                                // Runtime string, could be NULL; by length (#2521)
+                                /* Runtime string, could be NULL; by length
+                                 * (#2521). A fresh one is the call's
+                                 * argument temporary, released once it is
+                                 * written (#3549). */
                                 fprintf(gen->output, "_aether_println_str(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
@@ -9988,14 +10714,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "_aether_println_str(");
                             generate_expression(gen, arg);
                             fprintf(gen->output, ")");
-                        } else if (arg_type->kind == TYPE_BOOL) {
-                            fprintf(gen->output, "printf(\"%%s\\n\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, " ? \"true\" : \"false\")");
                         } else {
-                            fprintf(gen->output, "printf(\"%%d\\n\", ");
-                            generate_expression(gen, arg);
-                            fprintf(gen->output, ")");
+                            emit_print_scalar(gen, arg, 1);
                         }
                     } else if (expr->child_count == 1) {
                         ASTNode* a = expr->children[0];
@@ -10005,18 +10725,19 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             emit_string_literal_chars(gen, a);
                             fprintf(gen->output, ")");
                         } else {
-                            fprintf(gen->output, "printf(\"%%d\\n\", ");
-                            generate_expression(gen, a);
-                            fprintf(gen->output, ")");
+                            /* #3527: no type to write it by. */
+                            print_fmt_refuse(gen, a, "println");
+                            fprintf(gen->output, "(void)0");
                         }
                     } else if (expr->child_count == 0) {
                         fprintf(gen->output, "putchar('\\n')");
                     } else if (expr->child_count >= 2 && expr->children[0]->type == AST_LITERAL &&
                                expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_STRING &&
                                expr->children[0]->value) {
-                        // Multi-arg with literal format: auto-fix specifiers + newline
+                        // Multi-arg with literal format: auto-fix specifiers + newline,
+                        // by the runtime formatter, as print's above (#3525).
                         const char* fmt = expr->children[0]->value;
-                        fprintf(gen->output, "printf(\"");
+                        fprintf(gen->output, "_aether_interp_print(\"");
                         int arg_idx = 1;
                         for (int fi = 0; fmt[fi]; fi++) {
                             if (fmt[fi] == '%' && fmt[fi + 1]) {
@@ -10028,15 +10749,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 if (fmt[fi] == '%') {
                                     fprintf(gen->output, "%%%%");
                                 } else if (arg_idx < expr->child_count) {
-                                    Type* atype = expr->children[arg_idx]->node_type;
-                                    if (atype && atype->kind == TYPE_LONGDOUBLE) fprintf(gen->output, "%%Lf");
-                                    else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) fprintf(gen->output, "%%f");
-                                    else if (atype && atype->kind == TYPE_INT64) fprintf(gen->output, "%%lld");
-                                    else if (atype && atype->kind == TYPE_UINT32) fprintf(gen->output, "%%u");
-                                    else if (atype && atype->kind == TYPE_DURATION) fprintf(gen->output, "%%s");
-                                    else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) fprintf(gen->output, "%%s");
-                                    else if (atype && atype->kind == TYPE_BOOL) fprintf(gen->output, "%%s");
-                                    else fprintf(gen->output, "%%d");
+                                    /* #3527: the argument's own conversion. */
+                                    emit_print_format_spec(gen, expr->children[arg_idx]);
                                     arg_idx++;
                                 } else {
                                     fprintf(gen->output, "%%%c", fmt[fi]);
@@ -10055,12 +10769,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         fprintf(gen->output, "\\n\", ");
                         for (int i = 1; i < expr->child_count; i++) {
                             if (i > 1) fprintf(gen->output, ", ");
-                            Type* atype = expr->children[i]->node_type;
-                            if (atype && atype->kind == TYPE_INT64) { fprintf(gen->output, "(long long)"); generate_expression(gen, expr->children[i]); }
-                            else if (atype && atype->kind == TYPE_DURATION) { fprintf(gen->output, "_aether_duration_repr("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
-                            else if (atype && atype->kind == TYPE_BOOL) { generate_expression(gen, expr->children[i]); fprintf(gen->output, " ? \"true\" : \"false\""); }
-                            else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) { fprintf(gen->output, "_aether_safe_str("); generate_expression(gen, expr->children[i]); fprintf(gen->output, ")"); }
-                            else generate_expression(gen, expr->children[i]);
+                            emit_print_format_arg(gen, expr->children[i]);   /* #3527 */
                         }
                         fprintf(gen->output, ")");
                     } else {
@@ -10190,9 +10899,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          expr->children[0]->node_type->kind == TYPE_STRING) {
                     /* R3: a module `var` owns its string as a local does:
                      * freed, it gives its reference back and is left empty,
-                     * so the next store finds nothing to release. */
+                     * so the next store finds nothing to release. A `string`
+                     * var's empty value is stored as any other is, under its
+                     * lock (#3522); a `ptr` var holding a string has none. */
                     const char* g = expr->children[0]->value;
-                    fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)", g, g);
+                    if (is_module_string_var(gen, g)) {
+                        fprintf(gen->output, "(");
+                        emit_module_string_store(gen, g, NULL, NULL);
+                        fprintf(gen->output, ", (void)0)");
+                    } else {
+                        fprintf(gen->output, "(aether_heap_str_free((void*)%s), %s = NULL, (void)0)",
+                                g, g);
+                    }
                 }
                 else if ((strcmp(func_name, "release") == 0 || strcmp(func_name, "free") == 0) &&
                          expr->child_count == 1) {
@@ -10396,7 +11114,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     if (defined_val) {
                         generate_expression(gen, defined_val);
-                        break;
+                        goto by_name_done;
                     }
                     /* A platform with no value and no `other:` is E0701 in
                      * the typechecker (#3002, check_select_platforms), so
@@ -10584,7 +11302,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             break;
                         }
                         arg_drain_select(gen, expr, 1, NULL, literal,
-                                         !ad.have_value || ad_call_discarded, &ad);
+                                         !ad.have_value || ad_call_discarded, &ad, ARG_SEL_CALL);
                         arg_drain_open(gen, expr, &ad);
                         // Generate typed call: _closure_fn_N((_closure_env_N*)closure.env, args...)
                         fprintf(gen->output, "_closure_fn_%d((_closure_env_%d*)",
@@ -10684,7 +11402,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ad.have_value = strcmp(ret, "void") != 0;
                         ad.discarded = ad_call_discarded;
                         arg_drain_select(gen, expr, 1, NULL, NULL,
-                                         !ad.have_value || ad_call_discarded, &ad);
+                                         !ad.have_value || ad_call_discarded, &ad, ARG_SEL_CALL);
                         /* #2519: an owned closure used as the callee (a
                          * literal, or one a call hands over: `call(
                          * make_counter())`) is held by nothing else. It
@@ -10797,7 +11515,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "-1");
                         }
                         fprintf(gen->output, ")");
-                        break;
+                        goto by_name_done;
                     }
 
                     /* List owned-string element auto-routing (#467).
@@ -10868,7 +11586,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ASTNode* cval = closure_container_store_value(gen, expr);
                         if (cval) {
                             emit_closure_container_store(gen, expr, cval, ad_call_discarded);
-                            break;
+                            goto by_name_done;
                         }
                     }
                     if (is_list_shape || is_map_shape || is_set_shape) {
@@ -10898,7 +11616,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "), (void*)");
                                 emit_string_literal_node(gen, val);
                                 fprintf(gen->output, ")");
-                                break;
+                                goto by_name_done;
                             }
                             if (val && val->node_type &&
                                 (val->node_type->kind == TYPE_STRING ||
@@ -10938,61 +11656,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 } else if (is_set_shape) {
                                     fprintf(gen->output, "list_set_string_adopted(%s, %s, %s)", cc, ck, cv);
                                 } else {
+                                    /* The key is borrowed for the put (the
+                                     * map keeps a reference of its own, or a
+                                     * copy of a plain C string): a fresh one
+                                     * is the call's argument temporary,
+                                     * released after the put (#3549). */
                                     fprintf(gen->output, "%s(%s, %s, %s)",
                                             is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
                                             cc, ck, cv);
                                 }
                                 seq_close(gen, &s);
-                                break;
+                                goto by_name_done;
                             }
                         }
                     }
-
-                    /* Argument-temp lifetime wrap. Any heap-returning
-                     * AST_FUNCTION_CALL appearing in argument position
-                     * is an anonymous heap allocation with no consumer
-                     * — pre-fix this is a leak per call. Hoist each
-                     * such arg into a named temporary, run the parent
-                     * call, then free the temps (the wrap, a sequence
-                     * of temporaries). See ArgDrainSub at the top of
-                     * this file for the full rationale.
-                     *
-                     * Skip when the parent's return type is unknown:
-                     * the wrap holds the value in a temporary of its
-                     * type (a void parent yields nothing, see below).
-                     * Skip when the args are themselves substitution-
-                     * registered (we're inside a parent wrap already
-                     * — the registered entry handles the lifetime). */
-                    ArgDrainWrap ad;
-                    ad.have_value = expr->node_type &&
-                                    expr->node_type->kind != TYPE_VOID &&
-                                    expr->node_type->kind != TYPE_UNKNOWN;
-                    ad.ret_ct = NULL;
-                    ad.ret_type = expr->node_type;
-                    ad.discarded = ad_call_discarded;
-                    int ad_is_void = (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
-                                     ad_call_discarded;
-                    if (!ad.have_value && !ad_is_void) {
-                        /* #2519: the checker stamped no type on the call
-                         * (an unannotated callee), so the wrap could not
-                         * name its result's type and drained nothing. The
-                         * callee's definition says whether its C function
-                         * returns a value and of what type (the rule
-                         * generate_function emits the signature by), and
-                         * the temp is declared with that type (#2765: not
-                         * inferred, which only GCC-compatible compilers
-                         * can). */
-                        const char* rct = NULL;
-                        int shape = callee_result_shape(gen, func_name, &rct);
-                        if (shape > 0) {
-                            ad.have_value = 1;
-                            ad.ret_ct = rct;
-                        } else if (shape == 0) {
-                            ad_is_void = 1;
-                        }
-                    }
-                    arg_drain_select(gen, expr, 0, func_name, NULL, ad_is_void, &ad);
-                    arg_drain_open(gen, expr, &ad);
 
                     /* A trusted call in an enforced block goes through its
                      * wrapper (codegen.c emit_sandbox_trust_wrappers), which
@@ -11264,6 +11941,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             /* #914: a variant struct flowing into a sum
                              * parameter wraps into the tagged union. */
                             emit_sum_coerced(gen, arg, expected_type);
+                        } else if (emit_float_to_int(gen, arg,
+                                                     ext_name ? extern_param_t : expected_type)) {
+                            /* #3524: a float into an integer parameter
+                             * saturates, as `v as int` does. */
                         } else if (expected == TYPE_PTR && arg->node_type &&
                             arg->node_type->kind == TYPE_FUNCTION &&
                             !arg->node_type->is_fnptr) {
@@ -11474,8 +12155,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                                        ? g_builder_cfg_var : "(void*)0");
                     }
                     fprintf(gen->output, adopt ? "))" : ")");
-                    arg_drain_close(gen, expr, &ad);
                 }
+            by_name_done:
+                arg_drain_close(gen, expr, &nad);
             }
             break;
 
@@ -11504,20 +12186,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         emit_c_string_bytes(gen, ch->value ? ch->value : "", \
                                             (size_t)ast_literal_length(ch), 1); \
                     } else { \
-                        TypeKind tk = (ch->node_type) ? ch->node_type->kind : TYPE_UNKNOWN; \
-                        switch (tk) { \
-                            case TYPE_INT:    fprintf(gen->output, "%%d");  break; \
-                            case TYPE_INT64:  fprintf(gen->output, "%%lld"); break; \
-                            case TYPE_UINT32: fprintf(gen->output, "%%u");  break; \
-                            case TYPE_UINT64: fprintf(gen->output, "%%llu"); break; \
-                            case TYPE_DURATION: fprintf(gen->output, "%%s"); break; \
-                            case TYPE_FLOAT:  fprintf(gen->output, "%%g");  break; \
-                            case TYPE_FLOAT32: fprintf(gen->output, "%%g");  break; \
-                            case TYPE_LONGDOUBLE: fprintf(gen->output, "%%Lg"); break; \
-                            case TYPE_BOOL:   fprintf(gen->output, "%%s");  break; \
-                            case TYPE_STRING: fprintf(gen->output, "%%s");  break; \
-                            case TYPE_PTR:    fprintf(gen->output, "%%s");  break; \
-                            default:          fprintf(gen->output, "%%d");  break; \
+                        /* #3527: by the kind's own conversion; a type with \
+                         * none is a compile error, where it was a `%d`. */ \
+                        switch (print_fmt_of(ch->node_type)) { \
+                            case PF_INT:      fprintf(gen->output, "%%d");  break; \
+                            case PF_UINT:     fprintf(gen->output, "%%u");  break; \
+                            case PF_LONG:     fprintf(gen->output, "%%lld"); break; \
+                            case PF_ULONG:    fprintf(gen->output, "%%llu"); break; \
+                            case PF_DURATION: fprintf(gen->output, "%%D"); break; \
+                            case PF_DOUBLE:   fprintf(gen->output, "%%g");  break; \
+                            case PF_LDOUBLE:  fprintf(gen->output, "%%Lg"); break; \
+                            case PF_BOOL: case PF_STRING: fprintf(gen->output, "%%s"); break; \
+                            case PF_NONE: \
+                                print_fmt_refuse(gen, ch, "an interpolation"); \
+                                fprintf(gen->output, "%%d"); \
+                                break; \
                         } \
                     } \
                 } \
@@ -11532,37 +12215,35 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         continue; \
                     } \
                     fprintf(gen->output, ", "); \
-                    TypeKind tk = ch->node_type ? ch->node_type->kind : TYPE_UNKNOWN; \
-                    if (tk == TYPE_BOOL) { \
+                    PrintFmt pf = print_fmt_of(ch->node_type); \
+                    if (pf == PF_BOOL) { \
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, " ? \"true\" : \"false\""); \
-                    } else if (tk == TYPE_STRING || tk == TYPE_PTR) { \
+                    } else if (pf == PF_STRING) { \
                         /* As held, an AetherString or a char*: the \
                          * formatter writes it by its length (#2521). */ \
                         fprintf(gen->output, "(const void*)("); \
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
-                    } else if (tk == TYPE_INT64) { \
-                        fprintf(gen->output, "(long long)"); \
-                        interp_emit_segment(gen, ch, it_names[i]); \
-                    } else if (tk == TYPE_INT) { \
-                        /* Aether int is C `int` and %d expects one, but a \
-                         * TYPE_INT value can be stored wider: a single-scalar \
-                         * message field rides the intptr_t payload slot. Narrow \
-                         * to (int) to match %d, as INT64 casts to (long long). \
-                         * Only genuine TYPE_INT values reach here (actor-ref / \
-                         * ptr fields are TYPE_PTR and print via %s), so no \
-                         * pointer is ever truncated. */ \
-                        fprintf(gen->output, "(int)"); \
-                        interp_emit_segment(gen, ch, it_names[i]); \
-                    } else if (tk == TYPE_UINT64) { \
-                        fprintf(gen->output, "(unsigned long long)"); \
-                        interp_emit_segment(gen, ch, it_names[i]); \
-                    } else if (tk == TYPE_DURATION) { \
-                        fprintf(gen->output, "_aether_duration_repr("); \
+                    } else if (pf == PF_NONE) { \
+                        /* Refused by the format above. */ \
+                        fprintf(gen->output, "0"); \
+                    } else if (pf == PF_DURATION) { \
+                        /* #3526: the formatter writes its text (%D). */ \
+                        fprintf(gen->output, "(long long)("); \
                         interp_emit_segment(gen, ch, it_names[i]); \
                         fprintf(gen->output, ")"); \
+                    } else if (pf == PF_INT || pf == PF_LONG || pf == PF_ULONG) { \
+                        /* As the conversion reads it: an int stored wider \
+                         * (a single-scalar message field rides the \
+                         * intptr_t payload slot) narrowed to the int %d \
+                         * expects, a 64-bit one as the long long %lld and \
+                         * %llu take. */ \
+                        fprintf(gen->output, "%s", print_fmt_arg_cast(pf)); \
+                        interp_emit_segment(gen, ch, it_names[i]); \
                     } else { \
+                        /* A uint32 is the unsigned int %u reads, a float \
+                         * promotes to the double %g reads. */ \
                         interp_emit_segment(gen, ch, it_names[i]); \
                     } \
                 } \
@@ -11612,7 +12293,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 /* R3: a string read from a place a later segment can store
                  * into is evaluated ahead holding a reference of its own,
                  * released once the interpolation has read it. */
-                int held = !heap && string_reads_place(gen, ch);
+                int held = !heap && string_reads_place(gen, ch) &&
+                           !(module_string_var_read(gen, ch) && hoist_ready(gen));   /* #3522 */
                 if (it_hoisted == 0) {
                     if (as_printf) fprintf(gen->output, "{ ");
                     else seq_open(gen, &it_seq);
@@ -11798,6 +12480,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     continue;
                 const char* el_struct = struct_owning_strings(gen, el ? el->node_type : NULL);
                 if (el_struct && struct_take_shape(el)) emit_struct_take(gen, el, el_struct, NULL);
+                else if (at && at->kind == TYPE_ARRAY && emit_float_to_int(gen, el, at->element_type)) {
+                    /* #3524: a float element of an integer array saturates. */
+                }
                 else generate_expression(gen, el);
             }
             fprintf(gen->output, "}");
@@ -11876,6 +12561,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 } else if (fdecl && fdecl->kind == TYPE_STRING && fv && fv->node_type &&
                            fv->node_type->kind == TYPE_STRING) {
                     emit_string_take_owned(gen, fv, 0);
+                } else if (emit_float_to_int(gen, fv, fdecl)) {
+                    /* #3524: a float into an integer field saturates. */
                 } else if (struct_literal_field_takes_array(gen, expr->value, field_init)) {
                     fprintf(gen->output, "{0}");   /* #2688: filled below */
                 } else if (fdecl && fdecl->kind == TYPE_PTR && fn_value_into_ptr(gen, fv)) {

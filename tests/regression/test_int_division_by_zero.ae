@@ -1,0 +1,132 @@
+// Regression (#3524): an integer division or remainder by zero is a named
+// panic, the same on every target.
+//
+// `/` and `%` went straight to C, where a zero divisor is undefined: x86
+// raised SIGFPE (a crash, unless the opt-in signal conversion was on) and
+// ARM64 gave a quiet 0, so one program behaved differently per platform.
+// Each now panics with the category `division_by_zero` and the operation's
+// source position, which a `catch` receives, for every integer type and for
+// the compound forms `/=` and `%=` on a variable and on a field. A constant
+// divisor other than 0 and -1 is unchanged.
+
+import std.string
+
+extern exit(code: int)
+
+struct Box {
+    n: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+fn check_panic(e: string, line: string, what: string) {
+    check(string.starts_with(e, "division_by_zero: division by zero at "),
+        "${what}: category, got '${e}'")
+    check(string.contains(e, "test_int_division_by_zero.ae:${line}:"),
+        "${what}: position ${line}, got '${e}'")
+}
+
+div_int(a: int, b: int) -> string {
+    try {
+        println("no panic ${a / b}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod_int(a: int, b: int) -> string {
+    try {
+        println("no panic ${a % b}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div_long(a: long, b: long) -> string {
+    try {
+        long q = a / b
+        println("no panic ${q}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod_uint32(a: uint32, b: uint32) -> string {
+    try {
+        uint32 r = a % b
+        println("no panic ${r}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div_uint64(a: uint64, b: uint64) -> string {
+    try {
+        uint64 q = a / b
+        println("no panic ${q}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div_byte(a: byte, b: byte) -> string {
+    try {
+        int q = a / b
+        println("no panic ${q}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+div_assign(b: int) -> string {
+    x = 10
+    try {
+        x /= b
+        println("no panic ${x}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+mod_assign_field(b: int) -> string {
+    box = Box { n: 10 }
+    try {
+        box.n %= b
+        println("no panic ${box.n}")
+    } catch e {
+        return e
+    }
+    return "no panic"
+}
+
+main() {
+    zero = 0
+    check_panic(div_int(7, zero), "36", "int /")
+    check_panic(mod_int(7, zero), "45", "int %")
+    check_panic(div_long(7, 0), "54", "long /")
+    check_panic(mod_uint32(7, 0), "64", "uint32 %")
+    check_panic(div_uint64(7, 0), "74", "uint64 /")
+    check_panic(div_byte(7, 0), "84", "byte /")
+    check_panic(div_assign(zero), "95", "/=")
+    check_panic(mod_assign_field(zero), "106", "field %=")
+
+    // A divisor that is not zero divides as before, a constant one too.
+    seven = 7
+    two = 2
+    check(-7 / two == -3 && -7 % two == -1, "variable divisor")
+    check(-7 / 2 == -3 && -7 % 2 == -1, "constant divisor")
+    check(seven / 2 == 3 && seven % 2 == 1, "variable dividend")
+    println("division_by_zero: ok")
+}

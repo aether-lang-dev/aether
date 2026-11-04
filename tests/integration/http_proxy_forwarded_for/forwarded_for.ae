@@ -116,6 +116,9 @@ main() {
     http.server_stop(behind)
     http.server_stop(plain)
     http.server_stop(upstream)
+    http.server_free(behind)
+    http.server_free(plain)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

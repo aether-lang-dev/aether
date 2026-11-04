@@ -29,6 +29,16 @@ static int actor_has_wildcard_arm(ASTNode* actor) {
     return 0;
 }
 
+/* #3534: does the actor's step take messages to arms? Its struct then ends
+ * with the copy a payload that travelled in its message is handled from. */
+static int actor_has_receive_arms(ASTNode* actor) {
+    for (int i = 0; i < actor->child_count; i++) {
+        ASTNode* rs = actor->children[i];
+        if (rs && rs->type == AST_RECEIVE_STATEMENT && rs->child_count > 0) return 1;
+    }
+    return 0;
+}
+
 // Helper: given the receive-arm pattern, return 1 if the identifier name `rhs_name`
 // binds a pattern field whose message-def type_kind is TYPE_PTR or TYPE_STRING.
 // "Bound name" is either pf->value or its first PATTERN_VARIABLE child's value
@@ -469,7 +479,8 @@ static void emit_timeout_rearm(CodeGenerator* gen, ASTNode* timeout_arm) {
                     "self->_aether_base.last_activity_ns = (uint64_t)_aether_clock_ns();");
 }
 
-/* The handler's call on a heap payload, recorded in the actor's base while
+/* The handler's call on a payload (a heap copy, or the actor's copy of one
+ * that travelled in the message, #3534), recorded in the actor's base while
  * it runs: a panic out of it skips the release after it, and the step
  * barrier drops the message from there instead (#3142). */
 static void emit_handler_on_payload(CodeGenerator* gen, const char* actor, const char* msg) {
@@ -555,6 +566,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     }
+    /* #3534: the copy of a payload that travelled in its message, which
+     * the handler runs on (aether_message_take_payload) and the step
+     * barrier finds after a panic. Last, so the base and the state keep
+     * the cache lines they had: a small actor's step touches the line its
+     * state starts on. */
+    if (actor_has_receive_arms(actor)) print_line(gen, "AetherMsgInline _aether_step_inline;");
 
     unindent(gen);
     print_line(gen, "} %s;", actor->value);
@@ -995,7 +1012,11 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "");
     
     if (pattern_count > 0) {
-        print_line(gen, "void* _msg_data = msg.payload_ptr;");
+        /* #3534: a payload that travelled in the message is copied out to
+         * the actor's _aether_step_inline, where the handler and a panic's
+         * drop find it. */
+        print_line(gen, "void* _msg_data = aether_message_take_payload(&self->_aether_base, &msg, "
+                        "&self->_aether_step_inline);");
         print_line(gen, "int _msg_id = msg.type;");
         print_line(gen, "");
         // Emscripten/wasm32 doesn't support label-address tables (GCC's
@@ -1162,28 +1183,21 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                              * deep-copied at send time (#466). The
                              * _aether_msg_release_<Msg> function is
                              * emitted alongside the message struct
-                             * iff the message has at least one
-                             * string field; we always call it here
-                             * — for messages without string fields
-                             * the function isn't emitted and the C
-                             * compiler will reject this call,
-                             * but for the single-int path we land
-                             * here only when the message struct was
-                             * heap-allocated (non-inline path),
-                             * which by construction means the
-                             * message has at least one non-int
-                             * field. For inline (single-int)
-                             * messages this branch fires only when
-                             * _msg_data is non-NULL — same shape,
-                             * so the release_fields function is
-                             * always available. */
+                             * iff the message owns a field, so the
+                             * call is emitted only when
+                             * message_owns_fields says so. The
+                             * single-int path lands here only when
+                             * the message struct was sent whole (in
+                             * the message's payload area, #3534, or
+                             * on the heap) rather than as
+                             * payload_int. */
                             if (msg_def) {
                                 if (message_owns_fields(gen, pattern->value)) {
                                     print_line(gen, "_aether_msg_release_%s((%s*)_msg_data);",
                                                pattern->value, pattern->value);
                                 }
                             }
-                            print_line(gen, "aether_free_message(_msg_data);");
+                            print_line(gen, "aether_message_payload_done(_msg_data, &self->_aether_step_inline);");
                             unindent(gen);
                             print_line(gen, "} else {");
                             indent(gen);
@@ -1193,10 +1207,12 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                             unindent(gen);
                             print_line(gen, "}");
                         } else {
-                            // Two-field inline: reconstruct from payload_int + payload_ptr.
-                            // A message with no fields travels with no payload
-                            // unless an ask sent it: only then is there one to
-                            // record for a panic.
+                            // Every other message has its payload in _msg_data:
+                            // the actor's copy of one that travelled in the
+                            // message (#3534), or its heap copy. A message with
+                            // no fields travels with no payload unless an ask
+                            // sent it: only then is there one to record for a
+                            // panic.
                             if (msg_def && msg_def->fields) {
                                 emit_handler_on_payload(gen, actor->value, pattern->value);
                             } else {
@@ -1218,7 +1234,7 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
                                                pattern->value, pattern->value);
                                 }
                             }
-                            print_line(gen, "aether_free_message(_msg_data);");
+                            print_line(gen, "aether_message_payload_done(_msg_data, &self->_aether_step_inline);");
                         }
                         emit_timeout_rearm(gen, timeout_arm);
                         print_line(gen, "return;");

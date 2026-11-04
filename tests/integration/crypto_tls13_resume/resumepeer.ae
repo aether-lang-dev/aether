@@ -340,6 +340,8 @@ main() {
     }
     _pw = fs.write(os.getenv("PEER_PORT_OUT"), "${tcp.server_port(srv)}")
     sock, aerr = tcp.accept(srv)
+    // One connection is all the peer serves.
+    tcp.server_close(srv)
     if aerr != "" {
         println("FAIL: ${aerr}")
         exit(1)
@@ -358,6 +360,9 @@ main() {
     nonce = from_hex(NONCE)
     psk = tls13_kdf.expand_label(talgo, bytes.view(rm)[0..thl], "resumption", bytes.view(nonce)[0..1], thl)
     early = tls13_ks.early_secret_psk(talgo, bytes.view(psk)[0..thl])
+    bytes.free(rm)
+    bytes.free(nonce)
+    tls13_ks.free_secret(psk)
 
     ch = next_hello(&r)
     if ch == null {
@@ -370,6 +375,7 @@ main() {
     if ed_d >= 0 { eflag = 1 }
     bflag = "bad"
     if binder_ok(ch, empty, talgo, thl, early) == 1 { bflag = "ok" }
+    bytes.free(empty)
     println("CH binder=${bflag} early=${eflag}")
 
     // 0-RTT data, under client_early_traffic_secret over the ClientHello, in
@@ -463,6 +469,7 @@ main() {
     }
     cpub = bytes.new(sl)
     bytes.copy_from_bytes(cpub, 0, ch, so, sl)
+    bytes.free(ch)
     priv, _rerr = cryptography.random_buffer(32)
     if group == tls13_hs.GROUP_SECP256R1 {
         px, py = p256.scalar_mult_base(priv)
@@ -481,6 +488,8 @@ main() {
         s2, _xerr = x25519.agree(priv, cpub)
         shared = s2
     }
+    bytes.wipe_free(priv)
+    bytes.free(cpub)
 
     // The ServerHello: supported_versions, key_share, pre_shared_key.
     sgroup = group
@@ -504,6 +513,7 @@ main() {
     put16(exts, 2)
     put16(exts, pid)
     e = buf_take(exts)
+    bytes.free(ks)
     w2 = buf_new()
     put16(w2, 0x0303)
     srnd, _sr = cryptography.random_buffer(32)
@@ -516,10 +526,13 @@ main() {
     put_bytes(w2, e, 0, bytes.length(e))
     bytes.free(e)
     shb = buf_take(w2)
+    bytes.free(srnd)
+    bytes.free(sid)
     sh = hs_msg(2, shb)
     bytes.free(shb)
     send_plain(sock, 22, sh)
     tls13_client.transcript_add(tr, bytes.view(sh)[0..bytes.length(sh)])
+    bytes.free(sh)
 
     // A client that refuses the ServerHello answers now, in the clear.
     ready, _perr = tcp.poll(sock, 300)
@@ -532,8 +545,11 @@ main() {
     // The handshake keys: the PSK's early secret, then the ECDHE.
     th = tls13_client.transcript_hash_algo(tr, algo)
     hsec = tls13_ks.handshake_secret(algo, early, bytes.view(shared)[0..bytes.length(shared)])
+    tls13_ks.free_secret(early)
+    bytes.wipe_free(shared)
     c_hs = tls13_ks.traffic_secret(algo, hsec, "c hs traffic", bytes.view(th)[0..hl])
     s_hs = tls13_ks.traffic_secret(algo, hsec, "s hs traffic", bytes.view(th)[0..hl])
+    bytes.free(th)
     srv_ctx = ctx_of(algo, hl, aead, klen, s_hs)
     cli_ctx = ctx_of(algo, hl, aead, klen, c_hs)
 
@@ -553,11 +569,16 @@ main() {
     bytes.free(eeb)
     send_sealed(sock, srv_ctx, 22, ee)
     tls13_client.transcript_add(tr, bytes.view(ee)[0..bytes.length(ee)])
+    bytes.free(ee)
     th_ee = tls13_client.transcript_hash_algo(tr, algo)
     svd = tls13_client.finished_verify_data_algo(s_hs, bytes.view(th_ee)[0..hl], algo, hl)
+    bytes.free(th_ee)
+    tls13_ks.free_secret(s_hs)
     fin = tls13_hs.finished_msg(svd, hl)
     send_sealed(sock, srv_ctx, 22, fin)
     tls13_client.transcript_add(tr, bytes.view(fin)[0..bytes.length(fin)])
+    bytes.free(fin)
+    bytes.wipe_free(svd)
 
     // The application traffic secrets, over ClientHello..server Finished
     // (RFC 8446 7.1), EndOfEarlyData or not (#3336).
@@ -565,6 +586,9 @@ main() {
     ms = tls13_ks.master_secret(algo, hsec)
     c_ap = tls13_ks.traffic_secret(algo, ms, "c ap traffic", bytes.view(th_sf)[0..hl])
     s_ap = tls13_ks.traffic_secret(algo, ms, "s ap traffic", bytes.view(th_sf)[0..hl])
+    bytes.free(th_sf)
+    tls13_ks.free_secret(ms)
+    tls13_ks.free_secret(hsec)
 
     // EndOfEarlyData under the early traffic keys (4.5), then the Finished
     // under the client's handshake keys, over the transcript with it.
@@ -580,6 +604,9 @@ main() {
     }
     th_cf = tls13_client.transcript_hash_algo(tr, algo)
     want = tls13_client.finished_verify_data_algo(c_hs, bytes.view(th_cf)[0..hl], algo, hl)
+    bytes.free(th_cf)
+    tls13_ks.free_secret(c_hs)
+    tls13_client.transcript_free(tr)
     t2, p2 = client_record(&r, cli_ctx)
     fok = "bad"
     if t2 == 22 && bytes.length(p2) == 4 + hl && (bytes.get(p2, 0) & 0xFF) == 20 {
@@ -592,11 +619,14 @@ main() {
         if same == 1 { fok = "ok" }
     }
     println("FINISHED ${fok}")
+    bytes.wipe_free(want)
     bytes.free(p2)
 
     // The client's data under its application keys, then ours.
     actx = ctx_of(algo, hl, aead, klen, c_ap)
     sctx = ctx_of(algo, hl, aead, klen, s_ap)
+    tls13_ks.free_secret(c_ap)
+    tls13_ks.free_secret(s_ap)
     t3, p3 = client_record(&r, actx)
     if t3 == 23 { println("DATA ${string.trim(text_of(p3))}") } else { println("RECORD ${t3}") }
     bytes.free(p3)
@@ -606,5 +636,12 @@ main() {
     nr = next_record(&r)
     if nr != null { bytes.free(nr) }
     tcp.close(sock)
+    // The record contexts, the early one too when there was 0-RTT data.
+    tls13_record.free_ctx(srv_ctx)
+    tls13_record.free_ctx(cli_ctx)
+    tls13_record.free_ctx(actx)
+    tls13_record.free_ctx(sctx)
+    if ectx != null { tls13_record.free_ctx(ectx) }
+    bytes.free(r.buf)
     exit(0)
 }

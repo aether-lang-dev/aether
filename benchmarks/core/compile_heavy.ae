@@ -1,0 +1,22 @@
+// A program that imports a good part of std, for the compile time rows of
+// benchmarks/core/run.ae (#3518). It only has to compile; it prints one line.
+
+import std.string
+import std.list
+import std.map
+import std.json
+import std.fs
+import std.os
+import std.path
+import std.http
+import std.url
+import std.regex
+import std.time
+import std.cryptography
+import std.yaml
+import std.xml
+
+main() {
+    q = url.encode("a b&c")
+    println("compiled ${q}")
+}

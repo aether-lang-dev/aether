@@ -15,6 +15,8 @@
 #include "../../runtime/aether_locale_num.h"
 #include "../../runtime/config/aether_optimization_config.h"  // AETHER_HAS_THREADS
 #include "../../runtime/utils/aether_count.h"
+#include "../../runtime/actors/aether_panic.h"
+#include "../../runtime/utils/aether_compiler.h"  // AETHER_CPU_PAUSE
 
 #ifndef _WIN32
 #include <fnmatch.h>  // POSIX glob-pattern matching (string_glob_match_raw)
@@ -31,6 +33,17 @@ static inline size_t str_len(const void* s) {
     if (!s) return 0;
     if (is_aether_string(s)) return ((const AetherString*)s)->length;
     return strlen((const char*)s);
+}
+
+// A length or position as the int the string API returns (#3523). One past
+// INT_MAX has no right int answer: cast, a string over 2 GiB read as a
+// negative length, and a loop over it did nothing and said nothing. Cut to
+// INT_MAX it would be a wrong length or a wrong position just as quietly, so
+// it panics.
+static inline int str_int(size_t v) {
+    if (v > (size_t)INT_MAX)
+        aether_panic("string: a length or position past 2 GiB does not fit an int");
+    return (int)v;
 }
 
 // Alias for string literal creation
@@ -109,9 +122,9 @@ AetherString* string_empty(void) {
  * WITHOUT copying. The buffer MUST have come from aether_caps_malloc —
  * string_release reclaims it via aether_caps_free(data, capacity). On
  * struct-alloc failure the buffer is freed and NULL returned. This is
- * the zero-copy mint the string ops (concat/substring/upper/lower/trim)
- * use so they yield magic AetherStrings without the extra copy
- * string_new_with_length would make. */
+ * the zero-copy mint for a buffer filled before its string existed (a
+ * file read, a process's output); the string ops, which know the length
+ * first, write into string_alloc_inline's one block instead (#3530). */
 AetherString* string_adopt_caps_buffer(char* buf, size_t length, size_t cap) {
     if (!buf) return NULL;
     AetherString* s = string_header_for(buf);
@@ -182,13 +195,45 @@ void string_retain_shared(const void* str) {
     string_retain(str);
 }
 
+/* #3522: the lock of a module-level string `var` (aether_string.h). Held
+ * for a load and a retain, or for a swap: a few instructions, so a spin. */
+static void string_var_lock(atomic_flag* lock) {
+    while (atomic_flag_test_and_set_explicit(lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+}
+
+static void string_var_unlock(atomic_flag* lock) {
+    atomic_flag_clear_explicit(lock, memory_order_release);
+}
+
+const char* aether_string_var_take(const char* const* place, atomic_flag* lock) {
+    string_var_lock(lock);
+    const char* s = *place;
+    /* What a var holds was published by its store, so this counts
+     * atomically; a pinned literal is not counted. */
+    string_retain(s);
+    string_var_unlock(lock);
+    return s;
+}
+
+void aether_string_var_store(const char** place, atomic_flag* lock, const char* v) {
+    /* Published before it is reachable, so no reader counts it plainly. */
+    aether_string_publish(v);
+    string_var_lock(lock);
+    const char* old = *place;
+    *place = v;
+    string_var_unlock(lock);
+    string_release(old);
+}
+
 // String operations
 // Returns a magic AetherString* (refcounted, length-aware) — the unified
 // owned-heap string representation. Freed via string_release (dispatched
 // by aether_heap_str_free on the magic header); binary-safe (embedded
-// NULs preserved via the stored length). One zero-copy direct mint:
-// allocate the data buffer with aether_caps_malloc, write both halves,
-// adopt into an AetherString (no intermediate copy).
+// NULs preserved via the stored length). Written straight into one
+// block, the header then the text (string_alloc_inline), as every string
+// whose length is known before it is written now is (#3530): a separate
+// buffer and header cost two allocations and two frees, and put the header
+// and the text on different cache lines.
 AetherString* string_concat(const void* a, const void* b) {
     if (!a || !b) return NULL;
     size_t la = str_len(a), lb = str_len(b);
@@ -196,12 +241,11 @@ AetherString* string_concat(const void* a, const void* b) {
     // adding 1 for the null terminator.
     if (la > SIZE_MAX - lb - 1) return NULL;
     size_t new_length = la + lb;
-    char* buf = (char*)aether_caps_malloc(new_length + 1);
-    if (!buf) return NULL;
-    if (la) memcpy(buf, str_data(a), la);
-    if (lb) memcpy(buf + la, str_data(b), lb);
-    buf[new_length] = '\0';
-    return string_adopt_caps_buffer(buf, new_length, new_length + 1);
+    AetherString* out = string_alloc_inline(new_length);
+    if (!out) return NULL;
+    if (la) memcpy(out->data, str_data(a), la);
+    if (lb) memcpy(out->data + la, str_data(b), lb);
+    return out;
 }
 
 // Length-bearing variant of string_concat. Returns an AetherString*
@@ -223,24 +267,25 @@ AetherString* string_concat_wrapped(const void* a, const void* b) {
     if (la > SIZE_MAX - lb - 1) return NULL;
     size_t new_length = la + lb;
 
-    char* joined = (char*)malloc(new_length + 1);
-    if (!joined) return NULL;
-    if (la) memcpy(joined, da, la);
-    if (lb) memcpy(joined + la, db, lb);
-    joined[new_length] = '\0';
-
-    AetherString* wrapped = string_new_with_length(joined, new_length);
-    free(joined);
+    /* Joined where it stays: it was joined into a scratch buffer and then
+     * copied a second time into the string (#3530). */
+    AetherString* wrapped = string_alloc_inline(new_length);
+    if (!wrapped) return NULL;
+    if (la) memcpy(wrapped->data, da, la);
+    if (lb) memcpy(wrapped->data + la, db, lb);
     return wrapped;
 }
 
 int string_length(const void* str) {
-    return (int)str_len(str);
+    return str_int(str_len(str));
 }
 
 int string_char_at(const void* str, int index) {
     size_t len = str_len(str);
-    if (!str || index < 0 || index >= (int)len) return 0;
+    /* Compared as a size_t (#3523): `(int)len` of a string over 2 GiB is
+     * negative, and every index read as out of range. The index is the
+     * caller's int, so it always fits; the length is never cut. */
+    if (!str || index < 0 || (size_t)index >= len) return 0;
     /* Unsigned: a byte >= 0x80 used to come back sign-extended, so 0x85 read
      * as -123 and every binary parser written against this silently broke on
      * high bytes (#1516 found it through WebSocket framing). Returning int
@@ -326,6 +371,29 @@ int string_contains(const void* str, const void* substring) {
     return string_index_of(str, substring) >= 0;
 }
 
+/* Where the `nlen` bytes of `needle` first start in hay[0..hlen) at or after
+ * `from`, or SIZE_MAX for nowhere. An empty needle is at `from`.
+ *
+ * memchr finds each place the needle's first byte occurs, and only there is
+ * the rest compared: index_of, split and replace called memcmp at every
+ * offset of the haystack, a libc call per byte for a one byte separator
+ * (#3531). A one byte needle is memchr alone. */
+static size_t str_find(const char* hay, size_t hlen, size_t from,
+                       const char* needle, size_t nlen) {
+    if (from > hlen || nlen > hlen - from) return SIZE_MAX;
+    if (nlen == 0) return from;
+    const char* p = hay + from;
+    const char* last = hay + (hlen - nlen);   /* the last place it can start */
+    const unsigned char first = (unsigned char)needle[0];
+    while (p <= last) {
+        const char* q = (const char*)memchr(p, first, (size_t)(last - p) + 1);
+        if (!q) return SIZE_MAX;
+        if (nlen == 1 || memcmp(q + 1, needle + 1, nlen - 1) == 0) return (size_t)(q - hay);
+        p = q + 1;
+    }
+    return SIZE_MAX;
+}
+
 int string_index_of(const void* str, const void* substring) {
     if (!str || !substring) return -1;
     // Needle is binary-aware too: accepts AetherString* (for
@@ -333,18 +401,10 @@ int string_index_of(const void* str, const void* substring) {
     // AetherString needle ran strlen past the struct header and
     // returned garbage lengths — matters for packed-string
     // protocols that use string_from_char(2) as a separator.
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    size_t slen = str_len(str);
-    const char* sdata = str_data(str);
-    if (sub_len > slen) return -1;
-
-    for (size_t i = 0; i <= slen - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    size_t at = str_find(str_data(str), str_len(str), 0,
+                         str_data(substring), str_len(substring));
+    /* A position past INT_MAX panics, as string_length does (#3523). */
+    return at == SIZE_MAX ? -1 : str_int(at);
 }
 
 // Like string_index_of but starts the scan at byte offset `start`.
@@ -359,20 +419,10 @@ int string_index_of(const void* str, const void* substring) {
 // + start` which allocates a fresh copy of the tail on each step.
 int string_index_of_from(const void* str, const void* substring, int start) {
     if (!str || !substring) return -1;
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    size_t slen = str_len(str);
-    const char* sdata = str_data(str);
     if (start < 0) start = 0;
-    if ((size_t)start > slen) return -1;
-    if (sub_len > slen - (size_t)start) return -1;
-
-    for (size_t i = (size_t)start; i <= slen - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    size_t at = str_find(str_data(str), str_len(str), (size_t)start,
+                         str_data(substring), str_len(substring));
+    return at == SIZE_MAX ? -1 : str_int(at);
 }
 
 // Construct a 1-byte AetherString whose single byte is `code & 0xff`.
@@ -395,20 +445,18 @@ AetherString* string_substring(const void* str, int start, int end) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
     if (start < 0) start = 0;
-    if (end > (int)slen) end = (int)slen;
-    if (start >= end) {
-        char* empty = (char*)aether_caps_malloc(1);
-        if (!empty) return NULL;
-        empty[0] = '\0';
-        return string_adopt_caps_buffer(empty, 0, 1);
-    }
+    /* Clamped as a size_t (#3523): `(int)slen` of a string over 2 GiB is
+     * negative, and every substring of one came back empty. An `end` past
+     * the length is past a length below INT_MAX, which then fits. */
+    if (end > 0 && (size_t)end > slen) end = (int)slen;
+    if (start >= end) return string_alloc_inline(0);
 
+    /* One block (#3530), as string_concat. */
     size_t len = end - start;
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 /* Shared engine for string_replace / string_replace_all. Replaces up
@@ -435,16 +483,13 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
     size_t new_len = new_sub ? str_len(new_sub) : 0;
     const char* new_data = new_sub ? str_data(new_sub) : NULL;
 
+    /* Hits found with str_find, not a compare at every offset (#3531). */
     long hits = 0;
     if (old_len > 0 && old_len <= slen && max_hits != 0) {
-        for (size_t i = 0; i + old_len <= slen; ) {
-            if (memcmp(sdata + i, old_data, old_len) == 0) {
-                hits++;
-                i += old_len;
-                if (max_hits > 0 && hits >= max_hits) break;
-            } else {
-                i++;
-            }
+        for (size_t at = str_find(sdata, slen, 0, old_data, old_len); at != SIZE_MAX;
+             at = str_find(sdata, slen, at + old_len, old_data, old_len)) {
+            hits++;
+            if (max_hits > 0 && hits >= max_hits) break;
         }
     }
     if (hits == 0) {
@@ -452,24 +497,24 @@ static AetherString* string_replace_impl(const void* str, const void* old_sub,
     }
 
     size_t out_len = slen + (size_t)hits * new_len - (size_t)hits * old_len;
-    char* result = (char*)aether_caps_malloc(out_len + 1);
-    if (!result) return NULL;
+    /* One block (#3530), as string_concat. */
+    AetherString* out = string_alloc_inline(out_len);
+    if (!out) return NULL;
+    char* result = out->data;
 
-    size_t w = 0;
-    long done = 0;
-    for (size_t i = 0; i < slen; ) {
-        if (done < hits && i + old_len <= slen &&
-            memcmp(sdata + i, old_data, old_len) == 0) {
-            memcpy(result + w, new_data, new_len);
-            w += new_len;
-            i += old_len;
-            done++;
-        } else {
-            result[w++] = sdata[i++];
-        }
+    /* The text between hits goes over whole, and each hit is the next
+     * str_find from where the last one ended: the hits counted above. */
+    size_t w = 0, i = 0;
+    for (long done = 0; done < hits; done++) {
+        size_t at = str_find(sdata, slen, i, old_data, old_len);
+        memcpy(result + w, sdata + i, at - i);
+        w += at - i;
+        if (new_len) memcpy(result + w, new_data, new_len);
+        w += new_len;
+        i = at + old_len;
     }
-    result[out_len] = '\0';
-    return string_adopt_caps_buffer(result, out_len, out_len + 1);
+    memcpy(result + w, sdata + i, slen - i);
+    return out;
 }
 
 AetherString* string_replace(const void* str, const void* old_sub, const void* new_sub) {
@@ -488,12 +533,14 @@ AetherString* string_replace_all(const void* str, const void* old_sub, const voi
  * str_len() → strlen() on the unwrapped data and silently truncate
  * at the first NUL.
  *
- * Trusts the caller's `str_len` parameter — does NOT consult the
- * AetherString header even if one happens to be present. start/end
- * are clamped to [0, str_len]. */
+ * The caller's `str_len_bytes` is the length, cut to the stored one when
+ * `str` carries an AetherString header (#3523): that length is exact, so
+ * the cut keeps every embedded NUL and only stops a longer `str_len_bytes`
+ * reading past the end. A bare char* has no length to check, and its
+ * `str_len_bytes` stands. start/end are clamped to [0, str_len_bytes]. */
 AetherString* string_substring_n(const void* str, int str_len_bytes, int start, int end) {
     if (!str) return NULL;
-    if (str_len_bytes < 0) str_len_bytes = 0;
+    str_len_bytes = aether_string_bound_n(str, str_len_bytes);
     /* Resolve to the payload through str_data so we work uniformly
      * for both AetherString* inputs (bytes.finish, string_concat_wrapped,
      * string_new_with_length, fs.read_binary, etc.) and bare char*
@@ -502,26 +549,22 @@ AetherString* string_substring_n(const void* str, int str_len_bytes, int start, 
      * `string_*`-prefixed externs (is_stdlib_string_aware_extern), so
      * this function must do its own header dispatch.
      *
-     * `str_len_bytes` stays authoritative for slice bounds — we do
-     * NOT replace it with str_len(str). Callers may have tracked the
-     * length themselves through binary content with embedded NULs,
-     * which is the whole reason the `_n` variant exists. */
+     * `str_len_bytes` stays authoritative for slice bounds below the
+     * stored length. It is not replaced with str_len(str), which for a
+     * bare char* is strlen. Callers may have tracked the length
+     * themselves through binary content with embedded NULs, which is the
+     * whole reason the `_n` variant exists. */
     const char* sdata = str_data(str);
     if (start < 0) start = 0;
     if (end > str_len_bytes) end = str_len_bytes;
-    if (start >= end) {
-        char* empty = (char*)aether_caps_malloc(1);
-        if (!empty) return NULL;
-        empty[0] = '\0';
-        return string_adopt_caps_buffer(empty, 0, 1);
-    }
+    if (start >= end) return string_alloc_inline(0);
 
+    /* One block (#3530), as string_concat. */
     size_t len = (size_t)(end - start);
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 /* Identity helper that documents intent: in code that receives a
@@ -540,38 +583,35 @@ int string_length_n(const void* str, int known_length) {
  * string_char_at pays on every call when `str` arrives as a plain
  * `const char*`. Filed in string-length-aware-accessors.md after
  * avn's bench profile showed __strlen_avx2 dominating CPU at the
- * slow batches. Trusts the caller's known_length absolutely — does
- * NOT consult an AetherString header even if one is present. Same
+ * slow batches. The caller's known_length is cut to the stored length
+ * when `str` carries an AetherString header (#3523), so a longer one no
+ * longer reads past the end; a bare char*'s is trusted. Same
  * miss-return convention as string_char_at ('\0' for out-of-range
  * and NULL input). */
 int string_char_at_n(const void* str, int known_length, int index) {
     if (!str) return 0;
     if (known_length < 0) return 0;
+    known_length = aether_string_bound_n(str, known_length);
     if (index < 0 || index >= known_length) return 0;
     return (int)(unsigned char)str_data(str)[index];
 }
 
 /* Length-aware index_of_from. Same motivation as string_char_at_n:
  * caller has already cached the haystack length. Needle is still
- * strlen'd (small / fixed). `start` clamped to [0, known_length];
- * `start` > known_length OR needle longer than the searchable
- * range returns -1. */
+ * strlen'd (small / fixed). known_length is cut to the stored length
+ * when `str` carries an AetherString header (#3523). `start` clamped to
+ * [0, known_length]; `start` > known_length OR needle longer than the
+ * searchable range returns -1. */
 int string_index_of_from_n(const void* str, int known_length,
                            const char* substring, int start) {
     if (!str || !substring) return -1;
     if (known_length < 0) return -1;
-    size_t sub_len = str_len(substring);
-    const char* sub_data = str_data(substring);
-    const char* sdata = str_data(str);
+    known_length = aether_string_bound_n(str, known_length);
     if (start < 0) start = 0;
-    if ((size_t)start > (size_t)known_length) return -1;
-    if (sub_len > (size_t)known_length - (size_t)start) return -1;
-    for (size_t i = (size_t)start; i <= (size_t)known_length - sub_len; i++) {
-        if (memcmp(sdata + i, sub_data, sub_len) == 0) {
-            return (int)i;
-        }
-    }
-    return -1;
+    /* At most known_length, an int, so the position fits one. */
+    size_t at = str_find(str_data(str), (size_t)known_length, (size_t)start,
+                         str_data(substring), str_len(substring));
+    return at == SIZE_MAX ? -1 : (int)at;
 }
 
 AetherString* string_to_upper(const void* str) {
@@ -579,13 +619,12 @@ AetherString* string_to_upper(const void* str) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
 
-    char* new_data = (char*)aether_caps_malloc(slen + 1);
-    if (!new_data) return NULL;
+    AetherString* out = string_alloc_inline(slen);   /* one block (#3530) */
+    if (!out) return NULL;
     for (size_t i = 0; i < slen; i++) {
-        new_data[i] = toupper((unsigned char)sdata[i]);
+        out->data[i] = toupper((unsigned char)sdata[i]);
     }
-    new_data[slen] = '\0';
-    return string_adopt_caps_buffer(new_data, slen, slen + 1);
+    return out;
 }
 
 AetherString* string_to_lower(const void* str) {
@@ -593,13 +632,12 @@ AetherString* string_to_lower(const void* str) {
     size_t slen = str_len(str);
     const char* sdata = str_data(str);
 
-    char* new_data = (char*)aether_caps_malloc(slen + 1);
-    if (!new_data) return NULL;
+    AetherString* out = string_alloc_inline(slen);   /* one block (#3530) */
+    if (!out) return NULL;
     for (size_t i = 0; i < slen; i++) {
-        new_data[i] = tolower((unsigned char)sdata[i]);
+        out->data[i] = tolower((unsigned char)sdata[i]);
     }
-    new_data[slen] = '\0';
-    return string_adopt_caps_buffer(new_data, slen, slen + 1);
+    return out;
 }
 
 AetherString* string_trim(const void* str) {
@@ -614,11 +652,10 @@ AetherString* string_trim(const void* str) {
     while (end > start && isspace((unsigned char)sdata[end - 1])) end--;
 
     size_t len = end - start;
-    char* result = (char*)aether_caps_malloc(len + 1);
-    if (!result) return NULL;
-    memcpy(result, sdata + start, len);
-    result[len] = '\0';
-    return string_adopt_caps_buffer(result, len, len + 1);
+    AetherString* out = string_alloc_inline(len);   /* one block (#3530) */
+    if (!out) return NULL;
+    memcpy(out->data, sdata + start, len);
+    return out;
 }
 
 // Helper: free a partially-built array on OOM during split. Used on
@@ -691,15 +728,13 @@ AetherStringArray* string_split(const void* str, const void* delimiter) {
         return arr;
     }
 
-    // Count how many pieces we'll produce. At this point slen >= delim_len
-    // so the loop bound `slen - delim_len` won't underflow.
+    // Count how many pieces we'll produce: one more than the delimiters,
+    // each found with str_find rather than a compare at every offset
+    // (#3531).
     size_t count = 1;
-    size_t upper = slen - delim_len;
-    for (size_t i = 0; i <= upper; i++) {
-        if (memcmp(sdata + i, delim_data, delim_len) == 0) {
-            count++;
-            i += delim_len - 1;
-        }
+    for (size_t at = str_find(sdata, slen, 0, delim_data, delim_len); at != SIZE_MAX;
+         at = str_find(sdata, slen, at + delim_len, delim_data, delim_len)) {
+        count++;
     }
 
     arr->strings = (AetherString**)aether_caps_malloc(sizeof(AetherString*) * count);
@@ -707,14 +742,12 @@ AetherStringArray* string_split(const void* str, const void* delimiter) {
 
     size_t start = 0;
     size_t idx = 0;
-    for (size_t i = 0; i <= upper; i++) {
-        if (memcmp(sdata + i, delim_data, delim_len) == 0) {
-            AetherString* piece = string_new_with_length(sdata + start, i - start);
-            if (!piece) { string_array_partial_free(arr, idx, count); return NULL; }
-            arr->strings[idx++] = piece;
-            start = i + delim_len;
-            i += delim_len - 1;
-        }
+    for (size_t at = str_find(sdata, slen, 0, delim_data, delim_len); at != SIZE_MAX;
+         at = str_find(sdata, slen, start, delim_data, delim_len)) {
+        AetherString* piece = string_new_with_length(sdata + start, at - start);
+        if (!piece) { string_array_partial_free(arr, idx, count); return NULL; }
+        arr->strings[idx++] = piece;
+        start = at + delim_len;
     }
     // Tail piece (may be empty if input ends with the delimiter).
     AetherString* tail = string_new_with_length(sdata + start, slen - start);
@@ -801,9 +834,10 @@ void* string_join(struct StringSeq* seq, const void* sep) {
         cur = string_seq_tail(cur);
     }
     total += sep_len * (size_t)(n - 1);
-    /* One allocation (+1 for the NUL terminator string_adopt expects). */
-    char* buf = (char*)aether_caps_malloc(total + 1);
-    if (!buf) return NULL;
+    /* One allocation, header and text together (#3530). */
+    AetherString* out = string_alloc_inline(total);
+    if (!out) return NULL;
+    char* buf = out->data;
     /* Pass 2: copy elements, interleaving the separator. */
     size_t off = 0;
     cur = seq;
@@ -818,8 +852,11 @@ void* string_join(struct StringSeq* seq, const void* sep) {
         if (hl > 0) { memcpy(buf + off, str_data(h), hl); off += hl; }
         cur = string_seq_tail(cur);
     }
+    /* `off` is `total` but for a sequence shorter than it said; the block
+     * keeps its capacity, which is what freeing it counts. */
     buf[off] = '\0';
-    return string_adopt_caps_buffer(buf, off, total + 1);
+    out->length = off;
+    return out;
 }
 
 void* string_split_to_seq(const void* str, const void* delimiter) {
@@ -924,6 +961,33 @@ static void interp_put_signed(InterpSink* k, long long v) {
     else interp_put_decimal(k, (unsigned long long)v, 0);
 }
 
+/* #3526: `%D`, a duration (a signed count of nanoseconds) as its text: the
+ * largest unit it reaches, whole where it divides (`30s`, `-2h`, `0ns`),
+ * else to nine significant digits (`1.5s`), '.' for the radix whatever the
+ * locale. Written into the sink from the stack, so every duration of one
+ * format and of every thread at once has its own text; the generated
+ * helper this replaces handed out a ring of eight static buffers. */
+static void interp_put_duration(InterpSink* k, long long ns) {
+    static const struct { const char* suffix; long long scale; } units[] = {
+        {"d", 86400000000000LL}, {"h", 3600000000000LL}, {"m", 60000000000LL},
+        {"s", 1000000000LL}, {"ms", 1000000LL}, {"us", 1000LL}, {"ns", 1LL}
+    };
+    unsigned long long mag = ns < 0 ? 0ULL - (unsigned long long)ns : (unsigned long long)ns;
+    for (size_t i = 0; i < sizeof(units) / sizeof(units[0]); i++) {
+        if (mag < (unsigned long long)units[i].scale && units[i].scale != 1) continue;
+        if (ns % units[i].scale == 0) {
+            interp_put_signed(k, ns / units[i].scale);
+        } else {
+            char buf[64];
+            int n = aether_c_snprintf_double(buf, sizeof(buf), "%.9g",
+                                             (double)ns / (double)units[i].scale);
+            if (n > 0) interp_put(k, buf, (size_t)n < sizeof(buf) ? (size_t)n : sizeof(buf) - 1);
+        }
+        interp_put(k, units[i].suffix, strlen(units[i].suffix));
+        return;
+    }
+}
+
 static void interp_put(InterpSink* k, const char* p, size_t n) {
     if (n == 0) return;
     if (k->f) {
@@ -935,20 +999,20 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
     k->len += n;
 }
 
-/* Formats one numeric argument of type T with the conversion `sub` and
- * offers it to the sink: on the stack when it fits, else on the heap, so
- * no conversion is ever cut short. */
-#define INTERP_NUM(T) do {                                                  \
+/* Formats one numeric argument of type T with the conversion `sub`, through
+ * PRINT (snprintf's arguments), and offers it to the sink: on the stack when
+ * it fits, else on the heap, so no conversion is ever cut short. */
+#define INTERP_CONV(T, PRINT) do {                                          \
         T v_ = va_arg(ap, T);                                               \
         char small_[64];                                                    \
-        int n_ = snprintf(small_, sizeof(small_), sub, v_);                 \
+        int n_ = PRINT(small_, sizeof(small_), sub, v_);                    \
         if (n_ < 0) break;                                                  \
         if ((size_t)n_ < sizeof(small_)) {                                  \
             interp_put(&k, small_, (size_t)n_);                             \
         } else {                                                            \
             char* big_ = (char*)malloc((size_t)n_ + 1);                     \
             if (big_) {                                                     \
-                snprintf(big_, (size_t)n_ + 1, sub, v_);                    \
+                PRINT(big_, (size_t)n_ + 1, sub, v_);                       \
                 interp_put(&k, big_, (size_t)n_);                           \
                 free(big_);                                                 \
             } else {                                                        \
@@ -962,6 +1026,16 @@ static void interp_put(InterpSink* k, const char* p, size_t n) {
             }                                                               \
         }                                                                   \
     } while (0)
+
+#define INTERP_NUM(T) INTERP_CONV(T, snprintf)
+
+/* A double is machine text here, as string.from_float writes it: '.' for
+ * the radix whatever LC_NUMERIC the process is in (#3525). snprintf follows
+ * the locale, so in a host that called setlocale(LC_ALL, "de_DE.UTF-8")
+ * "${0.5}" was "0,5" and print(0.5) "0,500000", while string.from_float(0.5)
+ * was "0.5" (docs/locale-independent-float-text.md). A long double the same. */
+#define INTERP_DOUBLE() INTERP_CONV(double, aether_c_snprintf_double)
+#define INTERP_LONG_DOUBLE() INTERP_CONV(long double, aether_c_snprintf_long_double)
 
 size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_list ap) {
     InterpSink k = { out, cap, 0, f };
@@ -1031,8 +1105,12 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
                 else INTERP_NUM(unsigned int);
                 break;
             case 'g': case 'G': case 'f': case 'F': case 'e': case 'E':
-                if (long_double) INTERP_NUM(long double);
-                else INTERP_NUM(double);
+                if (long_double) INTERP_LONG_DOUBLE();
+                else INTERP_DOUBLE();
+                break;
+            case 'D':
+                /* #3526: a duration, given as a long long. */
+                interp_put_duration(&k, va_arg(ap, long long));
                 break;
             default:
                 interp_put(&k, spec, sl);
@@ -1045,6 +1123,9 @@ size_t aether_interp_format(char* out, size_t cap, FILE* f, const char* fmt, va_
 }
 
 #undef INTERP_NUM
+#undef INTERP_DOUBLE
+#undef INTERP_LONG_DOUBLE
+#undef INTERP_CONV
 
 void* aether_interp_string(const char* fmt, va_list ap) {
     /* Most interpolations are short: format once into the stack and copy,

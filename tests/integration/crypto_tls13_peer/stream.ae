@@ -87,6 +87,7 @@ main() {
         sock, aerr = tcp.accept(srv)
         if aerr != "" {
             println("server ERR: ${aerr}")
+            tcp.server_close(srv)
             exit(1)
         }
         chain, lens = tls13_server.parse_cert_chain_pem(peer_pem())
@@ -97,6 +98,8 @@ main() {
         tls13_server.free_private_key(key)
         if herr != "" {
             println("server ERR: ${herr}")
+            tls13_server.free_cert_chain(chain, lens)
+            tcp.server_close(srv)
             exit(1)
         }
         read_all(conn, 1, total, "server")
@@ -105,6 +108,8 @@ main() {
         b, _n, _e = tls13_server.conn_recv(conn)
         if b != null { bytes.free(b) }
         tls13_server.close_conn(conn)
+        tls13_server.free_cert_chain(chain, lens)
+        tcp.server_close(srv)
         return
     }
     port, _pe = string.to_int(os.getenv("PORT"))

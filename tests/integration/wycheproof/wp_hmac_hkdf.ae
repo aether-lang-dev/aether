@@ -115,6 +115,7 @@ fn run_hmac() -> int {
         gi = gi + 1
     }
     println("wycheproof hmac_sha256: ${passed} valid ok, ${rejected_invalid} bogus rejected, ${skipped} skipped (truncated tag), ${failed} failed")
+    json.free(root)
     return failed
 }
 
@@ -184,6 +185,7 @@ fn run_hkdf() -> int {
         gi = gi + 1
     }
     println("wycheproof hkdf_sha256: ${passed} valid ok, ${rejected_invalid} invalid rejected, ${failed} failed")
+    json.free(root)
     return failed
 }
 

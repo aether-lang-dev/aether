@@ -246,6 +246,8 @@ typedef struct {
     int sender_id;      // Sender actor ID
     intptr_t payload_int; // For single-int messages (intptr_t to pass actor refs without truncation)
     void* payload_ptr;  // For complex payloads
+    struct { void* data; int size; int owned; } zerocopy;  // owned: the payload's kind
+    void* _reply_slot;  // An ask's reply slot
 } Message;
 
 // Send to actor on same core (fast path)
@@ -299,7 +301,9 @@ The `ActorBase` contains:
   goes as a foreign thread's sends do, through the locked channel (#3246),
   and an ask it makes waits without stepping anything for the core
 - `step_payload`, `step_type`: The message a generated handler is running on,
-  for the step barrier to drop if the handler panics (#3142)
+  for the step barrier to drop if the handler panics (#3142); `step_inline`
+  says the payload is the actor's own copy of one that travelled in its
+  message (#3534), which the barrier does not free
 - `release_message`: Releases what a dropped message's fields own; NULL for
   an actor you register, whose messages are yours
 - `inflight`: Messages for the actor on their way through a core's queues;
@@ -330,8 +334,10 @@ void my_actor_step(void* self) {
             break;
 
         case MSG_TYPE_2:
-            // Handle message type 2
-            handle_type_2(actor, (SomeStruct*)msg.payload_ptr);
+            // Handle message type 2: a typed message's struct, sent with
+            // aether_send_message
+            handle_type_2(actor, (SomeStruct*)aether_message_payload(&msg));
+            aether_message_free_payload(&msg);
             break;
 
         default:
@@ -340,6 +346,16 @@ void my_actor_step(void* self) {
     }
 }
 ```
+
+A typed message whose struct fits the bytes from `payload_int` up to
+`zerocopy.owned` (28 on 64-bit targets, 16 on 32-bit) travels in the
+`Message` itself, with `zerocopy.owned` set to `AETHER_MSG_INLINE`; a larger
+one is a heap copy in `payload_ptr` (#3534). `aether_message_payload(&msg)`
+reads either, and `aether_message_free_payload(&msg)` gives either back once
+its fields are read or released; never read or free `payload_ptr` of a typed
+message directly. `zerocopy.owned` compares to `AETHER_MSG_ZC_BORROWED`,
+`AETHER_MSG_ZC_OWNED` (`zerocopy.data` is the message's to free) and
+`AETHER_MSG_INLINE` (`runtime/actors/actor_state_machine.h`).
 
 ## Build Configuration
 

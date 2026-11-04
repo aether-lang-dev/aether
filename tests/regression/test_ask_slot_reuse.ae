@@ -1,0 +1,97 @@
+// Regression (#3533): an ask's reply slot, with its mutex and condition
+// variable, is made once and lent to the next ask once both sides have let
+// go of it, where every ask used to allocate and build one. The replies must
+// still each reach the ask that made them: thousands of asks in a row from
+// main and from a handler, an ask made while this thread is already in one
+// (a slot still lent, so another is taken), and asks after one whose handler
+// died, which lets its slot go through the failure path.
+
+message Get { n: int }
+message Value { v: int }
+message Run { count: int }
+message Boom {}
+
+extern exit(code: int)
+
+actor Server {
+    receive {
+        Get(n) -> { reply Value { v: n + 1 } }
+        Boom() -> { panic("no reply") }
+    }
+}
+
+// Asks its server from inside a handler, so the asking thread is a core's.
+actor Client {
+    state server = 0
+    receive {
+        Run(count) -> {
+            sum = 0
+            i = 0
+            while i < count {
+                v, err = server ? Get { n: i }
+                if err == "" && v == i + 1 { sum = sum + 1 }
+                i = i + 1
+            }
+            reply Value { v: sum }
+        }
+    }
+}
+
+// Asked by an outer ask, and asks in turn while that one waits.
+actor Middle {
+    state client = 0
+    receive {
+        Run(count) -> {
+            v, err = client ? Run { count: count }
+            if err != "" { v = -1 }
+            reply Value { v: v }
+        }
+    }
+}
+
+main() {
+    fails = 0
+    s = spawn(Server())
+    right = 0
+    i = 0
+    while i < 3000 {
+        v, err = s ? Get { n: i }
+        if err == "" && v == i + 1 { right = right + 1 }
+        i = i + 1
+    }
+    if right != 3000 {
+        println("FAIL: from main, ${right} of 3000 replies reached their ask")
+        fails = fails + 1
+    }
+
+    c = spawn(Client())
+    c.server = s
+    got, cerr = c ? Run { count: 3000 }
+    if cerr != "" || got != 3000 {
+        println("FAIL: from a handler, ${got} of 3000 (${cerr})")
+        fails = fails + 1
+    }
+
+    m = spawn(Middle())
+    m.client = c
+    nested, nerr = m ? Run { count: 500 }
+    if nerr != "" || nested != 500 {
+        println("FAIL: nested asks, ${nested} of 500 (${nerr})")
+        fails = fails + 1
+    }
+
+    b = spawn(Server())
+    _, berr = b ? Boom {}
+    if berr != "the actor died before it replied" {
+        println("FAIL: a dying handler gave '${berr}'")
+        fails = fails + 1
+    }
+    after, aerr = s ? Get { n: 41 }
+    if aerr != "" || after != 42 {
+        println("FAIL: the ask after a failed one got ${after} (${aerr})")
+        fails = fails + 1
+    }
+
+    if fails > 0 { exit(1) }
+    println("PASS: every reply reached the ask that made it")
+}

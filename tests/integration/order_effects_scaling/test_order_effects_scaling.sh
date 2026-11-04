@@ -17,6 +17,12 @@
 # machine: four times the functions must cost less than eight times the time
 # (linear is four, the quadratic compile was thirteen), whatever the
 # runner's speed.
+#
+# The time is the CPU time of the compile's phases (`aetherc --time-phases`,
+# its second column), summed over three runs of each size taken in turn,
+# not the wall clock: the sweep runs this beside other tests, many running a
+# scheduler on every core, and the longer compile's wall clock counted the
+# time it waited for a core (8.2x once on a Linux runner).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -27,19 +33,12 @@ if [ ! -x "$AETHERC" ]; then
     echo "  [SKIP] order_effects_scaling: aetherc not built"
     exit 0
 fi
-if ! perl -MTime::HiRes -e 1 2>/dev/null; then
-    echo "  [SKIP] order_effects_scaling: no perl Time::HiRes to time the compiles"
-    exit 0
-fi
-
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# A sanity ceiling on the larger compile, far above what a linear one takes
-# on any runner.
+# A sanity ceiling on the larger compile's CPU time, far above what a linear
+# one takes on any runner.
 LIMIT_MS=60000
-
-now_ms() { perl -MTime::HiRes=time -e 'printf "%d\n", time * 1000'; }
 
 # chain <n>: write the chain of n functions to $TMPDIR/chain<n>.ae.
 chain() {
@@ -75,41 +74,43 @@ chain() {
     }' > "$TMPDIR/chain$1.ae"
 }
 
-# compile_ms <n>: compile the chain of n functions; its time in ms in $MS.
+# compile_ms <n>: compile the chain of n functions; the CPU time of its
+# phases in whole ms in $MS.
 compile_ms() {
-    start=$(now_ms)
-    "$AETHERC" "$TMPDIR/chain$1.ae" "$TMPDIR/chain$1.c" > "$TMPDIR/aetherc$1.log" 2>&1
+    "$AETHERC" --time-phases "$TMPDIR/chain$1.ae" "$TMPDIR/chain$1.c" > "$TMPDIR/aetherc$1.log" 2>&1
     rc=$?
-    MS=$(( $(now_ms) - start ))
     if [ "$rc" -ne 0 ]; then
         echo "  [FAIL] order_effects_scaling: aetherc failed (exit $rc) on a chain of $1 calls"
         tail -5 "$TMPDIR/aetherc$1.log" | sed 's/^/    /'
+        exit 1
+    fi
+    MS=$(awk '/^phase [a-z]+ [0-9.]+ [0-9.]+$/ { s += $4; n++ } END { if (n) printf "%d\n", s }' "$TMPDIR/aetherc$1.log")
+    if [ -z "$MS" ]; then
+        echo "  [FAIL] order_effects_scaling: no phases in aetherc's --time-phases output"
         exit 1
     fi
 }
 
 chain 4000
 chain 16000
-# The best of three of each, taken in turn, so a moment the runner is busy
-# slows one run, not the comparison (a single run each on macOS ARM64 once
-# measured 220 ms and 3263 ms, 14x, where this machine measures 3.7x).
-small=""
-large=""
+small=0
+large=0
 for run in 1 2 3; do
     compile_ms 4000
-    if [ -z "$small" ] || [ "$MS" -lt "$small" ]; then small=$MS; fi
+    small=$(( small + MS ))
     compile_ms 16000
-    if [ -z "$large" ] || [ "$MS" -lt "$large" ]; then large=$MS; fi
+    if [ "$MS" -gt "$LIMIT_MS" ]; then
+        echo "  [FAIL] order_effects_scaling: a chain of 16000 calls took ${MS} ms of CPU to compile (ceiling ${LIMIT_MS} ms)"
+        exit 1
+    fi
+    large=$(( large + MS ))
 done
 
-if [ "$large" -gt "$LIMIT_MS" ]; then
-    echo "  [FAIL] order_effects_scaling: a chain of 16000 calls took ${large} ms to compile (ceiling ${LIMIT_MS} ms)"
-    exit 1
-fi
-# Below 50 ms the timer's grain and the process start decide; both are fast.
-[ "$small" -lt 50 ] && small=50
+# Below 50 ms a run the clock's grain decides: Windows charges CPU time a
+# clock tick, about 15.6 ms, at a time.
+[ "$small" -lt 150 ] && small=150
 if [ "$large" -ge $(( small * 8 )) ]; then
-    echo "  [FAIL] order_effects_scaling: 4000 calls compiled in ${small} ms, 16000 in ${large} ms: four times the functions cost $(( large / small ))x the time (linear is 4x)"
+    echo "  [FAIL] order_effects_scaling: 4000 calls compiled in ${small} ms of CPU, 16000 in ${large} ms (three runs each): four times the functions cost $(( large / small ))x the time (linear is 4x)"
     exit 1
 fi
 # The read of q.n comes first, ahead of the call that writes it.
@@ -117,5 +118,5 @@ if ! grep -q "_eo[0-9]* = \|_AE_SEQ_LET" "$TMPDIR/chain16000.c"; then
     echo "  [FAIL] order_effects_scaling: q.n is not evaluated ahead of f0(p, 3)"
     exit 1
 fi
-echo "  [PASS] order_effects_scaling: 4000 calls in ${small} ms, 16000 in ${large} ms"
+echo "  [PASS] order_effects_scaling: 4000 calls in ${small} ms of CPU, 16000 in ${large} ms (three runs each)"
 exit 0

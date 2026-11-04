@@ -168,6 +168,8 @@ const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, s
 /* Is `name` a builtin codegen lowers by name (`println`, `exit`, `sleep`,
  * ...)? Such a name belongs to no module and needs no import. */
 int is_builtin_function_name(const char* name);
+/* Is a call of `name` with `args` arguments lowered as that builtin? */
+int is_builtin_call_name(const char* name, int args);
 
 // Type checking functions
 int typecheck_program(ASTNode* program);

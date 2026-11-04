@@ -1,0 +1,78 @@
+// Regression (#3524): a shift count is masked to the width the shift runs
+// in, and a left shift into the sign bit wraps.
+//
+// `<<` and `>>` went straight to C, where a count of the width or more, or
+// a negative one, is undefined (x86 masks the count, ARM64 another way, and
+// an optimizer may assume it never happens), and so is a signed left shift
+// that overflows. Java's rule now holds on every target: the count is taken
+// `& 31` for an int (and the narrower types, which shift as an int) and a
+// uint32, `& 63` for a long and a uint64, and a left shift runs in unsigned.
+// Checked through variable counts, a constant count past the width, and the
+// compound forms `<<=` and `>>=`.
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3524: ${msg}")
+        exit(1)
+    }
+}
+
+shl_int(x: int, n: int) -> int { return x << n }
+shr_int(x: int, n: int) -> int { return x >> n }
+shl_long(x: long, n: int) -> long { return x << n }
+shr_long(x: long, n: int) -> long { return x >> n }
+shl_u32(x: uint32, n: int) -> uint32 { return x << n }
+shr_u64(x: uint64, n: int) -> uint64 { return x >> n }
+shl_byte(x: byte, n: int) -> int { return x << n }
+
+main() {
+    // int: the count & 31.
+    check(shl_int(1, 32) == 1, "int: 1 << 32")
+    check(shl_int(1, 33) == 2, "int: 1 << 33")
+    check(shl_int(1, -1) == -2147483648, "int: 1 << -1 (count 31)")
+    check(shr_int(-8, 33) == -4, "int: -8 >> 33 keeps the sign")
+    check(shr_int(256, 40) == 1, "int: 256 >> 40")
+    // A bit shifted into the sign, and past it, wraps.
+    check(shl_int(1, 31) == -2147483648, "int: 1 << 31")
+    check(shl_int(3, 31) == -2147483648, "int: 3 << 31")
+    check(shl_int(-1, 4) == -16, "int: -1 << 4")
+
+    // long: the count & 63.
+    check(shl_long(1, 64) == 1, "long: 1 << 64")
+    check(shl_long(1, 65) == 2, "long: 1 << 65")
+    check(shl_long(1, 63) == -9223372036854775807 - 1, "long: 1 << 63")
+    check(shr_long(-16, 66) == -4, "long: -16 >> 66")
+
+    // uint32 shifts in 32 bits, uint64 in 64.
+    check(shl_u32(1, 32) == 1, "uint32: 1 << 32")
+    check(shl_u32(3, 31) == 2147483648, "uint32: 3 << 31")
+    uint64 top = 9223372036854775808
+    check(shr_u64(top, 127) == 1, "uint64: top >> 127")
+
+    // A byte shifts as an int.
+    check(shl_byte(1, 33) == 2, "byte: 1 << 33")
+    check(shl_byte(255, 24) == -16777216, "byte: 255 << 24")
+
+    // A constant count past the width is masked when compiled.
+    one = 1
+    check((one << 40) == 256, "int: one << 40")
+    long lone = 1
+    check((lone << 70) == 64, "long: lone << 70")
+
+    // The compound forms.
+    x = 1
+    n = 35
+    x <<= n
+    check(x == 8, "int: <<= 35")
+    x >>= n
+    check(x == 1, "int: >>= 35")
+    long y = 1
+    y <<= 64 + 3
+    check(y == 8, "long: <<= 67")
+
+    // A count inside the width shifts as before.
+    check(shl_int(5, 2) == 20 && shr_int(-20, 2) == -5, "in-range counts")
+    println("shift_count_masked: ok")
+}

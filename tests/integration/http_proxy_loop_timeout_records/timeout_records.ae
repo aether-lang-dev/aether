@@ -142,12 +142,14 @@ main() {
                 println("  PASS ${labels[k]} (${names[g]})")
             }
             http.server_stop(s)
+            http.server_free(s)
             g = g + 1
         }
         k = k + 1
     }
 
     http.server_stop(upstream)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

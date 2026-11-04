@@ -1,0 +1,57 @@
+// Regression (#3523): the length-aware (`_n`) functions took the caller's
+// length on trust even when the string carried its own, so a longer one read
+// past the end: string.substring_n, char_at_n and index_of_from_n,
+// strbuilder.append_n and bytes.copy_from_string. A builder truncated from
+// six bytes to three and then finished gives a string of length 3 whose
+// block still holds the cut "ef" past its end; before the fix each call
+// below read those bytes. A counted string's length is exact, so the length
+// given is now cut to it, and an embedded NUL inside the length still counts.
+
+import std.string
+import std.strbuilder
+import std.bytes
+
+extern exit(code: int)
+
+check(got: int, want: int, what: string) -> int {
+    if got == want { return 0 }
+    println("FAIL: ${what}: got ${got}, want ${want}")
+    return 1
+}
+
+main() {
+    sb = strbuilder.new(16)
+    strbuilder.append(sb, "abcdef")
+    strbuilder.truncate(sb, 3)
+    s = strbuilder.finish(sb)
+
+    fails = 0
+    sub = string.substring_n(s, 6, 0, 6)
+    fails = fails + check(string.length(sub), 3, "substring_n past the end")
+    fails = fails + check(string.char_at_n(s, 6, 4), 0, "char_at_n past the end")
+    fails = fails + check(string.index_of_from_n(s, 6, "ef", 0), -1, "index_of_from_n past the end")
+
+    b = bytes.new(8)
+    _ = bytes.copy_from_string(b, 0, s, 6)
+    fails = fails + check(bytes.length(b), 3, "bytes.copy_from_string past the end")
+    bytes.free(b)
+
+    sb2 = strbuilder.new(8)
+    _ = strbuilder.append_n(sb2, s, 6)
+    fails = fails + check(strbuilder.length(sb2), 3, "strbuilder.append_n past the end")
+    strbuilder.free(sb2)
+
+    // Within the stored length the caller's length still rules, NULs and all.
+    nul = string.from_char(0)
+    head = string.concat("ab", nul)
+    t = string.concat(head, "cd")
+    whole = string.substring_n(t, 5, 0, 5)
+    fails = fails + check(string.length(whole), 5, "substring_n over a NUL")
+    fails = fails + check(string.char_at_n(t, 5, 3), 99, "char_at_n after a NUL")
+    fails = fails + check(string.index_of_from_n(t, 5, "cd", 0), 3, "index_of_from_n after a NUL")
+    part = string.substring_n(t, 2, 0, 5)
+    fails = fails + check(string.length(part), 2, "substring_n shorter than the string")
+
+    if fails > 0 { exit(1) }
+    println("PASS: every _n call stayed inside the string")
+}

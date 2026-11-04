@@ -46,6 +46,19 @@ static inline int is_aether_string(const void* ptr) {
     return 1;
 }
 
+// The bytes a length-aware (`_n`) function reads of `s` when its caller
+// says `n` (#3523): `n`, cut to the stored length when `s` carries an
+// AetherString header. That length is exact, so the cut loses nothing an
+// embedded NUL needs and only keeps a longer `n` from reading past the end.
+// A bare char* has no length of its own to check against, and its `n`
+// stands. A negative `n` is 0.
+static inline int aether_string_bound_n(const void* s, int n) {
+    if (n < 0) return 0;
+    if (is_aether_string(s) && (size_t)n > ((const AetherString*)s)->length)
+        return (int)((const AetherString*)s)->length;
+    return n;
+}
+
 // String creation
 AetherString* string_new(const char* cstr);
 AetherString* string_from_cstr(const char* cstr);  // Alias for new
@@ -71,6 +84,15 @@ void aether_string_publish(const void* str);
 /* A reference for a place other threads can reach (a container element, a
  * closure environment): the string is published, then retained. */
 void string_retain_shared(const void* str);
+/* #3522: a module-level string `var` is a place every thread reaches, so
+ * each has a lock of its own, a flag held for a few instructions. A take
+ * loads the var and retains what it holds under the lock, so no store can
+ * release the value between the two; a store publishes the new value,
+ * swaps it in under the lock and releases the old one after unlocking.
+ * `v` is a reference the store hands to the var. */
+#include <stdatomic.h>
+const char* aether_string_var_take(const char* const* place, atomic_flag* lock);
+void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);
 void string_free(const void* str);  // Alias for release
 
 // String operations — accept both AetherString* and plain char*.
@@ -212,7 +234,9 @@ const char* aether_string_import(const void* s);
  * codegen emits (%d %i %u %x %o %ld %lld %llu %g %f %e %Lg %c %s %%). A %s
  * argument is the string as the program holds it, an AetherString* or a
  * plain char*, and is written by its length, so a NUL in it is kept;
- * vsnprintf stopped at the first NUL. Every other conversion is given to
+ * vsnprintf stopped at the first NUL. %D is no printf conversion: its
+ * argument is a duration, a long long count of nanoseconds, written as its
+ * text (`30s`, `1.5ms`, #3526). Every other conversion is given to
  * snprintf as written. Writes to `out` (at most `cap` bytes, NUL
  * terminated when cap > 0), or to `f` when `out` is NULL and `f` is set,
  * and returns the full length either way, so a caller sizes with

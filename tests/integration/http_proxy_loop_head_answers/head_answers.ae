@@ -116,6 +116,7 @@ main() {
     http.server_set_host(gone, "127.0.0.1")
     gone_url = "http://127.0.0.1:${start(gone)}"
     http.server_stop(gone)
+    http.server_free(gone)
 
     labels = ["an upstream that cannot be reached", "an upgrade the proxy does not forward",
         "an upstream that does not answer in time"]
@@ -145,6 +146,7 @@ main() {
                 println("  PASS ${labels[i]} (${names[g]})")
             }
             http.server_stop(s)
+            http.server_free(s)
             g = g + 1
         }
         i = i + 1
@@ -152,6 +154,8 @@ main() {
 
     http.server_stop(up)
     http.server_stop(slow)
+    http.server_free(up)
+    http.server_free(slow)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

@@ -349,16 +349,24 @@ const char* http_response_redirect_error_raw(HttpResponse* response);
 int http_header_name_ok(const char* name);
 int http_header_value_ok(const char* value);
 
+/* A number off the wire or out of a URL, read whole (#3520): the `n` bytes at
+ * `s` are all digits of `base` (10 or 16), at least one, at most as many as
+ * `max` has, and the value is at most `max`. 0 with the value in *out, or -1.
+ * http_parse_port: a port, 1..65535, or -1. */
+int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* out);
+int http_parse_port(const char* s, size_t n);
+
 
 /* Chunked transfer-coding, shared by the client and the server because a
  * request body and a response body are chunked the same way and two decoders
  * would be two chances to disagree.
  *
- * http_chunked_complete: does `buf` hold a whole chunked body, terminal chunk
- * included? http_dechunk: decode one, returning a malloc'd buffer the caller
- * frees (*out_len excludes the NUL), or NULL on malformed framing. */
-int    http_chunked_complete(const char* buf, size_t len);
-size_t http_chunked_frame_len(const char* buf, size_t len);
+ * http_chunked_frame: 1 when `buf` holds a whole chunked body, terminal chunk
+ * and trailers included, with *frame_len its length; 0 when more has to
+ * arrive; -1 when it is not chunked framing. http_dechunk: decode one,
+ * returning a malloc'd buffer the caller frees (*out_len excludes the NUL),
+ * or NULL on malformed framing. Both walk the same grammar. */
+int   http_chunked_frame(const char* buf, size_t len, size_t* frame_len);
 char* http_dechunk(const char* in, size_t in_len, size_t* out_len);
 
 

@@ -116,11 +116,11 @@ typedef struct {
     int type;           // Message type ID
     int sender_id;      // Sender actor ID
     intptr_t payload_int; // Integer payload (intptr_t to avoid truncation of actor refs on 64-bit)
-    void* payload_ptr;  // Pointer to message data (pool or malloc allocated)
+    void* payload_ptr;  // A typed message's heap copy (unless it travels inline)
     struct {
         void* data;
         int size;
-        int owned;
+        int owned;      // The payload's kind: AETHER_MSG_ZC_BORROWED, _OWNED, AETHER_MSG_INLINE
     } zerocopy;
     void* _reply_slot;  // ActorReplySlot* for ask messages, NULL for fire-and-forget
 } Message;
@@ -141,6 +141,8 @@ if (current_core_id >= 0 && current_core_id == atomic_load_explicit(&actor->assi
 
 For single-int messages, the code generator emits an inline path that stores the value directly in `msg.payload_int`, with no payload allocation.
 
+Any other typed message whose struct fits the bytes from `payload_int` up to `zerocopy.owned` (28 on 64-bit targets, 16 on 32-bit: two ints, an int and a string, a `Down`) travels in the message itself (#3534): the send copies the struct there and sets `zerocopy.owned` to `AETHER_MSG_INLINE`, so there is no heap copy to make or free, and a send under memory pressure cannot fail for want of one. What its fields own moves with the bytes, as it moves into a heap copy. Only a larger struct is copied to the heap. C code that takes messages from a mailbox itself reads either with `aether_message_payload(&msg)` and gives either back with `aether_message_free_payload(&msg)` ([C embedding](c-embedding.md#message-handler-pattern)).
+
 A `ptr` field (a `std.bytes` handle, a `*T`) crosses as the pointer, with no copy. To hand the buffer over rather than share it, send it with `move`: `r ! Chunk { data: move buf }`. The sender's `buf` is then moved-from, and any later use of it is a compile error naming the line of the move. See [`move`](isolated.md#move-handing-a-buffer-over-2975).
 
 ### Receiving Messages
@@ -154,7 +156,10 @@ void _aether_step_ActorName(ActorName* self) {
         self->base.active = 0;
         return;
     }
-    void* _msg_data = msg.payload_ptr;
+    // A payload that travelled in the message is copied to the actor's
+    // _aether_step_inline, the last member of its struct (#3534).
+    void* _msg_data = aether_message_take_payload(&self->_aether_base, &msg,
+                                                  &self->_aether_step_inline);
     int _msg_id = msg.type;
 
     static void* dispatch_table[256] = {
@@ -174,7 +179,7 @@ void _aether_step_ActorName(ActorName* self) {
         ActorName_handle_MessageA(self, _msg_data);
         self->_aether_base.step_payload = NULL;
         _aether_msg_release_MessageA(_msg_data);   // what its fields own
-        aether_free_message(_msg_data);
+        aether_message_payload_done(_msg_data, &self->_aether_step_inline);  // a heap copy is freed
         return;
 }
 ```
@@ -475,7 +480,7 @@ Measured on Windows (i7-13700K, 1,000,000 messages, 10 runs, M msg/s, medians) a
 
 Actor memory is allocated using NUMA-aware allocation (`aether_numa_alloc_aligned`, on a 64-byte boundary) at spawn time. The `scheduler_spawn_actor` function accepts the full derived-struct size to ensure correct allocation for user-defined actor types.
 
-A typed message's payload is a heap copy, freed with `free()` by `aether_free_message` once the message is handled or dropped. There is no payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374).
+A typed message's payload travels in the message when it fits (`AETHER_MSG_INLINE`, #3534), else it is a heap copy, freed with `free()` by `aether_free_message` once the message is handled or dropped. There is no payload pool: an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool (#3374).
 
 ## Memory Model
 

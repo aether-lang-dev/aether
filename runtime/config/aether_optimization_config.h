@@ -27,6 +27,7 @@
 #ifndef AETHER_OPTIMIZATION_CONFIG_H
 #define AETHER_OPTIMIZATION_CONFIG_H
 
+#include <limits.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -352,7 +353,11 @@ typedef enum {
     
     // Convenience combos
     AETHER_OPT_HIGH_CONTENTION  = AETHER_OPT_LOCKFREE_MAILBOX,  // For heavy multi-threaded workloads
-    AETHER_OPT_ALL              = 0xFFFFFFFF
+    // Every flag bit set. An enumerator is an int before C23, so a flag is
+    // at most (1 << 30) and INT_MAX holds every one of them, those added
+    // later too; 0xFFFFFFFF did not fit, which -std=c11 -pedantic refuses
+    // (#3548).
+    AETHER_OPT_ALL              = INT_MAX
 } AetherOptFlags;
 
 // Current runtime configuration

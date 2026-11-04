@@ -681,7 +681,10 @@ void http_serve_static(HttpRequest* req, HttpServerResponse* res, void* base_dir
 
 // Actor dispatch mode (one actor per connection)
 // step_fn: actor step function that handles the MSG_HTTP_CONNECTION message,
-//          normally by calling http_server_drain_connection on its client_fd
+//          normally by calling http_server_drain_connection on its client_fd.
+//          The message is small enough to travel in the Message itself
+//          (#3534): read it with aether_message_payload(&msg) and give it
+//          back with aether_message_free_payload(&msg), not payload_ptr
 // send_fn: pass aether_send_message
 // spawn_fn: pass scheduler_spawn_actor. The server asks it for an actor of
 //          its own size running its own step, which calls step_fn on the

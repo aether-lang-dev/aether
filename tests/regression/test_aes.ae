@@ -111,9 +111,10 @@ main() {
     bytes.free(padded); bytes.free(unp); bytes.free(blk16)
     // (b) corrupted padding is rejected.
     bad = hb("00112233445566778899aabbccddee07") // last byte says pad=7 but isn't
-    _, berr = aes.pkcs7_unpad(bad)
+    // The refusal still hands back a buffer, empty, which is ours to free.
+    bempty, berr = aes.pkcs7_unpad(bad)
     if berr == "" { print("FAIL pkcs7 should reject bad padding\n"); fails = fails + 1 }
-    bytes.free(bad)
+    bytes.free(bad); bytes.free(bempty)
 
     bytes.free(pt)
     if fails == 0 { print("PASS: std.cryptography.aes\n") } else { print("FAILED: ${fails}\n"); exit(1) }

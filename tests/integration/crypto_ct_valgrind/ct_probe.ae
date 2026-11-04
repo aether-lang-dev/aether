@@ -128,9 +128,9 @@ fn p256_cases() -> int {
     fails = fails + check("p256 scalar_mult_base y", py, "7903FE1008B8BC99A41AE9E95628BC64F2F1B20C2D7E9F5177A3C294D4462299")
     // The hedged nonce (#3376): the key and the extra bytes secret. No
     // vector exists for it, so the signature must verify.
-    z = hb("0101010101010101010101010101010101010101010101010101010101010101")
-    secret(z)
-    hr, hs = p256.ecdsa_sign_hedged(d, h, z)
+    hz = hb("0101010101010101010101010101010101010101010101010101010101010101")
+    secret(hz)
+    hr, hs = p256.ecdsa_sign_hedged(d, h, hz)
     public(hr)
     public(hs)
     if p256.ecdsa_verify(px, py, h, hr, hs) == 1 {
@@ -156,6 +156,9 @@ fn p256_cases() -> int {
     bytes.free(priv)
     bytes.free(qx)
     bytes.free(qy)
+    bytes.free(hz)
+    bytes.free(hr)
+    bytes.free(hs)
     bytes.free(z)
     return fails
 }
@@ -348,7 +351,7 @@ fn eddsa_xdh_cases() -> int {
         fails = fails + check("x448 agree", sh2, "07fff4181ac6cc95ec1c16a94a0f74d12da232ce40a77552281d282bb60c0b56fd2464c335543936521c24403085d59a449a5037514a879d")
         bytes.free(sh2)
     }
-    bytes.free(s1); bytes.free(m1); bytes.free(sig1); bytes.free(p1)
+    bytes.free(s1); bytes.free(m1); bytes.free(sig1); bytes.free(p1); bytes.free(z1); bytes.free(hsig)
     bytes.free(s2); bytes.free(e0); bytes.free(sig2)
     bytes.free(ak); bytes.free(apub); bytes.free(bpub); bytes.free(xk); bytes.free(xpub)
     return fails

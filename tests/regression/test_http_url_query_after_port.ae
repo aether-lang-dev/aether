@@ -1,0 +1,137 @@
+// Regression (#3520): the HTTP client ended a URL's authority only at a '/',
+// so in "http://127.0.0.1:PORT?x=1" the strict port reader saw "PORT?x=1" as
+// the port and refused the URL as malformed, as it did "...:PORT#f". Before
+// the strict reader the same URLs were sent, as "GET /", without the query.
+// A forward proxy URL and a ws:// URL were split the same way.
+//
+// The authority now ends at the first '/', '?' or '#' (RFC 3986 3.2), and the
+// request target is the path and the query, "/" for an empty path, never the
+// fragment. The server below answers with the path and the query it got, and
+// a WebSocket peer sends them as its first message.
+
+import std.http
+import std.http.client
+import std.string
+
+extern exit(code: int)
+extern sleep(ms: int)
+
+handle(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "${http.request_path(req)}|${http.request_query(req)}")
+}
+
+@c_callback ws_handle(req: ptr, ws: ptr, ud: ptr) {
+    _ = http.ws_send_text(ws, "${http.request_path(req)}|${http.request_query(req)}")
+}
+
+// What the server answered a GET of `url` with, or "error: <why>".
+got(url: string, proxy: string) -> string {
+    req = client.request("GET", url)
+    if req == null { return "error: request() rejected the URL" }
+    client.set_timeout(req, 3s)
+    if string.length(proxy) > 0 {
+        perr = client.use_http_proxy(req, proxy)
+        if perr != "" {
+            client.request_free(req)
+            return "error: ${perr}"
+        }
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" { return "error: ${err}" }
+    body = client.response_body(resp)
+    out = string.concat(body, "")
+    client.response_free(resp)
+    return out
+}
+
+expect(url: string, proxy: string, want: string) -> int {
+    g = got(url, proxy)
+    if string.equals(g, want) == 1 { return 0 }
+    println("FAIL: ${url} (proxy '${proxy}') was answered '${g}', want '${want}'")
+    return 1
+}
+
+// The first message the WebSocket peer sends on `url`, or "error".
+ws_got(url: string) -> string {
+    w = http.ws_connect(url)
+    if w == null { return "error: ws_connect refused or failed" }
+    out = "error: no message"
+    if http.ws_recv_timeout(w, 3000) == 1 {
+        out = string.concat(http.ws_message(w), "")
+    }
+    http.ws_close(w, 1000, "done")
+    http.ws_client_free(w)
+    return out
+}
+
+ws_expect(url: string, want: string) -> int {
+    g = ws_got(url)
+    if string.equals(g, want) == 1 { return 0 }
+    println("FAIL: ${url} gave the WebSocket peer '${g}', want '${want}'")
+    return 1
+}
+
+// A started server, and its port; 0 when it never bound.
+start(s: ptr) -> int {
+    _ = http.server_start_background(s)
+    port = 0
+    tries = 0
+    while port <= 0 && tries < 100 {
+        sleep(20)
+        port = http.server_port(s)
+        tries = tries + 1
+    }
+    return port
+}
+
+main() {
+    s = http.server_create(0)
+    w = http.server_create(0)
+    if s == 0 || w == 0 {
+        println("FAIL: server_create")
+        exit(1)
+    }
+    http.server_set_host(s, "127.0.0.1")
+    http.server_set_host(w, "127.0.0.1")
+    http.server_get(s, "/", handle, 0)
+    http.server_get(s, "/*", handle, 0)
+    http.server_websocket(w, "/", ws_handle, null)
+    port = start(s)
+    wport = start(w)
+    if port <= 0 || wport <= 0 {
+        println("FAIL: a server never bound")
+        exit(1)
+    }
+
+    base = "http://127.0.0.1:${port}"
+    fails = 0
+    // A query or a fragment straight after the port.
+    fails = fails + expect("${base}?x=1", "", "/|x=1")
+    fails = fails + expect("${base}#frag", "", "/|")
+    fails = fails + expect("${base}?x=1#frag", "", "/|x=1")
+    // After a path, the fragment is not sent either.
+    fails = fails + expect("${base}/p?q=2#frag", "", "/p|q=2")
+    fails = fails + expect("${base}/p#frag", "", "/p|")
+    // A port that is not one is still refused.
+    fails = fails + expect("http://127.0.0.1:${port}x?x=1", "", "error: malformed URL")
+    // A forward proxy URL ends its authority the same way: the request goes
+    // through the proxy (this server) rather than being refused.
+    pg = got("http://example.invalid/ok", "${base}?x")
+    if string.starts_with(pg, "error:") == 1 {
+        println("FAIL: a proxy URL with a query after its port gave '${pg}'")
+        fails = fails + 1
+    }
+    // So does a ws:// URL, whose resource name keeps its query.
+    fails = fails + ws_expect("ws://127.0.0.1:${wport}?room=1", "/|room=1")
+    fails = fails + ws_expect("ws://127.0.0.1:${wport}?room=1#frag", "/|room=1")
+    fails = fails + ws_expect("ws://127.0.0.1:${wport}#frag", "/|")
+
+    http.server_stop(s)
+    http.server_free(s)
+    http.server_stop(w)
+    http.server_free(w)
+    if fails > 0 { exit(1) }
+    println("PASS: the authority ends at a path, a query or a fragment")
+}

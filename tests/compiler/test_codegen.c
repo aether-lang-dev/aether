@@ -1054,3 +1054,89 @@ TEST(codegen_emit_header_message_matches_generated_struct) {
     free(header);
     free(buf);
 }
+
+/* #3527: the kinds an interpolation, print or println writes as an int are
+ * the ones that are ints in C on purpose (int, the types narrower than it,
+ * an enum) and an unresolved type, which codegen stores as a C int
+ * (get_c_type); every other kind has its own conversion or none. A kind
+ * with none fell through to `%d`, which reads a pointer, a double or a
+ * 64-bit count wrongly; it is a compile error now. */
+TEST(codegen_print_fmt_int_kinds_are_the_listed_ones) {
+    static const TypeKind ints[] = { TYPE_INT, TYPE_BYTE, TYPE_UINT8, TYPE_UINT16, TYPE_ENUM,
+                                     TYPE_UNKNOWN };
+    for (size_t i = 0; i < sizeof(ints) / sizeof(ints[0]); i++) {
+        Type* t = create_type(ints[i]);
+        ASSERT_EQ(PF_INT, print_fmt_of(t));
+        free_type(t);
+    }
+    static const struct { TypeKind k; PrintFmt f; } own[] = {
+        { TYPE_UINT32, PF_UINT }, { TYPE_INT64, PF_LONG }, { TYPE_UINT64, PF_ULONG },
+        { TYPE_DURATION, PF_DURATION }, { TYPE_FLOAT, PF_DOUBLE }, { TYPE_FLOAT32, PF_DOUBLE },
+        { TYPE_LONGDOUBLE, PF_LDOUBLE }, { TYPE_BOOL, PF_BOOL }, { TYPE_STRING, PF_STRING },
+        { TYPE_PTR, PF_STRING },
+    };
+    for (size_t i = 0; i < sizeof(own) / sizeof(own[0]); i++) {
+        Type* t = create_type(own[i].k);
+        ASSERT_EQ(own[i].f, print_fmt_of(t));
+        free_type(t);
+    }
+    static const TypeKind none[] = {
+        TYPE_VOID, TYPE_STRUCT, TYPE_ARRAY, TYPE_TUPLE, TYPE_FUNCTION,
+        TYPE_OPTIONAL, TYPE_SUM, TYPE_ACTOR_REF, TYPE_MESSAGE, TYPE_BITSET, TYPE_BITSTRUCT,
+        TYPE_F32X4, TYPE_I32X8,
+    };
+    for (size_t i = 0; i < sizeof(none) / sizeof(none[0]); i++) {
+        Type* t = create_type(none[i]);
+        ASSERT_EQ(PF_NONE, print_fmt_of(t));
+        free_type(t);
+    }
+    ASSERT_EQ(PF_NONE, print_fmt_of(NULL));
+}
+
+/* The node types of every identifier named `name` under `n`, dropped. */
+static void drop_identifier_types(ASTNode* n, const char* name) {
+    if (!n) return;
+    if (n->type == AST_IDENTIFIER && n->value && strcmp(n->value, name) == 0 && n->node_type) {
+        free_type(n->node_type);
+        n->node_type = NULL;
+    }
+    for (int i = 0; i < n->child_count; i++) drop_identifier_types(n->children[i], name);
+}
+
+/* #3527: a value with no type at all is a reported error in an
+ * interpolation, a println and a print, not a `%d` guess. The tree is
+ * generated without the checker, and the name's type taken off. */
+TEST(codegen_untyped_print_value_is_a_reported_error) {
+    aether_error_reset_counts();
+    int count;
+    Token** tokens = tokenize_source("main() { println(\"v ${q}\")\n println(q)\n print(q) }", &count);
+    Parser* parser = create_parser(tokens, count);
+    ASTNode* ast = parse_program(parser);
+    ASSERT_NOT_NULL(ast);
+    drop_identifier_types(ast, "q");
+    FILE* out = tmpfile();
+    ASSERT_NOT_NULL(out);
+    CodeGenerator* gen = create_code_generator(out);
+    generate_program(gen, ast);
+    char* buf = read_all(out);
+    ASSERT_NOT_NULL(buf);
+    ASSERT_EQ(3, aether_error_count());
+    ASSERT_TRUE(strstr(buf, "printf(\"%d\\n\", q)") == NULL);
+    aether_error_reset_counts();
+    free(buf);
+    fclose(out);
+    free_code_generator(gen);
+    free_ast_node(ast);
+    free_parser(parser);
+    for (int i = 0; i < count; i++) free_token(tokens[i]);
+    free(tokens);
+}
+
+/* #3527: println of a long double has its conversion; it fell through to
+ * `printf("%d\n", x)`. */
+TEST(codegen_println_long_double_has_its_conversion) {
+    char* buf = generate_typechecked("main() { longdouble x = 2.5\n println(x) }");
+    ASSERT_NOT_NULL(buf);
+    ASSERT_TRUE(strstr(buf, "_aether_interp_print(\"%Lf\\n\", (long double)(x))") != NULL);
+    free(buf);
+}

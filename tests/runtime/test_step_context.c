@@ -54,7 +54,7 @@ static void sc_step(ScActor* self) {
         return;
     }
     aether_reply_slot_set(msg._reply_slot);
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     atomic_fetch_add(&self->got, 1);
     if (self->tell) {
         ScMsg m = { 1, 0 };
@@ -153,7 +153,7 @@ static void ex_step(ExActor* self) {
         return;
     }
     aether_reply_slot_set(msg._reply_slot);
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     if (self->tell) {
         g_ex_x = self;
         aether_set_caller("alice", NULL, NULL, 0, 0);
@@ -244,7 +244,7 @@ static void ac_step(AcActor* self) {
         return;
     }
     aether_reply_slot_set(msg._reply_slot);
-    if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+    aether_message_free_payload(&msg);
     if (self->tell) {
         AetherExecLimits lim = { 0, 0, AETHER_DEADLINE_ELAPSED, NULL };
         AetherExecAccount* a = aether_exec_account_new(&lim);
@@ -325,6 +325,7 @@ typedef struct {
     atomic_long held;          // D: what its account holds after the sends
     atomic_int outcome;        // D: its call's outcome
     atomic_int done;
+    AetherMsgInline step_copy; // the payload a handler runs on, as a generated actor's (#3534)
 } DcActor;
 
 static atomic_int g_dc_began;  // drops begun
@@ -351,7 +352,7 @@ static void dc_step(DcActor* self) {
     }
     aether_reply_slot_set(msg._reply_slot);
     if (self->how == DC_CALLER) {
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        aether_message_free_payload(&msg);
         AetherExecLimits lim = { 0, 0, AETHER_DEADLINE_ELAPSED, NULL };
         AetherExecAccount* a = aether_exec_account_new(&lim);
         aether_exec_use(a, NULL);
@@ -380,10 +381,10 @@ static void dc_step(DcActor* self) {
         if (self->how == DC_PANICS) {
             /* The message the handler runs on, as a handler records it. */
             self->step_type = msg.type;
-            self->step_payload = msg.payload_ptr;
+            self->step_payload = aether_message_take_payload((ActorBase*)self, &msg, &self->step_copy);
             aether_panic("the receiver panicked");
         }
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        aether_message_free_payload(&msg);
         aether_actor_claim_end((ActorBase*)self, "normal", AETHER_ACTOR_STOPPED);
     }
     atomic_store_explicit(&self->active, self->mailbox.count > 0, memory_order_relaxed);
@@ -481,7 +482,7 @@ static void hk_step(HkActor* self) {
         if (aether_down_accept((ActorBase*)self, &msg)) atomic_fetch_add(&self->downs, 1);
         aether_message_drop((ActorBase*)self, &msg);
     } else {
-        if (msg.payload_ptr) aether_free_message(msg.payload_ptr);
+        aether_message_free_payload(&msg);
         ScMsg m = { 1, 0 };
         if (self->tell) {
             aether_send_message(self->tell, &m, sizeof m);

@@ -46,11 +46,34 @@
 #  endif
 #endif
 
-/* Process-wide. _Atomic for the lock-free fast path — every alloc
- * site touches g_mem_used; contention is real but bounded by the
- * compare-and-add pattern. */
-static _Atomic uint64_t g_mem_used = 0;
+/* The bytes the cap-aware allocators hold, in two parts (#3529).
+ *
+ * Every allocation and free of every thread counted on one atomic, so all
+ * the cores fought over one cache line for memory they never share: eight
+ * threads building strings took 100 ns a string where one took 65. Without
+ * a cap, each thread counts on a slot of its own instead (g_use_slots, a
+ * cache line each, chosen when the thread first counts), and the total is
+ * summed when someone asks. A slot is signed: a block one thread makes and
+ * another frees counts up on the first and down on the second.
+ *
+ * Under a cap the check has to be exact, so the capped path counts on
+ * g_mem_exact alone, and setting the cap first moves every slot's count
+ * into it (caps_fold_slots): a cap set later sees the bytes already in use.
+ * The total is always g_mem_exact plus the slots. */
+#define CAPS_USE_SLOTS 64
+typedef struct {
+    _Atomic int64_t bytes;
+    char pad[64 - sizeof(_Atomic int64_t)];
+} CapsUseSlot;
+static CapsUseSlot g_use_slots[CAPS_USE_SLOTS] AETHER_ALIGNED(64);
+static _Atomic unsigned g_use_next = 0;
+/* This thread's slot, plus one; 0 until it first counts. */
+static AETHER_TLS_SHARED unsigned t_use_slot = 0;
+static _Atomic int64_t g_mem_exact = 0;
 static _Atomic uint64_t g_mem_cap  = 0;   /* 0 = unlimited */
+/* Held while the slots are moved into g_mem_exact: setting a cap is rare,
+ * and two folds at once could each see the other's half-moved count. */
+static atomic_flag g_fold_lock = ATOMIC_FLAG_INIT;
 
 /* What the allocation fast path must ask about, in one word it reads once
  * (#2954): a cap is set, an execution account exists, the test hook is
@@ -82,28 +105,90 @@ static int64_t now_ns(void) {
     return (int64_t)aether_now_ns();
 }
 
+/* `ms` (> 0) milliseconds in nanoseconds, and `ms` from now as a time on
+ * now_ns's clock, each held at INT64_MAX past the end of what an int64_t
+ * counts: a time no clock reaches, so a deadline that far off never trips
+ * (#3528). `ms * 1000000LL` overflowed for anything past about 292 years,
+ * a host passing long.max to mean "no deadline" among them, and the
+ * runtime is not built with -fwrapv: in practice the sum landed in the
+ * past and the work stopped at once. */
+static int64_t ms_to_ns(int64_t ms) {
+    if (ms > INT64_MAX / 1000000LL) return INT64_MAX;
+    return ms * 1000000LL;
+}
+
+static int64_t ns_after_ms(int64_t ms) {
+    int64_t now = now_ns();
+    int64_t span = ms_to_ns(ms);
+    if (now > 0 && span > INT64_MAX - now) return INT64_MAX;
+    return now + span;
+}
+
+/* This thread's slot. A thread takes the next one the first time it counts,
+ * so threads that run at once use different lines until there are more of
+ * them than slots; after that two share one, which an atomic add keeps
+ * right. */
+static inline _Atomic int64_t* caps_use_slot(void) {
+    unsigned s = t_use_slot;
+    if (__builtin_expect(s == 0, 0)) {
+        s = atomic_fetch_add_explicit(&g_use_next, 1, memory_order_relaxed) % CAPS_USE_SLOTS + 1;
+        t_use_slot = s;
+    }
+    return &g_use_slots[s - 1].bytes;
+}
+
+static inline void caps_use_add(int64_t bytes) {
+    atomic_fetch_add_explicit(caps_use_slot(), bytes, memory_order_relaxed);
+}
+
+static inline int caps_capped(void) {
+    return (atomic_load_explicit(&aether_caps_slow, memory_order_relaxed) & CAPS_SLOW_CAP) != 0;
+}
+
+/* Every slot's count moved into g_mem_exact, under g_fold_lock. Each slot
+ * is emptied by an exchange, an atomic read and write, so a thread adding
+ * to it at the same time loses nothing: its add lands before the exchange,
+ * and moves, or after it, and stays for the next fold. A total below zero
+ * afterwards is frees of more than was ever counted, and is forgotten, as
+ * the one counter always held them at zero. */
+static void caps_fold_slots(void) {
+    while (atomic_flag_test_and_set_explicit(&g_fold_lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+    int64_t moved = 0;
+    for (int i = 0; i < CAPS_USE_SLOTS; i++)
+        moved += atomic_exchange_explicit(&g_use_slots[i].bytes, 0, memory_order_relaxed);
+    int64_t cur = atomic_fetch_add_explicit(&g_mem_exact, moved, memory_order_relaxed) + moved;
+    while (cur < 0 &&
+           !atomic_compare_exchange_weak_explicit(&g_mem_exact, &cur, 0,
+                                                  memory_order_relaxed, memory_order_relaxed)) {
+    }
+    atomic_flag_clear_explicit(&g_fold_lock, memory_order_release);
+}
+
 int aether_caps_check_alloc(size_t bytes) {
-    /* Fast path: no cap set. One relaxed load + branch. */
+    /* No cap: count on this thread's slot. */
+    if (!caps_capped()) {
+        caps_use_add((int64_t)bytes);
+        return 1;
+    }
+    /* Cleared since the flag was read: count it where the capped path
+     * would, so the free that follows under the same flag finds it. */
     uint64_t cap = atomic_load_explicit(&g_mem_cap, memory_order_relaxed);
     if (cap == 0) {
-        /* Still account the alloc so the counter reflects current
-         * usage even when no cap is active — keeps test harnesses
-         * and future cap-set transitions consistent. */
-        atomic_fetch_add_explicit(&g_mem_used, (uint64_t)bytes,
-                                  memory_order_relaxed);
+        atomic_fetch_add_explicit(&g_mem_exact, (int64_t)bytes, memory_order_relaxed);
         return 1;
     }
 
     /* Cap-set path: CAS-add to keep current+bytes <= cap. Loop
      * because another thread may bump the counter between our load
      * and our CAS — re-read and retry. */
-    uint64_t cur = atomic_load_explicit(&g_mem_used, memory_order_relaxed);
+    int64_t cur = atomic_load_explicit(&g_mem_exact, memory_order_relaxed);
     for (;;) {
-        if (cur + (uint64_t)bytes > cap || cur + (uint64_t)bytes < cur) {
-            return 0;  /* would exceed cap or wraps */
+        uint64_t held = cur > 0 ? (uint64_t)cur : 0;
+        if ((uint64_t)bytes > cap || held > cap - (uint64_t)bytes) {
+            return 0;  /* would exceed cap */
         }
         if (atomic_compare_exchange_weak_explicit(
-                &g_mem_used, &cur, cur + (uint64_t)bytes,
+                &g_mem_exact, &cur, cur + (int64_t)bytes,
                 memory_order_relaxed, memory_order_relaxed)) {
             return 1;
         }
@@ -112,26 +197,23 @@ int aether_caps_check_alloc(size_t bytes) {
 }
 
 void aether_caps_account_free(size_t bytes) {
-    /* Saturating decrement: never wrap below 0. Underflow would
-     * falsely trip the cap on subsequent allocations. */
-    uint64_t cur = atomic_load_explicit(&g_mem_used, memory_order_relaxed);
-    for (;;) {
-        uint64_t next = (cur >= (uint64_t)bytes) ? (cur - (uint64_t)bytes) : 0;
-#ifndef NDEBUG
-        assert(cur >= (uint64_t)bytes && "alloc/free accounting underflow");
-#endif
-        if (atomic_compare_exchange_weak_explicit(
-                &g_mem_used, &cur, next,
-                memory_order_relaxed, memory_order_relaxed)) {
-            return;
-        }
+    /* Where the allocation of the same moment counts. A total below zero
+     * (a free past what was counted) does not trip a cap: the count is
+     * signed, and a fold forgets it. */
+    if (!caps_capped()) {
+        caps_use_add(-(int64_t)bytes);
+        return;
     }
+    atomic_fetch_sub_explicit(&g_mem_exact, (int64_t)bytes, memory_order_relaxed);
 }
 
 void aether_caps_set_memory_cap(uint64_t bytes) {
     atomic_store_explicit(&g_mem_cap, bytes, memory_order_relaxed);
     if (bytes) atomic_fetch_or_explicit(&aether_caps_slow, CAPS_SLOW_CAP, memory_order_relaxed);
     else atomic_fetch_and_explicit(&aether_caps_slow, ~CAPS_SLOW_CAP, memory_order_relaxed);
+    /* After the flag, so what is counted from here on goes to the counter
+     * this cap is checked against, and everything counted before is in it. */
+    caps_fold_slots();
 }
 
 /* Nonzero once any thread has armed or tripped a deadline, or cancelled a
@@ -155,7 +237,7 @@ void aether_caps_set_deadline_ms(int64_t ms) {
     if (ms <= 0) {
         g_deadline_at_ns = 0;
     } else {
-        g_deadline_at_ns = now_ns() + ms * 1000000LL;
+        g_deadline_at_ns = ns_after_ms(ms);
     }
     /* Reset the sticky flag — a fresh deadline is a fresh chance. */
     g_tripped = 0;
@@ -190,7 +272,7 @@ void aether_caps_deadline_restore(const AetherDeadlineState* s) {
 
 AetherDeadlineState aether_caps_deadline_for_ms(int64_t ms) {
     AetherDeadlineState s;
-    s.at_ns = ms > 0 ? now_ns() + ms * 1000000LL : 0;
+    s.at_ns = ms > 0 ? ns_after_ms(ms) : 0;
     s.tripped = 0;
     return s;
 }
@@ -200,7 +282,12 @@ int aether_caps_deadline_flag(void) {
 }
 
 uint64_t aether_caps_used_bytes(void) {
-    return atomic_load_explicit(&g_mem_used, memory_order_relaxed);
+    /* The sum of the two parts. Read while other threads count, it is the
+     * total of some moment close to the call, as the one counter was. */
+    int64_t total = atomic_load_explicit(&g_mem_exact, memory_order_relaxed);
+    for (int i = 0; i < CAPS_USE_SLOTS; i++)
+        total += atomic_load_explicit(&g_use_slots[i].bytes, memory_order_relaxed);
+    return total > 0 ? (uint64_t)total : 0;
 }
 
 #include <stdlib.h>
@@ -631,9 +718,15 @@ static int own_exec_begin(AetherExecAccount* a, int64_t* at_out, int* tripped, i
                 since = now;
             }
             /* What is left of it: its budget, less what it spent before and
-             * since this thread began timing it. */
-            if (x->active_budget_ns)
-                own = since + x->active_budget_ns - atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+             * since this thread began timing it. Added to `since` held at
+             * INT64_MAX: a budget of INT64_MAX (ms_to_ns of "no deadline")
+             * wrapped `since + budget` to a time in the past, and an ACTIVE
+             * account with no deadline stopped its work at once (#3528). */
+            if (x->active_budget_ns) {
+                int64_t left = x->active_budget_ns -
+                               atomic_load_explicit(&x->active_spent_ns, memory_order_relaxed);
+                own = (left > 0 && since > INT64_MAX - left) ? INT64_MAX : since + left;
+            }
         } else {
             own = x->deadline_at_ns;
         }
@@ -710,9 +803,9 @@ static AetherExecAccount* own_new(const AetherExecLimits* limits) {
                                  ? AETHER_DEADLINE_ACTIVE : AETHER_DEADLINE_ELAPSED;
         if (limits->deadline_ms > 0) {
             if (a->deadline_counts == AETHER_DEADLINE_ACTIVE)
-                a->active_budget_ns = limits->deadline_ms * 1000000LL;
+                a->active_budget_ns = ms_to_ns(limits->deadline_ms);
             else
-                a->deadline_at_ns = now_ns() + limits->deadline_ms * 1000000LL;
+                a->deadline_at_ns = ns_after_ms(limits->deadline_ms);
             caps_arm();
         }
     }
@@ -1472,7 +1565,7 @@ void* aether_caps_malloc(size_t bytes) {
             aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
             return NULL;
         }
-        atomic_fetch_add_explicit(&g_mem_used, (uint64_t)bytes, memory_order_relaxed);
+        caps_use_add((int64_t)bytes);
         return p;
     }
     return caps_alloc_slow(bytes, 0, 0, 0);
@@ -1491,7 +1584,7 @@ void* aether_caps_calloc(size_t n, size_t size) {
             aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
             return NULL;
         }
-        atomic_fetch_add_explicit(&g_mem_used, (uint64_t)bytes, memory_order_relaxed);
+        caps_use_add((int64_t)bytes);
         return p;
     }
     return caps_alloc_slow(bytes, 1, n, size);

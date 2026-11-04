@@ -201,6 +201,11 @@ main() {
     http.server_stop(alone)
     http.server_stop(limited)
     http.server_stop(upstream)
+    http.server_free(zipped)
+    http.server_free(logged)
+    http.server_free(alone)
+    http.server_free(limited)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

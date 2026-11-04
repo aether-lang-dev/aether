@@ -1,0 +1,44 @@
+// Allocation from many threads at once (#3518): `workers` actors each build
+// and drop strings, so the allocator and its accounting are shared by every
+// core. ns per string, wall time over all workers.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+import std.string
+
+message Work { n: int }
+
+actor Worker {
+    state made = 0
+    receive {
+        Work(n) -> {
+            // Built here, so the compiler cannot fold the concatenation.
+            head = string.from_int(n)
+            i = 0
+            while i < n {
+                s = string.concat(head, "ijklmnop")
+                made = made + string.length(s)
+                i = i + 1
+            }
+        }
+    }
+}
+
+bench(workers: int, per: int) -> float {
+    w = 0
+    t0 = os.now_monotonic_ns()
+    while w < workers {
+        a = spawn(Worker())
+        a ! Work { n: per }
+        w = w + 1
+    }
+    wait_for_idle()
+    t1 = os.now_monotonic_ns()
+    return (t1 - t0) as float / (workers * per) as float
+}
+
+main() {
+    println("row alloc_strings_1_worker ${bench(1, 2000000)} ns/string")
+    println("row alloc_strings_8_workers ${bench(8, 500000)} ns/string")
+}

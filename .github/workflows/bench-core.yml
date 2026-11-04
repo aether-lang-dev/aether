@@ -1,0 +1,85 @@
+name: Core benchmarks
+
+# benchmarks/core (#3518) measures what a runtime, std or compiler change
+# costs every program: sends, asks, scheduling beside idle actors, std.string,
+# std.map, std.json, allocation from many threads, `ae run` on a warm cache
+# and aetherc's compile phases. On a pull request that touches those, this
+# builds the pull request and its merge base on one runner and runs both
+# through benchmarks/core/run.ae, the two trees' runs interleaved, best of 5,
+# and writes the table to the job summary.
+#
+# Report only: a hosted runner shares its machine, and the same commit moves
+# by 10% or more between runs there, so a failing threshold would fail on
+# noise. Read the table, and measure a suspicious row on a quiet machine
+# with `make bench-core-compare BASE=<tree>` before acting on it.
+on:
+  pull_request:
+    paths:
+      - 'runtime/**'
+      - 'std/**'
+      - 'compiler/**'
+      - 'tools/**'
+      - 'benchmarks/core/**'
+      - 'benchmarks/ownership/**'
+      - '.github/workflows/bench-core.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  compare:
+    name: Branch vs merge base
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - name: Install tools
+      run: |
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
+        sudo apt-get install -y gcc make
+
+    - name: Check out the merge base
+      run: |
+        base_ref="${{ github.event.pull_request.base.sha }}"
+        if [ -z "$base_ref" ]; then base_ref=origin/main; fi
+        mb=$(git merge-base HEAD "$base_ref")
+        echo "merge base $mb"
+        git worktree add ../base "$mb"
+
+    - name: Build the merge base
+      run: make -C ../base -j"$(nproc)" compiler ae stdlib
+
+    - name: Build this branch
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Run both
+      run: |
+        # A failed build or run fails the step: tee alone would hide it.
+        set -o pipefail
+        make bench-core-compare BASE=../base BENCH_RUNS=5 | tee bench-core.txt
+        {
+          echo '### Core benchmarks, best of 5, lower is better'
+          echo
+          echo '```'
+          sed -n '/^best of/,$p' bench-core.txt
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the table
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: bench-core
+        path: |
+          bench-core.txt
+          build/bench-core.tsv
+        retention-days: 14

@@ -265,6 +265,9 @@ free_ctx(ctx: ptr) {
         bytes.wipe_free(c.v)
         c.v = null
     }
+    // The context holds a reference to the algo name; `free` alone would
+    // not release it (#3539).
+    c.algo = ""
     mem.wipe(ctx, sizeof(DrbgCtx))
     free(ctx)
 }

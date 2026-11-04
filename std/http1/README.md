@@ -32,6 +32,11 @@ arrive rather than buffering a whole response first. `is_eof` tells it whether
 more can still come, which is what distinguishes a truncated response from one
 that is merely unfinished.
 
+A 1xx, 204 or 304 response has no body, and neither does any response to
+HEAD, whatever its headers say. The status line tells the reader the first,
+but only you know the request was HEAD: read its response with a reader
+from `response_new_for("HEAD")` rather than `response_new()`.
+
 `parse_status_line` and `parse_headers` are the lower-level pieces, operating
 on a response struct and a raw buffer: reach for them only when `feed`'s
 framing is not what you want.
@@ -44,5 +49,5 @@ implementing something HTTP-shaped rather than speaking HTTP.
 
 ## Exports
 
-`HttpResponse`, `response_new`, `response_free`, `parse_status_line`,
+`HttpResponse`, `response_new`, `response_new_for`, `response_free`, `parse_status_line`,
 `parse_headers`, `feed`, `read_response_conn`.

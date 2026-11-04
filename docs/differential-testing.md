@@ -162,6 +162,46 @@ the compiler, the runtime, std, `ae`, the Makefile or the sweep's scripts,
 every night on main, and by hand. It takes about 11 minutes (the sweep under
 UBSan is 1.75 times the plain one), which is why it is not on every PR.
 
+## Memory errors and leaks: the corpus under ASan and LSan
+
+`make test-asan-ae` (#3539) is the same run under AddressSanitizer with
+LeakSanitizer, through the same script (`tests/scripts/sanitizer_sweep.sh`,
+`SAN=asan`) and the same sanitizing compiler, `build/asan/bin/gcc`. A heap
+overflow, a use after free or a double free stops the program that made it,
+and a block it never freed is reported when it exits; the reports go to
+`build/asan/reports/`, grouped by the first frame that is not the
+sanitizer's or an allocator's. An error fails the run. A leak fails it only
+with `SAN_LEAKS=fail`: until the test programs that never free what they
+make are fixed (#3547), leaks are listed in the summary and the run passes
+on them. A fault stays the signal it is (`handle_segv=0`), so a program's
+own fault-to-panic handler and `ae run`'s crash report behave as without
+ASan. Libraries that carry their own runtime copy and the sandbox's preload
+are part of the design, so the one-definition and link-order checks are off
+(`detect_odr_violation=0`, `verify_asan_link_order=0`). Tests that check
+only what ASan replaces (a bound on RSS, the sandbox's preload, the shape of
+compiled code) are left out of this sweep, each with its reason, in
+`tests/ae_sweep_prune_asan.txt`;
+they run on every other leg. Two more take another path under ASan: one
+that needs an address-space limit and one that needs Valgrind read
+`AETHER_SANITIZER`.
+Its canaries
+are `tests/asan/overflow.ae`, which writes one byte past an 8 byte block, and
+`tests/asan/leak.ae`, which drops the only pointer to one: each must be
+stopped with its report before the corpus counts. aetherc and `ae` run
+instrumented too, so a memory error in them stops the build that hit it, but
+with leak detection off by default (`compiler/aether_toolchain_asan.h`): the
+compiler's own leaks are gated a program shape at a time by
+`tests/scripts/check_compiler_leaks.sh` (#1667). A test that asks for more
+memory than exists still gets NULL (`allocator_may_return_null`), and
+`mem.heap_in_use` counts the sanitizer allocator's live bytes, so the
+ownership tests' steady growth checks keep their meaning under it.
+
+`make test-asan` is older and narrower: the C unit runner only. Before #3539
+that was all ASan, LSan and Valgrind ran on Linux, and the macOS leaks gate
+over `tests/regression` was the only leak check of generated code. CI runs
+the new target in `.github/workflows/asan.yml`, in two shards
+(`AE_SWEEP_SHARD`), on the same pull requests and nights as UBSan.
+
 ## Extending it
 
 The exe-vs-lib pair and the two optimisation levels are path comparisons; there

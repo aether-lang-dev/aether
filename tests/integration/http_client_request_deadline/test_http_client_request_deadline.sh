@@ -72,6 +72,8 @@ main() {
     if err == "" && resp != null { err = client.response_error(resp) }
     println("elapsed_under_4s ${ms < 4000}")
     println("error [${err}]")
+    if resp != null { client.response_free(resp) }
+    client.request_free(req)
 }
 AE
 

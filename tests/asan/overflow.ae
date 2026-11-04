@@ -1,0 +1,10 @@
+// The heap overflow canary of `make test-asan-ae` (#3539): canary.c writes 9
+// bytes into an 8 byte block, so a sanitized build of it must be stopped with
+// an AddressSanitizer report. Built and run by tests/scripts/sanitizer_sweep.sh,
+// never by the sweep itself.
+
+extern asan_canary_overflow(n: int) -> int
+
+main() {
+    println("overflow: ${asan_canary_overflow(9)}")
+}

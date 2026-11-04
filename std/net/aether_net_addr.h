@@ -65,6 +65,30 @@ static inline const char* aether_addr_authority(char* buf, size_t cap, const cha
     return buf;
 }
 
+/* How long the authority at `s` is, `s` being what follows a URL's "//": up
+ * to the first '/', '?' or '#', or the end (RFC 3986 3.2). A query or a
+ * fragment may follow the authority with no path between them, as in
+ * "http://h:8080?x=1": ended only at '/', the authority took the query for
+ * part of the port (#3520). */
+static inline size_t aether_url_authority_len(const char* s) {
+    return strcspn(s, "/?#");
+}
+
+/* The request target for `rest`, what follows a URL's authority, in `dst`:
+ * its path and query, an empty path written "/", and never its fragment,
+ * which is no part of a request target (RFC 9112 3.2, RFC 6455 3). 1 when
+ * it fits in `cap` bytes with its NUL; 0, and nothing written, when it does
+ * not, since a target cut to the buffer would ask for something else. */
+static inline int aether_url_request_target(char* dst, size_t cap, const char* rest) {
+    size_t n = strcspn(rest, "#");
+    size_t lead = rest[0] == '/' ? 0 : 1;
+    if (cap == 0 || n + lead >= cap) return 0;
+    if (lead) dst[0] = '/';
+    memcpy(dst + lead, rest, n);
+    dst[lead + n] = '\0';
+    return 1;
+}
+
 /* A URL authority `a` of `alen` bytes split into its host, without the
  * brackets of an IPv6 literal ("[::1]:8443" gives "::1"), and its port text,
  * *port_at NULL when there is none. An unclosed bracket, anything but a port

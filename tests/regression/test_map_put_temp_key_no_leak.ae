@@ -1,0 +1,66 @@
+// #3539: `map.put(m, key, value)` with a key that is a fresh temporary (an
+// interpolation, a call's result) gave the value to the map and never
+// released the key. The map keeps a key by a reference of its own (#3538),
+// or a copy of a plain C string, so the caller's temporary was lost on
+// every put: LeakSanitizer and the macOS leaks gate reported one string per
+// put. A local or a literal key belongs to its owner and is not touched.
+//
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of the same work grows the heap by exactly 0.
+
+import std.map
+import std.mem
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+fn make_key(i: int) -> string {
+    return "key-${i}"
+}
+
+// Every put shape: a call's result, an interpolation, a local and a literal
+// key, a repeated key, and the value a fresh string too.
+fn round() -> int {
+    m = map.new()
+    i = 0
+    while i < 50 {
+        map.put(m, make_key(i), "v")
+        map.put(m, "other-${i}", make_key(i))
+        k = make_key(i)
+        map.put(m, k, "local")
+        i = i + 1
+    }
+    map.put(m, "literal", "x")
+    map.put(m, make_key(7), "again")
+    n = map.size(m)
+    v, _err = map.get_string(m, "key-7")
+    check(v == "again", "a repeated temporary key replaced the value (got '${v}')")
+    map.free(m)
+    return n
+}
+
+main() {
+    check(round() == 101, "the map holds every key once")
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 5 {
+            _n = round()
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 4 {
+                    _r = round()
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 4 rounds of puts grew the heap by ${grown} bytes in every run")
+    }
+    println("PASS a temporary map key is released after the put")
+}

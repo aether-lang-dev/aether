@@ -31,7 +31,7 @@ runtime queues a send the same way and runs it at the next `wait_for_idle`,
 
 **Implementation:** `runtime/actors/aether_send_message.c`
 
-A typed message's payload is a heap copy, made by the send and freed with `free()` by whoever handles or drops the message (`aether_free_message`). There is no payload pool (#3374): a per-thread pool was tried, but an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool. `AETHER_FLAG_LOCKFREE_POOLS` is accepted and ignored, and `aether_message_pool_stats` reports zeros; both are deprecated.
+A typed message whose struct fits the bytes `Message` has from `payload_int` up to `zerocopy.owned` (28 on 64-bit targets, 16 on 32-bit) travels in the message itself, with `zerocopy.owned` set to `AETHER_MSG_INLINE` (#3534): two ints, an int and a string, a reference and a string. The generated step copies it to the actor's `_aether_step_inline` and runs the handler there, so such a send makes no allocation and its handling frees none. Any other typed message's payload is a heap copy, made by the send and freed with `free()` by whoever handles or drops the message (`aether_free_message`). There is no payload pool (#3374): a per-thread pool was tried, but an actor can move to another core after a message is sent, so a pooled payload would be released by a thread that does not own the pool. `AETHER_FLAG_LOCKFREE_POOLS` is accepted and ignored, and `aether_message_pool_stats` reports zeros; both are deprecated.
 
 ### Message Coalescing with Batch Dequeue
 

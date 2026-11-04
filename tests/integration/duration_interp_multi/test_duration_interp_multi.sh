@@ -2,8 +2,9 @@
 # Issue #927: multiple ${duration} interpolations in ONE string each
 # rendered the SAME value, because _aether_duration_repr() returned a
 # shared static buffer — every result in a single printf/snprintf
-# pointed at the last-formatted value. The fix hands out a small ring
-# of buffers, so several distinct durations coexist in one expression.
+# pointed at the last-formatted value. A ring of eight buffers fixed it
+# up to eight; since #3526 the formatter writes each duration's text
+# itself (%D), so any number coexist in one expression.
 #
 # This test puts three durations of different magnitudes into one
 # interpolated string (twice, in different orders) and asserts each

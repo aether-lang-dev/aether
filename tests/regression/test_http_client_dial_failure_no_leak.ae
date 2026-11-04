@@ -1,0 +1,77 @@
+// Regression (#3539): a request whose connection cannot be made frees the
+// copy of the URL's path it made.
+//
+// http_request_internal copies the path out of the URL (parse_url_alloc) and
+// frees it once the request head is built. Two returns came before that and
+// did not free it: the host did not resolve, and the dial failed. Every
+// request to a server that was down leaked the path. LeakSanitizer found it
+// in std's HTTP client tests.
+//
+// The port here was listening and is closed, so nothing answers on it. The
+// timeout bounds the connect where a refused connect is slow (Windows waits
+// about two seconds); a refusal and a timeout both end in the dial failure.
+// The leak check runs where the heap count is exact (mem.heap_in_use_exact):
+// after a warm-up, some window of requests grows the heap by exactly 0.
+
+import std.mem
+import std.string
+import std.tcp
+import std.http.client
+
+extern exit(code: int)
+
+// One request to `url`, which must fail to connect. 1 when it did.
+fn dial_fails(url: string) -> int {
+    req = client.request("GET", url)
+    client.set_timeout(req, 200ms)
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if resp != null {
+        client.response_free(resp)
+        return 0
+    }
+    if err == "" { return 0 }
+    return 1
+}
+
+fn requests(url: string, n: int) -> int {
+    bad = 0
+    i = 0
+    while i < n {
+        if dial_fails(url) != 1 { bad = bad + 1 }
+        i = i + 1
+    }
+    return bad
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    port = tcp.server_port(srv)
+    tcp.server_close(srv)
+    // A long path, so a leaked copy is easy to tell from noise.
+    url = "http://127.0.0.1:${port}/a/path/long/enough/to/be/seen/in/the/heap"
+
+    fails = requests(url, 3)
+    if fails > 0 {
+        println("FAIL a request to a closed port did not fail")
+        exit(1)
+    }
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                fails = fails + requests(url, 3)
+            }, 5)
+        if grown != 0 {
+            println("FAIL three failed requests grew the heap by ${grown} bytes in every run")
+            exit(1)
+        }
+        if fails > 0 {
+            println("FAIL a request to a closed port did not fail")
+            exit(1)
+        }
+    }
+    println("PASS a failed dial frees the request's path")
+}

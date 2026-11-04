@@ -28,9 +28,11 @@
 #include "codegen/optimizer.h"
 #include "codegen/codegen.h"
 #include "aether_defines.h"
+#include "aether_compile_stack.h"
 #include "aether_error.h"
 #include "aether_module.h"
 #include "aether_source_text.h"
+#include "aether_toolchain_asan.h"  // leak checks are the sweep's programs', not ours (#3539)
 
 /* #2297: --shared-runtime (with --emit=lib): recorded in the catalog. */
 static int g_lib_shared_runtime = 0;
@@ -49,6 +51,35 @@ static int g_lib_actors = 0;
 
 // Global flags
 static bool verbose_mode = false;
+
+/* --time-phases (#3518): how long each phase of a compile took, written to
+ * stderr as `phase <name> <ms> <cpu ms>` lines as each one ends. The first
+ * is the wall clock, the runtime's monotonic one, which aetherc links
+ * (runtime/aether_resource_caps.c): what benchmarks/core/run.ae reports.
+ * The second is the process's CPU time (phase_cpu_ms), which a busy machine
+ * does not stretch the way it stretches the wall clock: what a test of how
+ * a phase scales compares (lookup_index_scaling). */
+int64_t aether_caps_now_ns(void);
+static double phase_cpu_ms(void);
+static bool time_phases = false;
+static double phase_started_ms = 0;
+static double phase_started_cpu_ms = 0;
+
+static double phase_clock_ms(void) {
+    return (double)aether_caps_now_ns() / 1000000.0;
+}
+
+/* Ends the phase running since the last mark; a NULL name only starts one. */
+static void phase_mark(const char* name) {
+    if (!time_phases) return;
+    double now = phase_clock_ms();
+    double cpu = phase_cpu_ms();
+    if (name)
+        fprintf(stderr, "phase %s %.3f %.3f\n", name, now - phase_started_ms,
+                cpu - phase_started_cpu_ms);
+    phase_started_ms = now;
+    phase_started_cpu_ms = cpu;
+}
 static bool dump_ast_mode = false;
 static bool emit_c_mode = false;
 static const char* csrc_header_path = NULL;  // #996 --emit-header=<path>
@@ -269,6 +300,25 @@ static bool emit_aea_mode = false;
     #include <unistd.h>
     #define PATH_SEP '/'
 #endif
+
+/* The process's CPU time in ms, for --time-phases. Windows charges CPU time
+ * a clock tick (about 15.6 ms) at a time, so a phase shorter than a few
+ * ticks reads coarse there; POSIX's clock() counts it in microseconds.
+ * (Windows' clock() is the wall clock, so it is not used there.) */
+static double phase_cpu_ms(void) {
+#ifdef _WIN32
+    FILETIME created, exited, kernel, user;
+    if (!GetProcessTimes(GetCurrentProcess(), &created, &exited, &kernel, &user)) return 0;
+    ULARGE_INTEGER k, u;
+    k.LowPart = kernel.dwLowDateTime;
+    k.HighPart = kernel.dwHighDateTime;
+    u.LowPart = user.dwLowDateTime;
+    u.HighPart = user.dwHighDateTime;
+    return (double)(k.QuadPart + u.QuadPart) / 10000.0;
+#else
+    return (double)clock() * 1000.0 / (double)CLOCKS_PER_SEC;
+#endif
+}
 
 // Helper to check file existence
 int compiler_file_exists(const char* path) {
@@ -1438,7 +1488,9 @@ int compile_source(const char* input_path, const char* output_path) {
     }
     
     int token_count = 0;
+    phase_mark(NULL);
     Token** tokens = lexer_tokenize(source, &token_count);
+    phase_mark("lex");
     if (!tokens) {
         fprintf(stderr, "error: out of memory while lexing %s\n", input_path);
         free(source);
@@ -1459,6 +1511,7 @@ int compile_source(const char* input_path, const char* output_path) {
     if (verbose_mode) printf("Step 2: Parsing...\n");
     Parser* parser = create_parser(tokens, token_count);
     ASTNode* program = parse_program(parser);
+    phase_mark("parse");
 
     // Stamp every parsed node with its source path so codegen can
     // emit `#line N "path"` directives. Imported-module nodes get
@@ -1596,6 +1649,7 @@ int compile_source(const char* input_path, const char* output_path) {
     // Step 2.6: Merge pure Aether module functions into program AST
     module_set_emit_lib(emit_lib);
     module_merge_into_program(program);
+    phase_mark("merge");
     /* The merge reports a struct defined differently in two modules
      * (#2129). Nothing downstream re-checks the count before codegen, so
      * without this gate a clash whose losing side the pruner happened to
@@ -1738,7 +1792,8 @@ int compile_source(const char* input_path, const char* output_path) {
         free(source);
         return 0;
     }
-    
+    phase_mark("typecheck");
+
     if (verbose_mode) printf("Type checking successful\n");
     if (check_only_mode && !emit_short_names_mode) typecheck_warn_short_names();
 
@@ -1963,11 +2018,13 @@ int compile_source(const char* input_path, const char* output_path) {
     codegen->source_file = input_path;
     codegen->lib_id = g_lib_id;
     int errors_before_codegen = aether_error_count();
+    phase_mark("analysis");
     generate_program(codegen, program);
     int write_ok = close_generated_file(output, output_path);
     if (!close_generated_file(csrc_header, csrc_header_path))   write_ok = 0;
     if (!close_generated_file(csrc_catalog, csrc_catalog_path)) write_ok = 0;
     if (!close_generated_file(header_output, header_path))      write_ok = 0;
+    phase_mark("codegen");
     if (!write_ok) {
         /* compile_source reports failure as 0; every caller tests
          * !compile_source(...). Returning 1 here would print the error and
@@ -2291,6 +2348,7 @@ void print_help(const char* program_name) {
     printf("Options:\n");
     printf("  --version, -v                    Show version information\n");
     printf("  --verbose                        Show detailed compilation phases and timing\n");
+    printf("  --time-phases                    Print `phase <name> <ms> <cpu ms>` to stderr as each phase ends\n");
     printf("  --emit-c                         Print generated C code to stdout\n");
     printf("  --emit-header [path]             Generate C header for embedding (default: auto)\n");
     printf("  --emit-deps=<path>              Write the resolver dependency manifest (files read +\n");
@@ -2370,7 +2428,15 @@ static int emit_aea(const char* input, const char* output) {
     return 0;
 }
 
+static int aetherc_main(int argc, char *argv[]);
+
+/* The whole of aetherc, the language server included, runs on the
+ * compiler's own stack (aether_compile_stack.h). */
 int main(int argc, char *argv[]) {
+    return aether_run_on_compile_stack(aetherc_main, argc, argv);
+}
+
+static int aetherc_main(int argc, char *argv[]) {
     // Subcommand dispatch — checked BEFORE the flag loop so flags
     // can't shadow it. `aetherc lsp` runs the embedded language
     // server on stdio (same code path as the standalone aether-lsp
@@ -2439,6 +2505,9 @@ int main(int argc, char *argv[]) {
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--verbose") == 0) {
             verbose_mode = true;
+            arg_offset++;
+        } else if (strcmp(argv[arg_offset], "--time-phases") == 0) {
+            time_phases = true;
             arg_offset++;
         } else if (strcmp(argv[arg_offset], "--emit-c") == 0) {
             emit_c_mode = true;

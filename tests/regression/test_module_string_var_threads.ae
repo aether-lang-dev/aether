@@ -1,0 +1,83 @@
+// Regression (#3522): a module-level string `var` stored and read by two
+// actors at once.
+//
+// A store read the var's old value, wrote the new one, published it and
+// released the old one, with nothing between it and another thread: two
+// actors storing at once both read the same old value and both released it
+// (a double free), and one new value leaked; a reader taking a reference
+// (`x = g`) could take it after a store had released the value, and one
+// using it without a reference (`g == "x"`, printing it, a call's argument)
+// could read it after it was freed. Each var now has a lock of its own: a
+// store swaps under it and releases the old value after it, and a read takes
+// a reference under it, which its statement releases.
+//
+// Two actors each store a fresh string into `g` and read it back in a loop,
+// both ways, at the same time. The check is that nothing crashes, every read
+// sees a whole value one of them stored, and, where the heap count is exact
+// (Windows), that a run of the work holds the heap steady: a double free
+// corrupts it, and a lost release grows it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+var g = "start"
+
+message Run { tag: string, n: int }
+message Get {}
+message Seen { bad: int }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3522: ${msg}")
+        exit(1)
+    }
+}
+
+// A value one of the actors stores: its tag, then "-" and a digit.
+fn whole(s: string) -> bool {
+    return string.length(s) == 3 && (string.starts_with(s, "a-") || string.starts_with(s, "b-"))
+}
+
+actor Writer {
+    state bad = 0
+    receive {
+        Run(tag: t, n: n) -> {
+            i = 0
+            while i < n {
+                g = string.concat(t, string.from_int(i % 10))
+                x = g
+                if !whole(x) { bad = bad + 1 }
+                if string.length(g) != 3 { bad = bad + 1 }
+                if g == "" { bad = bad + 1 }
+                i = i + 1
+            }
+        }
+        Get() -> { reply Seen { bad: bad } }
+    }
+}
+
+round(a: ptr, b: ptr, n: int) -> int {
+    a ! Run { tag: "a-", n: n }
+    b ! Run { tag: "b-", n: n }
+    int bad_a = a ? Get {}
+    int bad_b = b ? Get {}
+    return bad_a + bad_b
+}
+
+main() {
+    a = spawn(Writer())
+    b = spawn(Writer())
+    check(round(a, b, 200000) == 0, "a read saw a value no store made")
+    check(whole(g), "the var holds a value a store made, got '${g}'")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            check(round(a, b, 20000) == 0, "a read saw a value no store made")
+        }, 5)
+    check(grown == 0, "storing and reading from two actors grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

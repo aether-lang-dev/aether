@@ -235,5 +235,9 @@ main() {
         }
     }
     if server == 1 { tls13_server.close_conn(conn) } else { tls13_client.close_conn(conn) }
+    if server == 1 {
+        tls13_server.free_cert_chain(chain, lens)
+        tls13_server.free_private_key(key)
+    }
     exit(0)
 }

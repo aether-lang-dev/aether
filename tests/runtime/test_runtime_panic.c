@@ -1,7 +1,10 @@
 #include "test_harness.h"
 #include "../../runtime/actors/aether_panic.h"
 #include "../../std/string/aether_string.h"
+#include "../../runtime/aether_process_mem.h"
 #include <string.h>
+#include <stdint.h>
+#include <pthread.h>
 
 /* #2340: a heap-built panic message reaches the runtime as the AetherString*
  * codegen passes (so a catch can adopt it), typed const char*. Consumers that
@@ -161,4 +164,49 @@ TEST_CATEGORY(unwind_drain_keeps_entry_a_release_tracks, TEST_CATEGORY_RUNTIME) 
     ASSERT_EQ(8, g_rel_order[0]);
     ASSERT_EQ(1, left);
     ASSERT_EQ(0, aether_unwind_journal_size());
+}
+
+/* A thread that journaled gives its journal back when it ends (#3539). Only
+ * the scheduler's threads released theirs; any other thread that ran code
+ * inside a frame (a host's thread calling an --emit=lib library, a worker)
+ * left its journal behind, which LeakSanitizer found in
+ * tests/integration/emit_lib_interrupt. Each thread here journals more than
+ * the first allocation holds, so the journal is grown once too. Where the
+ * heap count is exact, some round of threads leaves it as it found it. */
+static int g_thread_cells[48];
+
+static void cell_kept(const void* p) {
+    (void)p;
+}
+
+static void* journal_then_end(void* arg) {
+    (void)arg;
+    (void)aether_try_push();
+    for (int i = 0; i < 48; i++) aether_unwind_track(&g_thread_cells[i], cell_kept);
+    for (int i = 0; i < 48; i++) aether_unwind_forget(&g_thread_cells[i]);
+    aether_try_pop();
+    return NULL;
+}
+
+static int threads_journal(int n) {
+    int ran = 0;
+    for (int i = 0; i < n; i++) {
+        pthread_t t;
+        if (pthread_create(&t, NULL, journal_then_end, NULL) != 0) continue;
+        pthread_join(t, NULL);
+        ran++;
+    }
+    return ran;
+}
+
+TEST_CATEGORY(unwind_journal_goes_back_with_its_thread, TEST_CATEGORY_RUNTIME) {
+    ASSERT_EQ(4, threads_journal(4));
+    if (!aether_heap_in_use_exact()) return;
+    int64_t grown = -1;
+    for (int round = 0; round < 5 && grown != 0; round++) {
+        int64_t before = aether_heap_in_use();
+        threads_journal(8);
+        grown = aether_heap_in_use() - before;
+    }
+    ASSERT_EQ(0, grown);
 }

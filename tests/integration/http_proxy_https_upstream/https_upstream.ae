@@ -199,6 +199,11 @@ main() {
     http.server_stop(mixed)
     http.server_stop(tls_only)
     http.server_stop(upstream)
+    http.server_free(late)
+    http.server_free(busy)
+    http.server_free(mixed)
+    http.server_free(tls_only)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

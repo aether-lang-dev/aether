@@ -262,6 +262,7 @@ new(algo: string) -> {
         ctx.sparkle_steps_big = 12
         ctx.state_words = 16
     } else {
+        free_internals(ctx)
         mem.wipe(ctx, sizeof(SparkleCtx))
         free(ctx)
         return null, "unknown algorithm"
@@ -358,8 +359,11 @@ finalize_to_bytes(c: *SparkleCtx) -> ptr {
     return out
 }
 
+// What the context owns: the block buffer and its reference to the algo
+// name, which `free` alone would not release (#3539).
 free_internals(c: *SparkleCtx) {
     if c.block != null { bytes.wipe_free(c.block); c.block = null }
+    c.algo = ""
 }
 
 final_bytes(ctx: ptr) -> ptr {

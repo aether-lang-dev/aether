@@ -1,0 +1,120 @@
+// Regression (#3538): a container that is given a parsed document adopted the
+// document's whole arena, and a parse gives every document a 16 KB first
+// chunk. 2000 parsed {"id":N,"ok":true} pushed into one array held about
+// 32 MB where copies of them take about 0.5 MB, and setting one key to a
+// parsed document again and again kept every arena, as much again. Before
+// the fix both rounds below grew the heap by about 16 KB a document.
+//
+// A container now adopts an arena only when a third of it or more is in use,
+// and copies a mostly empty one: the nodes of its own arena, with the arenas
+// it adopted handed over and the nodes in them kept where they are. The
+// checks bound the growth at 2 KB a document, and make sure such a copy
+// keeps what the document adopted: it reads back, takes further sets, and is
+// freed with the container.
+
+import std.json
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+const DOCS = 2000
+const BOUND_PER_DOC = 2048
+
+check(ok: bool, what: string) -> int {
+    if ok { return 0 }
+    println("FAIL: ${what}")
+    return 1
+}
+
+pushed() -> long {
+    h0 = mem.heap_in_use()
+    arr = json.arr()
+    i = 0
+    while i < DOCS {
+        doc, _perr = json.parse("{\"id\":${i},\"ok\":true}")
+        _ = json.push(arr, doc)
+        i = i + 1
+    }
+    h1 = mem.heap_in_use()
+    last, _ = json.array_get(arr, DOCS - 1)
+    id, _ = json.object_get(last, "id")
+    n = json.get_int(id)
+    json.free(arr)
+    if n != DOCS - 1 { return -1 }
+    return h1 - h0
+}
+
+replaced() -> long {
+    h0 = mem.heap_in_use()
+    o = json.obj()
+    i = 0
+    while i < DOCS {
+        doc, _perr = json.parse("{\"id\":${i},\"ok\":true}")
+        _ = json.set(o, "same", doc)
+        i = i + 1
+    }
+    h1 = mem.heap_in_use()
+    v, _ = json.object_get(o, "same")
+    id, _ = json.object_get(v, "id")
+    n = json.get_int(id)
+    json.free(o)
+    if n != DOCS - 1 { return -1 }
+    return h1 - h0
+}
+
+// A small parsed document that adopted a built one is copied when it is
+// given to a container, and what it adopted comes along.
+copied_keeps_adopted() -> int {
+    fails = 0
+    built = json.obj()
+    _ = json.set(built, "deep", json.str("kept"))
+    tmpl, perr = json.parse("{\"kind\":\"node\"}")
+    fails = fails + check(perr == "", "parse the template")
+    _ = json.set(tmpl, "child", built)
+    box = json.arr()
+    _ = json.push(box, tmpl)
+    out, err = json.encode(box)
+    fails = fails + check(err == "" && out == "[{\"kind\":\"node\",\"child\":{\"deep\":\"kept\"}}]",
+        "the copied document and what it adopted: ${out}")
+    node, _ = json.array_get(box, 0)
+    child, _ = json.object_get(node, "child")
+    _ = json.set(child, "more", json.num(1.0))
+    _ = json.set(node, "after", json.num(2.0))
+    out2, err2 = json.encode(box)
+    fails = fails + check(err2 == "" && out2 == "[{\"kind\":\"node\",\"child\":{\"deep\":\"kept\",\"more\":1},\"after\":2}]",
+        "sets into the copy and into what it adopted: ${out2}")
+    json.free(box)
+    return fails
+}
+
+// Parsed templates nested level by level: each level is copied, its own
+// nodes only, and every level is still there.
+nested_templates() -> int {
+    inner, _e0 = json.parse("{\"leaf\":true}")
+    d = 0
+    while d < 100 {
+        outer, _perr = json.parse("{\"n\":1}")
+        _ = json.set(outer, "child", inner)
+        inner = outer
+        d = d + 1
+    }
+    out, err = json.encode(inner)
+    json.free(inner)
+    return check(err == "" && string.length(out) == 100 * 16 + 13,
+        "100 nested templates encode whole: ${string.length(out)}")
+}
+
+main() {
+    fails = copied_keeps_adopted() + nested_templates()
+    if mem.heap_in_use() >= 0 {
+        p = pushed()
+        fails = fails + check(p >= 0 && p < DOCS * BOUND_PER_DOC,
+            "${DOCS} parsed documents pushed grew the heap by ${p} bytes")
+        r = replaced()
+        fails = fails + check(r >= 0 && r < DOCS * BOUND_PER_DOC,
+            "one key set to ${DOCS} parsed documents grew the heap by ${r} bytes")
+    }
+    if fails > 0 { exit(1) }
+    println("PASS: only well used arenas are adopted")
+}

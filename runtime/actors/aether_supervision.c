@@ -363,6 +363,9 @@ static char* watch_reason_copy(AetherWatch* w) {
 }
 
 int aether_down_accept(ActorBase* self, Message* msg) {
+    /* #3534: a Down in the message's own bytes is one a program sent (the
+     * runtime's are heap payloads): payload_int holds its fields there. */
+    if (aether_message_is_inline(msg)) return 1;
     int id = (int)msg->payload_int;
     if (id == 0) return 1;   // a link's, or one a program sent
     AetherWatch* w = atomic_load_explicit(&self->death_watch, memory_order_acquire);

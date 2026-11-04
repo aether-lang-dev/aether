@@ -40,7 +40,7 @@ header comment is the authoritative description.
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
 | `std.http` | HTTP client and server: the `std.net` surface plus Go-style wrappers. | 148 | [guide](../std/http/README.md) · [source](../std/http/module.ae) |
-| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 14 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
+| `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
@@ -2006,7 +2006,7 @@ described in its header comment):
 - `tls13_cert.check_validity_at(c, at)` → `string` - `""` when `at` is inside the certificate's validity period.
 - `tls13_cert.sign_server_cert_verify_ecdsa(kind, priv, transcript_hash)`, `sign_server_cert_verify_ed25519(seed, transcript_hash)`, `sign_server_cert_verify_rsa_pss(key, transcript_hash)` → `ptr` - A server CertificateVerify signature (RFC 8446 4.4.3) with an ECDSA key of `kind` (`KEY_P256`, `KEY_P384`, `KEY_P521`, hashed with SHA-256, -384, -512), an Ed25519 seed, or an `rsa` key as rsa_pss_rsae_sha256 with a fresh 32-byte salt; DER for ECDSA; null when the key cannot sign (#3326).
 - `tls13_server.load_private_key(pem_text)` → `(ptr, string)` - The server's key from PEM: PKCS#8 (EC P-256, P-384, P-521, Ed25519, RSA), SEC1 `EC PRIVATE KEY` (an EC PARAMETERS block before it is skipped) or PKCS#1 `RSA PRIVATE KEY`; RSA of 2048 to 16384 bits; an encrypted key is refused with how to decrypt it. `accept` takes it; `free_private_key(key)` wipes and frees it (#3326).
-- `tls13_server.parse_cert_chain_pem(pem_text)` → `(ptr, ptr)`, `parse_cert_chain_pem_checked(pem_text)` → `(ptr, ptr, string)` - The chain a server sends: the DER of every `BEGIN CERTIFICATE` block, in order, each parsed as a certificate when loaded; other blocks (a private key in a combined file) are skipped; a certificate block that does not decode or parse refuses the whole text, with why (#3378).
+- `tls13_server.parse_cert_chain_pem(pem_text)` → `(ptr, ptr)`, `parse_cert_chain_pem_checked(pem_text)` → `(ptr, ptr, string)` - The chain a server sends: the DER of every `BEGIN CERTIFICATE` block, in order, each parsed as a certificate when loaded; other blocks (a private key in a combined file) are skipped; a certificate block that does not decode or parse refuses the whole text, with why (#3378). `accept` borrows the chain; `free_cert_chain(chain, lens)` frees both when the caller is done with them (#3539).
 - `tls13_record.seal_records(ctx, content_type, plaintext)` → `ptr` - `plaintext` sealed as records of at most 2^14 bytes of content each, back to back, or null when one cannot be sealed; the TLS client and server send handshake messages and application data this way (RFC 8446 5.1, #3380).
 - `tls13_hs.ChParsed.sig_algs` - The `signature_algorithms` schemes a ClientHello offered that a server key signs with, as `SIGBIT_ECDSA_P256`, `SIGBIT_ECDSA_P384`, `SIGBIT_ECDSA_P521`, `SIGBIT_RSA_PSS_SHA256` and `SIGBIT_ED25519` bits; `saw_sig_algs` says whether the extension was there (#3326).
 - `tls13_client.connect_socket(sock, host, cafile)` → `(ptr, string)` - The verified TLS 1.3 handshake for `host` over an already-connected `std.tcp` socket, trusting the PEM bundle `cafile` (`""` for the system store); the connection owns the socket.
@@ -2500,7 +2500,7 @@ main() {
 - `client.set_header(req, name, value)` → `string` - Append `Name: value` to outgoing headers
 - `client.set_body(req, body: byte[], content_type)` → `string` - Set the request body to the bytes of `body` (binary-safe; pass a string as `string.bytes(s)`). Empty content_type defaults to `application/x-www-form-urlencoded`.
 - `client.set_timeout(req, timeout)` → `string` - `Duration` per-request timeout (`0ns` = block forever)
-- `client.set_follow_redirects(req, max_hops)` → `string` - Follow up to `max_hops` redirects (`0` = don't follow, the default)
+- `client.set_follow_redirects(req, max_hops)` → `string` - Follow up to `max_hops` redirects (`0` = don't follow, the default). A `Location` is resolved against the request's URL by RFC 3986 5.2 (`c` from `http://h/a/b?x=1` is `http://h/a/c`; an IPv6 host keeps its brackets); one that is not an `http` or `https` URL is not followed.
 - `client.send_request(req)` → `(ptr, string)` - Fire the request; returns `(resp, "")` on transport success or `(null, err)` on failure
 - `client.set_stream(req, on)` → `string` - Enable streaming of the response body for this request; `send_stream` is the convenience form
 - `client.send_stream(req)` → `(ptr, string)` - Like `send_request`, but the response body is streamed rather than buffered (see below)
@@ -2515,7 +2515,7 @@ in. These knobs relax that per request; precedence for proxy is
 - `client.set_partial_chain(req, on)` → `string` - trust partial chains for this request (#3311): any certificate in the trust store (the system one, or `set_cafile`'s) ends a certification path, not only a self-signed root. For a CA file that holds an intermediate CA alone: a private PKI that hands out its issuing CA, or pinning one CA below a public root. Peer and hostname verification stay on, and a trusted certificate that is not a root must still be a CA (v3, `cA`, `keyCertSign`). Off by default, and the same on both TLS backends (OpenSSL's `X509_V_FLAG_PARTIAL_CHAIN`; without it, a trust anchor must be a self-signed root, #3310). Pooled connections are kept apart by it.
 - `client.set_tls_backend(req, backend)` → `string` - Choose this request's TLS backend: `"openssl"`, `"aether"` (the pure-Aether TLS 1.3 client; the program must `import std.cryptography.tls13_client`) or `""` for the default (OpenSSL where it is built in, the pure client where it is not or with `AETHER_PURE_TLS=1`). The choice wins over the environment variable, and pooled connections are kept apart per backend. Returns `""`, or why the backend cannot be used (not built in, not linked, an unknown name).
 - `client.use_env_proxy(req, on)` → `string` - `1` follows `$HTTP_PROXY`/`$HTTPS_PROXY`/`$NO_PROXY` (Go-compatible). **Off by default**, the deliberate inverse of the default-follow that caused the httpoxy vulnerability class (CVE-2016-5385). It is a code-visible opt-in, never ambient, and carries two guards: the CGI-injectable uppercase `HTTP_PROXY` is refused when `$REQUEST_METHOD`/`$GATEWAY_INTERFACE` is set (lowercase `http_proxy` stays honoured), and a proxy resolving to a loopback/link-local IP literal (127/8, 169.254/16 IMDS, `::1`, `fc00::/7`, `fe80::/10`) is rejected (SSRF).
-- `client.use_http_proxy(req, "http://host:port")` → `string` - Pin an explicit forward proxy; env is ignored entirely (empty url reverts to direct). A team-controlled proxy (recorder / toxiproxy) is thus immune to whatever the shell or CI has set. HTTP goes through the proxy with an absolute-form request line; HTTPS establishes a `CONNECT` tunnel with TLS end-to-end to the origin.
+- `client.use_http_proxy(req, "http://host:port")` → `string` - Pin an explicit forward proxy (an IPv6 host in brackets, `http://[::1]:3128`; port 3128 when none is named); env is ignored entirely (empty url reverts to direct). A team-controlled proxy (recorder / toxiproxy) is thus immune to whatever the shell or CI has set. HTTP goes through the proxy with an absolute-form request line; HTTPS establishes a `CONNECT` tunnel with TLS end-to-end to the origin.
 - `client.ignore_http_proxy(req)` → `string` - Force a direct connection regardless of env or any proxy a higher layer set (the determinism escape hatch, e.g. a VCR that must record the origin, not a proxy's view).
 
 **Response accessors:**
@@ -2641,7 +2641,10 @@ arrive, and a header or chunk boundary can land anywhere in one; it
 accumulates them and parses once a complete response is there, returning
 `"incomplete"` until then. `read_response_conn` does the reading too, from a
 connection of the pure-Aether TLS client (`std.cryptography.tls13_client`). Content-Length, chunked, and
-close-delimited bodies are all framed.
+close-delimited bodies are all framed. A 1xx, 204 or 304 response, and any
+response to HEAD, ends at its header section whatever its headers say (RFC
+9110), as `std.net` reads one; make the reader for a HEAD request's response
+with `response_new_for("HEAD")`.
 
 ```aether,run
 import std.http1
@@ -2694,6 +2697,7 @@ chunked body Wikipedia
 
 **Functions:**
 - `http1.response_new()` → `ptr`, `http1.response_free(r)`
+- `http1.response_new_for(method)` → `ptr` - A reader for the response to a `method` request: the response to `"HEAD"` has no body
 - `http1.feed(r, data: byte[], is_eof)` → `string` - Add the bytes of `data` (copied in); `""` once a response is complete, `"incomplete"` before
 - `http1.read_response_conn(r, conn)` → `string` - Read a whole response from a `tls13_client` connection
 - `http1.status_code(r)` → `int`, `status_reason(r)` → `ptr` (a C string), `header(r, name)` → `string` (case-insensitive), `header_count(r)` → `int`

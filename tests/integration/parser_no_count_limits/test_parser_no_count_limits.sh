@@ -14,8 +14,9 @@
 # stack: a chain of operators nests the tree as deep as it is long and
 # every later pass walks it recursively. On Windows aetherc overflowed at
 # about 600 chained `+ 1`. A chain over 1000 is now E0100 naming the limit,
-# and a chain of 1000 builds and runs (aetherc gets on Windows the 8 MB
-# main-thread stack it has elsewhere).
+# and a chain of 1000 builds and runs: the compiler runs on a stack of its
+# own on every platform (compiler/aether_compile_stack.h, #3539), so it
+# does under AddressSanitizer too.
 #
 # The programs are generated here by shell loops.
 

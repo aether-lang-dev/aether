@@ -41,7 +41,10 @@ probe="$tmpdir/ct_probe"
 [ -x "$probe" ] || probe="$probe.exe"
 
 have_vg=0
-if [ "$(uname -s)" = "Linux" ] && command -v valgrind >/dev/null 2>&1; then
+# Valgrind cannot run an AddressSanitizer build (both replace the
+# allocator), so under ASan the probe runs as the known-answer test (#3539).
+if [ "$(uname -s)" = "Linux" ] && command -v valgrind >/dev/null 2>&1 &&
+   [ "${AETHER_SANITIZER:-}" != asan ]; then
     have_vg=1
 fi
 

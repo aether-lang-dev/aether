@@ -94,6 +94,44 @@ int http_header_value_ok(const char* value) {
     return 1;
 }
 
+/* The one reader for the numbers std.net takes off the wire or out of a URL
+ * (#3520): Content-Length, a chunk size, a port. Each reader it replaces
+ * accepted something the others did not: strtoll a sign, leading spaces and
+ * "0x", atoi any tail at all, and the decoder's own loop wrapped past 16
+ * digits. Two readings of one number are two answers about where a message
+ * ends, which is what request smuggling is built from.
+ *
+ * More digits than `max` itself has are refused even when the extra ones are
+ * leading zeros. No sender pads a length that far, and a reader that stops
+ * part way into a padded value, as the request head check did when it copied
+ * a value into a 256 byte buffer, reads a different number from one that
+ * does not. */
+int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* out) {
+    if (!s || !out || n == 0 || (base != 10 && base != 16)) return -1;
+    size_t digits = 1;
+    for (uint64_t m = max; m >= (uint64_t)base; m /= (uint64_t)base) digits++;
+    if (n > digits) return -1;
+    uint64_t v = 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        uint64_t d;
+        if (c >= '0' && c <= '9') d = (uint64_t)(c - '0');
+        else if (base == 16 && c >= 'a' && c <= 'f') d = (uint64_t)(c - 'a' + 10);
+        else if (base == 16 && c >= 'A' && c <= 'F') d = (uint64_t)(c - 'A' + 10);
+        else return -1;
+        if (d > max || v > (max - d) / (uint64_t)base) return -1;
+        v = v * (uint64_t)base + d;
+    }
+    *out = v;
+    return 0;
+}
+
+int http_parse_port(const char* s, size_t n) {
+    uint64_t v = 0;
+    if (http_parse_count(s, n, 10, 65535, &v) != 0 || v == 0) return -1;
+    return (int)v;
+}
+
 #if !AETHER_HAS_NETWORKING
 HttpResponse* http_get_raw(const char* u) { (void)u; return NULL; }
 HttpResponse* http_get_with_timeout_ns_raw(const char* u, int64_t ns) { (void)u; (void)ns; return NULL; }
@@ -323,23 +361,14 @@ static void http_init(void) {
 // URL parsing
 // -----------------------------------------------------------------
 
-// Parse `url` into (host, port, path, use_tls).
+// Parse `url` into (host, port, path, use_tls), `path` being the request
+// target: the path and the query, without the fragment.
 //   https://foo.example/bar  →  host="foo.example" port=443 path="/bar" use_tls=1
 //   http://foo:8080/         →  host="foo"         port=8080 path="/"   use_tls=0
-// Returns 1 on success, 0 on malformed input.
-/* A string copy that refuses rather than cuts: 1 when src fits in cap bytes
- * with its NUL, 0 (and nothing copied) when it does not. snprintf would bring
- * the whole formatting machinery with it, which parse_url paid for on a path
- * that runs once per proxied request; and it would cut. A path cut to the
- * buffer was sent anyway and answered for the wrong thing (#2674). */
-static int url_copy(char* dst, size_t cap, const char* src) {
-    size_t n = strlen(src);
-    if (n >= cap) return 0;
-    memcpy(dst, src, n);
-    dst[n] = '\0';
-    return 1;
-}
-
+//   http://foo:8080?q=1#f    →  host="foo"         port=8080 path="/?q=1"
+// Returns 1 on success, 0 on malformed input. The path is copied whole or
+// refused, never cut: a path cut to the buffer was sent anyway and answered
+// for the wrong thing (#2674).
 int parse_url(const char* url, char* host, size_t host_size,
                      int* port, char* path, size_t path_size, int* use_tls) {
     if (!url || !host || !port || !use_tls || host_size == 0 ||
@@ -360,18 +389,21 @@ int parse_url(const char* url, char* host, size_t host_size,
         *port = 80;
     }
 
-    /* The authority ends at the path. An IPv6 host is bracketed
-     * ("[::1]:8443") and comes back without the brackets; every user of
-     * `host` (the resolver, SNI, the sandbox resource, the Host header) wants
-     * it bare or brackets it again itself. */
-    const char* slash = strchr(start, '/');
-    size_t alen = slash ? (size_t)(slash - start) : strlen(start);
+    /* The authority ends at the path, the query or the fragment, whichever
+     * comes first. An IPv6 host is bracketed ("[::1]:8443") and comes back
+     * without the brackets; every user of `host` (the resolver, SNI, the
+     * sandbox resource, the Host header) wants it bare or brackets it again
+     * itself. */
+    size_t alen = aether_url_authority_len(start);
     const char* port_at = NULL;
     size_t port_len = 0;
     if (aether_addr_split_authority(start, alen, host, host_size, &port_at, &port_len) != 0)
         return 0;
-    if (port_at) *port = atoi(port_at);
-    if (path && !url_copy(path, path_size, slash ? slash : "/")) return 0;
+    /* The whole port, digits only, in 1..65535: atoi read "80abc" as 80 and
+     * passed 65616 to a resolver that may keep only its low 16 bits, which
+     * is port 80 again (#3520). */
+    if (port_at && (*port = http_parse_port(port_at, port_len)) < 0) return 0;
+    if (path && !aether_url_request_target(path, path_size, start + alen)) return 0;
 
     return 1;
 }
@@ -381,7 +413,8 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
     if (!path_out) return 0;
     *path_out = NULL;
     if (!url) return 0;
-    /* The path is a tail of the URL, or "/" when it has none. */
+    /* The target is a tail of the URL, with a "/" before it when its path is
+     * empty: never more than the URL and one byte. */
     size_t cap = strlen(url) + 2;
     char* path = (char*)malloc(cap);
     if (!path) return 0;
@@ -1010,28 +1043,19 @@ static int stream_pump(struct HttpStream* s) {
     return s->pending_len - s->pending_pos;  /* n==0 -> whatever remains buffered */
 }
 
-/* Consume a CRLF (or bare LF, tolerated) at the current read position, pumping
- * if needed. Returns 1 on success, 0 if a line terminator can't be obtained
- * (malformed framing at EOF -> sets s->err). */
+/* Consume the CRLF that ends a chunk's data at the current read position,
+ * pumping if needed. Returns 1 on success, 0 on anything else, malformed
+ * framing or EOF (sets s->err). A bare LF or a bare CR is refused, as the
+ * buffered walk refuses it (http_chunked_walk, #3520): taking either for the
+ * end of the data is reading one body two ways. */
 static int stream_consume_crlf(struct HttpStream* s) {
     for (;;) {
         int avail = s->pending_len - s->pending_pos;
-        if (avail >= 1) {
-            char c = s->pending[s->pending_pos];
-            if (c == '\r') {
-                if (avail >= 2) {
-                    s->pending_pos += (s->pending[s->pending_pos + 1] == '\n') ? 2 : 1;
-                    return 1;
-                }
-                /* need the byte after '\r' */
-            } else if (c == '\n') {
-                s->pending_pos += 1;
-                return 1;
-            } else {
-                /* not a line terminator where one was expected */
-                s->err = 1;
-                return 0;
-            }
+        if (avail >= 1 && s->pending[s->pending_pos] != '\r') { s->err = 1; return 0; }
+        if (avail >= 2) {
+            if (s->pending[s->pending_pos + 1] != '\n') { s->err = 1; return 0; }
+            s->pending_pos += 2;
+            return 1;
         }
         int r = stream_pump(s);
         if (r < 0) return 0;
@@ -1039,33 +1063,182 @@ static int stream_consume_crlf(struct HttpStream* s) {
     }
 }
 
-/* Parse a chunk-size line ("<hex>[;ext]\r\n"), pumping until the CRLF is
- * available. Sets *out to the parsed size and advances past the line.
- * Returns 1 on success, 0 on malformed framing / EOF (sets s->err). */
+/* The longest chunk-size line or trailer line read. One with no end in sight
+ * is refused rather than waited on. */
+#define HTTP_CHUNK_LINE_MAX 1024
+
+/* The trailer section after the last chunk, read to the empty line that ends
+ * it, pumping as needed:
+ *
+ *     trailer-section = *( field-line CRLF ), then CRLF        RFC 9112 7.1
+ *
+ * by the buffered walk's rules (http_chunked_walk): each line at most
+ * HTTP_CHUNK_LINE_MAX bytes, ending in CRLF, with no other CR. The fields are
+ * not used, but where the section ends is where the body does. Returns 1 at
+ * its end, 0 on malformed framing or EOF (sets s->err). The stream reader
+ * used to take the CRLF after the last chunk and ignore the rest, so a
+ * trailer line read as malformed framing and a bare LF ended the body. */
+static int stream_read_trailers(struct HttpStream* s) {
+    for (;;) {
+        int start = s->pending_pos, avail = s->pending_len - s->pending_pos;
+        const char* line = avail > 0 ? s->pending + start : NULL;
+        const char* lf = line ? (const char*)memchr(line, '\n', (size_t)avail) : NULL;
+        if (lf) {
+            size_t n = (size_t)(lf - line);
+            if (n > HTTP_CHUNK_LINE_MAX || n == 0 || line[n - 1] != '\r' ||
+                memchr(line, '\r', n - 1)) {
+                s->err = 1;
+                return 0;
+            }
+            s->pending_pos = start + (int)n + 1;
+            if (n == 1) return 1;
+            continue;
+        }
+        if (avail > HTTP_CHUNK_LINE_MAX) { s->err = 1; return 0; }
+        int r = stream_pump(s);
+        if (r < 0) return 0;
+        if (r == avail) { s->err = 1; return 0; }  /* EOF inside the trailers */
+    }
+}
+
+/* The largest chunk size: one a size_t and a long long both hold. */
+#define HTTP_CHUNK_SIZE_MAX ((uint64_t)INT64_MAX)
+
+static int http_chunk_ws(char c) { return c == ' ' || c == '\t'; }
+
+/* One chunk-size line, `n` bytes up to (not counting) its LF:
+ *
+ *     chunk-size [ chunk-ext ] CRLF                          RFC 9112 7.1
+ *     chunk-ext  = *( BWS ";" BWS name [ BWS "=" BWS value ] )
+ *     name = token, value = token / quoted-string
+ *
+ * 0 with the size in *size, or -1 for anything else (#3520). The client, its
+ * stream reader and the server all read sizes here. The client and the
+ * server walk the rest of a chunked body with http_chunked_walk, and the
+ * stream reader, which reads as the bytes arrive, keeps to the same rules
+ * (stream_consume_crlf, stream_read_trailers): a CRLF after each chunk's
+ * data, and trailer lines to the empty line, each at most
+ * HTTP_CHUNK_LINE_MAX bytes. So no two of them frame one body two ways. An
+ * extension is read to its end rather than skipped to the LF, so a CR or a
+ * stray byte inside one is refused instead of being somewhere a front end
+ * and this reader disagree about the line. */
+static int http_chunk_size_line(const char* line, size_t n, uint64_t* size) {
+    if (n == 0 || line[n - 1] != '\r') return -1;
+    n--;
+    size_t i = 0;
+    while (i < n && isxdigit((unsigned char)line[i])) i++;
+    if (http_parse_count(line, i, 16, HTTP_CHUNK_SIZE_MAX, size) != 0) return -1;
+    while (i < n) {
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i == n || line[i] != ';') return -1;
+        i++;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        size_t name_at = i;
+        while (i < n && http_tchar[(unsigned char)line[i]]) i++;
+        if (i == name_at) return -1;
+        size_t after_name = i;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i == n || line[i] != '=') { i = after_name; continue; }
+        i++;
+        while (i < n && http_chunk_ws(line[i])) i++;
+        if (i < n && line[i] == '"') {
+            /* quoted-string: qdtext / quoted-pair, then the closing quote. */
+            i++;
+            for (;;) {
+                if (i == n) return -1;
+                unsigned char c = (unsigned char)line[i];
+                if (c == '"') { i++; break; }
+                if (c == '\\') {
+                    if (++i == n) return -1;
+                    c = (unsigned char)line[i];
+                    if (c != '\t' && (c < 0x20 || c == 0x7f)) return -1;
+                } else if (c != '\t' && (c < 0x20 || c == 0x7f)) {
+                    return -1;
+                }
+                i++;
+            }
+        } else {
+            size_t value_at = i;
+            while (i < n && http_tchar[(unsigned char)line[i]]) i++;
+            if (i == value_at) return -1;
+        }
+    }
+    return 0;
+}
+
+/* The chunked body at `buf`, `len` bytes of it read so far, walked with the
+ * one grammar. 1 when all of it is there, with *frame_len the bytes it takes
+ * (its trailer section and the CRLF that ends it included); 0 when more has
+ * to arrive; -1 when it is not chunked framing. With `out`, the data of each
+ * chunk is copied there as well and *out_len is the payload's length.
+ *
+ * Framing and decoding are this one walk, so the length a server buffers and
+ * the bytes it then decodes cannot disagree: they did, when the framing check
+ * read sizes with strtoll and the decoder with a loop of its own, and "0x5"
+ * framed as five bytes decoded as the last chunk (#3520). */
+static int http_chunked_walk(const char* buf, size_t len, size_t* frame_len,
+                             char* out, size_t* out_len) {
+    size_t off = 0, oi = 0;
+    for (;;) {
+        const char* lf = (const char*)memchr(buf + off, '\n', len - off);
+        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        size_t line_len = (size_t)(lf - (buf + off));
+        uint64_t size = 0;
+        if (line_len > HTTP_CHUNK_LINE_MAX ||
+            http_chunk_size_line(buf + off, line_len, &size) != 0) return -1;
+        off += line_len + 1;
+        if (size == 0) break;
+        if ((uint64_t)(len - off) < size + 2) {
+            /* What is there of the CRLF after the data has to be one. */
+            if ((uint64_t)(len - off) > size && buf[off + size] != '\r') return -1;
+            return 0;
+        }
+        if (out) memcpy(out + oi, buf + off, (size_t)size);
+        oi += (size_t)size;
+        off += (size_t)size;
+        if (buf[off] != '\r' || buf[off + 1] != '\n') return -1;
+        off += 2;
+    }
+    /* trailer-section = *( field-line CRLF ), then the CRLF that ends it. The
+     * fields are not used, but where the section ends is framing, so each
+     * line ends in CRLF and carries no CR of its own. */
+    for (;;) {
+        const char* lf = (const char*)memchr(buf + off, '\n', len - off);
+        if (!lf) return len - off > HTTP_CHUNK_LINE_MAX ? -1 : 0;
+        size_t line_len = (size_t)(lf - (buf + off));
+        if (line_len > HTTP_CHUNK_LINE_MAX || line_len == 0 ||
+            buf[off + line_len - 1] != '\r' ||
+            memchr(buf + off, '\r', line_len - 1)) return -1;
+        off += line_len + 1;
+        if (line_len == 1) break;
+    }
+    *frame_len = off;
+    if (out_len) *out_len = oi;
+    return 1;
+}
+
+/* Parse a chunk-size line, pumping until its LF is available. Sets *out to
+ * the parsed size and advances past the line. Returns 1 on success, 0 on
+ * malformed framing / EOF (sets s->err). */
 static int stream_read_chunk_size(struct HttpStream* s, long long* out) {
     for (;;) {
-        /* find CRLF in the unconsumed region */
+        /* find the LF in the unconsumed region */
         int start = s->pending_pos, end = s->pending_len, nl = -1;
         for (int i = start; i < end; i++) {
             if (s->pending[i] == '\n') { nl = i; break; }
         }
         if (nl >= 0) {
-            long long sz = 0; int any = 0;
-            for (int i = start; i < nl; i++) {
-                char c = s->pending[i];
-                int d;
-                if (c >= '0' && c <= '9') d = c - '0';
-                else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-                else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-                else break;  /* end of hex digits (CR, ';', or ext) */
-                sz = sz * 16 + d;
-                any = 1;
+            uint64_t sz = 0;
+            if (nl - start > HTTP_CHUNK_LINE_MAX ||
+                http_chunk_size_line(s->pending + start, (size_t)(nl - start), &sz) != 0) {
+                s->err = 1;
+                return 0;
             }
             s->pending_pos = nl + 1;  /* consume through the LF */
-            if (!any) { s->err = 1; return 0; }
-            *out = sz;
+            *out = (long long)sz;
             return 1;
         }
+        if (end - start > HTTP_CHUNK_LINE_MAX) { s->err = 1; return 0; }
         int prev = s->pending_len - s->pending_pos;
         int r = stream_pump(s);
         if (r < 0) return 0;
@@ -1131,9 +1304,9 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
         long long sz = 0;
         if (!stream_read_chunk_size(s, &sz)) return produced ? produced : -1;
         if (sz == 0) {
-            /* terminal chunk: consume the CRLF after "0" (trailers, if any,
-             * are ignored) and end the body. */
-            stream_consume_crlf(s);
+            /* terminal chunk: the trailer section, to the empty line that
+             * ends it, then the end of the body. */
+            if (!stream_read_trailers(s)) return produced ? produced : -1;
             s->eof = 1;
             break;
         }
@@ -1599,48 +1772,20 @@ static int http_value_has_chunked(const char* v);
 static int http_value_has_chunked_n(const char* v, size_t len);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
 
-/* Is the chunked body in `buf` complete, i.e. has the terminating zero-size
- * chunk arrived? Walks chunk headers rather than searching for "0\r\n\r\n",
- * which can appear inside chunk data. */
-/* How many bytes does the complete chunked body at `buf` occupy, counting its
- * framing and trailers, or 0 when it is not complete yet? A complete body is
- * never zero-length (the terminal chunk alone is five bytes), so 0 is an
- * unambiguous "not yet".
+/* Has the whole chunked body at `buf` arrived? 1 when it has, with
+ * *frame_len the bytes it occupies, framing and trailers included; 0 when
+ * more has to arrive; -1 when it is not chunked framing, which no amount of
+ * further reading mends. Walks chunk headers rather than searching for
+ * "0\r\n\r\n", which can appear inside chunk data.
  *
  * The length matters as much as the fact: anything after it belongs to
  * whatever the peer sent next, and a caller that assumes the body runs to the
  * end of what it has read would swallow a pipelined message. */
-size_t http_chunked_frame_len(const char* buf, size_t len) {
-    size_t off = 0;
-    for (;;) {
-        const char* line_end = (const char*)memchr(buf + off, '\n', len - off);
-        if (!line_end) return 0;
-        size_t size_len = (size_t)(line_end - (buf + off));
-        char size_buf[32];
-        if (size_len >= sizeof(size_buf)) return 0;
-        memcpy(size_buf, buf + off, size_len);
-        size_buf[size_len] = '\0';
-        long long chunk = strtoll(size_buf, NULL, 16);
-        if (chunk < 0) return 0;
-        off = (size_t)(line_end - buf) + 1;
-        if (chunk == 0) {
-            /* Trailer section: header lines until an empty one ends it. */
-            for (;;) {
-                const char* le = (const char*)memchr(buf + off, '\n', len - off);
-                if (!le) return 0;
-                size_t line_len = (size_t)(le - (buf + off));
-                int empty = line_len == 0 || (line_len == 1 && buf[off] == '\r');
-                off = (size_t)(le - buf) + 1;
-                if (empty) return off;
-            }
-        }
-        off += (size_t)chunk + 2;   /* payload + its trailing CRLF */
-        if (off > len) return 0;
-    }
-}
-
-int http_chunked_complete(const char* buf, size_t len) {
-    return http_chunked_frame_len(buf, len) > 0;
+int http_chunked_frame(const char* buf, size_t len, size_t* frame_len) {
+    size_t n = 0;
+    int rc = http_chunked_walk(buf, len, &n, NULL, NULL);
+    if (frame_len) *frame_len = rc == 1 ? n : 0;
+    return rc;
 }
 
 static void http_socket_set_nonblocking(int fd, int on);
@@ -1667,6 +1812,23 @@ static int no_body_expected(int status, const char* method) {
     if (method && strcmp(method, "HEAD") == 0) return 1;
     if (status >= 100 && status < 200) return 1;
     return status == 204 || status == 304;
+}
+
+/* Whether a response's header section, the `n` bytes at `buf` up to and
+ * including the empty line that ends it, holds no NUL and no CR that is not
+ * followed by LF. A recipient has to refuse either or put a space in its
+ * place (RFC 9110 5.5, RFC 9112 2.2), and refusing is the answer nothing can
+ * read two ways (#3556). The client found the end of the section with
+ * strstr, which stops at a NUL, and read its fields as C strings: a NUL hid
+ * the section and handed the whole response back as a status-0 body, and a
+ * bare CR in a Location went out inside the request line of the redirect. */
+static int http_head_section_ok(const char* buf, size_t n) {
+    if (memchr(buf, '\0', n)) return 0;
+    const char* end = buf + n;
+    for (const char* p = buf; (p = (const char*)memchr(p, '\r', (size_t)(end - p))) != NULL; p += 2) {
+        if (p + 1 >= end || p[1] != '\n') return 0;
+    }
+    return 1;
 }
 
 // -----------------------------------------------------------------
@@ -1747,6 +1909,30 @@ static int host_in_no_proxy(const char* target_host, const char* no_proxy) {
     return 0;
 }
 
+/* A proxy URL, [http://]host[:port], in `host` and *port; 3128 when it names
+ * no port. An https:// one is read the same way: this client does not speak
+ * TLS to its proxy, so the scheme names nothing more. The authority is split
+ * by the rule a target URL's is (aether_url_authority_len, then
+ * aether_addr_split_authority), so "http://proxy:3128?x" is port 3128 and an
+ * IPv6 host comes back without its brackets, as parse_url gives one: split at
+ * its first ':', "http://[::1]:3128" was refused as malformed (#3552). 0, or
+ * -1 for a URL that is not one or a host that does not fit. */
+int http_parse_proxy_url(const char* url, char* host, size_t host_size, int* port) {
+    if (!url || !host || host_size == 0 || !port) return -1;
+    const char* s = url;
+    if (strncmp(s, "http://", 7) == 0) s += 7;
+    else if (strncmp(s, "https://", 8) == 0) s += 8;
+    size_t alen = aether_url_authority_len(s);
+    const char* port_at = NULL;
+    size_t port_len = 0;
+    if (aether_addr_split_authority(s, alen, host, host_size, &port_at, &port_len) != 0 ||
+        host[0] == '\0') return -1;
+    int p = 3128;
+    if (port_at && (p = http_parse_port(port_at, port_len)) < 0) return -1;
+    *port = p;
+    return 0;
+}
+
 /* Resolve the effective proxy for a request+target, applying the precedence
  * ladder and all guards. On "use a proxy" writes proxy_host/proxy_port and
  * returns 1; returns 0 for a direct connection; returns -1 with *err set on a
@@ -1780,28 +1966,11 @@ static int resolve_proxy_for(HttpClientRequest* req, const char* target_host, in
         if (!proxy_url) return 0;
     }
 
-    /* Parse proxy URL: [http://]host[:port]. Default port 3128. */
-    const char* s = proxy_url;
-    if (strncmp(s, "http://", 7) == 0) s += 7;
-    else if (strncmp(s, "https://", 8) == 0) s += 8; /* proxy-over-TLS not supported; treat as host */
-    int pport = 3128;
-    const char* slash = strchr(s, '/');
-    const char* colon = strchr(s, ':');
-    size_t hlen;
-    if (colon && (!slash || colon < slash)) {
-        hlen = (size_t)(colon - s);
-        pport = atoi(colon + 1);
-    } else if (slash) {
-        hlen = (size_t)(slash - s);
-    } else {
-        hlen = strlen(s);
-    }
-    if (hlen == 0 || hlen >= phost_size || pport <= 0 || pport > 65535) {
+    int pport = 0;
+    if (http_parse_proxy_url(proxy_url, proxy_host, phost_size, &pport) != 0) {
         *err = "malformed proxy URL";
         return -1;
     }
-    memcpy(proxy_host, s, hlen);
-    proxy_host[hlen] = '\0';
 
     /* SSRF guard applies to the ENV path (untrusted); an explicit
      * use_http_proxy is a code-visible grant, so it is trusted as-is. */
@@ -2294,6 +2463,61 @@ static const char* http_tls_backend_missing(const HttpClientRequest* req) {
 #endif
 }
 
+/* The longest head a CONNECT reply may have. */
+#define HTTP_CONNECT_REPLY_MAX 4096
+
+/* The reply to a CONNECT on `fd`, read to the empty line that ends its head
+ * and not a byte further (#3557). What follows the head is the tunnel's: the
+ * TLS handshake reads it from the socket. The reader took whatever one recv
+ * gave and dropped what came after the head, so bytes a proxy sent behind
+ * its 200 were lost to the handshake. Each round peeks at what has arrived
+ * and takes only what belongs to the head, so the socket keeps the rest.
+ *
+ * The status is read by the strict rule every response's is
+ * (response_status_of: exactly three digits), from a status line that starts
+ * "HTTP/1.", in a head with no NUL and no bare CR (http_head_section_ok).
+ * atoi took "2000" for 2000 and "20x" for 20, and a reply that was no HTTP
+ * at all for status 0. Returns the status, or 0 with *why set: a reply that
+ * ended, or a read that failed or timed out, before its head did; a head
+ * longer than HTTP_CONNECT_REPLY_MAX; or a malformed one. */
+int http_connect_reply_read(int fd, const char** why) {
+    char head[HTTP_CONNECT_REPLY_MAX + 1];
+    size_t len = 0;
+    for (;;) {
+        if (len == HTTP_CONNECT_REPLY_MAX) {
+            *why = "proxy CONNECT: the reply's head is longer than 4096 bytes";
+            return 0;
+        }
+        int n = (int)recv(fd, head + len, (int)(HTTP_CONNECT_REPLY_MAX - len), MSG_PEEK);
+        if (n <= 0) {
+            *why = "proxy CONNECT: no response from proxy";
+            return 0;
+        }
+        /* The empty line may have begun in what was taken already. */
+        size_t from = len >= 3 ? len - 3 : 0;
+        const char* end = http_find_header_end(head + from, len + (size_t)n - from);
+        size_t take = end ? (size_t)(end + 4 - (head + len)) : (size_t)n;
+        for (size_t got = 0; got < take; ) {
+            int r = (int)recv(fd, head + len + got, (int)(take - got), 0);
+            if (r <= 0) {
+                *why = "proxy CONNECT: no response from proxy";
+                return 0;
+            }
+            got += (size_t)r;
+        }
+        len += take;
+        if (end) break;
+    }
+    head[len] = '\0';
+    int status = 0;
+    if (strncmp(head, "HTTP/1.", 7) != 0 || !http_head_section_ok(head, len) ||
+        (status = response_status_of(head)) == 0) {
+        *why = "proxy CONNECT: malformed reply from the proxy";
+        return 0;
+    }
+    return status;
+}
+
 static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
                      const char* dial_host, int dial_port,
                      const char* host, int port, int use_tls, int via_proxy,
@@ -2355,27 +2579,14 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
             ae_set_err(out_err, "proxy CONNECT: send failed");
             return -1;
         }
-        /* Read the proxy's response headers up to the terminating CRLFCRLF.
+        /* The proxy's reply, to the end of its head and not a byte further.
          * A 2xx means the tunnel is open; anything else is a proxy refusal. */
-        char cbuf[1024];
-        size_t clen = 0;
-        int saw_end = 0;
-        while (clen < sizeof(cbuf) - 1) {
-            ssize_t rn = recv(sockfd, cbuf + clen, sizeof(cbuf) - 1 - clen, 0);
-            if (rn <= 0) break;
-            clen += (size_t)rn;
-            cbuf[clen] = '\0';
-            if (strstr(cbuf, "\r\n\r\n")) { saw_end = 1; break; }
-        }
-        if (!saw_end) {
+        int pstatus = http_connect_reply_read(sockfd, &why);
+        if (pstatus == 0) {
             close(sockfd);
-            ae_set_err(out_err, "proxy CONNECT: no response from proxy");
+            ae_set_err(out_err, why);
             return -1;
         }
-        /* Parse "HTTP/1.x NNN ..." status. */
-        int pstatus = 0;
-        const char* sp = strchr(cbuf, ' ');
-        if (sp) pstatus = atoi(sp + 1);
         if (pstatus < 200 || pstatus >= 300) {
             close(sockfd);
             char emsg[128];
@@ -2677,6 +2888,13 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
         char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
+        if (!http_head_section_ok(buf, f->header_bytes)) {
+            /* Stop reading: the driver reports it, and the connection,
+             * framed by fields nobody can read one way, is not kept. */
+            f->bad_head = 1;
+            f->invalid = 1;
+            return 1;
+        }
 
         /* Read Transfer-Encoding where it lies. Copying it out meant an
          * allocation and a free per response, and any buffer it was copied
@@ -2696,20 +2914,22 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
              * next request. */
             char cl[64];
             int differing = 0;
-            int count = http_find_header_in_block(buf, hend, "Content-Length",
-                                                  cl, sizeof(cl), &differing);
+            const char* clv = NULL;
+            size_t clv_len = 0;
+            int count = http_find_header_span(buf, hend, "Content-Length",
+                                              cl, sizeof(cl), &differing,
+                                              &clv, &clv_len);
             if (count > 0) {
-                if (differing) {
+                /* The whole value where it lies, read strictly: the copy in
+                 * `cl` stops at 63 bytes, and strtoll took a sign (#3520). */
+                uint64_t declared = 0;
+                if (differing ||
+                    http_parse_count(clv, clv_len, 10, (uint64_t)(SIZE_MAX / 2),
+                                     &declared) != 0) {
                     f->invalid = 1;
                 } else {
-                    char* endp = NULL;
-                    long long declared = strtoll(cl, &endp, 10);
-                    if (endp && *endp == '\0' && endp != cl && declared >= 0) {
-                        f->body_target = f->header_bytes + (size_t)declared;
-                        f->definite = 1;
-                    } else {
-                        f->invalid = 1;
-                    }
+                    f->body_target = f->header_bytes + (size_t)declared;
+                    f->definite = 1;
                 }
             }
         }
@@ -2721,8 +2941,13 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
     }
     if (f->invalid) return 1;      /* stop reading; the driver reports it */
     if (!f->definite) return 0;
-    if (f->chunked)
-        return http_chunked_complete(buf + f->header_bytes, len - f->header_bytes);
+    if (f->chunked) {
+        int rc = http_chunked_frame(buf + f->header_bytes, len - f->header_bytes, NULL);
+        /* Framing that is not chunked framing has not said where the body
+         * ends either: reading on would wait for an end that never comes. */
+        if (rc < 0) f->invalid = 1;
+        return rc != 0;
+    }
     return len >= f->body_target;
 }
 
@@ -2887,12 +3112,19 @@ char* http_build_request_head_into(const HttpReqHead* p,
  */
 void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
-    char* header_end = strstr(buf, "\r\n\r\n");
+    /* Found as the framing found it, past any NUL (#3556): strstr stopped at
+     * one, and the whole response came back as the body of a status-0
+     * response with no error. */
+    char* header_end = (char*)http_find_header_end(buf, len);
     if (!header_end) {
         response->body = string_new_with_length(buf, len);
         return;
     }
     size_t header_bytes = (size_t)((header_end + 4) - buf);
+    if (!http_head_section_ok(buf, header_bytes)) {
+        if (!response->error) response->error = string_new("malformed response header section");
+        return;
+    }
     size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
     *header_end = '\0';
     char* status_line = buf;
@@ -3551,6 +3783,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
     if (!reused) {
         if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
                                &serv_addr_resolved)) {
+            free(path);
             response->error = string_new(via_proxy ? "could not resolve proxy host"
                                                    : "could not resolve host");
             return response;
@@ -3558,6 +3791,7 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
 
         char* dial_err = NULL;
         if (http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &dial_err) != 0) {
+            free(path);
             response->error = string_new(dial_err ? dial_err : "connection failed");
             free(dial_err);
             return response;
@@ -3661,9 +3895,10 @@ send_request:
             memcpy(hb + hlen, sbuf, (size_t)sn);
             hlen += (size_t)sn;
             hb[hlen] = '\0';
-            /* The header terminator is NUL-free ASCII and precedes any body
-             * byte, so strstr finds it before any body NUL. */
-            hend = strstr(hb, "\r\n\r\n");
+            /* Found past any NUL, as the buffered reader finds it (#3556):
+             * strstr stopped at a NUL in the header section, and this kept
+             * reading for an end it had already been sent. */
+            hend = (char*)http_find_header_end(hb, hlen);
             if (hend) break;
         }
         if (sn < 0) serr = 1;
@@ -3678,12 +3913,26 @@ send_request:
 
         size_t header_bytes = (size_t)((hend + 4) - hb);
         size_t over_len     = hlen - header_bytes;   /* body bytes already read */
+        if (!http_head_section_ok(hb, header_bytes)) {
+            free(hb);
+            transport_close(&t);
+            response->error = string_new("malformed response header section");
+            return response;
+        }
         *hend = '\0';                                 /* isolate the header block */
 
         response->status_code = response_status_of(hb);
         response->headers = string_new(hb);
 
-        /* Framing: chunked wins over Content-Length; neither => read-until-close. */
+        /* Framing: chunked wins over Content-Length; neither => read-until-close.
+         * A response that carries no body (one to HEAD, a 1xx, a 204, a 304)
+         * ends here whatever those say, by the rule the buffered reader keeps
+         * (http_response_is_complete, #3551): read by its headers, a HEAD
+         * answered with a Content-Length waited for a body until the timeout,
+         * and a 204 without one for the connection to close. A declared length
+         * the reader cannot use is still refused, as the buffered reader
+         * refuses it. */
+        int no_body = no_body_expected(response->status_code, method);
         int       is_chunked = 0;
         long long clen = -1;
         char* te = http_extract_response_header(hb, "Transfer-Encoding");
@@ -3691,7 +3940,22 @@ send_request:
         free(te);
         if (!is_chunked) {
             char* cl = http_extract_response_header(hb, "Content-Length");
-            if (cl) { clen = strtoll(cl, NULL, 10); free(cl); }
+            if (cl) {
+                /* Read as the buffered path reads it (#3520): strtoll took
+                 * "5abc" as 5 and a negative length as read-until-close. */
+                uint64_t declared = 0;
+                int ok = http_parse_count(cl, strlen(cl), 10, (uint64_t)INT64_MAX,
+                                          &declared) == 0;
+                free(cl);
+                if (!ok) {
+                    free(hb);
+                    transport_close(&t);
+                    response->error = string_new(
+                        "response framing is ambiguous: the declared body length is not usable");
+                    return response;
+                }
+                clen = (long long)declared;
+            }
         }
 
         struct HttpStream* st = (struct HttpStream*)calloc(1, sizeof(struct HttpStream));
@@ -3702,8 +3966,12 @@ send_request:
             return response;
         }
         st->t = t;                 /* transfer ownership of the open transport */
-        st->chunked = is_chunked;
-        if (is_chunked) {
+        if (no_body) {
+            /* Bytes past the header section are not this response's body. */
+            st->eof = 1;
+            over_len = 0;
+        } else if (is_chunked) {
+            st->chunked = 1;
             st->chunk_state = 0;   /* start by reading a chunk-size line */
         } else if (clen >= 0) {
             st->content_remaining = clen;
@@ -3765,13 +4033,17 @@ send_request:
          * pooled connection they would be read as the head of the next
          * response. */
         if (rx.framing.invalid) {
+            aether_caps_free(hdr, hdr_cap);
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
-                "response framing is ambiguous: the declared body length is not usable");
+                rx.framing.bad_head
+                    ? "malformed response header section"
+                    : "response framing is ambiguous: the declared body length is not usable");
             return response;
         }
         if (rx.oom) {
+            aether_caps_free(hdr, hdr_cap);
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new("out of memory reading response");
@@ -3851,8 +4123,8 @@ send_request:
         recv_err = 1;
     }
 
-    // Zero-byte response: still need a valid empty string so strstr
-    // below is safe. Tiny allocation, done only on the empty path.
+    // Zero-byte response: still need a valid empty string for the readers
+    // below. Tiny allocation, done only on the empty path.
     if (!full_response) {
         full_response = (char*)aether_caps_malloc(1);
         if (!full_response) {
@@ -3888,7 +4160,7 @@ send_request:
      * header block, this was a timeout / I/O error mid-recv. Tell the
      * caller — otherwise they'd see status=0 + empty body and not
      * know whether the request even reached the server. */
-    char* header_end = strstr(full_response, "\r\n\r\n");
+    const char* header_end = http_find_header_end(full_response, total_len);
     /* A response framed by the close (no Content-Length, no chunked) that
      * the deadline cut off is NOT complete: `truncated` cannot see it
      * (nothing declared a length) and its headers did arrive, so without
@@ -4026,116 +4298,272 @@ static int http_value_has_chunked(const char* v) {
     return v ? http_value_has_chunked_n(v, strlen(v)) : 0;
 }
 
-/* Decode HTTP/1.1 chunked transfer-encoding (RFC 7230 §4.1). `in` /
+/* Decode HTTP/1.1 chunked transfer-encoding (RFC 9112 7.1). `in` /
  * `in_len` is the raw chunk-framed body; writes the decoded length to
  * *out_len and returns a malloc'd buffer (NUL-terminated for
- * convenience; *out_len excludes the NUL). Returns NULL on malformed
- * framing so the caller can fall back to the raw bytes. Binary-safe:
- * the payload is copied by length, never scanned for NUL. Chunk
- * extensions (`<size>;name=val`) are skipped; trailing trailers after
- * the terminating `0` chunk are ignored. */
+ * convenience; *out_len excludes the NUL). Returns NULL on malformed or
+ * incomplete framing so the caller can fall back to the raw bytes.
+ * Binary-safe: the payload is copied by length, never scanned for NUL.
+ * The walk is http_chunked_frame's own, so a body that frames decodes, and
+ * one that does not frame does not decode either (#3520). Bytes after the
+ * body's end are not part of it and are ignored. */
 char* http_dechunk(const char* in, size_t in_len, size_t* out_len) {
     if (!in || !out_len) return NULL;
     char* out = (char*)malloc(in_len + 1);   /* decoded payload <= input */
     if (!out) return NULL;
-    size_t oi = 0;
-    size_t i = 0;
-    while (i < in_len) {
-        size_t sz = 0;
-        int saw_hex = 0;
-        while (i < in_len) {
-            char c = in[i];
-            int d;
-            if (c >= '0' && c <= '9') d = c - '0';
-            else if (c >= 'a' && c <= 'f') d = c - 'a' + 10;
-            else if (c >= 'A' && c <= 'F') d = c - 'A' + 10;
-            else break;
-            sz = sz * 16u + (size_t)d;
-            saw_hex = 1;
-            i++;
-        }
-        if (!saw_hex) { free(out); return NULL; }   /* expected a hex size */
-        /* Skip the rest of the size line (chunk extensions) to the LF. */
-        while (i < in_len && in[i] != '\n') i++;
-        if (i >= in_len) { free(out); return NULL; } /* no CRLF after size */
-        i++;                                          /* consume the '\n' */
-        if (sz == 0) break;                           /* terminating chunk */
-        if (sz > in_len - i) { free(out); return NULL; } /* truncated chunk */
-        memcpy(out + oi, in + i, sz);
-        oi += sz;
-        i += sz;
-        /* Consume the CRLF (or bare LF) that follows the chunk data. */
-        if (i < in_len && in[i] == '\r') i++;
-        if (i < in_len && in[i] == '\n') i++;
+    size_t frame_len = 0, oi = 0;
+    if (http_chunked_walk(in, in_len, &frame_len, out, &oi) != 1) {
+        free(out);
+        return NULL;
     }
     out[oi] = '\0';
     *out_len = oi;
     return out;
 }
 
-/* Resolve a Location-header value against a base URL. The Location
- * may be absolute (`http://other.host/x`), scheme-relative
- * (`//other.host/x`), root-relative (`/x`), or relative
- * (`x`). Returns a malloc'd absolute URL on success, NULL on
- * malformed input. */
-static char* http_resolve_location(const char* base_url, const char* location) {
-    if (!base_url || !location || !*location) return NULL;
-    /* Absolute URL — Location starts with a scheme. */
-    if (strstr(location, "://")) return strdup(location);
-    /* Need to extract scheme + host[:port] from base_url.
-     * parse_url returns 1 on success, 0 on failure — bail when it
-     * fails. The earlier round-1 implementation had the check
-     * inverted, which produced a bogus "malformed Location header"
-     * for every well-formed base URL. Caught by the cases-8-10
-     * end-to-end test in test_http_client_v2.ae. */
-    /* Both paths are sized to fit: fixed 1024-byte buffers failed a redirect
-     * from, or to, a long path (#2674). */
-    char base_host[256];
-    char* base_path = NULL;
-    int base_port = 0, base_use_tls = 0;
-    if (parse_url_alloc(base_url, base_host, sizeof(base_host),
-                        &base_port, &base_path, &base_use_tls) == 0) {
-        return NULL;
+/* A URI reference split into its parts (RFC 3986 3, by the regular
+ * expression of its Appendix B):
+ *
+ *     [ scheme ":" ] [ "//" authority ] path [ "?" query ] [ "#" fragment ]
+ *
+ * Each part is a span of the string it came from, so an authority keeps its
+ * brackets ("[::1]:8080") and its port as written. An absent part differs
+ * from an empty one ("x?" has an empty query, "x" none), so each optional
+ * part says whether it is there. */
+typedef struct {
+    const char* scheme;    size_t scheme_len;    int has_scheme;
+    const char* authority; size_t authority_len; int has_authority;
+    const char* path;      size_t path_len;
+    const char* query;     size_t query_len;     int has_query;
+    const char* fragment;  size_t fragment_len;  int has_fragment;
+} HttpUriParts;
+
+/* scheme = ALPHA *( ALPHA / DIGIT / "+" / "-" / "." )        RFC 3986 3.1 */
+static int http_uri_scheme_ok(const char* s, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        int alpha = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z');
+        if (!alpha && (i == 0 || !((c >= '0' && c <= '9') || c == '+' || c == '-' || c == '.')))
+            return 0;
     }
-    const char* scheme = base_use_tls ? "https" : "http";
-    char* out = NULL;
-    /* Scheme-relative: //host/x → keep base scheme. */
-    if (location[0] == '/' && location[1] == '/') {
-        size_t need = strlen(scheme) + 1 + strlen(location) + 1;
-        out = (char*)malloc(need);
-        if (out) snprintf(out, need, "%s:%s", scheme, location);
-        free(base_path);
-        return out;
+    return n > 0;
+}
+
+/* Split `s` into `u`. 0, or -1 when its first segment holds a ':' that does
+ * not end a scheme: "1a:b" is neither a URI nor a relative reference (RFC
+ * 3986 4.2), and reading it as a path would ask for something else. */
+static int http_uri_split(const char* s, HttpUriParts* u) {
+    memset(u, 0, sizeof *u);
+    const char* p = s;
+    size_t lead = strcspn(p, ":/?#");
+    if (p[lead] == ':') {
+        if (!http_uri_scheme_ok(p, lead)) return -1;
+        u->scheme = p;
+        u->scheme_len = lead;
+        u->has_scheme = 1;
+        p += lead + 1;
     }
-    /* Root-relative: /x → keep base scheme + host[:port]; a relative path
-     * replaces the last segment of base_path. */
-    char* joined_path = NULL;
-    const char* tail = location;
-    if (location[0] != '/') {
-        char* last_slash = strrchr(base_path, '/');
-        size_t prefix_len = last_slash ? (size_t)(last_slash - base_path) + 1 : 0;
-        joined_path = (char*)malloc(prefix_len + strlen(location) + 2);
-        if (!joined_path) { free(base_path); return NULL; }
-        if (last_slash) {
-            memcpy(joined_path, base_path, prefix_len);
-            strcpy(joined_path + prefix_len, location);
-        } else {
-            joined_path[0] = '/';
-            strcpy(joined_path + 1, location);
+    if (p[0] == '/' && p[1] == '/') {
+        p += 2;
+        u->authority = p;
+        u->authority_len = aether_url_authority_len(p);
+        u->has_authority = 1;
+        p += u->authority_len;
+    }
+    u->path = p;
+    u->path_len = strcspn(p, "?#");
+    p += u->path_len;
+    if (*p == '?') {
+        p++;
+        u->query = p;
+        u->query_len = strcspn(p, "#");
+        u->has_query = 1;
+        p += u->query_len;
+    }
+    if (*p == '#') {
+        p++;
+        u->fragment = p;
+        u->fragment_len = strlen(p);
+        u->has_fragment = 1;
+    }
+    return 0;
+}
+
+/* remove_dot_segments (RFC 3986 5.2.4) over the `n` bytes at `in`, which it
+ * may overwrite, into `out` (at least n + 1 bytes). Returns the output's
+ * length. */
+static size_t http_uri_remove_dots(char* in, size_t n, char* out) {
+    size_t i = 0, o = 0;
+    while (i < n) {
+        const char* r = in + i;
+        size_t rest = n - i;
+        /* A: a "../" or "./" prefix goes. */
+        if (rest >= 3 && memcmp(r, "../", 3) == 0) { i += 3; continue; }
+        if (rest >= 2 && memcmp(r, "./", 2) == 0) { i += 2; continue; }
+        /* B: "/./" and a final "/." become "/". */
+        if (rest >= 3 && memcmp(r, "/./", 3) == 0) { i += 2; continue; }
+        if (rest == 2 && memcmp(r, "/.", 2) == 0) { i += 1; in[i] = '/'; continue; }
+        /* C: "/../" and a final "/.." become "/", and the last segment of
+         * the output goes, with the "/" before it. */
+        if ((rest >= 4 && memcmp(r, "/../", 4) == 0) || (rest == 3 && memcmp(r, "/..", 3) == 0)) {
+            if (rest == 3) { i += 2; in[i] = '/'; } else { i += 3; }
+            while (o > 0 && out[o - 1] != '/') o--;
+            if (o > 0) o--;
+            continue;
         }
-        tail = joined_path;
+        /* D: a lone "." or ".." goes. */
+        if ((rest == 1 && r[0] == '.') || (rest == 2 && memcmp(r, "..", 2) == 0)) break;
+        /* E: the first segment moves over, with its leading "/", up to the
+         * next "/". */
+        size_t k = r[0] == '/' ? 1 : 0;
+        while (k < rest && r[k] != '/') k++;
+        memcpy(out + o, r, k);
+        o += k;
+        i += k;
     }
-    size_t need = strlen(scheme) + 3 + strlen(base_host) + 16 + strlen(tail) + 1;
-    out = (char*)malloc(need);
+    out[o] = '\0';
+    return o;
+}
+
+/* Append the `n` bytes at `s` to `out` at *o. With `escape`, a space and
+ * every byte past ASCII are written percent-encoded: a URI holds neither
+ * (RFC 3986 2.1), and a space would split the request line of the next hop.
+ * Browsers and curl encode them the same way. A '%' already there stays. */
+static void http_uri_put(char* out, size_t* o, const char* s, size_t n, int escape) {
+    static const char hex[] = "0123456789ABCDEF";
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)s[i];
+        if (escape && (c == ' ' || c >= 0x80)) {
+            out[(*o)++] = '%';
+            out[(*o)++] = hex[c >> 4];
+            out[(*o)++] = hex[c & 15];
+        } else {
+            out[(*o)++] = (char)c;
+        }
+    }
+}
+
+/* Resolve `ref` against the absolute URI `base` (RFC 3986 5.2.2), with the
+ * merge of 5.2.3, then recompose it (5.3) with the scheme in lower case
+ * (3.1). With `inherit_fragment`, a reference without a fragment takes the
+ * base's, as a redirect does (RFC 9110 10.2.2). A malloc'd string, or NULL
+ * when either does not split, the base has no scheme, or no memory. */
+static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_fragment) {
+    HttpUriParts b, r;
+    if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme ||
+        http_uri_split(ref, &r) != 0) return NULL;
+    /* No URI reference holds a control byte (RFC 3986 2), and one in a
+     * Location would be written into the next hop's request line as it is
+     * (#3556). The response reader refuses a NUL and a bare CR in the
+     * header section; a TAB or any other control byte is refused here. */
+    for (const unsigned char* c = (const unsigned char*)ref; *c; c++) {
+        if (*c < 0x20 || *c == 0x7f) return NULL;
+    }
+
+    /* T's parts, by 5.2.2: which of the two each comes from, and the path
+     * built in `path`. A merged path, its dot segments removed, fits in the
+     * two inputs together. */
+    const HttpUriParts* from = &r;   /* the scheme's */
+    const HttpUriParts* auth = &r;   /* the authority's */
+    const HttpUriParts* query = &r;  /* the query's */
+    size_t cap = strlen(base) + strlen(ref) + 2;
+    char* merged = (char*)malloc(cap);
+    char* path = (char*)malloc(cap);
+    if (!merged || !path) { free(merged); free(path); return NULL; }
+    size_t mlen = 0;
+    const char* tpath = path;
+    size_t tpath_len = 0;
+    if (r.has_scheme || r.has_authority) {
+        /* An absolute reference, or a network-path one ("//g"): its own
+         * path, the base's scheme for the second. */
+        if (!r.has_scheme) from = &b;
+        memcpy(merged, r.path, r.path_len);
+        mlen = r.path_len;
+        tpath_len = http_uri_remove_dots(merged, mlen, path);
+    } else if (r.path_len == 0) {
+        /* The base's path as it is, and its query unless the reference
+         * has one. */
+        from = auth = &b;
+        tpath = b.path;
+        tpath_len = b.path_len;
+        if (!r.has_query) query = &b;
+    } else {
+        from = auth = &b;
+        if (r.path[0] != '/') {
+            /* 5.2.3: the base's path up to its last "/", or "/" for a base
+             * with an authority and an empty path, then the reference's. */
+            if (b.has_authority && b.path_len == 0) {
+                merged[mlen++] = '/';
+            } else {
+                size_t keep = b.path_len;
+                while (keep > 0 && b.path[keep - 1] != '/') keep--;
+                memcpy(merged, b.path, keep);
+                mlen = keep;
+            }
+        }
+        memcpy(merged + mlen, r.path, r.path_len);
+        mlen += r.path_len;
+        tpath_len = http_uri_remove_dots(merged, mlen, path);
+    }
+    const HttpUriParts* frag = &r;
+    if (inherit_fragment && !r.has_fragment) frag = &b;
+
+    /* 5.3. Escaping can triple the path, the query and the fragment. */
+    size_t need = from->scheme_len + 1 + 2 + auth->authority_len +
+                  3 * (tpath_len + query->query_len + frag->fragment_len) + 3;
+    char* out = (char*)malloc(need);
     if (out) {
-        if ((base_use_tls && base_port == 443) || (!base_use_tls && base_port == 80)) {
-            snprintf(out, need, "%s://%s%s", scheme, base_host, tail);
-        } else {
-            snprintf(out, need, "%s://%s:%d%s", scheme, base_host, base_port, tail);
+        size_t o = 0;
+        for (size_t i = 0; i < from->scheme_len; i++) {
+            unsigned char c = (unsigned char)from->scheme[i];
+            out[o++] = (char)((c >= 'A' && c <= 'Z') ? c + 32 : c);
         }
+        out[o++] = ':';
+        if (auth->has_authority) {
+            out[o++] = '/';
+            out[o++] = '/';
+            http_uri_put(out, &o, auth->authority, auth->authority_len, 0);
+        }
+        http_uri_put(out, &o, tpath, tpath_len, 1);
+        if (query->has_query) {
+            out[o++] = '?';
+            http_uri_put(out, &o, query->query, query->query_len, 1);
+        }
+        if (frag->has_fragment) {
+            out[o++] = '#';
+            http_uri_put(out, &o, frag->fragment, frag->fragment_len, 1);
+        }
+        out[o] = '\0';
     }
-    free(joined_path);
-    free(base_path);
+    free(merged);
+    free(path);
+    return out;
+}
+
+char* http_uri_resolve(const char* base, const char* ref) {
+    return http_uri_resolve_ex(base, ref, 0);
+}
+
+/* The URL a redirect's Location names, resolved against the URL that was
+ * asked for (#3552). The base is read the way parse_url reads a request URL:
+ * one that starts with neither http:// nor https:// is http, with its
+ * authority first. The reference is resolved on the base's parts (RFC 3986
+ * 5.2), so the authority keeps its form, brackets of an IPv6 host included:
+ * rebuilt from parse_url's host, http://[::1]:8080/a with Location /b went to
+ * http://::1:8080/b, which parse_url refuses. And a relative reference
+ * replaces the last segment of the base's path, not of its path and query:
+ * http://h/a/b?x=/y with Location c went to /a/b?x=/c instead of /a/c. */
+char* http_resolve_location(const char* base_url, const char* location) {
+    if (!base_url || !location) return NULL;
+    if (strncmp(base_url, "http://", 7) == 0 || strncmp(base_url, "https://", 8) == 0)
+        return http_uri_resolve_ex(base_url, location, 1);
+    size_t n = strlen(base_url);
+    char* base = (char*)malloc(n + 8);
+    if (!base) return NULL;
+    memcpy(base, "http://", 7);
+    memcpy(base + 7, base_url, n + 1);
+    char* out = http_uri_resolve_ex(base, location, 1);
+    free(base);
     return out;
 }
 
@@ -4221,9 +4649,21 @@ HttpResponse* http_send_raw(HttpClientRequest* req) {
             break;
         }
 
+        /* Only an http or https URL is followed (the resolver writes the
+         * scheme in lower case). Followed, any other ("ftp://x", "g:h") was
+         * a request parse_url refused, and the 3xx was lost behind a
+         * "malformed URL" error; it is kept now, as for any hop not taken. */
+        int next_https = strncmp(next_url, "https://", 8) == 0;
+        if (!next_https && strncmp(next_url, "http://", 7) != 0) {
+            if (resp->redirect_error) string_release(resp->redirect_error);
+            resp->redirect_error = string_new(
+                "redirect rejected: the target is not an http or https URL");
+            free(next_url);
+            break;
+        }
+
         /* Reject scheme downgrade: HTTPS origin → HTTP target. */
         int curr_https = strncmp(current_url, "https://", 8) == 0;
-        int next_https = strncmp(next_url, "https://", 8) == 0;
         if (curr_https && !next_https) {
             if (resp->redirect_error) string_release(resp->redirect_error);
             resp->redirect_error = string_new(

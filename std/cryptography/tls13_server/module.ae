@@ -56,7 +56,7 @@ extern tcp_socket_from_fd_owned(fd: int) -> ptr
 exports(
     accept, conn_send, conn_recv, close_conn, conn_key_update,
     ServerConn,
-    parse_cert_chain_pem, parse_cert_chain_pem_checked, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
+    parse_cert_chain_pem, parse_cert_chain_pem_checked, free_cert_chain, parse_ec_private_key_pem, load_private_key, free_private_key, ServerKey,
     pure_tls_server_check, pure_tls_server_accept, pure_tls_server_send, pure_tls_server_recv, pure_tls_server_pending, pure_tls_server_close
 )
 
@@ -1274,7 +1274,7 @@ close_conn(conn: ptr) {
 // key of a combined file, EC parameters) is skipped, as OpenSSL skips it,
 // and never goes into the chain: the chain is what the server sends every
 // client. (chain, lens) or (null, null); parse_cert_chain_pem_checked says
-// why.
+// why. Both are the caller's: free them with free_cert_chain(chain, lens).
 parse_cert_chain_pem(pem_text: string) -> (ptr, ptr) {
     chain, lens, _err = parse_cert_chain_pem_checked(pem_text)
     return chain, lens
@@ -1340,8 +1340,7 @@ parse_cert_chain_pem_checked(pem_text: string) -> (ptr, ptr, string) {
     }
     if string.equals(err, "") == 1 && list_size(chain) == 0 { err = "no certificate (no BEGIN CERTIFICATE block)" }
     if string.equals(err, "") != 1 {
-        free_cert_chain(chain)
-        list_free(lens)
+        free_cert_chain(chain, lens)
         return null, null, err
     }
     return chain, lens, ""
@@ -1751,7 +1750,11 @@ fn key_matches_cert(k: *ServerKey, leaf_der: ptr) -> string {
     return ""
 }
 
-fn free_cert_chain(chain: ptr) {
+// Free what parse_cert_chain_pem gave: every certificate's DER in `chain`,
+// the list itself, and `lens` (#3539). Either may be null. accept only
+// borrows them, so the caller frees them once its connections are made.
+free_cert_chain(chain: @frees ptr, lens: @frees ptr) {
+    if lens != null { list_free(lens) }
     if chain == null { return }
     n = list_size(chain)
     i = 0
@@ -1802,16 +1805,14 @@ pure_tls_server_load(cert_pem: string, key_pem: string) -> ptr {
     }
     key, perr = load_private_key(key_pem)
     if key == null {
-        free_cert_chain(chain_list)
-        list_free(lens_list)
+        free_cert_chain(chain_list, lens_list)
         aether_callback_set_reason("the TLS private key cannot be used: ${perr}")
         return null
     }
     merr = key_matches_cert(key as *ServerKey, list.at(chain_list, 0) as ptr)
     if string.equals(merr, "") != 1 {
         free_private_key(key)
-        free_cert_chain(chain_list)
-        list_free(lens_list)
+        free_cert_chain(chain_list, lens_list)
         aether_callback_set_reason(merr)
         return null
     }
@@ -1828,8 +1829,7 @@ pure_tls_server_free_creds(creds: @frees ptr) {
     if creds == null { return }
     c = creds as *ServerCreds
     free_private_key(c.key)
-    free_cert_chain(c.chain)
-    list_free(c.lens)
+    free_cert_chain(c.chain, c.lens)
     heap.free(c)
 }
 

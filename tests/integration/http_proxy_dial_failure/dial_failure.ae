@@ -126,6 +126,8 @@ main() {
 
     http.server_stop(servers[1])
     http.server_stop(servers[0])
+    http.server_free(servers[1])
+    http.server_free(servers[0])
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

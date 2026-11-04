@@ -19,8 +19,10 @@ extern AETHER_TLS int current_core_id;
 // ==============================================================================
 // Message payloads
 // ==============================================================================
-// A typed message's payload is a heap copy (payload_message below), freed by
-// whoever handles or drops the message. There is no payload pool (#3374):
+// A typed message's payload travels in the message when it fits its payload
+// area (AETHER_MSG_INLINE, #3534), else as a heap copy (payload_message
+// below), freed by whoever handles or drops the message. There is no
+// payload pool (#3374):
 // its acquire side was removed because an actor can move to another core
 // after a message is sent, so a pooled payload would be released by a
 // thread that does not own the pool.
@@ -38,6 +40,23 @@ void aether_free_message(void* msg_data) {
 }
 
 void aether_message_drop(ActorBase* target, Message* msg) {
+    if (aether_message_is_inline(msg)) {
+        /* #3534: the payload is the message's own bytes. Its fields are
+         * released from an aligned copy, and the message holds nothing
+         * from before the release runs, so a release that panics leaves
+         * nothing behind to free twice. */
+        AetherMsgInline payload;
+        memcpy(payload.bytes, aether_message_inline_bytes(msg), AETHER_MSG_INLINE_BYTES);
+        aether_message_free_payload(msg);
+        if (msg->type == AETHER_MSG_DOWN) {
+            /* A Down a program sent fits too: its reason is released as
+             * a heap Down's is, below. */
+            string_release(((AetherDownMsg*)payload.bytes)->reason);
+        } else if (target && target->release_message) {
+            target->release_message(msg->type, payload.bytes);
+        }
+        return;
+    }
     if (msg->payload_ptr) {
         if (msg->type == AETHER_MSG_DOWN) {
             // The runtime wrote it (#2974): its reason is the runtime's to
@@ -49,10 +68,10 @@ void aether_message_drop(ActorBase* target, Message* msg) {
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
     }
-    if (msg->zerocopy.owned && msg->zerocopy.data) {
+    if (msg->zerocopy.owned == AETHER_MSG_ZC_OWNED && msg->zerocopy.data) {
         free(msg->zerocopy.data);
         msg->zerocopy.data = NULL;
-        msg->zerocopy.owned = 0;
+        msg->zerocopy.owned = AETHER_MSG_ZC_BORROWED;
     }
 }
 
@@ -89,21 +108,23 @@ static void drop_body(void* p) {
  * the same freed and reports nothing: the call ends with it. */
 int aether_message_drop_contained(ActorBase* target, Message* msg, const char** reason,
                                   void (**reason_release)(const void*)) {
-    if (!target || !target->release_message || !msg->payload_ptr || msg->type == AETHER_MSG_DOWN) {
+    int has_payload = aether_message_is_inline(msg) || msg->payload_ptr;
+    if (!target || !target->release_message || !has_payload || msg->type == AETHER_MSG_DOWN) {
         aether_message_drop(target, msg);
         return 0;
     }
     DropCall c = { target, msg };
     int how = aether_contain(drop_body, &c, reason, reason_release);
     if (how == 0) return 0;
-    if (msg->payload_ptr) {
+    /* An inline payload was emptied before its release ran (#3534). */
+    if (!aether_message_is_inline(msg) && msg->payload_ptr) {
         aether_free_message(msg->payload_ptr);
         msg->payload_ptr = NULL;
     }
-    if (msg->zerocopy.owned && msg->zerocopy.data) {
+    if (msg->zerocopy.owned == AETHER_MSG_ZC_OWNED && msg->zerocopy.data) {
         free(msg->zerocopy.data);
         msg->zerocopy.data = NULL;
-        msg->zerocopy.owned = 0;
+        msg->zerocopy.owned = AETHER_MSG_ZC_BORROWED;
     }
     return how == 1;
 }
@@ -125,7 +146,7 @@ void aether_message_drop_at_end(ActorBase* target, Message* msg) {
 
 // The heap copy of a typed message's payload, or NULL when there was no
 // memory for it.
-// Always use heap allocation for type-safe messages.
+// A payload that does not fit the message is always a heap allocation.
 // TLS pools have thread affinity issues: a same-core actor may be migrated
 // to another core after the message is sent, causing the receiver to call
 // free() on pool memory (heap-use-after-free / free-on-non-malloc).
@@ -143,13 +164,31 @@ static Message message_of(void* payload, int type, void* reply_slot) {
     msg.payload_ptr = payload;
     msg.zerocopy.data = NULL;
     msg.zerocopy.size = 0;
-    msg.zerocopy.owned = 0;
+    msg.zerocopy.owned = AETHER_MSG_ZC_BORROWED;
     msg._reply_slot = reply_slot;
     return msg;
 }
 
-// The heap copy of a typed message's payload, as the Message a send carries.
+/* #3534: a typed message whose struct fits the message's payload area
+ * (AETHER_MSG_INLINE_BYTES) travels in it: its bytes are copied into the
+ * message, which carries them by value through every queue, with no heap
+ * copy to make or free. What the fields own moves with the bytes, as it
+ * does into a heap copy. */
+static int payload_fits_inline(size_t message_size) {
+    return message_size <= AETHER_MSG_INLINE_BYTES;
+}
+
+static Message inline_message(void* message_data, size_t message_size, void* reply_slot) {
+    Message msg = message_of(NULL, *(int*)message_data, reply_slot);
+    memcpy(aether_message_inline_bytes(&msg), message_data, message_size);
+    msg.zerocopy.owned = AETHER_MSG_INLINE;
+    return msg;
+}
+
+// The heap copy of a typed message's payload, as the Message a send carries,
+// or the payload in the message when it fits (#3534).
 static Message payload_message(ActorBase* actor, void* message_data, size_t message_size) {
+    if (payload_fits_inline(message_size)) return inline_message(message_data, message_size, NULL);
     void* msg_copy = payload_copy(message_data, message_size);
     if (!msg_copy) {
         /* Inside a library call (#2956): nothing is queued yet, so the
@@ -169,7 +208,8 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
     return message_of(msg_copy, *(int*)message_data, NULL);
 }
 
-// An ask's message (#3387): the payload copied, the asker's reply slot in it.
+// An ask's message (#3387): the payload copied (into the message when it
+// fits, #3534), the asker's reply slot in it.
 // An ask can fail, so a copy that finds no memory is its failure, not an
 // unwind: 0, with what the message owns released (its values moved into it)
 // and nothing sent. The slot is passed here rather than through a
@@ -178,6 +218,10 @@ static Message payload_message(ActorBase* actor, void* message_data, size_t mess
 int aether_ask_message(void* actor_ptr, void* message_data, size_t message_size,
                        void* reply_slot, Message* out) {
     ActorBase* actor = (ActorBase*)actor_ptr;
+    if (payload_fits_inline(message_size)) {   /* #3534 */
+        *out = inline_message(message_data, message_size, reply_slot);
+        return 1;
+    }
     void* msg_copy = payload_copy(message_data, message_size);
     if (!msg_copy) {
         if (actor && actor->release_message) actor->release_message(*(int*)message_data, message_data);
@@ -187,8 +231,9 @@ int aether_ask_message(void* actor_ptr, void* message_data, size_t message_size,
     return 1;
 }
 
-// Send a typed message to an actor. The payload is copied to the heap and
-// handed to the scheduler, which delivers it whatever the actor count
+// Send a typed message to an actor. The payload is copied (into the message
+// when it fits, #3534, else to the heap) and the message handed to the
+// scheduler, which delivers it whatever the actor count
 // (#3112): the handler runs later, on a scheduler thread, and the sender
 // goes on. The cooperative runtime queues it for the next wait_for_idle or
 // aether_scheduler_poll.

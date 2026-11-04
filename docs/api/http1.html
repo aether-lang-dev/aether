@@ -17,6 +17,7 @@
   <ul class="function-nav">
     <li><a href="#HttpResponse">HttpResponse</a></li>
     <li><a href="#response_new">response_new</a></li>
+    <li><a href="#response_new_for">response_new_for</a></li>
     <li><a href="#response_free">response_free</a></li>
     <li><a href="#parse_status_line">parse_status_line</a></li>
     <li><a href="#parse_headers">parse_headers</a></li>
@@ -141,6 +142,12 @@
     <div class="function" id="response_new" data-name="response_new">
       <h3 class="function-name">response_new <span class="kind">fn</span></h3>
       <pre class="usage"><code>response_new() <span class="arrow">-&gt;</span> ptr</code></pre>
+    </div>
+    <div class="function" id="response_new_for" data-name="response_new_for">
+      <h3 class="function-name">response_new_for <span class="kind">fn</span></h3>
+      <pre class="usage"><code>response_new_for(method) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">method: string</span></p>
+      <p class="doc">A reader for the response to a request of `method`, which it needs to know: a response to HEAD ends at its header section, whatever its headers say (RFC 9110 9.3.2). response_new() reads the response to any other method.</p>
     </div>
     <div class="function" id="response_free" data-name="response_free">
       <h3 class="function-name">response_free <span class="kind">fn</span></h3>

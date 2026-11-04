@@ -437,6 +437,12 @@ main() {
     http.server_stop(gw)
     http.server_stop(gl)
     http.server_stop(upstream)
+    http.server_free(bare)
+    http.server_free(tw)
+    http.server_free(tl)
+    http.server_free(gw)
+    http.server_free(gl)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

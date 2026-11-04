@@ -1,0 +1,156 @@
+// Regression (#3549): a value made for one use and given straight to a
+// builtin, an extern or a comparison is released once that use has read it.
+//
+// R3: a parameter borrows, so a fresh temporary given to one is the
+// caller's to release after the call. Calls of Aether functions did; the
+// builtins codegen lowers by name (`atoi`, `char_at`, `str_eq`, `print` with
+// a format, `spawn_sandboxed`), a comparison's operand (`os.getenv(k) !=
+// null`) and a buffer `make` handed out for an argument (`total(make([]int,
+// 3))`) never released theirs, and an ask's reply given to println was
+// never released either. Each leaked once per evaluation: LeakSanitizer
+// found them in the corpus. One rule now holds a fresh argument of any call
+// or comparison in a temporary and releases it after, and the map put's key
+// (#3539) is no longer a case of its own.
+//
+// Where the heap count is exact (mem.heap_in_use_exact), each shape runs
+// in rounds after a warm-up, and some round of each leaves the heap where
+// it found it.
+
+import std.mem
+import std.os
+import std.map
+import std.string
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+
+message Name {}
+
+actor Echo {
+    state name = "echo"
+    receive {
+        Name -> {
+            reply name
+        }
+    }
+}
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3549: ${what}")
+        exit(1)
+    }
+}
+
+fn fresh(i: int) -> string {
+    return "v-${i}"
+}
+
+fn total(xs: int[]) -> int {
+    t = 0
+    i = 0
+    while i < xs.len {
+        t = t + xs[i]
+        i = i + 1
+    }
+    return t
+}
+
+// Some round of `shape` leaves the heap as it found it.
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    _ = os.setenv("AE_TEST_3549_PORT", "4433")
+
+    // A fresh string given straight to builtins and to an extern.
+    check(atoi(os.getenv("AE_TEST_3549_PORT")) == 4433, "atoi read the variable")
+    steady("atoi(os.getenv(...))", || {
+            i = 0
+            while i < 100 {
+                check(atoi(os.getenv("AE_TEST_3549_PORT")) == 4433, "atoi in a round")
+                i = i + 1
+            }
+        })
+    steady("char_at and str_eq of a call's string", || {
+            i = 0
+            while i < 100 {
+                check(char_at(fresh(i), 0) == 118, "char_at read the string")
+                check(str_eq(fresh(1), "v-1") == 1, "str_eq read the string")
+                i = i + 1
+            }
+        })
+    steady("print with a format and a call's string", || {
+            i = 0
+            while i < 20 {
+                print("%s", string.substring(fresh(i), 0, 0))
+                i = i + 1
+            }
+        })
+
+    // A comparison's operand.
+    check(os.getenv("AE_TEST_3549_PORT") != null, "the variable is set")
+    steady("os.getenv(...) != null", || {
+            i = 0
+            while i < 100 {
+                check(os.getenv("AE_TEST_3549_PORT") != null, "the variable in a round")
+                check(!(os.getenv("AE_TEST_3549_PORT") == null), "the variable compared to null")
+                check(fresh(i) != "x", "a call's string compared by its bytes")
+                i = i + 1
+            }
+        })
+
+    // A buffer `make` hands out, given straight to a function.
+    check(total(make([]int, 3)) == 0, "a make buffer is an argument")
+    steady("total(make([]int, 3))", || {
+            i = 0
+            while i < 100 {
+                check(total(make([]int, 3)) == 0, "a make buffer in a round")
+                i = i + 1
+            }
+        })
+
+    // A map put's key, which the general rule now gives back.
+    steady("map.put with a call's key", || {
+            m = map.new()
+            i = 0
+            while i < 50 {
+                map.put(m, fresh(i), fresh(i))
+                i = i + 1
+            }
+            check(map.size(m) == 50, "the map holds every key")
+            map.free(m)
+        })
+
+    // An ask's reply given straight to println.
+    e = spawn(Echo())
+    steady("println of an ask's reply", || {
+            i = 0
+            while i < 5 {
+                println(e ? Name {})
+                i = i + 1
+            }
+        })
+
+    // spawn_sandboxed's program, where spawning is a stub that refuses
+    // (Windows, macOS, which it says on stderr): elsewhere it starts a
+    // child, which the sandbox tests do (tests/integration/sandbox_fork_grant).
+    p = os.platform()
+    if p == "windows" || p == "darwin" {
+        steady("spawn_sandboxed(null, os.argv0(), ...)", || {
+                rc = spawn_sandboxed(null, os.argv0(), "child")
+                check(rc == -1, "the stub refused")
+            })
+    }
+    println("PASS a temporary given to a builtin, an extern or a comparison is released")
+}

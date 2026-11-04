@@ -1,6 +1,6 @@
 // The canary of `make test-ubsan` (#2488): calls into canary.c, whose shift
 // by 32 is undefined, so a sanitized build of it must write a UBSan report.
-// Built and run by tests/scripts/ubsan_sweep.sh, never by the sweep itself.
+// Built and run by tests/scripts/sanitizer_sweep.sh, never by the sweep itself.
 
 extern ubsan_canary_shift(by: int) -> int
 

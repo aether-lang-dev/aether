@@ -1,0 +1,162 @@
+// Regression (#3556): a redirect's Location went into the next request line
+// with no check of its bytes. The client found the end of a response's
+// header section with strstr and read its fields as C strings
+// (http_response_fill_from_bytes, the stream reader), so:
+//
+//   - a bare CR stayed inside the Location value (lines are split at LF),
+//     and `Location: /x\rX-Injected: y` sent `GET /x\rX-Injected: y` to the
+//     next hop: a header of the server's choosing in the client's request;
+//   - a NUL hid the end of the section from strstr, and the whole response
+//     came back as the body of a status-0 response with no error (the
+//     stream reader kept reading for an end it had already been sent).
+//
+// A recipient has to refuse a NUL or a bare CR in a header section, or put a
+// space in its place (RFC 9110 5.5, RFC 9112 2.2). Both readers now find the
+// end of the section past any NUL and refuse a section holding either, with
+// "malformed response header section", and no second request is made. A
+// TAB or any other control byte in a Location, which no URI reference holds,
+// stops the hop with a redirect_error and the 3xx kept. A NUL in a body is
+// still body. The server records each request target it is asked for, so a
+// hop not taken is seen, not inferred.
+
+import std.string
+import std.tcp
+import std.http.client
+
+extern exit(code: int)
+
+message Listen { srv: ptr }
+message Serve { n: int }
+message Log {}
+message Targets { text: string }
+
+fn redirect_to(location: string) -> string {
+    return "HTTP/1.1 302 Found\r\nLocation: ${location}\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+}
+
+// The answer for each request target. Written whole, NULs included.
+fn route(target: string) -> string {
+    if target == "/cr" { return redirect_to("/x\rX-Injected: y") }
+    if target == "/tab" { return redirect_to("/x\ty") }
+    if target == "/ctl" { return redirect_to("/x\x01y") }
+    if target == "/nul" {
+        return "HTTP/1.1 302 Found\r\nLocation: /x\x00y\r\nContent-Length: 0\r\nConnection: close\r\n\r\n"
+    }
+    if target == "/bin" { return "HTTP/1.1 200 OK\r\nContent-Length: 3\r\nConnection: close\r\n\r\na\x00b" }
+    return "HTTP/1.1 200 OK\r\nContent-Length: 8\r\nConnection: close\r\n\r\nfollowed"
+}
+
+// Serves up to n connections, one request each, and records each request's
+// target. A connection that does not come within 3 s ends the round, so a
+// client that makes fewer than asked for cannot hang the test.
+actor Upstream {
+    state log = ""
+    state srv: ptr = null
+
+    receive {
+        Listen(srv: s) -> {
+            srv = s
+        }
+        Serve(n: n) -> {
+            i = 0
+            while i < n {
+                i = i + 1
+                if tcp.server_poll(srv, 3000) != 1 {
+                    i = n
+                } else {
+                    sock, aerr = tcp.accept(srv)
+                    if aerr == "" {
+                        seen = ""
+                        going = 1
+                        while going == 1 {
+                            got, rerr = tcp.read(sock, 4096)
+                            if rerr != "" {
+                                going = 0
+                            } else {
+                                seen = string.concat(seen, got)
+                                if string.contains(seen, "\r\n\r\n") == 1 { going = 0 }
+                            }
+                        }
+                        // The request line: METHOD SP target SP version.
+                        sp1 = string.index_of(seen, " ")
+                        rest = string.substring(seen, sp1 + 1, string.length(seen))
+                        target = string.substring(rest, 0, string.index_of(rest, " "))
+                        log = "${log}${target},"
+                        _n, _werr = tcp.write_n(sock, string.bytes(route(target)))
+                        tcp.close(sock)
+                    }
+                }
+            }
+        }
+        Log() -> {
+            reply Targets { text: log }
+            log = ""
+        }
+    }
+}
+
+// GET `url` following up to 3 redirects, streamed when `stream` is 1, the
+// server asked to take `conns` connections. Gives what the client answered
+// and the targets the server saw, on one line.
+fn fetch(up: actor_ref[Upstream], conns: int, url: string, stream: int) -> string {
+    up ! Serve { n: conns }
+    req = client.request("GET", url)
+    client.set_timeout(req, 2s)
+    _f = client.set_follow_redirects(req, 3)
+    out = ""
+    if stream == 1 {
+        r, err = client.send_stream(req)
+        if err != "" {
+            out = "error: ${err}"
+        } else {
+            out = "${client.response_status(r)} streamed"
+            client.response_free(r)
+        }
+    } else {
+        r, err = client.send_request(req)
+        if err != "" {
+            out = "error: ${err}"
+        } else {
+            body = client.response_body_bytes(r)
+            out = "${client.response_status(r)} body=${body.len} redirect_error='${client.response_redirect_error(r)}'"
+            client.response_free(r)
+        }
+    }
+    client.request_free(req)
+    string seen = up ? Log {}
+    return "${out} seen=${seen}"
+}
+
+fn expect(what: string, got: string, want: string) -> int {
+    if got != want {
+        println("FAIL: ${what}:\n  got  ${got}\n  want ${want}")
+        return 1
+    }
+    return 0
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL listen: ${lerr}")
+        exit(1)
+    }
+    base = "http://127.0.0.1:${tcp.server_port(srv)}"
+    up = spawn(Upstream())
+    up ! Listen { srv: srv }
+
+    refused = "error: malformed response header section"
+    stopped = "302 body=0 redirect_error='malformed Location header'"
+    fails = 0
+    fails = fails + expect("a bare CR in a Location", fetch(up, 1, "${base}/cr", 0), "${refused} seen=/cr,")
+    fails = fails + expect("a NUL in a Location", fetch(up, 1, "${base}/nul", 0), "${refused} seen=/nul,")
+    fails = fails + expect("a TAB in a Location", fetch(up, 1, "${base}/tab", 0), "${stopped} seen=/tab,")
+    fails = fails + expect("a 0x01 in a Location", fetch(up, 1, "${base}/ctl", 0), "${stopped} seen=/ctl,")
+    fails = fails + expect("a bare CR, streamed", fetch(up, 1, "${base}/cr", 1), "${refused} seen=/cr,")
+    fails = fails + expect("a NUL, streamed", fetch(up, 1, "${base}/nul", 1), "${refused} seen=/nul,")
+    fails = fails + expect("a NUL in a body", fetch(up, 1, "${base}/bin", 0), "200 body=3 redirect_error='' seen=/bin,")
+
+    tcp.server_close(srv)
+    if fails > 0 { exit(1) }
+    println("PASS: a header section with a NUL or a bare CR is refused, and a Location with a control byte is not followed")
+}

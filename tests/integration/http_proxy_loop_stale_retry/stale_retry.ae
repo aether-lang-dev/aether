@@ -169,10 +169,12 @@ main() {
             println("  PASS every request on a kept connection after a stale one (${names[g]})")
         }
         http.server_stop(s)
+        http.server_free(s)
         g = g + 1
     }
 
     http.server_stop(upstream)
+    http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

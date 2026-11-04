@@ -1,6 +1,20 @@
 #include "test_harness.h"
+/* The loopback socket pair of the CONNECT reply test (#3557), on every
+ * platform; winsock2.h ahead of anything that pulls in windows.h. */
+#ifdef _WIN32
+#include <winsock2.h>
+#include <ws2tcpip.h>
+#else
+#include <sys/socket.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <unistd.h>
+#endif
+#include <pthread.h>
 #include "../../std/net/aether_http.h"
 #include "../../std/string/aether_string.h"
+/* The URL resolver and the proxy URL parser (#3552), on every platform. */
+#include "../../std/net/aether_http_internal.h"
 /* The connect-completion contract below is exercised only where the driver
  * that depends on it is built. That driver needs a poller and a pipe, so it
  * is POSIX-only, and on Windows http_upstream_connected has no caller. */
@@ -676,4 +690,367 @@ TEST_CATEGORY(http_ci_eq_matches_strncasecmp, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(1, http_ci_eq("server", "Server", 6));
     ASSERT_EQ(0, http_ci_eq("servel", "Server", 6));
     ASSERT_EQ(1, http_ci_eq("anything", "anything", 0));
+}
+
+/* Reference resolution (#3552). The redirect path resolved a Location by
+ * hand: from parse_url's host, which has no IPv6 brackets, and from the last
+ * '/' of the base's path and query together. It now resolves by RFC 3986 5.2
+ * on the parsed parts. These are RFC 3986 5.4's examples, normal (5.4.1) and
+ * abnormal (5.4.2), against its base, then the two shapes of the issue. Each
+ * miss is printed, so one run names every one. */
+static int uri_resolve_misses(const char* base, const char* const (*cases)[2], int n) {
+    int misses = 0;
+    for (int i = 0; i < n; i++) {
+        char* got = http_uri_resolve(base, cases[i][0]);
+        if (!got || strcmp(got, cases[i][1]) != 0) {
+            fprintf(stderr, "  resolve '%s' against '%s': got '%s', want '%s'\n",
+                    cases[i][0], base, got ? got : "(null)", cases[i][1]);
+            misses++;
+        }
+        free(got);
+    }
+    return misses;
+}
+
+TEST_CATEGORY(http_uri_resolve_rfc3986_examples, TEST_CATEGORY_NETWORK) {
+    static const char* const normal[][2] = {
+        { "g:h", "g:h" },           { "g", "http://a/b/c/g" },
+        { "./g", "http://a/b/c/g" }, { "g/", "http://a/b/c/g/" },
+        { "/g", "http://a/g" },     { "//g", "http://g" },
+        { "?y", "http://a/b/c/d;p?y" }, { "g?y", "http://a/b/c/g?y" },
+        { "#s", "http://a/b/c/d;p?q#s" }, { "g#s", "http://a/b/c/g#s" },
+        { "g?y#s", "http://a/b/c/g?y#s" }, { ";x", "http://a/b/c/;x" },
+        { "g;x", "http://a/b/c/g;x" }, { "g;x?y#s", "http://a/b/c/g;x?y#s" },
+        { "", "http://a/b/c/d;p?q" }, { ".", "http://a/b/c/" },
+        { "./", "http://a/b/c/" },  { "..", "http://a/b/" },
+        { "../", "http://a/b/" },   { "../g", "http://a/b/g" },
+        { "../..", "http://a/" },   { "../../", "http://a/" },
+        { "../../g", "http://a/g" },
+    };
+    static const char* const abnormal[][2] = {
+        { "../../../g", "http://a/g" }, { "../../../../g", "http://a/g" },
+        { "/./g", "http://a/g" },   { "/../g", "http://a/g" },
+        { "g.", "http://a/b/c/g." }, { ".g", "http://a/b/c/.g" },
+        { "g..", "http://a/b/c/g.." }, { "..g", "http://a/b/c/..g" },
+        { "./../g", "http://a/b/g" }, { "./g/.", "http://a/b/c/g/" },
+        { "g/./h", "http://a/b/c/g/h" }, { "g/../h", "http://a/b/c/h" },
+        { "g;x=1/./y", "http://a/b/c/g;x=1/y" }, { "g;x=1/../y", "http://a/b/c/y" },
+        { "g?y/./x", "http://a/b/c/g?y/./x" }, { "g?y/../x", "http://a/b/c/g?y/../x" },
+        { "g#s/./x", "http://a/b/c/g#s/./x" }, { "g#s/../x", "http://a/b/c/g#s/../x" },
+        { "http:g", "http:g" },
+    };
+    int misses = uri_resolve_misses("http://a/b/c/d;p?q", normal,
+                                    (int)(sizeof normal / sizeof normal[0]));
+    misses += uri_resolve_misses("http://a/b/c/d;p?q", abnormal,
+                                 (int)(sizeof abnormal / sizeof abnormal[0]));
+    ASSERT_EQ(0, misses);
+}
+
+TEST_CATEGORY(http_uri_resolve_keeps_shapes, TEST_CATEGORY_NETWORK) {
+    /* An IPv6 authority keeps its brackets and its port. */
+    static const char* const v6[][2] = {
+        { "/b", "http://[::1]:8080/b" }, { "b?x", "http://[::1]:8080/b?x" },
+        { "//[::2]/c", "http://[::2]/c" },
+    };
+    int misses = uri_resolve_misses("http://[::1]:8080/a", v6, (int)(sizeof v6 / sizeof v6[0]));
+    /* A relative path merges with the base's path, not its query. */
+    static const char* const q[][2] = {
+        { "c", "http://h/a/c" }, { "?z", "http://h/a/b?z" }, { "", "http://h/a/b?x=/y" },
+    };
+    misses += uri_resolve_misses("http://h/a/b?x=/y", q, (int)(sizeof q / sizeof q[0]));
+    /* A base with an authority and an empty path merges under "/". */
+    static const char* const empty[][2] = { { "g", "http://h:81/g" } };
+    misses += uri_resolve_misses("http://h:81", empty, 1);
+    /* The scheme comes out in lower case; a space and bytes past ASCII come
+     * out percent-encoded in the path, the query and the fragment, and a
+     * '%' already there stays. */
+    static const char* const enc[][2] = {
+        { "HTTPS://H/x", "https://H/x" }, { "a b", "http://h/d/a%20b" },
+        { "/\xc3\xa9?q=\xc3\xa9#\xc3\xa9 ", "http://h/%C3%A9?q=%C3%A9#%C3%A9%20" },
+        { "x%20y", "http://h/d/x%20y" },
+    };
+    misses += uri_resolve_misses("http://h/d/e", enc, (int)(sizeof enc / sizeof enc[0]));
+    ASSERT_EQ(0, misses);
+
+    /* Not a URI reference: a first segment with a ':' that ends no scheme,
+     * and a base without a scheme. */
+    ASSERT_NULL(http_uri_resolve("http://h/", "1a:b"));
+    ASSERT_NULL(http_uri_resolve("http://h/", ":b"));
+    ASSERT_NULL(http_uri_resolve("/a/b", "c"));
+}
+
+TEST_CATEGORY(http_resolve_location_redirect_rules, TEST_CATEGORY_NETWORK) {
+    /* A base without a scheme is http, as parse_url reads it. */
+    char* got = http_resolve_location("h:8080/a/b", "c");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h:8080/a/c", got);
+    free(got);
+    /* A Location without a fragment keeps the request's (RFC 9110 10.2.2);
+     * one with a fragment has its own. */
+    got = http_resolve_location("http://h/a#top", "/b");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/b#top", got);
+    free(got);
+    got = http_resolve_location("http://h/a#top", "/b#end");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/b#end", got);
+    free(got);
+    /* A query naming a URL is no scheme: "x?u=http://y" is relative. */
+    got = http_resolve_location("http://h/a/b", "x?u=http://y");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://h/a/x?u=http://y", got);
+    free(got);
+}
+
+TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
+    char host[256];
+    int port = 0;
+    ASSERT_EQ(0, http_parse_proxy_url("http://[::1]:3129", host, sizeof host, &port));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(3129, port);
+    ASSERT_EQ(0, http_parse_proxy_url("[::1]", host, sizeof host, &port));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(3128, port);
+    ASSERT_EQ(0, http_parse_proxy_url("http://proxy:8080?x", host, sizeof host, &port));
+    ASSERT_STREQ("proxy", host);
+    ASSERT_EQ(8080, port);
+    ASSERT_EQ(0, http_parse_proxy_url("https://proxy/", host, sizeof host, &port));
+    ASSERT_STREQ("proxy", host);
+    ASSERT_EQ(3128, port);
+    /* An unclosed bracket, anything but a port after the closing one, an
+     * empty host, an empty or bad port, and an IPv6 host without brackets. */
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[::1", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[::1]x", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://:3128", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://[]:3128", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://proxy:", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://proxy:70000", host, sizeof host, &port));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://::1:3128", host, sizeof host, &port));
+}
+
+/* A NUL or a bare CR in a response's header section (#3556). The buffered
+ * reader found the end of the section with strstr, which stops at a NUL, and
+ * a bare CR stayed inside a field value, so a Location carrying one went out
+ * in the request line of the redirect. The section is now found past any NUL
+ * and refused when it holds either; a NUL in the body is body. */
+static HttpResponse* filled(const char* bytes, size_t n) {
+    HttpResponse* resp = http_response_alloc_empty();
+    char* buf = (char*)malloc(n + 1);
+    memcpy(buf, bytes, n);
+    buf[n] = '\0';
+    http_response_fill_from_bytes(resp, buf, n);
+    free(buf);
+    return resp;
+}
+
+TEST_CATEGORY(http_response_head_refuses_nul_and_bare_cr, TEST_CATEGORY_NETWORK) {
+    static const char nul_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\0y\r\n\r\n";
+    HttpResponse* r = filled(nul_head, sizeof nul_head - 1);
+    ASSERT_NOT_NULL(r->error);
+    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
+    ASSERT_EQ(0, r->status_code);
+    ASSERT_NULL(r->headers);
+    http_response_free(r);
+
+    static const char cr_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\rX-Injected: y\r\n\r\n";
+    r = filled(cr_head, sizeof cr_head - 1);
+    ASSERT_NOT_NULL(r->error);
+    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
+    ASSERT_NULL(r->headers);
+    http_response_free(r);
+
+    /* A CR right before the empty line that is not followed by LF. */
+    static const char cr_end[] = "HTTP/1.1 200 OK\r\nA: b\r\r\n\r\n";
+    r = filled(cr_end, sizeof cr_end - 1);
+    ASSERT_NOT_NULL(r->error);
+    http_response_free(r);
+
+    /* A NUL in the body is the body's. */
+    static const char nul_body[] = "HTTP/1.1 200 OK\r\nContent-Length: 3\r\n\r\na\0b";
+    r = filled(nul_body, sizeof nul_body - 1);
+    ASSERT_NULL(r->error);
+    ASSERT_EQ(200, r->status_code);
+    ASSERT_EQ(3, http_response_body_length(r));
+    http_response_free(r);
+}
+
+TEST_CATEGORY(http_uri_resolve_refuses_control_bytes, TEST_CATEGORY_NETWORK) {
+    static const char* const refs[] = { "/x\ty", "/x\x01y", "/x\ry", "/x\ny", "/x\x7fy", "\t" };
+    for (size_t i = 0; i < sizeof refs / sizeof refs[0]; i++) {
+        char* got = http_uri_resolve("http://h/a", refs[i]);
+        if (got) fprintf(stderr, "  resolved a control byte: '%s'\n", got);
+        ASSERT_NULL(got);
+    }
+    ASSERT_NULL(http_resolve_location("http://h/a", "/x\ty"));
+}
+
+/* A forward proxy's reply to CONNECT (#3557). The client read it with one
+ * recv into 1024 bytes and kept nothing past the head, so bytes the proxy
+ * sent behind its 200 were lost to the tunnel; and it read the status with
+ * atoi, which took "2000" and "20" and a reply that was no HTTP at all. The
+ * reader now takes the head and nothing more, and reads the status by the
+ * strict rule. Each case runs over a loopback TCP pair: fds[1] is the proxy,
+ * fds[0] the client. */
+#ifdef _WIN32
+#define T_CLOSE(s) closesocket((SOCKET)(s))
+#define T_NAP_MS(ms) Sleep(ms)
+#else
+#define T_CLOSE(s) close(s)
+#define T_NAP_MS(ms) usleep((ms) * 1000)
+#endif
+
+static int tcp_loopback_pair(int fds[2]) {
+#ifdef _WIN32
+    WSADATA wsa;
+    if (WSAStartup(MAKEWORD(2, 2), &wsa) != 0) return -1;
+#endif
+    int l = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (l < 0) return -1;
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    socklen_t alen = sizeof a;
+    if (bind(l, (struct sockaddr*)&a, sizeof a) != 0 || listen(l, 1) != 0 ||
+        getsockname(l, (struct sockaddr*)&a, &alen) != 0) {
+        T_CLOSE(l);
+        return -1;
+    }
+    int c = (int)socket(AF_INET, SOCK_STREAM, 0);
+    if (c < 0 || connect(c, (struct sockaddr*)&a, sizeof a) != 0) {
+        if (c >= 0) T_CLOSE(c);
+        T_CLOSE(l);
+        return -1;
+    }
+    int s = (int)accept(l, NULL, NULL);
+    T_CLOSE(l);
+    if (s < 0) {
+        T_CLOSE(c);
+        return -1;
+    }
+    fds[0] = c;
+    fds[1] = s;
+    return 0;
+}
+
+/* Send `n` bytes of `reply` as the proxy, read the reply as the client, and
+ * close the proxy's end first when `then_close`. The status read, and *why. */
+static int connect_reply_of(int fds[2], const char* reply, size_t n, int then_close,
+                            const char** why) {
+    if (n > 0) send(fds[1], reply, (int)n, 0);
+    if (then_close) {
+        T_CLOSE(fds[1]);
+        fds[1] = -1;
+    }
+    *why = NULL;
+    return http_connect_reply_read(fds[0], why);
+}
+
+/* What the client reads next: `want` bytes, or fewer if the proxy stops. */
+static size_t tunnel_read(int fd, char* buf, size_t want) {
+    size_t got = 0;
+    while (got < want) {
+        int r = (int)recv(fd, buf + got, (int)(want - got), 0);
+        if (r <= 0) break;
+        got += (size_t)r;
+    }
+    buf[got] = '\0';
+    return got;
+}
+
+typedef struct {
+    int fd;
+    const char* first;
+    const char* second;
+} SplitReply;
+
+/* The proxy's reply in two writes, the empty line split across them. */
+static void* split_reply_writer(void* arg) {
+    SplitReply* w = (SplitReply*)arg;
+    send(w->fd, w->first, (int)strlen(w->first), 0);
+    T_NAP_MS(50);
+    send(w->fd, w->second, (int)strlen(w->second), 0);
+    return NULL;
+}
+
+TEST_CATEGORY(http_connect_reply_keeps_tunnel_bytes, TEST_CATEGORY_NETWORK) {
+    int fds[2];
+    const char* why = NULL;
+    char got[64];
+
+    /* The tunnel's first bytes in the same write as the 200. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* r1 = "HTTP/1.1 200 Connection established\r\nProxy-Agent: t\r\n\r\nTUNNEL";
+    ASSERT_EQ(200, connect_reply_of(fds, r1, strlen(r1), 0, &why));
+    ASSERT_EQ(6, (int)tunnel_read(fds[0], got, 6));
+    ASSERT_STREQ("TUNNEL", got);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* The empty line split across two writes, the tunnel's bytes behind it. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    SplitReply w = { fds[1], "HTTP/1.1 200 OK\r\n\r", "\nTUNNEL" };
+    pthread_t th;
+    ASSERT_EQ(0, pthread_create(&th, NULL, split_reply_writer, &w));
+    int status = http_connect_reply_read(fds[0], &why);
+    pthread_join(th, NULL);
+    ASSERT_EQ(200, status);
+    ASSERT_EQ(6, (int)tunnel_read(fds[0], got, 6));
+    ASSERT_STREQ("TUNNEL", got);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* A refusal is a status the dial refuses on. */
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    const char* r3 = "HTTP/1.1 407 Proxy Authentication Required\r\n\r\n";
+    ASSERT_EQ(407, connect_reply_of(fds, r3, strlen(r3), 0, &why));
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+}
+
+TEST_CATEGORY(http_connect_reply_refuses_malformed, TEST_CATEGORY_NETWORK) {
+    static const char nul_head[] = "HTTP/1.1 200 OK\r\nX: a\0b\r\n\r\n";
+    struct { const char* bytes; size_t n; const char* why; } cases[] = {
+        { "HTTP/1.1 2000 OK\r\n\r\n", 0, "malformed" },
+        { "HTTP/1.1 20 OK\r\n\r\n", 0, "malformed" },
+        { "SSH-2.0-OpenSSH_9.6\r\n\r\n", 0, "malformed" },
+        { "HTTP/1.1 200 OK\r\nX: a\rb\r\n\r\n", 0, "malformed" },
+        { nul_head, sizeof nul_head - 1, "malformed" },
+    };
+    int misses = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        int fds[2];
+        ASSERT_EQ(0, tcp_loopback_pair(fds));
+        size_t n = cases[i].n ? cases[i].n : strlen(cases[i].bytes);
+        const char* why = NULL;
+        int status = connect_reply_of(fds, cases[i].bytes, n, 0, &why);
+        if (status != 0 || !why || !strstr(why, cases[i].why)) {
+            fprintf(stderr, "  case %d: status %d, why '%s'\n", (int)i, status, why ? why : "(none)");
+            misses++;
+        }
+        T_CLOSE(fds[0]);
+        T_CLOSE(fds[1]);
+    }
+    ASSERT_EQ(0, misses);
+
+    /* The proxy closes before the head ends. */
+    int fds[2];
+    const char* why = NULL;
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(0, connect_reply_of(fds, "HTTP/1.1 200 OK\r\n", 17, 1, &why));
+    ASSERT_NOT_NULL(why);
+    ASSERT_TRUE(strstr(why, "no response") != NULL);
+    T_CLOSE(fds[0]);
+
+    /* A head with no end within 4096 bytes. */
+    static char longhead[5000];
+    memcpy(longhead, "HTTP/1.1 200 OK\r\nX: ", 20);
+    memset(longhead + 20, 'a', sizeof longhead - 20);
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(0, connect_reply_of(fds, longhead, sizeof longhead, 0, &why));
+    ASSERT_NOT_NULL(why);
+    ASSERT_TRUE(strstr(why, "longer than 4096") != NULL);
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
 }

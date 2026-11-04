@@ -231,8 +231,33 @@ or shared cell, a container element (list, map, string sequence, strarr:
 slice or an actor's reference, by one rule for every store (#3398: only
 the string fields were, and a struct, an element, a whole array or a nested
 optional took its strings plain). A message does not share: a send
-deep-copies its strings (#466), so it needs no publish. A value read from a
-published place carries the bit with it.
+deep-copies its strings (#466), so it needs no publish, except a temporary
+held by nothing else (an owned call or interpolation result whose count is
+1, not pinned), which the message takes as it is: a dying temporary moves
+(#3535, `_aether_msg_str`). A value read from a published place carries the
+bit with it.
+
+**A module string `var` is locked (#3522).** Atomic counts make two
+threads' retains and releases of one string safe, not the place that holds
+it: two stores at once read the same old value and both released it, and a
+reader could take its reference after a store had released the value. Each
+module string `var` has a lock of its own, a flag held for a few
+instructions. A store publishes the value it takes, swaps it in under the
+lock and releases the old one after unlocking (aether_string_var_store, the
+one store every store site makes). A read takes a reference under the lock
+(aether_string_var_take) into a temporary of its statement, which the
+statement's block releases, as a read held for its statement is
+(order_hoist_operand): the read is a take (R3), and what the statement does
+with the value, a comparison or a borrowed argument included, is done with
+a value no other thread's store can free. Nothing is freed late: each
+release happens where R3 puts it. The cost is the lock and the count on
+every read: one reader pays a few nanoseconds more (2.2 to 6.6 ns a read in
+a hot loop, 15% on 8M reads in a handler), and readers on several cores at
+once contend on the lock's line and the string's count (four actors reading
+one var, 8M reads in all, took about 345 ms where the unlocked read took
+25 ms). A value read that often from many actors
+is better given to each actor, or kept in a local, than read from a module
+`var` each time.
 
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
@@ -714,6 +739,21 @@ did not compile (a host's box, a `@c_callback`'s argument) borrows the same
 way. The hand-back classifier, the callee memo, the closure-argument and
 fn-pointer conventions and the escape walk, all of which read other
 functions' bodies, are deleted.
+
+The same rule covers every other use that borrows a value made for it
+(#3549): a builtin lowered by name (`atoi`, `char_at`, `print`,
+`spawn_sandboxed`), a container store's key, and a comparison's operand
+(`os.getenv(k) != null`). Each had a lowering of its own that passed the
+temporary straight through, so it leaked once per evaluation, and the map
+put's key had a fix of its own (#3539). Now one selection
+(`arg_drain_select`) chooses the temporaries of every call by name and of
+every comparison, and one predicate says where the callee takes a value
+over instead: a free, an identity (`isolate`, `consume`, `select`), a box,
+thunk or cell that keeps it, a container's adopted element, `@retain`. A
+buffer `make` handed out (or any call's slice) given to a parameter is
+dropped after the call when slice ownership's summary of the callee says it
+neither stores the parameter nor hands a view of it back (the `slice_temp`
+marker), as the owning local it would otherwise be bound to is dropped.
 
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's

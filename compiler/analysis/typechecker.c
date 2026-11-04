@@ -347,37 +347,26 @@ static const char* find_import_alias(const char* name);
  * type-checking against, or writing, the program's `n`. Only a file-scope
  * entry no walk added is hidden: the inference pass pushes a function's
  * locals onto the same flat table, stamped with its walk id
- * (aether-ui asks/aether-program-global-leaks-into-module-scope.md). */
-static const char** g_program_globals = NULL;
-static int g_program_global_count = 0;
+ * (aether-ui asks/aether-program-global-leaks-into-module-scope.md).
+ * #3537: a set, so a lookup is one probe, not a walk of every name. */
+static StrMap g_program_globals;
+
+static void reset_lookup_indexes(void);
 
 static int is_program_global_name(const char* name) {
-    for (int i = 0; i < g_program_global_count; i++)
-        if (strcmp(g_program_globals[i], name) == 0) return 1;
-    return 0;
+    return strmap_has(&g_program_globals, name);
 }
 
 static void note_program_globals(ASTNode* program) {
-    for (int i = 0; i < g_program_global_count; i++) free((char*)g_program_globals[i]);
-    free(g_program_globals);
-    g_program_globals = NULL;
-    g_program_global_count = 0;
+    reset_lookup_indexes();
+    strmap_free(&g_program_globals);
+    strmap_init(&g_program_globals);
     if (!program) return;
-    int n = 0;
-    for (int i = 0; i < program->child_count; i++) {
-        ASTNode* c = program->children[i];
-        if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
-            c->annotation && strcmp(c->annotation, "global_var") == 0) n++;
-    }
-    if (n == 0) return;
-    g_program_globals = malloc(sizeof(char*) * (size_t)n);
-    if (!g_program_globals) return;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
         if (c && c->type == AST_CONST_DECLARATION && c->value && !c->origin_module &&
             c->annotation && strcmp(c->annotation, "global_var") == 0)
-            if ((g_program_globals[g_program_global_count] = strdup(c->value)))
-                g_program_global_count++;
+            strmap_put(&g_program_globals, c->value, NULL);
     }
 }
 
@@ -396,7 +385,21 @@ Symbol* lookup_symbol(SymbolTable* table, const char* name) {
  * itself is checked against its own declaration. */
 static ASTNode* g_typecheck_program;
 
-static ASTNode* own_extern_decl(const char* merged_from, const char* name) {
+/* #3537: each file's own externs by name, the program's (under "") and each
+ * module's (under its name), with the symbol made for one beside it. A
+ * scope's index is built the first time a lookup asks about it, in one walk
+ * of its top level; every lookup was that walk, and the symbols a list
+ * searched end to end and grown by one. */
+typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
+static StrMap g_extern_scopes;   /* scope name -> StrMap* of name -> OwnExtern* */
+
+static StrMap* extern_scope_index(const char* merged_from) {
+    const char* key = merged_from ? merged_from : "";
+    StrMap* idx = (StrMap*)strmap_get(&g_extern_scopes, key);
+    if (idx) return idx;
+    idx = (StrMap*)calloc(1, sizeof(StrMap));
+    if (!idx) return NULL;
+    strmap_init(idx);
     ASTNode* scope = NULL;
     if (merged_from) {
         AetherModule* m = module_find(merged_from);
@@ -407,42 +410,46 @@ static ASTNode* own_extern_decl(const char* merged_from, const char* name) {
     for (int i = 0; scope && i < scope->child_count; i++) {
         ASTNode* d = scope->children[i];
         if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value || strcmp(d->value, name) != 0)
-            continue;
-        /* The program's own, not a module's merged `@extern` clone. */
+        if (!d || d->type != AST_EXTERN_FUNCTION || !d->value) continue;
+        /* The program's own, not a module's merged `@extern` clone; the
+         * first of a name, as the walk this replaces found. */
         if (!merged_from && d->origin_module) continue;
-        return d;
+        if (strmap_has(idx, d->value)) continue;
+        OwnExtern* e = (OwnExtern*)calloc(1, sizeof(OwnExtern));
+        if (!e) continue;
+        e->decl = d;
+        strmap_put(idx, d->value, e);
     }
-    return NULL;
+    strmap_put(&g_extern_scopes, key, idx);
+    return idx;
 }
 
-typedef struct { ASTNode* decl; SymbolTable* table; } OwnExtern;
-static OwnExtern* g_own_externs = NULL;
-static int g_own_extern_count = 0;
+static OwnExtern* own_extern_decl(const char* merged_from, const char* name) {
+    StrMap* idx = extern_scope_index(merged_from);
+    return idx ? (OwnExtern*)strmap_get(idx, name) : NULL;
+}
 
 /* The symbol of the extern `own` a file declares itself, kept in a table
  * of its own; NULL when it cannot be made. */
-static Symbol* own_extern_decl_symbol(ASTNode* own, const char* name) {
-    for (int i = 0; i < g_own_extern_count; i++)
-        if (g_own_externs[i].decl == own) return lookup_symbol_local(g_own_externs[i].table, name);
-    OwnExtern* grown = realloc(g_own_externs, sizeof(OwnExtern) * (size_t)(g_own_extern_count + 1));
-    if (!grown) return NULL;
-    g_own_externs = grown;
-    SymbolTable* t = create_symbol_table(NULL);
-    add_symbol(t, name, clone_type(own->node_type), 0, 1, 0);
-    Symbol* s = lookup_symbol_local(t, name);
-    if (!s) return NULL;
-    s->node = own;
-    g_own_externs[g_own_extern_count].decl = own;
-    g_own_externs[g_own_extern_count].table = t;
-    g_own_extern_count++;
-    return s;
+static Symbol* own_extern_decl_symbol(OwnExtern* own, const char* name) {
+    if (!own->table) {
+        SymbolTable* t = create_symbol_table(NULL);
+        add_symbol(t, name, clone_type(own->decl->node_type), 0, 1, 0);
+        Symbol* s = lookup_symbol_local(t, name);
+        if (!s) {
+            free_symbol_table(t);
+            return NULL;
+        }
+        s->node = own->decl;
+        own->table = t;
+    }
+    return lookup_symbol_local(own->table, name);
 }
 
 static Symbol* own_extern_symbol(Symbol* found, const char* merged_from, const char* name) {
     if (!found || !found->node || found->node->type != AST_EXTERN_FUNCTION) return found;
-    ASTNode* own = own_extern_decl(merged_from, name);
-    if (!own || own == found->node) return found;
+    OwnExtern* own = own_extern_decl(merged_from, name);
+    if (!own || own->decl == found->node) return found;
     Symbol* s = own_extern_decl_symbol(own, name);
     return s ? s : found;
 }
@@ -472,16 +479,49 @@ static int is_program_own_decl(const Symbol* s) {
 /* #3088: does the module `module_name` declare `name` itself, at its top
  * level? A struct it declares identical to the program's is merged as the
  * program's one type (#2129), so its body names that type by its own
- * name. */
+ * name. #3537: each module's names in a set, built at its first question. */
+static StrMap g_module_decls;   /* module name -> StrMap* of the names it declares */
+
 static int module_declares(const char* module_name, const char* name) {
-    AetherModule* m = module_name ? module_find(module_name) : NULL;
-    for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
-        const ASTNode* d = m->ast->children[i];
-        if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
-        if (d && d->value && strcmp(d->value, name) == 0 && d->type != AST_IMPORT_STATEMENT)
-            return 1;
+    if (!module_name) return 0;
+    StrMap* names = (StrMap*)strmap_get(&g_module_decls, module_name);
+    if (!names) {
+        names = (StrMap*)calloc(1, sizeof(StrMap));
+        if (!names) return 0;
+        strmap_init(names);
+        AetherModule* m = module_find(module_name);
+        for (int i = 0; m && m->ast && i < m->ast->child_count; i++) {
+            const ASTNode* d = m->ast->children[i];
+            if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
+            if (d && d->value && d->type != AST_IMPORT_STATEMENT) strmap_put(names, d->value, NULL);
+        }
+        strmap_put(&g_module_decls, module_name, names);
     }
-    return 0;
+    return strmap_has(names, name);
+}
+
+/* #3537: the indexes above, dropped when a program's check begins: they
+ * name declarations of the tree being checked. */
+static void reset_lookup_indexes(void) {
+    for (int i = 0; i < strmap_count(&g_extern_scopes); i++) {
+        StrMap* idx = (StrMap*)strmap_value_at(&g_extern_scopes, i);
+        for (int j = 0; idx && j < strmap_count(idx); j++) {
+            OwnExtern* e = (OwnExtern*)strmap_value_at(idx, j);
+            if (e && e->table) free_symbol_table(e->table);
+            free(e);
+        }
+        if (idx) strmap_free(idx);
+        free(idx);
+    }
+    strmap_free(&g_extern_scopes);
+    strmap_init(&g_extern_scopes);
+    for (int i = 0; i < strmap_count(&g_module_decls); i++) {
+        StrMap* names = (StrMap*)strmap_value_at(&g_module_decls, i);
+        if (names) strmap_free(names);
+        free(names);
+    }
+    strmap_free(&g_module_decls);
+    strmap_init(&g_module_decls);
 }
 
 /* #3088: the newest symbol of `name` in the file scope `table` that is no
@@ -527,7 +567,7 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
         is_program_own_decl(symbol) && !module_declares(merged_from, name)) {
         symbol = lookup_file_symbol_for_module(table, name);
         if (!symbol) {
-            ASTNode* own = own_extern_decl(merged_from, name);
+            OwnExtern* own = own_extern_decl(merged_from, name);
             return own ? own_extern_decl_symbol(own, name) : NULL;
         }
     }
@@ -1148,6 +1188,10 @@ static int builtin_lowered_by_name(const char* name, int params) {
         return params >= names[i].min && (names[i].max < 0 || params <= names[i].max);
     }
     return 0;
+}
+
+int is_builtin_call_name(const char* name, int args) {
+    return name && builtin_lowered_by_name(name, args);
 }
 
 int is_builtin_function_name(const char* name) {
@@ -6745,8 +6789,15 @@ static int pending_result_of_top(const PendingResults* p, ASTNode* top) {
     return -1;
 }
 
+/* #3524: the top-level declaration the second pass is checking, for
+ * tc_const_int: a name it binds (a local, a parameter) is not the
+ * program's constant of that name, as codegen reads it (ast_binds_name). */
+static ASTNode* g_tc_top = NULL;
+
 /* One top-level declaration through the second pass. */
 static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
+    ASTNode* saved_top = g_tc_top;
+    g_tc_top = top;
     g_tc_file = top ? top->source_file : NULL;
     /* #2614: a merged declaration (a module's function, actor or
      * constant) resolves qualified names against its own module's
@@ -6755,6 +6806,7 @@ static void typecheck_top(ASTNode* top, SymbolTable* global_table) {
     typecheck_node(top, global_table);
     global_table->merged_from = NULL;
     warn_erased_result_closures();   /* #2484 */
+    g_tc_top = saved_top;
 }
 
 static void typecheck_pending_calls(ASTNode* n, PendingResults* p, SymbolTable* global_table,
@@ -17845,6 +17897,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (expr->node_type) free_type(expr->node_type);
                     expr->node_type = create_type(TYPE_INT);
                 }
+                /* #3527: `p[i]` on a typed pointer `*T` is a `T`, as an
+                 * array's element is: it was left unresolved, so `x =
+                 * p[0].a` declared an untyped local and a read of it was
+                 * printed by codegen's default. */
+                if (arr_type && arr_type->kind == TYPE_PTR && arr_type->element_type &&
+                    arr_type->element_type->kind != TYPE_UNKNOWN &&
+                    (!expr->node_type || expr->node_type->kind == TYPE_UNKNOWN)) {
+                    if (expr->node_type) free_type(expr->node_type);
+                    expr->node_type = clone_type(arr_type->element_type);
+                }
 
                 // Indexing a bare `ptr` (void*, element_type == NULL) has no
                 // element type: it lowers to a C index on `void*` and leaks
@@ -18676,6 +18738,224 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
     return 1;
 }
 
+/* #3524: the width a constant integer expression computes in, from its
+ * checked type: 0 when it is no integer. */
+static int tc_const_width(const ASTNode* e, int* is_unsigned) {
+    if (!e || !e->node_type) return 0;
+    switch (e->node_type->kind) {
+        case TYPE_INT64: case TYPE_DURATION: *is_unsigned = 0; return 64;
+        case TYPE_UINT64: *is_unsigned = 1; return 64;
+        case TYPE_UINT32: *is_unsigned = 1; return 32;
+        case TYPE_INT: case TYPE_UINT16: case TYPE_UINT8: case TYPE_BYTE:
+            *is_unsigned = 0; return 32;   /* the narrower ones compute in int */
+        default: return 0;
+    }
+}
+
+/* `v` as a value of `bits` bits, sign-extended unless unsigned. */
+static unsigned long long tc_const_in_width(unsigned long long v, int bits, int is_unsigned) {
+    if (bits == 64) return v;
+    return is_unsigned ? (unsigned long long)(uint32_t)v
+                       : (unsigned long long)(long long)(int32_t)(uint32_t)v;
+}
+
+/* #3524: the value of an integer constant expression the compiler computes:
+ * literals, the program's `const`s (not a name the declaration being
+ * checked binds, a local or a parameter), unary `-`, `+` and `~`, and the
+ * arithmetic, shift and bit operators, each in its operand's width with
+ * the runtime's rules (a shift count masked to the width, MIN / -1 wraps).
+ * 0 for anything else, and for an expression holding a division or
+ * remainder by zero: that one is refused where it is checked. `table` is
+ * NULL inside a constant's own initializer, whose names are the
+ * program's. */
+static int tc_const_int(ASTNode* e, SymbolTable* table, unsigned long long* out, int depth) {
+    if (!e || depth > 32) return 0;
+    int is_unsigned = 0;
+    int bits = tc_const_width(e, &is_unsigned);
+    if (!bits) return 0;
+    unsigned long long v = 0;
+    if (e->type == AST_LITERAL && e->value) {
+        char digits[72];
+        size_t k = 0;
+        for (const char* p = e->value; *p && k + 1 < sizeof(digits); p++)
+            if (*p != '_') digits[k++] = *p;
+        digits[k] = '\0';
+        const char* s = digits;
+        int neg = 0;
+        if (*s == '-' || *s == '+') neg = *s++ == '-';
+        int base = 10;
+        if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+        else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+        int digit = (*s >= '0' && *s <= '9') ||
+                    (base == 16 && ((*s >= 'a' && *s <= 'f') || (*s >= 'A' && *s <= 'F')));
+        if (!digit) return 0;
+        char* end = NULL;
+        errno = 0;
+        unsigned long long m = strtoull(s, &end, base);
+        while (end && (*end == 'u' || *end == 'U' || *end == 'l' || *end == 'L')) end++;
+        if (errno || !end || *end) return 0;
+        v = neg ? 0ULL - m : m;
+    } else if (e->type == AST_IDENTIFIER && e->value) {
+        if (table) {
+            /* Read where it is written: a name the declaration being
+             * checked binds is that binding (codegen reads it so), and
+             * outside the second pass that is not known. */
+            Symbol* s = lookup_symbol(table, e->value);
+            if (!s || !s->is_const || !g_tc_top) return 0;
+            if (g_tc_top->type != AST_CONST_DECLARATION && ast_binds_name(g_tc_top, e->value))
+                return 0;
+        }
+        ASTNode* d = tc_program_const(e->value);
+        if (!d || d->child_count == 0 ||
+            (d->annotation && strcmp(d->annotation, "array_const") == 0))
+            return 0;
+        if (!tc_const_int(d->children[0], NULL, &v, depth + 1)) return 0;
+    } else if (e->type == AST_UNARY_EXPRESSION && e->value && e->child_count == 1) {
+        unsigned long long a;
+        if (!tc_const_int(e->children[0], table, &a, depth + 1)) return 0;
+        if (strcmp(e->value, "-") == 0) v = 0ULL - a;
+        else if (strcmp(e->value, "+") == 0) v = a;
+        else if (strcmp(e->value, "~") == 0) v = ~a;
+        else return 0;
+    } else if (e->type == AST_BINARY_EXPRESSION && e->value && e->child_count == 2) {
+        const char* op = e->value;
+        unsigned long long a, b;
+        if (!tc_const_int(e->children[0], table, &a, depth + 1) ||
+            !tc_const_int(e->children[1], table, &b, depth + 1))
+            return 0;
+        a = tc_const_in_width(a, bits, is_unsigned);
+        b = tc_const_in_width(b, bits, is_unsigned);
+        if (strcmp(op, "+") == 0) v = a + b;
+        else if (strcmp(op, "-") == 0) v = a - b;
+        else if (strcmp(op, "*") == 0) v = a * b;
+        else if (strcmp(op, "&") == 0) v = a & b;
+        else if (strcmp(op, "|") == 0) v = a | b;
+        else if (strcmp(op, "^") == 0) v = a ^ b;
+        else if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+            if (b == 0) return 0;
+            int quotient = op[0] == '/';
+            if (is_unsigned) {
+                v = quotient ? a / b : a % b;
+            } else if ((long long)b == -1) {
+                v = quotient ? 0ULL - a : 0;
+            } else {
+                v = (unsigned long long)(quotient ? (long long)a / (long long)b
+                                                  : (long long)a % (long long)b);
+            }
+        } else if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+            unsigned n = (unsigned)(b & (unsigned long long)(bits - 1));
+            if (op[0] == '<') v = a << n;
+            else if (is_unsigned || (long long)tc_const_in_width(a, bits, 0) >= 0) v = a >> n;
+            else v = ~(~a >> n);
+        } else {
+            return 0;
+        }
+    } else {
+        return 0;
+    }
+    *out = tc_const_in_width(v, bits, is_unsigned);
+    return 1;
+}
+
+/* The source spelling of a constant expression tc_const_int reads, with
+ * the parentheses its precedence needs. */
+static int tc_const_prec(const char* op) {
+    static const struct { const char* op; int prec; } p[] = {
+        { "*", 6 }, { "/", 6 }, { "%", 6 }, { "+", 5 }, { "-", 5 },
+        { "<<", 4 }, { ">>", 4 }, { "&", 3 }, { "^", 2 }, { "|", 1 },
+    };
+    for (size_t i = 0; op && i < sizeof(p) / sizeof(p[0]); i++)
+        if (strcmp(p[i].op, op) == 0) return p[i].prec;
+    return 0;
+}
+
+/* The name an identifier in a constant expression was written as: a
+ * constant merged in from a module is `<ns>_<name>` in the program, written
+ * `name` in its own module and `ns.name` elsewhere (ast_source_name). */
+static void tc_const_spell_name(const ASTNode* e, char* at, size_t room) {
+    const char* name = e->value ? e->value : "?";
+    ASTNode* d = e->type == AST_IDENTIFIER ? tc_program_const(name) : NULL;
+    if (d && d->origin_module) {
+        char src[256];
+        const char* written = ast_source_name(d, src, sizeof(src));
+        const char* dot = strrchr(written, '.');
+        if (dot && g_tc_top && g_tc_top->origin_module &&
+            strcmp(g_tc_top->origin_module, d->origin_module) == 0)
+            written = dot + 1;
+        snprintf(at, room, "%s", written);
+        return;
+    }
+    snprintf(at, room, "%s", name);
+}
+
+static void tc_const_spell(const ASTNode* e, char* buf, size_t cap, int parent, int right) {
+    size_t len = strlen(buf);
+    if (!e || len + 1 >= cap) return;
+    char* at = buf + len;
+    size_t room = cap - len;
+    if (e->type == AST_BINARY_EXPRESSION && e->child_count == 2) {
+        int prec = tc_const_prec(e->value);
+        int paren = prec < parent || (right && prec == parent);
+        if (paren) snprintf(at, room, "(");
+        tc_const_spell(e->children[0], buf, cap, prec, 0);
+        len = strlen(buf);
+        if (len + 1 < cap) snprintf(buf + len, cap - len, " %s ", e->value);
+        tc_const_spell(e->children[1], buf, cap, prec, 1);
+        len = strlen(buf);
+        if (paren && len + 1 < cap) snprintf(buf + len, cap - len, ")");
+    } else if (e->type == AST_UNARY_EXPRESSION && e->child_count == 1) {
+        snprintf(at, room, "%s", e->value ? e->value : "");
+        tc_const_spell(e->children[0], buf, cap, 7, 0);
+    } else {
+        tc_const_spell_name(e, at, room);
+    }
+}
+
+/* Is `target` in `n`'s subtree outside every function value (a closure, a
+ * quote), whose body is code, not the initializer itself? */
+static int tc_in_initializer(const ASTNode* n, const ASTNode* target) {
+    if (!n) return 0;
+    if (n == target) return 1;
+    if (ast_is_own_function(n)) return 0;
+    for (int i = 0; i < n->child_count; i++)
+        if (tc_in_initializer(n->children[i], target)) return 1;
+    return 0;
+}
+
+/* #3524: an integer `/` or `%` by zero in the initializer of a constant or
+ * a module `var`, both operands constant. That initializer is a C static's,
+ * which must be a constant expression, and a division by zero is none: C
+ * refused the program or folded it to anything. Refused here, naming the
+ * expression. Anywhere else such a division is code, which may be guarded
+ * or never run (`if D != 0 { ... 100 / D }`): as in Java, it is no
+ * constant expression, and it panics with division_by_zero if it runs.
+ * Returns 1 when it reported. */
+static int refuse_constant_division_by_zero(ASTNode* expr, SymbolTable* table) {
+    if (!expr->value || (strcmp(expr->value, "/") != 0 && strcmp(expr->value, "%") != 0) ||
+        expr->child_count != 2)
+        return 0;
+    if (!g_tc_top || g_tc_top->type != AST_CONST_DECLARATION) return 0;
+    int in_init = 0;
+    for (int i = 0; i < g_tc_top->child_count && !in_init; i++)
+        in_init = tc_in_initializer(g_tc_top->children[i], expr);
+    if (!in_init) return 0;
+    unsigned long long l, r;
+    if (!tc_const_int(expr->children[0], table, &l, 0) ||
+        !tc_const_int(expr->children[1], table, &r, 0) || r != 0)
+        return 0;
+    char text[200] = "";
+    tc_const_spell(expr, text, sizeof(text), 0, 0);
+    char msg[320];
+    snprintf(msg, sizeof(msg), "%s by zero in the constant expression `%s`: it has no value",
+             expr->value[0] == '/' ? "division" : "remainder", text);
+    type_error_hint(msg,
+                    "a constant's initializer is computed when the program is compiled, so "
+                    "give it a divisor other than 0",
+                    expr->line, expr->column);
+    return 1;
+}
+
 int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     if (!expr || expr->type != AST_BINARY_EXPRESSION || expr->child_count < 2) return 0;
     
@@ -18729,6 +19009,14 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
     Type* right_type = infer_type(right, table);
 
     AeTokenType operator = get_token_type_from_string(expr->value);
+
+    /* #3524: `10 / 0`, `N % ZERO`: a constant division by zero. */
+    if ((operator == TOKEN_DIVIDE || operator == TOKEN_MODULO) &&
+        refuse_constant_division_by_zero(expr, table)) {
+        if (left_type) free_type(left_type);
+        if (right_type) free_type(right_type);
+        return 0;
+    }
 
     /* #3045: a number less a pointer is no value: C refuses `n - p`
      * ("invalid operands to binary -"), which it reached. */

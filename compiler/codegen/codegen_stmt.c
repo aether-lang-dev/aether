@@ -6293,6 +6293,9 @@ static int td_continue_target(CodeGenerator* gen, ASTNode* stmt) {
 // emission so the panic surface still names the failed clause; the
 // runtime trip is observable to the test suite without aetherc
 // having to refuse the build.
+static void hoist_begin(CodeGenerator* gen);
+static void hoist_end(CodeGenerator* gen);
+
 static void emit_contract_check(CodeGenerator* gen,
                                 ASTNode* clause,
                                 const char* role,
@@ -6331,6 +6334,13 @@ static void emit_contract_check(CodeGenerator* gen,
         fprintf(gen->output, " */\n");
         return;
     }
+    /* #3522: the check is a statement of its own, in a block of its own,
+     * so what its predicate holds for it (a module string `var` read takes
+     * a reference) is declared ahead of it and released after it. */
+    print_indent(gen);
+    fprintf(gen->output, "{\n");
+    enter_scope(gen);
+    hoist_begin(gen);
     print_indent(gen);
     fprintf(gen->output, "if (!(");
     generate_expression(gen, predicate);
@@ -6351,6 +6361,10 @@ static void emit_contract_check(CodeGenerator* gen,
         fputc(*p, gen->output);
     }
     fprintf(gen->output, " in %s\");\n", fn_name ? fn_name : "<fn>");
+    exit_scope(gen);
+    hoist_end(gen);
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
 }
 
 void emit_contract_preconditions(CodeGenerator* gen, ASTNode* func) {
@@ -7458,6 +7472,28 @@ static Type* module_global_decl_type(CodeGenerator* gen, const char* name) {
     return NULL;
 }
 
+/* #3522: the lock of the module-level string `var` `name`, declared beside
+ * it (emit_module_global_vars). */
+const char* module_string_var_lock(const char* name) {
+    return cg_internf("_ae_lock_%s", name);
+}
+
+/* #3522: the one store into a module-level string `var` `name`, every
+ * store site's: the new value taken (`rhs`, or `taken`, C that is already
+ * the var's own reference, or NULL for none), then published and swapped in
+ * under the var's lock, and the old value released after the lock is let
+ * go (aether_string_var_store). Two threads storing at once each release
+ * the value they replaced, and a reader taking a reference under the lock
+ * never takes one a store has already released. The caller ends the
+ * statement. */
+void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
+                              const char* taken) {
+    fprintf(gen->output, "aether_string_var_store(&%s, &%s, ", name, module_string_var_lock(name));
+    if (rhs) emit_string_take(gen, rhs, name);
+    else fputs(taken ? taken : "NULL", gen->output);
+    fprintf(gen->output, ")");
+}
+
 /* A module-level `var` bound to a call with a trailing block, `g = vstack(0) {
  * ... }`, runs the block with the stored value as its context, as the same
  * binding of a local does. The store into the global used to leave the case
@@ -7514,8 +7550,18 @@ static void emit_destructure_global_store(CodeGenerator* gen, const char* name, 
                 name, tmp_id, j, owned ? 1 : 0);
         return;
     }
+    if (pt && pt->kind == TYPE_STRING && is_module_string_var(gen, name)) {
+        /* As `g = v` stores it: taken, then swapped in under the var's
+         * lock and the old one released (#3522). */
+        emit_module_string_store(gen, name, NULL,
+                                 cg_internf("aether_uniform_heap_str(_tup%d._%d, %d)", tmp_id, j,
+                                            owned ? 1 : 0));
+        fprintf(gen->output, ";\n");
+        return;
+    }
     if (pt && pt->kind == TYPE_STRING) {
-        /* As `g = v` stores it: taken, published, the old one released. */
+        /* A var of no declared type of its own: taken, published, the old
+         * one released. */
         fprintf(gen->output, "{ const char* _ae_old = %s; %s = aether_uniform_heap_str(_tup%d._%d, %d); "
                 "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
                 name, name, tmp_id, j, owned ? 1 : 0, name);
@@ -8116,6 +8162,8 @@ static void emit_return_value(CodeGenerator* gen, ASTNode* stmt) {
                emit_int_ptr_bridged(gen, stmt->children[0],
                                     gen->current_func_return_type->kind)) {
         /* #2218: int <-> ptr return, cast emitted. */
+    } else if (emit_float_to_int(gen, stmt->children[0], gen->current_func_return_type)) {
+        /* #3524: a float returned as an integer saturates. */
     } else {
         generate_expression(gen, stmt->children[0]);
     }
@@ -9181,6 +9229,114 @@ static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
     return 0;
 }
 
+/* The value `print(...)` written as a statement is lowered to (no `;`).
+ * Its arguments are borrowed as a builtin's are: a fresh one is the
+ * statement's temporary (emit_with_builtin_args, #3549). */
+static void emit_print_statement_value(CodeGenerator* gen, ASTNode* stmt) {
+    ASTNode* first_arg = stmt->children[0];
+
+    // Interpolated string: delegate directly to expression codegen (emits printf(...)).
+    if (stmt->child_count == 1 && first_arg->type == AST_STRING_INTERP) {
+        gen->interp_as_printf = 1;
+        generate_expression(gen, first_arg);
+        gen->interp_as_printf = 0;
+        return;
+    }
+
+    // Check if we have a single typed argument (not a string literal)
+    if (stmt->child_count == 1 && first_arg->node_type &&
+        !(first_arg->type == AST_LITERAL && first_arg->node_type->kind == TYPE_STRING)) {
+
+        Type* arg_type = first_arg->node_type;
+
+        /* #3527: a string or a pointer by length, anything
+         * else by its kind's conversion (emit_print_scalar), a
+         * uint64 included, which fell through to `%d`; a kind
+         * with none refused. */
+        if (arg_type->kind == TYPE_STRING || arg_type->kind == TYPE_PTR) {
+            // NULL-safe, and by length (#2521)
+            fprintf(gen->output, "_aether_print_str(");
+            generate_expression(gen, first_arg);
+            fprintf(gen->output, ")");
+        } else {
+            emit_print_scalar(gen, first_arg, 0);
+        }
+    } else if (stmt->child_count == 1) {
+        // String literal - print directly
+        ASTNode* arg = stmt->children[0];
+        if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
+            emit_print_literal_format(gen, arg);
+        } else {
+            /* #3527: no type to write it by. */
+            print_fmt_refuse(gen, arg, "print");
+            fprintf(gen->output, "(void)0");
+        }
+    } else {
+        // Multiple arguments - first is format string
+        // Auto-fix format specifiers based on argument types to prevent
+        // undefined behavior (e.g. print("Test: %s", 201) would crash)
+        ASTNode* fmt_arg = stmt->children[0];
+        if (fmt_arg->type == AST_LITERAL && fmt_arg->node_type &&
+            fmt_arg->node_type->kind == TYPE_STRING && fmt_arg->value) {
+            // Parse format string and replace specifiers with type-correct ones.
+            // Written by the runtime formatter, whose %f is '.'
+            // whatever the process locale (#3525).
+            const char* fmt = fmt_arg->value;
+            fprintf(gen->output, "_aether_interp_print(\"");
+            int arg_idx = 1;  // index into stmt->children for arguments
+            for (int fi = 0; fmt[fi]; fi++) {
+                if (fmt[fi] == '%' && fmt[fi + 1]) {
+                    fi++;
+                    // Skip flags, width, precision
+                    while (fmt[fi] == '-' || fmt[fi] == '+' || fmt[fi] == ' ' ||
+                           fmt[fi] == '#' || fmt[fi] == '0') fi++;
+                    while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
+                    if (fmt[fi] == '.') {
+                        fi++;
+                        while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
+                    }
+                    if (fmt[fi] == '%') {
+                        // Literal %%
+                        fprintf(gen->output, "%%%%");
+                    } else if (arg_idx < stmt->child_count) {
+                        // Replace with type-correct specifier
+                        /* #3527: the argument's own conversion. */
+                        emit_print_format_spec(gen, stmt->children[arg_idx]);
+                        arg_idx++;
+                    } else {
+                        // More specifiers than args: keep the original
+                        fprintf(gen->output, "%%%c", fmt[fi]);
+                    }
+                } else {
+                    // Re-escape special characters for C string output
+                    switch (fmt[fi]) {
+                        case '\n': fprintf(gen->output, "\\n");  break;
+                        case '\t': fprintf(gen->output, "\\t");  break;
+                        case '\r': fprintf(gen->output, "\\r");  break;
+                        case '\0': fprintf(gen->output, "\\0");  break;
+                        case '\\': fprintf(gen->output, "\\\\"); break;
+                        case '"':  fprintf(gen->output, "\\\""); break;
+                        default:   fprintf(gen->output, "%c", fmt[fi]); break;
+                    }
+                }
+            }
+            fprintf(gen->output, "\", ");
+            // Emit arguments with type-safe wrappers
+            for (int i = 1; i < stmt->child_count; i++) {
+                if (i > 1) fprintf(gen->output, ", ");
+                emit_print_format_arg(gen, stmt->children[i]);   /* #3527 */
+            }
+            fprintf(gen->output, ")");
+        } else {
+            // A format that is not a literal is written through `%s`, so
+            // it cannot inject conversions.
+            fprintf(gen->output, "printf(\"%%s\", ");
+            generate_expression(gen, stmt->children[0]);
+            fprintf(gen->output, ")");
+        }
+    }
+}
+
 static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
@@ -10144,14 +10300,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     if (grhs && grhs->node_type && grhs->node_type->kind == TYPE_STRING &&
                         !(gt && gt->kind == TYPE_PTR)) {
                         /* R3: a module `var` owns the string it holds, as a
-                         * local does: the store takes the new value, publishes
-                         * it since any thread may read the global (#2919), and
-                         * releases the one it replaces. */
-                        fprintf(gen->output, "{ const char* _ae_new = ");
-                        emit_string_take(gen, grhs, stmt->value);
-                        fprintf(gen->output, "; const char* _ae_old = %s; %s = _ae_new; "
-                                "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
-                                stmt->value, stmt->value, stmt->value);
+                         * local does: the store takes the new value and
+                         * releases the one it replaces, under a `string`
+                         * var's lock (#3522, emit_module_string_store). */
+                        if (is_module_string_var(gen, stmt->value)) {
+                            emit_module_string_store(gen, stmt->value, grhs, NULL);
+                            fprintf(gen->output, ";\n");
+                        } else {
+                            fprintf(gen->output, "{ const char* _ae_new = ");
+                            emit_string_take(gen, grhs, stmt->value);
+                            fprintf(gen->output, "; const char* _ae_old = %s; %s = _ae_new; "
+                                    "aether_string_publish(%s); aether_heap_str_free(_ae_old); }\n",
+                                    stmt->value, stmt->value, stmt->value);
+                        }
                         emit_global_rebind_trailing(gen, stmt);
                         break;
                     }
@@ -10796,6 +10957,8 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                                 /* #2668: `a = b` likewise, and `b` keeps
                                  * releasing its own. */
                                 emit_closure_take(gen, stmt->children[0]);
+                            } else if (emit_float_to_int(gen, stmt->children[0], stmt->node_type)) {
+                                /* #3524: `int k = f` saturates, as `f as int`. */
                             } else {
                                 generate_expression(gen, stmt->children[0]);
                             }
@@ -11138,6 +11301,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     target = cg_internf("self->%s", stmt->value);
                 else if (is_promoted_capture(gen, stmt->value))
                     target = cg_internf("(*%s)", stmt->value);
+                /* #3524: `v /= w` and `v %= w` on integer lanes are `v = v op
+                 * w` with the scalar rules lane by lane (codegen_expr.c). */
+                if ((op[0] == '/' || op[0] == '%') && op[1] == '=' && !op[2]) {
+                    char lop[2] = { op[0], 0 };
+                    if (lane_int_div_applies(gen, lop, tk8, stmt->children[1])) {
+                        fprintf(gen->output, "%s = ", target);
+                        emit_lane_int_div(gen, lop, NULL, target, tk8, stmt->children[1], stmt);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
+                }
                 if (fn8) {
                     const char* pfx = tk8 == TYPE_F32X8 ? "f32x8" : "i32x8";
                     Type* rt = stmt->children[1]->node_type;
@@ -11174,6 +11348,31 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     generate_expression(gen, stmt->children[1]);
                     fprintf(gen->output, "));\n");
                     break;
+                }
+                /* #3524: `x /= y`, `x %= y`, `x <<= n` and `x >>= n` on an
+                 * integer are `x = x op y` with the operator's own rules.
+                 * The target is a name, an actor's state field or a cell,
+                 * so reading it twice reads one place. */
+                {
+                    char bop[4] = {0};
+                    size_t ol = strlen(op);
+                    if (ol >= 2 && ol <= 3 && op[ol - 1] == '=') memcpy(bop, op, ol - 1);
+                    if (bop[0] && int_edge_op_applies(gen, bop, stmt->node_type,
+                                                      stmt->children[1], NULL)) {
+                        fprintf(gen->output, "%s = ", target);
+                        emit_int_edge_op(gen, bop, NULL, target, stmt->node_type,
+                                         stmt->children[1], NULL, stmt);
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
+                    /* A float into an integer target (`x *= 2.5`) saturates
+                     * as the conversion does. */
+                    if (bop[0] && !bop[1] &&
+                        emit_float_op_to_int(gen, target, bop[0], stmt->children[1],
+                                             stmt->node_type)) {
+                        fprintf(gen->output, ";\n");
+                        break;
+                    }
                 }
                 fprintf(gen->output, "%s %s ", target, op);
                 generate_expression(gen, stmt->children[1]);
@@ -13322,209 +13521,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             break;
 
         case AST_PRINT_STATEMENT:
-            // Generate printf call with all arguments
             if (stmt->child_count > 0) {
-                ASTNode* first_arg = stmt->children[0];
-
-                // Interpolated string: delegate directly to expression codegen (emits printf(...)),
-                // then flush like every other print below.
-                if (stmt->child_count == 1 && first_arg->type == AST_STRING_INTERP) {
-                    gen->interp_as_printf = 1;
-                    generate_expression(gen, first_arg);
-                    gen->interp_as_printf = 0;
-                    fprintf(gen->output, ";\n");
-                    fprintf(gen->output, "fflush(stdout);\n");
-                    break;
-                }
-
-                // Check if we have a single typed argument (not a string literal)
-                if (stmt->child_count == 1 && first_arg->node_type &&
-                    !(first_arg->type == AST_LITERAL && first_arg->node_type->kind == TYPE_STRING)) {
-
-                    Type* arg_type = first_arg->node_type;
-
-                    // Generate printf with appropriate format string based on type
-                    if (arg_type->kind == TYPE_INT) {
-                        // Narrow to (int) to match %d: a single-scalar message
-                        // field rides the intptr_t payload slot, so a TYPE_INT
-                        // value can be stored wider. Genuine ints only reach
-                        // here (ptr/actor-ref use %s), so nothing is truncated.
-                        fprintf(gen->output, "printf(\"%%d\", (int)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_FLOAT || arg_type->kind == TYPE_FLOAT32) {
-                        fprintf(gen->output, "printf(\"%%f\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_LONGDOUBLE) {
-                        fprintf(gen->output, "printf(\"%%Lf\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_STRING) {
-                        /* A heap-producing CALL in bare argument position
-                         * (`print(string.concat(a, b))`) is a temporary
-                         * nothing else owns: print-and-free via the owned
-                         * helper or it leaks per call. Bare identifiers
-                         * stay unwrapped, their scope-exit defer owns the
-                         * free (wrapping them would double-free). The
-                         * interpolation path already handles its own
-                         * temporaries; this closes the direct-arg form. */
-                        if (first_arg->type == AST_FUNCTION_CALL &&
-                            is_heap_string_expr(gen, first_arg)) {
-                            fprintf(gen->output, "_aether_print_owned(");
-                            generate_expression(gen, first_arg);
-                            fprintf(gen->output, ");\n");
-                        } else {
-                            // NULL-safe, and by length (#2521)
-                            fprintf(gen->output, "_aether_print_str(");
-                            generate_expression(gen, first_arg);
-                            fprintf(gen->output, ");\n");
-                        }
-                    } else if (arg_type->kind == TYPE_BOOL) {
-                        fprintf(gen->output, "printf(\"%%s\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, " ? \"true\" : \"false\");\n");
-                    } else if (arg_type->kind == TYPE_INT64) {
-                        fprintf(gen->output, "printf(\"%%lld\", (long long)");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_UINT32) {
-                        /* Through %d a uint32 past 2^31 prints negative;
-                         * uint32_t is unsigned int on every target, so %u
-                         * is its conversion. */
-                        fprintf(gen->output, "printf(\"%%u\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else if (arg_type->kind == TYPE_DURATION) {
-                        fprintf(gen->output, "printf(\"%%s\", _aether_duration_repr(");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, "));\n");
-                    } else if (arg_type->kind == TYPE_PTR) {
-                        // NULL-safe, and by length (#2521)
-                        fprintf(gen->output, "_aether_print_str(");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else {
-                        // Unknown type - default to %d
-                        fprintf(gen->output, "printf(\"%%d\", ");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    }
-                } else if (stmt->child_count == 1) {
-                    // String literal - print directly
-                    ASTNode* arg = stmt->children[0];
-                    if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
-                        emit_print_literal_format(gen, arg);
-                        fprintf(gen->output, ";\n");
-                    } else {
-                        // Unknown type - default to %d
-                        fprintf(gen->output, "printf(\"%%d\", ");
-                        generate_expression(gen, arg);
-                        fprintf(gen->output, ");\n");
-                    }
-                } else {
-                    // Multiple arguments - first is format string
-                    // Auto-fix format specifiers based on argument types to prevent
-                    // undefined behavior (e.g. print("Test: %s", 201) would crash)
-                    ASTNode* fmt_arg = stmt->children[0];
-                    if (fmt_arg->type == AST_LITERAL && fmt_arg->node_type &&
-                        fmt_arg->node_type->kind == TYPE_STRING && fmt_arg->value) {
-                        // Parse format string and replace specifiers with type-correct ones
-                        const char* fmt = fmt_arg->value;
-                        fprintf(gen->output, "printf(\"");
-                        int arg_idx = 1;  // index into stmt->children for arguments
-                        for (int fi = 0; fmt[fi]; fi++) {
-                            if (fmt[fi] == '%' && fmt[fi + 1]) {
-                                fi++;
-                                // Skip flags, width, precision
-                                while (fmt[fi] == '-' || fmt[fi] == '+' || fmt[fi] == ' ' ||
-                                       fmt[fi] == '#' || fmt[fi] == '0') fi++;
-                                while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
-                                if (fmt[fi] == '.') {
-                                    fi++;
-                                    while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
-                                }
-                                if (fmt[fi] == '%') {
-                                    // Literal %%
-                                    fprintf(gen->output, "%%%%");
-                                } else if (arg_idx < stmt->child_count) {
-                                    // Replace with type-correct specifier
-                                    ASTNode* arg = stmt->children[arg_idx];
-                                    Type* atype = arg->node_type;
-                                    if (atype && atype->kind == TYPE_LONGDOUBLE) {
-                                        fprintf(gen->output, "%%Lf");
-                                    } else if (atype && (atype->kind == TYPE_FLOAT || atype->kind == TYPE_FLOAT32)) {
-                                        fprintf(gen->output, "%%f");
-                                    } else if (atype && atype->kind == TYPE_INT64) {
-                                        fprintf(gen->output, "%%lld");
-                                    } else if (atype && atype->kind == TYPE_UINT32) {
-                                        fprintf(gen->output, "%%u");
-                                    } else if (atype && atype->kind == TYPE_DURATION) {
-                                        fprintf(gen->output, "%%s");
-                                    } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {
-                                        fprintf(gen->output, "%%s");
-                                    } else if (atype && atype->kind == TYPE_BOOL) {
-                                        fprintf(gen->output, "%%s");
-                                    } else {
-                                        fprintf(gen->output, "%%d");
-                                    }
-                                    arg_idx++;
-                                } else {
-                                    // More specifiers than args — keep original
-                                    fprintf(gen->output, "%%%c", fmt[fi]);
-                                }
-                            } else {
-                                // Re-escape special characters for C string output
-                                switch (fmt[fi]) {
-                                    case '\n': fprintf(gen->output, "\\n");  break;
-                                    case '\t': fprintf(gen->output, "\\t");  break;
-                                    case '\r': fprintf(gen->output, "\\r");  break;
-                                    case '\0': fprintf(gen->output, "\\0");  break;
-                                    case '\\': fprintf(gen->output, "\\\\"); break;
-                                    case '"':  fprintf(gen->output, "\\\""); break;
-                                    default:   fprintf(gen->output, "%c", fmt[fi]); break;
-                                }
-                            }
-                        }
-                        fprintf(gen->output, "\", ");
-                        // Emit arguments with type-safe wrappers
-                        for (int i = 1; i < stmt->child_count; i++) {
-                            if (i > 1) fprintf(gen->output, ", ");
-                            ASTNode* arg = stmt->children[i];
-                            Type* atype = arg->node_type;
-                            if (atype && atype->kind == TYPE_INT64) {
-                                fprintf(gen->output, "(long long)");
-                                generate_expression(gen, arg);
-                            } else if (atype && atype->kind == TYPE_DURATION) {
-                                fprintf(gen->output, "_aether_duration_repr(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
-                            } else if (atype && atype->kind == TYPE_BOOL) {
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, " ? \"true\" : \"false\"");
-                            } else if (atype && (atype->kind == TYPE_STRING || atype->kind == TYPE_PTR)) {
-                                fprintf(gen->output, "_aether_safe_str(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
-                            } else if (atype && atype->kind == TYPE_INT) {
-                                // Narrow to (int) to match the %d chosen above:
-                                // a single-scalar message field rides the
-                                // intptr_t payload slot, so a TYPE_INT value can
-                                // be stored wider. Genuine ints only.
-                                fprintf(gen->output, "(int)");
-                                generate_expression(gen, arg);
-                            } else {
-                                generate_expression(gen, arg);
-                            }
-                        }
-                        fprintf(gen->output, ");\n");
-                    } else {
-                        // Non-literal format string — use %s to prevent format injection
-                        fprintf(gen->output, "printf(\"%%s\", ");
-                        generate_expression(gen, stmt->children[0]);
-                        fprintf(gen->output, ");\n");
-                    }
-                }
+                emit_with_builtin_args(gen, stmt, "print", emit_print_statement_value);
+                fprintf(gen->output, ";\n");
                 // Flush stdout so partial-line output appears immediately
                 // (without this, print(".") in a loop won't show until \n)
                 fprintf(gen->output, "fflush(stdout);\n");

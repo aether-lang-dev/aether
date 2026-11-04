@@ -1,0 +1,10 @@
+// The leak canary of `make test-asan-ae` (#3539): canary.c drops the only
+// pointer to a block, so a sanitized build of it must end with a LeakSanitizer
+// report. Built and run by tests/scripts/sanitizer_sweep.sh, never by the sweep
+// itself.
+
+extern asan_canary_leak(n: int) -> int
+
+main() {
+    println("leak: ${asan_canary_leak(64)}")
+}

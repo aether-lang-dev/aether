@@ -1,0 +1,197 @@
+// Regression (#3539): a hash, MAC or DRBG context gives back its reference
+// to the algorithm name when it is freed.
+//
+// The contexts of std.cryptography.hmac, drbg, ascon, dstu7564,
+// gost3411_2012 and sparkle keep the name they were made with in a string
+// field. Storing it there takes a reference, and the context was freed with
+// `free`, which releases no field, so a name that was not a literal leaked
+// once per context. tls13_client builds its hash name from the session
+// ticket's bytes, and every resumed connection leaked it; LeakSanitizer
+// found that in tests/integration/crypto_tls13_resume.
+//
+// The names here are built from parameters, so they are counted strings and
+// not folded literals. Each context is finished, abandoned with free_ctx, or
+// refused for an unknown name. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): after a warm-up, some window of the same
+// work grows the heap by exactly 0.
+
+import std.mem
+import std.bytes
+import std.string
+import std.cryptography.hmac
+import std.cryptography.drbg
+import std.cryptography.ascon
+import std.cryptography.dstu7564
+import std.cryptography.gost3411_2012
+import std.cryptography.sparkle
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3539: ${msg}")
+        exit(1)
+    }
+}
+
+fn text(s: string) -> ptr {
+    n = string.length(s)
+    b = bytes.new(n)
+    bytes.copy_from_string(b, 0, s, n)
+    bytes.set_length(b, n)
+    return b
+}
+
+// The name `a` + `b`, a counted string.
+fn name(a: string, b: string) -> string {
+    return string.concat(a, b)
+}
+
+fn hex(b: ptr) -> string {
+    d = "0123456789abcdef"
+    o = ""
+    n = bytes.length(b)
+    i = 0
+    while i < n {
+        v = bytes.get(b, i)
+        o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1)))
+        i = i + 1
+    }
+    return o
+}
+
+// HMAC under `algo`: one-shot, streamed to the end, and abandoned.
+fn with_hmac(algo: string, key: ptr, msg: ptr) -> string {
+    one = hmac.hmac_bytes(algo, bytes.view(key), bytes.view(msg))
+    ctx, err = hmac.new(algo, bytes.view(key))
+    check(err == "", "hmac.new(${algo}): ${err}")
+    hmac.update(ctx, bytes.view(msg))
+    streamed = hmac.final_bytes(ctx)
+    check(hex(one) == hex(streamed), "hmac one-shot and streamed agree")
+    dropped, derr = hmac.new(algo, bytes.view(key))
+    check(derr == "", "hmac.new(${algo}) again: ${derr}")
+    hmac.free_ctx(dropped)
+    out = hex(one)
+    bytes.free(one)
+    bytes.free(streamed)
+    return out
+}
+
+fn with_drbg(algo: string, seed: ptr) -> string {
+    ctx, err = drbg.new(algo, bytes.view(seed), bytes.view(seed), bytes.view(seed))
+    check(err == "", "drbg.new(${algo}): ${err}")
+    got = drbg.generate(ctx, 16)
+    drbg.free_ctx(ctx)
+    out = hex(got)
+    bytes.free(got)
+    return out
+}
+
+fn with_ascon(algo: string, msg: ptr) -> string {
+    ctx, err = ascon.new(algo)
+    check(err == "", "ascon.new(${algo}): ${err}")
+    ascon.update(ctx, bytes.view(msg))
+    got = ascon.final_bytes(ctx)
+    dropped, derr = ascon.new(algo)
+    check(derr == "", "ascon.new(${algo}) again: ${derr}")
+    ascon.free_ctx(dropped)
+    out = hex(got)
+    bytes.free(got)
+    return out
+}
+
+fn with_dstu(algo: string, msg: ptr) -> string {
+    ctx, err = dstu7564.new(algo)
+    check(err == "", "dstu7564.new(${algo}): ${err}")
+    dstu7564.update(ctx, bytes.view(msg))
+    got = dstu7564.final_bytes(ctx)
+    dropped, derr = dstu7564.new(algo)
+    check(derr == "", "dstu7564.new(${algo}) again: ${derr}")
+    dstu7564.free_ctx(dropped)
+    out = hex(got)
+    bytes.free(got)
+    return out
+}
+
+fn with_gost(variant: string, msg: ptr) -> string {
+    ctx, err = gost3411_2012.new(variant)
+    check(err == "", "gost3411_2012.new(${variant}): ${err}")
+    gost3411_2012.update(ctx, bytes.view(msg))
+    got = gost3411_2012.final_bytes(ctx)
+    dropped, derr = gost3411_2012.new(variant)
+    check(derr == "", "gost3411_2012.new(${variant}) again: ${derr}")
+    gost3411_2012.free_ctx(dropped)
+    out = hex(got)
+    bytes.free(got)
+    return out
+}
+
+fn with_sparkle(algo: string, msg: ptr) -> string {
+    ctx, err = sparkle.new(algo)
+    check(err == "", "sparkle.new(${algo}): ${err}")
+    sparkle.update(ctx, bytes.view(msg))
+    got = sparkle.final_bytes(ctx)
+    dropped, derr = sparkle.new(algo)
+    check(derr == "", "sparkle.new(${algo}) again: ${derr}")
+    sparkle.free_ctx(dropped)
+    out = hex(got)
+    bytes.free(got)
+    return out
+}
+
+// The names nothing knows: each new() refuses them.
+fn refused(nope: string) {
+    a, aerr = ascon.new(nope)
+    check(a == null && aerr != "", "ascon refuses ${nope}")
+    d, derr = dstu7564.new(nope)
+    check(d == null && derr != "", "dstu7564 refuses ${nope}")
+    s, serr = sparkle.new(nope)
+    check(s == null && serr != "", "sparkle refuses ${nope}")
+}
+
+// One of each, every name built from the parts given.
+fn round(key: ptr, msg: ptr, sha: string, n256: string, asc: string, dstu: string, gost: string, esch: string, nope: string) -> int {
+    total = 0
+    total = total + string.length(with_hmac(name(sha, n256), key, msg))
+    total = total + string.length(with_drbg(name(sha, n256), key))
+    total = total + string.length(with_ascon(name(asc, ""), msg))
+    total = total + string.length(with_dstu(name(dstu, n256), msg))
+    total = total + string.length(with_gost(name(gost, n256), msg))
+    total = total + string.length(with_sparkle(name(esch, n256), msg))
+    refused(name(nope, n256))
+    return total
+}
+
+main() {
+    key = text("key of the round")
+    msg = text("the message of the round")
+
+    // A counted name gives what the literal gives.
+    check(with_hmac(name("sha", "256"), key, msg) == with_hmac("sha256", key, msg), "hmac under a counted name")
+    check(with_drbg(name("sha", "256"), key) == with_drbg("sha256", key), "drbg under a counted name")
+    check(with_ascon(name("asc", "on"), msg) == with_ascon("ascon", msg), "ascon under a counted name")
+    check(with_dstu(name("dstu7564-", "256"), msg) == with_dstu("dstu7564-256", msg), "dstu7564 under a counted name")
+    check(with_gost(name("gost3411_2012_", "256"), msg) == with_gost("gost3411_2012_256", msg), "gost3411_2012 under a counted name")
+    check(with_sparkle(name("esch-", "256"), msg) == with_sparkle("esch-256", msg), "sparkle under a counted name")
+
+    want = round(key, msg, "sha", "256", "ascon", "dstu7564-", "gost3411_2012_", "esch-", "none-")
+    if mem.heap_in_use_exact() {
+        i = 0
+        while i < 5 {
+            round(key, msg, "sha", "256", "ascon", "dstu7564-", "gost3411_2012_", "esch-", "none-")
+            i = i + 1
+        }
+        grown = mem.steady_growth(|| {
+                j = 0
+                while j < 4 {
+                    got = round(key, msg, "sha", "256", "ascon", "dstu7564-", "gost3411_2012_", "esch-", "none-")
+                    check(got == want, "a round gives the same digests")
+                    j = j + 1
+                }
+            }, 5)
+        check(grown == 0, "a window of 4 rounds grew the heap by ${grown} bytes in every run")
+    }
+    bytes.free(key)
+    bytes.free(msg)
+    println("PASS a context gives back its algorithm name")
+}

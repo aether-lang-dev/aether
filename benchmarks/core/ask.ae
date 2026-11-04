@@ -1,0 +1,64 @@
+// Ask round trip (#3518): main asks an actor `count` times, then an actor
+// asks another actor `count` times from inside its handler.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+
+message Get { n: int }
+message Value { v: int }
+message Run { count: int }
+
+actor Server {
+    receive {
+        Get(n) -> { reply Value { v: n + 1 } }
+    }
+}
+
+actor Client {
+    state server = 0
+    state sum = 0
+    receive {
+        Run(count) -> {
+            i = 0
+            while i < count {
+                v, err = server ? Get { n: i }
+                if err == "" { sum = sum + v }
+                i = i + 1
+            }
+            reply Value { v: sum }
+        }
+    }
+}
+
+from_main(count: int) -> float {
+    s = spawn(Server())
+    sum = 0
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < count {
+        v, err = s ? Get { n: i }
+        if err == "" { sum = sum + v }
+        i = i + 1
+    }
+    t1 = os.now_monotonic_ns()
+    if sum == 0 { println("ask from main got nothing") }
+    return (t1 - t0) as float / count as float
+}
+
+from_actor(count: int) -> float {
+    s = spawn(Server())
+    c = spawn(Client())
+    c.server = s
+    t0 = os.now_monotonic_ns()
+    v, err = c ? Run { count: count }
+    t1 = os.now_monotonic_ns()
+    if err != "" || v == 0 { println("ask from an actor failed: ${err}") }
+    return (t1 - t0) as float / count as float
+}
+
+main() {
+    count = 50000
+    println("row ask_from_main ${from_main(count)} ns/ask")
+    println("row ask_from_actor ${from_actor(count)} ns/ask")
+}

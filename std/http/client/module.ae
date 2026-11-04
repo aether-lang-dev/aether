@@ -160,6 +160,14 @@ set_timeout(req: ptr, timeout: Duration) -> string {
 //     chain (returns the last 3xx with a "redirect loop" error)
 //   - an HTTPS origin tries to redirect to HTTP (returns the last
 //     3xx with a "scheme downgrade" error)
+//   - the target is not an http or https URL (returns the last 3xx
+//     with a "not an http or https URL" error)
+//
+// A Location is resolved against the URL of the request it answers by
+// RFC 3986 5.2: `c` from http://h/a/b?x=1 is http://h/a/c, `/b` from
+// http://[::1]:8080/a is http://[::1]:8080/b. A space or a byte past
+// ASCII in it is sent percent-encoded, and a Location without a
+// fragment keeps the request URL's (RFC 9110 10.2.2).
 //
 // Authorisation / Cookie / Proxy-Authorization headers are stripped
 // when the redirect target's host differs from the previous host —
@@ -260,7 +268,9 @@ use_env_proxy(req: ptr, on: int) -> string {
     return ""
 }
 
-// Pin an explicit forward proxy ("http://host:port"). OVERRIDES the environment
+// Pin an explicit forward proxy ("http://host:port", an IPv6 host in
+// brackets as in a URL: "http://[::1]:3128"; port 3128 when none is
+// named). OVERRIDES the environment
 // entirely — $HTTP_PROXY is never consulted — so a team-controlled proxy
 // (recorder / toxiproxy) is immune to whatever the shell or CI has set. An
 // empty url reverts to direct.

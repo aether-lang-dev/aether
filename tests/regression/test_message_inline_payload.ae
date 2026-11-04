@@ -1,0 +1,177 @@
+// Regression (#3534): a message whose fields fit the payload area of the
+// runtime's Message travels in it, by value, and every path that handles,
+// drops or records a queued message reads it there.
+//
+// Only a message of no field or of one scalar travelled inline; every other
+// send copied its struct to the heap and the receiver freed it, though a
+// message of two ints, or of an int and a string, fits the bytes Message
+// carries anyway. Such a message is carried in the message now. What its
+// fields own moves with its bytes, as it moved into the heap copy, so each
+// way a message ends gives it back once: its handler, an ask's handler, a
+// handler that panics (the step barrier drops it), a send to an actor that
+// has ended (a dead letter), and the drain of what an ending actor still
+// had queued. A Down the program sends fits too: it reaches its handler as
+// the program's own, not taken for a monitor's, and its reason is given
+// back where it is dropped.
+//
+// The values each receiver reads are checked, and where the heap count is
+// exact (Windows) each way is repeated in a window that must hold the heap
+// steady: a payload freed twice, or a field's string never given back,
+// shows there.
+
+import std.actors
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern scheduler_release_actor(a: ptr) @c_import
+extern scheduler_reclaim_released() -> int @c_import
+extern aether_test_fail_alloc_after(n: int)
+
+message Pair { a: int, b: int }
+message Named { n: int, s: string }
+message Ask2 { a: int, b: int }
+message Boom { s: string }
+message Park {}
+message Get {}
+message Total { v: int }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3534: ${msg}")
+        exit(1)
+    }
+}
+
+actor Sink {
+    state sum = 0
+    state chars = 0
+    receive {
+        Pair(a, b) -> { sum = sum + a * 10 + b }
+        Named(n, s) -> {
+            sum = sum + n
+            chars = chars + string.length(s)
+        }
+        Ask2(a, b) -> { reply Total { v: a * 100 + b } }
+        Boom(s) -> {
+            chars = chars + string.length(s)
+            panic("boom")
+        }
+        Park() -> { sleep(20) }
+        // A Down a program sends fits too, and is the program's (no monitor).
+        Down(ref, reason) -> { chars = chars + string.length(reason) }
+        Get() -> { reply Total { v: sum * 1000 + chars } }
+    }
+}
+
+fn word(i: int) -> string {
+    return string.concat("w", string.from_int(i % 10))
+}
+
+// Handled: two ints, an int and a string, a Down, and an ask.
+handled_round() -> int {
+    k = spawn(Sink())
+    i = 0
+    while i < 50 {
+        k ! Pair { a: 1, b: 2 }
+        k ! Named { n: 1, s: word(i) }
+        k ! Down { ref: k, reason: word(i) }
+        int r = k ? Ask2 { a: 3, b: 4 }
+        check(r == 304, "the ask read ${r}, not 304")
+        i = i + 1
+    }
+    int t = k ? Get {}
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+    return t
+}
+
+// A handler that panics on its message: the step barrier drops it.
+panic_round() {
+    k = spawn(Sink())
+    k ! Boom { s: word(3) }
+    wait_for_idle()
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+}
+
+// Sent to an actor already ended: dead letters, each dropped at the send,
+// and an ask that fails at once.
+dead_round() {
+    k = spawn(Sink())
+    actors.kill(k)
+    wait_for_idle()
+    i = 0
+    while i < 10 {
+        k ! Named { n: 1, s: word(i) }
+        k ! Pair { a: 1, b: 2 }
+        k ! Down { ref: k, reason: word(i) }
+        i = i + 1
+    }
+    r, err = k ? Ask2 { a: 3, b: 4 }
+    check(r == 0 && err == "the actor is dead", "an ask of a dead actor gave (${r}, \"${err}\")")
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+}
+
+// Queued behind a slow message when the actor ends: drained at its end.
+drain_round() {
+    k = spawn(Sink())
+    k ! Park {}
+    i = 0
+    while i < 10 {
+        k ! Named { n: 1, s: word(i) }
+        i = i + 1
+    }
+    let kp: ptr = k
+    scheduler_release_actor(kp)
+}
+
+main() {
+    // A send of a message that fits makes no heap copy: with the next
+    // allocation refused, as if memory had run out, it still goes through
+    // (a heap copy would have stopped the program).
+    q = spawn(Sink())
+    aether_test_fail_alloc_after(1)
+    q ! Pair { a: 4, b: 5 }
+    aether_test_fail_alloc_after(0)
+    int qt = q ? Get {}
+    check(qt == 45000, "the send under a refused allocation read ${qt}")
+    let qp: ptr = q
+    scheduler_release_actor(qp)
+
+    t = handled_round()
+    // 50 Pairs of 12, 50 Nameds of 1 with a two-letter word each, and 50
+    // Downs with one each.
+    check(t == (50 * 12 + 50) * 1000 + 100 + 100, "the handlers read ${t}")
+    panic_round()
+    dead_round()
+    drain_round()
+    wait_for_idle()
+    check(scheduler_reclaim_released() == 0, "released actors still retired")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    // Warm up the scheduler's lists, then hold each way steady.
+    i = 0
+    while i < 20 {
+        handled_round()
+        panic_round()
+        dead_round()
+        drain_round()
+        i = i + 1
+    }
+    wait_for_idle()
+    check(scheduler_reclaim_released() == 0, "released actors still retired after the warm-up")
+    grown = mem.steady_growth(|| {
+            handled_round()
+            panic_round()
+            dead_round()
+            drain_round()
+            wait_for_idle()
+            check(scheduler_reclaim_released() == 0, "released actors still retired after a window")
+        }, 5)
+    check(grown == 0, "messages that travel inline grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

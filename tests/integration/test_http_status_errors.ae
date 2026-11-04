@@ -90,5 +90,6 @@ main() {
     expect("status_text(599)", http.status_text(599), "")
 
     http.server_stop(server)
+    http.server_free(server)
     println("PASS: every failed status is named")
 }

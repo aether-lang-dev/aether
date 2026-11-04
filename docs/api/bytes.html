@@ -252,7 +252,7 @@
       <h3 class="function-name">copy_from_string <span class="kind">fn</span></h3>
       <pre class="usage"><code>copy_from_string(b, dst, src, src_len) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">b: ptr, dst: int, src: string, src_len: int</span></p>
-      <p class="doc">Copy `src_len` bytes from `src` into the buffer starting at offset `dst`. `src` may be either a plain `string` literal or an AetherString-bearing value (binary-safe via aether_string_data on the C side). Returns 1 on success, 0 on failure.</p>
+      <p class="doc">Copy `src_len` bytes from `src` into the buffer starting at offset `dst`. `src` may be either a plain `string` literal or an AetherString-bearing value (binary-safe via aether_string_data on the C side). A heap or counted string never gives more bytes than it holds: a larger `src_len` is cut to its length. Returns 1 on success, 0 on failure.</p>
     </div>
     <div class="function" id="copy_from_bytes" data-name="copy_from_bytes">
       <h3 class="function-name">copy_from_bytes <span class="kind">fn</span></h3>
