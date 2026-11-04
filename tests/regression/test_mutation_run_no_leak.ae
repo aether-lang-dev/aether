@@ -58,26 +58,37 @@ main() {
 
     dir, derr = fs.make_temp_dir("", "ae_mutation_leak")
     check(derr == "", "a temp dir: ${derr}")
-    sut = "${dir}/sut.ae"
-    test = "${dir}/test.ae"
+    me, _mk, merr = fs.realpath(os.argv0())
+    check(merr == "", "this program's path: ${merr}")
+    _ = os.setenv("AE_BIN", me)
+    // The run works inside the temp dir by relative names, so the report it
+    // prints (it names the SUT and the test) is the same on every run.
+    home = os.getcwd()
+    cerr = os.chdir(dir)
+    check(cerr == "", "into the temp dir: ${cerr}")
+    sut = "sut.ae"
+    test = "test.ae"
+    lib = "."
     fs.write(sut, "sum() -> int {\n    return 1 + 2\n}\n")
     fs.write(test, "main() {}\n")
-    _ = os.setenv("AE_BIN", os.argv0())
 
     // The fake suite never fails, so the one mutant survives.
-    check(mutation.run(sut, test, dir) == 1, "one mutant, and it survives")
+    check(mutation.run(sut, test, lib) == 1, "one mutant, and it survives")
     if mem.heap_in_use_exact() {
-        mutation.run(sut, test, dir)
+        mutation.run(sut, test, lib)
         long grown = -1
         tries = 0
         while tries < 5 && grown != 0 {
             before = mem.heap_in_use()
-            check(mutation.run(sut, test, dir) == 1, "the same run again")
+            check(mutation.run(sut, test, lib) == 1, "the same run again")
             grown = mem.heap_in_use() - before
             tries = tries + 1
         }
         check(grown == 0, "a mutation run grew the heap by ${grown} bytes in every try")
     }
+    // Out of the temp dir before removing it: Windows refuses to remove the
+    // working directory.
+    _h = os.chdir(home)
     _r = fs.remove_tree(dir)
     println("PASS a mutation run frees what it makes")
 }
