@@ -79,7 +79,6 @@ typedef struct {
     int    chunked;
     int    definite;
     int    invalid;    /* the response did not say where its body ends */
-    int    bad_head;   /* ... because its header section holds a NUL or a bare CR */
 } HttpRespFraming;
 
 typedef struct {
@@ -170,10 +169,12 @@ int parse_url_alloc(const char* url, char* host, size_t host_size,
                     int* port, char** path_out, int* use_tls);
 
 /* The URI reference `ref` resolved against the absolute URI `base` (RFC 3986
- * 5.2), recomposed with its scheme in lower case and a space or a byte past
- * ASCII in its path, query or fragment percent-encoded. malloc'd; NULL when
- * either is not a URI reference (a reference holding a control byte is
- * not), the base has no scheme, or no memory. */
+ * 5.2), recomposed with its scheme in lower case and a space, a control byte
+ * or a byte past ASCII in its path, query or fragment percent-encoded. `ref`
+ * is read as a browser reads it (#3572): its TABs, LFs and CRs removed.
+ * malloc'd; NULL when either
+ * is not a URI reference (an authority holding a control byte is not), the
+ * base has no scheme, or no memory. */
 char* http_uri_resolve(const char* base, const char* ref);
 
 /* The URL a redirect's Location names: http_uri_resolve against the URL that
@@ -191,8 +192,8 @@ int http_parse_proxy_url(const char* url, char* host, size_t host_size, int* por
  * its head and no further, so the bytes after it stay for the tunnel's first
  * read. The status, or 0 with *why set when the reply ended or the read
  * failed before its head did, the head is longer than 4096 bytes, or it is
- * malformed (no "HTTP/1." status line with a three-digit status, a NUL or a
- * bare CR). */
+ * malformed (no "HTTP/1." status line with a three-digit status, read with
+ * any NUL or bare CR as SP). */
 int http_connect_reply_read(int fd, const char** why);
 
 /* Accessors a driver needs from an outbound request it did not build. The
