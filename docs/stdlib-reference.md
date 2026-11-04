@@ -96,7 +96,7 @@ header comment is the authoritative description.
 | `std.url` | Percent-encoding and query-string parsing (RFC 3986). | 8 | [guide](../std/url/README.md) · [source](../std/url/module.ae) |
 | `std.uuid` | UUID v4 and v7 (RFC 9562). | 2 | [guide](../std/uuid/README.md) · [source](../std/uuid/module.ae) |
 | `std.worker` | Run blocking work off the loop thread, deliver the result back on it. | 10 | [guide](../std/worker/README.md) · [source](../std/worker/module.ae) |
-| `std.xml` | XML pull parsing and document writing. | 25 | [full section](#xml-stdxml) |
+| `std.xml` | XML pull parsing and document writing. | 27 | [full section](#xml-stdxml) |
 | `std.yaml` | YAML parsing and emitting. | 16 | [guide](../std/yaml/README.md) · [source](../std/yaml/module.ae) |
 | `std.zip` | ZIP archive reader and writer over a byte buffer: stored/deflate, ZIP64, per-entry CRC-32. | 25 | [guide](../std/zip/README.md) · [source](../std/zip/module.ae) |
 | `std.zlib` | One-shot zlib and gzip deflate and inflate. | 28 | [full section](#compression-stdzlib) |
@@ -1890,12 +1890,16 @@ The name/text/attr values are owned copies, safe to hold across `next`.
 
 **Builder:**
 - `xml.writer()` → `ptr` new builder (named `writer` because `builder` is a keyword; free with `xml.free_builder`)
+- `xml.writer_pretty(indent)` → `ptr` new builder producing indented output (`indent` spaces per level, 0 to 16)
 - `xml.declaration(b)` emit `<?xml version="1.0" encoding="UTF-8"?>`
 - `xml.start(b, name)` / `xml.attribute(b, name, value)` / `xml.end(b, name)`
 - `xml.text_node(b, content)` append escaped character data
 - `xml.element(b, name, content)` `<name>escaped</name>` in one call
 - `xml.finish(b)` → `string` the document (escaping already applied)
 - `xml.escape(s)` → `string` escape the five predefined entities (rarely needed directly)
+
+**Formatter:**
+- `xml.pretty(src, indent)` → `(string, string)` reformat document with `indent` spaces per level (0 to 16); returns `(formatted, error)`
 
 ---
 

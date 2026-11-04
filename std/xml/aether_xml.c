@@ -694,12 +694,22 @@ char* xml_escape(const char* s) {
 struct XmlBuilder {
     Sb   sb;
     int  tag_open;   /* an emitted start tag still awaits its closing '>' */
+    int  pretty_indent; /* -1 for normal mode, 0-16 for pretty mode */
 };
 
 XmlBuilder* xml_builder_new(void) {
     XmlBuilder* b = (XmlBuilder*)aether_caps_calloc(1, sizeof(XmlBuilder));
     if (!b) return NULL;
     sb_init(&b->sb);
+    b->pretty_indent = -1;
+    return b;
+}
+
+XmlBuilder* xml_builder_pretty_new(int indent) {
+    XmlBuilder* b = (XmlBuilder*)aether_caps_calloc(1, sizeof(XmlBuilder));
+    if (!b) return NULL;
+    sb_init(&b->sb);
+    b->pretty_indent = indent;
     return b;
 }
 
@@ -757,9 +767,450 @@ void xml_builder_element(XmlBuilder* b, const char* name, const char* text) {
     xml_builder_end(b, name);
 }
 
+/* Forward declaration */
+char* xml_pretty(const char* data, size_t len, int indent, char** out_err);
+
 char* xml_builder_finish(XmlBuilder* b) {
     if (!b) return NULL;
     close_open_tag(b);
-    return (char*)sb_finish_string(&b->sb);
+    if (b->pretty_indent < 0) {
+        return (char*)sb_finish_string(&b->sb);
+    }
+    /* Pretty mode: format the accumulated string */
+    char* raw = sb_finish(&b->sb);
+    sb_init(&b->sb);
+    if (!raw) return NULL;
+    char* err = NULL;
+    size_t raw_len = strlen(raw);
+    char* formatted = xml_pretty(raw, raw_len, b->pretty_indent, &err);
+    if (err) free(err);
+    if (!formatted) {
+        /* Not a whole document yet (an element left open, no root): give
+         * back what was written, unformatted, as the plain writer does,
+         * rather than lose it. */
+        formatted = (char*)string_new_with_length(raw, raw_len);
+    }
+    free(raw);
+    return formatted;
+}
+
+/* ------------------------------------------------------------------ */
+/* Pretty printing                                                    */
+/* ------------------------------------------------------------------ */
+
+typedef enum {
+    NODE_TOP_ITEM = 1,
+    NODE_TEXT,
+    NODE_CDATA,
+    NODE_ELEMENT,
+    NODE_MISC        /* comment, PI or DOCTYPE inside an element: kept verbatim */
+} PrettyNodeKind;
+
+typedef struct PrettyNode PrettyNode;
+
+struct PrettyNode {
+    PrettyNodeKind kind;
+    size_t span_start;
+    size_t span_end;       /* For leaf/verbatim: [span_start, span_end) */
+    size_t open_tag_start;  /* For element: <tag ...> */
+    size_t open_tag_end;
+    size_t close_tag_start; /* </tag> or 0 if self-closing */
+    size_t close_tag_end;
+    int    is_self_closing;
+    int    xml_space_preserve;
+    int    has_non_ws_text;
+    int    has_element_child;
+    int    child_count;
+    int    child_cap;
+    PrettyNode* children;
+};
+
+static void free_pretty_node(PrettyNode* n) {
+    if (!n) return;
+    for (int i = 0; i < n->child_count; i++) {
+        free_pretty_node(&n->children[i]);
+    }
+    free(n->children);
+    n->children = NULL;
+    n->child_count = 0;
+    n->child_cap = 0;
+}
+
+static int add_child_node(PrettyNode* parent, PrettyNode child) {
+    if (parent->child_count >= parent->child_cap) {
+        int ncap = parent->child_cap ? parent->child_cap * 2 : 8;
+        PrettyNode* nc = (PrettyNode*)realloc(parent->children, (size_t)ncap * sizeof(PrettyNode));
+        if (!nc) return 0;
+        parent->children = nc;
+        parent->child_cap = ncap;
+    }
+    parent->children[parent->child_count++] = child;
+    return 1;
+}
+
+static void emit_indent(Sb* s, int level, int indent) {
+    int total = level * indent;
+    for (int i = 0; i < total; i++) sb_putc(s, ' ');
+}
+
+static void emit_verbatim_span(Sb* s, const char* data, size_t start, size_t end) {
+    sb_append(s, data + start, end - start);
+}
+
+static void render_pretty_node(Sb* s, const PrettyNode* n, const char* data, int level, int indent, int parent_preserve) {
+    int preserve = parent_preserve || n->xml_space_preserve;
+
+    if (n->kind == NODE_TOP_ITEM) {
+        emit_verbatim_span(s, data, n->span_start, n->span_end);
+        sb_putc(s, '\n');
+        return;
+    }
+
+    if (preserve) {
+        emit_indent(s, level, indent);
+        emit_verbatim_span(s, data, n->span_start, n->span_end);
+        sb_putc(s, '\n');
+        return;
+    }
+
+    if (n->is_self_closing) {
+        emit_indent(s, level, indent);
+        emit_verbatim_span(s, data, n->span_start, n->span_end);
+        sb_putc(s, '\n');
+        return;
+    }
+
+    if (n->has_element_child && n->has_non_ws_text) {
+        /* Mixed content: emit whole element verbatim on its own line */
+        emit_indent(s, level, indent);
+        emit_verbatim_span(s, data, n->span_start, n->span_end);
+        sb_putc(s, '\n');
+        return;
+    }
+
+    if (!n->has_element_child) {
+        /* Leaf element:
+         * If it only has text/CDATA or comments/PIs, emit on one line:
+         * <tag>content</tag>
+         */
+        emit_indent(s, level, indent);
+        emit_verbatim_span(s, data, n->open_tag_start, n->open_tag_end);
+        for (int i = 0; i < n->child_count; i++) {
+            const PrettyNode* ch = &n->children[i];
+            emit_verbatim_span(s, data, ch->span_start, ch->span_end);
+        }
+        emit_verbatim_span(s, data, n->close_tag_start, n->close_tag_end);
+        sb_putc(s, '\n');
+        return;
+    }
+
+    /* Element with child elements (and possibly comments, PIs, whitespace text) */
+    emit_indent(s, level, indent);
+    emit_verbatim_span(s, data, n->open_tag_start, n->open_tag_end);
+    sb_putc(s, '\n');
+
+    for (int i = 0; i < n->child_count; i++) {
+        const PrettyNode* ch = &n->children[i];
+        if (ch->kind == NODE_TEXT && !ch->has_non_ws_text) {
+            /* Whitespace-only text child between elements: replaced by indentation */
+            continue;
+        }
+        if (ch->kind == NODE_ELEMENT) {
+            render_pretty_node(s, ch, data, level + 1, indent, 0);
+        } else {
+            /* Top-item-like child: comment, PI, CDATA, text */
+            emit_indent(s, level + 1, indent);
+            emit_verbatim_span(s, data, ch->span_start, ch->span_end);
+            sb_putc(s, '\n');
+        }
+    }
+
+    emit_indent(s, level, indent);
+    emit_verbatim_span(s, data, n->close_tag_start, n->close_tag_end);
+    sb_putc(s, '\n');
+}
+
+char* xml_pretty(const char* data, size_t len, int indent, char** out_err) {
+    if (out_err) *out_err = NULL;
+
+    if (indent < 0 || indent > 16) {
+        if (out_err) {
+            char msg[128];
+            snprintf(msg, sizeof(msg), "indent must be 0 to 16, got %d", indent);
+            *out_err = strdup(msg);
+        }
+        return NULL;
+    }
+
+    /* First, fully validate well-formedness using the pull reader */
+    XmlParser* parser = xml_parser_new(data, len);
+    if (!parser) {
+        if (out_err) *out_err = strdup("out of memory creating parser");
+        return NULL;
+    }
+
+    for (;;) {
+        int ev = xml_next(parser);
+        if (ev == XML_EVENT_ERROR) {
+            if (out_err) *out_err = strdup(xml_parser_error(parser));
+            xml_parser_free(parser);
+            return NULL;
+        }
+        if (ev == XML_EVENT_EOF) break;
+    }
+    xml_parser_free(parser);
+
+    /* The document is well-formed. Now build the PrettyNode tree. */
+    PrettyNode root;
+    memset(&root, 0, sizeof(root));
+
+    /* Explicit stack for elements */
+    size_t stack_cap = 32;
+    PrettyNode** stack = (PrettyNode**)malloc(stack_cap * sizeof(PrettyNode*));
+    if (!stack) {
+        if (out_err) *out_err = strdup("out of memory");
+        return NULL;
+    }
+    size_t stack_depth = 0;
+    stack[stack_depth++] = &root;
+
+    /* Handle UTF-8 BOM if present at start */
+    size_t pos = 0;
+    if (len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF) {
+        pos = 3;
+    }
+
+    while (pos < len) {
+        if (data[pos] != '<') {
+            size_t start = pos;
+            while (pos < len && data[pos] != '<') pos++;
+            if (stack_depth > 1) {
+                /* Text inside an element */
+                PrettyNode* cur = stack[stack_depth - 1];
+                int non_ws = 0;
+                for (size_t k = start; k < pos; k++) {
+                    if (!is_xml_space(data[k])) { non_ws = 1; break; }
+                }
+                if (non_ws) cur->has_non_ws_text = 1;
+
+                PrettyNode tn;
+                memset(&tn, 0, sizeof(tn));
+                tn.kind = NODE_TEXT;
+                tn.span_start = start;
+                tn.span_end = pos;
+                tn.has_non_ws_text = non_ws;
+                if (!add_child_node(cur, tn)) goto parse_oom;
+            }
+            continue;
+        }
+
+        /* Markup '<' */
+        size_t remain = len - pos;
+        if (remain >= 4 && memcmp(data + pos, "<!--", 4) == 0) {
+            const char* end = strstr(data + pos + 4, "-->");
+            size_t end_pos = (size_t)(end - data) + 3;
+            PrettyNode* cur = stack[stack_depth - 1];
+            PrettyNode cn;
+            memset(&cn, 0, sizeof(cn));
+            cn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
+            cn.span_start = pos;
+            cn.span_end = end_pos;
+            if (!add_child_node(cur, cn)) goto parse_oom;
+            pos = end_pos;
+            continue;
+        }
+
+        if (remain >= 9 && memcmp(data + pos, "<![CDATA[", 9) == 0) {
+            const char* end = strstr(data + pos + 9, "]]>");
+            size_t end_pos = (size_t)(end - data) + 3;
+            PrettyNode* cur = stack[stack_depth - 1];
+            cur->has_non_ws_text = 1; /* CDATA counts as non-whitespace content */
+            PrettyNode cdn;
+            memset(&cdn, 0, sizeof(cdn));
+            cdn.kind = NODE_CDATA;
+            cdn.span_start = pos;
+            cdn.span_end = end_pos;
+            cdn.has_non_ws_text = 1;
+            if (!add_child_node(cur, cdn)) goto parse_oom;
+            pos = end_pos;
+            continue;
+        }
+
+        if (remain >= 2 && data[pos + 1] == '?') {
+            const char* end = strstr(data + pos + 2, "?>");
+            size_t end_pos = (size_t)(end - data) + 2;
+            PrettyNode* cur = stack[stack_depth - 1];
+            PrettyNode pin;
+            memset(&pin, 0, sizeof(pin));
+            pin.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
+            pin.span_start = pos;
+            pin.span_end = end_pos;
+            if (!add_child_node(cur, pin)) goto parse_oom;
+            pos = end_pos;
+            continue;
+        }
+
+        if (remain >= 2 && data[pos + 1] == '!') {
+            /* DOCTYPE */
+            size_t i = pos + 2;
+            int bdepth = 0;
+            while (i < len) {
+                char c = data[i];
+                if (c == '[') bdepth++;
+                else if (c == ']') { if (bdepth > 0) bdepth--; }
+                else if (c == '>' && bdepth == 0) break;
+                i++;
+            }
+            size_t end_pos = i + 1;
+            PrettyNode* cur = stack[stack_depth - 1];
+            PrettyNode dtn;
+            memset(&dtn, 0, sizeof(dtn));
+            dtn.kind = (stack_depth == 1) ? NODE_TOP_ITEM : NODE_MISC;
+            dtn.span_start = pos;
+            dtn.span_end = end_pos;
+            if (!add_child_node(cur, dtn)) goto parse_oom;
+            pos = end_pos;
+            continue;
+        }
+
+        if (remain >= 2 && data[pos + 1] == '/') {
+            /* End element </name> */
+            size_t start = pos;
+            while (pos < len && data[pos] != '>') pos++;
+            size_t end_pos = pos + 1;
+            PrettyNode* elem = stack[stack_depth - 1];
+            elem->close_tag_start = start;
+            elem->close_tag_end = end_pos;
+            elem->span_end = end_pos;
+            stack_depth--;
+            pos = end_pos;
+            continue;
+        }
+
+        /* Start element <name ... > or <name ... /> */
+        size_t elem_start = pos;
+        size_t p = pos + 1;
+        while (p < len && is_name_char(data[p])) p++;
+        int is_self_closing = 0;
+        int xml_space_preserve = 0;
+
+        for (;;) {
+            while (p < len && is_xml_space(data[p])) p++;
+            if (p >= len) break;
+            if (data[p] == '>') {
+                p++;
+                break;
+            }
+            if (data[p] == '/' && p + 1 < len && data[p + 1] == '>') {
+                is_self_closing = 1;
+                p += 2;
+                break;
+            }
+            /* Attribute */
+            size_t aname_start = p;
+            while (p < len && is_name_char(data[p])) p++;
+            size_t aname_len = p - aname_start;
+            while (p < len && is_xml_space(data[p])) p++;
+            if (p < len && data[p] == '=') p++;
+            while (p < len && is_xml_space(data[p])) p++;
+            if (p < len && (data[p] == '"' || data[p] == '\'')) {
+                char q = data[p++];
+                size_t vstart = p;
+                while (p < len && data[p] != q) p++;
+                size_t vend = p;
+                if (p < len) p++; /* past quote */
+
+                if (aname_len == 9 && memcmp(data + aname_start, "xml:space", 9) == 0) {
+                    if (vend - vstart == 8 && memcmp(data + vstart, "preserve", 8) == 0) {
+                        xml_space_preserve = 1;
+                    }
+                }
+            }
+        }
+        size_t open_tag_end = p;
+        PrettyNode* cur = stack[stack_depth - 1];
+        cur->has_element_child = 1;
+
+        PrettyNode el;
+        memset(&el, 0, sizeof(el));
+        el.kind = NODE_ELEMENT;
+        el.span_start = elem_start;
+        el.open_tag_start = elem_start;
+        el.open_tag_end = open_tag_end;
+        el.is_self_closing = is_self_closing;
+        el.xml_space_preserve = xml_space_preserve;
+
+        if (is_self_closing) {
+            el.span_end = open_tag_end;
+            if (!add_child_node(cur, el)) goto parse_oom;
+        } else {
+            if (!add_child_node(cur, el)) goto parse_oom;
+            PrettyNode* pushed = &cur->children[cur->child_count - 1];
+            if (stack_depth >= stack_cap) {
+                size_t ncap = stack_cap * 2;
+                PrettyNode** ns = (PrettyNode**)realloc(stack, ncap * sizeof(PrettyNode*));
+                if (!ns) goto parse_oom;
+                stack = ns;
+                stack_cap = ncap;
+            }
+            stack[stack_depth++] = pushed;
+        }
+        pos = open_tag_end;
+    }
+
+    /* Output buffer */
+    Sb out;
+    sb_init(&out);
+
+    /* If BOM was present at the start of input, output it directly */
+    if (len >= 3 && (unsigned char)data[0] == 0xEF && (unsigned char)data[1] == 0xBB &&
+        (unsigned char)data[2] == 0xBF) {
+        sb_append(&out, data, 3);
+    }
+
+    for (int i = 0; i < root.child_count; i++) {
+        render_pretty_node(&out, &root.children[i], data, 0, indent, 0);
+    }
+
+    free_pretty_node(&root);
+    free(stack);
+
+    AetherString* astr = sb_finish_string(&out);
+    if (!astr) {
+        if (out_err) *out_err = strdup("out of memory assembling output");
+        return NULL;
+    }
+    return (char*)astr;
+
+parse_oom:
+    free_pretty_node(&root);
+    free(stack);
+    if (out_err) *out_err = strdup("out of memory");
+    return NULL;
+}
+
+char* xml_pretty_str(const char* s, int indent, char** out_err) {
+    return xml_pretty(s ? s : "", s ? strlen(s) : 0, indent, out_err);
+}
+
+/* The (formatted, error) tuple xml.pretty's extern returns; generated code
+ * declares the same layout. */
+typedef struct { const char* _0; const char* _1; } _tuple_string_string;
+
+_tuple_string_string xml_pretty_tuple(const char* s, int indent);
+_tuple_string_string xml_pretty_tuple(const char* s, int indent) {
+    char* err = NULL;
+    char* formatted = xml_pretty_str(s, indent, &err);
+    _tuple_string_string out;
+    if (formatted) {
+        out._0 = formatted;
+        out._1 = "";
+    } else {
+        out._0 = (const char*)string_empty();
+        out._1 = err ? (const char*)string_new_with_length(err, strlen(err)) : "";
+        if (err) free(err);
+    }
+    return out;
 }
 

@@ -38,12 +38,31 @@
 //   xml.end(b, "Error")
 //   out = xml.finish(b)          // owned string; escaping already applied
 //   xml.free_builder(b)
+//
+// Formatter — reformat an XML document with indentation:
+//   formatted, err = xml.pretty(src, 2)
+//   if err != "" {
+//       println("Malformed XML: ${err}")
+//   }
+//
+// Pretty mode builder:
+//   b = xml.writer_pretty(2)
+//   xml.declaration(b)
+//   xml.start(b, "Envelope")
+//   xml.element(b, "Body", "payload")
+//   xml.end(b, "Envelope")
+//   out = xml.finish(b)          // Indented document
+//   xml.free_builder(b)
+//
+// Note: output of `pretty` and `writer_pretty` is intended for reading and
+// recording, not for signed XML. Changing whitespace breaks XML signatures
+// such as WS-Security.
 
 exports(
     EVENT_START, EVENT_END, EVENT_TEXT, EVENT_EOF, EVENT_ERROR,
     parser, next, name, text, attr, attr_count, attr_name, attr_value,
-    error, free, writer, declaration, start, attribute, text_node,
-    end, element, finish, free_builder, escape
+    error, free, writer, writer_pretty, declaration, start, attribute, text_node,
+    end, element, finish, free_builder, escape, pretty
 )
 
 // Event kinds returned by `next` — match the C `XML_EVENT_*` values.
@@ -66,6 +85,7 @@ extern xml_parser_error(p: ptr) -> string
 extern xml_parser_free(p: @frees ptr)
 
 extern xml_builder_new() -> ptr
+extern xml_builder_pretty_new(indent: int) -> ptr
 extern xml_builder_declaration(b: ptr)
 extern xml_builder_start(b: ptr, name: string)
 extern xml_builder_attr(b: ptr, name: string, value: string)
@@ -76,6 +96,8 @@ extern xml_builder_finish(b: ptr) -> string @heap
 extern xml_builder_free(b: @frees ptr)
 
 extern xml_escape(s: string) -> string @heap
+
+extern xml_pretty_tuple(s: string, indent: int) -> (string @heap, string @heap)
 
 // Copy a borrowed C string into an owned Aether string. The reader's
 // name/text/attr accessors return pointers into the parser's scratch
@@ -191,6 +213,22 @@ finish(b: ptr) -> string {
 // Release a builder.
 free_builder(b: ptr) {
     xml_builder_free(b)
+}
+
+// New XML builder/writer configured for pretty-printed output.
+// Elements and children are indented with `indent` spaces (0 to 16).
+// Behaves identically to `writer`, but `finish` returns indented output.
+writer_pretty(indent: int) -> ptr {
+    return xml_builder_pretty_new(indent)
+}
+
+// Reformat `src` with `indent` spaces per level (0 to 16).
+// Returns (formatted, error). On success, error is "".
+// On any well-formedness error or invalid indent, returns ("", message).
+// Never returns partial output.
+pretty(src: string, indent: int) -> (string, string) {
+    formatted, err = xml_pretty_tuple(src, indent)
+    return string_concat(formatted, ""), string_concat(err, "")
 }
 
 // Escape the five predefined entities (& < > " ') in `s`; returns an owned
