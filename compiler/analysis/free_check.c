@@ -16,7 +16,16 @@
 #include "typechecker.h"
 #include "../aether_error.h"
 
-#define FC_MAX_PASSES 256
+/* How often one variable's facts can rise at a loop's head (#3574). The
+ * head only rises, as each pass joins the turn's end into it, and a join
+ * raises a variable at most: once to appear, once for `freed` (to maybe),
+ * once for `root` (to none), three times for `gone` (to maybe, to clean as
+ * its root goes, to maybe again), and once each for `unknown`, `released`
+ * and `rebound`. A pass that does not settle the head raises one, so a
+ * head of n variables settles within FC_VAR_RISES * n passes. 256 passes
+ * cut off a head that needs more (a chain of 300 views does), and past
+ * them no local was followed, so a second free in the loop compiled. */
+#define FC_VAR_RISES 9
 
 enum { FC_CLEAN = 0, FC_FREED = 1, FC_MAYBE = 2 };
 
@@ -558,32 +567,47 @@ static void loop(Walk* w, FState* s, ASTNode* node, ASTNode* init, ASTNode* cond
                  ASTNode* body, ASTNode* step) {
     walk(w, init, s);
     if (s->dead) return;
-    int report = w->report, carried = w->carried;
+    int reporting = w->report, carried = w->carried;
     FState* head = fs_new(s);
     FState* st = fs_new(s);
     FState* back = fs_new(s);
     FState* next = fs_new(s);
+    int unsettled = 0;
     for (int pass = 0; ; pass++) {
         w->report = 0;
         fs_set(st, head);
         loop_turn(w, node, cond, body, step, st, back, NULL);
         fs_set(next, head);
         join(next, back);
-        if (same(next, head) || pass >= FC_MAX_PASSES) {
-            if (pass >= FC_MAX_PASSES)
-                for (int i = 0; i < next->n; i++) next->v[i].unknown = 1;
+        if (same(next, head)) {
+            fs_set(head, next);
+            break;
+        }
+        if (pass >= FC_VAR_RISES * (next->n + 1)) {
+            /* More rises than the facts have: a fault in the count above.
+             * The loop is refused below, not passed unchecked. */
+            unsettled = 1;
+            for (int i = 0; i < next->n; i++) next->v[i].unknown = 1;
             fs_set(head, next);
             break;
         }
         fs_set(head, next);
     }
     /* The walk that reports, from the head. */
-    w->report = report;
+    w->report = reporting;
+    if (unsettled) {
+        char msg[200];
+        snprintf(msg, sizeof msg,
+                 "the free check found no settled state for this loop in %d passes",
+                 FC_VAR_RISES * (next->n + 1));
+        report(w, node, AETHER_ERR_USE_AFTER_FREE, msg,
+               "this is a fault in the compiler: please report it with this loop");
+    }
     FState* brk = fs_dead();
     fs_set(st, head);
     loop_turn(w, node, cond, body, step, st, back, brk);
     /* The next turn, from what this one leaves: a free it repeats. */
-    if (report && !back->dead) {
+    if (reporting && !back->dead) {
         w->carried = 1;
         fs_set(next, back);
         loop_turn(w, node, cond, body, step, next, head, NULL);

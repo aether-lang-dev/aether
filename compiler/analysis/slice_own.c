@@ -723,11 +723,14 @@ static ASTNode* call_def(Ctx* c, ASTNode* call) {
     if (!call->value) return NULL;
     ASTNode* d = (ASTNode*)strmap_get(&c->fns, call->value);
     if (!d && strchr(call->value, '.')) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s", call->value);
-        for (char* q = buf; *q; q++)
+        /* The whole name (#3574): 256 bytes cut a long qualified one, and
+         * the call found no definition, so a `@keep` it has went unseen. */
+        char* flat = strdup(call->value);
+        if (!flat) return NULL;
+        for (char* q = flat; *q; q++)
             if (*q == '.') *q = '_';
-        d = (ASTNode*)strmap_get(&c->fns, buf);
+        d = (ASTNode*)strmap_get(&c->fns, flat);
+        free(flat);
     }
     return d;
 }

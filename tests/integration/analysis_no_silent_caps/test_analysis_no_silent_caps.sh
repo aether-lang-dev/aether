@@ -23,6 +23,20 @@
 #   deep_call:     a closure that binds a view's name again, called 300 deep
 #                  in an expression: the escape check's path held 256 nodes,
 #                  missed the call, and refused the return of the name.
+#   loop_free:     a loop whose head settles in about 300 passes (each turn
+#                  takes a view of the next of 300 views, the last fresh) and
+#                  that frees a buffer each turn: the free check gave up at
+#                  256 passes, followed no local in the loop, and let the
+#                  second free through.
+#   loop_protocol: a loop that leaves a bare `actor_ref` under one of three
+#                  protocols by turns, and opens a reference each turn: the
+#                  protocol check dropped the first at the head and the next
+#                  turn brought it back, so the head never settled; at 256
+#                  passes no reference was followed, and the second Open
+#                  went unrefused.
+#   keep_name:     a parameter given to a `@keep` function of a 300-character
+#                  name, called qualified: the ownership check cut the name
+#                  to 256 bytes, found no definition, and did not refuse it.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -196,6 +210,96 @@ awk 'BEGIN {
 }' > "$TMP/deep_call/main.ae"
 runs deep_call "deep 1"
 
+mkdir -p "$TMP/loop_free"
+awk 'function v(i) { return i ? "v" i : "_v0" }
+BEGIN {
+    print "import std.bytes"
+    print "churn(n: int) {"
+    print "    let a: int[4] = [1, 2, 3, 4]"
+    for (i = 0; i <= 300; i++) printf "    %s = a[0..2]\n", v(i)
+    print "    p = bytes.new(1)"
+    print "    i = 0"
+    print "    while i < n {"
+    for (i = 0; i < 300; i++) printf "        %s = %s[0..1]\n", v(i), v(i + 1)
+    print "        v300 = make([]int, 2)"
+    print "        bytes.free(p)"
+    print "        i = i + 1"
+    print "    }"
+    print "}"
+    print "main() { churn(2) }"
+}' > "$TMP/loop_free/main.ae"
+refused loop_free "'p' is freed again: it was freed on the loop's previous turn"
+
+mkdir -p "$TMP/loop_protocol"
+cat > "$TMP/loop_protocol/main.ae" <<'AE'
+message Open {}
+message Write {}
+message Ping {}
+
+protocol W {
+    start -> Open -> open
+    open -> Write -> open
+}
+protocol PA { start -> Ping -> start }
+protocol PB { start -> Ping -> start }
+protocol PC { start -> Ping -> start }
+
+actor A implements PA { receive { Ping() -> {} } }
+actor B implements PB { receive { Ping() -> {} } }
+actor C implements PC { receive { Ping() -> {} } }
+actor F implements W {
+    receive {
+        Open() -> {}
+        Write() -> {}
+    }
+}
+
+churn(n: int, c0: int, c1: int, c2: int, c3: int) {
+    w = spawn(F())
+    let v: actor_ref = spawn(A())
+    i = 0
+    while i < n {
+        if c0 > i {
+            if c1 > i { v = spawn(C()) }
+            if c2 > i { v = spawn(B()) }
+        } else {
+            if c1 > i { v = spawn(C()) }
+            if c2 > i { v = spawn(B()) }
+            if c3 > i { v = spawn(A()) }
+        }
+        v ! Ping {}
+        w ! Open {}
+        i = i + 1
+    }
+}
+
+main() {
+    churn(1, 0, 0, 0, 0)
+    wait_for_idle()
+}
+AE
+refused loop_protocol "protocol 'W' does not allow 'Open' here: 'w' may be in state 'open'"
+
+mkdir -p "$TMP/keep_name/lib/qm"
+LONGK=$(awk 'BEGIN { s = "k"; while (length(s) < 300) s = s "x"; print s }')
+cat > "$TMP/keep_name/lib/qm/module.ae" <<AE
+$LONGK(s: @keep int[]) {
+    println("kept \${s.len}")
+}
+AE
+cat > "$TMP/keep_name/main.ae" <<AE
+import qm
+
+pass(s: int[]) {
+    qm.$LONGK(s)
+}
+
+main() {
+    pass(make([]int, 2))
+}
+AE
+refused keep_name "cannot give 's' to 'qm.kxxxxxxxx"
+
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: locals, @frees parameters, protocol references, arms, matches, helpers and paths past every old cap"
+echo "  [PASS] $NAME: locals, @frees parameters, protocol references, arms, matches, helpers, paths, loop heads and long names past every old cap"
 exit 0

@@ -38,7 +38,13 @@
 #include "../aether_error.h"
 
 #define PROTO_MAX_STATES 64
-#define PROTO_MAX_LOOP_PASSES 256
+/* How often one reference can rise at a loop's head (#3574): once to
+ * appear, once per state its mask gains, once to go unknown (`top`) and
+ * once to be dropped, which it stays for the loop (a reference whose
+ * protocol differs from one turn to the next). A pass that does not settle
+ * the head raises one, so a head of n references settles within
+ * PROTO_REF_RISES * n passes. */
+#define PROTO_REF_RISES (PROTO_MAX_STATES + 3)
 
 typedef struct {
     ASTNode* node;                       /* AST_PROTOCOL_DEFINITION */
@@ -617,27 +623,61 @@ static void loop(Walk* w, PState* s, ASTNode* node, ASTNode* init, ASTNode* cond
                  ASTNode* body, ASTNode* step) {
     walk(w, init, s);
     if (s->dead) return;
-    int report = w->report;
+    int reporting = w->report;
     PState* head = ps_new(s);
     PState* st = ps_new(s);
     PState* next = ps_new(s);
+    /* The references dropped at the head, which stay dropped (#3574): one
+     * that a turn leaves under another protocol than the head's is dropped,
+     * and the next turn's end brought it back under that one, so the head
+     * went round for good, and past 256 passes no reference in the loop was
+     * followed. It may hold either, so it is followed on no turn. */
+    const char** dropped = NULL;
+    int dropped_n = 0, dropped_cap = 0, unsettled = 0;
     for (int pass = 0; ; pass++) {
-        int last = pass >= PROTO_MAX_LOOP_PASSES;
         w->report = 0;
         ps_set(st, head);
         walk(w, cond, st);
         loop_turn(w, node, body, step, st, NULL);
         ps_set(next, head);
         join(next, st);
-        if (same(next, head) || last) {
-            if (last) for (int i = 0; i < next->n; i++) next->v[i].top = 1;
+        for (int i = 0; i < head->n; i++) {
+            if (var_find(next, head->v[i].name)) continue;
+            if (dropped_n == dropped_cap) {
+                dropped_cap = dropped_cap ? dropped_cap * 2 : 8;
+                dropped = (const char**)realloc(dropped, sizeof(char*) * (size_t)dropped_cap);
+                if (!dropped) {
+                    fprintf(stderr, "aetherc: out of memory in the protocol check\n");
+                    exit(1);
+                }
+            }
+            dropped[dropped_n++] = head->v[i].name;
+        }
+        for (int i = 0; i < dropped_n; i++) var_forget(next, dropped[i]);
+        if (same(next, head)) {
+            ps_set(head, next);
+            break;
+        }
+        if (pass >= PROTO_REF_RISES * (next->n + dropped_n + 1)) {
+            /* More rises than the states have: a fault in the count above.
+             * The loop is refused below, not passed unchecked. */
+            unsettled = 1;
+            for (int i = 0; i < next->n; i++) next->v[i].top = 1;
             ps_set(head, next);
             break;
         }
         ps_set(head, next);
     }
     /* The walk that reports, from the states at the head. */
-    w->report = report;
+    w->report = reporting;
+    if (unsettled && reporting) {
+        char msg[200];
+        snprintf(msg, sizeof msg,
+                 "the protocol check found no settled state for this loop in %d passes",
+                 PROTO_REF_RISES * (next->n + dropped_n + 1));
+        report(w->c, node, msg, "this is a fault in the compiler: please report it with this loop");
+    }
+    free(dropped);
     ps_set(st, head);
     walk(w, cond, st);
     PState* out = ps_new(st);                  /* the condition is false */
