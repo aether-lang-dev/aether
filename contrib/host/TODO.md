@@ -1,10 +1,10 @@
 # contrib/host TODO
 
 ## All host modules
-- [x] Bridges self-contained: each host pushes its `perms` as a grant level of the calling thread with `aether_sandbox_push` / `aether_sandbox_pop` (runtime/aether_sandbox.h), so a bridge called inside an `enforce` block is held to both (#2955; each used to keep a process-wide stack and swap the process-wide checker pointer, which dropped the enclosing block's grants and raced other threads). No longer pokes at the compiler-emitted preamble's `static` `_aether_ctx_stack`. Applies to python, lua, perl, ruby, js, tcl; the aether host is separate-process and unaffected. Demonstrated end-to-end in `examples/04-interop/05-hosts/tcl.ae` (compiles, links, runs).
+- [x] Bridges self-contained: each host pushes its `perms` as a grant level of the calling thread with `aether_sandbox_push` / `aether_sandbox_pop` (runtime/aether_sandbox.h), so a bridge called inside an `enforce` block is held to both (#2955; each used to keep a process-wide stack and swap the process-wide checker pointer, which dropped the enclosing block's grants and raced other threads). No longer pokes at the compiler-emitted preamble's `static` `_aether_ctx_stack`. Applies to python, perl, ruby, js, tcl (and lua, while it was here); the aether host is separate-process and unaffected. Demonstrated end-to-end in `examples/04-interop/05-hosts/tcl.ae` (compiles, links, runs).
 - [x] Import path drift fixed: all READMEs and module.ae headers now document the working form `import contrib.host.<lang>` (previously said `std.host.<lang>`, which the compiler's stdlib resolver doesn't handle since the modules live under `contrib/host/`, not `std/host/<lang>/`). `docs/containment-sandbox.md` already used the correct form.
 - [x] IPv6-mapped addresses normalized in `pattern_match`: a grant for `10.0.0.1` now matches a TCP resource reported as `::ffff:10.0.0.1` (and vice versa). Applied to all 6 in-process bridges, the LD_PRELOAD preload checker (`runtime/libaether_sandbox_preload.c`), and the Java-side `AetherGrantChecker`.
-- [x] CI + `make contrib-host-check` target added: syntax-checks every bridge in stub mode and runs per-language demos when the dev library is installed. Gracefully skips languages whose headers/libs aren't present. Wired into a Linux CI job (`ci-contrib-host`) that installs lua/python/ruby/perl/tcl/duktape/go dev packages.
+- [x] CI + `make contrib-host-check` target added: syntax-checks every bridge in stub mode and runs per-language demos when the dev library is installed. Gracefully skips languages whose headers/libs aren't present. Wired into a Linux CI job (`ci-contrib-host`) that installs python/ruby/perl/tcl/duktape/go dev packages (lua too, until it moved out).
 - [ ] **Deferred**, tracked in the issue tracker rather than here (the
   `docs/next-steps.md` this used to link to is not in the tree):
   - Capture stdout/stderr from hosted code (pipe + shared map `_stdout`/`_stderr` keys, or pass-through)
@@ -24,35 +24,39 @@
 - [ ] Run stunt on FreeBSD. Its FreeBSD branches (the preload in process,
   the uncontained child, `libc.so.7`/`libm.so.5`, `syscall()`) are written
   but have never run: untested there.
-- [ ] A hosts repository with the real bridges and more languages, each held
-  to stunt's catalogue by name; then the real bridges here move out, with a
-  transition.
+- [ ] More languages in the hosts repository, each held to stunt's
+  catalogue by name, then the real bridges here move out one at a time. The
+  repository exists:
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages).
+  Lua has moved there (2026-11-04) and was deleted from this tree, with no
+  transition period. The bridges still here (python, perl, ruby, js/duktape,
+  quickjs, tcl, go, tinygo, java, factor, racket, rhombus, aether) move as
+  they are ported.
 
 ## Python
 - [x] Dedicated `examples/04-interop/05-hosts/python.ae` written against the current stdlib + sandbox API (the `lazy-evaluation` recovery path no longer exists, confirmed via pickaxe search across all refs).
 - [x] `os.environ` is cached at CPython startup: sandbox `getenv` interception only works via `ctypes.CDLL(None).getenv`, not `os.environ.get()`. Covered in `docs/containment-sandbox.md` → host module matrix (Env cache issue row) and the "Shared-interpreter behavior" section below it. The `examples/04-interop/05-hosts/python.ae` demonstrates the `ctypes` workaround inline.
 
 ## Lua
-- [x] Tested and working well. Cleanest host module.
-- [x] **Bidirectional embedding API (#904)** — persistent host-owned VM
-  (`lua.vm_new`), host-callback registration (`lua.vm_register` — an Aether
-  `@c_callback` callable from script, dotted names build the prefix table),
-  typed args/returns inside callbacks (`lua.arg_*` / `lua.push_*` /
-  `push_tagged_table` / `raise_error`), typed `eval` result
-  (`lua.vm_result_type/_int/_str/_bool`), injected globals
-  (`lua.vm_set_global_str/_int/_strlist`), and an instruction-count guard
-  (`lua.vm_set_instruction_limit`). This is the **template** for the rollout
-  plan below. PR #906.
+- [x] Moved to [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)
+  (`ae add github.com/aether-lang-dev/aether-guest-languages`, then
+  `import lua`) and removed from this tree on 2026-11-04. The #904
+  bidirectional API (below) was first built here as the Lua bridge; the
+  template now lives there as `lua/`. Found there, not fixed here: the old
+  copy could not load Lua 5.5, and in-process `os.execute`/`io.popen` start
+  `/bin/sh` with no exec grant under the preload (glibc's `system()` and
+  `popen()` use `posix_spawn`).
 
 ## Bidirectional API rollout (which other hosts get the #904 treatment)
 
 The #904 work added a second tier on top of the fire-and-forget surface every
 host shares (`init`/`run`/`run_sandboxed`/`run_sandboxed_with_map`/`finalize`):
 a **persistent typed VM + host callbacks + typed marshalling both ways**. Lua
-is the only host with it today. Who should get it, and how hard:
+(#904, now in aether-guest-languages) was the first host with it and is the
+template. Who should get it, and how hard:
 
 **Tier-1 candidates — in-process dlopen hosts with a C value-stack to bridge
-(highest value, the Lua pattern ports directly):**
+(highest value, the Lua pattern in aether-guest-languages ports directly):**
 
 - [x] **Python** (`contrib/host/python`) — HIGHEST value after Lua. Done as
   `python_vm_*` / `python_arg_*` / `python_push_*`: `PyCFunction`s holding a
@@ -128,7 +132,7 @@ is the only host with it today. Who should get it, and how hard:
 
 ### Suggested order
 
-1. **Duktape/JS** — lowest effort, the Lua trampoline pattern ports nearly
+1. **Duktape/JS** — lowest effort, the Lua trampoline pattern (in aether-guest-languages) ports nearly
    verbatim; proves the rollout on a second stack-API host.
 2. **Python** — highest downstream value; establishes the refcounted-host
    pattern (the template for Ruby/Perl).
@@ -138,11 +142,11 @@ is the only host with it today. Who should get it, and how hard:
    refcount/exception-safety lessons. Closes the long-standing Perl/Ruby
    shared-map-writeback gap noted under "All host modules" above.
 
-Each should mirror Lua's shape exactly — same `vm_*` / `arg_*` / `push_*`
+Each should mirror Lua's shape (the `lua/` bridge in aether-guest-languages) exactly — same `vm_*` / `arg_*` / `push_*`
 naming and the same `LUA_T*`-style typed-value tag constants (rename per host,
 e.g. `PY_T*`) — so a consumer that learns one host's bidirectional API knows
 them all. Each needs a `tests/integration/host_<lang>_bidirectional/` test
-modelled on `host_lua_bidirectional/` (callback + typed result + global inject
+modelled on the Lua bridge's bidirectional test, `lua/test_host_lua_vm.ae` in aether-guest-languages (callback + typed result + global inject
 + guard), SKIPping without the dev library.
 
 ## JS (Duktape)
@@ -169,4 +173,4 @@ modelled on `host_lua_bidirectional/` (callback + typed result + global inject
 - [x] Added as the eighth host. Separate subprocess under LD_PRELOAD sandbox interception (same pattern as `contrib/host/aether`). Two modes: `go.run_script_sandboxed(perms, path)` shells out to `go run`, `go.run_sandboxed(perms, binary)` runs a pre-built binary under tight grants. End-to-end demo: `examples/04-interop/05-hosts/go.ae`.
 
 ## Tcl
-- [x] Added as the seventh host, mirroring the lua template. `::env` caveat (shared interpreter, same as Perl/Ruby) covered in `docs/containment-sandbox.md` → "Shared-interpreter behavior". End-to-end verified: `examples/04-interop/05-hosts/tcl.ae` compiles, links, and runs on macOS with system Tcl 8.5.
+- [x] Added as the seventh host, mirroring the Lua template (now in aether-guest-languages). `::env` caveat (shared interpreter, same as Perl/Ruby) covered in `docs/containment-sandbox.md` → "Shared-interpreter behavior". End-to-end verified: `examples/04-interop/05-hosts/tcl.ae` compiles, links, and runs on macOS with system Tcl 8.5.

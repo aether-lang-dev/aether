@@ -2,25 +2,6 @@
 # Detect available host language dev packages and output compile flags.
 # Source this file: . tests/sandbox/detect_host_langs.sh
 
-# Lua
-LUA_AVAILABLE=0
-for v in lua5.4 lua5.3 lua5.2; do
-    if pkg-config --exists $v 2>/dev/null; then
-        LUA_CFLAGS=$(pkg-config --cflags $v)
-        LUA_LIBS=$(pkg-config --libs $v)
-        LUA_LIBNAME=$(pkg-config --libs-only-l $v | sed -n 's/.*-l\([^ ]*\).*/lib\1.so/p')
-        AETHER_LUA_SONAME=$(ldconfig -p 2>/dev/null | awk -v lib="$LUA_LIBNAME" '$1 == lib { print $NF; exit }')
-        export AETHER_LUA_SONAME
-        LUA_CMD=$(echo $v | tr -d '.')  # lua54, lua53, etc — some systems use this
-        # Try common command names
-        for cmd in $v lua; do
-            if command -v $cmd >/dev/null 2>&1; then LUA_CMD=$cmd; break; fi
-        done
-        LUA_AVAILABLE=1
-        break
-    fi
-done
-
 # Python
 PY_AVAILABLE=0
 for v in python3 python3.12 python3.11 python3.10; do

@@ -8,7 +8,7 @@ into the host, use the shared map, run forever, never answer, send too much.
 The name is the film one: a stunt double takes every hit, so the real
 languages don't have to.
 
-It exists because the real bridges (`lua`, `python`, `ruby`, `perl`, `tcl`,
+It exists because the real bridges (`python`, `ruby`, `perl`, `tcl`,
 `js`/`duktape`, `quickjs`, ...) bring interpreter packages and their version
 churn into aether's CI: Lua 5.5, Ruby 3.0 and Python 3.14 each broke a lane
 in one month. Most of what those tests are there to catch is not about Lua
@@ -98,7 +98,7 @@ only Landlock and seccomp see the syscall instruction.
 ## Two modes, one catalogue
 
 **In-process.** `stunt.c` built as a shared library, `libstunt`, which
-`module.ae` and `aether_host_stunt.c` load as `contrib/host/lua` loads liblua:
+`module.ae` and `aether_host_stunt.c` load as `contrib/host/tcl` loads libtcl:
 `dlopen` at the first call (`AETHER_STUNT_LIB`, else `libstunt.so`,
 `libstunt.dylib` or `stunt.dll` on the loader's path), every function found
 with `dlsym`. The "script" passed to a run is `"<check> <expectation>"`. The
@@ -223,8 +223,11 @@ an aarch64 Linux lane and a stunt check failed, then restored:
 
 ## A real language in a hosts repo
 
-The plan is a separate hosts repository with the real bridges, and more
-languages, each held to this same named catalogue. A language there mirrors
+The hosts repository is
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages):
+the real bridges, and more languages, each held to this same named catalogue.
+Lua is there already (it was removed from this tree on 2026-11-04); the
+others follow one at a time. A language there mirrors
 stunt one check at a time: for each name, a short script in that language
 that does the same thing its own way (`io.open("/etc/passwd")` in Lua,
 `ctypes.CDLL(None).syscall(...)` in Python, `Fiddle.dlopen` in Ruby) and

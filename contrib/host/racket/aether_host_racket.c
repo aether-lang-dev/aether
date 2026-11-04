@@ -239,7 +239,7 @@ int racket_host_init(void) {
 
 void racket_host_finalize(void) {
     // The embedding API has no clean in-process teardown that allows a
-    // re-boot; leave the VM to process exit (matches host/factor, host/lua).
+    // re-boot; leave the VM to process exit (matches host/factor, host/tcl).
 }
 
 // Lazily load the Rhombus #lang on first rhombus use (large require).

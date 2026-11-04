@@ -26,7 +26,7 @@
 #
 #   Each --with=<lang> adds an apt -dev-kit layer + a `make contrib
 #   MODULES=<lang>` layer to the generated image. Known langs:
-#     python | lua | perl | ruby | java | duktape (alias: js) | tcl | tinygo
+#     python | perl | ruby | java | duktape (alias: js) | tcl | tinygo
 #
 #   `tinygo` is the odd one out — it's a c-shared sidecar builder, not
 #   a host-interpreter dlopen. Its layer installs the TinyGo .deb from
@@ -88,7 +88,7 @@
 #   - libaether_sqlite.a (always — sqlite is a real-link bridge and
 #     libsqlite3-dev is already in the base apt-install)
 #
-# Hosted-language bridges (Python, Lua, Perl, Ruby, JS, Tcl) are added
+# Hosted-language bridges (Python, Perl, Ruby, JS, Tcl) are added
 # ONLY via --with=<lang> (one layer per bridge — see USAGE). The base
 # image carries NONE of them. This keeps the "just Aether" case slim
 # and avoids the previous v0.209.0 model's footgun where vendored
@@ -113,9 +113,9 @@
 # After you copy your compiled binary off the container, the host
 # running it needs the runtime libraries for whichever host bridges
 # the binary uses. Examples:
-#   Bazzite / Fedora-derived:  rpm-ostree install python3 ruby lua perl
-#   Debian / Ubuntu:           apt install python3 ruby lua5.4 perl-base
-#   Alpine:                    apk add python3 ruby lua5.4 perl
+#   Bazzite / Fedora-derived:  rpm-ostree install python3 ruby perl
+#   Debian / Ubuntu:           apt install python3 ruby perl-base
+#   Alpine:                    apk add python3 ruby perl
 # Missing runtime → "libfoo.so not found" at startup. Install and retry.
 #
 #
@@ -153,7 +153,7 @@ AETHER_REF="${AETHER_REF:-v0.203.0}"
 # minimal -dev kit already in the base toolchain).
 #
 # Image name auto-derives from the alpha-sorted --with set so
-# `--with=python --with=lua` and `--with=lua --with=python` produce
+# `--with=python --with=perl` and `--with=perl --with=python` produce
 # IDENTICAL image names + IDENTICAL layer hashes (the canonical
 # `--with` order is the layer order). --image-name=<custom>
 # overrides the auto-derivation.
@@ -164,7 +164,6 @@ AETHER_REF="${AETHER_REF:-v0.203.0}"
 with_dev_pkg() {
     case "$1" in
         python)  echo "python3-dev" ;;
-        lua)     echo "liblua5.4-dev" ;;
         perl)    echo "libperl-dev" ;;
         ruby)    echo "ruby-dev" ;;
         java)    echo "default-jdk" ;;
@@ -194,7 +193,7 @@ while [ $# -gt 0 ]; do
         --with=*)
             lang="${1#--with=}"
             if ! with_dev_pkg "$lang" >/dev/null; then
-                echo "aether-build: --with=$lang: unknown language (known: python lua perl ruby java duktape (alias: js) tcl tinygo)" >&2
+                echo "aether-build: --with=$lang: unknown language (known: python perl ruby java duktape (alias: js) tcl tinygo)" >&2
                 exit 1
             fi
             # Canonicalise aliases BEFORE the sort/dedupe pass so
@@ -402,7 +401,7 @@ bootstrap_image() {
     # Compose the per-language layers from $WITH_LANGS. Each layer:
     #   1. apt-install <lang>-dev (REAL distro headers; the vendored
     #      multiarch shims in hosted-language-headers don't work for
-    #      python/lua/perl — they're Debian build products that
+    #      python/perl — they're Debian build products that
     #      reference paths only -dev kits provide).
     #   2. cd /src && make contrib MODULES=<lang> && make install-contrib
     #      (MODULES filter is fail-hard: any requested module that
@@ -461,7 +460,7 @@ RUN cd /src \\
 # --- Hosted-language layer: $lang (via apt $pkg) ---
 # Added because aether-build was invoked with --with=$lang.
 # The -dev kit lays down REAL platform-specific headers
-# (pyconfig.h / luaconf.h / perl.h etc.) that are generated build
+# (pyconfig.h / perl.h etc.) that are generated build
 # products and can't be portably vendored.
 RUN apt-get update \\
  && apt-get install -y --no-install-recommends $pkg \\
@@ -486,7 +485,7 @@ FROM debian:bookworm-slim
 # link time. gcc + libc6-dev (not build-essential — we don't need
 # g++ or dpkg-dev).
 #
-# Hosted-language -dev kits (python3-dev, liblua5.4-dev, etc.) are
+# Hosted-language -dev kits (python3-dev, libperl-dev, etc.) are
 # NOT installed here — they're added per layer by --with=<lang>.
 # This keeps the base image slim for the majority "just Aether" case.
 RUN apt-get update && apt-get install -y --no-install-recommends \\

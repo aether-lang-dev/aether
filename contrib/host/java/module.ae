@@ -1,6 +1,6 @@
 // contrib.host.java — JVM Sandbox Helpers
 //
-// Unlike the in-process hosts (Lua, Python, Perl, Ruby, Tcl, JS), the
+// Unlike the in-process hosts (Python, Perl, Ruby, Tcl, JS), the
 // JVM runs in a separate process via the `java` command. This module
 // carries no C bridge — it exists to provide a single importable
 // `grant_jvm_runtime()` helper that bundles the standard JVM startup

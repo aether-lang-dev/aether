@@ -669,7 +669,7 @@ another thread or a memory budget ends the call and gives the host an
 outcome. A deadline or a cancel lands at the call's next safe point, a
 loop head, so code with no loop (straight-line code, or a long C call) runs
 on until it returns. Aether also hosts other languages under the sandbox
-of chapter 5: Python, Lua and Tcl inside the program, a Go program as a
+of chapter 5: Python and Tcl inside the program, a Go program as a
 child process, and a Go library built as a C shared library in-process. [C
 interoperability](c-interop.md) and [emit=lib](emit-lib.md) are the
 references.

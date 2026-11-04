@@ -517,9 +517,6 @@ host_specs_no_skips() {
                     export AETHER_PYTHON_SONAME ;;
             perl)   AETHER_PERL_SONAME="$(perl -MConfig -e 'print "$Config{archlibexp}/CORE/$Config{libperl}"' 2>/dev/null)"
                     export AETHER_PERL_SONAME ;;
-            lua)    for so in /usr/lib/*/liblua5.4.so /usr/lib/*/liblua5.3.so /usr/lib/liblua5.4.so; do
-                        [ -f "$so" ] && { AETHER_LUA_SONAME="$so"; export AETHER_LUA_SONAME; break; }
-                    done ;;
         esac
         AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT="$rpt" \
             "$REPO/build/ae" run "$t" >/dev/null 2>&1

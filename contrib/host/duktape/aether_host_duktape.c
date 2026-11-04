@@ -1,12 +1,12 @@
 // aether_host_duktape.c — Embedded JavaScript Language Host Module (Duktape)
 //
-// Unlike Python/Lua, Duktape has NO built-in filesystem or env access.
+// Unlike Python, Duktape has NO built-in filesystem or env access.
 // We provide native bindings (env, readFile, print) that go through
 // the Aether sandbox check of the calling thread. This is the purest containment model —
 // the guest can ONLY do what we explicitly expose.
 //
 // LOADING MODEL: dlopen, not -lduktape. Mirrors contrib/host/python,
-// ruby, lua, perl — every Duktape C-API symbol resolved via dlsym at
+// ruby, perl — every Duktape C-API symbol resolved via dlsym at
 // first call. The bridge .a has NO unresolved Duktape symbols at
 // link time, so end-user binaries have no DT_NEEDED libduktape and
 // are ABI-portable across deploy-host Duktape minor versions.

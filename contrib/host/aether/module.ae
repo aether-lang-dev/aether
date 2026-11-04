@@ -6,7 +6,7 @@
 // checked against the grant list.  Communication with the child
 // happens via shared memory (aether_shared_map).
 //
-// Unlike the Lua/Python/Ruby host modules which embed an interpreter
+// Unlike the Python/Ruby/Tcl host modules which embed an interpreter
 // in-process, this module launches a separate process — because
 // Aether is compiled, not interpreted.  The sandbox enforcement is
 // at the OS level (LD_PRELOAD), not the language level.

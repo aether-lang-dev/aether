@@ -13,7 +13,6 @@
 # Build-time toggles (--build-arg WITH_<LANG>=1):
 #   WITH_JAVA       — build aether-sandbox.jar; ship JAR, drop JDK
 #   WITH_PYTHON     — capture <Python.h>; drop python3-dev
-#   WITH_LUA        — capture <lua.h>; drop liblua5.4-dev
 #   WITH_PERL       — capture <EXTERN.h>; drop libperl-dev
 #   WITH_RUBY       — capture <ruby.h>; drop ruby-dev
 #   WITH_JS         — capture <duktape.h>; drop duktape-dev
@@ -32,7 +31,7 @@
 #
 #   docker build -t aether-builder:polyglot \
 #       --build-arg WITH_JAVA=1 --build-arg WITH_PYTHON=1 \
-#       --build-arg WITH_LUA=1 --build-arg WITH_RUBY=1 \
+#       --build-arg WITH_RUBY=1 \
 #       --build-arg WITH_PERL=1 --build-arg WITH_JS=1 \
 #       -f tools/docker/Dockerfile .
 #
@@ -54,7 +53,6 @@ FROM debian:bookworm AS builder
 
 ARG WITH_JAVA=0
 ARG WITH_PYTHON=0
-ARG WITH_LUA=0
 ARG WITH_PERL=0
 ARG WITH_RUBY=0
 ARG WITH_JS=0
@@ -84,7 +82,7 @@ RUN chmod +x /usr/local/lib/docker-build-scripts/*.sh
 # host-language toggle is on. Skipped entirely for the slim
 # (no-toggle) build path. Header pin (commit SHA) and source repo
 # URL are env-vars inside the script — bump there to upgrade.
-RUN if [ "$WITH_PYTHON$WITH_LUA$WITH_PERL$WITH_RUBY$WITH_JS" != "00000" ]; then \
+RUN if [ "$WITH_PYTHON$WITH_PERL$WITH_RUBY$WITH_JS" != "0000" ]; then \
         /usr/local/lib/docker-build-scripts/clone-host-headers.sh; \
     fi
 
@@ -94,7 +92,6 @@ RUN if [ "$WITH_PYTHON$WITH_LUA$WITH_PERL$WITH_RUBY$WITH_JS" != "00000" ]; then 
 # the hosted-language-headers repo.
 RUN if [ "$WITH_JAVA"   = "1" ]; then /usr/local/lib/docker-build-scripts/install-java.sh;            fi
 RUN if [ "$WITH_PYTHON" = "1" ]; then /usr/local/lib/docker-build-scripts/install-python-headers.sh;  fi
-RUN if [ "$WITH_LUA"    = "1" ]; then /usr/local/lib/docker-build-scripts/install-lua-headers.sh;     fi
 RUN if [ "$WITH_PERL"   = "1" ]; then /usr/local/lib/docker-build-scripts/install-perl-headers.sh;    fi
 RUN if [ "$WITH_RUBY"   = "1" ]; then /usr/local/lib/docker-build-scripts/install-ruby-headers.sh;    fi
 RUN if [ "$WITH_JS"     = "1" ]; then /usr/local/lib/docker-build-scripts/install-js-headers.sh;      fi
@@ -114,7 +111,6 @@ FROM debian:bookworm-slim
 # values flow through.
 ARG WITH_JAVA=0
 ARG WITH_PYTHON=0
-ARG WITH_LUA=0
 ARG WITH_PERL=0
 ARG WITH_RUBY=0
 ARG WITH_JS=0
@@ -144,7 +140,6 @@ COPY --from=builder /opt/aether          /opt/aether
 # the runtime-only ones on the same conditional flag.
 RUN apt-get update \
  && if [ "$WITH_PYTHON" = "1" ]; then apt-get install -y --no-install-recommends python3; fi \
- && if [ "$WITH_LUA"    = "1" ]; then apt-get install -y --no-install-recommends liblua5.4-0; fi \
  && if [ "$WITH_PERL"   = "1" ]; then apt-get install -y --no-install-recommends perl-base; fi \
  && if [ "$WITH_RUBY"   = "1" ]; then apt-get install -y --no-install-recommends ruby; fi \
  && if [ "$WITH_JS"     = "1" ]; then apt-get install -y --no-install-recommends libduktape207; fi \

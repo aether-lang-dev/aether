@@ -6,7 +6,7 @@
 // grant list.
 //
 // LOADING MODEL: dlopen, not -ltcl. Mirrors contrib/host/python,
-// ruby, lua, perl, js — every Tcl C-API symbol resolved via dlsym
+// ruby, perl, js — every Tcl C-API symbol resolved via dlsym
 // at first call. The bridge .a has NO unresolved Tcl_* symbols at
 // link time, so end-user binaries have no DT_NEEDED libtcl and are
 // ABI-portable across deploy-host Tcl minor versions (8.6 / 9.0

@@ -15,7 +15,7 @@ go version
 
 ## Build flags
 
-Unlike the in-process hosts (Lua, Python, Perl, Ruby, Tcl, JS) the Go
+Unlike the in-process hosts (Python, Perl, Ruby, Tcl, JS) the Go
 host has no library to embed: the bridge shells out to the `go`
 toolchain. No headers or `-l` flags are needed beyond the standard
 Aether runtime:

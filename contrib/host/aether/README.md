@@ -6,7 +6,7 @@ launched with `LD_PRELOAD=libaether_sandbox.so` so its libc calls
 (`connect`, `open`, `execve`, `getenv`) are intercepted against a
 grant list.
 
-Unlike the Lua/Python/Ruby host modules which embed an interpreter
+Unlike the Python/Ruby/Tcl host modules which embed an interpreter
 in-process, this module launches a **separate process**, because
 Aether is compiled, not interpreted.
 
@@ -14,7 +14,6 @@ Aether is compiled, not interpreted.
 
 | Module | Mechanism | Containment |
 |---|---|---|
-| `contrib.host.lua` | Embed Lua interpreter in-process | Sandbox checker on libc calls |
 | `contrib.host.python` | Embed CPython in-process | Sandbox checker on libc calls |
 | **`contrib.host.aether`** | **Compile to binary, fork+exec** | **LD_PRELOAD on child process** |
 
