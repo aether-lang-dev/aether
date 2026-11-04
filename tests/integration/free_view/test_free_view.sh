@@ -7,7 +7,9 @@
 # the buffer's slice still holds. The slice that holds a `make` buffer, a
 # view of a raw pointer the program owns from its start, a local bound
 # again, and a `@keep` slice parameter compile; a view given to a function
-# is the run-time check's (tests/regression/test_issue3072_free_view.ae).
+# is the run-time check's (tests/regression/test_issue3072_free_view.ae). A
+# struct parameter's slice field compiles with W1007: its caller owns it, so
+# the `free` gives back nothing (#3568).
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -141,6 +143,40 @@ main() {
     e = make([]byte, 2)
     e = make([]byte, 3)
     free(e)
+}
+AE
+
+# #3568: `free` of a struct parameter's slice field gives back nothing (the
+# caller owns the field and releases it), with W1007 where it is written.
+warned() {
+    cat > "$TMP/$1.ae"
+    out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" check "$1.ae" 2>&1)
+    if [ $? -ne 0 ]; then
+        echo "  [FAIL] $1: refused"
+        echo "$out" | sed 's/^/        /' | head -8
+        fails=$((fails + 1))
+        return
+    fi
+    case "$out" in
+        *"warning[W1007]"*"$2"*"$1.ae:$3"*) ;;
+        *) echo "  [FAIL] $1: not W1007 \"$2\" at $3"
+           echo "$out" | sed 's/^/        /'
+           fails=$((fails + 1)) ;;
+    esac
+}
+
+warned param_field "this \`free\` gives back nothing: the slice is a field of a struct parameter" 6:5 <<'AE'
+struct Box {
+    items: int[]
+}
+
+drop_items(b: Box) {
+    free(b.items)
+}
+
+main() {
+    b = Box { items: make([]int, 3) }
+    drop_items(b)
 }
 AE
 

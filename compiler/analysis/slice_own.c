@@ -741,6 +741,16 @@ static void report(Ctx* c, Frame* f, ASTNode* at, AetherErrorCode code, const ch
     c->errors++;
 }
 
+static void warn(Ctx* c, Frame* f, ASTNode* at, AetherErrorCode code, const char* msg,
+                 const char* hint) {
+    if (pm_get(&c->reported, at)) return;
+    pm_put(&c->reported, at, (Local*)1);
+    AetherError w = {at && at->source_file ? at->source_file
+                                           : (f->owner ? f->owner->source_file : NULL),
+                     NULL, node_line(at), at ? at->column : 0, msg, hint, NULL, code};
+    aether_warning_report(&w);
+}
+
 /* ---- where a value goes ---- */
 
 /* How the `i`th child of `p` is used when it is a slice: borrowed (read,
@@ -1453,9 +1463,21 @@ static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
     return 1;
 }
 
+/* Is `e` a field of a struct parameter (`b.items`, `b.inner.items`)? The
+ * field is its caller's: the copy of the struct the callee is given holds
+ * no reference of its own (R3: parameters borrow). */
+static int param_struct_field(Frame* f, ASTNode* e) {
+    if (!e || e->type != AST_MEMBER_ACCESS) return 0;
+    ASTNode* b = e;
+    while (b && b->type == AST_MEMBER_ACCESS && b->child_count > 0) b = b->children[0];
+    Local* l = b && b->type == AST_IDENTIFIER ? pm_get(&f->uses, b) : NULL;
+    return l && l->param && l->type && l->type->kind == TYPE_STRUCT;
+}
+
 /* Does the value `e` hold a reference of its own: a local, a cell, a
  * field, an element, a module-level `var` or a state field (each place
- * holds one), or a call's result (which it hands over)? */
+ * holds one), a call's result (which it hands over), or a view of one
+ * (which takes it over)? */
 static int holds_reference(Ctx* c, Frame* f, ASTNode* e) {
     if (!e) return 0;
     switch (e->type) {
@@ -1466,15 +1488,10 @@ static int holds_reference(Ctx* c, Frame* f, ASTNode* e) {
                                 strmap_has(&c->globals, e->value) ||
                                 strmap_has(&c->state, e->value));
         }
-        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS: {
-            /* A field of a struct parameter is its caller's: the copy the
-             * callee is given holds none of its own. */
-            ASTNode* b = e;
-            while (b && b->type == AST_MEMBER_ACCESS && b->child_count > 0) b = b->children[0];
-            Local* l = b && b->type == AST_IDENTIFIER ? pm_get(&f->uses, b) : NULL;
-            return !(e->type == AST_MEMBER_ACCESS && l && l->param && l->type &&
-                     l->type->kind == TYPE_STRUCT);
-        }
+        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
+            return !param_struct_field(f, e);
+        case AST_SLICE_EXPR:
+            return view_of_fresh(e);
         case AST_FUNCTION_CALL:
             return e->value && strcmp(e->value, "__slice_lend") != 0;
         default:
@@ -1496,6 +1513,13 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
              * (`slice_free_view`, aether_slice_free_view). */
             if (!holds_reference(c, f, *xs))
                 n->annotation = annotation_add_marker(n->annotation, "slice_free_view");
+            /* A struct parameter's field is its caller's, who releases it:
+             * the `free` gives back nothing (aether_slice_free_view). */
+            if (param_struct_field(f, *xs))
+                warn(c, f, n, AETHER_WARN_FREE_NOT_OWNED,
+                     "this `free` gives back nothing: the slice is a field of a struct "
+                     "parameter, which its caller owns and releases (parameters borrow)",
+                     "free it where the struct is owned, or leave it to the caller's scope");
             /* The place `free` releases is left empty, so nothing releases
              * it again. */
             if (pure_place(*xs)) wrap(xs, "__slice_take");

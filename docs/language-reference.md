@@ -458,7 +458,7 @@ A buffer `make([]T, n)` hands out, or `push` or `append` grows, is counted (#356
 |---|---|
 | A local (`xs = make(...)`, `xs = f()`, `v = xs[1..]`, `int[] xs = []` then pushed) | It holds a reference. Every exit of its scope (the end of the block, `return`, `break`, `continue`, a caught panic) releases it. Binding the local again releases what it held. |
 | `ys = xs`, `return xs`, `s.f = xs`, `g = xs` (a module-level `var`), `rows[i] = xs`, `T { f: xs }`, `(xs, n)`, `[xs]`, a message field `xs` | The reference moves: `xs` is left empty, and using it again before it is bound anew is E0906, `'xs' is used after it was moved (line 3): an owned slice has one owner`. A local a view of which may be held (`xs[..]` or `xs[1..]` bound or passed on, `xs` given to a function, or named in a closure) is copied instead: the place gets a reference of its own, and `xs` stays as it was. `return xs` always moves. |
-| `free(xs)`, `append(xs, v)` | Consume `xs`: its reference is released, or grown into the result, and `xs` left empty. Using it again is E0906 where it would move. `free` works on any place (and `defer free(xs)` too): the scope exit then has nothing to release. `free` of a view a place holds releases that view's reference; the buffer stays for the others. |
+| `free(xs)`, `append(xs, v)` | Consume `xs`: its reference is released, or grown into the result, and `xs` left empty. Using it again is E0906 where it would move. `free` works on any place (and `defer free(xs)` too): the scope exit then has nothing to release. `free` of a view a place holds releases that view's reference; the buffer stays for the others. `free` of a field of a struct parameter gives back nothing (W1007): the caller owns the field and releases it. |
 | `xs.push(v)` | Grows `xs` where it is. |
 | `f(xs)` to a parameter `p: T[]` | `f` borrows it: `xs` still holds it after the call. In `f`, `p` is never released, and `free(p)`, `append(p, v)` and `p.push(v)` are refused (E0901), as is giving `p` to a `@keep` parameter. What `f` keeps (`p` stored, returned, bound) takes a reference of its own. A fresh buffer given straight to `p` (`f(make([]int, 3))`) is released when the call returns. |
 | `f(xs)` to a parameter `p: @keep T[]` | `p` holds a reference, `xs`'s moved in (E0906 to use `xs` after) or a copy of its own, and releases it as a local does. |
@@ -5473,6 +5473,26 @@ main() {
 and only those ([formatter.md](formatter.md)). A long name whose short form
 would start with a digit (`sha3.sha3_256_hex`) has no short form and is not
 reported. `ae build` and `ae run` do not report it.
+
+### A Free That Gives Back Nothing [W1007]
+
+A struct parameter is its caller's struct, lent for the call, so a slice
+field of it holds no reference of the function's own ([Slice
+ownership](#slice-ownership)). `free` of such a field gives back nothing: the
+caller still holds the field, and its scope's exit releases it.
+
+```aether,fragment
+struct Box {
+    items: int[]
+}
+
+drop_items(b: Box) {
+    free(b.items)
+    // warning[W1007]: this `free` gives back nothing: the slice is a field
+    // of a struct parameter, which its caller owns and releases (parameters
+    // borrow)
+}
+```
 
 ## Match Expressions
 

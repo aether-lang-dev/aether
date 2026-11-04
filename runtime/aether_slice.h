@@ -684,16 +684,18 @@ static inline void aether_slice_free(AetherSlice s, const char* file, int line) 
     free(s.ptr);
 }
 
-/* `free(v)` of a value no place holds (`free(xs[1..])`): a view borrowed for
- * the statement, which holds no reference to give back, so freeing it is the
- * named panic a view gets. */
+/* `free(v)` of a value its place holds no reference to: a field of a struct
+ * parameter (its caller's), a view borrowed for the statement. A view of
+ * elements something else holds (an array, a list pattern's tail) is the
+ * named panic a view gets. A counted buffer or string gives back nothing:
+ * the place that owns it releases it (R3: parameters borrow), where giving
+ * back the owner's reference freed the buffer under it. Uncounted memory
+ * the program viewed from its start is freed, as before. */
 static inline void aether_slice_free_view(AetherSlice s, const char* file, int line) {
-    if (s.flags & AETHER_SLICE_READONLY)
-        aether_slice_panicf("%s:%d: free of a read-only view of a string, which owns nothing",
-                            file, line);
     if (s.flags & AETHER_SLICE_BORROWED)
         aether_slice_panicf("%s:%d: free of a view of elements another slice or an array "
                             "holds, which owns nothing", file, line);
+    if (s.flags & (AETHER_SLICE_MADE | AETHER_SLICE_STRING)) return;
     aether_slice_free(s, file, line);
 }
 

@@ -41,6 +41,7 @@ typedef enum {
     AETHER_WARN_CONST_OVERFLOW = 1003,   // int constant expression exceeds 32 bits
     AETHER_WARN_UNREACHABLE_ARM = 1004,  // match arm shadowed by an earlier arm
     AETHER_WARN_DOUBLED_MODULE_NAME = 1006,  // `ns.ns_x(...)` where `ns.x` is the same declaration (#2976)
+    AETHER_WARN_FREE_NOT_OWNED = 1007,   // `free` of a slice its function does not own gives back nothing (#3568)
 } AetherErrorCode;
 
 // Error reporting with source context

@@ -308,7 +308,9 @@ as `free` gives it back). A program writes no `free` for it.
   the buffer stays for the others. `free` of a view no place holds
   (`free(xs[1..])`, a clause's list tail) and of a view of memory no count
   covers (an array viewed as a slice) is a named panic, as is `free` of a
-  string's bytes, which are read-only.
+  string's bytes, which are read-only. `free` of a field of a struct
+  parameter gives back nothing (W1007): the caller owns the field and
+  releases it, as parameters borrow.
 - **A view of a string's bytes holds the string** (`string.bytes(s)`,
   #3570): the string stays while any place holds a view of it, and is
   released with the last, as a `make` buffer is. A literal's bytes are
