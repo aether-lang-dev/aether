@@ -13,9 +13,11 @@
 #include <stdio.h>
 #include <string.h>
 
-/* Returns a counted AetherString; its characters come through aether_string_data. */
+/* Returns a counted AetherString; its characters come through aether_string_data,
+ * and the caller gives it back with string_release (#3547). */
 extern char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list);
 extern const char* aether_string_data(const void* s);
+extern void string_release(const void* str);
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <probe-script>\n", argv[0]); return 2; }
@@ -40,7 +42,9 @@ int main(int argc, char** argv) {
     const char* out = captured ? aether_string_data(captured) : NULL;
     printf("child status: %s", out ? out : "(null)\n");
 
-    if (out && strstr(out, "SigBlk:\t0000000000000000")) {
+    int clear = out && strstr(out, "SigBlk:\t0000000000000000") != NULL;
+    string_release(captured);
+    if (clear) {
         printf("PASS: spawned child has a clear signal mask\n");
         return 0;
     }
