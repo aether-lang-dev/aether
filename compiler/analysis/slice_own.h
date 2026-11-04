@@ -1,69 +1,59 @@
 /* Slice ownership: a buffer `make([]T, n)` hands out, or `append` or `push`
- * grows, has one owner, and is released when that owner goes out of scope.
+ * grows, is counted (R1, #3568), and every place that holds a slice of it
+ * holds one reference (R2): the last place to give its reference back
+ * gives back the buffer and what each element holds.
  *
- * A slice local the program binds (`xs = make([]int, n)`, `int[] xs = []`,
- * `xs = f()`) owns what it holds when anything it is given may be such a
- * buffer: a call's result, a local that owns one, or a buffer `free`,
- * `append` or `push` is applied to. It is dropped on every exit of its
+ * A slice local holds a reference: one a call hands over (`xs = f()`, `xs =
+ * make(...)`), one moved out of a local that owns (`ys = xs`), or a copy of
+ * its own of any other slice (`v = xs[1..3]`, `v = p` of a parameter, `v =
+ * s.items`, `v = rows[i]`). It gives the reference back on every exit of its
  * scope (the end of its block, a `return`, a `break` or `continue`, a
- * caught panic) by a `defer` this pass puts after its binding: the buffer,
- * and what each element holds, are released, unless the buffer was moved
- * out first. A local only ever given views (a sub-slice, an array, a
- * field, a parameter) owns nothing and is never dropped.
+ * caught panic), by a `defer` this pass puts after its binding, and a store
+ * into it (`xs = v`) gives back what it held. So a view keeps the buffer it
+ * views for as long as it is held, wherever its owner went: bound in an
+ * outer scope, held while the owner is bound again, returned, stored.
  *
- * A slice moves: binding it to another name (`ys = xs`), returning it,
- * storing it into a field, a module-level `var` or an element, putting it
- * in a struct, a tuple, an array or a message, and giving it to a `@keep`
- * parameter each take it out of the local, which is left empty (and its
- * drop finds nothing). Using the local again before it is bound anew is an
- * error (E0906), as it is after `free(xs)` and after `append(xs, v)`, which
- * consume it. A parameter borrows: it is never dropped, and `free`,
- * `append` and `push` on it are refused (E0901) unless it is declared
- * `xs: @keep T[]`, when the caller's buffer moves into it and it is
- * dropped as a local that owns. Passing a slice to any other parameter,
- * indexing it, measuring it, viewing it (`xs[a..b]`, `xs[..]`) and
- * iterating it borrow it.
+ * A local that owns what it holds moves: binding it to another name (`ys =
+ * xs`), returning it, storing it into a field, a module-level `var` or an
+ * element, putting it in a struct, a tuple, an array or a message, and
+ * giving it to a `@keep` parameter each take it out of the local, which is
+ * left empty (and its release finds nothing). Using the local again before
+ * it is bound anew is an error (E0906), as it is after `free(xs)` and after
+ * `append(xs, v)`, which consume it. A local only ever given views and
+ * copies is copied instead, a reference of its own for each place. A
+ * parameter borrows: it holds no reference, and `free`, `append` and `push`
+ * on it are refused (E0901) unless it is declared `xs: @keep T[]`, when the
+ * caller's reference moves into it and it is released as a local that
+ * owns. Passing a slice to any other parameter, indexing it, measuring it,
+ * viewing it (`xs[a..b]`, `xs[..]`) and iterating it borrow it.
  *
- * A copy of a slice out of a place that does not own it for the copy (a
- * parameter, a field, an element, a module-level `var`, a local captured
- * by a closure or bound by a pattern) is lent: it is marked a view at run
- * time (aether_slice_lend), so the place that holds the copy never frees
- * it. An element of a slice of slices owns its row: a store into it drops
- * the row it replaces, and the outer slice's drop (or `free`) drops every
- * row.
- *
- * A view of a local's buffer that may outlive the local (returned, stored,
- * given to a parameter its function stores or returns, captured by a
- * closure that escapes, bound in an outer scope, or held while the local is
- * re-bound, moved, freed or grown) keeps the buffer: the local does not
- * release it, as nothing did before ownership (the escape analysis in
- * slice_own.c, with a summary per function of what it does with its slice
- * parameters, to a fixed point over the calls).
+ * A copy (aether_slice_copy) is marked a view: it shares the buffer, so
+ * growing it is a named panic. `free` of any place gives back the
+ * reference it holds and leaves the place empty. A store into a field, an
+ * element, a module-level `var` or an actor's state field gives back what
+ * the place held (`__slice_set`, `__slice_set_shared` for a place other
+ * threads read, which publishes the stored buffer).
  *
  * A slice local a closure assigns is a cell the frame and its closures
- * share (codegen promotes it), and the cell owns what it holds (#3549)
- * where nothing else can reach the buffer: every use of the local in the
- * frame borrows it, stores into it or returns it, with no view of its
- * buffer bound or escaping, and every closure that captures it is bound to
- * a local only called and only stores into it, indexes it or reads its
- * length. Then every store into it, in the frame or the closure, drops
- * what it held (`__slice_set`), the cell's last release drops what it
- * holds then, and a `return` of it gives the buffer to the caller and
- * leaves the cell a loan (`__slice_give`). A closure holds the cell it
- * stores into, not a view of the buffer in it.
+ * share (codegen promotes it, by name): the cell holds the reference. Every
+ * store into it, in the frame or a closure, gives back what it held, and
+ * the cell's last release gives back what it holds then (#3549). A closure
+ * that only reads a slice holds a copy of it in its environment.
  *
- * Left to the program, as before: any other slice local a closure
- * captures, or whose address is taken, or that a pattern or a destructure
- * binds, and the buffers held by fields, module-level `var`s, tuples and
- * messages.
+ * A fresh buffer given straight to a call (`total(make([]int, 3))`) is the
+ * call's argument temporary, released once the call returns (the
+ * `slice_temp` marker): a callee that keeps it takes a reference of its
+ * own. No rule reads another function's body.
+ *
+ * A local a pattern, a destructure or a `catch` binds holds what it was
+ * bound from, as before: what it holds stays with that value.
  *
  * The pass runs over the type-checked program (before the escape check,
- * slice_escape.c, which counts a view of a buffer a local owns as the
- * frame's own storage) and rewrites it for codegen with the intrinsics
- * `__slice_take`, `__slice_lend`, `__slice_drop`, `__slice_set` and
- * `__slice_give`, and the markers `slice_temp` (a buffer made for a call,
- * which the call drops) and `slice_cell` (a cell owner's declaration).
- * Returns the number of errors reported. */
+ * slice_escape.c, which keeps a view of the frame's own arrays in the
+ * frame) and rewrites it for codegen with the intrinsics `__slice_take`,
+ * `__slice_copy`, `__slice_lend`, `__slice_drop`, `__slice_set` and
+ * `__slice_set_shared`, and the marker `slice_temp`. Returns the number of
+ * errors reported. */
 
 #ifndef AETHER_SLICE_OWN_H
 #define AETHER_SLICE_OWN_H
@@ -71,10 +61,5 @@
 #include "../ast.h"
 
 int check_slice_ownership(ASTNode* program);
-
-/* Does the identifier `n` name a local or a cell (#3549) that owns its
- * buffer (as the last check_slice_ownership found)? A view of that buffer
- * is storage of the frame, which the escape check keeps in it. */
-int slice_own_owner_ident(const ASTNode* n);
 
 #endif

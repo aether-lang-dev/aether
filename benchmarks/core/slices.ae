@@ -1,0 +1,86 @@
+// Slice hot paths (#3568): a `make` buffer made and released, one grown by
+// `append` from empty, a view of it bound to a local (which holds a
+// reference of its own), a view given to a function that only reads it, and
+// an index loop over a long slice.
+//
+// Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
+
+import std.os
+
+per_op(t0: long, t1: long, n: int) -> float {
+    return (t1 - t0) as float / n as float
+}
+
+total_of(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+main() {
+    n = 1000000
+    total = 0
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        xs = make([]int, 16)
+        xs[3] = i
+        total = total + xs[3]
+        i = i + 1
+    }
+    println("row slice_make ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    m = n / 10
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < m {
+        int[] xs = []
+        for k in 0..64 {
+            xs = append(xs, k)
+        }
+        total = total + xs.len
+        i = i + 1
+    }
+    println("row slice_append64 ${per_op(t0, os.now_monotonic_ns(), m)} ns/op")
+
+    buf = make([]int, 64)
+    for k in 0..64 {
+        buf[k] = k
+    }
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        v = buf[8..24]
+        total = total + v[3] + v.len
+        i = i + 1
+    }
+    println("row slice_view_bound ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < n {
+        total = total + total_of(buf[60..64])
+        i = i + 1
+    }
+    println("row slice_view_passed ${per_op(t0, os.now_monotonic_ns(), n)} ns/op")
+
+    big = make([]int, 4096)
+    for k in 0..4096 {
+        big[k] = k & 7
+    }
+    reps = 2000
+    t0 = os.now_monotonic_ns()
+    i = 0
+    while i < reps {
+        total = total + total_of(big)
+        i = i + 1
+    }
+    println("row slice_index_4096 ${per_op(t0, os.now_monotonic_ns(), reps)} ns/op")
+
+    if total == 42 {
+        println("unlikely")
+    }
+}

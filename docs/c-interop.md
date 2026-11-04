@@ -965,15 +965,24 @@ main() {
 - For Aether-owned data; prefer fixed-size stack arrays (`int[5] arr`) or the higher-level collections in `std.collections`. The `as T[]` cast is the systems-programming escape hatch, not the everyday array.
 - When you want bounds-checked storage. Sub-slice the view with an explicit end (`(raw as int[])[0..n]`) or start from a `T[N]` array / `make([]T, n)`; a bare view has no length to check against.
 
-**Slices at the C boundary.** An Aether `T[]` is `AetherSlice { void* ptr; uint64_t len; }` by value (`runtime/aether_slice.h`, included by every generated program). The extern ABI does not see that struct:
+**Slices at the C boundary.** An Aether `T[]` is `AetherSlice { void* ptr; uint64_t len; uint32_t flags; uint32_t off; }` by value (`runtime/aether_slice.h`, included by every generated program). The extern ABI does not see that struct:
 
 | Position | C sees | The compiler emits |
 |---|---|---|
-| `extern f(data: byte[])` parameter | `unsigned char*` | the argument's `.ptr` (the length is dropped; pass it separately, `f(data, data.len)`) |
-| `extern g() -> int[]` return | `int*` | `aether_slice_view(g())`: an unbounded slice |
+| `extern f(data: byte[])` parameter | `unsigned char*` | the argument's `.ptr`, borrowed for the call (the length is dropped; pass it separately, `f(data, data.len)`) |
+| `extern g() -> int[]` return | `int*` | `aether_slice_view(g())`: an unbounded slice, not counted |
 | `extern struct S { buf: byte[] }` field | `unsigned char buf[]` (last field) / `unsigned char*` | a read of `s.buf` is an unbounded view; `s.buf + i` is a `ptr` |
-| a `T[]` passed to a `ptr` parameter, `free(s)`, `s == null`, `s + n` | `void*` / `T*` | `.ptr` |
+| a `T[]` passed to a `ptr` parameter, `s == null`, `s + n` | `void*` / `T*` | `.ptr` |
+| `free(s)` | | `aether_slice_free`: a counted buffer's reference given back, the buffer going with the last; the pointer of memory the program owns freed |
 | an Aether function's `T[]` parameter, return, struct field | `AetherSlice` | the whole fat pointer |
+
+**Counted buffers (#3568, runtime ABI revision 3).** The buffer `make([]T, n)` hands out, or `append` grows, is counted: its storage starts `AETHER_SLICE_HEAD` (32) bytes before the first element, where a header holds the number of places that hold a slice of it, and every slice of it carries the mark `AETHER_SLICE_MADE` and its offset into the buffer (`off`, and bits 8 to 31 of `flags`), by which the header is found. A slice without the mark is not counted and nothing is read before its `ptr`: one C builds (`aether_slice_make`), an extern's `T[]` result, `p as T[]`, an array viewed as a slice, a string's bytes. `AetherSlice` keeps the size and the offsets of `ptr`, `len` and `flags` it had.
+
+Migrating C that touches Aether slices:
+
+- C must never `free()` the `.ptr` of a `make` buffer: it is not the start of the allocation. A C function given `.ptr` borrows it for the call.
+- A host that holds an `AetherSlice` an Aether function returned (C emitted with `--emit=csrc` or `--emit=obj`) holds one reference: it gives it back with `aether_slice_release(&s)`, which empties `s`.
+- A host makes a view of part of a slice with `aether_slice_sub(s, lo, hi, sizeof(T), file, line)`, never by moving `.ptr` and `.len` itself: the view has to carry its offset into the buffer. A view a host keeps past the call takes a reference of its own with `aether_slice_retain(v)`, given back with `aether_slice_release(&v)`.
 
 ### `@c_struct` typed overlays, width-correct field access over a raw `ptr`
 

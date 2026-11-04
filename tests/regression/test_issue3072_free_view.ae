@@ -7,6 +7,12 @@
 // ones it can see are refused (tests/integration/free_view). The slice that
 // holds a `make` buffer, and a view of a raw pointer the program owns from
 // its start, are freed as before, and the rounds must not grow the heap.
+//
+// #3568: a `make` buffer is counted, so a view of one given to a `@keep`
+// parameter is a reference the parameter holds: `free` gives that reference
+// back, and the buffer stays for the slice that holds it. Views of memory no
+// count covers (a string's bytes, an array) and a pattern's tail (which
+// holds no reference of its own) are still refused by name.
 
 import std.mem
 import std.string
@@ -97,9 +103,10 @@ main() {
     xs = make([]int, 3)
     // `b[..]` and `xs[..]` are views of the buffers, given where the
     // parameter that takes them is not the one tried.
-    refused("a sub-slice from an offset", 0, b[1..], xs[..], view)
-    refused("a sub-slice from the start", 0, b[0..4], xs[..], view)
-    refused("a sub-slice of a sub-slice", 0, b[2..6][0..2], xs[..], view)
+    drop(b[1..])
+    drop(b[0..4])
+    drop(b[2..6][0..2])
+    check(b.len == 8 && b[0] == 0, "a view given to a @keep parameter, freed, leaves the buffer")
     refused("a string's bytes", 0, string.bytes("abc"), xs[..], ro)
     refused("a sub-slice of a string's bytes", 0, string.bytes("abc")[1..], xs[..], ro)
     arr = [1, 2, 3]
@@ -107,7 +114,7 @@ main() {
     refused("a clause's list tail", 2, b[..], xs[..], view)
     refused("a match's list tail", 3, b[..], xs[..], view)
     h = Holder { buf: b[2..] }
-    refused("a field holding a sub-slice", 0, h.buf, xs[..], view)
+    drop(h.buf)
     check(b[0] == 0 && xs.len == 3, "the buffers the views were made of are intact")
     free(xs)
     drop(b)

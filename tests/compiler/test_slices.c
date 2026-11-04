@@ -364,8 +364,14 @@ TEST(slices_runtime_len_sub_and_from) {
     AetherSlice rest = aether_slice_from(view, 3, sizeof(int), "t", 9);
     ASSERT_EQ(-1, (int)aether_slice_len(rest));      /* still unbounded */
     ASSERT_EQ(4, *(int*)aether_slice_at(rest, 0, sizeof(int), "t", 10));
-    AetherSlice fresh = aether_slice_alloc(3, sizeof(int));
+    AetherSlice fresh = aether_slice_alloc(3, sizeof(int), NULL);
     ASSERT_EQ(3, (int)aether_slice_len(fresh));
     ASSERT_EQ(0, *(int*)aether_slice_at(fresh, 2, sizeof(int), "t", 11));   /* zeroed */
-    free(fresh.ptr);
+    /* #3568: counted; a view of it holds it too, and the last gives it back. */
+    AetherSlice part = aether_slice_sub(fresh, 1, 3, sizeof(int), "t", 12);
+    aether_slice_retain(part);
+    ASSERT_EQ(2, aether_slice_buf(fresh)->refs);
+    aether_slice_release(&fresh);
+    ASSERT_EQ(1, aether_slice_buf(part)->refs);
+    aether_slice_release(&part);
 }

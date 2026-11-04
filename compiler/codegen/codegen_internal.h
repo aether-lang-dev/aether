@@ -668,6 +668,8 @@ ASTNode* find_sum_definition_by_name(ASTNode* program, const char* name);
 /* #2921: R2/R3 for composite types (codegen_own.c). */
 typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
+/* #3568: own_type_owns, or a slice: what a part of a composite owns. */
+int own_part_owns(CodeGenerator* gen, Type* t);
 int own_value_composite(CodeGenerator* gen, Type* t);
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
 const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv);
@@ -707,8 +709,8 @@ const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
 const char* own_cell_release_fn(const char* c_type);
 const char* own_place_lvalue(Type* t, const char* name);
 const char* own_unwind_fn(CodeGenerator* gen, Type* t);
-/* Slice ownership: the drop of one element of a slice of `et` (or "NULL"). */
-const char* own_slice_elem_drop_fn(CodeGenerator* gen, Type* et);
+/* #3568: the element ops a counted buffer of slice type `t` carries (or "NULL"). */
+const char* own_slice_ops(CodeGenerator* gen, Type* t);
 void own_reset(void);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters

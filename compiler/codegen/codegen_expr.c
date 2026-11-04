@@ -351,7 +351,7 @@ typedef struct ArgDrainWrap {
                          * retained into the temp, released the same way;
                          * 3 = a slice that owns its buffer (#3549), dropped
                          * through drop[] */
-    const char* drop[16]; /* a slice's drop (own_slice_elem_drop_fn of its type) */
+    const char* drop[16]; /* a slice's release (aether_slice_release_at, #3568) */
     int scoped[16];     /* 1 = lives to its scope's exit: the call returns a view, which
                          * may point into it (call_returns_view) */
     int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
@@ -675,7 +675,8 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * and is released after the call. One wrapped into an optional or a
          * tuple parameter is that argument's temporary's
          * (emit_composite_arg_temp). */
-        if (arg->type == AST_IF_EXPRESSION && arg->node_type && branch_value_has_fresh(gen, arg)) {
+        if (arg->type == AST_IF_EXPRESSION && arg->node_type && !type_is_slice(arg->node_type) &&
+            branch_value_has_fresh(gen, arg)) {
             Type* at = arg->node_type;
             TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
             if (arg_drain_lookup(arg) || pk == TYPE_OPTIONAL || pk == TYPE_TUPLE) continue;
@@ -693,15 +694,17 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             continue;
         }
         /* #3549: a slice that owns the buffer it holds, made for the call:
-         * slice ownership marks the arguments it gives the call to drop (a
-         * fresh buffer given to a parameter that neither keeps it nor hands
-         * a view of it back, slice_own.c), and the call drops it as the
-         * owning local it would have been bound to would be. */
-        if (arg->type == AST_FUNCTION_CALL && type_is_slice(arg->node_type) &&
+         * slice ownership marks the arguments it gives the call to release (a
+         * fresh buffer given to a parameter that does not keep it, #3568: a
+         * callee that keeps it takes its own reference), and the call releases
+         * it as the local it would have been bound to would be. */
+        if ((arg->type == AST_FUNCTION_CALL || arg->type == AST_IF_EXPRESSION ||
+             arg->type == AST_MATCH_STATEMENT) &&
+            type_is_slice(arg->node_type) &&
             annotation_has_marker(arg->annotation, "slice_temp")) {
             if (mode != ARG_SEL_OPERATOR && borrowed && !arg_drain_lookup(arg)) {
                 w->closure[w->count] = 3;
-                w->drop[w->count] = own_slice_elem_drop_fn(gen, arg->node_type);
+                w->drop[w->count] = "aether_slice_release_at";
                 w->idx[w->count++] = ai;
             }
             continue;
@@ -3524,7 +3527,7 @@ static int is_builtin_name(const char* name) {
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
         "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
         "__slice_take", "__slice_lend", "__slice_drop", "__slice_set", "__slice_push",
-        "__slice_give",
+        "__slice_copy", "__slice_set_shared",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -4608,14 +4611,21 @@ static int capture_is_promoted(CodeGenerator* gen, const char* name, const char*
 static Type* capture_composite_type(CodeGenerator* gen, const char* name, const char* parent_func) {
     if (capture_is_promoted(gen, name, parent_func)) return NULL;
     Type* t = lookup_var_type(gen, name, parent_func);
+    /* #3568: a slice the closure reads is held by its environment, with a
+     * reference of its own, which the environment's teardown gives back. */
+    if (t && type_is_slice(t)) return t;
     if (!t || !own_type_owns(gen, t)) return NULL;
     if (own_value_composite(gen, t) || t->kind == TYPE_PTR) return t;
     return type_is_sized_array(t) && t->array_size > 0 ? t : NULL;
 }
 
-/* The retain of the environment's copy of `name`, of composite type `t`. */
+/* The retain of the environment's copy of `name`, of composite type `t`. A
+ * slice is published too: the closure may run on another thread. */
 static void capture_take(CodeGenerator* gen, const char* name, Type* t) {
-    if (t->kind == TYPE_PTR)
+    if (type_is_slice(t))
+        fprintf(gen->output, " aether_slice_retain(_e->%s); aether_slice_publish(_e->%s);", name,
+                name);
+    else if (t->kind == TYPE_PTR)
         fprintf(gen->output, " _e->%s = string_seq_retain(_e->%s);", name, name);
     else if (t->kind == TYPE_ARRAY)
         fprintf(gen->output, " %s((%s*)_e->%s);", own_fn(gen, t, "retain"),
@@ -5596,7 +5606,7 @@ void emit_message_publishes(CodeGenerator* gen, ASTNode* message, const char* lv
         if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
         Type* ft = message_field_type(gen->program, message->value, fi->value);
         if (!ft || ft->kind == TYPE_STRING || ft->kind == TYPE_FUNCTION ||
-            !own_type_owns(gen, ft)) continue;
+            !own_part_owns(gen, ft)) continue;
         const char* call = own_publish_call(gen, ft, cg_internf("%s.%s", lv, fi->value));
         if (!call) continue;
         if (s) {
@@ -5830,7 +5840,7 @@ int message_needs_publish(CodeGenerator* gen, ASTNode* message) {
         ASTNode* fi = message->children[i];
         if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
         Type* ft = message_field_type(gen->program, message->value, fi->value);
-        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft) &&
+        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_part_owns(gen, ft) &&
             own_publish_call(gen, ft, "x"))
             return 1;
     }
@@ -8153,7 +8163,7 @@ const char* print_fmt_arg_cast(PrintFmt f) {
 }
 
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
- * runtime's aether_slice_take, _lend, _drop, _set and _grow1). Returns 0
+ * runtime's aether_slice_take, _copy, _release, _set and _grow1). Returns 0
  * for a name that is none of them. */
 static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     const char* f = expr->value;
@@ -8174,31 +8184,30 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         fprintf(o, ")");
         return 1;
     }
-    if (strcmp(f, "__slice_give") == 0 && expr->child_count == 1) {
-        /* #3549: a cell's slice given to the caller, the cell left a loan. */
-        fprintf(o, "aether_slice_give((AetherSlice*)&(");
+    /* #3568: a copy for a place to hold, with a reference of its own. */
+    if (strcmp(f, "__slice_copy") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_copy(");
+        generate_expression(gen, a);
+        fprintf(o, ")");
+        return 1;
+    }
+    if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_release((AetherSlice*)&(");
         generate_expression(gen, a);
         fprintf(o, "))");
         return 1;
     }
-    if (!et) return 0;
-    const char* ect = get_c_type(et);
-    if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
-        fprintf(o, "aether_slice_drop((AetherSlice*)&(");
-        generate_expression(gen, a);
-        fprintf(o, "), sizeof(%s), %s)", ect, own_slice_elem_drop_fn(gen, et));
-        return 1;
-    }
-    if (strcmp(f, "__slice_set") == 0 && expr->child_count == 2) {
-        fprintf(o, "aether_slice_set((AetherSlice*)&(");
+    if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0) &&
+        expr->child_count == 2) {
+        fprintf(o, "%s((AetherSlice*)&(", strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared");
         generate_expression(gen, a);
         fprintf(o, "), ");
         generate_expression(gen, expr->children[1]);
-        fprintf(o, ", sizeof(%s), %s, ", ect, own_slice_elem_drop_fn(gen, et));
-        emit_slice_diag_file(gen, expr);
-        fprintf(o, ", %d)", expr->line);
+        fprintf(o, ")");
         return 1;
     }
+    if (!et) return 0;
+    const char* ect = get_c_type(et);
     if (strcmp(f, "__slice_push") == 0 && expr->child_count == 2) {
         /* `v` taken first (it may read the slice, whose storage the growth
          * may move), then the place grown in place, then `v` stored into the
@@ -8213,7 +8222,8 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         generate_expression(gen, a);
         fprintf(o, ")");
         seq_next(gen, &s);
-        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), ", p, p, ect);
+        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, ", p, p, ect,
+                own_slice_ops(gen, st));
         emit_slice_diag_file(gen, expr);
         fprintf(o, ", %d)", expr->line);
         seq_next(gen, &s);
@@ -10526,7 +10536,8 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_slice_alloc((int64_t)(");
                     if (expr->child_count > 0) generate_expression(gen, expr->children[0]);
                     else fprintf(gen->output, "0");
-                    fprintf(gen->output, "), sizeof(%s))", get_c_type(expr->node_type->element_type));
+                    fprintf(gen->output, "), sizeof(%s), %s)", get_c_type(expr->node_type->element_type),
+                            own_slice_ops(gen, expr->node_type));
                 }
                 else if (strcmp(func_name, "append") == 0 && expr->child_count == 2 &&
                          type_is_slice(expr->node_type) && expr->node_type->element_type &&
@@ -10558,7 +10569,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else {
                         generate_expression(gen, expr->children[0]);
                     }
-                    fprintf(gen->output, ", sizeof(%s), ", ect);
+                    fprintf(gen->output, ", sizeof(%s), %s, ", ect, own_slice_ops(gen, expr->node_type));
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                     seq_next(gen, &s);
@@ -10831,35 +10842,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * place it is read from owns a counted string (R2). */
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          type_is_slice(expr->children[0]->node_type)) {
-                    /* #3072: a slice is freed by aether_slice_free, which
-                     * refuses a view (it owns nothing) by name. #3159: its
-                     * elements are places where a store into them takes the
-                     * value (emit_slice_element_store's rule: an owning
-                     * element type, the slice no view of C memory), so a
-                     * `make` buffer's give back what they hold first. */
+                    /* #3072, #3568: `free` of a place gives back the
+                     * reference it holds (aether_slice_free), the buffer
+                     * and what its elements hold going with the last; the
+                     * element type's drop comes from the buffer. A view no
+                     * place holds (`free(xs[1..])`) holds no reference, and
+                     * is refused by name (aether_slice_free_view). */
                     ASTNode* sl = expr->children[0];
-                    Type* et = sl->node_type->element_type;
-                    int elems_own = et && et->kind != TYPE_ARRAY && own_type_owns(gen, et) &&
-                                    sl->type != AST_PTR_AS_ARRAY_CAST &&
-                                    !expr_is_c_view_of_slice(gen, sl);
-                    /* A slice of slices owns its rows (slice ownership): each
-                     * row a buffer of its own is dropped with it. */
-                    int rows_own = et && type_is_slice(et) && sl->type != AST_PTR_AS_ARRAY_CAST;
-                    if (rows_own) {
-                        fprintf(gen->output, "aether_slice_free_elems(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", sizeof(AetherSlice), %s, ",
-                                own_slice_elem_drop_fn(gen, et));
-                    } else if (elems_own) {
-                        fprintf(gen->output, "aether_slice_free_elems(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", sizeof(%s), %s, ", get_c_type(et),
-                                own_unwind_fn(gen, et));
-                    } else {
-                        fprintf(gen->output, "aether_slice_free(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", ");
-                    }
+                    int view = sl->type == AST_SLICE_EXPR || sl->type == AST_SLICE_FROM_ARRAY ||
+                               annotation_has_marker(expr->annotation, "slice_free_view");
+                    fprintf(gen->output, view ? "aether_slice_free_view(" : "aether_slice_free(");
+                    generate_expression(gen, sl);
+                    fprintf(gen->output, ", ");
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                 }

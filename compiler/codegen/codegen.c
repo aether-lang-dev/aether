@@ -2228,7 +2228,7 @@ int message_owns_fields(CodeGenerator* gen, const char* name) {
     for (int i = 0; def && i < def->child_count; i++) {
         ASTNode* f = def->children[i];
         if (f && f->type == AST_MESSAGE_FIELD &&
-            (own_type_owns(gen, f->node_type) || tc_type_is_owned(f->node_type)))   /* #3142 */
+            (own_part_owns(gen, f->node_type) || tc_type_is_owned(f->node_type)))   /* #3142 */
             return 1;
     }
     return 0;
@@ -3397,7 +3397,7 @@ static void emit_lib_stub_return(CodeGenerator* gen, Type* result, const char* r
     } else if (result && !result->c_alias && result->kind == TYPE_PTR) {
         if (is_string_seq_ptr_type(result))
             fprintf(o, "        string_seq_free((StringSeq*)(void*)_aether_r);\n");
-    } else if (result && !result->c_alias && own_type_owns(gen, result)) {
+    } else if (result && !result->c_alias && own_part_owns(gen, result)) {
         fprintf(o, "    ");
         own_emit_part(gen, result, "_aether_r", OWN_DROP);
     }
@@ -8779,7 +8779,7 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
              * copied, a closure or struct it took (#2525, #2921). */
             for (int fi = 0; fi < child->child_count; fi++) {
                 ASTNode* f = child->children[fi];
-                if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
+                if (f && f->type == AST_MESSAGE_FIELD && own_part_owns(gen, f->node_type))
                     own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
                 /* #3142: an owned pointer the handler did not take
                  * (its binding empties the field), or a message
@@ -9735,22 +9735,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) free(h);");
     print_line(gen, "}");
-    /* #3549: a slice cell holds, after its slice, the drop of a slice of
-     * its type when the cell owns what it holds (slice ownership's cell
-     * owner, set where the local is declared by _aether_slice_cell_own),
-     * NULL when the slice is the program's to free. Its last release drops
-     * what it holds then; a store into it drops what it replaces
-     * (aether_slice_set), and a return gives the buffer away first
-     * (aether_slice_give). */
-    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_slice_cell_own(void* cell, void (*drop)(const void*)) {");
-    print_line(gen, "    if (cell) *(void (**)(const void*))(void*)((char*)cell + sizeof(AetherSlice)) = drop;");
-    print_line(gen, "}");
+    /* #3549, #3568: a slice cell holds one reference to the buffer it
+     * holds, as every slice place does: a store into it gives back what it
+     * held (aether_slice_set), and its last release gives back what it holds
+     * then. */
     print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_slice(const void* cell) {");
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (!_aether_cell_last(h)) return;");
-    print_line(gen, "    void (*drop)(const void*) = *(void (* const*)(const void*))(const void*)((const char*)cell + sizeof(AetherSlice));");
-    print_line(gen, "    if (drop) drop(cell);");
+    print_line(gen, "    aether_slice_release((AetherSlice*)(void*)cell);");
     print_line(gen, "    free(h);");
     print_line(gen, "}");
     /* String-valued capture cell: the cell OWNS the heap string it holds, so

@@ -21,7 +21,7 @@
 
 #include "aether_version.h"
 
-#define AETHER_RUNTIME_ABI_REV 2
+#define AETHER_RUNTIME_ABI_REV 3
 
 /* Build flags that change a layout generated C reads. */
 #ifdef AETHER_DEBUG_MAILBOX

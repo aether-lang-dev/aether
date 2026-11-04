@@ -5392,19 +5392,6 @@ const char* promoted_cell_release_fn(CodeGenerator* gen, const char* c_type) {
     return "_aether_cell_release";
 }
 
-/* #3549: a slice cell that owns what it holds (slice ownership's cell
- * owner: its declaration, or the binding a hoisted cell is declared from,
- * is marked `slice_cell`) says so once the cell holds its first value or,
- * hoisted, once it exists: from there on its stores and its last release
- * drop what it held. */
-static void emit_slice_cell_own(CodeGenerator* gen, const ASTNode* decl, const char* name,
-                                Type* t) {
-    if (!decl || !name || !annotation_has_marker(decl->annotation, "slice_cell") ||
-        !type_is_slice(t) || !is_promoted_capture(gen, name))
-        return;
-    print_line(gen, "_aether_slice_cell_own((void*)%s, %s);", name, own_slice_elem_drop_fn(gen, t));
-}
-
 void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
                                     const char* c_type, Type* var_type,
                                     ASTNode* init_expr, const char* init_text,
@@ -5417,12 +5404,9 @@ void emit_promoted_cell_declaration(CodeGenerator* gen, const char* name,
     const char* cell_type = promoted_cell_pointer(c_type, NULL);
     const char* elem = "";
     /* #2797: a `ptr` cell has a second slot, for the string a string store
-     * gives it (_aether_ptr_cell_set_str); zeroed, it holds none. #3549: a
-     * slice cell has one after its slice, for its drop when it owns what it
-     * holds (_aether_slice_cell_own); zeroed, it owns nothing. */
-    fprintf(gen->output, "%s = (%s)_aether_cell_new(%ssizeof(%s)%s);",
-            cell_decl, cell_type, strcmp(c_type, "void*") == 0 ? "2 * " : "", c_type,
-            strcmp(c_type, "AetherSlice") == 0 ? " + sizeof(void (*)(const void*))" : "");
+     * gives it (_aether_ptr_cell_set_str); zeroed, it holds none. */
+    fprintf(gen->output, "%s = (%s)_aether_cell_new(%ssizeof(%s));",
+            cell_decl, cell_type, strcmp(c_type, "void*") == 0 ? "2 * " : "", c_type);
     int arr_len = promoted_cell_array_len(c_type, &elem);
     /* No initialiser is the hoisted shape (#2024): the cell is declared
      * ahead of the loop or branch that first assigns it, and the
@@ -5534,6 +5518,10 @@ void emit_promoted_param_cell(CodeGenerator* gen, const char* name,
          * (#2499 relies on it: a caller may free a plain heap argument
          * after a closure call). */
         init = cg_internf("aether_str_capture(%s)", param_cname);
+    } else if (c_type && strcmp(c_type, "AetherSlice") == 0) {
+        /* #3568: a slice cell holds a reference of its own to the buffer
+         * the parameter borrows. */
+        init = cg_internf("aether_slice_copy(%s)", param_cname);
     }
     emit_promoted_cell_declaration(gen, name, c_type, NULL, NULL, init, line, column);
     if (c_type && strcmp(c_type, "ae_opt_string") == 0) {
@@ -5839,7 +5827,6 @@ static void hoist_common_vars(CodeGenerator* gen, ASTNode* stmt) {
             emit_promoted_cell_declaration(gen, n, get_c_type(var_type), var_type, NULL, NULL,
                                            decl ? decl->line : stmt->line,
                                            decl ? decl->column : stmt->column);
-            emit_slice_cell_own(gen, decl, n, var_type);
             if (joined) free_type(joined);
             continue;
         }
@@ -5886,7 +5873,6 @@ static void hoist_loop_var(ASTNode* child, void* user) {
         if (is_promoted_capture(gen, child->value)) {
             emit_promoted_cell_declaration(gen, child->value, c_type, var_type, NULL, NULL,
                                            child->line, child->column);
-            emit_slice_cell_own(gen, child, child->value, var_type);
             if (joined) free_type(joined);
             return;
         }
@@ -9215,8 +9201,6 @@ void generate_statement(CodeGenerator* gen, ASTNode* stmt) {
         bsaved = builder_cfg_begin(gen, bcall, cfg);
     }
     generate_statement_body(gen, stmt);
-    if (stmt->type == AST_VARIABLE_DECLARATION)
-        emit_slice_cell_own(gen, stmt, stmt->value, stmt->node_type);
     if (builder_stmt) builder_cfg_end(gen, bsaved);
     if (g_ctl_deferred == stmt) g_ctl_deferred = NULL;
     control_prelude_end(ctl_depth);
@@ -9538,6 +9522,43 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     } else {
                         emit_array_fill_c(gen, var->value, src, pos_t, 0);
                         fprintf(gen->output, ";\n");
+                    }
+                    continue;
+                }
+
+                /* #3568: a slice position holds a reference to the
+                 * counted buffer it views: a call's tuple (or a literal's)
+                 * hands it over, a tuple another place holds keeps it and
+                 * the local takes one of its own. Slice ownership releases
+                 * the local at its scope's exit (slice_own.c); a store over
+                 * one gives back what it held. */
+                if (pos_t && var->value && type_is_slice(pos_t) &&
+                    !is_promoted_capture(gen, var->value) &&
+                    !is_module_global_var(gen, var->value) &&
+                    !is_actor_state_var(gen, var->value)) {
+                    int moved = rhs && (rhs->type == AST_FUNCTION_CALL ||
+                                        rhs->type == AST_TUPLE_LITERAL);
+                    const char* src = cg_internf("_tup%d._%d", tmp_id, j);
+                    if (strcmp(var->value, "_") == 0) {
+                        if (moved) {
+                            print_indent(gen);
+                            fprintf(gen->output, "aether_slice_release((AetherSlice*)&(%s));\n", src);
+                        }
+                        continue;
+                    }
+                    print_indent(gen);
+                    if (!is_var_declared(gen, var->value)) {
+                        fprintf(gen->output, "AetherSlice %s = %s;", var->value, src);
+                        if (!moved) fprintf(gen->output, " aether_slice_retain(%s);", var->value);
+                        if (destructure_local_unread(gen, var->value))
+                            fprintf(gen->output, " (void)%s;", var->value);
+                        fprintf(gen->output, "\n");
+                        mark_var_declared_typed(gen, var->value, pos_t);
+                    } else {
+                        fprintf(gen->output, "{ AetherSlice _ae_old = %s; %s = %s;", var->value,
+                                var->value, src);
+                        if (!moved) fprintf(gen->output, " aether_slice_retain(%s);", var->value);
+                        fprintf(gen->output, " aether_slice_release(&_ae_old); }\n");
                     }
                     continue;
                 }
@@ -10002,6 +10023,12 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                     fprintf(gen->output, "_aether_closure_env_release((");
                     generate_expression(gen, drhs);
                     fprintf(gen->output, ").env);\n");
+                } else if (type_is_slice(drhs->node_type)) {
+                    /* #3568: a slice thrown away gives back the reference
+                     * it holds (slice ownership hands `_` one). */
+                    fprintf(gen->output, "{ AetherSlice _od = ");
+                    generate_expression(gen, drhs);
+                    fprintf(gen->output, "; aether_slice_release(&_od); }\n");
                 } else if (type_is_sized_array(drhs->node_type)) {
                     /* An array is no C value: it fills a temporary, which
                      * drops what it took. */

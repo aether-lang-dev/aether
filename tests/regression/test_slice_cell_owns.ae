@@ -5,13 +5,10 @@
 // dropped nothing it replaced, and the cell's release freed the cell and
 // not the slice, so the `make` buffer it held leaked on every call. Now a
 // store into the cell drops what it held, the cell's last release drops
-// what it holds then, and a `return` of the local gives the buffer to the
-// caller, the cell keeping a loan of it. Where a view of the buffer may
-// outlive the cell (`w = v; return w`) the local is left to the program as
-// before, and nothing is freed under the view (tests/integration/
-// slice_cell_owns, which the leak gate's regression tests do not hold: that
-// buffer leaks by design). A closure that reads the cell holds the cell, not
-// a view of the buffer in it, so reading it keeps the cell an owner.
+// what it holds then, and a `return` of the local gives the caller a
+// reference of its own. Since #3568 the buffer is counted, so a view of it
+// that outlives the cell (`w = v; return w`, tests/integration/
+// slice_cell_owns) holds it too, and nothing is freed under the view.
 //
 // Where the heap count is exact (mem.heap_in_use_exact), some round of each
 // shape leaves the heap where it found it.

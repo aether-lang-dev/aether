@@ -447,7 +447,7 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
         /* #3142: an owned pointer the state holds. */
         if (emit_owned_ptr_drop(gen, child->node_type, cg_internf("self->%s", child->value)))
             continue;
-        if (!own_type_owns(gen, child->node_type) || state_field_is_ptr(gen, actor, child->value))
+        if (!own_part_owns(gen, child->node_type) || state_field_is_ptr(gen, actor, child->value))
             continue;
         own_emit_part(gen, child->node_type, cg_internf("self->%s", child->value), OWN_DROP);
     }
@@ -461,6 +461,9 @@ static void emit_actor_destroy_state(CodeGenerator* gen, ASTNode* actor) {
  * unknown type is taken as scalar, as it always was. */
 static int state_zero_is_aggregate(Type* t) {
     if (!t) return 0;
+    /* #3568: a slice field holds a reference from its first store on: it
+     * starts as the empty slice. */
+    if (type_is_slice(t)) return 1;
     switch (t->kind) {
         case TYPE_FUNCTION: return !t->is_fnptr;
         case TYPE_STRUCT: case TYPE_OPTIONAL: case TYPE_TUPLE: case TYPE_SUM:

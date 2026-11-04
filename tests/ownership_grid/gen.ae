@@ -380,32 +380,35 @@ sum_transfers() -> string {
     return "T1 T2 T3 T4 T5 T6 T6I T6M T9 T10 T11 T11R T12 T16"
 }
 
-// The slice kind (#3549): a buffer `make` hands out, given straight to a
-// function that only reads it, or returned (P17), and held in a cell a
-// closure rebinds (P9W): stored and left, overwritten, returned. A slice
-// local, field or element is slice ownership's
-// (tests/integration/slice_own); the grid measures the temporary, which
-// nothing but the call it is made for holds, and the cell, which the frame
-// and the closure share.
+// The slice kind (#3549, #3568): a buffer `make` hands out. It is counted,
+// and every place that holds a slice of it holds a reference (R2), so it is
+// crossed with the places and transfers a sum is: a local, a field, an
+// element, a tuple's slot, an optional, a module `var`, a closure's copy and
+// its cell, actor state, a message field, a parameter's field or element,
+// and the temporary. A container or a `ptr` slot holds strings and closures
+// only.
 is_slice_kind(kid: string) -> bool {
     return kid == "KM"
 }
 
 slice_places() -> string {
-    return "P9W P17"
+    return "${sum_places()} P4H P8"
 }
 
 slice_transfers() -> string {
-    return "T1 T2 T6 T9"
+    return sum_transfers()
 }
 
 // Why the slice kind does not take a place's transfer; "" when it does.
 slice_skip(pid: string, t: string) -> string {
-    if pid == "P17" && !in_words("T6 T9", t) {
-        return "a temporary buffer is measured passed to a reader and returned"
+    if (pid == "P12D" || pid == "P12K") && t == "T12" {
+        return "a slice moves into the message it is sent in: reading it after the send is E0906"
     }
-    if pid == "P9W" && !in_words("T1 T2 T9", t) {
-        return "a cell's buffer is measured stored and left, overwritten and returned"
+    if pid == "P11" && t == "T16" {
+        return "a closure in a handler reads no state field of a slice type (E0600)"
+    }
+    if pid == "P15" {
+        return "a fixed-size array of slices is no parameter type the parser takes (`p: int[][2]`)"
     }
     return ""
 }
@@ -530,6 +533,7 @@ state_decl(kid: string) -> string {
         "K7" -> "state string[2] v"
         "KS" -> "state Owned v"
         "KSF" -> "state Acting v"
+        "KM" -> "state int[] v"
         _ -> "state Doc[2] v"
     }
 }

@@ -452,21 +452,20 @@ main() {
 
 #### Slice ownership
 
-A buffer `make([]T, n)` hands out, or `push` or `append` grows, has one owner, and the owner releases it. There is no count: a slice moves from owner to owner, and the compiler checks that a slice that moved away is not used where it was.
+A buffer `make([]T, n)` hands out, or `push` or `append` grows, is counted (#3568). Every place that holds a slice of it holds one reference, a view as much as the slice `make` returned, and the last place to give its reference back releases the buffer, its elements first. A view therefore keeps the buffer it views, wherever it goes: returned, stored, bound in an outer scope, or held while the slice it was taken from is bound again.
 
 | Where the slice is | What happens |
 |---|---|
-| A local bound to a buffer (`xs = make(...)`, `xs = f()`, `int[] xs = []` then pushed) | It owns the buffer. Every exit of its scope (the end of the block, `return`, `break`, `continue`, a caught panic) releases it, its elements first. Binding the local again releases what it held. |
-| `ys = xs`, `return xs`, `s.f = xs`, `g = xs` (a module-level `var`), `rows[i] = xs`, `T { f: xs }`, `(xs, n)`, `[xs]`, a message field `xs` | The buffer moves: `xs` is left empty, and using it again before it is bound anew is E0906, `'xs' is used after it was moved (line 3): an owned slice has one owner`. |
-| `free(xs)`, `append(xs, v)` | Consume `xs`: it is released, or grown into the result, and left empty. Using it again is E0906. `free` still works on any owner (and `defer free(xs)` too): the scope exit then has nothing to release. |
-| `xs.push(v)` | Grows `xs` where it is; `xs` still owns it. |
-| `f(xs)` to a parameter `p: T[]` | `f` borrows it: `xs` still owns it after the call. In `f`, `p` is never released, and `free(p)`, `append(p, v)` and `p.push(v)` are refused (E0901), as is giving `p` to a `@keep` parameter. |
-| `f(xs)` to a parameter `p: @keep T[]` | The buffer moves into `f` (`xs` is left empty, E0906 to use it after), and `p` owns it as a local does: `f` returns it, stores it, grows it, or lets its scope release it. A field, element or `var` given there is left empty. |
-| `xs[a..b]`, `xs[..]`, `for x in xs`, `xs[i]`, `xs.len`, `xs as ptr` | Borrow it. A view (`v = xs[..]`, `v = xs[1..]`) is valid while `xs` owns the buffer. `v = xs[..]` before `ys = xs` is how to keep reading a buffer that moves on. |
-| `v = p` (a parameter), `v = s.f` (a field), `v = rows[i]` (an element), `v = g` (a `var`) | `v` is a view of what that place holds: it is marked at run time so nothing releases the buffer through it, and `free(v)` or `append(v, x)` is the named panic a view gets. A slice put in a field, a tuple or a message is not marked: the program frees it there, as before. |
-| A buffer in a field, a module-level `var`, a tuple or a message | Not released with what holds it: the program releases it with `free(s.f)`, which leaves the field empty. A slice of slices is the exception: it owns its rows. |
-| A local a closure captures, whose address is taken (`&xs`), or that a pattern or a destructure binds | Left to the program, as before: nothing releases it at its scope's exit, and it is freed with `free`. |
-| A view of a local's buffer that may outlive the local: returned (`return xs[1..]`), put in a struct, a tuple, a field, a `var` or a message, given to a parameter the callee puts in one or returns (`push_cells(l, v)` returning `Cells { v: v }`), captured by a closure that escapes, bound to a local of an outer scope, or taken before the local is bound again, moved, freed, grown or has a row replaced (in the order the code runs; a loop's views count from its start) | The buffer is the program's, as before ownership: the local does not release it, so the view stays valid (and the buffer is freed with `free`, or kept). The compiler finds these by following views through locals, struct and tuple values, and calls (what a function returns or stores of its slice parameters). |
+| A local (`xs = make(...)`, `xs = f()`, `v = xs[1..]`, `int[] xs = []` then pushed) | It holds a reference. Every exit of its scope (the end of the block, `return`, `break`, `continue`, a caught panic) releases it. Binding the local again releases what it held. |
+| `ys = xs`, `return xs`, `s.f = xs`, `g = xs` (a module-level `var`), `rows[i] = xs`, `T { f: xs }`, `(xs, n)`, `[xs]`, a message field `xs` | The reference moves: `xs` is left empty, and using it again before it is bound anew is E0906, `'xs' is used after it was moved (line 3): an owned slice has one owner`. A local a view of which may be held (`xs[..]` or `xs[1..]` bound or passed on, `xs` given to a function, or named in a closure) is copied instead: the place gets a reference of its own, and `xs` stays as it was. `return xs` always moves. |
+| `free(xs)`, `append(xs, v)` | Consume `xs`: its reference is released, or grown into the result, and `xs` left empty. Using it again is E0906 where it would move. `free` works on any place (and `defer free(xs)` too): the scope exit then has nothing to release. `free` of a view a place holds releases that view's reference; the buffer stays for the others. |
+| `xs.push(v)` | Grows `xs` where it is. |
+| `f(xs)` to a parameter `p: T[]` | `f` borrows it: `xs` still holds it after the call. In `f`, `p` is never released, and `free(p)`, `append(p, v)` and `p.push(v)` are refused (E0901), as is giving `p` to a `@keep` parameter. What `f` keeps (`p` stored, returned, bound) takes a reference of its own. A fresh buffer given straight to `p` (`f(make([]int, 3))`) is released when the call returns. |
+| `f(xs)` to a parameter `p: @keep T[]` | `p` holds a reference, `xs`'s moved in (E0906 to use `xs` after) or a copy of its own, and releases it as a local does. |
+| `xs[a..b]`, `xs[..]`, `for x in xs`, `xs[i]`, `xs.len`, `xs as ptr` | Borrow it for the expression. Bound to a place, a view takes a reference of its own. |
+| `v = p` (a parameter), `v = s.f` (a field), `v = rows[i]` (an element), `v = g` (a `var`) | `v` takes a reference of its own, which its scope's exit releases. A copy of a whole buffer can grow: the buffer being shared, `append` moves the copy to storage of its own. |
+| A buffer in a field, an element, a module-level `var`, a tuple, an optional, a sum, a fixed-size array, a closure, a cell, actor state or a message | Released with what holds it, as a string part is: a struct's destroy, a store over it, the message's end. `free(s.f)` releases it early and leaves the field empty. A struct allocated by hand starts zeroed (`calloc`, `heap.new`). |
+| A local a pattern binds (a list pattern's tail, a match arm's binding) | A view of what it was bound from, which holds the reference; `free` of it is the named panic a view gets. |
 
 ```aether,run
 total(xs: int[]) -> int {           // borrows: never releases xs
@@ -477,7 +476,7 @@ total(xs: int[]) -> int {           // borrows: never releases xs
     return t
 }
 
-take_all(xs: @keep int[]) -> int {  // takes the buffer; released at its scope's exit
+take_all(xs: @keep int[]) -> int {  // holds a reference; released at its scope's exit
     return xs.len
 }
 
@@ -493,10 +492,10 @@ evens(n: int) -> int[] {
 
 main() {
     xs = evens(10)
-    view = xs[..]                   // a view; xs still owns the buffer
-    println("${total(xs)} ${view.len}")
     ys = xs                         // moves: xs is empty from here
-    println("${take_all(ys)}")      // ys is given away
+    view = ys[..]                   // a view: it holds the buffer too
+    println("${total(ys)} ${view.len}")
+    println("${take_all(ys)}")      // a reference of its own given away
     rows = make([]int[], 2)
     rows[0] = evens(4)
     rows[1] = evens(6)

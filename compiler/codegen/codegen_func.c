@@ -2784,12 +2784,23 @@ static void generate_extern_struct_field(CodeGenerator* gen, ASTNode* field,
     }
 }
 
+/* #3568: does field `f` of struct `sd` own what it holds: an owning type,
+ * or a slice, but for an `extern struct`'s slice field, which C sees as a
+ * bare pointer (generate_extern_struct_field). */
+static int struct_field_owns(CodeGenerator* gen, ASTNode* sd, ASTNode* f) {
+    if (!f || f->type != AST_STRUCT_FIELD) return 0;
+    int is_extern = sd->annotation && (strcmp(sd->annotation, "extern") == 0 ||
+                                       strcmp(sd->annotation, "extern_packed") == 0);
+    if (is_extern && type_is_slice(f->node_type)) return 0;
+    return own_part_owns(gen, f->node_type);
+}
+
 /* Each field of `sd` that owns, as `<lvalue>.<field>` / `<lvalue>-><field>`:
  * `op` applied to it (own_emit_part). */
 static void emit_struct_fields_op(CodeGenerator* gen, ASTNode* sd, const char* lv, OwnOp op) {
     for (int i = 0; i < sd->child_count; i++) {
         ASTNode* f = sd->children[i];
-        if (f && f->type == AST_STRUCT_FIELD && f->value && own_type_owns(gen, f->node_type))
+        if (f && f->value && struct_field_owns(gen, sd, f))
             own_emit_part(gen, f->node_type, cg_internf("%s%s", lv, f->value), op);
     }
 }
@@ -3004,7 +3015,7 @@ int struct_owns_heap_strings(CodeGenerator* gen, ASTNode* struct_def) {
     depth++;
     for (int i = 0; i < struct_def->child_count && !owns; i++) {
         ASTNode* f = struct_def->children[i];
-        owns = f && f->type == AST_STRUCT_FIELD && own_type_owns(gen, f->node_type);
+        owns = struct_field_owns(gen, struct_def, f);
     }
     depth--;
     return owns;

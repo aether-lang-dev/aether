@@ -1,16 +1,14 @@
 #!/bin/sh
-# #3549: a slice cell (a slice local a closure assigns) owns its buffer only
-# where nothing else can reach that buffer. A view of it that outlives the
-# cell keeps the local left to the program, as before, so the view never
-# reads freed memory.
+# #3549, #3568: a slice cell (a slice local a closure assigns) holds a
+# reference to the buffer it holds, as every slice place does, so a view of
+# that buffer that outlives the cell keeps the buffer, and never reads freed
+# memory.
 #
 # viewed() binds `w = v` and returns `w`, a view of the cell's buffer: the
-# cell's release must not drop that buffer. given() returns `v` itself, its
-# buffer handed to the caller while the closure keeps a loan of it. After
-# each call the heap is churned with buffers of the same size filled with
-# -7: a freed buffer would come back holding that filler. (Like slice_own's
-# kept.ae, the viewed buffer leaks by design, so this is no regression test
-# under the leak gate.)
+# cell's release must not free what `w` holds. given() returns `v` itself,
+# the caller taking a reference of its own while the closure's cell keeps
+# one. After each call the heap is churned with buffers of the same size
+# filled with -7: a freed buffer would come back holding that filler.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"

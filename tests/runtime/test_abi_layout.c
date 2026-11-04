@@ -1,6 +1,6 @@
 /**
  * The layouts a shipped library and its host rely on, as recorded at host
- * ABI level 1, catalog schema 1.11 and runtime ABI revision 2 (#2957,
+ * ABI level 1, catalog schema 1.11 and runtime ABI revision 3 (#2957,
  * docs/abi-policy.md).
  *
  * Each recorded layout is a copy of the type as it stands at that level,
@@ -26,6 +26,7 @@
 #include "../../runtime/aether_abi.h"
 #include "../../runtime/aether_version.h"
 #include "../../runtime/aether_rv_mark.h"
+#include "../../runtime/aether_slice.h"
 #include <stddef.h>
 #include <string.h>
 
@@ -265,11 +266,67 @@ TEST_CATEGORY(abi_rv_mark_finds_the_program, TEST_CATEGORY_RUNTIME) {
 /* ---- The runtime ABI ---- */
 
 TEST_CATEGORY(abi_runtime_identity, TEST_CATEGORY_RUNTIME) {
-    ASSERT_EQ(2, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(3, AETHER_RUNTIME_ABI_REV);
     /* The runtime reports what it was built with, and what generated C
      * compiled with these headers compares it with. */
     ASSERT_STREQ(AETHER_RUNTIME_ABI_ID, aether_runtime_abi());
     char want[128];
     snprintf(want, sizeof(want), "%s/abi%d%s", AETHER_VERSION, AETHER_RUNTIME_ABI_REV, AETHER_ABI_FLAGS);
     ASSERT_STREQ(want, aether_runtime_abi());
+}
+
+/* ---- Counted slices (runtime ABI revision 3, #3568) ----
+ *
+ * AetherSlice keeps the size and the offsets of revision 2: `off` sits in
+ * the padding after `flags`, and flags' bits 8..31 carry the offset's bits
+ * 32..55. A slice marked AETHER_SLICE_MADE views a counted buffer whose
+ * header is AETHER_SLICE_HEAD bytes before the buffer's first element; C
+ * never frees such a slice's `ptr`. */
+
+typedef struct { void* ptr; uint64_t len; uint32_t flags; uint32_t off; } Slice_R3;
+typedef struct {
+    int refs;
+    uint32_t reserved;
+    uint64_t len;
+    uint64_t elem_size;
+    const void* ops;
+} SliceBuf_R3;
+
+TEST_CATEGORY(abi_slice_layouts, TEST_CATEGORY_RUNTIME) {
+    ASSERT_EQ(3, AETHER_RUNTIME_ABI_REV);
+    ASSERT_EQ(sizeof(Slice_R3), sizeof(AetherSlice));
+    SAME_MEMBER(AetherSlice, Slice_R3, ptr);
+    SAME_MEMBER(AetherSlice, Slice_R3, len);
+    SAME_MEMBER(AetherSlice, Slice_R3, flags);
+    SAME_MEMBER(AetherSlice, Slice_R3, off);
+    ASSERT_EQ(32, AETHER_SLICE_HEAD);
+    ASSERT_TRUE(sizeof(AetherSliceBuf) <= AETHER_SLICE_HEAD);
+    SAME_MEMBER(AetherSliceBuf, SliceBuf_R3, refs);
+    SAME_MEMBER(AetherSliceBuf, SliceBuf_R3, len);
+    SAME_MEMBER(AetherSliceBuf, SliceBuf_R3, elem_size);
+    SAME_MEMBER(AetherSliceBuf, SliceBuf_R3, ops);
+    ASSERT_EQ(1u, AETHER_SLICE_READONLY);
+    ASSERT_EQ(2u, AETHER_SLICE_BORROWED);
+    ASSERT_EQ(4u, AETHER_SLICE_MADE);
+    ASSERT_EQ(8u, AETHER_SLICE_GROWN);
+    ASSERT_EQ(0xFFu, AETHER_SLICE_MARKS);
+}
+
+TEST_CATEGORY(abi_slice_view_finds_its_buffer, TEST_CATEGORY_RUNTIME) {
+    AetherSlice s = aether_slice_alloc(10, sizeof(int), NULL);
+    ASSERT_TRUE((s.flags & AETHER_SLICE_MADE) != 0);
+    AetherSlice v = aether_slice_derive(s, (int*)s.ptr + 3, 4);
+    ASSERT_TRUE(aether_slice_buf(v) == aether_slice_buf(s));
+    aether_slice_retain(v);
+    ASSERT_EQ(2, aether_slice_buf(s)->refs);
+    aether_slice_release(&s);
+    ASSERT_TRUE(s.ptr == NULL);
+    ASSERT_EQ(1, aether_slice_buf(v)->refs);
+    aether_slice_release(&v);
+    /* An uncounted view takes and gives back nothing. */
+    int arr[3] = {1, 2, 3};
+    AetherSlice a = aether_slice_make(arr, 3);
+    aether_slice_retain(a);
+    aether_slice_release(&a);
+    ASSERT_EQ(2, arr[1]);
 }

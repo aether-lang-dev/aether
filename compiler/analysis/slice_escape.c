@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "slice_escape.h"
-#include "slice_own.h"
 #include "../aether_error.h"
 #include "../aether_strmap.h"
 
@@ -298,12 +297,13 @@ static int outer_holds(Frame* f, const char* path) {
 }
 
 /* Is `e` one of slice ownership's intrinsics (slice_own.c) that give the
- * slice they are handed: a move, a loan, a store, a cell's buffer given
- * to the caller (#3549)? The slice is its last argument. */
+ * slice they are handed: a move, a loan, a copy, a store? The slice is its
+ * last argument. */
 static int slice_own_gives(const ASTNode* e) {
     return e && e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
            (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
-            strcmp(e->value, "__slice_set") == 0 || strcmp(e->value, "__slice_give") == 0);
+            strcmp(e->value, "__slice_copy") == 0 || strcmp(e->value, "__slice_set") == 0 ||
+            strcmp(e->value, "__slice_set_shared") == 0);
 }
 
 /* Is `e` storage of the frame: a non-empty array literal (it lives in the
@@ -312,8 +312,7 @@ static int frame_storage(Frame* f, ASTNode* e) {
     if (!e) return 0;
     if (e->type == AST_ARRAY_LITERAL) return e->child_count > 0;
     if (e->type == AST_IDENTIFIER && e->value)
-        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value)) ||
-               slice_own_owner_ident(e);
+        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value));
     return 0;
 }
 
@@ -489,9 +488,6 @@ static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
             else if (c && c->type == AST_IDENTIFIER && c->value &&
                      (strmap_has(&f->arrays, c->value) || outer_array(f, c->value)))
                 snprintf(out, cap, "the array `%s`", c->value);
-            else if (slice_own_owner_ident(c))
-                snprintf(out, cap, "the buffer `%s` owns, released when it goes out of scope",
-                         c->value);
             else
                 describe(f, c, out, cap);
             return;
