@@ -656,7 +656,10 @@ static void classify(Frame* f) {
     for (int i = 0; i < f->nlocals; i++) {
         Local* l = f->locals[i];
         if (!l->is_slice) l->kind = K_NONE;
-        else if (strmap_has(&f->promoted, l->name) && !l->keep) l->kind = K_CELL;
+        /* A `@keep` parameter a closure assigns too: its cell takes over the
+         * parameter's reference (codegen's emit_promoted_cell_declaration
+         * seeded with it), and the cell's last holder gives it back. */
+        else if (strmap_has(&f->promoted, l->name)) l->kind = K_CELL;
         else if (l->param) l->kind = l->keep ? K_KEEP : K_PARAM;
         else if (l->destructured) l->kind = K_VIEW;
         else if (l->pattern && l->arm) l->kind = K_VIEW;   /* rewrite's AST_MATCH_ARM */

@@ -2145,8 +2145,18 @@ static void emit_function(CodeGenerator* gen, ASTNode* func, const char* clause_
                 }
                 const char* param_cname = cg_internf("_param_%s", child->value);
                 print_indent(gen);
-                emit_promoted_param_cell(gen, child->value, c_type, param_cname,
-                                         child->line, child->column);
+                /* #3568: a `@keep` slice parameter holds a reference the
+                 * caller gave it, which its cell takes over: the cell's
+                 * last holder gives it back. Copied in, the parameter's own
+                 * was never given back. */
+                if (type_is_slice(child->node_type) && child->annotation &&
+                    (strstr(child->annotation, "keep_param") ||
+                     strstr(child->annotation, "frees_param")))
+                    emit_promoted_cell_declaration(gen, child->value, c_type, NULL, NULL,
+                                                   param_cname, child->line, child->column);
+                else
+                    emit_promoted_param_cell(gen, child->value, c_type, param_cname,
+                                             child->line, child->column);
             } else if (is_sized_array_param(child->node_type)) {
                 print_indent(gen);
                 emit_sized_array_param_copy(gen, child->node_type, child->value, body);   /* #2516 */
