@@ -639,29 +639,16 @@ CodeGenerator* create_code_generator(FILE* output) {
     // Initialize defer tracking
     gen->defer_count = 0;
     gen->scope_depth = 0;
-    memset(gen->defer_stack, 0, sizeof(gen->defer_stack));
-    memset(gen->scope_defer_start, 0, sizeof(gen->scope_defer_start));
     /* #1140: every defer is unconditional until a `defer try` / `defer catch`
-     * says otherwise, and a bare scope exit is not a function outcome. */
-    memset(gen->defer_mode, 0, sizeof(gen->defer_mode));   /* DEFER_ALWAYS */
+     * says otherwise, and a bare scope exit is not a function outcome. The
+     * stacks start empty and grow (cg_defer_room and its kin, #3574). */
     gen->defer_exit = DEFER_EXIT_PLAIN;
     gen->defer_err_slot = NULL;
     // Issue #501: try/catch frame-pop tracking
     gen->try_frame_depth = 0;
     gen->loop_nest_depth = 0;
-    memset(gen->loop_try_base, 0, sizeof(gen->loop_try_base));
     // #893: labeled break/continue tracking
-    memset(gen->loop_label, 0, sizeof(gen->loop_label));
-    memset(gen->loop_label_scope, 0, sizeof(gen->loop_label_scope));
-    memset(gen->loop_label_id, 0, sizeof(gen->loop_label_id));
-    memset(gen->loop_label_break_used, 0, sizeof(gen->loop_label_break_used));
-    memset(gen->loop_label_continue_used, 0, sizeof(gen->loop_label_continue_used));
-    memset(gen->loop_step_in_body, 0, sizeof(gen->loop_step_in_body));
     gen->next_loop_label_id = 0;
-    for (int i = 0; i < AETHER_MAX_LOOP_NEST; i++) {
-        gen->loop_td_id[i] = 0;
-        gen->loop_td_node[i] = NULL;
-    }
     gen->td_switch = NULL;
     gen->td_id = 0;
     gen->td_arm = -1;
@@ -669,7 +656,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     /* #2696: break targets */
     gen->switch_nest_depth = 0;
     gen->c_break_depth = 0;
-    memset(gen->loop_c_depth, 0, sizeof(gen->loop_c_depth));
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
     gen->try_clobbered_depths = NULL;
@@ -883,6 +869,37 @@ void code_generator_release(CodeGenerator* gen) {
         gen->hoist_decls = NULL;
         free(gen->defer_thunks);
         gen->defer_thunks = NULL;
+        /* #3574: the defer, scope, loop and switch stacks. */
+        free(gen->defer_stack);
+        free(gen->defer_mode);
+        free(gen->scope_defer_start);
+        free(gen->loop_try_base);
+        free((void*)gen->loop_label);
+        free(gen->loop_label_scope);
+        free(gen->loop_label_id);
+        free(gen->loop_label_break_used);
+        free(gen->loop_label_continue_used);
+        free(gen->loop_step_in_body);
+        free(gen->loop_td_id);
+        free(gen->loop_td_node);
+        free(gen->loop_c_depth);
+        free(gen->switch_loop_depth);
+        free(gen->switch_scope);
+        free(gen->switch_try_base);
+        free(gen->switch_c_depth);
+        free(gen->switch_brk_id);
+        free(gen->switch_brk_used);
+        gen->defer_stack = NULL;
+        gen->defer_mode = NULL;
+        gen->scope_defer_start = NULL;
+        gen->loop_try_base = gen->loop_label_scope = gen->loop_label_id = NULL;
+        gen->loop_label = NULL;
+        gen->loop_label_break_used = gen->loop_label_continue_used = NULL;
+        gen->loop_step_in_body = gen->loop_td_id = gen->loop_c_depth = NULL;
+        gen->loop_td_node = NULL;
+        gen->switch_loop_depth = gen->switch_scope = gen->switch_try_base = NULL;
+        gen->switch_c_depth = gen->switch_brk_id = gen->switch_brk_used = NULL;
+        gen->defer_cap = gen->scope_cap = gen->loop_nest_cap = gen->switch_nest_cap = 0;
         free(gen->owned_thunks);   /* #3413: the names are interned */
         gen->owned_thunks = NULL;
         gen->owned_thunk_count = gen->owned_thunk_cap = 0;
@@ -1545,23 +1562,67 @@ void push_defer(CodeGenerator* gen, ASTNode* stmt) {
  * goes through push_defer above and so is DEFER_ALWAYS; only a user's
  * `defer try` / `defer catch` reaches here with anything else. */
 void push_defer_mode(CodeGenerator* gen, ASTNode* stmt, DeferMode mode) {
-    if (gen->defer_count < MAX_DEFER_STACK) {
-        gen->defer_mode[gen->defer_count] = mode;
-        gen->defer_stack[gen->defer_count++] = stmt;
-    } else {
-        AetherError w = {NULL, NULL, 0, 0, "defer stack overflow, too many nested defers",
-                         "simplify scope nesting or reduce number of deferred statements",
-                         NULL, AETHER_ERR_NONE};
-        aether_warning_report(&w);
-    }
+    cg_defer_room(gen);
+    gen->defer_mode[gen->defer_count] = mode;
+    gen->defer_stack[gen->defer_count++] = stmt;
 }
 
 // Enter a new scope - remember where defers started for this scope
 void enter_scope(CodeGenerator* gen) {
-    if (gen->scope_depth < MAX_SCOPE_DEPTH) {
-        gen->scope_defer_start[gen->scope_depth] = gen->defer_count;
-        gen->scope_depth++;
-    }
+    cg_scope_room(gen);
+    gen->scope_defer_start[gen->scope_depth] = gen->defer_count;
+    gen->scope_depth++;
+}
+
+/* The stacks' slots `[used, cap)` doubled onto the heap, the new ones zero. */
+static void* cg_stack_grow(void* v, int cap, int ncap, size_t size) {
+    char* grown = (char*)aether_xrealloc(v, size * (size_t)ncap);
+    memset(grown + size * (size_t)cap, 0, size * (size_t)(ncap - cap));
+    return grown;
+}
+
+void cg_defer_room(CodeGenerator* gen) {
+    if (gen->defer_count < gen->defer_cap) return;
+    int ncap = gen->defer_cap ? gen->defer_cap * 2 : 64;
+    gen->defer_stack = cg_stack_grow(gen->defer_stack, gen->defer_cap, ncap, sizeof(ASTNode*));
+    gen->defer_mode = cg_stack_grow(gen->defer_mode, gen->defer_cap, ncap, sizeof(DeferMode));
+    gen->defer_cap = ncap;
+}
+
+void cg_scope_room(CodeGenerator* gen) {
+    if (gen->scope_depth < gen->scope_cap) return;
+    int ncap = gen->scope_cap ? gen->scope_cap * 2 : 32;
+    gen->scope_defer_start = cg_stack_grow(gen->scope_defer_start, gen->scope_cap, ncap, sizeof(int));
+    gen->scope_cap = ncap;
+}
+
+void cg_loop_room(CodeGenerator* gen) {
+    if (gen->loop_nest_depth < gen->loop_nest_cap) return;
+    int cap = gen->loop_nest_cap, ncap = cap ? cap * 2 : 16;
+    gen->loop_try_base = cg_stack_grow(gen->loop_try_base, cap, ncap, sizeof(int));
+    gen->loop_label = cg_stack_grow((void*)gen->loop_label, cap, ncap, sizeof(char*));
+    gen->loop_label_scope = cg_stack_grow(gen->loop_label_scope, cap, ncap, sizeof(int));
+    gen->loop_label_id = cg_stack_grow(gen->loop_label_id, cap, ncap, sizeof(int));
+    gen->loop_label_break_used = cg_stack_grow(gen->loop_label_break_used, cap, ncap, sizeof(int));
+    gen->loop_label_continue_used =
+        cg_stack_grow(gen->loop_label_continue_used, cap, ncap, sizeof(int));
+    gen->loop_step_in_body = cg_stack_grow(gen->loop_step_in_body, cap, ncap, sizeof(int));
+    gen->loop_td_id = cg_stack_grow(gen->loop_td_id, cap, ncap, sizeof(int));
+    gen->loop_td_node = cg_stack_grow(gen->loop_td_node, cap, ncap, sizeof(ASTNode*));
+    gen->loop_c_depth = cg_stack_grow(gen->loop_c_depth, cap, ncap, sizeof(int));
+    gen->loop_nest_cap = ncap;
+}
+
+void cg_switch_room(CodeGenerator* gen) {
+    if (gen->switch_nest_depth < gen->switch_nest_cap) return;
+    int cap = gen->switch_nest_cap, ncap = cap ? cap * 2 : 16;
+    gen->switch_loop_depth = cg_stack_grow(gen->switch_loop_depth, cap, ncap, sizeof(int));
+    gen->switch_scope = cg_stack_grow(gen->switch_scope, cap, ncap, sizeof(int));
+    gen->switch_try_base = cg_stack_grow(gen->switch_try_base, cap, ncap, sizeof(int));
+    gen->switch_c_depth = cg_stack_grow(gen->switch_c_depth, cap, ncap, sizeof(int));
+    gen->switch_brk_id = cg_stack_grow(gen->switch_brk_id, cap, ncap, sizeof(int));
+    gen->switch_brk_used = cg_stack_grow(gen->switch_brk_used, cap, ncap, sizeof(int));
+    gen->switch_nest_cap = ncap;
 }
 
 // Heap-string-exit-free defer carrier (issue #420 follow-up).

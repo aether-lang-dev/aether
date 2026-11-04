@@ -55,6 +55,22 @@
 #                    adapter took 16, and the C did not compile.
 #   view_params:     a function indexing 10 slice parameters: the copy run
 #                    when they are unbounded views was chosen on 8 of them.
+#   heap_strings:    a function of 300 string locals: 256 were tracked, and
+#                    past the generator's 256 defers the rest of the releases
+#                    were dropped with a warning; the strings leaked.
+#   opt_strings:     a function of 300 `string?` locals: 256 were declared
+#                    and dropped, and the rest leaked.
+#   owned_locals:    a function of 70 owned-pointer locals: 64 were released.
+#   defer_locals:    a `defer` reading 70 locals: a fatal error at 64.
+#   sum_arms:        a match of 300 variant arms and a second arm for the
+#                    last: 256 were remembered, the second arm made a
+#                    duplicate C case, and the C did not compile.
+#   scope_depth:     string locals bound 70 blocks deep: past 64 scopes the
+#                    scope stack stopped, the exits still popped, and the
+#                    strings were released in the wrong blocks.
+#   switch_depth:    a `break` in a ranged switch 71 switches deep: past 64
+#                    the switch was no break target, and the break left the
+#                    64th switch, skipping what followed the innermost.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -469,6 +485,143 @@ runs view_params "views 20"
 n=$(grep 'if (a0.len == AETHER_SLICE_UNBOUNDED' "$TMP/view_params/main.c" 2>/dev/null | grep -o 'AETHER_SLICE_UNBOUNDED' | wc -l | tr -d ' ')
 [ "$n" = "10" ] || fail "view_params: the view copy is chosen on $n of the 10 parameters"
 
+# --- heap_strings, opt_strings ------------------------------------------------
+# steady <dir> <awk body of round(w), returning an int> <want>: main runs the
+# round once, prints its value and the heap's growth over more rounds.
+steady() {
+    mkdir -p "$TMP/$1"
+    awk "BEGIN { $2 }" > "$TMP/$1/body.ae"
+    cat - "$TMP/$1/body.ae" > "$TMP/$1/main.ae" <<'AE'
+import std.mem
+import std.string
+
+main() {
+    w = string.concat("ab", "c")
+    println("value ${round(w)}")
+    long grown = 0
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| { round(w) }, 4)
+    }
+    println("grown ${grown}")
+}
+AE
+    runs "$1" "value $3
+grown 0"
+}
+
+steady heap_strings '
+    print "round(w: string) -> int {"
+    for (i = 0; i < 300; i++) printf "    s%d = string.concat(w, \"%d\")\n", i, i
+    printf "    return string.length(s0)"
+    for (i = 1; i < 300; i++) printf " + string.length(s%d)", i
+    print ""
+    print "}"' 1690
+
+steady opt_strings '
+    print "pick(w: string, i: int) -> string? {"
+    print "    if i < 0 { return none }"
+    print "    return string.concat(w, \"q\")"
+    print "}"
+    print "round(w: string) -> int {"
+    for (i = 0; i < 300; i++) printf "    let o%d: string? = pick(w, %d)\n", i, i
+    print "    n = 0"
+    for (i = 0; i < 300; i++) printf "    if o%d != none { n = n + 1 }\n", i
+    print "    return n"
+    print "}"' 300
+
+# --- owned_locals -------------------------------------------------------------
+mkdir -p "$TMP/owned_locals"
+awk 'BEGIN {
+    print "import std.bytes"
+    print "var g_drops = 0"
+    print "release_counted(p: @frees ptr) {"
+    print "    g_drops = g_drops + 1"
+    print "    bytes.free(p)"
+    print "}"
+    print "type Buf = owned ptr drop release_counted"
+    print "fill(n: int) -> Buf { return bytes.new(n) as Buf }"
+    print "hold() -> int {"
+    for (i = 0; i < 70; i++) printf "    b%d = fill(%d)\n", i, i + 1
+    printf "    return bytes.length(b0)"
+    for (i = 1; i < 70; i++) printf " + bytes.length(b%d)", i
+    print ""
+    print "}"
+    print "main() {"
+    print "    n = hold()"
+    print "    println(\"drops ${g_drops} ${n}\")"
+    print "}"
+}' > "$TMP/owned_locals/main.ae"
+runs owned_locals "drops 70 0"
+
+# --- defer_locals -------------------------------------------------------------
+mkdir -p "$TMP/defer_locals"
+awk 'BEGIN {
+    print "main() {"
+    for (i = 0; i < 70; i++) printf "    a%d = %d\n", i, i
+    printf "    defer println(\"sum ${a0"
+    for (i = 1; i < 70; i++) printf " + a%d", i
+    print "}\")"
+    print "    println(\"body\")"
+    print "}"
+}' > "$TMP/defer_locals/main.ae"
+runs defer_locals "body
+sum 2415"
+
+# --- sum_arms -----------------------------------------------------------------
+mkdir -p "$TMP/sum_arms"
+awk 'BEGIN {
+    for (i = 0; i < 300; i++) printf "struct V%d {\n    n: int\n}\n", i
+    printf "type Big = "
+    for (i = 0; i < 300; i++) printf "%sV%d", (i ? " | " : ""), i
+    print ""
+    print "pick(b: Big) -> int {"
+    print "    r = 0"
+    print "    match b {"
+    for (i = 0; i < 300; i++) printf "        V%d -> { r = %d }\n", i, i
+    print "        V299 -> { r = -1 }"
+    print "    }"
+    print "    return r"
+    print "}"
+    print "main() {"
+    print "    let b: Big = V299 { n: 1 }"
+    print "    println(\"variant ${pick(b)}\")"
+    print "}"
+}' > "$TMP/sum_arms/main.ae"
+out=$(cd "$TMP/sum_arms" && AETHER_HOME="$ROOT" "$AE" run main.ae 2>&1 | tr -d '\r' | tail -1)
+[ "$out" = "variant 299" ] || fail "sum_arms: not \"variant 299\":" "$out"
+
+# --- scope_depth --------------------------------------------------------------
+steady scope_depth '
+    print "round(w: string) -> int {"
+    print "    total = 0"
+    for (d = 0; d < 70; d++) printf "    if string.length(w) > 0 {\n        s%d = string.concat(w, \"%d\")\n", d, d
+    print "        total = total + 1"
+    for (d = 69; d >= 0; d--) printf "        total = total + string.length(s%d)\n    }\n", d
+    print "    return total"
+    print "}"' 341
+
+# --- switch_depth -------------------------------------------------------------
+mkdir -p "$TMP/switch_depth"
+awk 'BEGIN {
+    print "main() {"
+    print "    seen = 0"
+    print "    i = 0"
+    print "    while i < 3 {"
+    print "        i = i + 1"
+    for (d = 0; d < 70; d++) printf "        switch i {\n        case %d: seen = seen + 1000\n        default:\n", d + 100
+    print "        switch i {"
+    print "            case 1..=2: break"
+    print "            default: seen = seen + 1"
+    print "        }"
+    print "        seen = seen + 100"
+    for (d = 0; d < 70; d++) print "        }"
+    print "        seen = seen + 10"
+    print "    }"
+    print "    println(\"switch ${seen}\")"
+    print "}"
+}' > "$TMP/switch_depth/main.ae"
+runs switch_depth "switch 331"
+
 [ "$fails" -eq 0 ] || exit 1
-echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lanes, call arguments, actor state, message arrays, adapters and views past every old cap"
+echo "  [PASS] $NAME: builder releases and depth, fn pointers, exports, library ids, catalog strings, lanes, call arguments, actor state, message arrays, adapters, views, statements and the generator's stacks past every old cap"
 exit 0

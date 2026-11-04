@@ -76,6 +76,17 @@ static char* heap_strf(const char* fmt, ...) {
     }
 }
 
+/* The nodes of `n`'s subtree, at least 1: a bound on the names a walk of
+ * it can collect, so a collector's array holds what the program has
+ * (#3574). */
+static int subtree_size(const ASTNode* n) {
+    if (!n) return 1;
+    int size = 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (n->children[i]) size += subtree_size(n->children[i]);
+    return size;
+}
+
 /* #2333: can a `catch NAME` binding be a heap-tracked local? Not when
  * NAME is reached through something other than a plain C local in the
  * handler (a closure-env field, a promoted capture cell, actor state):
@@ -334,8 +345,6 @@ typedef struct {
     ASTNode* closure;   /* the closure this frame is the body of, or NULL */
 } StrArrFrame;
 
-#define STR_ARR_MAX_DEPTH 128
-
 typedef struct {
     StrArr* arrs;
     int count, cap;
@@ -346,7 +355,10 @@ typedef struct {
     int* use_arrs;
     int use_count, use_cap;
     StrMap views;           /* "<element read>" -> 1, or 2 when the array owns */
-    StrArrFrame frames[STR_ARR_MAX_DEPTH];
+    /* The scopes the walk is in, as deep as they nest (#3574): 128 frames
+     * stopped it, and the arrays and reads below them went unjudged. */
+    StrArrFrame* frames;
+    int frame_cap;
     int depth;
 } StrArrs;
 
@@ -463,11 +475,18 @@ static int str_arr_value_is_literal(ASTNode* v) {
 
 static void str_arr_walk(StrArrs* sa, ASTNode* n);
 
-static void str_arr_enter(StrArrs* sa, ASTNode* fnlike, ASTNode* scope, ASTNode* closure) {
-    if (sa->depth >= STR_ARR_MAX_DEPTH) return;
+static void str_arr_push(StrArrs* sa, ASTNode* scope, ASTNode* closure) {
+    if (sa->depth == sa->frame_cap) {
+        sa->frame_cap = sa->frame_cap ? sa->frame_cap * 2 : 32;
+        sa->frames = aether_xrealloc(sa->frames, sizeof(*sa->frames) * (size_t)sa->frame_cap);
+    }
     sa->frames[sa->depth].scope = scope;
     sa->frames[sa->depth].closure = closure;
     sa->depth++;
+}
+
+static void str_arr_enter(StrArrs* sa, ASTNode* fnlike, ASTNode* scope, ASTNode* closure) {
+    str_arr_push(sa, scope, closure);
     if (scope) {
         for (int i = 0; i < fnlike->child_count; i++) {
             ASTNode* p = fnlike->children[i];
@@ -506,10 +525,7 @@ static void str_arr_walk(StrArrs* sa, ASTNode* n) {
         return;
     }
     if (n->type == AST_ACTOR_DEFINITION) {
-        if (sa->depth >= STR_ARR_MAX_DEPTH) return;
-        sa->frames[sa->depth].scope = n;
-        sa->frames[sa->depth].closure = NULL;
-        sa->depth++;
+        str_arr_push(sa, n, NULL);
         for (int i = 0; i < n->child_count; i++) {
             ASTNode* d = n->children[i];
             if (d && d->type == AST_STATE_DECLARATION && d->value &&
@@ -585,6 +601,9 @@ static StrArrs* str_arrs(CodeGenerator* gen) {
     }
     free(sa->uses);
     free(sa->use_arrs);
+    free(sa->frames);
+    sa->frames = NULL;
+    sa->frame_cap = 0;
     sa->uses = NULL;
     sa->use_arrs = NULL;
     return sa;
@@ -4373,9 +4392,12 @@ static int is_string_param_of(ASTNode* fn, const char* name) {
 
 void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
     if (!body || !gen) return;
-    const char* names[256];  // 256 string vars per fn is generous
+    /* Every string local the body binds (#3574): 256 slots left the rest
+     * untracked, so what they held was never given back. */
+    int cap = subtree_size(body);
+    const char** names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)cap);
     int count = 0;
-    collect_heap_string_var_names(gen, body, names, &count, 256);
+    collect_heap_string_var_names(gen, body, names, &count, cap);
     for (int i = 0; i < count; i++) {
         const char* name = names[i];
         /* A string state field is the actor's, not a local here: a take
@@ -4417,6 +4439,7 @@ void hoist_heap_string_trackers(CodeGenerator* gen, ASTNode* body) {
          * hold its value from before the `try`. */
         emit_string_local_decl(gen, name);
     }
+    free(names);
 }
 
 /* True for a `string?` type: an optional wrapping a bare string. The
@@ -4525,9 +4548,10 @@ static void collect_opt_str_var_names(CodeGenerator* gen, ASTNode* node,
  * local does (#2921), and every binding stores into it. */
 void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body) {
     if (!body || !gen) return;
-    const char* names[256];
+    int cap = subtree_size(body);   /* every one (#3574) */
+    const char** names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)cap);
     int count = 0;
-    collect_opt_str_var_names(gen, body, names, &count, 256);
+    collect_opt_str_var_names(gen, body, names, &count, cap);
     for (int i = 0; i < count; i++) {
         const char* name = names[i];
         if (is_var_declared(gen, name) || is_actor_state_var(gen, name) ||
@@ -4541,6 +4565,7 @@ void hoist_opt_string_locals(CodeGenerator* gen, ASTNode* body) {
         push_own_drop(gen, name, t, body->line, body->column);
         free_type(t);
     }
+    free(names);
 }
 
 /* Look up the parameter type-kind for the n-th argument of a callee
@@ -5605,10 +5630,11 @@ void push_owned_place_drop(CodeGenerator* gen, const char* name, const char* dro
  * or a module-level `var` is not a local here. */
 void hoist_owned_locals(CodeGenerator* gen, ASTNode* body) {
     if (!gen || !body) return;
-    const char* names[64];
-    Type* types[64];
+    int cap = subtree_size(body);   /* every one (#3574): 64 left the rest unreleased */
+    const char** names = (const char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)cap);
+    Type** types = (Type**)aether_xrealloc(NULL, sizeof(Type*) * (size_t)cap);
     int count = 0;
-    collect_owned_locals(body, names, types, &count, 64);
+    collect_owned_locals(body, names, types, &count, cap);
     for (int i = 0; i < count; i++) {
         const char* name = names[i];
         const char* drop = tc_owned_drop_c(types[i]);
@@ -5619,6 +5645,8 @@ void hoist_owned_locals(CodeGenerator* gen, ASTNode* body) {
         }
         push_owned_place_drop(gen, name, drop, body->line, body->column);
     }
+    free(names);
+    free(types);
 }
 
 void push_heap_string_exit_free_defers(CodeGenerator* gen, ASTNode* body) {
@@ -6211,7 +6239,7 @@ static int td_continue_target(CodeGenerator* gen, ASTNode* stmt) {
     } else {
         lvl = gen->loop_nest_depth - 1;
     }
-    if (lvl < 0 || lvl >= AETHER_MAX_LOOP_NEST) return -1;
+    if (lvl < 0 || lvl >= gen->loop_nest_depth) return -1;
     return gen->loop_td_id[lvl] ? lvl : -1;
 }
 
@@ -7272,8 +7300,10 @@ void push_struct_destroy_defer(CodeGenerator* gen, const char* var_name,
  * then; its scope exits forget it. A declaration being written holds the
  * journal call until its `;` (unwind_track_hold), at the statement level it
  * was pushed at, never inside a statement nested in its initializer. */
-#define UNWIND_TRACK_MAX 32
-static const char* g_utrack_call[UNWIND_TRACK_MAX];
+/* As many as the statement declares (#3574): 32 slots ended the compile
+ * with a fatal error on a statement declaring more. */
+static const char** g_utrack_call = NULL;
+static int g_utrack_cap = 0;
 static int g_utrack_count = 0;
 static int g_utrack_hold_depth = -1;
 
@@ -7289,9 +7319,10 @@ static void emit_unwind_track_call(CodeGenerator* gen, const char* call) {
         unwind_track_print(gen, call);
         return;
     }
-    if (g_utrack_count == UNWIND_TRACK_MAX) {
-        fprintf(stderr, "Fatal: too many owning locals declared in one statement\n");
-        exit(1);
+    if (g_utrack_count == g_utrack_cap) {
+        g_utrack_cap = g_utrack_cap ? g_utrack_cap * 2 : 32;
+        g_utrack_call = (const char**)aether_xrealloc((void*)g_utrack_call,
+                                                      sizeof(char*) * (size_t)g_utrack_cap);
     }
     g_utrack_call[g_utrack_count++] = call;
 }
@@ -7330,10 +7361,9 @@ static int find_labeled_loop_level(CodeGenerator* gen, const char* name) {
 
 /* #2696: enters a `switch` as the target of the unlabeled breaks in its
  * cases. Its C statement, if it lowers to one, sets switch_c_depth once
- * opened; an if-chain leaves it -1. Returns its level, or -1 past
- * AETHER_MAX_SWITCH_NEST. */
+ * opened; an if-chain leaves it -1. Returns its level. */
 static int switch_target_push(CodeGenerator* gen) {
-    if (gen->switch_nest_depth >= AETHER_MAX_SWITCH_NEST) return -1;
+    cg_switch_room(gen);
     int lvl = gen->switch_nest_depth++;
     gen->switch_loop_depth[lvl] = gen->loop_nest_depth;
     gen->switch_scope[lvl] = gen->scope_depth;
@@ -8703,7 +8733,14 @@ static int builder_call_to_run(CodeGenerator* gen, ASTNode* call) {
 static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) {
     if (stmt_runs_builder(gen)) return;
     ASTNode* v = NULL;
-    ASTNode* ops[64];
+    /* Room for every operand (#3574): 64 left the values past them
+     * unlinearized, so a construct in one ran as a statement
+     * expression, out of its turn. */
+    int room = stmt->child_count + 2;
+    for (ASTNode* t = stmt->child_count > 0 ? stmt->children[0] : NULL; t && t->child_count > 0;
+         t = t->children[0])
+        room++;
+    ASTNode** ops = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)room);
     int n = 0;
     int whole = 0;          /* an expression statement that is nothing else */
     int own_temps = 0;      /* the statement sets up its struct temporaries */
@@ -8723,7 +8760,7 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
             ASTNode* t = lhs;
             while (t && (t->type == AST_MEMBER_ACCESS || t->type == AST_ARRAY_ACCESS) &&
                    t->child_count > 0) {
-                if (t->type == AST_ARRAY_ACCESS && t->child_count >= 2 && n < 63)
+                if (t->type == AST_ARRAY_ACCESS && t->child_count >= 2 && n < room - 1)
                     ops[n++] = t->children[1];
                 t = t->children[0];
             }
@@ -8749,7 +8786,7 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
                 v = stmt->children[0];
                 break;
             }
-            for (int i = 0; i < stmt->child_count && n < 64; i++) ops[n++] = stmt->children[i];
+            for (int i = 0; i < stmt->child_count && n < room; i++) ops[n++] = stmt->children[i];
             break;
         case AST_IF_STATEMENT:
         case AST_MATCH_STATEMENT:
@@ -8785,7 +8822,10 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
     }
     int any = 0;
     for (int i = 0; i < n && !any; i++) any = ctl_contains(gen, ops[i]);
-    if (!any) return;
+    if (!any) {
+        free(ops);
+        return;
+    }
     if (own_temps && !temps_open) {
         ASTNode** nodes = NULL;
         int count = 0, cap = 0;
@@ -8796,11 +8836,13 @@ static void stmt_control_run(CodeGenerator* gen, ASTNode* stmt, int temps_open) 
         free(nodes);
         if (count > 0) {
             g_ctl_deferred = stmt;
+            free(ops);
             return;
         }
     }
     if (v) ctl_linearize_value(gen, v, whole);
     else if (hoist_ready(gen)) ctl_linearize_list(gen, ops, n);
+    free(ops);
 }
 
 static void stmt_control_prelude(CodeGenerator* gen, ASTNode* stmt) {
@@ -8900,25 +8942,27 @@ static void emit_loop_condition_in_body(CodeGenerator* gen, ASTNode* cond) {
  * with a thunk that runs it over the frame's locals (the journal drains
  * before the jump, so the frame is still there); a normal exit forgets the
  * entry and runs it in place (emit_deferred_one). */
-#define DEFER_CAP_MAX 64
 typedef struct { const char* name; const char* decl; } DeferCap;
+/* Every local the statement reads (#3574): 64 slots ended the compile
+ * with a fatal error on a defer reading more. */
+typedef struct { DeferCap* v; int n; int cap; } DeferCaps;
 
-static void defer_cap_add(DeferCap* caps, int* n, const char* name, const char* decl) {
-    for (int i = 0; i < *n; i++)
-        if (strcmp(caps[i].name, name) == 0) return;
-    if (*n == DEFER_CAP_MAX) {
-        fprintf(stderr, "Fatal: a defer reads more than %d locals\n", DEFER_CAP_MAX);
-        exit(1);
+static void defer_cap_add(DeferCaps* caps, const char* name, const char* decl) {
+    for (int i = 0; i < caps->n; i++)
+        if (strcmp(caps->v[i].name, name) == 0) return;
+    if (caps->n == caps->cap) {
+        caps->cap = caps->cap ? caps->cap * 2 : 16;
+        caps->v = (DeferCap*)aether_xrealloc(caps->v, sizeof(DeferCap) * (size_t)caps->cap);
     }
-    caps[*n].name = name;
-    caps[(*n)++].decl = decl;
+    caps->v[caps->n].name = name;
+    caps->v[caps->n++].decl = decl;
 }
 
 /* The C locals the deferred statement `n` reads or writes, each with its
  * declaration: a variable as it is declared (a promoted one is its cell
  * pointer), its string tracker, the actor (`self`) a state field is reached
  * through, the env an env-backed capture is. */
-static void defer_caps_walk(CodeGenerator* gen, ASTNode* n, DeferCap* caps, int* count) {
+static void defer_caps_walk(CodeGenerator* gen, ASTNode* n, DeferCaps* caps) {
     if (!n) return;
     if (n->type == AST_IDENTIFIER && n->value) {
         const char* name = n->value;
@@ -8932,20 +8976,20 @@ static void defer_caps_walk(CodeGenerator* gen, ASTNode* n, DeferCap* caps, int*
             const char* decl = is_promoted_capture(gen, name)
                                    ? promoted_cell_pointer(get_c_type(t), name)
                                    : c_member_decl(t, name);
-            defer_cap_add(caps, count, name, decl);
+            defer_cap_add(caps, name, decl);
         } else if (gen->current_actor && is_actor_state_var(gen, name)) {
-            defer_cap_add(caps, count, "self", cg_internf("%s* self", gen->current_actor));
+            defer_cap_add(caps, "self", cg_internf("%s* self", gen->current_actor));
         }
         for (int e = 0; e < gen->current_env_capture_count; e++) {
             if (!gen->current_env_captures[e] || strcmp(gen->current_env_captures[e], name) != 0)
                 continue;
             for (int ci = 0; ci < gen->closure_count; ci++)
                 if (gen->closures[ci].closure_node == gen->current_function)
-                    defer_cap_add(caps, count, "_env",
+                    defer_cap_add(caps, "_env",
                                   cg_internf("_closure_env_%d* _env", gen->closures[ci].id));
         }
     }
-    for (int i = 0; i < n->child_count; i++) defer_caps_walk(gen, n->children[i], caps, count);
+    for (int i = 0; i < n->child_count; i++) defer_caps_walk(gen, n->children[i], caps);
 }
 
 static ASTNode** g_udefer_node = NULL;
@@ -9022,9 +9066,10 @@ static void emit_defer_thunk(CodeGenerator* gen, ASTNode* body, int id, DeferCap
 }
 
 static void emit_defer_registration(CodeGenerator* gen, ASTNode* body) {
-    DeferCap caps[DEFER_CAP_MAX];
-    int n = 0;
-    defer_caps_walk(gen, body, caps, &n);
+    DeferCaps found = { NULL, 0, 0 };
+    defer_caps_walk(gen, body, &found);
+    DeferCap* caps = found.v;
+    int n = found.n;
     int id = gen->defer_thunk_count++;
     emit_defer_thunk(gen, body, id, caps, n);
     print_indent(gen);
@@ -9036,6 +9081,7 @@ static void emit_defer_registration(CodeGenerator* gen, ASTNode* body) {
     g_udefer_id = aether_xrealloc(g_udefer_id, sizeof(int) * (size_t)(g_udefer_count + 1));
     g_udefer_node[g_udefer_count] = body;
     g_udefer_id[g_udefer_count++] = id;
+    free(caps);
 }
 
 /* The thunks, after everything else, and their prototypes where the
@@ -11658,18 +11704,17 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             /* Issue #501: snapshot try_frame_depth at loop entry.
              * #893: record the loop's label / containing scope / C-label id. */
             int for_lbl_idx = -1;
-            if (gen->loop_nest_depth < AETHER_MAX_LOOP_NEST) {
-                for_lbl_idx = gen->loop_nest_depth;
-                gen->loop_try_base[for_lbl_idx] = gen->try_frame_depth;
-                gen->loop_label[for_lbl_idx] = stmt->value;
-                gen->loop_label_scope[for_lbl_idx] = gen->scope_depth;
-                gen->loop_label_id[for_lbl_idx] = gen->next_loop_label_id++;
-                gen->loop_label_break_used[for_lbl_idx] = 0;
-                gen->loop_label_continue_used[for_lbl_idx] = 0;
-                gen->loop_step_in_body[for_lbl_idx] = step_stmt || step_ctl;
-                gen->loop_c_depth[for_lbl_idx] = gen->c_break_depth + 1;
-                gen->loop_nest_depth++;
-            }
+            cg_loop_room(gen);
+            for_lbl_idx = gen->loop_nest_depth;
+            gen->loop_try_base[for_lbl_idx] = gen->try_frame_depth;
+            gen->loop_label[for_lbl_idx] = stmt->value;
+            gen->loop_label_scope[for_lbl_idx] = gen->scope_depth;
+            gen->loop_label_id[for_lbl_idx] = gen->next_loop_label_id++;
+            gen->loop_label_break_used[for_lbl_idx] = 0;
+            gen->loop_label_continue_used[for_lbl_idx] = 0;
+            gen->loop_step_in_body[for_lbl_idx] = step_stmt || step_ctl;
+            gen->loop_c_depth[for_lbl_idx] = gen->c_break_depth + 1;
+            gen->loop_nest_depth++;
             gen->c_break_depth++;
             if (for_cond_in_body) emit_loop_condition_in_body(gen, stmt->children[1]);
             if (stmt->child_count > 3 && stmt->children[3]) {
@@ -11748,7 +11793,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * shape is managed separately. */
             ASTNode* td_sw = NULL;
             int td_id = 0;
-            if (!has_sends && gen->loop_nest_depth < AETHER_MAX_LOOP_NEST) {
+            if (!has_sends) {
                 td_sw = td_loop_switch(gen, stmt);
                 if (td_sw) {
                     td_id = ++gen->next_td_id;
@@ -11781,20 +11826,19 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
              * #893: record the loop's label / containing scope / a fresh
              * C-label id in the same slot. */
             int while_lbl_idx = -1;
-            if (gen->loop_nest_depth < AETHER_MAX_LOOP_NEST) {
-                while_lbl_idx = gen->loop_nest_depth;
-                gen->loop_try_base[while_lbl_idx] = gen->try_frame_depth;
-                gen->loop_label[while_lbl_idx] = stmt->value;
-                gen->loop_label_scope[while_lbl_idx] = gen->scope_depth;
-                gen->loop_label_id[while_lbl_idx] = gen->next_loop_label_id++;
-                gen->loop_label_break_used[while_lbl_idx] = 0;
-                gen->loop_label_continue_used[while_lbl_idx] = 0;
-                gen->loop_step_in_body[while_lbl_idx] = 0;
-                gen->loop_td_id[while_lbl_idx] = td_id;
-                gen->loop_td_node[while_lbl_idx] = td_id ? stmt : NULL;
-                gen->loop_c_depth[while_lbl_idx] = gen->c_break_depth + 1;
-                gen->loop_nest_depth++;
-            }
+            cg_loop_room(gen);
+            while_lbl_idx = gen->loop_nest_depth;
+            gen->loop_try_base[while_lbl_idx] = gen->try_frame_depth;
+            gen->loop_label[while_lbl_idx] = stmt->value;
+            gen->loop_label_scope[while_lbl_idx] = gen->scope_depth;
+            gen->loop_label_id[while_lbl_idx] = gen->next_loop_label_id++;
+            gen->loop_label_break_used[while_lbl_idx] = 0;
+            gen->loop_label_continue_used[while_lbl_idx] = 0;
+            gen->loop_step_in_body[while_lbl_idx] = 0;
+            gen->loop_td_id[while_lbl_idx] = td_id;
+            gen->loop_td_node[while_lbl_idx] = td_id ? stmt : NULL;
+            gen->loop_c_depth[while_lbl_idx] = gen->c_break_depth + 1;
+            gen->loop_nest_depth++;
             gen->c_break_depth++;
             ASTNode* saved_td_switch = gen->td_switch;
             int saved_td_id = gen->td_id;
@@ -12036,7 +12080,11 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                      * an arm after `_` never runs (#2728). Emitting them made
                      * a duplicate `case`, which C rejects, or let a variant
                      * below `_` take its value back. */
-                    const char* seen_variants[256];
+                    /* Every variant's (#3574): 256 slots let a second arm of a
+                     * variant past them through, a duplicate case C rejects. */
+                    size_t arms = (size_t)(stmt->child_count > 0 ? stmt->child_count : 1);
+                    const char** seen_variants =
+                        (const char**)aether_xrealloc(NULL, sizeof(char*) * arms);
                     int nseen = 0;
                     int after_wild = 0;
                     for (int i = 1; i < stmt->child_count && !after_wild; i++) {
@@ -12061,7 +12109,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                             for (int s = 0; s < nseen; s++)
                                 if (strcmp(seen_variants[s], variant) == 0) { dup = 1; break; }
                             if (dup) continue;
-                            if (nseen < 256) seen_variants[nseen++] = variant;
+                            seen_variants[nseen++] = variant;
                         }
                         if (is_wild) after_wild = 1;
                         print_indent(gen);
@@ -12083,6 +12131,7 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         unindent(gen);
                         print_line(gen, "}");
                     }
+                    free(seen_variants);
                     gen->c_break_depth--;
                     unindent(gen);
                     print_line(gen, "}");
@@ -13877,17 +13926,20 @@ void codegen_diagnose_ownership(ASTNode* program, FILE* out) {
         /* Prelude — replicate what generate_function_definition runs
          * before the body, minus the emit. */
         clear_heap_string_vars(&gen);
-        const char* heap_names[256];
+        int heap_cap = subtree_size(c);
+        const char** heap_names = (const char**)aether_xrealloc(
+            NULL, sizeof(char*) * (size_t)heap_cap);
         int heap_count = 0;
         for (int j = 0; j < c->child_count; j++) {
             collect_heap_string_var_names(&gen, c->children[j],
-                                          heap_names, &heap_count, 256);
+                                          heap_names, &heap_count, heap_cap);
         }
         for (int n = 0; n < heap_count; n++) {
             if (!is_heap_string_var(&gen, heap_names[n])) {
                 mark_heap_string_var(&gen, heap_names[n]);
             }
         }
+        free(heap_names);
 
         fprintf(out, "  %s (line %d):\n",
                 c->value ? c->value : "(anonymous)", c->line);
