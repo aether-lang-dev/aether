@@ -548,6 +548,7 @@ read_registry_xml(text: string, what: string) {
         }
     }
     xml.free(p)
+    list.free(stack)
 }
 
 // "1.4.357": the registry release the output was generated from.
@@ -1677,6 +1678,9 @@ emit_dispatch(path: string, commands_path: string, api: string, extensions: stri
     out = strbuilder.finish(sb)
     werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
+    map.free(groups)
+    list.free(order)
+    map.free(levels)
     println("vkgen: wrote ${path}")
 }
 
