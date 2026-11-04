@@ -4677,9 +4677,10 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_FUNCTION_CALL: {
             /* #1286 `make([]T, n)` is a `T[]` slice of n elements; the parser
              * stamped the array type on the call. */
+            /* #3025; #3570: `__slice_readonly(v, s)`, a view of string `s`. */
             if (expr->value && strcmp(expr->value, "__slice_readonly") == 0 &&
-                expr->child_count == 1)
-                return infer_type(expr->children[0], table);   /* #3025 */
+                (expr->child_count == 1 || expr->child_count == 2))
+                return infer_type(expr->children[0], table);
             /* The slice-ownership intrinsics (slice_own.c) carry their type. */
             if (expr->value && strncmp(expr->value, "__slice_", 8) == 0 && expr->node_type)
                 return clone_type(expr->node_type);

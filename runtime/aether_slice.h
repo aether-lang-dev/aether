@@ -90,6 +90,14 @@ typedef struct AetherSlice {
  * BORROWED, so the mark never describes a length it was not grown to. */
 #define AETHER_SLICE_GROWN 8u
 
+/* #3570: a view of a counted string's characters (string.bytes(s)), which
+ * holds one reference to the string: the 56 bits that carry a counted
+ * buffer's offset (`off` and flags' bits 8..31) carry the string's header,
+ * an AetherString*, instead. A string's characters may sit in a block of
+ * their own (an adopted buffer), so no offset from `ptr` finds the header.
+ * Always READONLY. */
+#define AETHER_SLICE_STRING 16u
+
 /* #3568: the bits of `flags` that are marks; the rest carry the offset. */
 #define AETHER_SLICE_MARKS 0xFFu
 
@@ -154,9 +162,28 @@ static inline AetherSlice aether_slice_make(const void* ptr, uint64_t len) {
     return s;
 }
 
-/* A reference to the buffer `s` views, for a place that holds `s`. An
- * uncounted slice takes none. */
+/* #3570: the string a view of a counted string's characters holds, and its
+ * count, as the generated program declares them; std/string defines them.
+ * aether_string_counted says whether `s` is a counted string that is not
+ * pinned (a literal the compiler made static is never freed). */
+void string_retain(const char* s);
+void string_release(const char* s);
+void aether_string_publish(const void* s);
+int aether_string_counted(const void* s);
+
+/* The string header a view marked AETHER_SLICE_STRING holds. */
+static inline const char* aether_slice_string_of(AetherSlice s) {
+    return (const char*)(uintptr_t)aether_slice_off(s);
+}
+
+/* A reference to the buffer `s` views, for a place that holds `s`: to the
+ * string it views, for a view of a string's characters. An uncounted slice
+ * takes none. */
 static inline void aether_slice_retain(AetherSlice s) {
+    if (s.flags & AETHER_SLICE_STRING) {
+        string_retain(aether_slice_string_of(s));
+        return;
+    }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
     int rc = h->refs;
@@ -176,6 +203,10 @@ static inline void aether_slice_buf_free(AetherSliceBuf* h) {
 /* The reference a place held to the buffer `s` views, given back; the last
  * frees the buffer. An uncounted slice gives back nothing. */
 static inline void aether_slice_unref(AetherSlice s) {
+    if (s.flags & AETHER_SLICE_STRING) {
+        string_release(aether_slice_string_of(s));
+        return;
+    }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
     int rc = h->refs;
@@ -191,6 +222,10 @@ static inline void aether_slice_unref(AetherSlice s) {
  * closure, a message, an actor's state): its count is atomic. Only the
  * thread that holds it alone sets the bit. */
 static inline void aether_slice_publish(AetherSlice s) {
+    if (s.flags & AETHER_SLICE_STRING) {
+        aether_string_publish(aether_slice_string_of(s));
+        return;
+    }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
     if (!(h->refs & AETHER_SLICE_SHARED_BIT)) h->refs |= AETHER_SLICE_SHARED_BIT;
@@ -219,6 +254,8 @@ static inline AetherSlice aether_slice_derive(AetherSlice s, const void* ptr, ui
     if (s.flags & AETHER_SLICE_MADE)
         d = aether_slice_with_off(d, aether_slice_off(s) +
                                          (uint64_t)((const char*)ptr - (const char*)s.ptr));
+    else if (s.flags & AETHER_SLICE_STRING)   /* #3570: the same string */
+        d = aether_slice_with_off(d, aether_slice_off(s));
     return d;
 }
 
@@ -246,6 +283,36 @@ static inline AetherSlice aether_slice_alloc(int64_t count, size_t elem_size,
     AetherSlice s = aether_slice_make((char*)h + AETHER_SLICE_HEAD, (uint64_t)count);
     s.flags = AETHER_SLICE_MADE;
     return s;
+}
+
+/* #3570: `v`, a view of the characters of the counted string `header`, as
+ * a view that holds the string: read-only, marked AETHER_SLICE_STRING, the
+ * header in its 56 offset bits, and one reference to the string taken. A
+ * user-space pointer fits in 56 bits on every target Aether builds for; one
+ * that does not gets the characters copied into a counted buffer of its
+ * own instead, still read-only, so no view is ever made that cannot find
+ * what it holds. */
+static inline AetherSlice aether_slice_string_view(AetherSlice v, const void* header) {
+    v.flags |= AETHER_SLICE_READONLY;
+    uint64_t h = (uint64_t)(uintptr_t)header;
+    if (h >> 56) {
+        AetherSlice c = aether_slice_alloc((int64_t)v.len, 1, NULL);
+        if (v.len) memcpy(c.ptr, v.ptr, (size_t)v.len);
+        c.flags |= AETHER_SLICE_READONLY;
+        return c;
+    }
+    string_retain((const char*)header);
+    v.flags |= AETHER_SLICE_STRING;
+    return aether_slice_with_off(v, h);
+}
+
+/* `string.bytes(s)` (#3025, #3570): `v`, the bounded view of `s`'s
+ * characters, read-only, and holding `s` when `s` is a counted string. A
+ * literal and a plain C string are not counted: the view holds nothing, as
+ * before. */
+static inline AetherSlice aether_string_view(AetherSlice v, const void* s) {
+    if (!s || v.ptr == NULL || !aether_string_counted(s)) return aether_slice_readonly(v);
+    return aether_slice_string_view(v, s);
 }
 
 /* `.len` — -1 for an unbounded view. */

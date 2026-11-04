@@ -1108,6 +1108,16 @@ static ASTNode* mk_store(const char* name, Type* t, ASTNode* place, ASTNode* v) 
 
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot);
 
+/* Is `e` a view (`f()[a..b]`, `string.bytes(s)[1..]`, one of one) of a call's
+ * result, which holds the reference the call handed over and nothing else
+ * does? The view takes that reference over (#3568, #3570). */
+static int view_of_fresh(ASTNode* e) {
+    if (!e || e->type != AST_SLICE_EXPR) return 0;
+    while (e && e->type == AST_SLICE_EXPR && e->child_count > 0) e = e->children[0];
+    return e && e->type == AST_FUNCTION_CALL && type_is_slice(e->node_type) && e->value &&
+           strncmp(e->value, "__slice_", 8) != 0;
+}
+
 /* A slice moved into a place gives the place one reference (#3568): taken
  * out of a local that owns it (which is left empty), and copied, with a
  * reference of its own, out of any other place (a parameter, a view, a
@@ -1135,7 +1145,9 @@ static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
             return;
         case AST_SLICE_EXPR:
             rewrite(c, f, slot);
-            if (use == C_MOVE) wrap(slot, "__slice_copy");
+            /* A view of a call's result takes over the reference the result
+             * handed over, which nothing else holds. */
+            if (use == C_MOVE && !view_of_fresh(e)) wrap(slot, "__slice_copy");
             return;
         case AST_IF_EXPRESSION:
             /* Each branch is the value, going where the `if` goes. */
@@ -1191,7 +1203,8 @@ static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
      * of which gives a call's result. */
     int branches = a && type_is_slice(a->node_type) &&
                    (a->type == AST_IF_EXPRESSION ||
-                    (a->type == AST_MATCH_STATEMENT && match_gives_fresh(a)));
+                    (a->type == AST_MATCH_STATEMENT && match_gives_fresh(a)) ||
+                    view_of_fresh(a));
     if (!a || (!branches && (a->type != AST_FUNCTION_CALL || !type_is_slice(a->node_type) ||
                              !a->value || strncmp(a->value, "__slice_", 8) == 0)))
         return 0;

@@ -307,7 +307,12 @@ as `free` gives it back). A program writes no `free` for it.
   free(xs)`. `free` of a view a place holds releases that view's reference;
   the buffer stays for the others. `free` of a view no place holds
   (`free(xs[1..])`, a pattern's tail) and of a view of memory no count covers
-  (an array viewed as a slice, a string's bytes) is a named panic.
+  (an array viewed as a slice) is a named panic, as is `free` of a string's
+  bytes, which are read-only.
+- **A view of a string's bytes holds the string** (`string.bytes(s)`,
+  #3570): the string stays while any place holds a view of it, and is
+  released with the last, as a `make` buffer is. A literal's bytes are
+  static, and held by nothing.
 - **Not counted**: a slice local a pattern binds (a list pattern's tail, a
   match arm's binding) views what it was bound from, which holds the
   reference; a slice of C memory (`p as T[]`, a `T[]` an extern returns) is

@@ -818,8 +818,11 @@ from_ptr(p: ptr) -> (string, string) {
 // A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII
 // scanning (indexing, sub-slicing) without re-measuring the string on every
 // access the way string_char_at_n's separate known_length parameter does.
-// BORROWED: valid only as long as `s` itself is, exactly like any slice over
-// someone else's storage; do not free it. Reads cost what any slice's do.
+// #3570: a view of a counted string holds the string, as a view of a `make`
+// buffer holds its buffer (#3568): it stays valid wherever it is kept, after
+// `s` is gone, and the string is given back with the last place that holds
+// a view of it. A literal's bytes are static and held by nothing. Do not
+// free it. Reads cost what any slice's do.
 // #3025: a write through it (an element store, `+=`, `++`), or through any
 // view made from it, here or in a function it is passed to, panics with "a
 // write through a read-only view of a string": a literal's bytes are in
@@ -828,7 +831,7 @@ from_ptr(p: ptr) -> (string, string) {
 bytes(s: string) -> byte[] {
     n = string_length(s)
     if n <= 0 { return null }
-    return __slice_readonly((aether_string_raw_ptr(s) as byte[])[0..n])
+    return __slice_readonly((aether_string_raw_ptr(s) as byte[])[0..n], s)
 }
 
 // A bounded, OWNED string[] snapshot of a native string-array handle's

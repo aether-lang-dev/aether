@@ -1,0 +1,146 @@
+// Regression (#3570): a view of a string's bytes holds the string.
+//
+// `string.bytes(s)` gave a read-only `byte[]` over the string's characters
+// that held nothing: when the string's last holder let it go while the view
+// was still bound, the view read freed memory. A view of a counted string
+// now holds one reference to it, as a view of a `make` buffer holds its
+// buffer (#3568), given back when the view's place goes.
+//
+// Each shape reads the view back after a churn of strings of the same size
+// (a string freed under the view would hand its storage to one of them),
+// and where the heap count is exact (mem.heap_in_use_exact) some round of
+// each leaves the heap where it found it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3570: ${what}")
+        exit(1)
+    }
+}
+
+struct Held {
+    data: byte[]
+}
+
+// Strings of the size the views' are, kept alive until the caller lets the
+// buffer go, so the allocator hands out every block a freed string left
+// (it may pick them in any order).
+churn() -> string[] {
+    out = make([]string, 4096)
+    for r in 0..4096 {
+        out[r] = string.concat("zzzzzzzzzzzzzzzz", "zzzzzzzzzzzzzzz")
+    }
+    return out
+}
+
+word(k: int) -> string {
+    return string.concat("abcdefghijklmnop", "${k}qrstuvwxyz0123")
+}
+
+// The string is a local the function lets go: the view outlives it.
+bytes_of(k: int) -> byte[] {
+    s = word(k)
+    return string.bytes(s)
+}
+
+// The string is bound again while the view of the first is held.
+rebound(k: int, fill: bool) -> int {
+    s = word(k)
+    v = string.bytes(s)
+    s = word(k + 1)
+    if fill {
+        filler = churn()
+        return v[0] + v.len + string.length(s) + filler.len - 4096
+    }
+    return v[0] + v.len + string.length(s)
+}
+
+// A sub-view, in a struct the caller gets.
+held(k: int) -> Held {
+    s = word(k)
+    return Held { data: string.bytes(s)[2..6] }
+}
+
+// A view a closure keeps.
+reader(k: int) -> fn {
+    v = string.bytes(word(k))
+    return || {
+        return v[1]
+    }
+}
+
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+// The string stays while a view of it does: the heap holds its bytes until
+// the view goes (a view that held nothing left them freed, to be read back
+// as whatever took their place).
+held_while_viewed() {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    h0 = mem.heap_in_use()
+    v = bytes_of(1)
+    h1 = mem.heap_in_use()
+    check(h1 - h0 >= 31, "the string is freed while its view is held (${h1 - h0} bytes held)")
+    check(v[0] == 97, "the view reads its string")
+}
+
+main() {
+    held_while_viewed()
+    b = bytes_of(7)
+    _filler1 = churn()
+    check(b.len == 31 && b[0] == 97 && b[16] == 55, "a view returned past its string reads it")
+    check(rebound(3, true) == 97 + 31 + 31, "a view held across a re-bind reads its string")
+    h = held(4)
+    _filler2 = churn()
+    check(h.data.len == 4 && h.data[0] == 99, "a sub-view in a struct reads its string")
+    r = reader(5)
+    _filler3 = churn()
+    int got = call(r)
+    check(got == 98, "a view a closure keeps reads its string")
+    lit = string.bytes("literal")
+    check(lit.len == 7 && lit[0] == 108, "a view of a literal reads it")
+
+    steady("a view returned past its string", || {
+            i = 0
+            while i < 50 {
+                v = bytes_of(i)
+                _n = v.len
+                i = i + 1
+            }
+        })
+    steady("a view held across a re-bind", || {
+            i = 0
+            while i < 50 {
+                _n = rebound(i, false)
+                i = i + 1
+            }
+        })
+    steady("a sub-view in a struct, and a closure's view", || {
+            i = 0
+            while i < 50 {
+                hv = held(i)
+                rv = reader(i)
+                int m = call(rv)
+                _n = hv.data.len + m
+                i = i + 1
+            }
+        })
+    println("PASS a view of a string's bytes holds the string")
+}

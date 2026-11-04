@@ -774,9 +774,12 @@ that grows to storage of its own, each element copied with a reference of
 its own, where the reallocation used to free the storage under the view.
 A slice local a view of which may be held is copied where a local that
 owns would move, so no program that compiled before is refused. A slice of
-memory no count covers (an array viewed as a slice, a string's bytes, C
+memory no count covers (an array viewed as a slice, a literal's bytes, C
 memory) carries no AETHER_SLICE_MADE mark, and nothing is read before its
-`ptr`.
+`ptr`. A view of a counted string's characters (`string.bytes(s)`, #3570)
+holds the string by the same rule: it is marked AETHER_SLICE_STRING, the 56
+bits that carry a buffer's offset carry the string's header, and its
+retain and release are the string's.
 
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's

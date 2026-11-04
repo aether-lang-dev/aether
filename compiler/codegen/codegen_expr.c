@@ -699,7 +699,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * callee that keeps it takes its own reference), and the call releases
          * it as the local it would have been bound to would be. */
         if ((arg->type == AST_FUNCTION_CALL || arg->type == AST_IF_EXPRESSION ||
-             arg->type == AST_MATCH_STATEMENT) &&
+             arg->type == AST_MATCH_STATEMENT || arg->type == AST_SLICE_EXPR) &&
             type_is_slice(arg->node_type) &&
             annotation_has_marker(arg->annotation, "slice_temp")) {
             if (mode != ARG_SEL_OPERATOR && borrowed && !arg_drain_lookup(arg)) {
@@ -10529,6 +10529,15 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fprintf(gen->output, "aether_slice_readonly(");
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
+                }
+                else if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 2) {
+                    /* #3570: and, given the string it views, a view that
+                     * holds that string (a counted one). */
+                    fprintf(gen->output, "aether_string_view(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", (const void*)(");
+                    generate_expression(gen, expr->children[1]);
+                    fprintf(gen->output, "))");
                 }
                 else if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
                     /* #1286: `make([]T, n)` is a bounded slice over a fresh

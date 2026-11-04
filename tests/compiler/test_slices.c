@@ -375,3 +375,36 @@ TEST(slices_runtime_len_sub_and_from) {
     ASSERT_EQ(1, aether_slice_buf(part)->refs);
     aether_slice_release(&part);
 }
+
+/* #3570: a view of a counted string's characters carries the string's
+ * header in its 56 offset bits, marked AETHER_SLICE_STRING. A header whose
+ * address does not fit in 56 bits (none a target hands out; one built here
+ * by hand) gets the characters copied into a counted buffer of the view's
+ * own instead, still read-only, so no view is made that cannot find what it
+ * holds. A buffer that is no counted string stands in for the header: its
+ * retain and release are no-ops (is_aether_string). */
+TEST(slices_string_view_holds_its_header_or_copies) {
+    static char text[16] = "abcdefgh";
+    AetherSlice v = aether_slice_make(text, 8);
+    AetherSlice sv = aether_slice_string_view(v, text);
+    ASSERT_TRUE((sv.flags & AETHER_SLICE_STRING) != 0);
+    ASSERT_TRUE((sv.flags & AETHER_SLICE_READONLY) != 0);
+    ASSERT_TRUE(aether_slice_string_of(sv) == text);
+    ASSERT_TRUE(sv.ptr == (void*)text);
+    AetherSlice tail = aether_slice_from(sv, 2, 1, "t", 1);
+    ASSERT_TRUE((tail.flags & AETHER_SLICE_STRING) != 0);
+    ASSERT_TRUE(aether_slice_string_of(tail) == text);   /* the same string */
+    aether_slice_release(&tail);
+    aether_slice_release(&sv);
+    if (sizeof(void*) < 8) return;   /* a 32-bit address always fits */
+    const void* high = (const void*)(uintptr_t)((uint64_t)1 << 63 | 0x1000u);
+    AetherSlice c = aether_slice_string_view(v, high);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_STRING) == 0);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_MADE) != 0);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_READONLY) != 0);
+    ASSERT_TRUE(c.ptr != (void*)text);
+    ASSERT_EQ(8, (int)aether_slice_len(c));
+    ASSERT_EQ(0, memcmp(c.ptr, "abcdefgh", 8));
+    ASSERT_EQ(1, aether_slice_buf(c)->refs);
+    aether_slice_release(&c);
+}

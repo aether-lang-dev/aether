@@ -180,6 +180,14 @@ void string_release(const void* str) {
     if (rc <= 1) string_free_block(s);
 }
 
+/* #3570: is `str` a counted string a view of its characters must hold (not
+ * a plain C string, not a pinned literal)? runtime/aether_slice.h's
+ * aether_string_view asks it. */
+int aether_string_counted(const void* str) {
+    if (!str || !is_aether_string(str)) return 0;
+    return ((const AetherString*)str)->ref_count != AETHER_STRING_PINNED_REFS;
+}
+
 void aether_string_publish(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
