@@ -7076,14 +7076,44 @@ static int depth_holdable(CodeGenerator* gen, ASTNode* n) {
     return order_c11_type(n) != NULL;
 }
 
+/* Is child `i` of `n` a place `n` writes or takes the address of: the
+ * operand of `++`, `--` or `&`, the target of a store or a compound
+ * assignment, or what a slice ownership intrinsic grows, sets or empties?
+ * Held in a temporary, the write or the address would land on the
+ * temporary: `n[0]++` would have incremented a copy. */
+static int depth_place_child(const ASTNode* n, int i) {
+    switch (n->type) {
+        case AST_UNARY_EXPRESSION:
+            return i == 0 && n->value &&
+                   (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0 ||
+                    strcmp(n->value, "&") == 0);
+        case AST_BINARY_EXPRESSION:
+            return i == 0 && n->value && is_assignment_op(n->value);
+        case AST_ASSIGNMENT: case AST_COMPOUND_ASSIGNMENT:
+            return i == 0;
+        case AST_FUNCTION_CALL:
+            return n->value && strncmp(n->value, "__slice_", 8) == 0;
+        default:
+            return 0;
+    }
+}
+
 /* `n` at `depth` levels into its statement's expression; `pending`, the
  * next node that can be held is; `in_chain`, `n` is a link of an `if`
  * expression's `else if` chain written flat, each of whose conditions and
- * values is a statement of its own there. */
-static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, int in_chain) {
+ * values is a statement of its own there; `place`, `n` is (in) a place a
+ * write or an address takes (depth_place_child), where nothing is held:
+ * its object would be taken out of the place with it. */
+static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, int in_chain,
+                       int place) {
     if (!n) return;
+    if (place) {
+        for (int i = 0; i < n->child_count; i++) depth_walk(gen, n->children[i], 0, 0, 0, 1);
+        return;
+    }
     if (!depth_expr_node(n)) {
-        for (int i = 0; i < n->child_count; i++) depth_walk(gen, n->children[i], 0, 0, 0);
+        for (int i = 0; i < n->child_count; i++)
+            depth_walk(gen, n->children[i], 0, 0, 0, depth_place_child(n, i));
         return;
     }
     if (!in_chain && n->type == AST_IF_EXPRESSION && if_chain_links(n) > IF_CHAIN_LINKS) {
@@ -7097,11 +7127,15 @@ static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, i
     for (int i = 0; i < n->child_count; i++) {
         ASTNode* c = n->children[i];
         if (!c) continue;
+        if (depth_place_child(n, i)) {
+            depth_walk(gen, c, 0, 0, 0, 1);
+            continue;
+        }
         if (in_chain) {
             if (i == 2 && c->type == AST_IF_EXPRESSION && c->child_count >= 3)
-                depth_walk(gen, c, depth, 0, 1);
+                depth_walk(gen, c, depth, 0, 1, 0);
             else
-                depth_walk(gen, c, 0, 0, 0);
+                depth_walk(gen, c, 0, 0, 0, 0);
             continue;
         }
         /* A left chain of an operator, an `if` expression's `else if`
@@ -7109,7 +7143,7 @@ static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, i
         int same = (n->type == AST_BINARY_EXPRESSION && i == 0 && c->type == AST_BINARY_EXPRESSION) ||
                    (n->type == AST_IF_EXPRESSION && i == 2 && c->type == AST_IF_EXPRESSION);
         int d = same ? depth : depth + 1;
-        depth_walk(gen, c, d, pending || (!same && d % DEPTH_STEP == 0), 0);
+        depth_walk(gen, c, d, pending || (!same && d % DEPTH_STEP == 0), 0, 0);
     }
 }
 
@@ -7118,7 +7152,7 @@ void codegen_mark_depth(CodeGenerator* gen, ASTNode* program) {
     g_depth_keys = NULL;
     g_depth_cap = 0;
     g_depth_count = 0;
-    depth_walk(gen, program, 0, 0, 0);
+    depth_walk(gen, program, 0, 0, 0, 0);
 }
 
 /* Is `e` one of the three constructs, in the form that runs statements, and

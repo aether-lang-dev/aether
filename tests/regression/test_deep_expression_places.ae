@@ -1,0 +1,29 @@
+// A place an expression writes or takes the address of, 24 levels deep, is
+// written where it is (#3574). Every 24 levels of an expression a node is
+// held in a temporary ahead of its statement, and the operand of `++` and
+// `--` was held as a value: `n[0]++` incremented the temporary, and
+// `n[0]` stayed 0. The operand of `++`, `--` and `&`, a store's target and
+// what a slice intrinsic grows are places, and nothing in one is held.
+
+extern exit(code: int)
+
+struct S { count: int }
+
+f(i: int) -> int { return i }
+
+g(p: @into ptr) -> ptr { return p }
+
+main() {
+    let n: int[2] = [0, 0]
+    s = S { count: 0 }
+    k = 5
+    x = f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(n[0]++))))))))))))))))))))))))
+    y = f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(s.count++))))))))))))))))))))))))
+    z = f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(f(n[1]--))))))))))))))))))))))))
+    q = g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(g(&k))))))))))))))))))))))))
+    if n[0] != 1 || s.count != 1 || n[1] != -1 || x != 0 || y != 0 || z != 0 || q != &k {
+        println("FAIL: n[0] ${n[0]}, s.count ${s.count}, n[1] ${n[1]}, ${x} ${y} ${z}")
+        exit(1)
+    }
+    println("PASS: deep places written where they are")
+}
