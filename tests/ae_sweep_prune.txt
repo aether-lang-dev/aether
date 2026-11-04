@@ -143,6 +143,7 @@ tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
+tests/integration/http_client_connect_proxy/
 tests/integration/http_client_dechunk/
 tests/integration/http_client_forward_proxy/
 tests/integration/http_client_insecure_tls/
