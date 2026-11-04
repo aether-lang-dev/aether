@@ -349,6 +349,10 @@ AetherModule* module_create(const char* name, const char* file_path) {
     module->import_count = 0;
     module->ns = NULL;
     module->lane_target = NULL;
+    memset(&module->func_names, 0, sizeof(module->func_names));
+    memset(&module->const_names, 0, sizeof(module->const_names));
+    module->names_ast = NULL;
+    module->names_children = 0;
     return module;
 }
 
@@ -359,7 +363,9 @@ void module_free(AetherModule* module) {
     free(module->file_path);
     free(module->ns);
     free(module->lane_target);
-    
+    free(module->func_names.names);
+    free(module->const_names.names);
+
     if (module->ast) {
         free_ast_node(module->ast);
     }
@@ -2398,29 +2404,15 @@ int module_orchestrate(ASTNode* program) {
 
 // --- Pure Aether Module Merging ---
 
-// Soft ceiling for the per-module decl-name tables that
-// module_merge_into_program builds while cloning a module's bodies into
-// the consumer's program AST.
-//
-// Every clone-and-rename pass collects a snapshot of the source module's
-// function and constant names so that intra-module calls (`square(...)`
-// referencing a sibling) can be rewritten to the prefixed form
-// (`mathy_square(...)`) before the body lands in the consumer.
-//
-// Pre-fix this was hardcoded to 128 at every collection site. Modules
-// merged from large per-file shims (avn's working_copy/module.ae,
-// ~150 funcs in 4300 lines) silently truncated at the 129th decl —
-// every call to a beyond-128 sibling stayed bare and the consumer's
-// typer fired E0301 even though the symbol existed in the registry
-// under its prefixed name. The cap below leaves headroom for very
-// large merged modules without forcing dynamic allocation.
-//
-// Stack-frame budget: each merge pass allocates up to ~6 arrays of
-// (const char*) at this cap → 4096 × 8 bytes × 6 ≈ 192 KB peak. Well
-// within Linux/macOS 8 MB defaults and Windows 1 MB default. If a
-// future module pushes past 4096 we should switch to dynamic
-// allocation rather than another bump.
-#define AETHER_MODULE_MAX_DECLS 4096
+// The per-module name lists module_merge_into_program renames merged
+// bodies by. Every clone-and-rename pass reads the source module's function
+// and constant names so that intra-module calls (`square(...)` referencing a
+// sibling) are rewritten to the prefixed form (`mathy_square(...)`) before
+// the body lands in the consumer. They were fixed arrays, of 128 and then of
+// 4096 names, and a module past the cap silently left the rest bare: a call
+// of a sibling past it failed E0301, and a bare name past it that the
+// program also declares bound to the program's (#3545). Each list is now as
+// long as the module needs (ModuleNames, kept on the AetherModule).
 
 // Namespace a module path's merged symbols carry: "mypackage.utils" ->
 // "utils", unless another loaded module also ends in `utils` (#2209, see
@@ -2473,38 +2465,65 @@ void module_unwrap_entry_exports(ASTNode* program) {
     }
 }
 
-// Collect all function names defined in a module AST
-static int collect_module_func_names(ASTNode* mod_ast, const char** names, int max) {
-    int count = 0;
-    for (int i = 0; i < mod_ast->child_count && count < max; i++) {
-        ASTNode* decl = unwrap_export(mod_ast->children[i]);
-        if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) && decl->value) {
-            names[count++] = decl->value;
+/* #3545: `name` added to `l`, which grows to hold it. */
+static void names_add(ModuleNames* l, const char* name) {
+    if (l->count == l->cap) {
+        int cap = l->cap ? l->cap * 2 : 64;
+        const char** grown = realloc(l->names, sizeof(*grown) * (size_t)cap);
+        if (!grown) {
+            fprintf(stderr, "Fatal: out of memory\n");
+            exit(1);
         }
+        l->names = grown;
+        l->cap = cap;
     }
-    return count;
+    l->names[l->count++] = name;
 }
 
-// Collect all constant names defined in a module AST
-static int collect_module_const_names(ASTNode* mod_ast, const char** names, int max) {
-    int count = 0;
-    for (int i = 0; i < mod_ast->child_count && count < max; i++) {
-        ASTNode* decl = unwrap_export(mod_ast->children[i]);
-        if (decl->type == AST_CONST_DECLARATION && decl->value) {
-            names[count++] = decl->value;
-        }
-        /* #error-unification P3: fault members are const-like — a bare
-         * `return NotFound` inside the module must be renamed to
-         * `<ns>_NotFound` just like a const reference, so include each
-         * fault member's bare name in the intra-module rename list. */
-        else if (decl->type == AST_FAULT_DEFINITION) {
-            for (int mi = 0; mi < decl->child_count && count < max; mi++) {
+static void names_free(ModuleNames* l) {
+    free(l->names);
+    l->names = NULL;
+    l->count = l->cap = 0;
+}
+
+/* The function names and the constant names `m` declares (#3545): read
+ * from its AST once, as many as it has, and again only if the AST is
+ * another or has gained or lost a declaration since. A fault's members are
+ * const-like: a bare `return NotFound` inside the module is renamed to
+ * `<ns>_NotFound` as a constant's reference is, so each member's bare name
+ * is among the constants. */
+static void module_collect_names(AetherModule* m) {
+    if (!m || !m->ast) return;
+    if (m->names_ast == m->ast && m->names_children == m->ast->child_count) return;
+    m->func_names.count = 0;
+    m->const_names.count = 0;
+    for (int i = 0; i < m->ast->child_count; i++) {
+        ASTNode* decl = unwrap_export(m->ast->children[i]);
+        if (!decl) continue;
+        if ((decl->type == AST_FUNCTION_DEFINITION || decl->type == AST_BUILDER_FUNCTION) &&
+            decl->value) {
+            names_add(&m->func_names, decl->value);
+        } else if (decl->type == AST_CONST_DECLARATION && decl->value) {
+            names_add(&m->const_names, decl->value);
+        } else if (decl->type == AST_FAULT_DEFINITION) {
+            for (int mi = 0; mi < decl->child_count; mi++) {
                 ASTNode* mem = decl->children[mi];
-                if (mem && mem->value) names[count++] = mem->value;
+                if (mem && mem->value) names_add(&m->const_names, mem->value);
             }
         }
     }
-    return count;
+    m->names_ast = m->ast;
+    m->names_children = m->ast->child_count;
+}
+
+static const ModuleNames* module_func_names(AetherModule* m) {
+    module_collect_names(m);
+    return &m->func_names;
+}
+
+static const ModuleNames* module_const_names(AetherModule* m) {
+    module_collect_names(m);
+    return &m->const_names;
 }
 
 /* #937: is `name` a MUTABLE module-level `var` (annotation "global_var",
@@ -3778,19 +3797,15 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
         AetherModule* sub_mod = module_find(imp->value);
         if (!sub_mod || !sub_mod->ast) continue;
 
-        const char* sub_func_names[AETHER_MODULE_MAX_DECLS];
-        int sub_func_count = collect_module_func_names(sub_mod->ast,
-                                                       sub_func_names,
-                                                       AETHER_MODULE_MAX_DECLS);
-        const char* sub_const_names[AETHER_MODULE_MAX_DECLS];
-        int sub_const_count = collect_module_const_names(sub_mod->ast,
-                                                         sub_const_names,
-                                                         AETHER_MODULE_MAX_DECLS);
+        const ModuleNames* sub_funcs = module_func_names(sub_mod);
+        const ModuleNames* sub_consts = module_const_names(sub_mod);
+        const char** sub_func_names = sub_funcs->names;
+        int sub_func_count = sub_funcs->count;
+        const char** sub_const_names = sub_consts->names;
+        int sub_const_count = sub_consts->count;
 
-        const char* sel_func_names[AETHER_MODULE_MAX_DECLS];
-        int sel_func_count = 0;
-        const char* sel_const_names[AETHER_MODULE_MAX_DECLS];
-        int sel_const_count = 0;
+        ModuleNames sel_funcs = {0};
+        ModuleNames sel_consts = {0};
 
         if (is_glob) {
             // #896: the glob selection is M's whole export surface. Take every
@@ -3805,18 +3820,16 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
             // definition wins. Its functions and constants were renamed to
             // `<M>_<name>` before this runs; this keeps M's own externs, which
             // keep their bare name, from being rewritten to the glob's.
-            for (int k = 0; k < sub_func_count &&
-                            sel_func_count < AETHER_MODULE_MAX_DECLS; k++) {
+            for (int k = 0; k < sub_func_count; k++) {
                 if (sub_func_names[k] && sub_func_names[k][0] != '_' &&
                     !module_defines_own_name(mod_ast, sub_func_names[k])) {
-                    sel_func_names[sel_func_count++] = sub_func_names[k];
+                    names_add(&sel_funcs, sub_func_names[k]);
                 }
             }
-            for (int k = 0; k < sub_const_count &&
-                            sel_const_count < AETHER_MODULE_MAX_DECLS; k++) {
+            for (int k = 0; k < sub_const_count; k++) {
                 if (sub_const_names[k] && sub_const_names[k][0] != '_' &&
                     !module_defines_own_name(mod_ast, sub_const_names[k])) {
-                    sel_const_names[sel_const_count++] = sub_const_names[k];
+                    names_add(&sel_consts, sub_const_names[k]);
                 }
             }
             /* #2637: and its extern-backed names, as the checker's glob binds
@@ -3828,8 +3841,7 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
              * `<sub_ns>_<name>`, the extern itself. Same privacy and #2632
              * rules as the functions above. */
             size_t sub_ns_len = strlen(sub_ns);
-            for (int j = 0; j < sub_mod->ast->child_count &&
-                            sel_func_count < AETHER_MODULE_MAX_DECLS; j++) {
+            for (int j = 0; j < sub_mod->ast->child_count; j++) {
                 ASTNode* ext = unwrap_export(sub_mod->ast->children[j]);
                 if (!ext || ext->type != AST_EXTERN_FUNCTION || !ext->value) continue;
                 if (strncmp(ext->value, sub_ns, sub_ns_len) != 0 ||
@@ -3837,8 +3849,8 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                 const char* tail = ext->value + sub_ns_len + 1;
                 if (!*tail || tail[0] == '_') continue;
                 if (module_defines_own_name(mod_ast, tail)) continue;
-                if (name_in_list(tail, sel_func_names, sel_func_count)) continue;
-                sel_func_names[sel_func_count++] = tail;
+                if (name_in_list(tail, sel_funcs.names, sel_funcs.count)) continue;
+                names_add(&sel_funcs, tail);
             }
         } else {
             for (int k = 0; k < imp->child_count; k++) {
@@ -3862,29 +3874,27 @@ static void apply_inherited_selective_imports(ASTNode* clone, ASTNode* mod_ast) 
                     rename_aliased_import_refs(clone, sel->annotation + 13, prefixed, is_const);
                     continue;
                 }
-                if (name_in_list(sel->value, sub_func_names, sub_func_count) &&
-                    sel_func_count < AETHER_MODULE_MAX_DECLS) {
-                    sel_func_names[sel_func_count++] = sel->value;
+                if (name_in_list(sel->value, sub_func_names, sub_func_count)) {
+                    names_add(&sel_funcs, sel->value);
                 } else if (module_extern_short_name(sub_mod->ast, sub_ns, sel->value) &&
-                           !module_defines_own_name(mod_ast, sel->value) &&
-                           sel_func_count < AETHER_MODULE_MAX_DECLS) {
+                           !module_defines_own_name(mod_ast, sel->value)) {
                     /* An extern-backed name (`import std.http (server_create)`
                      * for `extern http_server_create`): renamed to the extern,
                      * as the glob form does since #2637. */
-                    sel_func_names[sel_func_count++] = sel->value;
-                } else if (name_in_list(sel->value, sub_const_names, sub_const_count) &&
-                           sel_const_count < AETHER_MODULE_MAX_DECLS) {
-                    sel_const_names[sel_const_count++] = sel->value;
+                    names_add(&sel_funcs, sel->value);
+                } else if (name_in_list(sel->value, sub_const_names, sub_const_count)) {
+                    names_add(&sel_consts, sel->value);
                 }
             }
         }
 
-        if (sel_func_count == 0 && sel_const_count == 0) continue;
-
-        rename_intra_module_refs(clone, sub_ns,
-                                 sel_func_names, sel_func_count,
-                                 sel_const_names, sel_const_count,
-                                 NULL, 0);
+        if (sel_funcs.count > 0 || sel_consts.count > 0)
+            rename_intra_module_refs(clone, sub_ns,
+                                     sel_funcs.names, sel_funcs.count,
+                                     sel_consts.names, sel_consts.count,
+                                     NULL, 0);
+        names_free(&sel_funcs);
+        names_free(&sel_consts);
     }
 }
 
@@ -4482,8 +4492,8 @@ void module_merge_into_program(ASTNode* program) {
         // assumption that it only contained externs, but stdlib can now
         // carry Aether-native wrappers (e.g. Go-style result-type wrappers
         // over the raw externs), which need to be cloned into the program
-        // AST just like user modules. collect_module_func_names only
-        // collects AST_FUNCTION_DEFINITION nodes, so externs are untouched
+        // AST just like user modules. module_collect_names only
+        // takes AST_FUNCTION_DEFINITION nodes as functions, so externs are untouched
         // by this path.
 
         AetherModule* mod = module_find(module_path);
@@ -4492,13 +4502,12 @@ void module_merge_into_program(ASTNode* program) {
         ASTNode* mod_ast = mod->ast;
         const char* ns = module_get_namespace(module_path);
 
-        // Collect function and constant names for intra-module renaming
-        const char* func_names[AETHER_MODULE_MAX_DECLS];
-        int func_count = collect_module_func_names(mod_ast, func_names,
-                                                   AETHER_MODULE_MAX_DECLS);
-        const char* const_names[AETHER_MODULE_MAX_DECLS];
-        int const_count = collect_module_const_names(mod_ast, const_names,
-                                                     AETHER_MODULE_MAX_DECLS);
+        // The function and constant names for intra-module renaming,
+        // as many as the module declares (#3545).
+        const char** func_names = module_func_names(mod)->names;
+        int func_count = module_func_names(mod)->count;
+        const char** const_names = module_const_names(mod)->names;
+        int const_count = module_const_names(mod)->count;
 
         /* #2613: a selective import (`import m (a, b)`) merges the whole
          * module like a bare one. The selection decides which names the
@@ -4897,12 +4906,10 @@ void module_merge_into_program(ASTNode* program) {
             ASTNode* mod_ast = dep_mod->ast;
             const char* ns = module_get_namespace(dep_path);
 
-            const char* func_names[AETHER_MODULE_MAX_DECLS];
-            int func_count = collect_module_func_names(mod_ast, func_names,
-                                                       AETHER_MODULE_MAX_DECLS);
-            const char* const_names[AETHER_MODULE_MAX_DECLS];
-            int const_count = collect_module_const_names(mod_ast, const_names,
-                                                         AETHER_MODULE_MAX_DECLS);
+            const char** func_names = module_func_names(dep_mod)->names;
+            int func_count = module_func_names(dep_mod)->count;
+            const char** const_names = module_const_names(dep_mod)->names;
+            int const_count = module_const_names(dep_mod)->count;
 
             // Add a synthetic AST_IMPORT_STATEMENT for this transitive
             // dep so the typechecker's namespace-registration pass
@@ -5059,22 +5066,18 @@ void module_merge_into_program(ASTNode* program) {
         if (!mod || !mod->ast) continue;
         const char* ns = module_get_namespace(module_path);
 
-        const char* sel_func_names[AETHER_MODULE_MAX_DECLS];
-        int sel_func_count = 0;
-        const char* sel_const_names[AETHER_MODULE_MAX_DECLS];
-        int sel_const_count = 0;
+        ModuleNames sel_funcs = {0};
+        ModuleNames sel_consts = {0};
 
-        const char* mod_func_names[AETHER_MODULE_MAX_DECLS];
-        int mod_func_count = collect_module_func_names(mod->ast, mod_func_names,
-                                                       AETHER_MODULE_MAX_DECLS);
-        const char* mod_const_names[AETHER_MODULE_MAX_DECLS];
-        int mod_const_count = collect_module_const_names(mod->ast, mod_const_names,
-                                                         AETHER_MODULE_MAX_DECLS);
+        const char** mod_func_names = module_func_names(mod)->names;
+        int mod_func_count = module_func_names(mod)->count;
+        const char** mod_const_names = module_const_names(mod)->names;
+        int mod_const_count = module_const_names(mod)->count;
 
-        const char* alias_from[AETHER_MODULE_MAX_DECLS];
-        const char* alias_to_name[AETHER_MODULE_MAX_DECLS];
-        int alias_is_const[AETHER_MODULE_MAX_DECLS];
-        int alias_count = 0;
+        /* Per-symbol aliases: the name written in the program (`from`),
+         * and the module's name it stands for (`to`). */
+        ModuleNames alias_from = {0};
+        ModuleNames alias_to = {0};
 
         /* A glob import's constants, written bare. The typechecker binds
          * each `<ns>_<NAME>` a glob brings in to its bare `NAME`, so a bare
@@ -5085,11 +5088,10 @@ void module_merge_into_program(ASTNode* program) {
          * leading underscore is private, and a name the program defines
          * itself is the program's (#2632). */
         if (is_glob) {
-            for (int k = 0; k < mod_const_count &&
-                            sel_const_count < AETHER_MODULE_MAX_DECLS; k++) {
+            for (int k = 0; k < mod_const_count; k++) {
                 const char* cn = mod_const_names[k];
                 if (!cn || cn[0] == '_' || module_defines_own_name(program, cn)) continue;
-                sel_const_names[sel_const_count++] = cn;
+                names_add(&sel_consts, cn);
             }
         }
 
@@ -5106,44 +5108,43 @@ void module_merge_into_program(ASTNode* program) {
              * exists to avoid. */
             if (sel->annotation &&
                 strncmp(sel->annotation, "select_alias:", 13) == 0) {
-                if (alias_count < AETHER_MODULE_MAX_DECLS &&
-                    (name_in_list(sel->value, mod_func_names, mod_func_count) ||
-                     name_in_list(sel->value, mod_const_names, mod_const_count))) {
-                    alias_from[alias_count] = sel->annotation + 13;
-                    alias_to_name[alias_count] = sel->value;
-                    alias_is_const[alias_count] =
-                        name_in_list(sel->value, mod_const_names, mod_const_count);
-                    alias_count++;
+                if (name_in_list(sel->value, mod_func_names, mod_func_count) ||
+                    name_in_list(sel->value, mod_const_names, mod_const_count)) {
+                    names_add(&alias_from, sel->annotation + 13);
+                    names_add(&alias_to, sel->value);
                 }
                 continue;
             }
-            if (name_in_list(sel->value, mod_func_names, mod_func_count) &&
-                sel_func_count < AETHER_MODULE_MAX_DECLS) {
-                sel_func_names[sel_func_count++] = sel->value;
-            } else if (name_in_list(sel->value, mod_const_names, mod_const_count) &&
-                       sel_const_count < AETHER_MODULE_MAX_DECLS) {
-                sel_const_names[sel_const_count++] = sel->value;
+            if (name_in_list(sel->value, mod_func_names, mod_func_count)) {
+                names_add(&sel_funcs, sel->value);
+            } else if (name_in_list(sel->value, mod_const_names, mod_const_count)) {
+                names_add(&sel_consts, sel->value);
             }
         }
-        if (sel_func_count == 0 && sel_const_count == 0 && alias_count == 0) continue;
 
-        for (int m = 0; m < program->child_count; m++) {
+        for (int m = 0; m < program->child_count &&
+                        (sel_funcs.count > 0 || sel_consts.count > 0 || alias_to.count > 0);
+             m++) {
             ASTNode* top = program->children[m];
             if (!top) continue;
             if (top->type == AST_IMPORT_STATEMENT) continue;
             if (top->is_imported) continue;
-            rename_intra_module_refs(top, ns, sel_func_names, sel_func_count,
-                                     sel_const_names, sel_const_count, NULL, 0);
-            for (int a = 0; a < alias_count; a++) {
+            rename_intra_module_refs(top, ns, sel_funcs.names, sel_funcs.count,
+                                     sel_consts.names, sel_consts.count, NULL, 0);
+            for (int a = 0; a < alias_to.count; a++) {
                 char prefixed[256];
-                if (alias_is_const[a])
-                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to_name[a]);
+                int is_const = name_in_list(alias_to.names[a], mod_const_names, mod_const_count);
+                if (is_const)
+                    snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, alias_to.names[a]);
                 else
-                    merged_function_name_ns(ns, alias_to_name[a], prefixed, sizeof(prefixed));
-                rename_aliased_import_refs(top, alias_from[a], prefixed,
-                                           alias_is_const[a]);
+                    merged_function_name_ns(ns, alias_to.names[a], prefixed, sizeof(prefixed));
+                rename_aliased_import_refs(top, alias_from.names[a], prefixed, is_const);
             }
         }
+        names_free(&sel_funcs);
+        names_free(&sel_consts);
+        names_free(&alias_from);
+        names_free(&alias_to);
     }
 
     /* #924 re-export pull-in. A directly-imported module may list, in its
@@ -5175,12 +5176,10 @@ void module_merge_into_program(ASTNode* program) {
             merged_function_name(ons, origin->ast, sym, fn_name, sizeof(fn_name));
             if (program_has_function(program, fn_name)) continue;
 
-            const char* of_names[AETHER_MODULE_MAX_DECLS];
-            int of_count = collect_module_func_names(origin->ast, of_names,
-                                                     AETHER_MODULE_MAX_DECLS);
-            const char* oc_names[AETHER_MODULE_MAX_DECLS];
-            int oc_count = collect_module_const_names(origin->ast, oc_names,
-                                                      AETHER_MODULE_MAX_DECLS);
+            const char** of_names = module_func_names(origin)->names;
+            int of_count = module_func_names(origin)->count;
+            const char** oc_names = module_const_names(origin)->names;
+            int oc_count = module_const_names(origin)->count;
 
             for (int j = 0; j < origin->ast->child_count; j++) {
                 ASTNode* decl = unwrap_export(origin->ast->children[j]);

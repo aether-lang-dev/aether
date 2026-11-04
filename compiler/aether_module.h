@@ -7,6 +7,13 @@
 // Module system for Aether
 // Supports: import/export, package management
 
+// #3545: a list of names, as long as what it lists needs.
+typedef struct {
+    const char** names;
+    int count;
+    int cap;
+} ModuleNames;
+
 // Module structure
 typedef struct {
     char* name;           // Module name (e.g., "game.player")
@@ -31,6 +38,15 @@ typedef struct {
     // functions inside a region compiled for the target. NULL for every
     // ordinary module.
     char* lane_target;
+    // #3545: the names the module declares, which the merge renames a
+    // merged body's references to: its functions, and its constants with
+    // its faults' members. Collected from `ast` when a merge first asks
+    // (names_ast and names_children say which AST they were read from),
+    // sized by the module, and freed with it.
+    ModuleNames func_names;
+    ModuleNames const_names;
+    const ASTNode* names_ast;
+    int names_children;
 } AetherModule;
 
 // Module registry
