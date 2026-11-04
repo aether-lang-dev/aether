@@ -2760,22 +2760,25 @@ static Type* fn_value_type_of(ASTNode* def, Type* sym_type) {
             p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
     }
     Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
-    int modes[64] = { 0 };
+    /* Each parameter's mode, every one (#3574): past 64 a `@keep` or
+     * `@into` parameter's was dropped, and the value's type borrowed it. */
+    int* modes = (int*)calloc((size_t)(count > 0 ? count : 1), sizeof(int));
+    if (!modes) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
     int k = 0;
     for (int i = 0; i < def->child_count && k < count; i++) {
         ASTNode* p = def->children[i];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
             p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
-        if (k < 64)
-            modes[k] = annotation_has_marker(p->annotation, "keep_param")   ? FN_MODE_KEEP
-                       : annotation_has_marker(p->annotation, "into_param") ? FN_MODE_INTO
-                                                                            : FN_MODE_BORROWED;
+        modes[k] = annotation_has_marker(p->annotation, "keep_param")   ? FN_MODE_KEEP
+                   : annotation_has_marker(p->annotation, "into_param") ? FN_MODE_INTO
+                                                                        : FN_MODE_BORROWED;
         params[k++] = p->node_type ? clone_type(p->node_type) : create_type(TYPE_INT);
     }
     Type* ret = (sym_type && sym_type->kind != TYPE_VOID) ? clone_type(sym_type) : NULL;
     Type* t = create_function_type(count, params, ret);
     free(params);
-    for (int i = 0; i < count && i < 64; i++) fn_type_set_param_mode(t, i, modes[i]);
+    for (int i = 0; i < count; i++) fn_type_set_param_mode(t, i, modes[i]);
+    free(modes);
     return t;
 }
 
@@ -3394,12 +3397,14 @@ static void coerce_closure_call_args(ASTNode* call, SymbolTable* table) {
     if (call->child_count < 2 || !call->children[0]) return;
     ASTNode* lit = call_callee_literal(call, table);
     if (lit) {
-        Type* pts[64];
+        /* Every parameter (#3574): past 64 they were not coerced. */
+        Type** pts = (Type**)aether_xrealloc(NULL, sizeof(Type*) * (size_t)(lit->child_count + 1));
         int n = 0;
-        for (int i = 0; i < lit->child_count && n < 64; i++)
+        for (int i = 0; i < lit->child_count; i++)
             if (lit->children[i] && lit->children[i]->type == AST_CLOSURE_PARAM)
                 pts[n++] = lit->children[i]->node_type;
         coerce_args_to_params(call, 1, pts, n);
+        free(pts);
         return;
     }
     Type* ft = infer_type(call->children[0], table);
@@ -5696,29 +5701,31 @@ static void resolve_bitstruct_types(ASTNode* program);
 // #891: typecheck-time registry of @c_struct overlay names. Codegen has its
 // own field-level registry; the typechecker only needs the NAME set so an
 // `expr as *Name` cast and member access against it validate.
-#define AETHER_MAX_C_STRUCTS 256
-static const char* g_c_struct_names[AETHER_MAX_C_STRUCTS];
-static int g_c_struct_name_count = 0;
+/* #3574: every one the program declares; 256 slots dropped the rest, and a
+ * cast or a field read against one of those was refused. */
+static StrMap g_c_struct_names;
 static ASTNode* g_c_struct_program = NULL;   /* for field-type lookup (#891) */
 
 static void collect_c_struct_names(ASTNode* program) {
-    g_c_struct_name_count = 0;
+    strmap_free(&g_c_struct_names);
+    strmap_init(&g_c_struct_names);
     g_c_struct_program = program;
     if (!program) return;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_C_STRUCT_DEF && c->value &&
-            g_c_struct_name_count < AETHER_MAX_C_STRUCTS)
-            g_c_struct_names[g_c_struct_name_count++] = c->value;
+        if (c && c->type == AST_C_STRUCT_DEF && c->value)
+            strmap_put(&g_c_struct_names, c->value, NULL);
     }
 }
 
 // #1044 first-class enums. Name registry + program handle so `EnumName.Member`
 // member access and `x: EnumName` annotations resolve without a symbol-table
-// round-trip (mirrors the @c_struct registry above).
-#define AETHER_MAX_ENUMS 256
-static const char* g_enum_names[AETHER_MAX_ENUMS];
+// round-trip (mirrors the @c_struct registry above). Every enum the program
+// declares (#3574): 256 slots dropped the rest, whose members and type
+// annotations then resolved to nothing.
+static const char** g_enum_names = NULL;
 static int g_enum_name_count = 0;
+static StrMap g_enum_name_set;
 static ASTNode* g_enum_program = NULL;
 
 // #1044 implicit enum selector: the return type of the function currently being
@@ -5811,8 +5818,10 @@ static const ASTNode* local_single_init(const char* name) {
             return NULL;
     }
     const ASTNode* found = NULL;
-    const ASTNode* stack[256];
-    int top = 0;
+    /* A stack as deep as the body needs (#3574): 256 slots dropped the
+     * nodes past them, and a binding there was not found. */
+    int cap = 64, top = 0;
+    const ASTNode** stack = (const ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)cap);
     stack[top++] = body;
     while (top > 0 && !found) {
         const ASTNode* n = stack[--top];
@@ -5820,8 +5829,13 @@ static const ASTNode* local_single_init(const char* name) {
         if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
             n->child_count > 0)
             found = n->children[n->child_count - 1];
-        for (int i = 0; i < n->child_count && top < 256; i++) stack[top++] = n->children[i];
+        if (top + n->child_count > cap) {
+            while (top + n->child_count > cap) cap *= 2;
+            stack = (const ASTNode**)aether_xrealloc(stack, sizeof(ASTNode*) * (size_t)cap);
+        }
+        for (int i = 0; i < n->child_count; i++) stack[top++] = n->children[i];
     }
+    free(stack);
     return found;
 }
 
@@ -5948,10 +5962,7 @@ static int reject_readonly_view_write(ASTNode* target, ASTNode* at) {
 
 
 static int is_enum_type_name(const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < g_enum_name_count; i++)
-        if (strcmp(g_enum_names[i], name) == 0) return 1;
-    return 0;
+    return name && strmap_has(&g_enum_name_set, name);
 }
 
 // #1132 bitstruct: program handle so a bitstruct name in type position, and a
@@ -6130,10 +6141,7 @@ static int enum_slot_count(const char* ename) {
 }
 
 static int is_c_struct_name(const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < g_c_struct_name_count; i++)
-        if (strcmp(g_c_struct_names[i], name) == 0) return 1;
-    return 0;
+    return name && strmap_has(&g_c_struct_names, name);
 }
 
 /* #891: find the AST_C_STRUCT_DEF for `name`. */
@@ -8278,8 +8286,11 @@ static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
  * Each arm after the first for a message is refused, naming both, in any
  * of the actor's receive blocks. */
 static void reject_duplicate_receive_arms(ASTNode* actor) {
-    ASTNode* seen[256];
-    int seen_count = 0;
+    /* The arms seen so far, by message name: every one (#3574). 256 slots
+     * stopped recording past them, so a duplicate arm after the 256th
+     * went unrefused. */
+    StrMap seen;
+    strmap_init(&seen);
     ASTNode* first_wildcard = NULL;
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* rs = actor->children[i];
@@ -8305,9 +8316,7 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
             }
             ASTNode* pattern = receive_arm_message_pattern(arm);
             if (!pattern || !pattern->value) continue;
-            ASTNode* first = NULL;
-            for (int s = 0; s < seen_count && !first; s++)
-                if (strcmp(seen[s]->value, pattern->value) == 0) first = seen[s];
+            ASTNode* first = (ASTNode*)strmap_get(&seen, pattern->value);
             if (first) {
                 char msg[320];
                 snprintf(msg, sizeof(msg),
@@ -8317,11 +8326,12 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
                          pattern->value, first->value, first->line, pattern->value,
                          actor->value ? actor->value : "?");
                 type_error(msg, pattern->line, pattern->column);
-            } else if (seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
-                seen[seen_count++] = pattern;
+            } else {
+                strmap_put(&seen, pattern->value, pattern);
             }
         }
     }
+    strmap_free(&seen);
 }
 
 /* #385: the actor a reference's type names, a `spawn(A())` result or a
@@ -8707,7 +8717,6 @@ static void scoped_check_bindings(ASTNode* node, ASTNode* root) {
  * return/break/continue); a loop body is analyzed twice so a consume that
  * would repeat across iterations is caught, while one rebound each iteration
  * is not. It descends into nested scopes' own analysis, not the parent's. */
-#define ISO_SET_MAX 128
 
 static ASTNode* iso_closure_body_block(ASTNode* closure) {
     if (!closure) return NULL;
@@ -8822,15 +8831,43 @@ typedef struct {
     int line;
 } IsoItem;
 
+/* As many names as the function moves (#3574): 128 slots dropped the ones
+ * past them, and a use after such a move was not refused. A branch works
+ * on a copy (iso_copy) and gives it up (iso_free); a join replaces the set
+ * (iso_take). */
 typedef struct {
-    IsoItem items[ISO_SET_MAX];
+    IsoItem* items;
     int count;
+    int cap;
 } IsoSet;
 
 typedef struct {
-    const char* names[ISO_SET_MAX];
+    const char** names;
     int count;
+    int cap;
 } NameSet;
+
+static void iso_free(IsoSet* s) {
+    free(s->items);
+    s->items = NULL;
+    s->count = s->cap = 0;
+}
+
+static void iso_copy(IsoSet* dst, const IsoSet* src) {
+    dst->count = dst->cap = src->count;
+    dst->items = src->count
+                     ? (IsoItem*)aether_xrealloc(NULL, sizeof(IsoItem) * (size_t)src->count)
+                     : NULL;
+    if (src->count) memcpy(dst->items, src->items, sizeof(IsoItem) * (size_t)src->count);
+}
+
+/* `dst` becomes `src`, whose storage it takes; `src` is left empty. */
+static void iso_take(IsoSet* dst, IsoSet* src) {
+    iso_free(dst);
+    *dst = *src;
+    src->items = NULL;
+    src->count = src->cap = 0;
+}
 
 typedef struct {
     ASTNode* fn;
@@ -8861,11 +8898,13 @@ static void iso_put_line(IsoSet* s, const char* n, int line) {
             return;
         }
     }
-    if (s->count < ISO_SET_MAX) {
-        s->items[s->count].name = n;
-        s->items[s->count].line = line;
-        s->count++;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->items = (IsoItem*)aether_xrealloc(s->items, sizeof(IsoItem) * (size_t)s->cap);
     }
+    s->items[s->count].name = n;
+    s->items[s->count].line = line;
+    s->count++;
 }
 
 static void iso_del(IsoSet* s, const char* n) {
@@ -8893,7 +8932,11 @@ static int name_has(const NameSet* s, const char* n) {
 
 static void name_put(NameSet* s, const char* n) {
     if (!n || name_has(s, n)) return;
-    if (s->count < ISO_SET_MAX) s->names[s->count++] = n;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->names = (const char**)aether_xrealloc(s->names, sizeof(char*) * (size_t)s->cap);
+    }
+    s->names[s->count++] = n;
 }
 
 static int is_param_owned_or_kept(ASTNode* fn, const char* name) {
@@ -8992,12 +9035,15 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
 
             IsoContext cl_ctx;
             cl_ctx.fn = node;
-            cl_ctx.rebound.count = 0;
+            cl_ctx.rebound = (NameSet){ NULL, 0, 0 };
             cl_ctx.in_closure = 1;
             cl_ctx.closure = node;
-            IsoSet cl_moved; cl_moved.count = 0;
-            IsoSet cl_iso; cl_iso.count = 0;
+            IsoSet cl_moved = { NULL, 0, 0 };
+            IsoSet cl_iso = { NULL, 0, 0 };
             if (cl_body) iso_check(cl_body, &cl_moved, &cl_iso, &cl_ctx);
+            iso_free(&cl_moved);
+            iso_free(&cl_iso);
+            free(cl_ctx.rebound.names);
             return;
         }
 
@@ -9100,11 +9146,14 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
          * the move. Checking it where it is registered as well would see a
          * consume there and then report the real run as a second use. */
         case AST_BLOCK: {
-            ASTNode* defers[64];
+            /* Every defer of the block (#3574): past 64 one was checked
+             * where it is written, ahead of what it runs after. */
+            ASTNode** defers = (ASTNode**)aether_xrealloc(
+                NULL, sizeof(ASTNode*) * (size_t)(node->child_count + 1));
             int defer_count = 0;
             for (int i = 0; i < node->child_count; i++) {
                 ASTNode* child = node->children[i];
-                if (child && child->type == AST_DEFER_STATEMENT && defer_count < 64) {
+                if (child && child->type == AST_DEFER_STATEMENT) {
                     defers[defer_count++] = child;
                     continue;
                 }
@@ -9114,58 +9163,69 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 for (int c = 0; c < defers[d]->child_count; c++)
                     iso_check(defers[d]->children[c], moved, iso, ctx);
             }
+            free(defers);
             return;
         }
 
         case AST_IF_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx); /* cond */
-            IsoSet then_s = *moved;
+            IsoSet then_s, else_s;
+            iso_copy(&then_s, moved);
             if (node->child_count > 1) iso_check(node->children[1], &then_s, iso, ctx);
-            IsoSet else_s = *moved;
+            iso_copy(&else_s, moved);
             if (node->child_count > 2) iso_check(node->children[2], &else_s, iso, ctx);
             int then_div = node->child_count > 1 && iso_diverges(node->children[1]);
             int else_div = node->child_count > 2 && iso_diverges(node->children[2]);
-            if (then_div && else_div) return;   /* code after is unreachable */
-            IsoSet joined; joined.count = 0;
-            if (!then_div) iso_merge(&joined, &then_s);
-            if (!else_div) iso_merge(&joined, &else_s);
-            *moved = joined;
+            if (!(then_div && else_div)) {   /* else the code after is unreachable */
+                IsoSet joined = { NULL, 0, 0 };
+                if (!then_div) iso_merge(&joined, &then_s);
+                if (!else_div) iso_merge(&joined, &else_s);
+                iso_take(moved, &joined);
+            }
+            iso_free(&then_s);
+            iso_free(&else_s);
             return;
         }
 
         case AST_MATCH_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx);
-            IsoSet joined; joined.count = 0;
+            IsoSet joined = { NULL, 0, 0 };
             int any_non_div = 0;
             for (int i = 1; i < node->child_count; i++) {
                 ASTNode* arm = node->children[i];
                 if (!arm) continue;
-                IsoSet arm_s = *moved;
+                IsoSet arm_s;
+                iso_copy(&arm_s, moved);
                 iso_check(arm, &arm_s, iso, ctx);
                 if (!iso_diverges(arm)) {
                     iso_merge(&joined, &arm_s);
                     any_non_div = 1;
                 }
+                iso_free(&arm_s);
             }
-            if (any_non_div) *moved = joined;
+            if (any_non_div) iso_take(moved, &joined);
+            iso_free(&joined);
             return;
         }
 
         case AST_SWITCH_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx);
-            IsoSet joined; joined.count = 0;
+            IsoSet joined = { NULL, 0, 0 };
             int any_non_div = 0;
             for (int i = 1; i < node->child_count; i++) {
                 ASTNode* c_case = node->children[i];
                 if (!c_case) continue;
-                IsoSet case_s = *moved;
+                IsoSet case_s;
+                iso_copy(&case_s, moved);
                 iso_check(c_case, &case_s, iso, ctx);
                 if (!iso_diverges(c_case)) {
                     iso_merge(&joined, &case_s);
                     any_non_div = 1;
                 }
+                iso_free(&case_s);
             }
-            if (any_non_div) *moved = joined;
+            if (any_non_div) iso_take(moved, &joined);
+            iso_free(&joined);
             return;
         }
 
@@ -9201,11 +9261,11 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
 
 static void iso_check_function(ASTNode* fn, ASTNode* body) {
     if (!body) return;
-    IsoSet moved; moved.count = 0;
-    IsoSet iso;   iso.count = 0;
+    IsoSet moved = { NULL, 0, 0 };
+    IsoSet iso = { NULL, 0, 0 };
     IsoContext ctx;
     ctx.fn = fn;
-    ctx.rebound.count = 0;
+    ctx.rebound = (NameSet){ NULL, 0, 0 };
     ctx.in_closure = 0;
     ctx.closure = NULL;
 
@@ -9219,6 +9279,9 @@ static void iso_check_function(ASTNode* fn, ASTNode* body) {
         }
     }
     iso_check(body, &moved, &iso, &ctx);
+    iso_free(&moved);
+    iso_free(&iso);
+    free(ctx.rebound.names);
 }
 
 /* Entry point: register Isolated-typed parameters, then walk the body. */
@@ -9316,7 +9379,6 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * closure holding it). A call's result holds what its arguments to `@into`
  * parameters carry, decided by the callee's signature, and is then tracked
  * as a struct local is. */
-#define KEEP_SET_MAX 128   /* the `@into` parameters a KeepSet lists */
 /* #3034: the `via` of a struct parameter's own entry: a holder, so a field
  * read out of it carries the parameter, but no holder to name. */
 static const char KEEP_PARAM_SELF[] = "held by the parameter";
@@ -9369,7 +9431,7 @@ typedef struct {
     int alias_count;
     int alias_cap;
     /* The function's `@into` parameters, which a `return` may hand back. */
-    const char* into[KEEP_SET_MAX];
+    const char** into;   /* every one of them (#3574): 128 slots dropped the rest */
     int into_count;
     ASTNode* program;
     Type* ret;   /* the function's declared result, or NULL */
@@ -9388,9 +9450,9 @@ typedef struct {
      * closure that may capture a borrowed pointer, or a struct taken by
      * value that holds a pointer or a closure; `other_kinds` spells the
      * type. A `return` of one hands the caller back its own value. */
-    const char* other_params[KEEP_SET_MAX];
-    const char* other_kinds[KEEP_SET_MAX];
-    int other_is_fn[KEEP_SET_MAX];
+    const char** other_params;   /* every one (#3574): past 128 one went unchecked */
+    const char** other_kinds;
+    int* other_is_fn;
     int other_count;
     /* #3058: each closure literal a name was bound to here (`g = || { ...
      * }`), every one, as the holders only grow: a call through the name,
@@ -9683,6 +9745,13 @@ static void keep_set_free(KeepSet* s) {
     s->rep_at = NULL;
     s->rep_param = s->rep_how = NULL;
     s->rep_count = s->rep_cap = 0;
+    free(s->into);
+    free(s->other_params);
+    free(s->other_kinds);
+    free(s->other_is_fn);
+    s->into = s->other_params = s->other_kinds = NULL;
+    s->other_is_fn = NULL;
+    s->into_count = s->other_count = 0;
 }
 
 static ASTNode* strip_ptr_casts(ASTNode* e);
@@ -9970,23 +10039,27 @@ int tc_call_arg_effect(ASTNode* program, ASTNode* call, int i, int* into) {
 
 /* #3142: owned pointer types, `type T = owned ptr drop f`: each one's name,
  * its drop function as written, and the C function a release calls. */
-#define AETHER_MAX_OWNED 64
 typedef struct {
     const char* name;
     const char* drop;       /* as written: `bytes.free` */
     const char* drop_c;     /* the C function: `bytes_free`, `free` */
     ASTNode* def;
 } OwnedDef;
-static OwnedDef g_owned[AETHER_MAX_OWNED];
+/* Every one the program declares (#3574): 64 slots dropped the rest, which
+ * were then checked as plain pointers and never released. */
+static OwnedDef* g_owned = NULL;
 static int g_owned_count = 0;
 
 static void collect_owned_types(ASTNode* program) {
     g_owned_count = 0;
+    if (program)
+        g_owned = (OwnedDef*)aether_xrealloc(g_owned, sizeof(OwnedDef) *
+                                                          (size_t)(program->child_count + 1));
     for (int i = 0; program && i < program->child_count; i++) {
         ASTNode* d = program->children[i];
         if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
         if (!d || d->type != AST_DISTINCT_TYPE_DEF || !d->value || !d->annotation ||
-            strncmp(d->annotation, "owned_drop:", 11) != 0 || g_owned_count >= AETHER_MAX_OWNED)
+            strncmp(d->annotation, "owned_drop:", 11) != 0)
             continue;
         OwnedDef* o = &g_owned[g_owned_count++];
         o->name = d->value;
@@ -11653,11 +11726,18 @@ static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* bo
         int is_fn = 0;
         const char* kind = bare ? NULL : borrowed_param_kind(program, p->node_type, &is_fn);
         if (!bare && !kind) continue;
-        if (kind && s.other_count >= KEEP_SET_MAX) continue;
+        if (!s.into) {
+            /* As many as the function has parameters (#3574). */
+            size_t np = (size_t)fn->child_count + 1;
+            s.into = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_params = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_kinds = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_is_fn = (int*)aether_xrealloc(NULL, np * sizeof(int));
+        }
         Carried self = { 0 };
         carried_add(&self, p->value, kind && !is_fn ? KEEP_PARAM_SELF : NULL);
         keep_set_add(&s, p->value, self);
-        if (bare && is_into_param(p) && s.into_count < KEEP_SET_MAX)
+        if (bare && is_into_param(p))
             s.into[s.into_count++] = p->value;
         if (kind) {
             s.other_params[s.other_count] = p->value;
@@ -12215,7 +12295,6 @@ void emit_effects_json(FILE* out, ASTNode* program) {
  * distinct Type: machine `kind` from Base (so codegen/get_c_type emit Base's
  * C type — zero cost) plus `distinct_name = Name` (so the type system keeps it
  * nominally separate). */
-#define AETHER_MAX_DISTINCT 256
 typedef struct { const char* name; Type* base; } DistinctDef;
 
 static void distinct_rewrite_type(Type* t, DistinctDef* defs, int ndefs, int depth) {
@@ -12252,18 +12331,23 @@ static void distinct_rewrite_ast(ASTNode* n, DistinctDef* defs, int ndefs) {
 
 static void resolve_distinct_types(ASTNode* program) {
     if (!program) return;
-    DistinctDef defs[AETHER_MAX_DISTINCT];
+    /* As many as the program declares (#3574): 256 slots dropped the rest,
+     * whose uses then kept the parser's placeholder struct type. */
+    DistinctDef* defs = (DistinctDef*)aether_xrealloc(
+        NULL, sizeof(DistinctDef) * (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_DISTINCT_TYPE_DEF && c->value && c->node_type &&
-            ndefs < AETHER_MAX_DISTINCT) {
+        if (c && c->type == AST_DISTINCT_TYPE_DEF && c->value && c->node_type) {
             defs[ndefs].name = c->value;
             defs[ndefs].base = c->node_type;
             ndefs++;
         }
     }
-    if (ndefs == 0) return;
+    if (ndefs == 0) {
+        free(defs);
+        return;
+    }
     distinct_rewrite_ast(program, defs, ndefs);
 
     /* Bare C externs stay in the module registry rather than being cloned
@@ -12282,6 +12366,7 @@ static void resolve_distinct_types(ASTNode* program) {
                 distinct_rewrite_ast(decl, defs, ndefs);
         }
     }
+    free(defs);
 }
 
 // #2200 named C function-pointer types. `cfn Name(a: T1, b: T2) -> R` parses
@@ -12293,7 +12378,6 @@ static void resolve_distinct_types(ASTNode* program) {
 // A `p as Name` cast was parsed as an AST_VALUE_CAST (the parser cannot tell a
 // cfn name from a distinct one); once its target is a function pointer the
 // node becomes the AST_PTR_AS_FN_CAST that `p as fn(...)` produces directly.
-#define AETHER_MAX_CFNS 256
 typedef struct { const char* name; Type* sig; } CfnDef;
 
 /* Turn the in-place TYPE_STRUCT{cfnName} into the signature. The name is
@@ -12353,7 +12437,9 @@ static ASTNode* unwrap_cfn_def(ASTNode* c) {
 
 static void resolve_cfn_types(ASTNode* program) {
     if (!program) return;
-    CfnDef defs[AETHER_MAX_CFNS];
+    /* As many as the program declares (#3574): past 256 one was dropped. */
+    CfnDef* defs = (CfnDef*)aether_xrealloc(NULL, sizeof(CfnDef) *
+                                                      (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = unwrap_cfn_def(program->children[i]);
@@ -12368,14 +12454,12 @@ static void resolve_cfn_types(ASTNode* program) {
             type_error(msg, c->line, c->column);
             continue;
         }
-        if (ndefs < AETHER_MAX_CFNS) {
-            defs[ndefs].name = c->value;
-            defs[ndefs].sig = c->node_type;
-            ndefs++;
-        }
+        defs[ndefs].name = c->value;
+        defs[ndefs].sig = c->node_type;
+        ndefs++;
     }
-    if (ndefs == 0) return;
-    cfn_rewrite_ast(program, defs, ndefs);
+    if (ndefs > 0) cfn_rewrite_ast(program, defs, ndefs);
+    free(defs);
 }
 
 // #914 sum/variant types. `type Name = A | B | C` parses to AST_SUM_TYPE_DEF
@@ -12384,7 +12468,6 @@ static void resolve_cfn_types(ASTNode* program) {
 // pass rewrites every such reference to the real TYPE_SUM (carrying the
 // variant Types in tuple_types[]), exactly as resolve_distinct_types does for
 // distinct aliases.
-#define AETHER_MAX_SUMS 256
 typedef struct { const char* name; ASTNode* def; } SumDef;
 
 // Convert an in-place TYPE_STRUCT{sumName} into the TYPE_SUM, filling its
@@ -12435,11 +12518,13 @@ static void resolve_sum_types(ASTNode* program) {
     /* #2996: the sums a branch value's arms join to (branch_join_type). */
     ast_sums_reset();
     if (!program) return;
-    SumDef defs[AETHER_MAX_SUMS];
+    /* As many as the program declares (#3574): past 256 one was dropped. */
+    SumDef* defs = (SumDef*)aether_xrealloc(NULL, sizeof(SumDef) *
+                                                      (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_SUM_TYPE_DEF && c->value && ndefs < AETHER_MAX_SUMS) {
+        if (c && c->type == AST_SUM_TYPE_DEF && c->value) {
             defs[ndefs].name = c->value;
             defs[ndefs].def = c;
             ndefs++;
@@ -12449,8 +12534,8 @@ static void resolve_sum_types(ASTNode* program) {
             free_type(st);
         }
     }
-    if (ndefs == 0) return;
-    sum_rewrite_ast(program, defs, ndefs);
+    if (ndefs > 0) sum_rewrite_ast(program, defs, ndefs);
+    free(defs);
 }
 
 // #1044: rewrite bare `TYPE_STRUCT{EnumName}` type annotations into TYPE_ENUM
@@ -12541,14 +12626,19 @@ static void enum_rewrite_member_access(ASTNode* nd) {
 
 static void resolve_enum_types(ASTNode* program) {
     g_enum_name_count = 0;
+    strmap_free(&g_enum_name_set);
+    strmap_init(&g_enum_name_set);
     g_enum_program = program;
     g_constfold_program = program;
     if (!program) return;
+    g_enum_names = (const char**)aether_xrealloc(
+        g_enum_names, sizeof(char*) * (size_t)(program->child_count + 1));
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_ENUM_DEFINITION && c->value &&
-            g_enum_name_count < AETHER_MAX_ENUMS)
+        if (c && c->type == AST_ENUM_DEFINITION && c->value) {
             g_enum_names[g_enum_name_count++] = c->value;
+            strmap_put(&g_enum_name_set, c->value, NULL);
+        }
     }
     if (g_enum_name_count == 0) return;
     enum_rewrite_ast(program, g_enum_names, g_enum_name_count);        /* type annotations */
@@ -13069,22 +13159,25 @@ static void declare_loop_hoist(ASTNode* decl, void* user) {
  * the block). Codegen gives each a result variable and keeps its arms'
  * names in the arms; a statement match declares the names every arm binds
  * before it (declare_common_hoists), as an if/else does. */
-#define TC_MAX_VALUE_MATCHES 256
-static ASTNode* tc_value_matches[TC_MAX_VALUE_MATCHES];
+/* As deep as the matches nest (#3574): 256 slots forgot the ones past them,
+ * which then were not seen as values. */
+static ASTNode** tc_value_matches = NULL;
 static int tc_value_match_depth = 0;
+static int tc_value_match_cap = 0;
 
 static void tc_push_value_match(ASTNode* m) {
-    if (tc_value_match_depth < TC_MAX_VALUE_MATCHES)
-        tc_value_matches[tc_value_match_depth] = m;
-    tc_value_match_depth++;   /* always increment so pop stays balanced */
+    if (tc_value_match_depth == tc_value_match_cap) {
+        tc_value_match_cap = tc_value_match_cap ? tc_value_match_cap * 2 : 16;
+        tc_value_matches = (ASTNode**)aether_xrealloc(
+            tc_value_matches, sizeof(ASTNode*) * (size_t)tc_value_match_cap);
+    }
+    tc_value_matches[tc_value_match_depth++] = m;
 }
 static void tc_pop_value_match(void) {
     if (tc_value_match_depth > 0) tc_value_match_depth--;
 }
 static int tc_is_value_match(ASTNode* m) {
-    int n = tc_value_match_depth < TC_MAX_VALUE_MATCHES
-          ? tc_value_match_depth : TC_MAX_VALUE_MATCHES;
-    for (int i = n - 1; i >= 0; i--)
+    for (int i = tc_value_match_depth - 1; i >= 0; i--)
         if (tc_value_matches[i] == m) return 1;
     return 0;
 }
@@ -13093,23 +13186,26 @@ static int tc_is_value_match(ASTNode* m) {
  * label`. Pushed (one slot per loop, NULL for an unlabeled loop) while a
  * loop body is type-checked. Type-checking is single-threaded, so a file-
  * static stack is sufficient. */
-#define TC_MAX_LOOP_LABELS 256
-static const char* tc_loop_labels[TC_MAX_LOOP_LABELS];
+/* As deep as the loops nest (#3574): 256 slots forgot the labels past them,
+ * and a `break` to one was refused. */
+static const char** tc_loop_labels = NULL;
 static int tc_loop_label_depth = 0;
+static int tc_loop_label_cap = 0;
 
 static void tc_push_loop_label(const char* label) {
-    if (tc_loop_label_depth < TC_MAX_LOOP_LABELS) {
-        tc_loop_labels[tc_loop_label_depth] = label;
+    if (tc_loop_label_depth == tc_loop_label_cap) {
+        tc_loop_label_cap = tc_loop_label_cap ? tc_loop_label_cap * 2 : 16;
+        tc_loop_labels = (const char**)aether_xrealloc(
+            tc_loop_labels, sizeof(char*) * (size_t)tc_loop_label_cap);
     }
-    tc_loop_label_depth++;   /* always increment so pop stays balanced */
+    tc_loop_labels[tc_loop_label_depth++] = label;
 }
 static void tc_pop_loop_label(void) {
     if (tc_loop_label_depth > 0) tc_loop_label_depth--;
 }
 static int tc_loop_label_in_scope(const char* label) {
     if (!label) return 0;
-    int n = tc_loop_label_depth < TC_MAX_LOOP_LABELS
-          ? tc_loop_label_depth : TC_MAX_LOOP_LABELS;
+    int n = tc_loop_label_depth;
     for (int i = 0; i < n; i++) {
         if (tc_loop_labels[i] && strcmp(tc_loop_labels[i], label) == 0) return 1;
     }
@@ -13317,18 +13413,23 @@ static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
 }
 
 /* #2727: the values a selector compares with: the selector itself, or each
- * value of a comma-list. A range is one value here. Returns the count written
- * to `out` (at most `cap`). */
-static int selector_elements(ASTNode* sel, ASTNode** out, int cap) {
-    if (!sel || cap <= 0) return 0;
-    if (sel->type != AST_MATCH_ALT) { out[0] = sel; return 1; }
-    int n = 0;
-    for (int i = 0; i < sel->child_count && n < cap; i++)
-        if (sel->children[i]) out[n++] = sel->children[i];
-    return n;
+ * value of a comma-list. A range is one value here. A malloc'd array of them,
+ * *n long, which the caller frees: every value (#3574), where 256 slots left
+ * the rest of a long comma-list unchecked. */
+static ASTNode** selector_elements(ASTNode* sel, int* n) {
+    *n = 0;
+    if (!sel) return NULL;
+    int cap = sel->type == AST_MATCH_ALT ? sel->child_count : 1;
+    ASTNode** out = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)(cap + 1));
+    if (sel->type != AST_MATCH_ALT) {
+        out[0] = sel;
+        *n = 1;
+        return out;
+    }
+    for (int i = 0; i < sel->child_count; i++)
+        if (sel->children[i]) out[(*n)++] = sel->children[i];
+    return out;
 }
-
-#define SELECTOR_ELEMENTS_MAX 256
 
 /* Run after the arms are checked, so a bare enum member is its constant by
  * then. An arm is unreachable below a `_`, or when every value it names is
@@ -13336,10 +13437,11 @@ static int selector_elements(ASTNode* sel, ASTNode** out, int cap) {
  * value, and over an enum, a sum or an optional an identifier is a case). */
 static void check_match_arm_reachability(ASTNode* stmt, int closed) {
     if (!stmt) return;
-    enum { MATCH_KEYS_MAX = 256 };
-    char* keys[MATCH_KEYS_MAX];
-    int  key_line[MATCH_KEYS_MAX];
-    int  nkeys = 0;
+    /* Every case the arms name (#3574): 256 slots forgot the rest, and an
+     * arm repeating one of them was not found unreachable. */
+    char** keys = NULL;
+    int* key_line = NULL;
+    int  nkeys = 0, key_cap = 0;
     int  wildcard_line = -1;
 
     for (int i = 1; i < stmt->child_count; i++) {
@@ -13362,9 +13464,9 @@ static void check_match_arm_reachability(ASTNode* stmt, int closed) {
             continue;
         }
 
-        ASTNode* els[SELECTOR_ELEMENTS_MAX];
-        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
-        char* arm_keys[SELECTOR_ELEMENTS_MAX];
+        int nel = 0;
+        ASTNode** els = selector_elements(pattern, &nel);
+        char** arm_keys = (char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)(nel + 1));
         int nak = 0, all_keyed = nel > 0, dup_line = -1, all_seen = 1;
         for (int e = 0; e < nel; e++) {
             char* key = match_arm_key(els[e], closed);
@@ -13387,16 +13489,21 @@ static void check_match_arm_reachability(ASTNode* stmt, int closed) {
                                  "remove the duplicate, or change it to the case you meant");
         }
         for (int k = 0; k < nak; k++) {
-            if (nkeys < MATCH_KEYS_MAX) {
-                keys[nkeys] = arm_keys[k];
-                key_line[nkeys] = pattern->line;
-                nkeys++;
-            } else {
-                free(arm_keys[k]);
+            if (nkeys == key_cap) {
+                key_cap = key_cap ? key_cap * 2 : 32;
+                keys = (char**)aether_xrealloc(keys, sizeof(char*) * (size_t)key_cap);
+                key_line = (int*)aether_xrealloc(key_line, sizeof(int) * (size_t)key_cap);
             }
+            keys[nkeys] = arm_keys[k];
+            key_line[nkeys] = pattern->line;
+            nkeys++;
         }
+        free(arm_keys);
+        free(els);
     }
     for (int k = 0; k < nkeys; k++) free(keys[k]);
+    free(keys);
+    free(key_line);
 }
 
 /* ---- #2727: a case selector against the value it is compared with -------
@@ -13566,11 +13673,12 @@ static int switch_subject_comparable(Type* t) {
 /* Check every value of selector `sel` against the value matched. */
 static int check_selector(ASTNode* sel, Type* subject, SymbolTable* table,
                           const char* what) {
-    ASTNode* els[SELECTOR_ELEMENTS_MAX];
-    int n = selector_elements(sel, els, SELECTOR_ELEMENTS_MAX);
+    int n = 0;
+    ASTNode** els = selector_elements(sel, &n);
     int ok = 1;
     for (int i = 0; i < n; i++)
         if (!check_selector_value(els[i], subject, table, what)) ok = 0;
+    free(els);
     return ok;
 }
 
@@ -15883,8 +15991,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  stmt->children[0]->type == AST_IDENTIFIER)
                     ? stmt->children[0]->value : NULL;
             int sum_nvar = sum_match ? match_expr_type->tuple_count : 0;
-            int sum_covered[64];
-            for (int z = 0; z < 64; z++) sum_covered[z] = 0;
+            /* One flag per variant and per member, as many as the type has
+             * (#3574): 64 flags left the rest out of the exhaustiveness
+             * check, so a match missing one of them compiled. */
+            int* sum_covered = (int*)calloc((size_t)(sum_nvar > 0 ? sum_nvar : 1), sizeof(int));
+            if (!sum_covered) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
             int sum_wildcard = 0;
             int sum_wildcard_line = -1;
 
@@ -15895,8 +16006,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int enum_match = (match_expr_type && match_expr_type->kind == TYPE_ENUM);
             const char* enum_name = enum_match ? match_expr_type->struct_name : NULL;
             ASTNode* enum_def = enum_name ? enum_def_lookup(enum_name) : NULL;
-            int enum_covered[64];
-            for (int z = 0; z < 64; z++) enum_covered[z] = 0;
+            int enum_members = enum_def ? enum_def->child_count : 0;
+            int* enum_covered = (int*)calloc((size_t)(enum_members > 0 ? enum_members : 1), sizeof(int));
+            if (!enum_covered) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
             int enum_wildcard = 0;
             int enum_wildcard_line = -1;
 
@@ -16079,7 +16191,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 match_expr_type->struct_name ? match_expr_type->struct_name : "?");
                             type_error(msg, pattern->line, pattern->column);
                         } else {
-                            if (vidx < 64) sum_covered[vidx] = 1;
+                            sum_covered[vidx] = 1;
                             // Narrow the scrutinee variable to the variant
                             // struct so `s.field` typechecks inside the arm.
                             if (scrutinee_name) {
@@ -16106,8 +16218,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         /* #2727: each value of a comma-list (`Red, Green ->`)
                          * is a member as a lone one is; anything else is
                          * checked as the comparison it lowers to. */
-                        ASTNode* els[SELECTOR_ELEMENTS_MAX];
-                        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
+                        int nel = 0;
+                        ASTNode** els = selector_elements(pattern, &nel);
                         for (int e = 0; e < nel; e++) {
                             ASTNode* el = els[e];
                             int el_some = el->type == AST_PATTERN_VARIABLE && el->annotation &&
@@ -16136,7 +16248,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 type_error(msg, el->line, el->column);
                                 continue;
                             }
-                            for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                            for (int mi = 0; mi < enum_def->child_count; mi++) {
                                 ASTNode* mn = enum_def->children[mi];
                                 if (mn && mn->type == AST_ENUM_MEMBER && mn->value &&
                                     strcmp(mn->value, mem) == 0) { enum_covered[mi] = 1; break; }
@@ -16151,6 +16263,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 el->node_type = clone_type(match_expr_type);
                             }
                         }
+                        free(els);
                     }
                 }
 
@@ -16245,7 +16358,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
              * every variant or member is already handled, the `_` arm cannot
              * run. Reported for sums and enums only, where the set of cases
              * is closed and known. */
-            if (sum_match && sum_wildcard && sum_nvar > 0 && sum_nvar <= 64) {
+            if (sum_match && sum_wildcard && sum_nvar > 0) {
                 int all = 1;
                 for (int vi = 0; vi < sum_nvar; vi++) {
                     if (!sum_covered[vi]) { all = 0; break; }
@@ -16269,7 +16382,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
             if (enum_match && enum_def && enum_wildcard) {
                 int nmem = 0, all = 1;
-                for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                for (int mi = 0; mi < enum_def->child_count; mi++) {
                     ASTNode* mn = enum_def->children[mi];
                     if (!mn || mn->type != AST_ENUM_MEMBER) continue;
                     nmem++;
@@ -16298,7 +16411,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // a compile error — the payoff that makes adding a variant safe.
             if (sum_match && !sum_wildcard) {
                 char missing[256]; int mp = 0, nmiss = 0;
-                for (int vi = 0; vi < sum_nvar && vi < 64; vi++) {
+                for (int vi = 0; vi < sum_nvar; vi++) {
                     if (sum_covered[vi]) continue;
                     Type* vt = match_expr_type->tuple_types[vi];
                     const char* vn = (vt && vt->struct_name) ? vt->struct_name : "?";
@@ -16325,7 +16438,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // yields an uninitialized result, into a compile error.
             if (enum_match && enum_def && !enum_wildcard) {
                 char missing[256]; int mp = 0, nmiss = 0;
-                for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                for (int mi = 0; mi < enum_def->child_count; mi++) {
                     ASTNode* mn = enum_def->children[mi];
                     if (!mn || mn->type != AST_ENUM_MEMBER || !mn->value) continue;
                     if (enum_covered[mi]) continue;
@@ -16345,6 +16458,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     type_error(msg, stmt->line, stmt->column);
                 }
             }
+            free(sum_covered);
+            free(enum_covered);
             return 1;
         }
 

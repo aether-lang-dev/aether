@@ -1056,7 +1056,9 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * a function does with a `ptr` is an Aether
                      * function's contract, and a typed C function
                      * pointer's parameters borrow. */
-                    int modes[64] = { 0 };
+                    /* Each parameter's mode, every one (#3574): past 64 a
+                     * `@keep` or `@into` parameter's was dropped. */
+                    int* modes = NULL;
                     int any_mode = 0;
                     if (!(peek_token(parser) && peek_token(parser)->type == TOKEN_RIGHT_PAREN)) {
                         do {
@@ -1077,6 +1079,7 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                             Type* p = parse_type(parser);
                             if (!p) {
                                 parser_error(parser, "Expected type in fn() signature");
+                                free(modes);
                                 free_type(type);
                                 return NULL;
                             }
@@ -1084,15 +1087,17 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                             type->param_types = aether_xrealloc(type->param_types,
                                 (size_t)type->param_count * sizeof(Type*));
                             type->param_types[type->param_count - 1] = p;
-                            if (type->param_count <= 64) modes[type->param_count - 1] = mode;
+                            modes = (int*)aether_xrealloc(modes, (size_t)type->param_count * sizeof(int));
+                            modes[type->param_count - 1] = mode;
                             if (mode != FN_MODE_BORROWED) any_mode = 1;
                         } while (match_token(parser, TOKEN_COMMA));
                     }
                     if (any_mode) {
                         type->is_fnptr = 0;
-                        for (int i = 0; i < type->param_count && i < 64; i++)
+                        for (int i = 0; i < type->param_count; i++)
                             fn_type_set_param_mode(type, i, modes[i]);
                     }
+                    free(modes);
                     if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
                         free_type(type);
                         return NULL;
@@ -5795,10 +5800,11 @@ static void hoist_place_indices(ASTNode* place, ASTNode* block, int seq, int* k)
 static void parse_place_destructure(Parser* parser, ASTNode* block) {
     Token* head = peek_token(parser);
     ASTNode* destructure = create_ast_node(AST_TUPLE_DESTRUCTURE, NULL, head->line, head->column);
-    enum { MAX_PLACES = 64 };
-    ASTNode* places[MAX_PLACES];
-    char* hidden[MAX_PLACES];
-    int np = 0;
+    /* Every place the destructure names (#3574): past 64 the next was
+     * refused as no destructure slot at all. */
+    ASTNode** places = NULL;
+    char** hidden = NULL;
+    int np = 0, place_cap = 0;
     int seq = ++g_place_destructure_seq;
     for (;;) {
         Token* t = peek_token(parser);
@@ -5812,8 +5818,7 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
             add_child(destructure, var);
         } else {
             ASTNode* place = parse_unary_expression(parser);
-            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS) ||
-                np == MAX_PLACES) {
+            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS)) {
                 if (!parser->suppress_errors && t) {
                     aether_error_with_code(
                         "a destructure slot is a name, `_`, an element (`a[i]`) or a field (`o.f`)",
@@ -5827,6 +5832,11 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
             ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, name, place->line, place->column);
             var->node_type = create_type(TYPE_UNKNOWN);
             add_child(destructure, var);
+            if (np == place_cap) {
+                place_cap = place_cap ? place_cap * 2 : 8;
+                places = (ASTNode**)aether_xrealloc(places, sizeof(ASTNode*) * (size_t)place_cap);
+                hidden = (char**)aether_xrealloc(hidden, sizeof(char*) * (size_t)place_cap);
+            }
             places[np] = place;
             hidden[np] = strdup(name);
             np++;
@@ -5851,6 +5861,8 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
                peek_token(parser)->type != TOKEN_EOF) advance_token(parser);
         free_ast_node(destructure);
         for (int i = 0; i < np; i++) { free_ast_node(places[i]); free(hidden[i]); }
+        free(places);
+        free(hidden);
         return;
     }
     add_child(destructure, rhs);  // Last child is the RHS
@@ -5867,6 +5879,8 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
         add_child(block, stmt);
         free(hidden[i]);
     }
+    free(places);
+    free(hidden);
 }
 
 ASTNode* parse_block(Parser* parser) {
