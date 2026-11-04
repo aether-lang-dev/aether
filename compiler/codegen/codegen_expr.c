@@ -2624,6 +2624,12 @@ static int left_operand_is_chain_link(ASTNode* expr) {
         left->child_count < 2 || !left->node_type) {
         return 0;
     }
+    /* #3574: `a && b && c` groups the same way, and neither operator has a
+     * lowering of its own: a left link of the same one needs no brackets
+     * either. Each one took a pair, and Clang refused a chain of 255. */
+    if ((strcmp(expr->value, "&&") == 0 || strcmp(expr->value, "||") == 0) &&
+        strcmp(left->value, expr->value) == 0)
+        return 1;
     switch (left->node_type->kind) {
         case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_FLOAT:
         case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_UINT32:
@@ -2640,6 +2646,69 @@ static int left_operand_is_chain_link(ASTNode* expr) {
         if (parent && child) return 1;
     }
     return 0;
+}
+
+/* A link of a left operator chain that its own C may hold in brackets or a
+ * call, `expr` with its left operand: a binary operation, not a store, not
+ * `&&` or `||` (whose right side runs on the left's say), and not already
+ * evaluated. */
+static int chain_link(ASTNode* expr) {
+    return expr && expr->type == AST_BINARY_EXPRESSION && expr->child_count == 2 &&
+           expr->value && expr->children[0] && !is_assignment_op(expr->value) &&
+           strcmp(expr->value, "&&") != 0 && strcmp(expr->value, "||") != 0 &&
+           !order_bound(expr);
+}
+
+/* Links of one chain that each nest the C once past which the chain is
+ * written link by link. */
+#define CHAIN_NESTING_LINKS 16
+
+/* #3574: a left chain whose links each nest the C once more: a comparison
+ * of a comparison (`a < b < c`, which C reads the same unbracketed but
+ * warns about), an integer `/`, `%`, `<<` or `>>` (each a checked call or a
+ * masked cast around its left operand, #3524), any operation lowered on
+ * its own (a bit_set's, a pointer's, a duration's). Two brackets a link and
+ * more, and Clang refuses C nested 256 deep: a chain of 128 links did not
+ * build. Past CHAIN_NESTING_LINKS such links the chain is one sequence,
+ * each link evaluated into a temporary the next reads as its left operand:
+ * left to right, each link's checks (a division by zero, MIN / -1) where
+ * the link is, before the operands after it. Returns 0, emitting nothing,
+ * for a shorter chain, or where no temporary can be declared ahead of the
+ * statement. */
+static int emit_chain_by_links(CodeGenerator* gen, ASTNode* expr) {
+    if (!chain_link(expr) || !hoist_ready(gen)) return 0;
+    int links = 0, nesting = 0;
+    for (ASTNode* t = expr; chain_link(t); t = t->children[0]) {
+        links++;
+        if (!left_operand_is_chain_link(t) ||
+            int_edge_op_applies(gen, t->value, t->children[0]->node_type, t->children[1],
+                                t->node_type))
+            nesting++;
+    }
+    if (nesting <= CHAIN_NESTING_LINKS) return 0;
+    ASTNode** spine = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)links);
+    int n = 0;
+    for (ASTNode* t = expr; chain_link(t); t = t->children[0]) spine[n++] = t;
+    int typed = 1;
+    for (int k = 1; k < n; k++)
+        if (!order_c11_type(spine[k])) typed = 0;
+    int saved = order_prelude_depth();
+    TempSeq s;
+    seq_open_ordered(gen, &s, typed);
+    for (int k = n - 1; k >= 1; k--) {
+        const char* name = cg_internf("_eo%d", g_order_counter++);
+        seq_let_named(gen, &s, order_c11_type(spine[k]), name);
+        fprintf(gen->output, "(");
+        generate_expression(gen, spine[k]);
+        fprintf(gen->output, ")");
+        seq_next(gen, &s);
+        order_bind(spine[k], name);
+    }
+    free(spine);
+    generate_expression(gen, expr);
+    seq_close(gen, &s);
+    order_prelude_end(saved);
+    return 1;
 }
 
 static int duration_unit_ns_codegen(const char* unit, long long* out) {
@@ -8703,6 +8772,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         return;
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
+    if (emit_chain_by_links(gen, expr)) return;   /* #3574 */
 
     /* #2619: a string a call may hand back from a struct temporary is
      * copied here, so it outlives the temporary (call_returns_view_of_temp,
