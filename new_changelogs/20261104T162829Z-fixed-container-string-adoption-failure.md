@@ -1,0 +1,1 @@
+- Release the compiler-transferred string reference when a list add or map put fails, including allocation refusal, without changing container runtime contracts.

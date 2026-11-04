@@ -1,0 +1,83 @@
+// A compiler-routed string store takes a reference before it knows whether
+// the container can accept it. A failed add/put must release that reference.
+// list.set already consumes its argument on failure: keep that path unchanged.
+import std.host
+import std.list
+import std.map
+import std.string
+
+extern exit(code: int)
+extern aether_test_fail_alloc_after(n: int)
+
+fn rejected(n: int) -> bool {
+    a = map.map_put_string_owned(null, "key", string.from_int(n))
+    b = list.list_add_string_owned(null, string.from_int(n))
+    c = map.put_raw(null, "key", string.from_int(n))
+    d = list.add_raw(null, string.from_int(n))
+    e = map.put(null, "key", string.from_int(n))
+    f = list.add(null, string.from_int(n))
+    // A live local also lends a reference, which failure must give back.
+    s = string.from_int(n)
+    _ = map.put(null, "key", s)
+    _ = list.add(null, s)
+    alive = string.length(s) > 0
+    list.set(null, 0, string.from_int(n))
+    return a == 0 && b == 0 && c == 0 && d == 0 &&
+    e == "map.put failed" && f == "list.add failed" && alive
+}
+
+fn accepted(n: int) -> bool {
+    m = map.new()
+    defer map.free(m)
+    l = list.new()
+    defer list.free(l)
+    s = string.from_int(n)
+    e = map.put(m, "key", s)
+    f = list.add(l, s)
+    list.set(l, 0, s)
+    return e == "" && f == "" && string.length(s) > 0
+}
+
+fn refused_map(n: int) -> bool {
+    m = map.new()
+    defer map.free(m)
+    s = string.from_int(n)
+    // A fresh put's one allocation is its entry (the key is kept by
+    // reference, #3538), so refusing the first allocation refuses the put.
+    aether_test_fail_alloc_after(1)
+    ok = map.put_raw(m, "key", s)
+    aether_test_fail_alloc_after(0)
+    return ok == 0 && map.size(m) == 0
+}
+
+fn refused_list(n: int) -> bool {
+    l = list.new()
+    defer list.free(l)
+    // Fill the initial capacity, with an ownership array already present.
+    i = 0
+    while i < 16 {
+        list.add(l, string.from_int(n + i))
+        i = i + 1
+    }
+    s = string.from_int(n)
+    aether_test_fail_alloc_after(1)
+    ok = list.add_raw(l, s)
+    aether_test_fail_alloc_after(0)
+    return ok == 0 && list.size(l) == 16
+}
+
+main() {
+    a = host.account_new(0, 0, host.DEADLINE_ELAPSED, null)
+    if a == null { exit(1) }
+    _ = host.account_use(a)
+    ok = rejected(76543) && accepted(76543) &&
+    refused_map(76543) && refused_list(76543)
+    _ = host.account_use(null)
+    held = host.account_used(a)
+    host.account_free(a)
+    if !ok || held != 0 {
+        println("FAIL container string adoption: correct results ${ok}, retained ${held} bytes")
+        exit(1)
+    }
+    println("PASS container string adoption releases failed transfers")
+}
