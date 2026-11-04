@@ -154,6 +154,7 @@ fn run_file(path: string, curve: string, l: int) -> int {
         gi = gi + 1
     }
     println("wycheproof ecdh_${curve}_ecpoint: ${valid_ok} valid ok, ${refused} invalid refused, ${acceptable} acceptable, ${failed} failed")
+    json.free(root)
     return failed
 }
 

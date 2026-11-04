@@ -214,6 +214,7 @@ fn run_file(path: string, kind: int, k: int, stride: int) -> (int, int, int) {
         }
         gi = gi + 1
     }
+    json.free(root)
     return passed, rejected_invalid, failed
 }
 

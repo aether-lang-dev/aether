@@ -37,6 +37,9 @@ main() {
         bh(aid, 32),
         "0d640df58d78766c08c037a34a8b53c9d01ef0452d75b65eb52520e96b01e659")
 
+    bytes.free(e0); bytes.free(s1); bytes.free(pw); bytes.free(nacl); bytes.free(s2)
+    bytes.free(pwd); bytes.free(salt); bytes.free(sec); bytes.free(ad); bytes.free(aid)
+
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
 }

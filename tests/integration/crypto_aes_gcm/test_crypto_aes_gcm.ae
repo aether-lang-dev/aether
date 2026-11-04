@@ -18,12 +18,13 @@ main() {
     k1 = hb("00000000000000000000000000000000")
     iv0 = hb("000000000000000000000000")
     e1 = aes.new_encryptor(bytes.view(k1)[0..16])
-    fails = fails + ck("case1 tag", bh(aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(empty)[0..0])),
-        "58e2fccefa7e3061367f1d57a4e7455a")
+    s1 = aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(empty)[0..0])
+    fails = fails + ck("case1 tag", bh(s1), "58e2fccefa7e3061367f1d57a4e7455a")
 
     // Case 2: zero key/IV, PT = 16 zero bytes
     pt2 = hb("00000000000000000000000000000000")
-    fails = fails + ck("case2 ct+tag", bh(aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(pt2)[0..16])),
+    s2 = aes.gcm_seal(e1, iv0, bytes.view(empty)[0..0], bytes.view(pt2)[0..16])
+    fails = fails + ck("case2 ct+tag", bh(s2),
         "0388dace60b6a392f328c2b971b2fe78ab6e47d42cec13bdf53a67b21257bddf")
 
     // Case 4: with AAD
@@ -42,8 +43,16 @@ main() {
     if bh(op) != bh(pt4) { println("FAIL open roundtrip"); fails = fails + 1 } else { println("ok   open roundtrip") }
     // tamper
     bytes.set(sealed, 0, bytes.get(sealed, 0) ^ 1)
-    _, terr = aes.gcm_open(e4, iv4, bytes.view(aad), bytes.view(sealed))
+    bad, terr = aes.gcm_open(e4, iv4, bytes.view(aad), bytes.view(sealed))
     if terr == "" { println("FAIL tamper not rejected"); fails = fails + 1 } else { println("ok   tamper rejected") }
+
+    // Each buffer and encryptor above is this program's to free (a refused
+    // open gives null).
+    bytes.free(empty); bytes.free(k1); bytes.free(iv0); bytes.free(s1); bytes.free(pt2); bytes.free(s2)
+    bytes.free(k4); bytes.free(iv4); bytes.free(aad); bytes.free(pt4); bytes.free(sealed)
+    bytes.free(op); bytes.free(bad)
+    aes.free(e1)
+    aes.free(e4)
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)

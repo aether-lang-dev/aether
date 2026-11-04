@@ -21,6 +21,8 @@ oid_case(label: string, dotted: string, want_ok: int) -> int {
     r = asn1.encode_oid(dotted)
     ok = 0
     if r != null { ok = 1 }
+    // The DER of an accepted OID is ours to free.
+    bytes.free(r)
     if ok != want_ok {
         println("  FAIL encode_oid(\"${dotted}\") [${label}]: accepted=${ok}, want ${want_ok}")
         return 1
@@ -111,6 +113,8 @@ main() {
         fails = fails + 1
     }
     tls13_cert.free_leaf(&leaf)
+    bytes.free(der)
+    bytes.free(big)
 
     if fails == 0 {
         println("All OID and certificate validation cases pass")

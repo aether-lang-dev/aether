@@ -8,6 +8,8 @@ import std.io
 hv(c: int) -> int { if c >= 48 { if c <= 57 { return c - 48 } } if c >= 97 { if c <= 102 { return c - 87 } } return 0 }
 hb(h: string) -> ptr { n = string.length(h); b = bytes.new(n / 2); i = 0; while i < n { bytes.set(b, i / 2, hv(string_char_at_n(h, n, i)) * 16 + hv(string_char_at_n(h, n, i + 1))); i = i + 2 } return b }
 bh(b: ptr) -> string { d = "0123456789abcdef"; o = ""; n = bytes.length(b); i = 0; while i < n { v = bytes.get(b, i); o = string.concat(o, string.concat(string.substring(d, (v / 16) & 15, ((v / 16) & 15) + 1), string.substring(d, v & 15, (v & 15) + 1))); i = i + 1 } return o }
+// The CMAC of m[0..n] under k, in hex. The tag is this program's to free.
+cmac_hex(k: ptr, m: ptr, n: int) -> string { t = aes.cmac(bytes.view(k)[0..16], bytes.view(m)[0..n]); h = bh(t); bytes.free(t); return h }
 beq(a: ptr, b: ptr) -> int { if bytes.length(a) != bytes.length(b) { return 0 } i = 0; while i < bytes.length(a) { if bytes.get(a, i) != bytes.get(b, i) { return 0 } i = i + 1 } return 1 }
 
 check(label: string, got: string, want: string) -> int {
@@ -21,13 +23,13 @@ main() {
 
     // RFC 4493 AES-128 CMAC, the four canonical lengths (0/16/40/64).
     e0 = bytes.new(0)
-    fails = fails + check("cmac empty", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(e0)[0..0])), "bb1d6929e95937287fa37d129b756746")
+    fails = fails + check("cmac empty", cmac_hex(k, e0, 0), "bb1d6929e95937287fa37d129b756746")
     m16 = hb("6bc1bee22e409f96e93d7e117393172a")
-    fails = fails + check("cmac 16", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m16)[0..16])), "070a16b46b4d4144f79bdd9dd04a287c")
+    fails = fails + check("cmac 16", cmac_hex(k, m16, 16), "070a16b46b4d4144f79bdd9dd04a287c")
     m40 = hb("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411")
-    fails = fails + check("cmac 40", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m40)[0..40])), "dfa66747de9ae63030ca32611497c827")
+    fails = fails + check("cmac 40", cmac_hex(k, m40, 40), "dfa66747de9ae63030ca32611497c827")
     m64 = hb("6bc1bee22e409f96e93d7e117393172aae2d8a571e03ac9c9eb76fac45af8e5130c81c46a35ce411e5fbc1191a0a52eff69f2445df4f9b17ad2b417be66c3710")
-    fails = fails + check("cmac 64", bh(aes.cmac(bytes.view(k)[0..16], bytes.view(m64)[0..64])), "51f0bebf7e3b9d92fc49741779363cfe")
+    fails = fails + check("cmac 64", cmac_hex(k, m64, 64), "51f0bebf7e3b9d92fc49741779363cfe")
 
     // RFC 3394 AES-128 Key Wrap.
     kek = hb("000102030405060708090a0b0c0d0e0f")
@@ -37,6 +39,9 @@ main() {
     uw, uerr = aes.key_unwrap(bytes.view(kek)[0..16], bytes.view(w))
     if uerr != "" { println("FAIL keyunwrap err ${uerr}"); fails = fails + 1 }
     if beq(uw, kdata) != 1 { println("FAIL keyunwrap roundtrip"); fails = fails + 1 } else { println("ok   keyunwrap roundtrip") }
+
+    bytes.free(k); bytes.free(e0); bytes.free(m16); bytes.free(m40); bytes.free(m64)
+    bytes.free(kek); bytes.free(kdata); bytes.free(w); bytes.free(uw)
 
     if fails == 0 { println("ALL PASS"); return }
     println("FAILURES"); exit(1)
