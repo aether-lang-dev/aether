@@ -204,6 +204,11 @@ main() {
     http.server_free(mixed)
     http.server_free(tls_only)
     http.server_free(upstream)
+    // The mounts' options and pools are the program's, freed after the servers.
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
+    proxy.opts_free(late_opts)
+    proxy.upstream_pool_free(late_pool)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

@@ -57,10 +57,18 @@ need(label: string, err: string) {
     }
 }
 
+// A gateway's server and the pool and options its mount uses, which stay
+// the program's: it frees them after the server (proxy.mount).
+struct Gateway {
+    server: ptr
+    pool: ptr
+    opts: ptr
+}
+
 // A proxy of "/" to `up_url` with a one second timeout. `breaker` 1 opens
 // the upstream's breaker after one failure; 0 admits one request at a time
 // instead. `worker` 1 puts a program's middleware ahead of it.
-gateway(up_url: string, breaker: int, worker: int) -> ptr {
+gateway(up_url: string, breaker: int, worker: int) -> Gateway {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     if worker == 1 {
@@ -79,8 +87,15 @@ gateway(up_url: string, breaker: int, worker: int) -> ptr {
     if breaker == 1 {
         need("breaker_configure", proxy.breaker_configure(pool, 1, 30000, 1))
     }
-    need("mount", proxy.mount(s, "/", pool, proxy.opts_new()))
-    return s
+    opts = proxy.opts_new()
+    need("mount", proxy.mount(s, "/", pool, opts))
+    return Gateway { server: s, pool: pool, opts: opts }
+}
+
+gateway_free(g: Gateway) {
+    http.server_free(g.server)
+    proxy.opts_free(g.opts)
+    proxy.upstream_pool_free(g.pool)
 }
 
 // One GET on a connection of its own; the status code, "none" when nothing
@@ -128,7 +143,8 @@ main() {
     while k < 2 {
         g = 0
         while g < 2 {
-            s = gateway(up_url, k, g)
+            gw = gateway(up_url, k, g)
+            s = gw.server
             port = start(s)
             sleep(200)
             first = status_of(port, "/slow")
@@ -142,7 +158,7 @@ main() {
                 println("  PASS ${labels[k]} (${names[g]})")
             }
             http.server_stop(s)
-            http.server_free(s)
+            gateway_free(gw)
             g = g + 1
         }
         k = k + 1

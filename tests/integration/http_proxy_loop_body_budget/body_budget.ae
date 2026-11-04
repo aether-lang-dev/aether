@@ -59,7 +59,15 @@ need(label: string, err: string) {
     }
 }
 
-gateway(up_url: string, worker: int) -> ptr {
+// A gateway's server and the pool and options its mount uses, which stay
+// the program's: it frees them after the server (proxy.mount).
+struct Gateway {
+    server: ptr
+    pool: ptr
+    opts: ptr
+}
+
+gateway(up_url: string, worker: int) -> Gateway {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     if worker == 1 {
@@ -70,7 +78,13 @@ gateway(up_url: string, worker: int) -> ptr {
     opts = proxy.opts_new()
     need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 65536))
     need("mount", proxy.mount(s, "/", pool, opts))
-    return s
+    return Gateway { server: s, pool: pool, opts: opts }
+}
+
+gateway_free(g: Gateway) {
+    http.server_free(g.server)
+    proxy.opts_free(g.opts)
+    proxy.upstream_pool_free(g.pool)
 }
 
 dial(port: int) -> ptr {
@@ -124,7 +138,8 @@ main() {
     bad = 0
     g = 0
     while g < 2 {
-        s = gateway(up_url, g)
+        gw = gateway(up_url, g)
+        s = gw.server
         port = start(s)
         sleep(100)
         socks = [dial(port), dial(port), dial(port), dial(port), dial(port),
@@ -163,7 +178,7 @@ main() {
             println("  PASS every body answered (${names[g]})")
         }
         http.server_stop(s)
-        http.server_free(s)
+        gateway_free(gw)
         g = g + 1
     }
 

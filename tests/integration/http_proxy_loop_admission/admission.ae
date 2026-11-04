@@ -58,9 +58,17 @@ need(label: string, err: string) {
     }
 }
 
+// A gateway's server and the pool and options its mount uses, which stay
+// the program's: it frees them after the server (proxy.mount).
+struct Gateway {
+    server: ptr
+    pool: ptr
+    opts: ptr
+}
+
 // A proxy of "/" to `up_url` with a 64 KB body cap; `worker` 1 puts a
 // program's middleware ahead of it.
-gateway(up_url: string, worker: int) -> ptr {
+gateway(up_url: string, worker: int) -> Gateway {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     if worker == 1 {
@@ -75,7 +83,13 @@ gateway(up_url: string, worker: int) -> ptr {
     opts = proxy.opts_new()
     need("opts_set_body_cap", proxy.opts_set_body_cap(opts, 65536))
     need("mount", proxy.mount(s, "/", pool, opts))
-    return s
+    return Gateway { server: s, pool: pool, opts: opts }
+}
+
+gateway_free(g: Gateway) {
+    http.server_free(g.server)
+    proxy.opts_free(g.opts)
+    proxy.upstream_pool_free(g.pool)
 }
 
 // The value of `name` in a response head, "" when it has none.
@@ -235,7 +249,7 @@ main() {
     up_url = "http://127.0.0.1:${start(upstream)}"
     loop_gw = gateway(up_url, 0)
     worker_gw = gateway(up_url, 1)
-    ports = [start(loop_gw), start(worker_gw)]
+    ports = [start(loop_gw.server), start(worker_gw.server)]
     sleep(200)
 
     bad = 0
@@ -336,11 +350,11 @@ main() {
     bad = bad + both_all("a head past 16 KiB after a body that grew the buffer", ports,
         string.concat(grow, long_head), "200 431 closed")
 
-    http.server_stop(worker_gw)
-    http.server_stop(loop_gw)
+    http.server_stop(worker_gw.server)
+    http.server_stop(loop_gw.server)
     http.server_stop(upstream)
-    http.server_free(worker_gw)
-    http.server_free(loop_gw)
+    gateway_free(worker_gw)
+    gateway_free(loop_gw)
     http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
