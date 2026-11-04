@@ -8434,8 +8434,15 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         generate_expression(gen, a);
         fprintf(o, ")");
         seq_next(gen, &s);
-        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, 0, ", p, p, ect,
-                own_slice_ops(gen, st));
+        /* #3568: a place that holds no reference of its own takes one, so
+         * the growth copies (slice_own's `slice_push_copy`). */
+        int copy = annotation_has_marker(expr->annotation, "slice_push_copy");
+        if (copy) {
+            fprintf(o, "aether_slice_retain(*%s)", p);
+            seq_next(gen, &s);
+        }
+        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, %d, ", p, p, ect,
+                own_slice_ops(gen, st), copy);
         emit_slice_diag_file(gen, expr);
         fprintf(o, ", %d)", expr->line);
         seq_next(gen, &s);
@@ -10802,10 +10809,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                      * was given (moved out of its place, or a call's fresh
                      * result), which a refusal gives back. */
                     ASTNode* grown_from = expr->children[0];
+                    /* A copy (`__slice_copy`, of a value that holds no
+                     * reference of its own) is a reference the append was
+                     * given too. */
                     int taken = annotation_has_marker(expr->annotation, "slice_consumes") ||
                                 (grown_from && grown_from->type == AST_FUNCTION_CALL &&
                                  grown_from->value &&
-                                 strncmp(grown_from->value, "__slice_", 8) != 0);
+                                 (strncmp(grown_from->value, "__slice_", 8) != 0 ||
+                                  strcmp(grown_from->value, "__slice_copy") == 0));
                     fprintf(gen->output, ", sizeof(%s), %s, %d, ", ect,
                             own_slice_ops(gen, expr->node_type), taken);
                     emit_slice_diag_file(gen, expr);

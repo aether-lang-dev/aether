@@ -6619,15 +6619,6 @@ void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
     }
 }
 
-/* #2582: is `n` an access chain (fields, elements) rooted at identifier
- * `pname`? */
-static int access_chain_rooted_at(ASTNode* n, const char* pname) {
-    while (n && (n->type == AST_MEMBER_ACCESS || n->type == AST_ARRAY_ACCESS) &&
-           n->child_count >= 1)
-        n = n->children[0];
-    return n && n->type == AST_IDENTIFIER && n->value && strcmp(n->value, pname) == 0;
-}
-
 /* #2582: can a value of type `t` point into memory an argument owns: a
  * string, a pointer, an array or a tuple holding one? */
 static int type_can_view(Type* t) {
@@ -6802,20 +6793,12 @@ static int tuple_call_pos_copied(CodeGenerator* gen, ASTNode* call, int j) {
            call_returns_tuple_view_of_temp(gen, call);
 }
 
-/* R3: does `n` write into the struct parameter `pname`: rebind it, or
- * store into a field or an element of it (`p.f = v`, `p.xs[i] = v`)? Such
- * a parameter is made a value of its own on entry, so the store releases
+/* R3: does `n` write into the struct parameter `pname` (ast.c's
+ * ast_struct_param_written, which slice ownership reads too)? Such a
+ * parameter is made a value of its own on entry, so the store releases
  * nothing of its caller's; any other borrows. */
 int struct_param_written(ASTNode* n, const char* pname) {
-    if (!n || !pname) return 0;
-    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, pname) == 0) return 1;
-    if (n->type == AST_BINARY_EXPRESSION && n->value && strcmp(n->value, "=") == 0 &&
-        n->child_count >= 1 && n->children[0] &&
-        (n->children[0]->type == AST_MEMBER_ACCESS || n->children[0]->type == AST_ARRAY_ACCESS) &&
-        access_chain_rooted_at(n->children[0], pname)) return 1;
-    for (int i = 0; i < n->child_count; i++)
-        if (struct_param_written(n->children[i], pname)) return 1;
-    return 0;
+    return ast_struct_param_written(n, pname);
 }
 
 static void add_value_temp(ASTNode* e, ASTNode*** nodes, int* count, int* cap) {

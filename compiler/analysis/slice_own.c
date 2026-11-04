@@ -1465,13 +1465,16 @@ static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
 
 /* Is `e` a field of a struct parameter (`b.items`, `b.inner.items`)? The
  * field is its caller's: the copy of the struct the callee is given holds
- * no reference of its own (R3: parameters borrow). */
+ * no reference of its own (R3: parameters borrow). A parameter its function
+ * writes into is a value of its own (ast_struct_param_written, as codegen
+ * makes it), whose fields hold theirs. */
 static int param_struct_field(Frame* f, ASTNode* e) {
     if (!e || e->type != AST_MEMBER_ACCESS) return 0;
     ASTNode* b = e;
     while (b && b->type == AST_MEMBER_ACCESS && b->child_count > 0) b = b->children[0];
     Local* l = b && b->type == AST_IDENTIFIER ? pm_get(&f->uses, b) : NULL;
-    return l && l->param && l->type && l->type->kind == TYPE_STRUCT;
+    if (!l || !l->param || !l->type || l->type->kind != TYPE_STRUCT) return 0;
+    return !ast_struct_param_written(f->body, l->name);
 }
 
 /* Does the value `e` hold a reference of its own: a local, a cell, a
@@ -1505,7 +1508,15 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
         if (n->child_count > 1) rewrite_value(c, f, &n->children[1], C_MOVE);
         ASTNode** xs = &n->children[0];
         rewrite(c, f, xs);
-        if (is_push(n)) return;
+        if (is_push(n)) {
+            /* A place that holds no reference of its own (a struct
+             * parameter's field) takes one before it grows, so the growth
+             * copies and leaves the buffer to its owner (`slice_push_copy`,
+             * as an append of such a value does below). */
+            if (!holds_reference(c, f, *xs))
+                n->annotation = annotation_add_marker(n->annotation, "slice_push_copy");
+            return;
+        }
         if (is_free(n)) {
             /* `free` gives back the reference its place holds. A value that
              * holds none (a pattern's view, a sub-slice, a name this pass
@@ -1523,6 +1534,15 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
             /* The place `free` releases is left empty, so nothing releases
              * it again. */
             if (pure_place(*xs)) wrap(xs, "__slice_take");
+            return;
+        }
+        /* A value that holds no reference of its own (a struct parameter's
+         * field, a view of a place) grows a copy: its own reference makes
+         * the buffer shared, so the growth moves to storage of its own
+         * (aether_slice_grow1) and leaves the buffer to its owner. It grew
+         * in place, under the owner, who then held freed storage. */
+        if (!holds_reference(c, f, *xs)) {
+            wrap(xs, "__slice_copy");
             return;
         }
         /* `append` reads `v` before it grows the slice, so the place it

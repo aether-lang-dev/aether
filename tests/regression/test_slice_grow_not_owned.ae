@@ -1,0 +1,100 @@
+// Regression (#3568): a slice its place does not own grows by copy.
+//
+// `append` grows the buffer in place when only one place holds it, and a
+// value that holds no reference of its own does not count as one: a field
+// of a struct parameter is its caller's (parameters borrow). `return
+// append(b.items, v)` with `b` a struct parameter saw the caller's one
+// reference, reallocated the buffer under the caller's `b.items`, which
+// then read freed memory, and `b.items.push(v)` did the same. Such a value
+// now takes a reference of its own
+// first, so the buffer is shared and the growth moves to storage of its
+// own: the caller's field keeps its buffer, and the grown slice is the new
+// one. A push into a struct parameter's field makes the parameter a value of
+// its own, as any store into it does, which the function's exit destroys.
+//
+// Each shape reads back the caller's slice and the grown one after a churn
+// of kept, filled buffers (a buffer freed under a reader would come back
+// holding the filler), and where the heap count is exact
+// (mem.heap_in_use_exact) rounds of them leave the heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Box {
+    items: int[]
+}
+
+appended(b: Box, v: int) -> int[] {
+    return append(b.items, v)
+}
+
+pushed(b: Box, v: int) -> int {
+    b.items.push(v)
+    return b.items.len + b.items[3]
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    for r in 0..64 {
+        for n in 1..9 {
+            c = make([]int, n)
+            for i in 0..n {
+                c[i] = -7
+            }
+            keep = append(keep, c)
+        }
+    }
+    return keep.len
+}
+
+filled() -> int[] {
+    xs = make([]int, 3)
+    for i in 0..3 {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+shape() -> int {
+    b = Box { items: filled() }
+    g = appended(b, 9)
+    p = pushed(b, 8)
+    churn()
+    check(b.items.len == 3 && b.items[0] == 10 && b.items[2] == 12, "the caller's field")
+    check(g.len == 4 && g[0] == 10 && g[3] == 9, "the slice grown from a parameter's field")
+    check(p == 4 + 8, "the field the callee pushed to")
+    return g.len + p
+}
+
+fn steady(what: string, round: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(round)
+        i = i + 1
+    }
+    grown = mem.steady_growth(round, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(shape() == 4 + 12, "the shapes")
+    steady("growing slices their places do not own", || {
+            i = 0
+            while i < 50 {
+                _a = shape()
+                i = i + 1
+            }
+        })
+    println("ok")
+}

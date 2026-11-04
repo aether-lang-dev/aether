@@ -925,6 +925,7 @@ char* annotation_add_marker(char* annotation, const char* marker);
  * one it types as an expression; a bound or returned `match`, an arm's, and
  * a statement are the statement's own. */
 int ast_match_is_operand(const ASTNode* m);
+int ast_struct_param_written(const ASTNode* n, const char* pname);
 
 /* #2496: the value a `match` arm body yields when the match is an
  * expression, or NULL when it yields none and leaves the result as it was.
