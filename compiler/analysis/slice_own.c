@@ -1042,6 +1042,11 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
                 report(c, w->f, a, AETHER_ERR_FREES_BORROWED, msg, hint);
             }
             move_local(w, a, n, s);
+        } else if (keeps_arg(c, n, i)) {
+            /* Any other value a `@keep` parameter takes moves as a plain
+             * argument does (rewrite_call gives it the parameter): an `if`'s
+             * branch that is a local that owns is moved there. */
+            flow_value(w, a, s, C_MOVE);
         } else {
             flow_value(w, a, s, C_BORROW);
         }
@@ -1611,9 +1616,12 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
             continue;
         }
         if (slice_temp_arg(c, n, i)) {
-            /* An `if`'s branches each give the call a reference. */
-            if ((*slot)->type == AST_IF_EXPRESSION) rewrite_value(c, f, slot, C_MOVE);
-            else rewrite(c, f, slot);
+            /* An `if`'s branches each give the call a reference, released
+             * after it: a call's result its own, a place a copy. The
+             * parameter borrows, as the move checks read it, so a local
+             * that owns is copied, never moved (it read empty after). */
+            rewrite(c, f, slot);
+            if ((*slot)->type == AST_IF_EXPRESSION) move_rewritten(slot);
             (*slot)->annotation = annotation_add_marker((*slot)->annotation, "slice_temp");
         } else {
             rewrite(c, f, slot);
