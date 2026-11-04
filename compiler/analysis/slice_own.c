@@ -59,6 +59,7 @@ struct Local {
     int viewed;         /* a view of what it holds may be taken (views_of) */
     int destructured;   /* declared by a tuple destructure (#3568) */
     ASTNode* arm;       /* bound by the pattern of this match arm, whose body is a block */
+    int written;        /* a pattern's binding its scope binds again or pushes into */
     int pidx;           /* a parameter: its position, else -1 */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
@@ -439,6 +440,7 @@ static void bind(R* r, Scope* s, ASTNode* n, ASTNode* block) {
     if (l && !n->type_inferred && !l->hoisted) l = NULL;   /* a new, typed declaration */
     if (l) {
         pm_put(&f->binds, n, l);
+        if (l->pattern) l->written = 1;
     } else if (n->type_inferred && store_elsewhere(r, n->value)) {
         return;
     } else {
@@ -566,11 +568,40 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
             strmap_init(&in.names);
             in.up = s;
             in.depth = s ? s->depth + 1 : 1;
+            int first = r->f->nlocals, pat_end = r->f->nlocals;
             for (int i = 0; i < n->child_count; i++) {
                 if (i == 1) r->arm = saved;   /* the body's own patterns are its own */
                 resolve(r, &in, n->children[i], NULL);
+                if (i == 0) pat_end = r->f->nlocals;
             }
             r->arm = saved;
+            /* A slice the pattern binds that a body that is no block binds
+             * again or pushes into holds a reference of its own as well:
+             * the body becomes a block of that one statement, whose start
+             * takes the reference (rewrite's AST_MATCH_ARM). */
+            ASTNode* body = n->child_count > 1 ? n->children[1] : NULL;
+            if (body && body->type != AST_BLOCK) {
+                int wrap_body = 0;
+                for (int k = first; k < pat_end && !wrap_body; k++) {
+                    Local* pl = r->f->locals[k];
+                    wrap_body = pl->pattern && pl->written && !pl->arm;
+                }
+                if (wrap_body) {
+                    ASTNode* blk = create_ast_node(AST_BLOCK, NULL, body->line, body->column);
+                    ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line,
+                                                  body->column);
+                    if (body->source_file) {
+                        blk->source_file = strdup(body->source_file);
+                        es->source_file = strdup(body->source_file);
+                    }
+                    add_child(es, body);
+                    add_child(blk, es);
+                    n->children[1] = blk;
+                    for (int k = first; k < pat_end; k++)
+                        if (r->f->locals[k]->pattern && !r->f->locals[k]->arm)
+                            r->f->locals[k]->arm = n;
+                }
+            }
             /* A list pattern's tail is a slice of the subject's type, and
              * each element it names one of the subject's element type, as
              * the checker types them in the arm's table alone. */
@@ -611,6 +642,7 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
                 n->children[0]->type == AST_IDENTIFIER && n->children[0]->value) {
                 Local* l = scope_lookup(s, n->children[0]->value);
                 if (l) l->target = 1;
+                if (l && l->pattern && is_push(n)) l->written = 1;
             }
             break;
         default:
@@ -628,6 +660,12 @@ static void classify(Frame* f) {
         else if (l->param) l->kind = l->keep ? K_KEEP : K_PARAM;
         else if (l->destructured) l->kind = K_VIEW;
         else if (l->pattern && l->arm) l->kind = K_VIEW;   /* rewrite's AST_MATCH_ARM */
+        /* A receive arm's field its body binds again or pushes into takes
+         * a reference of its own where the body starts (check_frame): it
+         * was a copy of the message's field, which the message releases. */
+        else if (l->pattern && l->written && !l->block && f->owner &&
+                 (f->owner->type == AST_RECEIVE_ARM || f->owner->type == AST_TIMEOUT_ARM))
+            l->kind = K_VIEW;
         else if (l->pattern || !l->block) l->kind = K_OTHER;
         else if (l->fresh || l->target) l->kind = K_OWNER;
         else l->kind = K_VIEW;
@@ -1680,6 +1718,18 @@ static void mark_in_place(ASTNode* e) {
     e->annotation = annotation_add_marker(e->annotation, "slice_stmt_temp");
 }
 
+/* At the start of `body`, the binding `l` takes a reference of its own
+ * (`__slice_hold`), which every exit of `body` gives back. */
+static void insert_hold(Local* l, ASTNode* body) {
+    insert_child(body, 0, mk_drop_defer(l, body));
+    ASTNode* hold = mk_call("__slice_hold", NULL, body);
+    add_child(hold, mk_ident(l, body));
+    ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, hold->line, hold->column);
+    add_child(es, hold);
+    if (body->source_file) es->source_file = strdup(body->source_file);
+    insert_child(body, 0, es);
+}
+
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
     ASTNode* n = *slot;
     if (!n || is_frame(n) || is_opaque(n) || is_pattern(n)) return;
@@ -1749,15 +1799,7 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
             if (!body || body->type != AST_BLOCK) return;
             for (int k = f->nlocals - 1; k >= 0; k--) {
                 Local* l = f->locals[k];
-                if (l->arm != n || l->kind != K_VIEW) continue;
-                insert_child(body, 0, mk_drop_defer(l, body));
-                ASTNode* hold = mk_call("__slice_hold", NULL, body);
-                add_child(hold, mk_ident(l, body));
-                ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, hold->line,
-                                              hold->column);
-                add_child(es, hold);
-                if (body->source_file) es->source_file = strdup(body->source_file);
-                insert_child(body, 0, es);
+                if (l->arm == n && l->kind == K_VIEW) insert_hold(l, body);
             }
             return;
         }
@@ -1869,6 +1911,12 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
             for (int i = f.nlocals - 1; i >= 0; i--)
                 if (f.locals[i]->kind == K_KEEP)
                     insert_child(body, 0, mk_drop_defer(f.locals[i], body));
+            /* A receive arm's field its body writes holds a reference of
+             * its own for the body (classify). */
+            for (int i = f.nlocals - 1; i >= 0; i--) {
+                Local* l = f.locals[i];
+                if (l->pattern && !l->arm && !l->block && l->kind == K_VIEW) insert_hold(l, body);
+            }
         }
     }
 

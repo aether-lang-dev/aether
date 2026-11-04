@@ -1,0 +1,156 @@
+// Regression (#3568): a binding that is a copy of a slice another place
+// holds frees nothing and grows by copy.
+//
+// A receive arm's field binding is a copy of the message's field, which the
+// message releases; a pattern's binding in a `match` arm whose body is no
+// block is a copy of what the match was given. Neither holds a reference of
+// its own. `Give(items) -> { free(items) }` gave back the message's
+// reference, and the message's release gave it back again;
+// `Grow(items) -> { items.push(9) }` reallocated the message's buffer under
+// it; `some(v) -> free(v)` and `Box { xs: s } -> free(s)` freed the buffer
+// under the value matched. Such a `free` now gives back nothing, and a
+// binding its body pushes into or binds again takes a reference of its own
+// where the body starts, so the growth copies and the body's exit gives the
+// new buffer back.
+//
+// Each shape reads back what the binding was a copy of after a churn of
+// kept, filled buffers (a buffer freed under a reader would come back
+// holding the filler), and where the heap count is exact
+// (mem.heap_in_use_exact) rounds of them leave the heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Box {
+    xs: int[]
+    n: int
+}
+
+message Give {
+    items: int[]
+}
+
+message Grow {
+    items: int[]
+}
+
+message Swap {
+    items: int[]
+}
+
+message Done {}
+
+message Ack {
+    n: int
+}
+
+actor Taker {
+    state seen = 0
+    receive {
+        Give(items) -> {
+            free(items)
+            seen = seen + 1
+        }
+        Grow(items) -> {
+            items.push(9)
+            seen = seen + items.len + items[4]
+        }
+        Swap(items) -> {
+            items = filled(2)
+            seen = seen + items.len
+        }
+        Done() -> {
+            reply Ack { n: seen }
+        }
+    }
+}
+
+filled(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    for r in 0..64 {
+        for n in 1..9 {
+            c = make([]int, n)
+            for i in 0..n {
+                c[i] = -7
+            }
+            keep = append(keep, c)
+        }
+    }
+    return keep.len
+}
+
+some_of(xs: int[]) -> int[]? {
+    return xs
+}
+
+patterns() -> int {
+    xs = filled(3)
+    o = some_of(xs)
+    match o {
+        some(v) -> free(v)
+        none -> {}
+    }
+    p = some_of(xs)
+    match p {
+        some(v) -> v.push(9)
+        none -> {}
+    }
+    b = Box { xs: filled(3), n: 1 }
+    match b {
+        Box { xs: s, n: k } -> free(s)
+    }
+    churn()
+    check(xs.len == 3 && xs[2] == 12, "the optional's slice, after its binding was freed and grown")
+    check(b.xs.len == 3 && b.xs[1] == 11, "the struct's slice, after its binding was freed")
+    return xs[2] + b.xs[1]
+}
+
+round(h: ptr) -> int {
+    for i in 0..10 {
+        h ! Give { items: filled(3) }
+        h ! Grow { items: filled(4) }
+        h ! Swap { items: filled(5) }
+    }
+    int n = h ? Done {}
+    churn()
+    return n + patterns()
+}
+
+fn steady(what: string, r: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(r)
+        i = i + 1
+    }
+    grown = mem.steady_growth(r, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    h = spawn(Taker())
+    // 10 rounds of: Give 1, Grow 5 + 9, Swap 2.
+    check(round(h) == 10 * (1 + 14 + 2) + 12 + 11, "the actor's count and the patterns")
+    steady("bindings freed and grown", || {
+            _n = round(h)
+        })
+    println("ok")
+}

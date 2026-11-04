@@ -323,7 +323,10 @@ as `free` gives it back). A program writes no `free` for it.
   slices, a struct pattern's slice field) where the arm's block starts, and
   gives it back on the block's every exit, so the arm may bind the subject
   again or `free` the binding. A clause's list tail borrows, as a parameter
-  does.
+  does. A receive arm's field binding, and the binding of an arm whose body
+  is no block, are copies that hold nothing: `free` of one gives back
+  nothing, `append` to one grows a copy, and one the body binds again or
+  pushes into takes a reference of its own for the body.
 - **Not counted**: a slice of C memory (`p as T[]`, a `T[]` an extern
   returns) is not counted, and the program frees it as before.
 
