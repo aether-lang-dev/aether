@@ -236,16 +236,19 @@ static void mark_block(ASTNode* node, TrustedName* names, int count, int site) {
                  * prototype is the header's, and reproducing it for a
                  * wrapper risks a quiet mismatch. Say so here rather than
                  * leave the call silently sandboxed. */
-                char mangled[512];
-                snprintf(mangled, sizeof mangled, "%s", node->value);
+                /* As long as the call's name (#3569): 512 bytes cut it. */
+                char* mangled = strdup(node->value);
+                if (!mangled) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
                 for (char* q = mangled; *q; q++) {
                     if (*q == '.') *q = '_';
                 }
-                if (is_extern_named(mangled) || is_extern_named(node->value) ||
+                int is_extern = is_extern_named(mangled) || is_extern_named(node->value) ||
                     (names[i].module_ns &&
                      (module_declares_extern(names[i].module_ns,
                                              node->value + strlen(names[i].module_ns) + 1) ||
-                      module_declares_extern(names[i].module_ns, mangled)))) {
+                      module_declares_extern(names[i].module_ns, mangled)));
+                free(mangled);
+                if (is_extern) {
                     char msg[640];
                     snprintf(msg, sizeof msg,
                              "sandbox.enforce trusts '%s', but '%s' is a C extern, and only Aether "

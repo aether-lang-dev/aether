@@ -11870,13 +11870,17 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
 /* Walk `node`; return the first forbidden capability reached (recursing into
  * user-function callees), writing the offending `ns.fn` spelling to `outcall`.
  * `forbid` is the comma list of forbidden caps; `visited` guards recursion. */
+/* `visited` holds the functions the walk has entered, as many as it enters
+ * (#3569): a 512-entry array stopped following calls past it, so a tag or a
+ * purity was decided on the part of the call graph that fit. The depth a
+ * walk recurses through is a real bound, its C stack; past it the answer is
+ * the conservative one (a diagnostic, impure, or reaches anything). */
 enum {
-    EFFECT_MAX_DEPTH = 128,
-    EFFECT_MAX_VISITED = 512
+    EFFECT_MAX_DEPTH = 128
 };
 
 static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forbid,
-                               const char** visited, int* nvisited,
+                               StrMap* visited,
                                char* outcall, size_t outsz, int depth,
                                int* incomplete) {
     if (!node) return NULL;
@@ -11897,37 +11901,27 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
         {
             ASTNode* def = effect_resolve_callee(program, node->value);
             const char* callee = def && def->value ? def->value : node->value;
-            int seen = 0;
-            for (int i = 0; i < *nvisited; i++)
-                if (strcmp(visited[i], callee) == 0) { seen = 1; break; }
-            if (!seen) {
-                if (def && def->child_count > 0) {
-                    if (*nvisited >= EFFECT_MAX_VISITED) {
-                        *incomplete = 1;
-                    } else {
-                        visited[(*nvisited)++] = callee;
-                        for (int i = 0; i < program->child_count; i++) {
-                            ASTNode* clause = program->children[i];
-                            if (!clause ||
-                                (clause->type != AST_FUNCTION_DEFINITION &&
-                                 clause->type != AST_BUILDER_FUNCTION) ||
-                                !clause->value || strcmp(clause->value, callee) != 0 ||
-                                clause->child_count == 0)
-                                continue;
-                            ASTNode* body = clause->children[clause->child_count - 1];
-                            const char* c = effect_scan(program, body, forbid, visited,
-                                                        nvisited, outcall, outsz, depth + 1,
-                                                        incomplete);
-                            if (c) return c;
-                        }
-                    }
+            if (!strmap_has(visited, callee) && def && def->child_count > 0) {
+                strmap_put(visited, callee, NULL);
+                for (int i = 0; i < program->child_count; i++) {
+                    ASTNode* clause = program->children[i];
+                    if (!clause ||
+                        (clause->type != AST_FUNCTION_DEFINITION &&
+                         clause->type != AST_BUILDER_FUNCTION) ||
+                        !clause->value || strcmp(clause->value, callee) != 0 ||
+                        clause->child_count == 0)
+                        continue;
+                    ASTNode* body = clause->children[clause->child_count - 1];
+                    const char* c = effect_scan(program, body, forbid, visited,
+                                                outcall, outsz, depth + 1, incomplete);
+                    if (c) return c;
                 }
             }
         }
     }
     for (int i = 0; i < node->child_count; i++) {
         const char* c = effect_scan(program, node->children[i], forbid, visited,
-                                    nvisited, outcall, outsz, depth, incomplete);
+                                    outcall, outsz, depth, incomplete);
         if (c) return c;
     }
     return NULL;
@@ -11946,9 +11940,9 @@ static void check_effect_tags(ASTNode* program) {
         if (!eff) continue;
         const char* forbid = eff + 7;  /* "fs,net,os" or a subset */
         if (fn->child_count == 0) continue;
-        const char* visited[EFFECT_MAX_VISITED];
-        int nv = 0;
-        if (fn->value) visited[nv++] = fn->value;  /* no self-recursion loop */
+        StrMap visited;
+        strmap_init(&visited);
+        if (fn->value) strmap_put(&visited, fn->value, NULL);  /* no self-recursion loop */
         char offending[160];
         offending[0] = '\0';
         int incomplete = 0;
@@ -11962,9 +11956,10 @@ static void check_effect_tags(ASTNode* program) {
                 clause->child_count == 0)
                 continue;
             ASTNode* body = clause->children[clause->child_count - 1];
-            cap = effect_scan(program, body, forbid, visited, &nv,
+            cap = effect_scan(program, body, forbid, &visited,
                               offending, sizeof(offending), 0, &incomplete);
         }
+        strmap_free(&visited);
         if (cap) {
             /* #2729: named as the source spells it (`checks.shell`), not by
              * the merged C name (`checks_shell`). */
@@ -11984,8 +11979,8 @@ static void check_effect_tags(ASTNode* program) {
             char msg[400];
             snprintf(msg, sizeof(msg),
                 "function '%s' carries an effect tag, but effect analysis exceeded "
-                "its call-graph limit (%d levels or %d functions). Validation is refused.",
-                name, EFFECT_MAX_DEPTH, EFFECT_MAX_VISITED);
+                "its call-graph limit (%d levels of calls). Validation is refused.",
+                name, EFFECT_MAX_DEPTH);
             g_tc_file = fn->source_file;
             type_error(msg, fn->line, fn->column);
             g_tc_file = NULL;
@@ -12024,8 +12019,11 @@ static const char* purity_lvalue_root(ASTNode* n) {
 
 static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
                        const char** globals, int nglobals,
-                       const char** visited, int* nv, int depth) {
-    if (!node || depth > 128) return 0;
+                       StrMap* visited, int depth) {
+    if (!node) return 0;
+    /* Past the depth bound the rest of the call graph is unseen: impure, as
+     * any body the analysis cannot see is. It said pure. */
+    if (depth > EFFECT_MAX_DEPTH) return 1;
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
@@ -12033,15 +12031,12 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
                 return 1;  /* fs/net/os → impure */
         }
         {
-            int seen = 0;
-            for (int i = 0; i < *nv; i++)
-                if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
-            if (!seen && *nv < 512) {
+            if (!strmap_has(visited, node->value)) {
                 ASTNode* def = effect_resolve_callee(program, node->value);
                 if (def && def->child_count > 0) {
-                    visited[(*nv)++] = node->value;
+                    strmap_put(visited, node->value, NULL);
                     if (purity_scan(program, def, def->children[def->child_count - 1],
-                                    globals, nglobals, visited, nv, depth + 1)) return 1;
+                                    globals, nglobals, visited, depth + 1)) return 1;
                 }
             }
         }
@@ -12066,7 +12061,7 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
         }
     }
     for (int i = 0; i < node->child_count; i++)
-        if (purity_scan(program, fn, node->children[i], globals, nglobals, visited, nv, depth))
+        if (purity_scan(program, fn, node->children[i], globals, nglobals, visited, depth))
             return 1;
     return 0;
 }
@@ -12075,11 +12070,13 @@ static int func_is_pure(ASTNode* program, const char* fnname,
                         const char** globals, int nglobals) {
     ASTNode* fn = effect_find_func(program, fnname);
     if (!fn || fn->child_count == 0) return 0;  /* unknown / extern → conservatively impure */
-    const char* visited[512];
-    int nv = 0;
-    visited[nv++] = fnname;
+    StrMap visited;
+    strmap_init(&visited);
+    strmap_put(&visited, fnname, NULL);
     ASTNode* body = fn->children[fn->child_count - 1];
-    return !purity_scan(program, fn, body, globals, nglobals, visited, &nv, 0);
+    int impure = purity_scan(program, fn, body, globals, nglobals, &visited, 0);
+    strmap_free(&visited);
+    return !impure;
 }
 
 /* #889: derived per-function effect reachability, exposed via --emit=effects.
@@ -12107,8 +12104,15 @@ static int effect_is_extern(ASTNode* program, const char* name) {
 }
 
 static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
-                           const char** visited, int* nvisited, int depth) {
-    if (!node || depth > 128) return;
+                           StrMap* visited, int depth) {
+    if (!node) return;
+    /* Past the depth bound the rest of the call graph is unseen: it may
+     * reach anything, the fail-closed answer an extern gets. The walk
+     * stopped there and reported what it had seen. */
+    if (depth > EFFECT_MAX_DEPTH) {
+        set->reach_extern = 1;
+        return;
+    }
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
@@ -12127,28 +12131,22 @@ static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
                    Interned, as long as it is (#3569): a namespace of 64
                    bytes or more was not followed. */
                 const char* merged = aether_internf("%.*s_%s", (int)l, node->value, dot + 1);
-                int seen = 0;
-                for (int i = 0; i < *nvisited; i++)
-                    if (strcmp(visited[i], merged) == 0) { seen = 1; break; }
-                if (!seen && *nvisited < 512) {
+                if (!strmap_has(visited, merged)) {
                     ASTNode* def = effect_find_func(program, merged);
                     if (def && def->child_count > 0) {
-                        visited[(*nvisited)++] = def->value ? def->value : merged;
+                        strmap_put(visited, def->value ? def->value : merged, NULL);
                         effect_collect(program, def->children[def->child_count - 1],
-                                       set, visited, nvisited, depth + 1);
+                                       set, visited, depth + 1);
                     }
                 }
             }
         } else {
-            int seen = 0;
-            for (int i = 0; i < *nvisited; i++)
-                if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
-            if (!seen && *nvisited < 512) {
+            if (!strmap_has(visited, node->value)) {
                 ASTNode* def = effect_find_func(program, node->value);
                 if (def && def->child_count > 0) {
-                    visited[(*nvisited)++] = node->value;
+                    strmap_put(visited, node->value, NULL);
                     effect_collect(program, def->children[def->child_count - 1],
-                                   set, visited, nvisited, depth + 1);
+                                   set, visited, depth + 1);
                 } else if (effect_is_extern(program, node->value)) {
                     set->reach_extern = 1;  /* fail-closed: unclassifiable */
                 }
@@ -12156,25 +12154,17 @@ static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
         }
     }
     for (int i = 0; i < node->child_count; i++)
-        effect_collect(program, node->children[i], set, visited, nvisited, depth);
+        effect_collect(program, node->children[i], set, visited, depth);
 }
 
 void emit_effects_json(FILE* out, ASTNode* program) {
     if (!out) return;
     /* Collect module globals once (for the purity test, same basis as #522:
        a global is a top-level CONST_DECLARATION annotated "global_var",
-       possibly wrapped in an EXPORT_STATEMENT). */
-    const char* globals[256];
+       possibly wrapped in an EXPORT_STATEMENT). Every one of them (#3569):
+       256 slots left the rest out, so a write to one of those read as pure. */
     int nglobals = 0;
-    if (program) {
-        for (int i = 0; i < program->child_count && nglobals < 256; i++) {
-            ASTNode* c = program->children[i];
-            if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-            if (c && c->type == AST_CONST_DECLARATION && c->value && c->annotation &&
-                strcmp(c->annotation, "global_var") == 0)
-                globals[nglobals++] = c->value;
-        }
-    }
+    const char** globals = program ? collect_global_var_names(program, &nglobals) : NULL;
     fprintf(out, "{\n");
     int first = 1;
     if (program) {
@@ -12184,12 +12174,13 @@ void emit_effects_json(FILE* out, ASTNode* program) {
                         fn->type != AST_BUILDER_FUNCTION) || !fn->value)
                 continue;
             EffectSet set = {0, 0, 0, 0};
-            const char* visited[512];
-            int nv = 0;
-            visited[nv++] = fn->value;
+            StrMap visited;
+            strmap_init(&visited);
+            strmap_put(&visited, fn->value, NULL);
             if (fn->child_count > 0)
                 effect_collect(program, fn->children[fn->child_count - 1],
-                               &set, visited, &nv, 0);
+                               &set, &visited, 0);
+            strmap_free(&visited);
             int rfs  = set.reach_fs  || set.reach_extern;
             int rnet = set.reach_net || set.reach_extern;
             int ros  = set.reach_os  || set.reach_extern;
@@ -12214,6 +12205,7 @@ void emit_effects_json(FILE* out, ASTNode* program) {
         }
     }
     fprintf(out, "\n}\n");
+    free(globals);
 }
 
 /* #480 distinct types — resolution pass. The parser leaves a reference to a

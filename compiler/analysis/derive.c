@@ -201,15 +201,12 @@ static ASTNode* synth_eq(ASTNode* struct_def) {
         chain->node_type = create_type(TYPE_INT);
     }
 
-    /* Build the function definition. Function name: T_eq.
-     * Precision spec caps the type-name component at 250 bytes
-     * regardless of source length — keeps -Werror=format-truncation
-     * builds happy. Identifiers above 250 bytes don't occur in
-     * practice. */
-    /* Named after the struct as written: a module's struct is merged as
-     * `<ns>_<Name>`, and its derive is still `Name_eq`. */
-    char fname[256];
-    snprintf(fname, sizeof(fname), "%.250s_eq", ast_struct_source_name(type_name));
+    /* Build the function definition. Function name: T_eq, as long as the
+     * struct's name: it was cut at 250 bytes, so a longer struct's derive
+     * was named nothing its callers name (#3569). Named after the struct
+     * as written: a module's struct is merged as `<ns>_<Name>`, and its
+     * derive is still `Name_eq`. */
+    const char* fname = aether_internf("%s_eq", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_INT);
 
@@ -301,8 +298,8 @@ static ASTNode* synth_schema(ASTNode* struct_def) {
     }
     if (!ok) return NULL;
 
-    char fname[256];
-    snprintf(fname, sizeof(fname), "%.240s_schema", ast_struct_source_name(type_name));
+    /* As long as the struct's name (#3569): cut at 240 bytes before. */
+    const char* fname = aether_internf("%s_schema", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_PTR);
 

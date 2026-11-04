@@ -732,13 +732,16 @@ Token* next_token(void) {
                 // Preserves all whitespace and newlines exactly.
                 // Use regular "..." strings for interpolation.
                 if (isalpha((unsigned char)peek()) || peek() == '_') {
-                    // Read the marker name
-                    char marker[MAX_IDENTIFIER_LENGTH];
+                    // Read the marker name: the source's own characters, as
+                    // long as they are. A copy into 256 bytes cut a longer
+                    // marker, whose rest was skipped as the line's, and no
+                    // closing line matched the cut one (#3569).
+                    const char* marker = &source[current_pos];
                     int mlen = 0;
-                    while ((isalnum((unsigned char)peek()) || peek() == '_') && mlen < MAX_IDENTIFIER_LENGTH - 1) {
-                        marker[mlen++] = advance();
+                    while (isalnum((unsigned char)peek()) || peek() == '_') {
+                        advance();
+                        mlen++;
                     }
-                    marker[mlen] = '\0';
 
                     // Skip to end of current line (past the marker)
                     while (peek() != '\n' && peek() != '\0') advance();
@@ -840,11 +843,14 @@ Token* next_token(void) {
                     }
                     if (!closed) {
                         free(buf);
-                        char err[MAX_IDENTIFIER_LENGTH + 64];
-                        snprintf(err, sizeof(err),
-                                 "unterminated heredoc: missing closing marker '%s'",
-                                 marker);
-                        return create_token(TOKEN_ERROR, err, start_line, current_column);
+                        size_t elen = (size_t)mlen + 64;
+                        char* err = (char*)malloc(elen);
+                        if (!err) return create_token(TOKEN_ERROR, "out of memory", start_line, current_column);
+                        snprintf(err, elen, "unterminated heredoc: missing closing marker '%.*s'",
+                                 mlen, marker);
+                        Token* et = create_token(TOKEN_ERROR, err, start_line, current_column);
+                        free(err);
+                        return et;
                     }
                     // Strip the final newline before the marker line.
                     // Content between the markers is preserved exactly,

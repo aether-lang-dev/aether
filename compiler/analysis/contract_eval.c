@@ -125,9 +125,11 @@ static int resolve_identifier(const char* name, ContractEnv* env,
                     break;   /* opaque member value poisons the rest of this enum */
                 next = mv.i;
             }
-            char qualified[256];
-            snprintf(qualified, sizeof(qualified), "%s_%s", en->value, mem->value);
-            if (strcmp(qualified, name) == 0) {
+            /* `<Enum>_<Member>`, compared in place: joined into 256 bytes, a
+             * longer one was cut and named no member (#3569). */
+            size_t en_len = strlen(en->value);
+            if (strncmp(name, en->value, en_len) == 0 && name[en_len] == '_' &&
+                strcmp(name + en_len + 1, mem->value) == 0) {
                 out->kind = CV_INT; out->i = next;
                 return 1;
             }
