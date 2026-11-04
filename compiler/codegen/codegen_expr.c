@@ -4,6 +4,7 @@
 #include "../analysis/contract_eval.h"
 #include "codegen_internal.h"
 #include "../analysis/sandbox_trust.h"
+#include "../analysis/typechecker.h"
 #include "../aether_defines.h"
 #include "../aether_error.h"
 #include "../../std/string/aether_string_abi.h"
@@ -347,7 +348,10 @@ typedef struct ArgDrainWrap {
     int idx[16];        /* their child indices in the call node */
     int closure[16];    /* 1 = an owned closure (#2507), released through its env;
                          * 2 = a closure cell's value, held for the call (#2755):
-                         * retained into the temp, released the same way */
+                         * retained into the temp, released the same way;
+                         * 3 = a slice that owns its buffer (#3549), dropped
+                         * through drop[] */
+    const char* drop[16]; /* a slice's drop (own_slice_elem_drop_fn of its type) */
     int scoped[16];     /* 1 = lives to its scope's exit: the call returns a view, which
                          * may point into it (call_returns_view) */
     int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
@@ -370,6 +374,77 @@ typedef struct ArgDrainWrap {
 static int arg_taken_by_call(CodeGenerator* gen, const char* func_name, int ai) {
     return func_name && (is_retain_extern_param(gen, func_name, ai) ||
                          call_frees_arg(gen, codegen_normalise_callee(func_name)));
+}
+
+/* How a call's arguments are chosen for its temporaries (arg_drain_select).
+ * The rule is the same for every callee (R3: a fresh value given to a
+ * parameter that borrows is the caller's, released after the call); what
+ * differs is what the callee can do while it runs. An Aether function, a
+ * closure or a typed function pointer may store into a place the argument
+ * was read from, so such a read is held for the call. A builtin lowered by
+ * name is C, and C rewrites no Aether place (a call into C is left alone,
+ * docs/design/ownership-model.md). A comparison borrows its operands as a
+ * call does; only its string operands are chosen, since a closure or an
+ * optional operand is read by the comparison's own temporary, which gives
+ * it back once it is read. */
+typedef enum {
+    ARG_SEL_CALL,
+    ARG_SEL_BUILTIN,
+    ARG_SEL_OPERATOR
+} ArgSelMode;
+
+/* Is `call` a builtin the by-name chain of generate_expression lowers, at
+ * its argument count (the typechecker's table of them, the slice ownership
+ * intrinsics, `make` and the builtin `append`)? */
+static int call_is_builtin(CodeGenerator* gen, ASTNode* call) {
+    const char* fn = call ? call->value : NULL;
+    if (!fn) return 0;
+    if (strncmp(fn, "__slice_", 8) == 0) return 1;
+    if (strcmp(fn, "make") == 0 && call->node_type && call->node_type->kind == TYPE_ARRAY) return 1;
+    if (strcmp(fn, "append") == 0 && call->child_count == 2 && type_is_slice(call->node_type) &&
+        !find_function_definition_by_name(gen->program, "append")) return 1;
+    if (strcmp(fn, "atoi") == 0)
+        return call->child_count == 1 && !find_function_definition_by_name(gen->program, "atoi");
+    return is_builtin_call_name(fn, call->child_count);
+}
+
+/* #3549: does the builtin `fn` take argument `ai` of `call` over? Every
+ * other argument of a builtin is borrowed for the call (R3). The frees end
+ * the value's life; `isolate`, `consume` and `select` are the identity, so
+ * their value is the argument; `box_closure`, `lazy`, `ref` and `ref_set`
+ * keep it in the box, thunk or cell they make; `append` and the slice
+ * ownership intrinsics move a slice and store a value. An interpolation
+ * that is print's or println's only argument is written straight to the
+ * stream: it makes no string, so there is no temporary to give back. */
+static int builtin_takes_arg(const char* fn, ASTNode* call, int ai) {
+    static const char* const takers[] = {
+        "isolate", "consume", "select", "release", "free", "string_free", "string_release",
+        "string_seq_free", "ref", "ref_free", "lazy", "thunk_free", "box_closure",
+        "release_closure", "append", NULL
+    };
+    if (!fn || strncmp(fn, "__slice_", 8) == 0) return 1;
+    if (strcmp(fn, "ref_set") == 0) return ai == 1;
+    for (int i = 0; takers[i]; i++)
+        if (strcmp(fn, takers[i]) == 0) return 1;
+    if ((strcmp(fn, "print") == 0 || strcmp(fn, "println") == 0) && call->child_count == 1 &&
+        call->children[0] && call->children[0]->type == AST_STRING_INTERP)
+        return 1;
+    return 0;
+}
+
+static int container_store_value_index(CodeGenerator* gen, ASTNode* call);
+
+/* Is argument `ai` of `call` (to `func_name`) given to a parameter that
+ * borrows it? Not when the callee takes it over (arg_taken_by_call, a
+ * builtin's own, builtin_takes_arg), and not the value a container store
+ * puts into its container (`store_idx`, container_store_value_index),
+ * which adopts a fresh string and takes a reference of its own to a
+ * closure (emit_closure_container_store). */
+static int call_arg_borrowed(CodeGenerator* gen, ASTNode* call, const char* func_name, int ai,
+                             ArgSelMode mode, int store_idx) {
+    if (mode == ARG_SEL_OPERATOR) return 1;
+    if (mode == ARG_SEL_BUILTIN) return !builtin_takes_arg(func_name, call, ai);
+    return ai != store_idx && !arg_taken_by_call(gen, func_name, ai);
 }
 
 /* #2519: does a call to user function `func_name` yield a value in C? 1 yes,
@@ -553,16 +628,19 @@ int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
 
 static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                              const char* func_name, ASTNode* closure, int is_void,
-                             ArgDrainWrap* w) {
+                             ArgDrainWrap* w, ArgSelMode mode) {
     w->saved_count = g_arg_drain_count;
     w->count = 0;
     memset(w->scoped, 0, sizeof(w->scoped));
     memset(w->held, 0, sizeof(w->held));
     memset(w->taken, 0, sizeof(w->taken));
+    memset(w->drop, 0, sizeof(w->drop));
     if (!w->have_value && !is_void) return;
+    int store_idx = mode == ARG_SEL_CALL && func_name ? container_store_value_index(gen, expr) : -1;
     for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
         ASTNode* arg = expr->children[ai];
         if (!arg) continue;
+        int borrowed = call_arg_borrowed(gen, expr, func_name, ai, mode, store_idx);
         /* Arg-temp wrapping fires on heap-classified subexpressions:
          * function calls, AST_STRING_INTERP (`_aether_interp(...)`
          * allocates a heap buffer the caller is expected to own; inline as
@@ -573,7 +651,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         /* #2755: a closure cell's value lent to the call is held for it:
          * the call may rebind the cell (the closure it runs replacing
          * itself), and the store gives back the cell's reference. */
-        if (is_closure_cell_read(gen, arg)) {
+        if (mode == ARG_SEL_CALL && is_closure_cell_read(gen, arg)) {
             if (!arg_drain_lookup(arg)) {
                 w->closure[w->count] = 2;
                 w->idx[w->count++] = ai;
@@ -582,7 +660,7 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
         }
         /* A callee that frees or keeps its argument takes the place's own
          * reference, so a hold of it would be what it takes instead. */
-        if (string_arg_held(gen, arg) && !arg_taken_by_call(gen, func_name, ai)) {
+        if (mode == ARG_SEL_CALL && string_arg_held(gen, arg) && borrowed) {
             if (!arg_drain_lookup(arg)) {
                 w->closure[w->count] = 0;
                 w->held[w->count] = 1;
@@ -601,11 +679,11 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             Type* at = arg->node_type;
             TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
             if (arg_drain_lookup(arg) || pk == TYPE_OPTIONAL || pk == TYPE_TUPLE) continue;
-            if (at->kind == TYPE_STRING && !arg_taken_by_call(gen, func_name, ai)) {
+            if (at->kind == TYPE_STRING && borrowed) {
                 w->closure[w->count] = 0;
                 w->scoped[w->count] = call_returns_view(expr) && hoist_ready(gen);
-            } else if (at->kind == TYPE_FUNCTION && !at->is_fnptr &&
-                       owned_closure_arg_drainable(gen, expr, func_name, ai)) {
+            } else if (mode != ARG_SEL_OPERATOR && borrowed && at->kind == TYPE_FUNCTION &&
+                       !at->is_fnptr && owned_closure_arg_drainable(gen, expr, func_name, ai)) {
                 w->closure[w->count] = 1;
             } else {
                 continue;
@@ -614,6 +692,24 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             w->idx[w->count++] = ai;
             continue;
         }
+        /* #3549: a slice that owns the buffer it holds, made for the call:
+         * slice ownership marks the arguments it gives the call to drop (a
+         * fresh buffer given to a parameter that neither keeps it nor hands
+         * a view of it back, slice_own.c), and the call drops it as the
+         * owning local it would have been bound to would be. */
+        if (arg->type == AST_FUNCTION_CALL && type_is_slice(arg->node_type) &&
+            annotation_has_marker(arg->annotation, "slice_temp")) {
+            if (mode != ARG_SEL_OPERATOR && borrowed && !arg_drain_lookup(arg)) {
+                w->closure[w->count] = 3;
+                w->drop[w->count] = own_slice_elem_drop_fn(gen, arg->node_type);
+                w->idx[w->count++] = ai;
+            }
+            continue;
+        }
+        /* An operand of any other type is read by the comparison's own
+         * code: a closure against `null`, an optional, a number. */
+        if (mode == ARG_SEL_OPERATOR && !(arg->node_type && arg->node_type->kind == TYPE_STRING))
+            continue;
         /* #2518: a capturing closure literal, as #2507 does a handed-over
          * closure: its only reference is the argument (a list that stores
          * it takes its own). */
@@ -629,13 +725,14 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * passed on as an argument anywhere in an expression: dead after
          * the call when the parameter keeps nothing. */
         if (literal_arg || call_returns_owned_closure(gen, arg)) {
-            if (owned_closure_arg_drainable(gen, expr, func_name, ai)) {
+            if (mode != ARG_SEL_OPERATOR && borrowed &&
+                owned_closure_arg_drainable(gen, expr, func_name, ai)) {
                 w->closure[w->count] = 1;
                 w->idx[w->count++] = ai;
             }
             continue;
         }
-        if (!is_heap_string_expr(gen, arg) || arg_taken_by_call(gen, func_name, ai)) continue;
+        if (!is_heap_string_expr(gen, arg) || !borrowed) continue;
         /* Wrapped into an optional or a tuple parameter, the string is that
          * argument's temporary's (emit_composite_arg_temp). */
         TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
@@ -680,7 +777,10 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
          * -Wincompatible-pointer-types-discards-qualifiers from a `const
          * char*` temp. The value is a fresh heap string this wrap owns and
          * frees, so there is nothing const about it. */
-        if (w->closure[h]) {
+        if (w->closure[h] == 3) {
+            seq_let_named(gen, &w->seq, "AetherSlice", names[h]);
+            generate_expression(gen, arg);
+        } else if (w->closure[h]) {
             seq_let_named(gen, &w->seq, "_AeClosure", names[h]);
             if (w->taken[h]) {
                 emit_closure_take(gen, arg);
@@ -711,7 +811,9 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
         }
         seq_next(gen, &w->seq);
         /* #2923: journaled for the call, which may panic. */
-        if (w->closure[h])
+        if (w->closure[h] == 3)
+            fprintf(gen->output, "aether_unwind_track((const void*)&%s, %s)", names[h], w->drop[h]);
+        else if (w->closure[h])
             fprintf(gen->output, "aether_unwind_track((const void*)&%s, _aether_closure_drop_unwind)",
                     names[h]);
         else if (!w->scoped[h])
@@ -746,7 +848,9 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
         seq_next(gen, &w->seq);
         fprintf(gen->output, "aether_unwind_forget((const void*)&%s)", nm);
         seq_next(gen, &w->seq);
-        if (w->closure[h]) {
+        if (w->closure[h] == 3) {
+            fprintf(gen->output, "%s((const void*)&%s)", w->drop[h], nm);
+        } else if (w->closure[h]) {
             fprintf(gen->output, "_aether_closure_env_release(%s.env)", nm);
         } else {
             fprintf(gen->output, "aether_heap_str_free(%s)", nm);
@@ -764,6 +868,21 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
      * yields void. */
     seq_close(gen, &w->seq);
     arg_drain_truncate(w->saved_count);
+}
+
+/* #3549: `node` lowered by `emit` as the builtin `name` with no value (a
+ * statement's `print`), its arguments borrowed as every builtin's are: a
+ * fresh one is held in a temporary and released once the lowering has
+ * read it (arg_drain_select). */
+void emit_with_builtin_args(CodeGenerator* gen, ASTNode* node, const char* name,
+                            void (*emit)(CodeGenerator* gen, ASTNode* node)) {
+    ArgDrainWrap w;
+    memset(&w, 0, sizeof(w));
+    w.discarded = 1;
+    arg_drain_select(gen, node, 0, name, NULL, 1, &w, ARG_SEL_BUILTIN);
+    arg_drain_open(gen, node, &w);
+    emit(gen, node);
+    arg_drain_close(gen, node, &w);
 }
 
 /* Returns 1 if the expression has any side effects (function calls, sends).
@@ -2085,7 +2204,7 @@ static void generate_fnptr_local_call(CodeGenerator* gen, Type* sig,
     ad.ret_type = NULL;
     ad.have_value = strcmp(ret_c, "void") != 0;
     ad.discarded = discarded;
-    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_select(gen, call, 0, NULL, NULL, !ad.have_value || discarded, &ad, ARG_SEL_CALL);
     arg_drain_open(gen, call, &ad);
     int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
@@ -2112,7 +2231,7 @@ static void generate_fnptr_value_call(CodeGenerator* gen, ASTNode* call, int dis
     ad.ret_type = NULL;
     ad.have_value = strcmp(ret_c, "void") != 0;
     ad.discarded = discarded;
-    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad);
+    arg_drain_select(gen, call, 1, NULL, NULL, !ad.have_value || discarded, &ad, ARG_SEL_CALL);
     arg_drain_open(gen, call, &ad);
     int took = emit_fnptr_take_open(gen, call);
     int narrow = !discarded && fnptr_returns_bool(sig);
@@ -5571,6 +5690,16 @@ static const ClosureStoreEntry* closure_store_entry(CodeGenerator* gen, ASTNode*
     return NULL;
 }
 
+/* The argument a container store (a list add or set, a map put, their raw
+ * and owned forms: the entries above, which the string routing below lowers
+ * too) puts into its container, or -1 when `call` is none. The container
+ * adopts a fresh string given there and takes a reference of its own to a
+ * closure, so that argument is no temporary the call borrows (#3549). */
+static int container_store_value_index(CodeGenerator* gen, ASTNode* call) {
+    const ClosureStoreEntry* e = closure_store_entry(gen, call);
+    return e ? e->val_idx : -1;
+}
+
 /* #2518: is `call` a list add or set, or a map put, that stores a closure
  * VALUE (`fn`-typed, not a raw fn-ptr)? Then the container takes a
  * reference of its own to the closure's env and releases it when the
@@ -6361,6 +6490,20 @@ int expr_is_c_view_of_slice(CodeGenerator* gen, const ASTNode* expr) {
 static const ASTNode* g_slice_view_wrapping = NULL;
 /* The enforce call whose site tag is being emitted (see AST_FUNCTION_CALL). */
 static const ASTNode* g_sandbox_site_wrapping = NULL;
+/* The comparison whose operand temporaries are open (see
+ * AST_BINARY_EXPRESSION): it is generated once more inside them. */
+static const ASTNode* g_operand_temps_wrapping = NULL;
+
+/* #3549: is `e` a comparison? It borrows its operands as a call borrows its
+ * arguments: a fresh string compared (`f() == "x"`, `os.getenv(k) != null`)
+ * is released once the comparison has read it. */
+static int is_comparison(const ASTNode* e) {
+    static const char* const ops[] = { "==", "!=", "<", "<=", ">", ">=", NULL };
+    if (!e || e->type != AST_BINARY_EXPRESSION || e->child_count != 2 || !e->value) return 0;
+    for (int i = 0; ops[i]; i++)
+        if (strcmp(e->value, ops[i]) == 0) return 1;
+    return 0;
+}
 
 /* The block of a call's trailing DSL closure, or NULL. A closure the
  * function declares a `fn` parameter for, where the block sits, is an
@@ -9394,6 +9537,29 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_BINARY_EXPRESSION:
+            /* #3549: a comparison borrows its operands (R3), as a call its
+             * arguments, by the same rule (arg_drain_select): a fresh string
+             * operand is held in a temporary while the comparison reads it
+             * and released after, whichever comparison it is (by bytes,
+             * against `null`, an optional against a value). The comparison
+             * is then generated inside, reading the temporaries. */
+            if (expr != g_operand_temps_wrapping && is_comparison(expr)) {
+                ArgDrainWrap ow;
+                memset(&ow, 0, sizeof(ow));
+                ow.have_value = 1;
+                ow.ret_ct = "int";
+                arg_drain_select(gen, expr, 0, NULL, NULL, 0, &ow, ARG_SEL_OPERATOR);
+                if (ow.count > 0) {
+                    const ASTNode* saved_cmp = g_operand_temps_wrapping;
+                    g_operand_temps_wrapping = expr;
+                    gen->in_condition = 0;
+                    arg_drain_open(gen, expr, &ow);
+                    generate_expression(gen, expr);
+                    arg_drain_close(gen, expr, &ow);
+                    g_operand_temps_wrapping = saved_cmp;
+                    break;
+                }
+            }
             if (expr->child_count >= 2 &&
                 ((expr->node_type && expr->node_type->kind == TYPE_FLOAT32) ||
                  (expr->children[0]->node_type && expr->children[0]->node_type->kind == TYPE_FLOAT32) ||
@@ -9706,9 +9872,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * value wrapped into the optional would (`lo == 3` as
                          * `lo == some(3)`): equal when present with an equal
                          * value, a string? by its contents. Both operands are
-                         * evaluated, in source order, and a fresh string
-                         * operand (or an owned string? call's) is freed once
-                         * compared, as a string comparison frees it. */
+                         * evaluated, in source order. An owned string? call's
+                         * string is freed once compared; a fresh string
+                         * operand is the comparison's temporary, released by
+                         * the operand rule at the top of this case (#3549). */
                         ASTNode* opt = l_opt ? L : R;
                         ASTNode* bare = l_opt ? R : L;
                         Type* elem = opt->node_type->element_type;
@@ -9747,7 +9914,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         int str_val = elem && elem->kind == TYPE_STRING;
                         Type* bt = bare->node_type && bare->node_type->kind != TYPE_UNKNOWN
                                    ? bare->node_type : elem;
-                        int drain_bare = str_val && is_fresh_heap_string_temp(gen, bare);
                         int drain_opt = str_val && is_owned_opt_string_call(gen, opt);
                         const char* o = NULL;
                         const char* v = NULL;
@@ -9777,10 +9943,6 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "%s.has ? aether_heap_str_free((void*)%s.val) : (void)0",
                                     o, o);
                         }
-                        if (drain_bare) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free((void*)%s)", v);
-                        }
                         seq_next(gen, &s);
                         fprintf(gen->output, "%s", res);
                         seq_close(gen, &s);
@@ -9801,66 +9963,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 int is_string_cmp = binary_is_string_compare(expr);
 
                 if (is_string_cmp) {
-                    /* Operand drain — the binary-operator analogue of the
-                     * call-argument drain (ArgDrainSub). A heap-returning
-                     * string expression used directly as a comparison
-                     * operand (`string.substring(s, i, j) == "lit"`,
-                     * `a.concat(b) != c`, an interpolation) is an anonymous
-                     * allocation with no owner: evaluated, read by
-                     * _aether_safe_str, then leaked. Inside a loop this is
-                     * one leak per iteration (observed in test_fs_realpath's
-                     * substring-scan). Capture each such operand in a temp,
-                     * run the compare, then free it. Gated exactly like the
-                     * arg-drain: only AST_FUNCTION_CALL / AST_STRING_INTERP
-                     * operands that is_heap_string_expr classifies as
-                     * fresh heap — never a tracked local (it owns its own
-                     * lifetime), a borrowed return (string.to_cstr), or a
-                     * literal. So no double-free is possible. */
-                    ASTNode* cl = expr->children[0];
-                    ASTNode* cr = expr->children[1];
-                    /* An `or` over a heap value slot is one too: compared in
-                     * place (`(f() or { "d" }) == "d"`), it leaked. */
-                    int drain_l = is_fresh_heap_string_temp(gen, cl);
-                    int drain_r = is_fresh_heap_string_temp(gen, cr);
-                    if (drain_l || drain_r) {
-                        if (!skip_parens) fprintf(gen->output, "(");
-                        TempSeq s;
-                        seq_open(gen, &s);
-                        const char* sl = seq_let(gen, &s, "const char*", "_se_l");
-                        fprintf(gen->output, "(const char*)(");
-                        generate_expression(gen, cl);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &s);
-                        const char* sr = seq_let(gen, &s, "const char*", "_se_r");
-                        fprintf(gen->output, "(const char*)(");
-                        generate_expression(gen, cr);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &s);
-                        const char* sv = seq_let(gen, &s, "int", "_se_v");
-                        emit_string_compare_open(gen, expr->value);
-                        fprintf(gen->output, "%s, %s", sl, sr);
-                        emit_string_compare_close(gen, expr->value);
-                        if (drain_l) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free(%s)", sl);
-                        }
-                        if (drain_r) {
-                            seq_next(gen, &s);
-                            fprintf(gen->output, "aether_heap_str_free(%s)", sr);
-                        }
-                        seq_next(gen, &s);
-                        fprintf(gen->output, "%s", sv);
-                        seq_close(gen, &s);
-                        if (!skip_parens) fprintf(gen->output, ")");
-                    } else {
-                        if (!skip_parens) fprintf(gen->output, "(");
-                        emit_string_compare_open(gen, expr->value);
-                        generate_expression(gen, expr->children[0]);
-                        fprintf(gen->output, ", ");
-                        generate_expression(gen, expr->children[1]);
-                        emit_string_compare_close(gen, expr->value);
-                        if (!skip_parens) fprintf(gen->output, ")");
-                    }
+                    /* A fresh string operand (`string.substring(s, i, j) ==
+                     * "lit"`, an interpolation, an `or` over a heap value
+                     * slot) is the comparison's temporary, held and released
+                     * by the operand rule at the top of this case (#3549):
+                     * here it is read by name. */
+                    if (!skip_parens) fprintf(gen->output, "(");
+                    emit_string_compare_open(gen, expr->value);
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", ");
+                    generate_expression(gen, expr->children[1]);
+                    emit_string_compare_close(gen, expr->value);
+                    if (!skip_parens) fprintf(gen->output, ")");
                 } else if (is_assignment && expr->children[0] &&
                            expr->children[0]->type == AST_MEMBER_ACCESS &&
                            aether_c_struct_overlay_lhs(expr->children[0])) {
@@ -10283,7 +10397,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fad.have_value = fad.ret_ct && strcmp(fad.ret_ct, "void") != 0;
                     fad.discarded = gen->discard_call_node == expr && !stmt_struct_temp_of(expr);
                     arg_drain_select(gen, expr, 0, NULL, NULL,
-                                     !fad.have_value || fad.discarded, &fad);
+                                     !fad.have_value || fad.discarded, &fad, ARG_SEL_CALL);
                     arg_drain_open(gen, expr, &fad);
                     int took = emit_fnptr_take_open(gen, expr);
                     int narrow = gen->discard_call_node != expr && fnptr_returns_bool(field_sig);
@@ -10337,6 +10451,50 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     fnptr_sig->is_fnptr) {
                     generate_fnptr_local_call(gen, fnptr_sig, func_name, expr, ad_call_discarded);
                     break;
+                }
+
+                /* The argument temporaries of every call lowered by name
+                 * (#3549): a builtin, a container store, an actor's spawn
+                 * and a named function or extern alike. R3: a parameter
+                 * borrows, so a fresh value given straight to one (a call's
+                 * string, an interpolation, an ask's reply, a closure
+                 * literal, a buffer made for the call) is held in a
+                 * temporary, journaled while the call runs and released
+                 * once it returns; one the callee takes over (a free, a
+                 * keep, a container's adopted value) moves in instead
+                 * (arg_drain_select, call_arg_borrowed). The temporaries
+                 * are bound before the lowering below runs, so whichever
+                 * branch writes the call reads them by name; a call
+                 * through a closure value (`call`) picks its own, from the
+                 * closure's parameters. The wrap holds the call's value in
+                 * a temporary of its type: the type checker's, or, for an
+                 * unannotated callee, the C type its definition is emitted
+                 * with (#2519); with neither it drains only a call whose
+                 * value is discarded. */
+                ArgDrainWrap nad;
+                memset(&nad, 0, sizeof(nad));
+                nad.have_value = expr->node_type &&
+                                 expr->node_type->kind != TYPE_VOID &&
+                                 expr->node_type->kind != TYPE_UNKNOWN;
+                nad.ret_ct = NULL;
+                nad.ret_type = expr->node_type;
+                nad.discarded = ad_call_discarded;
+                int nad_is_void = (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
+                                  ad_call_discarded;
+                if (!nad.have_value && !nad_is_void) {
+                    const char* rct = NULL;
+                    int shape = callee_result_shape(gen, func_name, &rct);
+                    if (shape > 0) {
+                        nad.have_value = 1;
+                        nad.ret_ct = rct;
+                    } else if (shape == 0) {
+                        nad_is_void = 1;
+                    }
+                }
+                if (strcmp(func_name, "call") != 0) {
+                    arg_drain_select(gen, expr, 0, func_name, NULL, nad_is_void, &nad,
+                                     call_is_builtin(gen, expr) ? ARG_SEL_BUILTIN : ARG_SEL_CALL);
+                    arg_drain_open(gen, expr, &nad);
                 }
 
                 /* Slice ownership (slice_own.c puts these in the tree):
@@ -10542,19 +10700,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "puts(");
                                 emit_string_literal_chars(gen, arg);
                                 fprintf(gen->output, ")");
-                            } else if (arg->type == AST_FUNCTION_CALL &&
-                                       is_heap_string_expr(gen, arg)) {
-                                /* Heap-producing call in bare argument
-                                 * position: the temporary is owned by no
-                                 * binding, print-and-free via the owned
-                                 * helper or it leaks per call (#1331
-                                 * review). Identifiers stay on the plain
-                                 * path; scope exit owns their free. */
-                                fprintf(gen->output, "_aether_println_owned(");
-                                generate_expression(gen, arg);
-                                fprintf(gen->output, ")");
                             } else {
-                                // Runtime string, could be NULL; by length (#2521)
+                                /* Runtime string, could be NULL; by length
+                                 * (#2521). A fresh one is the call's
+                                 * argument temporary, released once it is
+                                 * written (#3549). */
                                 fprintf(gen->output, "_aether_println_str(");
                                 generate_expression(gen, arg);
                                 fprintf(gen->output, ")");
@@ -10964,7 +11114,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     }
                     if (defined_val) {
                         generate_expression(gen, defined_val);
-                        break;
+                        goto by_name_done;
                     }
                     /* A platform with no value and no `other:` is E0701 in
                      * the typechecker (#3002, check_select_platforms), so
@@ -11152,7 +11302,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             break;
                         }
                         arg_drain_select(gen, expr, 1, NULL, literal,
-                                         !ad.have_value || ad_call_discarded, &ad);
+                                         !ad.have_value || ad_call_discarded, &ad, ARG_SEL_CALL);
                         arg_drain_open(gen, expr, &ad);
                         // Generate typed call: _closure_fn_N((_closure_env_N*)closure.env, args...)
                         fprintf(gen->output, "_closure_fn_%d((_closure_env_%d*)",
@@ -11252,7 +11402,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ad.have_value = strcmp(ret, "void") != 0;
                         ad.discarded = ad_call_discarded;
                         arg_drain_select(gen, expr, 1, NULL, NULL,
-                                         !ad.have_value || ad_call_discarded, &ad);
+                                         !ad.have_value || ad_call_discarded, &ad, ARG_SEL_CALL);
                         /* #2519: an owned closure used as the callee (a
                          * literal, or one a call hands over: `call(
                          * make_counter())`) is held by nothing else. It
@@ -11365,7 +11515,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                             fprintf(gen->output, "-1");
                         }
                         fprintf(gen->output, ")");
-                        break;
+                        goto by_name_done;
                     }
 
                     /* List owned-string element auto-routing (#467).
@@ -11436,7 +11586,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                         ASTNode* cval = closure_container_store_value(gen, expr);
                         if (cval) {
                             emit_closure_container_store(gen, expr, cval, ad_call_discarded);
-                            break;
+                            goto by_name_done;
                         }
                     }
                     if (is_list_shape || is_map_shape || is_set_shape) {
@@ -11466,7 +11616,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                 fprintf(gen->output, "), (void*)");
                                 emit_string_literal_node(gen, val);
                                 fprintf(gen->output, ")");
-                                break;
+                                goto by_name_done;
                             }
                             if (val && val->node_type &&
                                 (val->node_type->kind == TYPE_STRING ||
@@ -11505,80 +11655,21 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             cc, cv);
                                 } else if (is_set_shape) {
                                     fprintf(gen->output, "list_set_string_adopted(%s, %s, %s)", cc, ck, cv);
-                                } else if (is_fresh_heap_string_temp(gen, expr->children[1])) {
-                                    /* R3: the map keeps a key by a reference
-                                     * of its own (or a copy of a plain C
-                                     * string), so a key that is a fresh
-                                     * temporary is the caller's to release
-                                     * once the put returns, as the plain put
-                                     * releases it. Only the value is adopted;
-                                     * `map.put(m, "k${i}", v)` used to leak
-                                     * its key on every call (#3539). */
-                                    const char* cr = seq_let(gen, &s, is_wrapper ? "const char*" : "int",
-                                                             "_ae_cr");
-                                    fprintf(gen->output, "%s(%s, %s, %s)",
-                                            is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
-                                            cc, ck, cv);
-                                    seq_next(gen, &s);
-                                    fprintf(gen->output, "aether_heap_str_free(%s)", ck);
-                                    seq_next(gen, &s);
-                                    fprintf(gen->output, "%s", cr);
                                 } else {
+                                    /* The key is borrowed for the put (the
+                                     * map keeps a reference of its own, or a
+                                     * copy of a plain C string): a fresh one
+                                     * is the call's argument temporary,
+                                     * released after the put (#3549). */
                                     fprintf(gen->output, "%s(%s, %s, %s)",
                                             is_wrapper ? "_aether_map_put_adopted" : "map_put_string_adopted",
                                             cc, ck, cv);
                                 }
                                 seq_close(gen, &s);
-                                break;
+                                goto by_name_done;
                             }
                         }
                     }
-
-                    /* Argument-temp lifetime wrap. Any heap-returning
-                     * AST_FUNCTION_CALL appearing in argument position
-                     * is an anonymous heap allocation with no consumer
-                     * — pre-fix this is a leak per call. Hoist each
-                     * such arg into a named temporary, run the parent
-                     * call, then free the temps (the wrap, a sequence
-                     * of temporaries). See ArgDrainSub at the top of
-                     * this file for the full rationale.
-                     *
-                     * Skip when the parent's return type is unknown:
-                     * the wrap holds the value in a temporary of its
-                     * type (a void parent yields nothing, see below).
-                     * Skip when the args are themselves substitution-
-                     * registered (we're inside a parent wrap already
-                     * — the registered entry handles the lifetime). */
-                    ArgDrainWrap ad;
-                    ad.have_value = expr->node_type &&
-                                    expr->node_type->kind != TYPE_VOID &&
-                                    expr->node_type->kind != TYPE_UNKNOWN;
-                    ad.ret_ct = NULL;
-                    ad.ret_type = expr->node_type;
-                    ad.discarded = ad_call_discarded;
-                    int ad_is_void = (expr->node_type && expr->node_type->kind == TYPE_VOID) ||
-                                     ad_call_discarded;
-                    if (!ad.have_value && !ad_is_void) {
-                        /* #2519: the checker stamped no type on the call
-                         * (an unannotated callee), so the wrap could not
-                         * name its result's type and drained nothing. The
-                         * callee's definition says whether its C function
-                         * returns a value and of what type (the rule
-                         * generate_function emits the signature by), and
-                         * the temp is declared with that type (#2765: not
-                         * inferred, which only GCC-compatible compilers
-                         * can). */
-                        const char* rct = NULL;
-                        int shape = callee_result_shape(gen, func_name, &rct);
-                        if (shape > 0) {
-                            ad.have_value = 1;
-                            ad.ret_ct = rct;
-                        } else if (shape == 0) {
-                            ad_is_void = 1;
-                        }
-                    }
-                    arg_drain_select(gen, expr, 0, func_name, NULL, ad_is_void, &ad);
-                    arg_drain_open(gen, expr, &ad);
 
                     /* A trusted call in an enforced block goes through its
                      * wrapper (codegen.c emit_sandbox_trust_wrappers), which
@@ -12064,8 +12155,9 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                                        ? g_builder_cfg_var : "(void*)0");
                     }
                     fprintf(gen->output, adopt ? "))" : ")");
-                    arg_drain_close(gen, expr, &ad);
                 }
+            by_name_done:
+                arg_drain_close(gen, expr, &nad);
             }
             break;
 

@@ -1190,6 +1190,10 @@ static int builtin_lowered_by_name(const char* name, int params) {
     return 0;
 }
 
+int is_builtin_call_name(const char* name, int args) {
+    return name && builtin_lowered_by_name(name, args);
+}
+
 int is_builtin_function_name(const char* name) {
     if (!name) return 0;
     /* The table's smallest minimum arity is 2 (`str_eq`), so asking at 0, 1

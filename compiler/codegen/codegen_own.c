@@ -183,6 +183,12 @@ static void own_collect_type(CodeGenerator* gen, Type* t, int depth) {
 void own_collect_types(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
     own_collect_type(gen, node->node_type, 0);
+    /* #3549: a slice made for a call (slice ownership's `slice_temp`) is
+     * dropped by the call's argument temporaries, through the drop of a
+     * whole slice of its type. */
+    if (node->type == AST_FUNCTION_CALL && type_is_slice(node->node_type) &&
+        annotation_has_marker(node->annotation, "slice_temp"))
+        own_register_sdrop(gen, node->node_type);
     for (int i = 0; i < node->child_count; i++) own_collect_types(gen, node->children[i]);
 }
 

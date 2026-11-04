@@ -740,6 +740,21 @@ way. The hand-back classifier, the callee memo, the closure-argument and
 fn-pointer conventions and the escape walk, all of which read other
 functions' bodies, are deleted.
 
+The same rule covers every other use that borrows a value made for it
+(#3549): a builtin lowered by name (`atoi`, `char_at`, `print`,
+`spawn_sandboxed`), a container store's key, and a comparison's operand
+(`os.getenv(k) != null`). Each had a lowering of its own that passed the
+temporary straight through, so it leaked once per evaluation, and the map
+put's key had a fix of its own (#3539). Now one selection
+(`arg_drain_select`) chooses the temporaries of every call by name and of
+every comparison, and one predicate says where the callee takes a value
+over instead: a free, an identity (`isolate`, `consume`, `select`), a box,
+thunk or cell that keeps it, a container's adopted element, `@retain`. A
+buffer `make` handed out (or any call's slice) given to a parameter is
+dropped after the call when slice ownership's summary of the callee says it
+neither stores the parameter nor hands a view of it back (the `slice_temp`
+marker), as the owning local it would otherwise be bound to is dropped.
+
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's
 retained. This holds for a `string` and for a closure; the std externs that

@@ -189,6 +189,10 @@ int ask_timeout_ms(ASTNode* ask);
 int is_owned_opt_string_call(CodeGenerator* gen, ASTNode* e);
 int is_owned_string_unwrap(CodeGenerator* gen, ASTNode* e);
 int is_fresh_heap_string_temp(CodeGenerator* gen, ASTNode* e);
+/* #3549: `node` lowered by `emit` as the builtin `name`, yielding nothing,
+ * with its arguments borrowed as a call's are (codegen_expr.c). */
+void emit_with_builtin_args(CodeGenerator* gen, ASTNode* node, const char* name,
+                            void (*emit)(CodeGenerator* gen, ASTNode* node));
 
 /* Does evaluating the expression have a side effect (a call, a send, a
  * va_* op)? Defined in codegen_expr.c. Gates the series-collapse

@@ -264,7 +264,7 @@ need_acting(g: *GridGen) {
 // Kinds.
 
 kind_count() -> int {
-    return 25
+    return 26
 }
 
 kind_at(i: int) -> string {
@@ -293,7 +293,8 @@ kind_at(i: int) -> string {
         21 -> "ST1"
         22 -> "ST2"
         23 -> "KS"
-        _ -> "KSF"
+        24 -> "KSF"
+        _ -> "KM"
     }
 }
 
@@ -325,6 +326,7 @@ kind_title(kid: string) -> string {
         "KE" -> "fresh error string in the error slot of an `int!` result"
         "KS" -> "sum whose variant owns a string (`Owned = Named | Plain`)"
         "KSF" -> "sum whose variant owns a closure capturing a fresh string (`Acting = Act | Plain`)"
+        "KM" -> "slice owning the buffer `make([]int, 3)` handed out"
         _ -> ""
     }
 }
@@ -376,6 +378,22 @@ sum_places() -> string {
 
 sum_transfers() -> string {
     return "T1 T2 T3 T4 T5 T6 T6I T6M T9 T10 T11 T11R T12 T16"
+}
+
+// The slice kind (#3549): a buffer `make` hands out, given straight to a
+// function that only reads it, or returned. A slice local, field or element
+// is slice ownership's (tests/integration/slice_own); the grid measures the
+// temporary, which nothing but the call it is made for holds.
+is_slice_kind(kid: string) -> bool {
+    return kid == "KM"
+}
+
+slice_places() -> string {
+    return "P17"
+}
+
+slice_transfers() -> string {
+    return "T6 T9"
 }
 
 producer_class(kid: string) -> string {
@@ -452,6 +470,7 @@ kind_ty(kid: string) -> string {
         "K9" -> "fn"
         "KS" -> "Owned"
         "KSF" -> "Acting"
+        "KM" -> "int[]"
         _ -> "string"
     }
 }
@@ -470,6 +489,7 @@ kind_zero(kid: string) -> string {
         "K9" -> "null"
         "KS" -> ""
         "KSF" -> ""
+        "KM" -> ""
         _ -> "\"\""
     }
 }
@@ -583,6 +603,9 @@ fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
     if kid == "KSF" {
         need_acting(g)
         return "", "acting(w, \"${sx}\")"
+    }
+    if kid == "KM" {
+        return "", "make([]int, 3)"
     }
     if kid == "SA1" {
         return "", "string.replace(w, \"w\", \"${text_of(tag)}\")"
@@ -706,6 +729,10 @@ kind_check(g: *GridGen, kid: string, expr: string, tag: string, what: string) ->
         r = gen_name(g, "r")
         return "string ${r} = acting_run(${expr})\ncheck(${r} == \"${t}\", \"${what}\")"
     }
+    if kid == "KM" {
+        // Its length, and its first element, which `make` zeroed.
+        return "check(${expr}.len == 3 && ${expr}[0] == 0, \"${what}\")"
+    }
     if kid == "SD1" {
         // One character, '/' (47) or '\' (92), whichever the platform uses.
         return "check(string.length(${expr}) == 1 && (string.char_at(${expr}, 0) == 47 || string.char_at(${expr}, 0) == 92), \"${what}\")"
@@ -735,16 +762,17 @@ k9_elsewhere() -> string {
 
 // ---------------------------------------------------------------------------
 // Transfers (the column titles): T1 to T16, T6I and T6M (a branching value
-// passed as an argument, #3006), then the two only the KE cells
-// (an `int!` error slot) take.
+// passed as an argument, #3006), T17 to T19 (a temporary a builtin, an
+// extern's `string` parameter or a comparison borrows, #3549), then the two
+// only the KE cells (an `int!` error slot) take.
 
 column_count() -> int {
-    return 23
+    return 26
 }
 
-// The transfers every kind is crossed with: the first 21 columns.
+// The transfers every kind is crossed with: the first 24 columns.
 transfer_count() -> int {
-    return 21
+    return 24
 }
 
 column_at(i: int) -> string {
@@ -770,7 +798,10 @@ column_at(i: int) -> string {
         18 -> "T16"
         19 -> "T6I"
         20 -> "T6M"
-        21 -> "T9M"
+        21 -> "T17"
+        22 -> "T18"
+        23 -> "T19"
+        24 -> "T9M"
         _ -> "T10M"
     }
 }
@@ -798,6 +829,9 @@ transfer_title(t: string) -> string {
         "T14" -> "store it into a module `var` directly; read after the scope ended"
         "T15" -> "a store that fails (`list.set` out of range)"
         "T16" -> "captured by a closure, then overwritten, then the closure called"
+        "T17" -> "pass straight to builtins that only read it (`char_at`, `str_eq`, `atoi`)"
+        "T18" -> "pass straight to an extern's `string` parameter, which C reads as characters"
+        "T19" -> "compare it (`==` a literal, `!=` `null`)"
         "T9M" -> "propagated by `x!` in a function whose error position a pass-through vetoes"
         "T10M" -> "passed through from C on one path, a fresh error of its own on the other"
         _ -> ""
@@ -2268,7 +2302,10 @@ temp_cell(kid: string, t: string) -> string {
     if (t == "T8" || t == "T8S") && kid != "K1" {
         return "only a string has a free a callee can call"
     }
-    if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10", t) {
+    if in_words("T17 T18 T19", t) && kid != "K1" {
+        return "the builtins, an extern's `string` parameter and the comparisons read a string: K1"
+    }
+    if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10 T17 T18 T19", t) {
         return ""
     }
     g = gen_new("${kid}-P17-${t}")
@@ -2300,6 +2337,19 @@ temp_cell_in(g: *GridGen, kid: string, t: string) -> string {
             arg = "match k % 2 { 0 -> ${ea} _ -> ${eb} }"
         }
         body = lines_cat3(pa, pb, "n = reads(${arg})\ncheck(n == 1, \"the reader ran\")")
+    } else if t == "T17" {
+        // #3549: builtins lowered by name borrow their arguments as any
+        // call does: each temporary is released once the builtin read it.
+        body = lines_cat(pa, "c = char_at(${ea}, 0)\ncheck(c == 119, \"char_at read the temporary\")\ncheck(str_eq(${ea}, \"${text_of("a")}\") == 1, \"str_eq read the temporary\")\ncheck(atoi(${ea}) == 0, \"atoi read the temporary\")")
+    } else if t == "T18" {
+        // #3549: a C function given a temporary reads its characters; the
+        // temporary is the caller's to release after the call (R3, R4).
+        gen_decl(g, "extern file_exists", "// A C function that reads the characters of a path.\nextern file_exists(path: string) -> int")
+        body = lines_cat(pa, "check(file_exists(${ea}) == 0, \"the extern read the temporary\")")
+    } else if t == "T19" {
+        // #3549: a comparison borrows its operands: compared by bytes, or
+        // against `null`, the temporary is released once it is read.
+        body = lines_cat(pa, "check(${ea} == \"${text_of("a")}\", \"the temporary compared equal\")\ncheck(${ea} != null, \"the temporary is not null\")")
     } else if t == "T7" || t == "T7S" {
         some_paths = t == "T7S"
         helper_keep(g, kid, some_paths)
@@ -2420,6 +2470,9 @@ add_cell(kid: string, pid: string, t: string, src: string) {
 // A cell's program, or the reason the combination is skipped.
 cell_or_reason(kid: string, pid: string, t: string) -> string {
     res = ""
+    if in_words("T17 T18 T19", t) && pid != "P17" {
+        return "a transfer of a temporary, given straight to what reads it: P17 only"
+    }
     if pid == "P9" || pid == "P9W" {
         if !in_words("T1 T2 T3 T4 T5 T6 T7 T9 T10 T11 T12 T14", t) {
             return "not a transfer of a captured value"
@@ -2444,7 +2497,7 @@ cell_or_reason(kid: string, pid: string, t: string) -> string {
         }
         res = param_cell(kid, pid, t)
     } else if pid == "P17" {
-        if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10", t) {
+        if !in_words("T1 T5 T6 T6I T6M T7 T7S T8 T8S T9 T10 T17 T18 T19", t) {
             return "a temporary is never stored, overwritten or aliased"
         }
         res = temp_cell(kid, t)
@@ -2480,6 +2533,9 @@ build() {
                 t = column_at(ti)
                 crossed = is_producer(kid) && (!in_words(producer_places(), pid) || !in_words(producer_transfers(), t))
                 if is_sum_kind(kid) && (!in_words(sum_places(), pid) || !in_words(sum_transfers(), t)) {
+                    crossed = true
+                }
+                if is_slice_kind(kid) && (!in_words(slice_places(), pid) || !in_words(slice_transfers(), t)) {
                     crossed = true
                 }
                 if crossed {

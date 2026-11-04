@@ -10016,16 +10016,6 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline int _aether_println_str(const void* s) {");
     print_line(gen, "    return (int)aether_print_string(stdout, s, 1);");
     print_line(gen, "}");
-    print_line(gen, "static inline int _aether_println_owned(const char* s) {");
-    print_line(gen, "    int _n = _aether_println_str(s);");
-    print_line(gen, "    aether_heap_str_free((void*)s);");
-    print_line(gen, "    return _n;");
-    print_line(gen, "}");
-    print_line(gen, "static inline int _aether_print_owned(const char* s) {");
-    print_line(gen, "    int _n = _aether_print_str(s);");
-    print_line(gen, "    aether_heap_str_free((void*)s);");
-    print_line(gen, "    return _n;");
-    print_line(gen, "}");
     /* #3526: a duration in an interpolation or a print is the formatter's %D
      * (aether_interp_format), written from the stack; the ring of eight
      * static buffers it was formatted into here was shared by every thread

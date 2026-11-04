@@ -12,7 +12,8 @@ A cell is one value **kind** (a fresh string, a `string?`, a closure that
 captures a fresh string, an `fn[2]`, a struct owning a string, a
 `(string, int)` tuple, a `string[2]`, a `Doc[2]`, a named function used as a
 closure, the error slot of an `int!`, a sum whose variant owns a string or a
-closure) held in one **place** (a local, a local rebound in a loop, a struct
+closure, a slice owning the buffer `make` handed out) held in one **place**
+(a local, a local rebound in a loop, a struct
 field, a field of a heap box reached through a pointer, an array element, a
 tuple slot, an optional, a module `var`, a
 closure's capture or cell, a list or map, actor state, a message field, a
@@ -20,10 +21,11 @@ closure's capture or cell, a list or map, actor state, a message field, a
 and moved by one **transfer** (store and leave, overwrite, `break`/`continue`,
 early `return`, a caught panic, a reader, a keeper, a freer, return, hand
 back, `defer`, alias, store into a global, capture, an `if` expression or a
-value `match` of fresh values passed as an argument). Its id is
+value `match` of fresh values passed as an argument, a temporary given
+straight to a builtin, to an extern's `string` parameter or to a
+comparison). Its id is
 `<kind>-<place>-<transfer>`, `K1-P5-T7` for instance, and the tables in
 `gen.ae` (`kind_title`, `place_title`, `transfer_title`) say what each code is.
-
 A fourth axis is the **producer**: which std C function made the string.
 `docs/design/ownership-r1-inventory.md` classes every std function that
 returns a string by what it returns (A, a counted string the caller owns;
@@ -45,6 +47,14 @@ string, and `Acting = Act | Plain`, whose `Act` owns a closure) cross the
 places a sum can be held in, a module `var` aside (its initializer is no
 constant) and the containers and `ptr` slots (strings and closures only):
 a sum is a composite that owns what its variants own (R1).
+
+The slice kind `KM` (the buffer `make([]int, 3)` hands out) is crossed with
+the temporary only (P17), passed to a function that reads it and returned:
+a slice local, field or element is slice ownership's, which
+`tests/integration/slice_own` measures. The transfers `T17` to `T19` are a
+temporary's too (#3549): a fresh string given straight to builtins lowered by
+name, to an extern's `string` parameter and to a comparison, each borrowed
+for the use and released after it, as an Aether function's argument is.
 
 Each cell is a standalone program, written by `gen.ae` into
 `build/ownership_grid/cells/<id>.ae`. It runs the shape in a function called

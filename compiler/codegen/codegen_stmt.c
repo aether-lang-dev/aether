@@ -9229,6 +9229,114 @@ static int return_holds_statement_temps(CodeGenerator* gen, ASTNode* stmt) {
     return 0;
 }
 
+/* The value `print(...)` written as a statement is lowered to (no `;`).
+ * Its arguments are borrowed as a builtin's are: a fresh one is the
+ * statement's temporary (emit_with_builtin_args, #3549). */
+static void emit_print_statement_value(CodeGenerator* gen, ASTNode* stmt) {
+    ASTNode* first_arg = stmt->children[0];
+
+    // Interpolated string: delegate directly to expression codegen (emits printf(...)).
+    if (stmt->child_count == 1 && first_arg->type == AST_STRING_INTERP) {
+        gen->interp_as_printf = 1;
+        generate_expression(gen, first_arg);
+        gen->interp_as_printf = 0;
+        return;
+    }
+
+    // Check if we have a single typed argument (not a string literal)
+    if (stmt->child_count == 1 && first_arg->node_type &&
+        !(first_arg->type == AST_LITERAL && first_arg->node_type->kind == TYPE_STRING)) {
+
+        Type* arg_type = first_arg->node_type;
+
+        /* #3527: a string or a pointer by length, anything
+         * else by its kind's conversion (emit_print_scalar), a
+         * uint64 included, which fell through to `%d`; a kind
+         * with none refused. */
+        if (arg_type->kind == TYPE_STRING || arg_type->kind == TYPE_PTR) {
+            // NULL-safe, and by length (#2521)
+            fprintf(gen->output, "_aether_print_str(");
+            generate_expression(gen, first_arg);
+            fprintf(gen->output, ")");
+        } else {
+            emit_print_scalar(gen, first_arg, 0);
+        }
+    } else if (stmt->child_count == 1) {
+        // String literal - print directly
+        ASTNode* arg = stmt->children[0];
+        if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
+            emit_print_literal_format(gen, arg);
+        } else {
+            /* #3527: no type to write it by. */
+            print_fmt_refuse(gen, arg, "print");
+            fprintf(gen->output, "(void)0");
+        }
+    } else {
+        // Multiple arguments - first is format string
+        // Auto-fix format specifiers based on argument types to prevent
+        // undefined behavior (e.g. print("Test: %s", 201) would crash)
+        ASTNode* fmt_arg = stmt->children[0];
+        if (fmt_arg->type == AST_LITERAL && fmt_arg->node_type &&
+            fmt_arg->node_type->kind == TYPE_STRING && fmt_arg->value) {
+            // Parse format string and replace specifiers with type-correct ones.
+            // Written by the runtime formatter, whose %f is '.'
+            // whatever the process locale (#3525).
+            const char* fmt = fmt_arg->value;
+            fprintf(gen->output, "_aether_interp_print(\"");
+            int arg_idx = 1;  // index into stmt->children for arguments
+            for (int fi = 0; fmt[fi]; fi++) {
+                if (fmt[fi] == '%' && fmt[fi + 1]) {
+                    fi++;
+                    // Skip flags, width, precision
+                    while (fmt[fi] == '-' || fmt[fi] == '+' || fmt[fi] == ' ' ||
+                           fmt[fi] == '#' || fmt[fi] == '0') fi++;
+                    while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
+                    if (fmt[fi] == '.') {
+                        fi++;
+                        while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
+                    }
+                    if (fmt[fi] == '%') {
+                        // Literal %%
+                        fprintf(gen->output, "%%%%");
+                    } else if (arg_idx < stmt->child_count) {
+                        // Replace with type-correct specifier
+                        /* #3527: the argument's own conversion. */
+                        emit_print_format_spec(gen, stmt->children[arg_idx]);
+                        arg_idx++;
+                    } else {
+                        // More specifiers than args: keep the original
+                        fprintf(gen->output, "%%%c", fmt[fi]);
+                    }
+                } else {
+                    // Re-escape special characters for C string output
+                    switch (fmt[fi]) {
+                        case '\n': fprintf(gen->output, "\\n");  break;
+                        case '\t': fprintf(gen->output, "\\t");  break;
+                        case '\r': fprintf(gen->output, "\\r");  break;
+                        case '\0': fprintf(gen->output, "\\0");  break;
+                        case '\\': fprintf(gen->output, "\\\\"); break;
+                        case '"':  fprintf(gen->output, "\\\""); break;
+                        default:   fprintf(gen->output, "%c", fmt[fi]); break;
+                    }
+                }
+            }
+            fprintf(gen->output, "\", ");
+            // Emit arguments with type-safe wrappers
+            for (int i = 1; i < stmt->child_count; i++) {
+                if (i > 1) fprintf(gen->output, ", ");
+                emit_print_format_arg(gen, stmt->children[i]);   /* #3527 */
+            }
+            fprintf(gen->output, ")");
+        } else {
+            // A format that is not a literal is written through `%s`, so
+            // it cannot inject conversions.
+            fprintf(gen->output, "printf(\"%%s\", ");
+            generate_expression(gen, stmt->children[0]);
+            fprintf(gen->output, ")");
+        }
+    }
+}
+
 static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
     if (!stmt) return;
 
@@ -13413,134 +13521,9 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
             break;
 
         case AST_PRINT_STATEMENT:
-            // Generate printf call with all arguments
             if (stmt->child_count > 0) {
-                ASTNode* first_arg = stmt->children[0];
-
-                // Interpolated string: delegate directly to expression codegen (emits printf(...)),
-                // then flush like every other print below.
-                if (stmt->child_count == 1 && first_arg->type == AST_STRING_INTERP) {
-                    gen->interp_as_printf = 1;
-                    generate_expression(gen, first_arg);
-                    gen->interp_as_printf = 0;
-                    fprintf(gen->output, ";\n");
-                    fprintf(gen->output, "fflush(stdout);\n");
-                    break;
-                }
-
-                // Check if we have a single typed argument (not a string literal)
-                if (stmt->child_count == 1 && first_arg->node_type &&
-                    !(first_arg->type == AST_LITERAL && first_arg->node_type->kind == TYPE_STRING)) {
-
-                    Type* arg_type = first_arg->node_type;
-
-                    /* #3527: a string or a pointer by length, anything
-                     * else by its kind's conversion (emit_print_scalar), a
-                     * uint64 included, which fell through to `%d`; a kind
-                     * with none refused. */
-                    if (arg_type->kind == TYPE_STRING) {
-                        /* A heap-producing CALL in bare argument position
-                         * (`print(string.concat(a, b))`) is a temporary
-                         * nothing else owns: print-and-free via the owned
-                         * helper or it leaks per call. Bare identifiers
-                         * stay unwrapped, their scope-exit defer owns the
-                         * free (wrapping them would double-free). The
-                         * interpolation path already handles its own
-                         * temporaries; this closes the direct-arg form. */
-                        if (first_arg->type == AST_FUNCTION_CALL &&
-                            is_heap_string_expr(gen, first_arg)) {
-                            fprintf(gen->output, "_aether_print_owned(");
-                            generate_expression(gen, first_arg);
-                            fprintf(gen->output, ");\n");
-                        } else {
-                            // NULL-safe, and by length (#2521)
-                            fprintf(gen->output, "_aether_print_str(");
-                            generate_expression(gen, first_arg);
-                            fprintf(gen->output, ");\n");
-                        }
-                    } else if (arg_type->kind == TYPE_PTR) {
-                        // NULL-safe, and by length (#2521)
-                        fprintf(gen->output, "_aether_print_str(");
-                        generate_expression(gen, first_arg);
-                        fprintf(gen->output, ");\n");
-                    } else {
-                        emit_print_scalar(gen, first_arg, 0);
-                        fprintf(gen->output, ";\n");
-                    }
-                } else if (stmt->child_count == 1) {
-                    // String literal - print directly
-                    ASTNode* arg = stmt->children[0];
-                    if (arg->type == AST_LITERAL && arg->node_type && arg->node_type->kind == TYPE_STRING) {
-                        emit_print_literal_format(gen, arg);
-                        fprintf(gen->output, ";\n");
-                    } else {
-                        /* #3527: no type to write it by. */
-                        print_fmt_refuse(gen, arg, "print");
-                        fprintf(gen->output, "(void)0;\n");
-                    }
-                } else {
-                    // Multiple arguments - first is format string
-                    // Auto-fix format specifiers based on argument types to prevent
-                    // undefined behavior (e.g. print("Test: %s", 201) would crash)
-                    ASTNode* fmt_arg = stmt->children[0];
-                    if (fmt_arg->type == AST_LITERAL && fmt_arg->node_type &&
-                        fmt_arg->node_type->kind == TYPE_STRING && fmt_arg->value) {
-                        // Parse format string and replace specifiers with type-correct ones.
-                        // Written by the runtime formatter, whose %f is '.'
-                        // whatever the process locale (#3525).
-                        const char* fmt = fmt_arg->value;
-                        fprintf(gen->output, "_aether_interp_print(\"");
-                        int arg_idx = 1;  // index into stmt->children for arguments
-                        for (int fi = 0; fmt[fi]; fi++) {
-                            if (fmt[fi] == '%' && fmt[fi + 1]) {
-                                fi++;
-                                // Skip flags, width, precision
-                                while (fmt[fi] == '-' || fmt[fi] == '+' || fmt[fi] == ' ' ||
-                                       fmt[fi] == '#' || fmt[fi] == '0') fi++;
-                                while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
-                                if (fmt[fi] == '.') {
-                                    fi++;
-                                    while (fmt[fi] >= '0' && fmt[fi] <= '9') fi++;
-                                }
-                                if (fmt[fi] == '%') {
-                                    // Literal %%
-                                    fprintf(gen->output, "%%%%");
-                                } else if (arg_idx < stmt->child_count) {
-                                    // Replace with type-correct specifier
-                                    /* #3527: the argument's own conversion. */
-                                    emit_print_format_spec(gen, stmt->children[arg_idx]);
-                                    arg_idx++;
-                                } else {
-                                    // More specifiers than args — keep original
-                                    fprintf(gen->output, "%%%c", fmt[fi]);
-                                }
-                            } else {
-                                // Re-escape special characters for C string output
-                                switch (fmt[fi]) {
-                                    case '\n': fprintf(gen->output, "\\n");  break;
-                                    case '\t': fprintf(gen->output, "\\t");  break;
-                                    case '\r': fprintf(gen->output, "\\r");  break;
-                                    case '\0': fprintf(gen->output, "\\0");  break;
-                                    case '\\': fprintf(gen->output, "\\\\"); break;
-                                    case '"':  fprintf(gen->output, "\\\""); break;
-                                    default:   fprintf(gen->output, "%c", fmt[fi]); break;
-                                }
-                            }
-                        }
-                        fprintf(gen->output, "\", ");
-                        // Emit arguments with type-safe wrappers
-                        for (int i = 1; i < stmt->child_count; i++) {
-                            if (i > 1) fprintf(gen->output, ", ");
-                            emit_print_format_arg(gen, stmt->children[i]);   /* #3527 */
-                        }
-                        fprintf(gen->output, ");\n");
-                    } else {
-                        // Non-literal format string — use %s to prevent format injection
-                        fprintf(gen->output, "printf(\"%%s\", ");
-                        generate_expression(gen, stmt->children[0]);
-                        fprintf(gen->output, ");\n");
-                    }
-                }
+                emit_with_builtin_args(gen, stmt, "print", emit_print_statement_value);
+                fprintf(gen->output, ";\n");
                 // Flush stdout so partial-line output appears immediately
                 // (without this, print(".") in a loop won't show until \n)
                 fprintf(gen->output, "fflush(stdout);\n");
