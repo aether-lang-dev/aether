@@ -28,6 +28,7 @@
 #include "codegen/optimizer.h"
 #include "codegen/codegen.h"
 #include "aether_defines.h"
+#include "aether_compile_stack.h"
 #include "aether_error.h"
 #include "aether_module.h"
 #include "aether_source_text.h"
@@ -2427,7 +2428,15 @@ static int emit_aea(const char* input, const char* output) {
     return 0;
 }
 
+static int aetherc_main(int argc, char *argv[]);
+
+/* The whole of aetherc, the language server included, runs on the
+ * compiler's own stack (aether_compile_stack.h). */
 int main(int argc, char *argv[]) {
+    return aether_run_on_compile_stack(aetherc_main, argc, argv);
+}
+
+static int aetherc_main(int argc, char *argv[]) {
     // Subcommand dispatch — checked BEFORE the flag loop so flags
     // can't shadow it. `aetherc lsp` runs the embedded language
     // server on stdio (same code path as the standalone aether-lsp

@@ -13,8 +13,6 @@
 #   CODE-SHAPE  reads the compiled code (inlining, vector instructions,
 #               FORTIFY's abort, debug info, -Werror warnings), which ASan's
 #               instrumentation and the sweep's -g change
-#   STACK       compiles a nesting deep enough that ASan's larger frames
-#               overflow the compiler's stack
 
 # RSS
 tests/integration/bytes_finish_return_no_leak/
@@ -36,6 +34,3 @@ tests/integration/checksec_hardening/
 tests/integration/destructure_unused_local/
 tests/integration/lane_wide/
 tests/integration/packed_array_c_abi/
-
-# STACK
-tests/integration/parser_no_count_limits/

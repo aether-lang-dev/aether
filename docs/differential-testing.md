@@ -179,8 +179,8 @@ ASan. Libraries that carry their own runtime copy and the sandbox's preload
 are part of the design, so the one-definition and link-order checks are off
 (`detect_odr_violation=0`, `verify_asan_link_order=0`). Tests that check
 only what ASan replaces (a bound on RSS, the sandbox's preload, the shape of
-compiled code, compiler recursion deeper than ASan's frames allow) are left
-out of this sweep, each with its reason, in `tests/ae_sweep_prune_asan.txt`;
+compiled code) are left out of this sweep, each with its reason, in
+`tests/ae_sweep_prune_asan.txt`;
 they run on every other leg. Two more take another path under ASan: one
 that needs an address-space limit and one that needs Valgrind read
 `AETHER_SANITIZER`.
