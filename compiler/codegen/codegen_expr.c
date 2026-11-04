@@ -2086,11 +2086,78 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
     order_ops_free(&room);
 }
 
+/* The operands one ordered sequence evaluates ahead, in the order it
+ * evaluates them, each with the construct it is an operand of (#3574). */
+typedef struct {
+    ASTNode** op;
+    ASTNode** parent;
+    int n;
+    int cap;
+} OrderPlan;
+
+static void order_plan_add(OrderPlan* p, ASTNode* op, ASTNode* parent) {
+    if (p->n == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 16;
+        p->op = (ASTNode**)aether_xrealloc(p->op, sizeof(ASTNode*) * (size_t)p->cap);
+        p->parent = (ASTNode**)aether_xrealloc(p->parent, sizeof(ASTNode*) * (size_t)p->cap);
+    }
+    p->op[p->n] = op;
+    p->parent[p->n] = parent;
+    p->n++;
+}
+
+static ASTNode* g_slice_stmt_inner;
+
+/* Can the operands `op` evaluates ahead go in the sequence of the construct
+ * `op` is an operand of? Its own would otherwise be one more statement
+ * expression inside that one's (generate_expression, emit_in_operand_order):
+ * a chain of `a() + b() + ...` nested one per operator, three brackets each,
+ * and Clang refuses C more than 256 deep. Not an operand already evaluated,
+ * a send (written as a statement), nor a call generate_expression takes
+ * before it orders anything (a store target's, a slice statement
+ * temporary's, one returning an array), which orders its own. */
+static int order_splices(CodeGenerator* gen, ASTNode* op) {
+    if (!op || order_bound(op) || op->type == AST_SEND_FIRE_FORGET) return 0;
+    if (op->type != AST_FUNCTION_CALL) return 1;
+    if (gen->generating_lvalue) return 0;
+    if (op != g_slice_stmt_inner && annotation_has_marker(op->annotation, "slice_stmt_temp") &&
+        hoist_ready(gen))
+        return 0;
+    if (is_sized_array_param(op->node_type) && !gen->array_call_raw && hoist_ready(gen))
+        return 0;
+    return 1;
+}
+
+/* Plan the operands `expr` evaluates ahead (#3574). Each operand's own come
+ * first, from as deep as its operands go: every operand order_operands lists
+ * is evaluated unconditionally whenever its construct is, so what one of
+ * them evaluates ahead runs where the operand would have begun, still after
+ * the operands before it, which it does not conflict with or which were
+ * evaluated ahead already. Then the operand itself, when a later one
+ * conflicts with it. The C of an operator chain, or of calls inside calls,
+ * is then one sequence whatever its length. Returns whether `expr` has an
+ * operand of its own to evaluate ahead, the condition for a sequence. */
+static int order_plan(CodeGenerator* gen, ASTNode* expr, OrderPlan* p) {
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(expr));
+    int n = order_operands(expr, room.ops, room.cap);
+    int own = n >= 2 && order_hoist_set(gen, room.ops, n, room.hoist);
+    for (int k = 0; k < n; k++) {
+        ASTNode* op = room.ops[k];
+        if (order_splices(gen, op)) order_plan(gen, op, p);
+        if (own && room.hoist[k]) order_plan_add(p, op, expr);
+    }
+    order_ops_free(&room);
+    return own;
+}
+
 /* Emit `expr` with the operands a later one conflicts with evaluated first,
  * in source order, into temps it then reads, an ordered sequence (#2765):
  *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })     GCC-compatible
  *     (_eo0 = (i++), f(_eo0, i))                       any other compiler
- * Returns 0, emitting nothing, when no operand needs it. */
+ * Returns 0, emitting nothing, when no operand needs it. The sequence holds
+ * the temps of its operands' operands too (order_plan), so the operands
+ * themselves are then written with nothing left to order (#3574). */
 static int emit_in_operand_order_in(CodeGenerator* gen, ASTNode* expr, ASTNode** ops, int* hoist,
                                      int room) {
     int n = order_operands(expr, ops, room);
@@ -2120,18 +2187,23 @@ static int emit_in_operand_order_in(CodeGenerator* gen, ASTNode* expr, ASTNode**
         order_prelude_end(saved);
         return 1;
     }
+    OrderPlan plan = { NULL, NULL, 0, 0 };
+    order_plan(gen, expr, &plan);
     int typed = 1;
-    for (int k = 0; k < n; k++)
-        if (hoist[k] && !order_operand_hands_off(gen, expr, ops[k]) && !order_c11_type(ops[k]))
+    for (int k = 0; k < plan.n; k++)
+        if (!order_operand_hands_off(gen, plan.parent[k], plan.op[k]) &&
+            !order_c11_type(plan.op[k]))
             typed = 0;
     TempSeq s;
     seq_open_ordered(gen, &s, typed);
-    for (int k = 0; k < n; k++) {
-        if (!hoist[k]) continue;
-        int kind = order_operand_hands_off(gen, expr, ops[k]);
-        if (kind) order_hoist_handoff(gen, &s, ops[k], kind, expr);
-        else order_hoist_operand(gen, &s, ops[k]);
+    for (int k = 0; k < plan.n; k++) {
+        ASTNode* op = plan.op[k];
+        int kind = order_operand_hands_off(gen, plan.parent[k], op);
+        if (kind) order_hoist_handoff(gen, &s, op, kind, plan.parent[k]);
+        else order_hoist_operand(gen, &s, op);
     }
+    free(plan.op);
+    free(plan.parent);
     ASTNode* saved_emitting = g_order_emitting;
     g_order_emitting = expr;
     generate_expression(gen, expr);
