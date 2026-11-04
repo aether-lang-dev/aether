@@ -794,6 +794,15 @@ a give-back never releases what was not handed over. Dropping the header
 into the field left the reference with no way back, and every store leaked
 a string. A `string[]` view of C memory borrows under #2979's E0902 rules
 (below): the string keeps its own reference while C reads the characters.
+The same rule holds for the one `ptr` place a string goes into without
+`string.keep`, a module-level `ptr` var (`gp = s`): the store takes the
+value and records it as `keep`'s reference is, so `string.release_kept(gp)`
+gives it back, and nothing gives it back on a re-bind (decided 2026-11-04,
+no refusal: programs storing strings there compile as before). It held the
+pointer as it stood, which a string built in the statement left owned by
+nothing and a local left dangling once it went. A `ptr` field, message
+field or array element refuses a string (E0200, E0902), so it takes one
+only through `string.keep`.
 
 **A closure in a `ptr` slot (#2926, decided 2026-10-15).** A `ptr` slot owns
 nothing, as for strings: a closure kept in one goes in a box holding a

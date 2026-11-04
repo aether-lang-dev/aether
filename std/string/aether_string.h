@@ -284,6 +284,11 @@ const char* aether_string_capture_owned(const char* s);
  * slot, as capture_owned gives a closure environment one. The reference is
  * recorded (#3567), and release_kept gives back only a recorded one. */
 void* aether_string_keep(const void* s);
+/* #3567: a reference the caller hands over (a store's take), recorded as
+ * keep's is and returned: what a string stored into a `ptr` module var
+ * holds, given back with release_kept. keep retains its argument; this
+ * records the reference it is given. */
+void* aether_string_keep_owned(const void* s);
 /* #3567: a store into a header-defined struct's string field gives C the
  * reference `s` hands over, recorded by the characters it returns, which the
  * field holds; release_kept of those characters (or of the string) gives it

@@ -1418,6 +1418,17 @@ void* aether_string_keep(const void* s) {
     return (void*)k;
 }
 
+void* aether_string_keep_owned(const void* s) {
+    if (!s) return NULL;
+    /* A plain C string has no reference to hand over: a counted copy,
+     * recorded as keep's is. The take before the store makes one of any
+     * plain string, so this is the rare path. */
+    const char* k = is_aether_string(s) ? (const char*)s : (const char*)string_new((const char*)s);
+    AetherString* h = given_counted(k);
+    if (h) given_record(h);
+    return (void*)k;
+}
+
 void aether_string_release_kept(void* p) {
     if (!p) return;
     /* The pointer C holds first, the characters themselves: they may begin

@@ -9561,6 +9561,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * given from (std/string/aether_string.h). */
     print_line(gen, "extern const char* aether_string_give_c(const void* s);");
     print_line(gen, "extern const char* aether_string_from_c(const char* s);");
+    /* #3567: a string stored into a `ptr` module var, recorded as
+     * string.keep's reference is. */
+    print_line(gen, "extern void* aether_string_keep_owned(const void* s);");
     /* The header of a counted string, as the runtime lays it out. A string
      * no other thread can reach is counted here, inline; a shared one
      * (#2919) is counted atomically by the runtime, which also frees the

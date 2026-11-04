@@ -202,7 +202,12 @@ slots, below).
 
 A `ptr` slot owns nothing. A string goes into one only through
 `string.keep(s)`, which hands over a reference the program gives back with
-`string.release_kept(p)`. C memory viewed as `string[]` owns nothing either:
+`string.release_kept(p)`. A module-level `ptr` var takes a string as it
+stands (`gp = s`, `gp = string.concat(a, b)`) and gives it that same
+recorded reference (#3567): the string outlives the local or the statement
+it came from, and `string.release_kept(gp)` gives it back before the next
+store. Nothing gives it back on a re-bind: as with `keep`, that is the
+program's to do. C memory viewed as `string[]` owns nothing either:
 `(names as string[])[i] = s` gives C the characters and no reference, so
 the string must outlive every read. A local does only while the memory
 ends with the function (an argv array built, handed to C and freed in one

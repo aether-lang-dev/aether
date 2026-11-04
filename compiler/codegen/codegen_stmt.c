@@ -10333,6 +10333,27 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         break;
                     }
                     if (gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
+                        grhs->node_type->kind == TYPE_STRING) {
+                        /* #3567: a `ptr` global owns nothing, so a string
+                         * stored into it is given a reference of its own,
+                         * recorded as string.keep's is: the store takes the
+                         * value (a fresh one moved, a live one retained)
+                         * and aether_string_keep_owned records it, so
+                         * `string.release_kept(gp)` gives it back. As with
+                         * keep, nothing releases it behind the program's
+                         * back: a re-bind leaves the old one recorded, the
+                         * program's to give back. It was the pointer as it
+                         * stood, which a string built in the statement left
+                         * owned by nothing, and a local left dangling once
+                         * it went. The cast keeps the build quiet (#2811). */
+                        fprintf(gen->output, "%s = %saether_string_keep_owned((const void*)(",
+                                stmt->value, gcast);
+                        emit_string_take_owned(gen, grhs, 0);
+                        fprintf(gen->output, "));\n");
+                        emit_global_rebind_trailing(gen, stmt);
+                        break;
+                    }
+                    if (gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
                         grhs->node_type->kind == TYPE_FUNCTION) {
                         /* #2890: a `ptr` global takes a closure boxed, as a
                          * `ptr` field and a `ptr` parameter do, and a bare
