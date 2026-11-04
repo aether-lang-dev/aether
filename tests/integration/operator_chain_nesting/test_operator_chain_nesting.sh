@@ -205,7 +205,7 @@ awk 'BEGIN {
     print "    why = \"\""
     print "    try {"
     printf "        z_v = a[0]"
-    for (i = 1; i < N - 1; i++) printf " / a[%d]", i == 500 ? 3 : 1
+    for (i = 1; i < N - 1; i++) printf " / a[%d]", (i == 500 ? 3 : 1)
     print " / bump()"
     print "        println(\"z=${z_v}\")"
     print "    } catch e {"
@@ -214,7 +214,7 @@ awk 'BEGIN {
     print "    println(\"caught=${why != \"\"} after=${g_after}\")"
     print "}"
     printf "and=false last=500 bad=0\nor=true last=500 bad=0\n" > "/dev/stderr"
-    printf "lt=%s eq=%s div=%d mod=%d shl=%d shr=%d min=-2147483648\n", lt ? "true" : "false", eq ? "true" : "false", dv, md, sl, sr > "/dev/stderr"
+    printf "lt=%s eq=%s div=%d mod=%d shl=%d shr=%d min=-2147483648\n", (lt ? "true" : "false"), (eq ? "true" : "false"), dv, md, sl, sr > "/dev/stderr"
     printf "caught=true after=0\n" > "/dev/stderr"
 }' > "$WORK/ops.ae" 2> "$WORK/ops.want"
 got="$(AETHER_HOME="$ROOT" "$AE" run "$WORK/ops.ae" 2>&1 | tail -4 | tr -d '\r')"
