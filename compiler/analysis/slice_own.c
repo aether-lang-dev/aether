@@ -1608,7 +1608,12 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
          * the buffer shared, so the growth moves to storage of its own
          * (aether_slice_grow1) and leaves the buffer to its owner. It grew
          * in place, under the owner, who then held freed storage. */
-        if (!holds_reference(c, f, *xs)) {
+        /* A module-level `var` grows a copy too (#3568): it is read under
+         * its lock, which an emptying of the var in place would not be, and
+         * the store of the result swaps the new buffer in under the lock. */
+        int module_var = (*xs)->type == AST_IDENTIFIER && (*xs)->value &&
+                         !pm_get(&f->uses, *xs) && strmap_has(&c->globals, (*xs)->value);
+        if (!holds_reference(c, f, *xs) || module_var) {
             wrap(xs, "__slice_copy");
             return;
         }

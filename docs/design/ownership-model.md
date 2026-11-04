@@ -259,6 +259,18 @@ one var, 8M reads in all, took about 345 ms where the unlocked read took
 is better given to each actor, or kept in a local, than read from a module
 `var` each time.
 
+**A module slice `var` is locked the same way (#3568).** Its store released
+the buffer it held and then wrote the new slice, and a read copied the
+slice's 24 bytes and then took its reference: a reader could take a
+reference to a freed header, or see a slice torn between two stores, and a
+push grew the var's buffer in place under a reader. A store publishes the
+slice it takes, swaps it in under the var's lock and releases the old one
+after unlocking (aether_slice_var_store); a read takes a reference under
+the lock (aether_slice_var_take) into a temporary its statement's block
+releases; `free(g)` takes the slice out under it (aether_slice_var_take_out);
+and a push or an `append` grows a reference taken under it, a copy since
+the var shares the buffer, and stores the result back.
+
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
 first parent, the same output from both, 21 runs each interleaved, the

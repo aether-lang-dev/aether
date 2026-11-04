@@ -601,6 +601,34 @@ static void emit_module_string_read(CodeGenerator* gen, const char* name) {
     push_scoped_temp_free(gen, t);
 }
 
+/* #3568: does `e` read a module-level slice `var` (is_module_slice_var)? */
+int module_slice_var_read(CodeGenerator* gen, const ASTNode* e) {
+    return e && e->type == AST_IDENTIFIER && e->value && !gen->in_const_init &&
+           !is_actor_state_var(gen, e->value) && !is_var_declared(gen, e->value) &&
+           is_module_slice_var(gen, e->value);
+}
+
+/* #3568: a read of the module-level slice `var` `name`, as a string var's
+ * is (emit_module_string_read): any thread may store into the var while the
+ * value read is in use, and a store releases the buffer it replaces, so the
+ * read takes a reference of its own under the var's lock
+ * (aether_slice_var_take), into a temporary of the statement its block gives
+ * back on every exit. The 24 bytes of the slice are read whole under the
+ * lock, never torn by a store. Where no statement is being emitted the var
+ * is read in place. */
+static void emit_module_slice_read(CodeGenerator* gen, const char* name) {
+    if (!hoist_ready(gen)) {
+        fprintf(gen->output, "%s", name);
+        return;
+    }
+    const char* t = cg_internf("_eo%d", g_order_counter++);
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
+    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
+            "aether_slice_release(&%s), %s = aether_slice_var_take(&%s, &%s))",
+            t, t, t, name, module_string_var_lock(name));
+    push_scoped_slice_free(gen, t);
+}
+
 /* Is `e` a string read from such a place: the place itself, or `o ?? d` /
  * `o!` over a `string?` one? */
 int string_reads_place(CodeGenerator* gen, ASTNode* e) {
@@ -8370,6 +8398,16 @@ static void emit_slice_stmt_temp(CodeGenerator* gen, ASTNode* call) {
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
  * runtime's aether_slice_take, _copy, _release, _set and _grow1). Returns 0
  * for a name that is none of them. */
+/* The place `a` an intrinsic takes the address of, as the place it is: a
+ * module-level slice `var` named there is the var itself, not a read of it
+ * (emit_module_slice_read). */
+static void emit_slice_place(CodeGenerator* gen, ASTNode* a) {
+    int saved = gen->generating_lvalue;
+    gen->generating_lvalue = 1;
+    generate_expression(gen, a);
+    gen->generating_lvalue = saved;
+}
+
 static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     const char* f = expr->value;
     FILE* o = gen->output;
@@ -8377,9 +8415,17 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     if (!a) return 0;
     Type* st = type_is_slice(a->node_type) ? a->node_type : expr->node_type;
     Type* et = st && type_is_slice(st) ? st->element_type : NULL;
+    /* #3568: a module-level slice `var` is taken out, as stored into, under
+     * its lock (aether_slice_var_take_out). */
+    int gvar = module_slice_var_read(gen, a);
     if (strcmp(f, "__slice_take") == 0 && expr->child_count == 1) {
+        if (gvar) {
+            fprintf(o, "aether_slice_var_take_out(&%s, &%s)", a->value,
+                    module_string_var_lock(a->value));
+            return 1;
+        }
         fprintf(o, "aether_slice_take((AetherSlice*)&(");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, "))");
         return 1;
     }
@@ -8405,14 +8451,14 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     }
     if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
         fprintf(o, "aether_slice_release((AetherSlice*)&(");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, "))");
         return 1;
     }
     if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0) &&
         expr->child_count == 2) {
         fprintf(o, "%s((AetherSlice*)&(", strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, "), ");
         generate_expression(gen, expr->children[1]);
         fprintf(o, ")");
@@ -8429,9 +8475,30 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         const char* v = seq_let(gen, &s, ect, "_ae_puv");
         emit_value_take(gen, expr->children[1], et);
         seq_next(gen, &s);
+        if (gvar) {
+            /* #3568: a module-level slice `var` grows a reference taken
+             * under its lock (a copy, the buffer being shared with the
+             * var), stored back under it; the store releases what the var
+             * held. Grown in place, the var's buffer moved under a reader
+             * that had taken it. */
+            const char* lk = module_string_var_lock(a->value);
+            const char* g = seq_let(gen, &s, "AetherSlice", "_ae_pug");
+            fprintf(o, "aether_slice_var_take(&%s, &%s)", a->value, lk);
+            seq_next(gen, &s);
+            fprintf(o, "%s = aether_slice_grow1(%s, sizeof(%s), %s, 1, ", g, g, ect,
+                    own_slice_ops(gen, st));
+            emit_slice_diag_file(gen, expr);
+            fprintf(o, ", %d)", expr->line);
+            seq_next(gen, &s);
+            fprintf(o, "((%s*)%s.ptr)[%s.len - 1] = %s", ect, g, g, v);
+            seq_next(gen, &s);
+            fprintf(o, "aether_slice_var_store(&%s, &%s, %s)", a->value, lk, g);
+            seq_close(gen, &s);
+            return 1;
+        }
         const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_pup");
         fprintf(o, "(AetherSlice*)&(");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, ")");
         seq_next(gen, &s);
         /* #3568: a place that holds no reference of its own takes one, so
@@ -9475,6 +9542,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             }
             if (!gen->generating_lvalue && module_string_var_read(gen, expr)) {
                 emit_module_string_read(gen, expr->value);
+                break;
+            }
+            if (!gen->generating_lvalue && module_slice_var_read(gen, expr)) {   /* #3568 */
+                emit_module_slice_read(gen, expr->value);
                 break;
             }
             if (gen->current_actor) {

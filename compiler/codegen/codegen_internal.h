@@ -156,9 +156,13 @@ void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
+/* The kind of a module-level `var`: a string and a slice each have a lock of
+ * their own (#3522, #3568). */
+enum { MODULE_VAR_OTHER = 0, MODULE_VAR_STRING = 1, MODULE_VAR_SLICE = 2 };
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
-                                int is_string);
+                                int kind);
 int is_module_string_var(CodeGenerator* gen, const char* name);   /* #3522 */
+int is_module_slice_var(CodeGenerator* gen, const char* name);    /* #3568 */
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
@@ -500,6 +504,11 @@ const char* module_string_var_lock(const char* name);
 void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
                               const char* taken);
 int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
+/* #3568: whether `e` reads a module-level slice `var`, which a read takes a
+ * reference to under the var's lock (codegen_expr.c), and the one store
+ * into one (codegen_stmt.c). */
+int module_slice_var_read(CodeGenerator* gen, const ASTNode* e);
+void emit_module_slice_store(CodeGenerator* gen, const char* name, ASTNode* v);
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
 /* #3527: the conversion an interpolation, print or println writes a value
  * of a type with (codegen_expr.c); PF_NONE for a type none writes, which

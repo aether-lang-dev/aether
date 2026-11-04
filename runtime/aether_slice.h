@@ -27,8 +27,10 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdatomic.h>
 #include "actors/aether_panic.h"
 #include "utils/aether_count.h"
+#include "utils/aether_compiler.h"   /* AETHER_CPU_PAUSE, a slice var's lock */
 
 #ifdef __cplusplus
 extern "C" {
@@ -676,6 +678,52 @@ static inline AetherSlice aether_slice_set_shared(AetherSlice* p, AetherSlice v)
     aether_slice_publish(v);
     aether_slice_release(p);
     return v;
+}
+
+/* #3568: the lock of a module-level slice `var`, as a string var's (#3522):
+ * held for a load and a retain, or for a swap, a few instructions, so a
+ * spin. Generated code declares one beside each slice var. */
+static inline void aether_slice_var_lock(atomic_flag* lock) {
+    while (atomic_flag_test_and_set_explicit(lock, memory_order_acquire)) AETHER_CPU_PAUSE();
+}
+
+static inline void aether_slice_var_unlock(atomic_flag* lock) {
+    atomic_flag_clear_explicit(lock, memory_order_release);
+}
+
+/* A read of the var at `place`: its slice, read whole under the lock, with a
+ * reference of its own taken there, so no store frees what the reader holds
+ * and none tears the slice it sees. The var's slice was published by its
+ * store, so the count is atomic. */
+static inline AetherSlice aether_slice_var_take(const AetherSlice* place, atomic_flag* lock) {
+    aether_slice_var_lock(lock);
+    AetherSlice s = *place;
+    aether_slice_retain(s);
+    aether_slice_var_unlock(lock);
+    return s;
+}
+
+/* The var at `place` left empty, and its slice handed over with the
+ * reference the var held (`free(g)`). */
+static inline AetherSlice aether_slice_var_take_out(AetherSlice* place, atomic_flag* lock) {
+    aether_slice_var_lock(lock);
+    AetherSlice s = *place;
+    *place = aether_slice_make(NULL, 0);
+    aether_slice_var_unlock(lock);
+    return s;
+}
+
+/* A store into the var at `place`: `v`, which holds a reference of its own,
+ * published before any other thread can reach it, swapped in under the lock,
+ * and what the var held released once the lock is let go. Two stores at once
+ * each release the slice they replaced. */
+static inline void aether_slice_var_store(AetherSlice* place, atomic_flag* lock, AetherSlice v) {
+    aether_slice_publish(v);
+    aether_slice_var_lock(lock);
+    AetherSlice old = *place;
+    *place = v;
+    aether_slice_var_unlock(lock);
+    aether_slice_unref(old);
 }
 
 /* #3072: `free(s)` of a place: the buffer `make([]T, n)` handed out, a view

@@ -7518,6 +7518,19 @@ void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs
     fprintf(gen->output, ")");
 }
 
+/* #3568: the one store into a module-level slice `var` `name`: `v`, which
+ * holds a reference of its own already (a move, a copy, a call's result),
+ * published, swapped in under the var's lock, and the slice the var held
+ * released after the lock is let go (aether_slice_var_store), as a string
+ * var's store does (emit_module_string_store). A store that released the
+ * old slice before the new one was in left a reader taking a reference to a
+ * freed header. The caller ends the statement. */
+void emit_module_slice_store(CodeGenerator* gen, const char* name, ASTNode* v) {
+    fprintf(gen->output, "aether_slice_var_store(&%s, &%s, ", name, module_string_var_lock(name));
+    generate_expression(gen, v);
+    fprintf(gen->output, ")");
+}
+
 /* A module-level `var` bound to a call with a trailing block, `g = vstack(0) {
  * ... }`, runs the block with the stored value as its context, as the same
  * binding of a local does. The store into the global used to leave the case
@@ -10406,6 +10419,18 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         gt && gt->kind == TYPE_PTR && grhs && grhs->node_type &&
                                 grhs->node_type->kind == TYPE_STRING
                             ? cg_internf("(%s)", get_c_type(gt)) : "";
+                    /* #3568: a slice var's store (slice ownership's
+                     * `__slice_set_shared(g, v)`) swaps `v` in under the
+                     * var's lock (emit_module_slice_store). */
+                    if (is_module_slice_var(gen, stmt->value) && grhs &&
+                        grhs->type == AST_FUNCTION_CALL && grhs->value && grhs->child_count == 2 &&
+                        (strcmp(grhs->value, "__slice_set_shared") == 0 ||
+                         strcmp(grhs->value, "__slice_set") == 0)) {
+                        emit_module_slice_store(gen, stmt->value, grhs->children[1]);
+                        fprintf(gen->output, ";\n");
+                        emit_global_rebind_trailing(gen, stmt);
+                        break;
+                    }
                     if (grhs && grhs->node_type && grhs->node_type->kind == TYPE_STRING &&
                         !(gt && gt->kind == TYPE_PTR)) {
                         /* R3: a module `var` owns the string it holds, as a

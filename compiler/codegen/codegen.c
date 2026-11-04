@@ -1103,7 +1103,17 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
  * `ptr` var holding a string is the pointer it is (R4). */
 int is_module_string_var(CodeGenerator* gen, const char* name) {
     int i = module_global_var_index(gen, name);
-    return i >= 0 && gen->module_global_var_is_string && gen->module_global_var_is_string[i];
+    return i >= 0 && gen->module_global_var_is_string &&
+           gen->module_global_var_is_string[i] == MODULE_VAR_STRING;
+}
+
+/* #3568: is `name` a module-level `var` declared a slice, which has a lock
+ * of its own as a string var does? (module_global_var_is_string holds the
+ * kind of each var.) */
+int is_module_slice_var(CodeGenerator* gen, const char* name) {
+    int i = module_global_var_index(gen, name);
+    return i >= 0 && gen->module_global_var_is_string &&
+           gen->module_global_var_is_string[i] == MODULE_VAR_SLICE;
 }
 
 // Is `name` a state field of the actor being generated? A bare `name` in
@@ -1119,7 +1129,7 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 
 // #701: record a module-level `var` global name (deduped).
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
-                                int is_string) {
+                                int kind) {
     if (!name) return;
     for (int i = 0; i < gen->module_global_var_count; i++)
         if (strcmp(gen->module_global_vars[i], name) == 0) return;
@@ -1136,7 +1146,7 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
     if (!strs) return;
     gen->module_global_var_is_string = strs;
     flags[gen->module_global_var_count] = is_program ? 1 : 0;
-    strs[gen->module_global_var_count] = is_string ? 1 : 0;
+    strs[gen->module_global_var_count] = (unsigned char)kind;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
 }
 
@@ -7913,6 +7923,11 @@ static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) 
         if (cd->node_type && cd->node_type->kind == TYPE_STRING)
             fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
                     module_string_var_lock(cd->value));
+        /* #3568: so has a slice var: a read takes a reference under it, and
+         * a store swaps the slice in under it. */
+        else if (type_is_slice(cd->node_type))
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
+                    module_string_var_lock(cd->value));
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
         if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
             /* #2800: an optional's constant is its own struct: `none`
@@ -11005,7 +11020,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
                 register_module_global_var(gen, cd->value, cd->origin_module == NULL,
-                                           cd->node_type && cd->node_type->kind == TYPE_STRING);
+                                           cd->node_type && cd->node_type->kind == TYPE_STRING
+                                               ? MODULE_VAR_STRING
+                                               : type_is_slice(cd->node_type) ? MODULE_VAR_SLICE
+                                                                              : MODULE_VAR_OTHER);
             } else if (fn_const_decl(cd)) {
                 /* #2648: emitted with the module vars, after the function
                  * prototypes and adapters (emit_module_global_vars). */
