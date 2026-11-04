@@ -1730,13 +1730,14 @@ static int try_emit_builder_cfg_release(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation ||
         strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
         return 0;
-    char buf[512];
-    snprintf(buf, sizeof(buf), "%s", deferred->annotation + sizeof(prefix) - 1);
-    char* rel = strchr(buf, ':');
+    /* Read in place (#3574): a copy of 512 bytes cut a long factory's
+     * release name, and the C named a function that is not there. */
+    const char* cfg = deferred->annotation + sizeof(prefix) - 1;
+    const char* rel = strchr(cfg, ':');
     if (!rel) return 1;
-    *rel++ = '\0';
+    int cfg_len = (int)(rel - cfg);
     print_indent(gen);
-    fprintf(gen->output, "if (%s) %s(%s);\n", buf, rel, buf);
+    fprintf(gen->output, "if (%.*s) %s(%.*s);\n", cfg_len, cfg, rel + 1, cfg_len, cfg);
     return 1;
 }
 
@@ -3071,16 +3072,29 @@ static int lib_fn_is_export_head(ASTNode* program, ASTNode* fn) {
  * clauses give the position (fn_param_type_at), and the set's result
  * (fn_result_type). The gate read the first clause's own parameters, so a
  * literal pattern there (`fact(0)`) cost the set its alias while the
- * catalog, which read every clause, still named it. */
-#define LIB_SIG_MAX 32
+ * catalog, which read every clause, still named it.
+ *
+ * One entry per position, however many (#3574): 32 slots cost an export of
+ * more parameters its alias, with a warning that a parameter type is not
+ * representable, and named its parameters past the 32nd `argN` in the
+ * catalog. lib_fn_signature allocates them; lib_sig_free gives them back. */
 typedef struct {
     int count;
-    Type* ptypes[LIB_SIG_MAX];
-    const char* types[LIB_SIG_MAX];   /* the ABI spelling */
-    const char* names[LIB_SIG_MAX];
-    const char* casts[LIB_SIG_MAX];   /* the real `Struct*` a typed pointer is cast to, or NULL */
-    Type* result;                     /* NULL: returns nothing */
+    Type** ptypes;
+    const char** types;   /* the ABI spelling */
+    const char** names;
+    const char** casts;   /* the real `Struct*` a typed pointer is cast to, or NULL */
+    Type* result;         /* NULL: returns nothing */
 } LibSig;
+
+static void lib_sig_free(LibSig* sig) {
+    free(sig->ptypes);
+    free(sig->types);
+    free(sig->names);
+    free(sig->casts);
+    sig->ptypes = NULL;
+    sig->types = sig->names = sig->casts = NULL;
+}
 
 /* The name position `pos` of `fn` goes by: the first clause's that binds
  * one there, unless an earlier position took it, else `argN`. Names of the
@@ -3109,9 +3123,18 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
     sig->count = 0;
     sig->result = fn_result_type(gen, fn);
     int npos = fn_param_count(fn);
+    size_t slots = (size_t)(npos > 0 ? npos : 1);
+    sig->ptypes = (Type**)calloc(slots, sizeof(Type*));
+    sig->types = (const char**)calloc(slots, sizeof(char*));
+    sig->names = (const char**)calloc(slots, sizeof(char*));
+    sig->casts = (const char**)calloc(slots, sizeof(char*));
+    if (!sig->ptypes || !sig->types || !sig->names || !sig->casts) {
+        fprintf(stderr, "aetherc: out of memory reading an export's signature\n");
+        exit(1);
+    }
     /* Every position's name first: the catalog's records name a parameter
      * whether or not the export has an alias. */
-    for (int pos = 0; pos < npos && pos < LIB_SIG_MAX; pos++)
+    for (int pos = 0; pos < npos; pos++)
         sig->names[pos] = lib_param_name(gen, fn, pos, sig);
     for (int pos = 0; pos < npos; pos++) {
         int list = 0;
@@ -3121,7 +3144,7 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
         }
         Type* t = fn_param_type_at(gen, fn, pos);
         const char* abi = get_abi_type(t);
-        if (list || !abi || strcmp(abi, "void") == 0 || pos >= LIB_SIG_MAX) {
+        if (list || !abi || strcmp(abi, "void") == 0) {
             *why = "param";
             return 0;
         }
@@ -3218,10 +3241,13 @@ int lib_fn_is_local(CodeGenerator* gen, ASTNode* fn) {
     const char* alias;
     const char* name;
     const char* module;
+    if (!lib_fn_identity(fn, &alias, &name, &module) || !lib_fn_is_export_head(gen->program, fn))
+        return 0;
     LibSig sig;
     const char* why = NULL;
-    return lib_fn_identity(fn, &alias, &name, &module) &&
-           lib_fn_is_export_head(gen->program, fn) && lib_fn_signature(gen, fn, &sig, &why);
+    int ok = lib_fn_signature(gen, fn, &sig, &why);
+    lib_sig_free(&sig);
+    return ok;
 }
 
 /* The public identity of a module-level const in a --emit=lib build. A
@@ -3274,12 +3300,16 @@ static const char* lib_symbol_for(const char* lib_id, const char* package,
         end = strrchr(base, '.');
     }
     if (!end) end = base + strlen(base);
-    char id[128];
-    size_t n = 0;
-    for (const char* p = base; p < end && n + 1 < sizeof(id); p++)
-        id[n++] = isalnum((unsigned char)*p) ? *p : '_';
+    /* The whole id (#3574): 128 bytes cut a long one, so two libraries
+     * whose ids share their first 127 characters defined one symbol. */
+    size_t n = (size_t)(end - base);
+    char* id = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++)
+        id[i] = isalnum((unsigned char)base[i]) ? base[i] : '_';
     id[n] = '\0';
-    return cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+    const char* sym = cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+    free(id);
+    return sym;
 }
 
 /* #2931: the function a caller gives a string an export returned back to,
@@ -3604,6 +3634,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                              "use int, long, uint64, float, bool, byte, string, ptr, a *Struct, a struct by value, or a fn(...) -> R function pointer in public API functions",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
+            lib_sig_free(&sig);
             continue;
         }
 
@@ -3631,6 +3662,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                              "wrap the tuple-returning function with one that returns a single ABI-safe value if it should be exposed across the library boundary",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
+            lib_sig_free(&sig);
             continue;
         }
         if (!ret_abi) {
@@ -3729,6 +3761,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             emit_lib_stub_return(gen, result, ret_abi);
         else
             fprintf(gen->output, "    aether_exec_leave();\n}\n");
+        lib_sig_free(&sig);
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -4281,13 +4314,14 @@ static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
     int npos = fn_param_count(fn);
     for (int pos = 0; pos < npos; pos++) {
         const char* ts = cg_type_source(fn_param_type_at(gen, fn, pos));
-        if (!ts) { free(b.s); return NULL; }
+        if (!ts) { free(b.s); lib_sig_free(&sig); return NULL; }
         if (pos > 0) cg_text_put(&b, ", ");
-        cg_text_put(&b, pos < LIB_SIG_MAX ? sig.names[pos] : cg_internf("arg%d", pos));
+        cg_text_put(&b, sig.names[pos]);
         cg_text_put(&b, ": ");
         cg_text_put(&b, fn_param_mode_at(gen, fn, pos));
         cg_text_put(&b, ts);
     }
+    lib_sig_free(&sig);
     Type* result = fn_result_type(gen, fn);
     const char* rt = "void";
     if (result) {
@@ -4357,7 +4391,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (!fn_c_callback_def(gen, fn)) {
             LibSig sig;
             const char* why = NULL;
-            if (!lib_fn_signature(gen, fn, &sig, &why)) continue;
+            int ok = lib_fn_signature(gen, fn, &sig, &why);
+            lib_sig_free(&sig);
+            if (!ok) continue;
         }
         fns[fn_count++] = fn;
     }
@@ -4689,7 +4725,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             Type* pt = fn_param_type_at(gen, fn, p);
             if (pt && pt->kind == TYPE_FUNCTION) {
                 lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
-                rec_name[clo_count] = p < LIB_SIG_MAX ? psig.names[p] : cg_internf("arg%d", p);
+                rec_name[clo_count] = psig.names[p];
                 rec_role[clo_count] = "param";
                 rec_encl[clo_count] = fn->value;
                 rec_sig[clo_count]  = strdup(type_to_string(pt));
@@ -4700,6 +4736,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 clo_count++;
             }
         }
+        lib_sig_free(&psig);
     }
     /* 3: hoisted closure literals whose parent function is an export. */
     for (int ci = 0; ci < gen->closure_count; ci++) {
@@ -4962,17 +4999,19 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * count/pointer they know. */
     int strings_returned = 0;
     for (int i = 0; i < fn_count && !strings_returned; i++) {
-        LibSig rs;
+        LibSig rs = {0};
         const char* rwhy = NULL;
         if (lib_fn_signature(gen, fns[i], &rs, &rwhy) && rs.result &&
             rs.result->kind == TYPE_STRING) strings_returned = 1;
+        lib_sig_free(&rs);
     }
     for (int r = 0; r < clo_count && !strings_returned; r++) {
-        LibSig rs;
+        LibSig rs = {0};
         const char* rwhy = NULL;
         if (strcmp(rec_role[r], "builder") == 0 && rec_fn[r] &&
             lib_fn_signature(gen, rec_fn[r], &rs, &rwhy) && rs.result &&
             rs.result->kind == TYPE_STRING) strings_returned = 1;
+        lib_sig_free(&rs);
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
     /* #3481: on ELF `ae` links a library with a runtime of its own
@@ -5805,22 +5844,27 @@ void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name) {
  * passed `relay` to an incompatible pointer type. A fn-pointer result stays
  * `void*`, which is how a function returning one is declared. */
 const char* fnptr_c_spelling(Type* sig, const char* name) {
-    char buf[1024];
-    size_t n = 0;
+    /* As long as it is (#3574): 1024 bytes cut the spelling of a pointer
+     * of many or long parameter types, and the C did not compile. */
+    CgText b = {NULL, 0, 0};
     const char* ret_c = (sig && sig->return_type) ? get_c_type(sig->return_type) : "void";
-    n += (size_t)snprintf(buf + n, sizeof(buf) - n, name ? "%s (*%s)(" : "%s(*%s)(",
-                          ret_c, name ? name : "");
+    cg_text_put(&b, ret_c);
+    cg_text_put(&b, name ? " (*" : "(*");
+    if (name) cg_text_put(&b, name);
+    cg_text_put(&b, ")(");
     if (sig && sig->param_count > 0 && sig->param_types) {
-        for (int i = 0; i < sig->param_count && n < sizeof(buf); i++) {
+        for (int i = 0; i < sig->param_count; i++) {
             Type* p = sig->param_types[i];
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i > 0 ? ", " : "",
-                                  is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
+            if (i > 0) cg_text_put(&b, ", ");
+            cg_text_put(&b, is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
         }
-    } else if (n < sizeof(buf)) {
-        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "void");
+    } else {
+        cg_text_put(&b, "void");
     }
-    if (n < sizeof(buf)) snprintf(buf + n, sizeof(buf) - n, ")");
-    return cg_internf("%s", buf);
+    cg_text_put(&b, ")");
+    const char* spelled = cg_intern_n(b.s, b.len);
+    free(b.s);
+    return spelled;
 }
 
 /* True for a parameter/local whose declared type is a typed C function
@@ -8357,10 +8401,13 @@ static const char* const LANES8_NAMES[] = {
  * or the AETHER_GCC_COMPAT=0 path) the region is plain code with no target
  * attribute: the copy is a second ordinary copy, and off x86 it is never
  * chosen (lanes.cpu_has_avx2() is false). */
-#define LANE_REGION_MAX_STRUCTS 512
 typedef struct {
-    const char* structs[LANE_REGION_MAX_STRUCTS];  /* the copies' structs holding lanes */
+    /* The copies' structs holding lanes, every one (#3574): past 512 the
+     * rest were not remapped, so the copy's code named the plain copy's
+     * struct, whose lanes are another C type. */
+    const char** structs;
     int struct_count;
+    int struct_cap;
     int any;        /* a module was imported at a target */
     int defined;    /* the block and the structs went out in a region */
     int open;
@@ -8374,26 +8421,43 @@ static const char* decl_lane_target(const ASTNode* decl) {
     return m ? m->lane_target : NULL;
 }
 
-/* Does a value of this type hold an f32x8 or i32x8, directly, in a struct
- * field, through a pointer, in an array, a tuple or an optional? Such a
- * value has a different C type in the two copies. */
-static int type_holds_lanes8(ASTNode* program, Type* t, int depth) {
-    if (!t || depth > 24) return 0;
+/* The structs one type_holds_lanes8 query has entered, each once, so a
+ * struct that reaches itself through a pointer ends the walk (#3574): a
+ * depth of 24 stood for that, and lanes in a struct 25 deep were taken for
+ * none, so a value holding them crossed between the copies unrefused. */
+typedef struct {
+    const char** v;
+    int n, cap;
+} LaneSeen;
+
+static int lane_seen_enter(LaneSeen* s, const char* name) {
+    for (int i = 0; i < s->n; i++)
+        if (strcmp(s->v[i], name) == 0) return 0;
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 8;
+        s->v = (const char**)aether_xrealloc((void*)s->v, sizeof(char*) * (size_t)s->cap);
+    }
+    s->v[s->n++] = name;
+    return 1;
+}
+
+static int type_holds_lanes8_in(ASTNode* program, Type* t, LaneSeen* seen) {
+    if (!t) return 0;
     switch (t->kind) {
         case TYPE_F32X8: case TYPE_I32X8: return 1;
         case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
-            return type_holds_lanes8(program, t->element_type, depth + 1);
+            return type_holds_lanes8_in(program, t->element_type, seen);
         case TYPE_TUPLE:
             for (int i = 0; i < t->tuple_count; i++)
-                if (type_holds_lanes8(program, t->tuple_types[i], depth + 1)) return 1;
+                if (type_holds_lanes8_in(program, t->tuple_types[i], seen)) return 1;
             return 0;
         case TYPE_STRUCT: {
             ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
-            if (!sd) return 0;
+            if (!sd || !sd->value || !lane_seen_enter(seen, sd->value)) return 0;
             for (int f = 0; f < sd->child_count; f++) {
                 ASTNode* fld = sd->children[f];
                 if (fld && fld->type == AST_STRUCT_FIELD &&
-                    type_holds_lanes8(program, fld->node_type, depth + 1)) return 1;
+                    type_holds_lanes8_in(program, fld->node_type, seen)) return 1;
             }
             return 0;
         }
@@ -8401,6 +8465,15 @@ static int type_holds_lanes8(ASTNode* program, Type* t, int depth) {
     }
 }
 
+/* Does a value of this type hold an f32x8 or i32x8, directly, in a struct
+ * field, through a pointer, in an array, a tuple or an optional? Such a
+ * value has a different C type in the two copies. */
+static int type_holds_lanes8(ASTNode* program, Type* t) {
+    LaneSeen seen = {NULL, 0, 0};
+    int holds = type_holds_lanes8_in(program, t, &seen);
+    free((void*)seen.v);
+    return holds;
+}
 static int lane_region_struct_listed(const char* name) {
     for (int i = 0; i < g_lane_regions.struct_count; i++)
         if (strcmp(g_lane_regions.structs[i], name) == 0) return 1;
@@ -8416,15 +8489,15 @@ static void lane_region_error(ASTNode* at, const char* msg, const char* hint) {
 /* Does this signature (a definition's or an extern's) take or give lanes? */
 static int sig_holds_lanes8(CodeGenerator* gen, ASTNode* program, ASTNode* fn) {
     if (fn->type == AST_EXTERN_FUNCTION) {
-        if (type_holds_lanes8(program, fn->node_type, 0)) return 1;
+        if (type_holds_lanes8(program, fn->node_type)) return 1;
         for (int i = 0; i < fn->child_count; i++)
-            if (fn->children[i] && type_holds_lanes8(program, fn->children[i]->node_type, 0)) return 1;
+            if (fn->children[i] && type_holds_lanes8(program, fn->children[i]->node_type)) return 1;
         return 0;
     }
-    if (type_holds_lanes8(program, fn_result_type(gen, fn), 0)) return 1;
+    if (type_holds_lanes8(program, fn_result_type(gen, fn))) return 1;
     int n = fn_param_count(fn);
     for (int j = 0; j < n; j++)
-        if (type_holds_lanes8(program, fn_param_type_at(gen, fn, j), 0)) return 1;
+        if (type_holds_lanes8(program, fn_param_type_at(gen, fn, j))) return 1;
     return 0;
 }
 
@@ -8450,8 +8523,10 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
     if (node->type == AST_FUNCTION_CALL && node->value) {
         /* The entry program's qualified calls still read `ns.fn` here (the
          * merged modules' are already `ns_fn`): the definition is `ns_fn`. */
-        char cname[512];
-        snprintf(cname, sizeof(cname), "%s", node->value);
+        /* The whole name (#3574): 512 bytes cut a long one, the callee was
+         * not found, and lanes crossed unrefused. */
+        char* cname = (char*)aether_xrealloc(NULL, strlen(node->value) + 1);
+        strcpy(cname, node->value);
         for (char* p = cname; *p; p++) if (*p == '.') *p = '_';
         ASTNode* callee = find_function_definition_by_name(program, cname);
         if (callee) {
@@ -8473,6 +8548,7 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
                 lane_region_error(node, msg, "C compiled apart takes the build's form of an f32x8, not the target copy's");
             }
         }
+        free(cname);
     }
     for (int i = 0; i < node->child_count; i++)
         lane_region_check_body(gen, program, fn, target, node->children[i]);
@@ -8481,31 +8557,38 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
 /* Every struct holding lanes that a value of type `t` reaches: the region
  * remaps each one by its merged name. Two modules' identical structs share
  * one name (#2129's scoping), so the copy's functions name the plain copy's
- * struct, and the remap gives them their own. */
-static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t, int depth) {
-    if (!t || depth > 24) return;
+ * struct, and the remap gives them their own. A struct is listed before
+ * its fields are walked, and one holding no lanes is not walked, so the
+ * walk ends without a depth (#3574): 24 left a struct deeper than that
+ * unremapped. */
+static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t) {
+    if (!t) return;
     switch (t->kind) {
         case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
-            lane_region_note_type(gen, program, t->element_type, depth + 1);
+            lane_region_note_type(gen, program, t->element_type);
             return;
         case TYPE_TUPLE:
             for (int i = 0; i < t->tuple_count; i++)
-                lane_region_note_type(gen, program, t->tuple_types[i], depth + 1);
+                lane_region_note_type(gen, program, t->tuple_types[i]);
             return;
         case TYPE_STRUCT: {
             ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
-            if (!sd || lane_region_struct_listed(sd->value) || !type_holds_lanes8(program, t, 0)) return;
+            if (!sd || lane_region_struct_listed(sd->value) || !type_holds_lanes8(program, t)) return;
             if (struct_owns_heap_strings(gen, sd)) {
                 lane_region_error(sd, "a struct holding eight-lane values and owned strings or closures, used by a module imported at @target",
                                   "the @target copy redefines the lane structs it uses, not their generated retain and drop");
                 return;
             }
-            if (g_lane_regions.struct_count < LANE_REGION_MAX_STRUCTS)
-                g_lane_regions.structs[g_lane_regions.struct_count++] = sd->value;
+            if (g_lane_regions.struct_count == g_lane_regions.struct_cap) {
+                g_lane_regions.struct_cap = g_lane_regions.struct_cap ? g_lane_regions.struct_cap * 2 : 16;
+                g_lane_regions.structs = (const char**)aether_xrealloc(
+                    g_lane_regions.structs, sizeof(char*) * (size_t)g_lane_regions.struct_cap);
+            }
+            g_lane_regions.structs[g_lane_regions.struct_count++] = sd->value;
             for (int f = 0; f < sd->child_count; f++) {
                 ASTNode* fld = sd->children[f];
                 if (fld && fld->type == AST_STRUCT_FIELD)
-                    lane_region_note_type(gen, program, fld->node_type, depth + 1);
+                    lane_region_note_type(gen, program, fld->node_type);
             }
             return;
         }
@@ -8515,13 +8598,14 @@ static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t,
 
 static void lane_region_note_node(CodeGenerator* gen, ASTNode* program, ASTNode* n) {
     if (!n) return;
-    lane_region_note_type(gen, program, n->node_type, 0);
+    lane_region_note_type(gen, program, n->node_type);
     for (int i = 0; i < n->child_count; i++) lane_region_note_node(gen, program, n->children[i]);
 }
 
 /* Before any emission: the structs the copies' functions remap, and whether
  * the program keeps lanes on their side of the boundary. */
 static void lane_region_prepare(CodeGenerator* gen, ASTNode* program) {
+    free(g_lane_regions.structs);
     memset(&g_lane_regions, 0, sizeof(g_lane_regions));
     if (!global_module_registry) return;
     for (int m = 0; m < global_module_registry->module_count; m++) {
@@ -10211,10 +10295,16 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static void _aether_cooked_mode(void) {}");
     print_line(gen, "#endif");
     // Builder context stack: trailing blocks push/pop the return value
-    print_line(gen, "static void* _aether_ctx_stack[64];");
+    /* As deep as the blocks nest (#3574): 64 slots dropped the push of a
+     * block 65 deep (a builder call recursing inside its own block), and
+     * that block's calls then worked on an outer block's config. */
+    print_line(gen, "typedef void (*_aether_ctx_release_fn)(void*);");
+    print_line(gen, "static void** _aether_ctx_stack = 0;");
     print_line(gen, "static int _aether_ctx_depth = 0;");
-    print_line(gen, "static void (*_aether_ctx_release[64])(void*);");
-    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) { _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; } }");
+    print_line(gen, "static int _aether_ctx_cap = 0;");
+    print_line(gen, "static _aether_ctx_release_fn* _aether_ctx_release = 0;");
+    print_line(gen, "static inline void _aether_ctx_grow(void) { int cap = _aether_ctx_cap ? _aether_ctx_cap * 2 : 64; void** s = (void**)realloc(_aether_ctx_stack, sizeof(void*) * (size_t)cap); if (!s) aether_panic(\"builder blocks nest deeper than memory allows\"); _aether_ctx_stack = s; _aether_ctx_release_fn* r = (_aether_ctx_release_fn*)realloc(_aether_ctx_release, sizeof(_aether_ctx_release_fn) * (size_t)cap); if (!r) aether_panic(\"builder blocks nest deeper than memory allows\"); _aether_ctx_release = r; _aether_ctx_cap = cap; }");
+    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth == _aether_ctx_cap) _aether_ctx_grow(); _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
     print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
     /* #2810: a builder call's config is released by its call only on a way

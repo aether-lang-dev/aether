@@ -15,6 +15,7 @@
 
 #include <ctype.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 /* The type of field `k` of the struct the catalog records under the first
@@ -24,17 +25,21 @@ typedef const char* (*AetherLibFieldType)(const void* ctx, const char* name, siz
 
 /* A walk's state: the catalog, and the structs it has entered. A struct
  * entered once is not entered again, so a struct that names itself, or
- * many that name each other, cost one visit each. */
+ * many that name each other, cost one visit each, and the walk ends. Every
+ * struct it enters is kept (#3574): 64 slots and a depth of 64 left a
+ * string 65 structs down unseen, so a value holding one crossed between
+ * two runtimes. */
 typedef struct {
     AetherLibFieldType field;
     const void* ctx;
-    const char* seen[64];
-    size_t seen_len[64];
+    const char** seen;
+    size_t* seen_len;
     int seen_count;
+    int seen_cap;
 } AetherLibStringWalk;
 
-static inline int aether_lib_walk_holds_string(AetherLibStringWalk* w, const char* type, int depth) {
-    if (!type || depth > 64) return 0;
+static inline int aether_lib_walk_holds_string(AetherLibStringWalk* w, const char* type) {
+    if (!type) return 0;
     /* A parameter's `@keep` or `@into` (#3013) is not part of its type. */
     while (*type == ' ' || *type == '@') {
         if (*type == '@')
@@ -54,7 +59,7 @@ static inline int aether_lib_walk_holds_string(AetherLibStringWalk* w, const cha
             if (*p == '(' || *p == '[') nest++;
             else if ((*p == ')' || *p == ']') && nest > 0) nest--;
             else if (nest == 0 && (*p == ',' || *p == ')')) {
-                if (aether_lib_walk_holds_string(w, el, depth + 1)) return 1;
+                if (aether_lib_walk_holds_string(w, el)) return 1;
                 if (*p == ')') return 0;
                 el = p + 1;
             }
@@ -73,15 +78,23 @@ static inline int aether_lib_walk_holds_string(AetherLibStringWalk* w, const cha
     if (n == 0 || !w->field) return 0;
     for (int i = 0; i < w->seen_count; i++)
         if (w->seen_len[i] == n && strncmp(w->seen[i], type, n) == 0) return 0;
-    if (w->seen_count < (int)(sizeof(w->seen) / sizeof(w->seen[0]))) {
-        w->seen[w->seen_count] = type;
-        w->seen_len[w->seen_count] = n;
-        w->seen_count++;
+    if (w->seen_count == w->seen_cap) {
+        int cap = w->seen_cap ? w->seen_cap * 2 : 16;
+        const char** seen = (const char**)realloc((void*)w->seen, sizeof(char*) * (size_t)cap);
+        if (seen) w->seen = seen;
+        size_t* seen_len = seen ? (size_t*)realloc(w->seen_len, sizeof(size_t) * (size_t)cap) : NULL;
+        if (seen_len) w->seen_len = seen_len;
+        /* Out of memory: say it holds one, the side that refuses. */
+        if (!seen || !seen_len) return 1;
+        w->seen_cap = cap;
     }
+    w->seen[w->seen_count] = type;
+    w->seen_len[w->seen_count] = n;
+    w->seen_count++;
     for (int k = 0; ; k++) {
         const char* ft = w->field(w->ctx, type, n, k);
         if (!ft) return 0;
-        if (aether_lib_walk_holds_string(w, ft, depth + 1)) return 1;
+        if (aether_lib_walk_holds_string(w, ft)) return 1;
     }
 }
 
@@ -92,8 +105,14 @@ static inline int aether_lib_type_holds_string(const char* type, AetherLibFieldT
     AetherLibStringWalk w;
     w.field = field;
     w.ctx = ctx;
+    w.seen = NULL;
+    w.seen_len = NULL;
     w.seen_count = 0;
-    return aether_lib_walk_holds_string(&w, type, 0);
+    w.seen_cap = 0;
+    int holds = aether_lib_walk_holds_string(&w, type);
+    free((void*)w.seen);
+    free(w.seen_len);
+    return holds;
 }
 
 /* The type a signature ("(a: A, b: B) -> R" or "(A, B) -> R") passes that
@@ -112,14 +131,26 @@ static inline const char* aether_lib_signature_string_type(const char* sig, Aeth
             for (const char* q = start; q < p; q++)
                 if (*q == ':') { t = q + 1; break; }
             while (t < p && (*t == ' ' || *t == '-' || *t == '>')) t++;
-            snprintf(out, cap, "%.*s", (int)(p - t), t);
-            size_t len = strlen(out);
-            while (len > 0 && out[len - 1] == ' ') out[--len] = '\0';
-            const char* bare = out;
-            while (*bare == '*') bare++;
-            if (strncmp(bare, "struct ", 7) == 0) bare += 7;
-            if (strcmp(bare, "string") != 0 && aether_lib_type_holds_string(out, field, ctx))
+            size_t len = (size_t)(p - t);
+            while (len > 0 && t[len - 1] == ' ') len--;
+            /* The whole spelling decides (#3574); `out` only shows it. Read
+             * through `out`, a 200-byte one cut a long spelling, and a
+             * struct holding a string was not found by its cut name. */
+            char* type = (char*)malloc(len + 1);
+            int holds = 1;   /* out of memory: the side that refuses */
+            if (type) {
+                memcpy(type, t, len);
+                type[len] = '\0';
+                const char* bare = type;
+                while (*bare == '*') bare++;
+                if (strncmp(bare, "struct ", 7) == 0) bare += 7;
+                holds = strcmp(bare, "string") != 0 && aether_lib_type_holds_string(type, field, ctx);
+                free(type);
+            }
+            if (holds) {
+                snprintf(out, cap, "%.*s", (int)len, t);
                 return out;
+            }
             if (*p == '\0') return NULL;
             start = p + 1;
             if (*p == ')') {
