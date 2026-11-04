@@ -1,0 +1,407 @@
+// std.guest.child: the guest's side of std.guest, for a worker program that
+// runs one script for a host in another process.
+//
+// Everything about the protocol is here, so a worker is its engine and the
+// glue to it: how a script runs, and how a mounted function appears in the
+// language. The worker
+//
+//   1. opens the channel its host spawned it with (open), and reads
+//      what the host sends before the script: the functions to mount, a
+//      PROBE, a LOGLEVEL, and the SCRIPT itself (read_script);
+//   2. sets its engine up from that (mount_count, mount_at);
+//   3. locks itself down and runs the script (run): run enters
+//      sandbox.enforce with no grants, says so to the host's audit log,
+//      runs the PROBE self-check if one was asked for, and then calls the
+//      engine's one callback, the block that runs the script;
+//   4. reports what the script does: say, log, call_host (a mounted function:
+//      waits for the host's answer), audit, done, error;
+//   5. looks for a CANCEL: poll, without waiting, between steps or from an
+//      engine's interrupt hook; call_host returns one that comes instead of a
+//      reply. Either way it is `h.cancel`, and the engine stops the script
+//      and answers error(h, "cancelled by host: ...").
+//
+// A LOGLEVEL from the host at any time lands in `h.log_level`, which `log`
+// holds to; an engine with a threshold of its own copies it from there.
+//
+// The host is the guest's only way out, so when the channel breaks (the
+// host has gone, or a frame from it is malformed) there is nobody left to
+// answer: the guest process ends with exit status 1. README.md in
+// std/guest has the protocol, every message in both directions.
+//
+//   main() {
+//       h, err = child.open("my-worker")
+//       if err != "" { exit(2) }
+//       if child.read_script(h) != "" { exit(1) }   // the host was told why
+//       child.run(h) callback {
+//           // ... run h.source in the engine; for each mounted call:
+//           r = child.call_host(h, "GREET", "[\"you\"]")
+//           // r.kind VALUE (r.text is JSON), FAIL, or CANCEL
+//           child.done(h, 0)
+//       }
+//       exit(0)
+//   }
+
+exports(Host, Reply, open, attach, read_script, run, poll, call_host, say, log, audit,
+    report_refusals, done, error, mount_count, mount_at, is_mounted,
+    json_string, split_verb, MAX_FRAME, MAX_FILE)
+
+import std.audit as sandbox_audit
+import std.fs
+import std.io
+import std.ipc
+import std.list
+import std.sandbox
+import std.string
+import std.tcp
+
+// The largest frame either side accepts (std.guest's MAX_FRAME), and the
+// largest file a FILE reply is read up to.
+const MAX_FRAME = 65536
+const MAX_FILE = 65536
+
+// The guest's end of the conversation, and what the host sent before the
+// script.
+struct Host {
+    ch: int
+    // Labels the guest's own audit lines ("<name> locked itself down ...").
+    name: string
+    // The SCRIPT, once read_script has it.
+    source: string
+    // 1 when the host asked for the PROBE self-check.
+    probe: int
+    // The host's log threshold: -1 off, 0 trace .. 5 fatal.
+    log_level: int
+    // "" until the host cancels (or breaks the protocol while the script
+    // runs, which cancels too): the reason.
+    cancel: string
+    // The mounted functions, a std.list of "NAME min max".
+    mounts: ptr
+}
+
+// The host's answer to a call. kind is VALUE (text is the JSON value; a
+// granted file is {"granted":true,"text":...}), FAIL (text is the message)
+// or CANCEL (text is the reason, also in h.cancel).
+struct Reply {
+    kind: string
+    text: string
+}
+
+// The channel this process was spawned with (std.guest's launch, through
+// sandbox.spawn_socket): the Host, or why there is none.
+open(name: string) -> (*Host, string) {
+    ch = ipc.parent_channel()
+    h = attach(ch, name)
+    if ch < 0 || ipc.parent_channel_kind() != "socket" {
+        return h, "${name}: no socket channel to a host; a host starts this with guest.launch"
+    }
+    return h, ""
+}
+
+// A Host on an open socket `ch` other than the inherited one.
+attach(ch: int, name: string) -> *Host {
+    h = heap.new(Host)
+    h.ch = ch
+    h.name = name
+    h.source = ""
+    h.probe = 0
+    h.log_level = -1
+    h.cancel = ""
+    h.mounts = list.new()
+    return h
+}
+
+// What the host sends before the script: MOUNT, PROBE and LOGLEVEL, up to
+// and including SCRIPT. "" with h.source, h.mounts, h.probe and
+// h.log_level set; or the protocol error, which has also been sent to the
+// host as ERROR (the worker exits).
+read_script(h: *Host) -> string {
+    while true {
+        data = hear(h)
+        verb, rest = split_verb(data)
+        err = ""
+        match verb {
+            "SCRIPT" -> {
+                h.source = rest
+                return ""
+            }
+            "MOUNT" -> {
+                err = check_mount(rest)
+                if err == "" { list.add(h.mounts, rest) }
+            }
+            "PROBE" -> { h.probe = 1 }
+            "LOGLEVEL" -> { err = set_level(h, rest) }
+            _ -> { err = "protocol: expected MOUNT, PROBE, LOGLEVEL or SCRIPT, got '${verb}'" }
+        }
+        if err != "" {
+            tell(h, "ERROR ${err}")
+            return err
+        }
+    }
+}
+
+// "NAME min max": a name, and 0 <= min <= max. Whether the name is one the
+// engine can mount is the engine's to say when it sets up.
+fn check_mount(spec: string) -> string {
+    parts = string.split(spec, " ")
+    defer string.array_free(parts)
+    if string.array_size(parts) != 3 || string.length(string.array_get(parts, 0)) == 0 {
+        return "protocol: MOUNT wants NAME min max"
+    }
+    name = string.copy(string.array_get(parts, 0))
+    lo, lerr = string.to_int(string.array_get(parts, 1))
+    hi, herr = string.to_int(string.array_get(parts, 2))
+    if lerr != "" || herr != "" { return "protocol: MOUNT ${name}: arity is not a number" }
+    if lo < 0 || hi < lo { return "protocol: MOUNT ${name}: arity ${lo}..${hi} is not 0 <= min <= max" }
+    return ""
+}
+
+// "LOGLEVEL n": "" or why it is refused.
+fn set_level(h: *Host, rest: string) -> string {
+    level, lerr = string.to_int(rest)
+    if lerr != "" || level < -1 || level > 5 {
+        return "protocol: LOGLEVEL wants -1 (off) or 0..5, got '${rest}'"
+    }
+    h.log_level = level
+    return ""
+}
+
+// How many functions the host mounted.
+mount_count(h: *Host) -> int {
+    return list.size(h.mounts)
+}
+
+// The i'th mounted function: its name and arity.
+mount_at(h: *Host, i: int) -> (string, int, int) {
+    spec, _ = list.get_string(h.mounts, i)
+    parts = string.split(spec, " ")
+    defer string.array_free(parts)
+    name = string.copy(string.array_get(parts, 0))
+    lo, _ = string.to_int(string.array_get(parts, 1))
+    hi, _ = string.to_int(string.array_get(parts, 2))
+    return name, lo, hi
+}
+
+// Whether the host mounted `name` (compared exactly).
+is_mounted(h: *Host, name: string) -> bool {
+    n = list.size(h.mounts)
+    i = 0
+    while i < n {
+        spec, _ = list.get_string(h.mounts, i)
+        if string.starts_with(spec, "${name} ") == 1 { return true }
+        i = i + 1
+    }
+    return false
+}
+
+// Locks the worker down and runs `body`, the engine's block that runs
+// h.source: inside sandbox.enforce with no grants (no files, no network,
+// no processes, no platform path anywhere), so a bug in the engine is held
+// to nothing; a file comes only as a descriptor the host hands over. Before
+// the block, an AUDIT line saying so, and the PROBE self-check if the host
+// asked for one. The block is called with h.
+run(h: *Host, body: fn) {
+    nothing = sandbox.new(h.name) {
+    }
+    defer sandbox.free(nothing)
+    sandbox_audit.clear()
+    sandbox.enforce(nothing) callback {
+        locked(h, body)
+    }
+}
+
+// The first thing inside the lockdown.
+fn locked(h: *Host, body: fn) {
+    audit(h, "${h.name} locked itself down before the first step: no grants")
+    if h.probe == 1 { self_probe(h) }
+    call(body, h)
+}
+
+// PROBE: what a bug in the engine could try from inside the lockdown,
+// through std: its file and network calls, which the worker's own enforce
+// answers. An engine can add probes of its own after this (in its block,
+// when h.probe is 1).
+fn self_probe(h: *Host) {
+    _, ferr = fs.read("/etc/passwd")
+    got = if ferr == "" { "ALLOWED" } else { "refused (${ferr})" }
+    audit(h, "probe worker fs.read('/etc/passwd'): ${got}")
+    conn, cerr = tcp.connect("1.1.1.1", 443)
+    if cerr == "" {
+        tcp.close(conn)
+        audit(h, "probe worker tcp.connect 1.1.1.1:443: ALLOWED")
+    } else {
+        audit(h, "probe worker tcp.connect 1.1.1.1:443: refused (${cerr})")
+    }
+    report_refusals(h)
+}
+
+// What this worker's own sandbox refused since the last report, as AUDIT
+// lines. say, log, call_host, done and error report first, so a refusal reaches
+// the host's audit log before what the script did next.
+report_refusals(h: *Host) {
+    n = sandbox_audit.count()
+    if n == 0 { return }
+    i = 0
+    while i < n {
+        cat, res, allowed = sandbox_audit.entry(i)
+        if allowed == 0 { tell(h, "AUDIT ${h.name} sandbox refused ${cat} ${res}") }
+        i = i + 1
+    }
+    sandbox_audit.clear()
+}
+
+// A line for the host's audit log.
+audit(h: *Host, line: string) {
+    tell(h, "AUDIT ${line}")
+}
+
+// The script printed `text`.
+say(h: *Host, text: string) {
+    report_refusals(h)
+    tell(h, "SAY ${text}")
+}
+
+// A log message at `level` (0 trace .. 5 fatal) with `tags`, a JSON object
+// ("{}" for none). Sent only at or above the host's threshold; with
+// logging off (the default) nothing is.
+log(h: *Host, level: int, tags: string, text: string) {
+    if h.log_level < 0 || level < h.log_level || level > 5 { return }
+    report_refusals(h)
+    tell(h, "LOG ${level} ${string.length(tags)} ${tags} ${text}")
+}
+
+// The script ended with exit code `code`. The worker exits after it.
+done(h: *Host, code: int) {
+    report_refusals(h)
+    tell(h, "DONE ${code}")
+}
+
+// The script failed, or was cancelled ("cancelled by host: <h.cancel>").
+// The worker exits after it.
+error(h: *Host, why: string) {
+    report_refusals(h)
+    tell(h, "ERROR ${why}")
+}
+
+// Without waiting: whether the host has cancelled. "" to go on, or the
+// reason (also h.cancel). A LOGLEVEL that has come is applied; any other
+// frame while the script runs breaks the protocol, and cancels too.
+poll(h: *Host) -> string {
+    while h.cancel == "" {
+        ready, werr = ipc.wait_readable(h.ch, 0)
+        if werr != "" { exit(1) }
+        if ready == 0 { return "" }
+        verb, rest = split_verb(hear(h))
+        if verb == "CANCEL" {
+            h.cancel = reason(rest)
+        } else if verb == "LOGLEVEL" {
+            h.cancel = set_level(h, rest)
+        } else {
+            h.cancel = "protocol: unexpected '${verb}' while the script runs"
+        }
+    }
+    return h.cancel
+}
+
+// Calls the mounted function `name` with `args`, a JSON array, and waits
+// for the host's answer. A LOGLEVEL while it waits is applied; a CANCEL
+// instead of the answer is returned as one. After a cancel, call_host sends
+// nothing and returns it again.
+call_host(h: *Host, name: string, args: string) -> Reply {
+    if h.cancel != "" { return Reply { kind: "CANCEL", text: h.cancel } }
+    report_refusals(h)
+    tell(h, "CALL ${name} ${args}")
+    while true {
+        verb, rest = split_verb(hear(h))
+        match verb {
+            "LOGLEVEL" -> {
+                // A bad one cancels; the answer still comes, keeping the
+                // stream in step, and is dropped below.
+                lerr = set_level(h, rest)
+                if lerr != "" && h.cancel == "" { h.cancel = lerr }
+            }
+            "REPLY" -> { return answered(h, "VALUE", rest) }
+            "FAIL" -> { return answered(h, "FAIL", if rest == "" { "host function failed" } else { rest }) }
+            "FILE" -> { return answered(h, "VALUE", take_file(h)) }
+            "CANCEL" -> {
+                if h.cancel == "" { h.cancel = reason(rest) }
+                return Reply { kind: "CANCEL", text: h.cancel }
+            }
+            _ -> {
+                if h.cancel == "" { h.cancel = "protocol: unexpected '${verb}' for a reply" }
+                return Reply { kind: "CANCEL", text: h.cancel }
+            }
+        }
+    }
+}
+
+fn answered(h: *Host, kind: string, text: string) -> Reply {
+    if h.cancel != "" { return Reply { kind: "CANCEL", text: h.cancel } }
+    return Reply { kind: kind, text: text }
+}
+
+fn reason(rest: string) -> string {
+    if rest == "" { return "no reason given" }
+    return rest
+}
+
+// FILE: the descriptor rides on the next byte; read it, close it, and give
+// the script {"granted":true,"text":...}.
+fn take_file(h: *Host) -> string {
+    _, fd, rerr = ipc.recv(h.ch, 1)
+    if rerr != "" { return "{\"granted\":false,\"why\":${json_string(rerr)}}" }
+    if fd < 0 { return "{\"granted\":false,\"why\":\"no descriptor came with FILE\"}" }
+    text, count, ferr = io.fd_read_n(fd, MAX_FILE + 1)
+    io.fd_close(fd)
+    if ferr != "" { return "{\"granted\":false,\"why\":${json_string(ferr)}}" }
+    if count > MAX_FILE { return "{\"granted\":false,\"why\":\"file larger than ${MAX_FILE} bytes\"}" }
+    return "{\"granted\":true,\"text\":${json_string(text)}}"
+}
+
+// Sends one frame; a host that has gone away ends the worker.
+fn tell(h: *Host, frame: string) {
+    if ipc.write_frame(h.ch, frame) != "" { exit(1) }
+}
+
+// The host's next frame; a host that has gone away ends the worker.
+fn hear(h: *Host) -> string {
+    data, err = ipc.read_frame(h.ch, MAX_FRAME)
+    if err != "" { exit(1) }
+    return data
+}
+
+// `s` as a JSON string literal.
+json_string(s: string) -> string {
+    hex = "0123456789abcdef"
+    out = "\""
+    seg = 0
+    i = 0
+    n = string.length(s)
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 34 || c == 92 || (c >= 0 && c < 32) {
+            out = string.concat(out, string.substring(s, seg, i))
+            if c == 34 {
+                out = string.concat(out, "\\\"")
+            } else if c == 92 {
+                out = string.concat(out, "\\\\")
+            } else if c == 10 {
+                out = string.concat(out, "\\n")
+            } else {
+                hi = c / 16
+                lo = c % 16
+                out = string.concat(out, "\\u00${string.substring(hex, hi, hi + 1)}${string.substring(hex, lo, lo + 1)}")
+            }
+            seg = i + 1
+        }
+        i = i + 1
+    }
+    out = string.concat(out, string.substring(s, seg, n))
+    return string.concat(out, "\"")
+}
+
+// "VERB the rest" -> ("VERB", "the rest").
+split_verb(line: string) -> (string, string) {
+    at = string.index_of(line, " ")
+    if at < 0 { return line, "" }
+    return string.substring(line, 0, at), string.substring(line, at + 1, string.length(line))
+}

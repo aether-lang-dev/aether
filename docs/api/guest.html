@@ -1,0 +1,273 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>guest - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search guest..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#Guest">Guest</a></li>
+    <li><a href="#Event">Event</a></li>
+    <li><a href="#launch">launch</a></li>
+    <li><a href="#launch_uncontained">launch_uncontained</a></li>
+    <li><a href="#mount">mount</a></li>
+    <li><a href="#probe">probe</a></li>
+    <li><a href="#log_level">log_level</a></li>
+    <li><a href="#start">start</a></li>
+    <li><a href="#answer">answer</a></li>
+    <li><a href="#fail">fail</a></li>
+    <li><a href="#grant_file">grant_file</a></li>
+    <li><a href="#deny">deny</a></li>
+    <li><a href="#cancel">cancel</a></li>
+    <li><a href="#next">next</a></li>
+    <li><a href="#close">close</a></li>
+    <li><a href="#audit">audit</a></li>
+    <li><a href="#json_string">json_string</a></li>
+    <li><a href="#printable">printable</a></li>
+    <li><a href="#level_name">level_name</a></li>
+    <li><a href="#MAX_FRAME">MAX_FRAME</a></li>
+    <li><a href="#DEADLINE_MS">DEADLINE_MS</a></li>
+    <li><a href="#GRACE_MS">GRACE_MS</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li class="active"><a href="guest.html">guest</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>guest</h1>
+    <p class="module-desc">std.guest: an Aether host running a guest in a separate, sandboxed child process, and talking to it both ways over std.ipc.</p>
+    <p class="import-line"><code>import std.guest</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="Guest" data-name="Guest">
+      <h3 class="function-name">Guest <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Guest</code></pre>
+      <p class="doc">A running guest. `deadline_ms`, `grace_ms` and `max_frame` may be changed at any time.</p>
+    </div>
+    <div class="function" id="Event" data-name="Event">
+      <h3 class="function-name">Event <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Event</code></pre>
+      <p class="doc">One thing the guest did. kind is SAY     text LOG     code = the level 0..5, name = TRACE .. FATAL, text = the message, tags = a JSON object; nothing to answer CALL    name, text = the arguments as a JSON array; answer it with answer, fail, grant_file or deny before the next call to next DONE    code, the script's exit code ERROR   text, the guest's message (&quot;cancelled by host: ...&quot; after a deadline or a cancel) KILLED  text, why the host hung up and killed it</p>
+    </div>
+    <div class="function" id="launch" data-name="launch">
+      <h3 class="function-name">launch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>launch(perms, prog, args, name, audit_path) <span class="arrow">-&gt;</span> (Guest, string)</code></pre>
+      <p class="signature"><span class="sig-params">perms: sandbox.Grants, prog: string, args: ptr, name: string, audit_path: string</span></p>
+      <p class="doc">Starts the worker program `prog` in a child held to `perms` (sandbox.spawn_socket), with `args`, a std.list of strings, as its arguments (null for none: an Aether worker reads everything from the socket; a foreign interpreter takes its script, `-I guest.py`). Fails closed: where the child cannot be contained (macOS, Windows; Linux without Landlock) it returns the reason and starts nothing. `name` labels the audit log lines; `audit_path` is the log (&quot;&quot; for none). An Aether worker needs no grants to run a script: it is one binary and reads its script from the socket.</p>
+    </div>
+    <div class="function" id="launch_uncontained" data-name="launch_uncontained">
+      <h3 class="function-name">launch_uncontained <span class="kind">fn</span></h3>
+      <pre class="usage"><code>launch_uncontained(perms, prog, args, name, audit_path) <span class="arrow">-&gt;</span> (Guest, string)</code></pre>
+      <p class="signature"><span class="sig-params">perms: sandbox.Grants, prog: string, args: ptr, name: string, audit_path: string</span></p>
+      <p class="doc">launch with NO process sandbox (sandbox.spawn_socket_uncontained), for development where spawn_socket refuses (macOS). The worker still locks itself down with sandbox.enforce. The audit log says which it was.</p>
+    </div>
+    <div class="function" id="mount" data-name="mount">
+      <h3 class="function-name">mount <span class="kind">fn</span></h3>
+      <pre class="usage"><code>mount(g, name, min, max) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string, min: int, max: int</span></p>
+      <p class="doc">Mounts a host function `name` taking min..max arguments. Before start.</p>
+    </div>
+    <div class="function" id="probe" data-name="probe">
+      <h3 class="function-name">probe <span class="kind">fn</span></h3>
+      <pre class="usage"><code>probe(g) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest</span></p>
+      <p class="doc">Asks the guest to check its own wall once it has locked down: it tries to read /etc/passwd and connect to 1.1.1.1:443 and reports both as AUDIT lines. Before start.</p>
+    </div>
+    <div class="function" id="log_level" data-name="log_level">
+      <h3 class="function-name">log_level <span class="kind">fn</span></h3>
+      <pre class="usage"><code>log_level(g, level) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, level: int</span></p>
+      <p class="doc">Sets the guest's log threshold: -1 off (the default), 0 trace, 1 debug, 2 info, 3 warn, 4 error, 5 fatal. Before start it holds from the first step; after, from the guest's next step, also while a CALL waits for its answer. Out of range: the error, and nothing is sent.</p>
+    </div>
+    <div class="function" id="start" data-name="start">
+      <h3 class="function-name">start <span class="kind">fn</span></h3>
+      <pre class="usage"><code>start(g, source) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, source: string</span></p>
+      <p class="doc">Sends the script; the guest locks itself down and runs it.</p>
+    </div>
+    <div class="function" id="answer" data-name="answer">
+      <h3 class="function-name">answer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>answer(g, json) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, json: string</span></p>
+      <p class="doc">Answers the pending CALL with a JSON value.</p>
+    </div>
+    <div class="function" id="fail" data-name="fail">
+      <h3 class="function-name">fail <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fail(g, why) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, why: string</span></p>
+      <p class="doc">Fails the pending CALL; the script sees an error with this message.</p>
+    </div>
+    <div class="function" id="grant_file" data-name="grant_file">
+      <h3 class="function-name">grant_file <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_file(g, name, path) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string, path: string</span></p>
+      <p class="doc">Answers the pending CALL, a request for the file `name`, with the file at `path` as an open descriptor: the guest reads it and the script gets {&quot;granted&quot;:true,&quot;text&quot;:...}. If `path` cannot be opened it is a deny.</p>
+    </div>
+    <div class="function" id="deny" data-name="deny">
+      <h3 class="function-name">deny <span class="kind">fn</span></h3>
+      <pre class="usage"><code>deny(g, name, why) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, name: string, why: string</span></p>
+      <p class="doc">Answers the pending CALL, a request for the file `name`, with no: the script gets {&quot;granted&quot;:false,&quot;why&quot;:why}.</p>
+    </div>
+    <div class="function" id="cancel" data-name="cancel">
+      <h3 class="function-name">cancel <span class="kind">fn</span></h3>
+      <pre class="usage"><code>cancel(g, reason) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest, reason: string</span></p>
+      <p class="doc">Asks the guest to stop its script now. next() then returns its ERROR.</p>
+    </div>
+    <div class="function" id="next" data-name="next">
+      <h3 class="function-name">next <span class="kind">fn</span></h3>
+      <pre class="usage"><code>next(g) <span class="arrow">-&gt;</span> Event</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest</span></p>
+      <p class="doc">The guest's next event, waiting at most deadline_ms for it (see the top of this file). AUDIT frames go to the audit log and are not returned.</p>
+    </div>
+    <div class="function" id="close" data-name="close">
+      <h3 class="function-name">close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>close(g)</code></pre>
+      <p class="signature"><span class="sig-params">g: *Guest</span></p>
+      <p class="doc">Ends a guest early: hangs up and kills it. Safe after it has finished.</p>
+    </div>
+    <div class="function" id="audit" data-name="audit">
+      <h3 class="function-name">audit <span class="kind">fn</span></h3>
+      <pre class="usage"><code>audit(&amp;g, &quot;SPAWN refused)</code></pre>
+      <p class="signature"><span class="sig-params">&amp;g, &quot;SPAWN refused: ${err}&quot;</span></p>
+    </div>
+    <div class="function" id="json_string" data-name="json_string">
+      <h3 class="function-name">json_string <span class="kind">fn</span></h3>
+      <pre class="usage"><code>json_string(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">`s` as a JSON string literal.</p>
+    </div>
+    <div class="function" id="printable" data-name="printable">
+      <h3 class="function-name">printable <span class="kind">fn</span></h3>
+      <pre class="usage"><code>printable(s) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">`s` safe to print or log: control bytes, DEL and backslashes as \xNN, so a guest cannot forge a log line or send escape sequences to a terminal.</p>
+    </div>
+    <div class="function" id="level_name" data-name="level_name">
+      <h3 class="function-name">level_name <span class="kind">fn</span></h3>
+      <pre class="usage"><code>level_name(level) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">level: int</span></p>
+      <p class="doc">TRACE, DEBUG, INFO, WARN, ERROR or FATAL for a level 0..5; &quot;?&quot; otherwise.</p>
+    </div>
+    <div class="function" id="MAX_FRAME" data-name="MAX_FRAME">
+      <h3 class="function-name">MAX_FRAME <span class="kind">const</span></h3>
+      <pre class="usage"><code>MAX_FRAME = 65536</code></pre>
+      <p class="doc">The largest frame either side accepts.</p>
+    </div>
+    <div class="function" id="DEADLINE_MS" data-name="DEADLINE_MS">
+      <h3 class="function-name">DEADLINE_MS <span class="kind">const</span></h3>
+      <pre class="usage"><code>DEADLINE_MS = 5000</code></pre>
+      <p class="doc">The default bound on one exchange, and on the answer to a CANCEL.</p>
+    </div>
+    <div class="function" id="GRACE_MS" data-name="GRACE_MS">
+      <h3 class="function-name">GRACE_MS <span class="kind">const</span></h3>
+      <pre class="usage"><code>GRACE_MS = 1000</code></pre>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

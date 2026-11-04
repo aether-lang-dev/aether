@@ -593,6 +593,15 @@ The grants reach the child's preload on a sealed memfd it inherits
 stop the child changing it, and a program the child is granted to exec
 reads the same grants from it.
 
+For a guest that runs scripts for the host (an engine compiled into a
+worker, or an interpreter), `std.guest` is the conversation on top of this
+socket: it spawns with `spawn_socket`, mounts the functions the script may
+call, answers each call (a file as an open descriptor), and bounds every
+exchange with a deadline, then a `CANCEL`, then a kill. `std.guest.child`
+is an Aether worker's side, and enters `sandbox.enforce` with no grants
+before the script's first step. Its README (`std/guest/README.md`) has the
+protocol.
+
 ### Starting a foreign interpreter: `grant_runtime`
 
 Under the kernel layer a child reads nothing it is not granted, and an

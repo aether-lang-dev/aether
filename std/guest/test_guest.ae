@@ -1,0 +1,168 @@
+// std.guest, co-located with the module: the host's half of the protocol
+// over a socket pair in one process, the test playing the guest with raw
+// std.ipc frames, and the fail-closed launch. The cross-process run, with
+// std.guest.child as the guest in a real child, is
+// tests/integration/std_guest/.
+//
+// On Windows the socket channel does not exist, so only the pure parts run.
+
+import std.spec
+import std.fs
+import std.io
+import std.ipc
+import std.os
+import std.sandbox
+import std.string
+import std.guest
+
+// A Guest on one end of a socket pair, with no process behind it (pid -1:
+// hanging up kills nothing), logging to `log`.
+fn paired(ch: int, log: string) -> guest.Guest {
+    return guest.Guest {
+        ch: ch, pid: -1, name: "spec", audit_path: log,
+        deadline_ms: 200, grace_ms: 200, max_frame: guest.MAX_FRAME, over: 0
+    }
+}
+
+fn read_log(log: string) -> string {
+    text, err = fs.read(log)
+    if err != "" { return "" }
+    return text
+}
+
+main() {
+    fw = spec.init()
+    posix = !string.equals(os.platform(), "windows")
+    log = "${os.temp_dir()}/std_guest_spec_${os.getpid()}.log"
+    spec.describe(fw, "std.guest, pure") {
+        spec.it("escapes guest text for a terminal or a log") callback {
+            spec.assert_str_eq(guest.printable("ok\r\n\x1b[31m\\\x7f"), "ok\\x0d\\x0a\\x1b[31m\\x5c\\x7f", "control bytes, backslash, DEL")
+            spec.assert_str_eq(guest.printable("plain"), "plain", "plain text unchanged")
+        }
+        spec.it("writes a JSON string literal") callback {
+            spec.assert_str_eq(guest.json_string("a\"b\\c\nd\x01"), "\"a\\\"b\\\\c\\nd\\u0001\"", "escaped")
+        }
+        spec.it("names the log levels") callback {
+            spec.assert_str_eq("${guest.level_name(0)} ${guest.level_name(2)} ${guest.level_name(5)} ${guest.level_name(-1)}", "TRACE INFO FATAL ?", "0..5 and out of range")
+        }
+    }
+    if posix {
+        spec.describe(fw, "std.guest over a socket pair") {
+            spec.it("returns SAY, CALL, LOG and DONE, and logs AUDIT") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                ipc.write_frame(w, "AUDIT from the guest\x1b")
+                ipc.write_frame(w, "SAY hi there")
+                ipc.write_frame(w, "CALL F [1,\"x\"]")
+                ipc.write_frame(w, "LOG 4 7 {\"k\":1} a message")
+                ipc.write_frame(w, "LOG 0 2 {}")
+                ipc.write_frame(w, "DONE 5")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "SAY hi there", "SAY")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.name} ${e.text}", "CALL F [1,\"x\"]", "CALL")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.code} ${e.name} ${e.tags} [${e.text}]", "LOG 4 ERROR {\"k\":1} [a message]", "LOG")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.name} ${e.tags} [${e.text}]", "LOG TRACE {} []", "LOG with no message")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.code}", "DONE 5", "DONE")
+                spec.assert_eq(g.over, 1, "over")
+                spec.assert_contains(read_log(log), "spec reports: from the guest\\x1b\n", "AUDIT logged, escaped")
+                io.fd_close(w)
+            }
+            spec.it("sends each answer as one frame") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                guest.mount(&g, "F", 0, 2)
+                guest.probe(&g)
+                guest.log_level(&g, 1)
+                guest.start(&g, "x\ny")
+                guest.answer(&g, "[1]")
+                guest.fail(&g, "no")
+                guest.deny(&g, "/etc/shadow", "not \"yours\"")
+                guest.cancel(&g, "stop")
+                want = ["MOUNT F 0 2", "PROBE", "LOGLEVEL 1", "SCRIPT x\ny", "REPLY [1]", "FAIL no",
+                    "REPLY {\"granted\":false,\"why\":\"not \\\"yours\\\"\"}", "CANCEL stop"]
+                i = 0
+                while i < 8 {
+                    data, _ = ipc.read_frame(w, 65536)
+                    spec.assert_str_eq(data, want[i], want[i])
+                    i = i + 1
+                }
+                spec.assert_str_eq(guest.log_level(&g, 6), "log_level: -1 (off) or 0..5, not 6", "out of range")
+                ready, _ = ipc.wait_readable(w, 0)
+                spec.assert_eq(ready, 0, "and nothing sent for it")
+                text = read_log(log)
+                spec.assert_contains(text, "spec DENY /etc/shadow: not \"yours\"", "DENY audited")
+                spec.assert_contains(text, "spec CANCEL stop", "CANCEL audited")
+                io.fd_close(w)
+                io.fd_close(h)
+            }
+            spec.it("hangs up on a malformed LOG or an unknown verb") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                ipc.write_frame(w, "LOG 4 99 {}")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: malformed LOG", "malformed LOG")
+                io.fd_close(w)
+                a, b, _ = os.socketpair()
+                k = paired(b, log)
+                ipc.write_frame(a, "HELLO\x1b")
+                e = guest.next(&k)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED protocol: unexpected 'HELLO\\x1b'", "unknown verb, escaped")
+                e = guest.next(&k)
+                spec.assert_str_eq("${e.kind} ${e.text}", "ERROR the guest has finished", "then nothing")
+                io.fd_close(a)
+            }
+            spec.it("sends CANCEL when the deadline passes, and hangs up when that goes unanswered") callback {
+                fs.write(log, "")
+                w, h, _ = os.socketpair()
+                g = paired(h, log)
+                g.deadline_ms = 50
+                g.grace_ms = 50
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED no answer to CANCEL within 50 ms", "unanswered")
+                data, _ = ipc.read_frame(w, 65536)
+                spec.assert_str_eq(data, "CANCEL deadline of 50 ms passed", "the CANCEL went")
+                spec.assert_contains(read_log(log), "spec TIMEOUT no frame within 50 ms; CANCEL sent", "audited")
+                io.fd_close(w)
+            }
+            spec.it("refuses a frame over max_frame") callback {
+                w, h, _ = os.socketpair()
+                g = paired(h, "")
+                g.max_frame = 8
+                ipc.write_frame(w, "SAY nine bytes")
+                e = guest.next(&g)
+                spec.assert_str_eq("${e.kind} ${e.text}", "KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
+                io.fd_close(w)
+            }
+        }
+        spec.describe(fw, "std.guest launch") {
+            spec.it("fails closed where it cannot contain the child, and starts a missing program nowhere") callback {
+                fs.write(log, "")
+                perms = sandbox.new("spec") {
+                }
+                g, err = guest.launch(perms, "/nonexistent/worker", null, "missing", log)
+                spec.assert_true(err != "", "an error")
+                spec.assert_eq(g.over, 1, "nothing to talk to")
+                spec.assert_contains(read_log(log), "missing SPAWN refused: ", "audited")
+                e = guest.next(&g)
+                spec.assert_str_eq(e.kind, "ERROR", "next says so")
+                guest.close(&g)
+                if !string.equals(os.platform(), "linux") {
+                    spec.assert_err_contains(err, "nothing was started", "refused here, with the reason")
+                }
+                u, uerr = guest.launch_uncontained(perms, "/nonexistent/worker", null, "missing-u", log)
+                spec.assert_true(uerr != "", "uncontained, a missing program is an error too")
+                spec.assert_eq(u.over, 1, "and nothing to talk to")
+                sandbox.free(perms)
+            }
+        }
+    }
+    fs.delete(log)
+    return spec.run_summary(fw)
+}

@@ -1,0 +1,279 @@
+// std.guest driving stub_guest.ae (std.guest.child) in a real child, over
+// a real socket, with real deadlines. On Linux the child is spawned with
+// sandbox.spawn_socket; elsewhere spawn_socket refuses (one spec checks
+// that it starts nothing) and the rest run it uncontained, asked for by
+// name, still locked down by the guest's own sandbox.enforce.
+//
+//   host <stub_guest> <scratch dir>     (test_std_guest.sh builds both)
+
+import std.spec
+import std.fs
+import std.guest
+import std.ipc
+import std.list
+import std.os
+import std.sandbox
+import std.string
+
+fn begin(prog: string, name: string, log: string) -> guest.Guest {
+    perms = sandbox.new("std-guest-test") {
+    }
+    if os.platform() == "linux" {
+        g, err = guest.launch(perms, prog, null, name, log)
+        sandbox.free(perms)
+        if err != "" { println("spawn: ${err}") }
+        return g
+    }
+    g, err = guest.launch_uncontained(perms, prog, null, name, log)
+    sandbox.free(perms)
+    if err != "" { println("spawn: ${err}") }
+    return g
+}
+
+// Every event up to the end, one line each; a CALL is failed.
+fn transcript(g: *guest.Guest) -> string {
+    out = ""
+    while true {
+        e = guest.next(g)
+        if e.kind == "SAY" {
+            out = "${out}SAY ${e.text}\n"
+        } else if e.kind == "LOG" {
+            out = "${out}LOG ${e.name} ${e.text} ${e.tags}\n"
+        } else if e.kind == "CALL" {
+            out = "${out}CALL ${e.name} ${e.text}\n"
+            guest.fail(g, "not served here")
+        } else if e.kind == "DONE" {
+            return "${out}DONE ${e.code}\n"
+        } else {
+            return "${out}${e.kind} ${e.text}\n"
+        }
+    }
+}
+
+fn log_text(log: string) -> string {
+    text, err = fs.read(log)
+    if err != "" { return "" }
+    return text
+}
+
+main() {
+    if os.args_count() < 3 {
+        println("usage: host <stub_guest> <scratch dir>")
+        exit(2)
+    }
+    stub = os.args_get(1)
+    dir = os.args_get(2)
+    log = "${dir}/audit.log"
+    fs.write(log, "")
+    fw = spec.init()
+    spec.describe(fw, "std.guest and std.guest.child") {
+        spec.it("launch fails closed where it cannot contain the child") callback {
+            perms = sandbox.new("closed") {
+            }
+            g, err = guest.launch(perms, stub, null, "closed", log)
+            sandbox.free(perms)
+            if os.platform() == "linux" {
+                spec.assert_str_eq(err, "", "contained on Linux")
+                guest.close(&g)
+            } else {
+                spec.assert_err_contains(err, "nothing was started", "refused, with the reason")
+                spec.assert_eq(g.pid, -1, "no child")
+                spec.assert_contains(log_text(log), "closed SPAWN refused: sandbox.spawn_socket: cannot contain", "audited")
+                // The same start, asked for uncontained by name, runs.
+                perms2 = sandbox.new("by-name") {
+                }
+                u, uerr = guest.launch_uncontained(perms2, stub, null, "by-name", log)
+                sandbox.free(perms2)
+                spec.assert_str_eq(uerr, "", "uncontained by name starts")
+                guest.start(&u, "say hello")
+                spec.assert_str_eq(transcript(&u), "SAY hello\nDONE 0\n", "and runs")
+                spec.assert_contains(log_text(log), "by-name SPAWN ${stub} UNCONTAINED", "audited as uncontained")
+            }
+        }
+        spec.it("mounts a function, carries a call and its reply, and ends with the exit code") callback {
+            g = begin(stub, "normal", log)
+            spec.assert_str_eq(guest.mount(&g, "GREET", 1, 1), "", "mount")
+            spec.assert_str_eq(guest.start(&g, "say hello\ncall GREET [\"stub\"]\nexit 3"), "", "start")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "SAY hello", "first SAY")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.name} ${e.text}", "CALL GREET [\"stub\"]", "the call, as JSON")
+            guest.answer(&g, guest.json_string("hi \"stub\"\n"))
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "SAY value \"hi \\\"stub\\\"\\n\"", "the reply, as sent")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code}", "DONE 3", "exit code")
+            spec.assert_contains(log_text(log), "normal reports: stub-guest locked itself down before the first step: no grants", "lockdown audited")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "ERROR the guest has finished", "nothing after the end")
+        }
+        spec.it("passes the worker its arguments") callback {
+            perms = sandbox.new("args") {
+            }
+            args = list.new()
+            list.add(args, "one")
+            list.add(args, "two words")
+            g = guest.Guest { ch: -1, pid: -1, name: "", audit_path: "", deadline_ms: 0, grace_ms: 0, max_frame: 0, over: 1 }
+            err = ""
+            if os.platform() == "linux" {
+                g, err = guest.launch(perms, stub, args, "args", log)
+            } else {
+                g, err = guest.launch_uncontained(perms, stub, args, "args", log)
+            }
+            list.free(args)
+            sandbox.free(perms)
+            spec.assert_str_eq(err, "", "started")
+            guest.start(&g, "args")
+            spec.assert_str_eq(transcript(&g), "SAY [one][two words]\nDONE 0\n", "argv, each argument whole")
+        }
+        spec.it("fails a call the host fails") callback {
+            g = begin(stub, "fail", log)
+            guest.mount(&g, "GREET", 0, 1)
+            guest.start(&g, "call GREET []")
+            spec.assert_str_eq(transcript(&g), "CALL GREET []\nSAY fail not served here\nDONE 0\n", "FAIL reaches the script")
+        }
+        spec.it("hands over a granted file as a descriptor, refuses another, and audits both") callback {
+            fs.write("${dir}/granted.txt", "greeting=from the host's disk")
+            g = begin(stub, "files", log)
+            guest.mount(&g, "REQUEST", 1, 1)
+            guest.start(&g, "call REQUEST [\"config\"]\ncall REQUEST [\"/etc/passwd\"]")
+            out = ""
+            while true {
+                e = guest.next(&g)
+                if e.kind == "CALL" {
+                    if e.text == "[\"config\"]" {
+                        guest.grant_file(&g, "config", "${dir}/granted.txt")
+                    } else {
+                        guest.deny(&g, "/etc/passwd", "not in this guest's policy")
+                    }
+                } else if e.kind == "SAY" {
+                    out = "${out}${e.text}|"
+                } else {
+                    out = "${out}${e.kind}"
+                    break
+                }
+            }
+            spec.assert_str_eq(out, "value {\"granted\":true,\"text\":\"greeting=from the host's disk\"}|value {\"granted\":false,\"why\":\"not in this guest's policy\"}|DONE", "the file's text, read from the descriptor, then the refusal")
+            text = log_text(log)
+            spec.assert_contains(text, "files GRANT config -> ${dir}/granted.txt", "GRANT audited")
+            spec.assert_contains(text, "files DENY /etc/passwd: not in this guest's policy", "DENY audited")
+        }
+        spec.it("a grant of a file that cannot be opened is a deny") callback {
+            g = begin(stub, "nofile", log)
+            guest.mount(&g, "REQUEST", 1, 1)
+            guest.start(&g, "call REQUEST [\"gone\"]")
+            e = guest.next(&g)
+            spec.assert_str_eq(e.kind, "CALL", "the request")
+            guest.grant_file(&g, "gone", "${dir}/does-not-exist")
+            e = guest.next(&g)
+            spec.assert_contains(e.text, "value {\"granted\":false,\"why\":", "refused")
+            guest.close(&g)
+        }
+        spec.it("carries log messages at the host's threshold, and none by default") callback {
+            script = "log 1 quiet\nlog 3 careful: a b\nlog 4 loud\nsay end"
+            off = begin(stub, "log-off", log)
+            guest.start(&off, script)
+            spec.assert_str_eq(transcript(&off), "SAY end\nDONE 0\n", "off: no LOG frames")
+            g = begin(stub, "log", log)
+            spec.assert_str_eq(guest.log_level(&g, 7), "log_level: -1 (off) or 0..5, not 7", "out of range is refused here")
+            spec.assert_str_eq(guest.log_level(&g, -2), "log_level: -1 (off) or 0..5, not -2", "and below")
+            spec.assert_str_eq(guest.log_level(&g, 3), "", "warn")
+            guest.start(&g, script)
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.code} ${e.name} [${e.text}] ${e.tags}", "LOG 3 WARN [careful: a b] {\"line\":2}", "warn, debug skipped")
+            spec.assert_str_eq(transcript(&g), "LOG ERROR loud {\"line\":3}\nSAY end\nDONE 0\n", "then the rest")
+        }
+        spec.it("changes the log threshold while a call waits on the host") callback {
+            g = begin(stub, "log-live", log)
+            guest.mount(&g, "WAIT", 0, 0)
+            guest.start(&g, "log 4 not yet\ncall WAIT []\nlog 4 now")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.name}", "CALL WAIT", "off: no LOG before the call")
+            guest.log_level(&g, 0)
+            guest.answer(&g, "1")
+            spec.assert_str_eq(transcript(&g), "SAY value 1\nLOG ERROR now {\"line\":3}\nDONE 0\n", "on from the next step")
+        }
+        spec.it("refuses a malformed LOGLEVEL, MOUNT or verb before the script") callback {
+            g = begin(stub, "bad-level", log)
+            // Straight down the socket: log_level checks the range itself.
+            ipc.write_frame(g.ch, "LOGLEVEL loud")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "ERROR protocol: LOGLEVEL wants -1 (off) or 0..5, got 'loud'", "LOGLEVEL")
+            m = begin(stub, "bad-mount", log)
+            guest.mount(&m, "F", 2, 1)
+            e = guest.next(&m)
+            spec.assert_str_eq("${e.kind} ${e.text}", "ERROR protocol: MOUNT F: arity 2..1 is not 0 <= min <= max", "MOUNT arity")
+            v = begin(stub, "bad-verb", log)
+            ipc.write_frame(v.ch, "HELLO")
+            e = guest.next(&v)
+            spec.assert_str_eq("${e.kind} ${e.text}", "ERROR protocol: expected MOUNT, PROBE, LOGLEVEL or SCRIPT, got 'HELLO'", "verb")
+        }
+        spec.it("leaves the engine to refuse a name it cannot mount") callback {
+            g = begin(stub, "engine-mount", log)
+            guest.mount(&g, "no!", 0, 0)
+            guest.start(&g, "say never runs")
+            spec.assert_str_eq(transcript(&g), "ERROR cannot mount 'no!': not a name this engine takes\n", "the engine's own check")
+        }
+        spec.it("holds its own lockdown (PROBE)") callback {
+            g = begin(stub, "probe", log)
+            guest.probe(&g)
+            guest.start(&g, "say probed")
+            spec.assert_str_eq(transcript(&g), "SAY probed\nDONE 0\n", "runs")
+            text = log_text(log)
+            spec.assert_contains(text, "probe reports: probe worker fs.read('/etc/passwd'): refused", "fs refused by the guest's enforce")
+            spec.assert_contains(text, "probe reports: probe worker tcp.connect 1.1.1.1:443: refused", "tcp refused by the guest's enforce")
+            spec.assert_contains(text, "probe reports: stub-guest sandbox refused fs_read ", "refusal forwarded")
+        }
+        spec.it("cancels a spinning script politely when the deadline passes") callback {
+            g = begin(stub, "spin", log)
+            g.deadline_ms = 300
+            guest.start(&g, "say spinning\nspin")
+            spec.assert_str_eq(transcript(&g), "SAY spinning\nERROR cancelled by host: deadline of 300 ms passed\n", "stopped by the guest")
+            text = log_text(log)
+            spec.assert_contains(text, "spin TIMEOUT no frame within 300 ms; CANCEL sent", "timeout audited")
+            spec.assert_contains(text, "spin ERROR cancelled by host: deadline of 300 ms passed", "outcome audited")
+        }
+        spec.it("cancels a script waiting on a call when the host says so") callback {
+            g = begin(stub, "cancel", log)
+            guest.mount(&g, "WAIT", 0, 0)
+            guest.start(&g, "call WAIT []\nsay never")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.name}", "CALL WAIT", "the guest waits on the host")
+            guest.cancel(&g, "the host changed its mind")
+            spec.assert_str_eq(transcript(&g), "ERROR cancelled by host: the host changed its mind\n", "the cancel as the reply")
+            spec.assert_contains(log_text(log), "cancel CANCEL the host changed its mind", "audited")
+        }
+        spec.it("cancels a script when the host breaks the protocol while it runs") callback {
+            g = begin(stub, "breach", log)
+            guest.start(&g, "spin")
+            ipc.write_frame(g.ch, "REPLY 1")
+            spec.assert_str_eq(transcript(&g), "ERROR cancelled by host: protocol: unexpected 'REPLY' while the script runs\n", "cancelled")
+        }
+        spec.it("kills a guest that ignores CANCEL") callback {
+            g = begin(stub, "deaf", log)
+            g.deadline_ms = 200
+            g.grace_ms = 200
+            guest.start(&g, "deaf")
+            pid = g.pid
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "KILLED no answer to CANCEL within 200 ms", "killed")
+            spec.assert_eq(os.kill(pid, 0), -1, "the process is gone")
+            spec.assert_contains(log_text(log), "deaf KILLED no answer to CANCEL within 200 ms", "kill audited")
+        }
+        spec.it("refuses a frame over max_frame and kills the guest") callback {
+            g = begin(stub, "big", log)
+            guest.start(&g, "big 70000")
+            e = guest.next(&g)
+            spec.assert_str_eq("${e.kind} ${e.text}", "KILLED frame refused: ipc.read_frame: frame longer than max", "refused")
+            spec.assert_contains(log_text(log), "big KILLED frame refused: ipc.read_frame: frame longer than max", "audited")
+        }
+        spec.it("escapes what a guest sends before it reaches the audit log") callback {
+            spec.assert_str_eq(guest.printable("a\nb\x1b[2J\\"), "a\\x0ab\\x1b[2J\\x5c", "control bytes and backslash")
+            spec.assert_str_eq(guest.json_string("q\"\\\n\t"), "\"q\\\"\\\\\\n\\u0009\"", "a JSON string")
+            spec.assert_str_eq(guest.level_name(0), "TRACE", "trace")
+            spec.assert_str_eq(guest.level_name(5), "FATAL", "fatal")
+            spec.assert_str_eq(guest.level_name(6), "?", "out of range")
+        }
+    }
+    return spec.run_summary(fw)
+}
