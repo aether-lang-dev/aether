@@ -14,10 +14,10 @@
 #include <string.h>
 
 /* Returns a counted AetherString; its characters come through aether_string_data,
- * and the caller gives it back with string_release (#3547). */
+ * and string_release gives it back. */
 extern char* os_run_capture_raw(const char* prog, void* argv_list, void* env_list);
 extern const char* aether_string_data(const void* s);
-extern void string_release(const void* str);
+extern void string_release(const void* s);
 
 int main(int argc, char** argv) {
     if (argc < 2) { fprintf(stderr, "usage: %s <probe-script>\n", argv[0]); return 2; }
@@ -42,12 +42,15 @@ int main(int argc, char** argv) {
     const char* out = captured ? aether_string_data(captured) : NULL;
     printf("child status: %s", out ? out : "(null)\n");
 
-    int clear = out && strstr(out, "SigBlk:\t0000000000000000") != NULL;
-    string_release(captured);
-    if (clear) {
-        printf("PASS: spawned child has a clear signal mask\n");
-        return 0;
-    }
-    printf("FAIL: spawned child inherited the parent's blocked mask\n");
-    return 1;
+    int clear = out && strstr(out, "SigBlk:\t0000000000000000");
+    if (clear) printf("PASS: spawned child has a clear signal mask\n");
+    else printf("FAIL: spawned child inherited the parent's blocked mask\n");
+    /* The verdict is out before the exit: LeakSanitizer ends a leaking
+     * process with _exit(23), which drops what stdout still buffers (a
+     * pipe here), so a leak left the script with no output at all. And the
+     * capture is given back, as every caller of os_run_capture_raw must:
+     * it was the leak (the harness never released it). */
+    fflush(stdout);
+    if (captured) string_release(captured);
+    return clear ? 0 : 1;
 }

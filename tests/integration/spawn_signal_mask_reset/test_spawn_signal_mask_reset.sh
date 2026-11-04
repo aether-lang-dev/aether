@@ -43,7 +43,14 @@ if [ "$rc" -eq 0 ] && printf '%s' "$out" | grep -q "PASS: spawned child has a cl
     echo "PASS: spawn_signal_mask_reset"
     exit 0
 fi
-echo "  [FAIL] spawned child inherited the parent's blocked mask"
+# The harness's own verdict says what failed: a mask the child inherited, or
+# no output at all (the harness died: exit 23 is LeakSanitizer's, which
+# drops a pipe's unflushed stdout).
+if printf '%s' "$out" | grep -q "FAIL: spawned child inherited"; then
+    echo "  [FAIL] spawned child inherited the parent's blocked mask"
+else
+    echo "  [FAIL] the harness exited $rc without its verdict"
+fi
 printf '%s\n' "$out" | sed 's/^/          /' | head -6
 echo "FAIL: spawn_signal_mask_reset"
 exit 1
