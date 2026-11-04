@@ -126,6 +126,8 @@ main() {
 
     http.server_stop(gateway)
     http.server_stop(upstream)
+    http.server_free(gateway)
+    http.server_free(upstream)
     fs.delete(cert)
     fs.delete(key)
     fs.delete_dir(dir)

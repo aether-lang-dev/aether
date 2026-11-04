@@ -55,4 +55,6 @@ main() {
 
     println("READY")
     _ = http.server_start(s)
+    // server_start returns once the server has stopped.
+    http.server_free(s)
 }

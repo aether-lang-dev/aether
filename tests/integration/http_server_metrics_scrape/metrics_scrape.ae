@@ -198,6 +198,7 @@ main() {
 
     tcp.close(sock)
     http.server_stop(server)
+    http.server_free(server)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")
         exit(1)

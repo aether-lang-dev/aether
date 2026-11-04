@@ -17,4 +17,5 @@ main() {
     if rc != 0 {
         println("FAIL: probe returned ${rc}")
     }
+    http.server_free(s)
 }

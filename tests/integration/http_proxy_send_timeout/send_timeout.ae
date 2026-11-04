@@ -168,9 +168,11 @@ main() {
             println("  PASS a response nobody reads (${names[g]})")
         }
         http.server_stop(s)
+        http.server_free(s)
         g = g + 1
     }
     http.server_stop(upstream)
+    http.server_free(upstream)
 
     // A file, sent with sendfile(2) where there is one (#3257).
     dir, derr = fs.make_temp_dir("", "ae3257")
@@ -198,6 +200,7 @@ main() {
         println("  PASS a file nobody reads")
     }
     http.server_stop(files)
+    http.server_free(files)
     fs.delete(file)
     fs.delete_dir(dir)
 
