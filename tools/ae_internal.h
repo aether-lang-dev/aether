@@ -41,6 +41,20 @@
  * bug rather than a defined operation. */
 #define AETHER_WRAP_CFLAGS " -fwrapv"
 
+/* #3574: Clang refuses C nested past a fixed bracket depth, 256 unless
+ * -fbracket-depth raises it, and blocks nest in the C as deep as in the
+ * source, which the parser takes 512 levels deep. AETHER_C_BRACKET_DEPTH is
+ * what the C of any program the parser takes stays within. A Clang driver
+ * gets it on every command line that compiles generated C: emcc and zig cc
+ * are Clang always (AETHER_CLANG_DEPTH_CFLAGS); a native compiler is asked
+ * whether it takes the option (ae.c, bracket_depth_flags). GCC has no such
+ * limit and refuses the option. The flag changes no binary, only whether
+ * the C builds, so the build cache key does not read it. */
+#include "../compiler/parser/parse_limits.h"
+#define AE_DEPTH_TEXT_(x) #x
+#define AE_DEPTH_TEXT(x) AE_DEPTH_TEXT_(x)
+#define AETHER_CLANG_DEPTH_CFLAGS " -fbracket-depth=" AE_DEPTH_TEXT(AETHER_C_BRACKET_DEPTH)
+
 typedef struct {
     char root[1024];           // Aether root directory (dev: repo root;
                                // installed: the PREFIX, e.g. ~/.local)

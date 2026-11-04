@@ -294,6 +294,30 @@ The hand-written runtime and compiler are built by the Makefile rather than
 through `ae`, and are deliberately left out: signed overflow in that C is a bug
 to fix, not an operation with a defined result.
 
+## Nesting depth and C compilers
+
+Some C compilers refuse C nested past a fixed depth. The C an expression
+generates nests by a constant however deep or long the expression is: every 24
+levels a part of it is evaluated ahead of its statement, operator chains and
+`else if` chains are written flat. Blocks are different: `if`, `while`, `for`,
+`match` arms and plain blocks nest in the C as deep as in the source, one to
+three brackets a level, and the parser takes them up to 512 levels deep
+(`AETHER_MAX_PARSE_DEPTH`; 508 nested `match` arms are 1018 brackets of C).
+
+| C compiler | fixed limit | what `ae` does |
+|---|---|---|
+| GCC | none | nothing to do |
+| Clang (Apple's, emcc and zig cc included) | 256 brackets, parentheses and braces nested, unless `-fbracket-depth=N` raises it | passes `-fbracket-depth=2048` (`AETHER_C_BRACKET_DEPTH`, four a level of the parser's limit) on every compile of generated C: `ae run`, `ae build`, `ae build --target=<triple>` and the wasm backend. A native compiler is asked once per run whether it takes the option, so `$AE_CC` / `$CC` naming Clang anywhere gets it too |
+| MSVC (`cl.exe`) | compound statements, loops and selections nested about 100 to 110 deep (C1061, "blocks nested too deeply"); no option raises it | nothing it can do: a program nesting blocks deeper does not build with MSVC |
+
+A build system that compiles `aetherc` output with Clang itself passes the same
+option:
+
+```bash
+aetherc app.ae app.c
+clang app.c $(ae cflags) -fbracket-depth=2048 -o app
+```
+
 ## Binary Hardening
 
 `ae build` asks the C toolchain for the mitigations whose cost is a rounding

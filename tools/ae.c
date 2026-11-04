@@ -3605,6 +3605,35 @@ const char* c_backend_env_override(void) {
     return NULL;
 }
 
+/* #3574: " -fbracket-depth=N" when compiler `cc` takes it (Clang, Apple's
+ * included), else "" (GCC refuses an option it does not know, and sets no
+ * such limit). Blocks nest in the C as deep as in the source, and Clang
+ * refuses C nested past 256 brackets unless told otherwise, so a program
+ * the parser takes did not build there (AETHER_CLANG_DEPTH_CFLAGS says
+ * what the number is). `cc` is asked once per process, by compiling an
+ * empty file with the option. */
+static const char* bracket_depth_flags(const char* cc) {
+    static char* asked = NULL;
+    static const char* answer = "";
+    if (!cc || !*cc) return "";
+    if (asked && strcmp(asked, cc) == 0) return answer;
+    free(asked);
+    asked = strdup(cc);
+    answer = "";
+    char probe_c[1100];
+    snprintf(probe_c, sizeof(probe_c), "%s/ae_bracket_probe_%d.c", get_temp_dir(), (int)getpid());
+    FILE* f = fopen(probe_c, "w");
+    if (!f) return answer;
+    fputs("int ae_bracket_probe;\n", f);
+    fclose(f);
+    char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_CLANG_DEPTH_CFLAGS,
+                                   probe_c);
+    if (probe && run_cmd_quiet(probe) == 0) answer = AETHER_CLANG_DEPTH_CFLAGS;
+    free(probe);
+    remove(probe_c);
+    return answer;
+}
+
 // --------------------------------------------------------------------------
 // Windows: auto-install bundled GCC (WinLibs) if none found on PATH
 // --------------------------------------------------------------------------
@@ -5052,13 +5081,15 @@ void build_gcc_cmd(char* cmd, size_t size,
          * aether_script_handle. Strong here too, for the same one-TU reason. */
         ? "-shared -Wl,--export-all-symbols -DAETHER_LIB_META_WEAK= -DAETHER_WEAK_DEF= -DAETHER_NO_LIB_MAIN " : "";
     if (user_cflags[0])
-        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s", emit_lib_flags, opt_flags(optimize),
+        opt = ae_strdup_printf("-static %s%s%s%s %s%s%s%s", emit_lib_flags, opt_flags(optimize),
                                harden_cflags(optimize), harden_ldflags(), user_cflags,
-                               win_avx_stack_flags(user_cflags), trace_def);
+                               win_avx_stack_flags(user_cflags), trace_def,
+                               bracket_depth_flags(s_gcc_cmd));
     else
-        opt = ae_strdup_printf("-static %s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
+        opt = ae_strdup_printf("-static %s%s%s%s%s%s%s", emit_lib_flags, opt_flags(optimize),
                                harden_cflags(optimize), harden_ldflags(),
-                               win_avx_stack_flags(""), trace_def);
+                               win_avx_stack_flags(""), trace_def,
+                               bracket_depth_flags(s_gcc_cmd));
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -5273,13 +5304,13 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* size_link = (g_size && !g_emit_obj && !g_emit_csrc)
                             ? size_link_flags : "";
     if (user_cflags[0])
-        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s", emit_lib_flags, base_opt,
+        opt = ae_strdup_printf("%s%s%s%s%s%s %s%s%s", emit_lib_flags, base_opt,
                                harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               user_cflags, trace_def);
+                               user_cflags, trace_def, bracket_depth_flags(cc));
     else
-        opt = ae_strdup_printf("%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
+        opt = ae_strdup_printf("%s%s%s%s%s%s%s%s", emit_lib_flags, base_opt,
                                harden_cflags(optimize), harden_link, harden_pie, size_link,
-                               trace_def);
+                               trace_def, bracket_depth_flags(cc));
     if (!opt) {
         fprintf(stderr, "Error: out of memory building the compiler command.\n");
         set_failing_cmd(cmd, size);
@@ -5564,9 +5595,10 @@ static int build_wasm_cmd(char* cmd, size_t size,
 
     /* AETHER_WRAP_CFLAGS: emcc is clang, and the wasm build compiles the same
      * generated C as every other target, so it owes the same `int` semantics
-     * (#1957). */
+     * (#1957). AETHER_CLANG_DEPTH_CFLAGS for the same reason: Clang refuses C
+     * nested past 256 brackets unless told otherwise (#3574). */
     int w = snprintf(cmd, size,
-        "emcc -O2" AETHER_WRAP_CFLAGS
+        "emcc -O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
         " -DAETHER_NO_THREADING -DAETHER_NO_FILESYSTEM -DAETHER_NO_NETWORKING "
         "%s %s \"%s\" %s -o \"%s\" -lm "
         "-Wall -Wextra -Wno-unused-parameter -Wno-unused-function "

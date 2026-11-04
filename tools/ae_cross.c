@@ -745,10 +745,12 @@ int run_cross_compile_obj(const char* c_file, const char* obj_file,
      * own clang, so the version is not the host compiler's to vary. */
     /* AETHER_WRAP_CFLAGS on all three: a cross build has to compute what the
      * native build computes, and `int` wrapping is part of the language rather
-     * than of the host (#1957). */
-    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS
-                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS
-                                : "-O0 -g" AETHER_WRAP_CFLAGS);
+     * than of the host (#1957). AETHER_CLANG_DEPTH_CFLAGS too: zig cc and
+     * xcrun clang are Clang, which refuses C nested past 256 brackets
+     * unless told otherwise (#3574). */
+    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                                : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
 
     /* Same macos workaround as the link path: zig's bundled macOS SDK stubs
      * do not ship the Apple-licensed CoreAudio framework headers, so
@@ -1168,10 +1170,12 @@ int run_cross_build(const char* c_file, const char* out_file,
      * own clang, so the version is not the host compiler's to vary. */
     /* AETHER_WRAP_CFLAGS on all three: a cross build has to compute what the
      * native build computes, and `int` wrapping is part of the language rather
-     * than of the host (#1957). */
-    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS
-                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS
-                                : "-O0 -g" AETHER_WRAP_CFLAGS);
+     * than of the host (#1957). AETHER_CLANG_DEPTH_CFLAGS too: zig cc and
+     * xcrun clang are Clang, which refuses C nested past 256 brackets
+     * unless told otherwise (#3574). */
+    const char* opt = ae_build_size_mode() ? "-Oz -g0" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                    : (optimize ? "-O2" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS
+                                : "-O0 -g" AETHER_WRAP_CFLAGS AETHER_CLANG_DEPTH_CFLAGS);
     /* For --emit=lib / --emit=staticlib the runtime+stdlib objects that go into
      * libaether.a are linked into a SHARED object, so every one must be built
      * -fPIC — `-shared -fPIC` on the final link cannot retroactively fix an
