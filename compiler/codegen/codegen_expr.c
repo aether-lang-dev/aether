@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 
 /* Argument-temp lifetime management for nested heap-returning calls.
  *
@@ -9040,8 +9041,403 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     return 0;
 }
 
+/* --- Deep constants (#3574) -------------------------------------------------
+ *
+ * A file-scope constant's or module variable's initializer is C's: a
+ * constant expression, which takes no temporary, so neither the depth marks
+ * nor emit_chain_by_links can cut it, and a long chain of one nested its C
+ * a level a link (1000 comparisons were 1000 brackets, 1000 shifts 3999).
+ * Such an initializer is a constant by the language's rule, so past
+ * CONST_FOLD_NESTING levels the compiler computes it, as the C would
+ * (the C types of the operands, their promotions and usual arithmetic
+ * conversions, -fwrapv's wrapping; `/`, `%`, `<<` and `>>` by #3524's
+ * rules, as emit_int_edge_op writes them in a constant), and writes the
+ * value. Anything it does not compute (a string, a struct, a call, a value
+ * with no C literal) is written as before. */
+#define CONST_FOLD_NESTING 32
+
+typedef enum { CV_I32, CV_U32, CV_I64, CV_U64, CV_F32, CV_F64 } CvKind;
+
+typedef struct {
+    CvKind k;
+    unsigned long long b;   /* an integer's bits, two's complement */
+    double f;               /* a float's value */
+} CVal;
+
+static int cv_is_float(CvKind k) {
+    return k == CV_F32 || k == CV_F64;
+}
+
+static int cv_is_signed(CvKind k) {
+    return k == CV_I32 || k == CV_I64;
+}
+
+static int cv_bits(CvKind k) {
+    return k == CV_I64 || k == CV_U64 ? 64 : 32;
+}
+
+/* `v` held in its kind's width. */
+static CVal cv_norm(CVal v) {
+    switch (v.k) {
+        case CV_I32: v.b = (unsigned long long)(long long)(int)(unsigned int)v.b; break;
+        case CV_U32: v.b = (unsigned int)v.b; break;
+        case CV_F32: v.f = (float)v.f; break;
+        default: break;
+    }
+    return v;
+}
+
+static long long cv_signed(CVal v) {
+    return v.k == CV_I32 ? (long long)(int)(unsigned int)v.b : (long long)v.b;
+}
+
+/* The value as a double, as C converts it. */
+static double cv_as_double(CVal v) {
+    if (cv_is_float(v.k)) return v.f;
+    if (cv_is_signed(v.k)) return (double)cv_signed(v);
+    return v.k == CV_U32 ? (double)(unsigned int)v.b : (double)v.b;
+}
+
+/* `v` converted to kind `k`, as C converts between arithmetic types. 0 for
+ * a float out of an integer's range or NaN, which C leaves undefined. */
+static int cv_convert(CVal v, CvKind k, CVal* out) {
+    CVal r;
+    r.k = k;
+    r.b = 0;
+    r.f = 0;
+    if (cv_is_float(k)) {
+        r.f = cv_as_double(v);
+    } else if (cv_is_float(v.k)) {
+        double d = v.f;
+        double lo = k == CV_I32 ? -2147483648.0 : k == CV_I64 ? -9223372036854775808.0 : 0.0;
+        double hi = k == CV_I32 ? 2147483648.0 : k == CV_U32 ? 4294967296.0
+                  : k == CV_I64 ? 9223372036854775808.0 : 18446744073709551616.0;
+        if (!(d > lo - 1.0 && d < hi)) return 0;
+        r.b = cv_is_signed(k) ? (unsigned long long)(long long)d : (unsigned long long)d;
+    } else {
+        r.b = cv_is_signed(v.k) ? (unsigned long long)cv_signed(v) : v.b;
+    }
+    *out = cv_norm(r);
+    return 1;
+}
+
+/* The kind an operand of Aether type `t` has in the C, after C's integer
+ * promotions, and the bits it keeps first (a byte's 8). 0 for a type the
+ * fold does not take. */
+static int cv_kind_of(const Type* t, CvKind* k, int* keep_bits) {
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t) return 0;
+    *keep_bits = 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_ENUM: *k = CV_I32; return 1;
+        case TYPE_BOOL: *k = CV_I32; *keep_bits = 1; return 1;
+        case TYPE_BYTE: case TYPE_UINT8: *k = CV_I32; *keep_bits = 8; return 1;
+        case TYPE_UINT16: *k = CV_I32; *keep_bits = 16; return 1;
+        case TYPE_UINT32: *k = CV_U32; return 1;
+        case TYPE_INT64: *k = CV_I64; return 1;
+        case TYPE_UINT64: *k = CV_U64; return 1;
+        case TYPE_FLOAT: *k = CV_F64; return 1;
+        case TYPE_FLOAT32: *k = CV_F32; return 1;
+        default: return 0;
+    }
+}
+
+/* `v` stored into C type `t` (a cast, a constant's own type): converted,
+ * a narrow type's bits kept, then promoted as an operand of that type is. */
+static int cv_store(CVal v, const Type* t, CVal* out) {
+    CvKind k;
+    int keep;
+    if (!cv_kind_of(t, &k, &keep)) return 0;
+    if (keep == 1) {
+        /* A bool holds whether the value is not zero. */
+        out->k = CV_I32;
+        out->b = cv_is_float(v.k) ? v.f != 0.0 : v.b != 0;
+        out->f = 0;
+        return 1;
+    }
+    CVal r;
+    if (!cv_convert(v, keep ? CV_U32 : k, &r)) return 0;
+    if (keep) {
+        r.b &= (1ULL << keep) - 1;
+        r.k = CV_I32;
+    }
+    *out = r;
+    return 1;
+}
+
+/* C's usual arithmetic conversions: the kind two promoted operands meet in. */
+static CvKind cv_common(CvKind a, CvKind b) {
+    if (a == CV_F64 || b == CV_F64) return CV_F64;
+    if (a == CV_F32 || b == CV_F32) return CV_F32;
+    if (cv_bits(a) == 64 || cv_bits(b) == 64)
+        return (a == CV_U64 || b == CV_U64) ? CV_U64 : CV_I64;
+    return (a == CV_U32 || b == CV_U32) ? CV_U32 : CV_I32;
+}
+
+static int cv_truth(CVal v) {
+    return cv_is_float(v.k) ? v.f != 0.0 : v.b != 0;
+}
+
+static CVal cv_int(int x) {
+    CVal r;
+    r.k = CV_I32;
+    r.b = (unsigned long long)(long long)x;
+    r.f = 0;
+    return r;
+}
+
+static int cv_eval(CodeGenerator* gen, ASTNode* e, CVal* out, int depth);
+
+static int cv_eval_binary(CodeGenerator* gen, ASTNode* e, CVal* out, int depth) {
+    const char* op = e->value;
+    CVal l, r;
+    if (!op || e->child_count < 2 || !cv_eval(gen, e->children[0], &l, depth + 1) ||
+        !cv_eval(gen, e->children[1], &r, depth + 1))
+        return 0;
+    if (strcmp(op, "&&") == 0) { *out = cv_int(cv_truth(l) && cv_truth(r)); return 1; }
+    if (strcmp(op, "||") == 0) { *out = cv_int(cv_truth(l) || cv_truth(r)); return 1; }
+    if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+        /* #3524: the count masked to the left operand's width; a left shift
+         * into the sign bit wraps; `>>` on a signed value keeps the sign. */
+        if (cv_is_float(l.k) || cv_is_float(r.k)) return 0;
+        int bits = cv_bits(l.k);
+        unsigned n = (unsigned)(r.b & (unsigned long long)(bits - 1));
+        CVal v = l;
+        if (op[0] == '<') {
+            v.b = l.b << n;
+        } else if (cv_is_signed(l.k)) {
+            v.b = (unsigned long long)(cv_signed(l) >> n);
+        } else {
+            v.b = (l.k == CV_U32 ? (unsigned int)l.b : l.b) >> n;
+        }
+        *out = cv_norm(v);
+        return 1;
+    }
+    CvKind k = cv_common(l.k, r.k);
+    if (!cv_convert(l, k, &l) || !cv_convert(r, k, &r)) return 0;
+    int cmp = -2;
+    if (strcmp(op, "<") == 0) cmp = 0;
+    else if (strcmp(op, "<=") == 0) cmp = 1;
+    else if (strcmp(op, ">") == 0) cmp = 2;
+    else if (strcmp(op, ">=") == 0) cmp = 3;
+    else if (strcmp(op, "==") == 0) cmp = 4;
+    else if (strcmp(op, "!=") == 0) cmp = 5;
+    if (cmp >= 0) {
+        int lt, eq;
+        if (cv_is_float(k)) {
+            if (l.f != l.f || r.f != r.f) {
+                *out = cv_int(cmp == 5);   /* NaN: unordered, only `!=` holds */
+                return 1;
+            }
+            lt = l.f < r.f;
+            eq = l.f == r.f;
+        } else if (cv_is_signed(k)) {
+            lt = cv_signed(l) < cv_signed(r);
+            eq = l.b == r.b;
+        } else {
+            lt = l.b < r.b;
+            eq = l.b == r.b;
+        }
+        int v = cmp == 0 ? lt : cmp == 1 ? (lt || eq) : cmp == 2 ? !(lt || eq)
+              : cmp == 3 ? !lt : cmp == 4 ? eq : !eq;
+        *out = cv_int(v);
+        return 1;
+    }
+    CVal v;
+    v.k = k;
+    v.b = 0;
+    v.f = 0;
+    if (cv_is_float(k)) {
+        if (strcmp(op, "+") == 0) v.f = l.f + r.f;
+        else if (strcmp(op, "-") == 0) v.f = l.f - r.f;
+        else if (strcmp(op, "*") == 0) v.f = l.f * r.f;
+        else if (strcmp(op, "/") == 0) v.f = l.f / r.f;
+        else if (strcmp(op, "%") == 0) v.f = fmod(l.f, r.f);
+        else return 0;
+        v = cv_norm(v);
+        if (!isfinite(v.f)) return 0;
+        *out = v;
+        return 1;
+    }
+    if (strcmp(op, "+") == 0) v.b = l.b + r.b;
+    else if (strcmp(op, "-") == 0) v.b = l.b - r.b;
+    else if (strcmp(op, "*") == 0) v.b = l.b * r.b;
+    else if (strcmp(op, "&") == 0) v.b = l.b & r.b;
+    else if (strcmp(op, "|") == 0) v.b = l.b | r.b;
+    else if (strcmp(op, "^") == 0) v.b = l.b ^ r.b;
+    else if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+        /* #3524: the checker refuses a constant division by zero; the most
+         * negative value over -1 is itself, its remainder 0. */
+        if (r.b == 0) return 0;
+        int quotient = op[0] == '/';
+        if (cv_is_signed(k)) {
+            long long a = cv_signed(l), d = cv_signed(r);
+            long long min = k == CV_I32 ? -2147483647LL - 1 : LLONG_MIN;
+            if (d == -1 && a == min) v.b = quotient ? (unsigned long long)a : 0;
+            else v.b = (unsigned long long)(quotient ? a / d : a % d);
+        } else {
+            unsigned long long a = k == CV_U32 ? (unsigned int)l.b : l.b;
+            unsigned long long d = k == CV_U32 ? (unsigned int)r.b : r.b;
+            v.b = quotient ? a / d : a % d;
+        }
+    } else {
+        return 0;
+    }
+    *out = cv_norm(v);
+    return 1;
+}
+
+static int cv_eval(CodeGenerator* gen, ASTNode* e, CVal* out, int depth) {
+    if (!e || depth > 4096) return 0;
+    CvKind k;
+    int keep;
+    switch (e->type) {
+        case AST_LITERAL: {
+            if (!e->value || !cv_kind_of(e->node_type, &k, &keep)) return 0;
+            CVal v;
+            v.k = k;
+            v.b = 0;
+            v.f = 0;
+            if (e->node_type->kind == TYPE_BOOL) {
+                if (strcmp(e->value, "true") == 0) v.b = 1;
+                else if (strcmp(e->value, "false") != 0) return 0;
+                *out = v;
+                return 1;
+            }
+            if (cv_is_float(k)) {
+                char* end = NULL;
+                v.f = strtod(e->value, &end);
+                if (!end || end == e->value || *end) return 0;
+                *out = cv_norm(v);
+                return 1;
+            }
+            const char* s = e->value;
+            int neg = 0;
+            if (*s == '-') { neg = 1; s++; }
+            int base = 10;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+            else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+            else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+            if (!*s) return 0;
+            errno = 0;
+            char* end = NULL;
+            unsigned long long m = strtoull(s, &end, base);
+            if (errno || !end || *end) return 0;
+            v.b = neg ? 0ULL - m : m;
+            if (keep) {
+                return cv_store(v, e->node_type, out);
+            }
+            *out = cv_norm(v);
+            return 1;
+        }
+        case AST_IDENTIFIER: {
+            /* A constant named: its initializer, as a value of its own type
+             * (the identifier case of generate_expression writes it so). */
+            ASTNode* cd = e->value ? file_scope_value_const(gen->program, e->value) : NULL;
+            CVal v;
+            if (!cd || cd->child_count < 1 || !cv_eval(gen, cd->children[0], &v, depth + 1))
+                return 0;
+            return cv_store(v, cd->node_type, out);
+        }
+        case AST_UNARY_EXPRESSION: {
+            CVal v;
+            if (!e->value || e->child_count < 1 || !cv_eval(gen, e->children[0], &v, depth + 1))
+                return 0;
+            if (strcmp(e->value, "!") == 0) { *out = cv_int(!cv_truth(v)); return 1; }
+            if (strcmp(e->value, "-") == 0) {
+                if (cv_is_float(v.k)) v.f = -v.f;
+                else v.b = 0ULL - v.b;
+                *out = cv_norm(v);
+                return 1;
+            }
+            if (strcmp(e->value, "~") == 0 && !cv_is_float(v.k)) {
+                v.b = ~v.b;
+                *out = cv_norm(v);
+                return 1;
+            }
+            if (strcmp(e->value, "+") == 0) { *out = v; return 1; }
+            return 0;
+        }
+        case AST_BINARY_EXPRESSION:
+            return cv_eval_binary(gen, e, out, depth);
+        case AST_VALUE_CAST: {
+            CVal v;
+            if (e->child_count < 1 || !cv_eval(gen, e->children[0], &v, depth + 1)) return 0;
+            return cv_store(v, e->node_type, out);
+        }
+        default:
+            return 0;
+    }
+}
+
+/* How many levels the C of `e` nests, counted up to `cap`: a level a node,
+ * but none for a left link of the same flat operator chain (#2071), and the
+ * initializer of a constant named, which a constant's initializer writes in
+ * its place. */
+static int const_nesting(CodeGenerator* gen, ASTNode* e, int cap, int inline_depth) {
+    if (!e || cap <= 0) return 0;
+    if (e->type == AST_IDENTIFIER) {
+        ASTNode* cd = (e->value && inline_depth < 64) ? file_scope_value_const(gen->program, e->value)
+                                                      : NULL;
+        return cd && cd->child_count > 0
+                   ? 2 + const_nesting(gen, cd->children[0], cap - 2, inline_depth + 1) : 0;
+    }
+    int deepest = 0;
+    for (int i = 0; i < e->child_count && deepest < cap; i++) {
+        ASTNode* c = e->children[i];
+        if (!c) continue;
+        int flat = e->type == AST_BINARY_EXPRESSION && i == 0 && c->type == AST_BINARY_EXPRESSION &&
+                   left_operand_is_chain_link(e) &&
+                   !int_edge_op_applies(gen, e->value, c->node_type, e->children[1], e->node_type);
+        int d = (flat ? 0 : 1) + const_nesting(gen, c, cap - (flat ? 0 : 1), inline_depth);
+        if (d > deepest) deepest = d;
+    }
+    return deepest;
+}
+
+/* A constant's initializer `e` nested past CONST_FOLD_NESTING, written as
+ * its value (the section above). 0, having written nothing, for any other
+ * expression, or one the fold does not compute. */
+static int emit_deep_const(CodeGenerator* gen, ASTNode* e) {
+    if (!gen->in_const_init || !e || e->type == AST_LITERAL ||
+        const_nesting(gen, e, CONST_FOLD_NESTING + 1, 0) <= CONST_FOLD_NESTING)
+        return 0;
+    CVal v;
+    if (!cv_eval(gen, e, &v, 0)) return 0;
+    FILE* o = gen->output;
+    switch (v.k) {
+        case CV_I32: {
+            int x = (int)(unsigned int)v.b;
+            if (x == INT_MIN) fprintf(o, "(-2147483647 - 1)");
+            else if (x < 0) fprintf(o, "(%d)", x);
+            else fprintf(o, "%d", x);
+            return 1;
+        }
+        case CV_U32: fprintf(o, "%uU", (unsigned int)v.b); return 1;
+        case CV_I64: {
+            long long x = (long long)v.b;
+            if (x == LLONG_MIN) fprintf(o, "(-9223372036854775807LL - 1)");
+            else if (x < 0) fprintf(o, "(%lldLL)", x);
+            else fprintf(o, "%lldLL", x);
+            return 1;
+        }
+        case CV_U64: fprintf(o, "%lluULL", v.b); return 1;
+        case CV_F32: case CV_F64: {
+            char buf[64];
+            snprintf(buf, sizeof(buf), v.k == CV_F32 ? "%.9g" : "%.17g", v.f);
+            if (!strpbrk(buf, ".eE")) strcat(buf, ".0");
+            fprintf(o, "(%s%s)", buf, v.k == CV_F32 ? "f" : "");
+            return 1;
+        }
+    }
+    return 0;
+}
+
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
+
+    /* #3574: a deep constant initializer, written as its value. */
+    if (emit_deep_const(gen, expr)) return;
 
     /* A call is no place a store writes into: inside a store target it is
      * read (generate_read). */
