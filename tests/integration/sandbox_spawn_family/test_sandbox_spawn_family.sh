@@ -21,6 +21,12 @@
 #            line through /bin/sh, so it is refused for want of /bin/sh
 #   all      fork, exec of everything: all of it runs, except a shell whose
 #            environment has dropped the preload
+#
+# The grid runs twice: with probe.c linked plain, and linked to the thread
+# library, as every Aether program is. On FreeBSD that is not the same
+# program: libthr's fork, which fork() and system() reach, makes the process
+# with syscall(SYS_fork), and the preload once refused that as a raw
+# syscall, so a threaded program could not fork under any grants.
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -45,11 +51,16 @@ if ! $CC_PROBE -shared -fPIC -o "$TMP/libaether_sandbox.so" \
     sed 's/^/    /' "$TMP/cc.log"
     exit 1
 fi
-if ! $CC_PROBE -o "$TMP/probe" "$SCRIPT_DIR/probe.c" > "$TMP/cc.log" 2>&1; then
-    echo "  [FAIL] sandbox_spawn_family: probe.c does not build"
-    sed 's/^/    /' "$TMP/cc.log"
-    exit 1
-fi
+for variant in plain threaded; do
+    extra=""
+    [ "$variant" = threaded ] && extra="-pthread"
+    # shellcheck disable=SC2086
+    if ! $CC_PROBE $extra -o "$TMP/probe_$variant" "$SCRIPT_DIR/probe.c" > "$TMP/cc.log" 2>&1; then
+        echo "  [FAIL] sandbox_spawn_family: probe.c does not build ($variant)"
+        sed 's/^/    /' "$TMP/cc.log"
+        exit 1
+    fi
+done
 
 TRUE_BIN=""
 for t in /bin/true /usr/bin/true; do
@@ -82,12 +93,12 @@ checked=0
 expect() {   # expect <grants> <mode> <RAN|refused>
     got="$(cd "$TMP" && PATH="$TRUE_DIR" PROBE_TRUE="$TRUE_BIN" \
         AETHER_SANDBOX_LOG=none AETHER_SANDBOX_GRANTS="$TMP/$1" \
-        LD_PRELOAD="$TMP/libaether_sandbox.so" "$TMP/probe" "$2" "$SCRIPT" 2>&1 | tail -1)"
+        LD_PRELOAD="$TMP/libaether_sandbox.so" "$TMP/probe_$PROBE" "$2" "$SCRIPT" 2>&1 | tail -1)"
     case "$got" in
         "$2: n/a") return 0 ;;
         "$2: $3") checked=$((checked + 1)) ;;
         *)
-            echo "    grants '$1', $2: expected $3, got '$got'"
+            echo "    $PROBE probe, grants '$1', $2: expected $3, got '$got'"
             fails=$((fails + 1)) ;;
     esac
 }
@@ -96,6 +107,7 @@ STARTERS="posix_spawn posix_spawnp pidfd_spawn pidfd_spawnp"
 EXECS="execve execv execvp execvpe execl execlp execle fexecve execveat execveat_fd"
 SHELLS="system popen strip_system wordexp_cmd script_execvp"
 
+for PROBE in plain threaded; do
 for m in $STARTERS $EXECS $SHELLS _Fork; do expect none "$m" refused; done
 expect none wordexp_plain "$plain_noshell"
 
@@ -113,9 +125,10 @@ for m in $STARTERS $EXECS system popen wordexp_cmd script_execvp _Fork wordexp_p
     expect all "$m" RAN
 done
 expect all strip_system refused
+done
 
 if [ "$fails" -ne 0 ]; then
     echo "  [FAIL] sandbox_spawn_family: $fails of $((fails + checked)) cells wrong"
     exit 1
 fi
-echo "  [PASS] sandbox_spawn_family: $checked cells, every way of starting a program held to fork and exec ($(uname -s))"
+echo "  [PASS] sandbox_spawn_family: $checked cells, every way of starting a program held to fork and exec, plain and threaded ($(uname -s))"
