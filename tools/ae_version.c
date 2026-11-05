@@ -62,27 +62,24 @@
 // Version manager: list available releases, install, and switch versions
 // --------------------------------------------------------------------------
 
-// Compile-time platform string used to pick the right release archive.
+// The release archive this host takes: aether-<ver>-<platform><ext>, with
+// <platform> from ae_release_platform.h, the one helper that knows every
+// release target (FreeBSD, musl, arm64). This file used to keep a table of
+// its own that had no FreeBSD row and fell through to "linux-x86_64": on
+// FreeBSD, `ae version install` / `ae upgrade` fetched the Linux binaries,
+// installed them, and switching to them left no working ae. NULL (an
+// unsupported host) now refuses instead of guessing.
+#include "ae_release_platform.h"
 #if defined(_WIN32)
-#  if defined(__aarch64__) || defined(_M_ARM64)
-#    define AE_PLATFORM "windows-arm64"
-#  else
-#    define AE_PLATFORM "windows-x86_64"
-#  endif
 #  define AE_ARCHIVE_EXT ".zip"
-#elif defined(__APPLE__) && (defined(__arm64__) || defined(__aarch64__))
-#  define AE_PLATFORM "macos-arm64"
-#  define AE_ARCHIVE_EXT ".tar.gz"
-#elif defined(__APPLE__)
-#  define AE_PLATFORM "macos-x86_64"
-#  define AE_ARCHIVE_EXT ".tar.gz"
-#elif defined(__linux__) && (defined(__aarch64__) || defined(__arm64__))
-#  define AE_PLATFORM "linux-arm64"
-#  define AE_ARCHIVE_EXT ".tar.gz"
 #else
-#  define AE_PLATFORM "linux-x86_64"
 #  define AE_ARCHIVE_EXT ".tar.gz"
 #endif
+
+static const char* ae_platform_name(void) {
+    const char* t = ae_host_triple();
+    return t ? t : "unsupported";
+}
 
 /* The canonical repository path. It must be the CURRENT one, not an old name
  * that still redirects: `ae upgrade` / `ae install` download release binaries
@@ -314,7 +311,7 @@ static int cmd_version_list(void) {
         return 1;
     }
 
-    printf("\nAvailable Aether releases  (platform: " AE_PLATFORM "):\n\n");
+    printf("\nAvailable Aether releases  (platform: %s):\n\n", ae_platform_name());
     printf("  %-16s  %s\n", "Version", "Status");
     printf("  %-16s  %s\n", "-------", "------");
 
@@ -431,8 +428,8 @@ static void explain_missing_release(const char* vtag, const char* filename) {
                         "download yet; a release follows its tag once that tag's "
                         "build has finished.\n", vtag);
     else if (!has_asset)
-        fprintf(stderr, "The %s release has no archive for " AE_PLATFORM " (%s).\n",
-                vtag, filename);
+        fprintf(stderr, "The %s release has no archive for %s (%s).\n",
+                vtag, ae_platform_name(), filename);
     fprintf(stderr, "The latest release is %s. Available versions: ae version list\n", latest);
 }
 
@@ -496,19 +493,26 @@ static int cmd_version_install(const char* version) {
     }
 
     // Build URL and local archive path
+    const char* plat = ae_host_triple();
+    if (!plat) {
+        fprintf(stderr, "Error: there is no Aether release build for this host's platform,\n"
+                        "so there is nothing to download. Build from source instead:\n"
+                        "https://github.com/" AE_GITHUB_REPO "/blob/main/docs/bootstrap-from-source.md\n");
+        return 1;
+    }
     char filename[256], url[1024], archive[512];
     snprintf(filename, sizeof(filename),
-        "aether-%s-" AE_PLATFORM AE_ARCHIVE_EXT, ver);
+        "aether-%s-%s" AE_ARCHIVE_EXT, ver, plat);
     snprintf(url, sizeof(url),
         "https://github.com/" AE_GITHUB_REPO "/releases/download/%s/%s",
         vtag, filename);
     snprintf(archive, sizeof(archive), "%s/.aether/%s", home, filename);
 
-    printf("Downloading Aether %s for " AE_PLATFORM "...\n", vtag);
+    printf("Downloading Aether %s for %s...\n", vtag, plat);
     fflush(stdout);
     if (ae_download(url, archive) != 0) {
         remove(archive);
-        fprintf(stderr, "Error: could not download %s for " AE_PLATFORM ".\n", vtag);
+        fprintf(stderr, "Error: could not download %s for %s.\n", vtag, plat);
         explain_missing_release(vtag, filename);
         return 1;
     }
@@ -519,7 +523,7 @@ static int cmd_version_install(const char* version) {
     {
         FILE* af = fopen(archive, "rb");
         if (!af) {
-            fprintf(stderr, "Error: could not download %s for " AE_PLATFORM ".\n", vtag);
+            fprintf(stderr, "Error: could not download %s for %s.\n", vtag, plat);
             explain_missing_release(vtag, filename);
             return 1;
         }
@@ -537,8 +541,8 @@ static int cmd_version_install(const char* version) {
 
         if (!is_gzip && !is_zip && !is_xz) {
             remove(archive);
-            fprintf(stderr, "Error: the download of %s for " AE_PLATFORM " returned an error "
-                            "page, not a release archive.\n", vtag);
+            fprintf(stderr, "Error: the download of %s for %s returned an error "
+                            "page, not a release archive.\n", vtag, plat);
             explain_missing_release(vtag, filename);
             return 1;
         }
@@ -622,7 +626,7 @@ static int cmd_version_install(const char* version) {
 #endif
             if (system(probe) != 0) { /* cleanup failed — non-fatal */ }
             fprintf(stderr, "Error: Installation of %s failed, no bin/, lib/, or share/ found.\n", vtag);
-            fprintf(stderr, "This version may not have a release for " AE_PLATFORM ".\n");
+            fprintf(stderr, "This version may not have a release for %s.\n", plat);
             fprintf(stderr, "Available versions: ae version list\n");
             return 1;
         }
@@ -2286,7 +2290,7 @@ int cmd_version(int argc, char** argv) {
          * ~/.aether/active_version says) made a stale binary report whatever
          * the pin claimed, which is the whole of #1602's first defect. */
         printf("ae %s (Aether Language)\n", AE_VERSION);
-        printf("Platform: " AE_PLATFORM "\n");
+        printf("Platform: %s\n", ae_platform_name());
 
         char self[2048];
         if (get_exe_path(self, sizeof(self))) {
