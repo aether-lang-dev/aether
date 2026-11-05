@@ -14,6 +14,25 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.887.0]
+
+### Removed
+
+- **`contrib.host.python` is removed.** The Python bridge now lives in
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)
+  (`python/`, copied from this tree at `9673641e6`). Import it with
+  `ae add github.com/aether-lang-dev/aether-guest-languages` and then
+  `import python`, in place of `import contrib.host.python`. It is deleted
+  here with no transition period, along with its tests
+  (`host_python_bidirectional`, `host_python_map_context`), its example, its
+  `make contrib` module (`host_python`) and the `--with=python` layer of
+  `aether-build`; other bridges will follow it to that repository one at a
+  time (see `contrib/host/README.md`).
+
+### Fixed
+
+- **Under the sandbox preload on FreeBSD, a threaded program can fork again.** libthr's fork, which `fork()` and `system()` reach in any program linked with the thread library (every Aether program), makes the process with `syscall(SYS_fork)`, and the preload refused that as it refuses every raw syscall: `fork()` and `system()` failed with ENOSYS whatever the grants, while `posix_spawn` worked. `syscall(SYS_fork)` now gets `fork()`'s rule. `tests/integration/sandbox_spawn_family` runs its grid on a threaded probe too (18 of FreeBSD's 122 cells were wrong before).
+
 ## [0.886.0]
 
 ### Fixed
