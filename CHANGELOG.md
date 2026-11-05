@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.885.0]
+
+### Fixed
+
+- **`install.sh` writes the version stamps `make install` writes.** `ae build` compares `lib/aether/VERSION` with its own version to catch a split toolchain, but only `make install` wrote it (and `include/aether/VERSION`). An `install.sh` run over an older `make install` therefore kept the old stamp, and every build warned "toolchain version mismatch" against a runtime that was in fact current (0.562.0 reported under a fresh 0.884.0). `install.sh` now stamps both from `VERSION`, and with no release version to stamp removes a stale one.
+
 ## [0.884.0]
 
 ### Fixed
