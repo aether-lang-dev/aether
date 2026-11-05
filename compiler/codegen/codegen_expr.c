@@ -8968,6 +8968,19 @@ static int place_has_index(const ASTNode* a) {
     return 0;
 }
 
+/* May making the value `v` run code that grows, binds again or frees the
+ * slice a store's place indexes: does it call anything (a function, a
+ * closure, an ask)? Slice ownership's own intrinsics only read or count. */
+static int value_may_move_place(const ASTNode* v) {
+    if (!v) return 0;
+    if (v->type == AST_SEND_ASK || v->type == AST_CLOSURE) return v->type == AST_SEND_ASK;
+    if (v->type == AST_FUNCTION_CALL && !(v->value && strncmp(v->value, "__slice_", 8) == 0))
+        return 1;
+    for (int i = 0; i < v->child_count; i++)
+        if (value_may_move_place(v->children[i])) return 1;
+    return 0;
+}
+
 /* The place `a` an intrinsic takes the address of, as the place it is: a
  * module-level slice `var` named there is the var itself, not a read of it
  * (emit_module_slice_read). */
@@ -9029,18 +9042,47 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         expr->child_count == 2) {
         const char* set = strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared";
         if (hoist_ready(gen) && place_has_index(a)) {
-            /* #3568: the element's place first, its bounds checked, then
-             * the value, as a string or a struct element's store does: C
-             * orders a call's arguments as it likes, and a value made
-             * before the check panicked was held by nothing (a leak of
-             * `rows[k] = mk(2)` on a slice too short). */
+            /* #3568: C orders a call's arguments as it likes, and a value
+             * made before the place's bounds check panicked was held by
+             * nothing (a leak of `rows[k] = mk(2)` on a slice too short).
+             * A value that runs no code that could move the place (no call)
+             * is stored after the place is taken, its bounds checked, as a
+             * string or a struct element's store is. One that may (a call:
+             * a closure appending to the very slice, which moves its
+             * buffer) is made first, journaled so a panic in the place's
+             * check gives it back, and the place is taken after it, where
+             * the element then is: taken before, the store went through a
+             * pointer into the buffer the growth had left. */
+            /* A whole store (`slice_store`, the `=` it stands in for left
+             * out) writes the element through the place it took here. */
+            const char* whole =
+                annotation_has_marker(expr->annotation, "slice_store") ? "*%s = " : "";
             TempSeq s;
             seq_open(gen, &s);
+            if (value_may_move_place(expr->children[1])) {
+                const char* v = seq_let(gen, &s, "AetherSlice", "_ae_ssv");
+                generate_expression(gen, expr->children[1]);
+                seq_next(gen, &s);
+                fprintf(o, "aether_unwind_track((const void*)&%s, aether_slice_release_at)", v);
+                seq_next(gen, &s);
+                const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
+                fprintf(o, "(AetherSlice*)&(");
+                emit_slice_place(gen, a);
+                fprintf(o, ")");
+                seq_next(gen, &s);
+                fprintf(o, "aether_unwind_forget((const void*)&%s)", v);
+                seq_next(gen, &s);
+                fprintf(o, whole, p);
+                fprintf(o, "%s(%s, %s)", set, p, v);
+                seq_close(gen, &s);
+                return 1;
+            }
             const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
             fprintf(o, "(AetherSlice*)&(");
             emit_slice_place(gen, a);
             fprintf(o, ")");
             seq_next(gen, &s);
+            fprintf(o, whole, p);
             fprintf(o, "%s(%s, ", set, p);
             generate_expression(gen, expr->children[1]);
             fprintf(o, ")");
@@ -10847,6 +10889,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_BINARY_EXPRESSION:
+            /* #3568: a store into a slice element or an element's slice
+             * field (slice ownership's `place = __slice_set(place, v)`,
+             * marked `slice_store`) is the intrinsic's whole: it takes the
+             * place, makes the value and stores it, in the order that holds
+             * (emit_slice_own_intrinsic). C's `=` evaluates its two sides
+             * in the order it likes, and the place taken before the value
+             * was stale once the value's making moved the buffer. */
+            if (expr->value && strcmp(expr->value, "=") == 0 && expr->child_count == 2 &&
+                expr->children[1] && expr->children[1]->type == AST_FUNCTION_CALL &&
+                annotation_has_marker(expr->children[1]->annotation, "slice_store") &&
+                hoist_ready(gen)) {
+                generate_expression(gen, expr->children[1]);
+                break;
+            }
             /* #3549: a comparison borrows its operands (R3), as a call its
              * arguments, by the same rule (arg_drain_select): a fresh string
              * operand is held in a temporary while the comparison reads it

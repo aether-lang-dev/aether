@@ -1917,6 +1917,19 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
                     n->children[1] = mk_store(shared_place(c, lhs) ? "__slice_set_shared"
                                                                    : "__slice_set",
                                               lhs->node_type, clone_ast_node(lhs), v);
+                    /* A place reached through an element (`rows[k]`,
+                     * `hs[k].tags`) is taken, its bounds checked, by the
+                     * store itself, in order with the value's making
+                     * (codegen's `slice_store`): the `=` around it leaves
+                     * the order to C. */
+                    int indexed = 0;
+                    for (ASTNode* p = lhs; p && (p->type == AST_MEMBER_ACCESS ||
+                                                 p->type == AST_ARRAY_ACCESS) && p->child_count > 0;
+                         p = p->children[0])
+                        if (p->type == AST_ARRAY_ACCESS) indexed = 1;
+                    if (indexed)
+                        n->children[1]->annotation =
+                            annotation_add_marker(n->children[1]->annotation, "slice_store");
                 }
                 return;
             }
