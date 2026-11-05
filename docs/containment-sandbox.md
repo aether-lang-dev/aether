@@ -468,12 +468,35 @@ should have both.
   lists over the transport size limit are refused with `-1` and the
   message "invalid grant list" or "grant list too large".
 
-- **`execve` with an explicit environment keeps the sandbox controls.**
-  The preload layer re-adds `LD_PRELOAD` and the `AETHER_SANDBOX_*` /
-  `AETHER_CAPSICUM` entries it captured at startup, so the child stays
-  contained and edits to the live environment do not change them. Only
-  `execve` is interposed; `execvp` and `posix_spawn` paths that reach the
-  kernel through glibc internals are not (a known gap).
+- **Every libc way of starting a program is held to the same two rules.**
+  A new process needs what `fork` needs (under a grant file, the `fork`
+  grant), and the program run needs its `exec` grant. The preload holds
+  these at `execve`, `fork` and `clone3`, and also at each call libc
+  implements on its own internal `execve`, `clone` or `vfork`, which the
+  `execve` and `fork` wrappers never see:
+  - the rest of the exec family (`execv`, `execvp`, `execvpe`, `execl`,
+    `execlp`, `execle`, `fexecve`, `execveat`, FreeBSD's `execvP`);
+  - `posix_spawn`, `posix_spawnp`, glibc's `pidfd_spawn`/`pidfd_spawnp`
+    and `_Fork`;
+  - `system`, `popen` and `wordexp`'s command substitution, which run
+    `/bin/sh` and so need an `exec` grant for it.
+
+  The `p` forms search `PATH` in the preload, so the grant is checked
+  against the file that runs. A file with no `#!` line that `execvp` runs
+  through `/bin/sh` needs the shell's grant as well as its own.
+  `tests/integration/sandbox_spawn_family` holds the whole grid on Linux
+  and FreeBSD. Before this, a process under a grant file with no `exec`
+  grant could still run any program through any of them; so could a
+  guest language's `os.execute` in-process.
+
+- **A child's environment keeps the sandbox controls.**
+  `execve` and the spawn calls re-add `LD_PRELOAD` and the
+  `AETHER_SANDBOX_*` / `AETHER_CAPSICUM` entries the preload captured at
+  startup, so the child stays contained and edits to the live environment
+  do not change them. `system` and `popen` run the shell with the live
+  environment, which cannot be rebuilt there: under a grant file they are
+  refused when it no longer carries exactly the controls the process
+  started with.
 
 - **Application-level only.** See "Cross-process containment" below
   for extending enforcement to child processes.
@@ -1008,8 +1031,8 @@ issue backlog.
 
 | Function / syscall | What it does | Risk |
 |-------------------|-------------|------|
-| `execveat()` | Execute by fd (Linux 3.19+) | Alternative to `execve` |
 | `clone()` (arch-specific) | Create new process/thread | Variadic, arch-dependent, hard to intercept portably |
+| `execveat` / `clone` as raw syscalls | Execute or create a process with no libc wrapper | Out of the preload's reach; under a grant file `syscall()` itself is refused, and a contained child's kernel layer (seccomp, the clone fence) still holds them |
 | `prctl()` | Process control | Can disable dumpable, change name, etc. |
 | `ptrace()` | Debug/modify another process | Can modify own memory to skip checks |
 | `process_vm_readv/writev()` | Read/write another process's memory | Cross-process data exfiltration |
