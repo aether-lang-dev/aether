@@ -1471,7 +1471,9 @@ test-ae: compiler ae stdlib
 	fi; \
 	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_end; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
@@ -1491,7 +1493,10 @@ test-ae: compiler ae stdlib
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
 	  done; } | sh tests/scripts/sweep_shard.sh > "$$tmpdir/units_sh.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_start; \
 	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_end; \
+	times > "$$tmpdir/times.txt"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -1536,6 +1541,7 @@ test-ae: compiler ae stdlib
 		echo ""; \
 	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
+	sh "$$root/tests/scripts/sweep_cpu.sh" report "$$tmpdir" $(NPROC) "$$sh_nproc"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
 	printf '%s %s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" "$$expected" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \

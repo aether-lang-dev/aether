@@ -11,7 +11,7 @@
 # measure work, not the sweep's elapsed time.
 set -u
 tmpdir="$1"
-top="${AE_SWEEP_TIMING_TOP:-10}"
+top="${AE_SWEEP_TIMING_TOP:-25}"
 
 ae_times="$tmpdir/.timings_ae"
 sh_times="$tmpdir/.timings_sh"
