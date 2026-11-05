@@ -1,5 +1,5 @@
 #!/bin/sh
-# See install-python-headers.sh for the pattern.
+# See install-js-headers.sh for the pattern.
 
 set -eu
 

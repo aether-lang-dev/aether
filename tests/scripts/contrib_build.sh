@@ -17,8 +17,8 @@
 #    (ctr_notes.md Bug 6) we're closing here.
 #
 # Examples:
-#   MODULES=python                    # build only host_python; fail if it can't
-#   MODULES=python,tcl                # build python AND tcl; fail if either can't
+#   MODULES=tcl                       # build only host_tcl; fail if it can't
+#   MODULES=perl,tcl                  # build perl AND tcl; fail if either can't
 #   (unset)                           # build-all, tolerate skips
 #
 # Writes build/contrib/MANIFEST listing one line per built archive:
@@ -221,7 +221,7 @@ build_vendored_sqlite() {
 # this script stays runnable even if the demos script is renamed.)
 #
 # Each probe queries the distro's REAL -dev kit via pkg-config or a
-# language-specific config tool (python3-config / perl -MExtUtils::Embed).
+# language-specific config tool (ruby / perl -MExtUtils::Embed).
 # The earlier vendored-fallback path
 # (`/opt/aether/include/<lang>/` populated from
 # hosted-language-headers) was removed when ctr_notes.md Bug 6 proved
@@ -270,14 +270,6 @@ probe_avcodec() {
     fi
     if pkg-config --exists libavcodec libavformat libavutil libswscale libswresample 2>/dev/null; then
         pkg-config --cflags-only-I libavcodec libavformat libavutil libswscale libswresample
-        return 0
-    fi
-    return 1
-}
-
-probe_python() {
-    if command -v python3-config >/dev/null 2>&1; then
-        python3-config --includes
         return 0
     fi
     return 1
@@ -381,8 +373,8 @@ probe_quickjs() {
 }
 
 probe_factor() {
-    # The bridge .c loads libfactor purely via dlopen (mirrors host/tcl,
-    # host/python after their dlopen rewrites) — it needs NO Factor dev
+    # The bridge .c loads libfactor purely via dlopen (mirrors host/tcl
+    # after its dlopen rewrite) — it needs NO Factor dev
     # lib at COMPILE time. The aether-lang-dev/factor-language fork's
     # libfactor + bootstrapped factor.image are only required at RUNTIME
     # (the host_factor integration test gates on AETHER_FACTOR_SONAME /
@@ -461,9 +453,9 @@ cross_class() {   # <module-name> -> echoes the class token
         # stunt's bridge has no dependency at all: it compiles like core.
         host_stunt)            echo "tier1" ;;
         # host bridges whose headers are arch/config-GENERATED multiarch
-        # dispatchers (pyconfig.h / ruby/config.h / perl's config.h) that can't
+        # dispatchers (ruby/config.h / perl's config.h) that can't
         # be portably cross-staged — ctr_notes.md Bug 6. Not cross-buildable here.
-        host_python|host_perl|host_ruby|host_tcl|\
+        host_perl|host_ruby|host_tcl|\
         host_tinygo|host_factor|host_racket|host_aether)
                                echo "nocross" ;;
         *)                     echo "nocross" ;;
@@ -571,7 +563,6 @@ build_module() {
 CATALOGUE=(
     "sqlite|sqlite       contrib/sqlite/aether_sqlite.c           AETHER_HAS_SQLITE  probe_sqlite"
     "avcodec|avcodec     contrib/avcodec/aether_avcodec.c         AETHER_HAS_AVCODEC probe_avcodec"
-    "python|host_python  contrib/host/python/aether_host_python.c AETHER_HAS_PYTHON  probe_python"
     "perl|host_perl      contrib/host/perl/aether_host_perl.c     AETHER_HAS_PERL    probe_perl"
     "ruby|host_ruby      contrib/host/ruby/aether_host_ruby.c     AETHER_HAS_RUBY    probe_ruby"
     "duktape|host_duktape  contrib/host/duktape/aether_host_duktape.c  AETHER_HAS_DUKTAPE  probe_duktape"

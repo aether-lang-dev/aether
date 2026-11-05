@@ -128,7 +128,7 @@ main() {
 - `rb_intern` and `rb_funcall` are `#define`d as macros in
   `ruby/ruby.h` (rb_funcall expands to a GCC statement-expr block).
   The dlopen table fields are named `f_rb_intern` and `f_rb_funcall`
-  to avoid the macro collision (same trap as `Py_None` in the python
+  to avoid the macro collision (same trap as `Py_None` in the CPython
   bridge).
 - Ruby's `subst.h` `#define snprintf ruby_snprintf` is undef'd
   immediately after `#include <ruby.h>`: the bridge uses libc

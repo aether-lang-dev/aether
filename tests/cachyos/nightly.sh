@@ -219,7 +219,7 @@ contrib_ae_check() {
     # published table stays topline. publish_results() renders these to markdown.
     : > "$RESULTS_TSV"
     for mod in $(find contrib -name module.ae | sort); do
-        name="$(dirname "${mod#contrib/}")"   # e.g. tinyweb, host/python
+        name="$(dirname "${mod#contrib/}")"   # e.g. tinyweb, host/tcl
         t0="$(now_ms)"
         if out="$("$ae" check "$mod" 2>&1)"; then
             status="PASS"; echo "  ae-check OK: $mod"
@@ -513,8 +513,6 @@ host_specs_no_skips() {
         case "$lang" in
             ruby)   AETHER_RUBY_SONAME="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"
                     export AETHER_RUBY_SONAME ;;
-            python) AETHER_PYTHON_SONAME="$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"
-                    export AETHER_PYTHON_SONAME ;;
             perl)   AETHER_PERL_SONAME="$(perl -MConfig -e 'print "$Config{archlibexp}/CORE/$Config{libperl}"' 2>/dev/null)"
                     export AETHER_PERL_SONAME ;;
         esac

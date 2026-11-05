@@ -37,15 +37,6 @@ trap 'rm -rf "$tmpdir"' EXIT
 # available: "-I<path>" on line 1, "-L<path> -l<lib> ..." on line 2.
 # Exits 0 if available, 1 if not. Never prints to stderr.
 
-probe_python() {
-    if command -v python3-config >/dev/null 2>&1; then
-        python3-config --includes
-        python3-config --ldflags --embed
-        return 0
-    fi
-    return 1
-}
-
 probe_ruby() {
     for v in ruby-3.2 ruby-3.1 ruby-3.0 ruby; do
         if pkg-config --exists "$v" 2>/dev/null; then
@@ -183,12 +174,11 @@ CC="${CC:-cc}"
 printf "  using CC=%s\n" "$CC"
 printf "\n"
 
-for lang in duktape perl python ruby tcl go tinygo; do
+for lang in duktape perl ruby tcl go tinygo; do
     flag=""
     case "$lang" in
         duktape) flag="AETHER_HAS_DUKTAPE" ;;
         perl)    flag="AETHER_HAS_PERL" ;;
-        python)  flag="AETHER_HAS_PYTHON" ;;
         ruby)    flag="AETHER_HAS_RUBY" ;;
         tcl)     flag="AETHER_HAS_TCL" ;;
         go)      flag="AETHER_HAS_GO" ;;

@@ -131,8 +131,8 @@ The same grant list goes to:
   is the explicit way to run one with no sandbox. A foreign interpreter's
   start-up reads come from `grant_runtime("python3")`, which asks the
   interpreter for them;
-- the `contrib/host/<lang>` modules, which run embedded Python, Ruby and
-  others under it: `python.run_sandboxed(worker, code)`.
+- the `contrib/host/<lang>` modules, which run embedded Ruby, Tcl and
+  others under it: `tcl.run_sandboxed(worker, code)`.
 
 ## Paths and threads
 

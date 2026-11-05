@@ -404,11 +404,11 @@ static const char* binimport_link(void) { return g_binimport_link ? g_binimport_
 // (libaether_host_<lang>.a) must be on the link line or the produced
 // binary fails at runtime with `undefined symbol: <lang>_run` (the
 // BRIDGE symbol, not the host language's). The user previously had to
-// repeat themselves with `link_flags = "-laether_host_python"` in
+// repeat themselves with `link_flags = "-laether_host_tcl"` in
 // aether.toml — same information twice. Driven entirely by the import,
 // so a pure-Aether program with no `contrib.host.*` imports does NOT
 // link any bridge .a (critical: blanket-linking would force a
-// hello-world binary to dlopen libpython at runtime). Empty unless
+// hello-world binary to dlopen libtcl at runtime). Empty unless
 // `prepare_host_bridge_imports` found a match. Not POSIX-only any more: the
 // bridges DO build on Windows, and this used to be guarded out there, which is
 // what left `import contrib.host.tinygo` linking against nothing.
@@ -6916,19 +6916,19 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
 //
 // The bridge .c (contrib/host/<lang>/aether_host_<lang>.c) compiles
 // to libaether_host_<lang>.a (see Makefile:1324). Linking the .a is
-// what supplies symbols like `python_run` — the BRIDGE's own ABI,
-// distinct from the host language's runtime symbols (Py_Initialize
+// what supplies symbols like `tcl_run` — the BRIDGE's own ABI,
+// distinct from the host language's runtime symbols (Tcl_CreateInterp
 // et al.) that the bridge in turn calls. Without this scan, an
-// import like `import contrib.host.python` compiled because the
+// import like `import contrib.host.tcl` compiled because the
 // headers resolved, but at runtime failed with `undefined symbol:
-// python_run` because the .a was never linked. Users had to repeat
-// the import as `link_flags = "-laether_host_python"` in
+// tcl_run` because the .a was never linked. Users had to repeat
+// the import as `link_flags = "-laether_host_tcl"` in
 // aether.toml — busywork easily forgotten (the ctr_notes.md Bug 4
 // trace from 2026-06-03).
 //
 // Entry-file-only: only the top-level .ae passed to `ae build` /
 // `ae run` is scanned. If a library you import in turn imports
-// `contrib.host.python`, you must still write the import yourself
+// `contrib.host.tcl`, you must still write the import yourself
 // in your top-level file. Widening to transitive imports later is
 // purely additive — same predicate, more files to scan.
 //
@@ -7094,7 +7094,7 @@ static void prepare_host_bridge_imports(const char* main_file) {
         // available (ctr_notes.md Finding 2). Users would otherwise
         // have to add `link_flags = "-lffi"` to their aether.toml
         // manually — exactly the kind of "import is the trigger"
-        // footgun that contrib/host/python/README.md §8 promises
+        // footgun that contrib/host/tcl/README.md promises
         // bridges should avoid.
         //
         // The probe is by-symbol, not by-language: when libffi-dev
@@ -7609,7 +7609,7 @@ static int cmd_run(int argc, char** argv) {
 
     // Host-bridge prepass: `import contrib.host.<lang>` queues
     // libaether_host_<lang>.a onto the link line. Import-driven so a
-    // pure-Aether program doesn't gain libpython et al. as runtime
+    // pure-Aether program doesn't gain libtcl et al. as runtime
     // dependencies it doesn't use.
     prepare_host_bridge_imports(file);
 

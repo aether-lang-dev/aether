@@ -79,57 +79,6 @@ check "JS write" "js:result=14" "$JS_OUT"
 check "JS frozen" "js:untampered=Bob" "$JS_OUT"
 fi
 
-# --- Python ---
-echo ""
-echo "=== Python ==="
-if [ $PY_AVAILABLE -eq 0 ]; then skip "Python"; else
-PY_OUT=$(gcc -o $AE_TMP/test_map_py \
-    "$ROOT/contrib/host/python/aether_host_python.c" \
-    "$ROOT/runtime/aether_sandbox.c" \
-    "$ROOT/runtime/aether_shared_map.c" \
-    $PY_CFLAGS -I"$ROOT/runtime" -DAETHER_HAS_PYTHON -DAETHER_HAS_SANDBOX \
-    -L"$ROOT/build" -laether $PY_LIBS -ldl -lm -lrt \
-    -Wno-discarded-qualifiers \
-    -xc - 2>/dev/null << 'CEOF'
-#include <stdio.h>
-#include <stdint.h>
-#include "aether_shared_map.h"
-extern void* list_new(void); extern void list_add(void*, void*); extern void list_free(void*);
-extern int python_run_sandboxed_with_map(void*, const char*, uint64_t);
-extern void python_finalize(void);
-void aether_args_init(int a, char** v){(void)a;(void)v;}
-void* _aether_ctx_stack[64]; int _aether_ctx_depth = 0;
-int main() {
-    void* p = list_new();
-    list_add(p,"env"); list_add(p,"*");
-    list_add(p,"fs_read"); list_add(p,"/usr/*");
-    list_add(p,"fs_read"); list_add(p,"/lib/*");
-    list_add(p,"fs_read"); list_add(p,"/etc/*");
-    list_add(p,"fs_read"); list_add(p,"/home/*");
-    uint64_t t; AetherSharedMap* m = aether_shared_map_new(&t);
-    aether_shared_map_put(m, "name", "Charlie");
-    aether_shared_map_put(m, "factor", "5");
-    python_run_sandboxed_with_map(p,
-        "n = aether_map_get('name')\n"
-        "f = aether_map_get('factor')\n"
-        "s = aether_map_get('secret')\n"
-        "aether_map_put('product', str(int(f) * 10))\n"
-        "aether_map_put('name', 'TAMPERED')\n"
-        "print(f'py:name={n},factor={f},secret={s}')\n"
-    , t);
-    aether_shared_map_revoke_token(t);
-    printf("py:result=%s\n", aether_shared_map_get(m, "product"));
-    printf("py:untampered=%s\n", aether_shared_map_get(m, "name"));
-    aether_shared_map_free(m); python_finalize(); list_free(p);
-    return 0;
-}
-CEOF
-LD_PRELOAD="$PRELOAD" $AE_TMP/test_map_py 2>/dev/null)
-check "Python read" "py:name=Charlie,factor=5,secret=None" "$PY_OUT"
-check "Python write" "py:result=50" "$PY_OUT"
-check "Python frozen" "py:untampered=Charlie" "$PY_OUT"
-fi
-
 # --- Perl ---
 echo ""
 echo "=== Perl ==="
@@ -343,5 +292,5 @@ echo "============================================"
 echo "  $PASS passed, $FAIL failed"
 echo "============================================"
 
-rm -f $AE_TMP/test_map_js $AE_TMP/test_map_py $AE_TMP/test_map_perl $AE_TMP/test_map_ruby $AE_TMP/test_map_java $AE_TMP/test_map_factor
+rm -f $AE_TMP/test_map_js $AE_TMP/test_map_perl $AE_TMP/test_map_ruby $AE_TMP/test_map_java $AE_TMP/test_map_factor
 exit $FAIL

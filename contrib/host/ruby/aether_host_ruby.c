@@ -4,8 +4,8 @@
 // ENV[], Kernel#system etc. go through libc and are intercepted by
 // the LD_PRELOAD sandbox layer.
 //
-// LOADING MODEL: dlopen, not -lruby. Mirrors contrib/host/python's
-// v0.209.0 design — every Ruby C-API symbol resolved via dlsym at
+// LOADING MODEL: dlopen, not -lruby. Mirrors contrib/host/tcl's
+// design — every Ruby C-API symbol resolved via dlsym at
 // first call. The bridge .a has NO unresolved Ruby symbols at link
 // time, so end-user binaries have no DT_NEEDED libruby and are
 // ABI-portable across deploy-host Ruby minor versions.
@@ -79,7 +79,7 @@ static struct {
     // rb_funcall → __extension__({...}) GCC statement-expr block).
     // A bare struct field named `rb_intern` or `rb_funcall` gets
     // textually rewritten by the preprocessor and breaks the build.
-    // Same trap as `Py_None` in the python bridge — field names are
+    // Same trap as `Py_None` in the CPython bridge — field names are
     // prefixed `f_` to avoid the macro collision.
     ID    (*f_rb_intern)(const char*);
     char* (*rb_string_value_cstr)(volatile VALUE*);

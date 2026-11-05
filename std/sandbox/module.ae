@@ -19,7 +19,7 @@
 // (category, pattern) pairs that the in-process checks in std and the
 // LD_PRELOAD library (libaether_sandbox.so) consult, and that the
 // contrib/host/<lang> modules take as their `perms` argument
-// (`python.run_sandboxed(worker, code)`). This module is the one place those
+// (`tcl.run_sandboxed(worker, code)`). This module is the one place those
 // category names are spelt; a hand-written "fs-read" would match nothing
 // and deny silently.
 //

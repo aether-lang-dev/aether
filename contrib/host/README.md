@@ -29,6 +29,7 @@ name. A bridge that has moved is deleted here, with no transition period.
 | Bridge | Moved | Now |
 |---|---|---|
 | `lua` | 2026-11-04 | `lua/` in aether-guest-languages, copied from this tree at `d3732a0ed` |
+| `python` | 2026-11-05 | `python/` in aether-guest-languages, copied from this tree at `9673641e6` |
 
 To use it:
 
@@ -38,7 +39,13 @@ ae add github.com/aether-lang-dev/aether-guest-languages
 
 ```aether,fragment
 import lua
+import python
 ```
+
+Each language there has four ways to run it, from in-process with no
+containment to a contained child process (`std.guest`), and a containment
+table held to stunt's catalogue by name; see `python/README.md` (its "Four
+ways to run Python from Aether" and "Containment table") and `lua/README.md`.
 
 The other languages will follow there one at a time. `TODO.md` in this
 directory tracks which have moved and what is left.

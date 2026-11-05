@@ -4,8 +4,8 @@
 // system() etc. go through libc and are intercepted by the
 // LD_PRELOAD sandbox layer.
 //
-// LOADING MODEL: dlopen, not -lperl. Mirrors contrib/host/python,
-// contrib/host/ruby, contrib/host/tcl — every Perl C-API symbol
+// LOADING MODEL: dlopen, not -lperl. Mirrors contrib/host/ruby,
+// contrib/host/tcl — every Perl C-API symbol
 // resolved via dlsym at first call. The bridge .a has NO unresolved
 // Perl symbols at link time, so end-user binaries have no
 // DT_NEEDED libperl and are ABI-portable across deploy-host Perl

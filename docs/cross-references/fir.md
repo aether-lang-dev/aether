@@ -70,7 +70,7 @@ end.
 | Closures                         | Yes (compile to C)                                     | Yes, typed with effect sets; `\(): expr` lambda syntax; trailing closure syntax     |
 | Iterators                        | (none surfaced)                                        | `trait Iterator` with associated `Item` type and effect parameter; ~15 combinators in `Fir/Iter.fir` |
 | Stdlib surface                   | `std.fs`, `std.net`, `std.os`, `std.json`, `std.string` | `Array`, `Vec`, `HashMap`/`Set`, `Deque`, `List`, `Iter`, `Str`, `StrBuf`, `Char`, `Num`, `Option`, `Result`, `PPrint`, `Exn`, `RowToList` |
-| Embedded interpreters            | Yes (Python, Perl, Ruby, Tcl, JS in-process)      | Tree-walking interpreter ships in-process (used for tests, REPL, playground)         |
+| Embedded interpreters            | Yes (Perl, Ruby, Tcl, JS in-process)      | Tree-walking interpreter ships in-process (used for tests, REPL, playground)         |
 | Tooling shipped in repo          | `aetherc` only                                         | `aetherc` equiv + a **PEG generator** (`Tool/Peg/`) and a **formatter** (`Tool/Format/`), both written in Fir |
 | Self-hosting                     | No                                                     | Partial: a Fir compiler is being written in Fir under `Compiler/`                    |
 | Tests                            | `tests/regression/*.ae`                                | `Tests/*.fir` **409 files**, golden-tested via `goldentests`                       |
@@ -752,7 +752,7 @@ For symmetry, these are the places **Aether is ahead**:
 - **`--emit=lib` ABI** for FFI from C / Python / Java / Ruby. Fir
   generates a self-contained executable; there's no notion of
   "stable export ABI for hosting from another language".
-- **In-process embedded interpreters** (Python, Ruby, Tcl, JS).
+- **In-process embedded interpreters** (Ruby, Tcl, JS).
   Fir's interpreter only runs Fir.
 - **Real OS-level standard library**: `std.fs`, `std.net`, `std.os`,
   `std.json`. Fir's stdlib is data-structure-heavy (Array/Vec/HashMap/
