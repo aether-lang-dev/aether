@@ -198,6 +198,16 @@ unsigned long long compute_cache_key(const char* ae_file, const char* extra_file
  * could not see every file. The build then still asks aetherc for a depfile,
  * and the key recomputed from it (no walk) is the one it publishes under. */
 int cache_key_walk_incomplete(void);
+/* #3599: whether looking `ae_file` up in the build cache can find anything.
+ * A build publishes under the key its depfile gives (#2500), so the key a
+ * source with no depfile yet makes by walking directory trees names no entry,
+ * unless some build had to publish under such a key (cache_note_published).
+ * A build skips the lookup, and the walk, when this says no. */
+int cache_lookup_can_hit(const char* ae_file);
+/* #3599: after publishing an entry under the key the last compute_cache_key
+ * made: record it when that key came from a tree walk, so that later lookups
+ * of sources with no depfile walk again and can find it. */
+void cache_note_published(void);
 /* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
  * The cache key folds in the compiler it names (#2477). */
 const char* c_backend_env_override(void);

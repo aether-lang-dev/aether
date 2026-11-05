@@ -7555,8 +7555,16 @@ static int cmd_run(int argc, char** argv) {
     /* One salt for the lookup and the publish key below (#2500); it lives
      * for the process. */
     const char* run_key_salt = ae_define_salt(run_mode_salt());
-    unsigned long long cache_key =
-        compute_cache_key(file, extra_files, "O0", run_key_salt);
+    /* #3599: as `ae build` does, no lookup (and no tree walk) for a source
+     * with no depfile yet: nothing is published under the key it would make.
+     * aetherc writes the depfile, and the key it gives below is published. */
+    unsigned long long cache_key = 0;
+    if (!cache_lookup_can_hit(file)) {
+        if (tc.verbose) fprintf(stderr, "[cache] miss: no depfile yet, nothing to look up\n");
+        cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+    } else {
+        cache_key = compute_cache_key(file, extra_files, "O0", run_key_salt);
+    }
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -7703,6 +7711,7 @@ static int cmd_run(int argc, char** argv) {
         if (cache_publish(exe_file, cached_exe) == 0) {
             strncpy(exe_file, cached_exe, sizeof(exe_file) - 1);
             exe_file[sizeof(exe_file) - 1] = '\0';
+            cache_note_published();
             cache_enforce_limit(cached_exe, 0);
         } else {
             // Exotic-filesystem rename failure: run the private temp
@@ -10668,8 +10677,18 @@ static int cmd_build(int argc, char** argv) {
         char* build_mode_full = libs_salt ? ae_strdup_printf("%s%s", build_mode, libs_salt) : NULL;
         free(libs_salt);
         build_key_salt = ae_define_salt(build_mode_full);
-        cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
-                                      build_key_salt);
+        /* #3599: a source with no depfile yet has no entry to find (its key
+         * would come from walking two directory trees, and builds publish
+         * under the depfile's), so the lookup and its walk are skipped; the
+         * build asks aetherc for the depfile and publishes under its key. */
+        if (!cache_lookup_can_hit(file)) {
+            cache_key = 0;
+            if (tc.verbose) fprintf(stderr, "[cache] miss: no depfile yet, nothing to look up\n");
+            cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+        } else {
+            cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                          build_key_salt);
+        }
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
@@ -10966,6 +10985,7 @@ static int cmd_build(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] publish failed for %016llx\n", cache_key);
         } else {
             if (tc.verbose) fprintf(stderr, "[cache] wrote: %016llx\n", cache_key);
+            cache_note_published();
             cache_enforce_limit(cached_exe, 0);
         }
     }

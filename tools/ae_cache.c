@@ -1431,6 +1431,38 @@ static int s_key_walk_incomplete = 0;
 
 int cache_key_walk_incomplete(void) { return s_key_walk_incomplete; }
 
+/* #3599: whether the last compute_cache_key folded the entry's depfile, so
+ * that its key is the one a build publishes under, rather than walking the
+ * entry's and the working directory's trees. */
+static int s_key_from_depfile = 0;
+
+/* #3599: a file in the cache directory that exists once any build has
+ * published an entry under a tree-walk key. That happens only when no
+ * depfile could be folded after aetherc ran (it wrote none, or one the key
+ * does not trust): every other build publishes under its depfile's key
+ * (#2500). */
+static void walk_keyed_marker(char* out, size_t outsz) {
+    init_cache_dir();
+    snprintf(out, outsz, "%s/walk-keyed", s_cache_dir);
+}
+
+int cache_lookup_can_hit(const char* ae_file) {
+    char path[1200];
+    cache_depfile_path(ae_file, path, sizeof(path));
+    if (access(path, F_OK) == 0) return 1;
+    walk_keyed_marker(path, sizeof(path));
+    return access(path, F_OK) == 0;
+}
+
+void cache_note_published(void) {
+    if (s_key_from_depfile) return;
+    char path[1200];
+    walk_keyed_marker(path, sizeof(path));
+    if (access(path, F_OK) == 0) return;
+    FILE* f = fopen(path, "w");
+    if (f) fclose(f);
+}
+
 /* A tree walk for the key; 0 (after --verbose says why) when it could not see
  * every file. */
 static int key_hash_tree(const char* root, unsigned long long* acc, int* count) {
@@ -1446,6 +1478,7 @@ unsigned long long compute_cache_key(const char* ae_file,
                                             const char* opt_level,
                                             const char* extra_salt) {
     s_key_walk_incomplete = 0;
+    s_key_from_depfile = 0;
     /* A salt that could not be built (out of memory) would leave part of
      * the build's identity out of the key: no key, as for an unread file. */
     if (!extra_salt) return 0;
@@ -1547,6 +1580,7 @@ unsigned long long compute_cache_key(const char* ae_file,
         if (fold_depfile(depfile, &dep_acc)) {
             key_append(&key, ":deps=%016llx", dep_acc);
             used_depfile = 1;
+            s_key_from_depfile = 1;
         }
     }
 
