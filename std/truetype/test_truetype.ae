@@ -81,6 +81,11 @@ fn glyph_compound(b: ptr, at: int) {
 // The whole font. `mac_english` false gives the Macintosh name record a
 // language other than English, so the Windows record is the one read.
 fn build_font(mac_english: bool) -> (ptr, int) {
+    return build_font_cmap(mac_english, false)
+}
+
+// symbol: the cmap is Microsoft Symbol (3,0), its characters at 0xF000 + code.
+fn build_font_cmap(mac_english: bool, symbol: bool) -> (ptr, int) {
     size = 1024
     b = bytes.new(size)
     i = 0
@@ -126,12 +131,15 @@ fn build_font(mac_english: bool) -> (ptr, int) {
     cmap = at
     at = table(b, 6, "cmap", at, 52)
     put16(b, cmap, 0); put16(b, cmap + 2, 1)
-    put16(b, cmap + 4, 3); put16(b, cmap + 6, 1); put32(b, cmap + 8, 12)
+    enc = 1
+    hi = 0
+    if symbol { enc = 0; hi = 61440 }
+    put16(b, cmap + 4, 3); put16(b, cmap + 6, enc); put32(b, cmap + 8, 12)
     sub = cmap + 12
     put16(b, sub, 4); put16(b, sub + 2, 40); put16(b, sub + 6, 6)
-    put16(b, sub + 14, 32); put16(b, sub + 16, 66); put16(b, sub + 18, 65535) // ends
-    put16(b, sub + 22, 32); put16(b, sub + 24, 65); put16(b, sub + 26, 65535) // starts
-    put16(b, sub + 28, 3 - 32); put16(b, sub + 30, 1 - 65); put16(b, sub + 32, 1) // deltas
+    put16(b, sub + 14, hi + 32); put16(b, sub + 16, hi + 66); put16(b, sub + 18, 65535) // ends
+    put16(b, sub + 22, hi + 32); put16(b, sub + 24, hi + 65); put16(b, sub + 26, 65535) // starts
+    put16(b, sub + 28, 3 - 32 - hi); put16(b, sub + 30, 1 - 65 - hi); put16(b, sub + 32, 1) // deltas
 
     kern = at
     at = table(b, 7, "kern", at, 24)
@@ -254,6 +262,32 @@ fn test_declarations(f: *Typeface) -> int {
     return fails
 }
 
+// A Microsoft Symbol (3,0) cmap: characters at 0xF000 + code, found by code too.
+fn test_symbol_cmap() -> int {
+    fails = 0
+    b, n = build_font_cmap(true, true)
+    s = truetype.load_bytes(bytes.data(b), n, "synthetic-symbol")
+    bytes.free(b)
+    if s == null { println("FAIL: load (symbol): ${truetype.last_error()}"); exit(1) }
+    fails = fails + ck(truetype.glyph_index(s, 65) == 1, "symbol: 'A' (0x41) finds 0xF041")
+    fails = fails + ck(truetype.glyph_index(s, 66) == 2, "symbol: 'B' finds 0xF042")
+    fails = fails + ck(truetype.glyph_index(s, 32) == 3, "symbol: ' ' finds 0xF020")
+    fails = fails + ck(truetype.glyph_index(s, 61505) == 1, "symbol: 0xF041 directly still works")
+    fails = fails + ck(truetype.glyph_index(s, 67) == 0, "symbol: unmapped 'C' is still missing")
+    fails = fails + ck(truetype.glyph_index(s, 256 + 65) == 0, "symbol: the fallback stops below 0x100")
+    truetype.typeface_free(s)
+
+    // Negative control: the same codes in a plain Unicode (3,1) font with no
+    // entry at 0xF041 must not be rescued.
+    b2, n2 = build_font(true)
+    u = truetype.load_bytes(bytes.data(b2), n2, "synthetic-unicode")
+    bytes.free(b2)
+    fails = fails + ck(truetype.glyph_index(u, 67) == 0, "unicode: 'C' missing, no fallback")
+    fails = fails + ck(truetype.glyph_index(u, 61505) == 0, "unicode: 0xF041 is not mapped")
+    truetype.typeface_free(u)
+    return fails
+}
+
 fn test_refusals() -> int {
     fails = 0
     b, n = build_font(true)
@@ -291,6 +325,7 @@ main() {
     fails = fails + ck(truetype.full_name(g) == "Tést", "the English Windows name, UTF-16 to UTF-8 (${truetype.full_name(g)})")
     truetype.typeface_free(g)
 
+    fails = fails + test_symbol_cmap()
     fails = fails + test_refusals()
 
     if fails > 0 { println("${fails} failure(s)"); exit(1) }

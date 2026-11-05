@@ -76,6 +76,7 @@ struct Typeface {
     cmap: int // the Unicode subtable used, from the file's start
     cmap_end: int // the end of the cmap table, which bounds it
     cmap_format: int // 4 or 12
+    cmap_symbol: int // 1 when the subtable is Microsoft Symbol (3,0): its characters sit at 0xF000 + code
     kern_pairs: int // the first kern pair; 0 when there is no kerning
     kern_count: int
     kern_sorted: int // the pairs are in key order, as the format requires
@@ -219,6 +220,7 @@ choose_cmap(f: *Typeface, cmap: int, cmap_length: int) -> bool {
     tables = u16(f, cmap + 2)
     if cmap + 4 + 8 * tables > f.cmap_end { return false }
     best = 0
+    f.cmap_symbol = 0
     t = 0
     while t < tables {
         platform = u16(f, cmap + 4 + 8 * t)
@@ -236,6 +238,8 @@ choose_cmap(f: *Typeface, cmap: int, cmap_length: int) -> bool {
                 best = score
                 f.cmap = at
                 f.cmap_format = format
+                f.cmap_symbol = 0
+                if score == 1 { f.cmap_symbol = 1 }
             }
         }
         t = t + 1
@@ -432,6 +436,12 @@ glyph_index(f: *Typeface, codepoint: int) -> int {
         g = glyph_index_12(f, codepoint)
     } else if codepoint <= 65535 {
         g = glyph_index_4(f, codepoint)
+    }
+    // A symbol font keeps its characters in the private-use block, at
+    // 0xF000 + the character code, so the plain codepoint finds nothing;
+    // Windows and FreeType retry there for a code below 0x100.
+    if g == 0 && f.cmap_symbol == 1 && codepoint < 256 {
+        g = glyph_index_4(f, 61440 + codepoint)
     }
     if g < 0 || g >= f.glyph_count { return 0 }
     return g
