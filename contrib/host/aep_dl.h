@@ -1,8 +1,9 @@
 // aep_dl.h — tiny portable dlopen shim for the contrib.host.* bridges.
 //
-// The bridges load the deploy host's libperl/libruby at RUNTIME (not at
-// link) via dlopen+dlsym, so a binary is ABI-portable: compile anywhere, run
-// where the language is. POSIX spells that dlopen/dlsym/dlclose (<dlfcn.h>);
+// A bridge loads its engine at RUNTIME (not at link) via dlopen+dlsym, so a
+// binary is ABI-portable: compile anywhere, run where the engine is. In this
+// tree that is stunt's bridge loading libstunt; the language bridges that
+// loaded libperl/libruby the same way moved to aether-guest-languages. POSIX spells that dlopen/dlsym/dlclose (<dlfcn.h>);
 // Windows spells it LoadLibrary/GetProcAddress/FreeLibrary (no <dlfcn.h>).
 // This header maps the POSIX names the bridges already use onto Win32 so the
 // bridge source stays single-source across FreeBSD/macOS/Linux/Windows.

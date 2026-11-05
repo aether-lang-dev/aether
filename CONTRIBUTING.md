@@ -682,17 +682,23 @@ that **link-binds** its host library at compile time (e.g. sqlite,
 contract `AETHER_<LANG>_LDFLAGS` / `AETHER_<LANG>_CFLAGS` so the
 existing `${VAR}` allowlist accepts it without code changes here.
 
-For bridges that **dlopen** their host library at runtime (tcl, perl,
-ruby), users should NOT need to set
-`${AETHER_<LANG>_LDFLAGS}` at all, `ae build` adds nothing
-libtcl-related to the link line, and the bridge dlopens
-`libtcl*.so` / etc. at first call. See `contrib/host/tcl/README.md`
-for the canonical pattern. The optional `${AETHER_<LANG>_SONAME}` env var lets
-the orchestrator supply a host-probed exact soname as a fallback when
-the unversioned symlink isn't present (e.g. Debian).
+For bridges that **dlopen** their host library at runtime, users
+should NOT need to set `${AETHER_<LANG>_LDFLAGS}` at all: `ae build`
+adds nothing of the hosted language's to the link line, and the bridge
+dlopens its library at first call. `contrib/host/stunt` is the pattern
+in this tree (it dlopens libstunt, found through `AETHER_STUNT_LIB`).
+The language bridges (Tcl, Perl, Ruby and the rest) live in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages), where the optional
+`${AETHER_<LANG>_SONAME}` env var lets the orchestrator supply a
+host-probed exact soname as a fallback when the unversioned symlink
+isn't present (e.g. Debian).
 
-**9. New `contrib/host/<lang>` bridges are auto-linked by `ae build`
-when imported, do NOT ask users to repeat themselves.** `ae build`
+**9. `contrib/host/<lang>` bridges are auto-linked by `ae build`
+when imported, do NOT ask users to repeat themselves.** (A new
+language bridge belongs in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages), held to stunt's catalogue,
+not here; what follows is how the two bridges left here, stunt and
+aether, are linked.) `ae build`
 scans the entry .ae for `import contrib.host.<lang>` and queues
 `libaether_host_<lang>.a` onto the link line automatically (the .a
 is built by `tests/scripts/contrib_build.sh`; install paths handled
@@ -701,7 +707,7 @@ language's own runtime link flags (for real-link bridges via
 `${AETHER_<LANG>_LDFLAGS}` see §8 above) or nothing at all (for
 dlopen bridges), never the bridge .a itself.
 
-When adding a new bridge: the only step on the `ae` side is to
+For a bridge in this tree, the only step on the `ae` side is to
 verify the .a name matches `libaether_host_<lang>.a` and lives next
 to `libaether.a` (install) or in `build/contrib/` (dev). The scan
 loop in `tools/ae.c` keys on the `<lang>` token after
@@ -711,11 +717,9 @@ Prefer the **dlopen** shape for any new interpreter bridge:
 - No `DT_NEEDED libfoo.so` in the produced binary → ABI-agnostic
   across deploy-host minor versions.
 - No build-environment dependency on a `-dev` package at end-user
-  `ae build` time (the toolchain image still needs the `-dev` kit
-  to compile the bridge .a, via `aether-build --with=<lang>`).
-- See `contrib/host/tcl/aether_host_tcl.c` for the
-  `dlopen("libfoo3.so", RTLD_NOW|RTLD_GLOBAL)` + `dlsym` table +
-  `${AETHER_<LANG>_SONAME}` fallback pattern.
+  `ae build` time.
+- See `contrib/host/stunt/aether_host_stunt.c` for the
+  `dlopen` + `dlsym` table + env-var override pattern.
 
 ### Additional Checks
 

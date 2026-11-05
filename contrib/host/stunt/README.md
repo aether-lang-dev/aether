@@ -98,7 +98,7 @@ only Landlock and seccomp see the syscall instruction.
 ## Two modes, one catalogue
 
 **In-process.** `stunt.c` built as a shared library, `libstunt`, which
-`module.ae` and `aether_host_stunt.c` load as `contrib/host/tcl` loads libtcl:
+`module.ae` and `aether_host_stunt.c` load the way a language bridge (the Tcl one in aether-guest-languages, say) loads libtcl:
 `dlopen` at the first call (`AETHER_STUNT_LIB`, else `libstunt.so`,
 `libstunt.dylib` or `stunt.dll` on the loader's path), every function found
 with `dlsym`. The "script" passed to a run is `"<check> <expectation>"`. The

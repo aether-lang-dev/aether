@@ -2,8 +2,9 @@
 //
 // A sandboxed child starts with this library in LD_PRELOAD, so the parent
 // has to find it from wherever the parent program runs. spawn_sandboxed
-// (Linux and FreeBSD) and the contrib process hosts (contrib/host/aether,
-// contrib/host/go) all look it up here, in one order.
+// (Linux and FreeBSD), the contrib process host (contrib/host/aether) and
+// the process bridges of aether-guest-languages (go, java) all look it up
+// here, in one order.
 //
 // It used to be looked for only beside the running program and in
 // ../build/ from it. A program `ae run` builds lives in the build cache,

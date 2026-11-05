@@ -312,19 +312,19 @@ test deleted from the sweep); passing silently is worse, because a box that
 skips everything then looks exactly like a box that passes everything.
 
 ```aether,fragment
-have_ruby = 0
-if ruby.init_host() == 0 { have_ruby = 1 }
+have_stunt = 0
+if stunt.init() == 0 { have_stunt = 1 }
 
-spec.describe(fw, "contrib.host.ruby") {
-    spec.it_when(have_ruby, "evaluates a script", "libruby not loadable") callback {
-        spec.assert_eq(ruby.run("$x = 1"), 0, "eval")
+spec.describe(fw, "contrib.host.stunt") {
+    spec.it_when(have_stunt, "runs a check", "libstunt not loadable") callback {
+        spec.assert_eq(stunt.run("getenv-home succeed"), 0, "run")
     }
 }
 ```
 
 ```
-contrib.host.ruby
-  ⊘ evaluates a script  (skipped: libruby not loadable)
+contrib.host.stunt
+  ⊘ runs a check  (skipped: libstunt not loadable)
 
   0 passing
   5 skipped

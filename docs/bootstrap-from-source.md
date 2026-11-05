@@ -30,7 +30,7 @@ cd aether
 
 That builds the compiler, the `ae` CLI and the stdlib from the checkout,
 installs them to `~/.aether`, and (with `--contrib-too`) builds and installs
-the native contrib archives (sqlite, host_perl, …) for each module whose dev
+the native contrib archives (sqlite, avcodec, …) for each module whose dev
 library is present; the rest are skipped, not fatal. Leave the flag off if you
 don't use contrib. No tests run.
 
@@ -73,10 +73,13 @@ is absent**, a skip is normal, not an error):
 | Contrib module | Needs | Probe |
 |---|---|---|
 | `sqlite` | nothing: fetches the pinned amalgamation (#1372); `libsqlite3-dev` only when offline | `scripts/fetch-sqlite-amalgamation.sh`, else `pkg-config sqlite3` / `<sqlite3.h>` |
-| `host_ruby` | `ruby-dev` | `pkg-config ruby-3.x\|ruby` |
-| `host_perl` | `perl` + `ExtUtils::Embed` | `perl -MExtUtils::Embed -e ccopts` |
-| `host_tcl` | `tcl-dev` | `pkg-config tcl` |
-| `host_js` | `duktape` dev | `pkg-config duktape` |
+| `avcodec` | FFmpeg's `libavcodec`/`libavformat`/`libavutil`/`libswscale`/`libswresample` dev | `pkg-config libavcodec …` |
+| `host_stunt`, `host_aether` | nothing (libc and the in-tree runtime) | always built |
+
+The language bridges (Lua, Python, Tcl, Perl, Ruby, JS, Go, Java and more)
+are not built here: they live in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages), which a project adds with
+`ae add`.
 
 On Windows, build under MSYS2 (`pacman -S mingw-w64-x86_64-gcc make git`);
 see the README "Building on Windows" section.
@@ -162,10 +165,9 @@ looks like:
 
 ```
   sqlite             OK   build/contrib/libaether_sqlite.a
-  host_perl          OK   build/contrib/libaether_host_perl.a
-  host_ruby          OK   build/contrib/libaether_host_ruby.a
-  host_js            SKIP (dev library not found)
-  host_tcl           SKIP (dev library not found)
+  avcodec            SKIP (dev library not found)
+  host_aether        OK   build/contrib/libaether_host_aether.a
+  host_stunt         OK   build/contrib/libaether_host_stunt.a
 ```
 
 A `SKIP` is not a failure, it means the dev library wasn't found and
