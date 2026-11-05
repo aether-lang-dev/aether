@@ -28,6 +28,9 @@
 #      part of its hash; a link out of the package is refused (#3306).
 #      Where the host cannot create a symlink (Windows without Developer
 #      Mode) the add says so and leaves nothing.
+#  11. macOS tar's AppleDouble sidecars (`._<name>`) are not part of a
+#      package: one beside the top directory is not a second top directory,
+#      and none is installed or hashed.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -55,7 +58,7 @@ archive() {
     mkdir -p "$TMP/src/widget-$1"
     printf '%s\n' "$2" > "$TMP/src/widget-$1/f.txt"
     printf '[package]\nname = "widget"\nmodules = "."\n' > "$TMP/src/widget-$1/aether.toml"
-    ( cd "$TMP/src" && tar -czf "$ARCH/$1.tar.gz" "widget-$1" ) || fail "could not build the archive for $1"
+    ( cd "$TMP/src" && COPYFILE_DISABLE=1 tar -czf "$ARCH/$1.tar.gz" "widget-$1" ) || fail "could not build the archive for $1"
 }
 archive v0.2.0 two
 archive v0.2.1 three
@@ -231,4 +234,26 @@ case "$(uname -s)" in
     *) grep -q "escapes extraction root" "$TMP/esc.log" || fail "the escaping link was not named as the reason" "$TMP/esc.log" ;;
 esac
 
-echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. and non-versions refused; symlinks kept, escaping ones refused"
+# --- 11. AppleDouble sidecars from a tar made on a Mac --------------------
+# bsdtar writes `._<name>` for every file with an extended attribute
+# (com.apple.provenance on anything a Mac wrote), including one at the root
+# beside the top directory. The same tree, with and without them, must install
+# the same: one top directory, no sidecar left behind, one hash.
+ADPKG=example.com/acme/doubled
+CLPKG=example.com/acme/clean
+mkdir -p "$TMP/mirror/$ADPKG/archive" "$TMP/mirror/$CLPKG/archive"
+printf 'sidecar\n' > "$TMP/sidecar.src"
+SIDE="$(native "$TMP/sidecar.src")"
+mkarchive "$(native "$TMP/mirror/$ADPKG/archive/v1.tar.gz")" "f:._pkg-v1=$SIDE" d:pkg-v1 \
+    "f:pkg-v1/._f.txt=$SIDE" "f:pkg-v1/f.txt=$SRC" d:pkg-v1/sub "f:pkg-v1/sub/._g.txt=$SIDE" "f:pkg-v1/sub/g.txt=$SRC"
+mkarchive "$(native "$TMP/mirror/$CLPKG/archive/v1.tar.gz")" d:pkg-v1 \
+    "f:pkg-v1/f.txt=$SRC" d:pkg-v1/sub "f:pkg-v1/sub/g.txt=$SRC"
+( cd "$L" && "$AE" add "$ADPKG@v1" ) > "$TMP/ad.log" 2>&1 || fail "an archive with AppleDouble entries did not install" "$TMP/ad.log"
+( cd "$L" && "$AE" add "$CLPKG@v1" ) > "$TMP/cl.log" 2>&1 || fail "the clean twin did not install" "$TMP/cl.log"
+[ "$(cat "$HOME/.aether/packages/$ADPKG/sub/g.txt")" = hello ] || fail "the doubled package lost its files" "$TMP/ad.log"
+[ -z "$(find "$HOME/.aether/packages/$ADPKG" -name '._*')" ] || fail "an AppleDouble sidecar was installed" "$TMP/ad.log"
+HA=$(sed -n "s|^\"$ADPKG\" = \"\(sha256-[0-9a-f]*\)\"|\1|p" "$L/aether.toml")
+HC=$(sed -n "s|^\"$CLPKG\" = \"\(sha256-[0-9a-f]*\)\"|\1|p" "$L/aether.toml")
+[ -n "$HA" ] && [ "$HA" = "$HC" ] || fail "sidecars changed the hash ($HA, $HC)" "$L/aether.toml"
+
+echo "  [PASS] ae_add_hash_pin: the tree's hash is pinned, checked on add and build, moved only by --update; .. and non-versions refused; symlinks kept, escaping ones refused; AppleDouble sidecars ignored"

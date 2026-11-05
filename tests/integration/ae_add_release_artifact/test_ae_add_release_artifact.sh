@@ -82,7 +82,7 @@ mk_release() {   # $1 = tag, $2 = "sum" | "nosum"
     d="$FORGE/$PKG/releases/download/$1"
     mkdir -p "$d/payload"
     printf 'greet() -> string { return "hi" }\n' > "$d/payload/module.ae"
-    ( cd "$d" && tar -czf "repo-$1-$TRIPLE.tar.gz" -C payload . )
+    ( cd "$d" && COPYFILE_DISABLE=1 tar -czf "repo-$1-$TRIPLE.tar.gz" -C payload . )
     rm -rf "$d/payload"
     if [ "$2" = "sum" ]; then
         ( cd "$d" && $SHA "repo-$1-$TRIPLE.tar.gz" | awk -v n="repo-$1-$TRIPLE.tar.gz" '{print $1"  "n}' \
@@ -101,7 +101,7 @@ mk_source() {   # $1 = tag
     d="$FORGE/$PKG/archive"
     mkdir -p "$d" "$TMP/srctree/repo-$1"
     printf 'greet() -> string { return "from source" }\n' > "$TMP/srctree/repo-$1/source.ae"
-    ( cd "$TMP/srctree" && tar -czf "$d/$1.tar.gz" "repo-$1" )
+    ( cd "$TMP/srctree" && COPYFILE_DISABLE=1 tar -czf "$d/$1.tar.gz" "repo-$1" )
 }
 mk_source v1.0.0
 mk_source v9.9.9
