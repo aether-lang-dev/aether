@@ -1,0 +1,53 @@
+// Regression (#3568): an `append` into a cell a closure shares grows the
+// cell's own slice.
+//
+// `rows = append(rows, mk(1))` in a closure, `rows` a cell: the call in the
+// value made the append read its slice into a temporary first (the order
+// its operands are evaluated in), and the append then emptied that
+// temporary, not the cell. The cell kept the reference the growth had used
+// (or the storage a reallocation had moved), and the store of the result
+// gave it back again: a heap corruption. The append now empties the place
+// it consumes itself, after it reads the value.
+//
+// The closure grows the cell twice, read back by the frame, and where the
+// heap count is exact (mem.heap_in_use_exact) rounds of it leave the heap as
+// they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    return make([]int, n)
+}
+
+shape() -> int {
+    rows = make([]int[], 1)
+    grow = || {
+        rows = append(rows, mk(1))
+    }
+    grow()
+    grow()
+    check(rows.len == 3, "the cell grown twice")
+    return rows.len
+}
+
+main() {
+    check(shape() == 3, "the shape")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                for i in 0..50 {
+                    _a = shape()
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

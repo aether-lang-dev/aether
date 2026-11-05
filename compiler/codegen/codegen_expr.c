@@ -1843,6 +1843,15 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
              * or emptied instead of it (`g.push(make(...))` on a module
              * global grew a copy). */
             if (expr->value && strncmp(expr->value, "__slice_", 8) == 0) return 0;
+            /* #3568: an `append` that consumes its slice's place
+             * (`slice_consumes`) empties the place itself after it reads
+             * `v`: a temporary of the place, read first, was emptied
+             * instead, and the place, a cell a closure shares, kept the
+             * reference the growth had used, which its next store gave back
+             * again. */
+            if (expr->value && strcmp(expr->value, "append") == 0 &&
+                annotation_has_marker(expr->annotation, "slice_consumes"))
+                return 0;
             for (int k = 0; k < expr->child_count; k++) {
                 /* Named arguments stand in parameter order and are
                  * evaluated in the order written (#2850). */
