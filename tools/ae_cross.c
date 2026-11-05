@@ -1375,7 +1375,7 @@ int run_cross_build(const char* c_file, const char* out_file,
              * it (the `// aether-link:` header codegen emitted). Gating on (a)
              * alone over-links every staged archive — a sysroot provisioned
              * with `CB_LIBS="zlib pcre2 openssl"` plus the contrib veneers
-             * stages libpcre2-8.a / libaether_host_ruby.a / ... even for a
+             * stages libpcre2-8.a / libaether_sqlite.a / ... even for a
              * program that imports none of them. zig 0.13 tolerated the
              * dangling `-l`s; zig 0.16 hard-errors ("unable to find dynamic
              * system library 'pcre2-8'"), so (b) is required. openssl is the
@@ -1435,11 +1435,6 @@ int run_cross_build(const char* c_file, const char* out_file,
                  * sqlite3_* references resolved by the lib that follows. */
                 { "aether_sqlite", "-laether_sqlite -lsqlite3",
                   "aether_sqlite sqlite3", "" },
-                /* contrib.host.ruby: embedded-Ruby bridge veneer. NO -lruby —
-                 * the bridge dlopen()s the deploy host's libruby at runtime,
-                 * so the .a has no unresolved Ruby symbols. */
-                { "aether_host_ruby", "-laether_host_ruby",
-                  "aether_host_ruby", "" },
             };
             for (size_t i = 0; i < sizeof(t2) / sizeof(t2[0]); i++) {
                 snprintf(probe, sizeof(probe), "%s/lib/lib%s.a", xsr, t2[i].probe);
