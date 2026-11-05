@@ -4,7 +4,8 @@
 # Every shell test that starts a background program ends it through these
 # helpers (check_shell_kills.py holds them to it), so they are checked here
 # on their own: a running job ends and is reaped, an empty pid and a job that
-# already finished are no-ops, stop_server turns to SIGKILL when SIGTERM is
+# already finished are no-ops, a failed attempt to end a job is not the
+# helpers' answer (#3591), stop_server turns to SIGKILL when SIGTERM is
 # ignored (POSIX), and signal_server refuses on Windows, where a signal to a
 # native program's MSYS2 stand-in also reaches unrelated processes.
 
@@ -105,6 +106,37 @@ fi
   kill_server "$q"
   echo carried-on ) > "$tmp/sete.out" 2>&1
 grep -q carried-on "$tmp/sete.out" || fail "a helper ended a set -e caller with a finished job's status"
+
+# 6. An attempt to end a job that reports a failure, as taskkill and kill do
+# for a program that ended by itself an instant before, while bash still
+# lists its job as running (#3591): the attempt is not the helper's answer,
+# the job is still reaped, and a caller under `set -e` carries on. Before,
+# the failed attempt ended the caller's test there, with no message. Each
+# attempt here ends the program and then reports a failure.
+( set -e
+  if [ -n "$_SERVER_JOBS_WINDOWS" ]; then
+      eval "_server_end_real() $(declare -f _server_end_windows | sed 1d)"
+      _server_end_windows() { _server_end_real "$1"; return 1; }
+  else
+      # kill-ok: POSIX only; passes server_jobs.sh's own kill of its job through
+      kill() { builtin kill "$@"; return 1; }
+  fi
+  "$tmp/sleeper" &
+  q=$!
+  sleep 0.5
+  kill_server "$q"
+  server_alive "$q" && echo "kill_server left it running"
+  "$tmp/sleeper" &
+  q=$!
+  sleep 0.5
+  stop_server "$q"
+  server_alive "$q" && echo "stop_server left it running"
+  echo carried-on ) > "$tmp/attempt.out" 2>&1
+grep -q carried-on "$tmp/attempt.out" || fail "a failed attempt to end a job ended a set -e caller"
+if grep -q "left it running" "$tmp/attempt.out"; then
+    sed 's/^/        /' "$tmp/attempt.out"
+    fail "a job whose ending reported a failure was not ended"
+fi
 
 echo "  [PASS] $NAME: kill_server, stop_server and signal_server end and reap their jobs"
 exit 0

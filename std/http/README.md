@@ -44,6 +44,13 @@ turns that off if a regression needs bisecting.
 For the client, `http.get` / `http.post` return a response object that must be
 freed with `http_response_free`. Connection reuse is on by default.
 
+The client sends a URL's path and query, never its fragment. Everything from
+the first `#` stays with the client, as RFC 3986 and 9110 say and as curl and
+browsers do. Encode a query value that may hold `#`, `&`, `+`, `%` or a space
+with `url.encode` from `std.url`: `"?v=${url.encode(text)}"`. A raw `"?v=#FF0000"`
+sends `?v=`. Before 0.881.0 the fragment went out on the request line, which
+is not a valid request target.
+
 ## TLS
 
 `server_set_tls(server, cert_path, key_path)` before `server_start` turns a
