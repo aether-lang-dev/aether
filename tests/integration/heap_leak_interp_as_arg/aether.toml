@@ -1,4 +1,4 @@
 [[bin]]
 name = "probe"
 path = "probe.ae"
-extra_sources = ["shim.c"]
+extra_sources = ["../../lib/rss_kb.c"]
