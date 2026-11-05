@@ -1,6 +1,6 @@
 // aep_dl.h — tiny portable dlopen shim for the contrib.host.* bridges.
 //
-// The bridges load the deploy host's libpython/libruby at RUNTIME (not at
+// The bridges load the deploy host's libperl/libruby at RUNTIME (not at
 // link) via dlopen+dlsym, so a binary is ABI-portable: compile anywhere, run
 // where the language is. POSIX spells that dlopen/dlsym/dlclose (<dlfcn.h>);
 // Windows spells it LoadLibrary/GetProcAddress/FreeLibrary (no <dlfcn.h>).

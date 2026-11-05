@@ -2663,7 +2663,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 # contrib/ is a source-tree organising prefix; downstream consumes
 # individual artifacts, not a bundled lib. Each module's bridge .c
 # compiles to its own .a, named after the module — sqlite →
-# libaether_sqlite.a, host/python → libaether_host_python.a, etc.
+# libaether_sqlite.a, host/tcl → libaether_host_tcl.a, etc.
 #
 # Probe-and-build by design: machines without sqlite3-dev get no
 # libaether_sqlite.a. The same module.ae still installs (so
@@ -2673,7 +2673,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #
 # Modules covered (v1):
 #   - sqlite                    (-lsqlite3)
-#   - host/{python,perl,ruby,duktape,tcl,tinygo}
+#   - host/{perl,ruby,duktape,tcl,tinygo}
 #   - host/factor               (dlopen libfactor; archive builds bare,
 #                                runtime needs the factor-language fork)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
@@ -3308,7 +3308,7 @@ test-asan-ae:
 # has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
 # the Racket VM), so it is not listed here (the check SKIPs missing-bridge
 # dirs). `stunt` is the test double (contrib/host/stunt/README.md).
-CONTRIB_HOST_LANGS = js perl python ruby tcl go tinygo factor aether racket quickjs stunt
+CONTRIB_HOST_LANGS = js perl ruby tcl go tinygo factor aether racket quickjs stunt
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.
@@ -3585,9 +3585,6 @@ contrib-host-check: compiler ae stdlib stunt
 	    ruby) command -v ruby >/dev/null 2>&1 && { \
 	      AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
 	      export AETHER_RUBY_SONAME; }; ;; \
-	    python) command -v python3 >/dev/null 2>&1 && { \
-	      AETHER_PYTHON_SONAME="$$(python3 -c 'import sysconfig,os; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)"; \
-	      export AETHER_PYTHON_SONAME; }; ;; \
 	    perl) command -v perl >/dev/null 2>&1 && { \
 	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
 	      export AETHER_PERL_SONAME; }; ;; \

@@ -74,8 +74,8 @@ run_case "--with=os accepts std.dl"    std.dl  "--emit=lib --with=os"  accept
 
 # ---- 3b. contrib.host.* requires the explicit extern capability ----
 
-run_case "--with=extern accepts contrib.host.python" contrib.host.python "--emit=lib --with=extern" accept
-run_case "--with=os still rejects contrib.host.python" contrib.host.python "--emit=lib --with=os" reject
+run_case "--with=extern accepts contrib.host.tcl" contrib.host.tcl "--emit=lib --with=extern" accept
+run_case "--with=os still rejects contrib.host.tcl" contrib.host.tcl "--emit=lib --with=os" reject
 
 # ---- 4. --with=fs,os unlocks both in one invocation ----
 

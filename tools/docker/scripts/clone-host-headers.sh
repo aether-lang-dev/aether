@@ -6,7 +6,7 @@
 # a single network fetch + flat copies.
 #
 # Why pinned: reproducible builds. If hosted-language-headers gets
-# new headers for a different language version (Python 3.12, say),
+# new headers for a different language version (Ruby 3.4, say),
 # image builds keep using the version we tested against until the
 # pin is bumped explicitly.
 #
@@ -19,9 +19,8 @@ set -eu
 
 HEADERS_REPO="${HEADERS_REPO:-https://github.com/aether-lang-dev/hosted-language-headers.git}"
 # Bumped to 80b44be — the commit that adds the per-target configured-header
-# overlays (targets/<triple>/<lang>/). install-python-headers.sh now overlays
-# targets/x86_64-linux-gnu/python/pyconfig.h from this tree, so the pin MUST
-# include it (the prior 6872b5df predates the targets/ restructure).
+# overlays (targets/<triple>/<lang>/), which the per-language install-*-headers.sh
+# scripts overlay (the prior 6872b5df predates the targets/ restructure).
 HEADERS_REF="${HEADERS_REF:-80b44be5163a7c8279f23fd714dfe4d11993cb6f}"
 HEADERS_DIR="${HEADERS_DIR:-/opt/hosted-language-headers}"
 

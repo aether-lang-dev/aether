@@ -1,5 +1,8 @@
 #!/bin/sh
-# See install-python-headers.sh for the pattern.
+# Install the duktape headers by copying them from the pinned
+# hosted-language-headers checkout (clone-host-headers.sh), then install
+# the runtime library end-user binaries dlopen.
+# The other install-*-headers.sh scripts follow this pattern.
 
 set -eu
 

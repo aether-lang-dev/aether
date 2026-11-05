@@ -151,7 +151,7 @@ fi
 assert_sourced_c_present "$CONTRIB_INSTALL" "install.sh"
 
 # Spot-check a flagship module the issue called out by name.
-for canary in sqlite tinyweb host/python; do
+for canary in sqlite tinyweb host/tcl; do
     if [ ! -f "$CONTRIB_INSTALL/$canary/module.ae" ]; then
         echo "  [FAIL] canary contrib module $canary not installed"
         exit 1
@@ -247,7 +247,7 @@ assert_sourced_c_present "$MAKE_CONTRIB_INSTALL" "make install-contrib"
 # Same canary set as install.sh's check above — pinning the two
 # install paths to a matching ship-list defeats the tinyweb-trim
 # class of regressions.
-for canary in sqlite tinyweb host/python; do
+for canary in sqlite tinyweb host/tcl; do
     if [ ! -f "$MAKE_CONTRIB_INSTALL/$canary/module.ae" ]; then
         echo "  [FAIL] canary $canary missing from make install-contrib"
         exit 1
@@ -257,7 +257,7 @@ done
 # Archives — every canary that contrib_build.sh built on this runner
 # must produce a libaether_<X>.a. We skip the check when the system
 # dep was missing on the runner (recorded in MANIFEST: present = built).
-# `host/python` is recorded as `host_python` in the manifest.
+# `host/tcl` is recorded as `host_tcl` in the manifest.
 # host/factor's bridge needs no headers or libraries to build (it dlopens
 # libfactor), so its archive is there on every runner.
 if [ ! -f "$MAKE_LIB_DIR/libaether_host_factor.a" ]; then

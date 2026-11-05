@@ -1,5 +1,5 @@
 #!/bin/sh
-# See install-python-headers.sh for the pattern. Ruby has two
+# See install-js-headers.sh for the pattern. Ruby has two
 # include trees (portable + arch-specific); both are copied.
 
 set -eu

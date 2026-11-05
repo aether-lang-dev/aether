@@ -87,7 +87,7 @@ and `zlib` uses for libz.
 | `contrib/tinyweb/` | Builder DSL for HTTP services, competes with `std.http.server`'s closure-config approach; opinionated shape that's better off evolving without the stability constraint. |
 | `contrib/templating/{native,liquid}/` | Escape-correct output emission, `native` (Aether-as-template-language) and `liquid` (Shopify Liquid port). Opinionated template surfaces; fail Q2. |
 | `contrib/parsers/xml_expat/` | Expat-backed streaming XML parser, third-party C dependency; fails Q3 (`std.xml` covers the in-tree case). |
-| `contrib/host/{python,perl,ruby,js,tcl,go,java,factor,aether,…}/` | Per-language embedding bridges, each one is a separate sub-decision that wouldn't share an API; fails Q2. |
+| `contrib/host/{perl,ruby,js,tcl,go,java,factor,aether,…}/` | Per-language embedding bridges, each one is a separate sub-decision that wouldn't share an API; fails Q2. |
 
 ## Spun out to sibling repos
 

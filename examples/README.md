@@ -92,7 +92,6 @@ builds and runs them.
 | [02-own-c/main.ae](04-interop/02-own-c/main.ae) | `@source`: a C file the program ships; strings, arrays and structs into C | [@source](../docs/c-interop.md#a-module-that-ships-its-c-source) |
 | [03-callbacks.ae](04-interop/03-callbacks.ae) | `@c_callback`: C's `qsort` calling an Aether comparison | [C callbacks](../docs/c-interop.md#exporting-an-aether-function-as-a-c-callback-c_callback) |
 | [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
-| [05-hosts/python.ae](04-interop/05-hosts/python.ae) | Python run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/quickjs.ae](04-interop/05-hosts/quickjs.ae) | QuickJS run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
 | [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |

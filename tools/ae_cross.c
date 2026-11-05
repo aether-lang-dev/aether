@@ -1435,12 +1435,9 @@ int run_cross_build(const char* c_file, const char* out_file,
                  * sqlite3_* references resolved by the lib that follows. */
                 { "aether_sqlite", "-laether_sqlite -lsqlite3",
                   "aether_sqlite sqlite3", "" },
-                /* contrib.host.python: embedded-Python bridge veneer. NO
-                 * -lpython — the bridge dlopen()s the deploy host's libpython
-                 * at runtime, so the .a has no unresolved CPython symbols. */
-                { "aether_host_python", "-laether_host_python",
-                  "aether_host_python", "" },
-                /* contrib.host.ruby: same dlopen model as python. Veneer only. */
+                /* contrib.host.ruby: embedded-Ruby bridge veneer. NO -lruby —
+                 * the bridge dlopen()s the deploy host's libruby at runtime,
+                 * so the .a has no unresolved Ruby symbols. */
                 { "aether_host_ruby", "-laether_host_ruby",
                   "aether_host_ruby", "" },
             };

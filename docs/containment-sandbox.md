@@ -82,7 +82,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
 child process and what the `contrib/host/<lang>` modules take as their
-`perms` argument (`python.run_sandboxed(worker, code)`).
+`perms` argument (`tcl.run_sandboxed(worker, code)`).
 
 ### The key insight
 
@@ -245,7 +245,7 @@ runtime (#2955):
 | a message sent from a block | handled with no grants: an actor is not the block. That holds when the send steps an idle receiver of the same core inline, on the block's own thread: the step puts the block's levels aside and the block has them again when the send returns (#3393) |
 | a library's export called from inside a block on the same thread (through a host service, say), one runtime | held to the block's grants; its own `enforce` only narrows them, and when it ends the block is checked as before |
 | the same, with libraries built without `--shared-runtime` (on every platform since #3481; a library linked before it, without `-Bsymbolic`, binds to the program's runtime on Linux and FreeBSD) | each library has a copy of the runtime of its own, which cannot read another copy's grants: the inner library's checked operations are refused, and the first refusal prints a message naming `--shared-runtime`. Every copy finds the others by the record it carries in its image (a PE section, an ELF note, a Mach-O section), in load order, the program first: libraries a host loads, `RTLD_LOCAL` ones included, and a program with the libraries it loads, whenever it loads them and though its executable exports nothing (Windows, or Linux without `-rdynamic`, #3445: its copy went unfound, and the library's code inside its deny-all block was allowed everything) |
-| a contrib host bridge (`python.run_sandboxed(perms, code)` and the others) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |
+| a contrib host bridge (`tcl.run_sandboxed(perms, code)` and the others) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |
 | a panic out of a block, caught anywhere (a `try` in any code, an actor's barrier) | the levels pushed inside the catching frame end with it, so the catch is held only to the blocks still around it |
 | more than 64 levels on one thread (blocks, trusted calls, bridge calls) | the 65th is refused with a panic before its block runs |
 
@@ -1586,7 +1586,6 @@ sandboxes. Each hosted language is a module under `contrib/host/`.
 ### Available modules
 
 ```
-contrib/host/python/, import contrib.host.python   (CPython 3.x)
 contrib/host/duktape/, import contrib.host.duktape (Duktape ES5)
 contrib/host/js/, import contrib.host.js       (alias of duktape)
 contrib/host/quickjs/, import contrib.host.quickjs (QuickJS ES2023)
@@ -1595,16 +1594,20 @@ contrib/host/ruby/, import contrib.host.ruby     (CRuby 3.x)
 contrib/host/tcl/, import contrib.host.tcl      (Tcl 8.5+)
 ```
 
-The Lua bridge was removed from this tree on 2026-11-04. It lives in
+The Lua bridge was removed from this tree on 2026-11-04, and the Python
+bridge on 2026-11-05. They live in
 [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)
 (`ae add github.com/aether-lang-dev/aether-guest-languages`, then
-`import lua`), the home for these bridges outside aether's tree; other
-languages will move there one at a time (`contrib/host/README.md`). There
-each language is held to stunt's catalogue by name, in-process and in a
-std.guest contained child, and its README has the resulting table. For Lua
-it shows, among other rows, that in-process `os.execute` starts `/bin/sh`
-under the preload with no exec grant, and that the contained child refuses
-every row it runs.
+`import lua` or `import python`), the home for these bridges outside
+aether's tree; other languages will move there one at a time
+(`contrib/host/README.md`). There each language is held to stunt's
+catalogue by name, in-process and in a std.guest contained child, and its
+README has the resulting table. For Lua it shows, among other rows, that
+in-process `os.execute` starts `/bin/sh` under the preload with no exec
+grant, and that the contained child refuses every row it runs. For Python
+it shows that `os.environ` escapes the preload in process (CPython copies
+the environment at start), and that on macOS nothing holds Python's own
+calls in process; the contained child holds every row it runs on Linux.
 
 `contrib/host/stunt` is a test double for these: not a language, but a C
 engine loaded the way a bridge loads an interpreter (or run as a child under
@@ -1619,7 +1622,7 @@ of the tables below with no interpreter installed; see
 
 | Model | How it works | Used by |
 |-------|-------------|---------|
-| **LD_PRELOAD interception** | Intercept libc calls (connect, open, getenv, execve). The hosted language has ambient access to libc; we filter it. | Python, Perl, Ruby, Tcl |
+| **LD_PRELOAD interception** | Intercept libc calls (connect, open, getenv, execve). The hosted language has ambient access to libc; we filter it. | Perl, Ruby, Tcl |
 | **Native bindings only** | The hosted engine has NO ambient access. We expose only the functions we choose (env, readFile, etc.), each with a sandbox check built in. | JS (Duktape), QuickJS |
 
 The native bindings model (Duktape and QuickJS) is the purest containment: there
@@ -1628,23 +1631,23 @@ code can only call functions we explicitly provide.
 
 ### Host module matrix
 
-| | Python | JS (Duktape) | QuickJS | Perl | Ruby | Tcl |
-|---|--------|-------------|---------|------|------|-----|
-| **Runtime** | CPython 3.x | Duktape 2.x | QuickJS (quickjs-ng) | Perl 5.x | CRuby 3.x | Tcl 8.5+ |
-| **Dev package** | python3-dev | duktape-dev | (pinned amalgamation) | (ships with perl) | ruby-dev | tcl-dev |
-| **Compile flag** | AETHER_HAS_PYTHON | AETHER_HAS_DUKTAPE | AETHER_HAS_QUICKJS | AETHER_HAS_PERL | AETHER_HAS_RUBY | AETHER_HAS_TCL |
-| **Link** | -lpython3.11 | -lduktape | -lm | -lperl | -lruby-3.1 | -framework Tcl / -ltcl |
-| **Containment model** | LD_PRELOAD | Native bindings | Native bindings (no libc) | LD_PRELOAD | LD_PRELOAD | LD_PRELOAD |
-| **Needs LD_PRELOAD .so** | Yes | No | No | Yes | Yes | Yes |
-| **env var access** | libc getenv (intercepted) | `env()` binding (checked) | Host function grants | %ENV scrubbed at entry | ENV scrubbed at entry | ::env lazy via getenv (intercepted) |
-| **File access** | libc open/fopen (intercepted) | `readFile()` binding (checked) | Host function grants | libc open (intercepted) | libc open (intercepted) | libc open (intercepted) |
-| **Network** | libc connect (intercepted) | Not exposed | Host function grants | libc connect (intercepted) | libc connect (intercepted) | libc connect (intercepted) |
-| **Process exec** | libc execve (intercepted) | Not exposed | Host function grants | libc execve (intercepted) | libc execve (intercepted) | libc execve (intercepted) |
-| **Env cache issue** | Yes, os.environ cached at startup; use ctypes.CDLL(None).getenv | No, no cache | No, no cache | Yes, %ENV cached; scrubbed by host module | Yes, ENV cached; scrubbed by host module | Yes, ::env cached; not auto-scrubbed |
-| **Sandbox grants honoured** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Glob patterns work** | Yes (prefix, suffix, exact, wildcard) | Yes | Yes | Yes | Yes | Yes |
-| **Nested sandbox** | Yes | Yes | Yes | Yes | Yes | Yes |
-| **Guest knows it's sandboxed** | No | No | No | No | No | No |
+| | JS (Duktape) | QuickJS | Perl | Ruby | Tcl |
+|---|-------------|---------|------|------|-----|
+| **Runtime** | Duktape 2.x | QuickJS (quickjs-ng) | Perl 5.x | CRuby 3.x | Tcl 8.5+ |
+| **Dev package** | duktape-dev | (pinned amalgamation) | (ships with perl) | ruby-dev | tcl-dev |
+| **Compile flag** | AETHER_HAS_DUKTAPE | AETHER_HAS_QUICKJS | AETHER_HAS_PERL | AETHER_HAS_RUBY | AETHER_HAS_TCL |
+| **Link** | -lduktape | -lm | -lperl | -lruby-3.1 | -framework Tcl / -ltcl |
+| **Containment model** | Native bindings | Native bindings (no libc) | LD_PRELOAD | LD_PRELOAD | LD_PRELOAD |
+| **Needs LD_PRELOAD .so** | No | No | Yes | Yes | Yes |
+| **env var access** | `env()` binding (checked) | Host function grants | %ENV scrubbed at entry | ENV scrubbed at entry | ::env lazy via getenv (intercepted) |
+| **File access** | `readFile()` binding (checked) | Host function grants | libc open (intercepted) | libc open (intercepted) | libc open (intercepted) |
+| **Network** | Not exposed | Host function grants | libc connect (intercepted) | libc connect (intercepted) | libc connect (intercepted) |
+| **Process exec** | Not exposed | Host function grants | libc execve (intercepted) | libc execve (intercepted) | libc execve (intercepted) |
+| **Env cache issue** | No, no cache | No, no cache | Yes, %ENV cached; scrubbed by host module | Yes, ENV cached; scrubbed by host module | Yes, ::env cached; not auto-scrubbed |
+| **Sandbox grants honoured** | Yes | Yes | Yes | Yes | Yes |
+| **Glob patterns work** | Yes | Yes | Yes | Yes | Yes |
+| **Nested sandbox** | Yes | Yes | Yes | Yes | Yes |
+| **Guest knows it's sandboxed** | No | No | No | No | No |
 
 ### Shared-interpreter behavior
 
@@ -1654,8 +1657,7 @@ state in place on exit, a subsequent unsandboxed `run()` in the same
 process sees the scrubbed environment. Two stable usage patterns:
 (a) one mode per process, restart the host between modes; or
 (b) have the host snapshot the environment from the guest language
-before entering the sandbox and reassign it on exit. Python is unaffected
-because its cached `os.environ` is a separate copy from libc's environ.
+before entering the sandbox and reassign it on exit.
 JS doesn't cache the environment at all.
 
 Ruby behavior to be aware of: `Fiddle.dlopen("libc.so.6")` inside a
@@ -1670,7 +1672,7 @@ All host modules follow the same pattern:
 
 ```aether,fragment
 import std.list
-import contrib.host.python   // or js, perl, ruby, tcl
+import contrib.host.tcl   // or js, perl, ruby
 
 // Define sandbox grants
 worker = sandbox.new("worker") {
@@ -1679,10 +1681,9 @@ worker = sandbox.new("worker") {
 }
 
 // Run hosted code, it uses normal APIs, has no idea it's contained
-python.run_sandboxed(worker, <<SCRIPT
-import os
-print(os.getenv("HOME"))        # allowed
-print(os.getenv("AWS_SECRET"))   # returns None, sandboxed
+tcl.run_sandboxed(worker, <<SCRIPT
+puts $::env(HOME)                    ;# allowed
+puts [info exists ::env(AWS_SECRET)] ;# 0, sandboxed
 SCRIPT
 )
 ```
@@ -1749,7 +1750,6 @@ Each host module provides two bindings to the hosted language:
 | Language | Get | Put |
 |----------|-----|-----|
 | Lua | `aether_map_get(key)` | `aether_map_put(key, value)` |
-| Python | `aether_map_get(key)` | `aether_map_put(key, value)` |
 | JS | `aether_map_get(key)` | `aether_map_put(key, value)` |
 | Perl | `aether_map_get(key)` | `aether_map_put(key, value)` |
 | Ruby | `aether_map_get(key)` | `aether_map_put(key, value)` |
@@ -1757,7 +1757,7 @@ Each host module provides two bindings to the hosted language:
 ### Example
 
 ```aether,fragment
-import contrib.host.python
+import contrib.host.js
 
 worker = sandbox.new("worker") {
     grant_env("HOME")
@@ -1769,13 +1769,13 @@ map = shared_map_new(&token)
 shared_map_put(map, "user", "alice")
 shared_map_put(map, "threshold", "42")
 
-// Run Python, it reads inputs, writes outputs
-python.run_sandboxed_with_map(worker, <<PY
-    user = aether_map_get("user")
-    threshold = aether_map_get("threshold")
-    aether_map_put("result", "processed " + user)
-    aether_map_put("count", "1000")
-PY
+// Run JavaScript, it reads inputs, writes outputs
+js.run_sandboxed_with_map(worker, <<JS
+    var user = aether_map_get("user");
+    var threshold = aether_map_get("threshold");
+    aether_map_put("result", "processed " + user);
+    aether_map_put("count", "1000");
+JS
 , token)
 
 // Read outputs
@@ -1870,8 +1870,9 @@ same permissions registry and LD_PRELOAD checker either way.
   (rationale + YAML/HCL/Pkl/Jsonnet/Starlark comparison), and
   [`aether-vs-hcl.md`](aether-vs-hcl.md) for HCL side by side.
 - **Aether as host**, an Aether `main()` executable embeds
-  `contrib.host.<lang>.run_sandboxed(perms, code)` for Python
-  (CPython), Perl, Ruby, Tcl, JavaScript in-process. Java, Go, and
+  `contrib.host.<lang>.run_sandboxed(perms, code)` for
+  Perl, Ruby, Tcl, JavaScript in-process (Lua and Python bridges now live in
+  aether-guest-languages). Java, Go, and
   aether-hosts-aether are separate-process (Aether is compiled, so
   aether-hosts-aether uses fork+exec with LD_PRELOAD on the child).
   `hide` / `seal except` are Aether compile-time constructs, they
@@ -1941,7 +1942,7 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 - Capturing stdout/stderr from hosted scripts, pipe rewire vs.
   shared-map key vs. pass-through, design undecided.
 - Native shared-map bindings for Perl and Ruby, currently
-  tied-hash via `eval`, which swallows writes. Python, Lua, Tcl,
+  tied-hash via `eval`, which swallows writes. Tcl and
   JS already have proper native C bindings.
 - `bytes` mode on the shared map, so callers don't have to
   base64 binary payloads across the boundary.

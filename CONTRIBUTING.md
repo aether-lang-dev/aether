@@ -682,13 +682,12 @@ that **link-binds** its host library at compile time (e.g. sqlite,
 contract `AETHER_<LANG>_LDFLAGS` / `AETHER_<LANG>_CFLAGS` so the
 existing `${VAR}` allowlist accepts it without code changes here.
 
-For bridges that **dlopen** their host library at runtime (python and,
-in due course, perl/ruby), users should NOT need to set
+For bridges that **dlopen** their host library at runtime (tcl, perl,
+ruby), users should NOT need to set
 `${AETHER_<LANG>_LDFLAGS}` at all, `ae build` adds nothing
-libpython-related to the link line, and the bridge dlopens
-`libpython3.so` / etc. at first call. See `contrib/host/python/README.md`
-for the canonical pattern (the `aether_host_python.c` rewrite that
-landed v0.209.0). The optional `${AETHER_<LANG>_SONAME}` env var lets
+libtcl-related to the link line, and the bridge dlopens
+`libtcl*.so` / etc. at first call. See `contrib/host/tcl/README.md`
+for the canonical pattern. The optional `${AETHER_<LANG>_SONAME}` env var lets
 the orchestrator supply a host-probed exact soname as a fallback when
 the unversioned symlink isn't present (e.g. Debian).
 
@@ -714,7 +713,7 @@ Prefer the **dlopen** shape for any new interpreter bridge:
 - No build-environment dependency on a `-dev` package at end-user
   `ae build` time (the toolchain image still needs the `-dev` kit
   to compile the bridge .a, via `aether-build --with=<lang>`).
-- See `contrib/host/python/aether_host_python.c` for the
+- See `contrib/host/tcl/aether_host_tcl.c` for the
   `dlopen("libfoo3.so", RTLD_NOW|RTLD_GLOBAL)` + `dlsym` table +
   `${AETHER_<LANG>_SONAME}` fallback pattern.
 

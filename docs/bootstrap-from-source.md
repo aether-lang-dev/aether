@@ -30,7 +30,7 @@ cd aether
 
 That builds the compiler, the `ae` CLI and the stdlib from the checkout,
 installs them to `~/.aether`, and (with `--contrib-too`) builds and installs
-the native contrib archives (sqlite, host_python, …) for each module whose dev
+the native contrib archives (sqlite, host_perl, …) for each module whose dev
 library is present; the rest are skipped, not fatal. Leave the flag off if you
 don't use contrib. No tests run.
 
@@ -73,7 +73,6 @@ is absent**, a skip is normal, not an error):
 | Contrib module | Needs | Probe |
 |---|---|---|
 | `sqlite` | nothing: fetches the pinned amalgamation (#1372); `libsqlite3-dev` only when offline | `scripts/fetch-sqlite-amalgamation.sh`, else `pkg-config sqlite3` / `<sqlite3.h>` |
-| `host_python` | `python3-dev` | `python3-config --includes` |
 | `host_ruby` | `ruby-dev` | `pkg-config ruby-3.x\|ruby` |
 | `host_perl` | `perl` + `ExtUtils::Embed` | `perl -MExtUtils::Embed -e ccopts` |
 | `host_tcl` | `tcl-dev` | `pkg-config tcl` |
@@ -163,7 +162,6 @@ looks like:
 
 ```
   sqlite             OK   build/contrib/libaether_sqlite.a
-  host_python        OK   build/contrib/libaether_host_python.a
   host_perl          OK   build/contrib/libaether_host_perl.a
   host_ruby          OK   build/contrib/libaether_host_ruby.a
   host_js            SKIP (dev library not found)

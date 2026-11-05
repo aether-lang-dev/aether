@@ -41,8 +41,9 @@ Erlang's actor syntax, compiling via C.**
   object capabilities, Java's removed SecurityManager, and a fraction of
   gVisor.
 - **Hosts other languages in-process.** Aether `main()` embeds
-  Python/Perl/Ruby/Tcl/JS via
-  `contrib.host.<lang>.run_sandboxed(perms, code)`;
+  Perl/Ruby/Tcl/JS via
+  `contrib.host.<lang>.run_sandboxed(perms, code)` (the Lua and Python
+  bridges live in aether-guest-languages);
   Java/Go/aether-hosts-aether are separate-process. The same grant list
   + LD_PRELOAD gates the hosted interpreter's libc calls. Guest
   direction: `--emit=lib` → Python ctypes / Java Panama / Ruby
@@ -121,7 +122,7 @@ plays that role), no interfaces.
   `contrib/{cryptography, host, parsers, sqlite, templating, tinyweb}`:
   `parsers/xml_expat` (SAX XML via libexpat), `sqlite`,
   `templating/{liquid,native}`, and `host/<lang>` embedded interpreters
-  for js, perl, python, ruby, tcl, duktape, tinygo, go, java, factor,
+  for js, perl, ruby, tcl, duktape, tinygo, go, java, factor,
   racket, rhombus, and aether-in-aether.
 - `compiler/aetherc.c` CLI entry. `--emit=lib`, `--with=`, and the
   capability import gate (search for `--with=` argv parsing and the

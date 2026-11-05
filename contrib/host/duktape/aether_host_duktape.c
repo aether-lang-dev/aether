@@ -5,7 +5,7 @@
 // the Aether sandbox check of the calling thread. This is the purest containment model —
 // the guest can ONLY do what we explicitly expose.
 //
-// LOADING MODEL: dlopen, not -lduktape. Mirrors contrib/host/python,
+// LOADING MODEL: dlopen, not -lduktape. Mirrors contrib/host/tcl,
 // ruby, perl — every Duktape C-API symbol resolved via dlsym at
 // first call. The bridge .a has NO unresolved Duktape symbols at
 // link time, so end-user binaries have no DT_NEEDED libduktape and

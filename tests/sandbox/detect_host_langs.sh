@@ -2,34 +2,6 @@
 # Detect available host language dev packages and output compile flags.
 # Source this file: . tests/sandbox/detect_host_langs.sh
 
-# Python
-PY_AVAILABLE=0
-for v in python3 python3.12 python3.11 python3.10; do
-    cfg="${v}-config"
-    if command -v $cfg >/dev/null 2>&1; then
-        PY_CFLAGS=$($cfg --includes 2>/dev/null)
-        PY_LIBS="-l$(echo $v | tr -d .)"  # -lpython311 etc doesn't work, try embed
-        PY_LIBS=$($cfg --ldflags --embed 2>/dev/null || $cfg --ldflags 2>/dev/null)
-        AETHER_PYTHON_SONAME=$($v -c 'import os, sysconfig; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)
-        export AETHER_PYTHON_SONAME
-        PY_AVAILABLE=1
-        break
-    fi
-done
-# Fallback: try pkg-config
-if [ $PY_AVAILABLE -eq 0 ]; then
-    for v in python-3.12-embed python-3.11-embed python-3.10-embed python3-embed; do
-        if pkg-config --exists $v 2>/dev/null; then
-            PY_CFLAGS=$(pkg-config --cflags $v)
-            PY_LIBS=$(pkg-config --libs $v)
-            AETHER_PYTHON_SONAME=$(python3 -c 'import os, sysconfig; print(os.path.join(sysconfig.get_config_var("LIBDIR") or "", sysconfig.get_config_var("INSTSONAME") or ""))' 2>/dev/null)
-            export AETHER_PYTHON_SONAME
-            PY_AVAILABLE=1
-            break
-        fi
-    done
-fi
-
 # Perl
 PERL_AVAILABLE=0
 if perl -MExtUtils::Embed -e ccopts >/dev/null 2>&1; then

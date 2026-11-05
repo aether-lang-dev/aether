@@ -17,7 +17,7 @@
 // symbols at link time. The `@extern("aether_perl_*")` annotations
 // below bind those C symbols to the Aether-side `perl_*` names so
 // the dotted-call shape `perl.run(...)` resolves uniformly with
-// the other host bridges (python.run / tcl.run / etc.).
+// the other host bridges (ruby.run / tcl.run / etc.).
 //
 // One name per operation (#2976): the C names `aether_perl_run` and the
 // rest are not exported beside these; call `perl.run(...)`.
@@ -29,7 +29,7 @@ exports (
     perl_run, perl_init, perl_finalize
 )
 
-// Canonical `perl.*` shape (matches python.run / tcl.run / etc.).
+// Canonical `perl.*` shape (matches ruby.run / tcl.run / etc.).
 @extern("aether_perl_run_sandboxed") perl_run_sandboxed(perms: sandbox.Grants, code: string) -> int
 @extern("aether_perl_run_sandboxed_with_map") perl_run_sandboxed_with_map(perms: sandbox.Grants, code: string, map_token: long) -> int
 @extern("aether_perl_run") perl_run(code: string) -> int

@@ -14,7 +14,7 @@ Aether is compiled, not interpreted.
 
 | Module | Mechanism | Containment |
 |---|---|---|
-| `contrib.host.python` | Embed CPython in-process | Sandbox checker on libc calls |
+| `contrib.host.tcl` | Embed Tcl interpreter in-process | Sandbox checker on libc calls |
 | **`contrib.host.aether`** | **Compile to binary, fork+exec** | **LD_PRELOAD on child process** |
 
 The LD_PRELOAD approach is stronger: even if the child binary contains
