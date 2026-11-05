@@ -32,6 +32,7 @@
 extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);
 extern void* list_new(void);
 extern int list_add_raw(void* list, void* item);
+extern void list_free(void* list);
 
 static pid_t harness_pid;
 
@@ -108,6 +109,7 @@ int main(int argc, char** argv) {
     fails += expect("a program that is not there",
                     aether_spawn_sandboxed(all, "aether_no_such_program_3200", NULL), -1);
 
+    list_free(all);
     if (fails) return 1;
     printf("PASS: spawn_sandboxed's children call only async-signal-safe functions\n");
     return 0;

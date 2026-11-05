@@ -13,33 +13,31 @@
 #   upstream <portfile>  bind port 0, write the port, answer as the upstream
 #   client <proxy_port>  drive the requests and check the bytes that come back
 #
-# One hostile header per response, on purpose. A bare CR refuses the whole
-# response on both paths, so a response carrying both would never reach the
-# check that rejects a value holding a bare LF, and removing that check would
-# not fail this test.
+# One hostile header per response, on purpose, so each defence is the only
+# one a case meets.
 #
-# A bare CR makes the response invalid, not only its field (#3556): a
-# recipient has to refuse it or put a space in its place (RFC 9112 2.2), and
-# the client's response reader, which the proxy reads upstreams with,
-# refuses it. A proxy that gets an invalid response from its upstream answers
-# 502 (RFC 9110 15.6.3), as nginx does, so nothing of that upstream's head
-# reaches the client. The proxy used to forward the 200 with the field
-# dropped. A bare LF ends a line, so that case is still the dropped header.
+# A bare CR in a header section is read as SP (#3572): a recipient refuses
+# the message or replaces each bare CR with SP before it processes or
+# forwards it (RFC 9110 5.5, RFC 9112 2.2), and the client's response
+# reader, which the proxy reads upstreams with, replaces it. The field's
+# value then holds the rest of the line, with no CR in it, and the proxy
+# forwards the 200 with that value: nothing behind the CR becomes a field of
+# its own. A bare LF ends a line, so that case is the dropped header.
 
 import os
 import socket
 import sys
 import threading
 
-# (label, hostile header, its name, the header it tries to inject, whether
-# the proxy answers 502 rather than the upstream's response)
+# (label, hostile header, its name, the header it tries to inject, the field
+# the client gets in its place, or None when the header is dropped)
 CASES = [
     ("bare CR",
      b"X-Evil-CR: before\rX-Injected-A: yes\r\n",
-     b"X-Evil-CR", b"X-Injected-A", True),
+     b"X-Evil-CR", b"X-Injected-A", b"X-Evil-CR: before X-Injected-A: yes"),
     ("bare LF",
      b"X-Evil-LF: before\nX-Injected-B: yes\r\n",
-     b"X-Evil-LF", b"X-Injected-B", False),
+     b"X-Evil-LF", b"X-Injected-B", None),
 ]
 
 
@@ -126,36 +124,40 @@ def fetch(proxy_port, path):
 
 
 def run_client(proxy_port):
-    for i, (label, _evil, evil_name, injected, refused) in enumerate(CASES):
+    for i, (label, _evil, evil_name, injected, repaired) in enumerate(CASES):
         buf = fetch(proxy_port, b"/case%d" % i)
 
         if b"\r\n\r\n" not in buf:
             print("%s: no complete response from the proxy: %r" % (label, buf[:200]))
             return 1
         head = buf.split(b"\r\n\r\n")[0]
+        lines = head.split(b"\r\n")
 
-        if injected in head:
+        # No field of the upstream's choosing: no line of the head starts
+        # with the injected name, and no CR or LF stands alone in it.
+        if any(line.startswith(injected + b":") for line in lines):
             print("%s: upstream injected %s into the client's head: %r"
                   % (label, injected.decode(), head))
             return 1
-
-        # Dropping the header is the defence. Emitting a cleaned-up version
-        # would still be a header whose shape the upstream chose.
-        if evil_name in head:
-            print("%s: header carrying a bare line ending was forwarded: %r"
-                  % (label, head))
+        if any(b"\r" in line or b"\n" in line for line in lines):
+            print("%s: a bare line ending reached the client's head: %r" % (label, head))
             return 1
 
-        if refused:
-            if (not head.startswith(b"HTTP/1.1 502 ") or
-                    b"X-Aether-Proxy-Error: upstream_transport" not in head):
-                print("%s: the proxy did not answer 502 to an invalid upstream response: %r"
+        if not head.startswith(b"HTTP/1.1 200 "):
+            print("%s: the proxy did not forward the upstream's 200: %r" % (label, head))
+            return 1
+
+        if repaired is None:
+            # The header with a bare LF is dropped: a cleaned-up version would
+            # still be a header whose shape the upstream chose.
+            if evil_name in head:
+                print("%s: header carrying a bare line ending was forwarded: %r"
                       % (label, head))
                 return 1
-            if b"X-Case:" in head:
-                print("%s: a header of the invalid response was forwarded: %r" % (label, head))
-                return 1
-            continue
+        elif repaired not in lines:
+            print("%s: the field was not forwarded with its bare CR as SP: %r"
+                  % (label, head))
+            return 1
 
         if b"X-Case: %d" % i not in head:
             print("%s: the proxy answered from a different case: %r" % (label, head))

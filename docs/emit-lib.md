@@ -1299,8 +1299,9 @@ ae build app.ae -o app                                            # imports both
   `--shared-runtime`.
 - Each copy of the runtime frees only what it made. A string an export
   returns crosses as a copy ([above](#strings-an-export-returns)). Two
-  things have no copy: a value holding a string (a struct or a tuple with
-  one in it, passed by value or reached through a typed pointer), and the
+  things have no copy: a value holding a string or a slice (a struct or a
+  tuple with one in it, passed by value or reached through a typed pointer;
+  a slice of a `make` buffer holds a counted reference since #3568), and the
   config a builder uses. The copies stay apart on every platform (#3481), so
   importing a static library that has such an export is an error naming
   each one, with the rebuild: `--shared-runtime`.

@@ -1,0 +1,74 @@
+// Regression (#3568): a local given in an `if` to a borrowing parameter is
+// not moved.
+//
+// `total(if c { xs } else { mk(2) })`: the parameter borrows, as the move
+// checks read it, so `xs` stays usable after the call, yet the branch moved
+// `xs` into the call's temporary (`aether_slice_take`), and `xs.len` read 0
+// after it. A branch that is a place gives the call a copy now, released
+// after the call, and a branch that is a call hands its result over. Given
+// to a `@keep` parameter (`keep_it(if c { ys } else { zs })`), the branches
+// move as a plain argument does, by the move checks as by the code.
+//
+// Each shape reads back the local after the call, and where the heap count
+// is exact (mem.heap_in_use_exact) rounds of calls leave the heap as they
+// found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+var kept: int[] = []
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+total(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+keep_it(xs: @keep int[]) -> int {
+    kept = xs
+    return kept.len
+}
+
+shape(c: bool) -> int {
+    xs = mk(3)
+    n = total(if c { xs } else { mk(2) })
+    check(xs.len == 3 && xs[2] == 12, "an owner given to a borrowing call in an `if`")
+    ys = mk(4)
+    zs = mk(5)
+    k = keep_it(if c { ys } else { zs })
+    return n + k + xs.len
+}
+
+main() {
+    check(shape(true) == 33 + 4 + 3, "c true")
+    check(shape(false) == 21 + 5 + 3, "c false")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    _a = shape(i % 2 == 0)
+                    i = i + 1
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

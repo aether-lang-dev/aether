@@ -17,8 +17,8 @@
  * letters, digits and underscore, not starting with a digit. */
 int aether_define_is_valid_name(const char* name);
 
-/* Records NAME as defined. Repeats are harmless. Returns 0 when the name is
- * empty or the table is full. */
+/* Records NAME as defined, however many and however long (#3574). Repeats
+ * are harmless. Returns 0 when the name is no identifier, or out of memory. */
 int aether_define_add(const char* name);
 
 /* 1 when NAME was defined for this build. */
@@ -36,9 +36,9 @@ void aether_defines_clear(void);
  * asked about. A compiled module artifact records those answers and is only
  * reused by a build that would answer them the same way. Turning recording
  * on starts an empty log; each distinct name asked is kept once, with the
- * answer it got. When more distinct names are asked than the log holds,
- * aether_define_query_overflowed() says so and the log is incomplete, which
- * a caller must treat as "cannot tell". */
+ * answer it got, however many there are (#3574). Out of memory the log is
+ * incomplete, aether_define_query_overflowed() says so, and a caller must
+ * treat it as "cannot tell". */
 void        aether_define_record_queries(int on);
 int         aether_define_query_count(void);
 int         aether_define_query_overflowed(void);

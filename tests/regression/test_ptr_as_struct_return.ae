@@ -61,5 +61,7 @@ main() {
     }
     println("  PASS 2: *Header pass-through (param + return)")
 
+    // h3 is h: one buffer, freed once.
+    free(h as ptr)
     println("OK")
 }

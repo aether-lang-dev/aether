@@ -1,0 +1,133 @@
+// Regression (#3568): a value made for an element store whose bounds check
+// panics is given back.
+//
+// `rows[k] = mk(2)` on a slice of slices too short for `k`: slice
+// ownership's store is `aether_slice_set(&rows[k], mk(2))`, whose two
+// arguments C evaluates in the order it likes, and GCC made the value
+// first. The place's bounds check then panicked with the new buffer held by
+// nothing, and a caught panic leaked it each time, as `hs[k].tags = mk(3)`
+// (a field of an element) did. The place is taken, its bounds checked,
+// before the value is made now, as a string, a closure or a struct element's
+// store already takes it, so nothing is made when the check panics.
+//
+// Each element kind's store is tried past the end of an empty slice inside a
+// `try`, and where the heap count is exact (mem.heap_in_use_exact) rounds of
+// them leave the heap as they found it.
+
+import std.mem
+import std.string
+
+struct Item {
+    name: string
+    tags: int[]
+}
+
+struct Holder {
+    tags: int[]
+}
+
+mk(n: int) -> int[] {
+    return make([]int, n)
+}
+
+k_rows(k: int) -> int {
+    rows = make([]int[], 0)
+    try {
+        rows[k] = mk(2)
+    } catch e {
+        return 1
+    }
+    return 0
+}
+
+k_words(k: int) -> int {
+    words = make([]string, 0)
+    try {
+        words[k] = string.concat("a", "${k}")
+    } catch e {
+        return 1
+    }
+    return 0
+}
+
+k_fns(k: int) -> int {
+    fs = make([]fn, 0)
+    try {
+        fs[k] = || { return k }
+    } catch e {
+        return 1
+    }
+    return 0
+}
+
+k_items(k: int) -> int {
+    items = make([]Item, 0)
+    try {
+        items[k] = Item { name: string.concat("n", "${k}"), tags: mk(3) }
+    } catch e {
+        return 1
+    }
+    return 0
+}
+
+k_field(k: int) -> int {
+    hs = make([]Holder, 0)
+    try {
+        hs[k].tags = mk(3)
+    } catch e {
+        return 1
+    }
+    return 0
+}
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+fn steady(what: string, round: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(round)
+        i = i + 1
+    }
+    grown = mem.steady_growth(round, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(k_rows(0) + k_words(0) + k_fns(0) + k_items(0) + k_field(0) == 5, "every store panics")
+    steady("a row stored out of range", || {
+            for i in 0..50 {
+                _a = k_rows(i)
+            }
+        })
+    steady("a string stored out of range", || {
+            for i in 0..50 {
+                _a = k_words(i)
+            }
+        })
+    steady("a closure stored out of range", || {
+            for i in 0..50 {
+                _a = k_fns(i)
+            }
+        })
+    steady("a struct stored out of range", || {
+            for i in 0..50 {
+                _a = k_items(i)
+            }
+        })
+    steady("an element's slice field stored out of range", || {
+            for i in 0..50 {
+                _a = k_field(i)
+            }
+        })
+    println("ok")
+}

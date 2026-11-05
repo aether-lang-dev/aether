@@ -141,6 +141,8 @@ main() {
     http.server_stop(upstream)
     http.server_free(gateway)
     http.server_free(upstream)
+    // The handlers' counter, once no server can run one.
+    sync.atomic_free(count)
     bad = 0
     if waited != "saw 8" {
         println("  FAIL the handler saw the eight proxied requests while it waited: '${waited}'")

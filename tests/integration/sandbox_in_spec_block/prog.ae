@@ -32,6 +32,7 @@ fn check(label: string) {
     add_perm(perms, "env", "HOME")
     w = | _ctx: ptr | { os_getenv("HOME") }
     run_sandboxed(perms, w)
+    list.free(perms)
     c, r, a = audit.entry(0)
     println("${label} allowed=${a}")
 }

@@ -9,4 +9,5 @@ main() {
     let s: *Shader = compile(1, "comp")
     println(show(s))
     println(core.describe(core.material("m", 2)))
+    heap.free(s)
 }

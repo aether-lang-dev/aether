@@ -14,6 +14,29 @@ static int  parse_define_cond(Parser* parser, int* ok);
 static void skip_braced_region(Parser* parser);
 #include "lexer.h"
 #include "../aether_error.h"
+#include <stdarg.h>
+
+/* #3569: `fmt` formatted into a string as long as it needs, malloc'd for the
+ * caller: a name the parser joins is as long as its parts. Fixed buffers cut
+ * a longer one to a name nothing defines. Out of memory ends the compile, as
+ * aether_xrealloc does. */
+static char* parser_strf(const char* fmt, ...)
+#if defined(__GNUC__)
+    __attribute__((format(printf, 1, 2)))
+#endif
+    ;
+static char* parser_strf(const char* fmt, ...) {
+    va_list ap;
+    va_start(ap, fmt);
+    int n = vsnprintf(NULL, 0, fmt, ap);
+    va_end(ap);
+    if (n < 0) n = 0;
+    char* s = (char*)aether_xrealloc(NULL, (size_t)n + 1);
+    va_start(ap, fmt);
+    vsnprintf(s, (size_t)n + 1, fmt, ap);
+    va_end(ap);
+    return s;
+}
 
 Parser* create_parser(Token** tokens, int token_count) {
     Parser* parser = malloc(sizeof(Parser));
@@ -186,8 +209,8 @@ static int reject_none_binding(Parser* parser, const Token* token, const char* w
     if (!token || token->type != TOKEN_IDENTIFIER || !token->value ||
         strcmp(token->value, "none") != 0) return 0;
     if (!parser->suppress_errors) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
             "'none' is the empty-optional literal and cannot be used as a %s: every "
             "later use of it would read as the literal, not the binding", what);
         aether_error_full(msg, token->line, token->column,
@@ -257,12 +280,12 @@ static int c_abi_alias_kind(const char* name, TypeKind* out_kind) {
 Token* expect_token(Parser* parser, AeTokenType expected) {
     Token* token = peek_token(parser);
     if (!token || token->type != expected) {
-        char error_msg[256];
+        const char* error_msg = "";
         if (expected == TOKEN_IDENTIFIER && token_is_reserved_keyword(token)) {
             // User picked a reserved keyword as an identifier name —
             // point at the keyword and suggest a rename so they don't
             // have to guess which grammar slot was wanted.
-            snprintf(error_msg, sizeof(error_msg),
+            error_msg = aether_internf(
                 "'%s' is a reserved keyword and cannot be used as an identifier; "
                 "rename it (e.g. '%s_' or 'msg'), or escape it as `%s` to use the "
                 "name verbatim",
@@ -282,7 +305,7 @@ Token* expect_token(Parser* parser, AeTokenType expected) {
             }
             return NULL;
         }
-        snprintf(error_msg, sizeof(error_msg),
+        error_msg = aether_internf(
             "Expected %s, got %s",
             token_type_to_string(expected),
             token ? token_type_to_string(token->type) : "EOF");
@@ -397,9 +420,9 @@ static void missing_operand(Parser* parser, Token* after, int errors_before,
     else
         snprintf(seen, sizeof(seen), "%s", token_type_to_string(found->type));
     const char* op = (after && after->value) ? after->value : "?";
-    char msg[256], help[256];
-    snprintf(msg, sizeof(msg), "expected %s after `%s`, found %s", what, op, seen);
-    snprintf(help, sizeof(help), "write %s after `%s`", what, op);
+    const char* msg = ""; const char* help = "";
+    msg = aether_internf("expected %s after `%s`, found %s", what, op, seen);
+    help = aether_internf("write %s after `%s`", what, op);
     int line = after ? after->line : (found ? found->line : 0);
     int column = after ? after->column : (found ? found->column : 0);
     aether_error_full(msg, line, column, help, NULL, AETHER_ERR_SYNTAX);
@@ -418,9 +441,9 @@ static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw)
  * `T`, `*T` and `as *T`. */
 static Type* parse_struct_type_name(Parser* parser, Token* first) {
     const char* type_name = first->value;
-    char path[512];
-    size_t plen = 0;
-    path[0] = '\0';
+    /* The module path, as long as it is (#3569): 512 bytes cut a longer
+     * one to another module's. */
+    const char* path = NULL;
     while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT) {
         advance_token(parser);  // consume '.'
         Token* seg = peek_token(parser);
@@ -432,14 +455,12 @@ static Type* parse_struct_type_name(Parser* parser, Token* first) {
         }
         advance_token(parser);  // consume the segment
         /* the segment before this one joins the module path */
-        int n = snprintf(path + plen, sizeof(path) - plen, "%s%s",
-                         plen ? "." : "", type_name);
-        if (n > 0 && (size_t)n < sizeof(path) - plen) plen += (size_t)n;
+        path = path ? aether_internf("%s.%s", path, type_name) : aether_intern(type_name);
         type_name = seg->value; // last segment is the type
     }
     Type* type = create_type(TYPE_STRUCT);
     type->struct_name = strdup(type_name);
-    if (plen) type->qualifier = aether_intern(path);
+    if (path) type->qualifier = path;
     return type;
 }
 
@@ -638,16 +659,16 @@ static int parse_array_length(Parser* parser) {
     ConstEval ce = { parser, parser->current_token, NULL, NULL };
     long long v = 0;
     int ok = ce_shift(&ce, &v);
-    char msg[256];
+    const char* msg = "";
     if (!ok || ce.pos == parser->current_token) {
         if (ce.fail && strcmp(ce.fail, "zero") == 0) {
             parser_error_at(parser, ce.fail_at, "division by zero in an array length");
         } else if (ce.fail && strcmp(ce.fail, "range") == 0) {
-            snprintf(msg, sizeof msg, "an array length must be from 1 to %d; this one "
+            msg = aether_internf("an array length must be from 1 to %d; this one "
                      "reaches a value outside that", INT_MAX);
             parser_error_at(parser, ce.fail_at, msg);
         } else if (ce.fail) {
-            snprintf(msg, sizeof msg,
+            msg = aether_internf(
                 "array length '%s' is not an integer constant of this file: a length is "
                 "a number, a `const` of the file holding one, or an expression over those",
                 ce.fail_at->value);
@@ -660,7 +681,7 @@ static int parse_array_length(Parser* parser) {
         return 0;
     }
     if (v < 1 || v > INT_MAX) {
-        snprintf(msg, sizeof msg, "an array length must be from 1 to %d, but this one is %lld",
+        msg = aether_internf("an array length must be from 1 to %d, but this one is %lld",
                  INT_MAX, v);
         parser_error_at(parser, start, msg);
         return 0;
@@ -815,15 +836,13 @@ static Type* parse_type_unsuffixed(Parser* parser) {
         }
         /* Compute the unqualified C spelling, then prefix `const `. */
         const char* base = NULL;
-        char ptr_buf[128];
         if (inner->c_alias) {
             base = inner->c_alias;
         } else if (inner->kind == TYPE_PTR && inner->element_type &&
                    inner->element_type->kind == TYPE_STRUCT &&
                    inner->element_type->struct_name) {
-            snprintf(ptr_buf, sizeof(ptr_buf), "%s*",
-                     inner->element_type->struct_name);
-            base = ptr_buf;
+            /* As long as the struct's name (#3569): 128 bytes cut it. */
+            base = aether_internf("%s*", inner->element_type->struct_name);
         } else if (inner->kind == TYPE_PTR) {
             base = "void*";
         } else if (inner->kind == TYPE_STRING) {
@@ -1037,7 +1056,9 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                      * a function does with a `ptr` is an Aether
                      * function's contract, and a typed C function
                      * pointer's parameters borrow. */
-                    int modes[64] = { 0 };
+                    /* Each parameter's mode, every one (#3574): past 64 a
+                     * `@keep` or `@into` parameter's was dropped. */
+                    int* modes = NULL;
                     int any_mode = 0;
                     if (!(peek_token(parser) && peek_token(parser)->type == TOKEN_RIGHT_PAREN)) {
                         do {
@@ -1058,6 +1079,7 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                             Type* p = parse_type(parser);
                             if (!p) {
                                 parser_error(parser, "Expected type in fn() signature");
+                                free(modes);
                                 free_type(type);
                                 return NULL;
                             }
@@ -1065,15 +1087,17 @@ static Type* parse_type_unsuffixed(Parser* parser) {
                             type->param_types = aether_xrealloc(type->param_types,
                                 (size_t)type->param_count * sizeof(Type*));
                             type->param_types[type->param_count - 1] = p;
-                            if (type->param_count <= 64) modes[type->param_count - 1] = mode;
+                            modes = (int*)aether_xrealloc(modes, (size_t)type->param_count * sizeof(int));
+                            modes[type->param_count - 1] = mode;
                             if (mode != FN_MODE_BORROWED) any_mode = 1;
                         } while (match_token(parser, TOKEN_COMMA));
                     }
                     if (any_mode) {
                         type->is_fnptr = 0;
-                        for (int i = 0; i < type->param_count && i < 64; i++)
+                        for (int i = 0; i < type->param_count; i++)
                             fn_type_set_param_mode(type, i, modes[i]);
                     }
+                    free(modes);
                     if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
                         free_type(type);
                         return NULL;
@@ -1784,8 +1808,8 @@ static int parse_depth_enter(Parser* parser) {
     if (parser->depth >= AETHER_MAX_PARSE_DEPTH) {
         if (!parser->depth_exceeded) {
             parser->depth_exceeded = 1;
-            char msg[160];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "nested too deeply (limit %d); simplify the expression or "
                      "split the block into smaller functions",
                      AETHER_MAX_PARSE_DEPTH);
@@ -2480,10 +2504,9 @@ static ASTNode* parse_primary_expression_inner(Parser* parser) {
             if (!expect_token(parser, TOKEN_RIGHT_PAREN)) return NULL;
 
             // Internal representation: AST_FUNCTION_CALL with spawn_ActorName
-            char func_name[256];
-            snprintf(func_name, sizeof(func_name), "spawn_%s", actor_name->value);
-
+            char* func_name = parser_strf("spawn_%s", actor_name->value);
             ASTNode* spawn_call = create_ast_node(AST_FUNCTION_CALL, func_name, line, column);
+            free(func_name);
 
             // Optional core placement hint: spawn(Actor(), core: N)
             Token* next = peek_token(parser);
@@ -2652,8 +2675,8 @@ static int expr_chain_too_long(Parser* parser, int links, Token* at, const char*
     if (!parser->depth_exceeded) {
         parser->depth_exceeded = 1;
         if (!parser->suppress_errors && at) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "%s chains more than %d operations, the limit",
+            const char* msg = "";
+            msg = aether_internf("%s chains more than %d operations, the limit",
                      what, AETHER_MAX_EXPR_CHAIN);
             aether_error_full(msg, at->line, at->column,
                               "split it with intermediate locals", NULL, AETHER_ERR_SYNTAX);
@@ -2985,10 +3008,9 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 // (the receiver MIGHT be a value, not a module — the
                 // typechecker tries qualified resolution first and only
                 // falls back to UFCS, shape (b), if that fails.)
-                char qualified_name[256];
-                snprintf(qualified_name, sizeof(qualified_name), "%s.%s",
-                         expr->children[0]->value, expr->value);
-                func_name = strdup(qualified_name);
+                // As long as the two names are (#3569): a 256-byte buffer
+                // cut a longer one to a name nothing defines.
+                func_name = parser_strf("%s.%s", expr->children[0]->value, expr->value);
             } else if (expr && expr->type == AST_MEMBER_ACCESS && expr->value &&
                        expr->child_count > 0 && expr->children[0]) {
                 // #928 UFCS shape (a): receiver is not a bare identifier, so
@@ -4021,12 +4043,12 @@ static int reject_unbound_binding(Parser* parser, ASTNode* decl, const char* kw)
         return 0;
     if (!parser->suppress_errors) {
         Token* stray = peek_token(parser);
-        char msg[256];
-        snprintf(msg, sizeof(msg), "`%s %s` binds nothing: expected `= <expression>`",
+        const char* msg = "";
+        msg = aether_internf("`%s %s` binds nothing: expected `= <expression>`",
                  kw, decl->value ? decl->value : "?");
         if (stray && stray->type == TOKEN_IDENTIFIER && stray->value) {
-            char hint[320];
-            snprintf(hint, sizeof(hint),
+            const char* hint = "";
+            hint = aether_internf(
                      "a typed declaration is written without `%s` (`%s %s = ...`); "
                      "an inferred one names only the variable (`%s %s = ...`)",
                      kw, decl->value ? decl->value : "?", stray->value, kw, stray->value);
@@ -4867,14 +4889,13 @@ ASTNode* parse_module_declaration(Parser* parser) {
     if (!name_token) return NULL;
     
     // Build full module name (handle dotted notation)
-    char module_name[256] = {0};
-    strncpy(module_name, name_token->value, sizeof(module_name) - 1);
+    /* As long as its parts (#3569): 256 bytes cut it to another name. */
+    const char* module_name = aether_intern(name_token->value);
     
     while (match_token(parser, TOKEN_DOT)) {
         Token* part = expect_token(parser, TOKEN_IDENTIFIER);
         if (!part) break;
-        strncat(module_name, ".", sizeof(module_name) - strlen(module_name) - 1);
-        strncat(module_name, part->value, sizeof(module_name) - strlen(module_name) - 1);
+        module_name = aether_internf("%s.%s", module_name, part->value);
     }
     
     ASTNode* module_decl = create_ast_node(AST_MODULE_DECLARATION, module_name, 
@@ -4927,15 +4948,14 @@ ASTNode* parse_import_statement(Parser* parser) {
     advance_token(parser);  // consume name
 
     // Build module name (handle dotted notation)
-    char module_name[256] = {0};
-    strncpy(module_name, name_token->value, sizeof(module_name) - 1);
+    /* As long as its parts (#3569): 256 bytes cut it to another name. */
+    const char* module_name = aether_intern(name_token->value);
 
     while (match_token(parser, TOKEN_DOT)) {
         Token* part = peek_token(parser);
         if (!is_module_name_token(part)) break;
         advance_token(parser);  // consume the part
-        strncat(module_name, ".", sizeof(module_name) - strlen(module_name) - 1);
-        strncat(module_name, part->value, sizeof(module_name) - strlen(module_name) - 1);
+        module_name = aether_internf("%s.%s", module_name, part->value);
     }
     
     ASTNode* import_stmt = create_ast_node(AST_IMPORT_STATEMENT, module_name,
@@ -4977,9 +4997,8 @@ ASTNode* parse_import_statement(Parser* parser) {
                     advance_token(parser);  // consume 'as'
                     Token* alias = expect_token(parser, TOKEN_IDENTIFIER);
                     if (!alias) break;
-                    char ann[160];
-                    snprintf(ann, sizeof(ann), "select_alias:%s", alias->value);
-                    symbol_node->annotation = strdup(ann);
+                    /* As long as the alias (#3569): 160 bytes cut it. */
+                    symbol_node->annotation = parser_strf("select_alias:%s", alias->value);
                 }
                 add_child(import_stmt, symbol_node);
             } while (match_token(parser, TOKEN_COMMA));
@@ -5781,10 +5800,11 @@ static void hoist_place_indices(ASTNode* place, ASTNode* block, int seq, int* k)
 static void parse_place_destructure(Parser* parser, ASTNode* block) {
     Token* head = peek_token(parser);
     ASTNode* destructure = create_ast_node(AST_TUPLE_DESTRUCTURE, NULL, head->line, head->column);
-    enum { MAX_PLACES = 64 };
-    ASTNode* places[MAX_PLACES];
-    char* hidden[MAX_PLACES];
-    int np = 0;
+    /* Every place the destructure names (#3574): past 64 the next was
+     * refused as no destructure slot at all. */
+    ASTNode** places = NULL;
+    char** hidden = NULL;
+    int np = 0, place_cap = 0;
     int seq = ++g_place_destructure_seq;
     for (;;) {
         Token* t = peek_token(parser);
@@ -5798,8 +5818,7 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
             add_child(destructure, var);
         } else {
             ASTNode* place = parse_unary_expression(parser);
-            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS) ||
-                np == MAX_PLACES) {
+            if (!place || (place->type != AST_ARRAY_ACCESS && place->type != AST_MEMBER_ACCESS)) {
                 if (!parser->suppress_errors && t) {
                     aether_error_with_code(
                         "a destructure slot is a name, `_`, an element (`a[i]`) or a field (`o.f`)",
@@ -5813,6 +5832,11 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
             ASTNode* var = create_ast_node(AST_VARIABLE_DECLARATION, name, place->line, place->column);
             var->node_type = create_type(TYPE_UNKNOWN);
             add_child(destructure, var);
+            if (np == place_cap) {
+                place_cap = place_cap ? place_cap * 2 : 8;
+                places = (ASTNode**)aether_xrealloc(places, sizeof(ASTNode*) * (size_t)place_cap);
+                hidden = (char**)aether_xrealloc(hidden, sizeof(char*) * (size_t)place_cap);
+            }
             places[np] = place;
             hidden[np] = strdup(name);
             np++;
@@ -5837,6 +5861,8 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
                peek_token(parser)->type != TOKEN_EOF) advance_token(parser);
         free_ast_node(destructure);
         for (int i = 0; i < np; i++) { free_ast_node(places[i]); free(hidden[i]); }
+        free(places);
+        free(hidden);
         return;
     }
     add_child(destructure, rhs);  // Last child is the RHS
@@ -5853,6 +5879,8 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
         add_child(block, stmt);
         free(hidden[i]);
     }
+    free(places);
+    free(hidden);
 }
 
 ASTNode* parse_block(Parser* parser) {
@@ -5890,12 +5918,12 @@ ASTNode* parse_block(Parser* parser) {
                 !token_is_value_ident(head) &&
                 (after->type == TOKEN_ASSIGN || after->type == TOKEN_PLUS_ASSIGN ||
                  after->type == TOKEN_MINUS_ASSIGN)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "'%s' is a reserved keyword and cannot be used as an identifier; rename it (e.g. '%s_' or 'msg')",
                     head->value, head->value);
-                char hint[128];
-                snprintf(hint, sizeof(hint), "rename to '%s_' or another identifier", head->value);
+                const char* hint = "";
+                hint = aether_internf("rename to '%s_' or another identifier", head->value);
                 if (!parser->suppress_errors) {
                     aether_error_full(msg, head->line, head->column, hint, NULL, AETHER_ERR_SYNTAX);
                 }
@@ -5942,8 +5970,8 @@ ASTNode* parse_block(Parser* parser) {
             // that leaves users guessing.
             Token* stmt_head = peek_token(parser);
             if (stmt_head && token_is_reserved_keyword(stmt_head)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "'%s' is a reserved keyword and cannot be used as an identifier; rename it (e.g. '%s_' or 'msg')",
                     stmt_head->value, stmt_head->value);
                 char hint[128];
@@ -6100,8 +6128,8 @@ ASTNode* parse_actor_definition(Parser* parser) {
             } else {
                 Token* tok = peek_token(parser);
                 if (tok && aether_error_count() == body_errors) {
-                    char msg[128];
-                    snprintf(msg, sizeof(msg), "Unexpected token in actor body: '%.60s'",
+                    const char* msg = "";
+                    msg = aether_internf("Unexpected token in actor body: '%.60s'",
                              tok->value ? tok->value : "?");
                     parser_error(parser, msg);
                 }
@@ -6433,11 +6461,13 @@ static void parse_extern_param_attrs_and_type(Parser* parser, ASTNode* param) {
 /* Trailing `@`-attributes on an extern signature, shared by the bare
  * `extern name(...)` form and the `@extern("c_sym") name(...)` form:
  *
- *   @heap     the `-> string` return is a malloc'd buffer the caller owns.
- *             Recorded as "heap_return", read by is_heap_string_expr in
- *             codegen_stmt.c. Only meaningful on `-> string`; anything else
- *             is a parse error since integers and pointers aren't heap-
- *             tracked and void has nothing to own.
+ *   @heap     the `-> string` return is a malloc'd buffer the caller owns,
+ *             and a `-> fn` result a reference the caller owns (#3547).
+ *             Recorded as "heap_return", read by is_heap_string_expr and
+ *             closure_value_is_fresh in codegen_stmt.c. Only meaningful on
+ *             `-> string`, `-> ptr` and `-> fn`; anything else is a parse
+ *             error since integers aren't heap-tracked and void has
+ *             nothing to own.
  *   @fresh    the `-> ptr` result is memory the call allocates, which nothing
  *             else holds (#3086): std's list and map constructors. A
  *             container bound from one is a holder (`@holds`) that keeps
@@ -6471,11 +6501,16 @@ static void parse_extern_trailing_attrs(Parser* parser, ASTNode* ext) {
             /* A `ptr` result is a counted string returned untyped
              * (string.from_int and the like) or a `*StringSeq`: `@heap`
              * says the caller owns a reference, as for a `string` result
-             * (R1). */
+             * (R1). So does a closure (`-> fn`), an Aether library's
+             * export handing its caller the reference its return gives
+             * (#3547): a C function's closure is lent (R4). A typed C
+             * function pointer holds no reference. */
+            int closure_result = ext->node_type && ext->node_type->kind == TYPE_FUNCTION &&
+                                 !ext->node_type->is_fnptr;
             if (!ext->node_type || (ext->node_type->kind != TYPE_STRING &&
-                                    ext->node_type->kind != TYPE_PTR)) {
+                                    ext->node_type->kind != TYPE_PTR && !closure_result)) {
                 parser_error(parser,
-                    "@heap on extern return is only valid on `-> string` or `-> ptr`");
+                    "@heap on extern return is only valid on `-> string`, `-> ptr` or `-> fn`");
             } else {
                 ext->annotation =
                     annotation_add_marker(ext->annotation, "heap_return");
@@ -6857,12 +6892,13 @@ ASTNode* parse_function_definition(Parser* parser) {
                 // keyword and teach the backtick escape instead (#867).
                 Token* pk = peek_token(parser);
                 if (pk && token_is_reserved_keyword(pk) && !parser->suppress_errors) {
-                    char emsg[256], hint[160];
+                    char emsg[256];
+                    const char* hint = "";
                     snprintf(emsg, sizeof(emsg),
                         "'%s' is a reserved keyword and cannot be used as a parameter "
                         "name; rename it (e.g. '%s_'), or escape it as `%s` to use the "
                         "name verbatim", pk->value, pk->value, pk->value);
-                    snprintf(hint, sizeof(hint),
+                    hint = aether_internf(
                         "rename to '%s_', or write `%s` to keep the name",
                         pk->value, pk->value);
                     aether_error_full(emsg, pk->line, pk->column, hint, NULL, AETHER_ERR_SYNTAX);
@@ -7853,8 +7889,8 @@ static ASTNode* parse_bitstruct_definition(Parser* parser) {
             return NULL;
         }
         if (lo < 0 || hi >= total_bits) {
-            char msg[192];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "bitstruct field bits %d..=%d do not fit in the %d-bit backing type",
                      lo, hi, total_bits);
             parser_error(parser, msg);
@@ -8103,21 +8139,19 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser);                   // consume 'drop'
                     Token* fn = expect_token(parser, TOKEN_IDENTIFIER);
                     if (!fn) { free_type(base); return NULL; }
-                    char qname[256];
-                    snprintf(qname, sizeof(qname), "%s", fn->value);
+                    /* The drop function's name, as long as it is (#3569):
+                     * 256 bytes cut a qualified one to another name. */
+                    const char* qname = aether_intern(fn->value);
                     while (peek_token(parser) && peek_token(parser)->type == TOKEN_DOT &&
                            peek_ahead(parser, 1) && peek_ahead(parser, 1)->type == TOKEN_IDENTIFIER) {
                         advance_token(parser);
                         Token* part = expect_token(parser, TOKEN_IDENTIFIER);
-                        size_t used = strlen(qname);
-                        snprintf(qname + used, sizeof(qname) - used, ".%s", part->value);
+                        qname = aether_internf("%s.%s", qname, part->value);
                     }
                     ASTNode* d = create_ast_node(AST_DISTINCT_TYPE_DEF,
                                                  name->value, name->line, name->column);
                     d->node_type = base;
-                    size_t n = strlen(qname) + sizeof("owned_drop:");
-                    d->annotation = malloc(n);
-                    if (d->annotation) snprintf(d->annotation, n, "owned_drop:%s", qname);
+                    d->annotation = parser_strf("owned_drop:%s", qname);
                     match_token(parser, TOKEN_SEMICOLON);
                     return d;
                 }
@@ -8470,19 +8504,14 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                     advance_token(parser);  // consume 'derive'
                     if (!expect_token(parser, TOKEN_LEFT_PAREN)) return NULL;
                     // Parse the comma-separated derive list.
-                    char tag[256];
-                    snprintf(tag, sizeof(tag), "derive:");
-                    size_t tag_len = strlen(tag);
+                    /* As long as the list (#3569): one past 256 bytes
+                     * stopped the list there. */
+                    const char* tag = "derive:";
                     int first = 1;
                     while (1) {
                         Token* d = expect_token(parser, TOKEN_IDENTIFIER);
                         if (!d || !d->value) break;
-                        size_t dlen = strlen(d->value);
-                        if (tag_len + dlen + 2 >= sizeof(tag)) break;
-                        if (!first) { tag[tag_len++] = ','; }
-                        memcpy(tag + tag_len, d->value, dlen);
-                        tag_len += dlen;
-                        tag[tag_len] = '\0';
+                        tag = aether_internf("%s%s%s", tag, first ? "" : ",", d->value);
                         first = 0;
                         if (!match_token(parser, TOKEN_COMMA)) break;
                     }
@@ -8533,11 +8562,9 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         //                       falls back to fdef->value
                         //                       (post-merge namespace-
                         //                       prefixed when imported).
-                        char tag[256];
-                        snprintf(tag, sizeof(tag), "c_callback:%s",
-                                 explicit_sym ? explicit_sym : "");
                         if (fdef->annotation) free(fdef->annotation);
-                        fdef->annotation = strdup(tag);
+                        fdef->annotation =
+                            parser_strf("c_callback:%s", explicit_sym ? explicit_sym : "");
                     }
                     if (explicit_sym) free(explicit_sym);
                     node = fdef;
@@ -8644,9 +8671,7 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 // Stash the C symbol name with a recognizable prefix so
                 // codegen can detect it without colliding with other
                 // annotation users (e.g. defer factories).
-                char tag[256];
-                snprintf(tag, sizeof(tag), "c_symbol:%s", sym->value);
-                ext->annotation = strdup(tag);
+                ext->annotation = parser_strf("c_symbol:%s", sym->value);   /* #3569: whole */
 
                 if (!match_token(parser, TOKEN_RIGHT_PAREN)) {
                     do {
@@ -8954,8 +8979,8 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                 if (token_is_reserved_keyword(token)) {
                     Token* nxt = peek_ahead(parser, 1);
                     if (nxt && nxt->type == TOKEN_LEFT_PAREN) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "'%s' is a reserved keyword and cannot be used as a function name; rename it (e.g. '%s_' or 'do_%s')",
                             token->value, token->value, token->value);
                         char hint[128];

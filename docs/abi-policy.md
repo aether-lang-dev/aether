@@ -57,6 +57,15 @@ runtime it was made for. The shared runtime reports its ID
 (`aether_runtime_abi()`), and the catalog of a shared-runtime library
 records the one it was made for (`runtime_abi`).
 
+The revisions since the last release: 2, a typed message that fits is
+carried in the Message itself (#3534); 3, a slice's `make` buffer is counted
+(#3568): its storage starts a 32-byte header before the first element, and
+a slice of it carries the mark `AETHER_SLICE_MADE` and its offset into the
+buffer in the padding after `flags` (and that field's bits 8 to 31), so C
+code compiled for revision 2 that freed a buffer's `.ptr`, or built a view by
+moving `.ptr`, is refused at revision 3 ([c-interop.md](c-interop.md),
+Counted buffers).
+
 **Shared facilities.** A library without `--shared-runtime` brings a copy
 of the runtime, and copies in one process share the sandbox levels and the
 execution accounts through the first copy loaded that has them, by its

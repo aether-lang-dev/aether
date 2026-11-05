@@ -1,8 +1,7 @@
 # tests/leaks_exclude.txt — regression programs the macOS leaks(1) gate
 # cannot run, listed one per line ('#' and blank lines ignored). Linux CI
 # runs them with the rest of the corpus under ASan and LSan (`make
-# test-asan-ae`, asan.yml, #3539), which lists their leaks; a leak fails that
-# run once #3547 sets SAN_LEAKS=fail.
+# test-asan-ae`, asan.yml, #3539), where a leak fails the run (#3547).
 #
 # What stops leaks(1) (#3202, seen with the gate's sample(1) of the stuck
 # run): leaks --atExit interposes _exit in the target's image

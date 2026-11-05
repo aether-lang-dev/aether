@@ -3,9 +3,19 @@
 
 #include "ast.h"
 #include "aether_lib_path.h"  /* AETHER_LIB_DIRS_MAX, AETHER_LIB_PATH_SEP_CHAR */
+#include "aether_strmap.h"
 
 // Module system for Aether
 // Supports: import/export, package management
+
+// #3545: a list of names, as long as what it lists needs. #3546: with an
+// index of them, so asking whether a name is listed is one probe.
+typedef struct {
+    const char** names;
+    int count;
+    int cap;
+    StrMap index;
+} ModuleNames;
 
 // Module structure
 typedef struct {
@@ -31,6 +41,15 @@ typedef struct {
     // functions inside a region compiled for the target. NULL for every
     // ordinary module.
     char* lane_target;
+    // #3545: the names the module declares, which the merge renames a
+    // merged body's references to: its functions, and its constants with
+    // its faults' members. Collected from `ast` when a merge first asks
+    // (names_ast and names_children say which AST they were read from),
+    // sized by the module, and freed with it.
+    ModuleNames func_names;
+    ModuleNames const_names;
+    const ASTNode* names_ast;
+    int names_children;
 } AetherModule;
 
 // Module registry
@@ -77,6 +96,10 @@ AetherModule* module_find(const char* name);
  * — last — its bare last segment (the first such match), which is what a
  * qualified `ns.name` use carries. */
 void module_assign_namespaces(void);
+/* #3546: the first extern named `name` among a module AST's top-level
+ * declarations (an export unwrapped), or NULL; from the AST's index, so a
+ * lookup per call does not walk the module. */
+ASTNode* module_ast_extern_named(const ASTNode* ast, const char* name);
 const char* module_namespace_of(const char* module_path);
 AetherModule* module_find_by_namespace(const char* ns);
 /* The registered module whose source is `file_path` (compared as files, not
@@ -109,11 +132,11 @@ int module_exports_symbol(AetherModule* module, const char* name);
  * transitively). NULL when `module` itself is the definer. */
 AetherModule* module_resolve_reexport(AetherModule* module, const char* symbol);
 /* #2978: when the module whose namespace is `ns` defines a function, a
- * builder or an `@extern` whose Aether name is `name`, write the C name the
- * merge gives it into `buf` and return 1: `<ns>_<name>`, or `ae_<ns>_<name>`
- * for a function whose `<ns>_<name>` is one of the module's bare externs.
- * 0 when the module defines no such name. */
-int module_function_c_name(const char* ns, const char* name, char* buf, size_t cap);
+ * builder or an `@extern` whose Aether name is `name`, the C name the merge
+ * gives it, malloc'd for the caller to free: `<ns>_<name>`, or
+ * `ae_<ns>_<name>` for a function whose `<ns>_<name>` is one of the module's
+ * bare externs. NULL when the module defines no such name. */
+char* module_function_c_name_dup(const char* ns, const char* name);
 /* #2614: may code written in the module registered as `module_name` qualify
  * a name with namespace `ns`? Its own namespace and the namespaces of the
  * modules it imports, in any form; not a module some other module of the

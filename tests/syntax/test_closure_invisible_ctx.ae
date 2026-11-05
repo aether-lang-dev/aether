@@ -73,6 +73,10 @@ main() {
     p2, _ = list.get(root, 1)
     println("panel2 children: ${list.size(p2)}")
 
+    // The panels root holds are lists of their own, which list.free(root)
+    // leaves to the program.
+    list.free(p1)
+    list.free(p2)
     list.free(root)
     println("invisible ctx ok")
 }

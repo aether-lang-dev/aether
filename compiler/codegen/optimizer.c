@@ -189,8 +189,8 @@ static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right
         long long exact = (long long)bits;
         int wrapped = (int)exact;
         if ((long long)wrapped != exact) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "int constant expression overflows 32 bits: the exact value is "
                      "%lld, which wraps to %d at runtime. Widen a term to `long` "
                      "(e.g. `long x = a` then `x * b`) to keep the full value.",
@@ -201,8 +201,8 @@ static ASTNode* fold_integer_binary(ASTNode* node, ASTNode* left, ASTNode* right
         type = TYPE_INT;
     } else if (kind == LIT_INT64) {
         if (overflow) {
-            char msg[160];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "long constant expression overflows 64 bits and wraps to %lld at runtime.",
                      (long long)bits);
             report_const_overflow(node, msg);

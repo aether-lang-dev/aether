@@ -81,6 +81,8 @@ void string_release(const void* str);
  * a plain char* and NULL are left alone. Call it from the thread that holds
  * the string, before the store publishes it. */
 void aether_string_publish(const void* str);
+/* #3570: a counted string that is not pinned (aether_slice.h's string views). */
+int aether_string_counted(const void* str);
 /* A reference for a place other threads can reach (a container element, a
  * closure environment): the string is published, then retained. */
 void string_retain_shared(const void* str);
@@ -281,8 +283,22 @@ char* aether_string_mutable_data(void* s);
 
 const char* aether_string_capture_owned(const char* s);
 /* std.string's keep and release_kept (#2926): a reference for a `@keep ptr`
- * slot, as capture_owned gives a closure environment one. */
+ * slot, as capture_owned gives a closure environment one. The reference is
+ * recorded (#3567), and release_kept gives back only a recorded one. */
 void* aether_string_keep(const void* s);
+/* #3567: a reference the caller hands over (a store's take), recorded as
+ * keep's is and returned: what a string stored into a `ptr` module var
+ * holds, given back with release_kept. keep retains its argument; this
+ * records the reference it is given. */
+void* aether_string_keep_owned(const void* s);
+/* #3567: a store into a header-defined struct's string field gives C the
+ * reference `s` hands over, recorded by the characters it returns, which the
+ * field holds; release_kept of those characters (or of the string) gives it
+ * back. A pinned literal's characters and a plain C string are not recorded. */
+const char* aether_string_give_c(const void* s);
+/* A plain C string as a counted one: the string whose characters C was given
+ * (recorded by aether_string_give_c), retained, or else a copy. */
+const char* aether_string_from_c(const char* s);
 /* Is `p` an Aether string (a counted or a pinned AetherString)? For the
  * typed accessors (`string.from_ptr`, `map.get_string`, `list.get_string`),
  * which hand back a pointer as a string only when it is one. */

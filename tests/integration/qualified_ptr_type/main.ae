@@ -1,5 +1,7 @@
 import gpu
 
+extern free(p: ptr)
+
 // `*gpu.GpuShader` and `gpu.Pass` in every position a type is written,
 // with no selective `import gpu (GpuShader)`: each resolves to the struct
 // that selective import would bring in.
@@ -29,4 +31,8 @@ main() {
     f = Frame { first: s, pass: p }
     println(describe(f.first, f.pass))
     println(gpu.shader_id(f.pass.shader))
+    // The module's malloc'd shaders, freed by the program that asked for
+    // them; their names are literals.
+    free(s as ptr)
+    free(t as ptr)
 }

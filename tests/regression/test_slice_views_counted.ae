@@ -1,0 +1,238 @@
+// Regression (#3568): a slice buffer a view outlives is released with the
+// last place that holds it.
+//
+// A `make` buffer had one owner, and a view that might outlive it made the
+// owner keep the buffer for good: `last = first_two(xs)` in an outer scope
+// leaked each round's buffer, `v = xs[1..3]` held while `xs` was bound again
+// leaked both, and a view returned or stored kept its buffer forever. The
+// buffer is now counted: every place that holds a slice of it holds a
+// reference, and the last to let go releases it. An `append` to a buffer a
+// view still holds goes on in storage of its own (it used to reallocate the
+// storage under the view), and `free` of a view a place holds gives back
+// that view's reference.
+//
+// Each shape reads back what it stored, after a churn of same-sized buffers
+// filled with -7 (a buffer freed under a view would come back holding the
+// filler), and where the heap count is exact (mem.heap_in_use_exact) some
+// round of each leaves the heap where it found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Holder {
+    data: int[]
+}
+
+var kept_var: int[] = []
+
+around(k: int) -> int[] {
+    out = make([]int, 4)
+    for i in 0..4 {
+        out[i] = k * 10 + i
+    }
+    return out
+}
+
+churn() -> int {
+    t = 0
+    for r in 0..64 {
+        b = make([]int, 4)
+        for i in 0..4 {
+            b[i] = -7
+        }
+        t = t + b[0]
+    }
+    return t
+}
+
+first_two(xs: int[]) -> int[] {
+    return xs[0..2]
+}
+
+// A view a function hands back, kept in a local of an outer scope.
+kept_view(n: int) -> int {
+    int[] last = []
+    for k in 0..n {
+        xs = around(k)
+        last = first_two(xs)
+    }
+    churn()
+    return last[0] + last[1]
+}
+
+// A view held while its slice is bound again.
+rebound_view() -> int {
+    xs = around(5)
+    v = xs[1..3]
+    xs = around(6)
+    churn()
+    return v[0] + v[1] + xs[0]
+}
+
+// A view returned from the function that made the buffer.
+tail_of(k: int) -> int[] {
+    xs = around(k)
+    return xs[2..]
+}
+
+// A view stored in a struct the caller gets.
+held(k: int) -> Holder {
+    xs = around(k)
+    return Holder { data: xs[1..3] }
+}
+
+// A view in a tuple and in an optional.
+pair_of(k: int) -> (int[], int) {
+    xs = around(k)
+    return (xs[0..1], k)
+}
+
+maybe_view(k: int) -> int[]? {
+    xs = around(k)
+    return xs[3..]
+}
+
+// A view a closure keeps, called after the buffer's local is gone.
+reader(k: int) -> fn {
+    xs = around(k)
+    v = xs[1..2]
+    return || {
+        return v[0]
+    }
+}
+
+// A view in a module `var`.
+keep_in_var(k: int) {
+    xs = around(k)
+    kept_var = xs[2..4]
+}
+
+// An `append` to a buffer a view still holds: the view keeps what it held.
+grown_under_view() -> int {
+    xs = around(7)
+    w = xs[0..2]
+    for i in 0..9 {
+        xs = append(xs, i)
+    }
+    churn()
+    return w[0] + w[1] + xs.len
+}
+
+// `free` of a view a place holds gives back that view's reference only: a
+// `@keep` parameter holds one (it was a named panic, the view owning
+// nothing).
+drop_view(v: @keep int[]) {
+    free(v)
+}
+
+freed_view() -> int {
+    xs = around(8)
+    drop_view(xs[1..])
+    churn()
+    return xs[1]
+}
+
+total(xs: int[]) -> int {
+    t = 0
+    for x in xs {
+        t = t + x
+    }
+    return t
+}
+
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(kept_view(5) == 81, "a view kept in an outer scope reads its buffer")
+    check(rebound_view() == 163, "a view held across a re-bind reads its buffer")
+    t = tail_of(3)
+    churn()
+    check(t.len == 2 && t[0] == 32 && t[1] == 33, "a view returned reads its buffer")
+    h = held(4)
+    churn()
+    check(h.data[0] == 41 && h.data[1] == 42, "a view in a struct reads its buffer")
+    p, k = pair_of(5)
+    churn()
+    check(p[0] == 50 && k == 5, "a view in a tuple reads its buffer")
+    o = maybe_view(6)
+    churn()
+    check(o!.len == 1 && o![0] == 63, "a view in an optional reads its buffer")
+    r = reader(7)
+    churn()
+    int got = call(r)
+    check(got == 71, "a view a closure keeps reads its buffer")
+    keep_in_var(8)
+    churn()
+    check(total(kept_var) == 82 + 83, "a view in a module var reads its buffer")
+    check(grown_under_view() == 70 + 71 + 13, "a view held across an append reads its buffer")
+
+    steady("a view kept in an outer scope", || {
+            i = 0
+            while i < 50 {
+                _n = kept_view(5)
+                i = i + 1
+            }
+        })
+    steady("a view held across a re-bind", || {
+            i = 0
+            while i < 50 {
+                _n = rebound_view()
+                i = i + 1
+            }
+        })
+    steady("a view returned, stored, in a tuple and an optional", || {
+            i = 0
+            while i < 50 {
+                tv = tail_of(1)
+                hv = held(2)
+                pv, _ = pair_of(3)
+                ov = maybe_view(4)
+                _n = tv.len + hv.data.len + pv.len + ov!.len
+                i = i + 1
+            }
+        })
+    steady("a view a closure keeps", || {
+            i = 0
+            while i < 50 {
+                rv = reader(5)
+                int _m = call(rv)
+                i = i + 1
+            }
+        })
+    steady("a view in a module var, stored again", || {
+            i = 0
+            while i < 50 {
+                keep_in_var(i)
+                i = i + 1
+            }
+        })
+    steady("an append under a view, and a freed view", || {
+            i = 0
+            while i < 50 {
+                _a = grown_under_view()
+                _b = freed_view()
+                i = i + 1
+            }
+        })
+    check(freed_view() == 81, "free of a view leaves the buffer to its slice")
+    println("PASS a slice buffer a view outlives is released with its last holder")
+}

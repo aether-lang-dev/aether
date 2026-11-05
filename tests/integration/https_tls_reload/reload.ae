@@ -137,10 +137,11 @@ main() {
     taken = http_server_evloop_connections(raw)
     http.server_stop(raw)
     http.server_free(raw)
+    // The upstream is made in both modes and started only for the gateway.
     if gateway {
         http.server_stop(upstream)
-        http.server_free(upstream)
     }
+    http.server_free(upstream)
     loads = loads1 + loads2
     if loads1 < 0 || loads2 < 0 {
         println("FAIL: a re-load was refused")

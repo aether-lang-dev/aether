@@ -32,7 +32,7 @@ import std.floatarr
 extern exit(code: int)
 
 const MAX_ROWS = 96
-const PROGRAMS = "send,ask,idle,strings,maps,json,alloc_par"
+const PROGRAMS = "send,ask,idle,strings,maps,json,alloc_par,slices"
 const OWNERSHIP = "alias,closure,concat,fields,interp,list,listheap,passret,seq,splitjoin"
 
 // (stdout and stderr together, exit status); -1 when sh could not start.

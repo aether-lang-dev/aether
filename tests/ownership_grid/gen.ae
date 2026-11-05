@@ -264,7 +264,7 @@ need_acting(g: *GridGen) {
 // Kinds.
 
 kind_count() -> int {
-    return 26
+    return 27
 }
 
 kind_at(i: int) -> string {
@@ -294,7 +294,8 @@ kind_at(i: int) -> string {
         22 -> "ST2"
         23 -> "KS"
         24 -> "KSF"
-        _ -> "KM"
+        25 -> "KM"
+        _ -> "KB"
     }
 }
 
@@ -327,6 +328,7 @@ kind_title(kid: string) -> string {
         "KS" -> "sum whose variant owns a string (`Owned = Named | Plain`)"
         "KSF" -> "sum whose variant owns a closure capturing a fresh string (`Acting = Act | Plain`)"
         "KM" -> "slice owning the buffer `make([]int, 3)` handed out"
+        "KB" -> "view of a counted string's bytes (`string.bytes`, #3570), which holds the string"
         _ -> ""
     }
 }
@@ -380,20 +382,34 @@ sum_transfers() -> string {
     return "T1 T2 T3 T4 T5 T6 T6I T6M T9 T10 T11 T11R T12 T16"
 }
 
-// The slice kind (#3549): a buffer `make` hands out, given straight to a
-// function that only reads it, or returned. A slice local, field or element
-// is slice ownership's (tests/integration/slice_own); the grid measures the
-// temporary, which nothing but the call it is made for holds.
+// The slice kind (#3549, #3568): a buffer `make` hands out. It is counted,
+// and every place that holds a slice of it holds a reference (R2), so it is
+// crossed with the places and transfers a sum is: a local, a field, an
+// element, a tuple's slot, an optional, a module `var`, a closure's copy and
+// its cell, actor state, a message field, a parameter's field or element,
+// and the temporary. A container or a `ptr` slot holds strings and closures
+// only.
 is_slice_kind(kid: string) -> bool {
-    return kid == "KM"
+    return kid == "KM" || kid == "KB"
 }
 
 slice_places() -> string {
-    return "P17"
+    return "${sum_places()} P4H P8"
 }
 
 slice_transfers() -> string {
-    return "T6 T9"
+    return sum_transfers()
+}
+
+// Why the slice kind does not take a place's transfer; "" when it does.
+slice_skip(kid: string, pid: string, t: string) -> string {
+    if (pid == "P12D" || pid == "P12K") && t == "T12" {
+        return "a slice moves into the message it is sent in: reading it after the send is E0906"
+    }
+    if pid == "P15" {
+        return "a fixed-size array of slices is no parameter type the parser takes (`p: int[][2]`)"
+    }
+    return ""
 }
 
 producer_class(kid: string) -> string {
@@ -471,6 +487,7 @@ kind_ty(kid: string) -> string {
         "KS" -> "Owned"
         "KSF" -> "Acting"
         "KM" -> "int[]"
+        "KB" -> "byte[]"
         _ -> "string"
     }
 }
@@ -490,6 +507,7 @@ kind_zero(kid: string) -> string {
         "KS" -> ""
         "KSF" -> ""
         "KM" -> ""
+        "KB" -> ""
         _ -> "\"\""
     }
 }
@@ -516,6 +534,8 @@ state_decl(kid: string) -> string {
         "K7" -> "state string[2] v"
         "KS" -> "state Owned v"
         "KSF" -> "state Acting v"
+        "KM" -> "state int[] v"
+        "KB" -> "state byte[] v"
         _ -> "state Doc[2] v"
     }
 }
@@ -606,6 +626,11 @@ fresh(g: *GridGen, kid: string, tag: string) -> (string, string) {
     }
     if kid == "KM" {
         return "", "make([]int, 3)"
+    }
+    if kid == "KB" {
+        // #3570: a view of a fresh string's bytes, which holds the string
+        // the call's temporary was.
+        return "", "string.bytes(string.concat(w, \"${sx}\"))"
     }
     if kid == "SA1" {
         return "", "string.replace(w, \"w\", \"${text_of(tag)}\")"
@@ -732,6 +757,11 @@ kind_check(g: *GridGen, kid: string, expr: string, tag: string, what: string) ->
     if kid == "KM" {
         // Its length, and its first element, which `make` zeroed.
         return "check(${expr}.len == 3 && ${expr}[0] == 0, \"${what}\")"
+    }
+    if kid == "KB" {
+        // Its length, and its first and last bytes, which the string held.
+        tn = string.length(t)
+        return "check(${expr}.len == ${tn} && ${expr}[0] == ${string.char_at(t, 0)} && ${expr}[${tn - 1}] == ${string.char_at(t, tn - 1)}, \"${what}\")"
     }
     if kid == "SD1" {
         // One character, '/' (47) or '\' (92), whichever the platform uses.
@@ -1905,6 +1935,17 @@ captured_cell_in(g: *GridGen, kid: string, pid: string, t: string) -> string {
         gen_decl(g, "fn keep", "// Keeps the closure in a module var.\nkeep(h: @keep fn) {\n    kept = h\n}")
         body = lines_cat(bound, "keep(f)")
         round_lines = "shape(w, k)\nint n = call(kept)\ncheck(n == 1, \"the kept closure, after the scope ended\")"
+    } else if t == "T9" && is_slice_kind(kid) {
+        // #3549, #3568: the slice returned: the caller takes a reference of
+        // its own, and the closure, which the frame drops, kept one. It
+        // holds what the closure stored (P9W), or what it was bound to.
+        ret = kind_ty(kid)
+        body = lines_cat3(bound, call_f, "return x")
+        held = "a"
+        if writes {
+            held = "b"
+        }
+        round_lines = lines_cat(bind_local(kid, "v", "shape(w, k)"), kind_check(g, kid, "v", held, "the returned value"))
     } else if t == "T9" || t == "T10" {
         ret = "fn"
         r = "f"
@@ -2472,6 +2513,12 @@ cell_or_reason(kid: string, pid: string, t: string) -> string {
     res = ""
     if in_words("T17 T18 T19", t) && pid != "P17" {
         return "a transfer of a temporary, given straight to what reads it: P17 only"
+    }
+    if is_slice_kind(kid) {
+        skip = slice_skip(kid, pid, t)
+        if skip != "" {
+            return skip
+        }
     }
     if pid == "P9" || pid == "P9W" {
         if !in_words("T1 T2 T3 T4 T5 T6 T7 T9 T10 T11 T12 T14", t) {

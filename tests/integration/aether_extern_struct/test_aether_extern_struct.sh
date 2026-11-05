@@ -97,6 +97,7 @@ extern struct Flags {
 }
 
 extern malloc(n: int) -> ptr
+extern free(p: ptr)
 
 main() {
     raw = malloc(8)
@@ -105,6 +106,7 @@ main() {
     f.off = 0
     f.val = 1000
     println("on=${f.on} off=${f.off} val=${f.val}")
+    free(raw)
 }
 AE
 
@@ -159,6 +161,7 @@ extern struct UFlags {
 }
 
 extern malloc(n: int) -> ptr
+extern free(p: ptr)
 
 main() {
     raw = malloc(4)
@@ -166,6 +169,7 @@ main() {
     f.on = 1
     f.off = 0
     println("on=${f.on} off=${f.off}")
+    free(raw)
 }
 AE
 

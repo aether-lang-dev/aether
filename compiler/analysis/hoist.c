@@ -508,6 +508,19 @@ Type* hoist_join_type(ASTNode* scope_body, const char* name, Type* seed) {
  * other arm body is a value or a statement that binds nothing, and counts
  * as an arm all the same (#2768). Returns the count written to `arms` (at
  * most `cap`), 0 for any other statement. */
+static int branch_arms(ASTNode* stmt, ASTNode** arms, int cap);
+
+/* Every arm of `stmt`, malloc'd for the caller to free, *n of them (#3574):
+ * 256 slots left the arms past them out of every hoist, so a name bound
+ * only there was declared nowhere. NULL with *n 0 for no arms. */
+static ASTNode** branch_arms_all(ASTNode* stmt, int* n) {
+    *n = 0;
+    if (!stmt || stmt->child_count == 0) return NULL;
+    ASTNode** arms = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)stmt->child_count);
+    *n = branch_arms(stmt, arms, stmt->child_count);
+    return arms;
+}
+
 static int branch_arms(ASTNode* stmt, ASTNode** arms, int cap) {
     int n = 0;
     if (!stmt) return 0;
@@ -591,7 +604,6 @@ static int match_pattern_binds(const ASTNode* stmt, const char* name) {
     return 0;
 }
 
-#define HOIST_MAX_ARMS 256
 
 static HoistNames* names_new(int per) {
     HoistNames* h = (HoistNames*)calloc(1, sizeof(HoistNames));
@@ -690,9 +702,12 @@ static HoistNames* branch_hoists_build(ASTNode* body) {
      * (a name a match's pattern binds comes out of no arm of that match). */
     for (int i = 0; i < body->child_count; i++) {
         ASTNode* stmt = body->children[i];
-        ASTNode* arms[HOIST_MAX_ARMS];
-        int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
-        if (na == 0) continue;
+        int na = 0;
+        ASTNode** arms = branch_arms_all(stmt, &na);
+        if (na == 0) {
+            free(arms);
+            continue;
+        }
         StrMap bound;
         strmap_init(&bound);
         pattern_names(stmt, &bound);
@@ -706,6 +721,7 @@ static HoistNames* branch_hoists_build(ASTNode* body) {
             }
         }
         strmap_free(&bound);
+        free(arms);
     }
     for (int n = 0; n < all->count; n++) {
         const char* name = all->names[n];
@@ -726,9 +742,17 @@ const HoistNames* hoist_if_branch_hoists(ASTNode* body) {
     return c->branch;
 }
 
+static HoistNames* common_hoists_build_arms(ASTNode* stmt, ASTNode** arms, int na);
+
 static HoistNames* common_hoists_build(ASTNode* stmt) {
-    ASTNode* arms[HOIST_MAX_ARMS];
-    int na = branch_arms(stmt, arms, HOIST_MAX_ARMS);
+    int na = 0;
+    ASTNode** arms = branch_arms_all(stmt, &na);
+    HoistNames* h = common_hoists_build_arms(stmt, arms, na);
+    free(arms);
+    return h;
+}
+
+static HoistNames* common_hoists_build_arms(ASTNode* stmt, ASTNode** arms, int na) {
     HoistNames* h = names_new(na > 0 ? na : 1);
     if (!h) return NULL;
     /* Every path must pass through an arm: an if needs its else, a switch
@@ -785,12 +809,14 @@ const HoistNames* hoist_common_hoists(ASTNode* stmt) {
 
 /* The matches whose arms a hoist_loop_decls walk is inside, innermost last:
  * a name one of their patterns binds is declared in no loop hoist. */
-#define HOIST_MAX_MATCH_DEPTH 64
+/* As deep as the matches nest (#3574): past 64 the walk stopped going into
+ * them, and a name bound in a loop there was hoisted nowhere. */
 typedef struct {
     HoistDeclVisitor visit;
     void* user;
-    const ASTNode* matches[HOIST_MAX_MATCH_DEPTH];
+    const ASTNode** matches;
     int depth;
+    int cap;
 } LoopWalk;
 
 static void loop_decls_walk(ASTNode* body, LoopWalk* w) {
@@ -810,12 +836,18 @@ static void loop_decls_walk(ASTNode* body, LoopWalk* w) {
         if (child->type == AST_IF_STATEMENT || child->type == AST_WHILE_LOOP ||
             child->type == AST_FOR_LOOP || child->type == AST_SWITCH_STATEMENT) {
             for (int j = 0; j < child->child_count; j++) loop_decls_walk(child->children[j], w);
-        } else if (child->type == AST_MATCH_STATEMENT && w->depth < HOIST_MAX_MATCH_DEPTH) {
-            ASTNode* arms[HOIST_MAX_ARMS];
-            int na = branch_arms(child, arms, HOIST_MAX_ARMS);
+        } else if (child->type == AST_MATCH_STATEMENT) {
+            int na = 0;
+            ASTNode** arms = branch_arms_all(child, &na);
+            if (w->depth == w->cap) {
+                w->cap = w->cap ? w->cap * 2 : 16;
+                w->matches = (const ASTNode**)aether_xrealloc((void*)w->matches,
+                                                              sizeof(ASTNode*) * (size_t)w->cap);
+            }
             w->matches[w->depth++] = child;
             for (int j = 0; j < na; j++) loop_decls_walk(arms[j], w);
             w->depth--;
+            free(arms);
         }
     }
 }
@@ -825,6 +857,9 @@ void hoist_loop_decls(ASTNode* body, HoistDeclVisitor visit, void* user) {
     LoopWalk w;
     w.visit = visit;
     w.user = user;
+    w.matches = NULL;
     w.depth = 0;
+    w.cap = 0;
     loop_decls_walk(body, &w);
+    free((void*)w.matches);
 }

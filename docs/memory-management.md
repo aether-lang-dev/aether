@@ -8,9 +8,9 @@ source shows, in one of three ways:
   arrays built from them carry a reference count. Every place that holds one owns a
   reference, a store takes one, and leaving a scope releases what the scope
   held. The program writes no free for them.
-- **A slice's buffer has one owner.** The buffer `make([]T, n)` hands out,
-  or `append` and `push` grow, is released when the local that owns it goes
-  out of scope, unless it was moved out first ([Slices](#slices)).
+- **A slice's buffer is counted.** The buffer `make([]T, n)` hands out, or
+  `append` and `push` grow, is held by every place that holds a slice of it,
+  a view included, and is released with the last ([Slices](#slices)).
 - **Handles are freed by the program.** A container (`list.new()`,
   `map.new()`), a C buffer (`malloc`), a parsed document or an open file is a
   `ptr`, and a `ptr` owns nothing by itself. The module that made the handle
@@ -190,15 +190,24 @@ string is adopted at the call, and the caller owns it. Any other string an
 extern returns is C's and is copied when a place takes it.
 
 A string stored into a header-defined struct's field (`extern struct ...
-@c_import`) is given a reference of its own, which nothing in the program
-releases: it is C's from then on. One stored into C memory viewed as
-`string[]` is given no reference (see `ptr` slots, below).
+@c_import`) is given a reference of its own, recorded by the characters the
+field holds; nothing releases it behind C's back, and the program gives it
+back with `string.release_kept(s.field)` when C is done with it (#3567). A
+field read back is the string it was given, so `old = s.field`, a store of
+the next value and `string.release_kept(old)` give the old one back. One
+stored into C memory viewed as `string[]` is given no reference (see `ptr`
+slots, below).
 
 ### `ptr` slots
 
 A `ptr` slot owns nothing. A string goes into one only through
 `string.keep(s)`, which hands over a reference the program gives back with
-`string.release_kept(p)`. C memory viewed as `string[]` owns nothing either:
+`string.release_kept(p)`. A module-level `ptr` var takes a string as it
+stands (`gp = s`, `gp = string.concat(a, b)`) and gives it that same
+recorded reference (#3567): the string outlives the local or the statement
+it came from, and `string.release_kept(gp)` gives it back before the next
+store. Nothing gives it back on a re-bind: as with `keep`, that is the
+program's to do. C memory viewed as `string[]` owns nothing either:
 `(names as string[])[i] = s` gives C the characters and no reference, so
 the string must outlive every read. A local does only while the memory
 ends with the function (an argv array built, handed to C and freed in one
@@ -254,51 +263,72 @@ last outside reference.
 
 ### Slices
 
-A slice (`T[]`) is a view of elements, `{ ptr, len, flags }`, and is not
-counted. The buffer `make([]T, n)` hands out, and one `append(xs, v)` or
-`xs.push(v)` grows, has one owner instead, and the owner releases it:
+A slice (`T[]`) is a view of elements, `{ ptr, len, flags }`. The buffer
+`make([]T, n)` hands out, and one `append(xs, v)` or `xs.push(v)` grows, is
+counted (#3568): every place that holds a slice of it holds one reference,
+a view as much as the slice `make` returned, and the last place to give its
+reference back releases the buffer, elements first (a string, a closure or
+a struct that holds one, stored or appended into the buffer, is given back
+as `free` gives it back). A program writes no `free` for it.
 
-- **A local owns the buffer it holds, and leaving its scope releases it**,
-  on every exit (the end of the block, a `return`, a `break` or `continue`,
-  a caught panic), elements first: a string, a closure or a struct that
-  holds one, stored or appended into the buffer, is given back as `free`
-  gives it back. Binding the local again releases what it held. A program
-  writes no `free` for it.
+- **A local releases what it holds** on every exit of its scope (the end of
+  the block, a `return`, a `break` or `continue`, a caught panic). Binding
+  the local again releases what it held. A view keeps the buffer it views:
+  `v = xs[1..3]`, `last = first_two(xs)` in an outer scope, a view returned
+  or stored hold the buffer after `xs` is gone or bound again.
 - **A buffer moves.** `ys = xs`, `return xs`, a store of `xs` into a field,
   a module-level `var` or an element, `xs` in a struct, a tuple, an array or
   a message, and `xs` given to a `@keep` parameter each move the buffer out
   of `xs`, which is left empty (its scope exit then releases nothing).
   Using `xs` after that, before it is bound again, is a compile error
   (E0906), and so is using it after `free(xs)` or `append(xs, v)`, which
-  consume it. `v = xs[..]` is a view of it that leaves it where it is.
+  consume it. A local a view of which may be held (`v = xs[..]`, `xs` given
+  to a function) is copied instead, each place given a reference of its own,
+  so it can be used again.
 - **A parameter borrows.** A slice argument is lent for the call: the
   function never releases it, and `free`, `append` or `push` on the
   parameter is refused (E0901). A parameter declared `xs: @keep T[]` takes
-  the caller's buffer instead: the caller's local is left empty, and the
-  function owns it as a local does (returns it, stores it, or lets its scope
-  release it).
-- **A copy of a slice some other place holds is a view.** Bound out of a
-  parameter, a field, an element, a module-level `var`, the copy is marked
-  so that nothing frees through it, and `free` or `append` of it is the
-  named panic a view gets.
-- **A slice of slices owns its rows**: a store into `g[i]` releases the row
-  it replaces, and releasing `g` (its scope exit, or `free(g)`) releases
-  every row first.
-- **A view keeps the buffer it views.** When a view of a local's buffer may
-  outlive the local (returned, put in a struct, tuple, field or message,
-  given to a parameter its function stores or returns, captured by a closure
-  that escapes, bound in an outer scope, or taken before the local is bound
-  again, moved, freed or grown), the
-  local does not release the buffer: it is the program's, as before
-  ownership, so code that kept such views stays valid.
-- **Left to the program**, as before: a buffer moved into a field, a
-  module-level `var`, a tuple or a message is not released with what holds
-  it, and is given back with `free(s.items)` (which empties the field);
-  a slice local a closure captures, whose address is taken, or that a
-  pattern or a destructure binds is not released at its scope's exit. `free`
-  works on any of these, and on a local that owns: it releases the buffer
-  early and leaves the place empty, so the scope exit releases nothing
-  twice, and neither does `defer free(xs)`.
+  a reference instead, the caller's moved out of a local that owns or a copy
+  of its own, and releases it as a local does. A function that keeps what
+  it is given (stores it, returns it) takes a reference of its own.
+- **A copy of a slice another place holds takes a reference of its own.**
+  Bound out of a parameter, a field, an element, a module-level `var`, it is
+  released with the place that holds the copy. A copy of the whole buffer
+  can grow: the buffer being shared, `append` moves the copy to storage of
+  its own, so the other holders keep what they held.
+- **Every place releases its reference**: a field (a struct's destroy, a
+  store into it), an element of a slice of slices (a store into `g[i]`, the
+  outer slice's release), a tuple's slot, an optional, a sum, a fixed-size
+  array, a closure that captured it, a cell a closure shares, actor state
+  and a message. A struct allocated by hand must start zeroed (`calloc`,
+  `heap.new`): a store into its slice field releases what the field held.
+- **`free` releases a place's reference early** and leaves the place empty,
+  so the scope exit releases nothing twice, and neither does `defer
+  free(xs)`. `free` of a view a place holds releases that view's reference;
+  the buffer stays for the others. `free` of a view no place holds
+  (`free(xs[1..])`, a clause's list tail) and of a view of memory no count
+  covers (an array viewed as a slice) is a named panic, as is `free` of a
+  string's bytes, which are read-only. `free` of a field of a struct
+  parameter gives back nothing (W1007): the caller owns the field and
+  releases it, as parameters borrow.
+- **A view of a string's bytes holds the string** (`string.bytes(s)`,
+  #3570): the string stays while any place holds a view of it, and is
+  released with the last, as a `make` buffer is. A literal's bytes are
+  static, and held by nothing.
+- **A call's result used in place is the statement's** (`f().len`,
+  `f()[0]`, `for x in f()`): it is released on its block's every exit. A
+  view of it that is bound, returned or passed on takes its reference over.
+- **A slice a `match` arm's pattern binds takes a reference of its own**
+  (a list pattern's tail, a slice a list pattern binds out of a list of
+  slices, a struct pattern's slice field) where the arm's block starts, and
+  gives it back on the block's every exit, so the arm may bind the subject
+  again or `free` the binding. A clause's list tail borrows, as a parameter
+  does. A receive arm's field binding, and the binding of an arm whose body
+  is no block, are copies that hold nothing: `free` of one gives back
+  nothing, `append` to one grows a copy, and one the body binds again or
+  pushes into takes a reference of its own for the body.
+- **Not counted**: a slice of C memory (`p as T[]`, a `T[]` an extern
+  returns) is not counted, and the program frees it as before.
 
 The rules, with an example, are in the language reference
 ([Slice ownership](language-reference.md#slice-ownership)).

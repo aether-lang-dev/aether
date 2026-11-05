@@ -77,7 +77,7 @@ main() {
                 argv_len(w)
                 round(w)
             }, 4)
-        check(grown == 0, "the kept names are given back")
+        check(grown == 0, "the kept names are given back (the heap grew by ${grown} bytes a round)")
     }
     println("ok")
 }

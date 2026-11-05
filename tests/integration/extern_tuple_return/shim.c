@@ -38,9 +38,9 @@ typedef struct { void* _0; int _1; const char* _2; } _tuple_ptr_int_string;
 _tuple_ptr_int_string echo_bytes(const char* s, int len) {
     _tuple_ptr_int_string t;
     if (!s || len < 0) { t._0 = NULL; t._1 = 0; t._2 = "bad input"; return t; }
-    /* Allocate a fresh buffer the Aether side owns. The test never
-     * frees it — fine for the test's scope; real callers would route
-     * through string_new_with_length to get refcount lifecycle. */
+    /* Allocate a fresh buffer the Aether side owns: probe.ae frees it
+     * with free(). A real caller would route through
+     * string_new_with_length to get a refcount lifecycle. */
     char* buf = malloc((size_t)len + 1);
     if (!buf) { t._0 = NULL; t._1 = 0; t._2 = "alloc failed"; return t; }
     memcpy(buf, s, (size_t)len);

@@ -38,17 +38,45 @@ burn() -> int {
     return total
 }
 
-// A string stored into a `ptr` module var is the pointer it is, through a
-// cast the build log must not warn about (#2811). A global never gives
-// back what it holds, so this runs once, outside the leak window.
+// A string stored into a `ptr` module var, through a cast the build log
+// must not warn about (#2811). A `ptr` owns nothing, so the store gives the
+// global a reference of its own, recorded as string.keep's is (#3567): it
+// outlives the string's owner, a local or the statement that built it, and
+// the program gives it back with string.release_kept, each before the next
+// store, as it does a kept one. So this runs inside the leak window too.
 fn ptr_global(p: string) {
     t = string.concat("ab", "-lit")
     gp = t
     check(see(gp) == 6 && seen_is("ab-lit") == 1, "a ptr module var's `gp = t`")
+    string.release_kept(gp)
     s = string.concat(p, "-str")
     gp = s
+    check(see(gp) == 6 && seen_is("ab-str") == 1, "a ptr module var's `gp = s`")
+    string.release_kept(gp)
     gp = string.concat(p, "-call")
+    burn()
+    check(see(gp) == 7 && seen_is("ab-call") == 1, "a ptr module var given a string built in the statement")
+    string.release_kept(gp)
+    // A literal is pinned: given back, nothing happens.
+    gp = "lit"
+    string.release_kept(gp)
     gp = null
+}
+
+// A `ptr` module var's string outlives the local it came from: the global's
+// recorded reference keeps it. Read back as the string it holds.
+fn ptr_global_outlives(p: string) {
+    stash(p)
+    burn()
+    got, err = string.from_ptr(gp)
+    check(err == "" && got == "ab-stash", "a ptr module var's string after its local went ('${got}' '${err}')")
+    string.release_kept(gp)
+    gp = null
+}
+
+fn stash(p: string) {
+    local = string.concat(p, "-stash")
+    gp = local
 }
 
 // The closures given to `run` are released before C reads the pointer.
@@ -86,6 +114,7 @@ main() {
     p = string.concat("ab", "")
     check(stored(p) == 24, "strings stored into ptr cells")
     ptr_global(p)
+    ptr_global_outlives(p)
     if mem.heap_in_use_exact() {
         grown = mem.steady_growth(|| {
                 i = 0
@@ -95,6 +124,15 @@ main() {
                 }
             }, 5)
         check(grown == 0, "50 stores into ptr cells grew the heap by ${grown} bytes in every run")
+        grown_g = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    ptr_global(p)
+                    ptr_global_outlives(p)
+                    i = i + 1
+                }
+            }, 5)
+        check(grown_g == 0, "50 rounds of strings stored into a ptr module var and given back grew the heap by ${grown_g} bytes")
     }
     println("OK")
 }

@@ -24,6 +24,8 @@ main() {
         println("FAIL: list_dir errored: ${err}")
         exit(1)
     }
+    // The listing is the caller's; dir_list_free comes in with the glob.
+    dir_list_free(list)
 
     // Non-tuple string-returning utility, also via glob.
     j = path_join("a", "b")

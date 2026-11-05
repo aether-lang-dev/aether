@@ -1,0 +1,138 @@
+// Regression (#3567): a string stored into a header-defined struct's string
+// field (`extern struct ... @c_import`) is given a reference of its own
+// (R4), and C holds only its characters. Codegen kept the characters and
+// dropped the string's header, so that reference could never be given
+// back: every store leaked a string, and a C field updated in a loop grew
+// the heap without bound.
+//
+// The reference is now recorded by the pointer C holds, and the program
+// gives it back with string.release_kept(p) when C is done with it: a
+// dying local moves into the field, a live one is retained, a pinned
+// literal is not recorded, and a release_kept of a pointer nothing
+// recorded does nothing. The same string in two C places is two
+// references. Run where the heap count is exact, a field updated 1000
+// times in a loop, each old value given back, leaves the heap where it
+// found it, and so do four threads giving one string to fields of their
+// own and back at once.
+
+import std.mem
+import std.string
+import std.worker
+
+extern struct label @c_import {
+    text: string
+    size: int
+}
+
+extern struct tagged @c_import {
+    id: int
+    label: label
+}
+
+extern label_c_length(l: ptr) -> int @c_import
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+// The field updated `n` times with strings built here, each old value given
+// back once C is done with it, then the last.
+fn churn(l: *label, w: string, n: int) {
+    i = 0
+    while i < n {
+        old = l.text
+        l.text = "${w}-${i}"
+        l.size = i
+        string.release_kept(old)
+        i = i + 1
+    }
+    string.release_kept(l.text)
+    l.text = "done"
+}
+
+// Every way a string reaches a C field, each given back.
+fn shapes(w: string) -> int {
+    l = calloc(1, sizeof(label)) as *label
+    t = calloc(1, sizeof(tagged)) as *tagged
+    // A live local: the field takes a reference of its own, and the local
+    // keeps its own.
+    live = string.concat(w, "-live")
+    l.text = live
+    ok = label_c_length(l as ptr) == string.length(live)
+    // The same string in a second C place: a second reference.
+    t.label.text = live
+    ok = ok && string.equals(t.label.text, live) == 1
+    string.release_kept(l.text)
+    string.release_kept(t.label.text)
+    ok = ok && string.equals(live, "${w}-live") == 1
+    // A literal is pinned, not recorded: giving it back does nothing.
+    l.text = "lit"
+    string.release_kept(l.text)
+    ok = ok && label_c_length(l as ptr) == 3
+    // A struct literal, its string built in the statement.
+    v = label { text: "${w}-v", size: 1 }
+    ok = ok && string.equals(v.text, "${w}-v") == 1
+    string.release_kept(v.text)
+    // A pointer nothing recorded: no-op.
+    string.release_kept(null)
+    free(l)
+    free(t)
+    if ok { return 1 }
+    return 0
+}
+
+// Four threads give the same string to fields of their own and give it back
+// at once, each reading its field back first: the record counts under its
+// lock and the string counts atomically, so no reference is lost (a lost
+// one frees the string early) and none left over (the heap grows).
+fn race(shared: string, w: string) {
+    jobs = 0
+    while jobs < 4 {
+        _ = worker.run(|| {
+                l = calloc(1, sizeof(label)) as *label
+                i = 0
+                while i < 2000 {
+                    l.text = shared
+                    old = l.text
+                    l.text = "${w}-${i}"
+                    string.release_kept(old)
+                    string.release_kept(l.text)
+                    i = i + 1
+                }
+                free(l)
+                return null
+            }, | _r: ptr | {})
+        jobs = jobs + 1
+    }
+    _ran, err = worker.wait()
+    check(err == "", "worker.wait: ${err}")
+}
+
+main() {
+    w = string.concat("fie", "ld")
+    check(shapes(w) == 1, "every shape of store reads back and is given back")
+    l = calloc(1, sizeof(label)) as *label
+    churn(l, w, 1000)
+    check(l.size == 999, "the last update")
+    shared = string.concat(w, "-shared")
+    worker.pool_size(4)
+    race(shared, w)
+    check(string.equals(shared, "field-shared") == 1, "a string four threads gave and gave back is whole")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                churn(l, w, 1000)
+                shapes(w)
+                race(shared, w)
+            }, 4)
+        check(grown == 0, "1000 updates of a C field, each old value given back, grew the heap by ${grown} bytes")
+    }
+    free(l)
+    worker.pool_shutdown()
+    println("PASS: a string given to a C field is given back")
+}

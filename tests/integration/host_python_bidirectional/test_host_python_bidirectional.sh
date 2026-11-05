@@ -78,6 +78,7 @@ if ! gcc -o "$TMPDIR/t" \
 void aether_args_init(int a, char** v){(void)a;(void)v;}
 void* _aether_ctx_stack[64]; int _aether_ctx_depth = 0;
 extern void* list_new(void); extern void list_add_raw(void*, void*);
+extern void list_free(void*);
 
 static int failures = 0;
 #define CHECK(cond, ...) do { if (!(cond)) { printf("FAIL: " __VA_ARGS__); printf("\n"); failures++; } } while (0)
@@ -430,23 +431,28 @@ int main(void) {
     long g1 = bb - a, g2 = c - bb, g = g1 < g2 ? g1 : g2;
     CHECK(g < 256, "memory grows: %ld kB then %ld kB over 10000 rounds", g1, g2);
     python_vm_free(vm);
+    list_free(keys);
 
     // Finalize, then init again: a new interpreter, which the map helpers
     // must be registered into afresh.
     uint64_t token = 0;
     AetherSharedMap* map = aether_shared_map_new(&token);
     aether_shared_map_put(map, "k", "v");
-    rc = python_run_sandboxed_with_map(list_new(), "assert aether_map_get('k') == 'v'", token);
+    void* no_grants = list_new();
+    rc = python_run_sandboxed_with_map(no_grants, "assert aether_map_get('k') == 'v'", token);
     CHECK(rc == 0, "the map helpers: rc=%d", rc);
     python_finalize();
     CHECK(python_init() == 0, "re-init");
     void* vm4 = python_vm_new();
     CHECK(vm4 && python_vm_eval(vm4, "6 * 7") == 0 && python_vm_result_int(vm4) == 42, "a VM after re-init");
     python_vm_free(vm4);
-    rc = python_run_sandboxed_with_map(list_new(), "assert aether_map_get('k') == 'v'", token);
+    rc = python_run_sandboxed_with_map(no_grants, "assert aether_map_get('k') == 'v'", token);
     CHECK(rc == 0, "the map helpers after re-init: rc=%d", rc);
     python_finalize();
 
+    list_free(no_grants);
+    aether_shared_map_revoke_token(token);
+    aether_shared_map_free(map);
     if (failures) return 1;
     printf("PASS: host_python_bidirectional\n");
     return 0;
@@ -457,6 +463,11 @@ then
     head -8 "$TMPDIR/cc.log" | sed 's/^/      /'
     exit 1
 fi
+
+# CPython's own allocations outlive Py_Finalize; libpython.supp drops them
+# from the leak report of this program's run (see the file for its scope).
+LSAN_OPTIONS="${LSAN_OPTIONS:+$LSAN_OPTIONS:}suppressions=$SCRIPT_DIR/libpython.supp"
+export LSAN_OPTIONS
 
 # A broken instruction limit hangs, so the run is bounded: it fails rather
 # than stalling CI.

@@ -43,5 +43,6 @@ main() {
     } else {
         println("WRONG: ${a.code} ${b.code} ${d.code}")
     }
+    heap.free(cfg)
     return 0
 }

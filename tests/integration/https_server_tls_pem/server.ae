@@ -28,6 +28,14 @@ actor SrvActor {
     receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
+// A refusal the driver asks for (an encrypted key, text that is no
+// certificate) ends the program: the server is freed before the exit.
+refuse(raw: @frees ptr, text: string) {
+    println(text)
+    http.server_free(raw)
+    exit(1)
+}
+
 main() {
     raw = http.server_create(0)
     if raw == 0 {
@@ -37,8 +45,7 @@ main() {
     http.server_set_host(raw, "127.0.0.1")
     berr = http.server_set_tls_backend(raw, os.getenv("BACKEND"))
     if berr != "" {
-        println("FAIL: server_set_tls_backend: ${berr}")
-        exit(1)
+        refuse(raw, "FAIL: server_set_tls_backend: ${berr}")
     }
     if os.getenv("MODE") == "pem" {
         // The text the files hold; a missing file stands for empty text.
@@ -46,19 +53,16 @@ main() {
         key, _kerr = fs.read(os.getenv("KEY_PATH"))
         perr = http.server_set_tls_pem(raw, cert, key)
         if perr != "" {
-            println("FAIL: server_set_tls_pem: ${perr}")
-            exit(1)
+            refuse(raw, "FAIL: server_set_tls_pem: ${perr}")
         }
     } else {
         terr = http.server_set_tls(raw, os.getenv("CERT_PATH"), os.getenv("KEY_PATH"))
         if terr != "" {
-            println("FAIL: server_set_tls: ${terr}")
-            exit(1)
+            refuse(raw, "FAIL: server_set_tls: ${terr}")
         }
     }
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
-        println("FAIL: bind")
-        exit(1)
+        refuse(raw, "FAIL: bind")
     }
     println("READY ${http.server_port(raw)}")
     http.server_get(raw, "/", handle_root, 0)

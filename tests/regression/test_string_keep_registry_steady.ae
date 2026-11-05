@@ -1,0 +1,84 @@
+// Regression (#3567): the record of the references string.keep hands over
+// has a fixed footprint from the first keep, so a round of keeps that are
+// all given back leaves the heap exactly as it was, wherever the heap puts
+// the strings.
+//
+// The record is 16 shards, the shard a string's address. Each shard made
+// its table at its own first record and kept it, so a round whose strings
+// landed at other addresses than the rounds before reached a shard for the
+// first time and the heap grew by that table: a program whose keeps were
+// all given back failed a steady-heap check on a heap that does not hand
+// the same blocks back (CI's Windows UCRT64 run of string_into_c_memory).
+// Every shard's first table is now one block, made at the first record.
+//
+// Each round here holds a block of another size while it keeps and gives
+// back its names, so the names land at other addresses, and every round
+// after the first keep is checked on its own: on the code before, the
+// first rounds grew the heap by one table or more each.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+extern getenv(name: string) -> ptr
+
+var g_turn = 0
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+fill(names: ptr, w: string, i: int) {
+    name = "${w}-${i}"
+    (names as ptr[])[i] = string.keep(name)
+}
+
+// Eight names kept and given back, while a block of another size each
+// turn is held: the names are placed elsewhere every round.
+shifted(w: string) -> int {
+    g_turn = g_turn + 1
+    pad = calloc(1, 64 + g_turn * 40)
+    names = calloc(8, 8)
+    i = 0
+    while i < 8 {
+        fill(names, w, i)
+        i = i + 1
+    }
+    ok = 1
+    i = 0
+    while i < 8 {
+        if string.equals((names as ptr[])[i], "${w}-${i}") != 1 {
+            ok = 0
+        }
+        string.release_kept((names as ptr[])[i])
+        i = i + 1
+    }
+    free(names)
+    free(pad)
+    return ok
+}
+
+main() {
+    w = string.concat("ani", "m")
+    check(shifted(w) == 1, "every kept name read back")
+    // The poisoning allocator never hands a freed block back: the count
+    // measures nothing there.
+    if !mem.heap_in_use_exact() || getenv("OWNERSHIP_GRID_POISON") != null {
+        println("OK")
+        return
+    }
+    k = 0
+    while k < 8 {
+        grown = mem.steady_growth(|| {
+                shifted(w)
+            }, 1)
+        check(grown == 0, "round ${k} after the first keep grew the heap by ${grown} bytes")
+        k = k + 1
+    }
+    println("OK")
+}

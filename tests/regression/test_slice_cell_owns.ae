@@ -1,0 +1,191 @@
+// Regression (#3549): a slice local a closure assigns is a cell the frame
+// and the closure share, and the cell owns the buffer it holds.
+//
+// Such a local was left to the program: the closure's store (`v = xs`)
+// dropped nothing it replaced, and the cell's release freed the cell and
+// not the slice, so the `make` buffer it held leaked on every call. Now a
+// store into the cell drops what it held, the cell's last release drops
+// what it holds then, and a `return` of the local gives the caller a
+// reference of its own. Since #3568 the buffer is counted, so a view of it
+// that outlives the cell (`w = v; return w`, tests/integration/
+// slice_cell_owns) holds it too, and nothing is freed under the view.
+//
+// Where the heap count is exact (mem.heap_in_use_exact), some round of each
+// shape leaves the heap where it found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3549: ${what}")
+        exit(1)
+    }
+}
+
+// The closure stores a view of the caller's buffer over the one the frame
+// made: the made one is dropped, the view handed back.
+fn from_param(xs: int[]) -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = xs
+    }
+    set()
+    return v
+}
+
+// The closure stores a buffer of its own, which the caller owns once it is
+// returned.
+fn rebind(n: int) -> int[] {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = make([]int, n)
+    }
+    set()
+    v[0] = n
+    return v
+}
+
+// A buffer stored and left: the cell's release drops it.
+fn left(n: int) -> int {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = make([]int, n)
+    }
+    set()
+    return v.len
+}
+
+// The closure reads the cell it stores into: it holds the cell, not a view
+// of the buffer the cell holds.
+fn reads(n: int) -> int {
+    let v: int[] = make([]int, 2)
+    set = || {
+        v = make([]int, n)
+        v[0] = n
+        return v.len + v[0]
+    }
+    int k = call(set)
+    return k + v.len
+}
+
+// The closure is made in a loop, the cell before it: every round's store
+// drops the buffer the round before stored.
+fn closure_in_loop(n: int) -> int {
+    let v: int[] = make([]int, 1)
+    i = 0
+    while i < n {
+        set = || {
+            v = make([]int, i + 1)
+            v[0] = i
+        }
+        set()
+        i = i + 1
+    }
+    return v.len + v[0]
+}
+
+// The cell is declared in a loop, which codegen declares once ahead of
+// the loop: every round's binding of it is a store, which drops what the
+// round before left, the last round's by its release.
+fn cell_in_loop(n: int) -> int {
+    t = 0
+    i = 0
+    while i < n {
+        let v: int[] = make([]int, 2)
+        set = || {
+            v = make([]int, 3)
+        }
+        set()
+        i = i + 1
+        if i == 2 {
+            continue
+        }
+        t = t + v.len
+    }
+    return t
+}
+
+fn total(xs: int[]) -> int {
+    t = 0
+    i = 0
+    while i < xs.len {
+        t = t + xs[i]
+        i = i + 1
+    }
+    return t
+}
+
+fn steady(what: string, shape: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(shape)
+        i = i + 1
+    }
+    grown = mem.steady_growth(shape, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    xs = make([]int, 6)
+    xs[5] = 4
+    check(from_param(xs).len == 6, "the closure's view is what the function returns")
+    check(total(from_param(xs)) == 4, "the view reads the caller's buffer")
+    r = rebind(5)
+    check(r.len == 5 && r[0] == 5, "the buffer the closure stored is the caller's")
+    free(r)
+    check(left(3) == 3, "the closure's buffer is read before it is dropped")
+    check(reads(4) == 12, "the closure reads the buffer it stored")
+    check(closure_in_loop(4) == 7, "the last round's buffer is the cell's")
+    check(cell_in_loop(4) == 9, "every round reads the buffer its closure stored")
+
+    steady("a closure storing a view over a made buffer", || {
+            i = 0
+            while i < 100 {
+                _n = from_param(xs).len
+                i = i + 1
+            }
+        })
+    steady("a closure storing a buffer, returned", || {
+            i = 0
+            while i < 100 {
+                b = rebind(3)
+                free(b)
+                i = i + 1
+            }
+        })
+    steady("a closure storing a buffer, left", || {
+            i = 0
+            while i < 100 {
+                _n = left(3)
+                i = i + 1
+            }
+        })
+    steady("a closure storing a buffer and reading it", || {
+            i = 0
+            while i < 100 {
+                _n = reads(3)
+                i = i + 1
+            }
+        })
+    steady("a closure made in a loop storing into the cell", || {
+            i = 0
+            while i < 100 {
+                _n = closure_in_loop(3)
+                i = i + 1
+            }
+        })
+    steady("a cell declared in a loop", || {
+            i = 0
+            while i < 100 {
+                _n = cell_in_loop(3)
+                i = i + 1
+            }
+        })
+    free(xs)
+    println("PASS a slice cell owns the buffer it holds")
+}

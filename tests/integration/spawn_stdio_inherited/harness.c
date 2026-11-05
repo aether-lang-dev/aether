@@ -42,6 +42,8 @@ extern tuple_int_string os_wait_raw(int token);
 extern int os_kill_raw(int pid, int sig);
 extern void* list_new(void);
 extern int list_add_raw(void* list, void* item);
+extern void list_free(void* list);
+extern void string_release(const char* s);
 typedef struct { const void* _0; const void* _1; int _2; const char* _3; } tuple_run_full;
 extern tuple_run_full os_run_full_raw(const char* prog, void* argv_list, void* env_list,
                                       const char* stdin_data, int stdin_len);
@@ -76,6 +78,7 @@ static int run_pipe_env(void) {
     list_add_raw(av, (void*)"n=$(env | grep -c '^AETHER_IPC_FD='); "
                             "[ \"$AETHER_IPC_FD\" = 3 ] && [ \"$n\" = 1 ] && echo ok >&3");
     tuple_int_int_string sp = os_run_pipe_raw("/bin/sh", av, (void*)0);
+    list_free(av);
     if (sp._2 && sp._2[0]) { printf("FAIL: run_pipe: %s\n", sp._2); return 1; }
     char got[16] = { 0 };
     ssize_t k = read(sp._0, got, sizeof got - 1);
@@ -112,6 +115,7 @@ static int closed_stdio_spawn(void) {
     close(2);
     double start = seconds();
     tuple_int_string sp = os_spawn_raw("/bin/sh", av, (void*)0);
+    list_free(av);
     double took = seconds() - start;
     dup2(saved0, 0);
     dup2(saved2, 2);
@@ -183,7 +187,12 @@ static int closed_slots(const char* dir) {
                    closed, t._0, w._0, got, t._1 ? t._1 : "");
             fails++;
         }
+        /* The captures run_full hands back are the caller's. */
+        string_release((const char*)r._0);
+        string_release((const char*)r._1);
     }
+    list_free(full_av);
+    list_free(to_av);
     if (fails) return 1;
     printf("PASS: run_full and spawn_proc_to wire their stdio with any of 0, 1 and 2 closed in the parent\n");
     return 0;

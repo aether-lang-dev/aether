@@ -30,6 +30,9 @@ main() {
     }
 
     // Second use: reassignment with trailing block — was broken (block dropped)
+    // Each container and the items list it holds are the program's.
+    list.free(items1)
+    map.free(c)
     c = make_container("second") {
         add_item(10)
         add_item(20)
@@ -42,6 +45,8 @@ main() {
     }
 
     // Third use: another reassignment to verify consistency
+    list.free(items2)
+    map.free(c)
     c = make_container("third") {
         add_item(100)
     }
@@ -51,5 +56,7 @@ main() {
         exit(1)
     }
 
+    list.free(items3)
+    map.free(c)
     println("trailing block reassign ok")
 }

@@ -828,11 +828,13 @@ TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
     ASSERT_EQ(-1, http_parse_proxy_url("http://::1:3128", host, sizeof host, &port));
 }
 
-/* A NUL or a bare CR in a response's header section (#3556). The buffered
- * reader found the end of the section with strstr, which stops at a NUL, and
- * a bare CR stayed inside a field value, so a Location carrying one went out
- * in the request line of the redirect. The section is now found past any NUL
- * and refused when it holds either; a NUL in the body is body. */
+/* A NUL or a bare CR in a response's header section (#3556, #3572). The
+ * buffered reader found the end of the section with strstr, which stops at
+ * a NUL, and a bare CR stayed inside a field value, so a Location carrying
+ * one went out in the request line of the redirect. The section is now
+ * found past any NUL and read with each NUL and bare CR as SP (RFC 9110
+ * 5.5, RFC 9112 2.2): the response is read, and no field carries another
+ * behind a CR. A NUL in the body is body. */
 static HttpResponse* filled(const char* bytes, size_t n) {
     HttpResponse* resp = http_response_alloc_empty();
     char* buf = (char*)malloc(n + 1);
@@ -843,26 +845,28 @@ static HttpResponse* filled(const char* bytes, size_t n) {
     return resp;
 }
 
-TEST_CATEGORY(http_response_head_refuses_nul_and_bare_cr, TEST_CATEGORY_NETWORK) {
+TEST_CATEGORY(http_response_head_reads_nul_and_bare_cr_as_sp, TEST_CATEGORY_NETWORK) {
     static const char nul_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\0y\r\n\r\n";
     HttpResponse* r = filled(nul_head, sizeof nul_head - 1);
-    ASSERT_NOT_NULL(r->error);
-    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
-    ASSERT_EQ(0, r->status_code);
-    ASSERT_NULL(r->headers);
+    ASSERT_NULL(r->error);
+    ASSERT_EQ(302, r->status_code);
+    ASSERT_STREQ("/x y", http_response_header_raw(r, "Location"));
     http_response_free(r);
 
     static const char cr_head[] = "HTTP/1.1 302 Found\r\nLocation: /x\rX-Injected: y\r\n\r\n";
     r = filled(cr_head, sizeof cr_head - 1);
-    ASSERT_NOT_NULL(r->error);
-    ASSERT_STREQ("malformed response header section", string_to_cstr(r->error));
-    ASSERT_NULL(r->headers);
+    ASSERT_NULL(r->error);
+    ASSERT_EQ(302, r->status_code);
+    ASSERT_STREQ("/x X-Injected: y", http_response_header_raw(r, "Location"));
+    ASSERT_STREQ("", http_response_header_raw(r, "X-Injected"));
     http_response_free(r);
 
     /* A CR right before the empty line that is not followed by LF. */
     static const char cr_end[] = "HTTP/1.1 200 OK\r\nA: b\r\r\n\r\n";
     r = filled(cr_end, sizeof cr_end - 1);
-    ASSERT_NOT_NULL(r->error);
+    ASSERT_NULL(r->error);
+    ASSERT_EQ(200, r->status_code);
+    ASSERT_EQ('b', http_response_header_raw(r, "A")[0]);
     http_response_free(r);
 
     /* A NUL in the body is the body's. */
@@ -874,14 +878,40 @@ TEST_CATEGORY(http_response_head_refuses_nul_and_bare_cr, TEST_CATEGORY_NETWORK)
     http_response_free(r);
 }
 
-TEST_CATEGORY(http_uri_resolve_refuses_control_bytes, TEST_CATEGORY_NETWORK) {
-    static const char* const refs[] = { "/x\ty", "/x\x01y", "/x\ry", "/x\ny", "/x\x7fy", "\t" };
-    for (size_t i = 0; i < sizeof refs / sizeof refs[0]; i++) {
-        char* got = http_uri_resolve("http://h/a", refs[i]);
-        if (got) fprintf(stderr, "  resolved a control byte: '%s'\n", got);
-        ASSERT_NULL(got);
+/* A control byte in a reference, read as a browser reads it (#3572, WHATWG
+ * URL): a TAB, an LF and a CR removed, and any other control byte in the
+ * path, the query or the fragment percent-encoded, so no request line
+ * written from it carries a byte that ends or splits it. A host holds none:
+ * an authority with one is no reference. */
+TEST_CATEGORY(http_uri_resolve_reads_control_bytes_as_a_browser, TEST_CATEGORY_NETWORK) {
+    static const struct { const char* ref; const char* want; } cases[] = {
+        { "/x\ty", "http://h/xy" },
+        { "/x\ry", "http://h/xy" },
+        { "/x\ny", "http://h/xy" },
+        { "/x\r\nX-Injected: y", "http://h/xX-Injected:%20y" },
+        { "/x\x01y", "http://h/x%01y" },
+        { "/x\x7fy", "http://h/x%7Fy" },
+        { "?q\x02r", "http://h/a?q%02r" },
+        { "#f\x1fg", "http://h/a#f%1Fg" },
+        { "/x\x01", "http://h/x%01" },
+        { "\t", "http://h/a" },
+    };
+    int misses = 0;
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char* got = http_uri_resolve("http://h/a", cases[i].ref);
+        if (!got || strcmp(got, cases[i].want) != 0) {
+            fprintf(stderr, "  case %d: got '%s', want '%s'\n", (int)i, got ? got : "(null)",
+                    cases[i].want);
+            misses++;
+        }
+        free(got);
     }
-    ASSERT_NULL(http_resolve_location("http://h/a", "/x\ty"));
+    ASSERT_EQ(0, misses);
+    ASSERT_NULL(http_uri_resolve("http://h/a", "//h\x01x/y"));
+    char* loc = http_resolve_location("http://h/a", "/x\ty");
+    ASSERT_NOT_NULL(loc);
+    ASSERT_STREQ("http://h/xy", loc);
+    free(loc);
 }
 
 /* A forward proxy's reply to CONNECT (#3557). The client read it with one
@@ -1010,13 +1040,13 @@ TEST_CATEGORY(http_connect_reply_keeps_tunnel_bytes, TEST_CATEGORY_NETWORK) {
 }
 
 TEST_CATEGORY(http_connect_reply_refuses_malformed, TEST_CATEGORY_NETWORK) {
-    static const char nul_head[] = "HTTP/1.1 200 OK\r\nX: a\0b\r\n\r\n";
+    /* A NUL inside the status reads as SP (#3572), and "2 0" is no status. */
+    static const char nul_status[] = "HTTP/1.1 2\0" "0 OK\r\n\r\n";
     struct { const char* bytes; size_t n; const char* why; } cases[] = {
         { "HTTP/1.1 2000 OK\r\n\r\n", 0, "malformed" },
         { "HTTP/1.1 20 OK\r\n\r\n", 0, "malformed" },
         { "SSH-2.0-OpenSSH_9.6\r\n\r\n", 0, "malformed" },
-        { "HTTP/1.1 200 OK\r\nX: a\rb\r\n\r\n", 0, "malformed" },
-        { nul_head, sizeof nul_head - 1, "malformed" },
+        { nul_status, sizeof nul_status - 1, "malformed" },
     };
     int misses = 0;
     for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
@@ -1034,9 +1064,22 @@ TEST_CATEGORY(http_connect_reply_refuses_malformed, TEST_CATEGORY_NETWORK) {
     }
     ASSERT_EQ(0, misses);
 
-    /* The proxy closes before the head ends. */
+    /* A NUL or a bare CR in a field reads as SP, as in every response's
+     * head (#3572): the reply is the 200 it says. */
+    static const char nul_head[] = "HTTP/1.1 200 OK\r\nX: a\0b\r\n\r\n";
+    static const char cr_head[] = "HTTP/1.1 200 OK\r\nX: a\rb\r\n\r\n";
     int fds[2];
     const char* why = NULL;
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(200, connect_reply_of(fds, nul_head, sizeof nul_head - 1, 0, &why));
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+    ASSERT_EQ(0, tcp_loopback_pair(fds));
+    ASSERT_EQ(200, connect_reply_of(fds, cr_head, sizeof cr_head - 1, 0, &why));
+    T_CLOSE(fds[0]);
+    T_CLOSE(fds[1]);
+
+    /* The proxy closes before the head ends. */
     ASSERT_EQ(0, tcp_loopback_pair(fds));
     ASSERT_EQ(0, connect_reply_of(fds, "HTTP/1.1 200 OK\r\n", 17, 1, &why));
     ASSERT_NOT_NULL(why);

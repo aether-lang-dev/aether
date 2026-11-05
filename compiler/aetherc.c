@@ -10,6 +10,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdbool.h>
+#include <errno.h>
 #include <time.h>
 #ifdef _WIN32
 #include <process.h>
@@ -132,8 +133,10 @@ static bool with_extern = false;
 // directories holding the modules ae generated for binary imports. Those
 // stubs bind another Aether library's exports with externs, so the extern
 // gate treats a module under one of them like a toolchain module.
-#define AETHERC_STUB_DIRS_MAX 8
-static const char* binimport_stub_dirs[AETHERC_STUB_DIRS_MAX];
+// Every one ae names (#3574): 8 slots dropped the rest, and a stub past
+// them was gated as the program's own externs.
+static const char** binimport_stub_dirs = NULL;
+static int binimport_stub_dir_cap = 0;
 static int binimport_stub_dir_count = 0;
 
 // --emit-namespace-manifest: walk a manifest.ae's AST, extract the
@@ -323,6 +326,53 @@ static double phase_cpu_ms(void) {
 // Helper to check file existence
 int compiler_file_exists(const char* path) {
     return access(path, F_OK) == 0;
+}
+
+/* #3574: a file this compile writes, opened as fopen opens it, or NULL with
+ * errno set. On Windows another process can hold a file it has just seen
+ * written, without sharing it for writing: a virus scanner reading it after
+ * it was closed, an indexer, an editor. Opening it then fails with a sharing
+ * or lock violation, which msvcrt reports as EACCES ("Permission denied"),
+ * and a sweep that wrote one output path a program after another lost one
+ * compile in about a thousand to it, though the compile itself is the same
+ * every run. Such a hold is released within moments, so those two errors
+ * are retried for up to about two seconds; anything else (a missing
+ * directory, a read-only file) fails at once, as on every other platform,
+ * where a file is not held this way. */
+static FILE* open_output_file(const char* path, const char* mode) {
+    FILE* f = fopen(path, mode);
+#ifdef _WIN32
+    for (int wait_ms = 10, waited = 0; !f && waited < 2000; waited += wait_ms, wait_ms *= 2) {
+        DWORD why = GetLastError();
+        int held = why == ERROR_SHARING_VIOLATION || why == ERROR_LOCK_VIOLATION ||
+                   why == ERROR_USER_MAPPED_FILE;
+        if (why == ERROR_ACCESS_DENIED) {
+            /* A file being deleted while a handle to it stays open refuses
+             * every open until the handle goes; a read-only one, or a
+             * directory, refuses for good. */
+            DWORD attrs = GetFileAttributesA(path);
+            held = attrs != INVALID_FILE_ATTRIBUTES &&
+                   !(attrs & (FILE_ATTRIBUTE_READONLY | FILE_ATTRIBUTE_DIRECTORY));
+            SetLastError(why);   /* the open's error, for the report */
+        }
+        if (!held) break;
+        Sleep((DWORD)wait_ms);
+        f = fopen(path, mode);
+    }
+#endif
+    return f;
+}
+
+/* Why `path` could not be opened for writing, on stderr. */
+static void report_output_open_failure(const char* path) {
+    int err = errno;
+#ifdef _WIN32
+    DWORD why = GetLastError();
+    fprintf(stderr, "Error opening output file '%s': %s (Windows error %lu)\n", path,
+            strerror(err), (unsigned long)why);
+#else
+    fprintf(stderr, "Error opening output file '%s': %s\n", path, strerror(err));
+#endif
 }
 
 // Derive header filename from output path (output.c -> output.h)
@@ -732,8 +782,9 @@ static char* resolve_callee_name(const char* callee,
     if (!dot) return NULL;
 
     size_t prefix_len = (size_t)(dot - callee);
-    char prefix_buf[128];
-    if (prefix_len >= sizeof(prefix_buf)) return NULL;
+    /* As long as it is (#3574): 128 bytes left a longer alias unresolved,
+     * and the call went out as written. */
+    char* prefix_buf = (char*)aether_xrealloc(NULL, prefix_len + 1);
     memcpy(prefix_buf, callee, prefix_len);
     prefix_buf[prefix_len] = '\0';
     const char* suffix = dot + 1;
@@ -762,8 +813,8 @@ static char* resolve_callee_name(const char* callee,
 
     size_t out_len = strlen(short_ns) + 1 + strlen(suffix) + 1;
     char* resolved = malloc(out_len);
-    if (!resolved) return NULL;
-    snprintf(resolved, out_len, "%s_%s", short_ns, suffix);
+    if (resolved) snprintf(resolved, out_len, "%s_%s", short_ns, suffix);
+    free(prefix_buf);
     return resolved;
 }
 
@@ -807,16 +858,17 @@ static void emit_ast_json(FILE* out, ASTNode* program) {
     // Collect import aliases up-front so qualified call sites can be
     // canonicalised — `o.system` post `import std.os as o` becomes
     // `os_system` on the wire (which is what aeb's veto rules match
-    // against). Cap at 128 — pathological programs with more aliases
-    // get the tail dropped; aeb sees the as-written spelling for
-    // those and can decide.
-    EmitAlias aliases[128];
-    int alias_count = collect_import_aliases(program, aliases, 128);
+    // against). Every alias (#3574): 128 slots dropped the rest, and their
+    // calls went out as written.
+    EmitAlias* aliases = (EmitAlias*)aether_xrealloc(
+        NULL, sizeof(EmitAlias) * (size_t)(program->child_count > 0 ? program->child_count : 1));
+    int alias_count = collect_import_aliases(program, aliases, program->child_count);
 
     fputs("{\"nodes\":[", out);
     int first = 1;
     emit_ast_node_recursive(out, program, &first, aliases, alias_count);
     fputs("]}\n", out);
+    free(aliases);
 }
 
 // Returns 1 if the call node's `value` looks like a function-pointer
@@ -1090,18 +1142,16 @@ static const char* inspect_type_name(Type* t) {
 
 // Render a function/extern return type, expanding a tuple into
 // "(T1, T2, ...)". Writes into `buf`.
-static void inspect_return_type(Type* t, char* buf, size_t cap) {
+/* Written out whole (#3574): through a 256-byte buffer a long tuple was cut,
+ * and the offset past a cut ran beyond the buffer. */
+static void inspect_print_return_type(FILE* out, Type* t) {
     if (t && t->kind == TYPE_TUPLE && t->tuple_count > 0) {
-        size_t pos = 0;
-        pos += (size_t)snprintf(buf + pos, cap - pos, "(");
-        for (int i = 0; i < t->tuple_count && pos < cap; i++) {
-            pos += (size_t)snprintf(buf + pos, cap - pos, "%s%s",
-                                    i ? ", " : "",
-                                    inspect_type_name(t->tuple_types[i]));
-        }
-        snprintf(buf + pos, cap - pos, ")");
+        fputc('(', out);
+        for (int i = 0; i < t->tuple_count; i++)
+            fprintf(out, "%s%s", i ? ", " : "", inspect_type_name(t->tuple_types[i]));
+        fputc(')', out);
     } else {
-        snprintf(buf, cap, "%s", inspect_type_name(t));
+        fputs(inspect_type_name(t), out);
     }
 }
 
@@ -1297,11 +1347,11 @@ static void emit_inspect_report(FILE* out, ASTNode* program, const char* path) {
         for (int i = 0; i < program->child_count; i++) {
             ASTNode* c = program->children[i];
             if (!inspect_is_local(c, path) || c->type != AST_FUNCTION_DEFINITION || !c->value) continue;
-            char ret[256];
-            inspect_return_type(c->node_type, ret, sizeof(ret));
             fprintf(out, "    %s", c->value);
             inspect_print_params(out, c);
-            fprintf(out, " -> %s\n", ret);
+            fputs(" -> ", out);
+            inspect_print_return_type(out, c->node_type);
+            fputc('\n', out);
         }
     }
     if (n_builder) {
@@ -1570,9 +1620,9 @@ int compile_source(const char* input_path, const char* output_path) {
     // C file with the embedded AetherNamespaceManifest + aether_describe()
     // stub. Output path is `output_path` (the second positional argument).
     if (emit_namespace_describe) {
-        FILE* out = fopen(output_path, "w");
+        FILE* out = open_output_file(output_path, "w");
         if (!out) {
-            perror("Error opening output file");
+            report_output_open_failure(output_path);
             free_ast_node(program);
             free_tokens(tokens, token_count);
             free_parser(parser);
@@ -1938,10 +1988,10 @@ int compile_source(const char* input_path, const char* output_path) {
      * text stream on Windows does not take. A path that cannot be opened so
      * (a write-only device) is written as before, and codegen keeps its
      * temporaries in statement expressions there. */
-    FILE *output = fopen(output_path, "w+b");
-    if (!output) output = fopen(output_path, "w");
+    FILE *output = open_output_file(output_path, "w+b");
+    if (!output) output = open_output_file(output_path, "w");
     if (!output) {
-        perror("Error opening output file");
+        report_output_open_failure(output_path);
         // Cleanup
         module_registry_shutdown();
         free_ast_node(program);
@@ -1960,7 +2010,7 @@ int compile_source(const char* input_path, const char* output_path) {
         } else {
             header_path = strdup(emit_header_path);
         }
-        header_output = fopen(header_path, "w");
+        header_output = open_output_file(header_path, "w");
         if (!header_output) {
             fprintf(stderr, "Warning: Could not open header file %s\n", header_path);
         }
@@ -1983,7 +2033,7 @@ int compile_source(const char* input_path, const char* output_path) {
     // pre-existing --header (header_output) path above.
     FILE* csrc_header = NULL;
     if (csrc_header_path) {
-        csrc_header = fopen(csrc_header_path, "w");
+        csrc_header = open_output_file(csrc_header_path, "w");
         if (!csrc_header) {
             fprintf(stderr, "Error: cannot open --emit-header path '%s'\n", csrc_header_path);
             fclose(output);
@@ -1997,7 +2047,7 @@ int compile_source(const char* input_path, const char* output_path) {
     FILE* csrc_catalog = NULL;
     char csrc_cap_buf[64];
     if (csrc_catalog_path) {
-        csrc_catalog = fopen(csrc_catalog_path, "w");
+        csrc_catalog = open_output_file(csrc_catalog_path, "w");
         if (!csrc_catalog) {
             fprintf(stderr, "Error: cannot open --emit-catalog-json path '%s'\n", csrc_catalog_path);
             if (csrc_header) fclose(csrc_header);
@@ -2255,7 +2305,7 @@ static int do_concat_ae(char** inputs, int input_count, const char* output_path)
         return 1;
     }
 
-    FILE* out = fopen(output_path, "w");
+    FILE* out = open_output_file(output_path, "w");
     if (!out) {
         fprintf(stderr, "Error: --concat-ae: cannot write '%s'\n", output_path);
         for (int i = 0; i < input_count; i++) free(bodies[i]);
@@ -2397,22 +2447,26 @@ void print_help(const char* program_name) {
  * Written to a temporary name and renamed, so a concurrent reader never sees
  * half an artifact. Returns the process exit status. */
 static int emit_aea(const char* input, const char* output) {
-    char rel[4096];
+    /* The paths as long as they are (#3574): 4096 bytes cut a longer one,
+     * and the artifact recorded, or was written to, another path. */
     const char* in = input;
     while (in[0] == '.' && (in[1] == '/' || in[1] == '\\')) in += 2;
-    snprintf(rel, sizeof(rel), "%s", in);
+    char* rel = (char*)aether_xrealloc(NULL, strlen(in) + 1);
+    strcpy(rel, in);
     for (char* p = rel; *p; p++) if (*p == '\\') *p = '/';
 
     size_t len = 0;
     const char* err = NULL;
     char* data = module_build_artifact(input, rel, &len, &err);
+    free(rel);
     if (!data) {
         fprintf(stderr, "aetherc: no artifact for %s: %s\n", input, err ? err : "unknown error");
         return 1;
     }
-    char tmp[4200];
-    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", output, (int)getpid());
-    FILE* f = fopen(tmp, "wb");
+    size_t tmp_cap = strlen(output) + 32;
+    char* tmp = (char*)aether_xrealloc(NULL, tmp_cap);
+    snprintf(tmp, tmp_cap, "%s.tmp.%d", output, (int)getpid());
+    FILE* f = open_output_file(tmp, "wb");
     int ok = f && fwrite(data, 1, len, f) == len;
     if (f && fclose(f) != 0) ok = 0;
     free(data);
@@ -2420,8 +2474,9 @@ static int emit_aea(const char* input, const char* output) {
         remove(output);   /* rename() does not replace on Windows */
         ok = rename(tmp, output) == 0;
     }
+    if (!ok) remove(tmp);
+    free(tmp);
     if (!ok) {
-        remove(tmp);
         fprintf(stderr, "aetherc: cannot write %s\n", output);
         return 1;
     }
@@ -2499,7 +2554,7 @@ static int aetherc_main(int argc, char *argv[]) {
                 return 1;
             }
             if (!aether_define_add(name)) {
-                fprintf(stderr, "Error: too many -D symbols to add '%s'\n", name);
+                fprintf(stderr, "Error: out of memory adding the -D symbol '%s'\n", name);
                 return 1;
             }
             arg_offset++;
@@ -2524,8 +2579,12 @@ static int aetherc_main(int argc, char *argv[]) {
             csrc_catalog_path = argv[arg_offset] + 20;
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--binimport-stub-dir=", 21) == 0) {
-            if (binimport_stub_dir_count < AETHERC_STUB_DIRS_MAX)
-                binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
+            if (binimport_stub_dir_count == binimport_stub_dir_cap) {
+                binimport_stub_dir_cap = binimport_stub_dir_cap ? binimport_stub_dir_cap * 2 : 8;
+                binimport_stub_dirs = (const char**)aether_xrealloc(
+                    (void*)binimport_stub_dirs, sizeof(char*) * (size_t)binimport_stub_dir_cap);
+            }
+            binimport_stub_dirs[binimport_stub_dir_count++] = argv[arg_offset] + 21;
             arg_offset++;
         } else if (strncmp(argv[arg_offset], "--target-os=", 12) == 0 ||
                    strncmp(argv[arg_offset], "--target-arch=", 14) == 0) {

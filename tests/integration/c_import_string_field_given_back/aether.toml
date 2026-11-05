@@ -1,0 +1,6 @@
+[[bin]]
+name = "prog"
+path = "prog.ae"
+
+[build]
+cflags = "-include label.h -I."

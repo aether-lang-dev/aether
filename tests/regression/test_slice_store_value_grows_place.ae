@@ -1,0 +1,60 @@
+// Regression (#3568): a store into a slice's element whose value grows the
+// slice stores into the element where it is after the growth.
+//
+// `rows[0] = grow()`, where `grow` appends to `rows` (a cell the closure
+// shares) and then returns the value: the store took the element's address
+// before the value was made, so when the growth moved `rows` to storage of
+// its own (here because `keep` shares the old buffer; a reallocation moves
+// it the same way, into freed memory), the store released the element of
+// the buffer the growth had left, `keep`'s row, and the `=` around it,
+// evaluated in the order C likes, wrote the value over the new buffer's
+// copy of that row without releasing it. A value that calls anything is
+// made first now, held so a panic in the place's bounds check gives it
+// back, and the element's place is taken after it, by the store itself; a
+// value that calls nothing is still stored after its place is checked.
+//
+// The grown slice and the buffer the growth left are read back, and where
+// the heap count is exact (mem.heap_in_use_exact) rounds of it leave the
+// heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    return make([]int, n)
+}
+
+shape() -> int {
+    rows = make([]int[], 1)
+    rows[0] = mk(4)
+    keep = rows
+    grow = || {
+        rows = append(rows, mk(1))
+        return mk(3)
+    }
+    rows[0] = grow()
+    check(rows.len == 2 && rows[0].len == 3, "the store lands in the grown slice (${rows[0].len})")
+    check(keep.len == 1 && keep[0].len == 4, "the buffer the growth left keeps its row (${keep[0].len})")
+    return rows[0].len + keep[0].len
+}
+
+main() {
+    check(shape() == 3 + 4, "the shape")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                for i in 0..50 {
+                    _a = shape()
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

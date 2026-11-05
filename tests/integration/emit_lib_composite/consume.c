@@ -109,7 +109,8 @@ int main(int argc, char** argv) {
     if (aether_config_has(NULL, "x") != 0)           FAIL("has(NULL) didn't return 0");
     if (aether_config_list_size(NULL) != 0)          FAIL("list_size(NULL) didn't return 0");
 
-    aether_config_free(root);
+    /* The root map holds a nested map and list: free the whole tree. */
+    aether_config_free_deep(root);
     lib_close(h);
     printf("OK: composite config tree round-tripped\n");
     return 0;

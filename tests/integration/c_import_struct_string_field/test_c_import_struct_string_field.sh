@@ -5,8 +5,9 @@
 # C header does not have, so the generated C did not compile; a struct
 # literal of such a type also got ownership trackers, and a local holding
 # one was declared with the bare tag (`label v`), which needs a typedef the
-# header need not ship. The field borrows the string, as the C API that
-# declares it expects.
+# header need not ship. C keeps what the field holds, so the field is
+# given a reference of its own, recorded by its characters, and the probe
+# gives each one back with string.release_kept (#3567).
 #
 # label.h has no `_heap_text` and no typedef, so the probe builds only when
 # every store is plain and every spelling is `struct label`.

@@ -26,6 +26,15 @@ actor SrvActor {
     receive { StartSrv(raw) -> { s = raw; _ = http.server_start(raw) } }
 }
 
+// A refusal the driver asks for (a certificate the policy refuses, a
+// backend this build lacks) ends the program: the server is freed before
+// the exit.
+refuse(raw: @frees ptr, text: string, code: int) {
+    println(text)
+    http.server_free(raw)
+    exit(code)
+}
+
 main() {
     raw = http.server_create(0)
     if raw == 0 {
@@ -35,17 +44,14 @@ main() {
     http.server_set_host(raw, "127.0.0.1")
     tls_err = http.server_set_tls(raw, os.getenv("CERT_PATH"), os.getenv("KEY_PATH"))
     if tls_err != "" {
-        println("FAIL: server_set_tls: ${tls_err}")
-        exit(1)
+        refuse(raw, "FAIL: server_set_tls: ${tls_err}", 1)
     }
     berr = http.server_set_tls_backend(raw, os.getenv("SRV_BACKEND"))
     if berr != "" {
-        println("BACKEND-ERR: ${berr}")
-        exit(2)
+        refuse(raw, "BACKEND-ERR: ${berr}", 2)
     }
     if http.server_bind(raw, "127.0.0.1", 0) != "" {
-        println("FAIL: bind")
-        exit(1)
+        refuse(raw, "FAIL: bind", 1)
     }
     println("READY ${http.server_port(raw)}")
     http.server_get(raw, "/", handle_root, 0)

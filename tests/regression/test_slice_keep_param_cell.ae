@@ -1,0 +1,64 @@
+// Regression (#3568): a `@keep` slice parameter a closure assigns is a
+// cell that holds the parameter's reference.
+//
+// `grower(xs: @keep int[]) -> fn { f = || { xs = append(xs, 1); ... } }`:
+// the closure shares `xs` with the function through a cell. The parameter
+// kept its kind of its own (K_KEEP), whose release ran at the function's
+// return and emptied the cell the closure still held, and the cell was
+// seeded with a copy, so the reference the caller gave the parameter was
+// never given back. The cell takes over the parameter's reference now, and
+// its last holder gives it back.
+//
+// The closure's calls read the buffer grown in the cell, and where the heap
+// count is exact (mem.heap_in_use_exact) rounds of them leave the heap as
+// they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+grower(xs: @keep int[]) -> fn {
+    f = || {
+        xs = append(xs, 1)
+        return xs.len
+    }
+    return f
+}
+
+shape() -> int {
+    f = grower(mk(3))
+    int a = call(f)
+    int b = call(f)
+    check(a == 4 && b == 5, "the closure's cell holds the parameter's buffer (${a} ${b})")
+    return a + b
+}
+
+main() {
+    shape()
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    _a = shape()
+                    i = i + 1
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

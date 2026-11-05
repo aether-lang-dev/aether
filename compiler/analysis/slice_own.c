@@ -1,5 +1,6 @@
-/* Slice ownership: a `make` or `append` buffer is released when the local
- * that owns it goes out of scope. See slice_own.h for the rules. */
+/* Slice ownership: every place that holds a slice of a counted buffer holds
+ * one reference to it, released when the place goes out of scope (#3568).
+ * See slice_own.h for the rules. */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -7,6 +8,7 @@
 
 #include "slice_own.h"
 #include "hoist.h"
+#include "slice_coerce.h"
 #include "../aether_error.h"
 #include "../aether_strmap.h"
 
@@ -14,16 +16,29 @@
 
 typedef enum {
     K_NONE,   /* not a slice */
-    K_OWNER,  /* owns what it holds: dropped at every exit of its scope */
-    K_VIEW,   /* only ever given views: holds nothing to drop */
-    K_OTHER,  /* a slice local left to the program (captured, a pattern's) */
-    K_PARAM,  /* a parameter: borrowed */
-    K_KEEP,   /* a `@keep` parameter: owned, as a local that owns */
-    /* An owner a view of whose buffer may outlive it (escape analysis,
-     * below): never dropped, as before ownership. */
-    K_LOCALVIEW, /* the views stay in the function: a `return` still moves it */
-    K_PINNED     /* a view may leave the function: every copy is a loan */
+    K_OWNER,  /* holds a reference, which a move takes out (E0906 after):
+               * released at every exit of its scope */
+    K_VIEW,   /* only ever given views and copies: holds a reference of its
+               * own, released at every exit; a copy of it into another
+               * place takes another, so it is never moved */
+    K_OTHER,  /* bound by a pattern, a destructure, a `catch`, or outside a
+               * block: the reference stays with what it was bound from */
+    K_PARAM,  /* a parameter: borrows the caller's */
+    K_KEEP,   /* a `@keep` parameter: holds the caller's reference, as a
+               * local that owns */
+    /* A local a closure assigns, so a cell the frame and its closures share
+     * (codegen promotes it, by name): the cell holds the reference. Every
+     * store into it, in the frame or a closure, gives back what it held;
+     * the cell's last release gives back what it holds then (#3549). */
+    K_CELL
 } Kind;
+
+/* How a slice is used where it stands: borrowed (read, indexed, measured,
+ * viewed, compared), moved into a place (bound, returned, stored, put in a
+ * struct, a tuple, an array or a message), or C_LEND, given to a place this
+ * pass does not know, which a view is lent to and a local that owns moves
+ * into, as before ownership. */
+typedef enum { C_BORROW, C_MOVE, C_LEND } Use;
 
 typedef struct Local Local;
 struct Local {
@@ -39,25 +54,18 @@ struct Local {
     int keep;           /* a `@keep` parameter */
     int param;
     int pattern;        /* bound by a pattern, a destructure, a `catch` */
-    int captured;       /* a closure written in the frame names it */
-    int addr_taken;     /* `&x` */
-    int fresh;          /* some binding may give it a buffer to own */
+    int fresh;          /* some binding may give it a buffer of its own */
     int target;         /* `free`, `append` or `push` is applied to it */
-    int depth;          /* how many blocks deep its scope is */
+    int viewed;         /* a view of what it holds may be taken (views_of) */
+    int destructured;   /* declared by a tuple destructure (#3568) */
+    ASTNode* arm;       /* bound by the pattern of this match arm, whose body is a block */
+    int written;        /* a pattern's binding its scope binds again or pushes into */
+    int hold;           /* takes a reference of its own where its body starts (classify) */
     int pidx;           /* a parameter: its position, else -1 */
-    unsigned char* roots; /* the locals whose buffers what it holds may view */
-    int pinned;         /* a view of its buffer may leave the function */
-    int scoped_out;     /* a view of its buffer is bound outside its scope */
-    int viewed;         /* a view of its buffer is bound to a local */
-    int mutated;        /* re-bound, moved, freed, grown, or a row replaced */
-    int first_view;     /* the earliest point a view of its buffer is taken */
-    int last_mut;       /* the latest point it is mutated */
-    int self_view;      /* re-bound to a view of what it held */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
     Kind kind;
 };
-
 /* A map from a node to a local. */
 typedef struct {
     const void** keys;
@@ -113,10 +121,6 @@ static void pm_free(PtrMap* m) {
     memset(m, 0, sizeof(*m));
 }
 
-/* The names of locals that own a buffer, as the last check found them, for
- * the escape check (slice_own_owner_ident). */
-static PtrMap g_owner_idents;
-
 /* ---- the program and the frame being walked ---- */
 
 typedef struct {
@@ -127,20 +131,10 @@ typedef struct {
     int has_append;     /* the program defines a function `append` */
     int errors;
     PtrMap reported;    /* the nodes an error was reported at */
-    PtrMap sums;        /* function definition -> its Summary */
-    int final;          /* the pass that reports and rewrites */
-    int changed;        /* a summary grew in this pass */
+    StrMap structs;     /* struct name -> its definition */
+    StrMap cells;       /* the slice cells of the frames a closure being checked is
+                         * written in, by name (#3549) */
 } Ctx;
-
-/* What a function does with its slice parameters, as the escape analysis
- * finds it: whether a view of what parameter i is given may be in its
- * result (res), or stored where it outlives the call (store). */
-typedef struct {
-    int n;
-    unsigned char* res;      /* a view of the buffer itself */
-    unsigned char* res_deep; /* what its elements hold (a struct copied out) */
-    unsigned char* store;
-} Summary;
 
 typedef struct Frame {
     ASTNode* owner;
@@ -149,8 +143,8 @@ typedef struct Frame {
     int nlocals, cap;
     PtrMap uses;         /* identifier -> the local it names */
     PtrMap binds;        /* binding node -> the local it binds */
-    PtrMap row_ok;       /* row stores that release the row they replace */
     const StrMap* outer; /* the names of the frames a closure is written in */
+    StrMap promoted;     /* the names a closure written here assigns (#3549) */
 } Frame;
 
 typedef struct Scope {
@@ -175,7 +169,6 @@ static Local* new_local(Frame* f, Scope* s, ASTNode* decl, ASTNode* block) {
     l->type = decl->node_type;
     l->is_slice = type_is_slice(decl->node_type);
     l->idx = f->nlocals;
-    l->depth = s ? s->depth : 0;
     l->pidx = -1;
     if (f->nlocals == f->cap) {
         f->cap = f->cap ? f->cap * 2 : 16;
@@ -201,7 +194,6 @@ static Local* new_hoisted(Frame* f, Scope* s, ASTNode* first, ASTNode* block, AS
     if (!l->type) l->type = first->node_type;
     l->is_slice = type_is_slice(l->type);
     l->idx = f->nlocals;
-    l->depth = s->depth;
     l->pidx = -1;
     if (f->nlocals == f->cap) {
         f->cap = f->cap ? f->cap * 2 : 16;
@@ -246,7 +238,9 @@ static int is_push(ASTNode* n) {
  * it is. */
 static int is_intrinsic(ASTNode* n) {
     return is_call(n, "__slice_take") || is_call(n, "__slice_lend") ||
-           is_call(n, "__slice_drop") || is_call(n, "__slice_set");
+           is_call(n, "__slice_copy") || is_call(n, "__slice_drop") ||
+           is_call(n, "__slice_set") || is_call(n, "__slice_set_shared") ||
+           is_call(n, "__slice_hold");
 }
 
 /* A place read the same way twice: a name, a field of one, an element at
@@ -326,16 +320,63 @@ static void collect_names(ASTNode* n, StrMap* out) {
         strmap_put(out, n->value, (void*)1);
     for (int i = 0; i < n->child_count; i++) collect_names(n->children[i], out);
 }
+/* ---- the closures written in a frame ---- */
 
-/* A closure written in the frame: every local of the frame it names, read
- * or bound, is captured, and left to the program. */
-static void mark_captured(Scope* s, ASTNode* closure) {
+/* Does `n`, a closure's body, assign `name`, as codegen's promotion reads it
+ * (a binding of the name, `name op= x`, `name++`, a destructure into it)? A
+ * closure that declares the name itself (a parameter, a typed local) holds
+ * its own, which is not the frame's. */
+static int closure_assigns(ASTNode* n, const char* name) {
+    if (!n || is_opaque(n)) return 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0)
+        return n->type_inferred;
+    if (n->type == AST_COMPOUND_ASSIGNMENT && n->value && strcmp(n->value, name) == 0) return 1;
+    /* `name.push(v)` writes `name`: its length, and its buffer when it grows
+     * (#3568, ast_pushes_name). */
+    if (ast_pushes_name(n, name)) return 1;
+    if (n->type == AST_UNARY_EXPRESSION && n->value && n->child_count == 1 &&
+        (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0) && n->children[0] &&
+        n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+        strcmp(n->children[0]->value, name) == 0)
+        return 1;
+    if (n->type == AST_TUPLE_DESTRUCTURE) {
+        for (int i = 0; i + 1 < n->child_count; i++)
+            if (n->children[i] && n->children[i]->value &&
+                strcmp(n->children[i]->value, name) == 0)
+                return 1;
+    }
+    if (n->type == AST_CLOSURE_PARAM && n->value && strcmp(n->value, name) == 0) return 0;
+    for (int i = 0; i < n->child_count; i++)
+        if (closure_assigns(n->children[i], name)) return 1;
+    return 0;
+}
+
+/* Does closure `cl` declare `name` itself, as a parameter or a typed
+ * local? */
+static int closure_declares(ASTNode* cl, const char* name) {
+    if (!cl || is_opaque(cl)) return 0;
+    if ((cl->type == AST_CLOSURE_PARAM ||
+         (cl->type == AST_VARIABLE_DECLARATION && !cl->type_inferred)) &&
+        cl->value && strcmp(cl->value, name) == 0)
+        return 1;
+    for (int i = 0; i < cl->child_count; i++)
+        if (closure_declares(cl->children[i], name)) return 1;
+    return 0;
+}
+
+/* A closure written in the frame: every slice local of the frame it
+ * assigns is a cell the frame and the closure share (#3549), by name, as
+ * codegen promotes it. */
+static void note_closure(Frame* f, Scope* s, ASTNode* closure) {
     StrMap names;
     strmap_init(&names);
     collect_names(closure, &names);
     for (int i = 0; i < strmap_count(&names); i++) {
-        Local* l = scope_lookup(s, strmap_key_at(&names, i));
-        if (l) l->captured = 1;
+        const char* nm = strmap_key_at(&names, i);
+        Local* l = scope_lookup(s, nm);
+        if (!l || !l->is_slice || strmap_has(&f->promoted, nm)) continue;
+        if (!closure_declares(closure, nm) && closure_assigns(closure, nm))
+            strmap_put(&f->promoted, nm, (void*)1);
     }
     strmap_free(&names);
 }
@@ -365,6 +406,8 @@ static void note_source(Frame* f, Local* l, ASTNode* e) {
 typedef struct {
     Ctx* c;
     Frame* f;
+    ASTNode* arm;      /* the match arm whose pattern is being resolved (#3568) */
+    ASTNode* subject;  /* the value the innermost match matches */
 } R;
 
 static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block);
@@ -393,11 +436,15 @@ static int store_elsewhere(R* r, const char* name) {
 static void bind(R* r, Scope* s, ASTNode* n, ASTNode* block) {
     Frame* f = r->f;
     resolve_children(r, s, n);
+    /* `_ = v` binds nothing: codegen throws `v` away (and a slice's
+     * reference with it). */
+    if (strcmp(n->value, "_") == 0) return;
     ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
     Local* l = scope_lookup(s, n->value);
     if (l && !n->type_inferred && !l->hoisted) l = NULL;   /* a new, typed declaration */
     if (l) {
         pm_put(&f->binds, n, l);
+        if (l->pattern) l->written = 1;
     } else if (n->type_inferred && store_elsewhere(r, n->value)) {
         return;
     } else {
@@ -444,7 +491,7 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
     if (!n || is_opaque(n)) return;
     hoist_before(r, s, n, block);
     if (is_frame(n)) {
-        mark_captured(s, n);
+        if (n->type == AST_CLOSURE) note_closure(r->f, s, n);
         return;
     }
     switch (n->type) {
@@ -469,10 +516,19 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
                 ASTNode* v = n->children[i];
                 if (!v || !v->value) continue;
                 Local* l = scope_lookup(s, v->value);
-                if (l) pm_put(&r->f->binds, v, l);
-                else if (store_elsewhere(r, v->value)) continue;
-                else l = new_local(r->f, s, v, NULL);
-                l->pattern = 1;
+                if (l) {
+                    pm_put(&r->f->binds, v, l);
+                } else if (store_elsewhere(r, v->value)) {
+                    continue;
+                } else {
+                    /* #3568: codegen gives a slice local a destructure
+                     * declares a reference of its own (the part a call's
+                     * tuple hands over, or a copy of one another place
+                     * holds), which its scope's exit gives back. */
+                    l = new_local(r->f, s, v, block);
+                    if (l->is_slice && strcmp(v->value, "_") != 0) l->destructured = 1;
+                    else l->pattern = 1;
+                }
             }
             return;
         }
@@ -480,6 +536,7 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
             if (n->value) {
                 Local* l = new_local(r->f, s, n, NULL);
                 l->pattern = 1;
+                l->arm = r->arm;
             }
             resolve_children(r, s, n);
             return;
@@ -496,28 +553,100 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
             strmap_free(&in.names);
             return;
         }
-        case AST_MATCH_ARM: case AST_FOR_LOOP: case AST_CASE_STATEMENT:
+        case AST_MATCH_STATEMENT: {
+            ASTNode* saved_subject = r->subject;
+            r->subject = n->child_count > 0 ? n->children[0] : NULL;
+            resolve_children(r, s, n);
+            r->subject = saved_subject;
+            return;
+        }
+        case AST_MATCH_ARM: {
+            /* #3568: a slice its pattern binds views what the match was
+             * given, which the arm's body may let go (bind again, free):
+             * where the body is a block, the local takes a reference of its
+             * own there (rewrite's AST_MATCH_ARM). */
+            ASTNode* saved = r->arm;
+            r->arm = n->child_count > 1 && n->children[1] && n->children[1]->type == AST_BLOCK
+                         ? n : NULL;
+            Scope in;
+            strmap_init(&in.names);
+            in.up = s;
+            in.depth = s ? s->depth + 1 : 1;
+            int first = r->f->nlocals, pat_end = r->f->nlocals;
+            for (int i = 0; i < n->child_count; i++) {
+                if (i == 1) r->arm = saved;   /* the body's own patterns are its own */
+                resolve(r, &in, n->children[i], NULL);
+                if (i == 0) pat_end = r->f->nlocals;
+            }
+            r->arm = saved;
+            /* A slice the pattern binds that a body that is no block binds
+             * again or pushes into holds a reference of its own as well:
+             * the body becomes a block of that one statement, whose start
+             * takes the reference (rewrite's AST_MATCH_ARM). */
+            ASTNode* body = n->child_count > 1 ? n->children[1] : NULL;
+            if (body && body->type != AST_BLOCK) {
+                int wrap_body = 0;
+                for (int k = first; k < pat_end && !wrap_body; k++) {
+                    Local* pl = r->f->locals[k];
+                    wrap_body = pl->pattern && pl->written && !pl->arm;
+                }
+                if (wrap_body) {
+                    ASTNode* blk = create_ast_node(AST_BLOCK, NULL, body->line, body->column);
+                    ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, body->line,
+                                                  body->column);
+                    if (body->source_file) {
+                        blk->source_file = strdup(body->source_file);
+                        es->source_file = strdup(body->source_file);
+                    }
+                    add_child(es, body);
+                    add_child(blk, es);
+                    n->children[1] = blk;
+                    for (int k = first; k < pat_end; k++)
+                        if (r->f->locals[k]->pattern && !r->f->locals[k]->arm)
+                            r->f->locals[k]->arm = n;
+                }
+            }
+            /* A list pattern's tail is a slice of the subject's type, and
+             * each element it names one of the subject's element type, as
+             * the checker types them in the arm's table alone. */
+            ASTNode* p = n->child_count > 0 ? n->children[0] : NULL;
+            Type* st = r->subject ? r->subject->node_type : NULL;
+            if (p && (p->type == AST_PATTERN_CONS || p->type == AST_PATTERN_LIST) &&
+                type_is_slice(st)) {
+                for (int k = 0; k < p->child_count; k++) {
+                    int tail = p->type == AST_PATTERN_CONS && k == 1;
+                    Type* t = tail ? st : st->element_type;
+                    Local* pl = p->children[k] ? pm_get(&r->f->binds, p->children[k]) : NULL;
+                    if (pl && !pl->is_slice && type_is_slice(t)) {
+                        pl->type = t;
+                        pl->is_slice = 1;
+                    }
+                }
+            }
+            strmap_free(&in.names);
+            return;
+        }
+        case AST_FOR_LOOP: case AST_CASE_STATEMENT:
             resolve_scoped(r, s, n);
             return;
         case AST_IDENTIFIER: {
             Local* l = n->value ? scope_lookup(s, n->value) : NULL;
             if (l) pm_put(&r->f->uses, n, l);
+            /* A pattern's name carries no type of its own (the checker
+             * types it in the arm's table): its uses do. */
+            if (l && l->pattern && !l->type && n->node_type) {
+                l->type = n->node_type;
+                l->is_slice = type_is_slice(n->node_type);
+            }
             return;
         }
-        case AST_UNARY_EXPRESSION:
-            if (n->value && strcmp(n->value, "&") == 0 && n->child_count == 1 &&
-                n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
-                n->children[0]->value) {
-                Local* l = scope_lookup(s, n->children[0]->value);
-                if (l) l->addr_taken = 1;
-            }
-            break;
         case AST_FUNCTION_CALL:
             /* What `free`, `append` and `push` take a buffer from owns it. */
             if ((is_free(n) || is_append(r->c, n) || is_push(n)) && n->children[0] &&
                 n->children[0]->type == AST_IDENTIFIER && n->children[0]->value) {
                 Local* l = scope_lookup(s, n->children[0]->value);
                 if (l) l->target = 1;
+                if (l && l->pattern && is_push(n)) l->written = 1;
             }
             break;
         default:
@@ -525,20 +654,36 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
     }
     resolve_children(r, s, n);
 }
-
 /* ---- what each local is ---- */
 
 static void classify(Frame* f) {
     for (int i = 0; i < f->nlocals; i++) {
         Local* l = f->locals[i];
         if (!l->is_slice) l->kind = K_NONE;
-        else if (l->param) l->kind = !l->keep ? K_PARAM
-                                     : (l->captured || l->addr_taken) ? K_OTHER : K_KEEP;
-        else if (l->pattern || l->captured || l->addr_taken || !l->block) l->kind = K_OTHER;
+        /* A `@keep` parameter a closure assigns too: its cell takes over the
+         * parameter's reference (codegen's emit_promoted_cell_declaration
+         * seeded with it), and the cell's last holder gives it back. */
+        else if (strmap_has(&f->promoted, l->name)) l->kind = K_CELL;
+        else if (l->param) l->kind = l->keep ? K_KEEP : K_PARAM;
+        else if (l->destructured) l->kind = K_VIEW;
+        /* A binding of a match arm's pattern takes a reference of its own
+         * where the arm's body starts (rewrite's AST_MATCH_ARM), and so does
+         * a receive arm's field its body binds again or pushes into
+         * (check_frame): each is a copy of what was matched, or of the
+         * message's field, which the message releases. `hold` stays
+         * whatever kind the fixpoint below gives it: one an owner is moved
+         * into is still a copy until the hold makes it its own. */
+        else if (l->pattern && (l->arm || (l->written && !l->block && f->owner &&
+                                           (f->owner->type == AST_RECEIVE_ARM ||
+                                            f->owner->type == AST_TIMEOUT_ARM)))) {
+            l->kind = K_VIEW;
+            l->hold = 1;
+        }
+        else if (l->pattern || !l->block) l->kind = K_OTHER;
         else if (l->fresh || l->target) l->kind = K_OWNER;
         else l->kind = K_VIEW;
     }
-    /* A local a local that owns is copied into may be given its buffer. */
+    /* A local a local that owns is moved into may be given its buffer. */
     for (int changed = 1; changed;) {
         changed = 0;
         for (int i = 0; i < f->nlocals; i++) {
@@ -556,8 +701,84 @@ static void classify(Frame* f) {
     }
 }
 
+static int keeps_arg(Ctx* c, ASTNode* call, int i);
+
+/* Every slice local of the frame named in `n` may be viewed. */
+static void mark_viewed(Frame* f, ASTNode* n) {
+    if (!n || is_opaque(n)) return;
+    if (n->type == AST_IDENTIFIER) {
+        Local* l = pm_get(&f->uses, n);
+        if (l) l->viewed = 1;
+        return;
+    }
+    for (int i = 0; i < n->child_count; i++) mark_viewed(f, n->children[i]);
+}
+
+static Use child_use(ASTNode* p, int i);
+
+/* Is a call one that takes what it is given (`free`, `append`, `push`)? */
+static int consuming_call(Ctx* c, ASTNode* n) {
+    return is_intrinsic(n) || is_free(n) || is_append(c, n) || is_push(n);
+}
+
+/* The locals a view of whose buffer may be held past the expression that
+ * takes it, as the analysis before #3568 found them and more, read from the
+ * frame alone: a local under a sub-slice or a row read (`xs[a..b]`,
+ * `xs[..]`, `rows[i]`) that is bound, stored, returned or given to a call,
+ * a local given to a call (other than `free`, `append`, `push` and a `@keep`
+ * parameter, which take it), and a local a closure names. A view read in
+ * place (`rows[i].len`, `xs[1..][0]`, a store into `rows[i]`) is none. */
+static void views_of(Ctx* c, Frame* f, ASTNode* n, ASTNode* parent, int idx) {
+    if (!n || is_opaque(n)) return;
+    if (is_frame(n)) {
+        StrMap names;
+        strmap_init(&names);
+        collect_names(n, &names);
+        for (int i = 0; i < f->nlocals; i++)
+            if (strmap_has(&names, f->locals[i]->name)) f->locals[i]->viewed = 1;
+        strmap_free(&names);
+        return;
+    }
+    int held = parent && (parent->type == AST_FUNCTION_CALL ? !consuming_call(c, parent)
+                                                             : child_use(parent, idx) != C_BORROW);
+    if (held && n->child_count > 0 &&
+        (n->type == AST_SLICE_EXPR ||
+         (n->type == AST_ARRAY_ACCESS && type_is_slice(n->node_type))))
+        mark_viewed(f, n->children[0]);
+    if (n->type == AST_FUNCTION_CALL && !consuming_call(c, n)) {
+        for (int i = 0; i < n->child_count; i++) {
+            ASTNode* a = n->children[i];
+            if (a && a->type == AST_NAMED_ARG && a->child_count > 0) a = a->children[0];
+            if (a && a->type == AST_IDENTIFIER && type_is_slice(a->node_type) &&
+                !keeps_arg(c, n, i)) {
+                Local* l = pm_get(&f->uses, a);
+                if (l) l->viewed = 1;
+            }
+        }
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* ch = n->children[i];
+        /* A named argument is its call's. */
+        if (ch && ch->type == AST_NAMED_ARG && n->type == AST_FUNCTION_CALL) {
+            for (int k = 0; k < ch->child_count; k++) views_of(c, f, ch->children[k], n, i);
+            continue;
+        }
+        views_of(c, f, ch, n, i);
+    }
+}
+
+/* Does `l` own what it holds, so that a copy of it into another place is a
+ * move (E0906 after)? Not where a view of it may be taken (views_of): that
+ * local is copied, each place given a reference of its own, as it gave a
+ * view before #3568, so a program that kept a view of it and used it again
+ * still compiles. */
 static int owns(const Local* l) {
-    return l && (l->kind == K_OWNER || l->kind == K_KEEP);
+    return l && (l->kind == K_OWNER || l->kind == K_KEEP) && !l->viewed;
+}
+
+/* Does the place `l` hold a reference, which its scope's exit releases? */
+static int holds(const Local* l) {
+    return l && (l->kind == K_OWNER || l->kind == K_VIEW || l->kind == K_KEEP);
 }
 
 static void report(Ctx* c, Frame* f, ASTNode* at, AetherErrorCode code, const char* msg,
@@ -571,15 +792,23 @@ static void report(Ctx* c, Frame* f, ASTNode* at, AetherErrorCode code, const ch
     c->errors++;
 }
 
-/* ---- where a value goes ---- */
+static void warn(Ctx* c, Frame* f, ASTNode* at, AetherErrorCode code, const char* msg,
+                 const char* hint) {
+    if (pm_get(&c->reported, at)) return;
+    pm_put(&c->reported, at, (Local*)1);
+    AetherError w = {at && at->source_file ? at->source_file
+                                           : (f->owner ? f->owner->source_file : NULL),
+                     NULL, node_line(at), at ? at->column : 0, msg, hint, NULL, code};
+    aether_warning_report(&w);
+}
 
-typedef enum { C_BORROW, C_MOVE } Use;
+/* ---- where a value goes ---- */
 
 /* How the `i`th child of `p` is used when it is a slice: borrowed (read,
  * indexed, measured, viewed, compared), or moved into a place (bound,
  * returned, stored, put in a struct, a tuple, an array or a message). A
- * place this does not know is taken to be one it moves into. A call's
- * arguments are the call's to decide (keeps_arg). */
+ * place this does not know is lent to (C_LEND). A call's arguments are the
+ * call's to decide (keeps_arg). */
 static Use child_use(ASTNode* p, int i) {
     switch (p->type) {
         case AST_VARIABLE_DECLARATION: case AST_RETURN_STATEMENT: case AST_FIELD_INIT:
@@ -603,7 +832,7 @@ static Use child_use(ASTNode* p, int i) {
         case AST_ENSURES_CLAUSE: case AST_PTR_AS_STRUCT_CAST: case AST_WHEN_STATEMENT:
             return C_BORROW;
         default:
-            return C_MOVE;
+            return C_LEND;
     }
 }
 
@@ -611,11 +840,14 @@ static ASTNode* call_def(Ctx* c, ASTNode* call) {
     if (!call->value) return NULL;
     ASTNode* d = (ASTNode*)strmap_get(&c->fns, call->value);
     if (!d && strchr(call->value, '.')) {
-        char buf[256];
-        snprintf(buf, sizeof(buf), "%s", call->value);
-        for (char* q = buf; *q; q++)
+        /* The whole name (#3574): 256 bytes cut a long qualified one, and
+         * the call found no definition, so a `@keep` it has went unseen. */
+        char* flat = strdup(call->value);
+        if (!flat) return NULL;
+        for (char* q = flat; *q; q++)
             if (*q == '.') *q = '_';
-        d = (ASTNode*)strmap_get(&c->fns, buf);
+        d = (ASTNode*)strmap_get(&c->fns, flat);
+        free(flat);
     }
     return d;
 }
@@ -658,11 +890,20 @@ typedef struct Loop {
     struct Loop* up;
 } Loop;
 
+/* A loop walked from `entry`, which left `exit` (flow_loop). */
+typedef struct FlowMemo {
+    ASTNode* body;
+    ASTNode* cond;
+    State entry, exit;
+    struct FlowMemo* next;
+} FlowMemo;
+
 typedef struct {
     Ctx* c;
     Frame* f;
     int n;
     Loop* loop;
+    FlowMemo* memo;     /* the loops walked, by entry state */
 } Flow;
 
 static void st_init(Flow* w, State* s) {
@@ -708,7 +949,8 @@ static void flow(Flow* w, ASTNode* n, State* s, Use use);
 
 static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
     ASTNode* at = s->at[l->idx];
-    char msg[512], hint[400], howbuf[240];
+    char howbuf[240];
+    const char* msg = ""; const char* hint = "";
     const char* how = "it was moved";
     if (at && is_free(at)) how = "it was freed";
     else if (at && is_append(w->c, at)) how = "`append` consumed it";
@@ -716,15 +958,15 @@ static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
         snprintf(howbuf, sizeof(howbuf), "it was given to '%s', which keeps it", at->value);
         how = howbuf;
     }
-    snprintf(msg, sizeof(msg), "'%s' is used after %s%s (line %d): an owned slice has one owner",
+    msg = aether_internf("'%s' is used after %s%s (line %d): an owned slice has one owner",
              l->name, s->st[l->idx] == S_MAYBE ? "a path where " : "", how, node_line(at));
     if (at && is_append(w->c, at))
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "use the slice `append` returned (`%s = append(%s, v)`), or grow it in place "
                  "with `%s.push(v)`",
                  l->name, l->name, l->name);
     else
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "use the slice that holds it now, take a view first (`v = %s[..]`), or bind "
                  "'%s' again before this",
                  l->name, l->name);
@@ -733,7 +975,7 @@ static void moved_message(Flow* w, Local* l, ASTNode* use, State* s) {
 
 static void use_local(Flow* w, ASTNode* id, State* s) {
     Local* l = pm_get(&w->f->uses, id);
-    if (!owns(l) || s->dead) return;
+    if (!l || s->dead) return;   /* a local consume_local left empty too */
     if (s->st[l->idx] != S_LIVE) moved_message(w, l, id, s);
 }
 
@@ -745,16 +987,29 @@ static void move_local(Flow* w, ASTNode* id, ASTNode* at, State* s) {
     s->at[l->idx] = at;
 }
 
+/* `free(xs)` and `append(xs, v)` consume the local `xs` that holds a
+ * reference: it is left empty (rewrite_call's `__slice_take`,
+ * `slice_consumes`), so reading it before it is bound again is E0906,
+ * whether or not a view of it was taken or it was given to a function
+ * (`viewed`, which makes a move elsewhere a copy). */
+static void consume_local(Flow* w, ASTNode* id, ASTNode* at, State* s) {
+    Local* l = pm_get(&w->f->uses, id);
+    if (!l || !holds(l) || s->dead) return;
+    use_local(w, id, s);
+    s->st[l->idx] = S_MOVED;
+    s->at[l->idx] = at;
+}
+
 /* `free`, `append` and `push` release or grow a buffer: a parameter's is
  * the caller's (E0901), as a string parameter's count is. */
 static void borrowed_param_error(Flow* w, ASTNode* id, const char* what) {
     Local* l = pm_get(&w->f->uses, id);
     if (!l || l->kind != K_PARAM) return;
-    char msg[400], hint[400];
-    snprintf(msg, sizeof(msg),
+    const char* msg = ""; const char* hint = "";
+    msg = aether_internf(
              "cannot %s '%s': it is a parameter, which borrows the caller's slice", what,
              l->name);
-    snprintf(hint, sizeof(hint),
+    hint = aether_internf(
              "declare it `%s: @keep %s` to take the caller's buffer (the caller gives it up), "
              "or copy the elements into a buffer of the function's own",
              l->name, type_spelled(l->type));
@@ -764,7 +1019,7 @@ static void borrowed_param_error(Flow* w, ASTNode* id, const char* what) {
 static void flow_value(Flow* w, ASTNode* e, State* s, Use use) {
     if (!e) return;
     if (e->type == AST_IDENTIFIER) {
-        if (use == C_MOVE && type_is_slice(e->node_type)) move_local(w, e, e, s);
+        if (use != C_BORROW && type_is_slice(e->node_type)) move_local(w, e, e, s);
         else use_local(w, e, s);
         return;
     }
@@ -780,7 +1035,7 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         if (xs && xs->type == AST_IDENTIFIER) {
             borrowed_param_error(w, xs, is_push(n) ? "push to" : "append to");
             if (is_push(n)) use_local(w, xs, s);
-            else move_local(w, xs, n, s);
+            else consume_local(w, xs, n, s);
         } else {
             flow(w, xs, s, C_BORROW);
         }
@@ -790,7 +1045,7 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         ASTNode* xs = n->children[0];
         if (xs && xs->type == AST_IDENTIFIER) {
             borrowed_param_error(w, xs, "free");
-            move_local(w, xs, n, s);
+            consume_local(w, xs, n, s);
         } else {
             flow(w, xs, s, C_BORROW);
         }
@@ -802,24 +1057,29 @@ static void flow_call(Flow* w, ASTNode* n, State* s) {
         if (keeps_arg(c, n, i) && a && a->type == AST_IDENTIFIER) {
             Local* l = pm_get(&w->f->uses, a);
             if (l && l->kind == K_PARAM) {
-                char msg[400], hint[300];
-                snprintf(msg, sizeof(msg),
+                const char* msg = ""; const char* hint = "";
+                msg = aether_internf(
                          "cannot give '%s' to '%s', which keeps it (`@keep`): '%s' is a "
                          "parameter, which borrows the caller's slice",
                          l->name, n->value, l->name);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "declare it `%s: @keep %s` too, so the buffer passes through",
                          l->name, type_spelled(l->type));
                 report(c, w->f, a, AETHER_ERR_FREES_BORROWED, msg, hint);
             }
             move_local(w, a, n, s);
+        } else if (keeps_arg(c, n, i)) {
+            /* Any other value a `@keep` parameter takes moves as a plain
+             * argument does (rewrite_call gives it the parameter): an `if`'s
+             * branch that is a local that owns is moved there. */
+            flow_value(w, a, s, C_MOVE);
         } else {
             flow_value(w, a, s, C_BORROW);
         }
     }
 }
 
-static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
+static void flow_loop_walk(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
     Loop lp;
     st_init(w, &lp.brk);
     st_init(w, &lp.cont);
@@ -850,6 +1110,47 @@ static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, Stat
     st_free(&exits);
     st_free(&lp.brk);
     st_free(&lp.cont);
+}
+
+/* A loop's walk from `s`. A loop walked once already from the same state
+ * gives the same state after it, and has reported what it reports, so that
+ * walk is reused (#3574): each walk walks the body twice, each walking the
+ * loops inside, and loops nested 20 deep took a second, doubling with each
+ * level. The breaks and continues of a loop join only its own (the innermost
+ * loop), so a walk makes no join outside itself to make again. */
+static void flow_loop(Flow* w, ASTNode* cond, ASTNode* body, ASTNode* step, State* s) {
+    size_t n = (size_t)w->n;
+    for (FlowMemo* m = w->memo; m; m = m->next) {
+        if (m->body != body || m->cond != cond || m->entry.dead != s->dead ||
+            memcmp(m->entry.st, s->st, n) != 0 ||
+            memcmp(m->entry.at, s->at, n * sizeof(ASTNode*)) != 0)
+            continue;
+        st_copy(w, s, &m->exit);
+        return;
+    }
+    FlowMemo* m = (FlowMemo*)calloc(1, sizeof *m);
+    if (!m) {
+        fprintf(stderr, "aetherc: out of memory in the slice ownership check\n");
+        exit(1);
+    }
+    m->body = body;
+    m->cond = cond;
+    m->entry = st_clone(w, s);
+    flow_loop_walk(w, cond, body, step, s);
+    m->exit = st_clone(w, s);
+    m->next = w->memo;
+    w->memo = m;
+}
+
+/* The loops a frame's walk kept. */
+static void flow_memo_free(FlowMemo* m) {
+    while (m) {
+        FlowMemo* next = m->next;
+        st_free(&m->entry);
+        st_free(&m->exit);
+        free(m);
+        m = next;
+    }
 }
 
 static void flow(Flow* w, ASTNode* n, State* s, Use use) {
@@ -958,7 +1259,7 @@ static void flow(Flow* w, ASTNode* n, State* s, Use use) {
     }
 }
 
-/* ---- the rewrite: moves, loans, drops ---- */
+/* ---- the rewrite: moves, copies, releases ---- */
 
 static ASTNode* mk_ident(Local* l, ASTNode* at) {
     ASTNode* id = create_ast_node(AST_IDENTIFIER, l->name, at ? at->line : 0, at ? at->column : 0);
@@ -974,111 +1275,324 @@ static ASTNode* mk_call(const char* name, Type* t, ASTNode* at) {
     return c;
 }
 
+/* A `match` bound, assigned or returned is its statement's, lowered with the
+ * statement; one an intrinsic takes is an operand of it, which codegen runs
+ * ahead of the statement into a temporary (emit_match_operand) the
+ * intrinsic reads. Not marked, it was a statement expression, which only a
+ * GCC-compatible compiler takes (#3568). */
+static void own_operand(ASTNode* v) {
+    if (v && v->type == AST_MATCH_STATEMENT && !ast_match_is_operand(v))
+        v->annotation = annotation_add_marker(v->annotation, "operand");
+}
+
 /* *slot becomes `name(*slot)`, of *slot's type. */
 static void wrap(ASTNode** slot, const char* name) {
     ASTNode* e = *slot;
     ASTNode* c = mk_call(name, e->node_type, e);
+    own_operand(e);
     add_child(c, e);
     *slot = c;
 }
 
+/* `name(place, v)`, of `t`: the store of `v` into `place`, which gives back
+ * the reference `place` held. */
+static ASTNode* mk_store(const char* name, Type* t, ASTNode* place, ASTNode* v) {
+    own_operand(v);
+    ASTNode* set = mk_call(name, t, v);
+    add_child(set, place);
+    add_child(set, v);
+    return set;
+}
+
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot);
 
-/* A slice moved into a place: taken out of a local that owns it (which is
- * left empty), lent out of any other place (a parameter, a field, an
- * element, a module-level `var`, a local left to the program), so the copy
- * never frees what that place holds. */
-static void rewrite_value_at(Ctx* c, Frame* f, ASTNode** slot, Use use, int ret) {
+/* A pattern binds names and holds no value to own: a struct pattern's
+ * `field: name` is no store. */
+static int is_pattern(const ASTNode* n) {
+    return n->type == AST_PATTERN_VARIABLE || n->type == AST_PATTERN_STRUCT ||
+           n->type == AST_PATTERN_LIST || n->type == AST_PATTERN_CONS ||
+           n->type == AST_PATTERN_LITERAL;
+}
+
+/* Is `e` a view (`f()[a..b]`, `string.bytes(s)[1..]`, one of one) of a call's
+ * result, which holds the reference the call handed over and nothing else
+ * does? The view takes that reference over (#3568, #3570). */
+static int view_of_fresh(ASTNode* e) {
+    if (!e || e->type != AST_SLICE_EXPR) return 0;
+    while (e && e->type == AST_SLICE_EXPR && e->child_count > 0) e = e->children[0];
+    return e && e->type == AST_FUNCTION_CALL && type_is_slice(e->node_type) && e->value &&
+           strncmp(e->value, "__slice_", 8) != 0;
+}
+
+/* The arms' values of the `match` values being rewritten (rewrite_match_value):
+ * each is the match's value, not a statement's, so none is read in place
+ * (mark_in_place). A stack, for a `match` in an arm's statements. */
+static ASTNode** g_arm_values = NULL;
+static int g_arm_values_n = 0, g_arm_values_cap = 0;
+
+static int is_arm_value(const ASTNode* e) {
+    for (int i = 0; i < g_arm_values_n; i++)
+        if (g_arm_values[i] == e) return 1;
+    return 0;
+}
+
+static void push_arm_values(ASTNode* m) {
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* nested = NULL;
+        ASTNode** slot = m->children[i] ? match_arm_value_slot(m->children[i], &nested) : NULL;
+        if (nested) {
+            push_arm_values(nested);
+            continue;
+        }
+        if (!slot || !*slot) continue;
+        if (g_arm_values_n == g_arm_values_cap) {
+            g_arm_values_cap = g_arm_values_cap ? g_arm_values_cap * 2 : 16;
+            g_arm_values = (ASTNode**)realloc(g_arm_values,
+                                              (size_t)g_arm_values_cap * sizeof(ASTNode*));
+        }
+        g_arm_values[g_arm_values_n++] = *slot;
+    }
+}
+
+/* What a `match` arm's value, its parts rewritten, gives the place the
+ * `match` moves into: a local, a place or a view of one is copied, a call's
+ * result is the reference it hands over, as is a view of one. */
+static void move_rewritten(ASTNode** slot);
+
+static void move_arm_values(ASTNode* m) {
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* nested = NULL;
+        ASTNode** slot = m->children[i] ? match_arm_value_slot(m->children[i], &nested) : NULL;
+        if (nested) move_arm_values(nested);
+        else if (slot && *slot) move_rewritten(slot);
+    }
+}
+
+static void move_rewritten(ASTNode** slot) {
     ASTNode* e = *slot;
-    if (!e) return;
-    if (use != C_MOVE || !type_is_slice(e->node_type)) {
+    if (!e || !type_is_slice(e->node_type)) return;
+    switch (e->type) {
+        case AST_IDENTIFIER:
+            /* Copied, a local that owns too: the move checks (E0906) read
+             * a `match` arm's local as borrowed, so the local stays whole
+             * for its later reads. */
+            wrap(slot, "__slice_copy");
+            return;
+        case AST_SLICE_EXPR:
+            if (!view_of_fresh(e)) wrap(slot, "__slice_copy");
+            return;
+        case AST_IF_EXPRESSION:
+            for (int i = 1; i < e->child_count; i++) move_rewritten(&e->children[i]);
+            return;
+        case AST_MATCH_STATEMENT:
+            move_arm_values(e);
+            return;
+        case AST_FUNCTION_CALL: case AST_SEND_ASK: case AST_NULL_LITERAL: case AST_ARRAY_LITERAL:
+        case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST:
+            return;
+        default:
+            wrap(slot, "__slice_copy");
+            return;
+    }
+}
+
+/* #3568: a `match` whose value moves into a place gives it what each arm
+ * gives, arm by arm, as an `if`'s branches do: an arm's call hands its
+ * reference over, an arm's place is copied. The whole `match` copied held
+ * an arm's call result twice, which leaked (`vs = match k { 0 -> mk(4) _ ->
+ * xs }`), and nested the `match` in the copy, where codegen lowered it as a
+ * statement expression. */
+static void rewrite_match_value(Ctx* c, Frame* f, ASTNode* m) {
+    int mark = g_arm_values_n;
+    push_arm_values(m);
+    ASTNode* slot = m;
+    rewrite(c, f, &slot);
+    g_arm_values_n = mark;
+    if (mark == 0) {
+        free(g_arm_values);
+        g_arm_values = NULL;
+        g_arm_values_cap = 0;
+    }
+    move_arm_values(m);
+}
+
+/* A slice moved into a place gives the place one reference (#3568): taken
+ * out of a local that owns it (which is left empty), and copied, with a
+ * reference of its own, out of any other place (a parameter, a view, a
+ * field, an element, a module-level `var`, a cell) and out of a view of
+ * one. A call's result is the reference it hands over. */
+static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
+    ASTNode* e = *slot;
+    if (!e || is_pattern(e)) return;
+    if (use == C_BORROW || !type_is_slice(e->node_type)) {
         rewrite(c, f, slot);
         return;
     }
+    /* C_LEND: a place this pass does not know, which is given a view, as
+     * before ownership; a local that owns still moves there. */
     switch (e->type) {
         case AST_IDENTIFIER: {
             Local* l = pm_get(&f->uses, e);
             if (owns(l)) wrap(slot, "__slice_take");
-            else if (l && l->kind == K_VIEW) return;
-            /* Returned, a buffer left to the program goes to the caller as
-             * it did before ownership, unless a view of it may outlive the
-             * call. */
-            else if (ret && l && l->kind == K_LOCALVIEW) wrap(slot, "__slice_take");
-            else if (ret == 1 && l && l->kind == K_OTHER && !l->pinned) return;
-            /* A field, a tuple part or a message field holds what it is
-             * given, as before ownership, and the program frees it: the
-             * place it came from is kept (the escape analysis), so it is
-             * not lent. */
-            else if (ret == 2) return;
-            else wrap(slot, "__slice_lend");
+            else wrap(slot, use == C_MOVE ? "__slice_copy" : "__slice_lend");
             return;
         }
         case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
             rewrite(c, f, slot);
-            if (ret != 2) wrap(slot, "__slice_lend");
+            wrap(slot, use == C_MOVE ? "__slice_copy" : "__slice_lend");
+            return;
+        case AST_SLICE_EXPR:
+            rewrite(c, f, slot);
+            /* A view of a call's result takes over the reference the result
+             * handed over, which nothing else holds. */
+            if (use == C_MOVE && !view_of_fresh(e)) wrap(slot, "__slice_copy");
+            return;
+        case AST_IF_EXPRESSION:
+            /* Each branch is the value, going where the `if` goes. */
+            if (e->child_count > 0) rewrite(c, f, &e->children[0]);
+            for (int i = 1; i < e->child_count; i++) rewrite_value(c, f, &e->children[i], use);
+            return;
+        case AST_MATCH_STATEMENT:
+            if (use == C_MOVE) {
+                rewrite_match_value(c, f, e);
+                return;
+            }
+            rewrite(c, f, slot);
+            return;
+        case AST_FUNCTION_CALL: case AST_SEND_ASK: case AST_NULL_LITERAL: case AST_ARRAY_LITERAL:
+        case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST:
+            /* A call's result is the reference it hands over; the rest are
+             * no counted buffer. */
+            rewrite(c, f, slot);
             return;
         default:
+            /* Any other read of a slice (an optional's value, a cast) is a
+             * copy of what a place holds. */
             rewrite(c, f, slot);
+            if (use == C_MOVE) wrap(slot, "__slice_copy");
             return;
     }
 }
 
-static void rewrite_value(Ctx* c, Frame* f, ASTNode** slot, Use use) {
-    rewrite_value_at(c, f, slot, use, 0);
+/* Is `a`, argument `i` of `call`, a buffer made for the call and only lent
+ * to it? `a` is a call's slice, which holds the reference it hands over
+ * (`make`, `append`, a function's result, as a local bound to it would),
+ * given to a parameter that does not keep it (`@keep`). The call releases
+ * it once it returns (codegen's argument temporaries, through the
+ * `slice_temp` marker), as the local it would otherwise be bound to is
+ * released: a callee that keeps it took a reference of its own (#3568). An
+ * extern's or a builtin's result that may view memory (a slice, a pointer)
+ * is left alone, C taking no reference, and so is a call whose positions do
+ * not map onto the parameters one for one (a builder's `_ctx`, named
+ * arguments). */
+/* Does every arm of the `match` value `m` give a call's result? */
+static int match_gives_fresh(ASTNode* m) {
+    for (int i = 1; i < m->child_count; i++) {
+        ASTNode* nested = NULL;
+        ASTNode** slot = match_arm_value_slot(m->children[i], &nested);
+        if (nested) {
+            if (!match_gives_fresh(nested)) return 0;
+            continue;
+        }
+        if (!slot || !*slot || (*slot)->type != AST_FUNCTION_CALL || !(*slot)->value ||
+            strncmp((*slot)->value, "__slice_", 8) == 0)
+            return 0;
+    }
+    return m->child_count > 1;
 }
 
-static Summary* summary_of(Ctx* c, ASTNode* def);
-static int may_view(Type* t);
-static int unknown_callee(ASTNode* call);
+/* Does the parameter argument `i` of `call` is given wrap it (an optional, a
+ * tuple)? Codegen gives a value there that is no place (a call's result, a
+ * view, an `if`) an argument temporary of the parameter's type, which drops
+ * what it holds after the call (fresh_composite_arg_type,
+ * emit_composite_arg_temp); a place it passes as it is, borrowed. */
+static int wraps_arg(Ctx* c, ASTNode* call, int i) {
+    ASTNode* d = call_def(c, call);
+    if (!d) return 0;
+    int k = 0;
+    for (int j = 0; j < d->child_count; j++) {
+        ASTNode* p = d->children[j];
+        if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION))
+            continue;
+        if (k++ == i)
+            return p->node_type && (p->node_type->kind == TYPE_OPTIONAL ||
+                                    p->node_type->kind == TYPE_TUPLE);
+    }
+    return 0;
+}
 
-/* #3549: is `a`, argument `i` of `call`, a buffer made for the call and
- * only lent to it? `a` is a call's slice, which may own the buffer it
- * holds (`make`, `append`, a function's result, as a local bound to it
- * would), given to a parameter that does not keep it (`@keep`) and that
- * the callee's Summary says it neither stores nor hands a view of back.
- * The call then drops it once it returns (codegen's argument temporaries,
- * through the `slice_temp` marker), as the owning local it would otherwise
- * be bound to is dropped: a view or a buffer the program did not make is
- * left alone by the drop. A call through a closure value is not seen
- * through, and neither is an extern's or a builtin's result that may view
- * memory (a slice, a pointer), nor a call whose positions do not map onto
- * the parameters one for one (a builder's `_ctx`, named arguments). */
 static int slice_temp_arg(Ctx* c, ASTNode* call, int i) {
     ASTNode* a = call->children[i];
-    if (!a || a->type != AST_FUNCTION_CALL || !type_is_slice(a->node_type) || !a->value ||
-        strncmp(a->value, "__slice_", 8) == 0)
+    /* An `if` that gives the slice holds the reference its branch gave
+     * (each branch moved in, rewrite_call), and so does a `match` each arm
+     * of which gives a call's result. */
+    int branches = a && type_is_slice(a->node_type) &&
+                   (a->type == AST_IF_EXPRESSION ||
+                    (a->type == AST_MATCH_STATEMENT && match_gives_fresh(a)) ||
+                    view_of_fresh(a));
+    if (!a || (!branches && (a->type != AST_FUNCTION_CALL || !type_is_slice(a->node_type) ||
+                             !a->value || strncmp(a->value, "__slice_", 8) == 0)))
         return 0;
-    if (unknown_callee(call) || keeps_arg(c, call, i)) return 0;
+    if (keeps_arg(c, call, i)) return 0;
     for (int k = 0; k < call->child_count; k++)
         if (call->children[k] && call->children[k]->type == AST_NAMED_ARG) return 0;
+    if (call->value && strcmp(call->value, "call") == 0) return 1;
     ASTNode* d = call_def(c, call);
     if (!d) {
         Type* t = call->node_type;
-        return t && t->kind != TYPE_PTR && !may_view(t);
+        return t && t->kind != TYPE_PTR && !type_is_slice(t) && t->kind != TYPE_STRING;
     }
     for (int j = 0; j < d->child_count; j++) {
         ASTNode* p = d->children[j];
-        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION)) {
-            if (p->value && strcmp(p->value, "_ctx") == 0) return 0;
-            break;
-        }
+        if (!p || (p->type != AST_PATTERN_VARIABLE && p->type != AST_VARIABLE_DECLARATION))
+            continue;
+        if (p->value && strcmp(p->value, "_ctx") == 0) return 0;
+        break;
     }
-    Summary* sm = summary_of(c, d);
-    return sm && sm->n == call->child_count && !sm->res[i] && !sm->res_deep[i] && !sm->store[i];
+    /* A parameter that wraps the slice (an optional, a tuple) is given an
+     * argument temporary of its own, which holds the reference and drops it
+     * after the call (wraps_arg), as a string there is: released here too,
+     * it was given back twice. */
+    return !wraps_arg(c, call, i);
 }
 
-/* Mark each buffer of `n` made for a call and only lent to it
- * (slice_temp_arg). A nested frame is marked by its own walk. */
-static void mark_slice_temps(Ctx* c, ASTNode* n) {
-    if (!n || is_frame(n) || is_opaque(n)) return;
-    if (n->type == AST_FUNCTION_CALL && !is_intrinsic(n) && !is_append(c, n) && !is_push(n) &&
-        !is_free(n)) {
-        for (int i = 0; i < n->child_count; i++)
-            if (slice_temp_arg(c, n, i))
-                n->children[i]->annotation =
-                    annotation_add_marker(n->children[i]->annotation, "slice_temp");
+/* Is `e` a field of a struct parameter (`b.items`, `b.inner.items`)? The
+ * field is its caller's: the copy of the struct the callee is given holds
+ * no reference of its own (R3: parameters borrow). A parameter its function
+ * writes into is a value of its own (ast_struct_param_written, as codegen
+ * makes it), whose fields hold theirs. */
+static int param_struct_field(Frame* f, ASTNode* e) {
+    if (!e || e->type != AST_MEMBER_ACCESS) return 0;
+    ASTNode* b = e;
+    while (b && b->type == AST_MEMBER_ACCESS && b->child_count > 0) b = b->children[0];
+    Local* l = b && b->type == AST_IDENTIFIER ? pm_get(&f->uses, b) : NULL;
+    if (!l || !l->param || !l->type || l->type->kind != TYPE_STRUCT) return 0;
+    return !ast_struct_param_written(f->body, l->name);
+}
+
+/* Does the value `e` hold a reference of its own: a local, a cell, a
+ * field, an element, a module-level `var` or a state field (each place
+ * holds one), a call's result (which it hands over), or a view of one
+ * (which takes it over)? */
+static int holds_reference(Ctx* c, Frame* f, ASTNode* e) {
+    if (!e) return 0;
+    switch (e->type) {
+        case AST_IDENTIFIER: {
+            Local* l = pm_get(&f->uses, e);
+            if (l) return holds(l) || l->kind == K_CELL;
+            return e->value && (strmap_has(&c->cells, e->value) ||
+                                strmap_has(&c->globals, e->value) ||
+                                strmap_has(&c->state, e->value));
+        }
+        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
+            return !param_struct_field(f, e);
+        case AST_SLICE_EXPR:
+            return view_of_fresh(e);
+        case AST_FUNCTION_CALL:
+            return e->value && strcmp(e->value, "__slice_lend") != 0;
+        default:
+            return 0;
     }
-    for (int i = 0; i < n->child_count; i++) mark_slice_temps(c, n->children[i]);
 }
 
 static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
@@ -1087,18 +1601,55 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
         if (n->child_count > 1) rewrite_value(c, f, &n->children[1], C_MOVE);
         ASTNode** xs = &n->children[0];
         rewrite(c, f, xs);
-        Local* l = (*xs)->type == AST_IDENTIFIER ? pm_get(&f->uses, *xs) : NULL;
-        if (is_push(n)) return;
+        if (is_push(n)) {
+            /* A place that holds no reference of its own (a struct
+             * parameter's field) takes one before it grows, so the growth
+             * copies and leaves the buffer to its owner (`slice_push_copy`,
+             * as an append of such a value does below). A closure's push
+             * into a slice it captures is a write, which makes the slice a
+             * cell the frames share (closure_assigns), and a cell holds. */
+            if (!holds_reference(c, f, *xs))
+                n->annotation = annotation_add_marker(n->annotation, "slice_push_copy");
+            return;
+        }
         if (is_free(n)) {
-            /* The place `free` releases is left empty, so nothing frees it
-             * again. */
+            /* `free` gives back the reference its place holds. A value that
+             * holds none (a pattern's view, a sub-slice, a name this pass
+             * does not know) is a view `free` refuses by its mark
+             * (`slice_free_view`, aether_slice_free_view). */
+            if (!holds_reference(c, f, *xs))
+                n->annotation = annotation_add_marker(n->annotation, "slice_free_view");
+            /* A struct parameter's field is its caller's, who releases it:
+             * the `free` gives back nothing (aether_slice_free_view). */
+            if (param_struct_field(f, *xs))
+                warn(c, f, n, AETHER_WARN_FREE_NOT_OWNED,
+                     "this `free` gives back nothing: the slice is a field of a struct "
+                     "parameter, which its caller owns and releases (parameters borrow)",
+                     "free it where the struct is owned, or leave it to the caller's scope");
+            /* The place `free` releases is left empty, so nothing releases
+             * it again. */
             if (pure_place(*xs)) wrap(xs, "__slice_take");
             return;
         }
-        /* `append` reads `v` before it grows the slice, so the local it
+        /* A value that holds no reference of its own (a struct parameter's
+         * field, a view of a place) grows a copy: its own reference makes
+         * the buffer shared, so the growth moves to storage of its own
+         * (aether_slice_grow1) and leaves the buffer to its owner. It grew
+         * in place, under the owner, who then held freed storage. */
+        /* A module-level `var` grows a copy too (#3568): it is read under
+         * its lock, which an emptying of the var in place would not be, and
+         * the store of the result swaps the new buffer in under the lock. */
+        int module_var = (*xs)->type == AST_IDENTIFIER && (*xs)->value &&
+                         !pm_get(&f->uses, *xs) && strmap_has(&c->globals, (*xs)->value);
+        if (!holds_reference(c, f, *xs) || module_var) {
+            wrap(xs, "__slice_copy");
+            return;
+        }
+        /* `append` reads `v` before it grows the slice, so the place it
          * consumes is left empty there, by codegen, not by a `__slice_take`
-         * argument the operand-order rule (#2765) would evaluate first. */
-        if (owns(l) && !annotation_has_marker(n->annotation, "slice_consumes"))
+         * argument the operand-order rule (#2765) would evaluate first; the
+         * place holds no reference to the storage the growth may move. */
+        if (pure_place(*xs) && !annotation_has_marker(n->annotation, "slice_consumes"))
             n->annotation = annotation_add_marker(n->annotation, "slice_consumes");
         return;
     }
@@ -1107,14 +1658,44 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
         if (*slot && (*slot)->type == AST_NAMED_ARG && (*slot)->child_count > 0)
             slot = &(*slot)->children[0];
         if (!*slot) continue;
-        rewrite(c, f, slot);
-        /* Given to a `@keep` parameter: the place gives it up. */
-        if (keeps_arg(c, n, i) && pure_place(*slot)) wrap(slot, "__slice_take");
+        /* Given to a `@keep` parameter: the parameter holds a reference,
+         * moved out of a local that owns, or a copy of its own. */
+        if (keeps_arg(c, n, i)) {
+            rewrite_value(c, f, slot, C_MOVE);
+            continue;
+        }
+        /* #3568: given to a parameter that wraps it (an optional, a tuple),
+         * a value that is no place goes into an argument temporary, which
+         * drops what it holds after the call (wraps_arg): it takes a
+         * reference of its own, a view or a branch's place a copy, a call's
+         * result the one it hands over. A view (`count(xs[1..])`) or an
+         * `if` (`count(if c { xs } else { mk(2) })`) was put there as it
+         * stood, and the drop gave back the buffer's reference it never
+         * took. */
+        ASTNode* av = *slot;
+        if (wraps_arg(c, n, i) && type_is_slice(av->node_type) &&
+            av->type != AST_IDENTIFIER && av->type != AST_MEMBER_ACCESS &&
+            av->type != AST_ARRAY_ACCESS && av->type != AST_TUPLE_UNWRAP) {
+            rewrite(c, f, slot);
+            move_rewritten(slot);
+            continue;
+        }
+        if (slice_temp_arg(c, n, i)) {
+            /* An `if`'s branches each give the call a reference, released
+             * after it: a call's result its own, a place a copy. The
+             * parameter borrows, as the move checks read it, so a local
+             * that owns is copied, never moved (it read empty after). */
+            rewrite(c, f, slot);
+            if ((*slot)->type == AST_IF_EXPRESSION) move_rewritten(slot);
+            (*slot)->annotation = annotation_add_marker((*slot)->annotation, "slice_temp");
+        } else {
+            rewrite(c, f, slot);
+        }
     }
 }
 
-/* `defer __slice_drop(x)`: the owning local `l` is dropped on every exit of
- * the scope it is declared in. */
+/* `defer __slice_drop(x)`: the local `l` gives back its reference on every
+ * exit of the scope it is declared in. */
 static ASTNode* mk_drop_defer(Local* l, ASTNode* at) {
     ASTNode* call = mk_call("__slice_drop", NULL, at);
     add_child(call, mk_ident(l, at));
@@ -1146,32 +1727,110 @@ static void insert_child(ASTNode* block, int at, ASTNode* child) {
     block->children[at] = child;
 }
 
+/* Is `lhs` a field of a struct C lays out (`extern struct`, `@c_import`),
+ * where a slice is the bare pointer C declares, which holds no reference? */
+static int c_field(Ctx* c, ASTNode* lhs) {
+    if (!lhs || lhs->type != AST_MEMBER_ACCESS || lhs->child_count < 1 || !lhs->children[0])
+        return 0;
+    Type* t = lhs->children[0]->node_type;
+    while (t && t->kind == TYPE_PTR && t->element_type) t = t->element_type;
+    if (!t || t->kind != TYPE_STRUCT || !t->struct_name) return 0;
+    /* `extern`, `extern_packed`, `extern_c_import`, `extern_c_import_union` */
+    ASTNode* d = (ASTNode*)strmap_get(&c->structs, t->struct_name);
+    return d && d->annotation && strncmp(d->annotation, "extern", 6) == 0;
+}
+
+/* Is `place` one other threads may read: a module-level `var`, an actor's
+ * state field, or a place reached through a pointer, an actor's reference
+ * or a slice's element? A store there publishes what it stores. */
+static int shared_place(Ctx* c, ASTNode* place) {
+    while (place && (place->type == AST_MEMBER_ACCESS || place->type == AST_ARRAY_ACCESS) &&
+           place->child_count > 0) {
+        /* #3568: the rule a string store follows (#3398, codegen's
+         * store_publishes): a place reached through a pointer, an actor's
+         * reference or a slice's element is memory another actor can reach,
+         * so what is stored there counts atomically from then on. */
+        Type* ht = place->children[0] ? place->children[0]->node_type : NULL;
+        if (ht && (ht->kind == TYPE_PTR || ht->kind == TYPE_ACTOR_REF ||
+                   (place->type == AST_ARRAY_ACCESS && type_is_slice(ht))))
+            return 1;
+        place = place->children[0];
+    }
+    return place && place->type == AST_IDENTIFIER && place->value &&
+           (strmap_has(&c->globals, place->value) || strmap_has(&c->state, place->value));
+}
+
 static void rewrite_binding(Ctx* c, Frame* f, ASTNode* n) {
-    if (n->child_count > 0) rewrite_value(c, f, &n->children[0], C_MOVE);
     Local* l = pm_get(&f->binds, n);
-    if (!owns(l) || n == l->decl || n->child_count == 0) return;
-    /* A store into a local that owns: what it held is dropped, unless the
-     * value is `append(x, v)` of that very local, which consumed it. */
+    /* A pattern's local holds what it was bound from, as before: bound
+     * again, it is given a view. */
+    if (n->child_count > 0)
+        rewrite_value(c, f, &n->children[0], l && l->kind == K_OTHER ? C_LEND : C_MOVE);
+    if (n->child_count == 0 || !n->value) return;
+    /* A store into a local, a cell, a module-level `var` or an actor's state
+     * field gives back what it held; a declaration holds nothing yet. */
+    int store;
+    if (l) store = (holds(l) || l->kind == K_CELL) && n != l->decl;
+    else store = n->type_inferred && type_is_slice(n->node_type) &&
+                 (strmap_has(&c->cells, n->value) || strmap_has(&c->globals, n->value) ||
+                  strmap_has(&c->state, n->value));
+    if (!store) return;
     ASTNode* v = n->children[0];
-    if (is_append(c, v) && annotation_has_marker(v->annotation, "slice_consumes") &&
-        pm_get(&f->uses, v->children[0]) == l)
+    /* `xs = append(xs, v)` of that very local: `append` left it empty. */
+    if (l && is_append(c, v) && annotation_has_marker(v->annotation, "slice_consumes") &&
+        v->children[0]->type == AST_IDENTIFIER && pm_get(&f->uses, v->children[0]) == l)
         return;
-    ASTNode* set = mk_call("__slice_set", l->type, v);
-    add_child(set, mk_ident(l, n));
-    add_child(set, v);
-    n->children[0] = set;
+    ASTNode* place = create_ast_node(AST_IDENTIFIER, n->value, n->line, n->column);
+    place->node_type = clone_type(n->node_type ? n->node_type : (l ? l->type : NULL));
+    if (n->source_file) place->source_file = strdup(n->source_file);
+    if (l) pm_put(&f->uses, place, l);
+    int shared = !l && (strmap_has(&c->globals, n->value) || strmap_has(&c->state, n->value));
+    n->children[0] = mk_store(shared ? "__slice_set_shared" : "__slice_set", place->node_type,
+                              place, v);
+}
+
+/* A call's fresh slice read in place, which nothing binds (`f().len`,
+ * `f()[i]`, `for x in f()`, `f()[1..].len`, `f()` as a statement): the
+ * reference it hands over is the statement's, released at its end (codegen
+ * holds it in a temporary, `slice_stmt_temp`), where it used to leak. */
+static void mark_in_place(ASTNode* e) {
+    /* A view of the result used in place leaves it in place too. A view
+     * moved somewhere takes the result's reference over (view_of_fresh),
+     * so the base of a view is judged by how the view is used, never here
+     * for the view's own sake (rewrite's default loop). A `match` arm's
+     * value is the match's (rewrite_match_value). */
+    if (e && is_arm_value(e)) return;
+    while (e && e->type == AST_SLICE_EXPR && e->child_count > 0) e = e->children[0];
+    if (!e || e->type != AST_FUNCTION_CALL || !type_is_slice(e->node_type) || !e->value ||
+        strncmp(e->value, "__slice_", 8) == 0 ||
+        annotation_has_marker(e->annotation, "slice_temp") ||
+        annotation_has_marker(e->annotation, "slice_stmt_temp"))
+        return;
+    e->annotation = annotation_add_marker(e->annotation, "slice_stmt_temp");
+}
+
+/* At the start of `body`, the binding `l` takes a reference of its own
+ * (`__slice_hold`), which every exit of `body` gives back. */
+static void insert_hold(Local* l, ASTNode* body) {
+    insert_child(body, 0, mk_drop_defer(l, body));
+    ASTNode* hold = mk_call("__slice_hold", NULL, body);
+    add_child(hold, mk_ident(l, body));
+    ASTNode* es = create_ast_node(AST_EXPRESSION_STATEMENT, NULL, hold->line, hold->column);
+    add_child(es, hold);
+    if (body->source_file) es->source_file = strdup(body->source_file);
+    insert_child(body, 0, es);
 }
 
 static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
     ASTNode* n = *slot;
-    if (!n || is_frame(n) || is_opaque(n)) return;
+    if (!n || is_frame(n) || is_opaque(n) || is_pattern(n)) return;
     switch (n->type) {
         case AST_BLOCK:
-            /* A hoisted local that owns is declared here, where codegen
-             * would declare it, and dropped from there on. */
+            /* A hoisted local that holds a reference is declared here, where
+             * codegen would declare it, and released from there on. */
             for (int k = f->nlocals - 1; k >= 0; k--) {
                 Local* h = f->locals[k];
-                if (h->hoisted && h->kind == K_OWNER && h->block == n && !h->anchor) {
+                if (h->hoisted && holds(h) && h->block == n && !h->anchor) {
                     insert_child(n, 0, mk_drop_defer(h, n));
                     insert_child(n, 0, mk_hoisted_decl(h, n));
                 }
@@ -1180,7 +1839,7 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
                 ASTNode* ch = n->children[i];
                 for (int k = 0; k < f->nlocals; k++) {
                     Local* h = f->locals[k];
-                    if (h->hoisted && h->kind == K_OWNER && h->block == n && h->anchor == ch) {
+                    if (h->hoisted && holds(h) && h->block == n && h->anchor == ch) {
                         insert_child(n, i, mk_drop_defer(h, ch));
                         insert_child(n, i, mk_hoisted_decl(h, ch));
                         i += 2;
@@ -1188,9 +1847,19 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
                 }
                 rewrite(c, f, &n->children[i]);
                 Local* l = ch ? pm_get(&f->binds, ch) : NULL;
-                if (l && l->kind == K_OWNER && l->decl == ch && l->block == n) {
+                if (l && holds(l) && !l->param && l->decl == ch && l->block == n) {
                     insert_child(n, i + 1, mk_drop_defer(l, ch));
                     i++;
+                }
+                /* The slice locals a destructure declares (#3568). */
+                for (int k = 0; ch && ch->type == AST_TUPLE_DESTRUCTURE && k + 1 < ch->child_count;
+                     k++) {
+                    Local* d = pm_get(&f->binds, ch->children[k]);
+                    if (d && d->destructured && holds(d) && d->decl == ch->children[k] &&
+                        d->block == n) {
+                        insert_child(n, i + 1, mk_drop_defer(d, ch));
+                        i++;
+                    }
                 }
             }
             return;
@@ -1201,9 +1870,30 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
             rewrite_call(c, f, n);
             return;
         case AST_RETURN_STATEMENT:
+            /* A local that owns hands its reference to the caller; one a
+             * view of which may be held (a `defer` may still read it) is
+             * copied, and released at the exit. */
             for (int i = 0; i < n->child_count; i++)
-                if (n->children[i]) rewrite_value_at(c, f, &n->children[i], C_MOVE, 1);
+                if (n->children[i]) rewrite_value(c, f, &n->children[i], C_MOVE);
             return;
+        case AST_IF_EXPRESSION:
+            /* Read where it stands (rewrite_value takes a moved one). */
+            for (int i = 0; i < n->child_count; i++) rewrite(c, f, &n->children[i]);
+            return;
+        case AST_MATCH_ARM: {
+            for (int i = 0; i < n->child_count; i++)
+                if (n->children[i]) rewrite_value(c, f, &n->children[i], child_use(n, i));
+            /* #3568: each slice the pattern binds takes a reference of its
+             * own where the body starts, given back at the body's every
+             * exit: the body may let go of what the match was given. */
+            ASTNode* body = n->child_count > 1 ? n->children[1] : NULL;
+            if (!body || body->type != AST_BLOCK) return;
+            for (int k = f->nlocals - 1; k >= 0; k--) {
+                Local* l = f->locals[k];
+                if (l->arm == n && l->hold) insert_hold(l, body);
+            }
+            return;
+        }
         case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL: case AST_MESSAGE_CONSTRUCTOR:
             for (int i = 0; i < n->child_count; i++) {
                 ASTNode** slot2 = &n->children[i];
@@ -1211,29 +1901,35 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
                 if (((*slot2)->type == AST_ASSIGNMENT || (*slot2)->type == AST_FIELD_INIT) &&
                     (*slot2)->child_count > 0)
                     slot2 = &(*slot2)->children[(*slot2)->child_count - 1];
-                rewrite_value_at(c, f, slot2, C_MOVE, 2);
+                rewrite_value(c, f, slot2, C_MOVE);
             }
             return;
         case AST_BINARY_EXPRESSION:
             if (n->value && strcmp(n->value, "=") == 0 && n->child_count == 2) {
                 rewrite(c, f, &n->children[0]);
-                rewrite_value_at(c, f, &n->children[1], C_MOVE,
-                                 n->children[0]->type == AST_MEMBER_ACCESS ? 2 : 0);
-                /* An element of a slice of slices owns its slice: the store
-                 * drops the one it replaces. */
+                rewrite_value(c, f, &n->children[1], C_MOVE);
+                /* A store into a field, an element, a module-level `var` or
+                 * a state field gives back what the place held. */
                 ASTNode* lhs = n->children[0];
-                ASTNode* base = lhs;
-                while (base->type == AST_ARRAY_ACCESS && base->child_count > 0) base = base->children[0];
-                if (lhs->type == AST_ARRAY_ACCESS && type_is_slice(lhs->node_type) &&
-                    base->type == AST_IDENTIFIER &&
-                    (owns(pm_get(&f->uses, base)) || pm_get(&f->row_ok, n)) &&
-                    lhs->child_count == 2 && type_is_slice(lhs->children[0]->node_type) &&
-                    pure_place(lhs)) {
+                if (type_is_slice(lhs->node_type) && pure_place(lhs) && !c_field(c, lhs) &&
+                    (lhs->type == AST_MEMBER_ACCESS || lhs->type == AST_ARRAY_ACCESS)) {
                     ASTNode* v = n->children[1];
-                    ASTNode* set = mk_call("__slice_set", lhs->node_type, v);
-                    add_child(set, clone_ast_node(lhs));
-                    add_child(set, v);
-                    n->children[1] = set;
+                    n->children[1] = mk_store(shared_place(c, lhs) ? "__slice_set_shared"
+                                                                   : "__slice_set",
+                                              lhs->node_type, clone_ast_node(lhs), v);
+                    /* A place reached through an element (`rows[k]`,
+                     * `hs[k].tags`) is taken, its bounds checked, by the
+                     * store itself, in order with the value's making
+                     * (codegen's `slice_store`): the `=` around it leaves
+                     * the order to C. */
+                    int indexed = 0;
+                    for (ASTNode* p = lhs; p && (p->type == AST_MEMBER_ACCESS ||
+                                                 p->type == AST_ARRAY_ACCESS) && p->child_count > 0;
+                         p = p->children[0])
+                        if (p->type == AST_ARRAY_ACCESS) indexed = 1;
+                    if (indexed)
+                        n->children[1]->annotation =
+                            annotation_add_marker(n->children[1]->annotation, "slice_store");
                 }
                 return;
             }
@@ -1241,495 +1937,11 @@ static void rewrite(Ctx* c, Frame* f, ASTNode** slot) {
         default:
             break;
     }
-    for (int i = 0; i < n->child_count; i++)
-        if (n->children[i]) rewrite_value(c, f, &n->children[i], child_use(n, i));
-}
-
-/* ---- escape analysis: where a view of a buffer may go ----
- *
- * A local owns its buffer only while nothing that outlives it views that
- * buffer. Before ownership nothing was released, so a program could keep a
- * view of a buffer anywhere: in a struct a function returns, through a
- * parameter that stores what it is given, in a local of an outer scope.
- * Each slice-valued expression has roots, the locals whose buffers it may
- * view (a parameter: the caller's). A view of an owner's buffer that may
- * leave the function pins the owner (K_PINNED: never released, every copy a
- * loan); one bound outside the owner's scope, or held while the owner is
- * re-bound, moved, freed, grown or has a row replaced, leaves it to the
- * program (K_LOCALVIEW). Either is the program's memory as it was before
- * ownership, so code that was valid stays valid. A parameter whose view may
- * be stored is noted in the function's Summary, and its callers treat what
- * they pass there as viewed for good; one whose view may be returned makes
- * the call's result a view of the argument. */
-
-static Summary* summary_of(Ctx* c, ASTNode* def) {
-    if (!def) return NULL;
-    Summary* sm = (Summary*)(void*)pm_get(&c->sums, def);
-    if (sm) return sm;
-    int n = 0;
-    for (int j = 0; j < def->child_count; j++) {
-        ASTNode* p = def->children[j];
-        if (p && (p->type == AST_PATTERN_VARIABLE || p->type == AST_VARIABLE_DECLARATION)) n++;
-    }
-    sm = (Summary*)calloc(1, sizeof(Summary));
-    sm->n = n;
-    sm->res = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
-    sm->res_deep = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
-    sm->store = (unsigned char*)calloc((size_t)(n ? n : 1), 1);
-    pm_put(&c->sums, def, (Local*)(void*)sm);
-    return sm;
-}
-
-static int may_view(Type* t) {
-    if (!t) return 1;
-    switch (t->kind) {
-        case TYPE_ARRAY: case TYPE_STRUCT: case TYPE_TUPLE: case TYPE_OPTIONAL:
-        case TYPE_SUM: case TYPE_FUNCTION: case TYPE_UNKNOWN: case TYPE_WILDCARD:
-            return 1;
-        default:
-            return 0;
-    }
-}
-
-static int owner_ish(const Local* l) {
-    return l && (l->kind == K_OWNER || l->kind == K_KEEP);
-}
-
-typedef struct {
-    ASTNode* store;
-    Local* base;
-    int seq;
-} RowStore;
-
-/* A root set has a bit for each local (a view of its buffer) and, after
- * them, one for each parameter's elements (what the caller's buffer holds,
- * copied out: a struct read from it, not a view of it). */
-typedef struct {
-    Ctx* c;
-    Frame* f;
-    int n;      /* bits in a root set: 2 * nl */
-    int nl;     /* the frame's locals */
-    int grew;
-    /* Points of the walk, in the order the source runs straight through:
-     * a view taken in a loop counts from the start of the outermost loop it
-     * is in, since a later pass still holds it. */
-    int seq;
-    int loop_start;
-    RowStore* rows;
-    int nrows, rows_cap;
-} Esc;
-
-static void note_view(Esc* e, Local* x) {
-    int at = e->loop_start >= 0 ? e->loop_start : e->seq;
-    if (at < x->first_view) x->first_view = at;
-}
-
-static void note_mut(Esc* e, Local* x) {
-    x->mutated = 1;
-    if (e->seq > x->last_mut) x->last_mut = e->seq;
-}
-
-static void set_or(Esc* e, unsigned char* d, const unsigned char* s) {
-    for (int i = 0; i < e->n; i++) d[i] |= s[i];
-}
-
-static void roots_of(Esc* e, ASTNode* x, unsigned char* out);
-
-/* The roots of `x` given where it is only viewed (an argument, a sub-slice's
- * base): a local's own buffer among them. */
-static void view_roots(Esc* e, ASTNode* x, unsigned char* out) {
-    if (x && x->type == AST_NAMED_ARG && x->child_count > 0) x = x->children[0];
-    if (x && x->type == AST_IDENTIFIER) {
-        Local* l = pm_get(&e->f->uses, x);
-        if (l) {
-            out[l->idx] = 1;
-            set_or(e, out, l->roots);
-        }
-        return;
-    }
-    roots_of(e, x, out);
-}
-
-/* The roots of a value copied out of `x`'s elements (a struct, a tuple, a
- * number): what they hold, not `x`'s buffer. */
-static void deep_roots(Esc* e, ASTNode* x, unsigned char* out) {
-    if (x && x->type == AST_NAMED_ARG && x->child_count > 0) x = x->children[0];
-    if (x && x->type == AST_IDENTIFIER) {
-        Local* l = pm_get(&e->f->uses, x);
-        if (!l) return;
-        if (l->param) out[e->nl + l->idx] = 1;
-        else if (!owner_ish(l)) out[l->idx] = 1;
-        set_or(e, out, l->roots);
-        return;
-    }
-    roots_of(e, x, out);
-}
-
-static void frame_names_roots(Esc* e, ASTNode* n, unsigned char* out) {
-    if (!n) return;
-    if (n->type == AST_IDENTIFIER && n->value) {
-        for (int i = 0; i < e->f->nlocals; i++) {
-            Local* l = e->f->locals[i];
-            if (strcmp(l->name, n->value) == 0) {
-                out[l->idx] = 1;
-                set_or(e, out, l->roots);
-            }
-        }
-    }
-    for (int i = 0; i < n->child_count; i++) frame_names_roots(e, n->children[i], out);
-}
-
-/* Is `call` one whose callee the analysis cannot see (a closure value)? */
-static int unknown_callee(ASTNode* call) {
-    return call->value && strcmp(call->value, "call") == 0;
-}
-
-static void roots_of(Esc* e, ASTNode* x, unsigned char* out) {
-    if (!x || is_opaque(x)) return;
-    if (x->type == AST_CLOSURE) {
-        frame_names_roots(e, x, out);
-        return;
-    }
-    if (is_frame(x)) return;
-    if (x->node_type && !may_view(x->node_type) && x->type != AST_FUNCTION_CALL) return;
-    switch (x->type) {
-        case AST_IDENTIFIER: {
-            Local* l = pm_get(&e->f->uses, x);
-            if (!l) return;
-            /* An owner's buffer moves with it; what it holds goes along. */
-            if (!owner_ish(l)) out[l->idx] = 1;
-            set_or(e, out, l->roots);
-            return;
-        }
-        case AST_SLICE_EXPR:
-            if (x->child_count > 0) view_roots(e, x->children[0], out);
-            return;
-        case AST_MEMBER_ACCESS: case AST_ARRAY_ACCESS:
-            /* A row of a slice of slices, or a slice field, is a view into
-             * memory its holder owns; a struct copied out holds only what
-             * the element holds. */
-            if (x->child_count == 0) return;
-            if (type_is_slice(x->node_type)) view_roots(e, x->children[0], out);
-            else deep_roots(e, x->children[0], out);
-            return;
-        case AST_FUNCTION_CALL: {
-            if (is_append(e->c, x)) {
-                roots_of(e, x->children[0], out);
-                roots_of(e, x->children[1], out);
-                return;
-            }
-            if (is_free(x) || is_push(x) || is_call(x, "make")) return;
-            if (unknown_callee(x)) {
-                for (int i = 0; i < x->child_count; i++) view_roots(e, x->children[i], out);
-                return;
-            }
-            ASTNode* d = call_def(e->c, x);
-            if (!d) return;   /* an extern or a builtin keeps nothing */
-            Summary* sm = summary_of(e->c, d);
-            for (int i = 0; i < x->child_count && i < sm->n; i++) {
-                if (sm->res[i]) view_roots(e, x->children[i], out);
-                else if (sm->res_deep[i]) deep_roots(e, x->children[i], out);
-            }
-            return;
-        }
-        case AST_SLICE_FROM_ARRAY: case AST_PTR_AS_ARRAY_CAST: case AST_LITERAL:
-        case AST_NULL_LITERAL:
-            return;
-        default:
-            for (int i = 0; i < x->child_count; i++) {
-                if (x->type == AST_IF_EXPRESSION && i == 0) continue;
-                roots_of(e, x->children[i], out);
-            }
-            return;
-    }
-}
-
-/* The local whose value a store into `lhs` writes into, when that is a
- * value of the frame (a struct, a tuple, an array, a buffer it holds), or
- * NULL when the store reaches memory that outlives it (a pointer, a
- * module-level `var`, a parameter's pointee). */
-static Local* store_base(Esc* e, ASTNode* lhs) {
-    ASTNode* b = lhs;
-    while (b && (b->type == AST_MEMBER_ACCESS || b->type == AST_ARRAY_ACCESS) && b->child_count > 0)
-        b = b->children[0];
-    if (!b || b->type != AST_IDENTIFIER) return NULL;
-    Local* l = pm_get(&e->f->uses, b);
-    if (!l || l->param) return NULL;
-    if (l->type && (l->type->kind == TYPE_PTR)) return NULL;
-    return l;
-}
-
-/* `l` takes what `r` views. Returns 1 when its roots grew. */
-static int bind_roots(Esc* e, Local* l, const unsigned char* r) {
-    int grew = 0;
-    for (int i = 0; i < e->n; i++)
-        if (r[i] && !l->roots[i]) {
-            l->roots[i] = 1;
-            grew = 1;
-        }
-    return grew;
-}
-
-static void roots_pass(Esc* e, ASTNode* n) {
-    if (!n || is_opaque(n) || is_frame(n)) return;
-    unsigned char* r = (unsigned char*)calloc((size_t)(e->n ? e->n : 1), 1);
-    if (n->type == AST_VARIABLE_DECLARATION && n->child_count > 0) {
-        Local* l = pm_get(&e->f->binds, n);
-        if (l) {
-            roots_of(e, n->children[0], r);
-            if (bind_roots(e, l, r)) e->grew = 1;
-        }
-    } else if (n->type == AST_TUPLE_DESTRUCTURE && n->child_count > 0) {
-        roots_of(e, n->children[n->child_count - 1], r);
-        for (int i = 0; i + 1 < n->child_count; i++) {
-            Local* l = pm_get(&e->f->binds, n->children[i]);
-            if (l && bind_roots(e, l, r)) e->grew = 1;
-        }
-    } else if (n->type == AST_BINARY_EXPRESSION && n->value && strcmp(n->value, "=") == 0 &&
-               n->child_count == 2) {
-        Local* l = store_base(e, n->children[0]);
-        if (l) {
-            roots_of(e, n->children[1], r);
-            if (bind_roots(e, l, r)) e->grew = 1;
-        }
-    }
-    free(r);
-    for (int i = 0; i < n->child_count; i++) roots_pass(e, n->children[i]);
-}
-
-static void sink_store(Esc* e, const unsigned char* r) {
-    Summary* sm = e->f->owner->type == AST_CLOSURE ? NULL : summary_of(e->c, e->f->owner);
-    for (int i = 0; i < e->n; i++) {
-        if (!r[i]) continue;
-        Local* x = e->f->locals[i % e->nl];
-        if (x->param && !x->keep) {
-            if (sm && x->pidx >= 0 && x->pidx < sm->n && !sm->store[x->pidx]) {
-                sm->store[x->pidx] = 1;
-                e->c->changed = 1;
-            }
-        } else {
-            x->pinned = 1;
-            note_view(e, x);
-        }
-    }
-}
-
-static void sink_return(Esc* e, const unsigned char* r) {
-    Summary* sm = e->f->owner->type == AST_CLOSURE ? NULL : summary_of(e->c, e->f->owner);
-    for (int i = 0; i < e->n; i++) {
-        if (!r[i]) continue;
-        Local* x = e->f->locals[i % e->nl];
-        if (x->param && !x->keep) {
-            unsigned char* bit = !sm || x->pidx < 0 || x->pidx >= sm->n ? NULL
-                                 : i < e->nl ? &sm->res[x->pidx] : &sm->res_deep[x->pidx];
-            if (bit && !*bit) {
-                *bit = 1;
-                e->c->changed = 1;
-            }
-            /* A closure's result goes where its caller puts it. */
-            if (!sm) x->pinned = 1;
-        } else {
-            x->pinned = 1;
-            note_view(e, x);
-        }
-    }
-}
-
-/* A binding of `l` to what `r` views. */
-static void sink_bind(Esc* e, Local* l, const unsigned char* r) {
-    for (int i = 0; i < e->nl; i++) {
-        if (!r[i]) continue;
-        Local* x = e->f->locals[i];
-        if (x == l) {
-            x->viewed = 1;
-            x->self_view = 1;   /* re-bound to a view of what it held */
-            note_view(e, x);
-            note_mut(e, x);
-            continue;
-        }
-        x->viewed = 1;
-        note_view(e, x);
-        if (l->depth < x->depth || l->param) x->scoped_out = 1;
-    }
-}
-
-static void sinks(Esc* e, ASTNode* n, Use use);
-
-static void sinks_value(Esc* e, ASTNode* x, Use use) {
-    if (!x) return;
-    if (x->type == AST_IDENTIFIER) {
-        Local* l = pm_get(&e->f->uses, x);
-        if (l && use == C_MOVE && type_is_slice(x->node_type)) note_mut(e, l);
-        return;
-    }
-    sinks(e, x, use);
-}
-
-static void sinks(Esc* e, ASTNode* n, Use use) {
-    if (!n || is_opaque(n)) return;
-    int nn = e->n ? e->n : 1;
-    /* A closure value carries what it captures (roots_of), so it is judged
-     * where the value goes, as a struct holding the same views would be. */
-    if (is_frame(n)) return;
-    e->seq++;
-    if ((n->type == AST_WHILE_LOOP || n->type == AST_FOR_LOOP) && e->loop_start < 0) {
-        e->loop_start = e->seq;
-        for (int i = 0; i < n->child_count; i++)
-            if (n->children[i]) sinks_value(e, n->children[i], child_use(n, i));
-        e->loop_start = -1;
-        return;
-    }
-    unsigned char* r = (unsigned char*)calloc((size_t)nn, 1);
-    switch (n->type) {
-        case AST_VARIABLE_DECLARATION: {
-            if (n->child_count > 0) {
-                Local* l = pm_get(&e->f->binds, n);
-                roots_of(e, n->children[0], r);
-                if (l) {
-                    sink_bind(e, l, r);
-                    if (l->decl != n) note_mut(e, l);
-                } else {
-                    sink_store(e, r);   /* a module-level `var`, a state field */
-                }
-                sinks_value(e, n->children[0], C_MOVE);
-            }
-            free(r);
-            return;
-        }
-        case AST_TUPLE_DESTRUCTURE:
-            if (n->child_count > 0) {
-                roots_of(e, n->children[n->child_count - 1], r);
-                for (int i = 0; i + 1 < n->child_count; i++) {
-                    Local* l = pm_get(&e->f->binds, n->children[i]);
-                    if (l) sink_bind(e, l, r);
-                    else sink_store(e, r);
-                }
-                sinks(e, n->children[n->child_count - 1], C_BORROW);
-            }
-            free(r);
-            return;
-        case AST_BINARY_EXPRESSION:
-            if (n->value && strcmp(n->value, "=") == 0 && n->child_count == 2) {
-                Local* l = store_base(e, n->children[0]);
-                roots_of(e, n->children[1], r);
-                if (n->children[0]->type == AST_MEMBER_ACCESS) sink_store(e, r);
-                if (l) {
-                    sink_bind(e, l, r);
-                    if (n->children[0]->type == AST_ARRAY_ACCESS &&
-                        type_is_slice(n->children[0]->node_type)) {
-                        note_mut(e, l);   /* a row replaced */
-                        if (e->nrows == e->rows_cap) {
-                            e->rows_cap = e->rows_cap ? e->rows_cap * 2 : 8;
-                            e->rows = (RowStore*)realloc(e->rows,
-                                                         (size_t)e->rows_cap * sizeof(RowStore));
-                        }
-                        RowStore rs = {n, l, e->seq};
-                        e->rows[e->nrows++] = rs;
-                    }
-                } else {
-                    sink_store(e, r);
-                }
-                sinks(e, n->children[0], C_BORROW);
-                sinks_value(e, n->children[1], C_MOVE);
-                free(r);
-                return;
-            }
-            break;
-        case AST_RETURN_STATEMENT:
-            for (int i = 0; i < n->child_count; i++) {
-                ASTNode* ch = n->children[i];
-                Local* l = ch && ch->type == AST_IDENTIFIER ? pm_get(&e->f->uses, ch) : NULL;
-                /* A local returned whole hands its buffer to the caller; what
-                 * it holds of others' goes with it. */
-                if (l && !l->param) set_or(e, r, l->roots);
-                else roots_of(e, ch, r);
-                sinks_value(e, ch, C_MOVE);
-            }
-            sink_return(e, r);
-            free(r);
-            return;
-        case AST_MESSAGE_CONSTRUCTOR: case AST_SEND_FIRE_FORGET: case AST_SEND_ASK:
-        case AST_REPLY_STATEMENT: case AST_STRUCT_LITERAL: case AST_TUPLE_LITERAL:
-            /* What a field, a tuple part or a message holds the program
-             * frees by hand (it is not lent): what it views is kept. */
-            roots_of(e, n, r);
-            sink_store(e, r);
-            break;
-        case AST_FUNCTION_CALL: {
-            if (is_free(n) || is_append(e->c, n) || is_push(n)) {
-                ASTNode* xs = n->children[0];
-                Local* l = xs && xs->type == AST_IDENTIFIER ? pm_get(&e->f->uses, xs) : NULL;
-                if (l) note_mut(e, l);
-                for (int i = 0; i < n->child_count; i++) sinks_value(e, n->children[i], C_BORROW);
-                free(r);
-                return;
-            }
-            ASTNode* d = unknown_callee(n) ? NULL : call_def(e->c, n);
-            Summary* sm = d ? summary_of(e->c, d) : NULL;
-            for (int i = 0; i < n->child_count; i++) {
-                ASTNode* a = n->children[i];
-                /* The closure a value call calls is no argument of it. */
-                int callee = unknown_callee(n) && i == 0;
-                if ((unknown_callee(n) && !callee) || (sm && i < sm->n && sm->store[i])) {
-                    memset(r, 0, (size_t)nn);
-                    view_roots(e, a, r);
-                    sink_store(e, r);
-                }
-                if (keeps_arg(e->c, n, i)) sinks_value(e, a, C_MOVE);
-                else sinks_value(e, a, C_BORROW);
-            }
-            free(r);
-            return;
-        }
-        default:
-            break;
-    }
-    free(r);
-    for (int i = 0; i < n->child_count; i++)
-        if (n->children[i]) sinks_value(e, n->children[i], child_use(n, i));
-}
-
-/* The escape analysis of a frame whose locals are resolved and classified:
- * the roots of every local, the frame's Summary, and the owners a view of
- * whose buffer may outlive them, left to the program. */
-static void escape_frame(Ctx* c, Frame* f) {
-    Esc e;
-    memset(&e, 0, sizeof(e));
-    e.c = c;
-    e.f = f;
-    e.nl = f->nlocals;
-    e.n = 2 * f->nlocals;
-    e.loop_start = -1;
-    int nn = e.n ? e.n : 1;
-    for (int i = 0; i < f->nlocals; i++) {
-        f->locals[i]->roots = (unsigned char*)calloc((size_t)nn, 1);
-        f->locals[i]->first_view = 0x7fffffff;
-        f->locals[i]->last_mut = -1;
-    }
-    for (int pass = 0; pass < 8; pass++) {
-        e.grew = 0;
-        roots_pass(&e, f->body);
-        if (!e.grew) break;
-    }
-    sinks(&e, f->body, C_BORROW);
-    /* A row replaced before any view of its slice is taken (in the order
-     * the code runs, a loop's views counted from its start) releases the
-     * row it replaces: nothing can view that row. */
-    for (int i = 0; i < e.nrows; i++) {
-        RowStore* rs = &e.rows[i];
-        if (owner_ish(rs->base) && rs->seq < rs->base->first_view)
-            pm_put(&f->row_ok, rs->store, rs->base);
-    }
-    free(e.rows);
-    /* Mutated while a view of it may be held: a view taken before the
-     * mutation, or in a loop around it, or the local itself re-bound to a
-     * view of what it held. A view taken only after every mutation is not. */
-    for (int i = 0; i < f->nlocals; i++) {
-        Local* l = f->locals[i];
-        if (!owner_ish(l)) continue;
-        int held = l->viewed && (l->self_view || l->last_mut > l->first_view);
-        if (l->pinned) l->kind = K_PINNED;
-        else if (l->scoped_out || held) l->kind = K_LOCALVIEW;
+    for (int i = 0; i < n->child_count; i++) {
+        if (!n->children[i]) continue;
+        Use u = child_use(n, i);
+        if (u == C_BORROW && n->type != AST_SLICE_EXPR) mark_in_place(n->children[i]);
+        rewrite_value(c, f, &n->children[i], u);
     }
 }
 
@@ -1754,12 +1966,13 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
     f.owner = owner;
     f.body = body;
     f.outer = outer;
+    strmap_init(&f.promoted);
     Scope top;
     strmap_init(&top.names);
     top.up = NULL;
     top.depth = 0;
     int npar = 0;
-    R r = {c, &f};
+    R r = {c, &f, NULL, NULL};
     /* The parameters, and a receive arm's pattern. */
     for (int i = 0; i < owner->child_count; i++) {
         ASTNode* p = owner->children[i];
@@ -1784,53 +1997,65 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
     }
     resolve(&r, &top, body, NULL);
     classify(&f);
-    escape_frame(c, &f);
-    if (!c->final) goto done;
-    mark_slice_temps(c, body);
+    views_of(c, &f, body, NULL, 0);
 
-    int any = 0;
-    for (int i = 0; i < f.nlocals; i++)
-        if (f.locals[i]->kind != K_NONE) any = 1;
-    for (int i = 0; i < f.uses.cap; i++)
-        if (f.uses.keys[i] && owns(f.uses.vals[i]))
-            pm_put(&g_owner_idents, f.uses.keys[i], f.uses.vals[i]);
-    if (any) {
+    {
         int before = c->errors;
-        Flow w = {c, &f, f.nlocals, NULL};
+        Flow w = {c, &f, f.nlocals, NULL, NULL};
         State s;
         st_init(&w, &s);
         flow(&w, body, &s, C_BORROW);
         st_free(&s);
+        flow_memo_free(w.memo);
         if (c->errors == before) {
             ASTNode* b = body;
             rewrite(c, &f, &b);
-            /* A `@keep` parameter is dropped as a local that owns is. */
+            /* A `@keep` parameter gives back its reference as a local that
+             * owns does. */
             for (int i = f.nlocals - 1; i >= 0; i--)
                 if (f.locals[i]->kind == K_KEEP)
                     insert_child(body, 0, mk_drop_defer(f.locals[i], body));
+            /* A receive arm's field its body writes holds a reference of
+             * its own for the body (classify). */
+            for (int i = f.nlocals - 1; i >= 0; i--) {
+                Local* l = f.locals[i];
+                if (l->hold && !l->arm) insert_hold(l, body);
+            }
         }
     }
 
-    /* The closures written here, each a frame of its own. */
+    /* The closures written here, each a frame of its own, with the cells of
+     * this frame and of the frames it is written in, but for the names its
+     * own locals take (#3549). */
     StrMap names;
     strmap_init(&names);
     if (outer)
         for (int i = 0; i < strmap_count(outer); i++)
             strmap_put(&names, strmap_key_at(outer, i), (void*)1);
     for (int i = 0; i < f.nlocals; i++) strmap_put(&names, f.locals[i]->name, (void*)1);
+    StrMap saved_cells = c->cells;
+    strmap_init(&c->cells);
+    for (int i = 0; i < strmap_count(&saved_cells); i++) {
+        const char* nm = strmap_key_at(&saved_cells, i);
+        int own = 0;
+        for (int k = 0; k < f.nlocals && !own; k++) own = strcmp(f.locals[k]->name, nm) == 0;
+        if (!own) strmap_put(&c->cells, nm, (void*)1);
+    }
+    for (int i = 0; i < f.nlocals; i++)
+        if (f.locals[i]->kind == K_CELL) strmap_put(&c->cells, f.locals[i]->name, (void*)1);
     for (int i = 0; i < body->child_count; i++) frame_nested(c, body->children[i], &names);
+    strmap_free(&c->cells);
+    c->cells = saved_cells;
     strmap_free(&names);
 
-done:
     for (int i = 0; i < f.nlocals; i++) {
-        free(f.locals[i]->roots);
         free(f.locals[i]->srcs);
         free(f.locals[i]);
     }
     free(f.locals);
     pm_free(&f.uses);
     pm_free(&f.binds);
-    pm_free(&f.row_ok);
+    strmap_free(&f.promoted);
     strmap_free(&top.names);
 }
 
@@ -1862,12 +2087,7 @@ static void walk_program(Ctx* c, ASTNode* n) {
     for (int i = 0; i < n->child_count; i++) walk_program(c, n->children[i]);
 }
 
-int slice_own_owner_ident(const ASTNode* n) {
-    return n && n->type == AST_IDENTIFIER && pm_get(&g_owner_idents, n) != NULL;
-}
-
 int check_slice_ownership(ASTNode* program) {
-    pm_free(&g_owner_idents);
     if (!program) return 0;
     Ctx c;
     memset(&c, 0, sizeof(c));
@@ -1875,38 +2095,27 @@ int check_slice_ownership(ASTNode* program) {
     strmap_init(&c.globals);
     strmap_init(&c.state);
     strmap_init(&c.fns);
+    strmap_init(&c.cells);
+    strmap_init(&c.structs);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* d = unwrap_export(program->children[i]);
         if (!d || !d->value) continue;
         if (d->type == AST_CONST_DECLARATION && d->annotation &&
             strcmp(d->annotation, "global_var") == 0)
             strmap_put(&c.globals, d->value, d);
+        if (d->type == AST_STRUCT_DEFINITION && !strmap_has(&c.structs, d->value))
+            strmap_put(&c.structs, d->value, d);
         if (d->type == AST_FUNCTION_DEFINITION || d->type == AST_BUILDER_FUNCTION) {
             if (!strmap_has(&c.fns, d->value)) strmap_put(&c.fns, d->value, d);
             if (strcmp(d->value, "append") == 0) c.has_append = 1;
         }
     }
-    /* The summaries first: what each function does with its slice
-     * parameters, to a fixed point over the calls between them. */
-    for (int pass = 0; pass < 10; pass++) {
-        c.changed = 0;
-        for (int i = 0; i < program->child_count; i++) walk_program(&c, program->children[i]);
-        if (!c.changed) break;
-    }
-    c.final = 1;
     for (int i = 0; i < program->child_count; i++) walk_program(&c, program->children[i]);
-    for (int i = 0; i < c.sums.cap; i++) {
-        if (!c.sums.keys[i]) continue;
-        Summary* sm = (Summary*)(void*)c.sums.vals[i];
-        free(sm->res);
-        free(sm->res_deep);
-        free(sm->store);
-        free(sm);
-    }
-    pm_free(&c.sums);
     strmap_free(&c.globals);
     strmap_free(&c.state);
     strmap_free(&c.fns);
+    strmap_free(&c.cells);
+    strmap_free(&c.structs);
     pm_free(&c.reported);
     return c.errors;
 }

@@ -724,7 +724,7 @@
       <h3 class="function-name">bytes <span class="kind">fn</span></h3>
       <pre class="usage"><code>bytes(s) <span class="arrow">-&gt;</span> byte[]</code></pre>
       <p class="signature"><span class="sig-params">s: string</span></p>
-      <p class="doc">A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII scanning (indexing, sub-slicing) without re-measuring the string on every access the way string_char_at_n's separate known_length parameter does. BORROWED: valid only as long as `s` itself is, exactly like any slice over someone else's storage; do not free it. Reads cost what any slice's do. #3025: a write through it (an element store, `+=`, `++`), or through any view made from it, here or in a function it is passed to, panics with &quot;a write through a read-only view of a string&quot;: a literal's bytes are in read-only memory, and a counted string's are shared through its refcount. Copy the bytes into a buffer of your own to change them.</p>
+      <p class="doc">A bounded, READ-ONLY byte[] view of s's own bytes, for binary/ASCII scanning (indexing, sub-slicing) without re-measuring the string on every access the way string_char_at_n's separate known_length parameter does. #3570: a view of a counted string holds the string, as a view of a `make` buffer holds its buffer (#3568): it stays valid wherever it is kept, after `s` is gone, and the string is given back with the last place that holds a view of it. A literal's bytes are static and held by nothing. Do not free it. Reads cost what any slice's do. #3025: a write through it (an element store, `+=`, `++`), or through any view made from it, here or in a function it is passed to, panics with &quot;a write through a read-only view of a string&quot;: a literal's bytes are in read-only memory, and a counted string's are shared through its refcount. Copy the bytes into a buffer of your own to change them.</p>
     </div>
     <div class="function" id="array_view" data-name="array_view">
       <h3 class="function-name">array_view <span class="kind">fn</span></h3>
@@ -753,7 +753,7 @@
       <h3 class="function-name">release_kept <span class="kind">fn</span></h3>
       <pre class="usage"><code>release_kept(p)</code></pre>
       <p class="signature"><span class="sig-params">p: ptr</span></p>
-      <p class="doc">Give back a reference `keep` handed over.</p>
+      <p class="doc">Give back one reference `keep` handed over, or one a header-defined struct's string field (`extern struct ... @c_import`) was given by a store (#3567): `p` is the string or the characters the field holds. A pointer nothing handed over (a literal, a copy, C's own characters, one given back already) is left alone.</p>
     </div>
     <div class="function" id="from_ptr" data-name="from_ptr">
       <h3 class="function-name">from_ptr <span class="kind">fn</span></h3>

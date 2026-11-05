@@ -27,7 +27,13 @@ builder mk(c: ptr, body: string): string with opts_new {
     ctr.n = ctr.n + 1
     sel = ""
     if _builder != null { o = _builder as *Opts; sel = o.selector }
-    return "[${body}:${sel}]"
+    out = "[${body}:${sel}]"
+    // The builder owns the config its block filled; null without a block.
+    if _builder != null {
+        bag = _builder as *Opts
+        heap.free(bag)
+    }
+    return out
 }
 
 main() {
@@ -51,5 +57,6 @@ main() {
     if n != "[d:]" { println("WRONG: blockless value ${n}") return 1 }
 
     println("builder assign runs once")
+    heap.free(ctr)
     return 0
 }

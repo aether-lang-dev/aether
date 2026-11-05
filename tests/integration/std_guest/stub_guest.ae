@@ -41,6 +41,7 @@ main() {
     child.run(h) callback {
         run_script(h)
     }
+    child.free(h)
     exit(0)
 }
 

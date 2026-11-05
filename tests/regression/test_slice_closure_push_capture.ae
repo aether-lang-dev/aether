@@ -1,0 +1,50 @@
+// Regression (#3568): a closure's push into a slice it captures is a write
+// the closure and its frame share.
+//
+// A closure read a slice it captured through its environment's copy, which
+// holds a reference of its own, and pushed into the body's alias of that
+// copy: the growth moved the alias to a buffer of its own and gave back a
+// reference the environment still counted on, or, with a reference taken
+// first, left each call's new buffer held by nothing (the heap grew by 7200
+// bytes a round). A push writes the slice, as an assignment does, so the
+// slice is a cell the closure and its frame share, which owns its
+// reference: each push grows it, and the frame sees what was pushed.
+//
+// Three pushes through the closure are read back in the frame, and where
+// the heap count is exact (mem.heap_in_use_exact) rounds of them leave the
+// heap as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+shape() -> int {
+    xs = make([]int, 2)
+    add = | v: int | {
+        xs.push(v)
+    }
+    add(1)
+    add(2)
+    add(3)
+    return xs.len
+}
+
+main() {
+    check(shape() == 5, "the outer slice the closure pushed into")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                for i in 0..50 {
+                    _a = shape()
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

@@ -62,7 +62,7 @@ exports(
 // realloc(p, 0): glibc returns NULL for that, but macOS frees the old
 // block and returns a fresh minimum-size allocation, which then leaks —
 // caught by the macOS leaks(1) gate as 16-byte ROOT LEAKs.
-extern malloc(size: int) -> ptr
+extern calloc(count: long, size: long) -> ptr
 @extern("free") libc_free(p: ptr)
 
 struct BN {
@@ -73,9 +73,11 @@ struct BN {
 
 // ---- internal construction helpers ----
 
-// Allocate a BN. `mag` may be null (only valid with len 0 / sign 0).
+// Allocate a BN. `mag` may be null (only valid with len 0 / sign 0). The
+// struct starts zeroed: a store into its `mag` gives back the slice the field
+// held (#3568), and the field must hold none before the first.
 bn_alloc(s: int, mag: @keep int[], len: int) -> *BN {
-    n = malloc(sizeof(BN)) as *BN
+    n = calloc(1, sizeof(BN)) as *BN
     n.sign = s
     n.mag = mag
     n.len = len

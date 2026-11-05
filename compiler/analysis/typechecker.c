@@ -622,14 +622,9 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
     // on its scope — natural outer→inner shadowing without explicit
     // stack management.
     if (table->dsl_receiver && table->dsl_receiver[0] && name[0]) {
-        /* Bounded snprintf via precision spec — caps each component
-         * at 250 bytes regardless of strlen, which keeps GCC's
-         * format-truncation analyzer happy on -Werror builds.
-         * Identifiers above 250 bytes don't occur in practice
-         * (longest stdlib symbol is <40 chars). */
-        char rewritten[512];
-        snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s",
-                 table->dsl_receiver, name);
+        /* Interned, as long as the two names are: each was cut at 250
+         * bytes, and a longer one reached another name (#3569). */
+        const char* rewritten = aether_internf("%s_%s", table->dsl_receiver, name);
         for (SymbolTable* t = table; t; t = t->parent) {
             if (t != table &&
                 (scope_name_is_hidden(t, name) ||
@@ -822,8 +817,7 @@ int is_imported_namespace(const char* name);
  * merges the module's functions as `<ns>_<name>` and its own `m.a()` calls
  * resolve to them, as a module sees itself (module_sees_namespace); checked
  * on its own, the file used to know no namespace at all, so `ae check`
- * rejected a call `ae build` accepted. NULL for a program. */
-static char g_entry_self_ns_buf[256];
+ * rejected a call `ae build` accepted. NULL for a program. Interned. */
 static const char* g_entry_self_ns = NULL;
 
 /* The program's own (not merged) top-level definition named `name` that a
@@ -877,9 +871,7 @@ static int entry_self_reference(const char* prefix, const char* name) {
 static int entry_export_blocked(const char* name) {
     ASTNode* program = aether_typecheck_program_node();
     if (!program || !name) return 0;
-    char prefixed[512];
-    snprintf(prefixed, sizeof(prefixed), "%s_%s",
-             g_entry_self_ns ? g_entry_self_ns : "", name);
+    const char* prefixed = aether_internf("%s_%s", g_entry_self_ns ? g_entry_self_ns : "", name);
     int has_list = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* list = program->children[i];
@@ -1025,17 +1017,35 @@ int is_imported_namespace(const char* name) {
  * `<ns>_<name>`, which a module may list a name as: an Aether function so
  * named (std.md5's `md5_hex`, merged as `md5_md5_hex`) as much as an
  * extern, whose C name is that joined spelling. `md5.hex` built a C name,
- * `md5_hex`, and so reached the extern form only (#2976). */
-static void qualified_c_name(const char* ns, const char* name, char* buf, size_t cap) {
+ * `md5_hex`, and so reached the extern form only (#2976). Interned, as long
+ * as it is: a fixed buffer cut a longer name, which then named nothing
+ * (#3569). */
+static const char* qualified_c_name(const char* ns, const char* name) {
     if (global_module_registry) {
-        if (module_function_c_name(ns, name, buf, cap)) return;
-        char prefixed[512];
-        if (snprintf(prefixed, sizeof(prefixed), "%s_%s", ns, name) < (int)sizeof(prefixed) &&
-            module_function_c_name(ns, prefixed, buf, cap))
-            return;
+        char* c = module_function_c_name_dup(ns, name);
+        if (!c) {
+            const char* prefixed = aether_internf("%s_%s", ns, name);
+            c = module_function_c_name_dup(ns, prefixed);
+        }
+        if (c) {
+            const char* r = aether_intern(c);
+            free(c);
+            return r;
+        }
     }
-    /* A name too long for `buf` names nothing. */
-    if (snprintf(buf, cap, "%s_%s", ns, name) >= (int)cap) buf[0] = '\0';
+    return aether_internf("%s_%s", ns, name);
+}
+
+/* `name` with each `.` as `_`, interned and as long as it is: the C name a
+ * dotted path merges to (#3569). */
+static const char* dotted_as_c_name(const char* name) {
+    size_t n = strlen(name);
+    char* s = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++) s[i] = name[i] == '.' ? '_' : name[i];
+    s[n] = '\0';
+    const char* r = aether_intern_n(s, n);
+    free(s);
+    return r;
 }
 
 Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) {
@@ -1076,9 +1086,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         Symbol* alias_sym = resolve_module_alias(table, prefix);
         if (alias_sym && alias_sym->alias_target) {
             // Reconstruct with actual module name
-            char resolved_name[512];
-            snprintf(resolved_name, sizeof(resolved_name), "%s.%s",
-                    alias_sym->alias_target, suffix);
+            const char* resolved_name = aether_internf("%s.%s", alias_sym->alias_target, suffix);
             if (name_heap) free(name_copy);
             return lookup_symbol(table, resolved_name);
         }
@@ -1098,8 +1106,7 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
             // #878: no selective-import gate here — the qualified `X.fn()`
             // surface is available whenever the namespace is visible, in any
             // import form. (export visibility + hide/seal above still apply.)
-            char c_func_name[512];
-            qualified_c_name(prefix, suffix, c_func_name, sizeof(c_func_name));   /* #2978 */
+            const char* c_func_name = qualified_c_name(prefix, suffix);   /* #2978 */
             Symbol* sym = lookup_member_symbol(table, c_func_name);
             /* #924 re-export: `hub.fn()` where hub re-exports an imported
              * `fn`. No local `hub_fn` symbol exists; redirect to the
@@ -1108,10 +1115,8 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
                 AetherModule* hub = module_find_by_namespace(prefix);
                 AetherModule* origin = module_resolve_reexport(hub, suffix);
                 if (origin && origin->name) {
-                    char c_origin[512];
-                    qualified_c_name(module_namespace_of(origin->name), suffix, c_origin,
-                                     sizeof(c_origin));
-                    sym = lookup_member_symbol(table, c_origin);
+                    sym = lookup_member_symbol(
+                        table, qualified_c_name(module_namespace_of(origin->name), suffix));
                 }
             }
             /* #1035: exports that don't carry the module-name prefix —
@@ -1220,22 +1225,24 @@ static int definition_param_count(ASTNode* def) {
  * stored into an INFERRED 32-bit int: a 64-bit integer, and — since the
  * same slot kept `int` storage while the checker went on typing the name
  * as float, so `${r}` printed garbage through `%g` — a float. */
-static void narrowing_message(char* msg, size_t size, const char* nm, TypeKind assigned) {
+/* As long as the name makes it (#3574): through a caller's buffer a long
+ * name cut the explanation after it. */
+static const char* narrowing_message(const char* nm, TypeKind assigned) {
     if (assigned == TYPE_FLOAT || assigned == TYPE_FLOAT32 || assigned == TYPE_LONGDOUBLE) {
-        snprintf(msg, size,
+        return aether_internf(
             "narrowing assignment to '%s': its type was inferred as int from "
             "its initializer, but a float is assigned here and would truncate. "
             "Annotate the declaration to keep the fraction (e.g. `float %s = ...`), "
             "or write `int %s = ...` to make the narrowing explicit.", nm, nm, nm);
     } else if (assigned == TYPE_UINT32) {
-        snprintf(msg, size,
+        return aether_internf(
             "narrowing assignment to '%s': its type was inferred as int from "
             "its initializer, but a uint32 is assigned here and values past "
             "2^31 would not fit. Annotate the declaration to keep it unsigned "
             "(e.g. `uint32 %s = ...`), or write `int %s = ...` to make the "
             "narrowing explicit.", nm, nm, nm);
     } else {
-        snprintf(msg, size,
+        return aether_internf(
             "narrowing assignment to '%s': its type was inferred "
             "as 32-bit int from its initializer, but a 64-bit "
             "value is assigned here and would truncate. Annotate "
@@ -1317,27 +1324,26 @@ static void quote_report_error(const char* message, const char* hint, int line,
  * which is exactly why the call used to build: say so, since "check the
  * spelling" sends the reader the wrong way. A local of that name is not a
  * module reference, so it gets no hint. */
-static int missing_import_hint(const char* prefix, SymbolTable* table,
-                               char* out, size_t cap) {
+/* NULL, or the hint, as long as the names make it (#3574). */
+static const char* missing_import_hint(const char* prefix, SymbolTable* table) {
     if (!prefix || !global_module_registry || is_visible_namespace(prefix, table))
-        return 0;
+        return NULL;
     Symbol* local = lookup_symbol(table, prefix);
-    if (local && !local->is_module_alias) return 0;
+    if (local && !local->is_module_alias) return NULL;
     AetherModule* m = module_find_by_namespace(prefix);
-    if (!m || !m->name) return 0;
+    if (!m || !m->name) return NULL;
     if (table && table->merged_from) {
-        snprintf(out, cap,
+        return aether_internf(
                  "module '%s' does not import '%s': add `import %s` to it "
                  "(another module of the program importing '%s' does not "
                  "make it visible here)",
                  table->merged_from, m->name, m->name, m->name);
     } else {
-        snprintf(out, cap,
+        return aether_internf(
                  "'%s' is not imported by this file: add `import %s` "
                  "(another module of the program importing it does not make "
                  "it visible here)", m->name, m->name);
     }
-    return 1;
 }
 
 void type_warning(const char* message, int line, int column);
@@ -1446,10 +1452,10 @@ static void check_render_operand(ASTNode* child, SymbolTable* table,
     if (child->type == AST_IDENTIFIER && child->value) {
         Symbol* sym = lookup_symbol(table, child->value);
         if (sym && sym->is_function) {
-            char msg[640];
+            const char* msg = "";
             char call[96];
             snprintf(call, sizeof(call), "%s()", child->value);
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s '%s': it is a function, so %s renders "
                 "its ADDRESS, not a value. Did you mean %s?",
                 verb, child->value, render_form(printing, child->value, form, sizeof form),
@@ -1475,43 +1481,43 @@ static void check_render_operand(ASTNode* child, SymbolTable* table,
     Type* t = child->node_type;
     if (!t || interp_kind_is_renderable(t->kind)) return;
 
-    char msg[640];
+    const char* msg = "";
     switch (t->kind) {
         case TYPE_TUPLE:
             if (child->type == AST_FUNCTION_CALL) {
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                     "cannot %s a call that returns %d values: destructure it "
                     "first, e.g. `v, err = %s(...)` then %s",
                     verb, t->tuple_count, child->value ? child->value : "f",
                     render_form(printing, "v", form, sizeof form));
             } else {
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                     "cannot %s a tuple: it has no string rendering; destructure "
                     "it first, e.g. `a, b = t` then %s",
                     verb, render_form(printing, "a", form, sizeof form));
             }
             break;
         case TYPE_STRUCT:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s a struct%s%s: %s a field instead, e.g. %s",
                 verb, t->struct_name ? " " : "",
                 t->struct_name ? ast_struct_display_name(t->struct_name) : "",
                 verb, render_form(printing, "value.field", form, sizeof form));
             break;
         case TYPE_ARRAY:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s an array: %s an element, e.g. %s",
                 verb, verb, render_form(printing, "a[0]", form, sizeof form));
             break;
         case TYPE_FUNCTION:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s a function value: %s renders its address. Call it "
                 "(%s) to %s its result",
                 verb, render_form(printing, "f", form, sizeof form),
                 render_form(printing, "f()", form2, sizeof form2), verb);
             break;
         case TYPE_PTR:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s a `ptr`: it has no string rendering. A `ptr` that "
                 "holds an Aether string is read as one with `string.from_ptr(p)`, "
                 "one that holds C text is copied with `string.from_cstr(p)`, and "
@@ -1519,23 +1525,23 @@ static void check_render_operand(ASTNode* child, SymbolTable* table,
                 "(`map.get_string`, `list.get_string`)", verb);
             break;
         case TYPE_OPTIONAL:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s an optional: it may hold no value; give it one "
                 "first, e.g. %s",
                 verb, render_form(printing, "v ?? fallback", form, sizeof form));
             break;
         case TYPE_SUM:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s a sum value: `match` on it and %s what each "
                 "variant holds", verb, verb);
             break;
         case TYPE_VOID:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s a void value: this expression returns "
                 "nothing to render", verb);
             break;
         default:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "cannot %s this value: its type has no string "
                 "rendering", verb);
             break;
@@ -1601,15 +1607,15 @@ static void warn_conditional_defers_walk(ASTNode* node, int can_fail) {
     if (node->type == AST_CLOSURE || node->type == AST_QUOTE ||
         node->type == AST_FUNCTION_DEFINITION) return;
     if (node->type == AST_DEFER_STATEMENT && node->value && !can_fail) {
-        char msg[220];
+        const char* msg = "";
         if (strcmp(node->value, "catch") == 0) {
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "`defer catch` in a function that cannot fail: it will never run. "
                      "Give the function an error result (`-> (T, string)` or `-> T!`), "
                      "or use a plain `defer`.");
             type_warning(msg, node->line, node->column);
         } else if (strcmp(node->value, "try") == 0) {
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "`defer try` in a function that cannot fail: it always runs, so it "
                      "is the same as a plain `defer`. Drop the `try`, or give the "
                      "function an error result (`-> (T, string)` or `-> T!`).");
@@ -1722,16 +1728,25 @@ static const char* type_name(Type* t) {
      * "closure" it was named after the other representation, the one it
      * cannot hold (#2634). */
     if (t && t->kind == TYPE_FUNCTION && t->is_fnptr) {
-        char buf[256];
-        size_t n = (size_t)snprintf(buf, sizeof(buf), "fn(");
-        for (int i = 0; i < t->param_count && t->param_types && n < sizeof(buf); i++)
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i ? ", " : "",
-                                  type_name(t->param_types[i]));
-        if (n < sizeof(buf))
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, ")");
-        if (n < sizeof(buf) && t->return_type && t->return_type->kind != TYPE_VOID)
-            snprintf(buf + n, sizeof(buf) - n, " -> %s", type_name(t->return_type));
-        return aether_internf("%s", buf);
+        /* Grown to fit (#3569): 256 bytes cut a long signature's name. */
+        size_t cap = 64, len = 0;
+        char* buf = (char*)aether_xrealloc(NULL, cap);
+        int pc = t->param_types ? t->param_count : 0;
+        for (int i = -1; i <= pc; i++) {
+            const char* lead = i < 0 ? "fn(" : i == pc ? ")" : i ? ", " : "";
+            const char* piece = (i >= 0 && i < pc) ? type_name(t->param_types[i]) : "";
+            if (i == pc && t->return_type && t->return_type->kind != TYPE_VOID)
+                piece = aether_internf(" -> %s", type_name(t->return_type));
+            size_t need = len + strlen(lead) + strlen(piece) + 1;
+            if (need > cap) {
+                while (cap < need) cap *= 2;
+                buf = (char*)aether_xrealloc(buf, cap);
+            }
+            len += (size_t)sprintf(buf + len, "%s%s", lead, piece);
+        }
+        const char* r = aether_intern_n(buf, len);
+        free(buf);
+        return r;
     }
     /* #2980: a closure's type with a parameter's mode, as it is written. */
     if (t && t->kind == TYPE_FUNCTION && fn_type_has_modes(t)) return type_spelled(t);
@@ -1772,8 +1787,8 @@ static int reject_const_element_write(ASTNode* target, SymbolTable* table, ASTNo
     if (!root || root == target || root->type != AST_IDENTIFIER || !root->value) return 0;
     Symbol* s = lookup_symbol(table, root->value);
     if (!s || !s->is_const) return 0;
-    char msg[300];
-    snprintf(msg, sizeof(msg),
+    const char* msg = "";
+    msg = aether_internf(
              "cannot write to an element of '%s': it is a constant, a read-only table",
              root->value);
     type_error_hint(msg, "copy it into an array of your own (`t = [...]`) and change that",
@@ -1793,13 +1808,13 @@ static int reject_string_char_write(ASTNode* target, SymbolTable* table, ASTNode
     if (bt) free_type(bt);
     if (!is_string) return 0;
     ASTNode* base = target->children[0];
-    char msg[300];
+    const char* msg = "";
     if (base->type == AST_IDENTIFIER && base->value)
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "cannot write to a character of '%s': a string's bytes are read-only",
                  base->value);
     else
-        snprintf(msg, sizeof(msg), "cannot write to a character of a string: its bytes are read-only");
+        msg = aether_internf("cannot write to a character of a string: its bytes are read-only");
     type_error_hint(msg, "build the new text as a new string (interpolation, string.concat, "
                     "string.substring), or work on the bytes in a `byte[N]` array of your own",
                     at->line, at->column);
@@ -1821,13 +1836,13 @@ static int reject_length_write(ASTNode* target, SymbolTable* table, ASTNode* at)
     if (!is_array) return 0;
     ASTNode* base = target->children[0];
     int named = base->type == AST_IDENTIFIER && base->value;
-    char msg[300];
-    char hint[300];
-    snprintf(msg, sizeof(msg),
+    const char* msg = "";
+    const char* hint = "";
+    msg = aether_internf(
              "cannot write to the length of %s%s%s: a slice's length is fixed when the slice "
              "is made, and an array's is a constant",
              named ? "'" : "", named ? base->value : "a slice or an array", named ? "'" : "");
-    snprintf(hint, sizeof(hint),
+    hint = aether_internf(
              "for fewer elements, take a slice of the same ones: `%s[lo..hi]`",
              named ? base->value : "xs");
     type_error_hint(msg, hint, at->line, at->column);
@@ -2065,8 +2080,8 @@ static int check_quote_callee(ASTNode* call, Symbol* symbol) {
     int takes_tree = is_fn && quote_is_tree_type(last_param_type(fn));
     const char* name = call->value ? call->value : "function";
     if (last->type == AST_QUOTE && !takes_tree) {
-        char msg[320];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "'%s' is given a quote, but its last parameter is not a quote.Tree", name);
         type_error_code_hint(msg,
             "a quote hands its block over as a tree; the function receiving it "
@@ -2077,8 +2092,8 @@ static int check_quote_callee(ASTNode* call, Symbol* symbol) {
     }
     if (takes_tree && last->type == AST_CLOSURE) {
         int trailing = last->value && strcmp(last->value, "trailing") == 0;
-        char msg[320];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "'%s' takes a quote.Tree as its last parameter, but is given %s",
                  name, trailing ? "a block that runs inline" : "a closure or callback");
         type_error_code_hint(msg,
@@ -2262,11 +2277,10 @@ static int is_const_expr_call(ASTNode* expr) {
     static const char* const whitelist[] = {
         "from_int", "from_long", "from_float", "concat"
     };
+    /* `string.<name>` or `string_<name>`, compared in place. */
+    if (strncmp(name, "string", 6) != 0 || (name[6] != '.' && name[6] != '_')) return 0;
     for (size_t i = 0; i < sizeof(whitelist) / sizeof(whitelist[0]); i++) {
-        char dotted[64], under[64];
-        snprintf(dotted, sizeof(dotted), "string.%s", whitelist[i]);
-        snprintf(under,  sizeof(under),  "string_%s", whitelist[i]);
-        if (strcmp(name, dotted) == 0 || strcmp(name, under) == 0) {
+        if (strcmp(name + 7, whitelist[i]) == 0) {
             /* Arguments must themselves be const-expressions — guards
              * `string.from_int(rand())` and the like. */
             for (int a = 0; a < expr->child_count; a++) {
@@ -2680,28 +2694,27 @@ static Type* fn_value_type_of(ASTNode* def, Type* sym_type);
  * it is. */
 static int refuse_moded_fn_value(ASTNode* ident, ASTNode* def, Type* sym_type, int cast) {
     int refused = 0;
-    char help[400];
-    help[0] = '\0';
+    const char* help = "";
     for (int i = 0; ident && def && i < def->child_count; i++) {
         ASTNode* p = def->children[i];
         if (!p || !p->annotation) continue;
         int keep = annotation_has_marker(p->annotation, "keep_param");
         int into = annotation_has_marker(p->annotation, "into_param");
         if (!keep && !into) continue;
-        char msg[320];
+        const char* msg = "";
         if (keep)
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "'%s' keeps its `ptr` parameter '%s' (`@keep`), so it cannot be a C function "
                      "pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
         else
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "'%s' passes its `ptr` parameter '%s' into its result (`@into`), so it cannot "
                      "be a C function pointer, whose parameters borrow",
                      ident->value, p->value ? p->value : "?");
         if (!help[0]) {
             Type* vt = fn_value_type_of(def, sym_type);
-            snprintf(help, sizeof(help),
+            help = aether_internf(
                      cast ? "drop the cast and give the slot the function's modes, `%s`: '%s' "
                             "goes there as it is, and a call through it is checked as a call "
                             "of '%s' is"
@@ -2747,22 +2760,25 @@ static Type* fn_value_type_of(ASTNode* def, Type* sym_type) {
             p->type != AST_REQUIRES_CLAUSE && p->type != AST_ENSURES_CLAUSE) count++;
     }
     Type** params = count ? malloc(sizeof(Type*) * (size_t)count) : NULL;
-    int modes[64] = { 0 };
+    /* Each parameter's mode, every one (#3574): past 64 a `@keep` or
+     * `@into` parameter's was dropped, and the value's type borrowed it. */
+    int* modes = (int*)calloc((size_t)(count > 0 ? count : 1), sizeof(int));
+    if (!modes) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
     int k = 0;
     for (int i = 0; i < def->child_count && k < count; i++) {
         ASTNode* p = def->children[i];
         if (!p || p->type == AST_GUARD_CLAUSE || p->type == AST_BLOCK ||
             p->type == AST_REQUIRES_CLAUSE || p->type == AST_ENSURES_CLAUSE) continue;
-        if (k < 64)
-            modes[k] = annotation_has_marker(p->annotation, "keep_param")   ? FN_MODE_KEEP
-                       : annotation_has_marker(p->annotation, "into_param") ? FN_MODE_INTO
-                                                                            : FN_MODE_BORROWED;
+        modes[k] = annotation_has_marker(p->annotation, "keep_param")   ? FN_MODE_KEEP
+                   : annotation_has_marker(p->annotation, "into_param") ? FN_MODE_INTO
+                                                                        : FN_MODE_BORROWED;
         params[k++] = p->node_type ? clone_type(p->node_type) : create_type(TYPE_INT);
     }
     Type* ret = (sym_type && sym_type->kind != TYPE_VOID) ? clone_type(sym_type) : NULL;
     Type* t = create_function_type(count, params, ret);
     free(params);
-    for (int i = 0; i < count && i < 64; i++) fn_type_set_param_mode(t, i, modes[i]);
+    for (int i = 0; i < count; i++) fn_type_set_param_mode(t, i, modes[i]);
+    free(modes);
     return t;
 }
 
@@ -3190,8 +3206,8 @@ static void reject_optional_argument(SymbolTable* table, ASTNode* call, ASTNode*
         hoisted = s && s->branch_hoisted;
     }
     if (hoisted) {
-        char hint[512];
-        snprintf(hint, sizeof(hint),
+        const char* hint = "";
+        hint = aether_internf(
                  "'%s' is one variable for the whole function, as a local first bound in a "
                  "branch or loop body is, and a binding of it elsewhere makes it %s: give that "
                  "value a name of its own, or unwrap this one with `%s ?? fallback`",
@@ -3242,11 +3258,12 @@ static int reject_array_field_source(ASTNode* value, Type* value_type, Type* fie
                                      const char* slot, int line, int column) {
     if (!value || !field_type || field_type->kind != TYPE_ARRAY ||
         field_type->array_size <= 0 || field_type->index_enum_name) return 0;
-    char want[96], got[96], msg[640];
+    char want[96], got[96];
+    const char* msg = "";
     int n = field_type->array_size;
     if (value->type == AST_ARRAY_LITERAL) {
         if (value->child_count <= n) return 0;
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s is %s and cannot take an array literal of %d elements: a fixed-size "
                  "array field holds exactly its declared number of elements",
                  slot, array_type_spell(field_type, want, sizeof(want)), value->child_count);
@@ -3256,7 +3273,7 @@ static int reject_array_field_source(ASTNode* value, Type* value_type, Type* fie
     if (!value_type || value_type->kind == TYPE_UNKNOWN) return 0;
     if (value_type->kind == TYPE_ARRAY && value_type->array_size > 0) {
         if (value_type->array_size == n) return 0;
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s is %s and cannot take %s: binding an array to a fixed-size array field "
                  "copies its elements, so the two lengths must be the same",
                  slot, array_type_spell(field_type, want, sizeof(want)),
@@ -3265,7 +3282,7 @@ static int reject_array_field_source(ASTNode* value, Type* value_type, Type* fie
         return 1;
     }
     if (value_type->kind != TYPE_ARRAY && value_type->kind != TYPE_PTR) return 0;
-    snprintf(msg, sizeof(msg),
+    msg = aether_internf(
              "%s is %s and cannot take %s: its length is not known until the program "
              "runs, and a fixed-size array field takes an array of exactly its length",
              slot, array_type_spell(field_type, want, sizeof(want)),
@@ -3299,11 +3316,11 @@ static void reject_non_closure_callee(ASTNode* call, SymbolTable* table) {
         snprintf(name, sizeof(name), "'%s'", callee->value);
     else
         snprintf(name, sizeof(name), "the first argument");
-    char msg[640];
+    const char* msg = "";
     if (annotation_has_marker(call->annotation, "value_callee"))   /* #3099: `xs[0]()` */
-        snprintf(msg, sizeof(msg), "the value called here is not a function: it has type %s", what);
+        msg = aether_internf("the value called here is not a function: it has type %s", what);
     else
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "call() needs a closure, but %s has type %s", name, what);
     const char* hint =
         t->kind == TYPE_TUPLE
@@ -3342,12 +3359,12 @@ static void reject_untyped_erased_args(ASTNode* call, SymbolTable* table) {
         int is_none = a->type == AST_NONE_LITERAL;
         int is_empty = a->type == AST_ARRAY_LITERAL && a->child_count == 0;
         if (!is_none && !is_empty) continue;
-        char msg[400], help[300];
-        snprintf(msg, sizeof(msg),
+        const char* msg = ""; const char* help = "";
+        msg = aether_internf(
                  "`%s` given to '%s', a bare `fn`: its parameter types are not known here, so "
                  "there is no %s type to build it as",
                  is_none ? "none" : "[]", callee, is_none ? "optional" : "slice");
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "bind it to a local of the parameter's type first (e.g. `let o: %s = %s`) and "
                  "pass that, or, for a named function, take a typed function pointer (`%s: "
                  "fn(%s) -> int`)",
@@ -3381,12 +3398,14 @@ static void coerce_closure_call_args(ASTNode* call, SymbolTable* table) {
     if (call->child_count < 2 || !call->children[0]) return;
     ASTNode* lit = call_callee_literal(call, table);
     if (lit) {
-        Type* pts[64];
+        /* Every parameter (#3574): past 64 they were not coerced. */
+        Type** pts = (Type**)aether_xrealloc(NULL, sizeof(Type*) * (size_t)(lit->child_count + 1));
         int n = 0;
-        for (int i = 0; i < lit->child_count && n < 64; i++)
+        for (int i = 0; i < lit->child_count; i++)
             if (lit->children[i] && lit->children[i]->type == AST_CLOSURE_PARAM)
                 pts[n++] = lit->children[i]->node_type;
         coerce_args_to_params(call, 1, pts, n);
+        free(pts);
         return;
     }
     Type* ft = infer_type(call->children[0], table);
@@ -3778,8 +3797,8 @@ static int struct_field_value_fits(SymbolTable* table, ASTNode* sdef, ASTNode* f
     if (ft->kind == TYPE_STRING && fv->type == AST_NULL_LITERAL) return 1;
     const char* sname = sdef->value ? ast_struct_display_name(sdef->value) : "?";
     if (ft->kind == TYPE_BYTE && byte_assignment_literal_out_of_range(fv)) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "byte literal out of range for field '%s' of '%s': %s does not fit in 0..255",
                  fd->value, sname, fv->value ? fv->value : "?");
         type_error(msg, fv->line, fv->column);
@@ -3789,12 +3808,12 @@ static int struct_field_value_fits(SymbolTable* table, ASTNode* sdef, ASTNode* f
     int ok = !vt || vt->kind == TYPE_UNKNOWN || is_assignable(vt, ft) ||
              (ft->kind == TYPE_FUNCTION && fn_name_matches_signature(table, fv, ft));
     if (!ok) {
-        char msg[512];
+        const char* msg = "";
         if (fv->type == AST_NULL_LITERAL)
-            snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s: it cannot take null",
+            msg = aether_internf("field '%s' of '%s' is %s: it cannot take null",
                      fd->value, sname, type_spelled(ft));
         else
-            snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s: it cannot take a value of type %s",
+            msg = aether_internf("field '%s' of '%s' is %s: it cannot take a value of type %s",
                      fd->value, sname, type_spelled(ft), type_spelled(vt));
         type_error(msg, fv->line, fv->column);
     }
@@ -4046,16 +4065,14 @@ static Type* infer_member_access(ASTNode* expr, SymbolTable* table, Type* obj) {
     if (expr->child_count > 0 && expr->children[0] &&
         expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
         is_visible_namespace(expr->children[0]->value, table) && expr->value) {
-        char qualified[512];
-        snprintf(qualified, sizeof(qualified), "%s_%s",
-                 expr->children[0]->value, expr->value);
+        const char* qualified = aether_internf("%s_%s", expr->children[0]->value, expr->value);
         Symbol* sym = lookup_symbol(table, qualified);
         /* #2631: the checked module file's own constant, which a
          * build merges as `<ns>_<name>`: the bare one it carries. */
         if ((!sym || !sym->type) && !(table && table->merged_from) &&
             entry_self_reference(expr->children[0]->value, expr->value)) {
             sym = entry_self_symbol(table, expr->value);
-            snprintf(qualified, sizeof(qualified), "%s", expr->value);
+            qualified = aether_intern(expr->value);
         }
         if (sym && sym->type) {
             // Rewrite node in-place for codegen
@@ -4374,8 +4391,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 Symbol* struct_sym = lookup_symbol(table, expr->value);
                 if (!struct_sym || !struct_sym->type ||
                     struct_sym->type->kind != TYPE_STRUCT) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "`as *%s`, '%s' is not a struct type", expr->value, expr->value);
                     type_error(msg, expr->line, expr->column);
                     return create_type(TYPE_UNKNOWN);
@@ -4438,8 +4455,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (!base) return create_type(TYPE_UNKNOWN);
             if (base->kind == TYPE_UNKNOWN) { free_type(base); return create_type(TYPE_UNKNOWN); }
             if (base->kind != TYPE_ARRAY || !base->element_type) {
-                char msg[200];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "`[..]` sub-slicing is defined for a `T[]` slice or a "
                          "`T[N]` array, not for %s", type_name(base));
                 free_type(base);
@@ -4661,9 +4678,10 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
         case AST_FUNCTION_CALL: {
             /* #1286 `make([]T, n)` is a `T[]` slice of n elements; the parser
              * stamped the array type on the call. */
+            /* #3025; #3570: `__slice_readonly(v, s)`, a view of string `s`. */
             if (expr->value && strcmp(expr->value, "__slice_readonly") == 0 &&
-                expr->child_count == 1)
-                return infer_type(expr->children[0], table);   /* #3025 */
+                (expr->child_count == 1 || expr->child_count == 2))
+                return infer_type(expr->children[0], table);
             /* The slice-ownership intrinsics (slice_own.c) carry their type. */
             if (expr->value && strncmp(expr->value, "__slice_", 8) == 0 && expr->node_type)
                 return clone_type(expr->node_type);
@@ -4702,8 +4720,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                         continue;
                     }
                     if (t->kind != chosen->kind) {
-                        char msg[220];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "select() branches must all yield the same type: "
                                  "'%s' is %s but '%s' is %s",
                                  chosen_key ? chosen_key : "?", type_spelled(chosen),
@@ -4769,11 +4787,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
             if (expr->value && (!symbol || !symbol->is_function)) {
                 const char* dot = strrchr(expr->value, '.');
                 size_t rlen = dot ? (size_t)(dot - expr->value) : 0;
-                if (dot && rlen > 0 && rlen < 200 &&
-                    !memchr(expr->value, '.', rlen)) {
-                    char recv[200];
-                    memcpy(recv, expr->value, rlen);
-                    recv[rlen] = '\0';
+                if (dot && rlen > 0 && !memchr(expr->value, '.', rlen)) {
+                    const char* recv = aether_intern_n(expr->value, rlen);
                     Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
                     if (fsig && fsig->return_type) {
                         return clone_type(fsig->return_type);
@@ -4813,8 +4828,8 @@ Type* infer_type(ASTNode* expr, SymbolTable* table) {
                 !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value &&
                 is_export_blocked(expr->children[0]->value, expr->value)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'",
+                const char* msg = "";
+                msg = aether_internf("'%s' is not exported from module '%s'",
                          expr->value, expr->children[0]->value);
                 type_error(msg, expr->line, expr->column);
                 return create_type(TYPE_UNKNOWN);
@@ -5372,11 +5387,8 @@ static void collect_references(ASTNode* node, TrackedVars* t) {
     if (node->type == AST_FUNCTION_CALL && node->value && node->annotation &&
         strncmp(node->annotation, "fnfield_", 8) == 0) {
         const char* dot = strchr(node->value, '.');
-        char recv[256];
-        if (dot && dot > node->value && dot - node->value < (ptrdiff_t)sizeof(recv)) {
-            snprintf(recv, sizeof(recv), "%.*s", (int)(dot - node->value), node->value);
-            mark_used(t, recv);
-        }
+        if (dot && dot > node->value)
+            mark_used(t, aether_intern_n(node->value, (size_t)(dot - node->value)));
     }
 
     // Match statements with list patterns implicitly reference <expr>_len variables
@@ -5389,9 +5401,7 @@ static void collect_references(ASTNode* node, TrackedVars* t) {
         Type* mt = match_expr ? match_expr->node_type : NULL;
         if (match_expr && match_expr->type == AST_IDENTIFIER && match_expr->value &&
             !(mt && mt->kind == TYPE_ARRAY) && !is_string_seq_ptr_type(mt)) {
-            char len_name[256];
-            snprintf(len_name, sizeof(len_name), "%s_len", match_expr->value);
-            mark_used(t, len_name);
+            mark_used(t, aether_internf("%s_len", match_expr->value));
         }
     }
 
@@ -5693,29 +5703,31 @@ static void resolve_bitstruct_types(ASTNode* program);
 // #891: typecheck-time registry of @c_struct overlay names. Codegen has its
 // own field-level registry; the typechecker only needs the NAME set so an
 // `expr as *Name` cast and member access against it validate.
-#define AETHER_MAX_C_STRUCTS 256
-static const char* g_c_struct_names[AETHER_MAX_C_STRUCTS];
-static int g_c_struct_name_count = 0;
+/* #3574: every one the program declares; 256 slots dropped the rest, and a
+ * cast or a field read against one of those was refused. */
+static StrMap g_c_struct_names;
 static ASTNode* g_c_struct_program = NULL;   /* for field-type lookup (#891) */
 
 static void collect_c_struct_names(ASTNode* program) {
-    g_c_struct_name_count = 0;
+    strmap_free(&g_c_struct_names);
+    strmap_init(&g_c_struct_names);
     g_c_struct_program = program;
     if (!program) return;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_C_STRUCT_DEF && c->value &&
-            g_c_struct_name_count < AETHER_MAX_C_STRUCTS)
-            g_c_struct_names[g_c_struct_name_count++] = c->value;
+        if (c && c->type == AST_C_STRUCT_DEF && c->value)
+            strmap_put(&g_c_struct_names, c->value, NULL);
     }
 }
 
 // #1044 first-class enums. Name registry + program handle so `EnumName.Member`
 // member access and `x: EnumName` annotations resolve without a symbol-table
-// round-trip (mirrors the @c_struct registry above).
-#define AETHER_MAX_ENUMS 256
-static const char* g_enum_names[AETHER_MAX_ENUMS];
+// round-trip (mirrors the @c_struct registry above). Every enum the program
+// declares (#3574): 256 slots dropped the rest, whose members and type
+// annotations then resolved to nothing.
+static const char** g_enum_names = NULL;
 static int g_enum_name_count = 0;
+static StrMap g_enum_name_set;
 static ASTNode* g_enum_program = NULL;
 
 // #1044 implicit enum selector: the return type of the function currently being
@@ -5808,8 +5820,10 @@ static const ASTNode* local_single_init(const char* name) {
             return NULL;
     }
     const ASTNode* found = NULL;
-    const ASTNode* stack[256];
-    int top = 0;
+    /* A stack as deep as the body needs (#3574): 256 slots dropped the
+     * nodes past them, and a binding there was not found. */
+    int cap = 64, top = 0;
+    const ASTNode** stack = (const ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)cap);
     stack[top++] = body;
     while (top > 0 && !found) {
         const ASTNode* n = stack[--top];
@@ -5817,8 +5831,13 @@ static const ASTNode* local_single_init(const char* name) {
         if (n->type == AST_VARIABLE_DECLARATION && n->value && !strcmp(n->value, name) &&
             n->child_count > 0)
             found = n->children[n->child_count - 1];
-        for (int i = 0; i < n->child_count && top < 256; i++) stack[top++] = n->children[i];
+        if (top + n->child_count > cap) {
+            while (top + n->child_count > cap) cap *= 2;
+            stack = (const ASTNode**)aether_xrealloc(stack, sizeof(ASTNode*) * (size_t)cap);
+        }
+        for (int i = 0; i < n->child_count; i++) stack[top++] = n->children[i];
     }
+    free(stack);
     return found;
 }
 
@@ -5886,11 +5905,11 @@ static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb) {
     char what[160];
     snprintf(what, sizeof(what), "%s%s%s", local ? "'" : "", local ? arg->value : "this value",
              local ? "'" : "");
-    char msg[400];
+    const char* msg = "";
     const char* hint = NULL;
     Type* t = arg->node_type;
     if (t && type_is_sized_array(t) && t->array_size > 0) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "cannot %s %s: an array `%s` lives in its function or its struct, not in "
                  "an allocation",
                  verb, what, type_spelled(t));
@@ -5898,7 +5917,7 @@ static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb) {
                    ? "`free` takes a buffer `make([]T, n)` gave; an array needs no freeing"
                    : APPEND_VIEW_HINT;
     } else if (src && is_readonly_view_source(src, 0)) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "cannot %s %s: it is a read-only view of a string's bytes (string.bytes), "
                  "which owns nothing",
                  verb, what);
@@ -5906,7 +5925,7 @@ static int reject_view_owner_op(ASTNode* arg, ASTNode* at, const char* verb) {
                    ? "the string owns its bytes: release the string when it is done, not the view"
                    : APPEND_VIEW_HINT;
     } else if (src && is_borrowed_view_source(src)) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "cannot %s %s: it is a view of elements another slice or an array holds, "
                  "which owns nothing",
                  verb, what);
@@ -5932,8 +5951,8 @@ static int reject_readonly_view_write(ASTNode* target, ASTNode* at) {
     if (!base || (local ? !readonly_view_local_init(base->value, 0)
                         : !is_readonly_view_source(base, 0)))
         return 0;
-    char msg[300];
-    snprintf(msg, sizeof(msg),
+    const char* msg = "";
+    msg = aether_internf(
              "cannot write to an element of %s%s%s: it is a read-only view of a string's "
              "bytes (string.bytes)",
              local ? "'" : "", local ? base->value : "this view", local ? "'" : "");
@@ -5945,10 +5964,7 @@ static int reject_readonly_view_write(ASTNode* target, ASTNode* at) {
 
 
 static int is_enum_type_name(const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < g_enum_name_count; i++)
-        if (strcmp(g_enum_names[i], name) == 0) return 1;
-    return 0;
+    return name && strmap_has(&g_enum_name_set, name);
 }
 
 // #1132 bitstruct: program handle so a bitstruct name in type position, and a
@@ -6095,8 +6111,7 @@ static int coerce_bare_enum_member(ASTNode* expr, Type* expected, SymbolTable* t
     if (expr->node_type && expr->node_type->kind == TYPE_ENUM) return 0;
     if (!enum_has_member(expected->struct_name, expr->value)) return 0;
     if (table && lookup_symbol(table, expr->value)) return 0;  // a real binding wins
-    char qualified[512];
-    snprintf(qualified, sizeof(qualified), "%s_%s", expected->struct_name, expr->value);
+    const char* qualified = aether_internf("%s_%s", expected->struct_name, expr->value);
     free(expr->value);
     expr->value = strdup(qualified);
     if (expr->node_type) free_type(expr->node_type);
@@ -6128,10 +6143,7 @@ static int enum_slot_count(const char* ename) {
 }
 
 static int is_c_struct_name(const char* name) {
-    if (!name) return 0;
-    for (int i = 0; i < g_c_struct_name_count; i++)
-        if (strcmp(g_c_struct_names[i], name) == 0) return 1;
-    return 0;
+    return name && strmap_has(&g_c_struct_names, name);
 }
 
 /* #891: find the AST_C_STRUCT_DEF for `name`. */
@@ -6152,16 +6164,17 @@ static ASTNode* c_struct_def_node(const char* name) {
 static Type* c_struct_field_decl_type(const char* sname, const char* field) {
     ASTNode* def = c_struct_def_node(sname);
     if (!def || !field) return NULL;
-    char buf[256];
-    snprintf(buf, sizeof(buf), "%s", field);
-    char* seg = buf;
+    /* Each segment compared in place: a copy into 256 bytes cut a longer
+     * chain (#3569). */
+    const char* seg = field;
     while (seg && *seg) {
-        char* dot = strchr(seg, '.');
-        if (dot) *dot = '\0';
+        const char* dot = strchr(seg, '.');
+        size_t seg_len = dot ? (size_t)(dot - seg) : strlen(seg);
         ASTNode* fnode = NULL;
         for (int i = 0; i < def->child_count; i++) {
             ASTNode* f = def->children[i];
-            if (f && f->type == AST_STRUCT_FIELD && f->value && strcmp(f->value, seg) == 0) {
+            if (f && f->type == AST_STRUCT_FIELD && f->value &&
+                strncmp(f->value, seg, seg_len) == 0 && f->value[seg_len] == '\0') {
                 fnode = f; break;
             }
         }
@@ -6216,9 +6229,7 @@ static Type* const_initializer_type(ASTNode* e, SymbolTable* table) {
             if (!ns || ns->type != AST_IDENTIFIER || !ns->value || !e->value ||
                 value_hides_namespace(table, ns->value) || !is_visible_namespace(ns->value, table))
                 return create_type(TYPE_UNKNOWN);
-            char qualified[512];
-            snprintf(qualified, sizeof(qualified), "%s_%s", ns->value, e->value);
-            Symbol* s = lookup_symbol(table, qualified);
+            Symbol* s = lookup_symbol(table, aether_internf("%s_%s", ns->value, e->value));
             return (s && !s->is_function && s->type) ? clone_type(s->type)
                                                      : create_type(TYPE_UNKNOWN);
         }
@@ -6308,14 +6319,12 @@ static void const_order_visit(ConstOrder* co, int k);
 static void const_order_deps(ConstOrder* co, ASTNode* n) {
     if (!n || co->reported) return;
     const char* name = NULL;
-    char qualified[512];
     if (n->type == AST_IDENTIFIER && n->value) {
         name = n->value;
     } else if (n->type == AST_MEMBER_ACCESS && n->value && n->child_count > 0 &&
                n->children[0] && n->children[0]->type == AST_IDENTIFIER &&
                n->children[0]->value) {
-        snprintf(qualified, sizeof(qualified), "%s_%s", n->children[0]->value, n->value);
-        name = qualified;
+        name = aether_internf("%s_%s", n->children[0]->value, n->value);
     }
     if (name) {
         void* hit = strmap_get(&co->index, name);
@@ -6345,8 +6354,8 @@ static void const_order_visit(ConstOrder* co, int k) {
             if (pos >= sizeof(chain)) { pos = sizeof(chain) - 1; break; }
         }
         ASTNode* at = co->decls[k];
-        char msg[800];
-        snprintf(msg, sizeof(msg), "const '%s' depends on itself: %s",
+        const char* msg = "";
+        msg = aether_internf("const '%s' depends on itself: %s",
                  at->value, chain);
         const char* saved = g_tc_file;
         g_tc_file = at->source_file;
@@ -6492,7 +6501,7 @@ static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
         /* The merge has resolved it to the module's own struct, renamed
          * `<ns>_<Name>`; the module defines it under its written name. */
         const char* name = ast_struct_source_name(t->struct_name);
-        char msg[512];
+        const char* msg = "";
         const char* saved = g_tc_file;
         if (at->source_file) g_tc_file = at->source_file;
         /* #2631: a module file checked on its own names itself. */
@@ -6500,12 +6509,12 @@ static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
         AetherModule* m = self_entry ? NULL : qual_resolve_module(ctx, q);
         if (self_entry) {
             if (!qual_ast_has_type(ctx->imports_from, name)) {
-                snprintf(msg, sizeof(msg), "module '%s' has no type '%s'", q, name);
+                msg = aether_internf("module '%s' has no type '%s'", q, name);
                 type_error_code_hint(msg, "check the spelling: the module defines no struct or type by that name",
                                      at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
             }
         } else if (!m) {
-            snprintf(msg, sizeof(msg), "unknown module '%s' in the type '%s.%s'", q, q, name);
+            msg = aether_internf("unknown module '%s' in the type '%s.%s'", q, q, name);
             type_error_code_hint(msg, "a qualified type names a module this file imports: add `import` for it",
                                  at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
         } else if (m->ast) {
@@ -6515,11 +6524,11 @@ static void qual_check_type(const QualCtx* ctx, Type* t, ASTNode* at) {
                 def = (origin && origin->ast && qual_ast_has_type(origin->ast, name)) ? origin : NULL;
             }
             if (!def) {
-                snprintf(msg, sizeof(msg), "module '%s' has no type '%s'", q, name);
+                msg = aether_internf("module '%s' has no type '%s'", q, name);
                 type_error_code_hint(msg, "check the spelling: the module defines no struct or type by that name",
                                      at->line, at->column, AETHER_ERR_UNDEFINED_TYPE);
             } else if (m != ctx->self && m->export_count > 0 && !module_exports_symbol(m, name)) {
-                snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'", name, q);
+                msg = aether_internf("'%s' is not exported from module '%s'", name, q);
                 type_error_code_hint(msg, "add it to the module's exports(...) list",
                                      at->line, at->column, AETHER_ERR_NOT_EXPORTED);
             }
@@ -6630,8 +6639,8 @@ static void settle_list_param_types(ASTNode* program) {
 static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
     Symbol* ss = p->value ? lookup_symbol(table, p->value) : NULL;
     if (!ss || !ss->node || ss->node->type != AST_STRUCT_DEFINITION) {
-        char msg[300];
-        snprintf(msg, sizeof(msg), "the struct pattern names '%s', which is no struct",
+        const char* msg = "";
+        msg = aether_internf("the struct pattern names '%s', which is no struct",
                  p->value ? p->value : "?");
         type_error_code_hint(msg, "a struct pattern is written `Name { field: pattern, ... }`",
                              p->line, p->column, AETHER_ERR_UNDEFINED_TYPE);
@@ -6653,8 +6662,8 @@ static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
             }
         }
         if (!ft) {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "'%s' has no field '%s'", p->value, fp->value);
+            const char* msg = "";
+            msg = aether_internf("'%s' has no field '%s'", p->value, fp->value);
             type_error_code_hint(msg, "a struct pattern lists fields of the struct it names",
                                  fp->line, fp->column, AETHER_ERR_TYPE_MISMATCH);
             ok = 0;
@@ -6664,8 +6673,8 @@ static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
         if (sub->type == AST_PATTERN_VARIABLE) {
             if (type_is_sized_array(ft)) {
                 /* An array is no value a C declaration can be bound to. */
-                char msg[300];
-                snprintf(msg, sizeof(msg), "field '%s' of '%s' is a fixed-size array, which a "
+                const char* msg = "";
+                msg = aether_internf("field '%s' of '%s' is a fixed-size array, which a "
                          "struct pattern cannot bind to a name", fp->value, p->value);
                 type_error_code_hint(msg, "bind the struct itself and index its field",
                                      sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
@@ -6677,8 +6686,8 @@ static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
         } else if (sub->type == AST_PATTERN_LITERAL) {
             if (sub->node_type && sub->node_type->kind == TYPE_WILDCARD) continue;   /* `_` */
             if (sub->node_type && !is_type_compatible(sub->node_type, ft)) {
-                char msg[400];
-                snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s, and the pattern gives it %s",
+                const char* msg = "";
+                msg = aether_internf("field '%s' of '%s' is %s, and the pattern gives it %s",
                          fp->value, p->value, type_spelled(ft), type_spelled(sub->node_type));
                 type_error_code_hint(msg, "match the field with a value of its type, `_` or a name",
                                      sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
@@ -6688,16 +6697,16 @@ static int settle_struct_pattern(ASTNode* p, SymbolTable* table) {
             if (!settle_struct_pattern(sub, table)) { ok = 0; continue; }
             if (ft->kind != TYPE_STRUCT || !ft->struct_name ||
                 strcmp(ft->struct_name, sub->node_type->struct_name) != 0) {
-                char msg[400];
-                snprintf(msg, sizeof(msg), "field '%s' of '%s' is %s, and the pattern is a '%s'",
+                const char* msg = "";
+                msg = aether_internf("field '%s' of '%s' is %s, and the pattern is a '%s'",
                          fp->value, p->value, type_spelled(ft), sub->value);
                 type_error_code_hint(msg, "a struct pattern over a field names the field's struct",
                                      sub->line, sub->column, AETHER_ERR_TYPE_MISMATCH);
                 ok = 0;
             }
         } else {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "field '%s' of a struct pattern is matched by an expression",
+            const char* msg = "";
+            msg = aether_internf("field '%s' of a struct pattern is matched by an expression",
                      fp->value);
             type_error_code_hint(msg,
                                  "a field of a struct pattern takes a literal, `_`, a name or a "
@@ -7036,10 +7045,13 @@ int typecheck_program(ASTNode* program) {
     g_entry_self_ns = NULL;
     for (int i = 0; i < program->child_count; i++) {
         if (program->children[i] && program->children[i]->type == AST_EXPORTS_LIST) {
-            if (module_leaf_of_file(program->source_file, g_entry_self_ns_buf,
-                                    sizeof(g_entry_self_ns_buf))[0]) {
-                g_entry_self_ns = g_entry_self_ns_buf;
-            }
+            /* Room for any leaf of the path or of its full path, as the
+             * merge sizes it (#3545): 256 bytes left a longer leaf none. */
+            size_t cap = (program->source_file ? strlen(program->source_file) : 0) + 4096;
+            char* leaf = (char*)aether_xrealloc(NULL, cap);
+            if (module_leaf_of_file(program->source_file, leaf, cap)[0])
+                g_entry_self_ns = aether_intern(leaf);
+            free(leaf);
             break;
         }
     }
@@ -7274,23 +7286,18 @@ int typecheck_program(ASTNode* program) {
                 
                 // Add generated spawn_ActorName() function - returns pointer to actor
                 // Use TYPE_ACTOR_REF to represent pointer type
-                char spawn_name[256];
-                snprintf(spawn_name, sizeof(spawn_name), "spawn_%s", child->value);
                 Type* spawn_return_type = create_type(TYPE_ACTOR_REF);
                 spawn_return_type->element_type = clone_type(actor_type);
-                add_symbol(global_table, spawn_name, spawn_return_type, 0, 1, 0);
-                
+                add_symbol(global_table, aether_internf("spawn_%s", child->value),
+                           spawn_return_type, 0, 1, 0);
+
                 // Add generated send_ActorName() function - returns void
-                char send_name[256];
-                snprintf(send_name, sizeof(send_name), "send_%s", child->value);
                 Type* send_type = create_type(TYPE_VOID);
-                add_symbol(global_table, send_name, send_type, 0, 1, 0);
-                
+                add_symbol(global_table, aether_internf("send_%s", child->value), send_type, 0, 1, 0);
+
                 // Add generated ActorName_step() function - returns void
-                char step_name[256];
-                snprintf(step_name, sizeof(step_name), "%s_step", child->value);
                 Type* step_type = create_type(TYPE_VOID);
-                add_symbol(global_table, step_name, step_type, 0, 1, 0);
+                add_symbol(global_table, aether_internf("%s_step", child->value), step_type, 0, 1, 0);
                 break;
             }
             case AST_BUILDER_FUNCTION:
@@ -7323,8 +7330,8 @@ int typecheck_program(ASTNode* program) {
                     if (prior && !prior->node && prior->is_function &&
                         !program_is_module &&
                         builtin_lowered_by_name(child->value, definition_param_count(child))) {
-                        char msg[320];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "'%s' is a builtin function and cannot be redefined: "
                             "a call by that name is lowered to the builtin, so "
                             "this body would never run; rename it (e.g. '%s_')",
@@ -7339,8 +7346,8 @@ int typecheck_program(ASTNode* program) {
                             (child->type == AST_BUILDER_FUNCTION) ? "builder" : "function";
                         const char* prior_kind =
                             (prior->node->type == AST_BUILDER_FUNCTION) ? "builder" : "function";
-                        char msg[320];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "duplicate definition of '%s': a %s and a %s "
                             "cannot share a name (both emit the same C symbol); "
                             "previous definition at line %d",
@@ -7425,8 +7432,7 @@ int typecheck_program(ASTNode* program) {
                 for (int mi = 0; mi < child->child_count; mi++) {
                     ASTNode* m = child->children[mi];
                     if (!m || m->type != AST_ENUM_MEMBER || !m->value) continue;
-                    char qname[512];
-                    snprintf(qname, sizeof(qname), "%s_%s", child->value, m->value);
+                    const char* qname = aether_internf("%s_%s", child->value, m->value);
                     Type* mt = create_type(TYPE_ENUM);
                     mt->struct_name = strdup(child->value);
                     add_symbol(global_table, qname, mt, 0, 0, 0);
@@ -7763,8 +7769,7 @@ int typecheck_program(ASTNode* program) {
 
             // Build the full C name: namespace_shortname (#2978: as
             // `ns.short` reaches it)
-            char full_name[256];
-            qualified_c_name(ns, short_name, full_name, sizeof(full_name));
+            const char* full_name = qualified_c_name(ns, short_name);
 
             Symbol* full_sym = lookup_symbol(global_table, full_name);
             if (full_sym) {
@@ -7796,9 +7801,7 @@ int typecheck_program(ASTNode* program) {
                 // Only register when the prefixed symbol exists — otherwise
                 // we'd rewrite calls to externs (which keep their bare
                 // names) into nonexistent `ns_extern` forms.
-                char dotted[256];
-                snprintf(dotted, sizeof(dotted), "%s.%s", ns, short_name);
-                add_import_alias(local_name, dotted);
+                add_import_alias(local_name, aether_internf("%s.%s", ns, short_name));
             }
         }
         free((void*)glob_names);
@@ -7848,16 +7851,12 @@ int typecheck_program(ASTNode* program) {
         const char* dotted = (const char*)strmap_value_at(&import_aliases, a);
         // The full C name the dotted alias reaches ("fs.list_dir" ->
         // "fs_list_dir", #2978: as a qualified call reaches it).
-        char full_name[256];
-        snprintf(full_name, sizeof(full_name), "%s", dotted);
-        char* adot = strchr(full_name, '.');
-        if (adot && adot == strrchr(full_name, '.')) {
-            char ns_part[256];
-            snprintf(ns_part, sizeof(ns_part), "%.*s", (int)(adot - full_name), full_name);
-            qualified_c_name(ns_part, dotted + (adot - full_name) + 1, full_name,
-                             sizeof(full_name));
+        const char* full_name;
+        const char* adot = strchr(dotted, '.');
+        if (adot && adot == strrchr(dotted, '.')) {
+            full_name = qualified_c_name(aether_intern_n(dotted, (size_t)(adot - dotted)), adot + 1);
         } else {
-            for (char* p = full_name; *p; p++) { if (*p == '.') *p = '_'; }
+            full_name = dotted_as_c_name(dotted);
         }
 
         Symbol* full_sym = lookup_symbol(global_table, full_name);
@@ -8092,8 +8091,8 @@ int typecheck_node(ASTNode* node, SymbolTable* table) {
                 if (!v || v->type != AST_IDENTIFIER || !v->value) continue;
                 Symbol* vs = lookup_symbol(table, v->value);
                 if (!vs || !vs->type || vs->type->kind != TYPE_STRUCT) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "sum type '%s': variant '%s' must name a struct type",
                         node->value ? node->value : "?", v->value);
                     type_error(msg, v->line, v->column);
@@ -8180,17 +8179,17 @@ static void report_missing_message_field(SymbolTable* table, ASTNode* pattern, A
         if (w < 0 || (size_t)w >= sizeof(fields) - used) break;
         used += (size_t)w;
     }
-    char msg[512], hint[300];
+    const char* msg = ""; const char* hint = "";
     if (first) {
-        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; its fields are %s",
+        msg = aether_internf("message '%s' has no field '%s'; its fields are %s",
                  pattern->value, field->value, fields);
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "an arm binds a field by its name: `%s(%s)`, or `%s(%s: %s)` to bind it as `%s`",
                  pattern->value, first, pattern->value, first, field->value, field->value);
     } else {
-        snprintf(msg, sizeof(msg), "message '%s' has no field '%s'; it has no fields",
+        msg = aether_internf("message '%s' has no field '%s'; it has no fields",
                  pattern->value, field->value);
-        snprintf(hint, sizeof(hint), "match it with no bindings: `%s -> { ... }`", pattern->value);
+        hint = aether_internf("match it with no bindings: `%s -> { ... }`", pattern->value);
     }
     type_error_hint(msg, hint, field->line, field->column);
 }
@@ -8256,8 +8255,8 @@ static void typecheck_message_constructor(ASTNode* constructor, SymbolTable* tab
         } else if (actual && actual->kind != TYPE_UNKNOWN &&
             declared->kind != TYPE_UNKNOWN &&
             !is_type_compatible(actual, declared)) {
-            char buf[256];
-            snprintf(buf, sizeof(buf),
+            const char* buf = "";
+            buf = aether_internf(
                      "Type mismatch in field '%s' of message '%s': expected %s, got %s",
                      field_init->value, msg_name, type_name(declared), type_name(actual));
             type_error(buf, field_init->line, field_init->column);
@@ -8289,8 +8288,11 @@ static ASTNode* receive_arm_message_pattern(ASTNode* arm) {
  * Each arm after the first for a message is refused, naming both, in any
  * of the actor's receive blocks. */
 static void reject_duplicate_receive_arms(ASTNode* actor) {
-    ASTNode* seen[256];
-    int seen_count = 0;
+    /* The arms seen so far, by message name: every one (#3574). 256 slots
+     * stopped recording past them, so a duplicate arm after the 256th
+     * went unrefused. */
+    StrMap seen;
+    strmap_init(&seen);
     ASTNode* first_wildcard = NULL;
     for (int i = 0; i < actor->child_count; i++) {
         ASTNode* rs = actor->children[i];
@@ -8302,8 +8304,8 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
             if (arm && arm->type == AST_RECEIVE_ARM && arm->child_count >= 2 && arm->children[0] &&
                 arm->children[0]->type == AST_WILDCARD_PATTERN) {
                 if (first_wildcard) {
-                    char msg[320];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "this `_` arm can never run: the `_` arm at line %d already "
                              "receives every message of actor '%s' that no other arm names",
                              first_wildcard->line, actor->value ? actor->value : "?");
@@ -8316,23 +8318,22 @@ static void reject_duplicate_receive_arms(ASTNode* actor) {
             }
             ASTNode* pattern = receive_arm_message_pattern(arm);
             if (!pattern || !pattern->value) continue;
-            ASTNode* first = NULL;
-            for (int s = 0; s < seen_count && !first; s++)
-                if (strcmp(seen[s]->value, pattern->value) == 0) first = seen[s];
+            ASTNode* first = (ASTNode*)strmap_get(&seen, pattern->value);
             if (first) {
-                char msg[320];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "this receive arm for '%s' can never run: the arm for '%s' at "
                          "line %d already receives every '%s' message of actor '%s'. "
                          "Handle both cases in that one arm",
                          pattern->value, first->value, first->line, pattern->value,
                          actor->value ? actor->value : "?");
                 type_error(msg, pattern->line, pattern->column);
-            } else if (seen_count < (int)(sizeof(seen) / sizeof(seen[0]))) {
-                seen[seen_count++] = pattern;
+            } else {
+                strmap_put(&seen, pattern->value, pattern);
             }
         }
     }
+    strmap_free(&seen);
 }
 
 /* #385: the actor a reference's type names, a `spawn(A())` result or a
@@ -8377,22 +8378,22 @@ static void reject_unhandled_send(ASTNode* target, ASTNode* message, SymbolTable
                       t->element_type->kind == TYPE_STRUCT)
                          ? aether_protocol_lookup(t->element_type->struct_name) : NULL;
     if (t) free_type(t);
-    char msg[400], hint[400];
+    const char* msg = ""; const char* hint = "";
     if (proto) {
         if (aether_protocol_has_message(proto, message->value)) return;
-        snprintf(msg, sizeof(msg), "protocol '%s' has no message '%s'", proto->value,
+        msg = aether_internf("protocol '%s' has no message '%s'", proto->value,
                  message->value);
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "a reference typed actor_ref[%s] is sent only the messages of its protocol",
                  proto->value);
         type_error_code_hint(msg, hint, message->line, message->column, AETHER_ERR_ACTOR_ERROR);
         return;
     }
     if (!actor || actor_receives_message(actor, message->value)) return;
-    snprintf(msg, sizeof(msg),
+    msg = aether_internf(
              "actor '%s' has no receive arm for '%s', so this message would be dropped",
              actor->value ? actor->value : "?", message->value);
-    snprintf(hint, sizeof(hint),
+    hint = aether_internf(
              "add an arm for `%s` (or a `_` arm) to '%s', or send through a bare `actor_ref`, "
              "which is not checked",
              message->value, actor->value ? actor->value : "?");
@@ -8463,8 +8464,9 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                            is_assignable(it, child->node_type) ||
                            (init->type == AST_NULL_LITERAL && ast_type_takes_null(child->node_type));
                 if (!fits) {
-                    char msg[512], want[200], have[200];
-                    snprintf(msg, sizeof(msg),
+                    char want[200], have[200];
+                    const char* msg = "";
+                    msg = aether_internf(
                              "Type mismatch in state initialization: '%s' is %s, but this value is %s",
                              child->value ? child->value : "?",
                              ret_type_spell(child->node_type, want, sizeof(want)),
@@ -8522,11 +8524,11 @@ int typecheck_actor_definition(ASTNode* actor, SymbolTable* table) {
                                     ASTNode* sd = actor->children[s];
                                     if (sd && sd->type == AST_STATE_DECLARATION && sd->value &&
                                         strcmp(sd->value, var_name) == 0) {
-                                        char msg[200], hint[200];
-                                        snprintf(msg, sizeof(msg),
+                                        const char* msg = ""; const char* hint = "";
+                                        msg = aether_internf(
                                                  "receive pattern binds '%s', which is also a state field of this actor",
                                                  var_name);
-                                        snprintf(hint, sizeof(hint),
+                                        hint = aether_internf(
                                                  "bind the message field under another name: `%s(%s: new_%s)`",
                                                  pattern->value ? pattern->value : "Msg",
                                                  field->value, var_name);
@@ -8674,10 +8676,11 @@ static int scoped_check_subtree(ASTNode* node, ASTNode* decl) {
     const char* name = decl->value;
     const char* reason = scoped_escape_reason(node, name);
     if (reason) {
-        char msg[320], example[160], help[400];
-        snprintf(msg, sizeof(msg), "`@scoped` binding '%s' escapes its block: %s", name, reason);
+        char example[160];
+        const char* msg = ""; const char* help = "";
+        msg = aether_internf("`@scoped` binding '%s' escapes its block: %s", name, reason);
         scoped_derived_example(decl, example, sizeof(example));
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "a @scoped value must not outlive the block that introduced it: let a value "
                  "derived from it leave instead (%s), or drop the `@scoped`", example);
         type_error_hint(msg, help, node->line, node->column);
@@ -8718,7 +8721,6 @@ static void scoped_check_bindings(ASTNode* node, ASTNode* root) {
  * return/break/continue); a loop body is analyzed twice so a consume that
  * would repeat across iterations is caught, while one rebound each iteration
  * is not. It descends into nested scopes' own analysis, not the parent's. */
-#define ISO_SET_MAX 128
 
 static ASTNode* iso_closure_body_block(ASTNode* closure) {
     if (!closure) return NULL;
@@ -8833,21 +8835,59 @@ typedef struct {
     int line;
 } IsoItem;
 
+/* As many names as the function moves (#3574): 128 slots dropped the ones
+ * past them, and a use after such a move was not refused. A branch works
+ * on a copy (iso_copy) and gives it up (iso_free); a join replaces the set
+ * (iso_take). */
 typedef struct {
-    IsoItem items[ISO_SET_MAX];
+    IsoItem* items;
     int count;
+    int cap;
 } IsoSet;
 
 typedef struct {
-    const char* names[ISO_SET_MAX];
+    const char** names;
     int count;
+    int cap;
 } NameSet;
+
+static void iso_free(IsoSet* s) {
+    free(s->items);
+    s->items = NULL;
+    s->count = s->cap = 0;
+}
+
+static void iso_copy(IsoSet* dst, const IsoSet* src) {
+    dst->count = dst->cap = src->count;
+    dst->items = src->count
+                     ? (IsoItem*)aether_xrealloc(NULL, sizeof(IsoItem) * (size_t)src->count)
+                     : NULL;
+    if (src->count) memcpy(dst->items, src->items, sizeof(IsoItem) * (size_t)src->count);
+}
+
+/* `dst` becomes `src`, whose storage it takes; `src` is left empty. */
+static void iso_take(IsoSet* dst, IsoSet* src) {
+    iso_free(dst);
+    *dst = *src;
+    src->items = NULL;
+    src->count = src->cap = 0;
+}
+
+/* A loop body walked from `moved_in` and `iso_in`, with `rebound` names
+ * rebound so far, which left `moved_out` and `iso_out` (iso_loop_body). */
+typedef struct IsoMemo {
+    ASTNode* body;
+    int rebound;
+    IsoSet moved_in, iso_in, moved_out, iso_out;
+    struct IsoMemo* next;
+} IsoMemo;
 
 typedef struct {
     ASTNode* fn;
     NameSet rebound;
     int in_closure;
     ASTNode* closure;
+    IsoMemo* memo;      /* the loop bodies walked, by what they start from */
 } IsoContext;
 
 static int iso_has(const IsoSet* s, const char* n) {
@@ -8872,11 +8912,13 @@ static void iso_put_line(IsoSet* s, const char* n, int line) {
             return;
         }
     }
-    if (s->count < ISO_SET_MAX) {
-        s->items[s->count].name = n;
-        s->items[s->count].line = line;
-        s->count++;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->items = (IsoItem*)aether_xrealloc(s->items, sizeof(IsoItem) * (size_t)s->cap);
     }
+    s->items[s->count].name = n;
+    s->items[s->count].line = line;
+    s->count++;
 }
 
 static void iso_del(IsoSet* s, const char* n) {
@@ -8904,7 +8946,11 @@ static int name_has(const NameSet* s, const char* n) {
 
 static void name_put(NameSet* s, const char* n) {
     if (!n || name_has(s, n)) return;
-    if (s->count < ISO_SET_MAX) s->names[s->count++] = n;
+    if (s->count == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 16;
+        s->names = (const char**)aether_xrealloc(s->names, sizeof(char*) * (size_t)s->cap);
+    }
+    s->names[s->count++] = n;
 }
 
 static int is_param_owned_or_kept(ASTNode* fn, const char* name) {
@@ -8970,6 +9016,62 @@ static int iso_diverges(ASTNode* n) {
     return n && !stmt_can_complete(g_typecheck_program, n);
 }
 
+static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx);
+
+static int iso_same(const IsoSet* a, const IsoSet* b) {
+    if (a->count != b->count) return 0;
+    for (int i = 0; i < a->count; i++) {
+        const IsoItem* x = &a->items[i];
+        const IsoItem* y = &b->items[i];
+        if (x->line != y->line || (x->name == NULL) != (y->name == NULL) ||
+            (x->name && strcmp(x->name, y->name) != 0))
+            return 0;
+    }
+    return 1;
+}
+
+static void iso_memo_free(IsoMemo* m) {
+    while (m) {
+        IsoMemo* next = m->next;
+        iso_free(&m->moved_in);
+        iso_free(&m->iso_in);
+        iso_free(&m->moved_out);
+        iso_free(&m->iso_out);
+        free(m);
+        m = next;
+    }
+}
+
+/* A loop body's walk from `moved` and `iso`. The body is walked twice, so a
+ * move late in it meets a use early in it; walked once already from the
+ * same sets, with no name rebound since (`rebound` only grows), it leaves
+ * the same sets and has refused what it refuses, so that walk is reused
+ * (#3574): each walk of a loop walked the loops inside it twice, and loops
+ * nested 24 deep took seconds, doubling with each level. */
+static void iso_loop_body(ASTNode* body, IsoSet* moved, IsoSet* iso, IsoContext* ctx) {
+    for (IsoMemo* m = ctx->memo; m; m = m->next) {
+        if (m->body != body || m->rebound != ctx->rebound.count || !iso_same(&m->moved_in, moved) ||
+            !iso_same(&m->iso_in, iso))
+            continue;
+        iso_free(moved);
+        iso_free(iso);
+        iso_copy(moved, &m->moved_out);
+        iso_copy(iso, &m->iso_out);
+        return;
+    }
+    IsoMemo* m = (IsoMemo*)aether_xrealloc(NULL, sizeof(IsoMemo));
+    memset(m, 0, sizeof *m);
+    m->body = body;
+    m->rebound = ctx->rebound.count;
+    iso_copy(&m->moved_in, moved);
+    iso_copy(&m->iso_in, iso);
+    iso_check(body, moved, iso, ctx);
+    iso_copy(&m->moved_out, moved);
+    iso_copy(&m->iso_out, iso);
+    m->next = ctx->memo;
+    ctx->memo = m;
+}
+
 static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx) {
     if (!node) return;
     switch (node->type) {
@@ -8990,8 +9092,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 if (!iso_is_closure_param(node, nm) && !(cl_body && iso_is_local_var(cl_body, nm))) {
                     if (iso_has(moved, nm)) {
                         int prev_line = iso_get_line(moved, nm);
-                        char msg[320];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "use of moved value '%s': line %d moved it, and it cannot be used again",
                             nm, prev_line);
                         type_error(msg, node->line, node->column);
@@ -9003,12 +9105,17 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
 
             IsoContext cl_ctx;
             cl_ctx.fn = node;
-            cl_ctx.rebound.count = 0;
+            cl_ctx.rebound = (NameSet){ NULL, 0, 0 };
             cl_ctx.in_closure = 1;
             cl_ctx.closure = node;
-            IsoSet cl_moved; cl_moved.count = 0;
-            IsoSet cl_iso; cl_iso.count = 0;
+            cl_ctx.memo = NULL;
+            IsoSet cl_moved = { NULL, 0, 0 };
+            IsoSet cl_iso = { NULL, 0, 0 };
             if (cl_body) iso_check(cl_body, &cl_moved, &cl_iso, &cl_ctx);
+            iso_free(&cl_moved);
+            iso_free(&cl_iso);
+            free(cl_ctx.rebound.names);
+            iso_memo_free(cl_ctx.memo);
             return;
         }
 
@@ -9019,8 +9126,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 if (operand->type == AST_MEMBER_ACCESS) {
                     const char* field_name = operand->value ? operand->value : "field";
                     const char* obj_name = (operand->child_count > 0 && operand->children[0] && operand->children[0]->type == AST_IDENTIFIER && operand->children[0]->value) ? operand->children[0]->value : "object";
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "cannot move field '%s' out of object '%s'", field_name, obj_name);
+                    const char* msg = "";
+                    msg = aether_internf("cannot move field '%s' out of object '%s'", field_name, obj_name);
                     type_error(msg, node->line, node->column);
                     return;
                 }
@@ -9035,8 +9142,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 const char* nm = operand->value;
                 if (iso_has(moved, nm)) {
                     int prev_line = iso_get_line(moved, nm);
-                    char msg[320];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "use of moved value '%s': line %d moved it, and it cannot be used again",
                         nm, prev_line);
                     type_error(msg, node->line, node->column);
@@ -9045,15 +9152,15 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 if (ctx->in_closure && ctx->closure) {
                     ASTNode* cl_body = iso_closure_body_block(ctx->closure);
                     if (!iso_is_closure_param(ctx->closure, nm) && !(cl_body && iso_is_local_var(cl_body, nm))) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg), "cannot move captured variable '%s' inside closure", nm);
+                        const char* msg = "";
+                        msg = aether_internf("cannot move captured variable '%s' inside closure", nm);
                         type_error(msg, node->line, node->column);
                         return;
                     }
                 }
                 if (ctx->fn && is_fn_parameter(ctx->fn, nm) && !name_has(&ctx->rebound, nm) && !is_param_owned_or_kept(ctx->fn, nm)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "cannot move borrowed parameter '%s': the function borrows it for the call; declare it `%s: @keep ptr` to hand it on", nm, nm);
+                    const char* msg = "";
+                    msg = aether_internf("cannot move borrowed parameter '%s': the function borrows it for the call; declare it `%s: @keep ptr` to hand it on", nm, nm);
                     type_error(msg, node->line, node->column);
                     return;
                 }
@@ -9070,8 +9177,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
             if (!nm) return;
             if (iso_has(moved, nm)) {
                 int prev_line = iso_get_line(moved, nm);
-                char msg[320];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "use of moved value '%s': line %d moved it, and it cannot be used again",
                     nm, prev_line);
                 type_error(msg, node->line, node->column);
@@ -9111,11 +9218,14 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
          * the move. Checking it where it is registered as well would see a
          * consume there and then report the real run as a second use. */
         case AST_BLOCK: {
-            ASTNode* defers[64];
+            /* Every defer of the block (#3574): past 64 one was checked
+             * where it is written, ahead of what it runs after. */
+            ASTNode** defers = (ASTNode**)aether_xrealloc(
+                NULL, sizeof(ASTNode*) * (size_t)(node->child_count + 1));
             int defer_count = 0;
             for (int i = 0; i < node->child_count; i++) {
                 ASTNode* child = node->children[i];
-                if (child && child->type == AST_DEFER_STATEMENT && defer_count < 64) {
+                if (child && child->type == AST_DEFER_STATEMENT) {
                     defers[defer_count++] = child;
                     continue;
                 }
@@ -9125,58 +9235,69 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
                 for (int c = 0; c < defers[d]->child_count; c++)
                     iso_check(defers[d]->children[c], moved, iso, ctx);
             }
+            free(defers);
             return;
         }
 
         case AST_IF_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx); /* cond */
-            IsoSet then_s = *moved;
+            IsoSet then_s, else_s;
+            iso_copy(&then_s, moved);
             if (node->child_count > 1) iso_check(node->children[1], &then_s, iso, ctx);
-            IsoSet else_s = *moved;
+            iso_copy(&else_s, moved);
             if (node->child_count > 2) iso_check(node->children[2], &else_s, iso, ctx);
             int then_div = node->child_count > 1 && iso_diverges(node->children[1]);
             int else_div = node->child_count > 2 && iso_diverges(node->children[2]);
-            if (then_div && else_div) return;   /* code after is unreachable */
-            IsoSet joined; joined.count = 0;
-            if (!then_div) iso_merge(&joined, &then_s);
-            if (!else_div) iso_merge(&joined, &else_s);
-            *moved = joined;
+            if (!(then_div && else_div)) {   /* else the code after is unreachable */
+                IsoSet joined = { NULL, 0, 0 };
+                if (!then_div) iso_merge(&joined, &then_s);
+                if (!else_div) iso_merge(&joined, &else_s);
+                iso_take(moved, &joined);
+            }
+            iso_free(&then_s);
+            iso_free(&else_s);
             return;
         }
 
         case AST_MATCH_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx);
-            IsoSet joined; joined.count = 0;
+            IsoSet joined = { NULL, 0, 0 };
             int any_non_div = 0;
             for (int i = 1; i < node->child_count; i++) {
                 ASTNode* arm = node->children[i];
                 if (!arm) continue;
-                IsoSet arm_s = *moved;
+                IsoSet arm_s;
+                iso_copy(&arm_s, moved);
                 iso_check(arm, &arm_s, iso, ctx);
                 if (!iso_diverges(arm)) {
                     iso_merge(&joined, &arm_s);
                     any_non_div = 1;
                 }
+                iso_free(&arm_s);
             }
-            if (any_non_div) *moved = joined;
+            if (any_non_div) iso_take(moved, &joined);
+            iso_free(&joined);
             return;
         }
 
         case AST_SWITCH_STATEMENT: {
             if (node->child_count > 0) iso_check(node->children[0], moved, iso, ctx);
-            IsoSet joined; joined.count = 0;
+            IsoSet joined = { NULL, 0, 0 };
             int any_non_div = 0;
             for (int i = 1; i < node->child_count; i++) {
                 ASTNode* c_case = node->children[i];
                 if (!c_case) continue;
-                IsoSet case_s = *moved;
+                IsoSet case_s;
+                iso_copy(&case_s, moved);
                 iso_check(c_case, &case_s, iso, ctx);
                 if (!iso_diverges(c_case)) {
                     iso_merge(&joined, &case_s);
                     any_non_div = 1;
                 }
+                iso_free(&case_s);
             }
-            if (any_non_div) *moved = joined;
+            if (any_non_div) iso_take(moved, &joined);
+            iso_free(&joined);
             return;
         }
 
@@ -9186,8 +9307,8 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
             for (int i = 0; i < body_idx; i++)          /* init/cond/incr once */
                 iso_check(node->children[i], moved, iso, ctx);
             if (body_idx >= 0) {                          /* body twice */
-                iso_check(node->children[body_idx], moved, iso, ctx);
-                iso_check(node->children[body_idx], moved, iso, ctx);
+                iso_loop_body(node->children[body_idx], moved, iso, ctx);
+                iso_loop_body(node->children[body_idx], moved, iso, ctx);
             }
             return;
         }
@@ -9212,13 +9333,14 @@ static void iso_check(ASTNode* node, IsoSet* moved, IsoSet* iso, IsoContext* ctx
 
 static void iso_check_function(ASTNode* fn, ASTNode* body) {
     if (!body) return;
-    IsoSet moved; moved.count = 0;
-    IsoSet iso;   iso.count = 0;
+    IsoSet moved = { NULL, 0, 0 };
+    IsoSet iso = { NULL, 0, 0 };
     IsoContext ctx;
     ctx.fn = fn;
-    ctx.rebound.count = 0;
+    ctx.rebound = (NameSet){ NULL, 0, 0 };
     ctx.in_closure = 0;
     ctx.closure = NULL;
+    ctx.memo = NULL;
 
     if (fn) {
         for (int i = 0; i < fn->child_count; i++) {
@@ -9230,6 +9352,10 @@ static void iso_check_function(ASTNode* fn, ASTNode* body) {
         }
     }
     iso_check(body, &moved, &iso, &ctx);
+    iso_free(&moved);
+    iso_free(&iso);
+    free(ctx.rebound.names);
+    iso_memo_free(ctx.memo);
 }
 
 /* Entry point: register Isolated-typed parameters, then walk the body. */
@@ -9283,8 +9409,8 @@ static void check_frees_of_param(ASTNode* program, ASTNode* n, const char* name,
     if ((seq ? is_seq_free_call(n) : is_string_free_call(program, n)) && n->children[0] &&
         n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
         !strcmp(n->children[0]->value, name)) {
-        char msg[256];
-        snprintf(msg, sizeof(msg), "'%s' is a parameter: the function borrows it and may not free it", name);
+        const char* msg = "";
+        msg = aether_internf("'%s' is a parameter: the function borrows it and may not free it", name);
         type_error_code_hint(msg,
             seq ? "the caller owns the sequence and frees it; to keep a sequence of your own, store it"
                 : "the caller owns the string and frees it; to keep a string of your own, store it",
@@ -9327,7 +9453,6 @@ static void check_borrowed_param_frees(ASTNode* program, ASTNode* fn, ASTNode* b
  * closure holding it). A call's result holds what its arguments to `@into`
  * parameters carry, decided by the callee's signature, and is then tracked
  * as a struct local is. */
-#define KEEP_SET_MAX 128   /* the `@into` parameters a KeepSet lists */
 /* #3034: the `via` of a struct parameter's own entry: a holder, so a field
  * read out of it carries the parameter, but no holder to name. */
 static const char KEEP_PARAM_SELF[] = "held by the parameter";
@@ -9380,7 +9505,7 @@ typedef struct {
     int alias_count;
     int alias_cap;
     /* The function's `@into` parameters, which a `return` may hand back. */
-    const char* into[KEEP_SET_MAX];
+    const char** into;   /* every one of them (#3574): 128 slots dropped the rest */
     int into_count;
     ASTNode* program;
     Type* ret;   /* the function's declared result, or NULL */
@@ -9399,9 +9524,9 @@ typedef struct {
      * closure that may capture a borrowed pointer, or a struct taken by
      * value that holds a pointer or a closure; `other_kinds` spells the
      * type. A `return` of one hands the caller back its own value. */
-    const char* other_params[KEEP_SET_MAX];
-    const char* other_kinds[KEEP_SET_MAX];
-    int other_is_fn[KEEP_SET_MAX];
+    const char** other_params;   /* every one (#3574): past 128 one went unchecked */
+    const char** other_kinds;
+    int* other_is_fn;
     int other_count;
     /* #3058: each closure literal a name was bound to here (`g = || { ...
      * }`), every one, as the holders only grow: a call through the name,
@@ -9694,6 +9819,13 @@ static void keep_set_free(KeepSet* s) {
     s->rep_at = NULL;
     s->rep_param = s->rep_how = NULL;
     s->rep_count = s->rep_cap = 0;
+    free(s->into);
+    free(s->other_params);
+    free(s->other_kinds);
+    free(s->other_is_fn);
+    s->into = s->other_params = s->other_kinds = NULL;
+    s->other_is_fn = NULL;
+    s->into_count = s->other_count = 0;
 }
 
 static ASTNode* strip_ptr_casts(ASTNode* e);
@@ -9902,14 +10034,7 @@ static ASTNode* call_param_of(ASTNode* def, ASTNode* call, int i) {
  * function). */
 static ASTNode* call_extern_decl(ASTNode* program, const char* name) {
     if (!program || !name) return NULL;
-    char merged[256];
-    size_t n = strlen(name);
-    int dotted = strchr(name, '.') != NULL && n < sizeof(merged);
-    if (dotted) {
-        for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
-        merged[n] = '\0';
-    }
-    return tc_first_extern(program, name, dotted ? merged : NULL);
+    return tc_first_extern(program, name, strchr(name, '.') ? dotted_as_c_name(name) : NULL);
 }
 
 /* The declaration a call is checked against: an Aether function, or an
@@ -9988,23 +10113,27 @@ int tc_call_arg_effect(ASTNode* program, ASTNode* call, int i, int* into) {
 
 /* #3142: owned pointer types, `type T = owned ptr drop f`: each one's name,
  * its drop function as written, and the C function a release calls. */
-#define AETHER_MAX_OWNED 64
 typedef struct {
     const char* name;
     const char* drop;       /* as written: `bytes.free` */
     const char* drop_c;     /* the C function: `bytes_free`, `free` */
     ASTNode* def;
 } OwnedDef;
-static OwnedDef g_owned[AETHER_MAX_OWNED];
+/* Every one the program declares (#3574): 64 slots dropped the rest, which
+ * were then checked as plain pointers and never released. */
+static OwnedDef* g_owned = NULL;
 static int g_owned_count = 0;
 
 static void collect_owned_types(ASTNode* program) {
     g_owned_count = 0;
+    if (program)
+        g_owned = (OwnedDef*)aether_xrealloc(g_owned, sizeof(OwnedDef) *
+                                                          (size_t)(program->child_count + 1));
     for (int i = 0; program && i < program->child_count; i++) {
         ASTNode* d = program->children[i];
         if (d && d->type == AST_EXPORT_STATEMENT && d->child_count > 0) d = d->children[0];
         if (!d || d->type != AST_DISTINCT_TYPE_DEF || !d->value || !d->annotation ||
-            strncmp(d->annotation, "owned_drop:", 11) != 0 || g_owned_count >= AETHER_MAX_OWNED)
+            strncmp(d->annotation, "owned_drop:", 11) != 0)
             continue;
         OwnedDef* o = &g_owned[g_owned_count++];
         o->name = d->value;
@@ -10037,10 +10166,10 @@ const char* tc_owned_drop_c(const Type* t) {
 static void check_owned_types(ASTNode* program) {
     for (int i = 0; i < g_owned_count; i++) {
         OwnedDef* o = &g_owned[i];
-        char msg[400];
+        const char* msg = "";
         Type* base = o->def->node_type;
         if (!base || base->kind != TYPE_PTR || base->element_type) {
-            snprintf(msg, sizeof(msg), "owned type '%s' must be over a bare `ptr`", o->name);
+            msg = aether_internf("owned type '%s' must be over a bare `ptr`", o->name);
             type_error_code_hint(msg, "write `type Name = owned ptr drop f`", o->def->line,
                                  o->def->column, AETHER_ERR_OWNED);
             continue;
@@ -10067,7 +10196,7 @@ static void check_owned_types(ASTNode* program) {
                      (!strcmp(decl->value, "free") || binds_symbol(decl->annotation, "free"));
         if (!decl || params != 1 || !p || !p->node_type || p->node_type->kind != TYPE_PTR ||
             (!c_free && !param_has_mode(p, "frees_param"))) {
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "owned type '%s' is released by '%s', which %s", o->name, o->drop,
                      !decl ? "is not a function the program declares"
                      : params != 1 ? "does not take exactly one parameter"
@@ -10135,8 +10264,8 @@ static void owned_error(ASTNode* at, const char* msg, const char* hint) {
 
 static void owned_refuse_optional(Type* t, ASTNode* at, const char* what) {
     if (!t || t->kind != TYPE_OPTIONAL || !owned_def_of(t->element_type)) return;
-    char msg[320];
-    snprintf(msg, sizeof(msg), "%s is an optional owned pointer: an owned value holding nothing "
+    const char* msg = "";
+    msg = aether_internf("%s is an optional owned pointer: an owned value holding nothing "
              "is `null`", what);
     owned_error(at, msg, "write the owned type itself and use `null` for none");
 }
@@ -10164,17 +10293,17 @@ static int owned_mentions(ASTNode* n, const char** name) {
 
 static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
     if (!n) return;
-    char msg[400];
+    const char* msg = "";
     switch (n->type) {
         case AST_VARIABLE_DECLARATION: {
             ASTNode* init = n->child_count > 0 ? n->children[0] : NULL;
             owned_refuse_optional(n->node_type, n, n->value ? n->value : "this binding");
             if (n->value && owned_param_named(fn, n->value)) {
-                snprintf(msg, sizeof(msg), "'%s' is borrowed: a parameter of an owned type is "
+                msg = aether_internf("'%s' is borrowed: a parameter of an owned type is "
                          "the caller's, so it is not bound to another value", n->value);
                 owned_error(n, msg, "bind a local of the function's own instead");
             } else if (init && owned_is_place(init)) {
-                snprintf(msg, sizeof(msg), "'%s' would be a second owner of what %s holds",
+                msg = aether_internf("'%s' would be a second owner of what %s holds",
                          n->value ? n->value : "this binding",
                          init->type == AST_IDENTIFIER ? init->value : "that place");
                 owned_error(n, msg, "hand it over with `move`: `x = move y`");
@@ -10202,7 +10331,7 @@ static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
                 ASTNode* a = owned_unwrap(n->children[i]);
                 if (!a) continue;
                 if (owned_is_move(a) && a->child_count > 0 && owned_def_of(a->children[0]->node_type)) {
-                    snprintf(msg, sizeof(msg), "'%s' borrows its arguments: an owned value goes to "
+                    msg = aether_internf("'%s' borrows its arguments: an owned value goes to "
                              "it as it is, not moved", n->value);
                     owned_error(a, msg, "drop the `move`; the value stays its owner's");
                     continue;
@@ -10210,11 +10339,11 @@ static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
                 if (!owned_def_of(a->node_type)) continue;
                 int effect = tc_call_arg_effect(program, n, i, NULL);
                 if (effect == TC_ARG_FREES) {
-                    snprintf(msg, sizeof(msg), "an owned value is released by its owner, so '%s' "
+                    msg = aether_internf("an owned value is released by its owner, so '%s' "
                              "must not free it: it would be freed twice", n->value);
                     owned_error(a, msg, "let the owner go (the end of its scope), or `move` it on");
                 } else if (call_arg_mode(program, n, i) == FN_MODE_KEEP) {
-                    snprintf(msg, sizeof(msg), "'%s' keeps what it is given, and an owned value has "
+                    msg = aether_internf("'%s' keeps what it is given, and an owned value has "
                              "one owner", n->value);
                     owned_error(a, msg, "keep it in a local, an actor's state field or a message field");
                 }
@@ -10227,7 +10356,7 @@ static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
                 ASTNode* v = f->children[0];
                 if (owned_def_of(owned_msg_field_type(program, n->value, f->value)) &&
                     owned_is_place(v)) {
-                    snprintf(msg, sizeof(msg), "the message takes '%s' from its owner: hand it over "
+                    msg = aether_internf("the message takes '%s' from its owner: hand it over "
                              "with `move`", f->value);
                     owned_error(v, msg, "`field: move x`, after which `x` is not used");
                 }
@@ -10237,7 +10366,7 @@ static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
             if (!ast_is_trailing_block(n)) {
                 const char* name = NULL;
                 if (owned_mentions(n, &name)) {
-                    snprintf(msg, sizeof(msg), "a closure names the owned value '%s': it would "
+                    msg = aether_internf("a closure names the owned value '%s': it would "
                              "share what one owner holds", name);
                     owned_error(n, msg, "pass it to the closure as an argument when it is called");
                     return;
@@ -10248,7 +10377,7 @@ static void owned_walk(ASTNode* program, ASTNode* fn, ASTNode* n) {
             ASTNode* v = n->child_count > 0 ? n->children[0] : NULL;
             if (v && v->type == AST_IDENTIFIER && v->value && owned_def_of(v->node_type)) {
                 if (owned_param_named(fn, v->value)) {
-                    snprintf(msg, sizeof(msg), "'%s' is borrowed: a parameter of an owned type is "
+                    msg = aether_internf("'%s' is borrowed: a parameter of an owned type is "
                              "the caller's to release, not this function's to hand on", v->value);
                     owned_error(v, msg, "return a value the function owns");
                 } else {
@@ -10508,7 +10637,7 @@ static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
     s->rep_how[s->rep_count++] = how;
     int into = keep_set_is_into(s, param);
     const char* what = into ? "an `@into ptr` parameter" : "a borrowed `ptr` parameter";
-    char msg[480];
+    const char* msg = "";
     /* #3034: a `fn` parameter, or a struct one that holds a pointer. */
     int other = keep_set_other_param(s, param);
     if (via == KEEP_PARAM_SELF) via = NULL;
@@ -10518,10 +10647,10 @@ static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
                    ? aether_internf("a borrowed `%s` parameter", kind)
                    : aether_internf("a borrowed `%s` parameter, which holds a pointer", kind);
         if (via)
-            snprintf(msg, sizeof(msg), "'%s' is %s, %s that is %s, which outlives the call",
+            msg = aether_internf("'%s' is %s, %s that is %s, which outlives the call",
                      param, what, via, how);
         else
-            snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", param, what,
+            msg = aether_internf("'%s' is %s, %s, which outlives the call", param, what,
                      how);
         char keep_help[320];
         snprintf(keep_help, sizeof(keep_help),
@@ -10532,10 +10661,10 @@ static void report_borrowed_keep_one(KeepSet* s, ASTNode* at, const char* param,
         return;
     }
     if (via)
-        snprintf(msg, sizeof(msg), "'%s' is %s %s that is %s, which outlives the call",
+        msg = aether_internf("'%s' is %s %s that is %s, which outlives the call",
                  param, what, via, how);
     else
-        snprintf(msg, sizeof(msg), "'%s' is %s, %s, which outlives the call", param,
+        msg = aether_internf("'%s' is %s, %s, which outlives the call", param,
                  what, how);
     /* #3059: a returned parameter, or a pointer into it (`p + n`, #3033),
      * is fixed by naming the parameter `@into`: the help says so with its
@@ -11330,8 +11459,8 @@ static const char* unkept_value_kind(ASTNode* program, ASTNode* e) {
 
 static void report_unkept_into_ptr(ASTNode* at, const char* kind, const char* where,
                                    const char* until) {
-    char msg[200];
-    snprintf(msg, sizeof(msg), "a `%s` is given to %s, which keeps it past the %s", kind, where,
+    const char* msg = "";
+    msg = aether_internf("a `%s` is given to %s, which keeps it past the %s", kind, where,
              until);
     type_error_code_hint(msg,
                          !strcmp(kind, "string")
@@ -11616,8 +11745,8 @@ static void strings_into_keep_walk(const KeepCtx* c, ASTNode* n) {
                     continue;
                 report_unkept_into_ptr(a, kind, "a `@keep ptr` parameter", "call");
             } else if (mode == FN_MODE_INTO) {
-                char msg[200];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "a `%s` is given to an `@into ptr` parameter, and the result holds it "
                          "past the call", kind);
                 type_error_code_hint(msg,
@@ -11671,11 +11800,18 @@ static void check_borrowed_ptr_params(ASTNode* program, ASTNode* fn, ASTNode* bo
         int is_fn = 0;
         const char* kind = bare ? NULL : borrowed_param_kind(program, p->node_type, &is_fn);
         if (!bare && !kind) continue;
-        if (kind && s.other_count >= KEEP_SET_MAX) continue;
+        if (!s.into) {
+            /* As many as the function has parameters (#3574). */
+            size_t np = (size_t)fn->child_count + 1;
+            s.into = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_params = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_kinds = (const char**)aether_xrealloc(NULL, np * sizeof(char*));
+            s.other_is_fn = (int*)aether_xrealloc(NULL, np * sizeof(int));
+        }
         Carried self = { 0 };
         carried_add(&self, p->value, kind && !is_fn ? KEEP_PARAM_SELF : NULL);
         keep_set_add(&s, p->value, self);
-        if (bare && is_into_param(p) && s.into_count < KEEP_SET_MAX)
+        if (bare && is_into_param(p))
             s.into[s.into_count++] = p->value;
         if (kind) {
             s.other_params[s.other_count] = p->value;
@@ -11762,7 +11898,7 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
             p->type != AST_CLOSURE_PARAM)
             continue;
         int keep = is_keep_param(p), into = is_into_param(p);
-        char msg[320];
+        const char* msg = "";
         /* #1300: `@frees` and `@moves` say what a call does to the memory
          * a pointer, a `*T` or a slice parameter points at. */
         int frees = param_has_mode(p, "frees_param"), moves = param_has_mode(p, "moves_param");
@@ -11777,13 +11913,13 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
                                 : (frees && is_extern && param_has_mode(p, "noescape_param")) ? "noescape"
                                                                                                : NULL;
             if (!pointer) {
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "`@%s` applies to a pointer or slice parameter; '%s' is %s", mode2,
                          p->value, with_article(type_spelled(pt)));
                 type_error_code_hint(msg, "drop it: only memory a parameter points at is freed or moved",
                                      p->line, p->column, AETHER_ERR_FREES_MODE);
             } else if (other) {
-                snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode2,
+                msg = aether_internf("'%s' is declared both `@%s` and `@%s`", p->value, mode2,
                          other);
                 type_error_code_hint(msg,
                                      frees ? "a function that frees what it is given neither keeps "
@@ -11800,7 +11936,7 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
                             : (is_extern && param_has_mode(p, "noescape_param")) ? "noescape"
                                                                                  : NULL;
         if (other) {
-            snprintf(msg, sizeof(msg), "'%s' is declared both `@%s` and `@%s`", p->value, mode,
+            msg = aether_internf("'%s' is declared both `@%s` and `@%s`", p->value, mode,
                      other);
             const char* help =
                 !strcmp(other, "keep") ? "`@keep` already lets it reach the result"
@@ -11815,7 +11951,7 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
         }
         if (!into) continue;
         if (!is_bare_ptr_type(p->node_type)) {
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "`@into` applies to a `ptr` parameter; '%s' is %s, which E0902 leaves alone",
                      p->value, with_article(type_spelled(p->node_type)));
             type_error_code_hint(msg, "drop `@into`: only a bare `ptr` parameter is borrowed or kept",
@@ -11832,10 +11968,10 @@ static void check_param_modes(ASTNode* program, ASTNode* decl) {
                    ((!ret || ret->kind == TYPE_UNKNOWN) && body && !returns_a_value(body));
         if (none || !type_can_hold_ptr_decl(program, ret, 0)) {
             if (none)
-                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but %s has no result to hold it",
+                msg = aether_internf("'%s' is declared `@into`, but %s has no result to hold it",
                          p->value, who);
             else
-                snprintf(msg, sizeof(msg), "'%s' is declared `@into`, but %s returns %s, which "
+                msg = aether_internf("'%s' is declared `@into`, but %s returns %s, which "
                          "cannot hold it", p->value, who, type_spelled(ret));
             type_error_code_hint(msg, "a borrowed `ptr` parameter is enough", p->line, p->column,
                                  AETHER_ERR_KEEPS_BORROWED);
@@ -11878,28 +12014,27 @@ static ASTNode* effect_resolve_callee(ASTNode* program, const char* name) {
     if (!name) return NULL;
     const char* dot = strchr(name, '.');
     if (!dot) return effect_find_func(program, name);
-    char merged[256];
-    size_t n = strlen(name);
-    if (n >= sizeof(merged)) return NULL;
-    for (size_t i = 0; i < n; i++) merged[i] = name[i] == '.' ? '_' : name[i];
-    merged[n] = '\0';
     /* Only a merged module function: `value.method()` (UFCS on a local) is
      * also spelled `a.b` here, and must not be read as the program's own
      * `a_b` if one happens to exist. */
-    ASTNode* def = effect_find_func(program, merged);
+    ASTNode* def = effect_find_func(program, dotted_as_c_name(name));
     return (def && def->is_imported) ? def : NULL;
 }
 
 /* Walk `node`; return the first forbidden capability reached (recursing into
  * user-function callees), writing the offending `ns.fn` spelling to `outcall`.
  * `forbid` is the comma list of forbidden caps; `visited` guards recursion. */
+/* `visited` holds the functions the walk has entered, as many as it enters
+ * (#3569): a 512-entry array stopped following calls past it, so a tag or a
+ * purity was decided on the part of the call graph that fit. The depth a
+ * walk recurses through is a real bound, its C stack; past it the answer is
+ * the conservative one (a diagnostic, impure, or reaches anything). */
 enum {
-    EFFECT_MAX_DEPTH = 128,
-    EFFECT_MAX_VISITED = 512
+    EFFECT_MAX_DEPTH = 128
 };
 
 static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forbid,
-                               const char** visited, int* nvisited,
+                               StrMap* visited,
                                char* outcall, size_t outsz, int depth,
                                int* incomplete) {
     if (!node) return NULL;
@@ -11910,52 +12045,37 @@ static const char* effect_scan(ASTNode* program, ASTNode* node, const char* forb
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
-            size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                const char* cap = effect_call_capability(ns);
-                if (cap && strstr(forbid, cap)) {
-                    snprintf(outcall, outsz, "%s", node->value);
-                    return cap;
-                }
+            const char* cap =
+                effect_call_capability(aether_intern_n(node->value, (size_t)(dot - node->value)));
+            if (cap && strstr(forbid, cap)) {
+                snprintf(outcall, outsz, "%s", node->value);
+                return cap;
             }
         }
         {
             ASTNode* def = effect_resolve_callee(program, node->value);
             const char* callee = def && def->value ? def->value : node->value;
-            int seen = 0;
-            for (int i = 0; i < *nvisited; i++)
-                if (strcmp(visited[i], callee) == 0) { seen = 1; break; }
-            if (!seen) {
-                if (def && def->child_count > 0) {
-                    if (*nvisited >= EFFECT_MAX_VISITED) {
-                        *incomplete = 1;
-                    } else {
-                        visited[(*nvisited)++] = callee;
-                        for (int i = 0; i < program->child_count; i++) {
-                            ASTNode* clause = program->children[i];
-                            if (!clause ||
-                                (clause->type != AST_FUNCTION_DEFINITION &&
-                                 clause->type != AST_BUILDER_FUNCTION) ||
-                                !clause->value || strcmp(clause->value, callee) != 0 ||
-                                clause->child_count == 0)
-                                continue;
-                            ASTNode* body = clause->children[clause->child_count - 1];
-                            const char* c = effect_scan(program, body, forbid, visited,
-                                                        nvisited, outcall, outsz, depth + 1,
-                                                        incomplete);
-                            if (c) return c;
-                        }
-                    }
+            if (!strmap_has(visited, callee) && def && def->child_count > 0) {
+                strmap_put(visited, callee, NULL);
+                for (int i = 0; i < program->child_count; i++) {
+                    ASTNode* clause = program->children[i];
+                    if (!clause ||
+                        (clause->type != AST_FUNCTION_DEFINITION &&
+                         clause->type != AST_BUILDER_FUNCTION) ||
+                        !clause->value || strcmp(clause->value, callee) != 0 ||
+                        clause->child_count == 0)
+                        continue;
+                    ASTNode* body = clause->children[clause->child_count - 1];
+                    const char* c = effect_scan(program, body, forbid, visited,
+                                                outcall, outsz, depth + 1, incomplete);
+                    if (c) return c;
                 }
             }
         }
     }
     for (int i = 0; i < node->child_count; i++) {
         const char* c = effect_scan(program, node->children[i], forbid, visited,
-                                    nvisited, outcall, outsz, depth, incomplete);
+                                    outcall, outsz, depth, incomplete);
         if (c) return c;
     }
     return NULL;
@@ -11974,9 +12094,9 @@ static void check_effect_tags(ASTNode* program) {
         if (!eff) continue;
         const char* forbid = eff + 7;  /* "fs,net,os" or a subset */
         if (fn->child_count == 0) continue;
-        const char* visited[EFFECT_MAX_VISITED];
-        int nv = 0;
-        if (fn->value) visited[nv++] = fn->value;  /* no self-recursion loop */
+        StrMap visited;
+        strmap_init(&visited);
+        if (fn->value) strmap_put(&visited, fn->value, NULL);  /* no self-recursion loop */
         char offending[160];
         offending[0] = '\0';
         int incomplete = 0;
@@ -11990,16 +12110,17 @@ static void check_effect_tags(ASTNode* program) {
                 clause->child_count == 0)
                 continue;
             ASTNode* body = clause->children[clause->child_count - 1];
-            cap = effect_scan(program, body, forbid, visited, &nv,
+            cap = effect_scan(program, body, forbid, &visited,
                               offending, sizeof(offending), 0, &incomplete);
         }
+        strmap_free(&visited);
         if (cap) {
             /* #2729: named as the source spells it (`checks.shell`), not by
              * the merged C name (`checks_shell`). */
             char shown[160];
             const char* name = ast_source_name(fn, shown, sizeof(shown));
-            char msg[400];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                 "function '%s' is declared `@no_%s` (or `@pure`) but reaches a "
                 "`%s` operation through `%s`. Remove that call path, or drop the "
                 "effect tag.", name, cap, cap, offending);
@@ -12009,11 +12130,11 @@ static void check_effect_tags(ASTNode* program) {
         } else if (incomplete) {
             char shown[160];
             const char* name = ast_source_name(fn, shown, sizeof(shown));
-            char msg[400];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                 "function '%s' carries an effect tag, but effect analysis exceeded "
-                "its call-graph limit (%d levels or %d functions). Validation is refused.",
-                name, EFFECT_MAX_DEPTH, EFFECT_MAX_VISITED);
+                "its call-graph limit (%d levels of calls). Validation is refused.",
+                name, EFFECT_MAX_DEPTH);
             g_tc_file = fn->source_file;
             type_error(msg, fn->line, fn->column);
             g_tc_file = NULL;
@@ -12052,29 +12173,24 @@ static const char* purity_lvalue_root(ASTNode* n) {
 
 static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
                        const char** globals, int nglobals,
-                       const char** visited, int* nv, int depth) {
-    if (!node || depth > 128) return 0;
+                       StrMap* visited, int depth) {
+    if (!node) return 0;
+    /* Past the depth bound the rest of the call graph is unseen: impure, as
+     * any body the analysis cannot see is. It said pure. */
+    if (depth > EFFECT_MAX_DEPTH) return 1;
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
-            size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                if (effect_call_capability(ns)) return 1;  /* fs/net/os → impure */
-            }
+            if (effect_call_capability(aether_intern_n(node->value, (size_t)(dot - node->value))))
+                return 1;  /* fs/net/os → impure */
         }
         {
-            int seen = 0;
-            for (int i = 0; i < *nv; i++)
-                if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
-            if (!seen && *nv < 512) {
+            if (!strmap_has(visited, node->value)) {
                 ASTNode* def = effect_resolve_callee(program, node->value);
                 if (def && def->child_count > 0) {
-                    visited[(*nv)++] = node->value;
+                    strmap_put(visited, node->value, NULL);
                     if (purity_scan(program, def, def->children[def->child_count - 1],
-                                    globals, nglobals, visited, nv, depth + 1)) return 1;
+                                    globals, nglobals, visited, depth + 1)) return 1;
                 }
             }
         }
@@ -12099,7 +12215,7 @@ static int purity_scan(ASTNode* program, ASTNode* fn, ASTNode* node,
         }
     }
     for (int i = 0; i < node->child_count; i++)
-        if (purity_scan(program, fn, node->children[i], globals, nglobals, visited, nv, depth))
+        if (purity_scan(program, fn, node->children[i], globals, nglobals, visited, depth))
             return 1;
     return 0;
 }
@@ -12108,11 +12224,13 @@ static int func_is_pure(ASTNode* program, const char* fnname,
                         const char** globals, int nglobals) {
     ASTNode* fn = effect_find_func(program, fnname);
     if (!fn || fn->child_count == 0) return 0;  /* unknown / extern → conservatively impure */
-    const char* visited[512];
-    int nv = 0;
-    visited[nv++] = fnname;
+    StrMap visited;
+    strmap_init(&visited);
+    strmap_put(&visited, fnname, NULL);
     ASTNode* body = fn->children[fn->child_count - 1];
-    return !purity_scan(program, fn, body, globals, nglobals, visited, &nv, 0);
+    int impure = purity_scan(program, fn, body, globals, nglobals, &visited, 0);
+    strmap_free(&visited);
+    return !impure;
 }
 
 /* #889: derived per-function effect reachability, exposed via --emit=effects.
@@ -12140,57 +12258,49 @@ static int effect_is_extern(ASTNode* program, const char* name) {
 }
 
 static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
-                           const char** visited, int* nvisited, int depth) {
-    if (!node || depth > 128) return;
+                           StrMap* visited, int depth) {
+    if (!node) return;
+    /* Past the depth bound the rest of the call graph is unseen: it may
+     * reach anything, the fail-closed answer an extern gets. The walk
+     * stopped there and reported what it had seen. */
+    if (depth > EFFECT_MAX_DEPTH) {
+        set->reach_extern = 1;
+        return;
+    }
     if (node->type == AST_FUNCTION_CALL && node->value) {
         const char* dot = strchr(node->value, '.');
         if (dot) {
-            char ns[64];
             size_t l = (size_t)(dot - node->value);
-            if (l < sizeof(ns)) {
-                memcpy(ns, node->value, l);
-                ns[l] = '\0';
-                const char* cap = effect_call_capability(ns);
-                if (cap) {
-                    if (!strcmp(cap, "fs"))  set->reach_fs = 1;
-                    else if (!strcmp(cap, "net")) set->reach_net = 1;
-                    else if (!strcmp(cap, "os"))  set->reach_os = 1;
-                } else {
-                    /* Not a capability namespace — a call into an imported
-                       user module. After module merge the callee lives under
-                       its underscore-merged name (`osmod.do_exec` →
-                       `osmod_do_exec`), so follow that edge to keep the
-                       reachability whole-program across import boundaries. */
-                    char merged[256];
-                    snprintf(merged, sizeof(merged), "%.*s_%s",
-                             (int)l, node->value, dot + 1);
-                    int seen = 0;
-                    for (int i = 0; i < *nvisited; i++)
-                        if (strcmp(visited[i], merged) == 0) { seen = 1; break; }
-                    if (!seen && *nvisited < 512) {
-                        ASTNode* def = effect_find_func(program, merged);
-                        if (def && def->child_count > 0) {
-                            /* visited[] holds borrowed pointers; this name is
-                               stack-local, so search by value above is fine,
-                               but we must store a stable pointer. Use the
-                               def's own name (lives in the AST). */
-                            visited[(*nvisited)++] = def->value ? def->value : merged;
-                            effect_collect(program, def->children[def->child_count - 1],
-                                           set, visited, nvisited, depth + 1);
-                        }
+            const char* cap = effect_call_capability(aether_intern_n(node->value, l));
+            if (cap) {
+                if (!strcmp(cap, "fs"))  set->reach_fs = 1;
+                else if (!strcmp(cap, "net")) set->reach_net = 1;
+                else if (!strcmp(cap, "os"))  set->reach_os = 1;
+            } else {
+                /* Not a capability namespace: a call into an imported
+                   user module. After module merge the callee lives under
+                   its underscore-merged name (`osmod.do_exec` →
+                   `osmod_do_exec`), so follow that edge to keep the
+                   reachability whole-program across import boundaries.
+                   Interned, as long as it is (#3569): a namespace of 64
+                   bytes or more was not followed. */
+                const char* merged = aether_internf("%.*s_%s", (int)l, node->value, dot + 1);
+                if (!strmap_has(visited, merged)) {
+                    ASTNode* def = effect_find_func(program, merged);
+                    if (def && def->child_count > 0) {
+                        strmap_put(visited, def->value ? def->value : merged, NULL);
+                        effect_collect(program, def->children[def->child_count - 1],
+                                       set, visited, depth + 1);
                     }
                 }
             }
         } else {
-            int seen = 0;
-            for (int i = 0; i < *nvisited; i++)
-                if (strcmp(visited[i], node->value) == 0) { seen = 1; break; }
-            if (!seen && *nvisited < 512) {
+            if (!strmap_has(visited, node->value)) {
                 ASTNode* def = effect_find_func(program, node->value);
                 if (def && def->child_count > 0) {
-                    visited[(*nvisited)++] = node->value;
+                    strmap_put(visited, node->value, NULL);
                     effect_collect(program, def->children[def->child_count - 1],
-                                   set, visited, nvisited, depth + 1);
+                                   set, visited, depth + 1);
                 } else if (effect_is_extern(program, node->value)) {
                     set->reach_extern = 1;  /* fail-closed: unclassifiable */
                 }
@@ -12198,25 +12308,17 @@ static void effect_collect(ASTNode* program, ASTNode* node, EffectSet* set,
         }
     }
     for (int i = 0; i < node->child_count; i++)
-        effect_collect(program, node->children[i], set, visited, nvisited, depth);
+        effect_collect(program, node->children[i], set, visited, depth);
 }
 
 void emit_effects_json(FILE* out, ASTNode* program) {
     if (!out) return;
     /* Collect module globals once (for the purity test, same basis as #522:
        a global is a top-level CONST_DECLARATION annotated "global_var",
-       possibly wrapped in an EXPORT_STATEMENT). */
-    const char* globals[256];
+       possibly wrapped in an EXPORT_STATEMENT). Every one of them (#3569):
+       256 slots left the rest out, so a write to one of those read as pure. */
     int nglobals = 0;
-    if (program) {
-        for (int i = 0; i < program->child_count && nglobals < 256; i++) {
-            ASTNode* c = program->children[i];
-            if (c && c->type == AST_EXPORT_STATEMENT && c->child_count > 0) c = c->children[0];
-            if (c && c->type == AST_CONST_DECLARATION && c->value && c->annotation &&
-                strcmp(c->annotation, "global_var") == 0)
-                globals[nglobals++] = c->value;
-        }
-    }
+    const char** globals = program ? collect_global_var_names(program, &nglobals) : NULL;
     fprintf(out, "{\n");
     int first = 1;
     if (program) {
@@ -12226,12 +12328,13 @@ void emit_effects_json(FILE* out, ASTNode* program) {
                         fn->type != AST_BUILDER_FUNCTION) || !fn->value)
                 continue;
             EffectSet set = {0, 0, 0, 0};
-            const char* visited[512];
-            int nv = 0;
-            visited[nv++] = fn->value;
+            StrMap visited;
+            strmap_init(&visited);
+            strmap_put(&visited, fn->value, NULL);
             if (fn->child_count > 0)
                 effect_collect(program, fn->children[fn->child_count - 1],
-                               &set, visited, &nv, 0);
+                               &set, &visited, 0);
+            strmap_free(&visited);
             int rfs  = set.reach_fs  || set.reach_extern;
             int rnet = set.reach_net || set.reach_extern;
             int ros  = set.reach_os  || set.reach_extern;
@@ -12256,6 +12359,7 @@ void emit_effects_json(FILE* out, ASTNode* program) {
         }
     }
     fprintf(out, "\n}\n");
+    free(globals);
 }
 
 /* #480 distinct types — resolution pass. The parser leaves a reference to a
@@ -12265,7 +12369,6 @@ void emit_effects_json(FILE* out, ASTNode* program) {
  * distinct Type: machine `kind` from Base (so codegen/get_c_type emit Base's
  * C type — zero cost) plus `distinct_name = Name` (so the type system keeps it
  * nominally separate). */
-#define AETHER_MAX_DISTINCT 256
 typedef struct { const char* name; Type* base; } DistinctDef;
 
 static void distinct_rewrite_type(Type* t, DistinctDef* defs, int ndefs, int depth) {
@@ -12302,18 +12405,23 @@ static void distinct_rewrite_ast(ASTNode* n, DistinctDef* defs, int ndefs) {
 
 static void resolve_distinct_types(ASTNode* program) {
     if (!program) return;
-    DistinctDef defs[AETHER_MAX_DISTINCT];
+    /* As many as the program declares (#3574): 256 slots dropped the rest,
+     * whose uses then kept the parser's placeholder struct type. */
+    DistinctDef* defs = (DistinctDef*)aether_xrealloc(
+        NULL, sizeof(DistinctDef) * (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_DISTINCT_TYPE_DEF && c->value && c->node_type &&
-            ndefs < AETHER_MAX_DISTINCT) {
+        if (c && c->type == AST_DISTINCT_TYPE_DEF && c->value && c->node_type) {
             defs[ndefs].name = c->value;
             defs[ndefs].base = c->node_type;
             ndefs++;
         }
     }
-    if (ndefs == 0) return;
+    if (ndefs == 0) {
+        free(defs);
+        return;
+    }
     distinct_rewrite_ast(program, defs, ndefs);
 
     /* Bare C externs stay in the module registry rather than being cloned
@@ -12332,6 +12440,7 @@ static void resolve_distinct_types(ASTNode* program) {
                 distinct_rewrite_ast(decl, defs, ndefs);
         }
     }
+    free(defs);
 }
 
 // #2200 named C function-pointer types. `cfn Name(a: T1, b: T2) -> R` parses
@@ -12343,7 +12452,6 @@ static void resolve_distinct_types(ASTNode* program) {
 // A `p as Name` cast was parsed as an AST_VALUE_CAST (the parser cannot tell a
 // cfn name from a distinct one); once its target is a function pointer the
 // node becomes the AST_PTR_AS_FN_CAST that `p as fn(...)` produces directly.
-#define AETHER_MAX_CFNS 256
 typedef struct { const char* name; Type* sig; } CfnDef;
 
 /* Turn the in-place TYPE_STRUCT{cfnName} into the signature. The name is
@@ -12403,7 +12511,9 @@ static ASTNode* unwrap_cfn_def(ASTNode* c) {
 
 static void resolve_cfn_types(ASTNode* program) {
     if (!program) return;
-    CfnDef defs[AETHER_MAX_CFNS];
+    /* As many as the program declares (#3574): past 256 one was dropped. */
+    CfnDef* defs = (CfnDef*)aether_xrealloc(NULL, sizeof(CfnDef) *
+                                                      (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = unwrap_cfn_def(program->children[i]);
@@ -12413,19 +12523,17 @@ static void resolve_cfn_types(ASTNode* program) {
             if (strcmp(defs[j].name, c->value) == 0) { dup = 1; break; }
         }
         if (dup) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "cfn `%s` is declared twice", c->value);
+            const char* msg = "";
+            msg = aether_internf("cfn `%s` is declared twice", c->value);
             type_error(msg, c->line, c->column);
             continue;
         }
-        if (ndefs < AETHER_MAX_CFNS) {
-            defs[ndefs].name = c->value;
-            defs[ndefs].sig = c->node_type;
-            ndefs++;
-        }
+        defs[ndefs].name = c->value;
+        defs[ndefs].sig = c->node_type;
+        ndefs++;
     }
-    if (ndefs == 0) return;
-    cfn_rewrite_ast(program, defs, ndefs);
+    if (ndefs > 0) cfn_rewrite_ast(program, defs, ndefs);
+    free(defs);
 }
 
 // #914 sum/variant types. `type Name = A | B | C` parses to AST_SUM_TYPE_DEF
@@ -12434,7 +12542,6 @@ static void resolve_cfn_types(ASTNode* program) {
 // pass rewrites every such reference to the real TYPE_SUM (carrying the
 // variant Types in tuple_types[]), exactly as resolve_distinct_types does for
 // distinct aliases.
-#define AETHER_MAX_SUMS 256
 typedef struct { const char* name; ASTNode* def; } SumDef;
 
 // Convert an in-place TYPE_STRUCT{sumName} into the TYPE_SUM, filling its
@@ -12485,11 +12592,13 @@ static void resolve_sum_types(ASTNode* program) {
     /* #2996: the sums a branch value's arms join to (branch_join_type). */
     ast_sums_reset();
     if (!program) return;
-    SumDef defs[AETHER_MAX_SUMS];
+    /* As many as the program declares (#3574): past 256 one was dropped. */
+    SumDef* defs = (SumDef*)aether_xrealloc(NULL, sizeof(SumDef) *
+                                                      (size_t)(program->child_count + 1));
     int ndefs = 0;
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_SUM_TYPE_DEF && c->value && ndefs < AETHER_MAX_SUMS) {
+        if (c && c->type == AST_SUM_TYPE_DEF && c->value) {
             defs[ndefs].name = c->value;
             defs[ndefs].def = c;
             ndefs++;
@@ -12499,8 +12608,8 @@ static void resolve_sum_types(ASTNode* program) {
             free_type(st);
         }
     }
-    if (ndefs == 0) return;
-    sum_rewrite_ast(program, defs, ndefs);
+    if (ndefs > 0) sum_rewrite_ast(program, defs, ndefs);
+    free(defs);
 }
 
 // #1044: rewrite bare `TYPE_STRUCT{EnumName}` type annotations into TYPE_ENUM
@@ -12533,21 +12642,20 @@ static void enum_rewrite_ast(ASTNode* nd, const char** names, int n) {
 /* A qualified enum member is lowered to one identifier before lexical scopes
  * are checked. Preserve the prefix the source wrote so hide/seal decisions use
  * `Color`, not the generated `Color_Red` constant name. */
-static int enum_member_source_prefix(const ASTNode* nd, char* out, size_t outsz) {
+static const char* enum_member_source_prefix(const ASTNode* nd) {
     static const char marker[] = "enum_prefix:";
-    if (!nd || !nd->annotation || !out || outsz == 0) return 0;
+    if (!nd || !nd->annotation) return NULL;
     size_t marker_len = sizeof(marker) - 1;
     for (const char* p = nd->annotation; (p = strstr(p, marker)) != NULL; p += marker_len) {
         if (p != nd->annotation && p[-1] != ';') continue;
         const char* value = p + marker_len;
         const char* end = strchr(value, ';');
         size_t len = end ? (size_t)(end - value) : strlen(value);
-        if (len == 0 || len >= outsz) return 0;
-        memcpy(out, value, len);
-        out[len] = '\0';
-        return 1;
+        /* Interned, as long as it is: one past 512 bytes was no prefix at
+         * all, and its hide / seal went unchecked (#3569). */
+        return len ? aether_intern_n(value, len) : NULL;
     }
-    return 0;
+    return NULL;
 }
 
 // #1044: rewrite `EnumName.Member` member-access nodes into a plain identifier
@@ -12562,16 +12670,14 @@ static void enum_rewrite_member_access(ASTNode* nd) {
         nd->value && is_enum_type_name(nd->children[0]->value)) {
         const char* ename = nd->children[0]->value;
         if (!enum_has_member(ename, nd->value)) {
-            char msg[256];
-            snprintf(msg, sizeof(msg), "'%s' is not a member of enum '%s'",
+            const char* msg = "";
+            msg = aether_internf("'%s' is not a member of enum '%s'",
                      nd->value, ename);
             type_error(msg, nd->line, nd->column);
         } else {
-            char qualified[512];
-            snprintf(qualified, sizeof(qualified), "%s_%s", ename, nd->value);
-            char marker[512];
-            snprintf(marker, sizeof(marker), "enum_prefix:%s", ename);
-            nd->annotation = annotation_add_marker(nd->annotation, marker);
+            const char* qualified = aether_internf("%s_%s", ename, nd->value);
+            nd->annotation = annotation_add_marker(nd->annotation,
+                                                   aether_internf("enum_prefix:%s", ename));
             Type* et = create_type(TYPE_ENUM);
             et->struct_name = strdup(ename);
             free(nd->value);
@@ -12594,14 +12700,19 @@ static void enum_rewrite_member_access(ASTNode* nd) {
 
 static void resolve_enum_types(ASTNode* program) {
     g_enum_name_count = 0;
+    strmap_free(&g_enum_name_set);
+    strmap_init(&g_enum_name_set);
     g_enum_program = program;
     g_constfold_program = program;
     if (!program) return;
+    g_enum_names = (const char**)aether_xrealloc(
+        g_enum_names, sizeof(char*) * (size_t)(program->child_count + 1));
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* c = program->children[i];
-        if (c && c->type == AST_ENUM_DEFINITION && c->value &&
-            g_enum_name_count < AETHER_MAX_ENUMS)
+        if (c && c->type == AST_ENUM_DEFINITION && c->value) {
             g_enum_names[g_enum_name_count++] = c->value;
+            strmap_put(&g_enum_name_set, c->value, NULL);
+        }
     }
     if (g_enum_name_count == 0) return;
     enum_rewrite_ast(program, g_enum_names, g_enum_name_count);        /* type annotations */
@@ -12720,18 +12831,19 @@ static void array_type_spelling(Type* arr, char* out, size_t cap) {
  * function value's result has no struct to carry it. */
 static void refuse_array_result(const char* subject, Type* result, Type* arr, int line,
                                 int column) {
-    char spelled[128], msg[512], hint[256];
+    char spelled[128];
+    const char* msg = ""; const char* hint = "";
     array_type_spelling(arr, spelled, sizeof(spelled));
     if (result == arr) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s %s, a fixed-size array: only a named function returns one, alone or in "
                  "a tuple (#2894)", subject, spelled);
     } else {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "%s %s, which holds the fixed-size array %s: only a named function returns "
                  "one, alone or in a tuple (#2894)", subject, type_spelled(result), spelled);
     }
-    snprintf(hint, sizeof(hint),
+    hint = aether_internf(
              "return it from a named function, or wrap it in a struct: struct Pair { v: %s }",
              spelled);
     type_error_code_hint(msg, hint, line, column, AETHER_ERR_ARRAY_RESULT);
@@ -12821,8 +12933,8 @@ static int refuse_unknown_type(const char* what, const char* name, Type* t, Symb
                                int line, int column) {
     const char* u = type_unknown_name(t, table, 0);
     if (!u) return 0;
-    char msg[512];
-    snprintf(msg, sizeof(msg), "Unknown type '%s': %s '%s' is declared of a type the program "
+    const char* msg = "";
+    msg = aether_internf("Unknown type '%s': %s '%s' is declared of a type the program "
              "does not define", u, what, name ? name : "?");
     const char* hint = strcmp(u, "and") == 0
         ? "Aether's logical AND is `&&` (`a && b`), and OR is `||`"
@@ -12947,8 +13059,8 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
 
         // Verify field type is valid
         if (!field->node_type) {
-            char error_msg[256];
-            snprintf(error_msg, sizeof(error_msg),
+            const char* error_msg = "";
+            error_msg = aether_internf(
                     "Struct field '%s' has no type", field->value);
             type_error(error_msg, field->line, field->column);
             return 0;
@@ -12969,8 +13081,8 @@ int typecheck_struct_definition(ASTNode* struct_def, SymbolTable* table) {
         for (int j = 0; j < i; j++) {
             ASTNode* other_field = struct_def->children[j];
             if (strcmp(field->value, other_field->value) == 0) {
-                char error_msg[256];
-                snprintf(error_msg, sizeof(error_msg), 
+                const char* error_msg = "";
+                error_msg = aether_internf(
                         "Duplicate field name '%s' in struct '%s'", 
                         field->value, struct_def->value);
                 type_error(error_msg, field->line, field->column);
@@ -13083,8 +13195,8 @@ static int report_unheld_binding(ASTNode* stmt, Type* w, Type* t, ASTNode* init)
     int number = (is_numeric_scalar(t->kind) || t->kind == TYPE_BYTE) &&
                  (is_numeric_scalar(w->kind) || w->kind == TYPE_BYTE);
     if (number ? ast_number_holds(w, t, init) : is_assignable(t, w)) return 0;
-    char rmsg[512];
-    snprintf(rmsg, sizeof(rmsg),
+    const char* rmsg = "";
+    rmsg = aether_internf(
              "cannot bind '%s' to this %s value: it is written as %s in another branch or loop "
              "body of this function, which does not hold the value, and a local first bound "
              "inside a branch or loop body is one variable for the whole function",
@@ -13122,22 +13234,25 @@ static void declare_loop_hoist(ASTNode* decl, void* user) {
  * the block). Codegen gives each a result variable and keeps its arms'
  * names in the arms; a statement match declares the names every arm binds
  * before it (declare_common_hoists), as an if/else does. */
-#define TC_MAX_VALUE_MATCHES 256
-static ASTNode* tc_value_matches[TC_MAX_VALUE_MATCHES];
+/* As deep as the matches nest (#3574): 256 slots forgot the ones past them,
+ * which then were not seen as values. */
+static ASTNode** tc_value_matches = NULL;
 static int tc_value_match_depth = 0;
+static int tc_value_match_cap = 0;
 
 static void tc_push_value_match(ASTNode* m) {
-    if (tc_value_match_depth < TC_MAX_VALUE_MATCHES)
-        tc_value_matches[tc_value_match_depth] = m;
-    tc_value_match_depth++;   /* always increment so pop stays balanced */
+    if (tc_value_match_depth == tc_value_match_cap) {
+        tc_value_match_cap = tc_value_match_cap ? tc_value_match_cap * 2 : 16;
+        tc_value_matches = (ASTNode**)aether_xrealloc(
+            tc_value_matches, sizeof(ASTNode*) * (size_t)tc_value_match_cap);
+    }
+    tc_value_matches[tc_value_match_depth++] = m;
 }
 static void tc_pop_value_match(void) {
     if (tc_value_match_depth > 0) tc_value_match_depth--;
 }
 static int tc_is_value_match(ASTNode* m) {
-    int n = tc_value_match_depth < TC_MAX_VALUE_MATCHES
-          ? tc_value_match_depth : TC_MAX_VALUE_MATCHES;
-    for (int i = n - 1; i >= 0; i--)
+    for (int i = tc_value_match_depth - 1; i >= 0; i--)
         if (tc_value_matches[i] == m) return 1;
     return 0;
 }
@@ -13146,23 +13261,26 @@ static int tc_is_value_match(ASTNode* m) {
  * label`. Pushed (one slot per loop, NULL for an unlabeled loop) while a
  * loop body is type-checked. Type-checking is single-threaded, so a file-
  * static stack is sufficient. */
-#define TC_MAX_LOOP_LABELS 256
-static const char* tc_loop_labels[TC_MAX_LOOP_LABELS];
+/* As deep as the loops nest (#3574): 256 slots forgot the labels past them,
+ * and a `break` to one was refused. */
+static const char** tc_loop_labels = NULL;
 static int tc_loop_label_depth = 0;
+static int tc_loop_label_cap = 0;
 
 static void tc_push_loop_label(const char* label) {
-    if (tc_loop_label_depth < TC_MAX_LOOP_LABELS) {
-        tc_loop_labels[tc_loop_label_depth] = label;
+    if (tc_loop_label_depth == tc_loop_label_cap) {
+        tc_loop_label_cap = tc_loop_label_cap ? tc_loop_label_cap * 2 : 16;
+        tc_loop_labels = (const char**)aether_xrealloc(
+            tc_loop_labels, sizeof(char*) * (size_t)tc_loop_label_cap);
     }
-    tc_loop_label_depth++;   /* always increment so pop stays balanced */
+    tc_loop_labels[tc_loop_label_depth++] = label;
 }
 static void tc_pop_loop_label(void) {
     if (tc_loop_label_depth > 0) tc_loop_label_depth--;
 }
 static int tc_loop_label_in_scope(const char* label) {
     if (!label) return 0;
-    int n = tc_loop_label_depth < TC_MAX_LOOP_LABELS
-          ? tc_loop_label_depth : TC_MAX_LOOP_LABELS;
+    int n = tc_loop_label_depth;
     for (int i = 0; i < n; i++) {
         if (tc_loop_labels[i] && strcmp(tc_loop_labels[i], label) == 0) return 1;
     }
@@ -13189,12 +13307,12 @@ static void condition_not_boolean(const char* msg, ASTNode* cond, Type* t, int l
         type_error(msg, line, column);
         return;
     }
-    char hint[256];
+    const char* hint = "";
     if (cond && cond->type == AST_IDENTIFIER && cond->value)
-        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `%s != none`",
+        hint = aether_internf("an optional is not a bool: test it with `%s != none`",
                  cond->value);
     else
-        snprintf(hint, sizeof(hint), "an optional is not a bool: test it with `!= none`");
+        hint = aether_internf("an optional is not a bool: test it with `!= none`");
     type_error_hint(msg, hint, line, column);
 }
 
@@ -13370,18 +13488,23 @@ static void warn_unreachable_arm(ASTNode* pattern, const char* msg,
 }
 
 /* #2727: the values a selector compares with: the selector itself, or each
- * value of a comma-list. A range is one value here. Returns the count written
- * to `out` (at most `cap`). */
-static int selector_elements(ASTNode* sel, ASTNode** out, int cap) {
-    if (!sel || cap <= 0) return 0;
-    if (sel->type != AST_MATCH_ALT) { out[0] = sel; return 1; }
-    int n = 0;
-    for (int i = 0; i < sel->child_count && n < cap; i++)
-        if (sel->children[i]) out[n++] = sel->children[i];
-    return n;
+ * value of a comma-list. A range is one value here. A malloc'd array of them,
+ * *n long, which the caller frees: every value (#3574), where 256 slots left
+ * the rest of a long comma-list unchecked. */
+static ASTNode** selector_elements(ASTNode* sel, int* n) {
+    *n = 0;
+    if (!sel) return NULL;
+    int cap = sel->type == AST_MATCH_ALT ? sel->child_count : 1;
+    ASTNode** out = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)(cap + 1));
+    if (sel->type != AST_MATCH_ALT) {
+        out[0] = sel;
+        *n = 1;
+        return out;
+    }
+    for (int i = 0; i < sel->child_count; i++)
+        if (sel->children[i]) out[(*n)++] = sel->children[i];
+    return out;
 }
-
-#define SELECTOR_ELEMENTS_MAX 256
 
 /* Run after the arms are checked, so a bare enum member is its constant by
  * then. An arm is unreachable below a `_`, or when every value it names is
@@ -13389,10 +13512,11 @@ static int selector_elements(ASTNode* sel, ASTNode** out, int cap) {
  * value, and over an enum, a sum or an optional an identifier is a case). */
 static void check_match_arm_reachability(ASTNode* stmt, int closed) {
     if (!stmt) return;
-    enum { MATCH_KEYS_MAX = 256 };
-    char* keys[MATCH_KEYS_MAX];
-    int  key_line[MATCH_KEYS_MAX];
-    int  nkeys = 0;
+    /* Every case the arms name (#3574): 256 slots forgot the rest, and an
+     * arm repeating one of them was not found unreachable. */
+    char** keys = NULL;
+    int* key_line = NULL;
+    int  nkeys = 0, key_cap = 0;
     int  wildcard_line = -1;
 
     for (int i = 1; i < stmt->child_count; i++) {
@@ -13402,8 +13526,8 @@ static void check_match_arm_reachability(ASTNode* stmt, int closed) {
         if (!pattern) continue;
 
         if (wildcard_line >= 0) {
-            char msg[240];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "unreachable match arm: the `_` arm on line %d already "
                      "matches every remaining case", wildcard_line);
             warn_unreachable_arm(pattern, msg,
@@ -13415,9 +13539,9 @@ static void check_match_arm_reachability(ASTNode* stmt, int closed) {
             continue;
         }
 
-        ASTNode* els[SELECTOR_ELEMENTS_MAX];
-        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
-        char* arm_keys[SELECTOR_ELEMENTS_MAX];
+        int nel = 0;
+        ASTNode** els = selector_elements(pattern, &nel);
+        char** arm_keys = (char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)(nel + 1));
         int nak = 0, all_keyed = nel > 0, dup_line = -1, all_seen = 1;
         for (int e = 0; e < nel; e++) {
             char* key = match_arm_key(els[e], closed);
@@ -13432,24 +13556,29 @@ static void check_match_arm_reachability(ASTNode* stmt, int closed) {
             arm_keys[nak++] = key;
         }
         if (all_keyed && all_seen && dup_line >= 0) {
-            char msg[240];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "unreachable match arm: this case is already handled on "
                      "line %d", dup_line);
             warn_unreachable_arm(pattern, msg,
                                  "remove the duplicate, or change it to the case you meant");
         }
         for (int k = 0; k < nak; k++) {
-            if (nkeys < MATCH_KEYS_MAX) {
-                keys[nkeys] = arm_keys[k];
-                key_line[nkeys] = pattern->line;
-                nkeys++;
-            } else {
-                free(arm_keys[k]);
+            if (nkeys == key_cap) {
+                key_cap = key_cap ? key_cap * 2 : 32;
+                keys = (char**)aether_xrealloc(keys, sizeof(char*) * (size_t)key_cap);
+                key_line = (int*)aether_xrealloc(key_line, sizeof(int) * (size_t)key_cap);
             }
+            keys[nkeys] = arm_keys[k];
+            key_line[nkeys] = pattern->line;
+            nkeys++;
         }
+        free(arm_keys);
+        free(els);
     }
     for (int k = 0; k < nkeys; k++) free(keys[k]);
+    free(keys);
+    free(key_line);
 }
 
 /* ---- #2727: a case selector against the value it is compared with -------
@@ -13477,17 +13606,17 @@ static int selector_in_switch(const char* what) {
 
 static void selector_mismatch(ASTNode* at, const char* what, const char* shown,
                               Type* got, Type* subject) {
-    char msg[400];
-    char help[300];
-    snprintf(msg, sizeof(msg),
+    const char* msg = "";
+    const char* help = "";
+    msg = aether_internf(
              "this %s compares the value matched (%s) with %s, %s, which it can "
              "never equal", what, type_name(subject), shown, with_article(type_name(got)));
     if (subject && subject->distinct_name)
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "'%s' is a distinct type: write the value as one, `<value> as %s`",
                  subject->distinct_name, subject->distinct_name);
     else
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "write a value of type %s here, or convert the value matched with `as`",
                  type_name(subject));
     type_error_code_hint(msg, help, at->line, at->column, AETHER_ERR_TYPE_MISMATCH);
@@ -13519,8 +13648,8 @@ static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
     if (!v) return 1;
     if (v->type == AST_MATCH_RANGE) {
         if (subject && !selector_is_numeric(subject)) {   /* unknown is numeric */
-            char msg[300];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "a range %s compares by order, and the value matched is %s, "
                      "which has none", what, with_article(type_name(subject)));
             type_error_code_hint(msg, "name the values one by one, separated by commas",
@@ -13537,8 +13666,8 @@ static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
         (v->type == AST_PATTERN_VARIABLE && v->annotation &&
          strcmp(v->annotation, "some_pattern") == 0)) {
         if (!known) return 1;
-        char msg[300];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "`%s` matches an optional, and the value matched is %s",
                  v->type == AST_NONE_LITERAL ? "none" : "some(...)",
                  with_article(type_name(subject)));
@@ -13551,8 +13680,8 @@ static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
     }
     if (v->type == AST_PATTERN_LIST || v->type == AST_PATTERN_CONS) {
         if (!known) return 1;
-        char msg[300];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "a list pattern matches an array, a slice or a `*StringSeq`, and "
                  "the value matched is %s", with_article(type_name(subject)));
         type_error_code_hint(msg, "match the list itself, or use a value pattern here",
@@ -13562,8 +13691,8 @@ static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
     /* A bare member of the enum matched is that member's constant. */
     coerce_bare_enum_member(v, subject, table);
     if (match_arm_is_wildcard(v)) {
-        char msg[200];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "`_` takes every value, so it cannot be one of the values a %s names", what);
         type_error_code_hint(msg,
                              selector_in_switch(what)
@@ -13575,8 +13704,8 @@ static int check_selector_value(ASTNode* v, Type* subject, SymbolTable* table,
     if (v->type == AST_IDENTIFIER && v->value &&
         !(v->node_type && v->node_type->kind == TYPE_ENUM) &&
         !lookup_symbol(table, v->value)) {
-        char msg[300];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "'%s' names no variable: a %s compares the value matched with what "
                  "it names, and binds no new name", v->value, what);
         type_error_code_hint(msg,
@@ -13619,11 +13748,12 @@ static int switch_subject_comparable(Type* t) {
 /* Check every value of selector `sel` against the value matched. */
 static int check_selector(ASTNode* sel, Type* subject, SymbolTable* table,
                           const char* what) {
-    ASTNode* els[SELECTOR_ELEMENTS_MAX];
-    int n = selector_elements(sel, els, SELECTOR_ELEMENTS_MAX);
+    int n = 0;
+    ASTNode** els = selector_elements(sel, &n);
     int ok = 1;
     for (int i = 0; i < n; i++)
         if (!check_selector_value(els[i], subject, table, what)) ok = 0;
+    free(els);
     return ok;
 }
 
@@ -13683,11 +13813,11 @@ static int is_string_producer_call(ASTNode* e) {
 
 static void report_ptr_into_string(const char* name, ASTNode* rhs, int line, int column) {
     if (is_string_producer_call(rhs)) return;
-    char msg[300], hint[200];
-    snprintf(msg, sizeof(msg),
+    const char* msg = ""; const char* hint = "";
+    msg = aether_internf(
              "'%s' is a `string`, and a `ptr` given to it would be read as text whatever it points at",
              name ? name : "?");
-    snprintf(hint, sizeof(hint), "say it is a string with `%s`", ptr_string_accessor(rhs));
+    hint = aether_internf("say it is a string with `%s`", ptr_string_accessor(rhs));
     type_error_code_hint(msg, hint, line, column, AETHER_ERR_PTR_INTO_STRING);
 }
 
@@ -13737,8 +13867,8 @@ static int destructure_slot_rebind(ASTNode* var, SymbolTable* table, ASTNode* rh
         (!is_assignable(got, have) ||
          (got->kind == TYPE_PTR && is_numeric_scalar(have->kind)) ||
          (is_numeric_scalar(got->kind) && have->kind == TYPE_PTR))) {
-        char rmsg[400];
-        snprintf(rmsg, sizeof(rmsg),
+        const char* rmsg = "";
+        rmsg = aether_internf(
             "cannot re-bind '%s' as %s: it was bound as %s by its first "
             "assignment, and a local keeps that type. Use a new name for "
             "the %s value, or convert it to %s",
@@ -13749,8 +13879,7 @@ static int destructure_slot_rebind(ASTNode* var, SymbolTable* table, ASTNode* rh
     if (bound->type_inferred && have->kind == TYPE_INT &&
         (got->kind == TYPE_INT64 || got->kind == TYPE_UINT64 || got->kind == TYPE_UINT32 ||
          got->kind == TYPE_FLOAT32 || got->kind == TYPE_FLOAT || got->kind == TYPE_LONGDOUBLE)) {
-        char msg[420];
-        narrowing_message(msg, sizeof(msg), var->value, got->kind);
+        const char* msg = narrowing_message(var->value, got->kind);
         type_error(msg, var->line, var->column);
         return 0;
     }
@@ -13942,21 +14071,23 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
     }
     const char* hint = NULL;
     int fits = return_value_fits(v, vt, rt, &hint);
-    char want[200], got[200], msg[600], help[400];
+    char want[200], got[200];
+    const char* help = "";
+    const char* msg = "";
     if (fits && own->inferred && narrows_inferred_int(vt, rt)) {
         const char* what = vt->kind == TYPE_UINT32 ? "a uint32, and values past 2^31 would not fit"
                          : (vt->kind == TYPE_INT64 || vt->kind == TYPE_UINT64)
                                ? "a 64-bit value, which would truncate"
                                : "a float, which would truncate";
         if (own->fn_name)
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "narrowing return from '%s': its result type was inferred as int from "
                      "its first `return`, but this `return` gives %s", own->fn_name, what);
         else
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "narrowing return from a closure: its result type was inferred as int "
                      "from its first `return`, but this `return` gives %s", what);
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "write the result type to keep the value (`-> %s`), or `-> int` to make the "
                  "narrowing explicit", ret_type_spell(vt, got, sizeof(got)));
         type_error_hint(msg, help, v->line, v->column);
@@ -13971,30 +14102,30 @@ static int check_return_value(ASTNode* v, Type* rt, const ReturnOwner* own,
                          ? "the empty slice `[]`" : ret_type_spell(vt, got, sizeof(got));
     if (own->position) {
         char whole[240];
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "Type mismatch in return: %s%s%s returns %s, and value %d here is %s, not %s",
                  own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
                  own->fn_name ? "'" : "", ret_type_spell(own->whole, whole, sizeof(whole)),
                  own->position, vs, ret_type_spell(rt, want, sizeof(want)));
     } else if (own->result) {
         char whole[240];
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "Type mismatch in return: %s%s%s returns %s, and this value is %s, not %s",
                  own->fn_name ? "'" : "", own->fn_name ? own->fn_name : "this closure",
                  own->fn_name ? "'" : "", ret_type_spell(own->result, whole, sizeof(whole)),
                  vs, ret_type_spell(rt, want, sizeof(want)));
     } else if (own->fn_name)
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "Type mismatch in return: '%s' returns %s%s, but this value is %s",
                  own->fn_name, ret_type_spell(rt, want, sizeof(want)),
                  own->inferred ? " (inferred from its first `return`)" : "", vs);
     else
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "Type mismatch in return: this closure returns %s (the type of its first "
                  "`return`, or string when any `return` gives one), but this value is %s",
                  ret_type_spell(rt, want, sizeof(want)), vs);
     if (!hint) {
-        snprintf(help, sizeof(help), "%s",
+        help = aether_internf("%s",
                  !own->fn_name ? "return values of one type from the closure"
                  : own->inferred ? "return a value of that type, or write the result type the "
                                    "function means (`-> T`)"
@@ -14058,8 +14189,9 @@ static int check_return_values(ASTNode* ret, Type* rt, const ReturnOwner* own,
                     ok = 0;
             }
             if (!ok) {
-                char want[200], got[200], msg[600];
-                snprintf(msg, sizeof(msg), "Type mismatch in return: %s%s%s returns %s, but this "
+                char want[200], got[200];
+                const char* msg = "";
+                msg = aether_internf("Type mismatch in return: %s%s%s returns %s, but this "
                          "value is %s", own->fn_name ? "'" : "",
                          own->fn_name ? own->fn_name : "this closure", own->fn_name ? "'" : "",
                          ret_type_spell(rt, want, sizeof(want)),
@@ -14179,8 +14311,9 @@ static int check_return_statement(ASTNode* ret, SymbolTable* table) {
      * in a non-void function with a warning (GCC 14 refuses it). */
     if (ret->child_count == 0 && o && o->type != AST_CLOSURE && !o->type_inferred &&
         rt && rt->kind != TYPE_VOID && rt->kind != TYPE_UNKNOWN) {
-        char want[200], msg[400], shown[160];
-        snprintf(msg, sizeof(msg),
+        char want[200], shown[160];
+        const char* msg = "";
+        msg = aether_internf(
                  "Type mismatch in return: '%s' returns %s, but this `return` gives no value",
                  ast_source_name(o, shown, sizeof(shown)), ret_type_spell(rt, want, sizeof(want)));
         type_error_hint(msg, "return a value of the result type, or change the result type",
@@ -14218,18 +14351,16 @@ static int report_uncalled_function(ASTNode* e, SymbolTable* table) {
                e->children[0]->value && !value_hides_namespace(table, e->children[0]->value) &&
                is_visible_namespace(e->children[0]->value, table)) {
         /* `ns.name` reaches the C name the merge gave it, as a call does. */
-        char cname[512];
-        qualified_c_name(e->children[0]->value, e->value, cname, sizeof(cname));
-        if (cname[0]) sym = lookup_symbol(table, cname);
+        sym = lookup_symbol(table, qualified_c_name(e->children[0]->value, e->value));
         snprintf(shown, sizeof(shown), "%s.%s", e->children[0]->value, e->value);
     }
     if (!sym || !sym->is_function) return 0;
-    char msg[1024], hint[600];
-    snprintf(msg, sizeof(msg),
+    const char* msg = ""; const char* hint = "";
+    msg = aether_internf(
              "'%s' is a function, and its name alone calls nothing: call it as %s(), and a "
              "trailing block goes after the parentheses, %s() { ... }",
              shown, shown, shown);
-    snprintf(hint, sizeof(hint), "add the parentheses: %s()", shown);
+    hint = aether_internf("add the parentheses: %s()", shown);
     /* Reported where the name starts: a qualified one's node is its dot. */
     ASTNode* at = e->type == AST_MEMBER_ACCESS ? e->children[0] : e;
     type_error_hint(msg, hint, at->line, at->column);
@@ -14272,8 +14403,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
             // Verify RHS is a tuple with matching element count
             if (!rhs_type || rhs_type->kind != TYPE_TUPLE) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "cannot destructure, '%s' returns '%s', not a tuple",
                     rhs->value ? rhs->value : "expression",
                     type_spelled(rhs_type));
@@ -14314,8 +14445,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
 
             if (rhs_type->tuple_count != var_count) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "tuple destructuring count mismatch, %d variables, but expression returns %d values",
                     var_count, rhs_type->tuple_count);
                 aether_error_with_suggestion(msg, stmt->line, stmt->column,
@@ -14342,8 +14473,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (!visible &&
                         (scope_name_is_hidden(table, var->value) ||
                          name_blocked_by_hide(table, var->value))) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "'%s' is hidden in this scope by `hide` or `seal except`",
                                  var->value);
                         type_error(msg, var->line, var->column);
@@ -14377,8 +14508,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // shadowing a hidden binding would re-introduce position-sensitive
             // semantics. If you want a fresh name, pick a different one.
             if (stmt->value && scope_name_is_hidden(table, stmt->value)) {
-                char error_msg[256];
-                snprintf(error_msg, sizeof(error_msg),
+                const char* error_msg = "";
+                error_msg = aether_internf(
                          "cannot declare '%s', it is hidden in this scope by `hide`",
                          stmt->value);
                 type_error(error_msg, stmt->line, stmt->column);
@@ -14581,20 +14712,20 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                          init->child_count == 0 &&
                                          type_is_slice(stmt->node_type);
                     if (!is_array_const && !is_struct_init && !is_empty_slice) {
-                        char msg[512];
+                        const char* msg = "";
                         if (stmt->annotation && strcmp(stmt->annotation, "global_var") == 0) {
                             /* #701: a module-level `var` lowers to a C file-scope
                              * `static`, whose initializer C requires to be a
                              * constant expression. Initialize to a constant and
                              * assign the computed value from a function at
                              * startup. */
-                            snprintf(msg, sizeof(msg),
+                            msg = aether_internf(
                                 "module-level `var` initializer must be a compile-time constant "
                                 "expression, it lowers to a file-scope `static`, which C requires "
                                 "to have a constant initializer. Initialize it to a constant here "
                                 "and assign the computed value from a function at startup instead.");
                         } else {
-                            snprintf(msg, sizeof(msg),
+                            msg = aether_internf(
                                 "const initializer must be a compile-time constant expression, "
                                 "function calls are inlined at each use site, which would re-evaluate "
                                 "the call (and re-allocate / re-side-effect) on every reference. "
@@ -14687,8 +14818,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             if (joined) { free_type(bound->type); bound->type = joined; }
                         }
                         if (sibling_binding_other_type(init_type, bound->type, init)) {
-                            char rmsg[512];
-                            snprintf(rmsg, sizeof(rmsg),
+                            const char* rmsg = "";
+                            rmsg = aether_internf(
                                 "cannot bind '%s' as %s: it is bound as %s in another branch "
                                 "or loop body of this function, and a local first bound inside "
                                 "a branch or loop body is one variable for the whole function. "
@@ -14720,8 +14851,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (hoisted && hoisted->branch_hoisted && hoisted->hoist_written &&
                         hoisted_in != table && hoisted->type &&
                         !types_equal(stmt->node_type, hoisted->type)) {
-                        char rmsg[512];
-                        snprintf(rmsg, sizeof(rmsg),
+                        const char* rmsg = "";
+                        rmsg = aether_internf(
                             "cannot write '%s' as %s: it is written as %s in another branch or "
                             "loop body of this function, and a local first bound inside a branch "
                             "or loop body is one variable for the whole function, of one type",
@@ -14758,8 +14889,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                       * number) is the C compiler's -Wint-conversion error. */
                      (init_type->kind == TYPE_PTR && is_numeric_scalar(bound->type->kind)) ||
                      (is_numeric_scalar(init_type->kind) && bound->type->kind == TYPE_PTR))) {
-                    char rmsg[400];
-                    snprintf(rmsg, sizeof(rmsg),
+                    const char* rmsg = "";
+                    rmsg = aether_internf(
                         "cannot re-bind '%s' as %s: it was bound as %s by its first "
                         "assignment, and a local keeps that type. Use a new name for "
                         "the %s value, or convert it to %s",
@@ -14789,8 +14920,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     bound->type->array_size > 0 && init->type != AST_ARRAY_LITERAL &&
                     init_type && init_type->kind == TYPE_ARRAY && init_type->array_size > 0 &&
                     init_type->array_size != bound->type->array_size) {
-                    char want[96], got[96], rmsg[400];
-                    snprintf(rmsg, sizeof(rmsg),
+                    char want[96], got[96];
+                    const char* rmsg = "";
+                    rmsg = aether_internf(
                         "'%s' is %s and cannot take %s: an array keeps the length of its "
                         "first binding, and binding another array to it copies the elements",
                         stmt->value, array_type_spell(bound->type, want, sizeof(want)),
@@ -14801,8 +14933,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 }
                 if (existing && existing->type && existing->type->kind == TYPE_BYTE &&
                     byte_assignment_literal_out_of_range(init)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "byte literal out of range: %s does not fit in 0..255",
                         init->value ? init->value : "?");
                     type_error(msg, stmt->line, stmt->column);
@@ -14873,8 +15005,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                   init_type->kind == TYPE_FLOAT ||
                                   init_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = stmt->value ? stmt->value : "x";
-                    char msg[420];
-                    narrowing_message(msg, sizeof(msg), nm, init_type->kind);
+                    const char* msg = narrowing_message(nm, init_type->kind);
                     type_error(msg, stmt->line, stmt->column);
                     free_type(init_type);
                     return 0;
@@ -15077,8 +15208,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         int empty = init->type == AST_NULL_LITERAL ||
                                     (init->type == AST_ARRAY_LITERAL && init->child_count == 0);
                         if (!empty && !is_assignable(init_type, gv->node_type)) {
-                            char msg[256];
-                            snprintf(msg, sizeof(msg),
+                            const char* msg = "";
+                            msg = aether_internf(
                                      "Type mismatch in assignment to '%s': expected %s, got %s",
                                      stmt->value, type_name(gv->node_type), type_name(init_type));
                             free_type(init_type);
@@ -15113,8 +15244,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     stmt->node_type->index_enum_name) {
                     const char* en = stmt->node_type->index_enum_name;
                     if (!is_enum_type_name(en)) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "enum-indexed array `[%s]...` requires `%s` to be an enum",
                             en, en);
                         type_error(msg, stmt->line, stmt->column);
@@ -15123,8 +15254,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (init && init->type == AST_ARRAY_LITERAL &&
                         init->child_count > 0 &&
                         init->child_count != stmt->node_type->array_size) {
-                        char msg[256];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                             "enum-indexed array `[%s]...` needs %d values (one per "
                             "member, in order), got %d",
                             en, stmt->node_type->array_size, init->child_count);
@@ -15182,8 +15313,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * truncation, matching int64→int etc.). */
                 if (stmt->node_type && stmt->node_type->kind == TYPE_BYTE &&
                     byte_assignment_literal_out_of_range(init)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "byte literal out of range: %s does not fit in 0..255",
                         init->value ? init->value : "?");
                     type_error(msg, stmt->line, stmt->column);
@@ -15265,13 +15396,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
 
                 Symbol* symbol = lookup_symbol(table, left->value);
                 if (!symbol) {
-                    char error_msg[256];
+                    const char* error_msg = "";
                     if (left->value && name_blocked_by_hide(table, left->value)) {
-                        snprintf(error_msg, sizeof(error_msg),
+                        error_msg = aether_internf(
                                  "'%s' is hidden in this scope by `hide` or `seal except`",
                                  left->value);
                     } else {
-                        snprintf(error_msg, sizeof(error_msg), "Undefined variable '%s'", left->value ? left->value : "?");
+                        error_msg = aether_internf("Undefined variable '%s'", left->value ? left->value : "?");
                     }
                     type_error(error_msg, left->line, left->column);
                     return 0;
@@ -15293,8 +15424,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         free_type(right_type);
                         return 0;
                     }
-                    char error_msg[256];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "Type mismatch in assignment to '%s': expected %s, got %s",
                              left->value ? left->value : "?",
                              type_name(symbol->type), type_name(right_type));
@@ -15314,8 +15445,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                    right_type->kind == TYPE_FLOAT ||
                                    right_type->kind == TYPE_LONGDOUBLE)) {
                     const char* nm = left->value ? left->value : "x";
-                    char msg[420];
-                    narrowing_message(msg, sizeof(msg), nm, right_type->kind);
+                    const char* msg = narrowing_message(nm, right_type->kind);
                     type_error(msg, stmt->line, stmt->column);
                     free_type(right_type);
                     return 0;
@@ -15324,8 +15454,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  * declaration path. */
                 if (symbol->type && symbol->type->kind == TYPE_BYTE &&
                     byte_assignment_literal_out_of_range(right)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "byte literal out of range: %s does not fit in 0..255",
                         right->value ? right->value : "?");
                     type_error(msg, stmt->line, stmt->column);
@@ -15345,13 +15475,13 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             if (stmt->child_count >= 2) {
                 Symbol* symbol = lookup_symbol(table, stmt->value);
                 if (!symbol) {
-                    char error_msg[256];
+                    const char* error_msg = "";
                     if (stmt->value && name_blocked_by_hide(table, stmt->value)) {
-                        snprintf(error_msg, sizeof(error_msg),
+                        error_msg = aether_internf(
                                  "'%s' is hidden in this scope by `hide` or `seal except`",
                                  stmt->value);
                     } else {
-                        snprintf(error_msg, sizeof(error_msg), "Undefined variable '%s'", stmt->value ? stmt->value : "?");
+                        error_msg = aether_internf("Undefined variable '%s'", stmt->value ? stmt->value : "?");
                     }
                     type_error(error_msg, stmt->line, stmt->column);
                     return 0;
@@ -15422,8 +15552,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                          result->kind == TYPE_UINT32 || result->kind == TYPE_FLOAT ||
                          result->kind == TYPE_FLOAT32 ||
                          result->kind == TYPE_LONGDOUBLE)) {
-                        char msg[420];
-                        narrowing_message(msg, sizeof(msg), stmt->value, result->kind);
+                        const char* msg = narrowing_message(stmt->value, result->kind);
                         type_error(msg, stmt->line, stmt->column);
                         free_type(result);
                         free_type(rhs_type);
@@ -15616,8 +15745,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
         case AST_CONTINUE_STATEMENT:
             /* #893: a labeled break/continue must name an enclosing loop. */
             if (stmt->value && !tc_loop_label_in_scope(stmt->value)) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "no enclosing loop labeled '%s' for `%s %s`",
                     stmt->value,
                     stmt->type == AST_BREAK_STATEMENT ? "break" : "continue",
@@ -15806,8 +15935,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         ak != TYPE_BYTE && ak != TYPE_INT) mismatch = 1;
                     if ((spec == 'f' || spec == 'g' || spec == 'e') && ak != TYPE_FLOAT && ak != TYPE_FLOAT32 && ak != TYPE_LONGDOUBLE) mismatch = 1;
                     if (mismatch) {
-                        char wbuf[256];
-                        snprintf(wbuf, sizeof(wbuf),
+                        const char* wbuf = "";
+                        wbuf = aether_internf(
                             "Format specifier '%%%c' does not match argument type '%s' (auto-corrected)",
                             spec, type_name(atype));
                         type_warning(wbuf, stmt->children[arg_idx]->line, stmt->children[arg_idx]->column);
@@ -15848,8 +15977,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_expression(actor_ref, table);
                 Type* actor_type = infer_type(actor_ref, table);
                 if (actor_type && actor_type->kind != TYPE_ACTOR_REF && actor_type->kind != TYPE_UNKNOWN) {
-                    char error_msg[256];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "Cannot send to '%s': expected an actor reference",
                              actor_ref->value ? actor_ref->value : "expression");
                     free_type(actor_type);
@@ -15862,8 +15991,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 if (message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
                     Symbol* msg_sym = lookup_symbol(table, message->value);
                     if (!msg_sym || !msg_sym->type || msg_sym->type->kind != TYPE_MESSAGE) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "Undefined message type '%s'", message->value);
                         type_error(error_msg, message->line, message->column);
                         return 0;
@@ -15938,8 +16067,11 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                  stmt->children[0]->type == AST_IDENTIFIER)
                     ? stmt->children[0]->value : NULL;
             int sum_nvar = sum_match ? match_expr_type->tuple_count : 0;
-            int sum_covered[64];
-            for (int z = 0; z < 64; z++) sum_covered[z] = 0;
+            /* One flag per variant and per member, as many as the type has
+             * (#3574): 64 flags left the rest out of the exhaustiveness
+             * check, so a match missing one of them compiled. */
+            int* sum_covered = (int*)calloc((size_t)(sum_nvar > 0 ? sum_nvar : 1), sizeof(int));
+            if (!sum_covered) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
             int sum_wildcard = 0;
             int sum_wildcard_line = -1;
 
@@ -15950,8 +16082,9 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             int enum_match = (match_expr_type && match_expr_type->kind == TYPE_ENUM);
             const char* enum_name = enum_match ? match_expr_type->struct_name : NULL;
             ASTNode* enum_def = enum_name ? enum_def_lookup(enum_name) : NULL;
-            int enum_covered[64];
-            for (int z = 0; z < 64; z++) enum_covered[z] = 0;
+            int enum_members = enum_def ? enum_def->child_count : 0;
+            int* enum_covered = (int*)calloc((size_t)(enum_members > 0 ? enum_members : 1), sizeof(int));
+            if (!enum_covered) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
             int enum_wildcard = 0;
             int enum_wildcard_line = -1;
 
@@ -16021,8 +16154,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         !(match_expr_type->kind == TYPE_STRUCT && match_expr_type->struct_name &&
                           strcmp(match_expr_type->struct_name,
                                  pattern->node_type->struct_name) == 0)) {
-                        char msg[400];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "a struct pattern of '%s' matches a '%s', and the value "
                                  "matched is %s",
                                  pattern->value, pattern->value,
@@ -16057,8 +16190,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     if (some_arm || !pattern->value ||
                         (pattern->type != AST_IDENTIFIER &&
                          pattern->type != AST_PATTERN_VARIABLE)) {
-                        char msg[300];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "a match over the sum type '%s' takes one variant per arm, "
                                  "or `_`",
                                  match_expr_type->struct_name ? match_expr_type->struct_name : "?");
@@ -16127,14 +16260,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             }
                         }
                         if (vidx < 0) {
-                            char msg[256];
-                            snprintf(msg, sizeof(msg),
+                            const char* msg = "";
+                            msg = aether_internf(
                                 "'%s' is not a variant of sum type '%s'",
                                 pattern->value,
                                 match_expr_type->struct_name ? match_expr_type->struct_name : "?");
                             type_error(msg, pattern->line, pattern->column);
                         } else {
-                            if (vidx < 64) sum_covered[vidx] = 1;
+                            sum_covered[vidx] = 1;
                             // Narrow the scrutinee variable to the variant
                             // struct so `s.field` typechecks inside the arm.
                             if (scrutinee_name) {
@@ -16161,8 +16294,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                         /* #2727: each value of a comma-list (`Red, Green ->`)
                          * is a member as a lone one is; anything else is
                          * checked as the comparison it lowers to. */
-                        ASTNode* els[SELECTOR_ELEMENTS_MAX];
-                        int nel = selector_elements(pattern, els, SELECTOR_ELEMENTS_MAX);
+                        int nel = 0;
+                        ASTNode** els = selector_elements(pattern, &nel);
                         for (int e = 0; e < nel; e++) {
                             ASTNode* el = els[e];
                             int el_some = el->type == AST_PATTERN_VARIABLE && el->annotation &&
@@ -16184,14 +16317,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                 mem = el->value + elen + 1;           // lowered `Enum_Member`
                             }
                             if (!mem) {
-                                char msg[256];
-                                snprintf(msg, sizeof(msg),
+                                const char* msg = "";
+                                msg = aether_internf(
                                     "'%s' is not a member of enum '%s'",
                                     el->value, enum_name ? enum_name : "?");
                                 type_error(msg, el->line, el->column);
                                 continue;
                             }
-                            for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                            for (int mi = 0; mi < enum_def->child_count; mi++) {
                                 ASTNode* mn = enum_def->children[mi];
                                 if (mn && mn->type == AST_ENUM_MEMBER && mn->value &&
                                     strcmp(mn->value, mem) == 0) { enum_covered[mi] = 1; break; }
@@ -16199,15 +16332,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                             if (bare) {
                                 // Lower the bare member to the enum constant so
                                 // codegen compares against `Enum_Member`.
-                                char qualified[512];
-                                snprintf(qualified, sizeof(qualified), "%s_%s",
-                                         enum_name, mem);
+                                const char* qualified = aether_internf("%s_%s", enum_name, mem);
                                 free(el->value);
                                 el->value = strdup(qualified);
                                 if (el->node_type) free_type(el->node_type);
                                 el->node_type = clone_type(match_expr_type);
                             }
                         }
+                        free(els);
                     }
                 }
 
@@ -16273,8 +16405,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                                                    yielded->node_type, yielded, &refused);
                     if (j) set_node_type(stmt, j);
                     if (refused && value_match && yielded->type != AST_NONE_LITERAL) {
-                        char msg[512];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "the arms of this match give values of types %s and %s: "
                                  "every arm must give a value of one type",
                                  type_spelled(stmt->node_type), type_spelled(yielded->node_type));
@@ -16302,14 +16434,14 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
              * every variant or member is already handled, the `_` arm cannot
              * run. Reported for sums and enums only, where the set of cases
              * is closed and known. */
-            if (sum_match && sum_wildcard && sum_nvar > 0 && sum_nvar <= 64) {
+            if (sum_match && sum_wildcard && sum_nvar > 0) {
                 int all = 1;
                 for (int vi = 0; vi < sum_nvar; vi++) {
                     if (!sum_covered[vi]) { all = 0; break; }
                 }
                 if (all && sum_wildcard_line >= 0) {
-                    char msg[240];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "unreachable match arm: every variant of sum type "
                              "'%s' is already handled, so the `_` arm cannot run",
                              match_expr_type->struct_name ? match_expr_type->struct_name : "?");
@@ -16326,15 +16458,15 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             }
             if (enum_match && enum_def && enum_wildcard) {
                 int nmem = 0, all = 1;
-                for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                for (int mi = 0; mi < enum_def->child_count; mi++) {
                     ASTNode* mn = enum_def->children[mi];
                     if (!mn || mn->type != AST_ENUM_MEMBER) continue;
                     nmem++;
                     if (!enum_covered[mi]) { all = 0; break; }
                 }
                 if (all && nmem > 0 && enum_wildcard_line >= 0) {
-                    char msg[240];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "unreachable match arm: every member of enum '%s' "
                              "is already handled, so the `_` arm cannot run",
                              enum_name ? enum_name : "?");
@@ -16355,7 +16487,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // a compile error — the payoff that makes adding a variant safe.
             if (sum_match && !sum_wildcard) {
                 char missing[256]; int mp = 0, nmiss = 0;
-                for (int vi = 0; vi < sum_nvar && vi < 64; vi++) {
+                for (int vi = 0; vi < sum_nvar; vi++) {
                     if (sum_covered[vi]) continue;
                     Type* vt = match_expr_type->tuple_types[vi];
                     const char* vn = (vt && vt->struct_name) ? vt->struct_name : "?";
@@ -16366,8 +16498,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     nmiss++;
                 }
                 if (nmiss > 0) {
-                    char msg[360];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "non-exhaustive match on sum type '%s': missing variant%s "
                         "%s. Add an arm for each, or a `_` wildcard.",
                         match_expr_type->struct_name ? match_expr_type->struct_name : "?",
@@ -16382,7 +16514,7 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
             // yields an uninitialized result, into a compile error.
             if (enum_match && enum_def && !enum_wildcard) {
                 char missing[256]; int mp = 0, nmiss = 0;
-                for (int mi = 0; mi < enum_def->child_count && mi < 64; mi++) {
+                for (int mi = 0; mi < enum_def->child_count; mi++) {
                     ASTNode* mn = enum_def->children[mi];
                     if (!mn || mn->type != AST_ENUM_MEMBER || !mn->value) continue;
                     if (enum_covered[mi]) continue;
@@ -16393,8 +16525,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     nmiss++;
                 }
                 if (nmiss > 0) {
-                    char msg[360];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "non-exhaustive match on enum '%s': missing member%s "
                         "%s. Add an arm for each, or a `_` wildcard.",
                         enum_name ? enum_name : "?",
@@ -16402,6 +16534,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                     type_error(msg, stmt->line, stmt->column);
                 }
             }
+            free(sum_covered);
+            free(enum_covered);
             return 1;
         }
 
@@ -16420,8 +16554,8 @@ int typecheck_statement(ASTNode* stmt, SymbolTable* table) {
                 typecheck_expression(stmt->children[0], table);
                 subject = infer_type(stmt->children[0], table);
                 if (subject && !switch_subject_comparable(subject)) {
-                    char msg[300];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "a switch compares its value with each case, and %s "
                              "cannot be compared that way", with_article(type_name(subject)));
                     type_error_code_hint(msg,
@@ -16607,13 +16741,12 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             if (expr->child_count > 0) {
                 /* #3022: a qualified operand as written (`Color.Red`,
                  * `mod.K`), which checking rewrites to its C name. */
-                char written[256];
-                written[0] = '\0';
+                const char* written = NULL;
                 ASTNode* c0 = expr->children[0];
                 if (is_step_operator(expr) && c0 && c0->type == AST_MEMBER_ACCESS && c0->value &&
                     c0->child_count > 0 && c0->children[0] &&
                     c0->children[0]->type == AST_IDENTIFIER && c0->children[0]->value)
-                    snprintf(written, sizeof(written), "%s.%s", c0->children[0]->value, c0->value);
+                    written = aether_internf("%s.%s", c0->children[0]->value, c0->value);
                 int operand_ok = typecheck_expression(expr->children[0], table);
                 /* An operand of what gives no value, `-g()` with g
                  * returning nothing (refuse_valueless). */
@@ -16625,7 +16758,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (is_step_operator(expr) &&
                     !(is_step_operator(expr->children[0]) && !operand_ok) &&
                     reject_step_operand(expr, table,
-                                        written[0] && expr->children[0]->type == AST_IDENTIFIER
+                                        written && expr->children[0]->type == AST_IDENTIFIER
                                             ? written : NULL))
                     return 0;
                 /* `~` flips bits, which a float lane does not have in any
@@ -16633,8 +16766,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * operand. Integer lanes (masks) keep it. */
                 Type* ot = expr->children[0]->node_type;
                 if (expr->value && strcmp(expr->value, "!") == 0 && ot && is_lane_type(ot->kind)) {
-                    char msg[200];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "'!' is not defined on %s: a mask is not a bool. Reduce it with "
                              "lanes.any / lanes.all, or flip its lanes with lanes.mask_not",
                              type_name_of_kind(ot->kind));
@@ -16643,8 +16776,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 }
                 if (expr->value && strcmp(expr->value, "~") == 0 && ot && is_lane_type(ot->kind) &&
                     (lane_scalar_kind(ot->kind) == TYPE_FLOAT32 || lane_scalar_kind(ot->kind) == TYPE_FLOAT)) {
-                    char msg[160];
-                    snprintf(msg, sizeof(msg), "'~' is not defined on %s: it has float lanes",
+                    const char* msg = "";
+                    msg = aether_internf("'~' is not defined on %s: it has float lanes",
                              type_name_of_kind(ot->kind));
                     type_error(msg, expr->line, expr->column);
                     return 0;
@@ -16656,8 +16789,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * one would claim a transfer the runtime decides anyway. */
                 if (expr->value && strcmp(expr->value, "move") == 0 && ot &&
                     ot->kind != TYPE_PTR && ot->kind != TYPE_UNKNOWN) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "`move` hands over a `ptr` buffer, and this is %s: "
                              "a value that is not a pointer is copied, and a string "
                              "moves on its own when nothing else holds it",
@@ -16724,8 +16857,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             Type* d = infer_type(expr->children[1], table);
             if (d && value_t->kind != TYPE_UNKNOWN && d->kind != TYPE_UNKNOWN &&
                 !is_assignable(d, value_t)) {
-                char msg[200];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "`??` default type %s is not assignable to the value type %s",
                     type_name(d), type_name(value_t));
                 type_error(msg, expr->line, expr->column);
@@ -16925,8 +17058,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             Symbol* struct_sym = lookup_symbol(table, expr->value);
             if (!struct_sym || !struct_sym->type ||
                 struct_sym->type->kind != TYPE_STRUCT) {
-                char msg[256];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "heap.new(%s), '%s' is not a struct type",
                     expr->value, expr->value);
                 type_error(msg, expr->line, expr->column);
@@ -16953,12 +17086,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             return typecheck_function_call(expr, table);
             
         case AST_IDENTIFIER: {
-            char enum_prefix[512];
-            int qualified_enum = enum_member_source_prefix(expr, enum_prefix,
-                                                            sizeof(enum_prefix));
+            const char* enum_prefix = enum_member_source_prefix(expr);
+            int qualified_enum = enum_prefix != NULL;
             if (qualified_enum && qualified_prefix_blocked(table, enum_prefix)) {
-                char error_msg[640];
-                snprintf(error_msg, sizeof(error_msg),
+                const char* error_msg = "";
+                error_msg = aether_internf(
                          "'%s' is hidden in this scope by `hide` or `seal except`",
                          enum_prefix);
                 type_error(error_msg, expr->line, expr->column);
@@ -16970,16 +17102,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
             Symbol* symbol = qualified_enum ? lookup_member_symbol(table, expr->value)
                                             : lookup_symbol(table, expr->value);
             if (!symbol) {
-                char error_msg[256];
+                const char* error_msg = "";
                 if (expr->value && name_blocked_by_hide(table, expr->value)) {
-                    snprintf(error_msg, sizeof(error_msg),
+                    error_msg = aether_internf(
                              "'%s' is hidden in this scope by `hide` or `seal except`",
                              expr->value);
                 } else {
-                    snprintf(error_msg, sizeof(error_msg), "Undefined variable '%s'", expr->value ? expr->value : "?");
+                    error_msg = aether_internf("Undefined variable '%s'", expr->value ? expr->value : "?");
                     /* #2614: `low` of a `low.CONST` this scope cannot see. */
-                    char hint[512];
-                    if (missing_import_hint(expr->value, table, hint, sizeof(hint))) {
+                    const char* hint = missing_import_hint(expr->value, table);
+                    if (hint) {
                         type_error_code_hint(error_msg, hint, expr->line, expr->column,
                                              AETHER_ERR_UNDEFINED_VAR);
                         return 0;
@@ -17044,8 +17176,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // by resolve_enum_types; just validate they name this enum.
                 if (!m->node_type || m->node_type->kind != TYPE_ENUM ||
                     !types_equal(m->node_type, elem)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "bit_set member must be a value of enum '%s'",
                         elem->struct_name ? elem->struct_name : "?");
                     type_error(msg, m->line, m->column);
@@ -17154,11 +17286,11 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (!no_value) continue;
                     const char* callee = bv->type == AST_FUNCTION_CALL && bv->value
                                          ? bv->value : NULL;
-                    char msg[320];
+                    const char* msg = "";
                     int line = bv->line ? bv->line : expr->line;
                     int col = bv->line ? bv->column : expr->column;
                     if (callee && !stmt_can_complete(g_typecheck_program, bv)) {
-                        snprintf(msg, sizeof(msg),
+                        msg = aether_internf(
                                  "'%s' never returns, so this branch of the `if` expression "
                                  "gives no value", callee);
                         type_error_hint(msg,
@@ -17166,7 +17298,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             "`if` statement before it, or use a `match`, whose arm may leave",
                             line, col);
                     } else {
-                        snprintf(msg, sizeof(msg),
+                        msg = aether_internf(
                                  "%s%s%s returns no value, so this branch of the `if` "
                                  "expression gives none", callee ? "'" : "",
                                  callee ? callee : "this branch", callee ? "'" : "");
@@ -17195,8 +17327,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     refused = r1 || r2;
                 }
                 if (refused) {
-                    char msg[512];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "the branches of this if expression give values of types %s and "
                              "%s: both must give a value of one type",
                              type_spelled(th), type_spelled(el));
@@ -17248,8 +17380,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 Type* bt = infer_type(expr->children[i], table);
                 if (bt && bt->kind != TYPE_INT && bt->kind != TYPE_INT64 &&
                     bt->kind != TYPE_UNKNOWN) {
-                    char msg[160];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "slice bound must be an integer, got %s", type_name(bt));
                     type_error(msg, expr->children[i]->line, expr->children[i]->column);
                 }
@@ -17325,16 +17457,16 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                  (is_integer_scalar(operand->kind) || operand->kind == TYPE_BYTE));
                 if (operand->kind == TYPE_ENUM && tk == TYPE_ENUM &&
                     !types_equal(operand, expr->node_type)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "cannot cast %s to %s with `as`: two different enums never convert; "
                         "go through the integer on purpose, `(v as int) as %s`, if the "
                         "values line up", type_spelled(operand), type_spelled(expr->node_type),
                         type_spelled(expr->node_type));
                     type_error(msg, expr->line, expr->column);
                 } else if (!same && !numeric && !bs_cast && !fnptr_to_ptr && !enum_cast) {
-                    char msg[220];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                         "cannot cast %s to %s with `as`: a value cast converts "
                         "between a distinct type and its base, or between numeric "
                         "types", type_name(operand), type_name(expr->node_type));
@@ -17514,13 +17646,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                  (is_numeric_scalar(et->kind) && is_numeric_scalar(elem->kind)) ||
                                  is_assignable(et, elem)))
                     continue;
-                char msg[512];
+                const char* msg = "";
                 if (is_null || is_none)
-                    snprintf(msg, sizeof(msg),
+                    msg = aether_internf(
                              "array literal element %d is `%s`, which an array of '%s' cannot "
                              "hold", i + 1, is_null ? "null" : "none", type_spelled(elem));
                 else
-                    snprintf(msg, sizeof(msg),
+                    msg = aether_internf(
                              "array literal element %d is '%s', which an array of '%s' cannot "
                              "hold", i + 1, type_spelled(et), type_spelled(elem));
                 type_error_hint(msg,
@@ -17595,9 +17727,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 ASTNode* child = expr->children[i];
                 if (!child || child->type != AST_CLOSURE_PARAM || !child->value) continue;
                 if (!child->node_type) {
-                    char msg[256], hint[256];
-                    snprintf(msg, sizeof(msg), "quote parameter '%s' has no type", child->value);
-                    snprintf(hint, sizeof(hint),
+                    const char* msg = ""; const char* hint = "";
+                    msg = aether_internf("quote parameter '%s' has no type", child->value);
+                    hint = aether_internf(
                              "write its type, `| %s: float |`: the tree records every node's type, "
                              "and a quote does not guess one", child->value);
                     type_error_code_hint(msg, hint, child->line, child->column,
@@ -17835,8 +17967,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     if (idx_type && idx_type->kind != TYPE_UNKNOWN &&
                         !(idx_type->kind == TYPE_ENUM && idx_type->struct_name &&
                           strcmp(idx_type->struct_name, arr_type->index_enum_name) == 0)) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "index into `[%s]...` must be a %s value, got %s",
                                  arr_type->index_enum_name, arr_type->index_enum_name,
                                  type_name(idx_type));
@@ -17847,8 +17979,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                            idx_type->kind != TYPE_UNKNOWN &&
                            idx_type->kind != TYPE_ENUM) {
                     // Ordinary array: an integer index (an enum is int-backed).
-                    char error_msg[256];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "Array index must be an integer, got %s",
                              type_name(idx_type));
                     type_error(error_msg, expr->line, expr->column);
@@ -17862,9 +17994,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (type_is_sized_array(arr_type) && !arr_type->index_enum_name &&
                     tc_index_constant(expr->children[1], table, &civ) &&
                     (civ < 0 || civ >= arr_type->array_size)) {
-                    char error_msg[320];
+                    const char* error_msg = "";
                     char tn[160];
-                    snprintf(error_msg, sizeof(error_msg),
+                    error_msg = aether_internf(
                              "array index %lld is out of range for '%s', whose indexes are "
                              "0 through %d",
                              (long long)civ, ret_type_spell(arr_type, tn, sizeof(tn)),
@@ -18036,8 +18168,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                      * fixed-size array's alike), so any other name is a
                      * mistake to name here; left alone it reached the C as a
                      * member of a pointer or an array (`arr.length`). */
-                    char msg[256];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "'%s' is not a member of an array: an array's length is `.len`, its only member",
                              expr->value);
                     free_type(lt);
@@ -18050,8 +18182,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     TypeKind objk = lt->kind;
                     free_type(lt);
                     if (idx < 0) {
-                        char msg[200];
-                        snprintf(msg, sizeof(msg),
+                        const char* msg = "";
+                        msg = aether_internf(
                                  "'%s' is not a lane of %s: its lanes are %s",
                                  expr->value, type_name_of_kind(objk),
                                  objk == TYPE_F64X2 ? "`.x` and `.y`"
@@ -18088,8 +18220,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (bt && bt->kind == TYPE_BITSTRUCT && bt->struct_name &&
                     !bitstruct_field_lookup(g_bitstruct_program, bt->struct_name,
                                             expr->value)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "'%s' is not a field of bitstruct '%s'",
+                    const char* msg = "";
+                    msg = aether_internf("'%s' is not a field of bitstruct '%s'",
                              expr->value, bt->struct_name);
                     type_error(msg, expr->line, expr->column);
                     free_type(bt);
@@ -18117,15 +18249,14 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 is_visible_namespace(expr->children[0]->value, table) && expr->value) {
                 // Enforce export visibility for constants
                 if (is_export_blocked(expr->children[0]->value, expr->value)) {
-                    char msg[256];
-                    snprintf(msg, sizeof(msg), "'%s' is not exported from module '%s'",
+                    const char* msg = "";
+                    msg = aether_internf("'%s' is not exported from module '%s'",
                              expr->value, expr->children[0]->value);
                     type_error(msg, expr->line, expr->column);
                     return 0;
                 }
-                char qualified[512];
-                snprintf(qualified, sizeof(qualified), "%s_%s",
-                         expr->children[0]->value, expr->value);
+                const char* qualified =
+                    aether_internf("%s_%s", expr->children[0]->value, expr->value);
                 Symbol* sym = lookup_symbol(table, qualified);
                 /* #924 re-export: `hub.X` where hub lists X in `exports` but
                  * imports it from another module. The local `hub_X` symbol
@@ -18135,8 +18266,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                     AetherModule* hub = module_find_by_namespace(expr->children[0]->value);
                     AetherModule* origin = module_resolve_reexport(hub, expr->value);
                     if (origin && origin->name) {
-                        snprintf(qualified, sizeof(qualified), "%s_%s",
-                                 module_namespace_of(origin->name), expr->value);
+                        qualified = aether_internf("%s_%s", module_namespace_of(origin->name),
+                                                   expr->value);
                         sym = lookup_symbol(table, qualified);
                     }
                 }
@@ -18145,7 +18276,7 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if ((!sym || !sym->type) && !table->merged_from &&
                     entry_self_reference(expr->children[0]->value, expr->value)) {
                     sym = entry_self_symbol(table, expr->value);
-                    snprintf(qualified, sizeof(qualified), "%s", expr->value);
+                    qualified = aether_intern(expr->value);
                 }
                 if (sym && sym->type) {
                     // Rewrite node in-place
@@ -18169,8 +18300,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // (Non-exported *functions* are reported separately and
                 // already name `prefix.member` — this covers the value path.)
                 {
-                    char msg[320];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "module '%s' has no export '%s' "
                              "(not part of the module's API / library ABI)",
                              expr->children[0]->value, expr->value);
@@ -18194,8 +18325,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                                 strcmp(expr->value, "h") == 0 || strcmp(expr->value, "d") == 0)) {
                         set_node_type(expr, create_type(TYPE_FLOAT));
                     } else {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "Type 'Duration' has no field '%s'",
                                  expr->value ? expr->value : "?");
                         free_type(base_type);
@@ -18212,9 +18343,9 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * `ae_opt_<T>` wrapper (gcc: "'ae_opt_Shape' has no member
                  * named 'r'", #2841 review). */
                 if (base_type && base_type->kind == TYPE_OPTIONAL && expr->value) {
-                    char error_msg[400];
+                    const char* error_msg = "";
                     char tn[160];
-                    snprintf(error_msg, sizeof(error_msg),
+                    error_msg = aether_internf(
                              "Type '%s' has no field '%s': it is an optional, read the field "
                              "with `?.` or unwrap it first (`!`, or a none-check that "
                              "narrows it)",
@@ -18231,8 +18362,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * match, `h.sh.r` in an arm of `match h.sh`), the field
                  * reached C as a member of the tagged union. */
                 if (base_type && base_type->kind == TYPE_SUM && expr->value) {
-                    char error_msg[400];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "the sum type '%s' has no field '%s': a variant's field is read "
                              "where a `match` on a plain variable narrows the value to it",
                              base_type->struct_name ? base_type->struct_name : "?", expr->value);
@@ -18247,8 +18378,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 // Reject member access on primitive types — catch the error in Aether, not C
                 if (base_type && (base_type->kind == TYPE_INT || base_type->kind == TYPE_FLOAT ||
                                   base_type->kind == TYPE_BOOL || base_type->kind == TYPE_STRING)) {
-                    char error_msg[256];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "Type '%s' has no field '%s'",
                              type_name(base_type), expr->value ? expr->value : "?");
                     free_type(base_type);
@@ -18263,13 +18394,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                  * structure or union"). */
                 if (base_type && base_type->kind == TYPE_PTR && !base_type->element_type &&
                     !base_type->distinct_name && expr->value) {
-                    char error_msg[320];
-                    char hint[320];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    const char* hint = "";
+                    error_msg = aether_internf(
                              "Type 'ptr' has no field '%s': a bare `ptr` points at nothing "
                              "the checker knows",
                              expr->value);
-                    snprintf(hint, sizeof(hint),
+                    hint = aether_internf(
                              "view it as the struct it points at first: `(p as *Node).%s`",
                              expr->value);
                     free_type(base_type);
@@ -18284,13 +18415,13 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (base_type && base_type->kind == TYPE_ACTOR_REF &&
                     !(base_type->element_type && base_type->element_type->kind == TYPE_STRUCT &&
                       base_type->element_type->struct_name)) {
-                    char error_msg[320];
-                    char hint[320];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    const char* hint = "";
+                    error_msg = aether_internf(
                              "a bare `actor_ref` has no field '%s': it names no actor, "
                              "so its state is not known here",
                              expr->value);
-                    snprintf(hint, sizeof(hint),
+                    hint = aether_internf(
                              "give the reference its actor's type, `actor_ref[ActorName]`, "
                              "to reach the actor's state field '%s'",
                              expr->value);
@@ -18330,8 +18461,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                         /* #3333: a name the actor has no state of reached
                          * the C compiler as a member of its struct. */
                         if (!found_state) {
-                            char error_msg[320];
-                            snprintf(error_msg, sizeof(error_msg),
+                            const char* error_msg = "";
+                            error_msg = aether_internf(
                                      "actor '%s' has no state field '%s'",
                                      actor_def2->value ? actor_def2->value : "?", expr->value);
                             free_type(base_type);
@@ -18387,8 +18518,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             if (uft) { free_type(uft); found = 1; }
                         }
                         if (!found) {
-                            char error_msg[256];
-                            snprintf(error_msg, sizeof(error_msg),
+                            const char* error_msg = "";
+                            error_msg = aether_internf(
                                      "Struct '%s' has no field '%s'",
                                      ast_struct_display_name(base_type->struct_name), expr->value ? expr->value : "?");
                             free_type(base_type);
@@ -18441,8 +18572,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                             if (uft) { free_type(uft); found = 1; }
                         }
                         if (!found) {
-                            char error_msg[256];
-                            snprintf(error_msg, sizeof(error_msg),
+                            const char* error_msg = "";
+                            error_msg = aether_internf(
                                      "Struct '%s' has no field '%s'",
                                      ast_struct_display_name(base_type->element_type->struct_name),
                                      expr->value ? expr->value : "?");
@@ -18483,8 +18614,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
                     Symbol* msg_sym = lookup_symbol(table, message->value);
                     if (!msg_sym || !msg_sym->type || msg_sym->type->kind != TYPE_MESSAGE) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "Undefined message type '%s'", message->value);
                         type_error(error_msg, message->line, message->column);
                         return 0;
@@ -18513,8 +18644,8 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 if (message && message->type == AST_MESSAGE_CONSTRUCTOR && message->value) {
                     Symbol* msg_sym = lookup_symbol(table, message->value);
                     if (!msg_sym || !msg_sym->type || msg_sym->type->kind != TYPE_MESSAGE) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "Undefined message type '%s'", message->value);
                         type_error(error_msg, message->line, message->column);
                         return 0;
@@ -18590,10 +18721,8 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
         reject_readonly_view_write(t, expr) ||          /* #3025 */
         reject_length_write(t, table, expr))            /* #3104 */
         return 1;
-    char msg[512];
-    char hint[640];
-    msg[0] = '\0';
-    hint[0] = '\0';
+    const char* msg = "";
+    const char* hint = "";
     const char* head = "needs a number stored in a variable, a field or an element";
     switch (t->type) {
         case AST_IDENTIFIER: {
@@ -18613,25 +18742,25 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
                 size_t el = strlen(en);
                 const char* member = strncmp(t->value, en, el) == 0 && t->value[el] == '_'
                                          ? t->value + el + 1 : t->value;
-                snprintf(msg, sizeof(msg), "`%s` %s, and '%s.%s' is an enum member, a constant",
+                msg = aether_internf("`%s` %s, and '%s.%s' is an enum member, a constant",
                          op, head, en, member);
-                snprintf(hint, sizeof(hint), "an enum value is a name, not a count; assign the member "
+                hint = aether_internf("an enum value is a name, not a count; assign the member "
                          "you mean to a variable (`c = %s.<member>`)", en);
             } else if (s->is_const) {
-                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a constant", op, head, nm);
-                snprintf(hint, sizeof(hint), "copy it into a local and step that (`n = %s`, then `n%s`)",
+                msg = aether_internf("`%s` %s, and '%s' is a constant", op, head, nm);
+                hint = aether_internf("copy it into a local and step that (`n = %s`, then `n%s`)",
                          nm, op);
             } else if (names_type) {
-                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a type", op, head, nm);
-                snprintf(hint, sizeof(hint), "step a variable that holds a number");
+                msg = aether_internf("`%s` %s, and '%s' is a type", op, head, nm);
+                hint = aether_internf("step a variable that holds a number");
             } else if (s->is_function) {
-                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is a function", op, head, nm);
-                snprintf(hint, sizeof(hint),
+                msg = aether_internf("`%s` %s, and '%s' is a function", op, head, nm);
+                hint = aether_internf(
                          "bind its result to a local and step that (`v = %s(...)`, then `v%s`)", nm, op);
             } else if (s->is_actor || s->is_module_alias) {
-                snprintf(msg, sizeof(msg), "`%s` %s, and '%s' is %s", op, head, nm,
+                msg = aether_internf("`%s` %s, and '%s' is %s", op, head, nm,
                          s->is_actor ? "an actor" : "a module");
-                snprintf(hint, sizeof(hint), "step a variable that holds a number");
+                hint = aether_internf("step a variable that holds a number");
             }
             break;
         }
@@ -18640,10 +18769,10 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
             ASTNode* temp = assign_target_temporary(t, table, 1);
             if (temp) {
                 const char* fn = temp->value ? temp->value : "f";
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "`%s` %s, and this is a part of the result of '%s(...)', a temporary",
                          op, head, fn);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "bind the result to a local and step it there (`v = %s(...)`, then the "
                          "field or element of `v`)", fn);
             }
@@ -18651,28 +18780,28 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
         }
         case AST_FUNCTION_CALL: {
             const char* fn = t->value ? t->value : "f";
-            snprintf(msg, sizeof(msg), "`%s` %s, and the result of '%s(...)' is a value, not storage",
+            msg = aether_internf("`%s` %s, and the result of '%s(...)' is a value, not storage",
                      op, head, fn);
             if (strcmp(fn, "ref_get") == 0)
-                snprintf(hint, sizeof(hint), "write the cell with ref_set (`ref_set(r, ref_get(r) %s 1)`)",
+                hint = aether_internf("write the cell with ref_set (`ref_set(r, ref_get(r) %s 1)`)",
                          op[0] == '+' ? "+" : "-");
             else
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "bind the result to a local and step that (`v = %s(...)`, then `v%s`)", fn, op);
             break;
         }
         case AST_LITERAL: case AST_ARRAY_LITERAL: case AST_TUPLE_LITERAL:
         case AST_STRUCT_LITERAL: case AST_STRING_INTERP: case AST_NULL_LITERAL:
         case AST_NONE_LITERAL: case AST_BITSET_LITERAL: case AST_PATTERN_LITERAL:
-            snprintf(msg, sizeof(msg), "`%s` %s, and the operand is a literal", op, head);
-            snprintf(hint, sizeof(hint),
+            msg = aether_internf("`%s` %s, and the operand is a literal", op, head);
+            hint = aether_internf(
                      "write the value you mean, or put it in a local and step that "
                      "(`n = 5`, then `n%s`)", op);
             break;
         default:
-            snprintf(msg, sizeof(msg), "`%s` %s, and the operand is an expression, not storage",
+            msg = aether_internf("`%s` %s, and the operand is an expression, not storage",
                      op, head);
-            snprintf(hint, sizeof(hint),
+            hint = aether_internf(
                      "to change a variable, assign it (`y = y + 1`, or `y += 1`); for the value, "
                      "write the arithmetic (`(y + 1) + 1`)");
             break;
@@ -18699,37 +18828,37 @@ static int reject_step_operand(ASTNode* expr, SymbolTable* table, const char* wr
             } else {
                 snprintf(what, sizeof(what), "the element");
             }
-            snprintf(msg, sizeof(msg), "`%s` steps an integer or a float, and %s has type %s",
+            msg = aether_internf("`%s` steps an integer or a float, and %s has type %s",
                      op, what, type_spelled(ty));
             if (ty->distinct_name)
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "a distinct type steps through its base, as `%s += 1` would have to: "
                          "`%s = (%s as %s %s 1) as %s`",
                          nm, nm, nm, base_type_name(ty), op[0] == '+' ? "+" : "-", ty->distinct_name);
             else if (k == TYPE_STRING)
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "on a string it would move where the text starts, not change it; keep an "
                          "index and step that (`i%s`, then `%s[i]`)", op, nm);
             else if (k == TYPE_BOOL)
-                snprintf(hint, sizeof(hint), "flip it with `%s = !%s`, or count in an int", nm, nm);
+                hint = aether_internf("flip it with `%s = !%s`, or count in an int", nm, nm);
             else if (k == TYPE_DURATION)
-                snprintf(hint, sizeof(hint), "add a Duration to it (`%s = %s %s 1ms`)",
+                hint = aether_internf("add a Duration to it (`%s = %s %s 1ms`)",
                          nm, nm, op[0] == '+' ? "+" : "-");
             else if (k == TYPE_ENUM)
-                snprintf(hint, sizeof(hint), "an enum value is a name, not a count; assign the member "
+                hint = aether_internf("an enum value is a name, not a count; assign the member "
                          "you mean (`%s = %s.<member>`)", nm, type_spelled(ty));
             else if (k == TYPE_ARRAY)
-                snprintf(hint, sizeof(hint), "step one of its elements (`%s[i]%s`)", nm, op);
+                hint = aether_internf("step one of its elements (`%s[i]%s`)", nm, op);
             else if (k == TYPE_STRUCT)
-                snprintf(hint, sizeof(hint), "step one of its fields (`%s.<field>%s`)", nm, op);
+                hint = aether_internf("step one of its fields (`%s.<field>%s`)", nm, op);
             else if (k == TYPE_PTR)
-                snprintf(hint, sizeof(hint), "a pointer is not a count; keep an index or an offset "
+                hint = aether_internf("a pointer is not a count; keep an index or an offset "
                          "in an int and step that");
             else if (k == TYPE_OPTIONAL)
-                snprintf(hint, sizeof(hint), "step the value it holds in a local, then store it back "
+                hint = aether_internf("step the value it holds in a local, then store it back "
                          "(`n = %s ?? 0`, `n%s`, `%s = n`)", nm, op, nm);
             else
-                snprintf(hint, sizeof(hint), "give it a new value with an assignment");
+                hint = aether_internf("give it a new value with an assignment");
         }
         if (ty) free_type(ty);
     }
@@ -18946,8 +19075,8 @@ static int refuse_constant_division_by_zero(ASTNode* expr, SymbolTable* table) {
         return 0;
     char text[200] = "";
     tc_const_spell(expr, text, sizeof(text), 0, 0);
-    char msg[320];
-    snprintf(msg, sizeof(msg), "%s by zero in the constant expression `%s`: it has no value",
+    const char* msg = "";
+    msg = aether_internf("%s by zero in the constant expression `%s`: it has no value",
              expr->value[0] == '/' ? "division" : "remainder", text);
     type_error_hint(msg,
                     "a constant's initializer is computed when the program is compiled, so "
@@ -19103,15 +19232,15 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         if (refused) {
             Type* other = l_clo ? right_type : left_type;
             const char* op = expr->value ? expr->value : "==";
-            char msg[512];
+            const char* msg = "";
             if (l_clo && r_clo)
-                snprintf(msg, sizeof(msg), "'%s' compares two closures: a closure compares only "
+                msg = aether_internf("'%s' compares two closures: a closure compares only "
                          "with `null`", op);
             else if (other && other->kind != TYPE_UNKNOWN)
-                snprintf(msg, sizeof(msg), "'%s' compares a closure with '%s': a closure compares "
+                msg = aether_internf("'%s' compares a closure with '%s': a closure compares "
                          "only with `null`", op, type_spelled(other));
             else
-                snprintf(msg, sizeof(msg), "'%s' compares a closure: a closure compares only with "
+                msg = aether_internf("'%s' compares a closure: a closure compares only with "
                          "`null`", op);
             type_error_hint(msg,
                 "`f != null` asks whether f holds a function; to tell two closures apart, "
@@ -19144,8 +19273,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
                 Type* got = (other && other->kind == TYPE_OPTIONAL) ? other->element_type : other;
                 if (want && got && want->kind != TYPE_UNKNOWN && got->kind != TYPE_UNKNOWN &&
                     !is_type_compatible(got, want) && !is_type_compatible(want, got)) {
-                    char msg[512];
-                    snprintf(msg, sizeof(msg),
+                    const char* msg = "";
+                    msg = aether_internf(
                              "'%s' compares the optional '%s' with '%s', which it cannot hold",
                              expr->value ? expr->value : "==",
                              type_spelled(opt_t), type_spelled(other));
@@ -19204,8 +19333,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
         }
         ASTNode* temp = assign_target_temporary(left, table, 1);
         if (temp) {
-            char msg[512];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "cannot assign to %s of '%s(...)': a call's result is a "
                      "temporary, so the write would be lost",
                      temp == left ? "the result" : "a part of the result",
@@ -19310,8 +19439,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
             Symbol* arr_sym = lookup_symbol(table, left->children[0]->value);
             if (arr_sym && arr_sym->type_inferred) {
                 const char* nm = left->children[0]->value;
-                char msg[420];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                     "narrowing assignment to an element of '%s': its element type "
                     "was inferred as int from the array literal, but a float is "
                     "assigned here and would truncate. Write the literal with float "
@@ -19329,8 +19458,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
          * too. */
         if (left_type && left_type->kind == TYPE_BYTE &&
             byte_assignment_literal_out_of_range(right)) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                 "byte literal out of range: %s does not fit in 0..255",
                 right->value ? right->value : "?");
             type_error(msg, expr->line, expr->column);
@@ -19345,8 +19474,8 @@ int typecheck_binary_expression(ASTNode* expr, SymbolTable* table) {
              * operator does not mix them, as an assignment or a call
              * argument does not. Reported by their own names: by their
              * shared base it would read "float and float". */
-            char msg[400];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "'%s' mixes distinct types %s and %s: a distinct type does not "
                      "combine with another one; convert one side explicitly, "
                      "`<value> as %s`",
@@ -19496,8 +19625,7 @@ static char* ufcs_resolve(const char* method, Type* rtype, SymbolTable* table) {
         const char* ns = m->name;
         if (!is_visible_namespace(ns, table)) continue;
         if (!module_is_exported(m, method)) continue;
-        char qualified[512];
-        snprintf(qualified, sizeof(qualified), "%s.%s", ns, method);
+        const char* qualified = aether_internf("%s.%s", ns, method);
         Symbol* qs = lookup_qualified_symbol(table, qualified);
         if (qs && qs->is_function && qs->node &&
             ufcs_first_param_matches(qs->node, rtype)) {
@@ -19780,24 +19908,25 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
     }
     if (cj.status != CLAUSE_JOIN_OK) {
         set->refused = 1;
-        char a[160], b[160], msg[480], hint[200];
+        char a[160], b[160];
+        const char* hint = "";
+        const char* msg = "";
         const char* js = cj.join ? ret_type_spell(cj.join, a, sizeof(a)) : "";
         int line = cj.join_at ? cj.join_at->line : 0;
         const char* name = fn->value;
-        hint[0] = '\0';
         switch (cj.status) {
             case CLAUSE_JOIN_UNFIT:
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "the clauses of '%s' are written to return %s (line %d), and this "
                          "clause returns %s, which %s does not hold: a clause set is one "
                          "function with one result",
                          name, js, line, ret_type_spell(cj.other, b, sizeof(b)), js);
-                snprintf(hint, sizeof(hint), "write the wider type on the clause that names "
+                hint = aether_internf("write the wider type on the clause that names "
                          "one, or convert the value (`x as T`)");
                 break;
             case CLAUSE_JOIN_NULL_UNFIT:
             case CLAUSE_JOIN_NULL_APART:
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          cj.status == CLAUSE_JOIN_NULL_UNFIT
                              ? "the clauses of '%s' are written to return %s (line %d), and this "
                                "clause returns `null`, which %s does not take: a clause set is "
@@ -19805,48 +19934,48 @@ static void clause_set_settle(ASTNode* fn, SymbolTable* table) {
                              : "the clauses of '%s' return %s (line %d) and `null`, which %s "
                                "does not take: a clause set is one function with one result",
                          name, js, line, js);
-                snprintf(hint, sizeof(hint), "`null` is a pointer, a string or a closure; an "
+                hint = aether_internf("`null` is a pointer, a string or a closure; an "
                          "optional has `none` for no value");
                 break;
             case CLAUSE_JOIN_NONE_ONLY:
                 if (cj.recurse_at)
                     /* #3063: one that only calls the set gives no type. */
-                    snprintf(msg, sizeof(msg),
+                    msg = aether_internf(
                              "every clause of '%s' that returns a value returns `none`, an "
                              "optional of no type, or calls '%s' again (line %d): the set's "
                              "result `T?` needs its `T`",
                              name, name, cj.recurse_at->line);
                 else
-                    snprintf(msg, sizeof(msg),
+                    msg = aether_internf(
                              "every clause of '%s' that returns a value returns `none`, an "
                              "optional of no type: the set's result `T?` needs its `T`",
                              name);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "write the result type on a clause, `-> int?` for an optional int");
                 break;
             case CLAUSE_JOIN_NONE_UNFIT:
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "the clauses of '%s' are written to return %s (line %d), and this "
                          "clause returns `none`, which %s does not hold: a clause set is one "
                          "function with one result",
                          name, js, line, js);
-                snprintf(hint, sizeof(hint), "write the result type as an optional, `-> %s?`",
+                hint = aether_internf("write the result type as an optional, `-> %s?`",
                          js);
                 break;
             case CLAUSE_JOIN_NONE_APART:
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "the clauses of '%s' return %s (line %d) and `none`, which no one type "
                          "holds: a clause set is one function with one result",
                          name, js, line);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "return a value an optional can hold, or `none` from no clause");
                 break;
             default:   /* CLAUSE_JOIN_APART */
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "the clauses of '%s' return %s (line %d) and %s, which no one type "
                          "holds: a clause set is one function with one result",
                          name, js, line, ret_type_spell(cj.other, b, sizeof(b)));
-                snprintf(hint, sizeof(hint), "return the same type from every clause, or "
+                hint = aether_internf("return the same type from every clause, or "
                          "convert the value (`x as T`)");
                 break;
         }
@@ -19933,37 +20062,34 @@ static ASTNode* tc_closure_body(ASTNode* closure) {
 
 /* Issue #333: the receiver of a member-access call's trailing block
  * (typechecker.h). */
-const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table, char* buf, size_t cap) {
-    if (!call || !call->value || !buf || cap == 0) return NULL;
+const char* dsl_receiver_of_call(ASTNode* call, SymbolTable* table) {
+    if (!call || !call->value) return NULL;
     const char* dot = strchr(call->value, '.');
-    if (!dot) return NULL;
-    size_t prefix_len = (size_t)(dot - call->value);
-    if (prefix_len == 0 || prefix_len >= cap) return NULL;
-    memcpy(buf, call->value, prefix_len);
-    buf[prefix_len] = '\0';
+    if (!dot || dot == call->value) return NULL;
+    /* Interned, as long as it is: a prefix or a type name of 256 bytes or
+     * more named no receiver (#3569). */
+    const char* prefix = aether_intern_n(call->value, (size_t)(dot - call->value));
     /* Namespace receiver: directly visible. */
-    if (is_visible_namespace(buf, table)) return buf;
+    if (is_visible_namespace(prefix, table)) return prefix;
     /* Typed-value receiver: the prefix is a local variable; its struct
      * type's name. */
-    Symbol* recv_sym = lookup_symbol(table, buf);
+    Symbol* recv_sym = lookup_symbol(table, prefix);
     if (!recv_sym || !recv_sym->type) return NULL;
     const char* tn = base_type_name(recv_sym->type);
-    if (!tn || tn[0] == '\0' || strlen(tn) >= cap ||
+    if (!tn || tn[0] == '\0' ||
         strcmp(tn, "unknown") == 0 || strcmp(tn, "int") == 0 ||
         strcmp(tn, "long") == 0 || strcmp(tn, "float") == 0 ||
         strcmp(tn, "double") == 0 || strcmp(tn, "bool") == 0 ||
         strcmp(tn, "string") == 0) return NULL;
-    memmove(buf, tn, strlen(tn) + 1);
-    return buf;
+    return aether_intern(tn);
 }
 
 /* The receiver trailing block `block` of `call` resolves bare calls
  * through: the one the checker stamped on it, else the call's. */
-static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table,
-                                        char* buf, size_t cap) {
+static const char* tc_trailing_receiver(ASTNode* call, ASTNode* block, SymbolTable* table) {
     if (block->annotation && strncmp(block->annotation, "dsl_recv:", 9) == 0)
         return block->annotation[9] ? block->annotation + 9 : NULL;
-    return dsl_receiver_of_call(call, table, buf, cap);
+    return dsl_receiver_of_call(call, table);
 }
 
 static void tc_collect_locals(ASTNode* n, StrMap* locals);
@@ -19996,8 +20122,7 @@ static int tc_receiver_resolves(SymbolTable* table, const char* name) {
     for (SymbolTable* t = table; t; t = t->parent) {
         if (lookup_symbol_local(t, name)) return 0;
         if (t->dsl_receiver && t->dsl_receiver[0]) {
-            char rewritten[512];
-            snprintf(rewritten, sizeof(rewritten), "%.250s_%.250s", t->dsl_receiver, name);
+            const char* rewritten = aether_internf("%s_%s", t->dsl_receiver, name);
             for (SymbolTable* u = t; u; u = u->parent)
                 if (lookup_symbol_local(u, rewritten)) return 1;
         }
@@ -20019,8 +20144,7 @@ static int tc_body_yields(ASTNode* node, SymbolTable* table, StrMap* locals, int
     for (int i = 0; i < node->child_count; i++) {
         ASTNode* c = node->children[i];
         if (node->type == AST_FUNCTION_CALL && ast_is_trailing_block(c) && table) {
-            char buf[256];
-            const char* recv = tc_trailing_receiver(node, c, table, buf, sizeof(buf));
+            const char* recv = tc_trailing_receiver(node, c, table);
             if (recv) {
                 /* The block's scope, as the checker builds it: the
                  * receiver, and the names the block binds (its own, ahead
@@ -20140,17 +20264,12 @@ static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int
      * was rewritten already, or carries the field's type. */
     const char* dot = strchr(call->value, '.');
     if (locals && dot && dot != call->value && !strchr(dot + 1, '.')) {
-        char recv[200];
-        size_t rlen = (size_t)(dot - call->value);
-        if (rlen < sizeof(recv)) {
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
-            if (strmap_has(locals, recv) && !is_visible_namespace(recv, table)) {
-                Symbol* rs = table ? lookup_symbol(table, recv) : NULL;
-                int y = tc_method_call_yields(recv, dot + 1, rs ? rs->type : NULL, table,
-                                              depth);
-                if (y >= 0) return y;
-            }
+        const char* recv = aether_intern_n(call->value, (size_t)(dot - call->value));
+        if (strmap_has(locals, recv) && !is_visible_namespace(recv, table)) {
+            Symbol* rs = table ? lookup_symbol(table, recv) : NULL;
+            int y = tc_method_call_yields(recv, dot + 1, rs ? rs->type : NULL, table,
+                                          depth);
+            if (y >= 0) return y;
         }
     }
     /* A call through a function-pointer field, checked: the field's
@@ -20158,14 +20277,9 @@ static int tc_call_yields(ASTNode* call, SymbolTable* table, StrMap* locals, int
     if (!locals && table && call->annotation &&
         (strcmp(call->annotation, "fnfield_ptr") == 0 ||
          strcmp(call->annotation, "fnfield_val") == 0) && dot) {
-        char recv[200];
-        size_t rlen = (size_t)(dot - call->value);
-        if (rlen < sizeof(recv)) {
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
-            Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, NULL);
-            if (fsig) return tc_fn_type_yields(fsig);
-        }
+        Type* fsig = resolve_fnptr_struct_field(
+            table, aether_intern_n(call->value, (size_t)(dot - call->value)), dot + 1, NULL);
+        if (fsig) return tc_fn_type_yields(fsig);
     }
     Symbol* sym = table ? lookup_qualified_symbol(table, call->value) : NULL;
     if (sym && sym->node && sym->node->value &&
@@ -20392,12 +20506,12 @@ static int check_match_value_arms(ASTNode* m, SymbolTable* table) {
          * `return` arm does: it needs no value (#3017). */
         if (!stmt_can_complete(g_typecheck_program, given)) continue;
         const char* callee = given->value ? given->value : "function";
-        char msg[320];
-        char help[320];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        const char* help = "";
+        msg = aether_internf(
                  "'%s' returns no value, so this arm gives the `match` none, and the "
                  "value of the `match` is used", callee);
-        snprintf(help, sizeof(help),
+        help = aether_internf(
                  "give the arm a value: a block arm can make the call and end with one, "
                  "`{ %s(...); 0 }`", callee);
         type_error_hint(msg, help, given->line, given->column);
@@ -20481,13 +20595,13 @@ static int tc_return_settle(ASTNode* ret, SymbolTable* table) {
     if (tc_value_yields(v, table, NULL, 0)) return -1;
     int arrow = ret->annotation && strcmp(ret->annotation, "arrow_value") == 0;
     if (!arrow && tc_owner_yields(table)) {
-        char msg[320];
+        const char* msg = "";
         if (v->type == AST_FUNCTION_CALL)
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "'%s' returns no value, so this `return` has nothing to give back",
                      v->value ? v->value : "function");
         else
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "this `match` gives no value (each arm ends in a statement or in a "
                      "call that returns nothing), so this `return` has nothing to give back");
         type_error_hint(msg,
@@ -20654,13 +20768,13 @@ static int fold_clause_set_requires(ASTNode* call, ASTNode* fn) {
 static int refuse_valueless(ASTNode* v, SymbolTable* table, const char* what) {
     if (!v || (v->type != AST_FUNCTION_CALL && v->type != AST_PRINT_STATEMENT)) return 0;
     if (tc_value_yields(v, table, NULL, 0)) return 0;
-    char msg[400];
+    const char* msg = "";
     if (v->type == AST_PRINT_STATEMENT || !v->value) {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "'%s' returns no value, so there is nothing to %s here; call it as a "
                  "statement on its own line", v->value ? v->value : "print", what);
     } else {
-        snprintf(msg, sizeof(msg),
+        msg = aether_internf(
                  "'%s' returns no value, so there is nothing to %s here. Give it a "
                  "return type (e.g. `%s(...) -> int`) and a `return`, or call it as a "
                  "statement on its own line", v->value, what, v->value);
@@ -20701,12 +20815,12 @@ void typecheck_print_short_names(FILE* out) {
  * module twice, and the short form is the same declaration. */
 void typecheck_warn_short_names(void) {
     for (int i = 0; i < g_sn_count; i++) {
-        char msg[1024], hint[1024];
-        snprintf(msg, sizeof(msg),
+        const char* msg = ""; const char* hint = "";
+        msg = aether_internf(
                  "`%s.%s` names its module twice: `%s.%s` is the same function",
                  g_sn_edits[i].ns, g_sn_edits[i].long_name, g_sn_edits[i].ns,
                  g_sn_edits[i].short_name);
-        snprintf(hint, sizeof(hint),
+        hint = aether_internf(
                  "write `%s.%s`, or run `ae fmt --short-names %s` to rewrite every such call",
                  g_sn_edits[i].ns, g_sn_edits[i].short_name, g_sn_entry ? g_sn_entry : "<file>");
         AetherError w = {
@@ -20751,8 +20865,7 @@ static void note_short_name(ASTNode* call, SymbolTable* table) {
     if (call->annotation && strcmp(call->annotation, "ufcs") == 0) return;
     const char* dot = strchr(call->value, '.');
     if (!dot || dot != strrchr(call->value, '.')) return;
-    char prefix[256];
-    snprintf(prefix, sizeof(prefix), "%.*s", (int)(dot - call->value), call->value);
+    const char* prefix = aether_intern_n(call->value, (size_t)(dot - call->value));
     const char* suffix = dot + 1;
     /* The module's namespace as the call carries it, or the last segment
      * of its name, which a source writes when two modules share it. */
@@ -20770,8 +20883,7 @@ static void note_short_name(ASTNode* call, SymbolTable* table) {
         if (!lexes_as_identifier(short_name)) return;
         for (int i = 0; i < g_sn_count; i++)
             if (g_sn_edits[i].line == call->line && g_sn_edits[i].column == call->column) return;
-        char shortq[512];
-        snprintf(shortq, sizeof(shortq), "%s.%s", prefix, short_name);
+        const char* shortq = aether_internf("%s.%s", prefix, short_name);
         if (!same_declaration(lookup_qualified_symbol(table, call->value),
                               lookup_qualified_symbol(table, shortq))) return;
         if (g_sn_count == g_sn_cap) {
@@ -20802,8 +20914,8 @@ static ASTNode* first_named_argument(ASTNode* call) {
 static int reject_named_arguments(ASTNode* call, const char* what) {
     ASTNode* named = first_named_argument(call);
     if (!named) return 1;
-    char msg[320];
-    snprintf(msg, sizeof(msg), "named argument '%s' in a call of %s, whose parameters have no names",
+    const char* msg = "";
+    msg = aether_internf("named argument '%s' in a call of %s, whose parameters have no names",
              named->value ? named->value : "?", what);
     type_error_code_hint(msg, "pass the arguments by position, in the order of the parameters",
                          named->line, named->column, AETHER_ERR_TYPE_MISMATCH);
@@ -20899,8 +21011,8 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
     if (!slot || !src) { fprintf(stderr, "Fatal: out of memory binding arguments\n"); exit(1); }
     for (int i = 0; i < npos && ok; i++) {
         if (skip + i >= np) {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "Function '%s' expects %d argument(s), got more", fname,
+            const char* msg = "";
+            msg = aether_internf("Function '%s' expects %d argument(s), got more", fname,
                      np - skip);
             type_error(msg, call->children[i]->line, call->children[i]->column);
             ok = 0;
@@ -20919,8 +21031,8 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
             if (named_param && p->value && a->value && strcmp(p->value, a->value) == 0) { j = k; break; }
         }
         if (j < 0) {
-            char msg[320];
-            snprintf(msg, sizeof(msg), "'%s' has no parameter named '%s'", fname, a->value ? a->value : "?");
+            const char* msg = "";
+            msg = aether_internf("'%s' has no parameter named '%s'", fname, a->value ? a->value : "?");
             char hint[512];
             size_t used = (size_t)snprintf(hint, sizeof(hint), "its parameters are");
             for (int k = skip; k < np && used < sizeof(hint); k++) {
@@ -20933,8 +21045,8 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
             type_error_code_hint(msg, hint, a->line, a->column, AETHER_ERR_TYPE_MISMATCH);
             ok = 0;
         } else if (slot[j]) {
-            char msg[320];
-            snprintf(msg, sizeof(msg), "parameter '%s' of '%s' is given twice", a->value, fname);
+            const char* msg = "";
+            msg = aether_internf("parameter '%s' of '%s' is given twice", a->value, fname);
             type_error_code_hint(msg, "give each parameter one argument", a->line, a->column,
                                  AETHER_ERR_TYPE_MISMATCH);
             ok = 0;
@@ -20963,10 +21075,10 @@ static int bind_named_arguments(ASTNode* call, Symbol* symbol) {
             src[j] = argc + defaults++;
             continue;
         }
-        char msg[320];
+        const char* msg = "";
         int named_param = is_ext || params[j]->type == AST_VARIABLE_DECLARATION ||
                           params[j]->type == AST_PATTERN_VARIABLE;
-        snprintf(msg, sizeof(msg), "the call of '%s' gives no argument for parameter %d '%s'", fname,
+        msg = aether_internf("the call of '%s' gives no argument for parameter %d '%s'", fname,
                  j - skip + 1, named_param && params[j]->value ? params[j]->value : "(a pattern)");
         type_error_code_hint(msg, "pass it by position or by name", call->line, call->column,
                              AETHER_ERR_TYPE_MISMATCH);
@@ -21091,11 +21203,11 @@ static int check_select_platforms(ASTNode* call) {
         k += (size_t)snprintf(keys + k, sizeof(keys) - k, "%s`%s:`", sep, platforms[p]);
         done++;
     }
-    char msg[512], help[320];
-    snprintf(msg, sizeof(msg),
+    const char* msg = ""; const char* help = "";
+    msg = aether_internf(
              "select() has no value for %s and no `other:` fallback; its branches are %s",
              missing, given[0] ? given : "none");
-    snprintf(help, sizeof(help),
+    help = aether_internf(
              "add %s, or `other:` for every platform it does not name", keys);
     type_error_code_hint(msg, help, call->line, call->column, AETHER_ERR_SELECT_PLATFORM);
     return 0;
@@ -21258,8 +21370,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             return 0;
         }
         if (type_is_sized_array(st->element_type)) {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "`push` does not take a slice of arrays (%s) yet",
+            const char* msg = "";
+            msg = aether_internf("`push` does not take a slice of arrays (%s) yet",
                      type_spelled(st));
             type_error_hint(msg, "wrap the array in a struct, and push those", call->line,
                             call->column);
@@ -21284,8 +21396,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                                          call->children[1]->line, call->children[1]->column))
             fits = 0;
         else if (!fits) {
-            char msg[300];
-            snprintf(msg, sizeof(msg), "xs.push(v): v is %s, but the elements of xs are %s",
+            const char* msg = "";
+            msg = aether_internf("xs.push(v): v is %s, but the elements of xs are %s",
                      type_spelled(vt), type_spelled(st->element_type));
             type_error(msg, call->children[1]->line, call->children[1]->column);
         }
@@ -21311,8 +21423,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             }
             Type* st = infer_type(call->children[0], table);
             if (!type_is_slice(st) || !st->element_type) {
-                char msg[300];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "append(xs, v) takes a slice `T[]` as its first argument, got %s",
                          st ? type_spelled(st) : "an unknown type");
                 type_error_hint(msg, "start one with `make([]T, 0)` or a `T[]` bound to `[]`",
@@ -21322,8 +21434,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 return 0;
             }
             if (type_is_sized_array(st->element_type)) {
-                char msg[300];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "append(xs, v) does not take a slice of arrays (%s) yet",
                          type_spelled(st));
                 type_error_hint(msg, "wrap the array in a struct, and append those",
@@ -21352,8 +21464,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                                              call->children[1]->line, call->children[1]->column))
                 fits = 0;
             else if (!fits) {
-                char msg[300];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "append(xs, v): v is %s, but the elements of xs are %s",
                          type_spelled(vt), type_spelled(st->element_type));
                 type_error(msg, call->children[1]->line, call->children[1]->column);
@@ -21405,21 +21517,13 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if (symbol && call->value && global_module_registry) {
         char* dot = strchr(call->value, '.');
         if (dot && dot != call->value && !strchr(dot + 1, '.')) {
-            char hubname[256];
-            size_t hl = (size_t)(dot - call->value);
-            if (hl < sizeof(hubname)) {
-                memcpy(hubname, call->value, hl);
-                hubname[hl] = '\0';
-                AetherModule* hub = module_find(hubname);
-                AetherModule* origin = module_resolve_reexport(hub, dot + 1);
-                if (origin && origin->name &&
-                    strcmp(origin->name, hubname) != 0) {
-                    char rewritten[512];
-                    snprintf(rewritten, sizeof(rewritten), "%s.%s",
-                             origin->name, dot + 1);
-                    free(call->value);
-                    call->value = strdup(rewritten);
-                }
+            const char* hubname = aether_intern_n(call->value, (size_t)(dot - call->value));
+            AetherModule* hub = module_find(hubname);
+            AetherModule* origin = module_resolve_reexport(hub, dot + 1);
+            if (origin && origin->name && strcmp(origin->name, hubname) != 0) {
+                const char* rewritten = aether_internf("%s.%s", origin->name, dot + 1);
+                free(call->value);
+                call->value = strdup(rewritten);
             }
         }
     }
@@ -21498,9 +21602,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
          symbol->node->type == AST_BUILDER_FUNCTION) && symbol->node->value) {
         const char* dot = strchr(call->value, '.');
         if (dot && dot == strrchr(call->value, '.')) {
-            char joined[512];
-            snprintf(joined, sizeof(joined), "%.*s_%s", (int)(dot - call->value), call->value,
-                     dot + 1);
+            const char* joined =
+                aether_internf("%.*s_%s", (int)(dot - call->value), call->value, dot + 1);
             if (strcmp(joined, symbol->node->value) != 0) {
                 free(call->value);
                 call->value = strdup(symbol->node->value);
@@ -21597,10 +21700,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     if ((!symbol || !symbol->is_function) && call->value) {
         char* dot = strrchr(call->value, '.');
         size_t rlen = dot ? (size_t)(dot - call->value) : 0;
-        if (dot && rlen > 0 && rlen < 200 && !memchr(call->value, '.', rlen)) {
-            char recv[200];
-            memcpy(recv, call->value, rlen);
-            recv[rlen] = '\0';
+        if (dot && rlen > 0 && !memchr(call->value, '.', rlen)) {
+            const char* recv = aether_intern_n(call->value, rlen);
             int is_ptr = 0;
             Type* fsig = resolve_fnptr_struct_field(table, recv, dot + 1, &is_ptr);
             if (fsig) {
@@ -21653,7 +21754,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     }
 
     if (!symbol || !symbol->is_function) {
-        char error_msg[256];
+        const char* error_msg = "";
         /* #2683: a local bound earlier in the body hides the function of
          * its name from that binding on. "Undefined function", with its
          * spelling hint, pointed away from the function defined above. */
@@ -21662,11 +21763,11 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             while (root->parent) root = root->parent;
             Symbol* fn = lookup_symbol_local(root, call->value);
             if (fn && fn->is_function) {
-                char hint[384];
-                snprintf(error_msg, sizeof(error_msg),
+                const char* hint = "";
+                error_msg = aether_internf(
                          "'%s' is a local here, which hides the function '%s'",
                          call->value, call->value);
-                snprintf(hint, sizeof(hint),
+                hint = aether_internf(
                          "a local's scope starts after its initializer and lasts to the end "
                          "of the function, so the function cannot be called as '%s' here; "
                          "give the local another name",
@@ -21681,9 +21782,9 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             char* tmp = strdup(call->value);
             char* dot = strchr(tmp, '.');
             *dot = '\0';
-            char hint[512];
-            if (missing_import_hint(tmp, table, hint, sizeof(hint))) {
-                snprintf(error_msg, sizeof(error_msg),
+            const char* hint = missing_import_hint(tmp, table);
+            if (hint) {
+                error_msg = aether_internf(
                          "Undefined function '%s'", call->value);
                 free(tmp);
                 type_error_code_hint(error_msg, hint, call->line, call->column,
@@ -21691,15 +21792,15 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 return 0;
             }
             if (is_export_blocked(tmp, dot + 1)) {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "'%s' is not exported from module '%s'", dot + 1, tmp);
             } else {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Undefined function '%s'", call->value);
             }
             free(tmp);
         } else {
-            snprintf(error_msg, sizeof(error_msg),
+            error_msg = aether_internf(
                      "Undefined function '%s'", call->value ? call->value : "?");
         }
         type_error(error_msg, call->line, call->column);
@@ -21738,8 +21839,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 ASTNode* c = call->children[i];
                 if (c && c->type == AST_CLOSURE && c->value &&
                     strcmp(c->value, "trailing") == 0) {
-                    char cb_msg[320];
-                    snprintf(cb_msg, sizeof(cb_msg),
+                    const char* cb_msg = "";
+                    cb_msg = aether_internf(
                              "'%s' takes a closure as its last parameter, but "
                              "the trailing block here is a DSL block that runs "
                              "inline. Write `callback { ... }` (or `|params| "
@@ -21801,8 +21902,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     const char* bare = qual;
                     const char* dot = strrchr(qual, '.');
                     if (dot && dot[1]) bare = dot + 1;
-                    char setter_msg[400];
-                    snprintf(setter_msg, sizeof(setter_msg),
+                    const char* setter_msg = "";
+                    setter_msg = aether_internf(
                              "'%s' is a block setter, not a node builder; call "
                              "it inside a builder's block (e.g. "
                              "`mod.bundle() { %s() }`), not as a top-level "
@@ -21839,13 +21940,13 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                   strcmp(first->value, "builder_context") == 0));
             if (!passes_ctx && user < expected) {
                 if (user < required - 1) {
-                    char error_msg[256];
+                    const char* error_msg = "";
                     if (required < expected)
-                        snprintf(error_msg, sizeof(error_msg),
+                        error_msg = aether_internf(
                                  "Function '%s' expects %d-%d argument(s) in a builder block (its _ctx is given there), got %d",
                                  call->value, required - 1, expected - 1, user);
                     else
-                        snprintf(error_msg, sizeof(error_msg),
+                        error_msg = aether_internf(
                                  "Function '%s' expects %d argument(s) in a builder block (its _ctx is given there), got %d",
                                  call->value, expected - 1, user);
                     type_error(error_msg, call->line, call->column);
@@ -21862,8 +21963,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                         continue;
                     }
                     if (!param_has_default(p)) {
-                        char err[256];
-                        snprintf(err, sizeof(err),
+                        const char* err = "";
+                        err = aether_internf(
                                  "Function '%s' parameter %d has no default, caller must supply it",
                                  call->value, param_idx);
                         type_error(err, call->line, call->column);
@@ -21916,13 +22017,13 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                        (got >= required && got < expected) ||
                        (is_variadic_callee && got >= expected);
         if (!ctx_injected && !arity_ok) {
-            char error_msg[256];
+            const char* error_msg = "";
             if (required < expected) {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Function '%s' expects %d-%d argument(s), got %d",
                          call->value, required, expected, got);
             } else {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Function '%s' expects %d argument(s), got %d",
                          call->value, expected, got);
             }
@@ -21952,8 +22053,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     // Should be unreachable given the trailing-default
                     // rule, but defensively: error instead of silently
                     // filling with an undefined value.
-                    char err[256];
-                    snprintf(err, sizeof(err),
+                    const char* err = "";
+                    err = aether_internf(
                              "Function '%s' parameter %d has no default, caller must supply it",
                              call->value, param_idx + 1);
                     type_error(err, call->line, call->column);
@@ -22011,14 +22112,14 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             ? (got >= expected || (ctx_first && got >= expected - 1))
             : (got == expected || (ctx_first && got == expected - 1));
         if (!arity_ok) {
-            char error_msg[256];
+            const char* error_msg = "";
             int low = ctx_first ? (expected - 1) : expected;
             if (is_variadic) {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Function '%s' expects at least %d argument(s), got %d",
                          call->value, low, got);
             } else {
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Function '%s' expects %d argument(s), got %d",
                          call->value, low, got);
             }
@@ -22048,8 +22149,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                 int param_is_tuple = (p->node_type &&
                                       p->node_type->kind == TYPE_TUPLE);
                 if (!param_is_tuple && arg->type == AST_TUPLE_LITERAL) {
-                    char error_msg[256];
-                    snprintf(error_msg, sizeof(error_msg),
+                    const char* error_msg = "";
+                    error_msg = aether_internf(
                              "tuple literal passed to non-tuple parameter "
                              "%d of extern '%s'", pi, call->value);
                     type_error(error_msg, arg->line, arg->column);
@@ -22068,8 +22169,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                         ek != TYPE_FLOAT && ek != TYPE_FLOAT32 &&
                         ek != TYPE_BYTE && ek != TYPE_BOOL &&
                         ek != TYPE_PTR) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "tuple extern parameters support scalar, "
                                  "byte, f32, bool, and ptr elements only "
                                  "(parameter %d of '%s')", pi, call->value);
@@ -22080,8 +22181,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
 
                 if (arg->type == AST_TUPLE_LITERAL) {
                     if (arg->child_count != p->node_type->tuple_count) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "tuple argument for parameter %d of extern '%s' "
                                  "has %d element(s), expected %d",
                                  pi, call->value, arg->child_count,
@@ -22126,8 +22227,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     }
                     if (at) free_type(at);
                     if (!matches) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "parameter %d of extern '%s' is tuple-typed; "
                                  "pass a matching tuple value or a parenthesized "
                                  "tuple literal, e.g. (x, y)", pi, call->value);
@@ -22158,9 +22259,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
     // (none today on AST_CLOSURE; `defer` factory annotations live
     // on AST_VARIABLE_DECLARATION) are preserved.
     {
-        char recv_buf[256];
-        const char* dsl_recv_name = dsl_receiver_of_call(call, table, recv_buf,
-                                                         sizeof(recv_buf));
+        const char* dsl_recv_name = dsl_receiver_of_call(call, table);
         if (dsl_recv_name) {
             for (int i = 0; i < call->child_count; i++) {
                 ASTNode* child = call->children[i];
@@ -22495,9 +22594,9 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             int arg_is_unknown = arg_type->kind == TYPE_UNKNOWN;
 
             if (arg_is_plain_numeric && !arg_is_duration && !arg_is_unknown) {
-                char error_msg[384];
+                const char* error_msg = "";
                 const char* pname = param->value ? param->value : "?";
-                snprintf(error_msg, sizeof(error_msg),
+                error_msg = aether_internf(
                          "Cannot pass %s where Duration expected "
                          "(argument %d '%s' of '%s'). "
                          "Use a time-unit suffix on the literal: "
@@ -22559,8 +22658,8 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                                                                param->value);
                     if (!mode_refused && arg_type && arg_type->kind != TYPE_TUPLE &&
                         arg_type->kind != TYPE_UNKNOWN && !is_type_compatible(arg_type, param_type)) {
-                        char error_msg[256];
-                        snprintf(error_msg, sizeof(error_msg),
+                        const char* error_msg = "";
+                        error_msg = aether_internf(
                                  "Argument %d of '%s': expected %s, got %s",
                                  param_idx + 1, call->value,
                                  type_name(param_type), type_name(arg_type));

@@ -379,15 +379,20 @@ t.hashFunction = my_hash        // checked against fn(ptr) -> int
 
 ### String fields of a header-defined struct
 
-A `string` field of an `extern struct ... @c_import` is the header's `const char*`. The header's layout has no room for an ownership flag, so the struct never releases what it holds. A string stored there (`s.field = v`, or in a literal) is given a reference of its own, which nothing in the program releases: it stays valid for as long as C reads it, and it is C's from then on. The local it came from keeps and releases its own reference, as any local does.
+A `string` field of an `extern struct ... @c_import` is the header's `const char*`. The header's layout has no room for an ownership flag, and Aether cannot see what C keeps, so nothing releases what the field holds behind C's back: not a store over it, not the end of a scope. A string stored there (`s.field = v`, or in a literal) is given a reference of its own, recorded by the characters the field holds, and the program gives it back with `string.release_kept(s.field)` once C is done with it (#3567). The local it came from keeps and releases its own reference, as any local does.
 
 ```aether,fragment
 app = calloc(1, sizeof(VkApplicationInfo)) as *VkApplicationInfo
-app.pApplicationName = "viewer"          // a literal: pinned, never freed
-app.pEngineName = "viewer ${version}"    // given a reference that C keeps
+app.pApplicationName = "viewer"          // a literal: pinned, never recorded
+app.pEngineName = "viewer ${version}"    // given a recorded reference
+// ... C reads app ...
+string.release_kept(app.pEngineName)     // the reference given back
+free(app)
 ```
 
-- Each string stored into such a field stays allocated until the program exits, so a program that stores many over time should store them once, or keep them in memory it frees itself.
+- A field read back is the string it was given, so a field updated over time gives each old value back: `old = s.field`, `s.field = next`, `string.release_kept(old)`.
+- The same string stored into two fields is two references, each given back once. A pinned literal's characters, a plain C string and a pointer already given back are not recorded, and `string.release_kept` of them does nothing.
+- A string stored and never given back stays allocated until the program exits.
 - A field of an Aether-defined struct is different: it owns its string, and a store over it or the struct's drop releases it.
 
 ### A header's union: `extern union ... @c_import`
@@ -960,15 +965,24 @@ main() {
 - For Aether-owned data; prefer fixed-size stack arrays (`int[5] arr`) or the higher-level collections in `std.collections`. The `as T[]` cast is the systems-programming escape hatch, not the everyday array.
 - When you want bounds-checked storage. Sub-slice the view with an explicit end (`(raw as int[])[0..n]`) or start from a `T[N]` array / `make([]T, n)`; a bare view has no length to check against.
 
-**Slices at the C boundary.** An Aether `T[]` is `AetherSlice { void* ptr; uint64_t len; }` by value (`runtime/aether_slice.h`, included by every generated program). The extern ABI does not see that struct:
+**Slices at the C boundary.** An Aether `T[]` is `AetherSlice { void* ptr; uint64_t len; uint32_t flags; uint32_t off; }` by value (`runtime/aether_slice.h`, included by every generated program). The extern ABI does not see that struct:
 
 | Position | C sees | The compiler emits |
 |---|---|---|
-| `extern f(data: byte[])` parameter | `unsigned char*` | the argument's `.ptr` (the length is dropped; pass it separately, `f(data, data.len)`) |
-| `extern g() -> int[]` return | `int*` | `aether_slice_view(g())`: an unbounded slice |
+| `extern f(data: byte[])` parameter | `unsigned char*` | the argument's `.ptr`, borrowed for the call (the length is dropped; pass it separately, `f(data, data.len)`) |
+| `extern g() -> int[]` return | `int*` | `aether_slice_view(g())`: an unbounded slice, not counted |
 | `extern struct S { buf: byte[] }` field | `unsigned char buf[]` (last field) / `unsigned char*` | a read of `s.buf` is an unbounded view; `s.buf + i` is a `ptr` |
-| a `T[]` passed to a `ptr` parameter, `free(s)`, `s == null`, `s + n` | `void*` / `T*` | `.ptr` |
+| a `T[]` passed to a `ptr` parameter, `s == null`, `s + n` | `void*` / `T*` | `.ptr` |
+| `free(s)` | | `aether_slice_free`: a counted buffer's reference given back, the buffer going with the last; the pointer of memory the program owns freed |
 | an Aether function's `T[]` parameter, return, struct field | `AetherSlice` | the whole fat pointer |
+
+**Counted buffers (#3568, runtime ABI revision 3).** The buffer `make([]T, n)` hands out, or `append` grows, is counted: its storage starts `AETHER_SLICE_HEAD` (32) bytes before the first element, where a header holds the number of places that hold a slice of it, and every slice of it carries the mark `AETHER_SLICE_MADE` and its offset into the buffer (`off`, and bits 8 to 31 of `flags`), by which the header is found. A slice without the mark is not counted and nothing is read before its `ptr`: one C builds (`aether_slice_make`), an extern's `T[]` result, `p as T[]`, an array viewed as a slice, a literal's bytes. A view of a counted string's bytes (`string.bytes(s)`, #3570) is marked `AETHER_SLICE_STRING` and holds the string: the same 56 bits carry the string's header (an `AetherString*`) instead of an offset. `AetherSlice` keeps the size and the offsets of `ptr`, `len` and `flags` it had.
+
+Migrating C that touches Aether slices:
+
+- C must never `free()` the `.ptr` of a `make` buffer: it is not the start of the allocation. A C function given `.ptr` borrows it for the call.
+- A host that holds an `AetherSlice` an Aether function returned (C emitted with `--emit=csrc` or `--emit=obj`) holds one reference: it gives it back with `aether_slice_release(&s)`, which empties `s`.
+- A host makes a view of part of a slice with `aether_slice_sub(s, lo, hi, sizeof(T), file, line)`, never by moving `.ptr` and `.len` itself: the view has to carry its offset into the buffer. A view a host keeps past the call takes a reference of its own with `aether_slice_retain(v)`, given back with `aether_slice_release(&v)`.
 
 ### `@c_struct` typed overlays, width-correct field access over a raw `ptr`
 
@@ -1179,7 +1193,7 @@ These all mint their result through `string_adopt_caps_buffer`, which sets the m
 What a call does with a string is decided by the extern's declaration, never by reading C (R4 of the [ownership rules](memory-management.md#c-boundaries-r4)):
 
 - **An extern `-> string`** returns C's characters, borrowed: `getenv(3)`, `dlerror(3)` and most POSIX functions return memory the caller must not free. A place that takes the result copies the characters into a counted string it owns, so the value stays valid when C reuses its buffer.
-- **An extern `-> string @heap`** returns a string the caller owns: a `malloc`'d `char*` is adopted into a counted string at the call, with no copy, and released by the place that holds it, as any string is. `-> ptr @heap` says the same of a counted string returned untyped (std types every string it returns `string`), and a tuple position can carry it too (`-> (string @heap, int)`).
+- **An extern `-> string @heap`** returns a string the caller owns: a `malloc`'d `char*` is adopted into a counted string at the call, with no copy, and released by the place that holds it, as any string is. `-> ptr @heap` says the same of a counted string returned untyped (std types every string it returns `string`), and a tuple position can carry it too (`-> (string @heap, int)`). `-> fn @heap` says it of a closure: the reference an Aether library's export hands its caller, which the program gives back at the end of the place that holds it (a binary import's stub declares its closure results so, #3547). Without it a closure an extern returns is lent, as a C function's is.
 - **A `string` parameter** is borrowed for the call: C must not free it or keep it. One that C keeps is declared `@retain`, and the call hands it a reference of its own.
 - **A `ptr` parameter whose memory the result points into** (`strchr`, `memchr`, a lookup that returns an element of the buffer it was given) is declared `@into`: the C function hands the argument to its result and keeps it nowhere else. The call is checked as one to an Aether function's `@into` parameter: the caller may hold the result in a local, a borrowed `ptr` parameter of the caller is E0902 where the result escapes the function, and a string goes there only through `string.keep(s)`. It is trusted, as `@retain` is, since the compiler does not read C.
 

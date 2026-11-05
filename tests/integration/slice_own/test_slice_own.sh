@@ -75,6 +75,31 @@ main() {
 }
 AE
 
+# #3568: given to a function first (a view of it may be held there, so a
+# move elsewhere would copy it), `append` and `free` still consume it.
+refused use_after_viewed_append E0906 "'xs' is used after \`append\` consumed it (line 8)" 9:16 <<'AE'
+total(xs: int[]) -> int {
+    return xs.len
+}
+
+main() {
+    xs = make([]int, 2)
+    total(xs)
+    ys = append(xs, 5)
+    println("${xs.len} ${ys.len}")
+}
+AE
+
+refused use_after_viewed_free E0906 "'xs' is used after it was freed (line 5)" 6:16 <<'AE'
+main() {
+    xs = make([]int, 2)
+    v = xs[0..1]
+    println("${v.len}")
+    free(xs)
+    println("${xs.len}")
+}
+AE
+
 refused use_after_keep E0906 "'xs' is used after it was given to 'take_all', which keeps it (line 7)" 8:16 <<'AE'
 take_all(v: @keep int[]) -> int {
     return v.len
@@ -262,11 +287,15 @@ main() {
 }
 AE
 
-# Views that keep a buffer for good, as before ownership (they leak by
-# design, so the leak gate's regression tests do not hold them): a view a
-# function hands back kept in a local of an outer scope, and a view held
-# while its owner is bound again. Released, each read back the filler.
+# Views that keep their buffer: a view a function hands back kept in a local
+# of an outer scope, and a view held while its owner is bound again. Freed
+# under the view, each would read back the filler. They no longer leak
+# (#3568): a buffer is counted, each view holds a reference of its own, and
+# the last place to let go releases it, so the heap is where it was after
+# every round (where its count is exact).
 cat > "$TMP/kept.ae" <<'AE'
+import std.mem
+
 around(k: int) -> int[] {
     out = make([]int, 4)
     for i in 0..4 {
@@ -311,25 +340,40 @@ rebound_view() -> int {
 
 main() {
     println("kept ${kept_view(5)} ${rebound_view()}")
+    long grown = 0
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    _a = kept_view(5)
+                    _b = rebound_view()
+                    i = i + 1
+                }
+            }, 6)
+    }
+    println("kept grew ${grown}")
 }
 AE
 out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run kept.ae 2>&1)
 case "$out" in
-    *"kept 81 163"*) ;;
-    *) echo "  [FAIL] kept: not \"kept 81 163\":"
+    *"kept 81 163"*"kept grew 0"*) ;;
+    *) echo "  [FAIL] kept: not \"kept 81 163\" and \"kept grew 0\":"
        echo "$out" | sed 's/^/        /'
        fails=$((fails + 1)) ;;
 esac
 
 # The heap does not grow: 200 rounds of buffers released at scope exit (a
 # make buffer, one pushed and moved, rows of a slice of slices replaced,
-# buffers of strings in a loop left by `break`), 256 KB each, against the
-# same rounds leaking one more buffer into a field nothing frees, which the
-# check must catch (about 50 MB). A leak tool's job too (the leak gate runs
-# tests/regression/test_slice_own.ae); this one needs none.
+# buffers of strings in a loop left by `break`, a buffer in a struct's field,
+# #3568), 256 KB each, against the same rounds leaking one more allocation
+# nothing frees, which the check must catch (about 50 MB). A leak tool's job
+# too (the leak gate runs tests/regression/test_slice_own.ae); this one
+# needs none.
 cat > "$TMP/grow.ae" <<'AE'
 import std.mem
 import std.os
+
+extern malloc(n: int) -> ptr
 
 struct Bag {
     items: int[]
@@ -361,9 +405,14 @@ round(leak: bool) -> int {
         }
     }
     total = a.len + c.len + rows[1].len
+    bag = Bag { items: fill(n) }   // a field: released with the struct (#3568)
+    total = total + bag.items.len
     if leak {
-        bag = Bag { items: fill(n) }   // a field: freed by hand, and here it is not
-        total = total + bag.items.len
+        p = malloc(n * 4)   // C memory: the program frees it, and here it does not
+        for i in 0..n {
+            mem.set_byte(p, i * 4, 1)
+        }
+        total = total + mem.get_byte(p, 4)
     }
     return total
 }
@@ -383,7 +432,15 @@ main() {
 AE
 if (cd "$TMP" && AETHER_HOME="$ROOT" "$AE" build grow.ae -o grow >/dev/null 2>&1); then
     owned=$("$TMP/grow" | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
-    leaked=$("$TMP/grow" leak | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    # The control leaks on purpose. Under ASan (the sweep's AETHER_SANITIZER
+    # =asan run) LeakSanitizer is told so for that one run, whose leak is the
+    # point; the run that releases what it makes is still checked by it.
+    if [ "${AETHER_SANITIZER:-}" = asan ]; then
+        leaked=$(ASAN_OPTIONS="${ASAN_OPTIONS:+$ASAN_OPTIONS:}detect_leaks=0" "$TMP/grow" leak \
+            | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    else
+        leaked=$("$TMP/grow" leak | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
+    fi
     if [ -z "$owned" ] || [ "$owned" -gt 8 ]; then
         echo "  [FAIL] grow: the heap grew by ${owned:-?} MB over 200 rounds that release what they make"
         fails=$((fails + 1))

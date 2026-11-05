@@ -262,9 +262,16 @@ static const char* find_exports_open(const char* src) {
     return NULL;
 }
 
+static void free_exports(char** exports, int count) {
+    for (int i = 0; i < count; i++) free(exports[i]);
+    free(exports);
+}
+
 /* Collect comma/whitespace-separated identifiers from the `exports ( ... )`
  * block into `*out` (each owned). Returns the export count, or -1 when the
- * block never closes. Inline `//` comments inside the block are skipped. */
+ * block never closes, with nothing handed back: the names read so far are
+ * freed here, since the caller cannot know how many there were. Inline `//`
+ * comments inside the block are skipped. */
 static int parse_exports(const char* src, char*** out) {
     *out = NULL;
     const char* p = find_exports_open(src);
@@ -286,12 +293,12 @@ static int parse_exports(const char* src, char*** out) {
         }
         (*out)[count++] = xstrndup(start, (size_t)(p - start));
     }
-    return *p == ')' ? count : -1;
-}
-
-static void free_exports(char** exports, int count) {
-    for (int i = 0; i < count; i++) free(exports[i]);
-    free(exports);
+    if (*p != ')') {
+        free_exports(*out, count);
+        *out = NULL;
+        return -1;
+    }
+    return count;
 }
 
 /* ---------------------------------------------------------------------- */
@@ -664,7 +671,6 @@ static int parse_module_ae(const char* filepath, const char* module_name) {
     int export_count = parse_exports(src, &exports);
     if (export_count < 0) {
         fprintf(stderr, "docgen: %s: the exports ( list is never closed\n", filepath);
-        free_exports(exports, 0);
         free(src);
         return 0;
     }

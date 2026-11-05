@@ -56,6 +56,7 @@ main() {
     a, _ = list.get_string(kept, 0)
     b, _ = list.get_string(kept, 1)
     println("${a} ${b}")
+    list.free(kept)
 
     // Kept: a nested closure captures the parameter and is returned.
     hold = | s: string | {

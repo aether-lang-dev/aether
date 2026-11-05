@@ -98,5 +98,6 @@ main() {
             }, 5)
         check(grown == 0, "a window of 100 rounds grew the heap by ${grown} bytes in every run")
     }
+    heap.free(filled)
     println("c_pointer done")
 }

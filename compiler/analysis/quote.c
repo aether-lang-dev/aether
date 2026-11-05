@@ -157,10 +157,14 @@ static const char* helper_tree_name(ASTNode* def) {
     size_t n = strlen(ns);
     const char* fn = def->value;
     if (strncmp(fn, ns, n) == 0 && fn[n] == '_' && fn[n + 1]) fn += n + 1;
-    char buf[512];
-    snprintf(buf, sizeof buf, "%s_%s", def->origin_module, fn);
+    /* As long as it is (#3574): 512 bytes cut it, and two helpers took one
+     * tree name. */
+    char* buf = strdup(aether_internf("%s_%s", def->origin_module, fn));
+    if (!buf) { fprintf(stderr, "aetherc: out of memory registering a @quotable function\n"); exit(1); }
     for (char* c = buf; *c; c++) if (*c == '.') *c = '_';
-    return aether_intern(buf);
+    const char* r = aether_intern(buf);
+    free(buf);
+    return r;
 }
 
 void quote_register_helper(ASTNode* def) {
@@ -189,14 +193,18 @@ QHelper* quote_helper_at(int index) {
  * written (`shaderlib.luma`, which is `shaderlib_luma` merged). */
 static QHelper* helper_named(const char* name) {
     if (!name || !*name) return NULL;
-    char flat[256];
-    snprintf(flat, sizeof flat, "%s", name);
+    /* As long as the name (#3574): 256 bytes cut it, and the helper was not
+     * found. */
+    char* flat = strdup(name);
+    if (!flat) { fprintf(stderr, "aetherc: out of memory lowering a quote\n"); exit(1); }
     for (char* c = flat; *c; c++) if (*c == '.') *c = '_';
-    for (int i = 0; i < g_helper_count; i++) {
+    QHelper* found = NULL;
+    for (int i = 0; i < g_helper_count && !found; i++) {
         if (strcmp(g_helpers[i]->c_name, name) == 0 || strcmp(g_helpers[i]->c_name, flat) == 0)
-            return g_helpers[i];
+            found = g_helpers[i];
     }
-    return NULL;
+    free(flat);
+    return found;
 }
 
 static void note_call(Lower* L, QHelper* h) {
@@ -252,14 +260,14 @@ static void lerror(Lower* L, ASTNode* at, AetherErrorCode code, const char* msg,
 
 /* A construct the tree has no node for. */
 static QNode* reject(Lower* L, ASTNode* at, const char* what, const char* why) {
-    char msg[320], hint[320];
+    const char* msg = ""; const char* hint = "";
     if (L->helper) {
-        snprintf(msg, sizeof msg, "%s can't be in a @quotable function", what);
-        snprintf(hint, sizeof hint,
+        msg = aether_internf("%s can't be in a @quotable function", what);
+        hint = aether_internf(
                  "its body becomes a tree, as a quote's does; %s", why);
     } else {
-        snprintf(msg, sizeof msg, "%s can't be quoted", what);
-        snprintf(hint, sizeof hint,
+        msg = aether_internf("%s can't be quoted", what);
+        hint = aether_internf(
                  "a quote becomes a tree for a library to read; %s", why);
     }
     lerror(L, at, AETHER_ERR_QUOTE_SUBSET, msg, hint);
@@ -338,8 +346,8 @@ static int names_capture(Lower* L, ASTNode* target) {
 }
 
 static void capture_write_error(Lower* L, ASTNode* at, const char* name, const char* how) {
-    char msg[320];
-    snprintf(msg, sizeof msg, "a quote can't %s '%s', a variable it captures", how, name);
+    const char* msg = "";
+    msg = aether_internf("a quote can't %s '%s', a variable it captures", how, name);
     lerror(L, at, AETHER_ERR_QUOTE_CAPTURE, msg,
            "the captured variable's cell is shared with the program; a quote reads it. "
            "Copy it into a local of the quote and change that");
@@ -357,8 +365,8 @@ static const char* node_type_name(ASTNode* e) {
  * of the program, and the uniforms stay the quote's own captures. The one
  * place that rule lives; drop the call in lower_identifier to lift it. */
 static QNode* helper_reads_outer(Lower* L, ASTNode* e, const char* name) {
-    char msg[320];
-    snprintf(msg, sizeof msg, "@quotable function '%s' reads '%s', a variable outside it",
+    const char* msg = "";
+    msg = aether_internf("@quotable function '%s' reads '%s', a variable outside it",
              L->helper->def->value, name);
     lerror(L, e, AETHER_ERR_QUOTE_HELPER_READ, msg,
            "a @quotable function is emitted as a function of its own; pass the value "
@@ -904,8 +912,8 @@ static int recursion_dfs(QHelper* h, QHelper** stack, int depth, QuoteErrorFn re
         }
         size_t len = strlen(path);
         snprintf(path + len, sizeof path - len, "%s", h->def->value);
-        char msg[640];
-        snprintf(msg, sizeof msg, "@quotable function '%s' reaches itself: %s",
+        const char* msg = "";
+        msg = aether_internf("@quotable function '%s' reaches itself: %s",
                  h->def->value, path);
         if (report) report(msg, "GLSL and MSL have no recursion, so a quote's helpers can't "
                            "either; write the repetition as a loop",
@@ -916,18 +924,23 @@ static int recursion_dfs(QHelper* h, QHelper** stack, int depth, QuoteErrorFn re
     h->mark = 1;
     stack[depth] = h;
     int errors = 0;
-    for (int i = 0; i < h->ncallees && depth + 1 < 256; i++)
+    for (int i = 0; i < h->ncallees; i++)
         errors += recursion_dfs(h->callees[i], stack, depth + 1, report);
     h->mark = 2;
     return errors;
 }
 
 int quote_check_recursion(QuoteErrorFn report) {
-    QHelper* stack[256];
+    /* A path holds each helper once, so it is never longer than the helpers
+     * (#3574): 256 slots stopped following past them, and a cycle deeper
+     * than that went unreported. */
+    QHelper** stack = (QHelper**)aether_xrealloc(NULL, sizeof(QHelper*) *
+                                                           (size_t)(g_helper_count + 1));
     int errors = 0;
     for (int i = 0; i < g_helper_count; i++) g_helpers[i]->mark = 0;
     for (int i = 0; i < g_helper_count; i++)
         if (g_helpers[i]->mark == 0) errors += recursion_dfs(g_helpers[i], stack, 0, report);
+    free(stack);
     return errors;
 }
 

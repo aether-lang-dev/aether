@@ -1567,6 +1567,46 @@ int ast_match_covers(const ASTNode* m) {
     return has_empty && has_cons;
 }
 
+/* Is `n` an access chain (fields, elements) rooted at identifier `pname`? */
+static int access_chain_rooted_at(const ASTNode* n, const char* pname) {
+    while (n && (n->type == AST_MEMBER_ACCESS || n->type == AST_ARRAY_ACCESS) &&
+           n->child_count >= 1)
+        n = n->children[0];
+    return n && n->type == AST_IDENTIFIER && n->value && strcmp(n->value, pname) == 0;
+}
+
+/* R3 (#2582): does `n` write into the struct parameter `pname`: rebind it,
+ * store into a field or an element of it (`p.f = v`, `p.xs[i] = v`), or grow
+ * a slice field of it in place (`p.xs.push(v)`, #3568)? Codegen makes such a
+ * parameter a value of its own on entry, destroyed at its exit, so a store
+ * or a growth releases nothing of its caller's, and slice ownership counts
+ * its fields as holding references; any other borrows. */
+int ast_struct_param_written(const ASTNode* n, const char* pname) {
+    if (!n || !pname) return 0;
+    if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, pname) == 0) return 1;
+    if (n->type == AST_BINARY_EXPRESSION && n->value && strcmp(n->value, "=") == 0 &&
+        n->child_count >= 1 && n->children[0] &&
+        (n->children[0]->type == AST_MEMBER_ACCESS || n->children[0]->type == AST_ARRAY_ACCESS) &&
+        access_chain_rooted_at(n->children[0], pname)) return 1;
+    if (n->type == AST_FUNCTION_CALL && n->value && strcmp(n->value, "__slice_push") == 0 &&
+        n->child_count >= 1 && n->children[0] && n->children[0]->type == AST_MEMBER_ACCESS &&
+        access_chain_rooted_at(n->children[0], pname)) return 1;
+    for (int i = 0; i < n->child_count; i++)
+        if (ast_struct_param_written(n->children[i], pname)) return 1;
+    return 0;
+}
+
+/* Is `n` a push into the slice named `name` (`name.push(v)`, lowered to
+ * `__slice_push(name, v)`)? It writes `name`, as an assignment does: a
+ * closure that pushes into a slice it captures shares it with its frame
+ * through a cell (#3568). */
+int ast_pushes_name(const ASTNode* n, const char* name) {
+    return n && name && n->type == AST_FUNCTION_CALL && n->value &&
+           strcmp(n->value, "__slice_push") == 0 && n->child_count >= 1 && n->children[0] &&
+           n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+           strcmp(n->children[0]->value, name) == 0;
+}
+
 int ast_match_is_operand(const ASTNode* m) {
     return m && m->type == AST_MATCH_STATEMENT && annotation_has_marker(m->annotation, "operand");
 }

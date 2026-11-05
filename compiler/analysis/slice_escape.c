@@ -6,7 +6,6 @@
 #include <string.h>
 
 #include "slice_escape.h"
-#include "slice_own.h"
 #include "../aether_error.h"
 #include "../aether_strmap.h"
 
@@ -44,6 +43,7 @@ typedef struct Frame {
     StrMap sticky;    /* paths a closure written here may give a view, from where it is written on */
     StrMap ever;      /* paths that held a view at some point of the walk */
     Views* try_states; /* in a `try` body: what held a view after any statement of it */
+    struct EscMemo* memo; /* the loops walked, by what they start from (flow_loop) */
 } Frame;
 
 /* ---- the path sets ---- */
@@ -109,9 +109,8 @@ static void views_alias(Views* v, const char* from, const char* to) {
         if (!strmap_value_at(v, i)) continue;
         const char* k = strmap_key_at(v, i);
         if (!key_on(k, from)) continue;
-        char path[256];
-        snprintf(path, sizeof(path), "%s%s", to, k + n);
-        strmap_put(v, path, LIVE);
+        /* As long as it is (#3569): 256 bytes cut it to another path. */
+        strmap_put(v, aether_internf("%s%s", to, k + n), LIVE);
     }
 }
 
@@ -230,7 +229,10 @@ static void frame_init(Esc* esc, Frame* f, ASTNode* owner, Frame* parent) {
     collect_locals(esc, f, body);
 }
 
+static void esc_memo_free(struct EscMemo* m);
+
 static void frame_free(Frame* f) {
+    esc_memo_free(f->memo);
     strmap_free(&f->typed);
     strmap_free(&f->locals);
     strmap_free(&f->params);
@@ -287,11 +289,9 @@ static int views_touch(const Views* v, const char* path);
  * closure frame `f` is written in, or may a closure written there give it
  * one? */
 static int outer_holds(Frame* f, const char* path) {
-    char root[160];
-    size_t n = strcspn(path, ".");
-    if (n >= sizeof(root)) n = sizeof(root) - 1;
-    memcpy(root, path, n);
-    root[n] = '\0';
+    /* The root name as long as it is (#3569): cut at 159 bytes, it named
+     * another binding. */
+    const char* root = aether_intern_n(path, strcspn(path, "."));
     for (Frame* a = f; a && a->parent; a = a->parent) {
         if (own_name(a, root)) return 0;
         if (views_touch(&a->parent->ever, path) || views_touch(&a->parent->sticky, path))
@@ -300,14 +300,23 @@ static int outer_holds(Frame* f, const char* path) {
     return 0;
 }
 
+/* Is `e` one of slice ownership's intrinsics (slice_own.c) that give the
+ * slice they are handed: a move, a loan, a copy, a store? The slice is its
+ * last argument. */
+static int slice_own_gives(const ASTNode* e) {
+    return e && e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
+           (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
+            strcmp(e->value, "__slice_copy") == 0 || strcmp(e->value, "__slice_set") == 0 ||
+            strcmp(e->value, "__slice_set_shared") == 0);
+}
+
 /* Is `e` storage of the frame: a non-empty array literal (it lives in the
  * frame as the array it is), or one of the frame's own fixed-size arrays? */
 static int frame_storage(Frame* f, ASTNode* e) {
     if (!e) return 0;
     if (e->type == AST_ARRAY_LITERAL) return e->child_count > 0;
     if (e->type == AST_IDENTIFIER && e->value)
-        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value)) ||
-               slice_own_owner_ident(e);
+        return strmap_has(&f->arrays, e->value) || (g_with_outer && outer_array(f, e->value));
     return 0;
 }
 
@@ -323,25 +332,42 @@ static int holds_view(Frame* f, const Views* v, const char* path) {
  * field of one; an element (`a[i]`) is its array as a whole, since another
  * element may hold what this one does not. Writes it into `out` and returns
  * its root, or NULL when the root is not a name. `*whole` is set when an
- * element was taken. */
-static ASTNode* value_path(ASTNode* e, char* out, size_t cap, int* whole) {
-    const char* fields[16];
-    int nf = 0;
+ * element was taken. The path is interned and as long as it is: built into
+ * a 256-byte buffer from at most 16 fields, a longer one was cut or lost the
+ * fields nearest its root, and named another path (#3569). */
+static ASTNode* value_path(ASTNode* e, const char** out, int* whole) {
     *whole = 0;
+    *out = NULL;
+    /* The fields from the outermost access in: the path is the root, then
+     * these from the last kept back to the first. An element access drops
+     * the fields outside it. */
+    ASTNode* from = e;   /* the outermost access whose fields are kept */
     while (e && (e->type == AST_MEMBER_ACCESS || e->type == AST_ARRAY_ACCESS) &&
            e->child_count > 0) {
         if (e->type == AST_ARRAY_ACCESS) {
-            nf = 0;
             *whole = 1;
-        } else if (nf < 16 && e->value) {
-            fields[nf++] = e->value;
+            from = e->children[0];
         }
         e = e->children[0];
     }
     if (!e || e->type != AST_IDENTIFIER || !e->value) return NULL;
-    size_t pos = (size_t)snprintf(out, cap, "%s", e->value);
-    for (int i = nf - 1; i >= 0 && pos < cap; i--)
-        pos += (size_t)snprintf(out + pos, cap - pos, ".%s", fields[i]);
+    size_t len = strlen(e->value);
+    for (ASTNode* a = from; a && a != e; a = a->children[0])
+        if (a->type == AST_MEMBER_ACCESS && a->value) len += 1 + strlen(a->value);
+    char* buf = (char*)aether_xrealloc(NULL, len + 1);
+    /* Written from the end: the outermost field last. */
+    size_t pos = len;
+    buf[pos] = '\0';
+    for (ASTNode* a = from; a && a != e; a = a->children[0]) {
+        if (a->type != AST_MEMBER_ACCESS || !a->value) continue;
+        size_t n = strlen(a->value);
+        pos -= n;
+        memcpy(buf + pos, a->value, n);
+        buf[--pos] = '.';
+    }
+    memcpy(buf, e->value, strlen(e->value));
+    *out = aether_intern_n(buf, len);
+    free(buf);
     return e;
 }
 
@@ -403,20 +429,14 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
             /* A field or an element is a view only when it can hold one:
              * an int read out of a slice views nothing. */
             if (!may_hold_view(e->node_type)) return 0;
-            char path[256];
+            const char* path = NULL;
             int whole;
-            return value_path(e, path, sizeof(path), &whole) && holds_view(f, v, path);
+            return value_path(e, &path, &whole) && holds_view(f, v, path);
         }
         case AST_EXPRESSION_STATEMENT:
             return e->child_count > 0 && frame_view(f, v, e->children[0]);
         case AST_FUNCTION_CALL:
-            /* Slice ownership's intrinsics (slice_own.c) give the slice
-             * they are handed: a move, a loan, a store. */
-            if (e->value && (strcmp(e->value, "__slice_take") == 0 ||
-                             strcmp(e->value, "__slice_lend") == 0 ||
-                             strcmp(e->value, "__slice_set") == 0) &&
-                e->child_count > 0)
-                return frame_view(f, v, e->children[e->child_count - 1]);
+            if (slice_own_gives(e)) return frame_view(f, v, e->children[e->child_count - 1]);
             return closure_call_view(f, v, e);
         case AST_IF_EXPRESSION:
             return (e->child_count > 1 && frame_view(f, v, e->children[1])) ||
@@ -460,11 +480,7 @@ static int frame_view(Frame* f, const Views* v, ASTNode* e) {
 /* What the value that leaves is, for the message. */
 static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
     if (!e) { snprintf(out, cap, "a slice of it"); return; }
-    /* Slice ownership's move, loan and store give what they are handed. */
-    while (e->type == AST_FUNCTION_CALL && e->value && e->child_count > 0 &&
-           (strcmp(e->value, "__slice_take") == 0 || strcmp(e->value, "__slice_lend") == 0 ||
-            strcmp(e->value, "__slice_set") == 0))
-        e = e->children[e->child_count - 1];
+    while (slice_own_gives(e)) e = e->children[e->child_count - 1];
     switch (e->type) {
         case AST_SLICE_FROM_ARRAY:
         case AST_SLICE_EXPR: {
@@ -476,9 +492,6 @@ static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
             else if (c && c->type == AST_IDENTIFIER && c->value &&
                      (strmap_has(&f->arrays, c->value) || outer_array(f, c->value)))
                 snprintf(out, cap, "the array `%s`", c->value);
-            else if (slice_own_owner_ident(c))
-                snprintf(out, cap, "the buffer `%s` owns, released when it goes out of scope",
-                         c->value);
             else
                 describe(f, c, out, cap);
             return;
@@ -488,9 +501,9 @@ static void describe(Frame* f, ASTNode* e, char* out, size_t cap) {
             return;
         case AST_MEMBER_ACCESS:
         case AST_ARRAY_ACCESS: {
-            char path[160];
+            const char* path = NULL;
             int whole;
-            if (value_path(e, path, sizeof(path), &whole))
+            if (value_path(e, &path, &whole))
                 snprintf(out, cap, "`%s`, which holds a slice of it", path);
             else
                 snprintf(out, cap, "a slice of it");
@@ -536,19 +549,20 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
      * (Frame.shown, 160 each) and the description (what, 200) beside the
      * text, so no message is cut short (and gcc's -Wformat-truncation,
      * an error under -Werror on Linux, has nothing to report). */
-    char what[200], msg[1024];
+    char what[200];
+    const char* msg = "";
     describe(f, value, what, sizeof(what));
     /* A closure storing a view of the frame it is written in: the storage
      * is that frame's. */
     if (f->parent && how != LEAVES_BY_RETURN && g_store_outer_only) {
         Frame* p = f->parent;
         if (how == LEAVES_TO_GLOBAL)
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "the module-level `%s` is given by this closure a slice of the storage of %s "
                      "(%s), which ends when %s returns, while `%s` lasts as long as the program",
                      target, p->shown, what, p->shown, target);
         else
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "a field of `%s`, which may outlive %s, is given by this closure a slice of "
                      "the storage of %s (%s): the storage ends when %s returns, so the slice "
                      "would view memory that is gone",
@@ -559,20 +573,20 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
     switch (how) {
         case LEAVES_TO_OUTER: {
             Frame* o = outer_frame_of(f, target);
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "`%s`, a variable of %s, is given by this closure a slice of its own storage "
                      "(%s): the storage ends when the closure returns, while `%s` lives on",
                      target, o ? o->shown : "the frame it is written in", what, target);
             break;
         }
         case LEAVES_BY_RETURN:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "%s returns a slice of its own storage (%s): the storage ends when %s "
                      "returns, so the slice would view memory that is gone",
                      f->shown, what, f->shown);
             break;
         case LEAVES_TO_GLOBAL:
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                      "the module-level `%s` is given a slice of the storage of %s (%s), which "
                      "ends when %s returns, while `%s` lasts as long as the program",
                      target, f->shown, what, f->shown, target);
@@ -580,13 +594,13 @@ static void report_escape(Esc* esc, Frame* f, ASTNode* value, Leaves how, const 
         case LEAVES_TO_FIELD:
         default:
             if (target)
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "a field of `%s`, which outlives %s, is given a slice of its own "
                          "storage (%s): the storage ends when %s returns, so the slice would "
                          "view memory that is gone",
                          target, f->shown, what, f->shown);
             else
-                snprintf(msg, sizeof(msg),
+                msg = aether_internf(
                          "a field that outlives %s is given a slice of its own storage (%s): "
                          "the storage ends when %s returns, so the slice would view memory "
                          "that is gone",
@@ -637,11 +651,11 @@ static int root_is_frame_value(Frame* f, ASTNode* root) {
 static void bind_path(Frame* f, Views* v, const char* path, int element, ASTNode* value) {
     int holds = frame_view(f, v, value);
     if (holds) strmap_put(&f->ever, path, LIVE);
-    char from[256];
+    const char* from = NULL;
     int whole = 0;
     ASTNode* src = NULL;
     if (holds && value && (value->type == AST_IDENTIFIER || value->type == AST_MEMBER_ACCESS))
-        src = value_path(value, from, sizeof(from), &whole);
+        src = value_path(value, &from, &whole);
     /* What the value holds is read before the old contents go: `v = v[1..]`. */
     Views was;
     if (src) views_copy(&was, v);
@@ -668,9 +682,7 @@ static void bind_path(Frame* f, Views* v, const char* path, int element, ASTNode
             ASTNode* c = value->children[i];
             if (!c || c->type != AST_ASSIGNMENT || c->child_count != 1 || !c->value) continue;
             if (frame_view(f, v, c->children[0])) {
-                char fp[256];
-                snprintf(fp, sizeof(fp), "%s.%s", path, c->value);
-                views_set(v, fp);
+                views_set(v, aether_internf("%s.%s", path, c->value));   /* #3569: whole */
                 any = 1;
             }
         }
@@ -721,7 +733,7 @@ static void flow_branches(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep, int
 /* A loop: its body runs any number of times, so what holds a view at its
  * top is what held one before it or at the end of any pass, or where a
  * `continue` left; after it, also what held one where a `break` left. */
-static void flow_loop(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
+static void flow_loop_walk(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
     LoopExits lx;
     strmap_init(&lx.exits);
     strmap_init(&lx.next);
@@ -846,9 +858,9 @@ static void taint_stores(Frame* f, ASTNode* n, StrMap* own, Views* j) {
         strmap_put(&f->sticky, n->value, LIVE);
     ASTNode *left, *value;
     if (store_parts(n, &left, &value) && frame_view(f, j, value)) {
-        char path[256];
+        const char* path = NULL;
         int element = 0;
-        ASTNode* root = value_path(left, path, sizeof(path), &element);
+        ASTNode* root = value_path(left, &path, &element);
         if (root && !strmap_has(own, root->value) && strmap_has(&f->locals, root->value))
             strmap_put(&f->sticky, path, LIVE);
     }
@@ -1039,13 +1051,23 @@ static int closure_call_view(Frame* f, const Views* v, ASTNode* call) {
  *   (or before the bind), which a `try` around the call starts its handler
  *   from (the `try` case of flow joins every statement's state). */
 
-#define CLOSURE_PATH_MAX 256
+/* A chain of nodes, as long as the tree is deep (#3574): 256 slots stopped
+ * the search past them, and a closure called that deep in an expression
+ * was not followed. */
+typedef struct {
+    ASTNode** v;
+    int cap;
+} NodePath;
 
 /* The chain of nodes from `n` down to `target`, `n` first, into `path`;
  * its length, or 0 when `target` is not under `n`. */
-static int path_to(ASTNode* n, ASTNode* target, ASTNode** path, int depth) {
-    if (!n || depth >= CLOSURE_PATH_MAX) return 0;
-    path[depth] = n;
+static int path_to(ASTNode* n, ASTNode* target, NodePath* path, int depth) {
+    if (!n) return 0;
+    if (depth >= path->cap) {
+        path->cap = path->cap ? path->cap * 2 : 64;
+        path->v = (ASTNode**)aether_xrealloc(path->v, sizeof(ASTNode*) * (size_t)path->cap);
+    }
+    path->v[depth] = n;
     if (n == target) return depth + 1;
     for (int i = 0; i < n->child_count; i++) {
         int len = path_to(n->children[i], target, path, depth + 1);
@@ -1164,9 +1186,9 @@ static void statement_must_bind(Frame* f, ASTNode* s, StrMap* scope, StrMap* own
     }
     ASTNode *left, *value;
     if (store_parts(s, &left, &value)) {
-        char path[256];
+        const char* path = NULL;
         int element = 0;
-        ASTNode* root = value_path(left, path, sizeof(path), &element);
+        ASTNode* root = value_path(left, &path, &element);
         if (root && !element && !strmap_has(own, root->value) && strmap_has(scope, root->value) &&
             (strchr(path, '.') == NULL || root_is_frame_value(f, root)))
             strmap_put(out, path, LIVE);
@@ -1245,16 +1267,21 @@ static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
     if (!lit || seen != 1) return;
     ASTNode* decl = binding_of(body, lit);
     ASTNode* lit_body = frame_body(lit);
-    ASTNode* cpath[CLOSURE_PATH_MAX];
-    ASTNode* dpath[CLOSURE_PATH_MAX];
-    int clen = path_to(body, call, cpath, 0);
-    int dlen = decl ? path_to(body, decl, dpath, 0) : 0;
-    if (!decl || !lit_body || !clen || !dlen || !runs_after(cpath, clen, decl)) return;
+    NodePath cpath = { NULL, 0 }, dpath = { NULL, 0 };
+    int clen = path_to(body, call, &cpath, 0);
+    int dlen = decl ? path_to(body, decl, &dpath, 0) : 0;
+    if (!decl || !lit_body || !clen || !dlen || !runs_after(cpath.v, clen, decl)) {
+        free(cpath.v);
+        free(dpath.v);
+        return;
+    }
     StrMap scope, own, bound;
     strmap_init(&scope);
     strmap_init(&own);
     strmap_init(&bound);
-    names_in_scope(dpath, dlen, &scope);
+    names_in_scope(dpath.v, dlen, &scope);
+    free(cpath.v);
+    free(dpath.v);
     for (int i = 0; i < strmap_count(&f->params); i++)
         if (!strmap_has(&scope, strmap_key_at(&f->params, i)))
             strmap_put(&scope, strmap_key_at(&f->params, i), strmap_value_at(&f->params, i));
@@ -1266,11 +1293,9 @@ static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
     for (int i = 0; i < strmap_count(&bound); i++) {
         if (!strmap_value_at(&bound, i)) continue;
         const char* path = strmap_key_at(&bound, i);
-        char root[160];
-        size_t n = strcspn(path, ".");
-        if (n >= sizeof(root)) continue;
-        memcpy(root, path, n);
-        root[n] = '\0';
+        /* As long as it is (#3569): a root of 160 bytes or more was skipped,
+         * and the check below was not made for it. */
+        const char* root = aether_intern_n(path, strcspn(path, "."));
         if (!strmap_has(&f->locals, root)) continue;
         /* No other variable of the name may stand at the call. */
         ASTNode* typed = NULL;
@@ -1281,6 +1306,83 @@ static void closure_call_rebinds(Frame* f, Views* v, ASTNode* call) {
     strmap_free(&bound);
     strmap_free(&own);
     strmap_free(&scope);
+}
+
+/* A loop walked from `entry`, which left `exit`, in the frame and the
+ * checking context it was walked in (flow_loop). */
+typedef struct EscMemo {
+    ASTNode* node;
+    int rep;
+    Views* try_states;
+    int ever, sticky;
+    int with_outer, store_outer_only, judging_call;
+    Views entry, exit;
+    struct EscMemo* next;
+} EscMemo;
+
+static int views_live(const Views* v) {
+    int n = 0;
+    for (int i = 0; i < strmap_count(v); i++)
+        if (strmap_value_at(v, i)) n++;
+    return n;
+}
+
+/* The same paths hold a view in both. */
+static int views_same(const Views* a, const Views* b) {
+    if (views_live(a) != views_live(b)) return 0;
+    for (int i = 0; i < strmap_count(a); i++)
+        if (strmap_value_at(a, i) && !strmap_get(b, strmap_key_at(a, i))) return 0;
+    return 1;
+}
+
+static void esc_memo_free(EscMemo* m) {
+    while (m) {
+        EscMemo* next = m->next;
+        strmap_free(&m->entry);
+        strmap_free(&m->exit);
+        free(m);
+        m = next;
+    }
+}
+
+/* A loop's walk from `v`. A loop walked once already from the same views,
+ * reporting or not, in the same `try` and with nothing added since to what
+ * the frame's walk has seen held (`ever`, `sticky`: they only grow), leaves
+ * the same views, has reported what it reports and made the joins it makes
+ * into the `try`'s states, so that walk is reused (#3574): a loop's walk
+ * walks its body at least twice, each walking the loops inside, and loops
+ * nested 20 deep took a second, doubling with each level. Its breaks and
+ * continues join only its own exits. */
+static void flow_loop(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
+    int ever = strmap_count(&f->ever), sticky = strmap_count(&f->sticky);
+    for (EscMemo* m = f->memo; m; m = m->next) {
+        if (m->node != n || m->rep != rep || m->try_states != f->try_states ||
+            m->ever != ever || m->sticky != sticky || m->with_outer != g_with_outer ||
+            m->store_outer_only != g_store_outer_only || m->judging_call != g_judging_call ||
+            !views_same(&m->entry, v))
+            continue;
+        strmap_free(v);
+        views_copy(v, &m->exit);
+        return;
+    }
+    EscMemo* m = (EscMemo*)calloc(1, sizeof *m);
+    if (!m) {
+        fprintf(stderr, "aetherc: out of memory in the escape check\n");
+        exit(1);
+    }
+    m->node = n;
+    m->rep = rep;
+    m->try_states = f->try_states;
+    m->ever = ever;
+    m->sticky = sticky;
+    m->with_outer = g_with_outer;
+    m->store_outer_only = g_store_outer_only;
+    m->judging_call = g_judging_call;
+    views_copy(&m->entry, v);
+    flow_loop_walk(esc, f, n, v, rep);
+    views_copy(&m->exit, v);
+    m->next = f->memo;
+    f->memo = m;
 }
 
 static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
@@ -1418,9 +1520,9 @@ static void flow(Esc* esc, Frame* f, ASTNode* n, Views* v, int rep) {
                 report_escape(esc, f, value, LEAVES_TO_GLOBAL, left->value);
             return;
         }
-        char path[256];
+        const char* path = NULL;
         int element = 0;
-        ASTNode* root = value_path(left, path, sizeof(path), &element);
+        ASTNode* root = value_path(left, &path, &element);
         if (root && root_is_frame_value(f, root))
             bind_path(f, v, path, element, value);
         else if (rep && frame_view_store(f, v, value))

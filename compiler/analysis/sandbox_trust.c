@@ -236,18 +236,21 @@ static void mark_block(ASTNode* node, TrustedName* names, int count, int site) {
                  * prototype is the header's, and reproducing it for a
                  * wrapper risks a quiet mismatch. Say so here rather than
                  * leave the call silently sandboxed. */
-                char mangled[512];
-                snprintf(mangled, sizeof mangled, "%s", node->value);
+                /* As long as the call's name (#3569): 512 bytes cut it. */
+                char* mangled = strdup(node->value);
+                if (!mangled) { fprintf(stderr, "Fatal: out of memory\n"); exit(1); }
                 for (char* q = mangled; *q; q++) {
                     if (*q == '.') *q = '_';
                 }
-                if (is_extern_named(mangled) || is_extern_named(node->value) ||
+                int is_extern = is_extern_named(mangled) || is_extern_named(node->value) ||
                     (names[i].module_ns &&
                      (module_declares_extern(names[i].module_ns,
                                              node->value + strlen(names[i].module_ns) + 1) ||
-                      module_declares_extern(names[i].module_ns, mangled)))) {
-                    char msg[640];
-                    snprintf(msg, sizeof msg,
+                      module_declares_extern(names[i].module_ns, mangled)));
+                free(mangled);
+                if (is_extern) {
+                    const char* msg = "";
+                    msg = aether_internf(
                              "sandbox.enforce trusts '%s', but '%s' is a C extern, and only Aether "
                              "functions can be trusted: call it from an Aether function and "
                              "trust that function instead",
@@ -263,8 +266,8 @@ static void mark_block(ASTNode* node, TrustedName* names, int count, int site) {
     } else if (node->type == AST_IDENTIFIER && node->value) {
         for (int i = 0; i < count; i++) {
             if (!names[i].module_ns && strcmp(node->value, names[i].name) == 0) {
-                char msg[512];
-                snprintf(msg, sizeof msg,
+                const char* msg = "";
+                msg = aether_internf(
                          "'%s' is trusted by this sandbox.enforce, so inside its block it can "
                          "only be called, not used as a value: a value passed on would leave "
                          "the block and run without the exemption, or with it somewhere it was "
@@ -314,8 +317,8 @@ static void process_enforce(ASTNode* call) {
         ASTNode* fn = find_function(a->value);
         if (fn) {
             if (fn->type == AST_BUILDER_FUNCTION) {
-                char msg[384];
-                snprintf(msg, sizeof msg,
+                const char* msg = "";
+                msg = aether_internf(
                          "sandbox.enforce cannot trust '%s': it is a builder function, which "
                          "takes a trailing block. Trust a plain function that calls it",
                          a->value);
@@ -326,8 +329,8 @@ static void process_enforce(ASTNode* call) {
                 ASTNode* p = fn->children[k];
                 if (p && (p->type == AST_PATTERN_LIST || p->type == AST_PATTERN_CONS ||
                           p->type == AST_PATTERN_LITERAL || p->type == AST_PATTERN_STRUCT)) {
-                    char msg[384];
-                    snprintf(msg, sizeof msg,
+                    const char* msg = "";
+                    msg = aether_internf(
                              "sandbox.enforce cannot trust '%s': it matches on its parameters "
                              "(a multi-clause function). Trust a plain function that calls it",
                              a->value);
@@ -368,8 +371,8 @@ static void process_enforce(ASTNode* call) {
             ok = 0;
             continue;
         }
-        char msg[384];
-        snprintf(msg, sizeof msg,
+        const char* msg = "";
+        msg = aether_internf(
                  "sandbox.enforce: '%s' is not a function or an imported module, so it cannot "
                  "be trusted",
                  a->value);
@@ -381,8 +384,8 @@ static void process_enforce(ASTNode* call) {
         mark_block(block, names, count, site);
         for (int i = 0; i < count; i++) {
             if (names[i].called) continue;
-            char msg[384];
-            snprintf(msg, sizeof msg,
+            const char* msg = "";
+            msg = aether_internf(
                      "sandbox.enforce trusts '%s', but the block never calls %s: drop the name, "
                      "or check its spelling (a trusted name only covers calls written in the block)",
                      names[i].name, names[i].module_ns ? "into that module" : "it");

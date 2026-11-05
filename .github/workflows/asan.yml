@@ -6,11 +6,10 @@ name: ASan
 # instrumented: `make test-asan-ae` (#3539, tests/scripts/sanitizer_sweep.sh).
 # A heap overflow, a use after free or a double free stops the program that
 # made it, a block it never freed is reported when it exits, and the job fails
-# on any test failure and on any ASan error, which the step summary groups by
-# source location. Leaks are listed in the summary but do not fail the run
-# yet (SAN_LEAKS=report): the std and runtime leaks the first runs found are
-# fixed, and the test programs that do not free what they make are #3547,
-# after which this sets SAN_LEAKS=fail.
+# on any test failure, any ASan error and any leak (SAN_LEAKS=fail), which the
+# step summary groups by source location: the std and runtime leaks the first
+# runs found are fixed (#3539), and so are the test programs that did not free
+# what they made (#3547).
 #
 # Before this, ASan, LSan and Valgrind on Linux ran only the C unit runner
 # (memory-check.yml); the generated C of an Aether program was never run under
@@ -66,7 +65,7 @@ jobs:
       run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
     - name: make test-asan-ae
-      run: AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)"
+      run: AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
 
     - name: Upload the ASan reports
       if: failure()

@@ -1,7 +1,9 @@
 /* A C header that owns a struct with a `const char*` field and ships no
  * typedef, like most C APIs that take a name or a path in a struct
  * (VkApplicationInfo.pApplicationName, struct option.name, ...). The
- * struct borrows the string: whoever fills it keeps the string alive.
+ * struct holds the characters and keeps them as long as C needs: an
+ * Aether program gives the field a reference of its own and gives it
+ * back with string.release_kept once C is done with it (#3567).
  *
  * Force-included into the Aether-generated TU via aether.toml's
  * `cflags = "-include label.h"`. */

@@ -67,6 +67,7 @@ void hoist_declare(CodeGenerator* gen, const char* ctype, const char* name);
 void hoist_declare_null(CodeGenerator* gen, const char* ctype, const char* name);
 void hoist_append_text(CodeGenerator* gen, const char* text);
 void push_scoped_temp_free(CodeGenerator* gen, const char* name);
+void push_scoped_slice_free(CodeGenerator* gen, const char* name);   /* #3568 */
 /* Where declarations go ahead of a statement, judged by the `n` bytes of C
  * before it: 0 there, 1 after a null statement (a label precedes), 2 in a
  * block with the statement (an unbraced body). */
@@ -77,6 +78,14 @@ int codegen_hoist_site(const char* s, size_t n);
  * (codegen_expr.c). */
 int is_control_value(CodeGenerator* gen, ASTNode* e);
 int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded);
+/* #3574: find the nodes of `program` run ahead of their statements for
+ * their depth, so that no stretch of an expression's C nests past what C
+ * compilers take (codegen_expr.c). */
+void codegen_mark_depth(CodeGenerator* gen, ASTNode* program);
+/* #3574: is `e` an `if` expression a consumer takes branch by branch, and
+ * not one already evaluated ahead of its statement into a temporary, which
+ * is read as any value is (codegen_expr.c)? */
+int if_takes_by_branch(ASTNode* e);
 /* #2798: the same anywhere in a statement: does `e` hold one, and run the
  * ones a value or a list of operands holds, with what is evaluated before
  * them, ahead of the statement (1 when every one is bound). */
@@ -155,9 +164,13 @@ void clear_declared_vars(CodeGenerator* gen);
 void clear_fnptr_locals(CodeGenerator* gen);
 int is_module_global_var(CodeGenerator* gen, const char* name);
 int is_actor_state_var(CodeGenerator* gen, const char* name);   /* #2505 */
+/* The kind of a module-level `var`: a string and a slice each have a lock of
+ * their own (#3522, #3568). */
+enum { MODULE_VAR_OTHER = 0, MODULE_VAR_STRING = 1, MODULE_VAR_SLICE = 2 };
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
-                                int is_string);
+                                int kind);
 int is_module_string_var(CodeGenerator* gen, const char* name);   /* #3522 */
+int is_module_slice_var(CodeGenerator* gen, const char* name);    /* #3568 */
 int is_heap_string_var(CodeGenerator* gen, const char* var_name);
 void mark_heap_string_var(CodeGenerator* gen, const char* var_name);
 void unmark_heap_string_var(CodeGenerator* gen, const char* var_name);
@@ -499,7 +512,16 @@ const char* module_string_var_lock(const char* name);
 void emit_module_string_store(CodeGenerator* gen, const char* name, ASTNode* rhs,
                               const char* taken);
 int module_string_var_read(CodeGenerator* gen, const ASTNode* e);
+/* #3568: whether `e` reads a module-level slice `var`, which a read takes a
+ * reference to under the var's lock (codegen_expr.c), and the one store
+ * into one (codegen_stmt.c). */
+int module_slice_var_read(CodeGenerator* gen, const ASTNode* e);
+void emit_module_slice_store(CodeGenerator* gen, const char* name, ASTNode* v);
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t);
+/* #3577: a float `%` (Java's, C's fmod), and the prelude macro computing
+ * one in a floating type, NULL for any other type (codegen_expr.c). */
+int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* r, const Type* t);
+const char* float_rem_macro(const Type* t);
 /* #3527: the conversion an interpolation, print or println writes a value
  * of a type with (codegen_expr.c); PF_NONE for a type none writes, which
  * print_fmt_refuse reports as a compile error naming it. */
@@ -668,6 +690,8 @@ ASTNode* find_sum_definition_by_name(ASTNode* program, const char* name);
 /* #2921: R2/R3 for composite types (codegen_own.c). */
 typedef enum { OWN_RETAIN, OWN_DROP, OWN_ZERO, OWN_PUBLISH } OwnOp;
 int own_type_owns(CodeGenerator* gen, Type* t);
+/* #3568: own_type_owns, or a slice: what a part of a composite owns. */
+int own_part_owns(CodeGenerator* gen, Type* t);
 int own_value_composite(CodeGenerator* gen, Type* t);
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op);
 const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv);
@@ -698,14 +722,17 @@ void emit_owning_array_store(CodeGenerator* gen, const char* name, Type* at, AST
 Type* match_value_type(ASTNode* m);
 int struct_param_written(ASTNode* n, const char* pname);
 void emit_string_take_owned(CodeGenerator* gen, ASTNode* e, int cell);
+/* #3567: `v` given to a header-defined struct's string field, its reference
+ * recorded for string.release_kept. */
+void emit_c_import_string_give(CodeGenerator* gen, ASTNode* v);
 void own_collect_types(CodeGenerator* gen, ASTNode* node);
 void emit_own_ops(CodeGenerator* gen);
 const char* own_fn(CodeGenerator* gen, Type* t, const char* op);
 const char* own_cell_release_fn(const char* c_type);
 const char* own_place_lvalue(Type* t, const char* name);
 const char* own_unwind_fn(CodeGenerator* gen, Type* t);
-/* Slice ownership: the drop of one element of a slice of `et` (or "NULL"). */
-const char* own_slice_elem_drop_fn(CodeGenerator* gen, Type* et);
+/* #3568: the element ops a counted buffer of slice type `t` carries (or "NULL"). */
+const char* own_slice_ops(CodeGenerator* gen, Type* t);
 void own_reset(void);
 
 /* #2298: emit the `@derive(schema)` field tables and their getters
@@ -855,6 +882,13 @@ typedef struct {
     ASTNode* main_fn;          /* the AST_MAIN_FUNCTION, or NULL */
     StrMap defs;               /* name -> DefClauses* */
     StrMap externs;            /* name -> ASTNode* (own or imported AST_EXTERN_FUNCTION) */
+    /* #3546: the externs find_extern_declaration_by_name and _in_scope find,
+     * the first of each name: the program's own top-level ones, those of
+     * them no module was merged from (origin_module NULL), and those of the
+     * modules it imports, in import order. */
+    StrMap program_externs;
+    StrMap unmerged_externs;
+    StrMap import_externs;
     StrMap c_callbacks;        /* name -> const char* C symbol */
     StrMap clause_scopes;      /* `__clause_<ptr>` -> its clause (#2644, fn_scope_name) */
     StrMap def_children;       /* `<ptr>` of a definition's child (its body, a

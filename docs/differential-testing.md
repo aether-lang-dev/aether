@@ -170,10 +170,13 @@ LeakSanitizer, through the same script (`tests/scripts/sanitizer_sweep.sh`,
 overflow, a use after free or a double free stops the program that made it,
 and a block it never freed is reported when it exits; the reports go to
 `build/asan/reports/`, grouped by the first frame that is not the
-sanitizer's or an allocator's. An error fails the run. A leak fails it only
-with `SAN_LEAKS=fail`: until the test programs that never free what they
-make are fixed (#3547), leaks are listed in the summary and the run passes
-on them. A fault stays the signal it is (`handle_segv=0`), so a program's
+sanitizer's or an allocator's. An error fails the run, and so does a leak
+(#3547): a program that leaks exits 23 under LeakSanitizer, so the test
+that ran it fails, and the summary lists every leak by where it was made.
+`SAN_LEAKS=report` lists them without failing, for a run that only surveys
+them. A test whose point is a leak says so to LeakSanitizer for that one
+run (slice_own's control, `detect_leaks=0` under `AETHER_SANITIZER=asan`).
+A fault stays the signal it is (`handle_segv=0`), so a program's
 own fault-to-panic handler and `ae run`'s crash report behave as without
 ASan. Libraries that carry their own runtime copy and the sandbox's preload
 are part of the design, so the one-definition and link-order checks are off

@@ -639,29 +639,16 @@ CodeGenerator* create_code_generator(FILE* output) {
     // Initialize defer tracking
     gen->defer_count = 0;
     gen->scope_depth = 0;
-    memset(gen->defer_stack, 0, sizeof(gen->defer_stack));
-    memset(gen->scope_defer_start, 0, sizeof(gen->scope_defer_start));
     /* #1140: every defer is unconditional until a `defer try` / `defer catch`
-     * says otherwise, and a bare scope exit is not a function outcome. */
-    memset(gen->defer_mode, 0, sizeof(gen->defer_mode));   /* DEFER_ALWAYS */
+     * says otherwise, and a bare scope exit is not a function outcome. The
+     * stacks start empty and grow (cg_defer_room and its kin, #3574). */
     gen->defer_exit = DEFER_EXIT_PLAIN;
     gen->defer_err_slot = NULL;
     // Issue #501: try/catch frame-pop tracking
     gen->try_frame_depth = 0;
     gen->loop_nest_depth = 0;
-    memset(gen->loop_try_base, 0, sizeof(gen->loop_try_base));
     // #893: labeled break/continue tracking
-    memset(gen->loop_label, 0, sizeof(gen->loop_label));
-    memset(gen->loop_label_scope, 0, sizeof(gen->loop_label_scope));
-    memset(gen->loop_label_id, 0, sizeof(gen->loop_label_id));
-    memset(gen->loop_label_break_used, 0, sizeof(gen->loop_label_break_used));
-    memset(gen->loop_label_continue_used, 0, sizeof(gen->loop_label_continue_used));
-    memset(gen->loop_step_in_body, 0, sizeof(gen->loop_step_in_body));
     gen->next_loop_label_id = 0;
-    for (int i = 0; i < AETHER_MAX_LOOP_NEST; i++) {
-        gen->loop_td_id[i] = 0;
-        gen->loop_td_node[i] = NULL;
-    }
     gen->td_switch = NULL;
     gen->td_id = 0;
     gen->td_arm = -1;
@@ -669,7 +656,6 @@ CodeGenerator* create_code_generator(FILE* output) {
     /* #2696: break targets */
     gen->switch_nest_depth = 0;
     gen->c_break_depth = 0;
-    memset(gen->loop_c_depth, 0, sizeof(gen->loop_c_depth));
     // Issue #501 follow-up: try-clobbered locals tracking
     gen->try_clobbered_vars = NULL;
     gen->try_clobbered_depths = NULL;
@@ -678,6 +664,7 @@ CodeGenerator* create_code_generator(FILE* output) {
     gen->extern_registry = NULL;
     gen->extern_registry_count = 0;
     gen->extern_registry_capacity = 0;
+    strmap_init(&gen->extern_registry_index);
     // MSVC compat: counter for ask-operator temp variables
     gen->ask_temp_counter = 0;
     // Counter for message-send array hoist variables
@@ -882,6 +869,37 @@ void code_generator_release(CodeGenerator* gen) {
         gen->hoist_decls = NULL;
         free(gen->defer_thunks);
         gen->defer_thunks = NULL;
+        /* #3574: the defer, scope, loop and switch stacks. */
+        free(gen->defer_stack);
+        free(gen->defer_mode);
+        free(gen->scope_defer_start);
+        free(gen->loop_try_base);
+        free((void*)gen->loop_label);
+        free(gen->loop_label_scope);
+        free(gen->loop_label_id);
+        free(gen->loop_label_break_used);
+        free(gen->loop_label_continue_used);
+        free(gen->loop_step_in_body);
+        free(gen->loop_td_id);
+        free(gen->loop_td_node);
+        free(gen->loop_c_depth);
+        free(gen->switch_loop_depth);
+        free(gen->switch_scope);
+        free(gen->switch_try_base);
+        free(gen->switch_c_depth);
+        free(gen->switch_brk_id);
+        free(gen->switch_brk_used);
+        gen->defer_stack = NULL;
+        gen->defer_mode = NULL;
+        gen->scope_defer_start = NULL;
+        gen->loop_try_base = gen->loop_label_scope = gen->loop_label_id = NULL;
+        gen->loop_label = NULL;
+        gen->loop_label_break_used = gen->loop_label_continue_used = NULL;
+        gen->loop_step_in_body = gen->loop_td_id = gen->loop_c_depth = NULL;
+        gen->loop_td_node = NULL;
+        gen->switch_loop_depth = gen->switch_scope = gen->switch_try_base = NULL;
+        gen->switch_c_depth = gen->switch_brk_id = gen->switch_brk_used = NULL;
+        gen->defer_cap = gen->scope_cap = gen->loop_nest_cap = gen->switch_nest_cap = 0;
         free(gen->owned_thunks);   /* #3413: the names are interned */
         gen->owned_thunks = NULL;
         gen->owned_thunk_count = gen->owned_thunk_cap = 0;
@@ -1033,6 +1051,7 @@ void code_generator_release(CodeGenerator* gen) {
                 free(gen->extern_registry[i].param_full);
             }
             free(gen->extern_registry);
+            strmap_free(&gen->extern_registry_index);
         }
         if (gen->reply_type_map) {
             for (int i = 0; i < gen->reply_type_count; i++) {
@@ -1084,7 +1103,17 @@ int is_module_global_var(CodeGenerator* gen, const char* name) {
  * `ptr` var holding a string is the pointer it is (R4). */
 int is_module_string_var(CodeGenerator* gen, const char* name) {
     int i = module_global_var_index(gen, name);
-    return i >= 0 && gen->module_global_var_is_string && gen->module_global_var_is_string[i];
+    return i >= 0 && gen->module_global_var_is_string &&
+           gen->module_global_var_is_string[i] == MODULE_VAR_STRING;
+}
+
+/* #3568: is `name` a module-level `var` declared a slice, which has a lock
+ * of its own as a string var does? (module_global_var_is_string holds the
+ * kind of each var.) */
+int is_module_slice_var(CodeGenerator* gen, const char* name) {
+    int i = module_global_var_index(gen, name);
+    return i >= 0 && gen->module_global_var_is_string &&
+           gen->module_global_var_is_string[i] == MODULE_VAR_SLICE;
 }
 
 // Is `name` a state field of the actor being generated? A bare `name` in
@@ -1100,7 +1129,7 @@ int is_actor_state_var(CodeGenerator* gen, const char* name) {
 
 // #701: record a module-level `var` global name (deduped).
 void register_module_global_var(CodeGenerator* gen, const char* name, int is_program,
-                                int is_string) {
+                                int kind) {
     if (!name) return;
     for (int i = 0; i < gen->module_global_var_count; i++)
         if (strcmp(gen->module_global_vars[i], name) == 0) return;
@@ -1117,7 +1146,7 @@ void register_module_global_var(CodeGenerator* gen, const char* name, int is_pro
     if (!strs) return;
     gen->module_global_var_is_string = strs;
     flags[gen->module_global_var_count] = is_program ? 1 : 0;
-    strs[gen->module_global_var_count] = is_string ? 1 : 0;
+    strs[gen->module_global_var_count] = (unsigned char)kind;
     gen->module_global_vars[gen->module_global_var_count++] = strdup(name);
 }
 
@@ -1369,6 +1398,10 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             if (!ix->main_fn) ix->main_fn = c;
         } else if (c->type == AST_EXTERN_FUNCTION) {
             program_index_add_extern(ix, c);
+            if (c->value && !strmap_has(&ix->program_externs, c->value))
+                strmap_put(&ix->program_externs, c->value, c);
+            if (c->value && !c->origin_module && !strmap_has(&ix->unmerged_externs, c->value))
+                strmap_put(&ix->unmerged_externs, c->value, c);
         } else if (c->type == AST_IMPORT_STATEMENT && c->value) {
             /* Imported modules' externs land as declarations in this TU too;
                they stay in the module's own AST (aether_module.c), so they
@@ -1377,7 +1410,11 @@ static void program_index_build(ProgramIndex* ix, ASTNode* program) {
             ASTNode* mod_ast = mod_entry ? mod_entry->ast : NULL;
             if (!mod_ast) continue;
             for (int j = 0; j < mod_ast->child_count; j++) {
-                program_index_add_extern(ix, mod_ast->children[j]);
+                ASTNode* d = mod_ast->children[j];
+                program_index_add_extern(ix, d);
+                if (d && d->type == AST_EXTERN_FUNCTION && d->value &&
+                    !strmap_has(&ix->import_externs, d->value))
+                    strmap_put(&ix->import_externs, d->value, d);
             }
         }
     }
@@ -1410,6 +1447,9 @@ void program_index_reset(void) {
     }
     strmap_free(&ix->defs);
     strmap_free(&ix->externs);
+    strmap_free(&ix->program_externs);
+    strmap_free(&ix->unmerged_externs);
+    strmap_free(&ix->import_externs);
     strmap_free(&ix->c_callbacks);
     strmap_free(&ix->clause_scopes);
     strmap_free(&ix->def_children);
@@ -1532,23 +1572,67 @@ void push_defer(CodeGenerator* gen, ASTNode* stmt) {
  * goes through push_defer above and so is DEFER_ALWAYS; only a user's
  * `defer try` / `defer catch` reaches here with anything else. */
 void push_defer_mode(CodeGenerator* gen, ASTNode* stmt, DeferMode mode) {
-    if (gen->defer_count < MAX_DEFER_STACK) {
-        gen->defer_mode[gen->defer_count] = mode;
-        gen->defer_stack[gen->defer_count++] = stmt;
-    } else {
-        AetherError w = {NULL, NULL, 0, 0, "defer stack overflow, too many nested defers",
-                         "simplify scope nesting or reduce number of deferred statements",
-                         NULL, AETHER_ERR_NONE};
-        aether_warning_report(&w);
-    }
+    cg_defer_room(gen);
+    gen->defer_mode[gen->defer_count] = mode;
+    gen->defer_stack[gen->defer_count++] = stmt;
 }
 
 // Enter a new scope - remember where defers started for this scope
 void enter_scope(CodeGenerator* gen) {
-    if (gen->scope_depth < MAX_SCOPE_DEPTH) {
-        gen->scope_defer_start[gen->scope_depth] = gen->defer_count;
-        gen->scope_depth++;
-    }
+    cg_scope_room(gen);
+    gen->scope_defer_start[gen->scope_depth] = gen->defer_count;
+    gen->scope_depth++;
+}
+
+/* The stacks' slots `[used, cap)` doubled onto the heap, the new ones zero. */
+static void* cg_stack_grow(void* v, int cap, int ncap, size_t size) {
+    char* grown = (char*)aether_xrealloc(v, size * (size_t)ncap);
+    memset(grown + size * (size_t)cap, 0, size * (size_t)(ncap - cap));
+    return grown;
+}
+
+void cg_defer_room(CodeGenerator* gen) {
+    if (gen->defer_count < gen->defer_cap) return;
+    int ncap = gen->defer_cap ? gen->defer_cap * 2 : 64;
+    gen->defer_stack = cg_stack_grow(gen->defer_stack, gen->defer_cap, ncap, sizeof(ASTNode*));
+    gen->defer_mode = cg_stack_grow(gen->defer_mode, gen->defer_cap, ncap, sizeof(DeferMode));
+    gen->defer_cap = ncap;
+}
+
+void cg_scope_room(CodeGenerator* gen) {
+    if (gen->scope_depth < gen->scope_cap) return;
+    int ncap = gen->scope_cap ? gen->scope_cap * 2 : 32;
+    gen->scope_defer_start = cg_stack_grow(gen->scope_defer_start, gen->scope_cap, ncap, sizeof(int));
+    gen->scope_cap = ncap;
+}
+
+void cg_loop_room(CodeGenerator* gen) {
+    if (gen->loop_nest_depth < gen->loop_nest_cap) return;
+    int cap = gen->loop_nest_cap, ncap = cap ? cap * 2 : 16;
+    gen->loop_try_base = cg_stack_grow(gen->loop_try_base, cap, ncap, sizeof(int));
+    gen->loop_label = cg_stack_grow((void*)gen->loop_label, cap, ncap, sizeof(char*));
+    gen->loop_label_scope = cg_stack_grow(gen->loop_label_scope, cap, ncap, sizeof(int));
+    gen->loop_label_id = cg_stack_grow(gen->loop_label_id, cap, ncap, sizeof(int));
+    gen->loop_label_break_used = cg_stack_grow(gen->loop_label_break_used, cap, ncap, sizeof(int));
+    gen->loop_label_continue_used =
+        cg_stack_grow(gen->loop_label_continue_used, cap, ncap, sizeof(int));
+    gen->loop_step_in_body = cg_stack_grow(gen->loop_step_in_body, cap, ncap, sizeof(int));
+    gen->loop_td_id = cg_stack_grow(gen->loop_td_id, cap, ncap, sizeof(int));
+    gen->loop_td_node = cg_stack_grow(gen->loop_td_node, cap, ncap, sizeof(ASTNode*));
+    gen->loop_c_depth = cg_stack_grow(gen->loop_c_depth, cap, ncap, sizeof(int));
+    gen->loop_nest_cap = ncap;
+}
+
+void cg_switch_room(CodeGenerator* gen) {
+    if (gen->switch_nest_depth < gen->switch_nest_cap) return;
+    int cap = gen->switch_nest_cap, ncap = cap ? cap * 2 : 16;
+    gen->switch_loop_depth = cg_stack_grow(gen->switch_loop_depth, cap, ncap, sizeof(int));
+    gen->switch_scope = cg_stack_grow(gen->switch_scope, cap, ncap, sizeof(int));
+    gen->switch_try_base = cg_stack_grow(gen->switch_try_base, cap, ncap, sizeof(int));
+    gen->switch_c_depth = cg_stack_grow(gen->switch_c_depth, cap, ncap, sizeof(int));
+    gen->switch_brk_id = cg_stack_grow(gen->switch_brk_id, cap, ncap, sizeof(int));
+    gen->switch_brk_used = cg_stack_grow(gen->switch_brk_used, cap, ncap, sizeof(int));
+    gen->switch_nest_cap = ncap;
 }
 
 // Heap-string-exit-free defer carrier (issue #420 follow-up).
@@ -1620,8 +1704,31 @@ static int try_emit_scoped_temp_free(CodeGenerator* gen, ASTNode* deferred) {
     if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
     const char* name = deferred->annotation + plen;
     print_indent(gen);
+    /* #3570: at a return whose slice results may be views of it, released
+     * only when each holds what it views (a counted view); an uncounted one
+     * keeps it, as before, so it never dangles. */
+    if (gen->scoped_free_guard)
+        fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+                "if (%s) aether_heap_str_free(%s); %s = NULL;\n", name, gen->scoped_free_guard,
+                name, name);
+    else
+        fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
+                "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
+    return 1;
+}
+
+/* #3568: a slice statement temporary (emit_slice_stmt_temp) released at its
+ * block's every exit, and left empty for the next time the block runs.
+ * Annotation: "scoped_slice_free:<name>". */
+static int try_emit_scoped_slice_free(CodeGenerator* gen, ASTNode* deferred) {
+    if (!deferred || !deferred->annotation) return 0;
+    const char* prefix = "scoped_slice_free:";
+    size_t plen = strlen(prefix);
+    if (strncmp(deferred->annotation, prefix, plen) != 0) return 0;
+    const char* name = deferred->annotation + plen;
+    print_indent(gen);
     fprintf(gen->output, "/* deferred */ aether_unwind_forget((const void*)&%s); "
-            "aether_heap_str_free(%s); %s = NULL;\n", name, name, name);
+            "aether_slice_release(&%s);\n", name, name);
     return 1;
 }
 
@@ -1687,7 +1794,8 @@ static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
     return 1;
 }
 
-/* Builder-context pop carrier. Annotation: "builder_ctx_pop".
+/* Builder-context pop carrier. Annotation: "builder_ctx_pop:<mark>", the
+ * block's journaled depth (#3574).
  * emit_trailing_block_body pushes one as the first defer of every trailing
  * block's scope, right after the call site pushed the block's builder
  * context. Riding the defer stack means every way out of the block pops
@@ -1696,12 +1804,17 @@ static int try_emit_own_drop(CodeGenerator* gen, ASTNode* deferred) {
  * labeled or unlabeled break/continue to a loop outside it. A return used
  * to leave without popping, so a function returning from inside a block
  * leaked one context per call; at the stack's cap of 64 later pushes were
- * dropped and builder calls attached to a stale parent. */
+ * dropped and builder calls attached to a stale parent. Each way out also
+ * takes the block's entry out of the unwind journal, which only a panic
+ * past the block drains. */
 static int try_emit_builder_ctx_pop(CodeGenerator* gen, ASTNode* deferred) {
-    if (!deferred || !deferred->annotation) return 0;
-    if (strcmp(deferred->annotation, "builder_ctx_pop") != 0) return 0;
+    static const char prefix[] = "builder_ctx_pop:";
+    if (!deferred || !deferred->annotation ||
+        strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
+        return 0;
     print_indent(gen);
-    fprintf(gen->output, "_aether_ctx_pop();\n");
+    fprintf(gen->output, "aether_unwind_forget((const void*)&%s); _aether_ctx_pop();\n",
+            deferred->annotation + sizeof(prefix) - 1);
     return 1;
 }
 
@@ -1717,13 +1830,14 @@ static int try_emit_builder_cfg_release(CodeGenerator* gen, ASTNode* deferred) {
     if (!deferred || !deferred->annotation ||
         strncmp(deferred->annotation, prefix, sizeof(prefix) - 1) != 0)
         return 0;
-    char buf[512];
-    snprintf(buf, sizeof(buf), "%s", deferred->annotation + sizeof(prefix) - 1);
-    char* rel = strchr(buf, ':');
+    /* Read in place (#3574): a copy of 512 bytes cut a long factory's
+     * release name, and the C named a function that is not there. */
+    const char* cfg = deferred->annotation + sizeof(prefix) - 1;
+    const char* rel = strchr(cfg, ':');
     if (!rel) return 1;
-    *rel++ = '\0';
+    int cfg_len = (int)(rel - cfg);
     print_indent(gen);
-    fprintf(gen->output, "if (%s) %s(%s);\n", buf, rel, buf);
+    fprintf(gen->output, "if (%.*s) %s(%.*s);\n", cfg_len, cfg, rel + 1, cfg_len, cfg);
     return 1;
 }
 
@@ -1779,6 +1893,7 @@ static void emit_deferred_one(CodeGenerator* gen, int i) {
         !try_emit_heap_string_exit_free(gen, deferred) &&
         !try_emit_handover_exit_free(gen, deferred) &&   /* #2798 */
         !try_emit_scoped_temp_free(gen, deferred) &&
+        !try_emit_scoped_slice_free(gen, deferred) &&     /* #3568 */
         !try_emit_owned_exit_drop(gen, deferred) &&        /* #3142 */
         !try_emit_struct_destroy(gen, deferred) &&
         !try_emit_cell_release(gen, deferred) &&
@@ -2215,7 +2330,7 @@ int message_owns_fields(CodeGenerator* gen, const char* name) {
     for (int i = 0; def && i < def->child_count; i++) {
         ASTNode* f = def->children[i];
         if (f && f->type == AST_MESSAGE_FIELD &&
-            (own_type_owns(gen, f->node_type) || tc_type_is_owned(f->node_type)))   /* #3142 */
+            (own_part_owns(gen, f->node_type) || tc_type_is_owned(f->node_type)))   /* #3142 */
             return 1;
     }
     return 0;
@@ -2958,8 +3073,8 @@ const char* get_c_type(Type* type) {
             return "int";
         }
         default: {
-            char wbuf[128];
-            snprintf(wbuf, sizeof(wbuf), "internal: unknown type kind %d in codegen, defaulting to void", type->kind);
+            const char* wbuf = "";
+            wbuf = aether_internf("internal: unknown type kind %d in codegen, defaulting to void", type->kind);
             AetherError w = {codegen_diag_file(), NULL, g_diag_line, g_diag_column, wbuf,
                              "this is a compiler bug, please report it",
                              codegen_diag_context(), AETHER_ERR_NONE};
@@ -3058,16 +3173,29 @@ static int lib_fn_is_export_head(ASTNode* program, ASTNode* fn) {
  * clauses give the position (fn_param_type_at), and the set's result
  * (fn_result_type). The gate read the first clause's own parameters, so a
  * literal pattern there (`fact(0)`) cost the set its alias while the
- * catalog, which read every clause, still named it. */
-#define LIB_SIG_MAX 32
+ * catalog, which read every clause, still named it.
+ *
+ * One entry per position, however many (#3574): 32 slots cost an export of
+ * more parameters its alias, with a warning that a parameter type is not
+ * representable, and named its parameters past the 32nd `argN` in the
+ * catalog. lib_fn_signature allocates them; lib_sig_free gives them back. */
 typedef struct {
     int count;
-    Type* ptypes[LIB_SIG_MAX];
-    const char* types[LIB_SIG_MAX];   /* the ABI spelling */
-    const char* names[LIB_SIG_MAX];
-    const char* casts[LIB_SIG_MAX];   /* the real `Struct*` a typed pointer is cast to, or NULL */
-    Type* result;                     /* NULL: returns nothing */
+    Type** ptypes;
+    const char** types;   /* the ABI spelling */
+    const char** names;
+    const char** casts;   /* the real `Struct*` a typed pointer is cast to, or NULL */
+    Type* result;         /* NULL: returns nothing */
 } LibSig;
+
+static void lib_sig_free(LibSig* sig) {
+    free(sig->ptypes);
+    free(sig->types);
+    free(sig->names);
+    free(sig->casts);
+    sig->ptypes = NULL;
+    sig->types = sig->names = sig->casts = NULL;
+}
 
 /* The name position `pos` of `fn` goes by: the first clause's that binds
  * one there, unless an earlier position took it, else `argN`. Names of the
@@ -3096,9 +3224,18 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
     sig->count = 0;
     sig->result = fn_result_type(gen, fn);
     int npos = fn_param_count(fn);
+    size_t slots = (size_t)(npos > 0 ? npos : 1);
+    sig->ptypes = (Type**)calloc(slots, sizeof(Type*));
+    sig->types = (const char**)calloc(slots, sizeof(char*));
+    sig->names = (const char**)calloc(slots, sizeof(char*));
+    sig->casts = (const char**)calloc(slots, sizeof(char*));
+    if (!sig->ptypes || !sig->types || !sig->names || !sig->casts) {
+        fprintf(stderr, "aetherc: out of memory reading an export's signature\n");
+        exit(1);
+    }
     /* Every position's name first: the catalog's records name a parameter
      * whether or not the export has an alias. */
-    for (int pos = 0; pos < npos && pos < LIB_SIG_MAX; pos++)
+    for (int pos = 0; pos < npos; pos++)
         sig->names[pos] = lib_param_name(gen, fn, pos, sig);
     for (int pos = 0; pos < npos; pos++) {
         int list = 0;
@@ -3108,7 +3245,7 @@ static int lib_fn_signature(CodeGenerator* gen, ASTNode* fn, LibSig* sig, const 
         }
         Type* t = fn_param_type_at(gen, fn, pos);
         const char* abi = get_abi_type(t);
-        if (list || !abi || strcmp(abi, "void") == 0 || pos >= LIB_SIG_MAX) {
+        if (list || !abi || strcmp(abi, "void") == 0) {
             *why = "param";
             return 0;
         }
@@ -3205,10 +3342,13 @@ int lib_fn_is_local(CodeGenerator* gen, ASTNode* fn) {
     const char* alias;
     const char* name;
     const char* module;
+    if (!lib_fn_identity(fn, &alias, &name, &module) || !lib_fn_is_export_head(gen->program, fn))
+        return 0;
     LibSig sig;
     const char* why = NULL;
-    return lib_fn_identity(fn, &alias, &name, &module) &&
-           lib_fn_is_export_head(gen->program, fn) && lib_fn_signature(gen, fn, &sig, &why);
+    int ok = lib_fn_signature(gen, fn, &sig, &why);
+    lib_sig_free(&sig);
+    return ok;
 }
 
 /* The public identity of a module-level const in a --emit=lib build. A
@@ -3261,12 +3401,16 @@ static const char* lib_symbol_for(const char* lib_id, const char* package,
         end = strrchr(base, '.');
     }
     if (!end) end = base + strlen(base);
-    char id[128];
-    size_t n = 0;
-    for (const char* p = base; p < end && n + 1 < sizeof(id); p++)
-        id[n++] = isalnum((unsigned char)*p) ? *p : '_';
+    /* The whole id (#3574): 128 bytes cut a long one, so two libraries
+     * whose ids share their first 127 characters defined one symbol. */
+    size_t n = (size_t)(end - base);
+    char* id = (char*)aether_xrealloc(NULL, n + 1);
+    for (size_t i = 0; i < n; i++)
+        id[i] = isalnum((unsigned char)base[i]) ? base[i] : '_';
     id[n] = '\0';
-    return cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+    const char* sym = cg_internf("aether_%s_%s", n ? id : "lib", suffix);
+    free(id);
+    return sym;
 }
 
 /* #2931: the function a caller gives a string an export returned back to,
@@ -3384,7 +3528,7 @@ static void emit_lib_stub_return(CodeGenerator* gen, Type* result, const char* r
     } else if (result && !result->c_alias && result->kind == TYPE_PTR) {
         if (is_string_seq_ptr_type(result))
             fprintf(o, "        string_seq_free((StringSeq*)(void*)_aether_r);\n");
-    } else if (result && !result->c_alias && own_type_owns(gen, result)) {
+    } else if (result && !result->c_alias && own_part_owns(gen, result)) {
         fprintf(o, "    ");
         own_emit_part(gen, result, "_aether_r", OWN_DROP);
     }
@@ -3583,14 +3727,15 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
         const char** param_casts = sig.casts;
         int param_count = sig.count;
         if (!ok && strcmp(why, "param") == 0) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%s' has a parameter type that isn't representable in the --emit=lib ABI; skipping alias stub",
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
                              "use int, long, uint64, float, bool, byte, string, ptr, a *Struct, a struct by value, or a fn(...) -> R function pointer in public API functions",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
+            lib_sig_free(&sig);
             continue;
         }
 
@@ -3610,14 +3755,15 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
                                                                     : get_abi_type(result);
         int returns_value = result != NULL;
         if (!ok) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%s' returns a tuple; --emit=lib alias stub skipped (tuples aren't part of the public ABI)",
                      fn->value);
             AetherError w = {NULL, NULL, fn->line, fn->column, msg,
                              "wrap the tuple-returning function with one that returns a single ABI-safe value if it should be exposed across the library boundary",
                              NULL, AETHER_ERR_NONE};
             aether_warning_report(&w);
+            lib_sig_free(&sig);
             continue;
         }
         if (!ret_abi) {
@@ -3716,6 +3862,7 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             emit_lib_stub_return(gen, result, ret_abi);
         else
             fprintf(gen->output, "    aether_exec_leave();\n}\n");
+        lib_sig_free(&sig);
     }
 
     /* #2349: an exported builder of a package module. A builder's ABI is its
@@ -3739,8 +3886,8 @@ static void emit_lib_alias_stubs(CodeGenerator* gen, ASTNode* program) {
             if (c->type != AST_VARIABLE_DECLARATION && c->type != AST_PATTERN_VARIABLE) { ok = 0; break; }
         }
         if (!ok) {
-            char msg[384];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "builder '%s' in package module '%s' has a pattern parameter; "
                      "it is not exported by the package library", base, m->name);
             AetherError w = {NULL, NULL, b->line, b->column, msg,
@@ -4268,13 +4415,14 @@ static char* fn_source_signature_string(CodeGenerator* gen, ASTNode* fn) {
     int npos = fn_param_count(fn);
     for (int pos = 0; pos < npos; pos++) {
         const char* ts = cg_type_source(fn_param_type_at(gen, fn, pos));
-        if (!ts) { free(b.s); return NULL; }
+        if (!ts) { free(b.s); lib_sig_free(&sig); return NULL; }
         if (pos > 0) cg_text_put(&b, ", ");
-        cg_text_put(&b, pos < LIB_SIG_MAX ? sig.names[pos] : cg_internf("arg%d", pos));
+        cg_text_put(&b, sig.names[pos]);
         cg_text_put(&b, ": ");
         cg_text_put(&b, fn_param_mode_at(gen, fn, pos));
         cg_text_put(&b, ts);
     }
+    lib_sig_free(&sig);
     Type* result = fn_result_type(gen, fn);
     const char* rt = "void";
     if (result) {
@@ -4344,7 +4492,9 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (!fn_c_callback_def(gen, fn)) {
             LibSig sig;
             const char* why = NULL;
-            if (!lib_fn_signature(gen, fn, &sig, &why)) continue;
+            int ok = lib_fn_signature(gen, fn, &sig, &why);
+            lib_sig_free(&sig);
+            if (!ok) continue;
         }
         fns[fn_count++] = fn;
     }
@@ -4447,8 +4597,8 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
         if (lib_struct_recordable(st_all[i], &why)) {
             structs[struct_count++] = st_all[i];
         } else {
-            char msg[384];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "struct '%s' is left out of the --emit=lib catalog: %s",
                      st_all[i]->value, why);
             AetherError w = {NULL, NULL, st_all[i]->line, st_all[i]->column, msg,
@@ -4676,7 +4826,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
             Type* pt = fn_param_type_at(gen, fn, p);
             if (pt && pt->kind == TYPE_FUNCTION) {
                 lit_ci[clo_count] = -1; cap_arr_id[clo_count] = -1;
-                rec_name[clo_count] = p < LIB_SIG_MAX ? psig.names[p] : cg_internf("arg%d", p);
+                rec_name[clo_count] = psig.names[p];
                 rec_role[clo_count] = "param";
                 rec_encl[clo_count] = fn->value;
                 rec_sig[clo_count]  = strdup(type_to_string(pt));
@@ -4687,6 +4837,7 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
                 clo_count++;
             }
         }
+        lib_sig_free(&psig);
     }
     /* 3: hoisted closure literals whose parent function is an export. */
     for (int ci = 0; ci < gen->closure_count; ci++) {
@@ -4949,17 +5100,19 @@ static void emit_lib_metadata(CodeGenerator* gen, ASTNode* program) {
      * count/pointer they know. */
     int strings_returned = 0;
     for (int i = 0; i < fn_count && !strings_returned; i++) {
-        LibSig rs;
+        LibSig rs = {0};
         const char* rwhy = NULL;
         if (lib_fn_signature(gen, fns[i], &rs, &rwhy) && rs.result &&
             rs.result->kind == TYPE_STRING) strings_returned = 1;
+        lib_sig_free(&rs);
     }
     for (int r = 0; r < clo_count && !strings_returned; r++) {
-        LibSig rs;
+        LibSig rs = {0};
         const char* rwhy = NULL;
         if (strcmp(rec_role[r], "builder") == 0 && rec_fn[r] &&
             lib_fn_signature(gen, rec_fn[r], &rs, &rwhy) && rs.result &&
             rs.result->kind == TYPE_STRING) strings_returned = 1;
+        lib_sig_free(&rs);
     }
     int lib_runs_actors = gen->actor_count > 0 || gen->lib_actors;
     /* #3481: on ELF `ae` links a library with a runtime of its own
@@ -5364,8 +5517,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         break;
     }
     if (!fn) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: no top-level function named '%s' in this translation unit",
                  target, target);
         AetherError e = {NULL, NULL, 0, 0, msg,
@@ -5387,8 +5540,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         }
     }
     if (param_count != 0) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: target function takes %d parameter(s); the shim entry must be zero-arg",
                  target, param_count);
         AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -5417,8 +5570,8 @@ static void emit_main_shim_for_target(CodeGenerator* gen, ASTNode* program) {
         returns_void = 1;
     }
     if (!returns_int && !returns_void) {
-        char msg[256];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "--emit-main=%s: target function's return type isn't int / int32 / int64 / void; can't be forwarded as a process exit code",
                  target);
         AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -5792,22 +5945,27 @@ void emit_fnptr_decl(CodeGenerator* gen, Type* sig, const char* name) {
  * passed `relay` to an incompatible pointer type. A fn-pointer result stays
  * `void*`, which is how a function returning one is declared. */
 const char* fnptr_c_spelling(Type* sig, const char* name) {
-    char buf[1024];
-    size_t n = 0;
+    /* As long as it is (#3574): 1024 bytes cut the spelling of a pointer
+     * of many or long parameter types, and the C did not compile. */
+    CgText b = {NULL, 0, 0};
     const char* ret_c = (sig && sig->return_type) ? get_c_type(sig->return_type) : "void";
-    n += (size_t)snprintf(buf + n, sizeof(buf) - n, name ? "%s (*%s)(" : "%s(*%s)(",
-                          ret_c, name ? name : "");
+    cg_text_put(&b, ret_c);
+    cg_text_put(&b, name ? " (*" : "(*");
+    if (name) cg_text_put(&b, name);
+    cg_text_put(&b, ")(");
     if (sig && sig->param_count > 0 && sig->param_types) {
-        for (int i = 0; i < sig->param_count && n < sizeof(buf); i++) {
+        for (int i = 0; i < sig->param_count; i++) {
             Type* p = sig->param_types[i];
-            n += (size_t)snprintf(buf + n, sizeof(buf) - n, "%s%s", i > 0 ? ", " : "",
-                                  is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
+            if (i > 0) cg_text_put(&b, ", ");
+            cg_text_put(&b, is_fnptr_type(p) ? fnptr_c_spelling(p, NULL) : get_c_type(p));
         }
-    } else if (n < sizeof(buf)) {
-        n += (size_t)snprintf(buf + n, sizeof(buf) - n, "void");
+    } else {
+        cg_text_put(&b, "void");
     }
-    if (n < sizeof(buf)) snprintf(buf + n, sizeof(buf) - n, ")");
-    return cg_internf("%s", buf);
+    cg_text_put(&b, ")");
+    const char* spelled = cg_intern_n(b.s, b.len);
+    free(b.s);
+    return spelled;
 }
 
 /* True for a parameter/local whose declared type is a typed C function
@@ -6041,8 +6199,8 @@ static void report_actor_spawn_collisions(ASTNode* program) {
             if (fn && fn->type == AST_EXPORT_STATEMENT && fn->child_count > 0) fn = fn->children[0];
             if (!fn || fn->type != AST_FUNCTION_DEFINITION || !fn->value || fn->is_imported ||
                 strcmp(fn->value, spawn) != 0) continue;
-            char msg[512];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "function '%.200s' takes the name of the spawn function of actor '%.200s'",
                      fn->value, a->value);
             AetherError e = {NULL, NULL, fn->line, fn->column, msg,
@@ -6077,8 +6235,8 @@ static int report_lib_main_name_collisions(CodeGenerator* gen, ASTNode* program)
         if (strcmp(sym, "aether_main") != 0 && strcmp(sym, "aether_main_exit") != 0) continue;
         /* sym is "aether_main" or "aether_main_exit" here; the precision
          * bounds keep gcc's -Wformat-truncation provably satisfied. */
-        char msg[512];
-        snprintf(msg, sizeof(msg),
+        const char* msg = "";
+        msg = aether_internf(
                  "function '%.200s' would be exported as '%.32s', which --emit=lib reserves "
                  "for this program's main() (aether_main / aether_main_exit)",
                  fn->value, sym);
@@ -7771,6 +7929,11 @@ static void emit_module_global_vars_inner(CodeGenerator* gen, ASTNode* program) 
         if (cd->node_type && cd->node_type->kind == TYPE_STRING)
             fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
                     module_string_var_lock(cd->value));
+        /* #3568: so has a slice var: a read takes a reference under it, and
+         * a store swaps the slice in under it. */
+        else if (type_is_slice(cd->node_type))
+            fprintf(gen->output, "static AETHER_MAYBE_UNUSED atomic_flag %s = ATOMIC_FLAG_INIT;\n",
+                    module_string_var_lock(cd->value));
         fprintf(gen->output, "static %s %s = ", ctype, cd->value);
         if (cd->node_type && cd->node_type->kind == TYPE_OPTIONAL) {
             /* #2800: an optional's constant is its own struct: `none`
@@ -8344,10 +8507,13 @@ static const char* const LANES8_NAMES[] = {
  * or the AETHER_GCC_COMPAT=0 path) the region is plain code with no target
  * attribute: the copy is a second ordinary copy, and off x86 it is never
  * chosen (lanes.cpu_has_avx2() is false). */
-#define LANE_REGION_MAX_STRUCTS 512
 typedef struct {
-    const char* structs[LANE_REGION_MAX_STRUCTS];  /* the copies' structs holding lanes */
+    /* The copies' structs holding lanes, every one (#3574): past 512 the
+     * rest were not remapped, so the copy's code named the plain copy's
+     * struct, whose lanes are another C type. */
+    const char** structs;
     int struct_count;
+    int struct_cap;
     int any;        /* a module was imported at a target */
     int defined;    /* the block and the structs went out in a region */
     int open;
@@ -8361,26 +8527,43 @@ static const char* decl_lane_target(const ASTNode* decl) {
     return m ? m->lane_target : NULL;
 }
 
-/* Does a value of this type hold an f32x8 or i32x8, directly, in a struct
- * field, through a pointer, in an array, a tuple or an optional? Such a
- * value has a different C type in the two copies. */
-static int type_holds_lanes8(ASTNode* program, Type* t, int depth) {
-    if (!t || depth > 24) return 0;
+/* The structs one type_holds_lanes8 query has entered, each once, so a
+ * struct that reaches itself through a pointer ends the walk (#3574): a
+ * depth of 24 stood for that, and lanes in a struct 25 deep were taken for
+ * none, so a value holding them crossed between the copies unrefused. */
+typedef struct {
+    const char** v;
+    int n, cap;
+} LaneSeen;
+
+static int lane_seen_enter(LaneSeen* s, const char* name) {
+    for (int i = 0; i < s->n; i++)
+        if (strcmp(s->v[i], name) == 0) return 0;
+    if (s->n == s->cap) {
+        s->cap = s->cap ? s->cap * 2 : 8;
+        s->v = (const char**)aether_xrealloc((void*)s->v, sizeof(char*) * (size_t)s->cap);
+    }
+    s->v[s->n++] = name;
+    return 1;
+}
+
+static int type_holds_lanes8_in(ASTNode* program, Type* t, LaneSeen* seen) {
+    if (!t) return 0;
     switch (t->kind) {
         case TYPE_F32X8: case TYPE_I32X8: return 1;
         case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
-            return type_holds_lanes8(program, t->element_type, depth + 1);
+            return type_holds_lanes8_in(program, t->element_type, seen);
         case TYPE_TUPLE:
             for (int i = 0; i < t->tuple_count; i++)
-                if (type_holds_lanes8(program, t->tuple_types[i], depth + 1)) return 1;
+                if (type_holds_lanes8_in(program, t->tuple_types[i], seen)) return 1;
             return 0;
         case TYPE_STRUCT: {
             ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
-            if (!sd) return 0;
+            if (!sd || !sd->value || !lane_seen_enter(seen, sd->value)) return 0;
             for (int f = 0; f < sd->child_count; f++) {
                 ASTNode* fld = sd->children[f];
                 if (fld && fld->type == AST_STRUCT_FIELD &&
-                    type_holds_lanes8(program, fld->node_type, depth + 1)) return 1;
+                    type_holds_lanes8_in(program, fld->node_type, seen)) return 1;
             }
             return 0;
         }
@@ -8388,6 +8571,15 @@ static int type_holds_lanes8(ASTNode* program, Type* t, int depth) {
     }
 }
 
+/* Does a value of this type hold an f32x8 or i32x8, directly, in a struct
+ * field, through a pointer, in an array, a tuple or an optional? Such a
+ * value has a different C type in the two copies. */
+static int type_holds_lanes8(ASTNode* program, Type* t) {
+    LaneSeen seen = {NULL, 0, 0};
+    int holds = type_holds_lanes8_in(program, t, &seen);
+    free((void*)seen.v);
+    return holds;
+}
 static int lane_region_struct_listed(const char* name) {
     for (int i = 0; i < g_lane_regions.struct_count; i++)
         if (strcmp(g_lane_regions.structs[i], name) == 0) return 1;
@@ -8403,15 +8595,15 @@ static void lane_region_error(ASTNode* at, const char* msg, const char* hint) {
 /* Does this signature (a definition's or an extern's) take or give lanes? */
 static int sig_holds_lanes8(CodeGenerator* gen, ASTNode* program, ASTNode* fn) {
     if (fn->type == AST_EXTERN_FUNCTION) {
-        if (type_holds_lanes8(program, fn->node_type, 0)) return 1;
+        if (type_holds_lanes8(program, fn->node_type)) return 1;
         for (int i = 0; i < fn->child_count; i++)
-            if (fn->children[i] && type_holds_lanes8(program, fn->children[i]->node_type, 0)) return 1;
+            if (fn->children[i] && type_holds_lanes8(program, fn->children[i]->node_type)) return 1;
         return 0;
     }
-    if (type_holds_lanes8(program, fn_result_type(gen, fn), 0)) return 1;
+    if (type_holds_lanes8(program, fn_result_type(gen, fn))) return 1;
     int n = fn_param_count(fn);
     for (int j = 0; j < n; j++)
-        if (type_holds_lanes8(program, fn_param_type_at(gen, fn, j), 0)) return 1;
+        if (type_holds_lanes8(program, fn_param_type_at(gen, fn, j))) return 1;
     return 0;
 }
 
@@ -8437,16 +8629,18 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
     if (node->type == AST_FUNCTION_CALL && node->value) {
         /* The entry program's qualified calls still read `ns.fn` here (the
          * merged modules' are already `ns_fn`): the definition is `ns_fn`. */
-        char cname[512];
-        snprintf(cname, sizeof(cname), "%s", node->value);
+        /* The whole name (#3574): 512 bytes cut a long one, the callee was
+         * not found, and lanes crossed unrefused. */
+        char* cname = (char*)aether_xrealloc(NULL, strlen(node->value) + 1);
+        strcpy(cname, node->value);
         for (char* p = cname; *p; p++) if (*p == '.') *p = '_';
         ASTNode* callee = find_function_definition_by_name(program, cname);
         if (callee) {
             const char* ct = decl_lane_target(callee);
             int same = (!ct && !target) || (ct && target && strcmp(ct, target) == 0);
             if (!same && sig_holds_lanes8(gen, program, callee)) {
-                char msg[512];
-                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values between a module imported at @target(\"%s\") and the build's own code",
+                const char* msg = "";
+                msg = aether_internf("'%s' passes eight-lane values between a module imported at @target(\"%s\") and the build's own code",
                          node->value, ct ? ct : target);
                 lane_region_error(node, msg,
                                   "an f32x8 is one register in the @target copy and two halves outside it: call across with scalars, pointers or the plain copy's own functions");
@@ -8454,12 +8648,13 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
         } else if (target) {
             ASTNode* ext = find_extern_declaration_by_name(program, cname);
             if (ext && !extern_is_lanes8_helper(ext) && sig_holds_lanes8(gen, program, ext)) {
-                char msg[512];
-                snprintf(msg, sizeof(msg), "'%s' passes eight-lane values to C from a module imported at @target(\"%s\")",
+                const char* msg = "";
+                msg = aether_internf("'%s' passes eight-lane values to C from a module imported at @target(\"%s\")",
                          node->value, target);
                 lane_region_error(node, msg, "C compiled apart takes the build's form of an f32x8, not the target copy's");
             }
         }
+        free(cname);
     }
     for (int i = 0; i < node->child_count; i++)
         lane_region_check_body(gen, program, fn, target, node->children[i]);
@@ -8468,31 +8663,38 @@ static void lane_region_check_body(CodeGenerator* gen, ASTNode* program, ASTNode
 /* Every struct holding lanes that a value of type `t` reaches: the region
  * remaps each one by its merged name. Two modules' identical structs share
  * one name (#2129's scoping), so the copy's functions name the plain copy's
- * struct, and the remap gives them their own. */
-static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t, int depth) {
-    if (!t || depth > 24) return;
+ * struct, and the remap gives them their own. A struct is listed before
+ * its fields are walked, and one holding no lanes is not walked, so the
+ * walk ends without a depth (#3574): 24 left a struct deeper than that
+ * unremapped. */
+static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t) {
+    if (!t) return;
     switch (t->kind) {
         case TYPE_ARRAY: case TYPE_PTR: case TYPE_OPTIONAL: case TYPE_ISOLATED:
-            lane_region_note_type(gen, program, t->element_type, depth + 1);
+            lane_region_note_type(gen, program, t->element_type);
             return;
         case TYPE_TUPLE:
             for (int i = 0; i < t->tuple_count; i++)
-                lane_region_note_type(gen, program, t->tuple_types[i], depth + 1);
+                lane_region_note_type(gen, program, t->tuple_types[i]);
             return;
         case TYPE_STRUCT: {
             ASTNode* sd = t->struct_name ? find_struct_definition_by_name(program, t->struct_name) : NULL;
-            if (!sd || lane_region_struct_listed(sd->value) || !type_holds_lanes8(program, t, 0)) return;
+            if (!sd || lane_region_struct_listed(sd->value) || !type_holds_lanes8(program, t)) return;
             if (struct_owns_heap_strings(gen, sd)) {
                 lane_region_error(sd, "a struct holding eight-lane values and owned strings or closures, used by a module imported at @target",
                                   "the @target copy redefines the lane structs it uses, not their generated retain and drop");
                 return;
             }
-            if (g_lane_regions.struct_count < LANE_REGION_MAX_STRUCTS)
-                g_lane_regions.structs[g_lane_regions.struct_count++] = sd->value;
+            if (g_lane_regions.struct_count == g_lane_regions.struct_cap) {
+                g_lane_regions.struct_cap = g_lane_regions.struct_cap ? g_lane_regions.struct_cap * 2 : 16;
+                g_lane_regions.structs = (const char**)aether_xrealloc(
+                    g_lane_regions.structs, sizeof(char*) * (size_t)g_lane_regions.struct_cap);
+            }
+            g_lane_regions.structs[g_lane_regions.struct_count++] = sd->value;
             for (int f = 0; f < sd->child_count; f++) {
                 ASTNode* fld = sd->children[f];
                 if (fld && fld->type == AST_STRUCT_FIELD)
-                    lane_region_note_type(gen, program, fld->node_type, depth + 1);
+                    lane_region_note_type(gen, program, fld->node_type);
             }
             return;
         }
@@ -8502,13 +8704,14 @@ static void lane_region_note_type(CodeGenerator* gen, ASTNode* program, Type* t,
 
 static void lane_region_note_node(CodeGenerator* gen, ASTNode* program, ASTNode* n) {
     if (!n) return;
-    lane_region_note_type(gen, program, n->node_type, 0);
+    lane_region_note_type(gen, program, n->node_type);
     for (int i = 0; i < n->child_count; i++) lane_region_note_node(gen, program, n->children[i]);
 }
 
 /* Before any emission: the structs the copies' functions remap, and whether
  * the program keeps lanes on their side of the boundary. */
 static void lane_region_prepare(CodeGenerator* gen, ASTNode* program) {
+    free(g_lane_regions.structs);
     memset(&g_lane_regions, 0, sizeof(g_lane_regions));
     if (!global_module_registry) return;
     for (int m = 0; m < global_module_registry->module_count; m++) {
@@ -8766,7 +8969,7 @@ static void emit_message_definition(CodeGenerator* gen, ASTNode* child) {
              * copied, a closure or struct it took (#2525, #2921). */
             for (int fi = 0; fi < child->child_count; fi++) {
                 ASTNode* f = child->children[fi];
-                if (f && f->type == AST_MESSAGE_FIELD && own_type_owns(gen, f->node_type))
+                if (f && f->type == AST_MESSAGE_FIELD && own_part_owns(gen, f->node_type))
                     own_emit_part(gen, f->node_type, cg_internf("m->%s", f->value), OWN_DROP);
                 /* #3142: an owned pointer the handler did not take
                  * (its binding empties the field), or a message
@@ -9441,6 +9644,20 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "#  include <math.h>");
     print_line(gen, "#  define _AE_FDIV0(a, s) ((a) * (s) > 0 ? (double)INFINITY : (a) * (s) < 0 ? -(double)INFINITY : (double)NAN)");
     print_line(gen, "#endif");
+    /* A float `%` is the IEEE remainder of a truncated quotient, as Java's
+       (the rules of #3524): C's fmod, the sign of the dividend, NaN for a
+       zero divisor. C has no `%` on floating types, so `a % b` on doubles
+       did not compile. The builtin needs no <math.h>, which the GCC path
+       leaves out. */
+    print_line(gen, "#if AETHER_GCC_COMPAT");
+    print_line(gen, "#  define _AE_FMOD(a, b) __builtin_fmod((a), (b))");
+    print_line(gen, "#  define _AE_FMODF(a, b) __builtin_fmodf((a), (b))");
+    print_line(gen, "#  define _AE_FMODL(a, b) __builtin_fmodl((a), (b))");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_FMOD(a, b) fmod((a), (b))");
+    print_line(gen, "#  define _AE_FMODF(a, b) fmodf((a), (b))");
+    print_line(gen, "#  define _AE_FMODL(a, b) fmodl((a), (b))");
+    print_line(gen, "#endif");
     print_line(gen, "#if AETHER_GCC_COMPAT");
     print_line(gen, "#  define _AE_MEMCPY(d, s, n) __builtin_memcpy((d), (s), (n))");
     print_line(gen, "#  define _AE_CLZ32(x) __builtin_clz(x)");
@@ -9543,15 +9760,25 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     /* #3522: a module-level string `var`'s locked take and store. */
     print_line(gen, "extern const char* aether_string_var_take(const char* const* place, atomic_flag* lock);");
     print_line(gen, "extern void aether_string_var_store(const char** place, atomic_flag* lock, const char* v);");
+    /* #3567: a header-defined struct's string field is given a recorded
+     * reference, and characters C holds read back as the string they were
+     * given from (std/string/aether_string.h). */
+    print_line(gen, "extern const char* aether_string_give_c(const void* s);");
+    print_line(gen, "extern const char* aether_string_from_c(const char* s);");
+    /* #3567: a string stored into a `ptr` module var, recorded as
+     * string.keep's reference is. */
+    print_line(gen, "extern void* aether_string_keep_owned(const void* s);");
     /* The header of a counted string, as the runtime lays it out. A string
      * no other thread can reach is counted here, inline; a shared one
      * (#2919) is counted atomically by the runtime, which also frees the
      * last reference. Same rules as string_retain and string_release. */
     print_line(gen, "struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
     /* A take (R3): a counted string is retained (strings are immutable once
-     * made) and a pinned one, a literal, handed over as it is; only a plain
-     * C string is copied. The magic is read byte by byte to stay ASan-clean
-     * on short literal allocations. */
+     * made) and a pinned one, a literal, handed over as it is; a plain C
+     * string is the string a C place was given it from, retained, or else a
+     * copy (aether_string_from_c, #3567), so a field read back and given
+     * back returns the reference the field was given. The magic is read
+     * byte by byte to stay ASan-clean on short literal allocations. */
     print_line(gen, "static inline const char* aether_uniform_heap_str(const char* s, int is_heap) {");
     print_line(gen, "    if (!s) return (const char*)0;");
     print_line(gen, "    if (is_heap) return s;");
@@ -9565,7 +9792,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                (unsigned)AETHER_STRING_SHARED_BIT);
     print_line(gen, "        return s;");
     print_line(gen, "    }");
-    print_line(gen, "    return string_new_with_length((void*)s, strlen(s));");
+    print_line(gen, "    return aether_string_from_c(s);");
     print_line(gen, "}");
     /* A string handed out as a `ptr` result: a pinned string (a literal, a
      * fault's name) is its C characters, as a literal used as a `ptr` is
@@ -9711,6 +9938,17 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (!cell) return;");
     print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
     print_line(gen, "    if (_aether_cell_last(h)) free(h);");
+    print_line(gen, "}");
+    /* #3549, #3568: a slice cell holds one reference to the buffer it
+     * holds, as every slice place does: a store into it gives back what it
+     * held (aether_slice_set), and its last release gives back what it holds
+     * then. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED void _aether_cell_release_slice(const void* cell) {");
+    print_line(gen, "    if (!cell) return;");
+    print_line(gen, "    _AeCellHeader* h = (_AeCellHeader*)cell - 1;");
+    print_line(gen, "    if (!_aether_cell_last(h)) return;");
+    print_line(gen, "    aether_slice_release((AetherSlice*)(void*)cell);");
+    print_line(gen, "    free(h);");
     print_line(gen, "}");
     /* String-valued capture cell: the cell OWNS the heap string it holds, so
      * the last releaser frees that string before freeing the cell. Used for a
@@ -10192,11 +10430,44 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static void _aether_cooked_mode(void) {}");
     print_line(gen, "#endif");
     // Builder context stack: trailing blocks push/pop the return value
-    print_line(gen, "static void* _aether_ctx_stack[64];");
-    print_line(gen, "static int _aether_ctx_depth = 0;");
-    print_line(gen, "static void (*_aether_ctx_release[64])(void*);");
-    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth < 64) { _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; } }");
-    print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; }");
+    /* As deep as the blocks nest (#3574): 64 slots dropped the push of a
+     * block 65 deep (a builder call recursing inside its own block), and
+     * that block's calls then worked on an outer block's config. */
+    /* Each thread's own (#3574): a builder block runs on the thread that
+     * entered it, and one stack the scheduler threads shared mixed their
+     * blocks' configs, and two of them growing it at once lost a block. The
+     * first _AE_CTX_INLINE entries are the thread's own storage; past them
+     * the stack is on the heap, given back once the blocks are half that
+     * deep again (half, so blocks going in and out at the edge do not
+     * allocate each time), so a thread whose blocks have all ended holds
+     * none of it. */
+    print_line(gen, "#if defined(AETHER_NO_THREADING)");
+    print_line(gen, "#  define _AE_CTX_TLS");
+    print_line(gen, "#elif defined(_MSC_VER)");
+    print_line(gen, "#  define _AE_CTX_TLS __declspec(thread)");
+    print_line(gen, "#elif defined(__GNUC__) && !defined(_WIN32) && !defined(__APPLE__)");
+    print_line(gen, "#  define _AE_CTX_TLS __thread __attribute__((tls_model(\"global-dynamic\")))");
+    print_line(gen, "#elif defined(__GNUC__)");
+    print_line(gen, "#  define _AE_CTX_TLS __thread");
+    print_line(gen, "#elif defined(__STDC_VERSION__) && __STDC_VERSION__ >= 201112L");
+    print_line(gen, "#  define _AE_CTX_TLS _Thread_local");
+    print_line(gen, "#else");
+    print_line(gen, "#  define _AE_CTX_TLS");
+    print_line(gen, "#endif");
+    print_line(gen, "#define _AE_CTX_INLINE 64");
+    print_line(gen, "typedef void (*_aether_ctx_release_fn)(void*);");
+    print_line(gen, "static _AE_CTX_TLS void* _aether_ctx_inline[_AE_CTX_INLINE];");
+    print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn _aether_ctx_release_inline[_AE_CTX_INLINE];");
+    print_line(gen, "static _AE_CTX_TLS void** _aether_ctx_heap = 0;");
+    print_line(gen, "static _AE_CTX_TLS _aether_ctx_release_fn* _aether_ctx_release_heap = 0;");
+    print_line(gen, "static _AE_CTX_TLS int _aether_ctx_depth = 0;");
+    print_line(gen, "static _AE_CTX_TLS int _aether_ctx_cap = 0;");
+    print_line(gen, "#define _aether_ctx_stack (_aether_ctx_heap ? _aether_ctx_heap : _aether_ctx_inline)");
+    print_line(gen, "#define _aether_ctx_release (_aether_ctx_release_heap ? _aether_ctx_release_heap : _aether_ctx_release_inline)");
+    print_line(gen, "static inline void _aether_ctx_grow(void) { int cap = _aether_ctx_heap ? _aether_ctx_cap * 2 : _AE_CTX_INLINE * 2; void** s = (void**)malloc(sizeof(void*) * (size_t)cap); _aether_ctx_release_fn* r = (_aether_ctx_release_fn*)malloc(sizeof(_aether_ctx_release_fn) * (size_t)cap); if (!s || !r) aether_panic(\"builder blocks nest deeper than memory allows\"); memcpy(s, _aether_ctx_stack, sizeof(void*) * (size_t)_aether_ctx_depth); memcpy(r, _aether_ctx_release, sizeof(_aether_ctx_release_fn) * (size_t)_aether_ctx_depth); free(_aether_ctx_heap); free((void*)_aether_ctx_release_heap); _aether_ctx_heap = s; _aether_ctx_release_heap = r; _aether_ctx_cap = cap; }");
+    print_line(gen, "static inline void _aether_ctx_fit(void) { if (!_aether_ctx_heap || _aether_ctx_depth > _AE_CTX_INLINE / 2) return; memcpy(_aether_ctx_inline, _aether_ctx_heap, sizeof(void*) * (size_t)_aether_ctx_depth); memcpy(_aether_ctx_release_inline, _aether_ctx_release_heap, sizeof(_aether_ctx_release_fn) * (size_t)_aether_ctx_depth); free(_aether_ctx_heap); free((void*)_aether_ctx_release_heap); _aether_ctx_heap = 0; _aether_ctx_release_heap = 0; _aether_ctx_cap = 0; }");
+    print_line(gen, "static inline void _aether_ctx_push(void* ctx) { if (_aether_ctx_depth == (_aether_ctx_heap ? _aether_ctx_cap : _AE_CTX_INLINE)) _aether_ctx_grow(); _aether_ctx_release[_aether_ctx_depth] = 0; _aether_ctx_stack[_aether_ctx_depth++] = ctx; }");
+    print_line(gen, "static inline void _aether_ctx_pop(void) { if (_aether_ctx_depth > 0) _aether_ctx_depth--; _aether_ctx_fit(); }");
     print_line(gen, "static inline void* _aether_ctx_get(void) { return _aether_ctx_depth > 0 ? _aether_ctx_stack[_aether_ctx_depth-1] : (void*)0; }");
     /* #2810: a builder call's config is released by its call only on a way
      * out of the block the call compiles (#2791); a panic leaves the block
@@ -10205,7 +10476,15 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * puts the stack back to its depth at the try and releases the configs
      * of the blocks the panic abandoned. */
     print_line(gen, "static inline void _aether_ctx_own(void* ctx, void (*release)(void*)) { if (_aether_ctx_depth > 0 && _aether_ctx_stack[_aether_ctx_depth-1] == ctx) _aether_ctx_release[_aether_ctx_depth-1] = release; }");
-    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } }");
+    print_line(gen, "static inline void _aether_ctx_unwind(int depth) { while (_aether_ctx_depth > depth) { _aether_ctx_depth--; void (*r)(void*) = _aether_ctx_release[_aether_ctx_depth]; _aether_ctx_release[_aether_ctx_depth] = 0; if (r && _aether_ctx_stack[_aether_ctx_depth]) r(_aether_ctx_stack[_aether_ctx_depth]); } _aether_ctx_fit(); }");
+    /* #3574: any panic past a block, caught by a `try` or by the barrier of
+     * an actor's step, which no `try` of the program's unwinds: each block
+     * journals the depth below its entry (emit_trailing_block_body), and a
+     * drain puts the stack back to it, releasing the block's config. A
+     * handler that panicked inside blocks used to leave its thread's stack
+     * that deep, so the next handler on the thread worked on the dead
+     * blocks' configs, which nothing released. */
+    print_line(gen, "static inline void _aether_ctx_unwind_at(const void* depth) { _aether_ctx_unwind(*(const int*)depth); }");
     /* #1704: the sandbox permission stack is SEPARATE from the builder
      * context stack above. They used to be the same array, so entering any
      * trailing block pushed that builder's config object onto the stack the
@@ -10811,7 +11090,10 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
                 // The definition itself is emitted by emit_module_global_vars,
                 // after the function prototypes.
                 register_module_global_var(gen, cd->value, cd->origin_module == NULL,
-                                           cd->node_type && cd->node_type->kind == TYPE_STRING);
+                                           cd->node_type && cd->node_type->kind == TYPE_STRING
+                                               ? MODULE_VAR_STRING
+                                               : type_is_slice(cd->node_type) ? MODULE_VAR_SLICE
+                                                                              : MODULE_VAR_OTHER);
             } else if (fn_const_decl(cd)) {
                 /* #2648: emitted with the module vars, after the function
                  * prototypes and adapters (emit_module_global_vars). */
@@ -11026,6 +11308,9 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     emit_bare_fn_adapters(gen);
     fflush(gen->output);
     gen->defer_proto_pos = ftell(gen->output);   /* #2923: emit_defer_thunks */
+    /* #3574: the nodes held ahead of their statements for their depth,
+     * found before any function body is written. */
+    codegen_mark_depth(gen, program);
 
     // Pre-pass: build request->reply type map from actor receive handlers.
     // This lets the ? operator know the reply message type at codegen time.

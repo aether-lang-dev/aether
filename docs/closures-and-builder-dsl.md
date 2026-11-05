@@ -627,12 +627,15 @@ named otherwise has no release the compiler can find, and an early exit
 leaves its object unreleased (#2802), so pair a custom factory with its
 `_free`.
 
-A panic that leaves the block skips the builder too. When a `try` catches
-it, the catch puts the builder context stack back to its depth at the `try`
-and releases, with the same function, the configs of the blocks the panic
-abandoned; a block after the `try` fills its own call's config. Before
-(#2810), each caught panic left an entry on the stack, and after 64 of them
-a block's setters filled the config of a call a panic had abandoned.
+A panic that leaves the block skips the builder too. Whatever catches it, a
+`try` or the barrier of an actor's step when the handler has none, the
+builder context stack is put back to its depth where the panic is caught,
+and the configs of the blocks the panic abandoned are released with the
+same function; a block after the `try`, or the next handler on the actor's
+thread, fills its own call's config. Before (#2810), each caught panic left
+an entry on the stack, and after 64 of them a block's setters filled the
+config of a call a panic had abandoned; until #3574 a handler that panicked
+inside blocks left them on its thread's stack, unreleased.
 
 ### Generated code
 
@@ -665,9 +668,10 @@ _aether_ctx_pop();                                  // 3. pop
 Aether heap-promotes a captured variable that a closure **assigns to**: the
 enclosing binding and every closure capturing it then share one heap cell, so
 `count = count + 1` inside a closure is visible to the outer scope and to
-sibling closures (the Ruby/Groovy model). A simple named local needs no ref
-cell to share mutable state this way. A capture the closure only reads stays a
-cheap aliased copy.
+sibling closures (the Ruby/Groovy model). A push into a captured slice
+(`xs.push(v)`) is such a write too (#3568): the outer scope sees what the
+closure pushed. A simple named local needs no ref cell to share mutable state
+this way. A capture the closure only reads stays a cheap aliased copy.
 
 **Ref cells** are for shared mutable state that isn't a plain captured local:
 a value passed explicitly as a `ptr` argument to callbacks (UI event
@@ -855,10 +859,14 @@ Closures compile to C as:
 - Heap-allocated environment structs for captured variables
 - NULL environment for zero-capture closures
 
-The builder context stack is a simple C array:
+The builder context stack is each thread's own C array:
 - `_aether_ctx_push(void*)` / `_aether_ctx_pop()` / `_aether_ctx_get()`
-- Maximum nesting depth: 64 levels
-- Zero overhead when not used (the stack is static, no allocation)
+- Blocks on different threads (actors on different scheduler threads) never
+  see each other's contexts, and `builder_depth()` counts the thread's own
+- The first 64 levels are the thread's own storage, with no allocation; a
+  deeper stack goes on the heap until the blocks are half that deep again,
+  so nesting has no fixed limit and a thread whose blocks have all ended
+  holds no heap for it
 
 Trailing blocks (parameterless `{ }`) are inlined at the call site, no closure
 allocation, no function pointer overhead. They are pure syntactic sugar for

@@ -74,5 +74,6 @@ int main(int argc, char** argv) {
             ended++;
     }
     printf("ended %d of %d\n", ended, n);
+    free(c.chain);
     return ended == n ? 0 : 1;
 }

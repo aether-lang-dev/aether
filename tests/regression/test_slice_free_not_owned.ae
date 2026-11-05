@@ -1,0 +1,97 @@
+// Regression (#3568): `free` of a slice its function does not own gives
+// back nothing, and the owner still releases it.
+//
+// A struct parameter is the caller's struct, lent for the call (R3:
+// parameters borrow), so its slice field holds no reference of the callee's.
+// `drop_items(b: Box) { free(b.items) }` gave back the caller's only
+// reference: the buffer was freed under the caller's `b.items`, which then
+// read freed memory, and the caller's scope exit released it again. The same
+// held for a field that is a view of a string's bytes. Such a `free` gives
+// back nothing now (W1007 says so where it is written), and the caller's
+// field stays whole until its own scope ends.
+//
+// Each shape reads back the caller's fields after a churn of kept, filled
+// buffers (a buffer freed under a reader would come back holding the
+// filler), and where the heap count is exact (mem.heap_in_use_exact) rounds
+// of them leave the heap as they found it.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+struct Box {
+    items: int[]
+}
+
+struct Words {
+    bytes: byte[]
+}
+
+drop_items(b: Box) {
+    free(b.items)
+}
+
+drop_bytes(w: Words) {
+    free(w.bytes)
+}
+
+churn() -> int {
+    keep = make([]int[], 0)
+    words = make([]string, 0)
+    for r in 0..64 {
+        for n in 1..6 {
+            c = make([]int, n)
+            for i in 0..n {
+                c[i] = -7
+            }
+            keep = append(keep, c)
+        }
+        words = append(words, string.concat("zzz", "${r % 10}"))
+    }
+    return keep.len + words.len
+}
+
+shape(p: string) -> int {
+    b = Box { items: make([]int, 3) }
+    b.items[1] = 42
+    drop_items(b)
+    w = Words { bytes: string.bytes(string.concat(p, "cd")) }
+    drop_bytes(w)
+    churn()
+    check(b.items.len == 3 && b.items[1] == 42, "the caller's field, after its copy was freed")
+    check(w.bytes.len == 4 && w.bytes[3] == 100, "the caller's view, after its copy was freed")
+    return b.items[1]
+}
+
+fn steady(what: string, round: fn) {
+    if !mem.heap_in_use_exact() {
+        return
+    }
+    i = 0
+    while i < 3 {
+        call(round)
+        i = i + 1
+    }
+    grown = mem.steady_growth(round, 6)
+    check(grown == 0, "${what} grew the heap by ${grown} bytes in every round")
+}
+
+main() {
+    check(shape("ab") == 42, "the shape")
+    steady("a helper freeing its struct parameter's fields", || {
+            i = 0
+            while i < 50 {
+                _a = shape("ab")
+                i = i + 1
+            }
+        })
+    println("ok")
+}

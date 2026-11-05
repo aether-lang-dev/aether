@@ -5,6 +5,7 @@ import raw
 // against this one, raw's against raw's.
 extern memcpy(dst: ptr, src: int[], n: long) -> ptr
 extern malloc(n: long) -> ptr
+extern free(p: ptr)
 extern memcmp(a: ptr, b: ptr, n: long) -> int
 
 main() {
@@ -14,4 +15,6 @@ main() {
     memcpy(p, xs, 12)
     raw.copy12(q, p)
     println("${memcmp(p, q, 12)}")
+    free(p)
+    free(q)
 }

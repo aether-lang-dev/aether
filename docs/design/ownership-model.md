@@ -259,6 +259,18 @@ one var, 8M reads in all, took about 345 ms where the unlocked read took
 is better given to each actor, or kept in a local, than read from a module
 `var` each time.
 
+**A module slice `var` is locked the same way (#3568).** Its store released
+the buffer it held and then wrote the new slice, and a read copied the
+slice's 24 bytes and then took its reference: a reader could take a
+reference to a freed header, or see a slice torn between two stores, and a
+push grew the var's buffer in place under a reader. A store publishes the
+slice it takes, swaps it in under the var's lock and releases the old one
+after unlocking (aether_slice_var_store); a read takes a reference under
+the lock (aether_slice_var_take) into a temporary its statement's block
+releases; `free(g)` takes the slice out under it (aether_slice_var_take_out);
+and a push or an `append` grows a reference taken under it, a copy since
+the var shares the buffer, and stores the result back.
+
 **Within the budgets (#2925).** Measured on an Apple M1 Pro, each
 `benchmarks/ownership/` program built by #2916's merge (c5f20025) and by its
 first parent, the same output from both, 21 runs each interleaved, the
@@ -751,9 +763,42 @@ every comparison, and one predicate says where the callee takes a value
 over instead: a free, an identity (`isolate`, `consume`, `select`), a box,
 thunk or cell that keeps it, a container's adopted element, `@retain`. A
 buffer `make` handed out (or any call's slice) given to a parameter is
-dropped after the call when slice ownership's summary of the callee says it
-neither stores the parameter nor hands a view of it back (the `slice_temp`
-marker), as the owning local it would otherwise be bound to is dropped.
+released after the call (the `slice_temp` marker), as the local it would
+otherwise be bound to is released: a callee that keeps it takes a reference
+of its own (#3568).
+
+A slice buffer is counted (R1, #3568): `make` and `append` put a header
+before the first element (runtime/aether_slice.h, `AetherSliceBuf`) with
+the number of places that hold a slice of it, the buffer's length and its
+element type's drop and copy, and the slice carries its offset into the
+buffer in the padding after `flags`, so every view finds the header. Every
+slice place holds one reference (R2): a local, a cell a closure shares
+(#3549), a closure's copy, a field, an element, a tuple's slot, an optional,
+a sum, a fixed-size array, actor state, a message. A store retains the new
+value (a copy, a move out of a local that owns, a call's fresh result) and
+releases the old; leaving a scope releases; a parameter borrows; a return
+hands over one reference (R3). A view therefore holds the buffer it views
+for as long as it is held, and the analysis that kept an owner's buffer
+for good where a view might outlive it, with a summary of what each
+function does with its slice parameters (which read other functions'
+bodies), is gone. `append` on a buffer another place holds moves the slice
+that grows to storage of its own, each element copied with a reference of
+its own, where the reallocation used to free the storage under the view.
+A slice local a view of which may be held is copied where a local that
+owns would move, so no program that compiled before is refused. A slice of
+memory no count covers (an array viewed as a slice, a literal's bytes, C
+memory) carries no AETHER_SLICE_MADE mark, and nothing is read before its
+`ptr`. A view of a counted string's characters (`string.bytes(s)`, #3570)
+holds the string by the same rule: it is marked AETHER_SLICE_STRING, the 56
+bits that carry a buffer's offset carry the string's header, and its
+retain and release are the string's. A call's slice result used only in
+place (`f().len`, `f()[0]`, a `for` over it) is a temporary of its
+statement, released on its block's every exit as a string temporary is; a
+view of it that is bound, returned or passed on takes its reference over. A
+slice a `match` arm's pattern binds (a list pattern's tail or element, a
+struct pattern's field) takes a reference where the arm's block starts and
+drops it on the block's every exit, since the arm may bind the subject
+again; a clause's pattern borrows, as a parameter does.
 
 **`@retain` hands over a reference (R4).** A call to an extern parameter
 declared `@retain` hands it one reference: a fresh value as it is, a place's
@@ -762,10 +807,34 @@ keep a closure (observe, worker jobs and the main-thread poster, the http and
 net server handlers, the QuickJS function binding) are declared so, and they
 release what they keep through the closure's own destructor.
 
-**C's places are given a reference (R4).** A string stored into a
-header-defined struct's field or into a slice over C memory is given a
-reference of its own, which nothing in the program releases; the local it
-came from keeps its own and releases it as any local does.
+**C's places are given a reference (R4, decided 2026-11-04 by the owner,
+#3567).** A header-defined struct's string field (`extern struct ...
+@c_import`) is given a recorded reference the program gives back with
+`string.release_kept`. Aether cannot see what C keeps, so nothing releases
+that reference behind C's back: not an overwrite of the field, not the end
+of a scope. The store takes the value as any store does (a dying local
+moved, a live one retained) and the runtime records the reference by the
+characters the field holds, with a count per string, since the same string
+given to two places is two references; a pinned literal's characters and a
+plain C string are not recorded. A field read back is the string it was
+given, retained, not a copy, so `old = p.text`, the store of a new value
+and `string.release_kept(old)` hand the old reference back.
+`string.release_kept(p)` gives back one recorded reference, given the
+characters or the string, and is a no-op for a pointer the record does not
+hold; `string.keep(s)` records the reference it hands over the same way, so
+a give-back never releases what was not handed over. Dropping the header
+into the field left the reference with no way back, and every store leaked
+a string. A `string[]` view of C memory borrows under #2979's E0902 rules
+(below): the string keeps its own reference while C reads the characters.
+The same rule holds for the one `ptr` place a string goes into without
+`string.keep`, a module-level `ptr` var (`gp = s`): the store takes the
+value and records it as `keep`'s reference is, so `string.release_kept(gp)`
+gives it back, and nothing gives it back on a re-bind (decided 2026-11-04,
+no refusal: programs storing strings there compile as before). It held the
+pointer as it stood, which a string built in the statement left owned by
+nothing and a local left dangling once it went. A `ptr` field, message
+field or array element refuses a string (E0200, E0902), so it takes one
+only through `string.keep`.
 
 **A closure in a `ptr` slot (#2926, decided 2026-10-15).** A `ptr` slot owns
 nothing, as for strings: a closure kept in one goes in a box holding a

@@ -1814,21 +1814,22 @@ static int no_body_expected(int status, const char* method) {
     return status == 204 || status == 304;
 }
 
-/* Whether a response's header section, the `n` bytes at `buf` up to and
- * including the empty line that ends it, holds no NUL and no CR that is not
- * followed by LF. A recipient has to refuse either or put a space in its
- * place (RFC 9110 5.5, RFC 9112 2.2), and refusing is the answer nothing can
- * read two ways (#3556). The client found the end of the section with
- * strstr, which stops at a NUL, and read its fields as C strings: a NUL hid
- * the section and handed the whole response back as a status-0 body, and a
- * bare CR in a Location went out inside the request line of the redirect. */
-static int http_head_section_ok(const char* buf, size_t n) {
-    if (memchr(buf, '\0', n)) return 0;
-    const char* end = buf + n;
-    for (const char* p = buf; (p = (const char*)memchr(p, '\r', (size_t)(end - p))) != NULL; p += 2) {
-        if (p + 1 >= end || p[1] != '\n') return 0;
+/* A response's header section, the `n` bytes at `buf` up to and including
+ * the empty line that ends it, with each NUL and each CR not followed by LF
+ * replaced by SP, in place. A recipient either refuses such a message or
+ * replaces each of those with SP before it processes or forwards it (RFC
+ * 9110 5.5, RFC 9112 2.2). Replaced, a CR ends nothing, so a field cannot
+ * carry another field or a request line behind it, and a response that was
+ * readable stays readable (#3572; #3556 refused it). The client found the
+ * end of the section with strstr, which stops at a NUL, and read its fields
+ * as C strings: a NUL hid the section and handed the whole response back as
+ * a status-0 body, and a bare CR in a Location went out inside the request
+ * line of the redirect. */
+static void http_head_section_repair(char* buf, size_t n) {
+    for (size_t i = 0; i < n; i++) {
+        if (buf[i] == '\0' || (buf[i] == '\r' && (i + 1 >= n || buf[i + 1] != '\n')))
+            buf[i] = ' ';
     }
-    return 1;
 }
 
 // -----------------------------------------------------------------
@@ -2475,7 +2476,8 @@ static const char* http_tls_backend_missing(const HttpClientRequest* req) {
  *
  * The status is read by the strict rule every response's is
  * (response_status_of: exactly three digits), from a status line that starts
- * "HTTP/1.", in a head with no NUL and no bare CR (http_head_section_ok).
+ * "HTTP/1.", in a head whose NULs and bare CRs read as SP
+ * (http_head_section_repair).
  * atoi took "2000" for 2000 and "20x" for 20, and a reply that was no HTTP
  * at all for status 0. Returns the status, or 0 with *why set: a reply that
  * ended, or a read that failed or timed out, before its head did; a head
@@ -2509,9 +2511,10 @@ int http_connect_reply_read(int fd, const char** why) {
         if (end) break;
     }
     head[len] = '\0';
+    /* A NUL or a bare CR is read as SP, as in every response's head. */
+    http_head_section_repair(head, len);
     int status = 0;
-    if (strncmp(head, "HTTP/1.", 7) != 0 || !http_head_section_ok(head, len) ||
-        (status = response_status_of(head)) == 0) {
+    if (strncmp(head, "HTTP/1.", 7) != 0 || (status = response_status_of(head)) == 0) {
         *why = "proxy CONNECT: malformed reply from the proxy";
         return 0;
     }
@@ -2888,13 +2891,10 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
         char* hend = (char*)http_find_header_end(buf, len);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
-        if (!http_head_section_ok(buf, f->header_bytes)) {
-            /* Stop reading: the driver reports it, and the connection,
-             * framed by fields nobody can read one way, is not kept. */
-            f->bad_head = 1;
-            f->invalid = 1;
-            return 1;
-        }
+        /* Read with its NULs and bare CRs as SP (#3572), here where the
+         * section is first whole, so the framing and every reader after it
+         * read the same fields. */
+        http_head_section_repair(buf, f->header_bytes);
 
         /* Read Transfer-Encoding where it lies. Copying it out meant an
          * allocation and a free per response, and any buffer it was copied
@@ -3121,10 +3121,9 @@ void http_response_fill_from_bytes(HttpResponse* response,
         return;
     }
     size_t header_bytes = (size_t)((header_end + 4) - buf);
-    if (!http_head_section_ok(buf, header_bytes)) {
-        if (!response->error) response->error = string_new("malformed response header section");
-        return;
-    }
+    /* Its NULs and bare CRs read as SP (#3572), so no field carries
+     * another behind a CR and no NUL ends one early. */
+    http_head_section_repair(buf, header_bytes);
     size_t body_bytes = len >= header_bytes ? len - header_bytes : 0;
     *header_end = '\0';
     char* status_line = buf;
@@ -3913,12 +3912,7 @@ send_request:
 
         size_t header_bytes = (size_t)((hend + 4) - hb);
         size_t over_len     = hlen - header_bytes;   /* body bytes already read */
-        if (!http_head_section_ok(hb, header_bytes)) {
-            free(hb);
-            transport_close(&t);
-            response->error = string_new("malformed response header section");
-            return response;
-        }
+        http_head_section_repair(hb, header_bytes);  /* NULs and bare CRs as SP (#3572) */
         *hend = '\0';                                 /* isolate the header block */
 
         response->status_code = response_status_of(hb);
@@ -4037,9 +4031,7 @@ send_request:
             aether_caps_free(full_response, cap);
             transport_close(&t);
             response->error = string_new(
-                rx.framing.bad_head
-                    ? "malformed response header section"
-                    : "response framing is ambiguous: the declared body length is not usable");
+                "response framing is ambiguous: the declared body length is not usable");
             return response;
         }
         if (rx.oom) {
@@ -4425,15 +4417,17 @@ static size_t http_uri_remove_dots(char* in, size_t n, char* out) {
     return o;
 }
 
-/* Append the `n` bytes at `s` to `out` at *o. With `escape`, a space and
- * every byte past ASCII are written percent-encoded: a URI holds neither
- * (RFC 3986 2.1), and a space would split the request line of the next hop.
- * Browsers and curl encode them the same way. A '%' already there stays. */
+/* Append the `n` bytes at `s` to `out` at *o. With `escape`, a space, a
+ * control byte (C0 and DEL) and every byte past ASCII are written
+ * percent-encoded: a URI holds none of them (RFC 3986 2.1), and a space or a
+ * control would split or end the request line of the next hop. Browsers
+ * and curl encode them the same way (WHATWG URL's C0 control percent-encode
+ * set, #3572). A '%' already there stays. */
 static void http_uri_put(char* out, size_t* o, const char* s, size_t n, int escape) {
     static const char hex[] = "0123456789ABCDEF";
     for (size_t i = 0; i < n; i++) {
         unsigned char c = (unsigned char)s[i];
-        if (escape && (c == ' ' || c >= 0x80)) {
+        if (escape && (c <= ' ' || c == 0x7f || c >= 0x80)) {
             out[(*o)++] = '%';
             out[(*o)++] = hex[c >> 4];
             out[(*o)++] = hex[c & 15];
@@ -4448,16 +4442,51 @@ static void http_uri_put(char* out, size_t* o, const char* s, size_t n, int esca
  * (3.1). With `inherit_fragment`, a reference without a fragment takes the
  * base's, as a redirect does (RFC 9110 10.2.2). A malloc'd string, or NULL
  * when either does not split, the base has no scheme, or no memory. */
+/* `ref` with every TAB, LF and CR removed, as a URL parser reads it (WHATWG
+ * URL, the basic URL parser's "remove all ASCII tab or newline"). Leading
+ * and trailing spaces stay, percent-encoded as any space is (#3552).
+ * malloc'd, or NULL with no memory. */
+static char* http_uri_reference_clean(const char* ref) {
+    size_t n = strlen(ref);
+    char* out = (char*)malloc(n + 1);
+    if (!out) return NULL;
+    size_t o = 0;
+    for (size_t i = 0; i < n; i++) {
+        if (ref[i] == '\t' || ref[i] == '\n' || ref[i] == '\r') continue;
+        out[o++] = ref[i];
+    }
+    out[o] = '\0';
+    return out;
+}
+
+static char* http_uri_resolve_parts(const char* base, const HttpUriParts* bp, const char* ref,
+                                    int inherit_fragment);
+
 static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_fragment) {
-    HttpUriParts b, r;
-    if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme ||
-        http_uri_split(ref, &r) != 0) return NULL;
-    /* No URI reference holds a control byte (RFC 3986 2), and one in a
-     * Location would be written into the next hop's request line as it is
-     * (#3556). The response reader refuses a NUL and a bare CR in the
-     * header section; a TAB or any other control byte is refused here. */
-    for (const unsigned char* c = (const unsigned char*)ref; *c; c++) {
-        if (*c < 0x20 || *c == 0x7f) return NULL;
+    HttpUriParts b;
+    if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme) return NULL;
+    /* A Location went into the next hop's request line as it was, so a
+     * control byte in it ended or split that line (#3556). It is read as a
+     * browser reads it (#3572): a TAB, an LF or a CR is removed
+     * (http_uri_reference_clean), and any other control byte in the path,
+     * the query or the fragment is percent-encoded, as a space is
+     * (http_uri_put). A host holds no control byte, so an
+     * authority with one is no reference. The hop goes on, and no request
+     * line it writes carries a byte a server reads as its end. */
+    char* clean = http_uri_reference_clean(ref);
+    if (!clean) return NULL;
+    char* out = http_uri_resolve_parts(base, &b, clean, inherit_fragment);
+    free(clean);
+    return out;
+}
+
+static char* http_uri_resolve_parts(const char* base, const HttpUriParts* bp, const char* ref,
+                                    int inherit_fragment) {
+    HttpUriParts b = *bp, r;
+    if (http_uri_split(ref, &r) != 0) return NULL;
+    for (size_t i = 0; r.has_authority && i < r.authority_len; i++) {
+        unsigned char c = (unsigned char)r.authority[i];
+        if (c < 0x20 || c == 0x7f) return NULL;
     }
 
     /* T's parts, by 5.2.2: which of the two each comes from, and the path

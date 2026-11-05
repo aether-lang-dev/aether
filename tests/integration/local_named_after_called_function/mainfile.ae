@@ -70,4 +70,5 @@ main() {
     magnitude = magnitude(-5)
     println("${user()} ${user_compound()} ${user_value()} ${pick(1)} ${pick(0)} ${use_twice()}")
     println("${list_size} ${sqrt} ${magnitude} ${carry()}")
+    list.free(xs)
 }

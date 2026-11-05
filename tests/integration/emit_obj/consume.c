@@ -9,17 +9,21 @@ extern int add(int, int);
  * docs/aether-string-abi.md. */
 extern const void* greet(const char*);
 extern const char* aether_string_data(const void*);
+/* The string greet returns is the caller's: one reference, released here. */
+extern void string_release(const void*);
 
 int main(void) {
     if (add(2, 40) != 42) {
         printf("FAIL add=%d\n", add(2, 40));
         return 1;
     }
-    const char* g = aether_string_data(greet("world"));
+    const void* gs = greet("world");
+    const char* g = aether_string_data(gs);
     if (!g || strcmp(g, "hello world") != 0) {
         printf("FAIL greet=%s\n", g ? g : "(null)");
         return 1;
     }
+    string_release(gs);
     printf("ok\n");
     return 0;
 }

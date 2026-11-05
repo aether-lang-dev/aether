@@ -558,15 +558,56 @@ TEST_CATEGORY(aea_define_queries_are_recorded_once_with_answers, TEST_CATEGORY_C
     aether_defines_clear();
 }
 
-TEST_CATEGORY(aea_define_query_log_reports_overflow, TEST_CATEGORY_COMPILER) {
+/* #3574: the log keeps every name asked, of any length: it held 128 names
+ * of 127 bytes, and a module asking about more got no artifact. */
+TEST_CATEGORY(aea_define_query_log_keeps_every_name, TEST_CATEGORY_COMPILER) {
     aether_define_record_queries(1);
     char name[32];
     for (int i = 0; i < 200; i++) {
         snprintf(name, sizeof(name), "SYM_%d", i);
         aether_define_is_set(name);
     }
+    char longname[301];
+    memset(longname, 'L', 300);
+    longname[300] = '\0';
+    aether_define_is_set(longname);
     aether_define_record_queries(0);
-    ASSERT_TRUE(aether_define_query_overflowed());
+    ASSERT_FALSE(aether_define_query_overflowed());
+    ASSERT_EQ(201, aether_define_query_count());
+    ASSERT_STREQ("SYM_199", aether_define_query_name(199));
+    ASSERT_STREQ(longname, aether_define_query_name(200));
+}
+
+/* #3574: a -D name of any length is a symbol: one of 128 bytes or more was
+ * refused as "too many -D symbols". */
+TEST_CATEGORY(aea_define_takes_a_long_name, TEST_CATEGORY_COMPILER) {
+    char longname[301];
+    memset(longname, 'D', 300);
+    longname[300] = '\0';
+    ASSERT_TRUE(aether_define_add(longname));
+    ASSERT_TRUE(aether_define_is_set(longname));
+    aether_defines_clear();
+}
+
+/* #3574: a header value is read as long as its line: a build symbol of 600
+ * characters made a value past 512 bytes, and the artifact was refused as
+ * malformed every time it was read. */
+TEST_CATEGORY(aea_decode_reads_a_long_build_symbol, TEST_CATEGORY_COMPILER) {
+    char longname[601];
+    memset(longname, 'S', 600);
+    longname[600] = '\0';
+    ASTNode* ast = parse_text(RICH_SOURCE);
+    AeaDefine defs[] = { { longname, 0 } };
+    AeaProducer p = producer_for(RICH_SOURCE);
+    p.defines = defs;
+    p.define_count = 1;
+    size_t len = 0;
+    char* data = aea_encode(ast, &p, &len, NULL);
+    ASSERT_NOT_NULL(data);
+    AeaConsumer c = consumer_for(RICH_SOURCE);
+    ASSERT_STREQ("decoded", decode_reason(data, len, &c));
+    free(data);
+    free_ast_node(ast);
 }
 
 TEST_CATEGORY(aea_parse_of_when_region_asks_the_define_table, TEST_CATEGORY_COMPILER) {

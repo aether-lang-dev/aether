@@ -1,0 +1,55 @@
+// Regression (#3568): a fresh slice given to an optional parameter is
+// released once.
+//
+// A call's slice result given straight to a borrowing parameter is the
+// calling statement's to release after the call (`slice_temp`). Given to an
+// optional parameter (`count(o: int[]?)` called as `count(mk(3))`), the
+// slice is wrapped into the optional's argument temporary, which holds it
+// and drops it after the call, as for a string: released by both, the
+// buffer was given back twice (a heap corruption on the second round). The
+// wrapped argument is the optional temporary's alone now.
+//
+// The value read through the optional is checked, and where the heap count
+// is exact (mem.heap_in_use_exact) rounds of calls leave the heap as they
+// found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+mk(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+count(o: int[]?) -> int {
+    return match o {
+        some(v) -> v.len + v[0]
+        none -> 0
+    }
+}
+
+main() {
+    check(count(mk(3)) == 13, "an optional parameter given a fresh slice")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                i = 0
+                while i < 50 {
+                    _a = count(mk(3))
+                    i = i + 1
+                }
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

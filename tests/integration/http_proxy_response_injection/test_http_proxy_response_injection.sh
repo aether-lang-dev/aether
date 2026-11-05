@@ -5,10 +5,11 @@
 # early and let the bytes behind it be read as headers the upstream never sent
 # (CWE-113, response splitting).
 #
-# A bare CR makes the upstream's response invalid (RFC 9112 2.2), and the
-# client's reader, which the proxy reads upstreams with, refuses it (#3556):
-# the proxy answers 502 (RFC 9110 15.6.3) and forwards nothing of it. A bare
-# LF ends a line, so that header is dropped and the rest forwarded.
+# A bare CR in the upstream's head is read as SP by the client's reader,
+# which the proxy reads upstreams with (RFC 9110 5.5, RFC 9112 2.2; #3572):
+# the proxy forwards the 200, the field with its value as one line, and
+# nothing behind the CR becomes a field. A bare LF ends a line, so that
+# header is dropped and the rest forwarded.
 #
 # The upstream here is hostile and speaks raw bytes, which is the only way to
 # send a header value an HTTP server would never produce.
@@ -57,7 +58,8 @@ fi
 # is served by one or the other: the pass-through checks the value and drops
 # that header, while the copying path stops parsing the block at the malformed
 # line. Testing only whichever happens to be active would leave the other
-# unguarded. A bare CR is refused before either, so both answer it 502.
+# unguarded. A bare CR is read as SP before either, so both forward its field
+# as one line.
 # The hostile upstream, once: it binds port 0 and names the port it landed on,
 # which is what the proxy has to be told.
 $PY "$SCRIPT_DIR/injection_probe.py" upstream "$TMPDIR/up.port" \
@@ -101,4 +103,4 @@ run_one() {
 run_one pass-through 1
 run_one copying 0
 
-echo "  [PASS] http_proxy_response_injection: 2/2 paths - a bare CR in an upstream head is a 502, a bare LF header is dropped; neither reaches the client"
+echo "  [PASS] http_proxy_response_injection: 2/2 paths - a bare CR in an upstream head reads as SP, a bare LF header is dropped; no injected field reaches the client"

@@ -12,6 +12,8 @@ set_opt(_ctx: ptr, key: string, value: string) {
 }
 
 builder compile(src: string) {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     rel = ""
     if _builder != null {
         if map_has(_builder, "release") == 1 {
@@ -28,6 +30,8 @@ add_flag(_ctx: ptr, flag: string) {
 }
 
 builder run_command(name: string) with list_new {
+    // The builder owns the config its block filled; null without a block.
+    defer list.free(_builder)
     count = 0
     if _builder != null {
         count = list.size(_builder)
@@ -62,6 +66,8 @@ set_limit(_ctx: ptr, n: int) {
 }
 
 builder execute_query(db: string) with query_builder_new {
+    // The builder owns the config its block filled; null without a block.
+    defer map.free(_builder)
     table = ""
     where_clause = ""
     if _builder != null {
@@ -74,6 +80,8 @@ builder execute_query(db: string) with query_builder_new {
 // ---- with + return value ----
 
 builder count_flags(label: string): int with list_new {
+    // The builder owns the config its block filled; null without a block.
+    defer list.free(_builder)
     n = 0
     if _builder != null {
         n = list.size(_builder)
@@ -85,6 +93,8 @@ builder count_flags(label: string): int with list_new {
 // ---- with + no explicit params ----
 
 builder run_all() with list_new {
+    // The builder owns the config its block filled; null without a block.
+    defer list.free(_builder)
     n = 0
     if _builder != null {
         n = list.size(_builder)

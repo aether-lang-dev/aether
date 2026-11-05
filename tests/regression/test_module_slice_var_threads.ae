@@ -1,0 +1,114 @@
+// Regression (#3568): a module-level slice `var` stored, grown and read by
+// two actors at once.
+//
+// A store into the var released the slice it held and then wrote the new
+// one, with nothing between it and another thread, and a read copied the
+// var's 24 bytes and then took a reference: a reader could take a
+// reference to a buffer a store had just freed, or see a slice torn between
+// two stores, and two stores at once released the same old buffer twice.
+// A push grew the var's buffer in place, under a reader holding it. Each
+// slice var now has a lock of its own, as a string var does (#3522): a read
+// takes a reference under it, which its statement releases, a store swaps
+// under it and releases the old slice after it, and a push grows a
+// reference taken under it and stores the result back.
+//
+// Two actors each store fresh buffers into `g`, push into it and read it
+// back in a loop, at the same time. The check is that nothing crashes,
+// every read sees a whole slice the actors stored (every element a tag of
+// theirs), and, where the heap count is exact (Windows), that a run of the work
+// holds the heap steady: a double free corrupts it, and a lost release
+// grows it.
+
+import std.mem
+
+extern exit(code: int)
+
+var g: int[] = []
+
+message Run {
+    tag: int
+    n: int
+}
+
+message Get {}
+
+message Seen {
+    bad: int
+}
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL #3568: ${msg}")
+        exit(1)
+    }
+}
+
+filled(tag: int, n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = tag
+    }
+    return xs
+}
+
+// A slice the actors stored: every element a tag, 1 or 2 (a push may add
+// one actor's tag to the other's buffer). A freed buffer comes back holding
+// whatever its next owner wrote.
+fn whole(xs: int[]) -> bool {
+    for x in xs {
+        if x != 1 && x != 2 {
+            return false
+        }
+    }
+    return true
+}
+
+actor Writer {
+    state bad = 0
+    receive {
+        Run(tag: t, n: n) -> {
+            i = 0
+            while i < n {
+                g = filled(t, 2 + i % 3)
+                x = g
+                if !whole(x) {
+                    bad = bad + 1
+                }
+                if i % 4 == 0 {
+                    g.push(t)
+                }
+                if !whole(g) {
+                    bad = bad + 1
+                }
+                i = i + 1
+            }
+        }
+        Get() -> {
+            reply Seen { bad: bad }
+        }
+    }
+}
+
+round(a: ptr, b: ptr, n: int) -> int {
+    a ! Run { tag: 1, n: n }
+    b ! Run { tag: 2, n: n }
+    int bad_a = a ? Get {}
+    int bad_b = b ? Get {}
+    return bad_a + bad_b
+}
+
+main() {
+    a = spawn(Writer())
+    b = spawn(Writer())
+    check(round(a, b, 200000) == 0, "a read saw a slice no store made")
+    check(whole(g), "the var holds a slice a store made")
+    if !mem.heap_in_use_exact() {
+        println("OK") // count not exact here: the macOS leaks gate checks this program
+        return
+    }
+    grown = mem.steady_growth(|| {
+            check(round(a, b, 20000) == 0, "a read saw a slice no store made")
+        }, 5)
+    check(grown == 0, "storing, growing and reading from two actors grew the heap by ${grown} bytes in every run")
+    println("OK")
+}

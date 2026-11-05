@@ -127,7 +127,37 @@ if [ -f "$LIBAETHER" ] && command -v nm >/dev/null 2>&1; then
     rm -f "$nm_out" "$defs_out"
 fi
 
-# Functional check: `gcc trivial.c $(ae cflags) -o out` runs end-to-end.
+# #3574: the bracket depth every `ae` build gives a Clang travels with the
+# flags when the compiler `ae` drives takes it (Clang refuses the C of blocks
+# nested past 256 brackets otherwise), and not when it does not (GCC refuses
+# the option). Two stand-in compilers, asked as `ae` asks one: the first
+# takes -fbracket-depth, the second refuses it.
+fakes="$(mktemp -d)"
+cat > "$fakes/takes.sh" <<'SH'
+#!/bin/sh
+exit 0
+SH
+cat > "$fakes/refuses.sh" <<'SH'
+#!/bin/sh
+case "$*" in *-fbracket-depth=*) exit 1 ;; esac
+exit 0
+SH
+takes="$(AE_CC="sh $fakes/takes.sh" "$AE" cflags --cflags 2>/dev/null)"
+refuses="$(AE_CC="sh $fakes/refuses.sh" "$AE" cflags --cflags 2>/dev/null)"
+rm -rf "$fakes"
+if ! printf %s "$takes" | grep -q -- "-fbracket-depth=2048"; then
+    echo "  [FAIL] ae_cflags: a compiler that takes -fbracket-depth got no -fbracket-depth=2048"
+    echo "$takes"
+    exit 1
+fi
+if printf %s "$refuses" | grep -q -- "-fbracket-depth"; then
+    echo "  [FAIL] ae_cflags: a compiler that refuses -fbracket-depth was given it"
+    echo "$refuses"
+    exit 1
+fi
+
+# Functional check: `<cc> trivial.c $(ae cflags) -o out` runs end-to-end, with
+# the compiler `ae` drives, whose flags `ae cflags` prints.
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 cat > "$tmpdir/trivial.c" <<'C'
@@ -135,7 +165,11 @@ cat > "$tmpdir/trivial.c" <<'C'
 int main(void) { printf("ae_cflags ok\n"); return 0; }
 C
 
-if ! gcc "$tmpdir/trivial.c" $flags -o "$tmpdir/trivial" >"$tmpdir/gcc.log" 2>&1; then
+cc_cmd="${AE_CC:-${CC:-}}"
+if [ -z "$cc_cmd" ]; then
+    if command -v gcc >/dev/null 2>&1; then cc_cmd=gcc; else cc_cmd=cc; fi
+fi
+if ! $cc_cmd "$tmpdir/trivial.c" $flags -o "$tmpdir/trivial" >"$tmpdir/gcc.log" 2>&1; then
     echo "  [FAIL] ae_cflags: gcc \$(ae cflags) failed end-to-end"
     cat "$tmpdir/gcc.log"
     exit 1

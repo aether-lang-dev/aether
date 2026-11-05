@@ -1,0 +1,102 @@
+// Regression (#3568): a pattern's binding bound again from a slice that
+// owns takes its reference of its own first.
+//
+// A receive arm's field binding and a `match` arm's binding are copies of
+// what the message or the matched value holds; one the body binds again
+// takes a reference of its own where the body starts (`__slice_hold`), so
+// the store gives back that one. Bound from a local that owns
+// (`items = xs`), the binding became an owner in slice ownership's
+// fixpoint, and the hold went with the kind: the store then gave back the
+// message's reference, which the message's release gave back again, and
+// the buffer `xs` handed over was never released. The hold no longer
+// depends on the kind the binding ends up with.
+//
+// The arm reads the binding before binding it again (which is when the
+// binding is a slice by then, and the fixpoint saw the move), and where the
+// heap count is exact (mem.heap_in_use_exact) rounds of it leave the heap
+// as they found it.
+
+import std.mem
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3568: ${what}")
+        exit(1)
+    }
+}
+
+message Give {
+    items: int[]
+}
+
+message Done {}
+
+message Ack {
+    n: int
+}
+
+actor Taker {
+    state seen = 0
+    receive {
+        Give(items) -> {
+            seen = seen + items.len - 3
+            xs = make([]int, 2)
+            items = xs
+            seen = seen + items.len
+        }
+        Done() -> {
+            reply Ack { n: seen }
+        }
+    }
+}
+
+some_of(xs: int[]) -> int[]? {
+    return xs
+}
+
+filled(n: int) -> int[] {
+    xs = make([]int, n)
+    for i in 0..n {
+        xs[i] = 10 + i
+    }
+    return xs
+}
+
+arm() -> int {
+    xs = filled(3)
+    o = some_of(xs)
+    t = 0
+    match o {
+        some(v) -> {
+            t = v.len - 3
+            w = make([]int, 2)
+            v = w
+            t = t + v.len
+        }
+        none -> {}
+    }
+    check(xs.len == 3 && xs[2] == 12, "the optional's slice after its binding was bound again")
+    return t
+}
+
+round(h: ptr) -> int {
+    for i in 0..20 {
+        h ! Give { items: filled(3) }
+    }
+    int n = h ? Done {}
+    return n + arm()
+}
+
+main() {
+    h = spawn(Taker())
+    check(round(h) == 40 + 2, "the counts")
+    if mem.heap_in_use_exact() {
+        g = mem.steady_growth(|| {
+                _n = round(h)
+            }, 6)
+        check(g == 0, "grew ${g}")
+    }
+    println("ok")
+}

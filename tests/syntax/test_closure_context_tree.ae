@@ -44,6 +44,10 @@ main() {
     row2, _ = list.get(root, 1)
     println(list.size(row2))
 
+    // The containers root holds are lists of their own, which list.free(root)
+    // leaves to the program.
+    list.free(row1)
+    list.free(row2)
     list.free(root)
     println("tree ok")
 }

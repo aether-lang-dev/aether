@@ -1,0 +1,166 @@
+// A panic past builder blocks puts the thread's stack of blocks back, and
+// releases their configs, whatever catches it (#3574).
+//
+// 1. A handler panics inside blocks 40 deep, with no `try`: the barrier of
+//    the actor's step catches it. Only a `try` of the program put the stack
+//    back, so the thread kept the 40 dead blocks: the next handler on it saw
+//    its block 41 deep, and the dead blocks' configs were never released.
+// 2. The same caught by a `try` in the program: the stack is back at the
+//    try's depth after the catch, as before.
+// 3. Under the heap check, where it is exact: a handler that panics 40 blocks
+//    deep grows the heap by what one that panics outside any block does
+//    (what an actor keeps of its death, the same reason for both).
+
+import std.map
+import std.mem
+
+message Boom { depth: int }
+message Probe {}
+
+extern exit(code: int)
+
+var g_made = 0
+var g_freed = 0
+var g_wrong = 0
+
+cfg_new() -> ptr {
+    g_made = g_made + 1
+    return map_new()
+}
+
+cfg_free(m: ptr) {
+    g_freed = g_freed + 1
+    map_free(m)
+}
+
+builder node(depth: int) with cfg_new {
+    if _builder != null {
+        if map_size(_builder) != 1 {
+            g_wrong = g_wrong + 1
+        }
+        cfg_free(_builder)
+    }
+}
+
+set_opt(_ctx: ptr, key: string, value: string) {
+    map_put(_ctx, key, value)
+}
+
+// Blocks `d` to `top` deep; the innermost panics (none, for a `top` of 0).
+dive(d: int, top: int) {
+    node(d) {
+        set_opt("k", "v")
+        if d < top {
+            dive(d + 1, top)
+        } else if top > 0 {
+            panic("deep")
+        }
+    }
+}
+
+// The depth a fresh block reads inside itself: 1 with no block open.
+probe() -> int {
+    seen = -1
+    node(0) {
+        set_opt("k", "v")
+        seen = builder_depth()
+    }
+    return seen
+}
+
+actor Diver {
+    receive {
+        Boom(depth) -> {
+            if depth == 0 {
+                panic("bare")
+            }
+            dive(1, depth)
+        }
+    }
+}
+
+actor Prober {
+    receive {
+        Probe() -> {
+            reply probe()
+        }
+    }
+}
+
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  PASS ${label}")
+    return 0
+}
+
+// The heap rounds: round k kills diver k, its handler panicking `depth`
+// blocks deep (0: outside any block). The divers are spawned before the
+// rounds, so a round's growth is the panic's alone.
+var g_round = 0
+
+next_round(a0: actor_ref, a1: actor_ref, a2: actor_ref, a3: actor_ref, a4: actor_ref,
+    a5: actor_ref, a6: actor_ref, a7: actor_ref, depth: int) {
+    k = g_round
+    g_round = g_round + 1
+    if k == 0 { a0 ! Boom { depth: depth } }
+    if k == 1 { a1 ! Boom { depth: depth } }
+    if k == 2 { a2 ! Boom { depth: depth } }
+    if k == 3 { a3 ! Boom { depth: depth } }
+    if k == 4 { a4 ! Boom { depth: depth } }
+    if k == 5 { a5 ! Boom { depth: depth } }
+    if k == 6 { a6 ! Boom { depth: depth } }
+    if k == 7 { a7 ! Boom { depth: depth } }
+    wait_for_idle()
+}
+
+main() {
+    fails = 0
+
+    d = spawn(Diver(), core: 0)
+    p = spawn(Prober(), core: 0)
+    d ! Boom { depth: 40 }
+    wait_for_idle()
+    int seen = p ? Probe {}
+    fails = fails + check("after a handler panicked 40 blocks deep, the next block on its thread is 1 deep: ${seen}",
+        seen == 1)
+    fails = fails + check("the 40 blocks' configs were released: ${g_made} made, ${g_freed} released",
+        g_made == g_freed)
+
+    why = ""
+    try {
+        dive(1, 40)
+    } catch e {
+        why = e
+    }
+    fails = fails + check("a try caught the panic 40 deep: ${why}", why == "deep")
+    fails = fails + check("and the stack is back: ${builder_depth()} deep", builder_depth() == 0)
+    fails = fails + check("a block after it is 1 deep: ${probe()}", probe() == 1)
+    fails = fails + check("its configs were released: ${g_made} made, ${g_freed} released",
+        g_made == g_freed)
+    fails = fails + check("every block saw its own config: ${g_wrong} did not", g_wrong == 0)
+
+    if mem.heap_in_use_exact() {
+        a0 = spawn(Diver(), core: 0)
+        a1 = spawn(Diver(), core: 0)
+        a2 = spawn(Diver(), core: 0)
+        a3 = spawn(Diver(), core: 0)
+        a4 = spawn(Diver(), core: 0)
+        a5 = spawn(Diver(), core: 0)
+        a6 = spawn(Diver(), core: 0)
+        a7 = spawn(Diver(), core: 0)
+        next_round(a0, a1, a2, a3, a4, a5, a6, a7, 0)
+        bare = mem.steady_growth(|| { next_round(a0, a1, a2, a3, a4, a5, a6, a7, 0) }, 3)
+        deep = mem.steady_growth(|| { next_round(a0, a1, a2, a3, a4, a5, a6, a7, 40) }, 4)
+        fails = fails + check("a handler panicking 40 blocks deep grows the heap by ${deep}, one outside any block by ${bare}",
+            deep == bare)
+    }
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -1,6 +1,6 @@
-// Regression (#3556): a redirect's Location went into the next request line
-// with no check of its bytes. The client found the end of a response's
-// header section with strstr and read its fields as C strings
+// Regression (#3556, #3572): a redirect's Location went into the next
+// request line with no check of its bytes. The client found the end of a
+// response's header section with strstr and read its fields as C strings
 // (http_response_fill_from_bytes, the stream reader), so:
 //
 //   - a bare CR stayed inside the Location value (lines are split at LF),
@@ -10,14 +10,16 @@
 //     came back as the body of a status-0 response with no error (the
 //     stream reader kept reading for an end it had already been sent).
 //
-// A recipient has to refuse a NUL or a bare CR in a header section, or put a
-// space in its place (RFC 9110 5.5, RFC 9112 2.2). Both readers now find the
-// end of the section past any NUL and refuse a section holding either, with
-// "malformed response header section", and no second request is made. A
-// TAB or any other control byte in a Location, which no URI reference holds,
-// stops the hop with a redirect_error and the 3xx kept. A NUL in a body is
-// still body. The server records each request target it is asked for, so a
-// hop not taken is seen, not inferred.
+// A recipient refuses a NUL or a bare CR in a header section, or puts a
+// space in its place (RFC 9110 5.5, RFC 9112 2.2). Both readers find the end
+// of the section past any NUL and read each of them as SP, so the response
+// is read and its Location ends nothing. The Location is then read as a
+// browser reads it (WHATWG URL): a TAB, an LF or a CR is removed, and any
+// other control byte, like a space, is percent-encoded. Each hop goes on,
+// and the request line it writes carries no byte that ends or splits it: no
+// injected field reaches the server. A NUL in a body is still body. The
+// server records each request target it is asked for, and any request head
+// that holds an injected field, so a hop is seen, not inferred.
 
 import std.string
 import std.tcp
@@ -82,6 +84,7 @@ actor Upstream {
                         rest = string.substring(seen, sp1 + 1, string.length(seen))
                         target = string.substring(rest, 0, string.index_of(rest, " "))
                         log = "${log}${target},"
+                        if string.contains(seen, "\nX-Injected") == 1 { log = "${log}INJECTED," }
                         _n, _werr = tcp.write_n(sock, string.bytes(route(target)))
                         tcp.close(sock)
                     }
@@ -145,18 +148,20 @@ main() {
     up = spawn(Upstream())
     up ! Listen { srv: srv }
 
-    refused = "error: malformed response header section"
-    stopped = "302 body=0 redirect_error='malformed Location header'"
+    followed = "200 body=8 redirect_error=''"
+    streamed = "200 streamed"
     fails = 0
-    fails = fails + expect("a bare CR in a Location", fetch(up, 1, "${base}/cr", 0), "${refused} seen=/cr,")
-    fails = fails + expect("a NUL in a Location", fetch(up, 1, "${base}/nul", 0), "${refused} seen=/nul,")
-    fails = fails + expect("a TAB in a Location", fetch(up, 1, "${base}/tab", 0), "${stopped} seen=/tab,")
-    fails = fails + expect("a 0x01 in a Location", fetch(up, 1, "${base}/ctl", 0), "${stopped} seen=/ctl,")
-    fails = fails + expect("a bare CR, streamed", fetch(up, 1, "${base}/cr", 1), "${refused} seen=/cr,")
-    fails = fails + expect("a NUL, streamed", fetch(up, 1, "${base}/nul", 1), "${refused} seen=/nul,")
+    fails = fails + expect("a bare CR in a Location", fetch(up, 2, "${base}/cr", 0),
+        "${followed} seen=/cr,/x%20X-Injected:%20y,")
+    fails = fails + expect("a NUL in a Location", fetch(up, 2, "${base}/nul", 0), "${followed} seen=/nul,/x%20y,")
+    fails = fails + expect("a TAB in a Location", fetch(up, 2, "${base}/tab", 0), "${followed} seen=/tab,/xy,")
+    fails = fails + expect("a 0x01 in a Location", fetch(up, 2, "${base}/ctl", 0), "${followed} seen=/ctl,/x%01y,")
+    fails = fails + expect("a bare CR, streamed", fetch(up, 2, "${base}/cr", 1),
+        "${streamed} seen=/cr,/x%20X-Injected:%20y,")
+    fails = fails + expect("a NUL, streamed", fetch(up, 2, "${base}/nul", 1), "${streamed} seen=/nul,/x%20y,")
     fails = fails + expect("a NUL in a body", fetch(up, 1, "${base}/bin", 0), "200 body=3 redirect_error='' seen=/bin,")
 
     tcp.server_close(srv)
     if fails > 0 { exit(1) }
-    println("PASS: a header section with a NUL or a bare CR is refused, and a Location with a control byte is not followed")
+    println("PASS: a NUL or a bare CR in a header section reads as SP, and a Location's control bytes are removed or encoded, with nothing injected")
 }

@@ -48,10 +48,12 @@ places a sum can be held in, a module `var` aside (its initializer is no
 constant) and the containers and `ptr` slots (strings and closures only):
 a sum is a composite that owns what its variants own (R1).
 
-The slice kind `KM` (the buffer `make([]int, 3)` hands out) is crossed with
-the temporary only (P17), passed to a function that reads it and returned:
-a slice local, field or element is slice ownership's, which
-`tests/integration/slice_own` measures. The transfers `T17` to `T19` are a
+The slice kind `KM` (the buffer `make([]int, 3)` hands out) is counted
+(#3568): every place that holds a slice of it holds a reference, so it is
+crossed with the places and transfers a sum is, and with a field reached
+through a pointer (P4H) and a module `var` (P8). A fixed-size array of slices
+is no parameter type (P15), and a slice sent in a message moves into it
+(P12K-T12, P12D-T12). The transfers `T17` to `T19` are a
 temporary's too (#3549): a fresh string given straight to builtins lowered by
 name, to an extern's `string` parameter and to a comparison, each borrowed
 for the use and released after it, as an Aether function's argument is.

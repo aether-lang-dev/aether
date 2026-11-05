@@ -128,6 +128,9 @@ main() {
     http.server_stop(gateway)
     http.server_stop(upstream)
     http.server_free(gateway)
+    // The mount's options and pool are the program's, freed after the server.
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
     http.server_free(upstream)
     if bad > 0 {
         println("FAIL: ${bad} case(s)")

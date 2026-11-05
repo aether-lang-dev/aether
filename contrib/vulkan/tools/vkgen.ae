@@ -35,6 +35,7 @@
 // contrib/vulkan/tools/regenerate.sh runs both with the selections the
 // repository commits.
 
+import std.collections
 import std.fs
 import std.list
 import std.map
@@ -548,6 +549,7 @@ read_registry_xml(text: string, what: string) {
         }
     }
     xml.free(p)
+    list.free(stack)
 }
 
 // "1.4.357": the registry release the output was generated from.
@@ -1100,21 +1102,24 @@ emit_module(path: string, api: string, extensions: string) {
     strbuilder.append(body, "\n")
 
     enum_blocks, _berr = map.keys(g_req_types)
-    blocks = list.new()
+    // A StringList owns a copy of each name and sorts its slots (#3547):
+    // sorted in a list by swapping through list_set, the names were the
+    // list's no longer, and list.free gave none of them back.
+    blocks = string_list_new()
     b = 0
     while b < map.keys_size(enum_blocks) {
         t = str_of(map.keys_get(enum_blocks, b))
         if string.equals(get(g_cat, t), "enum") == 1 && map_has(g_enum_kind, t) == 1 {
-            list.add(blocks, string.concat(t, ""))
+            string_list_add(blocks, t)
         }
         b = b + 1
     }
     map_keys_free(enum_blocks)
-    sort_list(blocks)
+    string_list_sort_lex(blocks)
     emitted = map.new()
     bi = 0
-    while bi < list_size(blocks) {
-        t = str_of(list.at(blocks, bi))
+    while bi < string_list_size(blocks) {
+        t = string_list_get(blocks, bi)
         strbuilder.append(body, "// ${t}\n")
         all = string.concat(get(g_enum_values, t), get(g_ext_values, t))
         vals = lines_of(all)
@@ -1373,6 +1378,11 @@ emit_module(path: string, api: string, extensions: string) {
     werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
     println("vkgen: wrote ${path}")
+    // The module's own list and maps, and the strings they hold; the
+    // globals the other emitters read stay.
+    string_list_free(blocks)
+    map.free(emitted)
+    map.free(done)
 }
 
 // The Aether expression for the size of one ctype, "" when it has none.
@@ -1556,22 +1566,6 @@ for_each_platform_check(extensions: string) {
     string_array_free(parts)
 }
 
-// Insertion sort: the lists are a few hundred names long.
-sort_list(l: ptr) {
-    n = list_size(l)
-    i = 1
-    while i < n {
-        j = i
-        while j > 0 && string.compare(str_of(list.at(l, j - 1)), str_of(list.at(l, j))) > 0 {
-            a = list.at(l, j - 1)
-            list_set(l, j - 1, list.at(l, j))
-            list_set(l, j, a)
-            j = j - 1
-        }
-        i = i + 1
-    }
-}
-
 // ---------------------------------------------------------------------------
 // The C dispatch tables
 // ---------------------------------------------------------------------------
@@ -1677,6 +1671,9 @@ emit_dispatch(path: string, commands_path: string, api: string, extensions: stri
     out = strbuilder.finish(sb)
     werr = fs.write_binary(path, string.bytes(out))
     if werr != "" { die("cannot write ${path}: ${werr}") }
+    map.free(groups)
+    list.free(order)
+    map.free(levels)
     println("vkgen: wrote ${path}")
 }
 

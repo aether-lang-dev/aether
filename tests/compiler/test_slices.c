@@ -364,8 +364,115 @@ TEST(slices_runtime_len_sub_and_from) {
     AetherSlice rest = aether_slice_from(view, 3, sizeof(int), "t", 9);
     ASSERT_EQ(-1, (int)aether_slice_len(rest));      /* still unbounded */
     ASSERT_EQ(4, *(int*)aether_slice_at(rest, 0, sizeof(int), "t", 10));
-    AetherSlice fresh = aether_slice_alloc(3, sizeof(int));
+    AetherSlice fresh = aether_slice_alloc(3, sizeof(int), NULL);
     ASSERT_EQ(3, (int)aether_slice_len(fresh));
     ASSERT_EQ(0, *(int*)aether_slice_at(fresh, 2, sizeof(int), "t", 11));   /* zeroed */
-    free(fresh.ptr);
+    /* #3568: counted; a view of it holds it too, and the last gives it back. */
+    AetherSlice part = aether_slice_sub(fresh, 1, 3, sizeof(int), "t", 12);
+    aether_slice_retain(part);
+    ASSERT_EQ(2, aether_slice_buf(fresh)->refs);
+    aether_slice_release(&fresh);
+    ASSERT_EQ(1, aether_slice_buf(part)->refs);
+    aether_slice_release(&part);
+}
+
+/* #3570: a view of a counted string's characters carries the string's
+ * header in its 56 offset bits, marked AETHER_SLICE_STRING. A header whose
+ * address does not fit in 56 bits (none a target hands out; one built here
+ * by hand) gets the characters copied into a counted buffer of the view's
+ * own instead, still read-only, so no view is made that cannot find what it
+ * holds. A buffer that is no counted string stands in for the header: its
+ * retain and release are no-ops (is_aether_string). */
+TEST(slices_string_view_holds_its_header_or_copies) {
+    static char text[16] = "abcdefgh";
+    AetherSlice v = aether_slice_make(text, 8);
+    AetherSlice sv = aether_slice_string_view(v, text);
+    ASSERT_TRUE((sv.flags & AETHER_SLICE_STRING) != 0);
+    ASSERT_TRUE((sv.flags & AETHER_SLICE_READONLY) != 0);
+    ASSERT_TRUE(aether_slice_string_of(sv) == text);
+    ASSERT_TRUE(sv.ptr == (void*)text);
+    AetherSlice tail = aether_slice_from(sv, 2, 1, "t", 1);
+    ASSERT_TRUE((tail.flags & AETHER_SLICE_STRING) != 0);
+    ASSERT_TRUE(aether_slice_string_of(tail) == text);   /* the same string */
+    aether_slice_release(&tail);
+    aether_slice_release(&sv);
+    if (sizeof(void*) < 8) return;   /* a 32-bit address always fits */
+    const void* high = (const void*)(uintptr_t)((uint64_t)1 << 63 | 0x1000u);
+    AetherSlice c = aether_slice_string_view(v, high);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_STRING) == 0);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_MADE) != 0);
+    ASSERT_TRUE((c.flags & AETHER_SLICE_READONLY) != 0);
+    ASSERT_TRUE(c.ptr != (void*)text);
+    ASSERT_EQ(8, (int)aether_slice_len(c));
+    ASSERT_EQ(0, memcmp(c.ptr, "abcdefgh", 8));
+    ASSERT_EQ(1, aether_slice_buf(c)->refs);
+    aether_slice_release(&c);
+}
+
+/* #3568: a buffer of struct elements carries a publish for what each holds,
+ * and a store into a slice's element publishes what it stores, as a string
+ * store there does (#3398): memory reached through a slice is memory
+ * another actor can reach. */
+TEST(slices_codegen_publishes_elements) {
+    ASTNode* ast = parse_source(
+        "struct Item { data: int[] }\n"
+        "main() { items = make([]Item, 2)\n  rows = make([]int[], 1)\n"
+        "  r = make([]int, 2)\n  rows[0] = r\n  println(\"${items.len} ${rows[0].len}\") }");
+    ASSERT_NOT_NULL(ast);
+    ASSERT_EQ(1, typecheck_program(ast));
+    char* c = generate_c(ast);
+    ASSERT_NOT_NULL(strstr(c, "static AETHER_MAYBE_UNUSED void _ae_spub_"));
+    /* The row's place is taken first, its bounds checked, then the store
+     * publishes the row it takes. */
+    ASSERT_NOT_NULL(strstr(c, "aether_slice_set_shared(_ae_ssp"));
+    free(c);
+    free_ast_node(ast);
+}
+
+/* #3568: publishing a buffer makes what its elements hold count atomically
+ * too, the rows of a slice of slices here: another thread reaches them
+ * through it. The bit was set on the outer header alone, so two threads
+ * copying a row counted it plainly. A row stored after the publish is
+ * published by its store (aether_slice_set_shared), and publishing again
+ * walks nothing. */
+TEST(slices_publish_reaches_rows) {
+    AetherSlice outer = aether_slice_alloc(2, sizeof(AetherSlice), aether_slice_row_ops());
+    ((AetherSlice*)outer.ptr)[0] = aether_slice_alloc(3, sizeof(int), NULL);
+    ((AetherSlice*)outer.ptr)[1] = aether_slice_alloc(1, sizeof(int), NULL);
+    AetherSlice r0 = ((AetherSlice*)outer.ptr)[0];
+    AetherSlice r1 = ((AetherSlice*)outer.ptr)[1];
+    ASSERT_EQ(0, aether_slice_buf(r0)->refs & AETHER_SLICE_SHARED_BIT);
+    aether_slice_publish(outer);
+    ASSERT_TRUE((aether_slice_buf(outer)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_TRUE((aether_slice_buf(r0)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_TRUE((aether_slice_buf(r1)->refs & AETHER_SLICE_SHARED_BIT) != 0);
+    ASSERT_EQ(1, aether_slice_buf(r0)->refs & AETHER_SLICE_COUNT_MASK);
+    aether_slice_publish(outer);
+    ASSERT_EQ(1, aether_slice_buf(r1)->refs & AETHER_SLICE_COUNT_MASK);
+    aether_slice_release(&outer);   /* the rows with it */
+}
+
+/* #3568: the copy a header with its top byte set forces (a target whose heap
+ * pointers carry a tag there, Android on aarch64) is a read-only view as the
+ * string's own view is, so `free` of it is the same named panic everywhere.
+ * It gave back the copy's buffer instead, where every other target panics. */
+static void free_string_copy(void* arg) {
+    aether_slice_free(*(AetherSlice*)arg, "copy.ae", 3);
+}
+
+TEST(slices_string_view_copy_is_freed_as_the_view_is) {
+    if (sizeof(void*) < 8) return;   /* a 32-bit address always fits */
+    static char text[8] = "abcd";
+    AetherSlice v = aether_slice_make(text, 4);
+    const void* high = (const void*)(uintptr_t)((uint64_t)1 << 63 | 0x1000u);
+    AetherSlice c = aether_slice_string_view(v, high);
+    const char* reason = NULL;
+    void (*release)(const void*) = NULL;
+    int panicked = aether_contain(free_string_copy, &c, &reason, &release);
+    ASSERT_EQ(1, panicked);
+    ASSERT_NOT_NULL(strstr(aether_panic_reason_text(reason),
+                           "copy.ae:3: free of a read-only view of a string"));
+    if (release) release(reason);
+    ASSERT_EQ(1, aether_slice_buf(c)->refs);   /* the copy still holds it */
+    aether_slice_release(&c);
 }

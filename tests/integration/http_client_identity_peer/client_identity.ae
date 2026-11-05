@@ -180,6 +180,9 @@ main() {
     http.server_stop(behind)
     http.server_stop(limited)
     http.server_free(gateway)
+    // The mount's options and pool are the program's, freed after the server.
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
     http.server_free(up_b)
     http.server_free(up_a)
     http.server_free(distrust)

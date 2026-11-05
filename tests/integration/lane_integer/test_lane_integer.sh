@@ -60,6 +60,7 @@ main() {
     lanes.i32store(bytes.data(buf), 0, lanes.i32x4(100, 200, 300, 400))
     ld = lanes.i32load(bytes.data(buf), 0)
     check_int("i32 load/store", lanes.i32lane(ld, 2), 300)
+    bytes.free(buf)
 
     // ---- i16x8 ----
     h = lanes.i16x8(1, 2, 3, 4, 5, 6, 7, 8)
@@ -84,6 +85,7 @@ main() {
     check_int("pack_i16_u8 satlo", bytes.get(ob, 1), 0)
     check_int("pack_i16_u8 exact", bytes.get(ob, 2), 128)
     check_int("pack_i16_u8 highhalf", bytes.get(ob, 8), 7)
+    bytes.free(ob)
 
     // ---- IDCT-shaped kernel: lane-wise vs scalar, must agree ----
     // coeffs (i16) * weights (i16) -> i32 accumulate -> descale >> 4 ->
@@ -122,6 +124,7 @@ main() {
         i = i + 1
     }
     check_int("idct-shaped lane vs scalar (clamped) mismatches", mism as long, 0)
+    bytes.free(outb)
 
     println("done")
 }

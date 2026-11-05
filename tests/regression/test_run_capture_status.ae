@@ -93,5 +93,9 @@ main() {
     }
     println("  PASS: shell 'exit 127' → status 127, no err")
 
+    list_free(av0)
+    list_free(av1)
+    list_free(av2)
+    list_free(av3)
     println("=== All cases passed ===")
 }

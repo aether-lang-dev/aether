@@ -6,10 +6,6 @@
 #include "../aether_strmap.h"
 #include "../../runtime/actors/aether_message_registry.h"
 
-// Maximum defer nesting depth (scope depth * statements per scope)
-#define MAX_DEFER_STACK 256
-#define MAX_SCOPE_DEPTH 64
-
 /* #1140 — which exits a deferred statement fires on.
  *
  *   DEFER_ALWAYS  `defer x`        every exit (the pre-existing behaviour, and
@@ -175,14 +171,22 @@ typedef struct {
     StrMap fault_members;        // a fault member's name -> its content literal (R1)
 
     // Defer stack: tracks deferred statements for LIFO execution at scope exit
-    ASTNode* defer_stack[MAX_DEFER_STACK];
+    // As deep as the program needs (#3574): the stacks below were fixed
+    // arrays (256 defers, 64 scopes, 64 loops, 64 switches), and past them
+    // a defer was dropped (a string local's release among them), or a
+    // scope, a loop or a switch went unrecorded while its exit still
+    // popped one, so break, continue and the scope-exit drains acted on
+    // another's. cg_defer_room, cg_scope_room, cg_loop_room and
+    // cg_switch_room grow them; code_generator_release frees them.
+    ASTNode** defer_stack;
     // #1140: parallel to defer_stack — which exits this defer fires on.
     // Kept as a separate array rather than stashed on the AST node because
     // push_defer receives the deferred STATEMENT (the AST_DEFER_STATEMENT
     // parent, which carries the qualifier, is dropped at the push site), and
     // because the node's `annotation` slot is already spoken for by the
     // synthetic cleanup carriers (`heap_string_exit_free:` and friends).
-    DeferMode defer_mode[MAX_DEFER_STACK];
+    DeferMode* defer_mode;
+    int defer_cap;
     /* #1140: the kind of exit currently being emitted, so the defer-drain loops
      * know which conditional defers to fire. Set by a return site immediately
      * before it drains, and reset afterwards. Threading it through the
@@ -194,8 +198,14 @@ typedef struct {
      * DEFER_EXIT_RUNTIME — the conditional defers are then emitted under a
      * runtime test on it. NULL otherwise. Borrowed; not owned. */
     const char* defer_err_slot;
+    /* #3570: while a return's defers are emitted, the C condition that its
+     * slice results hold what they view (aether_slice_holds_or_empty): a
+     * temporary string the statement holds is released only then, kept when
+     * a result is an uncounted view that may point into it. NULL otherwise. */
+    const char* scoped_free_guard;
     int defer_count;
-    int scope_defer_start[MAX_SCOPE_DEPTH];  // defer_count at scope entry
+    int* scope_defer_start;  // defer_count at scope entry
+    int scope_cap;
     int scope_depth;
 
     // try { } catch { } frame-pop tracking (issue #501). Incremented
@@ -212,8 +222,8 @@ typedef struct {
     // current loop body (`try_frame_depth - loop_try_base[depth-1]`),
     // not all live frames — a try whose `{` lexically precedes the
     // loop's `{` survives a break/continue.
-    #define AETHER_MAX_LOOP_NEST 64
-    int loop_try_base[AETHER_MAX_LOOP_NEST];
+    int* loop_try_base;
+    int loop_nest_cap;
     int loop_nest_depth;
 
     // Labeled break/continue (#893). Parallel to loop_try_base, indexed by
@@ -223,16 +233,16 @@ typedef struct {
     // unique id used to mint the C goto labels, and whether the break/continue
     // target labels were actually referenced (so only a C label that is used
     // gets emitted, avoiding -Wunused-label).
-    const char* loop_label[AETHER_MAX_LOOP_NEST];
-    int loop_label_scope[AETHER_MAX_LOOP_NEST];
-    int loop_label_id[AETHER_MAX_LOOP_NEST];
-    int loop_label_break_used[AETHER_MAX_LOOP_NEST];
-    int loop_label_continue_used[AETHER_MAX_LOOP_NEST];
+    const char** loop_label;
+    int* loop_label_scope;
+    int* loop_label_id;
+    int* loop_label_break_used;
+    int* loop_label_continue_used;
     /* #2742: the loop steps in a statement at the end of its body (a
      * C-style for whose increment is a binding), after its __ae_cont_N
      * label, so a `continue` to it jumps there instead of C `continue`,
      * which would skip the step. */
-    int loop_step_in_body[AETHER_MAX_LOOP_NEST];
+    int* loop_step_in_body;
     int next_loop_label_id;
     /* #2378 threaded dispatch: a `while true { head; switch sel { ... } }`
      * loop lowers to computed goto where the C compiler has labels-as-values.
@@ -241,8 +251,8 @@ typedef struct {
      * the head and the indirect jump. td_switch / td_id / td_arm mark the
      * loop's own switch while its arms are generated, so each arm gets a label.
      * next_td_id numbers threaded loops per translation unit. */
-    int loop_td_id[AETHER_MAX_LOOP_NEST];
-    struct ASTNode* loop_td_node[AETHER_MAX_LOOP_NEST];
+    int* loop_td_id;
+    struct ASTNode** loop_td_node;
     struct ASTNode* td_switch;
     int td_id;
     int td_arm;
@@ -256,14 +266,14 @@ typedef struct {
      * the defers and pops the try frames of only what it leaves, and a C
      * label id (__ae_brk_N, numbered with the loops' labels) for a break
      * that cannot be a C `break`. */
-    #define AETHER_MAX_SWITCH_NEST 64
     int switch_nest_depth;
-    int switch_loop_depth[AETHER_MAX_SWITCH_NEST];
-    int switch_scope[AETHER_MAX_SWITCH_NEST];
-    int switch_try_base[AETHER_MAX_SWITCH_NEST];
-    int switch_c_depth[AETHER_MAX_SWITCH_NEST];
-    int switch_brk_id[AETHER_MAX_SWITCH_NEST];
-    int switch_brk_used[AETHER_MAX_SWITCH_NEST];
+    int switch_nest_cap;
+    int* switch_loop_depth;
+    int* switch_scope;
+    int* switch_try_base;
+    int* switch_c_depth;
+    int* switch_brk_id;
+    int* switch_brk_used;
     /* #2696: the C statements a C `break` leaves (a loop or a `switch`)
      * open around the code being generated. A break is a C `break` only
      * when its target's own C statement is the innermost of them
@@ -273,7 +283,7 @@ typedef struct {
      * if-chain, switch_c_depth -1), and the break jumps to the target's
      * __ae_brk_N label instead. */
     int c_break_depth;
-    int loop_c_depth[AETHER_MAX_LOOP_NEST];
+    int* loop_c_depth;
 
     // try-clobbered locals: variable names modified inside any try
     // body of the current function.  Such locals — when declared
@@ -349,6 +359,9 @@ typedef struct {
     }* extern_registry;
     int extern_registry_count;
     int extern_registry_capacity;
+    /* #3546: name -> registry index + 1, of the first entry of each name,
+     * filled as entries are registered (find_extern_registry_index). */
+    StrMap extern_registry_index;
 
     // MSVC compat: counter for ask-operator temp variables (_ask_result_N)
     int ask_temp_counter;
@@ -698,6 +711,12 @@ typedef struct {
 CodeGenerator* create_code_generator(FILE* output);
 CodeGenerator* create_code_generator_with_header(FILE* output, FILE* header, const char* header_path);
 void free_code_generator(CodeGenerator* gen);
+/* Room for one more defer, scope, enclosing loop or enclosing switch on
+ * the generator's stacks, which grow as deep as the program nests (#3574). */
+void cg_defer_room(CodeGenerator* gen);
+void cg_scope_room(CodeGenerator* gen);
+void cg_loop_room(CodeGenerator* gen);
+void cg_switch_room(CodeGenerator* gen);
 void generate_program(CodeGenerator* gen, ASTNode* program);
 /* L4 validation: reject closures inside actor handlers that write to
    actor state fields. Call before generate_program. Returns 1 on

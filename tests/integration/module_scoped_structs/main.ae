@@ -49,4 +49,7 @@ main() {
     // identical definitions in two modules are one type
     t = twin.twin(4)
     println(gpu.describe(&t))
+    // The two shaders gpu.compile made; f, p, q and b only point at them.
+    heap.free(g)
+    heap.free(g2)
 }

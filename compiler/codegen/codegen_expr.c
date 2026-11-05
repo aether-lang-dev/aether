@@ -11,6 +11,7 @@
 #include <ctype.h>
 #include <errno.h>
 #include <limits.h>
+#include <math.h>
 
 /* Argument-temp lifetime management for nested heap-returning calls.
  *
@@ -341,23 +342,33 @@ static void arg_drain_truncate(int target_count) {
  * are hoisted into `_ad_N` temps and freed after the call, and what the
  * wrap yields. A named call and a closure call (`call(f, ...)`, `f(...)` on
  * a closure local) share it; the closure call used to pass a heap-string
- * argument straight through, so nothing freed it (#2493). */
+ * argument straight through, so nothing freed it (#2493).
+ *
+ * As many hoisted arguments as the call has (#3574): 16 slots left the
+ * fresh arguments past the 16th unhoisted, and nothing freed them. The
+ * arrays start in the wrap's own ARG_DRAIN_INLINE slots and move to the
+ * heap past them (arg_drain_room); arg_drain_close gives those back. */
+#define ARG_DRAIN_INLINE 16
 typedef struct ArgDrainWrap {
     int saved_count;    /* registry depth to truncate back to */
     int count;          /* hoisted arguments */
-    int idx[16];        /* their child indices in the call node */
-    int closure[16];    /* 1 = an owned closure (#2507), released through its env;
+    int cap;            /* slots in each array below */
+    int* idx;           /* their child indices in the call node */
+    int* closure;       /* 1 = an owned closure (#2507), released through its env;
                          * 2 = a closure cell's value, held for the call (#2755):
                          * retained into the temp, released the same way;
                          * 3 = a slice that owns its buffer (#3549), dropped
                          * through drop[] */
-    const char* drop[16]; /* a slice's drop (own_slice_elem_drop_fn of its type) */
-    int scoped[16];     /* 1 = lives to its scope's exit: the call returns a view, which
+    const char** drop;  /* a slice's release (aether_slice_release_at, #3568) */
+    int* scoped;        /* 1 = lives to its scope's exit: the call returns a view, which
                          * may point into it (call_returns_view) */
-    int held[16];       /* 1 = a string read from a place the callee can rewrite, taken
+    int* held;          /* 1 = a string read from a place the callee can rewrite, taken
                          * for the call (string_arg_held) */
-    int taken[16];      /* 1 = an `if` giving a fresh string or closure, taken branch by
+    int* taken;         /* 1 = an `if` giving a fresh string or closure, taken branch by
                          * branch (branch_value_has_fresh, #3006) */
+    int idx_in[ARG_DRAIN_INLINE], closure_in[ARG_DRAIN_INLINE], scoped_in[ARG_DRAIN_INLINE],
+        held_in[ARG_DRAIN_INLINE], taken_in[ARG_DRAIN_INLINE];
+    const char* drop_in[ARG_DRAIN_INLINE];
     int have_value;     /* the call yields a value: of C type ret_ct, or
                          * when that is NULL, of type ret_type */
     const char* ret_ct;
@@ -591,6 +602,34 @@ static void emit_module_string_read(CodeGenerator* gen, const char* name) {
     push_scoped_temp_free(gen, t);
 }
 
+/* #3568: does `e` read a module-level slice `var` (is_module_slice_var)? */
+int module_slice_var_read(CodeGenerator* gen, const ASTNode* e) {
+    return e && e->type == AST_IDENTIFIER && e->value && !gen->in_const_init &&
+           !is_actor_state_var(gen, e->value) && !is_var_declared(gen, e->value) &&
+           is_module_slice_var(gen, e->value);
+}
+
+/* #3568: a read of the module-level slice `var` `name`, as a string var's
+ * is (emit_module_string_read): any thread may store into the var while the
+ * value read is in use, and a store releases the buffer it replaces, so the
+ * read takes a reference of its own under the var's lock
+ * (aether_slice_var_take), into a temporary of the statement its block gives
+ * back on every exit. The 24 bytes of the slice are read whole under the
+ * lock, never torn by a store. Where no statement is being emitted the var
+ * is read in place. */
+static void emit_module_slice_read(CodeGenerator* gen, const char* name) {
+    if (!hoist_ready(gen)) {
+        fprintf(gen->output, "%s", name);
+        return;
+    }
+    const char* t = cg_internf("_eo%d", g_order_counter++);
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
+    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
+            "aether_slice_release(&%s), %s = aether_slice_var_take(&%s, &%s))",
+            t, t, t, name, module_string_var_lock(name));
+    push_scoped_slice_free(gen, t);
+}
+
 /* Is `e` a string read from such a place: the place itself, or `o ?? d` /
  * `o!` over a `string?` one? */
 int string_reads_place(CodeGenerator* gen, ASTNode* e) {
@@ -620,10 +659,46 @@ static int string_arg_held(CodeGenerator* gen, ASTNode* arg) {
 int value_holds_statement_temps(CodeGenerator* gen, ASTNode* e) {
     if (!e || e->type == AST_CLOSURE) return 0;
     if (e->type == AST_FUNCTION_CALL && call_returns_view(e) && e->child_count > 0) return 1;
+    /* #3568: a fresh slice read in place, held to the statement's end. */
+    if (e->type == AST_FUNCTION_CALL && annotation_has_marker(e->annotation, "slice_stmt_temp"))
+        return 1;
     if (string_reads_place(gen, e)) return 1;
     for (int i = 0; i < e->child_count; i++)
         if (value_holds_statement_temps(gen, e->children[i])) return 1;
     return 0;
+}
+
+/* Room for one more hoisted argument: the slots double onto the heap once
+ * the wrap's own are full. */
+static void arg_drain_room(ArgDrainWrap* w) {
+    if (w->count < w->cap) return;
+    int cap = w->cap * 2;
+    int inl = w->idx == w->idx_in;
+    int** ints[] = { &w->idx, &w->closure, &w->scoped, &w->held, &w->taken };
+    for (size_t k = 0; k < sizeof(ints) / sizeof(ints[0]); k++) {
+        int* grown = (int*)aether_xrealloc(inl ? NULL : *ints[k], sizeof(int) * (size_t)cap);
+        if (inl) memcpy(grown, *ints[k], sizeof(int) * (size_t)w->count);
+        memset(grown + w->count, 0, sizeof(int) * (size_t)(cap - w->count));
+        *ints[k] = grown;
+    }
+    const char** drop = (const char**)aether_xrealloc(inl ? NULL : (void*)w->drop,
+                                                      sizeof(char*) * (size_t)cap);
+    if (inl) memcpy(drop, w->drop, sizeof(char*) * (size_t)w->count);
+    memset(drop + w->count, 0, sizeof(char*) * (size_t)(cap - w->count));
+    w->drop = drop;
+    w->cap = cap;
+}
+
+/* The slots arg_drain_room moved to the heap, given back. */
+static void arg_drain_slots_free(ArgDrainWrap* w) {
+    if (!w->idx || w->idx == w->idx_in) return;
+    free(w->idx);
+    free(w->closure);
+    free(w->scoped);
+    free(w->held);
+    free(w->taken);
+    free((void*)w->drop);
+    w->idx = NULL;
 }
 
 static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
@@ -631,13 +706,22 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
                              ArgDrainWrap* w, ArgSelMode mode) {
     w->saved_count = g_arg_drain_count;
     w->count = 0;
-    memset(w->scoped, 0, sizeof(w->scoped));
-    memset(w->held, 0, sizeof(w->held));
-    memset(w->taken, 0, sizeof(w->taken));
-    memset(w->drop, 0, sizeof(w->drop));
+    w->cap = ARG_DRAIN_INLINE;
+    w->idx = w->idx_in;
+    w->closure = w->closure_in;
+    w->drop = w->drop_in;
+    w->scoped = w->scoped_in;
+    w->held = w->held_in;
+    w->taken = w->taken_in;
+    memset(w->closure_in, 0, sizeof(w->closure_in));
+    memset(w->scoped_in, 0, sizeof(w->scoped_in));
+    memset(w->held_in, 0, sizeof(w->held_in));
+    memset(w->taken_in, 0, sizeof(w->taken_in));
+    memset(w->drop_in, 0, sizeof(w->drop_in));
     if (!w->have_value && !is_void) return;
     int store_idx = mode == ARG_SEL_CALL && func_name ? container_store_value_index(gen, expr) : -1;
-    for (int ai = first_arg; ai < expr->child_count && w->count < 16; ai++) {
+    for (int ai = first_arg; ai < expr->child_count; ai++) {
+        arg_drain_room(w);
         ASTNode* arg = expr->children[ai];
         if (!arg) continue;
         int borrowed = call_arg_borrowed(gen, expr, func_name, ai, mode, store_idx);
@@ -675,7 +759,8 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
          * and is released after the call. One wrapped into an optional or a
          * tuple parameter is that argument's temporary's
          * (emit_composite_arg_temp). */
-        if (arg->type == AST_IF_EXPRESSION && arg->node_type && branch_value_has_fresh(gen, arg)) {
+        if (arg->type == AST_IF_EXPRESSION && arg->node_type && !type_is_slice(arg->node_type) &&
+            branch_value_has_fresh(gen, arg)) {
             Type* at = arg->node_type;
             TypeKind pk = func_name ? lookup_callee_param_kind(gen, func_name, ai) : TYPE_UNKNOWN;
             if (arg_drain_lookup(arg) || pk == TYPE_OPTIONAL || pk == TYPE_TUPLE) continue;
@@ -693,15 +778,17 @@ static void arg_drain_select(CodeGenerator* gen, ASTNode* expr, int first_arg,
             continue;
         }
         /* #3549: a slice that owns the buffer it holds, made for the call:
-         * slice ownership marks the arguments it gives the call to drop (a
-         * fresh buffer given to a parameter that neither keeps it nor hands
-         * a view of it back, slice_own.c), and the call drops it as the
-         * owning local it would have been bound to would be. */
-        if (arg->type == AST_FUNCTION_CALL && type_is_slice(arg->node_type) &&
+         * slice ownership marks the arguments it gives the call to release (a
+         * fresh buffer given to a parameter that does not keep it, #3568: a
+         * callee that keeps it takes its own reference), and the call releases
+         * it as the local it would have been bound to would be. */
+        if ((arg->type == AST_FUNCTION_CALL || arg->type == AST_IF_EXPRESSION ||
+             arg->type == AST_MATCH_STATEMENT || arg->type == AST_SLICE_EXPR) &&
+            type_is_slice(arg->node_type) &&
             annotation_has_marker(arg->annotation, "slice_temp")) {
             if (mode != ARG_SEL_OPERATOR && borrowed && !arg_drain_lookup(arg)) {
                 w->closure[w->count] = 3;
-                w->drop[w->count] = own_slice_elem_drop_fn(gen, arg->node_type);
+                w->drop[w->count] = "aether_slice_release_at";
                 w->idx[w->count++] = ai;
             }
             continue;
@@ -757,7 +844,7 @@ static int closure_callee_is_path(ASTNode* e) {
 
 static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     if (w->count == 0) return;
-    char* names[16] = {0};
+    char** names = (char**)aether_xrealloc(NULL, sizeof(char*) * (size_t)w->count);
     seq_open(gen, &w->seq);
     /* Pre-mint all temp names BEFORE recursing into generate_expression:
      * the recursion may itself open inner wraps and mint their own temps,
@@ -828,6 +915,7 @@ static void arg_drain_open(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) {
     for (int h = 0; h < w->count; h++) {
         arg_drain_bind(expr->children[w->idx[h]], names[h]);
     }
+    free(names);
     /* A void parent emits the call bare (no _ad_r); the wrap yields void
      * through the final free in arg_drain_close. */
     w->r = NULL;
@@ -868,6 +956,7 @@ static void arg_drain_close(CodeGenerator* gen, ASTNode* expr, ArgDrainWrap* w) 
      * yields void. */
     seq_close(gen, &w->seq);
     arg_drain_truncate(w->saved_count);
+    arg_drain_slots_free(w);
 }
 
 /* #3549: `node` lowered by `emit` as the builtin `name` with no value (a
@@ -1678,6 +1767,50 @@ static int order_hoist_set(CodeGenerator* gen, ASTNode** ops, int n, int* hoist)
 
 #define ORDER_MAX_OPERANDS 32
 
+/* Room for the operands order_operands or ctl_operands lists for `e`, and
+ * whether each is hoisted (#3574): ORDER_MAX_OPERANDS of them in the
+ * struct, the heap past them. With only those, a call of more arguments, a
+ * struct or message of more fields or a list of more elements was left in
+ * C's unspecified order, so `f(i++, ..., i)` read `i` in either order. */
+typedef struct {
+    ASTNode** ops;
+    int* hoist;
+    int cap;
+    ASTNode* ops_in[ORDER_MAX_OPERANDS];
+    int hoist_in[ORDER_MAX_OPERANDS];
+} OrderOps;
+
+/* An upper bound of the operands either list holds for `e`: its children,
+ * a send's message fields, an assignment target's indexes, and two. */
+static int order_operand_room(const ASTNode* e) {
+    if (!e) return 2;
+    int n = 2 + e->child_count;
+    if ((e->type == AST_SEND_FIRE_FORGET || e->type == AST_SEND_ASK) && e->child_count > 1 &&
+        e->children[1])
+        n += e->children[1]->child_count;
+    if (e->type == AST_BINARY_EXPRESSION && e->child_count > 0)
+        for (const ASTNode* t = e->children[0]; t && t->child_count > 0; t = t->children[0]) n++;
+    return n;
+}
+
+static void order_ops_init(OrderOps* o, int room) {
+    if (room <= ORDER_MAX_OPERANDS) {
+        o->ops = o->ops_in;
+        o->hoist = o->hoist_in;
+        o->cap = ORDER_MAX_OPERANDS;
+        return;
+    }
+    o->ops = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)room);
+    o->hoist = (int*)aether_xrealloc(NULL, sizeof(int) * (size_t)room);
+    o->cap = room;
+}
+
+static void order_ops_free(OrderOps* o) {
+    if (o->ops == o->ops_in) return;
+    free(o->ops);
+    free(o->hoist);
+}
+
 /* The indexes an assignment's target evaluates before the store, in source
  * order (`a[i][j] = v` reads `i` then `j`), appended to `ops` (#2516). */
 static int order_target_operands(ASTNode* lhs, ASTNode** ops, int n, int cap) {
@@ -1710,6 +1843,15 @@ static int order_operands(ASTNode* expr, ASTNode** ops, int cap) {
              * or emptied instead of it (`g.push(make(...))` on a module
              * global grew a copy). */
             if (expr->value && strncmp(expr->value, "__slice_", 8) == 0) return 0;
+            /* #3568: an `append` that consumes its slice's place
+             * (`slice_consumes`) empties the place itself after it reads
+             * `v`: a temporary of the place, read first, was emptied
+             * instead, and the place, a cell a closure shares, kept the
+             * reference the growth had used, which its next store gave back
+             * again. */
+            if (expr->value && strcmp(expr->value, "append") == 0 &&
+                annotation_has_marker(expr->annotation, "slice_consumes"))
+                return 0;
             for (int k = 0; k < expr->child_count; k++) {
                 /* Named arguments stand in parameter order and are
                  * evaluated in the order written (#2850). */
@@ -1921,8 +2063,10 @@ void order_prelude_end(int depth) {
  * or NULL: an element that reads it is evaluated before the first store,
  * so `a = [a[1], a[0]]` swaps. */
 void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char* target) {
-    if (!items || n < 1 || n > ORDER_MAX_OPERANDS) return;
-    int hoist[ORDER_MAX_OPERANDS];
+    if (!items || n < 1) return;
+    OrderOps room;
+    order_ops_init(&room, n);
+    int* hoist = room.hoist;
     int any = n >= 2 ? order_hoist_set(gen, items, n, hoist) : 0;
     if (n < 2) hoist[0] = 0;
     for (int k = 0; target && k < n; k++) {
@@ -1932,7 +2076,10 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
             any = 1;
         }
     }
-    if (!any) return;
+    if (!any) {
+        order_ops_free(&room);
+        return;
+    }
     /* Statements, ahead of the one the list belongs to: `T _eoN = (op);`,
      * T inferred (__auto_type) where the compiler can, and the operand's
      * own type elsewhere (#2765). */
@@ -1946,18 +2093,84 @@ void order_prelude_begin(CodeGenerator* gen, ASTNode** items, int n, const char*
         fprintf(gen->output, "); ");
         order_bind(items[k], name);
     }
+    order_ops_free(&room);
+}
+
+/* The operands one ordered sequence evaluates ahead, in the order it
+ * evaluates them, each with the construct it is an operand of (#3574). */
+typedef struct {
+    ASTNode** op;
+    ASTNode** parent;
+    int n;
+    int cap;
+} OrderPlan;
+
+static void order_plan_add(OrderPlan* p, ASTNode* op, ASTNode* parent) {
+    if (p->n == p->cap) {
+        p->cap = p->cap ? p->cap * 2 : 16;
+        p->op = (ASTNode**)aether_xrealloc(p->op, sizeof(ASTNode*) * (size_t)p->cap);
+        p->parent = (ASTNode**)aether_xrealloc(p->parent, sizeof(ASTNode*) * (size_t)p->cap);
+    }
+    p->op[p->n] = op;
+    p->parent[p->n] = parent;
+    p->n++;
+}
+
+static ASTNode* g_slice_stmt_inner;
+
+/* Can the operands `op` evaluates ahead go in the sequence of the construct
+ * `op` is an operand of? Its own would otherwise be one more statement
+ * expression inside that one's (generate_expression, emit_in_operand_order):
+ * a chain of `a() + b() + ...` nested one per operator, three brackets each,
+ * and Clang refuses C more than 256 deep. Not an operand already evaluated,
+ * a send (written as a statement), nor a call generate_expression takes
+ * before it orders anything (a store target's, a slice statement
+ * temporary's, one returning an array), which orders its own. */
+static int order_splices(CodeGenerator* gen, ASTNode* op) {
+    if (!op || order_bound(op) || op->type == AST_SEND_FIRE_FORGET) return 0;
+    if (op->type != AST_FUNCTION_CALL) return 1;
+    if (gen->generating_lvalue) return 0;
+    if (op != g_slice_stmt_inner && annotation_has_marker(op->annotation, "slice_stmt_temp") &&
+        hoist_ready(gen))
+        return 0;
+    if (is_sized_array_param(op->node_type) && !gen->array_call_raw && hoist_ready(gen))
+        return 0;
+    return 1;
+}
+
+/* Plan the operands `expr` evaluates ahead (#3574). Each operand's own come
+ * first, from as deep as its operands go: every operand order_operands lists
+ * is evaluated unconditionally whenever its construct is, so what one of
+ * them evaluates ahead runs where the operand would have begun, still after
+ * the operands before it, which it does not conflict with or which were
+ * evaluated ahead already. Then the operand itself, when a later one
+ * conflicts with it. The C of an operator chain, or of calls inside calls,
+ * is then one sequence whatever its length. Returns whether `expr` has an
+ * operand of its own to evaluate ahead, the condition for a sequence. */
+static int order_plan(CodeGenerator* gen, ASTNode* expr, OrderPlan* p) {
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(expr));
+    int n = order_operands(expr, room.ops, room.cap);
+    int own = n >= 2 && order_hoist_set(gen, room.ops, n, room.hoist);
+    for (int k = 0; k < n; k++) {
+        ASTNode* op = room.ops[k];
+        if (order_splices(gen, op)) order_plan(gen, op, p);
+        if (own && room.hoist[k]) order_plan_add(p, op, expr);
+    }
+    order_ops_free(&room);
+    return own;
 }
 
 /* Emit `expr` with the operands a later one conflicts with evaluated first,
  * in source order, into temps it then reads, an ordered sequence (#2765):
  *     ({ __auto_type _eo0 = (i++); f(_eo0, i); })     GCC-compatible
  *     (_eo0 = (i++), f(_eo0, i))                       any other compiler
- * Returns 0, emitting nothing, when no operand needs it. */
-static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int hoist[ORDER_MAX_OPERANDS];
-    if (order_bound(expr)) return 0;   /* emitted as the temp that holds it */
-    int n = order_operands(expr, ops, ORDER_MAX_OPERANDS);
+ * Returns 0, emitting nothing, when no operand needs it. The sequence holds
+ * the temps of its operands' operands too (order_plan), so the operands
+ * themselves are then written with nothing left to order (#3574). */
+static int emit_in_operand_order_in(CodeGenerator* gen, ASTNode* expr, ASTNode** ops, int* hoist,
+                                     int room) {
+    int n = order_operands(expr, ops, room);
     if (n < 2 || !order_hoist_set(gen, ops, n, hoist)) return 0;
     int saved = g_order_count;
     if (expr->type == AST_SEND_FIRE_FORGET) {
@@ -1984,18 +2197,23 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
         order_prelude_end(saved);
         return 1;
     }
+    OrderPlan plan = { NULL, NULL, 0, 0 };
+    order_plan(gen, expr, &plan);
     int typed = 1;
-    for (int k = 0; k < n; k++)
-        if (hoist[k] && !order_operand_hands_off(gen, expr, ops[k]) && !order_c11_type(ops[k]))
+    for (int k = 0; k < plan.n; k++)
+        if (!order_operand_hands_off(gen, plan.parent[k], plan.op[k]) &&
+            !order_c11_type(plan.op[k]))
             typed = 0;
     TempSeq s;
     seq_open_ordered(gen, &s, typed);
-    for (int k = 0; k < n; k++) {
-        if (!hoist[k]) continue;
-        int kind = order_operand_hands_off(gen, expr, ops[k]);
-        if (kind) order_hoist_handoff(gen, &s, ops[k], kind, expr);
-        else order_hoist_operand(gen, &s, ops[k]);
+    for (int k = 0; k < plan.n; k++) {
+        ASTNode* op = plan.op[k];
+        int kind = order_operand_hands_off(gen, plan.parent[k], op);
+        if (kind) order_hoist_handoff(gen, &s, op, kind, plan.parent[k]);
+        else order_hoist_operand(gen, &s, op);
     }
+    free(plan.op);
+    free(plan.parent);
     ASTNode* saved_emitting = g_order_emitting;
     g_order_emitting = expr;
     generate_expression(gen, expr);
@@ -2003,6 +2221,15 @@ static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
     seq_close(gen, &s);
     order_prelude_end(saved);
     return 1;
+}
+
+static int emit_in_operand_order(CodeGenerator* gen, ASTNode* expr) {
+    if (order_bound(expr)) return 0;   /* emitted as the temp that holds it */
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(expr));
+    int done = emit_in_operand_order_in(gen, expr, room.ops, room.hoist, room.cap);
+    order_ops_free(&room);
+    return done;
 }
 
 /* Index of the last child that must be evaluated into a temp to keep the
@@ -2407,6 +2634,12 @@ static int left_operand_is_chain_link(ASTNode* expr) {
         left->child_count < 2 || !left->node_type) {
         return 0;
     }
+    /* #3574: `a && b && c` groups the same way, and neither operator has a
+     * lowering of its own: a left link of the same one needs no brackets
+     * either. Each one took a pair, and Clang refused a chain of 255. */
+    if ((strcmp(expr->value, "&&") == 0 || strcmp(expr->value, "||") == 0) &&
+        strcmp(left->value, expr->value) == 0)
+        return 1;
     switch (left->node_type->kind) {
         case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_FLOAT:
         case TYPE_BYTE: case TYPE_UINT8: case TYPE_UINT16: case TYPE_UINT32:
@@ -2423,6 +2656,69 @@ static int left_operand_is_chain_link(ASTNode* expr) {
         if (parent && child) return 1;
     }
     return 0;
+}
+
+/* A link of a left operator chain that its own C may hold in brackets or a
+ * call, `expr` with its left operand: a binary operation, not a store, not
+ * `&&` or `||` (whose right side runs on the left's say), and not already
+ * evaluated. */
+static int chain_link(ASTNode* expr) {
+    return expr && expr->type == AST_BINARY_EXPRESSION && expr->child_count == 2 &&
+           expr->value && expr->children[0] && !is_assignment_op(expr->value) &&
+           strcmp(expr->value, "&&") != 0 && strcmp(expr->value, "||") != 0 &&
+           !order_bound(expr);
+}
+
+/* Links of one chain that each nest the C once past which the chain is
+ * written link by link. */
+#define CHAIN_NESTING_LINKS 16
+
+/* #3574: a left chain whose links each nest the C once more: a comparison
+ * of a comparison (`a < b < c`, which C reads the same unbracketed but
+ * warns about), an integer `/`, `%`, `<<` or `>>` (each a checked call or a
+ * masked cast around its left operand, #3524), any operation lowered on
+ * its own (a bit_set's, a pointer's, a duration's). Two brackets a link and
+ * more, and Clang refuses C nested 256 deep: a chain of 128 links did not
+ * build. Past CHAIN_NESTING_LINKS such links the chain is one sequence,
+ * each link evaluated into a temporary the next reads as its left operand:
+ * left to right, each link's checks (a division by zero, MIN / -1) where
+ * the link is, before the operands after it. Returns 0, emitting nothing,
+ * for a shorter chain, or where no temporary can be declared ahead of the
+ * statement. */
+static int emit_chain_by_links(CodeGenerator* gen, ASTNode* expr) {
+    if (!chain_link(expr) || !hoist_ready(gen)) return 0;
+    int links = 0, nesting = 0;
+    for (ASTNode* t = expr; chain_link(t); t = t->children[0]) {
+        links++;
+        if (!left_operand_is_chain_link(t) ||
+            int_edge_op_applies(gen, t->value, t->children[0]->node_type, t->children[1],
+                                t->node_type))
+            nesting++;
+    }
+    if (nesting <= CHAIN_NESTING_LINKS) return 0;
+    ASTNode** spine = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * (size_t)links);
+    int n = 0;
+    for (ASTNode* t = expr; chain_link(t); t = t->children[0]) spine[n++] = t;
+    int typed = 1;
+    for (int k = 1; k < n; k++)
+        if (!order_c11_type(spine[k])) typed = 0;
+    int saved = order_prelude_depth();
+    TempSeq s;
+    seq_open_ordered(gen, &s, typed);
+    for (int k = n - 1; k >= 1; k--) {
+        const char* name = cg_internf("_eo%d", g_order_counter++);
+        seq_let_named(gen, &s, order_c11_type(spine[k]), name);
+        fprintf(gen->output, "(");
+        generate_expression(gen, spine[k]);
+        fprintf(gen->output, ")");
+        seq_next(gen, &s);
+        order_bind(spine[k], name);
+    }
+    free(spine);
+    generate_expression(gen, expr);
+    seq_close(gen, &s);
+    order_prelude_end(saved);
+    return 1;
 }
 
 static int duration_unit_ns_codegen(const char* unit, long long* out) {
@@ -3496,6 +3792,10 @@ static int is_assigned_to(ASTNode* node, const char* name) {
         node->children[0]->value && strcmp(node->children[0]->value, name) == 0) {
         return 1;
     }
+    /* `name.push(v)` writes `name` (#3568): the closure's copy of a slice
+     * grew under the copy the environment holds, so a push is a write the
+     * frames share through a cell, as an assignment is. */
+    if (ast_pushes_name(node, name)) return 1;
     // Tuple destructure assigns to each non-discard target; if `name` is
     // any of them, treat as assignment for promotion analysis. Without
     // this, `out, status, _ = sh(...)` inside a closure body would
@@ -3524,6 +3824,7 @@ static int is_builtin_name(const char* name) {
         "getenv", "atoi", "clock_ns", "typeof", "is_type", "convert_type",
         "print_char", "wait_for_idle", "each", "map", "filter", "__slice_readonly", "append",
         "__slice_take", "__slice_lend", "__slice_drop", "__slice_set", "__slice_push",
+        "__slice_copy", "__slice_set_shared", "__slice_hold",
         NULL
     };
     for (int i = 0; builtins[i]; i++) {
@@ -4233,8 +4534,10 @@ static ASTNode* find_enclosing_actor(ASTNode* root, ASTNode* arm_node) {
  *   - a struct is copied, by `_aether_copy_<Name>` when it owns strings, closures
  *     or arrays (#2504), so the copy holds its own;
  *   - a tuple, an optional, a sum and a fixed-size array are copied with a
- *     reference taken to each part they own (capture_take, #2921, #3005).
- * A slice is not judged here and is refused. */
+ *     reference taken to each part they own (capture_take, #2921, #3005);
+ *   - a slice's buffer is counted (#3568): the copy takes a reference of
+ *     its own to it (capture_take), which the environment gives back.
+ * A fixed-size array of slices is not judged here and is refused. */
 static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* closure,
                                                   ASTNode* sd) {
     Type* t = sd ? sd->node_type : NULL;
@@ -4249,7 +4552,8 @@ static const char* arm_closure_state_read_refusal(CodeGenerator* gen, ASTNode* c
             return NULL;
         case TYPE_ARRAY: {
             Type* e = t->element_type;
-            if (t->array_size <= 0 || !e) return "a slice is not judged here";
+            if (!e) return "its element type is not known here";
+            if (t->array_size <= 0) return NULL;   /* a slice, counted (#3568) */
             switch (e->kind) {
                 case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32:
                 case TYPE_UINT16: case TYPE_UINT8: case TYPE_DURATION: case TYPE_FLOAT:
@@ -4294,23 +4598,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
         // AST_VARIABLE_DECLARATION children of the actor with
         // annotation marking them as state vars. Actors typically list
         // state decls as top-level children of AST_ACTOR_DEFINITION.
-        const char* state_names[64];
-        ASTNode* state_decls[64];
-        int state_count = 0;
-        for (int j = 0; j < actor->child_count && state_count < 64; j++) {
-            ASTNode* c = actor->children[j];
-            if (!c || !c->value) continue;
-            if (c->type == AST_STATE_DECLARATION ||
-                (c->type == AST_VARIABLE_DECLARATION && c->annotation &&
-                 strcmp(c->annotation, "state") == 0)) {
-                state_decls[state_count] = c;
-                state_names[state_count++] = c->value;
-            }
-        }
-        if (state_count == 0) continue;
-
-        // Walk the closure body looking for assignments to any of the
-        // state field names.
+        // Every one (#3574): 64 slots left a write to a state field past
+        // the 64th unrefused, and the closure wrote a stale local.
         ASTNode* closure = gen->closures[ci].closure_node;
         ASTNode* body = NULL;
         for (int k = closure->child_count - 1; k >= 0; k--) {
@@ -4320,7 +4609,28 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
             }
         }
         if (!body) continue;
+        size_t slots = (size_t)(actor->child_count > 0 ? actor->child_count : 1);
+        const char** state_names = (const char**)aether_xrealloc(NULL, sizeof(char*) * slots);
+        ASTNode** state_decls = (ASTNode**)aether_xrealloc(NULL, sizeof(ASTNode*) * slots);
+        int state_count = 0;
+        for (int j = 0; j < actor->child_count; j++) {
+            ASTNode* c = actor->children[j];
+            if (!c || !c->value) continue;
+            if (c->type == AST_STATE_DECLARATION ||
+                (c->type == AST_VARIABLE_DECLARATION && c->annotation &&
+                 strcmp(c->annotation, "state") == 0)) {
+                state_decls[state_count] = c;
+                state_names[state_count++] = c->value;
+            }
+        }
+        if (state_count == 0) {
+            free(state_names);
+            free(state_decls);
+            continue;
+        }
 
+        // Walk the closure body looking for assignments to any of the
+        // state field names.
         for (int n = 0; n < state_count; n++) {
             /* An element or field write (`hist[i] = v`, `pos.x += 1`)
              * writes the state field as much as `hist = ...` does. A state
@@ -4337,8 +4647,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                 const char* why = captured
                     ? arm_closure_state_read_refusal(gen, closure, state_decls[n]) : NULL;
                 if (!why) continue;
-                char rmsg[512];
-                snprintf(rmsg, sizeof(rmsg),
+                const char* rmsg = "";
+                rmsg = aether_internf(
                     "closure inside actor '%s' handler reads state field '%s' (%s): "
                     "not supported, the closure copies the field when it is made and %s, "
                     "so a later store into the state would free what it reads",
@@ -4346,8 +4656,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                     state_decls[n]->node_type ? type_to_string(state_decls[n]->node_type)
                                               : "unknown",
                     why);
-                char rsug[256];
-                snprintf(rsug, sizeof(rsug),
+                const char* rsug = "";
+                rsug = aether_internf(
                     "read what the closure needs out of '%s' into arm locals first "
                     "(an element `f = %s[0]`, a field `name = %s[0].name`) and use those",
                     state_names[n], state_names[n], state_names[n]);
@@ -4357,15 +4667,14 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                 continue;
             }
             // Report error. Location: closure node.
-            char msg[512];
+            const char* msg = "";
             const char* actor_name = actor->value ? actor->value : "actor";
-            snprintf(msg, sizeof(msg),
+            msg = aether_internf(
                 "closure inside actor '%s' handler writes state field '%s': "
                 "not supported (closures can't mutate actor state; the "
                 "closure has no access to self)",
                 actor_name, state_names[n]);
-            char suggestion[256];
-            snprintf(suggestion, sizeof(suggestion),
+            const char* suggestion = aether_internf(
                 "copy '%s' into an arm-local, mutate the local, then write "
                 "back. See tests/syntax/README_closure_actor_state_limitation.md "
                 "for the workaround pattern.",
@@ -4375,6 +4684,8 @@ int validate_closure_state_mutations(CodeGenerator* gen, ASTNode* program) {
                               AETHER_ERR_ACTOR_ERROR);
             ok = 0;
         }
+        free(state_names);
+        free(state_decls);
     }
     return ok;
 }
@@ -4607,14 +4918,21 @@ static int capture_is_promoted(CodeGenerator* gen, const char* name, const char*
 static Type* capture_composite_type(CodeGenerator* gen, const char* name, const char* parent_func) {
     if (capture_is_promoted(gen, name, parent_func)) return NULL;
     Type* t = lookup_var_type(gen, name, parent_func);
+    /* #3568: a slice the closure reads is held by its environment, with a
+     * reference of its own, which the environment's teardown gives back. */
+    if (t && type_is_slice(t)) return t;
     if (!t || !own_type_owns(gen, t)) return NULL;
     if (own_value_composite(gen, t) || t->kind == TYPE_PTR) return t;
     return type_is_sized_array(t) && t->array_size > 0 ? t : NULL;
 }
 
-/* The retain of the environment's copy of `name`, of composite type `t`. */
+/* The retain of the environment's copy of `name`, of composite type `t`. A
+ * slice is published too: the closure may run on another thread. */
 static void capture_take(CodeGenerator* gen, const char* name, Type* t) {
-    if (t->kind == TYPE_PTR)
+    if (type_is_slice(t))
+        fprintf(gen->output, " aether_slice_retain(_e->%s); aether_slice_publish(_e->%s);", name,
+                name);
+    else if (t->kind == TYPE_PTR)
         fprintf(gen->output, " _e->%s = string_seq_retain(_e->%s);", name, name);
     else if (t->kind == TYPE_ARRAY)
         fprintf(gen->output, " %s((%s*)_e->%s);", own_fn(gen, t, "retain"),
@@ -5503,10 +5821,13 @@ MessageFieldDef* find_msg_field(MessageDef* msg_def, const char* name) {
 // The msg_arr_id_for_field map is stored on the gen state as a sparse
 // per-send table (reset via `reset_msg_arr_map`).
 
-#define MAX_MSG_ARR_FIELDS 16
-static int msg_arr_ids[MAX_MSG_ARR_FIELDS];
-static const char* msg_arr_field_names[MAX_MSG_ARR_FIELDS];
+/* Every array field of the message (#3574): 16 slots left a field past
+ * them unrecorded, and its init a compound literal the receiver read
+ * after the send's block had ended. */
+static int* msg_arr_ids = NULL;
+static const char** msg_arr_field_names = NULL;
 static int msg_arr_count = 0;
+static int msg_arr_cap = 0;
 
 static void reset_msg_arr_map(void) {
     msg_arr_count = 0;
@@ -5554,11 +5875,15 @@ void emit_message_array_hoists(CodeGenerator* gen, ASTNode* message, MessageDef*
         }
         fprintf(gen->output, "}; ");
 
-        if (msg_arr_count < MAX_MSG_ARR_FIELDS) {
-            msg_arr_ids[msg_arr_count] = id;
-            msg_arr_field_names[msg_arr_count] = field_init->value;
-            msg_arr_count++;
+        if (msg_arr_count == msg_arr_cap) {
+            msg_arr_cap = msg_arr_cap ? msg_arr_cap * 2 : 16;
+            msg_arr_ids = (int*)aether_xrealloc(msg_arr_ids, sizeof(int) * (size_t)msg_arr_cap);
+            msg_arr_field_names = (const char**)aether_xrealloc(
+                (void*)msg_arr_field_names, sizeof(char*) * (size_t)msg_arr_cap);
         }
+        msg_arr_ids[msg_arr_count] = id;
+        msg_arr_field_names[msg_arr_count] = field_init->value;
+        msg_arr_count++;
     }
 }
 
@@ -5595,7 +5920,7 @@ void emit_message_publishes(CodeGenerator* gen, ASTNode* message, const char* lv
         if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
         Type* ft = message_field_type(gen->program, message->value, fi->value);
         if (!ft || ft->kind == TYPE_STRING || ft->kind == TYPE_FUNCTION ||
-            !own_type_owns(gen, ft)) continue;
+            !own_part_owns(gen, ft)) continue;
         const char* call = own_publish_call(gen, ft, cg_internf("%s.%s", lv, fi->value));
         if (!call) continue;
         if (s) {
@@ -5829,7 +6154,7 @@ int message_needs_publish(CodeGenerator* gen, ASTNode* message) {
         ASTNode* fi = message->children[i];
         if (!fi || fi->type != AST_FIELD_INIT || !fi->value || fi->child_count == 0) continue;
         Type* ft = message_field_type(gen->program, message->value, fi->value);
-        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_type_owns(gen, ft) &&
+        if (ft && ft->kind != TYPE_STRING && ft->kind != TYPE_FUNCTION && own_part_owns(gen, ft) &&
             own_publish_call(gen, ft, "x"))
             return 1;
     }
@@ -6611,10 +6936,280 @@ static Type* match_operand_type(ASTNode* m) {
     return t && t->kind != TYPE_UNKNOWN && t->kind != TYPE_VOID ? t : NULL;
 }
 
+/* --- Depth (#3574) ----------------------------------------------------------
+ *
+ * C compilers refuse an expression nested past a fixed depth (Clang 256
+ * brackets), and an expression's C nests about as its tree does: a call in
+ * a call, a cast of a cast, `!` of `!`, a segment of an interpolation in an
+ * interpolation, each one to four brackets deeper. The parser takes trees
+ * far deeper (AETHER_MAX_PARSE_DEPTH), and some it builds a link a token
+ * (`x.f().f()`, `x as int as long`), whatever the depth.
+ *
+ * So every DEPTH_STEP levels of a statement's expression a node is run
+ * ahead of the statement into a temporary, the way a construct that runs
+ * statements is (ctl_linearize: what the statement evaluates before it
+ * first, a part that runs on a test under that test), and the statement
+ * reads the temporary: no stretch of the C is deeper than DEPTH_STEP
+ * levels. A left chain of one operator, which C writes flat or
+ * emit_chain_by_links writes link by link, counts as one level, and so
+ * does an `else if` chain of an `if` expression, which ctl_if_chain writes
+ * flat. The nodes are found once, before the program is written
+ * (codegen_mark_depth). */
+#define DEPTH_STEP 24
+/* Links of an `if` expression's `else if` chain past which it is written
+ * flat, ahead of its statement (ctl_if_chain). */
+#define IF_CHAIN_LINKS 16
+
+static const void** g_depth_keys = NULL;
+static int g_depth_cap = 0;
+static int g_depth_count = 0;
+
+static unsigned depth_hash(const void* p) {
+    uintptr_t x = (uintptr_t)p;
+    x ^= x >> 17;
+    x *= (uintptr_t)0x9E3779B97F4A7C15ULL;
+    x ^= x >> 29;
+    return (unsigned)x;
+}
+
+static void depth_put(const void* p);
+
+static void depth_grow(void) {
+    const void** old = g_depth_keys;
+    int old_cap = g_depth_cap;
+    g_depth_cap = old_cap ? old_cap * 2 : 64;
+    g_depth_keys = (const void**)calloc((size_t)g_depth_cap, sizeof(void*));
+    if (!g_depth_keys) {
+        fprintf(stderr, "Fatal: out of memory marking deep expressions\n");
+        exit(1);
+    }
+    g_depth_count = 0;
+    for (int i = 0; i < old_cap; i++)
+        if (old[i]) depth_put(old[i]);
+    free(old);
+}
+
+static void depth_put(const void* p) {
+    if ((g_depth_count + 1) * 2 > g_depth_cap) depth_grow();
+    unsigned m = (unsigned)g_depth_cap - 1;
+    unsigned i = depth_hash(p) & m;
+    while (g_depth_keys[i] && g_depth_keys[i] != p) i = (i + 1) & m;
+    if (!g_depth_keys[i]) {
+        g_depth_keys[i] = p;
+        g_depth_count++;
+    }
+}
+
+static int depth_marked(const ASTNode* p) {
+    if (!g_depth_count || !p) return 0;
+    unsigned m = (unsigned)g_depth_cap - 1;
+    unsigned i = depth_hash(p) & m;
+    while (g_depth_keys[i]) {
+        if (g_depth_keys[i] == p) return 1;
+        i = (i + 1) & m;
+    }
+    return 0;
+}
+
+/* A node of an expression: its children are a level deeper. Anything else
+ * (a statement, a block, a closure's body, a `match` operand's arms) starts
+ * its children afresh. */
+static int depth_expr_node(const ASTNode* n) {
+    switch (n->type) {
+        case AST_FUNCTION_CALL: case AST_BINARY_EXPRESSION: case AST_UNARY_EXPRESSION:
+        case AST_TUPLE_UNWRAP: case AST_ARRAY_LITERAL: case AST_TUPLE_LITERAL:
+        case AST_ARRAY_ACCESS: case AST_MEMBER_ACCESS: case AST_STRUCT_LITERAL:
+        case AST_STRING_INTERP: case AST_PTR_AS_STRUCT_CAST: case AST_SLICE_EXPR:
+        case AST_SLICE_FROM_ARRAY: case AST_SLICE_TO_PTR: case AST_PTR_AS_ARRAY_CAST:
+        case AST_PTR_AS_FN_CAST: case AST_IF_EXPRESSION: case AST_VALUE_CAST:
+        case AST_NULL_COALESCE: case AST_OPTIONAL_CHAIN: case AST_OR_ELSE:
+        case AST_MESSAGE_CONSTRUCTOR: case AST_FIELD_INIT: case AST_SEND_ASK: case AST_NAMED_ARG:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+static int if_chain_links(const ASTNode* e) {
+    int n = 0;
+    while (e && e->type == AST_IF_EXPRESSION && e->child_count >= 3) {
+        n++;
+        e = e->children[2];
+    }
+    return n;
+}
+
+/* The value types of an `if` expression whose chain ctl_if_chain writes
+ * flat into one temporary: a number, a bool or an enum, which a consumer
+ * reads as it is. A string, an optional, a struct, a closure, a tuple or a
+ * slice its consumers take branch by branch (a fresh value moved in, a
+ * borrowed one retained or copied, each arm wrapped), which one temporary
+ * holding whichever branch ran cannot say. */
+static int if_chain_flat_type(const Type* t) {
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+        case TYPE_UINT8: case TYPE_BYTE: case TYPE_BOOL: case TYPE_FLOAT: case TYPE_FLOAT32:
+        case TYPE_ENUM:
+            return 1;
+        default:
+            return 0;
+    }
+}
+
+/* #3574: does a consumer take `if` expression `e` branch by branch (each
+ * arm wrapped, taken or coerced on its own)? Not one evaluated ahead of its
+ * statement already (ctl_if_chain, an operand evaluated ahead in order): its
+ * temporary holds the value of the branch that ran, and is read as any value
+ * is. Taken branch by branch, its chain was written again inline: every
+ * condition ran twice. */
+int if_takes_by_branch(ASTNode* e) {
+    return e && e->type == AST_IF_EXPRESSION && e->child_count >= 3 && !order_bound(e);
+}
+
+/* A node a temporary of its statement can hold in its place: one whose
+ * value is a scalar, a pointer or a string made fresh (an interpolation, a
+ * call returning a string of its own), and that is no construct of its own
+ * (a store, `&&`, `||`, `++`, a call with a trailing block, a slice
+ * ownership intrinsic). */
+static int depth_holdable(CodeGenerator* gen, ASTNode* n) {
+    switch (n->type) {
+        case AST_FUNCTION_CALL:
+            if (!n->value || strcmp(n->value, "select") == 0 ||
+                strncmp(n->value, "__slice_", 8) == 0 || trailing_dsl_block(gen, n))
+                return 0;
+            for (int i = 0; i < n->child_count; i++)
+                if (n->children[i] && n->children[i]->type == AST_CLOSURE &&
+                    n->children[i]->value && strcmp(n->children[i]->value, "trailing") == 0)
+                    return 0;
+            break;
+        case AST_BINARY_EXPRESSION:
+            if (!n->value || is_assignment_op(n->value) || strcmp(n->value, "&&") == 0 ||
+                strcmp(n->value, "||") == 0)
+                return 0;
+            break;
+        case AST_UNARY_EXPRESSION:
+            if (!n->value || strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0) return 0;
+            break;
+        case AST_VALUE_CAST: case AST_STRING_INTERP: case AST_ARRAY_ACCESS: case AST_MEMBER_ACCESS:
+            break;
+        default:
+            return 0;
+    }
+    Type* t = n->node_type;
+    if (!t) return 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_INT64: case TYPE_UINT64: case TYPE_UINT32: case TYPE_UINT16:
+        case TYPE_UINT8: case TYPE_BYTE: case TYPE_BOOL: case TYPE_FLOAT: case TYPE_ENUM:
+        case TYPE_PTR:
+            break;
+        case TYPE_STRING:
+            /* A string a place holds may be replaced before the statement
+             * reads it; only a fresh one is held. */
+            if (n->type == AST_STRING_INTERP) break;
+            if (n->type == AST_FUNCTION_CALL && is_heap_string_expr(gen, n) &&
+                !string_reads_place(gen, n))
+                break;
+            return 0;
+        default:
+            return 0;
+    }
+    return order_c11_type(n) != NULL;
+}
+
+/* Is child `i` of `n` a place `n` writes or takes the address of: the
+ * operand of `++`, `--` or `&`, the target of a store or a compound
+ * assignment, or what a slice ownership intrinsic grows, sets or empties?
+ * Held in a temporary, the write or the address would land on the
+ * temporary: `n[0]++` would have incremented a copy. */
+static int depth_place_child(const ASTNode* n, int i) {
+    switch (n->type) {
+        case AST_UNARY_EXPRESSION:
+            return i == 0 && n->value &&
+                   (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0 ||
+                    strcmp(n->value, "&") == 0);
+        case AST_BINARY_EXPRESSION:
+            return i == 0 && n->value && is_assignment_op(n->value);
+        case AST_ASSIGNMENT: case AST_COMPOUND_ASSIGNMENT:
+            return i == 0;
+        case AST_FUNCTION_CALL:
+            return n->value && strncmp(n->value, "__slice_", 8) == 0;
+        default:
+            return 0;
+    }
+}
+
+/* `n` at `depth` levels into its statement's expression; `pending`, the
+ * next node that can be held is; `in_chain`, `n` is a link of an `if`
+ * expression's `else if` chain written flat, each of whose conditions and
+ * values is a statement of its own there; `place`, `n` is (in) a place a
+ * write or an address takes (depth_place_child), where nothing is held:
+ * its object would be taken out of the place with it. */
+static void depth_walk(CodeGenerator* gen, ASTNode* n, int depth, int pending, int in_chain,
+                       int place) {
+    if (!n) return;
+    if (place) {
+        for (int i = 0; i < n->child_count; i++) depth_walk(gen, n->children[i], 0, 0, 0, 1);
+        return;
+    }
+    if (!depth_expr_node(n)) {
+        for (int i = 0; i < n->child_count; i++)
+            depth_walk(gen, n->children[i], 0, 0, 0, depth_place_child(n, i));
+        return;
+    }
+    if (!in_chain && n->type == AST_IF_EXPRESSION && if_chain_links(n) > IF_CHAIN_LINKS &&
+        if_chain_flat_type(n->node_type)) {
+        depth_put(n);
+        in_chain = 1;
+    }
+    if (!in_chain && pending && depth_holdable(gen, n)) {
+        depth_put(n);
+        pending = 0;
+    }
+    for (int i = 0; i < n->child_count; i++) {
+        ASTNode* c = n->children[i];
+        if (!c) continue;
+        if (depth_place_child(n, i)) {
+            depth_walk(gen, c, 0, 0, 0, 1);
+            continue;
+        }
+        if (in_chain) {
+            if (i == 2 && c->type == AST_IF_EXPRESSION && c->child_count >= 3)
+                depth_walk(gen, c, depth, 0, 1, 0);
+            else
+                depth_walk(gen, c, 0, 0, 0, 0);
+            continue;
+        }
+        /* A left chain of an operator, an `if` expression's `else if`
+         * chain: one level whatever their length. */
+        int same = (n->type == AST_BINARY_EXPRESSION && i == 0 && c->type == AST_BINARY_EXPRESSION) ||
+                   (n->type == AST_IF_EXPRESSION && i == 2 && c->type == AST_IF_EXPRESSION);
+        int d = same ? depth : depth + 1;
+        depth_walk(gen, c, d, pending || (!same && d % DEPTH_STEP == 0), 0, 0);
+    }
+}
+
+void codegen_mark_depth(CodeGenerator* gen, ASTNode* program) {
+    free(g_depth_keys);
+    g_depth_keys = NULL;
+    g_depth_cap = 0;
+    g_depth_count = 0;
+    depth_walk(gen, program, 0, 0, 0, 0);
+}
+
 /* Is `e` one of the three constructs, in the form that runs statements, and
  * one emit_control_prelude can run ahead of its statement? A `match` used
- * as an operand (#2993) is a fourth: it is a statement whatever its form. */
+ * as an operand (#2993) is a fourth: it is a statement whatever its form.
+ * is_control_value: that, or a node held ahead of its statement for its
+ * depth (#3574). */
+static int is_control_construct(CodeGenerator* gen, ASTNode* e);
+
 int is_control_value(CodeGenerator* gen, ASTNode* e) {
+    return is_control_construct(gen, e) || depth_marked(e);
+}
+
+static int is_control_construct(CodeGenerator* gen, ASTNode* e) {
     if (!e) return 0;
     /* #2974: try_send(ref, Msg { ... }), a send written as statements. */
     if (e->type == AST_SEND_FIRE_FORGET)
@@ -6638,14 +7233,15 @@ int is_control_value(CodeGenerator* gen, ASTNode* e) {
          * arguments evaluated in order, its result taken as owned or
          * copied, a statement's struct temporary) is left as it is: the
          * wrap reads what the call does inside it. */
-        ASTNode* ops[ORDER_MAX_OPERANDS];
-        int hoist[ORDER_MAX_OPERANDS];
-        int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
+        OrderOps room;
+        order_ops_init(&room, order_operand_room(e));
+        int n = order_operands(e, room.ops, room.cap);
         /* A builder's lowering orders its arguments itself, after its
          * block (ctl_builder_args). */
-        if (n >= 2 && !(e->value && is_builder_func_reg(gen, e->value)) &&
-            order_hoist_set(gen, ops, n, hoist))
-            return 0;
+        int ordered = n >= 2 && !(e->value && is_builder_func_reg(gen, e->value)) &&
+                      order_hoist_set(gen, room.ops, n, room.hoist);
+        order_ops_free(&room);
+        if (ordered) return 0;
         return !call_returns_view_of_temp(gen, e) &&
                !call_returns_tuple_view_of_temp(gen, e) && !expr_is_c_view_of_slice(gen, e) &&
                !stmt_struct_temp_of(e);
@@ -6738,7 +7334,7 @@ static void emit_match_operand(CodeGenerator* gen, ASTNode* m) {
  * other node or when temporaries cannot be declared ahead of the
  * statement. */
 int emit_control_prelude(CodeGenerator* gen, ASTNode* e, int discarded) {
-    if (!hoist_ready(gen) || !is_control_value(gen, e)) return 0;
+    if (!hoist_ready(gen) || !is_control_construct(gen, e)) return 0;
     int mark = g_ctl_count;
     const ASTNode* saved = g_ctl_emitting;
     g_ctl_emitting = e;
@@ -6831,6 +7427,21 @@ static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
     return 1;
 }
 
+/* The operand of slice ownership's intrinsic `call` (slice_own.c) that is a
+ * value: what `__slice_copy` and `__slice_lend` read, and what `__slice_set`,
+ * `__slice_set_shared` and `__slice_push` store. NULL for the others, whose
+ * operand is a place (`__slice_take`, `__slice_drop`, `__slice_hold`). */
+static ASTNode* slice_intrinsic_value(ASTNode* call) {
+    const char* f = call->value;
+    if ((strcmp(f, "__slice_copy") == 0 || strcmp(f, "__slice_lend") == 0) &&
+        call->child_count == 1)
+        return call->children[0];
+    if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0 ||
+         strcmp(f, "__slice_push") == 0) && call->child_count == 2)
+        return call->children[1];
+    return NULL;
+}
+
 /* The operands `e` evaluates unconditionally, in source order, into `ops`:
  * an operation whose C spelling leaves their order open (order_operands),
  * and the ones C orders or that have one: a unary operation's, a field's
@@ -6841,6 +7452,17 @@ static int ctl_hoist_operand(CodeGenerator* gen, ASTNode* parent, ASTNode* op) {
 static int ctl_operands(CodeGenerator* gen, ASTNode* e, ASTNode** ops, int cap) {
     (void)gen;
     int n = 0;
+    if (e->type == AST_FUNCTION_CALL && e->value && strncmp(e->value, "__slice_", 8) == 0) {
+        /* #3568: slice ownership's intrinsics order their operands
+         * themselves (order_operands lists none), and the place one names
+         * is no value to read into a temporary; the value one copies,
+         * lends, stores or pushes is its operand here. A `match` there (`ws
+         * = match c { ... }`, copied) was a statement expression. */
+        ASTNode* v = slice_intrinsic_value(e);
+        if (!v) return -1;
+        ops[0] = v;
+        return 1;
+    }
     if (e->type == AST_BINARY_EXPRESSION && e->child_count == 2 && e->value &&
         is_assignment_op(e->value)) {
         /* The target's indexes, then the value: a target with none
@@ -6932,6 +7554,86 @@ static int ctl_guarded(CodeGenerator* gen, const char* test, ASTNode* c) {
     return ok;
 }
 
+/* Branch `br` of an `if` expression of type `vt` into temporary `v`: its
+ * constructs first, then its value, coerced as the ternary coerces it. */
+static void ctl_if_branch(CodeGenerator* gen, ASTNode* br, Type* vt, const char* v) {
+    ctl_linearize(gen, br, 0);
+    print_indent(gen);
+    fprintf(gen->output, "%s = ", v);
+    if (vt->kind == TYPE_SUM && needs_sum_coerce(br, vt)) {
+        emit_sum_coerced(gen, br, vt);
+    } else if (signed_join_of_unsigned(vt, br->node_type)) {
+        fprintf(gen->output, "(%s)(", get_c_type(vt));
+        generate_expression(gen, br);
+        fprintf(gen->output, ")");
+    } else {
+        generate_expression(gen, br);
+    }
+    fprintf(gen->output, ";\n");
+}
+
+/* #3574: an `if` expression whose `else if` chain has more than
+ * IF_CHAIN_LINKS links (depth_walk marks its first), run ahead of its
+ * statement flat:
+ *     _ae_ict = 0;
+ *     <c1's constructs> if (c1) { <v1's> _ae_icv = v1; _ae_ict = 1; }
+ *     if (!_ae_ict) { <c2's> if (c2) { <v2's> _ae_icv = v2; _ae_ict = 1; } }
+ *     ...
+ *     if (!_ae_ict) { <the else's> _ae_icv = else; }
+ * Each condition is evaluated only when none before it held and each value
+ * only when its condition did, as the ternaries `c1 ? v1 : c2 ? v2 : ...`
+ * evaluate them, at one depth whatever the chain's length: the ternaries
+ * nested two brackets a link. */
+static int ctl_if_chain(CodeGenerator* gen, ASTNode* e) {
+    Type* vt = e->node_type;
+    if (!vt || vt->kind == TYPE_VOID || vt->kind == TYPE_UNKNOWN ||
+        (vt->kind == TYPE_OPTIONAL && needs_optional_coerce(e, vt)))
+        return 0;
+    const char* ct = order_c11_type(e);
+    if (!ct) return 0;
+    const char* v = cg_internf("_ae_icv%d", g_order_counter++);
+    const char* taken = cg_internf("_ae_ict%d", g_order_counter++);
+    hoist_declare(gen, ct, v);
+    hoist_declare(gen, "int", taken);
+    print_indent(gen);
+    fprintf(gen->output, "%s = (%s){0}; %s = 0;\n", v, ct, taken);
+    ASTNode* link = e;
+    for (int first = 1; link && link->type == AST_IF_EXPRESSION && link->child_count >= 3;
+         link = link->children[2], first = 0) {
+        if (!first) {
+            print_indent(gen);
+            fprintf(gen->output, "if (!%s) {\n", taken);
+            gen->indent_level++;
+        }
+        ctl_linearize(gen, link->children[0], 0);
+        print_indent(gen);
+        fprintf(gen->output, "if (");
+        generate_expression(gen, link->children[0]);
+        fprintf(gen->output, ") {\n");
+        gen->indent_level++;
+        ctl_if_branch(gen, link->children[1], vt, v);
+        print_indent(gen);
+        fprintf(gen->output, "%s = 1;\n", taken);
+        gen->indent_level--;
+        print_indent(gen);
+        fprintf(gen->output, "}\n");
+        if (!first) {
+            gen->indent_level--;
+            print_indent(gen);
+            fprintf(gen->output, "}\n");
+        }
+    }
+    print_indent(gen);
+    fprintf(gen->output, "if (!%s) {\n", taken);
+    gen->indent_level++;
+    ctl_if_branch(gen, link, vt, v);
+    gen->indent_level--;
+    print_indent(gen);
+    fprintf(gen->output, "}\n");
+    order_bind(e, v);
+    return 1;
+}
+
 /* The conditional parts of `e` that hold a construct, run each under the
  * test that selects it: the branches of an `if` expression, the default of
  * `??` and an `or` handler that is an expression. -1 when `e` is none of
@@ -7008,21 +7710,39 @@ static int ctl_short_circuit(ASTNode* e) {
  * `discarded`: the statement throws `e`'s value away. */
 static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
     if (!e || !ctl_contains(gen, e)) return 1;
-    if (is_control_value(gen, e)) {
+    if (is_control_construct(gen, e)) {
         /* What the construct evaluates first: the tuple an `or` or a `!`
          * tests, the arguments of a call whose trailing block runs after
          * it. A builder's block runs first, and its arguments after it, in
          * its lowering (emit_trailing_call_expression). */
         if (e->type == AST_FUNCTION_CALL) {
             if (!trailing_call_is_builder(gen, e)) {
-                ASTNode* ops[ORDER_MAX_OPERANDS];
-                int n = order_operands(e, ops, ORDER_MAX_OPERANDS);
-                if (n > 0 && !ctl_linearize_ops(gen, e, ops, n)) return 0;
+                OrderOps room;
+                order_ops_init(&room, order_operand_room(e));
+                int n = order_operands(e, room.ops, room.cap);
+                int ran = n <= 0 || ctl_linearize_ops(gen, e, room.ops, n);
+                order_ops_free(&room);
+                if (!ran) return 0;
             }
         } else if (e->child_count > 0 && !ctl_linearize(gen, e->children[0], 0)) {
             return 0;
         }
         return emit_control_prelude(gen, e, discarded);
+    }
+    /* #3574: a node held ahead for its depth: what it evaluates first, and
+     * the deeper ones it holds, then its value into a temporary. An `if`
+     * expression's long `else if` chain, written flat. */
+    if (depth_marked(e)) {
+        if (e->type == AST_IF_EXPRESSION) return ctl_if_chain(gen, e);
+        OrderOps room;
+        order_ops_init(&room, order_operand_room(e));
+        int n = ctl_operands(gen, e, room.ops, room.cap);
+        int ran = n >= 0;
+        for (int i = 0; ran && i < e->child_count; i++)
+            if (ctl_unreached(gen, e->children[i], room.ops, n)) ran = 0;
+        if (ran && !ctl_linearize_ops(gen, e, room.ops, n)) ran = 0;
+        order_ops_free(&room);
+        return ran && ctl_emit_hoist(gen, e);
     }
     if (ctl_short_circuit(e)) {
         ASTNode* l = e->children[0];
@@ -7050,17 +7770,20 @@ static int ctl_linearize(CodeGenerator* gen, ASTNode* e, int discarded) {
     }
     int cond = ctl_conditional(gen, e);
     if (cond >= 0) return cond;
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int n = ctl_operands(gen, e, ops, ORDER_MAX_OPERANDS);
-    if (n < 0) return 0;
-    for (int i = 0; i < e->child_count; i++)
-        if (ctl_unreached(gen, e->children[i], ops, n)) return 0;
-    if (!ctl_linearize_ops(gen, e, ops, n)) return 0;
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(e));
+    int n = ctl_operands(gen, e, room.ops, room.cap);
+    int ran = n >= 0;
+    for (int i = 0; ran && i < e->child_count; i++)
+        if (ctl_unreached(gen, e->children[i], room.ops, n)) ran = 0;
+    if (ran && !ctl_linearize_ops(gen, e, room.ops, n)) ran = 0;
+    order_ops_free(&room);
+    if (!ran) return 0;
     /* A call with a trailing block whose arguments kept it from running
      * ahead (is_control_value: their order needed a wrap) may now, with
      * them evaluated. Not a builder's, whose block runs before them. */
     if (e->type == AST_FUNCTION_CALL && !trailing_call_is_builder(gen, e) &&
-        is_control_value(gen, e))
+        is_control_construct(gen, e))
         return emit_control_prelude(gen, e, discarded);
     return 1;
 }
@@ -7079,17 +7802,17 @@ int ctl_linearize_value(CodeGenerator* gen, ASTNode* e, int discarded) {
  * right. */
 void ctl_builder_args(CodeGenerator* gen, ASTNode* call) {
     if (!hoist_ready(gen)) return;
-    ASTNode* ops[ORDER_MAX_OPERANDS];
-    int hoist[ORDER_MAX_OPERANDS];
-    int n = order_operands(call, ops, ORDER_MAX_OPERANDS);
-    if (n <= 0) return;
-    int need = n >= 2 && order_hoist_set(gen, ops, n, hoist);
+    OrderOps room;
+    order_ops_init(&room, order_operand_room(call));
+    ASTNode** ops = room.ops;
+    int n = order_operands(call, ops, room.cap);
+    int need = n >= 2 && order_hoist_set(gen, ops, n, room.hoist);
     for (int i = 0; i < n && !need; i++) need = ctl_contains(gen, ops[i]);
-    if (!need) return;
-    for (int i = 0; i < n; i++) {
-        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) return;
-        if (i < n - 1 && !ctl_hoist(gen, ops[i])) return;
+    for (int i = 0; need && i < n; i++) {
+        if (ctl_contains(gen, ops[i]) && !ctl_linearize(gen, ops[i], 0)) break;
+        if (i < n - 1 && !ctl_hoist(gen, ops[i])) break;
     }
+    order_ops_free(&room);
 }
 
 /* `call(args) { block }` where the value is used inside an expression:
@@ -7261,11 +7984,9 @@ static int erased_call_args(ASTNode* call, ASTNode** out, int cap) {
  * coerced, writes `((f.fn == sym) ? <its call> : ` and returns 1. A call
  * whose value is not used (`is_void`) takes any result, each branch cast
  * to void; one whose value is used, only the C type it reads. */
-static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
-                                  const char* ret, int is_void, const char* sym, Type** ps,
-                                  int np, const char* rc) {
-    ASTNode* args[16];
-    int na = erased_call_args(call, args, 16);
+static int erased_dispatch_branch_in(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                     const char* ret, int is_void, const char* sym, Type** ps,
+                                     int np, const char* rc, ASTNode** args, int na) {
     if (na < 0 || na != np || !rc) return 0;
     if (!is_void && strcmp(rc, ret) != 0) return 0;
     int coerced = 0;
@@ -7299,6 +8020,20 @@ static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
     return 1;
 }
 
+/* Every argument and parameter, however many (#3574): 16 slots left a
+ * target of more parameters undispatched, so its arguments reached it
+ * uncoerced (an int read as a float). */
+static int erased_dispatch_branch(CodeGenerator* gen, ASTNode* call, ASTNode* f,
+                                  const char* ret, int is_void, const char* sym, Type** ps,
+                                  int np, const char* rc) {
+    ASTNode** args = (ASTNode**)aether_xrealloc(
+        NULL, sizeof(ASTNode*) * (size_t)(call->child_count > 0 ? call->child_count : 1));
+    int na = erased_call_args(call, args, call->child_count);
+    int opened = erased_dispatch_branch_in(gen, call, f, ret, is_void, sym, ps, np, rc, args, na);
+    free(args);
+    return opened;
+}
+
 static const char* resolve_closure_return_type(CodeGenerator* gen, int ci);
 
 /* The branches of the erased call `call` for every closure literal and
@@ -7313,18 +8048,21 @@ static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode*
     while (base && base->type == AST_MEMBER_ACCESS && base->child_count > 0) base = base->children[0];
     if (!arg_drain_lookup(f) && (!base || base->type != AST_IDENTIFIER)) return 0;
     int n = 0;
+    Type** ps = NULL;
+    int ps_cap = 0;
     for (int cj = 0; cj < gen->closure_count; cj++) {
         ASTNode* lit = gen->closures[cj].closure_node;
         if (!lit || lit->type != AST_CLOSURE) continue;
-        Type* ps[16];
-        int np = 0, over = 0;
+        if (lit->child_count > ps_cap) {
+            ps_cap = lit->child_count;
+            ps = (Type**)aether_xrealloc(ps, sizeof(Type*) * (size_t)ps_cap);
+        }
+        int np = 0;
         for (int k = 0; k < lit->child_count; k++) {
             ASTNode* p = lit->children[k];
             if (!p || p->type != AST_CLOSURE_PARAM) continue;
-            if (np >= 16) { over = 1; break; }
             ps[np++] = p->node_type;
         }
-        if (over) continue;
         const char* sym = cg_internf("_closure_fn_%d", gen->closures[cj].id);
         n += erased_dispatch_branch(gen, call, f, ret, is_void, sym, ps, np,
                                     cg_intern(resolve_closure_return_type(gen, cj)));
@@ -7334,14 +8072,17 @@ static int emit_erased_call_dispatch(CodeGenerator* gen, ASTNode* call, ASTNode*
         ASTNode* fdef = find_function_definition_by_name(gen->program, name);
         if (!fdef) continue;
         int np = fn_param_count(fdef);
-        if (np > 16) continue;
-        Type* ps[16];
+        if (np > ps_cap) {
+            ps_cap = np;
+            ps = (Type**)aether_xrealloc(ps, sizeof(Type*) * (size_t)ps_cap);
+        }
         for (int k = 0; k < np; k++) ps[k] = fn_param_type_at(gen, fdef, k);
         Type* rt = fn_result_type(gen, fdef);
         n += erased_dispatch_branch(gen, call, f, ret, is_void,
                                     cg_internf("_aether_bare_adapter_%s", name), ps, np,
                                     cg_intern(rt ? get_c_type(rt) : "void"));
     }
+    free(ps);
     return n;
 }
 
@@ -7516,7 +8257,7 @@ static Type* fresh_composite_arg_type(CodeGenerator* gen, ASTNode* arg, Type* t)
  * emitted as a bare `{3, 4}`, which C refused (#3071). So is an `if` giving
  * arrays (#3006): the temporary is filled from the branch taken. */
 static int array_literal_arg_temp(CodeGenerator* gen, ASTNode* arg) {
-    int branches = arg->type == AST_IF_EXPRESSION && arg->child_count >= 3;
+    int branches = if_takes_by_branch(arg);
     if ((arg->type != AST_ARRAY_LITERAL && !branches) || !type_is_sized_array(arg->node_type) ||
         !hoist_ready(gen)) return 0;
     Type* at = arg->node_type;
@@ -8003,13 +8744,54 @@ int emit_float_to_int(CodeGenerator* gen, ASTNode* v, Type* t) {
  * and a float `r`: emits `x = x op r` with the float result converted into
  * `x` saturating. Returns 0 having emitted nothing for other operands. */
 int emit_float_op_to_int(CodeGenerator* gen, const char* l_text, char op, ASTNode* r, Type* t) {
-    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/", op)) return 0;
+    if (!r || !op || !ie_float_kind(r->node_type) || !strchr("+-*/%", op)) return 0;
     const char* sfx = f2i_suffix(t);
     if (!sfx) return 0;
-    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(%s %c (", l_text, get_c_type(t),
-            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx, l_text, op);
+    fprintf(gen->output, "%s = ((%s)_ae_%s2%s(", l_text, get_c_type(t),
+            r->node_type->kind == TYPE_LONGDOUBLE ? "ld" : "f", sfx);
+    if (op == '%') {
+        /* The float remainder (emit_float_rem), of the target read as a
+         * float. */
+        fprintf(gen->output, "%s((%s)%s, ", float_rem_macro(r->node_type),
+                get_c_type(r->node_type), l_text);
+        generate_read(gen, r);
+        fprintf(gen->output, ")))");
+        return 1;
+    }
+    fprintf(gen->output, "%s %c (", l_text, op);
     generate_read(gen, r);
     fprintf(gen->output, ")))");
+    return 1;
+}
+
+/* The macro computing a float `%` in type `t` (codegen.c's prelude), NULL
+ * for any other type. */
+const char* float_rem_macro(const Type* t) {
+    if (!t) return NULL;
+    switch (t->kind) {
+        case TYPE_FLOAT: return "_AE_FMOD";
+        case TYPE_FLOAT32: return "_AE_FMODF";
+        case TYPE_LONGDOUBLE: return "_AE_FMODL";
+        default: return NULL;
+    }
+}
+
+/* `l % r` of floating type `t`: the remainder of the quotient truncated
+ * toward zero, with the sign of `l`, as Java's `%` on floats, which is C's
+ * fmod: `-7.5 % 2.0` is -1.5, a zero divisor gives NaN and no panic (a
+ * float division by zero is no error either). C has no `%` on floating
+ * types: the C of one did not compile. `l_text` is the left operand's C
+ * when it has no node (a compound assignment's target). Returns 0, having
+ * emitted nothing, for any other type. */
+int emit_float_rem(CodeGenerator* gen, ASTNode* l, const char* l_text, ASTNode* r, const Type* t) {
+    const char* m = float_rem_macro(t);
+    if (!m || !r || (!l && !l_text)) return 0;
+    fprintf(gen->output, "%s(", m);
+    if (l_text) fputs(l_text, gen->output);
+    else generate_expression(gen, l);
+    fprintf(gen->output, ", ");
+    generate_expression(gen, r);
+    fprintf(gen->output, ")");
     return 1;
 }
 
@@ -8050,13 +8832,13 @@ PrintFmt print_fmt_of(const Type* t) {
  * type. The caller emits a placeholder; the build stops at the error. */
 void print_fmt_refuse(CodeGenerator* gen, const ASTNode* v, const char* what) {
     (void)gen;
-    char msg[400];
+    const char* msg = "";
     const Type* t = v ? v->node_type : NULL;
     while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
     if (!t)
-        snprintf(msg, sizeof(msg), "%s cannot write this value: it has no type", what);
+        msg = aether_internf("%s cannot write this value: it has no type", what);
     else
-        snprintf(msg, sizeof(msg), "%s cannot write a value of type %s", what,
+        msg = aether_internf("%s cannot write a value of type %s", what,
                  type_spelled((Type*)t));
     aether_error_full(msg, v ? v->line : 0, v ? v->column : 0,
                       "it writes numbers, bool, string, ptr, enums and durations; convert the "
@@ -8151,9 +8933,64 @@ const char* print_fmt_arg_cast(PrintFmt f) {
     }
 }
 
+/* #3568: the call a statement temporary is being made for, emitted as the
+ * call itself inside it. */
+static ASTNode* g_slice_stmt_inner = NULL;
+
+/* A call's fresh slice read in place (slice_own.c's `slice_stmt_temp`): the
+ * reference it hands over is held in a temporary declared ahead of the
+ * statement, which gives back the one before when the statement runs again
+ * and is released at its block's every exit, as a temporary string a view
+ * may point into is (push_scoped_temp_free). */
+static void emit_slice_stmt_temp(CodeGenerator* gen, ASTNode* call) {
+    static int seq = 0;
+    const char* t = cg_internf("_ae_sst%d", seq++);
+    hoist_append_text(gen, cg_internf("AetherSlice %s = {0}; ", t));
+    fprintf(gen->output, "(aether_unwind_track((const void*)&%s, aether_slice_release_at), "
+            "aether_slice_release(&%s), %s = (", t, t, t);
+    ASTNode* saved = g_slice_stmt_inner;
+    g_slice_stmt_inner = call;
+    generate_expression(gen, call);
+    g_slice_stmt_inner = saved;
+    fprintf(gen->output, "))");
+    push_scoped_slice_free(gen, t);
+}
+
 /* The slice-ownership intrinsics slice_own.c writes into the tree (see the
- * runtime's aether_slice_take, _lend, _drop, _set and _grow1). Returns 0
+ * runtime's aether_slice_take, _copy, _release, _set and _grow1). Returns 0
  * for a name that is none of them. */
+/* Does the place `a` index a slice or an array on its way (`rows[k]`,
+ * `hs[k].tags`), a bounds check that may panic? */
+static int place_has_index(const ASTNode* a) {
+    for (; a && (a->type == AST_MEMBER_ACCESS || a->type == AST_ARRAY_ACCESS) && a->child_count > 0;
+         a = a->children[0])
+        if (a->type == AST_ARRAY_ACCESS) return 1;
+    return 0;
+}
+
+/* May making the value `v` run code that grows, binds again or frees the
+ * slice a store's place indexes: does it call anything (a function, a
+ * closure, an ask)? Slice ownership's own intrinsics only read or count. */
+static int value_may_move_place(const ASTNode* v) {
+    if (!v) return 0;
+    if (v->type == AST_SEND_ASK || v->type == AST_CLOSURE) return v->type == AST_SEND_ASK;
+    if (v->type == AST_FUNCTION_CALL && !(v->value && strncmp(v->value, "__slice_", 8) == 0))
+        return 1;
+    for (int i = 0; i < v->child_count; i++)
+        if (value_may_move_place(v->children[i])) return 1;
+    return 0;
+}
+
+/* The place `a` an intrinsic takes the address of, as the place it is: a
+ * module-level slice `var` named there is the var itself, not a read of it
+ * (emit_module_slice_read). */
+static void emit_slice_place(CodeGenerator* gen, ASTNode* a) {
+    int saved = gen->generating_lvalue;
+    gen->generating_lvalue = 1;
+    generate_expression(gen, a);
+    gen->generating_lvalue = saved;
+}
+
 static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     const char* f = expr->value;
     FILE* o = gen->output;
@@ -8161,9 +8998,17 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
     if (!a) return 0;
     Type* st = type_is_slice(a->node_type) ? a->node_type : expr->node_type;
     Type* et = st && type_is_slice(st) ? st->element_type : NULL;
+    /* #3568: a module-level slice `var` is taken out, as stored into, under
+     * its lock (aether_slice_var_take_out). */
+    int gvar = module_slice_var_read(gen, a);
     if (strcmp(f, "__slice_take") == 0 && expr->child_count == 1) {
+        if (gvar) {
+            fprintf(o, "aether_slice_var_take_out(&%s, &%s)", a->value,
+                    module_string_var_lock(a->value));
+            return 1;
+        }
         fprintf(o, "aether_slice_take((AetherSlice*)&(");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, "))");
         return 1;
     }
@@ -8173,24 +9018,86 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         fprintf(o, ")");
         return 1;
     }
-    if (!et) return 0;
-    const char* ect = get_c_type(et);
-    if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
-        fprintf(o, "aether_slice_drop((AetherSlice*)&(");
+    /* #3568: a copy for a place to hold, with a reference of its own. */
+    if (strcmp(f, "__slice_copy") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_copy(");
         generate_expression(gen, a);
-        fprintf(o, "), sizeof(%s), %s)", ect, own_slice_elem_drop_fn(gen, et));
+        fprintf(o, ")");
         return 1;
     }
-    if (strcmp(f, "__slice_set") == 0 && expr->child_count == 2) {
-        fprintf(o, "aether_slice_set((AetherSlice*)&(");
+    /* #3568: a pattern's slice taking a reference of its own, in place. */
+    if (strcmp(f, "__slice_hold") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_retain(");
         generate_expression(gen, a);
+        fprintf(o, ")");
+        return 1;
+    }
+    if (strcmp(f, "__slice_drop") == 0 && expr->child_count == 1) {
+        fprintf(o, "aether_slice_release((AetherSlice*)&(");
+        emit_slice_place(gen, a);
+        fprintf(o, "))");
+        return 1;
+    }
+    if ((strcmp(f, "__slice_set") == 0 || strcmp(f, "__slice_set_shared") == 0) &&
+        expr->child_count == 2) {
+        const char* set = strcmp(f, "__slice_set") == 0 ? "aether_slice_set" : "aether_slice_set_shared";
+        if (hoist_ready(gen) && place_has_index(a)) {
+            /* #3568: C orders a call's arguments as it likes, and a value
+             * made before the place's bounds check panicked was held by
+             * nothing (a leak of `rows[k] = mk(2)` on a slice too short).
+             * A value that runs no code that could move the place (no call)
+             * is stored after the place is taken, its bounds checked, as a
+             * string or a struct element's store is. One that may (a call:
+             * a closure appending to the very slice, which moves its
+             * buffer) is made first, journaled so a panic in the place's
+             * check gives it back, and the place is taken after it, where
+             * the element then is: taken before, the store went through a
+             * pointer into the buffer the growth had left. */
+            /* A whole store (`slice_store`, the `=` it stands in for left
+             * out) writes the element through the place it took here. */
+            const char* whole =
+                annotation_has_marker(expr->annotation, "slice_store") ? "*%s = " : "";
+            TempSeq s;
+            seq_open(gen, &s);
+            if (value_may_move_place(expr->children[1])) {
+                const char* v = seq_let(gen, &s, "AetherSlice", "_ae_ssv");
+                generate_expression(gen, expr->children[1]);
+                seq_next(gen, &s);
+                fprintf(o, "aether_unwind_track((const void*)&%s, aether_slice_release_at)", v);
+                seq_next(gen, &s);
+                const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
+                fprintf(o, "(AetherSlice*)&(");
+                emit_slice_place(gen, a);
+                fprintf(o, ")");
+                seq_next(gen, &s);
+                fprintf(o, "aether_unwind_forget((const void*)&%s)", v);
+                seq_next(gen, &s);
+                fprintf(o, whole, p);
+                fprintf(o, "%s(%s, %s)", set, p, v);
+                seq_close(gen, &s);
+                return 1;
+            }
+            const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_ssp");
+            fprintf(o, "(AetherSlice*)&(");
+            emit_slice_place(gen, a);
+            fprintf(o, ")");
+            seq_next(gen, &s);
+            fprintf(o, whole, p);
+            fprintf(o, "%s(%s, ", set, p);
+            generate_expression(gen, expr->children[1]);
+            fprintf(o, ")");
+            seq_close(gen, &s);
+            return 1;
+        }
+        fprintf(o, "%s((AetherSlice*)&(", set);
+        emit_slice_place(gen, a);
         fprintf(o, "), ");
         generate_expression(gen, expr->children[1]);
-        fprintf(o, ", sizeof(%s), %s, ", ect, own_slice_elem_drop_fn(gen, et));
-        emit_slice_diag_file(gen, expr);
-        fprintf(o, ", %d)", expr->line);
+        fprintf(o, ")");
         return 1;
     }
+    if (!et) return 0;
+    const char* ect = get_c_type(et);
     if (strcmp(f, "__slice_push") == 0 && expr->child_count == 2) {
         /* `v` taken first (it may read the slice, whose storage the growth
          * may move), then the place grown in place, then `v` stored into the
@@ -8200,18 +9107,447 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
         const char* v = seq_let(gen, &s, ect, "_ae_puv");
         emit_value_take(gen, expr->children[1], et);
         seq_next(gen, &s);
+        if (gvar) {
+            /* #3568: a module-level slice `var` grows a reference taken
+             * under its lock (a copy, the buffer being shared with the
+             * var), stored back under it; the store releases what the var
+             * held. Grown in place, the var's buffer moved under a reader
+             * that had taken it. */
+            const char* lk = module_string_var_lock(a->value);
+            const char* g = seq_let(gen, &s, "AetherSlice", "_ae_pug");
+            fprintf(o, "aether_slice_var_take(&%s, &%s)", a->value, lk);
+            seq_next(gen, &s);
+            fprintf(o, "%s = aether_slice_grow1(%s, sizeof(%s), %s, 1, ", g, g, ect,
+                    own_slice_ops(gen, st));
+            emit_slice_diag_file(gen, expr);
+            fprintf(o, ", %d)", expr->line);
+            seq_next(gen, &s);
+            fprintf(o, "((%s*)%s.ptr)[%s.len - 1] = %s", ect, g, g, v);
+            seq_next(gen, &s);
+            fprintf(o, "aether_slice_var_store(&%s, &%s, %s)", a->value, lk, g);
+            seq_close(gen, &s);
+            return 1;
+        }
         const char* p = seq_let(gen, &s, "AetherSlice*", "_ae_pup");
         fprintf(o, "(AetherSlice*)&(");
-        generate_expression(gen, a);
+        emit_slice_place(gen, a);
         fprintf(o, ")");
         seq_next(gen, &s);
-        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), ", p, p, ect);
+        /* #3568: a place that holds no reference of its own takes one, so
+         * the growth copies (slice_own's `slice_push_copy`). */
+        int copy = annotation_has_marker(expr->annotation, "slice_push_copy");
+        if (copy) {
+            fprintf(o, "aether_slice_retain(*%s)", p);
+            seq_next(gen, &s);
+        }
+        fprintf(o, "*%s = aether_slice_grow1(*%s, sizeof(%s), %s, %d, ", p, p, ect,
+                own_slice_ops(gen, st), copy);
         emit_slice_diag_file(gen, expr);
         fprintf(o, ", %d)", expr->line);
         seq_next(gen, &s);
         fprintf(o, "((%s*)%s->ptr)[%s->len - 1] = %s", ect, p, p, v);
+        /* #3568: a store into the slice's element publishes what it stores
+         * (shared_place in slice_own.c, store_publishes for a string). */
+        const char* pub = own_publish_call(gen, et, cg_internf("((%s*)%s->ptr)[%s->len - 1]",
+                                                               ect, p, p));
+        if (pub) {
+            seq_next(gen, &s);
+            fprintf(o, "%s", pub);
+        }
         seq_close(gen, &s);
         return 1;
+    }
+    return 0;
+}
+
+/* --- Deep constants (#3574) -------------------------------------------------
+ *
+ * A file-scope constant's or module variable's initializer is C's: a
+ * constant expression, which takes no temporary, so neither the depth marks
+ * nor emit_chain_by_links can cut it, and a long chain of one nested its C
+ * a level a link (1000 comparisons were 1000 brackets, 1000 shifts 3999).
+ * Such an initializer is a constant by the language's rule, so past
+ * CONST_FOLD_NESTING levels the compiler computes it, as the C would
+ * (the C types of the operands, their promotions and usual arithmetic
+ * conversions, -fwrapv's wrapping; `/`, `%`, `<<` and `>>` by #3524's
+ * rules, as emit_int_edge_op writes them in a constant), and writes the
+ * value. Anything it does not compute (a string, a struct, a call, a value
+ * with no C literal) is written as before. */
+#define CONST_FOLD_NESTING 32
+
+typedef enum { CV_I32, CV_U32, CV_I64, CV_U64, CV_F32, CV_F64 } CvKind;
+
+typedef struct {
+    CvKind k;
+    unsigned long long b;   /* an integer's bits, two's complement */
+    double f;               /* a float's value */
+} CVal;
+
+static int cv_is_float(CvKind k) {
+    return k == CV_F32 || k == CV_F64;
+}
+
+static int cv_is_signed(CvKind k) {
+    return k == CV_I32 || k == CV_I64;
+}
+
+static int cv_bits(CvKind k) {
+    return k == CV_I64 || k == CV_U64 ? 64 : 32;
+}
+
+/* `v` held in its kind's width. */
+static CVal cv_norm(CVal v) {
+    switch (v.k) {
+        case CV_I32: v.b = (unsigned long long)(long long)(int)(unsigned int)v.b; break;
+        case CV_U32: v.b = (unsigned int)v.b; break;
+        case CV_F32: v.f = (float)v.f; break;
+        default: break;
+    }
+    return v;
+}
+
+static long long cv_signed(CVal v) {
+    return v.k == CV_I32 ? (long long)(int)(unsigned int)v.b : (long long)v.b;
+}
+
+/* The value as a double, as C converts it. */
+static double cv_as_double(CVal v) {
+    if (cv_is_float(v.k)) return v.f;
+    if (cv_is_signed(v.k)) return (double)cv_signed(v);
+    return v.k == CV_U32 ? (double)(unsigned int)v.b : (double)v.b;
+}
+
+/* `v` converted to kind `k`, as C converts between arithmetic types. 0 for
+ * a float out of an integer's range or NaN, which C leaves undefined. */
+static int cv_convert(CVal v, CvKind k, CVal* out) {
+    CVal r;
+    r.k = k;
+    r.b = 0;
+    r.f = 0;
+    if (cv_is_float(k)) {
+        r.f = cv_as_double(v);
+    } else if (cv_is_float(v.k)) {
+        double d = v.f;
+        double lo = k == CV_I32 ? -2147483648.0 : k == CV_I64 ? -9223372036854775808.0 : 0.0;
+        double hi = k == CV_I32 ? 2147483648.0 : k == CV_U32 ? 4294967296.0
+                  : k == CV_I64 ? 9223372036854775808.0 : 18446744073709551616.0;
+        if (!(d > lo - 1.0 && d < hi)) return 0;
+        r.b = cv_is_signed(k) ? (unsigned long long)(long long)d : (unsigned long long)d;
+    } else {
+        r.b = cv_is_signed(v.k) ? (unsigned long long)cv_signed(v) : v.b;
+    }
+    *out = cv_norm(r);
+    return 1;
+}
+
+/* The kind an operand of Aether type `t` has in the C, after C's integer
+ * promotions, and the bits it keeps first (a byte's 8). 0 for a type the
+ * fold does not take. */
+static int cv_kind_of(const Type* t, CvKind* k, int* keep_bits) {
+    while (t && t->kind == TYPE_ISOLATED) t = t->element_type;
+    if (!t) return 0;
+    *keep_bits = 0;
+    switch (t->kind) {
+        case TYPE_INT: case TYPE_ENUM: *k = CV_I32; return 1;
+        case TYPE_BOOL: *k = CV_I32; *keep_bits = 1; return 1;
+        case TYPE_BYTE: case TYPE_UINT8: *k = CV_I32; *keep_bits = 8; return 1;
+        case TYPE_UINT16: *k = CV_I32; *keep_bits = 16; return 1;
+        case TYPE_UINT32: *k = CV_U32; return 1;
+        case TYPE_INT64: *k = CV_I64; return 1;
+        case TYPE_UINT64: *k = CV_U64; return 1;
+        case TYPE_FLOAT: *k = CV_F64; return 1;
+        case TYPE_FLOAT32: *k = CV_F32; return 1;
+        default: return 0;
+    }
+}
+
+/* `v` stored into C type `t` (a cast, a constant's own type): converted,
+ * a narrow type's bits kept, then promoted as an operand of that type is. */
+static int cv_store(CVal v, const Type* t, CVal* out) {
+    CvKind k;
+    int keep;
+    if (!cv_kind_of(t, &k, &keep)) return 0;
+    if (keep == 1) {
+        /* A bool holds whether the value is not zero. */
+        out->k = CV_I32;
+        out->b = cv_is_float(v.k) ? v.f != 0.0 : v.b != 0;
+        out->f = 0;
+        return 1;
+    }
+    CVal r;
+    if (!cv_convert(v, keep ? CV_U32 : k, &r)) return 0;
+    if (keep) {
+        r.b &= (1ULL << keep) - 1;
+        r.k = CV_I32;
+    }
+    *out = r;
+    return 1;
+}
+
+/* C's usual arithmetic conversions: the kind two promoted operands meet in. */
+static CvKind cv_common(CvKind a, CvKind b) {
+    if (a == CV_F64 || b == CV_F64) return CV_F64;
+    if (a == CV_F32 || b == CV_F32) return CV_F32;
+    if (cv_bits(a) == 64 || cv_bits(b) == 64)
+        return (a == CV_U64 || b == CV_U64) ? CV_U64 : CV_I64;
+    return (a == CV_U32 || b == CV_U32) ? CV_U32 : CV_I32;
+}
+
+static int cv_truth(CVal v) {
+    return cv_is_float(v.k) ? v.f != 0.0 : v.b != 0;
+}
+
+static CVal cv_int(int x) {
+    CVal r;
+    r.k = CV_I32;
+    r.b = (unsigned long long)(long long)x;
+    r.f = 0;
+    return r;
+}
+
+static int cv_eval(CodeGenerator* gen, ASTNode* e, CVal* out, int depth);
+
+static int cv_eval_binary(CodeGenerator* gen, ASTNode* e, CVal* out, int depth) {
+    const char* op = e->value;
+    CVal l, r;
+    if (!op || e->child_count < 2 || !cv_eval(gen, e->children[0], &l, depth + 1) ||
+        !cv_eval(gen, e->children[1], &r, depth + 1))
+        return 0;
+    if (strcmp(op, "&&") == 0) { *out = cv_int(cv_truth(l) && cv_truth(r)); return 1; }
+    if (strcmp(op, "||") == 0) { *out = cv_int(cv_truth(l) || cv_truth(r)); return 1; }
+    if (strcmp(op, "<<") == 0 || strcmp(op, ">>") == 0) {
+        /* #3524: the count masked to the left operand's width; a left shift
+         * into the sign bit wraps; `>>` on a signed value keeps the sign. */
+        if (cv_is_float(l.k) || cv_is_float(r.k)) return 0;
+        int bits = cv_bits(l.k);
+        unsigned n = (unsigned)(r.b & (unsigned long long)(bits - 1));
+        CVal v = l;
+        if (op[0] == '<') {
+            v.b = l.b << n;
+        } else if (cv_is_signed(l.k)) {
+            v.b = (unsigned long long)(cv_signed(l) >> n);
+        } else {
+            v.b = (l.k == CV_U32 ? (unsigned int)l.b : l.b) >> n;
+        }
+        *out = cv_norm(v);
+        return 1;
+    }
+    CvKind k = cv_common(l.k, r.k);
+    if (!cv_convert(l, k, &l) || !cv_convert(r, k, &r)) return 0;
+    int cmp = -2;
+    if (strcmp(op, "<") == 0) cmp = 0;
+    else if (strcmp(op, "<=") == 0) cmp = 1;
+    else if (strcmp(op, ">") == 0) cmp = 2;
+    else if (strcmp(op, ">=") == 0) cmp = 3;
+    else if (strcmp(op, "==") == 0) cmp = 4;
+    else if (strcmp(op, "!=") == 0) cmp = 5;
+    if (cmp >= 0) {
+        int lt, eq;
+        if (cv_is_float(k)) {
+            if (l.f != l.f || r.f != r.f) {
+                *out = cv_int(cmp == 5);   /* NaN: unordered, only `!=` holds */
+                return 1;
+            }
+            lt = l.f < r.f;
+            eq = l.f == r.f;
+        } else if (cv_is_signed(k)) {
+            lt = cv_signed(l) < cv_signed(r);
+            eq = l.b == r.b;
+        } else {
+            lt = l.b < r.b;
+            eq = l.b == r.b;
+        }
+        int v = cmp == 0 ? lt : cmp == 1 ? (lt || eq) : cmp == 2 ? !(lt || eq)
+              : cmp == 3 ? !lt : cmp == 4 ? eq : !eq;
+        *out = cv_int(v);
+        return 1;
+    }
+    CVal v;
+    v.k = k;
+    v.b = 0;
+    v.f = 0;
+    if (cv_is_float(k)) {
+        if (strcmp(op, "+") == 0) v.f = l.f + r.f;
+        else if (strcmp(op, "-") == 0) v.f = l.f - r.f;
+        else if (strcmp(op, "*") == 0) v.f = l.f * r.f;
+        else if (strcmp(op, "/") == 0) v.f = l.f / r.f;
+        else if (strcmp(op, "%") == 0) v.f = fmod(l.f, r.f);
+        else return 0;
+        v = cv_norm(v);
+        if (!isfinite(v.f)) return 0;
+        *out = v;
+        return 1;
+    }
+    if (strcmp(op, "+") == 0) v.b = l.b + r.b;
+    else if (strcmp(op, "-") == 0) v.b = l.b - r.b;
+    else if (strcmp(op, "*") == 0) v.b = l.b * r.b;
+    else if (strcmp(op, "&") == 0) v.b = l.b & r.b;
+    else if (strcmp(op, "|") == 0) v.b = l.b | r.b;
+    else if (strcmp(op, "^") == 0) v.b = l.b ^ r.b;
+    else if (strcmp(op, "/") == 0 || strcmp(op, "%") == 0) {
+        /* #3524: the checker refuses a constant division by zero; the most
+         * negative value over -1 is itself, its remainder 0. */
+        if (r.b == 0) return 0;
+        int quotient = op[0] == '/';
+        if (cv_is_signed(k)) {
+            long long a = cv_signed(l), d = cv_signed(r);
+            long long min = k == CV_I32 ? -2147483647LL - 1 : LLONG_MIN;
+            if (d == -1 && a == min) v.b = quotient ? (unsigned long long)a : 0;
+            else v.b = (unsigned long long)(quotient ? a / d : a % d);
+        } else {
+            unsigned long long a = k == CV_U32 ? (unsigned int)l.b : l.b;
+            unsigned long long d = k == CV_U32 ? (unsigned int)r.b : r.b;
+            v.b = quotient ? a / d : a % d;
+        }
+    } else {
+        return 0;
+    }
+    *out = cv_norm(v);
+    return 1;
+}
+
+static int cv_eval(CodeGenerator* gen, ASTNode* e, CVal* out, int depth) {
+    if (!e || depth > 4096) return 0;
+    CvKind k;
+    int keep;
+    switch (e->type) {
+        case AST_LITERAL: {
+            if (!e->value || !cv_kind_of(e->node_type, &k, &keep)) return 0;
+            CVal v;
+            v.k = k;
+            v.b = 0;
+            v.f = 0;
+            if (e->node_type->kind == TYPE_BOOL) {
+                if (strcmp(e->value, "true") == 0) v.b = 1;
+                else if (strcmp(e->value, "false") != 0) return 0;
+                *out = v;
+                return 1;
+            }
+            if (cv_is_float(k)) {
+                char* end = NULL;
+                v.f = strtod(e->value, &end);
+                if (!end || end == e->value || *end) return 0;
+                *out = cv_norm(v);
+                return 1;
+            }
+            const char* s = e->value;
+            int neg = 0;
+            if (*s == '-') { neg = 1; s++; }
+            int base = 10;
+            if (s[0] == '0' && (s[1] == 'x' || s[1] == 'X')) { base = 16; s += 2; }
+            else if (s[0] == '0' && (s[1] == 'o' || s[1] == 'O')) { base = 8; s += 2; }
+            else if (s[0] == '0' && (s[1] == 'b' || s[1] == 'B')) { base = 2; s += 2; }
+            if (!*s) return 0;
+            errno = 0;
+            char* end = NULL;
+            unsigned long long m = strtoull(s, &end, base);
+            if (errno || !end || *end) return 0;
+            v.b = neg ? 0ULL - m : m;
+            if (keep) {
+                return cv_store(v, e->node_type, out);
+            }
+            *out = cv_norm(v);
+            return 1;
+        }
+        case AST_IDENTIFIER: {
+            /* A constant named: its initializer, as a value of its own type
+             * (the identifier case of generate_expression writes it so). */
+            ASTNode* cd = e->value ? file_scope_value_const(gen->program, e->value) : NULL;
+            CVal v;
+            if (!cd || cd->child_count < 1 || !cv_eval(gen, cd->children[0], &v, depth + 1))
+                return 0;
+            return cv_store(v, cd->node_type, out);
+        }
+        case AST_UNARY_EXPRESSION: {
+            CVal v;
+            if (!e->value || e->child_count < 1 || !cv_eval(gen, e->children[0], &v, depth + 1))
+                return 0;
+            if (strcmp(e->value, "!") == 0) { *out = cv_int(!cv_truth(v)); return 1; }
+            if (strcmp(e->value, "-") == 0) {
+                if (cv_is_float(v.k)) v.f = -v.f;
+                else v.b = 0ULL - v.b;
+                *out = cv_norm(v);
+                return 1;
+            }
+            if (strcmp(e->value, "~") == 0 && !cv_is_float(v.k)) {
+                v.b = ~v.b;
+                *out = cv_norm(v);
+                return 1;
+            }
+            if (strcmp(e->value, "+") == 0) { *out = v; return 1; }
+            return 0;
+        }
+        case AST_BINARY_EXPRESSION:
+            return cv_eval_binary(gen, e, out, depth);
+        case AST_VALUE_CAST: {
+            CVal v;
+            if (e->child_count < 1 || !cv_eval(gen, e->children[0], &v, depth + 1)) return 0;
+            return cv_store(v, e->node_type, out);
+        }
+        default:
+            return 0;
+    }
+}
+
+/* How many levels the C of `e` nests, counted up to `cap`: a level a node,
+ * but none for a left link of the same flat operator chain (#2071), and the
+ * initializer of a constant named, which a constant's initializer writes in
+ * its place. */
+static int const_nesting(CodeGenerator* gen, ASTNode* e, int cap, int inline_depth) {
+    if (!e || cap <= 0) return 0;
+    if (e->type == AST_IDENTIFIER) {
+        ASTNode* cd = (e->value && inline_depth < 64) ? file_scope_value_const(gen->program, e->value)
+                                                      : NULL;
+        return cd && cd->child_count > 0
+                   ? 2 + const_nesting(gen, cd->children[0], cap - 2, inline_depth + 1) : 0;
+    }
+    int deepest = 0;
+    for (int i = 0; i < e->child_count && deepest < cap; i++) {
+        ASTNode* c = e->children[i];
+        if (!c) continue;
+        int flat = e->type == AST_BINARY_EXPRESSION && i == 0 && c->type == AST_BINARY_EXPRESSION &&
+                   left_operand_is_chain_link(e) &&
+                   !int_edge_op_applies(gen, e->value, c->node_type, e->children[1], e->node_type);
+        int d = (flat ? 0 : 1) + const_nesting(gen, c, cap - (flat ? 0 : 1), inline_depth);
+        if (d > deepest) deepest = d;
+    }
+    return deepest;
+}
+
+/* A constant's initializer `e` nested past CONST_FOLD_NESTING, written as
+ * its value (the section above). 0, having written nothing, for any other
+ * expression, or one the fold does not compute. */
+static int emit_deep_const(CodeGenerator* gen, ASTNode* e) {
+    if (!gen->in_const_init || !e || e->type == AST_LITERAL ||
+        const_nesting(gen, e, CONST_FOLD_NESTING + 1, 0) <= CONST_FOLD_NESTING)
+        return 0;
+    CVal v;
+    if (!cv_eval(gen, e, &v, 0)) return 0;
+    FILE* o = gen->output;
+    switch (v.k) {
+        case CV_I32: {
+            int x = (int)(unsigned int)v.b;
+            if (x == INT_MIN) fprintf(o, "(-2147483647 - 1)");
+            else if (x < 0) fprintf(o, "(%d)", x);
+            else fprintf(o, "%d", x);
+            return 1;
+        }
+        case CV_U32: fprintf(o, "%uU", (unsigned int)v.b); return 1;
+        case CV_I64: {
+            long long x = (long long)v.b;
+            if (x == LLONG_MIN) fprintf(o, "(-9223372036854775807LL - 1)");
+            else if (x < 0) fprintf(o, "(%lldLL)", x);
+            else fprintf(o, "%lldLL", x);
+            return 1;
+        }
+        case CV_U64: fprintf(o, "%lluULL", v.b); return 1;
+        case CV_F32: case CV_F64: {
+            char buf[64];
+            snprintf(buf, sizeof(buf), v.k == CV_F32 ? "%.9g" : "%.17g", v.f);
+            if (!strpbrk(buf, ".eE")) strcat(buf, ".0");
+            fprintf(o, "(%s%s)", buf, v.k == CV_F32 ? "f" : "");
+            return 1;
+        }
     }
     return 0;
 }
@@ -8219,10 +9555,21 @@ static int emit_slice_own_intrinsic(CodeGenerator* gen, ASTNode* expr) {
 void generate_expression(CodeGenerator* gen, ASTNode* expr) {
     if (!expr) return;
 
+    /* #3574: a deep constant initializer, written as its value. */
+    if (emit_deep_const(gen, expr)) return;
+
     /* A call is no place a store writes into: inside a store target it is
      * read (generate_read). */
     if (gen->generating_lvalue && expr->type == AST_FUNCTION_CALL) {
         generate_read(gen, expr);
+        return;
+    }
+
+    /* #3568: a call's fresh slice read in place is held to its statement's
+     * end (slice_own.c's `slice_stmt_temp`). */
+    if (expr->type == AST_FUNCTION_CALL && expr != g_slice_stmt_inner &&
+        annotation_has_marker(expr->annotation, "slice_stmt_temp") && hoist_ready(gen)) {
+        emit_slice_stmt_temp(gen, expr);
         return;
     }
 
@@ -8282,6 +9629,7 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
         return;
     }
     if (expr != g_order_emitting && emit_in_operand_order(gen, expr)) return;
+    if (emit_chain_by_links(gen, expr)) return;   /* #3574 */
 
     /* #2619: a string a call may hand back from a struct temporary is
      * copied here, so it outlives the temporary (call_returns_view_of_temp,
@@ -9224,6 +10572,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 emit_module_string_read(gen, expr->value);
                 break;
             }
+            if (!gen->generating_lvalue && module_slice_var_read(gen, expr)) {   /* #3568 */
+                emit_module_slice_read(gen, expr->value);
+                break;
+            }
             if (gen->current_actor) {
                 int is_state_var = 0;
                 for (int i = 0; i < gen->state_var_count; i++) {
@@ -9537,6 +10889,20 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
             break;
             
         case AST_BINARY_EXPRESSION:
+            /* #3568: a store into a slice element or an element's slice
+             * field (slice ownership's `place = __slice_set(place, v)`,
+             * marked `slice_store`) is the intrinsic's whole: it takes the
+             * place, makes the value and stores it, in the order that holds
+             * (emit_slice_own_intrinsic). C's `=` evaluates its two sides
+             * in the order it likes, and the place taken before the value
+             * was stale once the value's making moved the buffer. */
+            if (expr->value && strcmp(expr->value, "=") == 0 && expr->child_count == 2 &&
+                expr->children[1] && expr->children[1]->type == AST_FUNCTION_CALL &&
+                annotation_has_marker(expr->children[1]->annotation, "slice_store") &&
+                hoist_ready(gen)) {
+                generate_expression(gen, expr->children[1]);
+                break;
+            }
             /* #3549: a comparison borrows its operands (R3), as a call its
              * arguments, by the same rule (arg_drain_select): a fresh string
              * operand is held in a temporary while the comparison reads it
@@ -10051,6 +11417,10 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                                             expr->node_type, expr)) {
                     /* #3524: an integer `/`, `%`, `<<` or `>>` C leaves
                      * undefined for some values, with Java's rules. */
+                } else if (!is_assignment && expr->value && strcmp(expr->value, "%") == 0 &&
+                           emit_float_rem(gen, expr->children[0], NULL, expr->children[1],
+                                          expr->node_type)) {
+                    /* #3577: a float `%`, which C has no operator for. */
                 } else {
                     if (!skip_parens) fprintf(gen->output, "(");
 
@@ -10512,13 +11882,23 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     generate_expression(gen, expr->children[0]);
                     fprintf(gen->output, ")");
                 }
+                else if (strcmp(func_name, "__slice_readonly") == 0 && expr->child_count == 2) {
+                    /* #3570: and, given the string it views, a view that
+                     * holds that string (a counted one). */
+                    fprintf(gen->output, "aether_string_view(");
+                    generate_expression(gen, expr->children[0]);
+                    fprintf(gen->output, ", (const void*)(");
+                    generate_expression(gen, expr->children[1]);
+                    fprintf(gen->output, "))");
+                }
                 else if (strcmp(func_name, "make") == 0 && expr->node_type && expr->node_type->kind == TYPE_ARRAY) {
                     /* #1286: `make([]T, n)` is a bounded slice over a fresh
                      * zeroed buffer of n elements; `free(s)` releases it. */
                     fprintf(gen->output, "aether_slice_alloc((int64_t)(");
                     if (expr->child_count > 0) generate_expression(gen, expr->children[0]);
                     else fprintf(gen->output, "0");
-                    fprintf(gen->output, "), sizeof(%s))", get_c_type(expr->node_type->element_type));
+                    fprintf(gen->output, "), sizeof(%s), %s)", get_c_type(expr->node_type->element_type),
+                            own_slice_ops(gen, expr->node_type));
                 }
                 else if (strcmp(func_name, "append") == 0 && expr->child_count == 2 &&
                          type_is_slice(expr->node_type) && expr->node_type->element_type &&
@@ -10550,11 +11930,32 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                     } else {
                         generate_expression(gen, expr->children[0]);
                     }
-                    fprintf(gen->output, ", sizeof(%s), ", ect);
+                    /* #3568: whether the slice holds a reference `append`
+                     * was given (moved out of its place, or a call's fresh
+                     * result), which a refusal gives back. */
+                    ASTNode* grown_from = expr->children[0];
+                    /* A copy (`__slice_copy`, of a value that holds no
+                     * reference of its own) is a reference the append was
+                     * given too. */
+                    int taken = annotation_has_marker(expr->annotation, "slice_consumes") ||
+                                (grown_from && grown_from->type == AST_FUNCTION_CALL &&
+                                 grown_from->value &&
+                                 (strncmp(grown_from->value, "__slice_", 8) != 0 ||
+                                  strcmp(grown_from->value, "__slice_copy") == 0));
+                    fprintf(gen->output, ", sizeof(%s), %s, %d, ", ect,
+                            own_slice_ops(gen, expr->node_type), taken);
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                     seq_next(gen, &s);
                     fprintf(gen->output, "((%s*)%s.ptr)[%s.len - 1] = %s", ect, g, g, v);
+                    /* #3568: an element store, which publishes what it
+                     * stores as a store into a slice's element does. */
+                    const char* pub = own_publish_call(
+                        gen, et, cg_internf("((%s*)%s.ptr)[%s.len - 1]", ect, g, g));
+                    if (pub) {
+                        seq_next(gen, &s);
+                        fprintf(gen->output, "%s", pub);
+                    }
                     seq_next(gen, &s);
                     fprintf(gen->output, "%s", g);
                     seq_close(gen, &s);
@@ -10823,35 +12224,18 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                  * place it is read from owns a counted string (R2). */
                 else if (strcmp(func_name, "free") == 0 && expr->child_count == 1 &&
                          type_is_slice(expr->children[0]->node_type)) {
-                    /* #3072: a slice is freed by aether_slice_free, which
-                     * refuses a view (it owns nothing) by name. #3159: its
-                     * elements are places where a store into them takes the
-                     * value (emit_slice_element_store's rule: an owning
-                     * element type, the slice no view of C memory), so a
-                     * `make` buffer's give back what they hold first. */
+                    /* #3072, #3568: `free` of a place gives back the
+                     * reference it holds (aether_slice_free), the buffer
+                     * and what its elements hold going with the last; the
+                     * element type's drop comes from the buffer. A view no
+                     * place holds (`free(xs[1..])`) holds no reference, and
+                     * is refused by name (aether_slice_free_view). */
                     ASTNode* sl = expr->children[0];
-                    Type* et = sl->node_type->element_type;
-                    int elems_own = et && et->kind != TYPE_ARRAY && own_type_owns(gen, et) &&
-                                    sl->type != AST_PTR_AS_ARRAY_CAST &&
-                                    !expr_is_c_view_of_slice(gen, sl);
-                    /* A slice of slices owns its rows (slice ownership): each
-                     * row a buffer of its own is dropped with it. */
-                    int rows_own = et && type_is_slice(et) && sl->type != AST_PTR_AS_ARRAY_CAST;
-                    if (rows_own) {
-                        fprintf(gen->output, "aether_slice_free_elems(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", sizeof(AetherSlice), %s, ",
-                                own_slice_elem_drop_fn(gen, et));
-                    } else if (elems_own) {
-                        fprintf(gen->output, "aether_slice_free_elems(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", sizeof(%s), %s, ", get_c_type(et),
-                                own_unwind_fn(gen, et));
-                    } else {
-                        fprintf(gen->output, "aether_slice_free(");
-                        generate_expression(gen, sl);
-                        fprintf(gen->output, ", ");
-                    }
+                    int view = sl->type == AST_SLICE_EXPR || sl->type == AST_SLICE_FROM_ARRAY ||
+                               annotation_has_marker(expr->annotation, "slice_free_view");
+                    fprintf(gen->output, view ? "aether_slice_free_view(" : "aether_slice_free(");
+                    generate_expression(gen, sl);
+                    fprintf(gen->output, ", ");
                     emit_slice_diag_file(gen, expr);
                     fprintf(gen->output, ", %d)", expr->line);
                 }
@@ -11410,13 +12794,14 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                          * reads below (`.fn`, `.env`) name instead of
                          * evaluating the callee twice, and released after
                          * the call. */
-                        if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                        arg_drain_room(&ad);
+                        if (closure_arg && !arg_drain_lookup(closure_arg) &&
                             ((closure_arg->type == AST_CLOSURE &&
                               !(closure_arg->value && strcmp(closure_arg->value, "trailing") == 0)) ||
                              call_returns_owned_closure(gen, closure_arg))) {
                             ad.closure[ad.count] = 1;
                             ad.idx[ad.count++] = 0;
-                        } else if (closure_arg && !arg_drain_lookup(closure_arg) && ad.count < 16 &&
+                        } else if (closure_arg && !arg_drain_lookup(closure_arg) &&
                                    (is_closure_cell_read(gen, closure_arg) ||
                                     !closure_callee_is_path(closure_arg))) {
                             /* #2755: a closure a cell holds is held for its
@@ -12529,18 +13914,11 @@ void generate_expression(CodeGenerator* gen, ASTNode* expr) {
                 Type* fdecl = c_imported ? NULL
                               : struct_literal_field_type(gen, expr->value, field_init->value);
                 if (c_imported) {
-                    /* NULL stays NULL, as in the field store, and C's field
-                     * is given a reference of its own (R4). */
+                    /* As in the field store: C's field is given a reference
+                     * of its own (R4), recorded for string.release_kept
+                     * (#3567), and NULL stays NULL. */
                     if (fv && fv->node_type && fv->node_type->kind == TYPE_STRING) {
-                        TempSeq cs_seq;
-                        seq_open(gen, &cs_seq);
-                        const char* cs = seq_let(gen, &cs_seq, "const void*", "_ae_cs");
-                        fprintf(gen->output, "(const void*)(");
-                        emit_string_take_owned(gen, fv, 0);
-                        fprintf(gen->output, ")");
-                        seq_next(gen, &cs_seq);
-                        fprintf(gen->output, "%s ? aether_string_data(%s) : (const char*)0", cs, cs);
-                        seq_close(gen, &cs_seq);
+                        emit_c_import_string_give(gen, fv);
                     } else {
                         generate_expression(gen, fv);
                     }

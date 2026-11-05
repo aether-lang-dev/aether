@@ -47,6 +47,7 @@ tests/integration/c_import_extern_proto/
 tests/integration/c_import_struct/
 tests/integration/c_import_struct_no_typedef/
 tests/integration/c_import_struct_string_field/
+tests/integration/c_import_string_field_given_back/
 tests/integration/c_import_union/
 tests/integration/c_qualified_ptr/
 tests/integration/c_static_inline/
@@ -143,6 +144,7 @@ tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
 tests/integration/http_client_custom_ca/
+tests/integration/http_client_connect_proxy/
 tests/integration/http_client_dechunk/
 tests/integration/http_client_forward_proxy/
 tests/integration/http_client_insecure_tls/

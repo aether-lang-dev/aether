@@ -868,7 +868,7 @@ Hel
 - `string.substring(str, start, end)` - Extract substring
 - `string.substring_n(str, str_len_bytes, start, end)` - Length-aware sibling. Caller threads the source length through; `str_len(s)` is not consulted internally. Reach for this when `str` arrived as a `string`-typed parameter at a function boundary AND the content may contain embedded NULs, see [c-interop.md § Passing string values into C externs (auto-unwrap)](c-interop.md#passing-string-values-into-c-externs-auto-unwrap). Without it, the auto-unwrap strips the AetherString header at the call site, `str_len` falls through to `strlen`, and binary content gets truncated at the first NUL.
 - `string.length_n(str, known_length)` - Identity helper that documents intent. In code that receives a `string` parameter plus an explicit length, the explicit length IS the truth, don't consult the AetherString header. `n = string.length_n(s, n)` reads as "yes I know my length" instead of looking like a forgotten `string.length(s)` that would have truncated at NUL.
-- `string.bytes(s)` → `byte[]` (#2301) - A bounded, read-only view of `s`'s own bytes, for binary/ASCII scanning by indexing (`v[i]`) or sub-slicing instead of repeated `char_at_n` calls. BORROWED: valid only as long as `s` is; never free it. Read-only: a store through it, or through a view made from it, panics with "a write through a read-only view of a string", and one the checker can see is refused (#3025).
+- `string.bytes(s)` → `byte[]` (#2301) - A bounded, read-only view of `s`'s own bytes, for binary/ASCII scanning by indexing (`v[i]`) or sub-slicing instead of repeated `char_at_n` calls. It holds `s` when `s` is a counted string (#3570), so it stays valid after `s` is gone, wherever it is kept; never free it. Read-only: a store through it, or through a view made from it, panics with "a write through a read-only view of a string", and one the checker can see is refused (#3025).
 - `string.to_upper(str)` - Convert to uppercase (returns new string)
 - `string.to_lower(str)` - Convert to lowercase (returns new string)
 - `string.trim(str)` - Remove leading/trailing whitespace
@@ -948,7 +948,7 @@ Raw out-parameter externs are preserved as `string_to_int_raw`, `string_to_long_
 - `string.release(str)` - Decrement reference count (frees when zero)
 - `string.free(str)` - Alias for `release`
 - `string.keep(s)` → `ptr` - A reference of its own to `s`, as a `ptr`, for a `@keep ptr` parameter or a `ptr` field that holds the string past the call (E0902)
-- `string.release_kept(p)` - Gives back what `string.keep` took
+- `string.release_kept(p)` - Gives back one reference `string.keep` handed over, or one a header-defined struct's string field was given (`p` the string or the characters the field holds, #3567); a no-op for a pointer nothing handed over
 - `string.from_ptr(p)` → `(string, string)` - The string a `ptr` holds, typed as one: `(null, "not a string")` when `p` points at something else (a bare `ptr` given to a `string` local is refused, E0202)
 
 ### Building strings incrementally (avoiding quadratic cost)

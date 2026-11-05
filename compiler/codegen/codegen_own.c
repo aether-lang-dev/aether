@@ -29,13 +29,16 @@ typedef struct {
     const char* mangled;
 } OwnType;
 
-/* Slice ownership: a slice type whose elements are slices that own
- * something of their own (strings, or slices again) has its element drop
- * generated, `_ae_sdrop_<M>(p)`, the drop of one element at `p`
- * (own_slice_elem_drop_fn). */
-static Type** g_sdrop_types = NULL;
-static int g_sdrop_count = 0;
-static int g_sdrop_cap = 0;
+/* #3568: a counted slice buffer whose elements own something (strings,
+ * closures, structs or composites that hold them) carries its element
+ * type's drop, copy and publish in its header, `_ae_sops_<M>`
+ * (own_slice_ops), one static table per element type `<M>`, generated with
+ * the element copy `_ae_scopy_<M>(p)` and publish `_ae_spub_<M>(p)`. A
+ * slice of slices uses the runtime's own
+ * (aether_slice_row_ops): each row carries its element type itself. */
+static Type** g_sops_types = NULL;
+static int g_sops_count = 0;
+static int g_sops_cap = 0;
 
 static OwnType* g_own_types = NULL;
 static int g_own_count = 0;
@@ -57,6 +60,8 @@ static const char* sanitize(const char* s) {
 }
 
 static const char* own_mangle(Type* t) {
+    /* A slice part (#3568): its element type's, marked; no size. */
+    if (type_is_slice(t)) return cg_internf("s_%s", own_mangle(t->element_type));
     if (t->kind == TYPE_ARRAY)
         return cg_internf("arr%d_%s", t->array_size, own_mangle(t->element_type));
     if (t->kind == TYPE_STRING) return "str";
@@ -86,6 +91,17 @@ static const char* own_sum_variant(CodeGenerator* gen, Type* t, int i) {
     return sd && struct_owns_heap_strings(gen, sd) ? v->value : NULL;
 }
 
+/* #3568: does a part of type `t` (a field, a tuple part, an optional's
+ * value, an element of a fixed-size array, a closure's capture, a message
+ * field, a state field) own something: an owning type, or a slice, which
+ * holds a reference to the counted buffer it views. A slice local, a slice
+ * parameter and a slice result are slice ownership's (slice_own.c), so
+ * own_type_owns, which places of every kind ask, leaves the bare slice
+ * out. */
+int own_part_owns(CodeGenerator* gen, Type* t) {
+    return type_is_slice(t) || own_type_owns(gen, t);
+}
+
 int own_type_owns(CodeGenerator* gen, Type* t) {
     if (!t) return 0;
     switch (t->kind) {
@@ -97,12 +113,12 @@ int own_type_owns(CodeGenerator* gen, Type* t) {
         return struct_owning_strings(gen, t) != NULL;
     case TYPE_TUPLE:
         for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
-            if (own_type_owns(gen, t->tuple_types[i])) return 1;
+            if (own_part_owns(gen, t->tuple_types[i])) return 1;
         return 0;
     case TYPE_OPTIONAL:
-        return own_type_owns(gen, t->element_type);
+        return own_part_owns(gen, t->element_type);
     case TYPE_ARRAY:
-        return t->array_size > 0 && own_type_owns(gen, t->element_type);
+        return t->array_size > 0 && own_part_owns(gen, t->element_type);
     case TYPE_PTR:
         return is_string_seq_ptr_type(t);
     case TYPE_SUM:
@@ -160,14 +176,13 @@ static const char* own_slice_mangle(Type* t) {
     return own_mangle(t);
 }
 
-static void own_register_sdrop(CodeGenerator* gen, Type* t);
-static void emit_slice_drops(CodeGenerator* gen);
+static void own_register_sops(CodeGenerator* gen, Type* et);
+static void emit_slice_ops(CodeGenerator* gen);
 
 static void own_collect_type(CodeGenerator* gen, Type* t, int depth) {
     if (!t || depth > 16) return;
     own_register(gen, t);
-    if (type_is_slice(t) && t->element_type && type_is_slice(t->element_type))
-        own_register_sdrop(gen, t->element_type);
+    if (type_is_slice(t) && t->element_type) own_register_sops(gen, t->element_type);
     if (t->kind == TYPE_TUPLE) {
         for (int i = 0; t->tuple_types && i < t->tuple_count; i++)
             own_collect_type(gen, t->tuple_types[i], depth + 1);
@@ -183,12 +198,6 @@ static void own_collect_type(CodeGenerator* gen, Type* t, int depth) {
 void own_collect_types(CodeGenerator* gen, ASTNode* node) {
     if (!node) return;
     own_collect_type(gen, node->node_type, 0);
-    /* #3549: a slice made for a call (slice ownership's `slice_temp`) is
-     * dropped by the call's argument temporaries, through the drop of a
-     * whole slice of its type. */
-    if (node->type == AST_FUNCTION_CALL && type_is_slice(node->node_type) &&
-        annotation_has_marker(node->annotation, "slice_temp"))
-        own_register_sdrop(gen, node->node_type);
     for (int i = 0; i < node->child_count; i++) own_collect_types(gen, node->children[i]);
 }
 
@@ -213,6 +222,7 @@ static const char* own_ptr_type(Type* t) {
  * (a closure's environment is counted atomically already; a string
  * sequence's cells are not published, as own_emit_part does not). */
 const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv) {
+    if (type_is_slice(pt)) return cg_internf("aether_slice_publish(%s)", lv);   /* #3568 */
     if (!own_type_owns(gen, pt)) return NULL;
     switch (pt->kind) {
     case TYPE_STRING:
@@ -235,7 +245,16 @@ const char* own_publish_call(CodeGenerator* gen, Type* pt, const char* lv) {
  * (#2919; a closure environment's count is atomic already). */
 void own_emit_part(CodeGenerator* gen, Type* pt, const char* lv, OwnOp op) {
     FILE* o = gen->output;
-    if (!own_type_owns(gen, pt)) return;
+    if (!own_part_owns(gen, pt)) return;
+    /* #3568: a slice part holds a reference to the counted buffer it views
+     * (none for an uncounted one, which these leave alone). */
+    if (type_is_slice(pt)) {
+        if (op == OWN_RETAIN) fprintf(o, "    aether_slice_retain(%s);\n", lv);
+        else if (op == OWN_DROP) fprintf(o, "    aether_slice_release((AetherSlice*)&(%s));\n", lv);
+        else if (op == OWN_PUBLISH) fprintf(o, "    aether_slice_publish(%s);\n", lv);
+        else fprintf(o, "    (void)aether_slice_take((AetherSlice*)&(%s));\n", lv);
+        return;
+    }
     switch (pt->kind) {
     case TYPE_STRING:
         if (op == OWN_RETAIN) fprintf(o, "    %s = aether_uniform_heap_str(%s, 0);\n", lv, lv);
@@ -333,7 +352,7 @@ static void own_emit_body(CodeGenerator* gen, Type* t, OwnOp op) {
 
 void emit_own_ops(CodeGenerator* gen) {
     if (g_own_count == 0) {
-        emit_slice_drops(gen);
+        emit_slice_ops(gen);
         g_own_emitted = 1;
         return;
     }
@@ -376,7 +395,7 @@ void emit_own_ops(CodeGenerator* gen) {
         fprintf(o, "    if (_aether_cell_last(h)) { _ae_drop_%s((%s)(void*)cell); free(h); }\n", ot->mangled, pt);
         fprintf(o, "}\n");
     }
-    emit_slice_drops(gen);
+    emit_slice_ops(gen);
     g_own_emitted = 1;
 }
 
@@ -400,6 +419,7 @@ const char* own_place_lvalue(Type* t, const char* name) {
 
 /* The drop the unwind journal runs on a place of owning type `t` (#2923). */
 const char* own_unwind_fn(CodeGenerator* gen, Type* t) {
+    if (type_is_slice(t)) return "aether_slice_release_at";   /* #3568 */
     if (t->kind == TYPE_STRING) return "_aether_string_drop_unwind";
     if (t->kind == TYPE_FUNCTION) return "_aether_closure_drop_unwind";
     if (t->kind == TYPE_PTR) return "_aether_seq_drop_unwind";
@@ -412,67 +432,72 @@ const char* own_fn(CodeGenerator* gen, Type* t, const char* op) {
     return cg_internf("_ae_%s_%s", op, own_find(gen, t)->mangled);
 }
 
-/* The drop of one element of a slice whose elements are of type `et`, as
- * aether_slice_drop takes it: NULL when an element owns nothing, the
- * element type's unwind drop when it is counted (a string, a closure, a
- * struct or composite that holds one), and for a slice element the drop of
- * that slice (its rows are owned by the slice that holds them). */
-const char* own_slice_elem_drop_fn(CodeGenerator* gen, Type* et) {
-    if (!et) return "NULL";
-    if (type_is_slice(et)) {
-        const char* inner = own_slice_elem_drop_fn(gen, et->element_type);
-        if (strcmp(inner, "NULL") == 0) return "aether_slice_drop_plain";
-        own_register_sdrop(gen, et);
-        return cg_internf("_ae_sdrop_%s", own_slice_mangle(et));
-    }
-    if (et->kind == TYPE_ARRAY) return "NULL";   /* a slice of arrays is not grown */
-    if (!own_type_owns(gen, et)) return "NULL";
-    return own_unwind_fn(gen, et);
+/* Does a counted buffer of elements of type `et` need its element type's
+ * drop and copy: an element that owns something of its own (a string, a
+ * closure, a struct or composite that holds one)? A slice of slices has
+ * the runtime's row ops; a slice of fixed-size arrays is not grown. */
+static int own_sops_needed(CodeGenerator* gen, Type* et) {
+    return et && !type_is_slice(et) && et->kind != TYPE_ARRAY && own_type_owns(gen, et);
 }
 
-static void own_register_sdrop(CodeGenerator* gen, Type* t) {
-    if (!t || !type_is_slice(t) || !t->element_type) return;
-    /* A slice of plain elements is dropped by aether_slice_drop_plain. */
-    if (strcmp(own_slice_elem_drop_fn(gen, t->element_type), "NULL") == 0) return;
-    const char* m = own_slice_mangle(t);
-    for (int i = 0; i < g_sdrop_count; i++)
-        if (strcmp(own_slice_mangle(g_sdrop_types[i]), m) == 0) return;
+static void own_register_sops(CodeGenerator* gen, Type* et) {
+    if (!own_sops_needed(gen, et)) return;
+    const char* m = own_slice_mangle(et);
+    for (int i = 0; i < g_sops_count; i++)
+        if (strcmp(own_slice_mangle(g_sops_types[i]), m) == 0) return;
     if (g_own_emitted) {
-        fprintf(stderr, "aetherc: internal error: the slice drop of %s was asked for after "
-                        "it was emitted\n", get_c_type(t));
+        fprintf(stderr, "aetherc: internal error: the element ops of %s[] were asked for "
+                        "after they were emitted\n", get_c_type(et));
         exit(1);
     }
-    if (g_sdrop_count == g_sdrop_cap) {
-        g_sdrop_cap = g_sdrop_cap ? g_sdrop_cap * 2 : 8;
-        g_sdrop_types = (Type**)aether_xrealloc(g_sdrop_types,
-                                                (size_t)g_sdrop_cap * sizeof(Type*));
+    if (g_sops_count == g_sops_cap) {
+        g_sops_cap = g_sops_cap ? g_sops_cap * 2 : 8;
+        g_sops_types = (Type**)aether_xrealloc(g_sops_types, (size_t)g_sops_cap * sizeof(Type*));
     }
-    g_sdrop_types[g_sdrop_count++] = clone_type(t);
+    g_sops_types[g_sops_count++] = clone_type(et);
 }
 
-/* The element drops own_slice_elem_drop_fn names, prototypes first. */
-static void emit_slice_drops(CodeGenerator* gen) {
+/* #3568: the element ops a counted buffer of slice type `t` carries in its
+ * header (aether_slice_alloc, aether_slice_grow1), as C: NULL when its
+ * elements own nothing. */
+const char* own_slice_ops(CodeGenerator* gen, Type* t) {
+    Type* et = t && type_is_slice(t) ? t->element_type : NULL;
+    if (!et) return "NULL";
+    if (type_is_slice(et)) return "aether_slice_row_ops()";
+    if (!own_sops_needed(gen, et)) return "NULL";
+    own_register_sops(gen, et);
+    return cg_internf("&_ae_sops_%s", own_slice_mangle(et));
+}
+
+/* The element ops own_slice_ops names: the copy of one element in place,
+ * and the table with the element type's unwind drop. */
+static void emit_slice_ops(CodeGenerator* gen) {
     FILE* o = gen->output;
-    if (g_sdrop_count == 0) return;
-    fprintf(o, "\n/* Slice ownership: the drop of a slice that is an element of another. */\n");
-    for (int i = 0; i < g_sdrop_count; i++)
-        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_sdrop_%s(const void* p);\n",
-                own_slice_mangle(g_sdrop_types[i]));
-    for (int i = 0; i < g_sdrop_count; i++) {
-        Type* t = g_sdrop_types[i];
-        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_sdrop_%s(const void* p) {\n",
-                own_slice_mangle(t));
-        fprintf(o, "    aether_slice_drop((AetherSlice*)(void*)p, sizeof(%s), %s);\n",
-                get_c_type(t->element_type), own_slice_elem_drop_fn(gen, t->element_type));
+    if (g_sops_count == 0) return;
+    fprintf(o, "\n/* Counted slice buffers (#3568): each element type's drop and copy. */\n");
+    for (int i = 0; i < g_sops_count; i++) {
+        Type* et = g_sops_types[i];
+        const char* m = own_slice_mangle(et);
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_scopy_%s(void* p) {\n", m);
+        own_emit_part(gen, et, cg_internf("(*(%s*)p)", get_c_type(et)), OWN_RETAIN);
         fprintf(o, "}\n");
+        /* #3568: what the element holds, made atomic with the buffer when
+         * the buffer is published (aether_slice_publish). */
+        fprintf(o, "static AETHER_MAYBE_UNUSED void _ae_spub_%s(void* p) {\n", m);
+        fprintf(o, "    (void)p;\n");
+        own_emit_part(gen, et, cg_internf("(*(%s*)p)", get_c_type(et)), OWN_PUBLISH);
+        fprintf(o, "}\n");
+        fprintf(o, "static AETHER_MAYBE_UNUSED const AetherSliceOps _ae_sops_%s = "
+                   "{%s, _ae_scopy_%s, _ae_spub_%s};\n",
+                m, own_unwind_fn(gen, et), m, m);
     }
 }
 
 void own_reset(void) {
-    for (int i = 0; i < g_sdrop_count; i++) free_type(g_sdrop_types[i]);
-    free(g_sdrop_types);
-    g_sdrop_types = NULL;
-    g_sdrop_count = g_sdrop_cap = 0;
+    for (int i = 0; i < g_sops_count; i++) free_type(g_sops_types[i]);
+    free(g_sops_types);
+    g_sops_types = NULL;
+    g_sops_count = g_sops_cap = 0;
     for (int i = 0; i < g_own_count; i++) free_type(g_own_types[i].type);
     free(g_own_types);
     g_own_types = NULL;

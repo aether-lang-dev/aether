@@ -93,5 +93,19 @@ main() {
         println("${fifth} ${base - x}")
     }
     fire(f, 1)
+    // A closure stored into a `ptr` field is kept in a box, which the field
+    // does not own: each is given back before its holder goes. oc only
+    // points at c.
+    release_closure(a.cb)
+    heap.free(a)
+    release_closure(b.cb)
+    heap.free(b)
+    release_closure(c.cb)
+    heap.free(c)
+    release_closure(d.cb)
+    heap.free(d)
+    release_closure(f.cb)
+    heap.free(f)
+    heap.free(oc)
     return 0
 }

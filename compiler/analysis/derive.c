@@ -170,8 +170,8 @@ static ASTNode* synth_eq(ASTNode* struct_def) {
         ASTNode* fcmp = mk_field_eq(field, "a", "b", line, column, &ok);
         if (!ok) {
             ok_overall = 0;
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "@derive(eq) on '%s': field '%s' has an unsupported type. "
                      "v1 supports primitive numeric and string fields only.",
                      type_name, field->value ? field->value : "?");
@@ -201,15 +201,12 @@ static ASTNode* synth_eq(ASTNode* struct_def) {
         chain->node_type = create_type(TYPE_INT);
     }
 
-    /* Build the function definition. Function name: T_eq.
-     * Precision spec caps the type-name component at 250 bytes
-     * regardless of source length — keeps -Werror=format-truncation
-     * builds happy. Identifiers above 250 bytes don't occur in
-     * practice. */
-    /* Named after the struct as written: a module's struct is merged as
-     * `<ns>_<Name>`, and its derive is still `Name_eq`. */
-    char fname[256];
-    snprintf(fname, sizeof(fname), "%.250s_eq", ast_struct_source_name(type_name));
+    /* Build the function definition. Function name: T_eq, as long as the
+     * struct's name: it was cut at 250 bytes, so a longer struct's derive
+     * was named nothing its callers name (#3569). Named after the struct
+     * as written: a module's struct is merged as `<ns>_<Name>`, and its
+     * derive is still `Name_eq`. */
+    const char* fname = aether_internf("%s_eq", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_INT);
 
@@ -254,8 +251,8 @@ static int check_attributes_have_a_schema(ASTNode* struct_def) {
         for (int a = 0; a < field->child_count; a++) {
             ASTNode* attr = field->children[a];
             if (!attr || attr->type != AST_FIELD_ATTRIBUTE) continue;
-            char msg[512];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "field attribute `@%.100s` on '%.100s.%.100s' needs `@derive(schema)` on "
                      "the struct: the schema table is what carries it",
                      attr->value ? attr->value : "?",
@@ -289,8 +286,8 @@ static ASTNode* synth_schema(ASTNode* struct_def) {
                 ASTNode* y = field->children[b];
                 if (!y || y->type != AST_FIELD_ATTRIBUTE || !y->value) continue;
                 if (strcmp(x->value, y->value) != 0) continue;
-                char msg[512];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "field '%.120s.%.120s' has `@%.120s` twice; a field names each "
                          "attribute once",
                          type_name, field->value ? field->value : "?", x->value);
@@ -301,8 +298,8 @@ static ASTNode* synth_schema(ASTNode* struct_def) {
     }
     if (!ok) return NULL;
 
-    char fname[256];
-    snprintf(fname, sizeof(fname), "%.240s_schema", ast_struct_source_name(type_name));
+    /* As long as the struct's name (#3569): cut at 240 bytes before. */
+    const char* fname = aether_internf("%s_schema", ast_struct_source_name(type_name));
     ASTNode* func = create_ast_node(AST_FUNCTION_DEFINITION, fname, line, column);
     func->node_type = create_type(TYPE_PTR);
 
@@ -347,8 +344,8 @@ int derive_synthesize_pass(ASTNode* program) {
         int flags = 0;
         char unsupported[64];
         if (parse_derive_list(child->annotation, &flags, unsupported, sizeof(unsupported)) < 0) {
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "@derive: unknown derive '%s' (supported: eq, schema)",
                      unsupported);
             type_error(msg, child->line, child->column);
@@ -364,8 +361,8 @@ int derive_synthesize_pass(ASTNode* program) {
                               : (flags & DERIVE_CLONE)  ? "clone"
                               : (flags & DERIVE_HASH)   ? "hash"
                               : "<unknown>";
-            char msg[256];
-            snprintf(msg, sizeof(msg),
+            const char* msg = "";
+            msg = aether_internf(
                      "@derive(%s): not yet supported (eq and schema are; "
                      "format/clone/hash land in follow-up commits)",
                      unsup);
@@ -400,8 +397,8 @@ int derive_synthesize_pass(ASTNode* program) {
             if ((tasks[k].flags & t.flags) && o->value && t.sd->value &&
                 strcmp(o->value, t.sd->value) != 0 &&
                 strcmp(ast_struct_source_name(o->value), ast_struct_source_name(t.sd->value)) == 0) {
-                char msg[512];
-                snprintf(msg, sizeof(msg),
+                const char* msg = "";
+                msg = aether_internf(
                          "@derive on two structs named '%.120s' (%.120s and %.120s): a derived "
                          "function is named after the struct as written, so both would define "
                          "the same one",
