@@ -153,8 +153,10 @@ static int cache_slot_is_countable(const char* name) {
     if (strstr(name, ".tmp.")) return 0;
     size_t n = strlen(name);
     if (n > 5 && strcmp(name + n - 5, ".deps") == 0) return 0;
+    /* A compiler probe's remembered answer (#3600). */
+    if (n > 6 && strcmp(name + n - 6, ".probe") == 0) return 0;
     if (strcmp(name, "gc.stamp") == 0 || strcmp(name, "latest_release") == 0 ||
-        strcmp(name, FILE_MEMO_NAME) == 0) return 0;
+        strcmp(name, FILE_MEMO_NAME) == 0 || strcmp(name, "walk-keyed") == 0) return 0;
     return 1;
 }
 
@@ -1392,6 +1394,98 @@ static unsigned long long c_compiler_fingerprint(void) {
     free(owned);
     fp = h ? h : 1ULL;
     return fp;
+}
+
+/* ---- Compiler probes, remembered (#3600) -----------------------------------
+ *
+ * A probe asks the C compiler whether it takes a flag, by compiling an empty
+ * file with it. ae is a new process for every build, so a probe kept in a
+ * static was asked again by every build: two compiles before the real one.
+ * The answer depends on the compiler, which c_compiler_fingerprint identifies
+ * as the build cache trusts it (the driver's path and content, and the first
+ * line of its --version), plus whatever else the caller folds into `what`.
+ * Each answer is a file of its own in the cache directory, written whole by
+ * a rename, so concurrent builds never read half of one. */
+/* "<path> <size> <mtime ns>" of the program the first word of `prog` names
+ * (looked up on PATH, quotes dropped), or of the file `name` in that
+ * program's directory when `name` is not NULL; 0 when either is not found. */
+static int program_file_identity(const char* prog, const char* name, char* out, size_t outsz) {
+    if (!prog || outsz == 0) return 0;
+    size_t n = strcspn(prog, " \t");
+    char first[1024];
+    if (n == 0 || n >= sizeof(first)) return 0;
+    memcpy(first, prog, n);
+    first[n] = '\0';
+    /* A quoted path ("C:\...\gcc.exe") loses its quotes. */
+    if (first[0] == '"') {
+        memmove(first, first + 1, n);
+        char* q = strchr(first, '"');
+        if (q) *q = '\0';
+    }
+    char* resolved = resolve_program(first);
+    if (!resolved) return 0;
+    char* path = resolved;
+    if (name) {
+        char* cut = strrchr(resolved, '/');
+#ifdef _WIN32
+        char* bcut = strrchr(resolved, '\\');
+        if (!cut || (bcut && bcut > cut)) cut = bcut;
+#endif
+        size_t dlen = cut ? (size_t)(cut - resolved) + 1 : 0;
+        path = str_join4(resolved, dlen, name, "", "");
+        free(resolved);
+        if (!path) return 0;
+    }
+    unsigned long long size = 0, mtime_ns = 0, ident = 0;
+    int found = file_stat_id(path, &size, &mtime_ns, &ident);
+    if (found) snprintf(out, outsz, "%s %llu %llu", path, size, mtime_ns);
+    free(path);
+    return found;
+}
+
+/* The answer's slot: the compiler command, the question, the compiler's
+ * fingerprint, and the program the command runs, as it is on disk now (so a
+ * command that names another compiler than the one the fingerprint resolved
+ * is keyed by its own). 0 when the program cannot be found: nothing is
+ * remembered for it. */
+static int probe_memo_path(const char* cc, const char* what, char* out, size_t outsz) {
+    char ident[1400];
+    if (!program_file_identity(cc, NULL, ident, sizeof(ident))) return 0;
+    unsigned long long h = fnv64_more(fnv64_more(fnv64_str(cc ? cc : ""), "\n"),
+                                      what ? what : "");
+    h = fnv64_more(fnv64_more(h, "\n"), ident);
+    h = (h * 1099511628211ULL) ^ c_compiler_fingerprint();
+    init_cache_dir();
+    snprintf(out, outsz, "%s/%016llx.probe", s_cache_dir, h);
+    return 1;
+}
+
+int cache_probe_memo_get(const char* cc, const char* what) {
+    char path[1200];
+    if (!probe_memo_path(cc, what, path, sizeof(path))) return -1;
+    FILE* f = fopen(path, "r");
+    if (!f) return -1;
+    int c = fgetc(f);
+    fclose(f);
+    return c == '1' ? 1 : c == '0' ? 0 : -1;
+}
+
+void cache_probe_memo_put(const char* cc, const char* what, int answer) {
+    char path[1200], tmp[1300];
+    if (!probe_memo_path(cc, what, path, sizeof(path))) return;
+    snprintf(tmp, sizeof(tmp), "%s.tmp.%d", path, (int)getpid());
+    FILE* f = fopen(tmp, "w");
+    if (!f) return;
+    int ok = fputc(answer ? '1' : '0', f) != EOF;
+    if (fclose(f) != 0) ok = 0;
+    if (!ok || cache_publish(tmp, path) != 0) remove(tmp);
+}
+
+/* "<path> <size> <mtime ns>" of the file `name` in the directory the program
+ * `prog` (its first word) resolves to on PATH, into `out`; 0 when either is
+ * not found. */
+int cache_file_beside_program(const char* prog, const char* name, char* out, size_t outsz) {
+    return name ? program_file_identity(prog, name, out, outsz) : 0;
 }
 
 /* The key text, grown as needed (#2538). It was built in 2 KB and cut at the

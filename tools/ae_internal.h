@@ -208,6 +208,16 @@ int cache_lookup_can_hit(const char* ae_file);
  * made: record it when that key came from a tree walk, so that later lookups
  * of sources with no depfile walk again and can find it. */
 void cache_note_published(void);
+/* #3600: the remembered answer (1 yes, 0 no) of compiler probe `what` for the
+ * compiler command `cc`, or -1 when none is remembered. It is kept per C
+ * compiler identity (the cache key's) in the cache directory; `what` names
+ * the question and anything else its answer depends on. */
+int cache_probe_memo_get(const char* cc, const char* what);
+void cache_probe_memo_put(const char* cc, const char* what, int answer);
+/* #3600: "<path> <size> <mtime ns>" of the file `name` beside the program
+ * `prog` (its first word, looked up on PATH): 1, or 0 when either is not
+ * found. */
+int cache_file_beside_program(const char* prog, const char* name, char* out, size_t outsz);
 /* $AE_CC, else $CC, else NULL: the C-backend compiler the user picked (ae.c).
  * The cache key folds in the compiler it names (#2477). */
 const char* c_backend_env_override(void);
