@@ -436,6 +436,20 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # std/ trees walked below, so it shipped in no install at all and
     # runtime/libaether_caps.c could not find it when cross-compiling (#1420).
     cp include/*.h "$INCLUDE_DIR/" 2>/dev/null || true
+    # Version stamps beside libaether.a and the headers, as `make install`
+    # writes them. `ae build` compares lib/aether/VERSION to its own version
+    # and warns of a split toolchain when they differ; install.sh never wrote
+    # them, so an install over an older `make install` kept its stamp (0.562.0
+    # under a fresh 0.884.0 on one host) and every build warned falsely. With
+    # no release version to stamp, a stale stamp goes rather than staying.
+    _stamp="$(tr -d '[:space:]' < VERSION 2>/dev/null || true)"
+    case "$_stamp" in
+        ""|0.0.0|0.0.0-dev)
+            rm -f "$LIB_DIR/VERSION" "$INCLUDE_DIR/VERSION" ;;
+        *)
+            printf '%s\n' "$_stamp" > "$LIB_DIR/VERSION"
+            printf '%s\n' "$_stamp" > "$INCLUDE_DIR/VERSION" ;;
+    esac
     # One tar per tree carries every header to the same relative path,
     # making the directories that hold one. It replaced a loop of mkdir,
     # dirname and cp for each of the 120 headers, three process starts
