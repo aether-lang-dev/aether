@@ -13,6 +13,15 @@
  * views for as long as it is held, wherever its owner went: bound in an
  * outer scope, held while the owner is bound again, returned, stored.
  *
+ * A slice local only ever given views of memory no count covers holds no
+ * reference (#3583): a cast of a pointer (`p as T[]`), `null`, an array
+ * literal, an array viewed as a slice, a sub-slice of one of these, of a
+ * fixed-size array or of a pointer, and a copy or a view of a local that
+ * is one. What it holds is never a counted buffer, so nothing releases it
+ * and no caught panic has anything of it to give back. One that may be
+ * given a view of a counted buffer on any path, directly or through other
+ * locals, holds its own as above.
+ *
  * A local that owns what it holds moves: binding it to another name (`ys =
  * xs`), returning it, storing it into a field, a module-level `var` or an
  * element, putting it in a struct, a tuple, an array or a message, and

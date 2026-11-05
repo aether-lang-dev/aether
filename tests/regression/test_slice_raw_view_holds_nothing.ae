@@ -1,0 +1,176 @@
+// Regression (#3583): a slice local only ever given views of memory no count
+// covers holds no reference, and one that may be given a view of a counted
+// buffer still holds its own.
+//
+// Since #3568 every slice local that is given views held a reference,
+// released at each exit and registered for a caught panic. For a local
+// whose values are never counted (a cast of a pointer, `null`, an array
+// literal, an array viewed as a slice, a sub-slice of one, a local that is
+// one) the release gave back nothing and the registration cost a call each
+// way: a three-line accessor over C memory became 3.5 to 5 times slower.
+// tests/integration/slice_raw_view_holds_nothing checks the generated C;
+// this checks what runs:
+//
+// - each such shape reads and writes the memory it views;
+// - a local given such a view on one path and a view of a `make` buffer on
+//   another keeps that buffer alive after its owner lets go of it: the view
+//   reads back what was stored, after a churn of same-sized buffers filled
+//   with -7 (a buffer freed under the view would come back holding the
+//   filler, and ASan reports the read);
+// - a parameter's view, a field's and a call's are held as before;
+// - where the heap count is exact (mem.heap_in_use_exact), some round of
+//   all of it leaves the heap where it found it.
+
+import std.mem
+
+extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL #3583: ${what}")
+        exit(1)
+    }
+}
+
+struct Column {
+    data: ptr
+    arity: int
+}
+
+struct Holder {
+    data: int[]
+}
+
+column_get(c: *Column, slot: int, k: int) -> float {
+    buf = c.data as float[]
+    return buf[slot * c.arity + k]
+}
+
+column_set(c: *Column, slot: int, k: int, v: float) {
+    buf = c.data as float[]
+    buf[slot * c.arity + k] = v
+}
+
+churn() -> int {
+    t = 0
+    for r in 0..64 {
+        b = make([]int, 4)
+        for i in 0..4 {
+            b[i] = -7
+        }
+        t = t + b[0]
+    }
+    return t
+}
+
+// C memory through a cast, a bounded sub-slice of it, and a chain of
+// locals that are each a view of the one before.
+raw_shapes(p: ptr) -> int {
+    whole = p as int[]
+    whole[0] = 3
+    first = (p as int[])[0..4]
+    first[1] = 4
+    tail = first[1..4]
+    again = tail
+    again[1] = 5
+    int[] lit = [10, 20, 30]
+    arr = [1, 2, 3, 4]
+    part = arr[1..3]
+    other = whole
+    other = lit
+    return whole[0] + first[1] + whole[2] + lit[2] + part[1] + other[0]
+}
+
+// A local given a view of C memory, then, on a path, a view of a `make`
+// buffer whose owner is bound again before the view is read.
+mixed(p: ptr, take: int) -> int {
+    xs = make([]int, 4)
+    for i in 0..4 {
+        xs[i] = 40 + i
+    }
+    v = p as int[]
+    if take > 0 {
+        v = xs[1..3]
+    }
+    xs = make([]int, 4)
+    churn()
+    return v[0]
+}
+
+// The same through a chain: the view of the counted buffer reaches the
+// local at the end of it.
+mixed_chain(p: ptr) -> int {
+    xs = make([]int, 4)
+    xs[2] = 77
+    a = p as int[]
+    b = a[0..4]
+    a = xs[1..4]
+    c = a
+    b = c[1..3]
+    xs = make([]int, 1)
+    a = p as int[]
+    c = a
+    churn()
+    return b[0]
+}
+
+// A parameter's view, the caller's buffer, which the copy returned keeps.
+from_param(xs: int[]) -> int[] {
+    v = xs[0..1]
+    v = xs[0..2]
+    return v
+}
+
+// A field's view and a call's.
+from_field(h: Holder, p: ptr) -> int {
+    v = p as int[]
+    v = h.data
+    w = p as int[]
+    w = from_param(h.data)
+    return v[0] + w[1]
+}
+
+one_round(c: *Column, p: ptr) -> int {
+    for slot in 0..8 {
+        column_set(c, slot, 2, 1.5)
+    }
+    s = 0.0
+    for slot in 0..8 {
+        s = s + column_get(c, slot, 2)
+    }
+    check(s == 12.0, "the accessors read back what they stored")
+    check(raw_shapes(p) == 3 + 4 + 5 + 30 + 3 + 10, "each view reads and writes what it views")
+    check(mixed(p, 1) == 41, "a view of a make buffer outlives its owner")
+    check(mixed(p, 0) == 3, "on the other path the local views C memory")
+    check(mixed_chain(p) == 77, "a view through a chain of locals outlives its owner")
+    ys = make([]int, 3)
+    ys[0] = 6
+    ys[1] = 8
+    h = Holder { data: ys }
+    kept = from_param(h.data)
+    h = Holder { data: make([]int, 2) }
+    churn()
+    check(kept[1] == 8, "a parameter's view outlives the field it came from")
+    h.data[0] = 9
+    h.data[1] = 11
+    check(from_field(h, p) == 9 + 11, "a field's view and a call's")
+    return 1
+}
+
+main() {
+    c = Column { data: calloc(64, 8), arity: 3 }
+    p = calloc(16, 8)
+    one_round(&c, p)
+    if mem.heap_in_use_exact() {
+        one_round(&c, p)
+        grown = mem.steady_growth(|| {
+                one_round(&c, p)
+            }, 5)
+        check(grown == 0, "a round grew the heap by ${grown} bytes in every window")
+    }
+    free(p)
+    free(c.data)
+    println("OK")
+}
