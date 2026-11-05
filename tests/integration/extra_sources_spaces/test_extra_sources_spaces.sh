@@ -64,16 +64,36 @@ else
 fi
 rm -f "$tmp/proj/aether.toml"
 
-# 4. the clobber check still sees the entry: -o naming the shim's own
-#    directory + basename would write the generated C over it
-if (cd "$tmp/proj" && "$AE" build ex.ae --extra "sp dir/shim.c" -o "sp dir/shim" >"$tmp/clobber.log" 2>&1); then
-    echo "  [FAIL] extra_sources_spaces: a build that writes its C over 'sp dir/shim.c' was not refused"
-    fail=1
-elif ! grep -q "would be written over an --extra input" "$tmp/clobber.log"; then
-    echo "  [FAIL] extra_sources_spaces: the clobber refusal did not name the --extra input"
+# 4. the clobber check still sees the entry. The generated C no longer goes
+#    beside the output, so -o naming the shim's directory + basename builds
+#    and leaves the shim alone; -o naming the shim itself would write the
+#    program over it and is refused, naming the --extra input (not on
+#    Windows, where the program gets .exe and the names do not meet).
+. "$ROOT/tests/lib/same_bytes.sh"
+cp "$tmp/proj/sp dir/shim.c" "$tmp/shim.before"
+if ! (cd "$tmp/proj" && "$AE" build ex.ae --extra "sp dir/shim.c" -o "sp dir/shim" >"$tmp/clobber.log" 2>&1); then
+    echo "  [FAIL] extra_sources_spaces: -o 'sp dir/shim' beside --extra 'sp dir/shim.c' did not build"
     head -3 "$tmp/clobber.log" | sed 's/^/        /'
     fail=1
+elif ! same_bytes "$tmp/proj/sp dir/shim.c" "$tmp/shim.before"; then
+    echo "  [FAIL] extra_sources_spaces: the build changed 'sp dir/shim.c'"
+    fail=1
 fi
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) ;;
+    *)
+        if (cd "$tmp/proj" && "$AE" build ex.ae --extra "sp dir/shim.c" -o "sp dir/shim.c" >"$tmp/clobber2.log" 2>&1); then
+            echo "  [FAIL] extra_sources_spaces: a build that writes its program over 'sp dir/shim.c' was not refused"
+            fail=1
+        elif ! grep -q "would be written over an --extra input" "$tmp/clobber2.log"; then
+            echo "  [FAIL] extra_sources_spaces: the clobber refusal did not name the --extra input"
+            head -3 "$tmp/clobber2.log" | sed 's/^/        /'
+            fail=1
+        elif ! same_bytes "$tmp/proj/sp dir/shim.c" "$tmp/shim.before"; then
+            echo "  [FAIL] extra_sources_spaces: the refused build changed 'sp dir/shim.c'"
+            fail=1
+        fi ;;
+esac
 
 if [ "$fail" = 0 ]; then
     echo "  [PASS] extra_sources_spaces: --extra and extra_sources paths with a space build, invalidate the cache and are clobber-checked"
