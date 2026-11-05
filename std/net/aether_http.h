@@ -165,6 +165,20 @@ int  http_response_body_length(HttpResponse* response);
 int http_response_is_stream_raw(HttpResponse* response);
 const char* http_response_read_chunk_raw(HttpResponse* response, int max);
 
+// Take the plaintext connection out of a streaming response, after a 101 or
+// a 200 that hands the connection over to a raw stream (Docker's attach and
+// exec start). _0: a std.tcp socket handle the caller owns (tcp_close), or
+// NULL; _1: an OWNED AetherString of the bytes read past the head and not
+// consumed, to be read before the socket; _2: "" or why not (not a
+// streaming response, already taken, a TLS connection).
+struct TcpSocket;
+typedef struct HttpTakeConnResult {
+    struct TcpSocket* _0;
+    void* _1;
+    const char* _2;
+} HttpTakeConnResult;
+HttpTakeConnResult http_response_take_conn_raw(HttpResponse* response);
+
 const char* http_response_headers(HttpResponse* response);
 const char* http_response_error(HttpResponse* response);
 
@@ -293,6 +307,13 @@ int http_request_set_tls_backend_raw(HttpClientRequest* req, const char* name);
 // if it stops reading early. Redirects are still followed if enabled; only the
 // final hop's body streams. Default 0 = buffer the whole body.
 int http_request_set_stream_raw(HttpClientRequest* req, int on);
+
+// Send THIS request over the Unix-domain stream socket at `path` instead of
+// dialling the URL's host and port, which still give the Host header and,
+// for https, the server name (curl's --unix-socket). NULL or "" clears it.
+// No proxy applies. In an enforce block the connect needs fs_write on
+// `path`. Returns 0, or -1 on a NULL request or out of memory.
+int http_request_set_unix_socket_raw(HttpClientRequest* req, const char* path);
 
 // Forward-proxy control (aether#1012). Default is DIRECT — std.http.client does
 // NOT follow $HTTP_PROXY unless the program opts in, the hardened inverse of the

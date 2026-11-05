@@ -19,6 +19,17 @@ int tcp_send_bytes_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (
 int tcp_send_all_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return 0; }
 int tcp_receive_into_raw(TcpSocket* s, void* b, int c) { (void)s; (void)b; (void)c; return TCP_RECV_CLOSED; }
 int tcp_close(TcpSocket* s) { (void)s; return 0; }
+TcpOpenResult tcp_connect_unix_raw(const char* p) {
+    (void)p;
+    TcpOpenResult out = { NULL, "networking disabled at build time" };
+    return out;
+}
+TcpOpenResult tcp_listen_unix_raw(const char* p) {
+    (void)p;
+    TcpOpenResult out = { NULL, "networking disabled at build time" };
+    return out;
+}
+int aether_net_dial_unix(const char* p, const char** why) { (void)p; *why = "networking disabled at build time"; return -1; }
 TcpServer* tcp_listen_raw(int p) { (void)p; return NULL; }
 TcpServer* tcp_listen_on_raw(const char* a, int p) { (void)a; (void)p; return NULL; }
 int tcp_server_port_raw(TcpServer* s) { (void)s; return -1; }
@@ -41,6 +52,7 @@ int aether_net_wouldblock(void) { return 0; }
 #include <string.h>
 #include <stdio.h>   /* snprintf (getaddrinfo port string) */
 #include <errno.h>   /* EAGAIN/EWOULDBLOCK: idle-peer vs. closed-peer recv */
+#include <stddef.h>  /* offsetof (sockaddr_un length) */
 
 #ifdef _WIN32
     #include <winsock2.h>
@@ -50,7 +62,23 @@ int aether_net_wouldblock(void) { return 0; }
     #endif
     #define close closesocket
     typedef int socklen_t;
+    /* AF_UNIX on Windows 10 1803 and later. Older MinGW headers lack
+     * afunix.h; the struct is the one it declares. */
+    #if defined(__has_include)
+        #if __has_include(<afunix.h>)
+            #include <afunix.h>
+            #define AE_HAVE_AFUNIX_H 1
+        #endif
+    #endif
+    #ifndef AE_HAVE_AFUNIX_H
+        #define UNIX_PATH_MAX 108
+        struct sockaddr_un {
+            ADDRESS_FAMILY sun_family;
+            char sun_path[UNIX_PATH_MAX];
+        };
+    #endif
 #else
+    #include <sys/un.h>     /* sockaddr_un: Unix-domain stream sockets */
     #include <sys/socket.h>
     #include <sys/time.h>   /* struct timeval: glibc leaks it via other headers, musl does not */
     #include <netinet/in.h>
@@ -89,6 +117,9 @@ struct TcpSocket {
 struct TcpServer {
     int fd;
     int port;
+    /* The socket file a Unix-domain listener bound, removed when it is
+     * closed; NULL for a TCP listener. */
+    char* unix_path;
 };
 
 static int net_initialized = 0;
@@ -721,6 +752,7 @@ static TcpServer* tcp_listen_impl(const char* address, int port, int allow_zero)
     if (!server) { close(sockfd); return NULL; }
     server->fd = sockfd;
     server->port = bound;
+    server->unix_path = NULL;
     return server;
 }
 
@@ -800,8 +832,166 @@ int tcp_server_close(TcpServer* server) {
     if (!server) return -1;
 
     close(server->fd);
+    /* A Unix-domain listener's socket file outlives the socket: remove it,
+     * so the next listen on the path does not find it in use. */
+    if (server->unix_path) {
+        remove(server->unix_path);
+        free(server->unix_path);
+    }
     free(server);
     return 0;
+}
+
+/* ---- Unix-domain stream sockets --------------------------------------- */
+
+/* `path` as a sockaddr_un. A path that does not fit sun_path with its NUL
+ * is refused: truncating it would connect to (or bind) a different file. */
+static int net_unix_addr(const char* path, struct sockaddr_un* sa, socklen_t* len,
+                         const char** why) {
+    if (!path || !path[0]) { *why = "empty socket path"; return -1; }
+    size_t n = strlen(path);
+    memset(sa, 0, sizeof *sa);
+    if (n >= sizeof sa->sun_path) {
+        *why = "socket path too long: sockaddr_un holds 103 bytes on macOS and the BSDs, "
+               "107 on Linux and Windows";
+        return -1;
+    }
+    sa->sun_family = AF_UNIX;
+    memcpy(sa->sun_path, path, n + 1);
+    *len = (socklen_t)(offsetof(struct sockaddr_un, sun_path) + n + 1);
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__NetBSD__) || \
+    defined(__OpenBSD__) || defined(__DragonFly__)
+    sa->sun_len = (unsigned char)*len;
+#endif
+    return 0;
+}
+
+/* A socket() for AF_UNIX that failed: on Windows before 10 1803 the family
+ * itself is missing. */
+static const char* net_unix_socket_why(void) {
+#ifdef _WIN32
+    int err = WSAGetLastError();
+    if (err == WSAEAFNOSUPPORT || err == WSAEPROTONOSUPPORT)
+        return "Unix-domain sockets are not supported on this Windows (they need Windows 10 1803 or later)";
+#else
+    if (errno == EAFNOSUPPORT) return "Unix-domain sockets are not supported on this platform";
+#endif
+    return "could not create socket";
+}
+
+int aether_net_dial_unix(const char* path, const char** why) {
+    *why = "connection failed";
+    if (!path || !path[0]) { *why = "empty socket path"; return -1; }
+    /* The kernel's rule, in process: connecting to a Unix socket needs write
+     * permission on its file. A socket in a directory the program may write
+     * is one it may talk to, and one it may not write is refused. */
+    if (!aether_sandbox_check("fs_write", path)) {
+        *why = "denied by sandbox: a Unix socket connect needs fs_write on its path";
+        return -1;
+    }
+    struct sockaddr_un sa;
+    socklen_t len = 0;
+    if (net_unix_addr(path, &sa, &len, why) != 0) return -1;
+
+    aether_net_init();
+    int fd = (int)socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { *why = net_unix_socket_why(); return -1; }
+    /* A write after the peer closed fails with EPIPE at once on a Unix
+     * socket (a TCP one takes a reset first), and a pooled HTTP connection
+     * the daemon closed is written before it is found closed: that must be
+     * an error the client retries on, not a SIGPIPE that ends the process.
+     * Linux says so per send (MSG_NOSIGNAL), macOS and the BSDs here. */
+    net_no_sigpipe(fd);
+    for (;;) {
+        if (connect(fd, (const struct sockaddr*)&sa, len) == 0) return fd;
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        if (err == WSAEINTR) continue;
+        if (err == WSAECONNREFUSED) *why = "connection refused: nothing is listening on the socket";
+        else if (err == WSAEACCES) *why = "permission denied";
+        else *why = "connection failed";
+#else
+        if (errno == EINTR) continue;
+        if (errno == ENOENT) *why = "no such socket";
+        else if (errno == ECONNREFUSED) *why = "connection refused: nothing is listening on the socket";
+        else if (errno == EACCES || errno == EPERM) *why = "permission denied";
+        else if (errno == ENOTSOCK || errno == EPROTOTYPE) *why = "not a stream socket";
+        else if (errno == ENOTDIR) *why = "no such socket";
+        else *why = "connection failed";
+#endif
+        break;
+    }
+    close(fd);
+    return -1;
+}
+
+TcpOpenResult tcp_connect_unix_raw(const char* path) {
+    TcpOpenResult out = { NULL, "connection failed" };
+    const char* why = NULL;
+    int fd = aether_net_dial_unix(path, &why);
+    if (fd < 0) { out._1 = why; return out; }
+    /* The same as a TCP connect's from here: 30 s send/receive timeouts (a
+     * quiet peer reads as "timeout", not a close) and no SIGPIPE. */
+    net_set_socket_timeouts(fd, 30);
+    net_no_sigpipe(fd);
+    TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
+    if (!sock) { close(fd); out._1 = "out of memory"; return out; }
+    sock->fd = fd;
+    sock->connected = 1;
+    out._0 = sock;
+    out._1 = "";
+    return out;
+}
+
+TcpOpenResult tcp_listen_unix_raw(const char* path) {
+    TcpOpenResult out = { NULL, "listen failed" };
+    if (!aether_sandbox_check("tcp_listen", "*") || !aether_sandbox_check("fs_write", path ? path : "")) {
+        out._1 = "denied by sandbox: a Unix socket listener needs tcp_listen and fs_write on its path";
+        return out;
+    }
+    struct sockaddr_un sa;
+    socklen_t len = 0;
+    const char* why = NULL;
+    if (net_unix_addr(path, &sa, &len, &why) != 0) { out._1 = why; return out; }
+
+    aether_net_init();
+    int fd = (int)socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) { out._1 = net_unix_socket_why(); return out; }
+    if (bind(fd, (const struct sockaddr*)&sa, len) != 0) {
+#ifdef _WIN32
+        int err = WSAGetLastError();
+        out._1 = err == WSAEADDRINUSE ? "address in use: a file already exists at the socket path"
+               : err == WSAEACCES     ? "permission denied" : "bind failed";
+#else
+        out._1 = errno == EADDRINUSE ? "address in use: a file already exists at the socket path"
+               : (errno == EACCES || errno == EPERM) ? "permission denied"
+               : (errno == ENOENT || errno == ENOTDIR) ? "no such directory for the socket path"
+               : "bind failed";
+#endif
+        close(fd);
+        return out;
+    }
+    if (listen(fd, 16) != 0) {
+        close(fd);
+        remove(path);
+        return out;
+    }
+    TcpServer* server = (TcpServer*)malloc(sizeof(TcpServer));
+    char* kept = strdup(path);
+    if (!server || !kept) {
+        free(server);
+        free(kept);
+        close(fd);
+        remove(path);
+        out._1 = "out of memory";
+        return out;
+    }
+    server->fd = fd;
+    server->port = -1;
+    server->unix_path = kept;
+    out._0 = server;
+    out._1 = "";
+    return out;
 }
 
 /* Expose the OS-level descriptors inside the opaque socket handles

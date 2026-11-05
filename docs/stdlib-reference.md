@@ -86,7 +86,7 @@ header comment is the authoritative description.
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 43 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 47 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -2506,6 +2506,7 @@ main() {
 - `client.send_request(req)` → `(ptr, string)` - Fire the request; returns `(resp, "")` on transport success or `(null, err)` on failure
 - `client.set_stream(req, on)` → `string` - Enable streaming of the response body for this request; `send_stream` is the convenience form
 - `client.send_stream(req)` → `(ptr, string)` - Like `send_request`, but the response body is streamed rather than buffered (see below)
+- `client.set_unix_socket(req, path)` → `string` - Send this request over the Unix-domain stream socket at `path` instead of dialling the URL's host (curl's `--unix-socket`). The URL still gives the request target and the `Host` header, so a Docker or Podman Engine API call is `client.request("GET", "http://localhost/v1.41/_ping")` plus `set_unix_socket(req, "/var/run/docker.sock")`. Redirects stay on the socket, no proxy applies, and pooled connections are kept per socket path. In an enforce block every request on it needs `fs_write` on `path`, pooled connection or not. `""` goes back to dialling the host.
 - `client.request_free(req)` - Free the request handle
 
 **TLS + forward proxy (per request):** the client is hardened by default, TLS
@@ -2525,6 +2526,7 @@ in. These knobs relax that per request; precedence for proxy is
 - `client.response_body(resp)` → `string` - Response body, binary-safe (buffered responses)
 - `client.response_is_stream(resp)` → `int` - 1 if the body is streamed (from `send_stream`), 0 if buffered
 - `client.response_read(resp, max)` → `string` - Pull the next decoded body window (up to `max` bytes) from a streaming response; empty result = end-of-body (streaming)
+- `client.response_take_conn(resp)` → `(ptr, string, string)` - Take the connection out of a streaming response, for a protocol that carries on over it after the head: a `101 Switching Protocols`, or a 200 after which the server speaks a raw stream both ways (Docker's `attach` and exec `start`). Returns `(sock, early, "")`: a `std.tcp` socket the caller owns, and the bytes the peer already sent past its head (binary-safe), which come before anything read from the socket. Take it before any `response_read`. `(null, "", err)` for a buffered response, one taken already, or a TLS connection (only a plaintext one can be a socket). The response still needs `response_free`, which leaves the taken socket open.
 - `client.response_header(resp, name)` → `string` - Case-insensitive single-header lookup, `""` if absent
 - `client.response_headers(resp)` → `string` - Raw header block
 - `client.response_error(resp)` → `string` - Transport error string
@@ -2537,6 +2539,8 @@ in. These knobs relax that per request; precedence for proxy is
 - `client.response_body_json(resp)` → `(ptr, string)` - Wrap `response_body` + `json.parse`; returns `(value, "")` on success or `(null, parse_error)` on malformed JSON
 
 **Streaming large response bodies:** `send_request` materialises the whole body into one `AetherString`, fine for JSON APIs, but for a multi-megabyte download that is O(Content-Length) memory. `send_stream` instead reads only the header block, keeps the connection open, and hands back a response you drain window-by-window with `response_read`, so peak memory is one window regardless of body size. `Content-Length` and `Transfer-Encoding: chunked` bodies are both decoded transparently (you always see payload bytes, never chunk framing). Redirects are still followed if enabled; only the final hop streams. Always `response_free` the response when done (it closes the connection), even if you stop reading early.
+
+`response_read` returns as soon as it has body bytes to give, without waiting to fill `max`: a chunk that has arrived is handed over even while the server holds the next one back, which is what a long-lived feed needs (Docker's `/events`, `/containers/{id}/logs?follow=1`). Each read waits only when nothing is buffered, up to the request's timeout: a feed that can go quiet longer than that wants `set_timeout(req, 0ns)`.
 
 ```aether,fragment
 import std.http
@@ -2741,6 +2745,8 @@ main() {
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
 - `tcp.connect_buffered(host, port, read_buffer)` → `(ptr, string)` - Connect with the receive buffer (`SO_RCVBUF`) set to `read_buffer` bytes before the connection is made, so the window it opens with is that size; for a client meant to take little while it does not read. `tcp.set_read_buffer` on a connected socket leaves the window already advertised (#3338).
+- `tcp.connect_unix(path)` → `(ptr, string)` - Connect to the Unix-domain stream socket at `path` (a local daemon's API socket, such as Docker's `/var/run/docker.sock`). The socket is the handle `connect` returns, so every read, write, poll and close works on it. Errors name the path: `no such socket`, `connection refused: nothing is listening on the socket`, `permission denied`, a path too long for `sockaddr_un` (103 bytes on macOS and the BSDs, 107 on Linux and Windows; refused, never truncated). In an enforce block it needs `fs_write` on `path`, the kernel's own rule for connecting to a Unix socket. Windows 10 1803 and later; before that `Unix-domain sockets are not supported on this Windows`.
+- `tcp.listen_unix(path)` → `(ptr, string)` - Listen on a new Unix-domain socket file at `path`; a file already there is `address in use` (a stale one is the caller's to remove). `accept`, `server_poll` and `server_fd` work on it, `server_port` is -1, and `server_close` removes the socket file. Needs `tcp_listen` and `fs_write` on `path` in an enforce block.
 - `tcp.available(sock)` → `int` - Bytes waiting in the socket's receive buffer, readable without blocking (`FIONREAD`), or -1.
 - `tcp.write(sock, data)` → `(int, string)` - Write text-shaped data, return `(bytes_sent, err)`. Uses the legacy strlen-shaped raw send; use `tcp.write_n` for binary payloads.
 - `tcp.write_n(sock, data: byte[])` → `(int, string)` - Length-aware write, return `(bytes_sent, err)`. Sends the slice's bytes, preserving embedded NUL bytes; send a string as `string.bytes(s)`, a prefix as `string.bytes(s)[0..n]`.
@@ -2753,7 +2759,7 @@ main() {
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_connect_unix_raw`, `tcp_listen_unix_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
 
 ### UDP slices (`std.udp`)
 

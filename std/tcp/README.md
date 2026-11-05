@@ -116,8 +116,57 @@ while !stopping {
 }
 ```
 
+## Unix-domain sockets
+
+`connect_unix(path)` connects to the stream socket file at `path`, a local
+daemon's API socket such as Docker's `/var/run/docker.sock` or Podman's, and
+returns the same handle `connect` does: every read, write, poll and close
+above works on it (`set_nodelay` does not; there is no TCP). Errors name the
+path: `no such socket`, `connection refused: nothing is listening on the
+socket`, `permission denied`. A path longer than `sockaddr_un` holds (103
+bytes on macOS and the BSDs, 107 on Linux and Windows) is refused rather
+than truncated, since a truncated path names another file.
+
+`listen_unix(path)` creates the socket file and listens on it: `accept`,
+`server_poll` and `server_fd` work as for a TCP listener, `server_port` is
+-1, and `tcp_server_close` removes the file. A file already at the path is
+`address in use`; removing a stale one is the caller's call, never this
+module's.
+
+In a `sandbox.enforce` block, a connect needs `fs_write` on the path (the
+kernel's own rule: connecting to a Unix socket takes write permission on its
+file; the path is resolved, symlinks followed, as every fs check is), and a
+listen needs `tcp_listen` as well. The `LD_PRELOAD` layer does not check
+`AF_UNIX` connects, which libc makes on its own (nscd, syslog).
+
+The descriptor inside is an ordinary connected `AF_UNIX` stream socket, so
+`std.ipc`'s `send_fd` / `recv_fd` / `write_frame` work on `tcp.fd(sock)` to
+pass open files to or from a daemon; `os.socketpair` is the unnamed twin, for
+two ends in one process tree with no path at all.
+
+Windows has `AF_UNIX` from Windows 10 1803; on an older one (and under Wine)
+both calls say `Unix-domain sockets are not supported on this Windows`.
+
+For HTTP over a Unix socket, `std.http.client`'s `set_unix_socket` sends a
+request there instead of dialling the URL's host:
+
+```aether,fragment
+req = client.request("GET", "http://localhost/v1.41/containers/c1/logs?follow=1&stdout=1")
+client.set_unix_socket(req, "/var/run/docker.sock")
+client.set_timeout(req, 0ns)                 // a followed log can go quiet
+resp, err = client.send_stream(req)
+client.request_free(req)
+if err != "" { println("engine: ${err}"); return }
+going = 1
+while going == 1 {
+    chunk = client.response_read(resp, 65536)    // each chunk as it arrives
+    if string.length(chunk) == 0 { going = 0 } else { print(chunk) }
+}
+client.response_free(resp)
+```
+
 ## Exports
 
-`connect`, `connect_buffered`, `listen`, `listen_on`, `accept`, `available`, `read`, `read_n`, `read_into`,
+`connect`, `connect_buffered`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `set_read_buffer`, `fd`, `server_fd`, `close_drained`, `tcp_close`, `tcp_server_close`.

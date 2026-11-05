@@ -51,6 +51,16 @@ with `url.encode` from `std.url`: `"?v=${url.encode(text)}"`. A raw `"?v=#FF0000
 sends `?v=`. Before 0.881.0 the fragment went out on the request line, which
 is not a valid request target.
 
+`std.http.client` also speaks HTTP over a Unix-domain socket:
+`set_unix_socket(req, "/var/run/docker.sock")` sends the request there
+instead of dialling the URL's host, which still gives the `Host` header (the
+Docker and Podman Engine APIs are served this way). A streamed response
+(`send_stream`) hands each chunk to `response_read` as it arrives, for feeds
+that never end (`/events`, a followed log), and `response_take_conn` takes the
+connection out of one after a `101` or a hijacking `200`, as a `std.tcp`
+socket plus the bytes already read past the head (Docker's `attach` and exec
+`start`). See `docs/stdlib-reference.md` and `std/tcp/README.md`.
+
 ## TLS
 
 `server_set_tls(server, cert_path, key_path)` before `server_start` turns a

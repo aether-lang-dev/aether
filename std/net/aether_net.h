@@ -11,6 +11,13 @@ typedef struct TcpReceiveResult {
     const char* _2;
 } TcpReceiveResult;
 
+// The (handle, error) pair the Unix-socket entry points return: the handle,
+// or NULL with a static message saying why.
+typedef struct TcpOpenResult {
+    void* _0;
+    const char* _1;
+} TcpOpenResult;
+
 // TCP Client
 TcpSocket* tcp_connect_raw(const char* host, int port);
 // tcp_connect_raw with the receive buffer (SO_RCVBUF) set to `read_buffer`
@@ -37,6 +44,19 @@ int tcp_send_bytes_raw(TcpSocket* sock, const void* data, int length);
 int tcp_send_all_raw(TcpSocket* sock, const void* data, int length);
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap);
 int tcp_close(TcpSocket* sock);
+
+// Unix-domain stream sockets, as the same TcpSocket / TcpServer handles, so
+// every read, write, poll and close above works on them unchanged.
+// tcp_connect_unix_raw: connect to the socket file at `path`; in an enforce
+//   block it needs fs_write on `path` (connecting to a Unix socket needs
+//   write permission on its file, the kernel's rule).
+// tcp_listen_unix_raw: bind a socket file at `path` and listen; needs
+//   tcp_listen and fs_write on `path`. The file must not exist yet;
+//   tcp_server_close removes it.
+// A path longer than sockaddr_un holds (103 bytes on macOS and the BSDs,
+// 107 on Linux and Windows) is refused, never truncated.
+TcpOpenResult tcp_connect_unix_raw(const char* path);
+TcpOpenResult tcp_listen_unix_raw(const char* path);
 
 // TCP Server
 TcpServer* tcp_listen_raw(int port);

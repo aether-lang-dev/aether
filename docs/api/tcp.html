@@ -30,6 +30,8 @@
     <li><a href="#set_nodelay_raw">set_nodelay_raw</a></li>
     <li><a href="#set_read_buffer_raw">set_read_buffer_raw</a></li>
     <li><a href="#available_raw">available_raw</a></li>
+    <li><a href="#connect_unix_raw">connect_unix_raw</a></li>
+    <li><a href="#listen_unix_raw">listen_unix_raw</a></li>
     <li><a href="#fd_raw">fd_raw</a></li>
     <li><a href="#server_fd_raw">server_fd_raw</a></li>
     <li><a href="#poll_raw">poll_raw</a></li>
@@ -38,6 +40,8 @@
     <li><a href="#receive_into_raw">receive_into_raw</a></li>
     <li><a href="#connect">connect</a></li>
     <li><a href="#connect_buffered">connect_buffered</a></li>
+    <li><a href="#connect_unix">connect_unix</a></li>
+    <li><a href="#listen_unix">listen_unix</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_n">write_n</a></li>
     <li><a href="#write_slice">write_slice</a></li>
@@ -239,6 +243,16 @@
       <pre class="usage"><code>available_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr</span></p>
     </div>
+    <div class="function" id="connect_unix_raw" data-name="connect_unix_raw">
+      <h3 class="function-name">connect_unix_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>connect_unix_raw(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="listen_unix_raw" data-name="listen_unix_raw">
+      <h3 class="function-name">listen_unix_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>listen_unix_raw(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
     <div class="function" id="fd_raw" data-name="fd_raw">
       <h3 class="function-name">fd_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>fd_raw(sock) <span class="arrow">-&gt;</span> int</code></pre>
@@ -280,6 +294,18 @@
       <pre class="usage"><code>connect_buffered(host, port, read_buffer) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
       <p class="doc">connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes before the connection is made, so the window the connection opens with is that size. A client meant to take little while it does not read (a test of a server's send timeout) connects this way: set_read_buffer on a connected socket shrinks the buffer, but the kernel still takes the window it advertised when connecting (#3338). The size is a request: a kernel may round it up (macOS holds about 300 KB for a 16 KB request on loopback). Returns (socket, &quot;&quot;) or (null, error); `read_buffer` must be positive.</p>
+    </div>
+    <div class="function" id="connect_unix" data-name="connect_unix">
+      <h3 class="function-name">connect_unix <span class="kind">fn</span></h3>
+      <pre class="usage"><code>connect_unix(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Connect to the Unix-domain stream socket at `path` (a local daemon's API socket: Docker's /var/run/docker.sock, Podman's). Returns (socket, &quot;&quot;) or (null, error), the error naming the path: &quot;no such socket&quot;, &quot;connection refused: nothing is listening on the socket&quot;, &quot;permission denied&quot;, a path too long for sockaddr_un (refused, never truncated), or the sandbox's refusal. The socket is the handle `connect` returns, so every read, write, poll and close here works on it; set_nodelay does not (no TCP). In an enforce block it needs fs_write on `path`: connecting to a Unix socket needs write permission on its file, the kernel's own rule.</p>
+    </div>
+    <div class="function" id="listen_unix" data-name="listen_unix">
+      <h3 class="function-name">listen_unix <span class="kind">fn</span></h3>
+      <pre class="usage"><code>listen_unix(path) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Listen on a new Unix-domain stream socket at `path`. Returns (server, &quot;&quot;) or (null, error); a file already at `path` is &quot;address in use&quot; (a stale socket is the caller's to remove: this never deletes a file it did not make). The server is the handle `listen` returns: accept, server_poll, server_fd work on it, server_port is -1, and tcp_server_close removes the socket file. In an enforce block it needs tcp_listen and fs_write on `path`.</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
