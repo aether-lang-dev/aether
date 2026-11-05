@@ -179,7 +179,17 @@ jobs:
     # AE_SWEEP_KEEP_C=1 on the Linux / GCC leg keeps the C each .ae build of
     # the sweep compiled (build/test_<name>.c), for the strict C11 step below.
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
+      run: AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
+
+    # Every test's time, for the cost-split shards (#3601).
+    - name: Upload the sweep's timings
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
+        retention-days: 14
 
     # The cross-version ABI matrix (#2957, docs/abi-policy.md): this tree's
     # libraries and hosts against the latest published release's, on the
@@ -1171,7 +1181,17 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /mingw64/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
+        AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
+
+    # Every test's time, for the cost-split shards (#3601).
+    - name: Upload the sweep's timings
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-windows-gcc-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
+        retention-days: 14
 
   # ============================================================
   # Windows contrib series — beside `Windows / GCC (MSYS2)` rather than after
