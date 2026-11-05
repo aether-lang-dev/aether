@@ -14,6 +14,14 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.890.0]
+
+### Fixed
+
+- **`std.truetype` finds the glyphs of a Microsoft Symbol font.** A font whose only usable cmap subtable is Microsoft Symbol (platform 3, encoding 0: Wingdings, Symbol, Webdings and the like) keeps its characters in the private-use block at `0xF000 + code`, so looking up the plain character found no glyph and every such text rendered as the missing-glyph box. As Windows and FreeType do, a code below `0x100` that has no glyph is now looked up at `0xF000 + code` when the chosen subtable is Symbol.
+
+- **`ae version install` and `ae upgrade` fetch the right archive on FreeBSD.** The version manager kept its own platform table, which had no FreeBSD row and fell through to `linux-x86_64`, so on FreeBSD it downloaded and installed the Linux binaries, and switching to them left no working `ae`. It now names the platform with the same helper as the rest of `ae` (`freebsd-x86_64`, `freebsd-arm64`, `linux-*-musl`, …), and on a host with no release target it refuses and points at building from source instead of guessing. `ae version` prints that platform.
+
 ## [0.889.0]
 
 ### Added
