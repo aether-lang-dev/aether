@@ -14,6 +14,635 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.883.0]
+
+### Changed
+
+- **`make test-asan-ae` fails on a leak (#3547).** LeakSanitizer's leaks
+  were only listed (`SAN_LEAKS=report`) while the test programs that never
+  freed what they made were fixed: the crypto, TLS, HTTP, syntax,
+  regression and integration programs, the C hosts and two tools (vkgen,
+  and docgen, which leaked the names of an exports list that never closes).
+  A leak now fails the run, as a memory error does, in
+  `tests/scripts/sanitizer_sweep.sh`, the Makefile's `test-asan-ae` and
+  `asan.yml`; `SAN_LEAKS=report` still lists them without failing.
+
+- **A closure's push into a slice it captures is seen by its frame
+  (#3568).** `add = |v: int| { xs.push(v) }` grew a copy of `xs` that
+  nothing released, a leak on every call that grew with the slice. A push
+  is a write now, as an assignment is, so `xs` is shared with the closure
+  the way an assigned capture is: each push grows it, and the frame sees
+  what was pushed.
+
+### Fixed
+
+- **A module with more than 4096 functions or constants merges every one of
+  them (#3545).** The merge read a module's names into fixed lists of 4096
+  and silently stopped there, so a merged body's reference to a name past
+  the cap stayed bare: reading the 4097th `var` failed "Undefined variable",
+  and a bare call of a later function the program also defines reached the
+  program's function instead of the module's. The lists are now as long as
+  the module, which generated binding modules need.
+
+- **The module merge reads everything past the limits it used to stop at
+  without a word (#3545).** A merged function's locals were read into 128
+  slots, so a local past them named like a module function was taken for the
+  function; a module's aliased imports into 64, so `a.f()` past the 64th kept
+  a namespace nothing binds; a selective import's names into 256 for the
+  check that a local function does not shadow one, so a shadowing function
+  past them was not refused; and names were joined into 256-byte buffers, so
+  two long names that differ past that merged under one C name. Every list
+  now grows with what it lists and every name and path is as long as it is
+  written.
+
+- **A slice local a closure assigns owns the buffer it holds (#3549).** The
+  local is a cell the frame and the closure share, and it was left to the
+  program: a store into it from the closure dropped nothing it replaced, and
+  the cell's release freed the cell and not the buffer, so a `make` buffer
+  held there leaked on every call. Now a store into the cell, in the frame or
+  the closure, drops what it held, the cell's last release drops what it
+  holds then, and a `return` of the local gives the buffer to the caller. A
+  local whose buffer a view may outlive (`w = v; return w`) is left to the
+  program as before, so no view reads freed memory.
+
+- **A string stored into a header-defined struct's string field can be given
+  back (#3567).** A store into a field of an `extern struct ... @c_import`
+  (`p.text = s`, or the field in a struct literal) gave C's field a
+  reference of its own and then kept only the characters, dropping the
+  string's header, so the reference could never be given back: every store
+  leaked a string, and a C field updated in a loop grew the heap without
+  bound. The reference is now recorded by the characters the field holds,
+  with a count per string (the same string in two fields is two references),
+  and `string.release_kept(p.text)` gives it back once C is done with it;
+  nothing releases it behind C's back. A field read back is the string it
+  was given, retained, so `old = p.text`, a store of the next value and
+  `string.release_kept(old)` give the old one back. A pinned literal's
+  characters and a plain C string are not recorded. `string.keep` records
+  the reference it hands over the same way, and `string.release_kept` gives
+  back only a recorded reference: a pointer nothing handed over (a literal,
+  a copy, C's own characters, one already given back) is left alone, where
+  a counted string not from `keep` was released, and a field's copy given
+  back was freed twice.
+- **Migrating:** `string.release_kept(p)` of a counted string that did not
+  come from `string.keep` or a C field store no longer releases it; a
+  program that used it as a plain release calls `string.release` instead.
+
+- **A name of any length resolves (#3569).** The parser and the checker
+  joined the names they build into fixed buffers of 64 to 512 bytes, and a
+  longer name was cut to another one, which then named nothing: a call
+  `mod.<name>()` whose name ran past about 250 bytes was "Undefined
+  function", and so were a qualified constant, a function bound by a
+  selective or aliased import, a tuple result destructured from a qualified
+  call, an enum's member, a function of a DSL block's receiver, an
+  `@extern("sym")` or `@c_callback` symbol, a `select_alias`, a module path
+  and the drop function of an owned type past their buffers; the effect
+  check did not follow a call into a module whose namespace ran past 64
+  bytes. Every name they build is now as long as it is.
+
+- **A response whose header section holds a NUL or a bare CR is read again,
+  and a redirect whose `Location` holds a control byte is followed (#3572).**
+  #3556 closed a header injection by refusing such a response ("malformed
+  response header section") and such a redirect (`redirect_error`), so a
+  response that read before failed. A recipient may instead replace each
+  NUL and bare CR with SP (RFC 9110 5.5, RFC 9112 2.2), and both response
+  readers, the CONNECT reply's included, now do: a CR no longer ends
+  anything, so a field cannot carry another behind it, and the response is
+  read. A `Location` is read as a browser reads it (WHATWG URL): a TAB, an
+  LF or a CR is removed, and any other control byte in its path, query or
+  fragment is percent-encoded, as a space is, so the hop goes on and the
+  request line it writes carries no injected field. A control byte in a
+  `Location`'s host still stops the hop.
+- **Migrating:** v0.881.0's note on the reverse proxy no longer applies: an
+  upstream response with a bare CR in a header is forwarded again, that
+  field's value with SP for the CR, where v0.881.0 answered 502.
+
+- **The passes around the checker take a long name, a long path and a wide
+  call graph whole (#3569).** Each built into a fixed buffer or list and
+  cut what did not fit: `@derive(eq)` and `@derive(schema)` named their
+  helper after a struct name cut at 250 bytes, so a call of `<Struct>_eq`
+  named nothing; a heredoc's marker past 255 bytes never matched its
+  closing line; a contract did not fold a member of an enum whose name ran
+  past 256 bytes, so a call that breaks a precondition compiled; the slice
+  escape check cut field paths at 256 bytes and refused returning a field
+  for another one whose name shared its first 250 bytes; `sandbox.enforce`
+  trusted a module's C extern reached under a name past 512 bytes; and the
+  effect walks kept the functions they entered in 512 slots: an effect tag
+  on a function calling more was refused for a limit instead of for what it
+  reaches, and `__pure` stopped following there and said pure, as it did
+  for the module globals past the first 256 in `--emit=effects`. Past the
+  walks' depth bound, `__pure` now says impure and `--emit=effects` says the
+  function may reach anything, where they said pure and reported what they
+  had seen.
+
+- **Correction to the v0.881.0 notes: printing an actor ref, a bit set, a bitstruct or an optional did not become a compile error there.** Those kinds have been refused before C since v0.836.0, by the one rendering rule of #3016 (E0200, with the spelling that renders each, as the language reference's "What renders" says); #3527 only gave the code generator the same refusal for a value that reaches it with no type, which no program reaches. Nothing that compiled on v0.880.0 stopped compiling on v0.881.0 (#3571).
+
+- **A closure a binary-imported library returns is given back (#3547).**
+  An Aether library's export hands its caller the reference its return
+  gives, but the program's stub declared the export as a plain extern, and
+  a closure an extern returns is lent: the program retained it once more,
+  released only its own reference, and the library's environment leaked on
+  every call. An extern now takes `-> fn @heap` (as `-> string @heap`),
+  which says the caller owns the closure, and the stub of a binary import
+  declares its closure results so.
+
+- **`std.guest.child` gives a Host back (#3547).** `child.open` and
+  `child.attach` allocate the `Host` a worker talks to its host through,
+  with its list of mounts, and nothing freed either, so every Host leaked,
+  six in the module's own tests. `child.free(h)` gives back the Host, its
+  mounts and its strings, and leaves the channel open: the socket given to
+  `attach` is its caller's, the inherited one the process's.
+
+- **A string stored into a module-level `ptr` var is given a reference of
+  its own (#3567).** `gp = s`, with `gp` a `ptr` global, stored the string
+  as it stood: a string built in the statement (`gp = string.concat(a, b)`)
+  was then owned by nothing and leaked, and a local's dangled once the
+  local went. The store now gives the global the recorded reference
+  `string.keep` hands over, so the string lives as long as the global holds
+  it and `string.release_kept(gp)` gives it back. As with `keep`, a re-bind
+  does not give the old one back: the program does, before the next store.
+
+- **A slice buffer is counted, so a view keeps what it views and nothing
+  leaks (#3568).** A `make` or `append` buffer had one owner, and a view that
+  might outlive it (kept in an outer scope, held while its slice was bound
+  again, returned or stored) made the owner keep the buffer for good, so it
+  leaked. Every place that holds a slice of a buffer now holds a reference
+  (a local, a field, an element, a tuple, an optional, a sum, an array, a
+  closure, a cell, a module `var`, actor state, a message), and the last one
+  to let go releases it, elements first. `append` to a buffer a view still
+  holds goes on in storage of its own: it reallocated the storage under the
+  view, a use after free. Widened, refusing nothing that compiled before:
+  `free` of a view a place holds gives back that view's reference (it was a
+  named panic), `xs = xs[1..]` keeps the buffer (it was a named panic), and
+  a copy of a whole buffer can grow. A buffer costs 32 bytes of header; a
+  view bound to a local costs a count up and down (1.8 ns against 0.13 in a
+  loop the C compiler folded); `make` is 11% faster, an `append` loop 2%
+  slower, and indexing and passing a slice are unchanged.
+- **Migrating: C never frees a `make` buffer's `.ptr` (#3568).** The buffer
+  is counted, its storage starting a 32-byte header before the first
+  element, and a slice of it carries the mark `AETHER_SLICE_MADE` and its
+  offset into the buffer in the padding after `flags`. A host that holds an
+  `AetherSlice` an Aether function returned gives it back with
+  `aether_slice_release(&s)`, and makes a view of part of it with
+  `aether_slice_sub`, never by moving `.ptr` itself. A slice C builds, an
+  extern's `T[]` and `p as T[]` are not counted. The runtime ABI revision is
+  3, so C built for revision 2 is refused rather than misread.
+
+- **The checker and the parser no longer drop what does not fit (#3574).**
+  Each held a list of the program in a fixed array and compiled the rest
+  wrong without a word: past 256 enums, distinct types, named C
+  function-pointer types, sum types or `@c_struct` overlays, the rest did
+  not resolve; past 64 owned pointer types the rest were plain pointers; a
+  match on an enum or a sum of more than 64 members or variants was not
+  checked for the ones past them, so a match missing one compiled; an actor
+  arm past the 256th, a match key past the 256th and a comma-list value past
+  the 256th were not checked; a block's defers past the 64th, isolated moves
+  past the 128th and borrowed `fn` parameters past the 128th were not
+  followed; a function's or a closure type's parameter modes past the 64th
+  were dropped; a destructure into more than 64 places was refused; and the
+  binding of a local past 256 pending nodes was not found. Each now grows
+  with the program.
+
+- **The free check, the protocol check, the hoists, the quote checks and
+  the escape check follow everything the program has (#3574).** Each held
+  what it followed in a fixed array and stopped past it: a second free of
+  a local past the 128th and an unfreed `@frees` parameter past the 16th
+  compiled, a reference past the 64th with a protocol could send what its
+  state does not take, a name bound only in a switch's arms past the 256th
+  or in a loop 64 matches deep was declared nowhere, a cycle of `@quotable`
+  functions deeper than 256 was not found and a helper of a long name was
+  not carried in its quote, and a closure called deeper than 256 nodes in
+  an expression was not followed, so the return of the name it binds again
+  was refused. Each now grows with the program.
+
+- **A view of a string's bytes holds the string (#3570).** `string.bytes(s)`
+  gave a read-only `byte[]` over the string's characters that held nothing,
+  so once the string's last holder let it go (`s` bound again, released in
+  a callee, a function returning `string.bytes` of its own local) the view
+  read freed memory. A view of a counted string now holds one reference to
+  it, by the rule a view of a `make` buffer holds its buffer (#3568): it is
+  marked `AETHER_SLICE_STRING`, carries the string's header where a
+  buffer's view carries its offset, and gives the reference back when the
+  place that holds it goes. A literal's bytes are static and held by
+  nothing. `string.bytes(s)` costs one count up and down. A view of a fresh
+  call's result (`f()[1..]`, `string.bytes(s)[2..6]`) bound or passed to a
+  call takes over the reference the result handed over, where it used to
+  leak it.
+
+- **The free check and the protocol check follow a loop until it settles
+  (#3574).** Each gave up on a loop after 256 passes and then followed no
+  local or reference in it, so a buffer freed on every turn of a loop that
+  took a view of the next of 300 views compiled, and so did a second
+  `Open` sent through a reference in a loop that left a bare `actor_ref`
+  under one of three protocols by turns: there the protocol check dropped
+  the reference at the loop's head and the next turn brought it back, so
+  the head never settled. A reference dropped at a loop's head now stays
+  dropped for the loop, and each check's budget is what its facts can rise
+  by, so every loop settles inside it. A `@keep` function of a name longer
+  than 255 characters, called qualified, was not found by the ownership
+  check, and a parameter given to it was not refused; the whole name is
+  read now.
+
+- **A send that its protocol allows in no state is refused in a loop too
+  (#3575).** `w ! Write {}` on every turn of a loop, with `w` in `start`
+  where only `Open` is taken, compiled, while the same send outside a loop
+  was refused: the protocol check took a reference sent a message wrong
+  from every state to unknown, the loop's head joined to unknown, and the
+  walk that reports, from the head, refused nothing. Such a reference is
+  now in no state, which the head's join leaves out, so the send is refused
+  where it is; the next send through it leads where the protocol says, as
+  before.
+- **Migrating:** a loop that sends a message its protocol never allows in
+  the state the reference is in is refused, as the same send outside the
+  loop always was. Send what the state takes first (`w ! Open {}` before
+  the loop), or send through a bare `actor_ref`, which follows no protocol.
+
+- **The record of kept strings has a fixed footprint from the first keep
+  (#3567).** The record of the references `string.keep` and a C field's
+  store hand over is 16 shards, chosen by the string's address, and each
+  made its table at its own first record and kept it. On a heap that does
+  not hand the same blocks back, a round of keeps that were all given back
+  could reach a shard for the first time and grow the heap by its table,
+  so a steady-heap check of such a program failed (seen on Windows UCRT64).
+  Every shard's first table is now one block, made at the first record.
+
+- **The code generator no longer cuts or drops what does not fit (#3574).**
+  A builder call nested more than 64 deep (a builder recursing inside its
+  own block) had its block's calls work on an outer block's config; a
+  builder whose factory has a long name left its block by a `return` into
+  a C call of a cut name; a C function pointer type (`cfn`) whose spelling
+  passed 1024 bytes did not compile; an `--emit=lib` export of more than
+  32 parameters lost its alias, with a warning that a parameter type is
+  not representable; a library id longer than 127 characters was cut in
+  the symbols named after it; a library whose exports pass a struct of a
+  name longer than 199 characters, or reach a string more than 64 structs
+  down, did not name its own runtime among an importer's duties; and in a
+  module imported at `@target`, a call of a function of a name longer than
+  511 characters, a struct holding lanes more than 24 structs down, or a
+  copy using more than 512 lane structs passed lanes between the copies
+  unrefused or unremapped. Each now grows with the program.
+
+- **Calls, operands, actor closures and messages past the old slot counts
+  compile right (#3574).** The expression code generator held what a call
+  or a construct has in fixed arrays: a call's fresh arguments past the
+  16th were never freed; a call of more than 32 arguments, a struct or
+  message literal of more than 32 fields or a list of more than 32
+  elements was left in C's unspecified order, so `f(bump(), ..., count)`
+  could read `count` before the bump; a closure in an actor handler
+  writing a state field past the 64th was not refused, and wrote a stale
+  local; a closure of more than 16 parameters called through a bare `fn`
+  got its arguments uncoerced; and a message's array fields past the 16th
+  were sent as compound literals the receiver read after the send's block
+  had ended. Each now grows with the program.
+
+- **A slice a call hands over is given back where it is used in place
+  (#3568).** `f().len`, `f()[0]`, `"${f().len}"`, `f()[1..].len`, a `for`
+  over `f()`, a `while` condition and a call written as a statement of its
+  own never gave back the reference a call's slice result holds, so each
+  such use leaked the buffer. The statement now holds the result in a
+  temporary its block gives back on every exit, a panic's unwinding
+  included. A view of the result that is bound, returned or passed on still
+  takes that reference over. An `append` that panics (a view that may not
+  grow, or no memory) gives back the slice it was handed, which the panic
+  lost. An empty `make` buffer takes one byte past its header, so its
+  `.ptr` points into the block and a leak checker that follows the
+  pointers a program holds (LeakSanitizer) sees the module `var` or the
+  row that holds it.
+
+- **A `match` whose value is a slice gives its place what each arm gives
+  (#3568).** The whole `match` was copied into the place it was bound,
+  assigned, stored or returned to, so an arm that gave a call's result
+  (`vs = match k { 0 -> mk(4) _ -> xs }`) held that buffer twice and leaked
+  it each time the arm ran. Each arm's value now goes into the place as an
+  `if` branch's does: a call's result hands its reference over, a local or
+  another place is copied, and an arm's value that ends a block is the
+  match's, not a temporary of its statement.
+
+- **A slice a `match` arm's pattern binds holds a reference of its own
+  (#3568).** A list pattern's tail (`[h | t]`), a slice a list pattern binds
+  out of a list of slices and a struct pattern's slice field viewed what the
+  match was given and held nothing: an arm that bound the subject again read
+  freed memory, and one that bound its tail again leaked a buffer each
+  time. Each takes a reference where the arm's body starts and gives it
+  back on the body's every exit, so `free(t)` of a match tail gives that
+  reference back where it was a named panic (a clause's tail, a parameter's,
+  still is). A struct pattern's slice field (`Box { xs: s }`) was not bound
+  at all, and the generated C named an undeclared `s`.
+
+- **A return gives back the strings its statement made once its views hold
+  them (#3570).** `return string.bytes(string.concat(w, "x")), 7`, and the
+  same return of a single slice, kept the concatenated string for good,
+  since a slice result might view it uncounted: the string leaked once a
+  call. A view of a counted string holds the string, so the return now gives
+  back each temporary string when every slice it returns holds what it
+  views (a counted buffer or string) or views nothing, and keeps it only
+  when one might view it uncounted.
+
+- **A function of more than 16 parameters works as a `fn` value (#3574).**
+  The adapter that lets a named function stand in a `fn` slot took at most
+  16 of its parameters, so a wider function used as a value did not
+  compile. A function indexing more than 8 slice parameters now picks its
+  view copy on all of them, and every parameter in scope shadows a
+  function of its name, past the old 256.
+
+- **A closure in a receive arm may read a state field of a slice type
+  (#3568).** The closure copies the field when it is made, and the next
+  store into the state releases what the field held, so a slice, which no
+  count covered, was refused (E0600). A slice buffer is counted now: the
+  copy takes a reference of its own, given back with the closure's
+  environment, and reads what it was made with however often the state is
+  stored over. It views the same buffer, as any copy of a slice does, so an
+  element stored before the field is bound again is seen through it.
+
+- **A `match` a slice store takes holds no GNU statement expression on the
+  non-GCC path (#3568).** `ys = match ...`, `h.data = match ...` and
+  `rows[1] = match ...` nested the `match` in the store's call, where the C
+  for a compiler without GCC's extensions (`AETHER_GCC_COMPAT` 0, what MSVC
+  compiles) held a statement expression it refuses. The `match` now runs
+  ahead of its statement, its value in a temporary the store reads.
+
+- **Functions of many locals and deeply nested blocks compile right (#3574).**
+  The statement code generator and the generator's own stacks held what a
+  function has in fixed arrays: a function of more than 256 string locals,
+  or of more than 256 `string?` locals, leaked what the rest held (past 256
+  pending releases they were dropped with only a warning); a function of
+  more than 64 owned-pointer locals left the rest unreleased; a `defer`
+  reading more than 64 locals stopped the compile; a `match` of more than
+  256 variant arms with a second arm for one past them did not compile;
+  string locals bound more than 64 blocks deep were released in the wrong
+  blocks; a `break` in a switch nested more than 64 switches deep left
+  an outer switch; and a statement of more than 64 values, or loops nested
+  more than 64 deep, lost track of what they hold. Each now grows with the
+  program.
+
+- **The compiler's driver keeps every name and list it is given (#3574).**
+  A `-D` symbol of 128 characters or more was refused as "too many -D
+  symbols"; past nine `--binimport-stub-dir` directories the module of the
+  ninth was gated as the program's own, so its externs were refused under
+  `--emit=lib`; `--emit=inspect` cut a function's tuple return type at 256
+  bytes; a compiled module artifact recording a build symbol or source path
+  longer than 511 characters was refused as malformed every time it was
+  read, and a module asking about more than 128 build symbols got none; and
+  a diagnostic's path deeper than 256 directories, or longer than 8192
+  bytes, was shown cut. Each now grows with what it holds.
+
+- **A diagnostic keeps the words that say what is wrong, however long a name
+  is in it (#3574).** The compiler formatted its messages into fixed buffers
+  of 160 to 2048 bytes, and a long name formatted ahead of the explanation
+  cut the explanation off: a local, a field, a function, a type or a module
+  of 600 characters left a message of the name and nothing after it, in the
+  checker, the free, protocol, ownership, escape, derive, missing-return and
+  quote checks, the code generator and the module loader. Every message is
+  as long as it is now. The few kept in a fixed buffer name only what is
+  bounded (a keyword, a character) or put the names last, so a long one
+  shortens a name and never an explanation.
+
+- **`free` of a struct parameter's slice field gives back nothing, and says
+  so (#3568).** The field is the caller's (parameters borrow), so the copy of
+  the struct a function is given holds no reference of its own, yet `free`
+  gave back the caller's only one: the buffer was freed under the caller's
+  field, which then read freed memory, and the caller's scope exit released
+  it again. Such a `free` now leaves the buffer, or the string a field views,
+  to the caller, and the compiler warns where it is written (W1007).
+
+- **`free` of a string's bytes is the same panic on every target (#3568).**
+  Where a heap pointer carries a tag in its top byte (Android on aarch64),
+  `string.bytes(s)` gives a read-only copy of the characters instead of a view
+  that holds the string, and `free` of that copy gave its buffer back where
+  every other target refuses the `free` by name. The copy is refused the same
+  way now.
+
+- **`append` to a struct parameter's slice field grows a copy (#3568).**
+  The field is the caller's (parameters borrow), so it holds no reference of
+  the function's own, and `append` saw the caller's one reference, took the
+  buffer for unshared and reallocated it in place: `return append(b.items,
+  v)` left the caller's `b.items` pointing at freed storage, and so did
+  `b.items.push(v)`. A value its place does not own now takes a reference
+  first, so the growth copies to storage of its own and the caller keeps its
+  buffer; a push into a parameter's field makes the parameter a value of its
+  own, released when the function returns.
+
+- **A receive arm's or a pattern's slice binding frees nothing and grows a
+  copy (#3568).** A receive arm's field binding is a copy of the message's
+  field, and the binding of a `match` arm whose body is no block a copy of
+  what was matched; neither holds a reference of its own. `free(items)` in
+  an arm gave back the message's reference, which the message then gave
+  back again, `items.push(v)` reallocated the message's buffer under it, and
+  `some(v) -> free(v)` freed the buffer under the value matched. Such a
+  `free` gives back nothing now, and a binding the body binds again or pushes
+  into takes a reference of its own for the body, so the growth copies and
+  nothing leaks.
+
+- **A fresh slice given to an optional parameter is given back once
+  (#3568).** `count(mk(3))` with `count(o: int[]?)` wrapped the slice into
+  the optional argument's temporary, which gave it back after the call, and
+  the calling statement gave it back again as it does for a slice parameter:
+  the buffer was freed twice. The wrapped slice is the optional temporary's
+  alone now, as a string argument there is.
+
+- **A slice local given in an `if` to a borrowing parameter stays
+  usable (#3568).** `total(if c { xs } else { mk(2) })` moved `xs` into the
+  call's temporary although the parameter only borrows it, so `xs.len` read
+  0 after the call. A branch that is a place gives the call a copy now, and
+  one given to a `@keep` parameter moves there by the move checks too, as a
+  plain argument does.
+
+- **A `@keep` slice parameter a closure assigns keeps its buffer for the
+  closure (#3568).** The cell the closure shares the parameter through was
+  seeded with a copy, and the parameter's own release at the function's
+  return emptied that cell: the closure grew an empty slice, and the
+  reference the caller gave the parameter was never given back. The cell
+  takes over the parameter's reference now, and its last holder gives it
+  back.
+
+- **Using a slice after `append` or `free` consumed it is E0906 again
+  (#3568).** Once a slice local had been given to a function or a view of it
+  taken, `ys = append(xs, 5)` and `free(xs)` still emptied `xs`, but the
+  check took it for copied and let `xs.len` through, which then read 0. The
+  check follows the consume again, as it did before slices were counted.
+
+- **A published slice publishes what its elements hold (#3568).** A slice
+  other threads can reach (a module `var`, a message, a closure, actor
+  state, or a place reached through a pointer or another slice) has an
+  atomic count, but its rows, or the slices and strings its struct elements
+  hold, kept plain ones: two actors copying a row of a shared slice of
+  slices lost counts, and the row was freed under one of them. Publishing
+  now reaches every element once, with the published bit set atomically,
+  and a store or a push into a slice's element publishes what it stores, as
+  a string store there does.
+
+- **A module-level slice `var` is safe to read and store from several
+  actors (#3568).** A store released the slice the var held before writing
+  the new one, and a read copied the slice and then took a reference, so a
+  reader could take a reference to a freed buffer or see a slice torn between
+  two stores, and a push grew the var's buffer in place under a reader. Each
+  slice `var` has a lock of its own now, as a string `var` does: a read takes
+  a reference under it, a store swaps under it and releases the old slice
+  after, and a push or an `append` grows a copy and stores it back.
+
+- **A slice stored past the end of a slice is no longer leaked by the panic
+  (#3568).** `rows[k] = mk(2)` on a slice of slices too short for `k` made
+  the new buffer before the bounds check, which then panicked with the
+  buffer held by nothing: a caught panic leaked it each time, and so did a
+  store into a slice field of an element (`hs[k].tags = mk(3)`). The place
+  is checked before the value is made now, as a string, a closure or a
+  struct element's store already is.
+
+- **Builder blocks on different threads no longer share one stack (#3574).**
+  The stack of open builder blocks was one for the whole process, so two
+  actors running builder blocks at once on different scheduler threads
+  mixed them: a block's calls could set another thread's config, and
+  `builder_depth()` counted the other thread's blocks too. Two threads
+  growing the stack at the same moment could also lose part of it, which
+  crashed or leaked. Each thread now has its own stack. Its first 64 levels
+  need no allocation; a deeper stack goes on the heap and is freed once the
+  blocks are back to half that depth, so a thread whose blocks have all
+  ended keeps none of it.
+
+- **A panic inside builder blocks no longer leaves them open (#3574).** Only
+  a `try` of the program put the stack of builder blocks back after a
+  panic. When an actor's handler panicked inside blocks without one, the
+  actor's step caught the panic and the blocks stayed on its thread's
+  stack: the next handler on that thread found its own block nested under
+  them, as `builder_depth()` showed, and their configs were never
+  released. Each block now records its depth in the same unwind journal a
+  `defer` uses, so the stack goes back to where the panic is caught, and
+  the abandoned blocks' configs are released, whatever catches it.
+
+- **The spawn signal-mask test gives back what it captures (#3547).** Its C
+  harness never released the string `os_run_capture_raw` hands over, so
+  LeakSanitizer ended it with exit 23 before stdout (a pipe) was flushed,
+  and the ASan run reported "spawned child inherited the parent's blocked
+  mask" with no output, though the child's mask was clear. The harness
+  releases the capture and flushes its verdict first, and the script says
+  when the harness exits without one.
+
+- **A long chain of calls compiles with Clang (#3574).** To keep the
+  calls in source order, each operator of a chain like
+  `f(0) + f(1) + ... + f(n)`, and each call whose arguments are calls,
+  held its operands in a C statement expression of its own, inside the one
+  of the operator around it: three brackets deeper per term. Clang refuses
+  C nested more than 256 deep, so a sum of about 86 calls did not build on
+  macOS or with Clang anywhere (GCC has no such limit). One sequence now
+  holds the operands of the whole chain, of calls inside calls too, and
+  the C nests by a constant whatever the length: a 1000-term sum of calls
+  nests 5 deep.
+
+- **Long chains of `&&`, `||`, comparisons, `/`, `%`, `<<` and `>>`
+  compile with Clang (#3574).** Each link of such a chain wrapped the one
+  before it in C of its own: brackets for `&&`, `||` and comparisons, the
+  checked division's call for `/` and `%`, the masked shift's casts for
+  `<<` and `>>`, one to four brackets a link. Clang refuses C nested more
+  than 256 deep, so a chain of about 128 links (64 shifts) did not build.
+  `&&` and `||` chains are now written as flat as `+` chains are; the
+  others, past 16 links, link by link in one sequence, left to right, with
+  a division by zero still raised at its own link, before anything after
+  it is evaluated.
+
+- **Deep expressions and long `else if` chains compile with Clang
+  (#3574).** The C of an expression nested about as its tree did: a call
+  in a call, a cast of a cast, `!` of `!`, an interpolation in an
+  interpolation, a method chain `x.f().f()...`, each one to four brackets
+  deeper, and the parser takes trees far deeper than the 256 brackets
+  Clang allows. `if` expressions and `if` statements with long `else if`
+  chains nested a level a link too. Every 24 levels of an expression a
+  part is now evaluated into a temporary ahead of its statement, in the
+  order the statement evaluates it, and an `else if` chain of more than
+  16 links is written flat, each condition still evaluated only when no
+  branch before it was taken: the C of an expression nests by a constant,
+  however deep or long.
+
+- **Programs nesting blocks deeply build with Clang (#3574).** Blocks
+  nest in the C as deep as in the source, and the parser takes them 512
+  levels deep, but Clang refuses C nested past 256 brackets unless told
+  otherwise: about 128 nested `match` arms or 85 nested `for` loops did not
+  build on macOS. `ae` now passes `-fbracket-depth=2048`, sized from the
+  parser's own limit, to every Clang it drives (`ae run`, `ae build`,
+  cross builds through zig cc or xcrun, the wasm backend through emcc,
+  and `$AE_CC` / `$CC` naming Clang anywhere). The build system guide
+  lists which C compilers fix a nesting limit; MSVC's, about 100 to 110
+  nested blocks, cannot be raised.
+
+- **`%` on floats compiles (#3577).** The checker accepted `a % b` on
+  `float`, `f32` and `longdouble` values, and `x %= y` on them, but the C
+  was C's `%`, which has no floating form, so the program did not build.
+  It is now the remainder of the quotient truncated toward zero with the
+  sign of the dividend, as Java's: C's `fmod`. `7.5 % 2.0` is `1.5`,
+  `-7.5 % 2.0` is `-1.5`, and `x % 0.0` is NaN rather than a panic.
+
+- **`ae cflags` prints `-fbracket-depth=2048` for a Clang (#3574).** A
+  build that compiles `aetherc` output itself with the compiler `ae`
+  drives (`$AE_CC`, `$CC`, else `gcc`, else `cc`) now gets the bracket
+  depth every `ae` build gives Clang, with the include flags, when that
+  compiler takes the option; GCC, which refuses it, does not.
+
+- **aetherc waits for an output file another process holds (#3574).** On
+  Windows a virus scanner, an indexer or an editor can hold a file it has
+  just seen written without sharing it for writing, and a compile that
+  wrote that path next failed with "Error opening output file:
+  Permission denied": about one compile in a thousand in a sweep writing
+  one output path a program after another. aetherc now waits up to about
+  two seconds for such a hold to go, and a path it can never write is
+  still refused at once, now by name with the Windows error.
+
+- **Long chains in constant initializers compile with Clang (#3574).** A
+  file-scope `const`'s initializer, and a module variable's, is a C
+  constant expression, which can hold no temporary, so a long chain in
+  one still nested its C a level a link: 1000 comparisons were 1000
+  brackets, 1000 shifts 3999, past the 256 Clang takes. Past 32 levels
+  the compiler now computes such an initializer, as the C would, and
+  writes the value.
+
+- **A receive arm's or a `match` arm's slice binding bound again from a
+  slice that owns keeps the message's buffer (#3568).** `Give(items) -> {
+  n = items.len; xs = make([]int, 2); items = xs }` gave back the message's
+  reference, which the message then gave back again (a heap corruption),
+  and leaked `xs`'s buffer: the binding took no reference of its own once
+  the analysis saw an owner moved into it. It takes one now whatever it
+  becomes.
+
+- **A view or an `if` given to an optional parameter no longer frees the
+  slice it views (#3568).** `count(xs[1..])` and `count(if c { xs } else {
+  mk(2) })` with `count(o: int[]?)` put the slice into the optional
+  argument's temporary without a reference of its own, and the temporary's
+  release after the call gave back `xs`'s. The temporary takes its own now.
+
+- **`rows = append(rows, f())` on a slice a closure shares no longer
+  corrupts the heap (#3568).** The append emptied a temporary copy of the
+  shared slice instead of the slice itself, which then gave back the same
+  reference again. It empties the slice itself now, after the value is
+  read.
+
+- **A store into a slice's element whose value grows the slice lands in
+  the slice (#3568).** `rows[0] = grow()`, where `grow` appends to `rows`,
+  took the element's address before the value was made, and stored into
+  the buffer the growth had left (or freed). A value that calls anything is
+  made first now, and the element's place taken after it; a panic in the
+  place's bounds check still gives the value back.
+
+### Performance
+
+- **Merging a large module and compiling many extern calls no longer grows
+  with the square of their size (#3546).** The module merge walked the
+  program and the module for every declaration it merged and every
+  reference it renamed, and the code generator walked the extern table for
+  every extern call; both are now one probe of an index. Merging a module of
+  8000 functions and 8000 vars took 7.5 s of CPU and takes 94 ms, and
+  writing 8000 extern calls 1.5 s and 63 ms (aetherc --time-phases, best of
+  5); a std-heavy program (benchmarks/core/compile_heavy.ae) compiles in
+  63 ms of CPU where it took 78.
+
+- **Nested loops compile in time linear in their depth (#3574).** The free
+  check, the slice ownership and escape checks, the isolation check and
+  the protocol check walk a loop's body two or three times, and each walk
+  walked the loops inside it again, so the time doubled with each level of
+  nesting: 20 nested loops took seconds and 70 did not finish. A loop
+  walked again from the same state now reuses the walk already made, with
+  the joins it made into the loops around it, and 96 nested loops check in
+  a few milliseconds. The protocol check's join is now a proper join: a
+  reference that reaches a point under two protocols is followed on no
+  path from there, however the paths are joined, where it was forgotten
+  and could come back under one of them.
+
 ## [0.882.0]
 
 ### Fixed
