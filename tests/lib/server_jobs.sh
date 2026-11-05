@@ -101,10 +101,15 @@ kill_server() {
         wait "$1" 2>/dev/null || :   # status not ours: see _server_reap
         return 0
     fi
+    # Each way of ending the job is an attempt, and fails when the program
+    # ended by itself an instant ago (its /proc entry gone, nothing for
+    # taskkill or kill to match). _server_reap says whether the job ended.
+    # Under `set -e` the failed attempt ended the caller's test instead, with
+    # no message (#3591).
     if [ -n "$_SERVER_JOBS_WINDOWS" ]; then
-        _server_end_windows "$1"
+        _server_end_windows "$1" || :
     else
-        kill -9 "%$_sj" 2>/dev/null
+        kill -9 "%$_sj" 2>/dev/null || :
     fi
     _server_reap "$1" "$_sj" 100 2>/dev/null ||
         echo "server_jobs: job %$_sj (pid $1) did not end; left running" >&2
@@ -122,7 +127,7 @@ stop_server() {
         wait "$1" 2>/dev/null || :   # status not ours: see _server_reap
         return 0
     fi
-    kill -TERM "%$_sj" 2>/dev/null
+    kill -TERM "%$_sj" 2>/dev/null || :   # an attempt, as in kill_server
     _server_reap "$1" "$_sj" 50 2>/dev/null && return 0
     kill_server "$1"
     return 0
