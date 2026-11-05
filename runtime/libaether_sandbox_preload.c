@@ -33,6 +33,7 @@
 #include <wordexp.h>
 #if defined(__FreeBSD__)
 #include <sys/user.h>            // struct kinfo_file, for fexecve's F_KINFO
+#include <sys/syscall.h>         // SYS_fork, which libthr's fork issues itself
 #endif
 
 // Grant storage
@@ -1354,6 +1355,22 @@ typedef long aether_syscall_arg_t;
 static aether_syscall_arg_t (*real_syscall)(aether_syscall_arg_t, ...) = NULL;
 aether_syscall_arg_t syscall(aether_syscall_arg_t number, ...) {
     if (!real_syscall) real_syscall = dlsym(RTLD_NEXT, "syscall");
+#if defined(__FreeBSD__)
+    // libthr's fork, which every threaded program's fork() and system()
+    // reach through libc's interposing table, makes the process with
+    // syscall(SYS_fork) itself. Refused here as every raw syscall is, no
+    // threaded program could fork under the preload, fork grant or not
+    // (ENOSYS from fork() and system(); posix_spawn and vfork, which do not
+    // go that way, worked). It is fork, so it gets fork()'s rule, and it
+    // takes no arguments, so it forwards as it is.
+    if (number == SYS_fork) {
+        if (!new_process_allowed()) {
+            errno = EPERM;
+            return -1;
+        }
+        return real_syscall(SYS_fork);
+    }
+#endif
     if (sandbox_active) {
 #if defined(__linux__)
         // Block dangerous syscalls: open(2), openat(257), connect(42),
