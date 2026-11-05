@@ -14,6 +14,16 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.884.0]
+
+### Fixed
+
+- **The sandbox preload holds every libc way of starting a program, not only `execve` and `fork`.** libc runs the rest of the exec family, `posix_spawn`, `system`, `popen` and `wordexp`'s command substitution on its own internal `execve` and `clone`, so under a grant file with no `exec` grant any of them still ran its program, and so did a guest language's `os.execute` in-process. Each now needs the `fork` rule for a new process and an `exec` grant for what it runs (`/bin/sh` for the shell ones), on Linux and FreeBSD; `tests/integration/sandbox_spawn_family` holds the grid.
+
+- **`install.sh` into a shared prefix such as `~/.local` registers only Aether's own files.** To record the version under `<prefix>/versions/`, it copied the prefix's whole `bin`, `lib`, `include` and `share`, so an install into `~/.local` also copied everything else living there (on one host, a 4 GB podman image store with root-owned files) and then stopped half way under `set -e`, leaving `current` and `active_version` unwritten. It now copies `ae`, `aetherc`, `aether-lsp` and the `lib/aether`, `include/aether` and `share/aether` trees only.
+
+- **The no-leak tests measure current RSS on every platform, from one shared shim.** Eight copies of the probes' RSS helper, in four variants, read either getrusage's `ru_maxrss` (a peak that never falls and counts pages the allocator freed but kept) or `/proc/self/statm` (absent on FreeBSD, so the probes ran smoke-only there). On FreeBSD, jemalloc's retained dirty pages raised the peak by 3.2 MB across a leak-free loop and failed `heap_leak_interp_as_arg` with no leak; the same held `std_strbuilder_no_leak` flaky. `tests/lib/rss_kb.c` now releases the allocator's cached pages first (`malloc_zone_pressure_relief`, jemalloc's purge, glibc's `malloc_trim`) and reads current RSS (`task_info`, `kinfo_proc`, `/proc/self/statm`); ten tests use it. A deliberate 34-byte-per-call leak still shows as 4.7 MB of growth on macOS, FreeBSD and Linux.
+
 ## [0.883.0]
 
 ### Changed
