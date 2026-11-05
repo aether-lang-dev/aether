@@ -21,6 +21,11 @@ typedef enum {
     K_VIEW,   /* only ever given views and copies: holds a reference of its
                * own, released at every exit; a copy of it into another
                * place takes another, so it is never moved */
+    K_RAW,    /* only ever given views of memory no count covers (a cast of
+               * a pointer, `null`, an array literal, an array viewed as a
+               * slice, a sub-slice of one, a local that is one): there is
+               * no reference to hold, so it holds none and nothing releases
+               * it; otherwise it is copied as a K_VIEW is */
     K_OTHER,  /* bound by a pattern, a destructure, a `catch`, or outside a
                * block: the reference stays with what it was bound from */
     K_PARAM,  /* a parameter: borrows the caller's */
@@ -64,6 +69,9 @@ struct Local {
     int pidx;           /* a parameter: its position, else -1 */
     Local** srcs;       /* the locals a binding copies it from */
     int nsrcs, srcs_cap;
+    int counted;        /* some binding may give it a view of a counted buffer */
+    Local** bases;      /* the locals a binding gives it a copy or a view of */
+    int nbases, bases_cap;
     Kind kind;
 };
 /* A map from a node to a local. */
@@ -210,6 +218,14 @@ static void add_src(Local* l, Local* src) {
         l->srcs = (Local**)realloc(l->srcs, (size_t)l->srcs_cap * sizeof(Local*));
     }
     l->srcs[l->nsrcs++] = src;
+}
+
+static void add_base(Local* l, Local* base) {
+    if (l->nbases == l->bases_cap) {
+        l->bases_cap = l->bases_cap ? l->bases_cap * 2 : 4;
+        l->bases = (Local**)realloc(l->bases, (size_t)l->bases_cap * sizeof(Local*));
+    }
+    l->bases[l->nbases++] = base;
 }
 
 /* ---- the tree ---- */
@@ -384,8 +400,11 @@ static void note_closure(Frame* f, Scope* s, ASTNode* closure) {
 /* Can the value `e` give the slice local `l` a buffer to own? A view (a
  * sub-slice, an array, a field or an element read, a cast) cannot; a call
  * can, and so can a local that owns one. */
+static void note_counted(Frame* f, Local* l, ASTNode* e);
+
 static void note_source(Frame* f, Local* l, ASTNode* e) {
     if (!e) return;
+    note_counted(f, l, e);
     switch (e->type) {
         case AST_SLICE_EXPR: case AST_SLICE_FROM_ARRAY: case AST_MEMBER_ACCESS:
         case AST_ARRAY_ACCESS: case AST_PTR_AS_ARRAY_CAST: case AST_NULL_LITERAL:
@@ -401,6 +420,37 @@ static void note_source(Frame* f, Local* l, ASTNode* e) {
             l->fresh = 1;
             return;
     }
+}
+
+/* Can the value `e` give the slice local `l` a view of a counted buffer?
+ * Not a cast of a pointer (C's memory), `null`, an array literal or an
+ * array viewed as a slice (storage no count covers), nor a sub-slice of
+ * any of these, of a fixed-size array or of a pointer. A copy or a view of
+ * a local can when that local can (`bases`, settled in classify). Any other
+ * value can: a call's result, a field, an element, a module-level `var`. */
+static void note_counted(Frame* f, Local* l, ASTNode* e) {
+    while (e && e->type == AST_SLICE_EXPR && e->child_count > 0 && e->children[0]) {
+        Type* bt = e->children[0]->node_type;
+        if (bt && (type_is_sized_array(bt) || bt->kind == TYPE_PTR)) return;
+        e = e->children[0];
+    }
+    if (!e) return;
+    switch (e->type) {
+        case AST_PTR_AS_ARRAY_CAST: case AST_NULL_LITERAL: case AST_ARRAY_LITERAL:
+        case AST_SLICE_FROM_ARRAY:
+            return;
+        case AST_IDENTIFIER: {
+            Local* s = pm_get(&f->uses, e);
+            if (s) {
+                add_base(l, s);
+                return;
+            }
+            break;
+        }
+        default:
+            break;
+    }
+    l->counted = 1;
 }
 
 typedef struct {
@@ -518,6 +568,9 @@ static void resolve(R* r, Scope* s, ASTNode* n, ASTNode* block) {
                 Local* l = scope_lookup(s, v->value);
                 if (l) {
                     pm_put(&r->f->binds, v, l);
+                    /* Bound again by a part of a tuple, which may be a view
+                     * of a counted buffer. */
+                    l->counted = 1;
                 } else if (store_elsewhere(r, v->value)) {
                     continue;
                 } else {
@@ -693,6 +746,30 @@ static void classify(Frame* f) {
                 Kind k = l->srcs[j]->kind;
                 if (k == K_OWNER || k == K_KEEP) {
                     l->kind = K_OWNER;
+                    changed = 1;
+                    break;
+                }
+            }
+        }
+    }
+    /* A local only ever given views of memory no count covers, directly or
+     * through locals that are only given such views, holds no reference
+     * (K_RAW): what it holds is never a counted buffer, so a release of it,
+     * at an exit, a store or a caught panic, would give back nothing. The
+     * largest such set: every candidate starts in it, and one given a copy
+     * or a view of a local outside it leaves it, until none does. */
+    for (int i = 0; i < f->nlocals; i++) {
+        Local* l = f->locals[i];
+        if (l->kind == K_VIEW && !l->destructured && !l->hold && !l->counted) l->kind = K_RAW;
+    }
+    for (int changed = 1; changed;) {
+        changed = 0;
+        for (int i = 0; i < f->nlocals; i++) {
+            Local* l = f->locals[i];
+            if (l->kind != K_RAW) continue;
+            for (int j = 0; j < l->nbases; j++) {
+                if (l->bases[j]->kind != K_RAW) {
+                    l->kind = K_VIEW;
                     changed = 1;
                     break;
                 }
@@ -2050,6 +2127,7 @@ static void check_frame(Ctx* c, ASTNode* owner, const StrMap* outer) {
 
     for (int i = 0; i < f.nlocals; i++) {
         free(f.locals[i]->srcs);
+        free(f.locals[i]->bases);
         free(f.locals[i]);
     }
     free(f.locals);
