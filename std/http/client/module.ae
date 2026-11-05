@@ -55,10 +55,10 @@ import std.string
 
 exports(
     request, set_header, set_body, set_timeout, set_follow_redirects, set_insecure,
-    set_cafile, set_partial_chain, set_tls_backend, set_stream, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
+    set_cafile, set_partial_chain, set_tls_backend, set_stream, set_unix_socket, use_env_proxy, use_http_proxy, ignore_http_proxy, request_free,
     send_request, send_stream,
     response_status, response_body, response_body_bytes, response_error, response_redirect_error,
-    response_is_stream, response_read,
+    response_is_stream, response_read, response_take_conn,
     response_header, response_headers, response_url, response_free,
     get_with_headers, post_with_status,
     post_json, response_body_json,
@@ -81,6 +81,7 @@ extern http_request_set_cafile_raw(req: ptr, path: string) -> int
 extern http_request_set_partial_chain_raw(req: ptr, on: int) -> int
 extern http_request_set_tls_backend_raw(req: ptr, name: string) -> int
 extern http_request_set_stream_raw(req: ptr, on: int) -> int
+extern http_request_set_unix_socket_raw(req: ptr, path: string) -> int
 extern http_request_use_env_proxy_raw(req: ptr, on: int) -> int
 extern http_request_use_http_proxy_raw(req: ptr, proxy_url: string) -> int
 extern http_request_ignore_http_proxy_raw(req: ptr) -> int
@@ -92,6 +93,7 @@ extern http_response_body(response: ptr) -> string @heap
 extern http_response_body_length(response: ptr) -> int
 extern http_response_is_stream_raw(response: ptr) -> int
 extern http_response_read_chunk_raw(response: ptr, max: int) -> string @heap
+extern http_response_take_conn_raw(response: ptr) -> (ptr, string @heap, string)
 extern http_response_headers(response: ptr) -> string
 extern http_response_error(response: ptr) -> string
 extern http_response_redirect_error_raw(response: ptr) -> string
@@ -251,6 +253,20 @@ set_stream(req: ptr, on: int) -> string {
     return ""
 }
 
+// Send this request over the Unix-domain stream socket at `path` instead of
+// dialling the URL's host (curl's --unix-socket): the URL still gives the
+// request target and the Host header, so a Docker or Podman Engine API call
+// is `client.request("GET", "http://localhost/v1.41/_ping")` with
+// `set_unix_socket(req, "/var/run/docker.sock")`. Redirects stay on the
+// socket; no proxy applies. In an enforce block the connect needs fs_write
+// on `path`. "" goes back to dialling the host.
+set_unix_socket(req: ptr, path: string) -> string {
+    if http_request_set_unix_socket_raw(req, path) != 0 {
+        return "set_unix_socket failed (null req)"
+    }
+    return ""
+}
+
 // Forward-proxy control (aether#1012). Default is DIRECT — the client does not
 // follow $HTTP_PROXY unless you opt in, the hardened inverse of the httpoxy
 // (CVE-2016-5385) default-follow footgun. Precedence: ignore > explicit > env.
@@ -361,6 +377,22 @@ response_body_bytes(resp: ptr) -> byte[] {
 // Use string.length() on the returned chunk for its byte count (binary-safe).
 response_is_stream(resp: ptr) -> int { return http_response_is_stream_raw(resp) }
 response_read(resp: ptr, max: int) -> string { return http_response_read_chunk_raw(resp, max) }
+
+// Take the connection out of a streaming response (send_stream), for a
+// protocol that carries on over it after the head: a 101 Switching Protocols
+// (Docker's attach with `Connection: Upgrade` + `Upgrade: tcp`), or a 200
+// after which the server speaks a raw stream both ways (Docker's exec start).
+// Returns (sock, early, ""): `sock` a std.tcp socket the caller owns (read
+// and write it with std.tcp, close it with tcp.tcp_close), `early` the bytes
+// the peer already sent past its head, binary-safe, which come before
+// anything read from `sock`. Take it before any response_read. Returns
+// (null, "", error) for a buffered response, one taken already, or a TLS
+// connection (only a plaintext one can be a socket). The response keeps its
+// status and headers and still needs response_free.
+response_take_conn(resp: ptr) -> {
+    sock, early, err = http_response_take_conn_raw(resp)
+    return sock, early, err
+}
 
 response_error(resp: ptr) -> string { return http_response_error(resp) }
 

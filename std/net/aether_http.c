@@ -2,6 +2,7 @@
 #include "aether_http_internal.h"
 #include "../../runtime/config/aether_optimization_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/aether_sandbox.h"   /* a Unix-socket request's fs_write check */
 #include "../../runtime/utils/aether_thread.h"
 #include "../../runtime/utils/aether_compiler.h"
 
@@ -168,6 +169,12 @@ const char* http_response_header_raw(HttpResponse* r, const char* n) { (void)r; 
 const char* http_response_effective_url_raw(HttpResponse* r) { (void)r; return ""; }
 const char* http_response_redirect_error_raw(HttpResponse* r) { (void)r; return ""; }
 int http_request_set_stream_raw(HttpClientRequest* r, int on) { (void)r; (void)on; return -1; }
+int http_request_set_unix_socket_raw(HttpClientRequest* r, const char* p) { (void)r; (void)p; return -1; }
+HttpTakeConnResult http_response_take_conn_raw(HttpResponse* r) {
+    (void)r;
+    HttpTakeConnResult out = { NULL, (void*)string_empty(), "networking disabled at build time" };
+    return out;
+}
 int http_response_is_stream_raw(HttpResponse* r) { (void)r; return 0; }
 const char* http_response_read_chunk_raw(HttpResponse* r, int max) { (void)r; (void)max; return (const char*)string_empty(); }
 /* Linked by the proxy, which is built without networking too (#2517). */
@@ -580,7 +587,14 @@ static int transport_send(Transport* t, const void* buf, int len) {
     if (t->ssl) return SSL_write(t->ssl, buf, len);
 #endif
     if (t->pure_tls) return pt_client_send(t->pure_tls, buf, len);
+    /* EPIPE, not SIGPIPE, for a peer that has gone (a pooled connection
+     * the server closed): Linux per send, macOS and the BSDs on the socket
+     * (SO_NOSIGPIPE, where a Unix-socket dial sets it). */
+#if defined(MSG_NOSIGNAL)
+    return (int)send(t->sockfd, buf, len, MSG_NOSIGNAL);
+#else
     return (int)send(t->sockfd, buf, len, 0);
+#endif
 }
 
 static int transport_recv(Transport* t, void* buf, int len) {
@@ -644,7 +658,8 @@ struct HttpStream {
     int  read_until_close;    /* no Content-Length and not chunked: body ends at EOF */
     long long content_remaining; /* Content-Length framing: undelivered body bytes */
     /* chunked decode state machine: 0=read size line, 1=deliver chunk data,
-     * 2=consume the CRLF that trails a chunk's data. */
+     * 2=consume the CRLF that trails a chunk's data, 3=read the trailer
+     * section after the last chunk. */
     int  chunk_state;
     long long chunk_remaining; /* chunked: undelivered payload bytes in current chunk */
     int  eof;                 /* body fully delivered (nothing more will arrive) */
@@ -1273,9 +1288,26 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
         return give;
     }
 
-    /* Chunked: run the state machine until `out` fills or the body ends. */
+    /* Chunked: run the state machine until `out` fills, the body ends, or
+     * it has payload to give and the next step would wait on the transport.
+     * A stream is read as it arrives: a followed log or an event feed sends
+     * a chunk and then nothing until the next event, and a read that waited
+     * for `max` bytes held the first event until enough others came. */
     int produced = 0;
     while (produced < max && !s->eof) {
+        if (produced > 0) {
+            int avail = s->pending_len - s->pending_pos;
+            if (avail == 0) break;
+            if (s->chunk_state == 2 && avail < 2) break;
+            if (s->chunk_state == 0 &&
+                !memchr(s->pending + s->pending_pos, '\n', (size_t)avail)) break;
+            if (s->chunk_state == 3) break;
+        }
+        if (s->chunk_state == 3) {  /* the trailer section, after the last chunk */
+            if (!stream_read_trailers(s)) return produced ? produced : -1;
+            s->eof = 1;
+            break;
+        }
         if (s->chunk_state == 1) {  /* deliver chunk payload */
             if (s->chunk_remaining == 0) { s->chunk_state = 2; continue; }
             int avail = s->pending_len - s->pending_pos;
@@ -1306,9 +1338,8 @@ static int stream_read_decoded(struct HttpStream* s, char* out, int max) {
         if (sz == 0) {
             /* terminal chunk: the trailer section, to the empty line that
              * ends it, then the end of the body. */
-            if (!stream_read_trailers(s)) return produced ? produced : -1;
-            s->eof = 1;
-            break;
+            s->chunk_state = 3;
+            continue;
         }
         s->chunk_remaining = sz;
         s->chunk_state = 1;
@@ -1394,6 +1425,11 @@ struct HttpClientRequest {
      *   PROXY_MODE_DIRECT (0)   default: no proxy */
     int   proxy_mode;
     char* proxy_url;     /* owned; set only for PROXY_MODE_EXPLICIT */
+    char* unix_socket;   /* owned, or NULL. When set, every connection this
+                          * request makes goes to the AF_UNIX stream socket at
+                          * this path instead of the URL's host and port, which
+                          * still name the Host header and TLS's server name
+                          * (curl's --unix-socket). No proxy applies. */
     int   tls_backend;   /* HTTP_TLS_BACKEND_*: DEFAULT follows AETHER_PURE_TLS
                           * and the build; AETHER or OPENSSL is the program's
                           * choice for this request (set_tls_backend, #1298). */
@@ -1685,6 +1721,23 @@ int http_request_set_stream_raw(HttpClientRequest* req, int on) {
     return 0;
 }
 
+/* Send THIS request over the Unix-domain stream socket at `path` (a Docker
+ * or Podman Engine API socket, say) instead of dialling the URL's host: the
+ * URL still gives the request target, the Host header and, for https, the
+ * server name. NULL or "" goes back to dialling the host. The connect needs
+ * fs_write on `path` in an enforce block (aether_net_dial_unix). */
+int http_request_set_unix_socket_raw(HttpClientRequest* req, const char* path) {
+    if (!req) return -1;
+    char* kept = NULL;
+    if (path && path[0]) {
+        kept = strdup(path);
+        if (!kept) return -1;
+    }
+    free(req->unix_socket);
+    req->unix_socket = kept;
+    return 0;
+}
+
 /* ---- Forward-proxy control (aether#1012 part 2) ------------------------------
  *
  * Default is DIRECT: std.http.client does NOT follow $HTTP_PROXY unless the
@@ -1746,6 +1799,7 @@ void http_request_free_raw(HttpClientRequest* req) {
     free(req->content_type);
     free(req->proxy_url);
     free(req->cafile);
+    free(req->unix_socket);
     HttpHeader* h = req->headers;
     while (h) {
         HttpHeader* next = h->next;
@@ -2530,8 +2584,12 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
      * timeout across all of them, and the family that connected tried first
      * next time. */
     const char* why = NULL;
-    int sockfd = aether_net_dial_addrs(dial_host, dial_port, addrs,
-                                       req->timeout_ns > 0 ? req->timeout_ns : 0, 0, &why);
+    /* A request bound to a Unix socket connects there, whatever the URL's
+     * host (`addrs` is unused: nothing was resolved). */
+    int sockfd = req->unix_socket
+        ? aether_net_dial_unix(req->unix_socket, &why)
+        : aether_net_dial_addrs(dial_host, dial_port, addrs,
+                                req->timeout_ns > 0 ? req->timeout_ns : 0, 0, &why);
     if (sockfd < 0) {
         ae_set_err(out_err, why);
         return -1;
@@ -3688,7 +3746,9 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         char phost[256];
         int  pport = 0;
         const char* perr = NULL;
-        int pr = resolve_proxy_for(req, host, use_tls,
+        /* A Unix socket is local: no proxy stands between. */
+        int pr = req->unix_socket ? 0
+               : resolve_proxy_for(req, host, use_tls,
                                    phost, sizeof(phost), &pport, &perr);
         if (pr < 0) {
             free(path);
@@ -3709,6 +3769,21 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
      * when via_proxy, else the origin). Rebind the resolve/connect variables. */
     const char* dial_host = connect_host;
     int         dial_port = connect_port;
+    /* Over a Unix socket the endpoint is the path, and the pool keys its
+     * connections by it: port -1 marks it as no TCP endpoint. The sandbox
+     * is asked here, for every request, not only when one dials: a pooled
+     * connection opened outside an enforce block must not carry a request
+     * made inside one past the check. */
+    if (req->unix_socket) {
+        dial_host = req->unix_socket;
+        dial_port = -1;
+        if (!aether_sandbox_check("fs_write", req->unix_socket)) {
+            free(path);
+            response->error = string_new(
+                "denied by sandbox: a Unix socket connect needs fs_write on its path");
+            return response;
+        }
+    }
 
     /* The dial address, resolved lazily (#1719).
      *
@@ -3780,8 +3855,8 @@ static HttpResponse* http_request_internal(HttpClientRequest* req) {
         transport_apply_timeouts(&t, req->timeout_ns);
     }
     if (!reused) {
-        if (!resolve_dial_addr(dial_host, dial_port, &serv_addr,
-                               &serv_addr_resolved)) {
+        if (!(req->unix_socket || resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                               &serv_addr_resolved))) {
             free(path);
             response->error = string_new(via_proxy ? "could not resolve proxy host"
                                                    : "could not resolve host");
@@ -3850,8 +3925,8 @@ send_request:
             char* rd_err = NULL;
             /* This connection came from the pool, so the resolve above was
              * skipped; do it now. A failure here just means no retry. */
-            if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
-                                  &serv_addr_resolved)
+            if ((req->unix_socket || resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                                  &serv_addr_resolved))
                 && http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
                 free(rd_err);
                 goto send_request;
@@ -3961,9 +4036,12 @@ send_request:
         }
         st->t = t;                 /* transfer ownership of the open transport */
         if (no_body) {
-            /* Bytes past the header section are not this response's body. */
+            /* Bytes past the header section are not this response's body,
+             * and no read hands them out as one. They are kept all the same:
+             * after a 101 Switching Protocols they are the first bytes of
+             * the protocol switched to, which http_response_take_conn_raw
+             * gives back with the connection. */
             st->eof = 1;
-            over_len = 0;
         } else if (is_chunked) {
             st->chunked = 1;
             st->chunk_state = 0;   /* start by reading a chunk-size line */
@@ -4078,8 +4156,8 @@ send_request:
         transport_close(&t);
         char* rd_err = NULL;
         /* Pooled connection, so the resolve was skipped; do it now. */
-        if (resolve_dial_addr(dial_host, dial_port, &serv_addr,
-                              &serv_addr_resolved)
+        if ((req->unix_socket || resolve_dial_addr(dial_host, dial_port, &serv_addr,
+                              &serv_addr_resolved))
             && http_dial(req, &serv_addr, dial_host, dial_port, host, port, use_tls, via_proxy, &t, &rd_err) == 0) {
             free(rd_err);
             aether_caps_free(full_response, cap);
@@ -4910,6 +4988,68 @@ int http_response_body_length(HttpResponse* response) {
  * http_response_read_chunk_raw), 0 if the body was buffered. */
 int http_response_is_stream_raw(HttpResponse* response) {
     return (response && response->stream) ? 1 : 0;
+}
+
+/* Take the connection out of a streaming response, for a protocol that
+ * carries on over it after the response head: a 101 Switching Protocols
+ * (Docker's attach with `Upgrade: tcp`), or a 200 after which the server
+ * speaks a raw stream both ways (Docker's exec start, attach without the
+ * upgrade). Returns the socket as a std.tcp handle the caller now owns
+ * (tcp.close), and the bytes already read past the head that no body read
+ * consumed: the first of what the peer sent on the connection after its
+ * head, which the caller reads before anything from the socket. After a
+ * body read they are what is left undecoded, raw. The response keeps its
+ * status and headers, reads no further, and still needs freeing.
+ *
+ * Only a plaintext connection can be handed over as a socket: one carrying
+ * TLS has state no std.tcp handle can hold, so it is refused, and stays
+ * with the response. */
+struct TcpSocket* tcp_socket_from_fd_owned(int fd);
+HttpTakeConnResult http_response_take_conn_raw(HttpResponse* response) {
+    HttpTakeConnResult out = { NULL, NULL, "" };
+    if (!response || !response->stream) {
+        out._1 = (void*)string_empty();
+        out._2 = "not a streaming response: send it with send_stream (or set_stream) to take its connection";
+        return out;
+    }
+    struct HttpStream* st = response->stream;
+    if (st->t.sockfd < 0) {
+        out._1 = (void*)string_empty();
+        out._2 = "the connection has already been taken or closed";
+        return out;
+    }
+    int tls = st->t.pure_tls != NULL;
+#ifdef AETHER_HAS_OPENSSL
+    tls = tls || st->t.ssl != NULL;
+#endif
+    if (tls) {
+        out._1 = (void*)string_empty();
+        out._2 = "the connection carries TLS: only a plaintext connection can be taken as a socket";
+        return out;
+    }
+    int avail = st->pending_len - st->pending_pos;
+    AetherString* rest = avail > 0
+        ? string_new_with_length(st->pending + st->pending_pos, (size_t)avail)
+        : string_empty();
+    if (!rest) {
+        out._1 = (void*)string_empty();
+        out._2 = "out of memory";
+        return out;
+    }
+    int fd = st->t.sockfd;
+    st->t.sockfd = -1;           /* the response no longer closes it */
+    st->pending_pos = st->pending_len;
+    st->eof = 1;
+    struct TcpSocket* sock = tcp_socket_from_fd_owned(fd);   /* closes fd on failure */
+    if (!sock) {
+        string_release(rest);
+        out._1 = (void*)string_empty();
+        out._2 = "out of memory";
+        return out;
+    }
+    out._0 = sock;
+    out._1 = rest;
+    return out;
 }
 
 /* #1004: pull the next decoded body window from a streaming response. Returns

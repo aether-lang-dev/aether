@@ -9,10 +9,10 @@ exports(
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
-    tcp_available_raw,
+    tcp_available_raw, tcp_connect_unix_raw, tcp_listen_unix_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     tcp_send_bytes_raw, tcp_receive_into_raw,
-    connect, connect_buffered, write, write_n, write_slice, write_all, read, read_n, read_into,
+    connect, connect_buffered, connect_unix, listen_unix, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
     close_drained
@@ -51,6 +51,8 @@ extern tcp_fd_raw(sock: ptr) -> int
 extern tcp_server_fd_raw(server: ptr) -> int
 extern tcp_poll_raw(sock: ptr, timeout_ms: int) -> int
 extern tcp_poll2_raw(a: ptr, b: ptr, timeout_ms: int) -> int
+extern tcp_connect_unix_raw(path: string) -> (ptr, string)
+extern tcp_listen_unix_raw(path: string) -> (ptr, string)
 
 // Connect to host:port. Returns (socket, "") on success, (null, error)
 // on failure. Caller must tcp.close the returned socket.
@@ -80,6 +82,38 @@ connect_buffered(host: string, port: int, read_buffer: int) -> {
         return null, "connect failed"
     }
     return sock, ""
+}
+
+// Connect to the Unix-domain stream socket at `path` (a local daemon's API
+// socket: Docker's /var/run/docker.sock, Podman's). Returns (socket, "") or
+// (null, error), the error naming the path: "no such socket", "connection
+// refused: nothing is listening on the socket", "permission denied", a path
+// too long for sockaddr_un (refused, never truncated), or the sandbox's
+// refusal. The socket is the handle `connect` returns, so every read,
+// write, poll and close here works on it; set_nodelay does not (no TCP).
+// In an enforce block it needs fs_write on `path`: connecting to a Unix
+// socket needs write permission on its file, the kernel's own rule.
+connect_unix(path: string) -> {
+    sock, err = tcp_connect_unix_raw(path)
+    if sock == null {
+        return null, "${path}: ${err}"
+    }
+    return sock, ""
+}
+
+// Listen on a new Unix-domain stream socket at `path`. Returns (server, "")
+// or (null, error); a file already at `path` is "address in use" (a stale
+// socket is the caller's to remove: this never deletes a file it did not
+// make). The server is the handle `listen` returns: accept, server_poll,
+// server_fd work on it, server_port is -1, and tcp_server_close removes the
+// socket file. In an enforce block it needs tcp_listen and fs_write on
+// `path`.
+listen_unix(path: string) -> {
+    server, err = tcp_listen_unix_raw(path)
+    if server == null {
+        return null, "${path}: ${err}"
+    }
+    return server, ""
 }
 
 // Write data to a socket. Returns (bytes_sent, "") on success,

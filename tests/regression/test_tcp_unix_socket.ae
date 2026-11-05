@@ -1,0 +1,315 @@
+// Unix-domain stream sockets in std.tcp, and HTTP/1.1 over one through
+// std.http.client (the Docker / Podman Engine API's transport).
+//
+// tcp.connect_unix / tcp.listen_unix return the handles tcp.connect and
+// tcp.listen return, so std.tcp's reads, writes and polls work on them;
+// client.set_unix_socket sends a request over a socket path instead of
+// dialling the URL's host, which still names the Host header. Checked here,
+// over a socket in the scratch directory served by an actor:
+//   - a path too long for sockaddr_un refused (not truncated) by connect and
+//     listen; a missing socket named; a second listen on a path in use
+//   - bytes both ways over a raw connection
+//   - a request's head as the server sees it: origin-form target, Host
+//   - Content-Length and chunked bodies, buffered
+//   - a chunked body streamed: the first chunk read before the server has
+//     sent the rest (Docker's logs?follow=1 and /events)
+//   - a 101 response's connection taken as a socket, with the bytes the
+//     server sent behind the head, then used both ways (Docker's attach)
+//   - take_conn refused on a buffered response
+//   - the sandbox: a connect needs fs_write on the path, a listen
+//     tcp_listen as well; the same grant lets the HTTP client through
+
+import std.string
+import std.tcp
+import std.os
+import std.time
+import std.sandbox
+import std.http.client
+
+extern exit(code: int)
+
+message Listen { srv: ptr }
+message Serve { resp: string, want: string }
+message More { rest: string }
+message Echo {}
+message Release {}
+message Count { n: int }
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// Accepts one connection per Serve, reads the request head, checks it holds
+// `want`, writes `resp`, and keeps the connection for More / Echo until
+// Release, which answers with how many heads lacked what they should hold.
+actor Daemon {
+    state srv: ptr = null
+    state held: ptr = null
+    state bad = 0
+
+    receive {
+        Listen(srv: s) -> {
+            srv = s
+        }
+        Serve(resp: resp, want: want) -> {
+            sock, aerr = tcp.accept(srv)
+            if aerr != "" {
+                bad = bad + 1
+            } else {
+                seen = ""
+                going = 1
+                while going == 1 {
+                    got, rerr = tcp.read(sock, 4096)
+                    if rerr != "" {
+                        going = 0
+                    } else {
+                        seen = string.concat(seen, got)
+                        if string.contains(seen, "\r\n\r\n") == 1 { going = 0 }
+                    }
+                }
+                if string.contains(seen, want) != 1 {
+                    println("the server read a head without '${want}':\n${seen}")
+                    bad = bad + 1
+                }
+                _n, _werr = tcp.write(sock, resp)
+                held = sock
+            }
+        }
+        More(rest: rest) -> {
+            _n, _werr = tcp.write(held, rest)
+        }
+        Echo() -> {
+            got, rerr = tcp.read(held, 64)
+            if rerr != "" {
+                bad = bad + 1
+            } else {
+                _n, _werr = tcp.write(held, "pong:${got}")
+            }
+        }
+        Release() -> {
+            if held != null {
+                tcp.close(held)
+                held = null
+            }
+            reply Count { n: bad }
+        }
+    }
+}
+
+// Whether `err` is the error for a socket path with nothing at it. Windows'
+// AF_UNIX has its own codes for that, so there any error will do.
+fn says_missing(err: string) -> bool {
+    ok = false
+    when target.os == "windows" {
+        ok = err != ""
+    } else {
+        ok = string.contains(err, "no such socket") == 1
+    }
+    return ok
+}
+
+fn get(sock_path: string, url: string) -> ptr {
+    req = client.request("GET", url)
+    client.set_unix_socket(req, sock_path)
+    client.set_timeout(req, 5s)
+    return req
+}
+
+main() {
+    pid = os.getpid()
+    // The scratch directory, unless it is long enough to crowd sun_path.
+    dir = os.temp_dir()
+    if string.length(dir) > 64 { dir = "/tmp" }
+    path = "${dir}/ae-uds-${pid}.sock"
+    missing = "${dir}/ae-uds-${pid}-missing.sock"
+
+    // 120 bytes: past sun_path's 104 (macOS, BSDs) and 108 (Linux, Windows).
+    overlong = "/tmp/"
+    while string.length(overlong) < 120 { overlong = string.concat(overlong, "a") }
+    nolong, lerr = tcp.connect_unix(overlong)
+    check(nolong == null, "an over-long path connected")
+    check(string.contains(lerr, "too long") == 1, "an over-long connect said '${lerr}'")
+    nolisten, llerr = tcp.listen_unix(overlong)
+    check(nolisten == null, "an over-long path was listened on")
+    check(string.contains(llerr, "too long") == 1, "an over-long listen said '${llerr}'")
+
+    nosock, merr = tcp.connect_unix(missing)
+    check(nosock == null, "a missing socket connected")
+    // Windows before 10 1803, and Wine, have no AF_UNIX: that is said
+    // plainly, and there is nothing further to check.
+    if string.contains(merr, "not supported on this") == 1 {
+        println("SKIP: ${merr}")
+        return
+    }
+    check(string.starts_with(merr, "${missing}: ") == 1, "a missing socket's error names no path: '${merr}'")
+    check(says_missing(merr), "a missing socket said '${merr}'")
+    nreq = get(missing, "http://localhost/_ping")
+    nr, nerr = client.send_request(nreq)
+    client.request_free(nreq)
+    check(nr == null && says_missing(nerr),
+        "an HTTP request to a missing socket said '${nerr}'")
+
+    srv, serr = tcp.listen_unix(path)
+    check(serr == "", "listen_unix: ${serr}")
+    check(tcp.server_port(srv) == -1, "a Unix listener has a port")
+    _dup, derr = tcp.listen_unix(path)
+    check(string.contains(derr, "address in use") == 1, "a second listen said '${derr}'")
+
+    // Bytes both ways over a raw connection.
+    conn, cerr = tcp.connect_unix(path)
+    check(cerr == "", "connect_unix: ${cerr}")
+    peer, aerr = tcp.accept(srv)
+    check(aerr == "", "accept: ${aerr}")
+    _w, werr = tcp.write(conn, "hello")
+    check(werr == "", "write: ${werr}")
+    got, rerr = tcp.read(peer, 64)
+    check(rerr == "" && got == "hello", "the server read '${got}' (${rerr})")
+    _w2, werr2 = tcp.write_all(peer, string.bytes("back"))
+    check(werr2 == "", "write_all: ${werr2}")
+    ready, perr = tcp.poll(conn, 2000)
+    check(ready && perr == "", "poll on a Unix socket: ${perr}")
+    back, berr = tcp.read(conn, 64)
+    check(berr == "" && back == "back", "the client read '${back}' (${berr})")
+    tcp.close(conn)
+    tcp.close(peer)
+
+    up = spawn(Daemon())
+    up ! Listen { srv: srv }
+
+    // Content-Length, buffered; the head as the daemon reads it.
+    up ! Serve { resp: "HTTP/1.1 200 OK\r\nContent-Length: 2\r\nApi-Version: 1.41\r\n\r\nOK",
+        want: "GET /v1.41/_ping HTTP/1.1\r\nHost: localhost\r\n" }
+    req = get(path, "http://localhost/v1.41/_ping")
+    r, err = client.send_request(req)
+    client.request_free(req)
+    check(err == "", "GET over the socket: ${err}")
+    check(client.response_status(r) == 200, "status ${client.response_status(r)}")
+    check(client.response_body(r) == "OK", "body '${client.response_body(r)}'")
+    check(client.response_header(r, "Api-Version") == "1.41", "a header was lost")
+    client.response_free(r)
+    int bad1 = up ? Release {}
+    check(bad1 == 0, "the Content-Length request's head")
+
+    // Chunked, buffered.
+    up ! Serve { resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n4\r\n[{}]\r\n3\r\n,{}\r\n0\r\n\r\n",
+        want: "GET /containers/json HTTP/1.1\r\n" }
+    req2 = get(path, "http://localhost/containers/json")
+    r2, err2 = client.send_request(req2)
+    client.request_free(req2)
+    check(err2 == "", "a chunked GET: ${err2}")
+    check(client.response_body(r2) == "[{}],{}", "the chunked body '${client.response_body(r2)}'")
+    client.response_free(r2)
+    int bad2 = up ? Release {}
+    check(bad2 == 0, "the chunked request's head")
+
+    // Chunked, streamed: the first chunk arrives while the daemon still holds
+    // the rest, as a followed log does.
+    up ! Serve { resp: "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n6\r\nline1\n\r\n",
+        want: "GET /containers/c1/logs?follow=1&stdout=1 HTTP/1.1\r\n" }
+    req3 = get(path, "http://localhost/containers/c1/logs?follow=1&stdout=1")
+    r3, err3 = client.send_stream(req3)
+    client.request_free(req3)
+    check(err3 == "", "a streamed GET: ${err3}")
+    // Well inside the request's 5 s timeout: a reader that waits for more
+    // than the chunk that came gives it up only when the receive times out.
+    t0 = time.now_ms()
+    first = client.response_read(r3, 4096)
+    waited = time.now_ms() - t0
+    check(first == "line1\n", "the first streamed chunk '${first}'")
+    check(waited < 2000, "the first chunk took ${waited} ms: the read waited for more")
+    up ! More { rest: "6\r\nline2\n\r\n0\r\n\r\n" }
+    second = client.response_read(r3, 4096)
+    check(second == "line2\n", "the second streamed chunk '${second}'")
+    tail = client.response_read(r3, 4096)
+    check(string.length(tail) == 0 && client.response_error(r3) == "",
+        "the stream did not end cleanly: '${tail}' ${client.response_error(r3)}")
+    client.response_free(r3)
+    int bad3 = up ? Release {}
+    check(bad3 == 0, "the streamed request's head")
+
+    // A 101: take the connection, with what the daemon sent behind the head.
+    up ! Serve { resp: "HTTP/1.1 101 UPGRADED\r\nConnection: Upgrade\r\nUpgrade: tcp\r\n\r\nEARLY",
+        want: "Upgrade: tcp\r\n" }
+    req4 = client.request("POST", "http://localhost/containers/c1/attach?stream=1&stdin=1")
+    client.set_unix_socket(req4, path)
+    client.set_header(req4, "Connection", "Upgrade")
+    client.set_header(req4, "Upgrade", "tcp")
+    r4, err4 = client.send_stream(req4)
+    client.request_free(req4)
+    check(err4 == "", "the upgrade request: ${err4}")
+    check(client.response_status(r4) == 101, "the upgrade's status ${client.response_status(r4)}")
+    raw, early, terr = client.response_take_conn(r4)
+    check(terr == "" && raw != null, "take_conn: ${terr}")
+    // EARLY may have come with the head or after it.
+    seen = string.concat("", early)
+    while string.length(seen) < 5 {
+        more, merr2 = tcp.read(raw, 64)
+        check(merr2 == "", "reading past the head: ${merr2}")
+        seen = string.concat(seen, more)
+    }
+    check(seen == "EARLY", "the bytes behind the head '${seen}'")
+    _again, _e2, terr2 = client.response_take_conn(r4)
+    check(string.contains(terr2, "already") == 1, "a second take said '${terr2}'")
+    client.response_free(r4) // the taken socket stays open
+    _w3, werr3 = tcp.write(raw, "ping")
+    check(werr3 == "", "writing the taken socket: ${werr3}")
+    up ! Echo {}
+    pong, perr2 = tcp.read(raw, 64)
+    check(perr2 == "" && pong == "pong:ping", "the taken socket read '${pong}' (${perr2})")
+    tcp.close(raw)
+    int bad4 = up ? Release {}
+    check(bad4 == 0, "the upgrade request's head")
+
+    // take_conn needs a streaming response.
+    up ! Serve { resp: "HTTP/1.1 200 OK\r\nContent-Length: 0\r\n\r\n", want: "GET" }
+    req5 = get(path, "http://localhost/_ping")
+    r5, err5 = client.send_request(req5)
+    client.request_free(req5)
+    check(err5 == "", "a buffered GET: ${err5}")
+    nb, _e5, terr5 = client.response_take_conn(r5)
+    check(nb == null && string.contains(terr5, "not a streaming response") == 1,
+        "take_conn on a buffered response said '${terr5}'")
+    client.response_free(r5)
+    int bad5 = up ? Release {}
+    check(bad5 == 0, "the buffered request's head")
+
+    // The sandbox: no grant, no connect, raw or over HTTP, and no listen.
+    nothing = sandbox.new("nothing") {
+    }
+    sandbox.enforce(nothing) callback {
+        s0, e0 = tcp.connect_unix(path)
+        check(s0 == null && string.contains(e0, "denied by sandbox") == 1,
+            "a connect without fs_write said '${e0}'")
+        hreq = get(path, "http://localhost/_ping")
+        hr, herr = client.send_request(hreq)
+        client.request_free(hreq)
+        check(hr == null && string.contains(herr, "denied by sandbox") == 1,
+            "an HTTP request without fs_write said '${herr}'")
+        l0, le0 = tcp.listen_unix("${dir}/ae-uds-${pid}-boxed.sock")
+        check(l0 == null && string.contains(le0, "denied by sandbox") == 1,
+            "a listen without grants said '${le0}'")
+    }
+    sandbox.free(nothing)
+
+    // fs_write on the socket's path is the grant a connect needs.
+    writer = sandbox.new("writer") {
+        grant_fs_write(path)
+    }
+    sandbox.enforce(writer) callback {
+        s1, e1 = tcp.connect_unix(path)
+        check(e1 == "", "a connect with fs_write on the path: ${e1}")
+        tcp.close(s1)
+    }
+    sandbox.free(writer)
+    leftover, _le = tcp.accept(srv)
+    tcp.close(leftover)
+
+    tcp.server_close(srv)
+    again, gerr = tcp.connect_unix(path)
+    check(again == null && says_missing(gerr),
+        "server_close left the socket file: '${gerr}'")
+    println("PASS: Unix-domain sockets, raw and under HTTP/1.1")
+}

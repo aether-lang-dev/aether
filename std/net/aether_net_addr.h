@@ -288,4 +288,12 @@ int  aether_net_order(const char* host, int port, AetherAddrList* addrs);
 /* Remember that `family` connected to `host`:`port`. */
 void aether_net_note_family(const char* host, int port, int family);
 
+/* Connect a fresh AF_UNIX stream socket to the socket file at `path`. The
+ * sandbox check is the kernel's own rule: connecting to a Unix socket needs
+ * write permission on its file, so in an enforce block it needs `fs_write`
+ * on `path` (resolved, symlinks followed, as every fs check is). A path too
+ * long for sockaddr_un is refused, never truncated. Returns the descriptor
+ * (blocking, no timeouts set), or -1 with *why set to a static message. */
+int aether_net_dial_unix(const char* path, const char** why);
+
 #endif // AETHER_NET_ADDR_H

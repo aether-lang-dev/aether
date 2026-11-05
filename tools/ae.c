@@ -4408,6 +4408,12 @@ static int paths_same(const char* a, const char* b) {
  * had just destroyed. Checked before anything is written, and refused rather
  * than worked around, because the two names the caller gave are in conflict
  * and only the caller knows which one they meant. */
+/* AE_KEEP_C=1: keep the generated C beside the output as <output>.c (#2885). */
+static int keep_generated_c(void) {
+    const char* keep_env = getenv("AE_KEEP_C");
+    return keep_env && strcmp(keep_env, "1") == 0;
+}
+
 static int output_clobbers_input(const char* c_file, const char* exe_file,
                                  const char* ae_file, const char* extras) {
     const char* outs[2] = { c_file, exe_file };
@@ -10345,6 +10351,24 @@ static int cmd_build(int argc, char** argv) {
         snprintf(exe_file, sizeof(exe_file), "%s%s", base, exe_ext);
     }
 
+    /* The generated C is an intermediate, and the name chosen above (beside
+     * the output: `<base>.c` in the current directory, or `<-o>.c`) is the
+     * name a user's own C file is likely to have. `ae build y.ae` beside a
+     * y.c of the user's wrote the generated C over it and then removed it;
+     * `-o x` beside an `@source("x.c")` did the same to the bridge source.
+     * output_clobbers_input only guards the .ae and --extra inputs. So the
+     * intermediate goes to the temp directory, named for this process.
+     * Two builds keep the old place, because there the .c is wanted:
+     * --emit=csrc (the .c is the artifact) and AE_KEEP_C=1 (kept beside the
+     * output for a look, #2885). nominal_c keeps the old name for what is
+     * derived from it (the object file of --emit=obj). */
+    char nominal_c[2048];
+    snprintf(nominal_c, sizeof(nominal_c), "%s", c_file);
+    if (!g_emit_csrc && !keep_generated_c()) {
+        snprintf(c_file, sizeof(c_file), "%s/ae_build_%d_%s.c",
+                 get_temp_dir(), (int)getpid(), base);
+    }
+
     // Override output extension for wasm target
     if (is_wasm) {
         // Replace .exe or binary with .js (emcc produces .js + .wasm pair)
@@ -10742,7 +10766,7 @@ static int cmd_build(int argc, char** argv) {
             /* Derive from the generated C rather than from exe_file: c_file
                already encodes the same project / dev / plain-source layout
                choice, and carries no EXE_EXT to strip. */
-            snprintf(obj_file, sizeof(obj_file), "%s", c_file);
+            snprintf(obj_file, sizeof(obj_file), "%s", nominal_c);
             size_t ol = strlen(obj_file);
             if (ol > 2 && strcmp(obj_file + ol - 2, ".c") == 0) {
                 obj_file[ol - 1] = 'o';
@@ -10760,6 +10784,7 @@ static int cmd_build(int argc, char** argv) {
                 fprintf(stderr, "Failed to compile the generated C to an object.\n");
                 return 1;
             }
+            if (!keep_generated_c()) remove(c_file);
             printf("Built object: %s\n", obj_file);
             printf("       target %s: link it on a matching host, or with the same "
                    "cross target.\n", target);
@@ -10799,6 +10824,10 @@ static int cmd_build(int argc, char** argv) {
             fprintf(stderr, "Failed to compile the generated C to an object.\n");
             return 1;
         }
+        /* The object is the artifact; the C it came from is an intermediate,
+         * removed as the executable build removes it (it used to be left
+         * beside the source as <base>.c). */
+        if (!keep_generated_c()) remove(c_file);
         printf("Built object: %s\n", obj_file);
         printf("Link it with `ae cflags --libs` (or -laether) from your own build.\n");
         return 0;
@@ -10875,8 +10904,7 @@ static int cmd_build(int argc, char** argv) {
      * the C a build compiled: CI's strict C11 check of the whole sweep
      * reads the C the sweep kept, rather than generating it again
      * (tests/compiler/test_msvc_compat.sh, #2885). */
-    const char* keep_c = getenv("AE_KEEP_C");
-    if (!keep_c || strcmp(keep_c, "1") != 0) remove(c_file);
+    if (!keep_generated_c()) remove(c_file);
 
     /* #2297: Windows has no rpath: the DLLs this output loads (binary
      * imports, the shared runtime) go next to it. */

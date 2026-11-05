@@ -1,0 +1,59 @@
+// GET /_ping over a real Docker or Podman Engine API socket, through
+// std.http.client's set_unix_socket, buffered and streamed. The socket path
+// comes from AE_ENGINE_SOCKET, which test_engine_socket_ping.sh sets when it
+// finds an engine; without it there is nothing to talk to, and this skips.
+
+import std.os
+import std.string
+import std.http.client
+
+extern exit(code: int)
+
+main() {
+    sock = os.os_getenv("AE_ENGINE_SOCKET")
+    if sock == null || string.length(sock) == 0 {
+        println("SKIP: no engine socket (AE_ENGINE_SOCKET unset)")
+        return
+    }
+
+    req = client.request("GET", "http://localhost/_ping")
+    client.set_unix_socket(req, sock)
+    client.set_timeout(req, 10s)
+    r, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: GET /_ping over ${sock}: ${err}")
+        exit(1)
+    }
+    status = client.response_status(r)
+    body = client.response_body(r)
+    api = client.response_header(r, "Api-Version")
+    client.response_free(r)
+    if status != 200 || body != "OK" {
+        println("FAIL: GET /_ping answered ${status} '${body}'")
+        exit(1)
+    }
+
+    sreq = client.request("GET", "http://localhost/_ping")
+    client.set_unix_socket(sreq, sock)
+    client.set_timeout(sreq, 10s)
+    sr, serr = client.send_stream(sreq)
+    client.request_free(sreq)
+    if serr != "" {
+        println("FAIL: streamed GET /_ping: ${serr}")
+        exit(1)
+    }
+    got = ""
+    going = 1
+    while going == 1 {
+        ch = client.response_read(sr, 4096)
+        if string.length(ch) == 0 { going = 0 } else { got = string.concat(got, ch) }
+    }
+    rerr = client.response_error(sr)
+    client.response_free(sr)
+    if rerr != "" || got != "OK" {
+        println("FAIL: streamed GET /_ping read '${got}' (${rerr})")
+        exit(1)
+    }
+    println("PASS: engine /_ping is OK over the Unix socket (Api-Version ${api})")
+}
