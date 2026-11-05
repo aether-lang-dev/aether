@@ -1,0 +1,68 @@
+name: apt-get install from a package cache
+description: >
+  apt-get update, then apt-get install of the given packages, with the .deb
+  files kept in an actions/cache entry (#3602). The runner's Ubuntu mirror
+  served some legs' 12 MB at 39 kB/s: 5 to 7 minutes on Linux / Clang and
+  under UBSan in 3 of 7 runs each, 0.3 minutes in the rest. A hit installs
+  from the cached files. `apt-get update` still runs, so what gets installed
+  is the index's current version: a cached file apt does not find in the
+  index, or whose hash does not match it, is fetched as before, so a stale
+  or tampered entry costs a download and changes nothing installed.
+inputs:
+  packages:
+    description: The packages, as apt-get install takes them.
+    required: true
+  scope:
+    description: >
+      A name for the job or leg, part of the key: two jobs that install the
+      same packages at once would both save one key, and the second save
+      fails.
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Name the package cache
+      id: name
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+        SCOPE: ${{ inputs.scope }}
+      run: |
+        # The leg, the packages and the runner image: a new image
+        # (ImageVersion) starts from the last entry for the same leg and
+        # packages, and keeps what still matches.
+        set=$(printf '%s\n%s' "$SCOPE" "$(printf '%s' "$PACKAGES" | tr -s ' ' '\n' | sort | tr '\n' ' ')" |
+              sha256sum | cut -c1-16)
+        echo "prefix=apt-${ImageOS:-unknown}-$set-" >> "$GITHUB_OUTPUT"
+        echo "key=apt-${ImageOS:-unknown}-$set-${ImageVersion:-0}" >> "$GITHUB_OUTPUT"
+    - name: Restore the package cache
+      id: restore
+      uses: actions/cache/restore@v5
+      with:
+        path: ~/.cache/aether-apt
+        key: ${{ steps.name.outputs.key }}
+        restore-keys: ${{ steps.name.outputs.prefix }}
+    - name: apt-get install
+      shell: bash
+      env:
+        PACKAGES: ${{ inputs.packages }}
+      run: |
+        # Nothing here installs from the runner's Google Chrome source, whose
+        # index is at times inconsistent and fails every apt-get update
+        # (see ci.yml).
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list
+        if ls "$HOME"/.cache/aether-apt/*.deb > /dev/null 2>&1; then
+          sudo cp "$HOME"/.cache/aether-apt/*.deb /var/cache/apt/archives/
+          echo "$(ls "$HOME"/.cache/aether-apt/*.deb | wc -l) cached packages offered to apt"
+        fi
+        sudo apt-get update
+        # shellcheck disable=SC2086
+        sudo apt-get install -y $PACKAGES
+        mkdir -p "$HOME/.cache/aether-apt"
+        cp /var/cache/apt/archives/*.deb "$HOME/.cache/aether-apt/" 2> /dev/null || true
+    - name: Save the package cache (on a miss)
+      if: steps.restore.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v5
+      with:
+        path: ~/.cache/aether-apt
+        key: ${{ steps.name.outputs.key }}

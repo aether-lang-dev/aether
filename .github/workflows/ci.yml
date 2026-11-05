@@ -82,13 +82,15 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "0"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "gcc make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           - name: Linux / Clang
             os: ubuntu-22.04
             cc: clang
             harden: "0"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "clang make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           # Hardened gcc build (issue #396). Same OS + compiler as
           # Linux / GCC but with HARDEN=1 set in the environment, which
@@ -102,7 +104,8 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "1"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "gcc make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           - name: macOS / Clang (ARM64)
             os: macos-latest
@@ -137,6 +140,15 @@ jobs:
 
     steps:
     - uses: actions/checkout@v5
+
+    # The Linux legs' packages, from a cache of their .deb files (#3602):
+    # the mirror served one leg in three at 39 kB/s, five minutes or more.
+    - name: Install packages
+      if: matrix.apt != ''
+      uses: ./.github/actions/apt-install
+      with:
+        packages: ${{ matrix.apt }}
+        scope: ci ${{ matrix.name }}
 
     - name: Install toolchain
       if: matrix.install != ''

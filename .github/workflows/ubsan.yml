@@ -34,6 +34,7 @@ on:
       - 'tests/scripts/run_ae_sh_dir.sh'
       - 'tests/lib/sweep_timeout.sh'
       - '.github/workflows/ubsan.yml'
+      - '.github/actions/apt-install/**'
   schedule:
     - cron: '23 6 * * *'
   workflow_dispatch:
@@ -58,8 +59,16 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    # From a cache of the packages' .deb files (#3602): the mirror served
+    # this job at 39 kB/s in one run in three, six minutes or more.
+    - name: Install packages
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make bc pkg-config libgtk-4-dev
+        scope: ubsan
+
     - name: Install toolchain
-      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+      run: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
     - name: make test-ubsan
       run: make test-ubsan NPROC="$(nproc)"
