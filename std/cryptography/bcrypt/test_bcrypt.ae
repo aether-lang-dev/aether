@@ -1,0 +1,198 @@
+// std.cryptography.bcrypt: the contract of each function and its edges. The
+// algorithm itself is held to two independent bcrypt implementations by
+// tests/integration/crypto_bcrypt; this file pins the API: hash() and
+// gen_salt(), raw()/hex() and their Bouncy Castle vectors, what hash_pw and
+// check_pw accept and refuse, the 72-byte rule, bcrypt's base64, and the
+// version rules ($2x$ refused, $2a$ = $2b$, $2$ without the NUL).
+
+import std.cryptography.bcrypt
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+fn ck(cond: bool, msg: string) -> int {
+    if cond {
+        println("ok   ${msg}")
+        return 0
+    }
+    println("FAIL ${msg}")
+    return 1
+}
+
+hv(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return 0
+}
+
+// A buffer of the bytes a hex string spells.
+hb(h: string) -> ptr {
+    n = string.length(h)
+    b = bytes.new(n / 2 + 1)
+    bytes.set_length(b, n / 2)
+    i = 0
+    while i < n {
+        bytes.set(b, i / 2, hv(string_char_at(h, i)) * 16 + hv(string_char_at(h, i + 1)))
+        i = i + 2
+    }
+    return b
+}
+
+// s with the character at i replaced by c.
+with_char(s: string, i: int, c: string) -> string {
+    return "${string.substring(s, 0, i)}${c}${string.substring(s, i + 1, string.length(s))}"
+}
+
+main() {
+    fails = 0
+
+    // ---- raw / hex: Bouncy Castle BCryptTest's raw vectors ----
+    e0 = bytes.new(1)
+    s1 = hb("144b3d691a7b4ecf39cf735c7fa7a79c")
+    fails = fails + ck(bcrypt.hex(bytes.view(e0)[0..0], bytes.view(s1)[0..16], 6) == "557e94f34bf286e8719a26be94ac1e16d95ef9f819dee092", "raw: empty password, cost 6")
+    s2 = hb("a3612d8c9a37dac2f99d94da03bd4521")
+    pwa0 = hb("6100")
+    fails = fails + ck(bcrypt.hex(bytes.view(pwa0)[0..2], bytes.view(s2)[0..16], 6) == "e6d53831f82060dc08a2e8489ce850ce48fbf976978738f3", "raw: 'a' NUL, cost 6")
+    s3 = hb("2a1f1dc70a3d147956a46febe3016017")
+    pwabc0 = hb("61626300")
+    fails = fails + ck(bcrypt.hex(bytes.view(pwabc0)[0..4], bytes.view(s3)[0..16], 6) == "d9a275b493bcbe1024b0ff80d330253cfdca34687d8f69e5", "raw: 'abc' NUL, cost 6")
+    // add_terminator appends the NUL itself: 'a' with it is 'a' NUL.
+    pwa = hb("61")
+    rt = bcrypt.raw(bytes.view(pwa)[0..1], bytes.view(s2)[0..16], 6, 1)
+    rn = bcrypt.raw(bytes.view(pwa0)[0..2], bytes.view(s2)[0..16], 6, 0)
+    same = 1
+    k = 0
+    while k < 24 {
+        if bytes.get(rt, k) != bytes.get(rn, k) { same = 0 }
+        k = k + 1
+    }
+    fails = fails + ck(same == 1 && bytes.length(rt) == 24, "raw: add_terminator is the NUL, and the output is 24 bytes")
+    bytes.free(rt)
+    bytes.free(rn)
+    // raw refuses what bcrypt cannot take.
+    s15 = bytes.new(16)
+    bytes.set_length(s15, 15)
+    long73 = bytes.new(73)
+    bytes.set_length(long73, 73)
+    fails = fails + ck(bcrypt.raw(bytes.view(pwa)[0..1], bytes.view(s15)[0..15], 6, 0) == null, "raw: a 15-byte salt is refused")
+    fails = fails + ck(bcrypt.raw(bytes.view(pwa)[0..1], bytes.view(s2)[0..16], 3, 0) == null, "raw: cost 3 is refused")
+    fails = fails + ck(bcrypt.raw(bytes.view(pwa)[0..1], bytes.view(s2)[0..16], 32, 0) == null, "raw: cost 32 is refused")
+    fails = fails + ck(bcrypt.raw(bytes.view(long73)[0..73], bytes.view(s2)[0..16], 4, 0) == null, "raw: a 73-byte key is refused (hash_pw cuts to 72 first)")
+    fails = fails + ck(bcrypt.hex(bytes.view(pwa)[0..1], bytes.view(s15)[0..15], 6) == "", "hex: \"\" where raw refuses")
+
+    // ---- hash(): a fresh salt every time, in the OpenBSD format ----
+    h1 = bcrypt.hash("correct horse battery staple", 4)
+    h2 = bcrypt.hash("correct horse battery staple", 4)
+    fails = fails + ck(string.length(h1) == 60 && string.starts_with(h1, "$2b$04$"), "hash: 60 characters, $2b$ and the cost, zero-padded")
+    fails = fails + ck(h1 != h2, "hash: two hashes of one password differ (fresh salt)")
+    fails = fails + ck(bcrypt.check_pw("correct horse battery staple", h1) == 1 && bcrypt.check_pw("correct horse battery staple", h2) == 1, "hash: both verify")
+    fails = fails + ck(bcrypt.check_pw("correct horse battery stapl", h1) == 0, "hash: a one-character-shorter password does not verify")
+    fails = fails + ck(bcrypt.check_pw("correct horse battery staplf", h1) == 0, "hash: a one-bit change does not verify")
+    fails = fails + ck(bcrypt.check_pw("", h1) == 0, "hash: the empty password does not verify")
+    he = bcrypt.hash("", 4)
+    fails = fails + ck(bcrypt.check_pw("", he) == 1 && bcrypt.check_pw("a", he) == 0, "hash: the empty password hashes and verifies")
+    fails = fails + ck(bcrypt.hash("x", 3) == "" && bcrypt.hash("x", 32) == "", "hash: costs outside 4..31 give \"\"")
+    fails = fails + ck(bcrypt.DEFAULT_COST == 12, "hash: DEFAULT_COST is 12")
+    h10 = bcrypt.hash("cost ten", 10)
+    fails = fails + ck(string.starts_with(h10, "$2b$10$") && bcrypt.check_pw("cost ten", h10) == 1, "hash: a two-digit cost")
+
+    // ---- gen_salt ----
+    ga, gerr = bcrypt.gen_salt()
+    gb, gerr2 = bcrypt.gen_salt()
+    differ = 0
+    k = 0
+    while k < 16 {
+        if bytes.get(ga, k) != bytes.get(gb, k) { differ = 1 }
+        k = k + 1
+    }
+    fails = fails + ck(gerr == "" && gerr2 == "" && bytes.length(ga) == 16 && bytes.length(gb) == 16, "gen_salt: 16 bytes, no error")
+    fails = fails + ck(differ == 1, "gen_salt: two salts differ")
+    bytes.free(ga)
+    bytes.free(gb)
+
+    // ---- the 72-byte rule ----
+    p72 = "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+    p71 = string.substring(p72, 0, 71)
+    hl = bcrypt.hash("${p72} and then some more that is never read", 4)
+    fails = fails + ck(bcrypt.check_pw(p72, hl) == 1, "72 bytes: what follows the 72nd byte is ignored")
+    fails = fails + ck(bcrypt.check_pw(p71, hl) == 0, "72 bytes: the 72nd byte counts")
+    h71 = bcrypt.hash(p71, 4)
+    fails = fails + ck(bcrypt.check_pw(p72, h71) == 0 && bcrypt.check_pw(p71, h71) == 1, "72 bytes: 71 and 72 bytes are different keys")
+
+    // ---- a password is its bytes ----
+    nul = hb("610062") // "a", NUL, "b"
+    ha = bcrypt.hash("a", 4)
+    fails = fails + ck(bcrypt.check_pw_bytes(bytes.view(nul)[0..3], ha) == 0, "bytes: an embedded NUL is part of the password (C crypt stops there)")
+    hnul = bcrypt.hash_bytes(bytes.view(nul)[0..3], 4)
+    fails = fails + ck(bcrypt.check_pw_bytes(bytes.view(nul)[0..3], hnul) == 1, "bytes: hash_bytes and check_pw_bytes agree")
+    hu = bcrypt.hash("pässwörd 密码", 4)
+    fails = fails + ck(bcrypt.check_pw("pässwörd 密码", hu) == 1 && bcrypt.check_pw("passwörd 密码", hu) == 0, "bytes: UTF-8 passwords")
+
+    // ---- versions ----
+    sz = bytes.new(16)
+    bytes.set_length(sz, 16)
+    h2a = bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2a")
+    h2b = bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2b")
+    h2y = bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2y")
+    h2 = bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2")
+    fails = fails + ck(string.substring(h2a, 4, 60) == string.substring(h2b, 4, 60) && string.substring(h2b, 4, 60) == string.substring(h2y, 4, 60), "versions: $2a$, $2b$ and $2y$ are one algorithm")
+    fails = fails + ck(string.length(h2) == 59 && string.starts_with(h2, "$2$04$"), "versions: $2$ is 59 characters")
+    fails = fails + ck(string.substring(h2, 3, 59) != string.substring(h2b, 4, 60), "versions: $2$ differs from $2b$ (no NUL)")
+    fails = fails + ck(bcrypt.check_pw("version", h2) == 1 && bcrypt.check_pw("version", h2y) == 1 && bcrypt.check_pw("version", h2a) == 1, "versions: each verifies")
+    fails = fails + ck(bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2x") == "", "versions: hash_pw refuses $2x$")
+    fails = fails + ck(bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "3a") == "" && bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "") == "", "versions: hash_pw refuses an unknown version")
+    fails = fails + ck(bcrypt.check_pw("version", "$2x$${string.substring(h2b, 4, 60)}") == 0, "versions: check_pw refuses $2x$")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 2, "B")) == 0, "versions: check_pw refuses $2B$ (case)")
+    fails = fails + ck(bcrypt.hash_pw("version", bytes.view(sz)[0..16], 4, "2b") == h2b, "hash_pw: the same password, salt and cost give the same hash")
+
+    // ---- check_pw refuses what is not a bcrypt hash ----
+    fails = fails + ck(bcrypt.check_pw("version", "") == 0, "check_pw: \"\"")
+    fails = fails + ck(bcrypt.check_pw("version", string.substring(h2b, 0, 59)) == 0, "check_pw: 59 characters of a $2b$ hash")
+    fails = fails + ck(bcrypt.check_pw("version", "${h2b}.") == 0, "check_pw: 61 characters")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 0, "x")) == 0, "check_pw: not starting with $")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 1, "3")) == 0, "check_pw: major version 3")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 6, "x")) == 0, "check_pw: no $ after the cost")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 5, "a")) == 0, "check_pw: a cost that is not two digits")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(with_char(h2b, 4, "0"), 5, "3")) == 0, "check_pw: cost 03")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(with_char(h2b, 4, "3"), 5, "2")) == 0, "check_pw: cost 32")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 10, "*")) == 0, "check_pw: a character outside bcrypt's base64 in the salt")
+    // The salt's 22nd character carries 2 bits; one with the others set is not
+    // a canonical salt, and is not the hash of anything.
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 28, "/")) == 0, "check_pw: a non-canonical salt")
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 59, "a")) == 0, "check_pw: the last character of the key changed")
+    mid = "Q"
+    if string_char_at(h2b, 40) == 81 { mid = "R" }
+    fails = fails + ck(bcrypt.check_pw("version", with_char(h2b, 40, mid)) == 0, "check_pw: a middle character of the key changed")
+
+    // ---- bcrypt's base64 ----
+    salt_s = "Ro0CUfOqk6cXEKf3dyaM7O"
+    sd = bcrypt.base64_decode_salt(salt_s)
+    fails = fails + ck(sd != null && bytes.length(sd) == 16, "base64: a 22-character salt decodes to 16 bytes")
+    fails = fails + ck(bcrypt.base64_encode_salt(bytes.view(sd)[0..16]) == salt_s, "base64: encode(decode(salt)) is the salt")
+    fails = fails + ck(bcrypt.base64_decode_salt("Ro0CUfOqk6cXEKf3dyaM7") == null && bcrypt.base64_decode_salt("Ro0CUfOqk6cXEKf3dyaM7OO") == null, "base64: 21 and 23 characters are refused")
+    fails = fails + ck(bcrypt.base64_decode_salt("Ro0CUfOqk6cXEKf3dyaM7=") == null, "base64: '=' is not bcrypt base64")
+    fails = fails + ck(bcrypt.base64_encode_salt(bytes.view(s15)[0..15]) == "", "base64: a 15-byte salt does not encode")
+    fails = fails + ck(bcrypt.base64_encode_key(null) == "", "base64: a null key does not encode")
+    bytes.free(sd)
+
+    bytes.free(e0)
+    bytes.free(s1)
+    bytes.free(s2)
+    bytes.free(s3)
+    bytes.free(pwa0)
+    bytes.free(pwabc0)
+    bytes.free(pwa)
+    bytes.free(s15)
+    bytes.free(long73)
+    bytes.free(nul)
+    bytes.free(sz)
+
+    if fails == 0 {
+        println("ALL BCRYPT UNIT TESTS PASSED")
+        return
+    }
+    println("${fails} FAILURES")
+    exit(1)
+}
