@@ -5,11 +5,18 @@
 // hosted code returns, the token is revoked — the map is inaccessible from
 // the hosted language side.
 
+#if defined(_WIN32) && !defined(_CRT_RAND_S)
+#define _CRT_RAND_S   /* rand_s, for the token (generate_token) */
+#endif
 #include "aether_shared_map.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <errno.h>
+#if defined(__linux__)
+#include <sys/random.h>   /* getrandom, for the token */
+#endif
 #if defined(__linux__) || defined(__APPLE__)
 #include <unistd.h>
 #include <sys/mman.h>
@@ -42,17 +49,60 @@ struct AetherSharedMap {
 static AetherSharedMap* active_maps[MAX_ACTIVE_MAPS];
 static int active_map_count = 0;
 
-// Simple random token
+// A map's token is the guard on it: a hosted language reaches the map only
+// through its token, and revoking the token is what shuts it out. So two live
+// maps must never share one, and one map's token must not be guessable from
+// another's. The token used to come from the monotonic clock mixed with a
+// stack address: two maps made within one clock tick (a microsecond on macOS)
+// from the same call depth got the same token, find_by_token returned the
+// first, and revoking the second revoked the first. Now: 64 bits from the OS
+// random source, drawn again while any registered map (live or revoked) holds
+// them. The fallback, if the OS source fails, is a process counter mixed with
+// the clock, still unique by the registry check.
+static int os_random64(uint64_t* out) {
+#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
+    arc4random_buf(out, sizeof *out);
+    return 1;
+#elif defined(__linux__)
+    size_t got = 0;
+    unsigned char* b = (unsigned char*)out;
+    while (got < sizeof *out) {
+        ssize_t r = getrandom(b + got, sizeof *out - got, 0);
+        if (r < 0) { if (errno == EINTR) continue; return 0; }
+        got += (size_t)r;
+    }
+    return 1;
+#elif defined(_WIN32)
+    unsigned int hi = 0, lo = 0;
+    if (rand_s(&hi) != 0 || rand_s(&lo) != 0) return 0;
+    *out = ((uint64_t)hi << 32) | lo;
+    return 1;
+#else
+    (void)out;
+    return 0;
+#endif
+}
+
+static int token_registered(uint64_t token) {
+    for (int i = 0; i < active_map_count; i++) {
+        if (active_maps[i] && active_maps[i]->token == token) return 1;
+    }
+    return 0;
+}
+
 static uint64_t generate_token(void) {
-    uint64_t t = 0;
-    struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    t = (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 32);
-    t ^= (uint64_t)(uintptr_t)&t;  // mix in stack address for entropy
-    t ^= t >> 17;
-    t *= 0xbf58476d1ce4e5b9ULL;
-    t ^= t >> 31;
-    return t | 1;  // never zero
+    static uint64_t fallback_counter = 0;
+    uint64_t t;
+    do {
+        if (!os_random64(&t)) {
+            struct timespec ts;
+            clock_gettime(CLOCK_MONOTONIC, &ts);
+            t = ++fallback_counter * 0x9e3779b97f4a7c15ULL;
+            t ^= (uint64_t)ts.tv_nsec ^ ((uint64_t)ts.tv_sec << 32);
+            t ^= t >> 31;
+        }
+    } while (t == 0 || token_registered(t));
+    return t;
 }
 
 static AetherSharedMap* find_by_token(uint64_t token) {
