@@ -20,17 +20,14 @@
 # POLICY: fail-on-missing-deps. A dedicated build box should test EVERYTHING, so
 # a missing contrib dependency is a provisioning bug that turns the nightly RED
 # (deliberately the opposite of contrib_build.sh's probe-and-skip). Provisioning:
-#   - pacman -S --needed sqlite expat python ruby perl lua tcl duktape go nodejs
-#       jdk-openjdk tinygo racket
-#     (racket ships the CS embedding headers/lib/boot images — no source build)
-#   - build the aether-lang-dev/factor-language fork: `./build.sh net-bootstrap`
-#     (NOT `update`/`self-update` — those git-pull and fail on a shallow clone).
-#     NB the fork's `libfactor.a` is actually an ELF shared object; symlink
-#     `libfactor.so -> libfactor.a` for AETHER_FACTOR_SONAME.
+#   - pacman -S --needed sqlite expat ffmpeg python ruby nodejs jdk-openjdk
+#     (ruby and the JDK for the generated-SDK tests, namespace_ruby and
+#     namespace_java / embedded_java_trading_e2e, not for a bridge)
+# The language bridges (and the lua, tcl, perl, duktape, go, tinygo, racket
+# and Factor-fork provisioning they needed) moved to aether-guest-languages.
 #
 # Toolchain + dep env (set in the timer/cron environment; see AETHER_* below):
-#   AETHER_REPO, AETHER_RACKET_INCLUDE/_LIB/_BOOT_DIR,
-#   AETHER_FACTOR_SONAME, AETHER_FACTOR_IMAGE
+#   AETHER_REPO
 # The script pins PATH/AE/AETHERC/AETHER_HOME to the tree it builds, so a
 # version-managed `ae` on PATH (e.g. /usr/local/bin) is never used.
 
@@ -95,11 +92,11 @@ echo "HEAD: $HEAD_LINE" >> "$LOG"
 
 # --- Dependency gate: this is a dedicated build box, so a MISSING contrib
 # --- dependency is a provisioning FAILURE, not a skip. (Deliberately the
-# --- opposite of contrib_build.sh / contrib_host_demos.sh, which probe-and-
+# --- opposite of contrib_build.sh, which probe-and-
 # --- skip because portable CI runners can't have every language.) Any gap
 # --- here turns the nightly RED and names what to install/build.
 # A dep is satisfied if EITHER a command is on PATH OR a matching library/
-# header exists (many bridges link a .so and never ship a CLI, e.g. duktape,
+# header exists (many modules link a .so and never ship a CLI, e.g.
 # sqlite, expat). Args after the kind are candidates; any one present = OK.
 have_dep() {
     kind="$1"; shift
@@ -134,17 +131,10 @@ require_deps() {
         "expat|lib|libexpat.so"                          \
         "python|cmd|python3"                             \
         "ruby|cmd|ruby"                                  \
-        "perl|cmd|perl"                                  \
-        "lua|cmd|lua|lua5.4|lua5.3"                      \
-        "tcl|cmd|tclsh"                                  \
-        "duktape|lib|libduktape.so"                      \
         "ffmpeg|lib|libavcodec.so"                       \
         "ffmpeg-swr|lib|libswresample.so"                \
-        "go|cmd|go"                                      \
         "nodejs|cmd|node"                                \
         "java|cmd|java"                                  \
-        "tinygo|cmd|tinygo"                              \
-        "racket|cmd|racket"                              \
         "de_DE.UTF-8 locale|locale|de_DE.utf8|de_DE.UTF-8"
     pkg_specs="$*"
     for spec in $pkg_specs; do
@@ -159,21 +149,6 @@ require_deps() {
             echo "  dep OK:   $pkg"
         else
             echo "  dep MISS: $pkg — none of [$cands] found ($kind)"
-            missing=$((missing+1))
-        fi
-    done
-    # Fork/source-built bridges: gated on their runtime env var being set.
-    # "<label>:<ENVVAR>" — label first, envvar last (labels may have spaces).
-    set --                                                        \
-        "factor (aether-lang fork libfactor+image):AETHER_FACTOR_SONAME" \
-        "racket-CS embedding tree:AETHER_RACKET_INCLUDE"
-    for spec in "$@"; do
-        label="${spec%:*}"; var="${spec##*:}"
-        val="$(eval "printf '%s' \"\${$var:-}\"")"
-        if [ -n "$val" ]; then
-            echo "  dep OK:   $label ($var set)"
-        else
-            echo "  dep MISS: $label — $var unset (build required, see TODO)"
             missing=$((missing+1))
         fi
     done
@@ -219,7 +194,7 @@ contrib_ae_check() {
     # published table stays topline. publish_results() renders these to markdown.
     : > "$RESULTS_TSV"
     for mod in $(find contrib -name module.ae | sort); do
-        name="$(dirname "${mod#contrib/}")"   # e.g. tinyweb, host/tcl
+        name="$(dirname "${mod#contrib/}")"   # e.g. tinyweb, host/stunt
         t0="$(now_ms)"
         if out="$("$ae" check "$mod" 2>&1)"; then
             status="PASS"; echo "  ae-check OK: $mod"
@@ -280,36 +255,17 @@ dep_version() {
 capture_dep_versions() {
     : > "$DEPS_TSV"
     {
-        # `racket --version` greets rather than reports ("Welcome to Racket
-        # v9.2 [cs]."); (version) prints the bare number.
-        dep_version "racket"   racket -e '(display (version))'
-        dep_version "tclsh"    sh -c 'echo "puts [info patchlevel]" | tclsh'
-        dep_version "go"       go version
-        dep_version "tinygo"   tinygo version
         dep_version "python"   python3 --version
         dep_version "ruby"     ruby --version
-        dep_version "perl"     sh -c 'perl -e "print \$^V"'
-        dep_version "lua"      sh -c 'lua -v 2>&1'
         dep_version "node"     node --version
         dep_version "java"     sh -c 'java -version 2>&1'
-        # Libraries have no --version; take the package manager's record. Also
-        # covers the two the bridges dlopen rather than link (duktape, expat).
+        # Libraries have no --version; take the package manager's record.
         if command -v pacman >/dev/null 2>&1; then
-            for pkg in sqlite expat duktape ffmpeg racket tcl; do
+            for pkg in sqlite expat ffmpeg; do
                 v="$(pacman -Q "$pkg" 2>/dev/null | awk '{print $2}')"
                 [ -n "$v" ] || v="(absent)"
                 printf 'pkg:%s\t%s\n' "$pkg" "$v"
             done
-        fi
-        # The Factor fork is built from source, so its identity is a commit,
-        # not a version. AETHER_FACTOR_SONAME points into that tree.
-        if [ -n "${AETHER_FACTOR_SONAME:-}" ] && [ -e "${AETHER_FACTOR_SONAME}" ]; then
-            fdir="$(dirname "$AETHER_FACTOR_SONAME")"
-            fv="$(git -C "$fdir" log --oneline -1 2>/dev/null)"
-            [ -n "$fv" ] || fv="(present, not a git tree)"
-            printf 'factor-fork\t%s\n' "$fv"
-        else
-            printf 'factor-fork\t%s\n' "(absent)"
         fi
     } >> "$DEPS_TSV" 2>/dev/null
     # Echo into the log so the versions are visible in the run output too, not
@@ -483,13 +439,14 @@ make_host_check_step() { make contrib-host-check CONTRIB_HOST_STRICT=1; }
 #
 # CONTRIB_HOST_STRICT catches a bridge whose ARCHIVE is missing, but not the
 # layer below it: a spec whose archive built fine and which then skips every
-# case at RUNTIME because a runtime dependency is unset. contrib/host/factor is
-# the live example — with AETHER_FACTOR_SONAME unset it reports
+# case at RUNTIME because a runtime dependency is unset. The Factor bridge
+# was the live example (it moved to aether-guest-languages) — with
+# AETHER_FACTOR_SONAME unset it reported
 #
 #     0 passing
 #     6 skipped
 #
-# and exits 0, so the step passes while testing nothing. std.spec puts the
+# and exited 0, so the step passes while testing nothing. std.spec puts the
 # principle plainly (std/spec/module.ae): "A skip that reports as a pass is
 # worse than no skip at all." On a portable runner a skip is honest; on a box
 # provisioned for the purpose it is a provisioning failure.
@@ -506,15 +463,13 @@ host_specs_no_skips() {
     for t in $(find "$REPO/contrib/host" -maxdepth 2 -name 'test_*.ae' | sort); do
         lang="$(basename "$(dirname "$t")")"
         rm -f "$rpt"
-        # Mirror the per-language SONAME discovery `make contrib-host-check`
-        # does before running each spec (Makefile, phase [3/3]). Without it the
-        # bridges cannot dlopen their runtime and every case skips — which
-        # would make this gate fire on a correctly provisioned box.
+        # Mirror what `make contrib-host-check` sets before running each spec
+        # (Makefile, phase [2/2]): stunt's bridge dlopens the libstunt built
+        # beside it. Without it every case skips — which would make this gate
+        # fire on a correctly provisioned box.
         case "$lang" in
-            ruby)   AETHER_RUBY_SONAME="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"
-                    export AETHER_RUBY_SONAME ;;
-            perl)   AETHER_PERL_SONAME="$(perl -MConfig -e 'print "$Config{archlibexp}/CORE/$Config{libperl}"' 2>/dev/null)"
-                    export AETHER_PERL_SONAME ;;
+            stunt)  AETHER_STUNT_LIB="$REPO/build/stunt/libstunt.so"
+                    export AETHER_STUNT_LIB ;;
         esac
         AE_SPEC_FORMAT=aeocha AE_SPEC_REPORT="$rpt" \
             "$REPO/build/ae" run "$t" >/dev/null 2>&1

@@ -622,11 +622,10 @@ jobs:
           sh tests/freebsd/run.sh
 
   # ============================================================
-  # contrib/host bridge check — syntax check of every host bridge
-  # in stub mode (always-on), plus end-to-end build+link+run of
-  # host demos for every language whose dev library is installed
-  # on the runner. Linux-only since apt installs most dev libs
-  # in one shot; other platforms can be added if needed.
+  # contrib/host bridge check — syntax check of the host bridges left
+  # here (stunt, the test double, and aether) and their co-located
+  # specs. The language bridges and their dev libraries moved to
+  # aether-guest-languages, whose own CI installs them.
   # ============================================================
   ci-contrib-host:
     name: contrib/host bridges (Linux)
@@ -635,37 +634,16 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
-    - name: Install host language dev libraries
+    - name: Install build tools
       run: |
         sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y \
-          gcc make bc pkg-config \
-          ruby-dev \
-          libperl-dev \
-          duktape-dev \
-          tcl-dev \
-          golang-go
+        sudo apt-get install -y gcc make bc pkg-config
 
     - name: Build compiler + stdlib
       run: make compiler ae stdlib
 
     - name: Run contrib/host check
       run: make contrib-host-check
-
-    # contrib.host.tinygo's two tests need the bridge archive, which no other
-    # leg builds, so everywhere else they skip. Here it is built, and each
-    # test has to print its PASS line: test_host_tinygo.sh against a real cgo
-    # library (golang-go is installed above), test_host_tinygo_owned.sh
-    # against a C stand-in that checks the owned string wrappers free what
-    # they take over (#2569).
-    - name: contrib.host.tinygo end to end
-      run: |
-        MODULES=tinygo bash tests/scripts/contrib_build.sh
-        for t in test_host_tinygo test_host_tinygo_owned; do
-          out="$(sh tests/integration/host_tinygo/$t.sh)" || { echo "$out"; exit 1; }
-          echo "$out"
-          echo "$out" | grep -q '\[PASS\]' || { echo "$t did not run"; exit 1; }
-        done
 
     - name: Type-check every non-host contrib module
       run: make check-contrib-modules

@@ -3,15 +3,18 @@
 # onto the gcc link line; a pure-Aether program does NOT.
 #
 # This is the import-driven linking from ctr_notes.md Bug 4: without it,
-# `import contrib.host.tcl` resolved the headers (so the program
-# compiled) but never linked the bridge .a, so the binary failed at
-# runtime with `undefined symbol: tcl_run` — the bridge's OWN
-# function, not a CPython symbol.
+# `import contrib.host.<lang>` resolved the module (so the program
+# compiled) but never linked the bridge .a, so the binary failed with
+# an undefined bridge symbol (`tcl_run`, back when the Tcl bridge was
+# here) — the bridge's OWN function, not the hosted language's.
+#
+# The fixture is contrib.host.stunt, the test double: its bridge needs no
+# library to build, so the positive case runs on every machine. (The
+# language bridges moved to aether-guest-languages.)
 #
 # We verify by capturing `ae build -v` output and grepping for the .a
 # (positive) or its absence (negative). We do NOT attempt to RUN the
-# produced positive binary — that needs libtcl at runtime, which
-# the CI box may not have. The link-line check is portable and
+# produced positive binary; the link-line check is portable and
 # sufficient to prove the wiring.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
@@ -22,38 +25,39 @@ fail=0
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-# --- Setup: ensure contrib bridges are built so the positive case has
-# a .a to find. Skip the test gracefully when host_tcl wasn't built
-# (e.g. because tcl-dev is unavailable on this host).
-TCL_A="$ROOT/build/contrib/libaether_host_tcl.a"
-INST_TCL_A="$ROOT/lib/aether/libaether_host_tcl.a"
-if [ ! -f "$TCL_A" ] && [ ! -f "$INST_TCL_A" ]; then
+# --- Setup: ensure the stunt bridge is built so the positive case has
+# a .a to find.
+STUNT_A="$ROOT/build/contrib/libaether_host_stunt.a"
+INST_STUNT_A="$ROOT/lib/aether/libaether_host_stunt.a"
+if [ ! -f "$STUNT_A" ] && [ ! -f "$INST_STUNT_A" ]; then
     # Try to build it once.
     # Only the bridge this test links (#2757): every contrib module took
     # 70 to 80 s of the Windows sweep, for one archive.
-    (cd "$ROOT" && MODULES=tcl bash tests/scripts/contrib_build.sh) >/dev/null 2>&1 || true
+    (cd "$ROOT" && MODULES=stunt bash tests/scripts/contrib_build.sh) >/dev/null 2>&1 || true
 fi
-if [ ! -f "$TCL_A" ] && [ ! -f "$INST_TCL_A" ]; then
-    echo "  [SKIP] host_bridge_import_link: libaether_host_tcl.a not built (tcl-dev not installed?)"
-    exit 0
+if [ ! -f "$STUNT_A" ] && [ ! -f "$INST_STUNT_A" ]; then
+    # stunt's bridge needs only libc and the in-tree runtime: not building
+    # it is a failure, not a missing dependency.
+    echo "  [FAIL] host_bridge_import_link: libaether_host_stunt.a did not build"
+    exit 1
 fi
 
-# --- Test A (positive): import contrib.host.tcl → .a in link line.
+# --- Test A (positive): import contrib.host.stunt → .a in link line.
 # We don't need the source to compile/link successfully — the link line
 # is logged before the linker actually runs, so even a failing link
 # proves what flags reached gcc. To avoid spurious "build failed" noise
 # we redirect everything; we read the verbose log for the .a path.
 cat > "$tmpdir/a.ae" <<'EOF'
-import contrib.host.tcl
+import contrib.host.stunt
 
 main() {
-    tcl.run_sandboxed(0, "puts unreached")
+    stunt.run("open-etc-passwd succeed")
 }
 EOF
 "$AE" build "$tmpdir/a.ae" -o "$tmpdir/a_out" -v >"$tmpdir/a.log" 2>&1 || true
 
-if grep -q 'libaether_host_tcl\.a' "$tmpdir/a.log"; then
-    echo "  [PASS] host_bridge_import_link A: contrib.host.tcl import queues libaether_host_tcl.a"
+if grep -q 'libaether_host_stunt\.a' "$tmpdir/a.log"; then
+    echo "  [PASS] host_bridge_import_link A: contrib.host.stunt import queues libaether_host_stunt.a"
 else
     echo "  [FAIL] host_bridge_import_link A: bridge .a missing from link line despite the import"
     grep -E 'host bridge|libaether_host|\[cmd\]' "$tmpdir/a.log" | sed 's/^/    /' | head -5
@@ -63,7 +67,7 @@ fi
 # --- Test B (negative): pure-Aether program → NO bridge .a on link
 # line, AND the build must succeed + run. This guards the critical
 # "do not blanket-link" constraint: a hello-world must not pick up
-# libtcl runtime deps it doesn't need.
+# a bridge it doesn't call.
 cat > "$tmpdir/b.ae" <<'EOF'
 main() { println("hi") }
 EOF
