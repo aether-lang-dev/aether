@@ -1,6 +1,7 @@
 // libaether_sandbox_preload.c — LD_PRELOAD library for cross-process containment
 //
-// Intercepts libc calls (open, connect, execve, getenv) and checks
+// Intercepts libc calls (open, connect, the exec family, posix_spawn,
+// system and popen, getenv) and checks
 // against an Aether grant list loaded from a file.
 //
 // Grant file format (one per line): category:pattern
@@ -27,6 +28,12 @@
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <netdb.h>
+#include <stdarg.h>
+#include <spawn.h>
+#include <wordexp.h>
+#if defined(__FreeBSD__)
+#include <sys/user.h>            // struct kinfo_file, for fexecve's F_KINFO
+#endif
 
 // Grant storage
 #define MAX_GRANTS 256
@@ -610,32 +617,23 @@ static int env_has_nonempty(char* const env[], size_t count, const char* key) {
     return 0;
 }
 
-// execve
-int execve(const char* pathname, char* const argv[], char* const envp[]) {
-    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
-    if (pathname && !check_grant("exec", pathname)) {
-        errno = EPERM;
-        return -1;
-    }
-    if (!sandbox_active) return real_execve(pathname, argv, envp);
-
-    // An explicit envp is the child's whole environment. Rebuild it on the
-    // stack so application entries survive while sandbox controls come only
-    // from the init-time snapshot of this contained process. This avoids allocation in the common
-    // fork-then-exec path and prevents an explicit environment from dropping
-    // or replacing the preload and grant source.
-    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+// The environment a contained process's child gets: the caller's entries
+// minus every sandbox control, plus the controls from the init-time snapshot.
+// So an explicit environment cannot drop or replace the preload and the grant
+// source. On the stack, no malloc: it runs between fork (or vfork) and exec.
+// Returns 0 with errno set when it cannot.
+static int child_env(char* const envp[], char* merged_env[MAX_EXEC_ENV_ENTRIES + 1]) {
     size_t count = 0;
     size_t scanned = 0;
     while (envp && envp[scanned]) {
         if (scanned >= MAX_EXEC_ENV_ENTRIES) {
             errno = E2BIG;
-            return -1;
+            return 0;
         }
         if (!is_sandbox_control_env(envp[scanned])) {
             if (count >= MAX_EXEC_ENV_ENTRIES) {
                 errno = E2BIG;
-                return -1;
+                return 0;
             }
             merged_env[count++] = envp[scanned];
         }
@@ -644,12 +642,12 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
 
     if (snap_overflow) {
         errno = EPERM;
-        return -1;
+        return 0;
     }
     for (size_t i = 0; i < snap_count; i++) {
         if (count >= MAX_EXEC_ENV_ENTRIES) {
             errno = E2BIG;
-            return -1;
+            return 0;
         }
         merged_env[count++] = snap_entries[i];
     }
@@ -660,10 +658,302 @@ int execve(const char* pathname, char* const argv[], char* const envp[]) {
          !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS") &&
          !env_has_nonempty(merged_env, count, "AETHER_SANDBOX_GRANTS_FD"))) {
         errno = EPERM;
-        return -1;
+        return 0;
     }
+    return 1;
+}
+
+// Run `pathname` once its exec grant has been checked: with the child's
+// environment rebuilt under a grant file, as is otherwise.
+static int exec_checked(const char* pathname, char* const argv[], char* const envp[]) {
+    if (!real_execve) real_execve = dlsym(RTLD_NEXT, "execve");
+    if (!sandbox_active) return real_execve(pathname, argv, envp);
+    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+    if (!child_env(envp, merged_env)) return -1;
     return real_execve(pathname, argv, merged_env);
 }
+
+// execve
+int execve(const char* pathname, char* const argv[], char* const envp[]) {
+    if (pathname && !check_grant("exec", pathname)) {
+        errno = EPERM;
+        return -1;
+    }
+    return exec_checked(pathname, argv, envp);
+}
+
+// The rest of the exec family. libc implements each of these on its own
+// internal execve, never the exported one, so the wrapper above did not see
+// them: under a grant file with no exec grant, execv, execvp, execl and the
+// rest ran their program. Each comes here and goes through execve above.
+// execvp, execvpe and execlp search PATH here, the way glibc does, so the
+// grant is checked against each file actually run.
+#define MAX_EXEC_ARGS 4096
+#define SANDBOX_SHELL "/bin/sh"
+
+// A file that is not an executable format (no #! line) is run as a shell
+// script by execvp and execlp, as glibc and FreeBSD do; through execve above,
+// so the shell needs its exec grant.
+static int exec_or_script(const char* path, char* const argv[], char* const envp[]) {
+    execve(path, argv, envp);
+    if (errno != ENOEXEC) return -1;
+    size_t argc = 0;
+    while (argv && argv[argc]) argc++;
+    if (argc + 2 > MAX_EXEC_ARGS) {
+        errno = E2BIG;
+        return -1;
+    }
+    // Sized to the arguments: this can run in a vfork child, on the
+    // parent's stack.
+    char* sh_argv[argc + 2];
+    sh_argv[0] = (char*)SANDBOX_SHELL;
+    sh_argv[1] = (char*)path;
+    size_t n = 2;
+    for (size_t i = 1; i < argc; i++) sh_argv[n++] = argv[i];
+    sh_argv[n] = NULL;
+    return execve(SANDBOX_SHELL, sh_argv, envp);
+}
+
+// PATH search as glibc's execvpe does it: a name with a slash is run as it
+// is; otherwise each PATH entry in turn (an empty entry is the current
+// directory), going on past a missing or unreadable one and stopping at any
+// other failure, a refused grant included.
+static int exec_search(const char* file, const char* path, char* const argv[], char* const envp[]) {
+    if (!file || !*file) {
+        errno = ENOENT;
+        return -1;
+    }
+    if (strchr(file, '/')) return exec_or_script(file, argv, envp);
+    size_t flen = strlen(file);
+    char buf[PATH_MAX];
+    int got_eacces = 0;
+    const char* p = path;
+    for (;;) {
+        const char* colon = strchr(p, ':');
+        size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+        if (dlen + 1 + flen + 1 <= sizeof(buf)) {
+            memcpy(buf, p, dlen);
+            size_t at = dlen;
+            if (dlen) buf[at++] = '/';
+            memcpy(buf + at, file, flen + 1);
+            exec_or_script(buf, argv, envp);
+            switch (errno) {
+                case EACCES: got_eacces = 1; break;
+                case ENOENT: case ESTALE: case ENOTDIR: case ENODEV: case ETIMEDOUT: break;
+                default: return -1;
+            }
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    errno = got_eacces ? EACCES : ENOENT;
+    return -1;
+}
+
+static const char* exec_path(void) {
+    if (!real_getenv) real_getenv = dlsym(RTLD_NEXT, "getenv");
+    const char* path = real_getenv ? real_getenv("PATH") : NULL;
+    return path ? path : "/bin:/usr/bin";
+}
+
+int execv(const char* path, char* const argv[]) {
+    return execve(path, argv, environ);
+}
+
+int execvp(const char* file, char* const argv[]) {
+    return exec_search(file, exec_path(), argv, environ);
+}
+
+int execvpe(const char* file, char* const argv[], char* const envp[]) {
+    return exec_search(file, exec_path(), argv, envp);
+}
+
+#if defined(__FreeBSD__)
+int execvP(const char* file, const char* search_path, char* const argv[]) {
+    return exec_search(file, search_path ? search_path : "", argv, environ);
+}
+#endif
+
+// The variadic forms: their arguments into an argv on the stack, sized to
+// them (this can run in a vfork child, on the parent's stack). Counted
+// first, up to and including the terminating NULL.
+static size_t count_args(const char* arg0, va_list ap) {
+    size_t n = 1;
+    for (const char* a = arg0; a && n <= MAX_EXEC_ARGS; n++) a = va_arg(ap, const char*);
+    return n;
+}
+
+static void fill_args(const char* arg0, va_list ap, char* argv[], size_t n) {
+    argv[0] = (char*)arg0;
+    for (size_t i = 1; i < n; i++) argv[i] = va_arg(ap, char*);
+}
+
+int execl(const char* path, const char* arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    size_t n = count_args(arg, ap);
+    va_end(ap);
+    if (n > MAX_EXEC_ARGS) {
+        errno = E2BIG;
+        return -1;
+    }
+    char* argv[n];
+    va_start(ap, arg);
+    fill_args(arg, ap, argv, n);
+    va_end(ap);
+    return execve(path, argv, environ);
+}
+
+int execle(const char* path, const char* arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    size_t n = count_args(arg, ap);
+    va_end(ap);
+    if (n > MAX_EXEC_ARGS) {
+        errno = E2BIG;
+        return -1;
+    }
+    char* argv[n];
+    va_start(ap, arg);
+    fill_args(arg, ap, argv, n);
+    char** envp = va_arg(ap, char**);   // after the terminating NULL
+    va_end(ap);
+    return execve(path, argv, envp);
+}
+
+int execlp(const char* file, const char* arg, ...) {
+    va_list ap;
+    va_start(ap, arg);
+    size_t n = count_args(arg, ap);
+    va_end(ap);
+    if (n > MAX_EXEC_ARGS) {
+        errno = E2BIG;
+        return -1;
+    }
+    char* argv[n];
+    va_start(ap, arg);
+    fill_args(arg, ap, argv, n);
+    va_end(ap);
+    return exec_search(file, exec_path(), argv, environ);
+}
+
+// The absolute path of the file `fd` is open on, into `out`, and in `run` a
+// name execve can run that same file by (/proc/self/fd/N on Linux, the path
+// itself on FreeBSD). 0 when the descriptor's file cannot be named.
+static int fd_path(int fd, char out[PATH_MAX], char run[PATH_MAX]) {
+    if (fd < 0) return 0;
+#if defined(__linux__)
+    char link[32] = "/proc/self/fd/";
+    char digits[16];
+    int d = 0;
+    unsigned int v = (unsigned int)fd;
+    do { digits[d++] = (char)('0' + v % 10); v /= 10; } while (v && d < (int)sizeof(digits));
+    size_t at = strlen(link);
+    while (d > 0) link[at++] = digits[--d];
+    link[at] = '\0';
+    ssize_t n = readlink(link, out, PATH_MAX - 1);
+    if (n <= 0) return 0;
+    out[n] = '\0';
+    if (out[0] != '/') return 0;
+    memcpy(run, link, at + 1);
+    return 1;
+#elif defined(__FreeBSD__) && defined(F_KINFO)
+    struct kinfo_file kf;
+    memset(&kf, 0, sizeof(kf));
+    kf.kf_structsize = sizeof(kf);
+    if (fcntl(fd, F_KINFO, &kf) != 0 || kf.kf_path[0] != '/') return 0;
+    size_t n = strnlen(kf.kf_path, PATH_MAX - 1);
+    memcpy(out, kf.kf_path, n);
+    out[n] = '\0';
+    memcpy(run, out, n + 1);
+    return 1;
+#else
+    (void)out;
+    (void)run;
+    return 0;
+#endif
+}
+
+// Is any policy in force here: a grant file, or this thread's in-process
+// levels (an enforce block, a host bridge's sandboxed run)?
+static int policy_in_force(void) {
+    int in_process = aether_sandbox_levels_here ? aether_sandbox_levels_here() : 0;
+    return sandbox_active || in_process > 0;
+}
+
+// fexecve runs whatever file the descriptor is open on: the grant is checked
+// against that file's path, and the program is run through execve by a name
+// for it. A descriptor whose file cannot be named is refused whenever a
+// policy is in force.
+int fexecve(int fd, char* const argv[], char* const envp[]) {
+    char target[PATH_MAX];
+    char run[PATH_MAX];
+    if (!fd_path(fd, target, run)) {
+        if (policy_in_force()) {
+            log_deny("exec", "fexecve: a descriptor with no path");
+            errno = EPERM;
+            return -1;
+        }
+        static int (*real_fexecve)(int, char* const[], char* const[]) = NULL;
+        if (!real_fexecve) real_fexecve = dlsym(RTLD_NEXT, "fexecve");
+        return real_fexecve(fd, argv, envp);
+    }
+    if (!check_grant("exec", target)) {
+        errno = EPERM;
+        return -1;
+    }
+    return exec_checked(run, argv, envp);
+}
+
+#if defined(__linux__) && defined(__GLIBC__) && \
+    (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+// execveat (glibc 2.34): execve of a name relative to a directory
+// descriptor, or of the descriptor itself (AT_EMPTY_PATH). The file it
+// names is worked out here, its grant checked, and the call made with the
+// environment execve would give.
+static int (*real_execveat)(int, const char*, char* const[], char* const[], int) = NULL;
+int execveat(int dirfd, const char* pathname, char* const argv[], char* const envp[], int flags) {
+    if (!real_execveat) real_execveat = dlsym(RTLD_NEXT, "execveat");
+    char target[PATH_MAX];
+    char run[PATH_MAX];
+    int named = 0;
+    if (pathname[0] == '/' || (dirfd == AT_FDCWD && pathname[0])) {
+        // As execve sees it: an absolute name, or one relative to the
+        // working directory.
+        size_t n = strlen(pathname);
+        if (n < PATH_MAX) {
+            memcpy(target, pathname, n + 1);
+            named = 1;
+        }
+    } else if (!pathname[0] && (flags & AT_EMPTY_PATH)) {
+        named = fd_path(dirfd, target, run);
+    } else if (pathname[0] && fd_path(dirfd, target, run)) {
+        size_t dn = strlen(target);
+        size_t pn = strlen(pathname);
+        if (dn + 1 + pn < PATH_MAX) {
+            target[dn] = '/';
+            memcpy(target + dn + 1, pathname, pn + 1);
+            named = 1;
+        }
+    }
+    if (!named) {
+        if (policy_in_force()) {
+            log_deny("exec", "execveat: a file with no path");
+            errno = EPERM;
+            return -1;
+        }
+        return real_execveat(dirfd, pathname, argv, envp, flags);
+    }
+    if (!check_grant("exec", target)) {
+        errno = EPERM;
+        return -1;
+    }
+    if (!sandbox_active) return real_execveat(dirfd, pathname, argv, envp, flags);
+    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+    if (!child_env(envp, merged_env)) return -1;
+    return real_execveat(dirfd, pathname, argv, merged_env, flags);
+}
+#endif
 
 // stat/access/fstatat — NOT intercepted. Modern glibc inlines these as
 // direct syscalls via asm, bypassing any LD_PRELOAD override. Documented
@@ -713,6 +1003,193 @@ long clone3(struct clone_args* args, size_t size) {
 // internals (where it's harmless), and any exec by a vfork'd child is
 // caught by the execve interceptor below. See
 // sandbox-preload-toolchain-segfault.md for the bug this fixes.
+
+// The process starters that are not fork plus execve. libc starts the child
+// inside itself (clone or vfork, then its internal execve), so neither the
+// fork nor the execve wrapper sees it: under a grant file with no exec or
+// fork grant, posix_spawn, posix_spawnp, system and popen all ran their
+// program, and so did os.execute and io.popen in a contained-in-process Lua.
+// Each applies here the two rules the wrappers above would have applied had
+// libc gone through them: a new process needs what fork() needs, and the
+// program run needs its exec grant.
+
+// fork()'s rule, for a starter that makes a new process: under a grant
+// file, the fork grant.
+static int new_process_allowed(void) {
+    return !sandbox_active || check_grant("fork", "*");
+}
+
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 34))
+// _Fork (glibc 2.34): fork without the atfork handlers, a public symbol of
+// its own that fork() does not go through, so it gets fork()'s rule.
+static pid_t (*real__Fork)(void) = NULL;
+pid_t _Fork(void) {
+    if (!real__Fork) real__Fork = dlsym(RTLD_NEXT, "_Fork");
+    if (!new_process_allowed()) {
+        errno = EPERM;
+        return -1;
+    }
+    return real__Fork();
+}
+#endif
+
+typedef int (*spawn_fn)(void*, const char*, const posix_spawn_file_actions_t*,
+                        const posix_spawnattr_t*, char* const[], char* const[]);
+
+// posix_spawn's checks and environment, for the real starter `real`: its
+// first argument a pid_t* (posix_spawn) or an int* pidfd (pidfd_spawn).
+// Returns an error number, as posix_spawn does.
+static int spawn_checked(spawn_fn real, void* who, const char* path,
+                         const posix_spawn_file_actions_t* fa,
+                         const posix_spawnattr_t* attr,
+                         char* const argv[], char* const envp[]) {
+    if (!new_process_allowed()) return EPERM;
+    if (path && !check_grant("exec", path)) return EPERM;
+    if (!sandbox_active) return real(who, path, fa, attr, argv, envp);
+    char* merged_env[MAX_EXEC_ENV_ENTRIES + 1];
+    if (!child_env(envp, merged_env)) return errno;
+    return real(who, path, fa, attr, argv, merged_env);
+}
+
+// posix_spawnp's PATH search, done here so the grant is checked against the
+// file that runs: the first PATH entry holding a regular file this process
+// may execute, which is then started by its full path. A name with a slash
+// is used as it is. Fills `out`; 0 or an error number.
+static int spawn_search(const char* file, char out[PATH_MAX]) {
+    if (!file || !*file) return ENOENT;
+    if (strchr(file, '/')) {
+        if (strlen(file) >= PATH_MAX) return ENAMETOOLONG;
+        memcpy(out, file, strlen(file) + 1);
+        return 0;
+    }
+    size_t flen = strlen(file);
+    int got_eacces = 0;
+    const char* p = exec_path();
+    for (;;) {
+        const char* colon = strchr(p, ':');
+        size_t dlen = colon ? (size_t)(colon - p) : strlen(p);
+        if (dlen + 1 + flen + 1 <= PATH_MAX) {
+            memcpy(out, p, dlen);
+            size_t at = dlen;
+            if (dlen) out[at++] = '/';
+            memcpy(out + at, file, flen + 1);
+            struct stat st;
+            if (stat(out, &st) == 0 && S_ISREG(st.st_mode)) {
+                if (faccessat(AT_FDCWD, out, X_OK, AT_EACCESS) == 0) return 0;
+                got_eacces = 1;
+            }
+        }
+        if (!colon) break;
+        p = colon + 1;
+    }
+    return got_eacces ? EACCES : ENOENT;
+}
+
+static spawn_fn real_posix_spawn = NULL;
+
+int posix_spawn(pid_t* pid, const char* path, const posix_spawn_file_actions_t* fa,
+                const posix_spawnattr_t* attr, char* const argv[], char* const envp[]) {
+    if (!real_posix_spawn) real_posix_spawn = (spawn_fn)dlsym(RTLD_NEXT, "posix_spawn");
+    return spawn_checked(real_posix_spawn, pid, path, fa, attr, argv, envp);
+}
+
+int posix_spawnp(pid_t* pid, const char* file, const posix_spawn_file_actions_t* fa,
+                 const posix_spawnattr_t* attr, char* const argv[], char* const envp[]) {
+    if (!real_posix_spawn) real_posix_spawn = (spawn_fn)dlsym(RTLD_NEXT, "posix_spawn");
+    char found[PATH_MAX];
+    int err = spawn_search(file, found);
+    if (err) return err;
+    return spawn_checked(real_posix_spawn, pid, found, fa, attr, argv, envp);
+}
+
+#if defined(__GLIBC__) && (__GLIBC__ > 2 || (__GLIBC__ == 2 && __GLIBC_MINOR__ >= 39))
+// pidfd_spawn and pidfd_spawnp (glibc 2.39): posix_spawn's starters that
+// hand back a pidfd.
+static spawn_fn real_pidfd_spawn = NULL;
+int pidfd_spawn(int* pidfd, const char* path, const posix_spawn_file_actions_t* fa,
+                const posix_spawnattr_t* attr, char* const argv[], char* const envp[]) {
+    if (!real_pidfd_spawn) real_pidfd_spawn = (spawn_fn)dlsym(RTLD_NEXT, "pidfd_spawn");
+    return spawn_checked(real_pidfd_spawn, pidfd, path, fa, attr, argv, envp);
+}
+int pidfd_spawnp(int* pidfd, const char* file, const posix_spawn_file_actions_t* fa,
+                 const posix_spawnattr_t* attr, char* const argv[], char* const envp[]) {
+    if (!real_pidfd_spawn) real_pidfd_spawn = (spawn_fn)dlsym(RTLD_NEXT, "pidfd_spawn");
+    char found[PATH_MAX];
+    int err = spawn_search(file, found);
+    if (err) return err;
+    return spawn_checked(real_pidfd_spawn, pidfd, found, fa, attr, argv, envp);
+}
+#endif
+
+// The shell: system(), popen() and wordexp()'s command substitution run
+// /bin/sh. It needs fork()'s rule and an exec grant for /bin/sh, as the
+// fork and execve it amounts to would. The shell inherits the live
+// environment, which (unlike execve's) cannot be rebuilt here, so under a
+// grant file it must still carry exactly the controls the process started
+// with: one that has dropped or changed them is refused, as execve would
+// replace them.
+static int live_env_keeps_controls(void) {
+    if (snap_overflow) return 0;
+    size_t live = 0;
+    for (size_t i = 0; environ && environ[i]; i++) {
+        if (!is_sandbox_control_env(environ[i])) continue;
+        int found = 0;
+        for (size_t j = 0; j < snap_count; j++) {
+            if (strcmp(environ[i], snap_entries[j]) == 0) { found = 1; break; }
+        }
+        if (!found) return 0;
+        live++;
+    }
+    return live == snap_count;
+}
+
+static int shell_allowed(void) {
+    if (!new_process_allowed()) return 0;
+    if (!check_grant("exec", SANDBOX_SHELL)) return 0;
+    if (sandbox_active && !live_env_keeps_controls()) {
+        log_deny("exec", "a shell whose environment lost the sandbox controls");
+        return 0;
+    }
+    return 1;
+}
+
+static int (*real_system)(const char*) = NULL;
+int system(const char* command) {
+    if (!real_system) real_system = dlsym(RTLD_NEXT, "system");
+    if (!shell_allowed()) {
+        errno = EPERM;
+        return command ? -1 : 0;   // system(NULL): 0, no shell to be had
+    }
+    return real_system(command);
+}
+
+static FILE* (*real_popen)(const char*, const char*) = NULL;
+FILE* popen(const char* command, const char* mode) {
+    if (!real_popen) real_popen = dlsym(RTLD_NEXT, "popen");
+    if (!shell_allowed()) {
+        errno = EPERM;
+        return NULL;
+    }
+    return real_popen(command, mode);
+}
+
+// wordexp. glibc runs only a command substitution ($(...) or `...`) through
+// the shell, and not at all under WRDE_NOCMD: where the shell is not
+// allowed, WRDE_NOCMD is added, so a substitution fails with WRDE_CMDSUB and
+// plain words still expand. FreeBSD's wordexp runs /bin/sh for every call,
+// WRDE_NOCMD or not: there it is refused outright, with WRDE_CMDSUB, an
+// error after which POSIX leaves `we` as it was (after WRDE_NOSPACE a
+// caller would wordfree it, and it was never filled).
+static int (*real_wordexp)(const char*, wordexp_t*, int) = NULL;
+int wordexp(const char* words, wordexp_t* we, int flags) {
+    if (!real_wordexp) real_wordexp = dlsym(RTLD_NEXT, "wordexp");
+#if defined(__GLIBC__)
+    if (!(flags & WRDE_NOCMD) && !shell_allowed()) flags |= WRDE_NOCMD;
+#else
+    if (!shell_allowed()) return WRDE_CMDSUB;
+#endif
+    return real_wordexp(words, we, flags);
+}
 
 // mmap — block PROT_EXEC to prevent shellcode execution from byte arrays
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
