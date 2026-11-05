@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.888.0]
+
+### Fixed
+
+- **A slice local that only views memory no count covers costs nothing again (#3583).** Since 0.883.0 (#3568), a local such as `buf = c.data as float[]` held a reference it never had. It registered a cleanup for a caught panic and released at every exit. Both did nothing at run time, but the escaped address kept the C compiler from folding the view, so the bounds check and the release path stayed in. ae3d's per-entity column accessors ran 3.5 to 5 times slower than on 0.880. Some locals only ever hold a pointer cast, `null`, an array literal, an array viewed as a slice, a sub-slice of one of these, or another such local. Those now hold no reference, and the accessor is again one indexed load or store at -O2. A local that may be given a view of a `make` buffer on any path still holds and releases its own.
+
 ## [0.887.0]
 
 ### Removed
