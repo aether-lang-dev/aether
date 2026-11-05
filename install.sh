@@ -561,12 +561,23 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
         VER_ENTRY="$INSTALL_DIR/versions/$VTAG"
         mkdir -p "$INSTALL_DIR/versions"
 
-        # Copy the full install into versions/ so 'ae version use' works.
-        # Remove old entry first (may be stale from a previous build).
+        # Copy what this install wrote into versions/ so 'ae version use'
+        # works. Remove old entry first (may be stale from a previous build).
+        # Only Aether's own files: the prefix can be a shared one such as
+        # ~/.local, whose lib/, include/ and share/ hold everything else
+        # installed there (a podman image store under share/containers, a
+        # few GB of it with root-owned files), and copying those whole
+        # stopped the install half way under set -e.
         rm -rf "$VER_ENTRY"
-        mkdir -p "$VER_ENTRY"
-        for subdir in bin lib include share; do
+        mkdir -p "$VER_ENTRY/bin"
+        for tool in ae aetherc aether-lsp; do
+            if [ -f "$BIN_DIR/$tool${EXE}" ]; then
+                cp -p "$BIN_DIR/$tool${EXE}" "$VER_ENTRY/bin/$tool${EXE}"
+            fi
+        done
+        for subdir in lib/aether include/aether share/aether; do
             if [ -d "$INSTALL_DIR/$subdir" ]; then
+                mkdir -p "$VER_ENTRY/$(dirname "$subdir")"
                 cp -r "$INSTALL_DIR/$subdir" "$VER_ENTRY/$subdir"
             fi
         done
