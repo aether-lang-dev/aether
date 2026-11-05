@@ -14,6 +14,50 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.889.0]
+
+### Added
+
+- **Unix-domain sockets, and HTTP over them.** `tcp.connect_unix(path)` and
+  `tcp.listen_unix(path)` return the handles `tcp.connect` and `tcp.listen`
+  do, so every std.tcp read, write, poll and close works on them;
+  `client.set_unix_socket(req, path)` sends a `std.http.client` request over
+  a socket path instead of dialling the URL's host, which still names the
+  Host header (curl's `--unix-socket`): the Docker and Podman Engine APIs at
+  `/var/run/docker.sock` and Podman's machine socket. `client.response_take_conn(resp)`
+  takes the connection out of a streaming response after a `101` or a
+  hijacking `200`, as a std.tcp socket plus the bytes already read past the
+  head, for Docker's `attach` and exec `start`. A path too long for
+  `sockaddr_un` is refused, never truncated. In an enforce block a connect
+  needs `fs_write` on the path (the kernel's rule for a Unix socket), asked
+  on every HTTP request so a pooled connection does not skip it; a listen
+  needs `tcp_listen` too. Linux, macOS, the BSDs, and Windows 10 1803 or
+  later; an older Windows says it has no `AF_UNIX`. A write to a Unix socket
+  the peer closed is EPIPE rather than a SIGPIPE that ended the process, and
+  the HTTP client sends with `MSG_NOSIGNAL` on Linux.
+
+- **`std.cryptography.bcrypt`: bcrypt password hashing in pure Aether** (Bouncy Castle's `BCrypt`/`OpenBSDBCrypt` lineage, no OpenSSL). `bcrypt.hash(password, cost)` makes a `$2b$` hash with a salt from the OS CSPRNG and `bcrypt.check_pw(password, hash)` verifies one in constant time; `hash_pw`/`raw`/`hex` take an explicit salt for known-answer tests. `$2a$`, `$2b$`, `$2y$` and the original `$2$` are supported and `$2x$` is refused. `tests/integration/crypto_bcrypt` holds it to 195 vectors generated with two independent implementations (libxcrypt, i.e. crypt_blowfish, and FreeBSD's libc), covering every version, passwords of 0 to 300 bytes including 8-bit and UTF-8 ones, and the Openwall crypt_blowfish vectors; where those two differ (crypt_blowfish's `$2a$` countermeasure for some 8-bit passwords, and old OpenBSD's `$2a$` length wrap at 255 bytes) this follows current OpenBSD, Bouncy Castle and Go, and the module header says so.
+
+### Changed
+
+- **The HTTP client never sends a URL's fragment, and the reference now says so.** Since 0.881.0 (#3520), the request target is the URL's path and query. `http://h/p?q=1#top` sends `GET /p?q=1`, as RFC 3986 and 9110 require and as curl, Go and browsers do. Earlier releases sent `#` and what followed it on the request line. So a query value written raw with a `#` in it, such as `"/set?v=#FF0000"`, used to arrive and now arrives empty (`?v=`). Encode query values with `url.encode` from `std.url`: `"/set?v=${url.encode(text)}"` sends `%23FF0000`, which a server that decodes its query reads back as `#FF0000`. The 0.881.0 note said only that the fragment is no longer sent. `docs/stdlib-reference.md` and `std/http/README.md` now say what that means for a query value.
+
+### Fixed
+
+- **A streamed chunked body is read as it arrives.** `client.response_read`
+  on a `Transfer-Encoding: chunked` response ran its decoder until `max`
+  bytes were in or the body ended, so a chunk that had arrived waited for
+  more: a followed log or an event feed (Docker's `logs?follow=1`, `/events`)
+  held its first line until enough others came or the receive timed out. It
+  now returns the payload it has once the next step would wait on the
+  connection, as a `Content-Length` stream already did. The bytes past the
+  head of a streamed response with no body (a `101`) are kept for
+  `response_take_conn` instead of dropped.
+
+- **`ae build` no longer writes over a C file beside the output.** The generated C, an intermediate, was written beside the output as `<-o>.c` (or `<name>.c` in the current directory) and removed after the build, so `ae build y.ae -o y` beside a `y.c` of your own, or `-o x` beside an `@source("x.c")`, wrote over that file and deleted it, and `--emit=obj` left the generated C behind as `<name>.c`. The intermediate now goes to the temp directory and is removed after every build, `--emit=obj` included. `AE_KEEP_C=1` still keeps it beside the output, and `--emit=csrc` still writes the `.c` it was asked for.
+
+- **A shell test that stops a server which already exited no longer ends silently on Windows (#3591).** `tests/lib/server_jobs.sh` treated a failed attempt to end a job as a failure. On Windows that attempt is `taskkill` of the native program, and elsewhere it is `kill`. It fails for a program that exited by itself an instant before, while bash still lists its job as running. Under `set -e` it ended the calling test with status 1 and no message: `https_pure_server_keys` did so on a Windows runner right after a server that refuses its key had exited. The attempt is now only an attempt. `_server_reap` still decides whether the job ended, and still reports one that did not. `tests/integration/server_jobs_helpers` makes each attempt end the program and report a failure, and checks that a `set -e` caller carries on and the job is gone.
+
 ## [0.888.0]
 
 ### Fixed
