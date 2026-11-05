@@ -50,7 +50,8 @@ captures from fresh body-locals while honouring Python-style `x = expr`
 shadowing: if the RHS does not read `x`, treat `x` as a fresh local.
 
 **Resulting semantics:** a read-only capture stays an aliased copy (zero
-cost). A capture the closure *assigns to* is heap-promoted, so the enclosing
+cost). A capture the closure *assigns to*, or pushes into when it is a slice
+(#3568), is heap-promoted, so the enclosing
 binding and the closure env share one heap cell and writes are visible in both
 directions (the Ruby/Groovy model, verified by
 `tests/syntax/test_closure_mutable_capture_probe.ae`). A simple named local

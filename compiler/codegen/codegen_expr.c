@@ -3783,6 +3783,10 @@ static int is_assigned_to(ASTNode* node, const char* name) {
         node->children[0]->value && strcmp(node->children[0]->value, name) == 0) {
         return 1;
     }
+    /* `name.push(v)` writes `name` (#3568): the closure's copy of a slice
+     * grew under the copy the environment holds, so a push is a write the
+     * frames share through a cell, as an assignment is. */
+    if (ast_pushes_name(node, name)) return 1;
     // Tuple destructure assigns to each non-discard target; if `name` is
     // any of them, treat as assignment for promotion analysis. Without
     // this, `out, status, _ = sh(...)` inside a closure body would

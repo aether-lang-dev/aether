@@ -331,6 +331,9 @@ static int closure_assigns(ASTNode* n, const char* name) {
     if (n->type == AST_VARIABLE_DECLARATION && n->value && strcmp(n->value, name) == 0)
         return n->type_inferred;
     if (n->type == AST_COMPOUND_ASSIGNMENT && n->value && strcmp(n->value, name) == 0) return 1;
+    /* `name.push(v)` writes `name`: its length, and its buffer when it grows
+     * (#3568, ast_pushes_name). */
+    if (ast_pushes_name(n, name)) return 1;
     if (n->type == AST_UNARY_EXPRESSION && n->value && n->child_count == 1 &&
         (strcmp(n->value, "++") == 0 || strcmp(n->value, "--") == 0) && n->children[0] &&
         n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
@@ -1602,7 +1605,9 @@ static void rewrite_call(Ctx* c, Frame* f, ASTNode* n) {
             /* A place that holds no reference of its own (a struct
              * parameter's field) takes one before it grows, so the growth
              * copies and leaves the buffer to its owner (`slice_push_copy`,
-             * as an append of such a value does below). */
+             * as an append of such a value does below). A closure's push
+             * into a slice it captures is a write, which makes the slice a
+             * cell the frames share (closure_assigns), and a cell holds. */
             if (!holds_reference(c, f, *xs))
                 n->annotation = annotation_add_marker(n->annotation, "slice_push_copy");
             return;

@@ -668,9 +668,10 @@ _aether_ctx_pop();                                  // 3. pop
 Aether heap-promotes a captured variable that a closure **assigns to**: the
 enclosing binding and every closure capturing it then share one heap cell, so
 `count = count + 1` inside a closure is visible to the outer scope and to
-sibling closures (the Ruby/Groovy model). A simple named local needs no ref
-cell to share mutable state this way. A capture the closure only reads stays a
-cheap aliased copy.
+sibling closures (the Ruby/Groovy model). A push into a captured slice
+(`xs.push(v)`) is such a write too (#3568): the outer scope sees what the
+closure pushed. A simple named local needs no ref cell to share mutable state
+this way. A capture the closure only reads stays a cheap aliased copy.
 
 **Ref cells** are for shared mutable state that isn't a plain captured local:
 a value passed explicitly as a `ptr` argument to callbacks (UI event

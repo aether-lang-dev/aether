@@ -1596,6 +1596,17 @@ int ast_struct_param_written(const ASTNode* n, const char* pname) {
     return 0;
 }
 
+/* Is `n` a push into the slice named `name` (`name.push(v)`, lowered to
+ * `__slice_push(name, v)`)? It writes `name`, as an assignment does: a
+ * closure that pushes into a slice it captures shares it with its frame
+ * through a cell (#3568). */
+int ast_pushes_name(const ASTNode* n, const char* name) {
+    return n && name && n->type == AST_FUNCTION_CALL && n->value &&
+           strcmp(n->value, "__slice_push") == 0 && n->child_count >= 1 && n->children[0] &&
+           n->children[0]->type == AST_IDENTIFIER && n->children[0]->value &&
+           strcmp(n->children[0]->value, name) == 0;
+}
+
 int ast_match_is_operand(const ASTNode* m) {
     return m && m->type == AST_MATCH_STATEMENT && annotation_has_marker(m->annotation, "operand");
 }
