@@ -31,6 +31,8 @@ on:
       - 'tests/scripts/sanitizer_sweep.sh'
       - 'tests/ae_sweep_prune_asan.txt'
       - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/sweep_shard.sh'
+      - 'tests/sweep_weights_linux.txt'
       - 'tests/scripts/run_ae_test.sh'
       - 'tests/scripts/run_ae_sh_dir.sh'
       - 'tests/lib/sweep_timeout.sh'
