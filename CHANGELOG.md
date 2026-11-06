@@ -14,6 +14,26 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.894.0]
+
+### Added
+
+- **`tcp.connect_timeout(host, port, timeout_ms)`: a TCP dial held to a budget.** `tcp.connect` had no timeout, so a connect to an address that drops the SYN (a firewalled port, a host that is down, a container port not yet forwarded) blocked for the kernel's own retry schedule, 75 s on macOS and about two minutes on Linux. `connect_timeout` dials each address the host resolves to non-blocking and polls it, the whole dial inside `timeout_ms`, and returns `(null, "connect timeout")` when the budget runs out (`"could not resolve host"`, `"connection failed"` or the sandbox's refusal otherwise). `tcp_connect_timeout_raw` is the extern. `tests/integration/tcp_connect_timeout` dials TEST-NET-1 with 300 ms.
+
+- **RSA-OAEP with SHA-1 (and SHA-384, SHA-512).** `std.cryptography.rsa`'s OAEP was SHA-256 only, while OpenSSL's default `RSA_PKCS1_OAEP_PADDING` is SHA-1 with MGF1-SHA1, the padding MySQL's `caching_sha2_password` and `sha256_password` RSA exchange uses, so a MySQL client in Aether could not log in over a plain connection. `rsa.encrypt_oaep_hash(k, algo, msg, seed)` and `rsa.decrypt_oaep_hash(k, algo, ct)` take `"sha1"`, `"sha256"`, `"sha384"` or `"sha512"` for the label hash and MGF1, as `sign_pss_hash` does for PSS; `encrypt_oaep` and `decrypt_oaep` are the `"sha256"` cases, unchanged, and decryption keeps its constant-time padding check. `crypto_rsa_oaep_sha1_openssl` checks both directions against `openssl pkeyutl -pkeyopt rsa_oaep_md:sha1`.
+
+- **TLS 1.3 over an adopted socket: client certificates, and verification off by name.** `tls13_client.connect_socket` (TLS over a socket the program connected itself, for a protocol that starts in the clear, as Postgres' `SSLRequest` and MySQL's handshake do) always verified the server and never presented a client certificate; `connect_full` had both, but nothing exported reached them. `connect_socket_mtls(sock, host, cafile, cert, cert_len, key)` presents a client certificate (leaf DER, ECDSA-P256 key) to a server that asks for one, the server verified as before; `connect_socket_insecure_skip_verify(sock, host)` and `connect_socket_mtls_insecure_skip_verify(...)` skip server verification, named so as not to be reached for by accident. An alert 116 from the server now reads `certificate_required`, not `unknown_alert`. `crypto_tls13_socket_verify_mtls` runs each against `openssl s_server`, `-Verify 1` among them.
+
+### Changed
+
+- **E0900's hint names `const NAMES[] = [...]`.** Returning an array literal (`return ["a", "b"]`) is refused, rightly: the array is in the function's frame. The hint pointed at "a module-level array", and the forms a reader tries first, `var NAMES = [...]` and `const NAMES = [...]`, are both refused as non-constant initializers. The hint and the language reference now name the one that works, `const NAMES[] = [...]`, a static array of constants in the function or at module level, which may be returned.
+
+### Fixed
+
+- **`heap.new(pkg.T)` boxes another module's struct.** heap.new read its argument as one identifier, so a struct from an imported module could not be named as it is in every other type position (`*pkg.T`, `pkg.T { ... }`): `heap.new(pkg.Point)` stopped at the `.` with "Expected RIGHT_PAREN, got DOT", and a selective import was the only way round it, one that fails when two modules both define the name. The argument is now parsed as a type name, its qualifier resolved by the merge to that module's struct and held by the same checks as `*pkg.T` (an unknown module, a type the module does not have or does not export). `tests/integration/heap_new_qualified` boxes two modules' differently laid out `Shape`s and the program's own.
+
+- **`ptr[] xs = []` declares a local array of pointers.** A typed local declaration took `int[] xs`, `string[] xs`, `byte[] xs` and `ptr p`, but not `ptr[] xs` or `ptr[4] xs`: the `ptr` keyword is also a value name, so only `ptr NAME` was taken as a declaration and `ptr[] xs = []` was "Expected statement in block". `ptr` followed by `[]` or `[N]` groups and a name on the same line declares now; `ptr[i] = v` is still an element store. `tests/syntax/test_ptr_array_decl.ae`.
+
 ## [0.893.0]
 
 ### Removed
