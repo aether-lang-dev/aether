@@ -3035,8 +3035,22 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 advance_token(parser); // consume '('
                 Token* tyname = expect_token(parser, TOKEN_IDENTIFIER);
                 if (!tyname) { free((void*)func_name); free_ast_node(expr); return NULL; }
-                ASTNode* heap_new = create_ast_node(AST_HEAP_NEW, tyname->value,
+                /* The struct may be another module's, `heap.new(pkg.T)`,
+                 * as in `*pkg.T` and `pkg.T { ... }`: the node names `T`,
+                 * and its parsed type keeps `pkg` as the qualifier the merge
+                 * resolves (ss_rewrite_node) and check_qualified_types holds
+                 * to a module that has the type: `*pkg.T`, the type the
+                 * checker gives the node. */
+                Type* hn_type = parse_struct_type_name(parser, tyname);
+                if (!hn_type) { free((void*)func_name); free_ast_node(expr); return NULL; }
+                ASTNode* heap_new = create_ast_node(AST_HEAP_NEW, hn_type->struct_name,
                                                     hn_line, hn_col);
+                if (hn_type->qualifier) {
+                    heap_new->node_type = create_type(TYPE_PTR);
+                    heap_new->node_type->element_type = hn_type;
+                } else {
+                    free_type(hn_type);
+                }
                 if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
                     free((void*)func_name); free_ast_node(expr);
                     free_ast_node(heap_new); return NULL;
@@ -3670,6 +3684,32 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             Token* next = peek_ahead(parser, 1);
             if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
                 return parse_variable_declaration(parser);
+            }
+            /* `ptr[] xs = []`, `ptr[4] xs`, `ptr[][] m`: an array of
+             * pointers, declared as `int[] xs` is. Each `[...]` is empty or
+             * holds one token (a size), and a name follows on the line;
+             * `ptr[i] = v`, an element of an array named `ptr`, ends at `=`
+             * and stays an expression. */
+            {
+                int off = 1;
+                Token* b = peek_ahead(parser, off);
+                int brackets = 0;
+                while (b && b->type == TOKEN_LEFT_BRACKET) {
+                    Token* in = peek_ahead(parser, off + 1);
+                    if (in && in->type == TOKEN_RIGHT_BRACKET) {
+                        off += 2;
+                    } else if (in && peek_ahead(parser, off + 2) &&
+                               peek_ahead(parser, off + 2)->type == TOKEN_RIGHT_BRACKET) {
+                        off += 3;
+                    } else {
+                        break;
+                    }
+                    brackets++;
+                    b = peek_ahead(parser, off);
+                }
+                if (brackets > 0 && b && b->type == TOKEN_IDENTIFIER && b->line == token->line) {
+                    return parse_variable_declaration(parser);
+                }
             }
             ASTNode* expr = parse_expression(parser);
             if (!expr) return NULL;

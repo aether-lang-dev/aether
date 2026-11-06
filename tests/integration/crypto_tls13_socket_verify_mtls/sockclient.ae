@@ -1,0 +1,95 @@
+// tls13_client over a socket the caller connected, for
+// test_tls13_socket_verify_mtls.sh. PORT is the server's port on
+// 127.0.0.1, MODE one of:
+//   verify       connect_socket(sock, "localhost", CAFILE)
+//   skip         connect_socket_insecure_skip_verify(sock, "localhost")
+//   mtls         connect_socket_mtls(sock, "localhost", CAFILE, cert, key)
+//   mtls_skip    connect_socket_mtls_insecure_skip_verify(sock, "localhost", cert, key)
+//   mtls_nokey   connect_socket_mtls with no key: refused before a handshake
+// CLIENT_CERT / CLIENT_KEY name the client's PEM pair (ECDSA P-256) for the
+// mtls modes. It sends "GET / HTTP/1.0" and prints "GOT <first line>", or
+// "REFUSED: <why>" when the handshake fails, or "RECVERR: <why>" when the
+// server ends the connection instead of answering.
+
+import std.os
+import std.fs
+import std.tcp
+import std.bytes
+import std.list
+import std.string
+import std.cryptography.tls13_client
+import std.cryptography.tls13_server
+
+extern exit(code: int)
+extern atoi(s: string) -> int
+
+main() {
+    mode = os.getenv("MODE")
+    sock, derr = tcp.connect("127.0.0.1", atoi(os.getenv("PORT")))
+    if derr != "" {
+        println("FAIL: dial: ${derr}")
+        exit(1)
+    }
+    chain = null
+    lens = null
+    cert = null
+    certlen = 0
+    scalar = null
+    if string.starts_with(mode, "mtls") == 1 {
+        cert_pem, cerr = fs.read(os.getenv("CLIENT_CERT"))
+        key_pem, kerr = fs.read(os.getenv("CLIENT_KEY"))
+        if cerr != "" || kerr != "" {
+            println("FAIL: read the pair: ${cerr}${kerr}")
+            exit(1)
+        }
+        chain, lens = tls13_server.parse_cert_chain_pem(cert_pem)
+        if chain == null || list.size(chain) < 1 {
+            println("FAIL: the client certificate does not parse")
+            exit(1)
+        }
+        cert = list.at(chain, 0) as ptr
+        certlen = bytes.length(cert)
+        scalar = tls13_server.parse_ec_private_key_pem(key_pem)
+        if scalar == null || bytes.length(scalar) != 32 {
+            println("FAIL: the client key is not a P-256 key")
+            exit(1)
+        }
+    }
+
+    conn = null
+    err = ""
+    match (mode) {
+        "verify" -> { conn, err = tls13_client.connect_socket(sock, "localhost", os.getenv("CAFILE")) }
+        "skip" -> { conn, err = tls13_client.connect_socket_insecure_skip_verify(sock, "localhost") }
+        "mtls" -> { conn, err = tls13_client.connect_socket_mtls(sock, "localhost", os.getenv("CAFILE"), cert, certlen, scalar) }
+        "mtls_skip" -> { conn, err = tls13_client.connect_socket_mtls_insecure_skip_verify(sock, "localhost", cert, certlen, scalar) }
+        "mtls_nokey" -> { conn, err = tls13_client.connect_socket_mtls(sock, "localhost", os.getenv("CAFILE"), cert, certlen, null) }
+        _ -> { println("FAIL: unknown MODE ${mode}"); exit(1) }
+    }
+    if scalar != null { bytes.wipe_free(scalar) }
+    if err != "" {
+        println("REFUSED: ${err}")
+        if chain != null { tls13_server.free_cert_chain(chain, lens) }
+        exit(0)
+    }
+    serr = tls13_client.conn_send(conn, string.bytes("GET / HTTP/1.0\r\n\r\n"))
+    if serr != "" {
+        println("RECVERR: send: ${serr}")
+    } else {
+        buf, n, rerr = tls13_client.conn_recv(conn)
+        if rerr != "" {
+            println("RECVERR: ${rerr}")
+        } else if buf == null || n == 0 {
+            println("RECVERR: closed with no answer")
+        } else {
+            text = bytes.to_string(buf, n)
+            line = text
+            nl = string.index_of(text, "\r\n")
+            if nl >= 0 { line = string.substring(text, 0, nl) }
+            println("GOT ${line}")
+            bytes.free(buf)
+        }
+    }
+    tls13_client.close_conn(conn)
+    if chain != null { tls13_server.free_cert_chain(chain, lens) }
+}
