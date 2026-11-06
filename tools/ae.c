@@ -7794,6 +7794,11 @@ static int cmd_check(int argc, char** argv) {
      * Nothing runs, so the check need not go back. */
     find_and_chdir_to_aether_toml(&file);
     rebase_typed_lib_dirs();
+    /* [dependencies] and [patch] join the search path as for `ae build` and
+     * `ae run`: without them a project that built and ran clean failed its
+     * check with the dependency's import unresolved. After the walk-up, so
+     * the manifest is read from the project root. */
+    if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
 
     // Project mode
@@ -11381,6 +11386,13 @@ static int cmd_test(int argc, char** argv) {
             targets[ntargets++] = argv[i];
         }
     }
+    /* The tests compile against the project's [dependencies] and [patch], as
+     * `ae build` and `ae run` do. They used to be skipped here, so a project
+     * whose program built and ran against a dependency had every test that
+     * imported it fail to compile, the import unresolved. The manifest is
+     * found by walking up from the cwd and a [patch] path is taken relative
+     * to it, so this holds from any directory of the project. */
+    if (ae_resolve_dependencies() < 0) { free(targets); return 1; }
     load_defines_from_toml();
 
     // Collect test files. Grown as they are found rather than capped: a fixed

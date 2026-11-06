@@ -516,7 +516,11 @@ jobs:
     - name: Setup (Linux)
       if: matrix.os == 'ubuntu-22.04'
       run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc python3-pip
+        # libfyaml-dev: std.yaml's library. Without it the build compiled
+        # std.yaml's stubs and the release shipped them (0.889.0 did, here and
+        # on macOS): every yaml call returned "std.yaml unavailable". The
+        # build steps pass YAML=1, which now stops the build instead.
+        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc python3-pip libfyaml-dev
         # The websocket suites check our RFC 6455 implementation against an
         # independent one, and they fail rather than skip on a Linux CI runner
         # because a silent skip would hide the only thing they exist for.
@@ -531,7 +535,21 @@ jobs:
         # 3.10+. pip gets a current one.
         pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
+    # -- macOS ---
+    # libfyaml for std.yaml, as on Linux above. Linked dynamically, like the
+    # Homebrew openssl, nghttp2 and pcre2 this leg already builds against,
+    # and only into programs that import std.yaml: ae and aetherc leave it
+    # out of their own link (Makefile AETHER_TOOL_LDFLAGS), so the released
+    # toolchain starts on a Mac without it.
+    - name: Setup (macOS)
+      if: startsWith(matrix.os, 'macos')
+      run: brew list libfyaml >/dev/null 2>&1 || brew install libfyaml
+
     # -- Windows -- MinGW-w64 via MSYS2 ---
+    # std.yaml stays the stub build here, and says so (YAML=0 below): the
+    # Windows release links -static, and MSYS2's libfyaml has no static
+    # archive (Makefile #1896), so a yaml-enabled release would make every
+    # yaml program depend on a DLL the user does not have.
     - name: Setup (Windows)
       if: matrix.os == 'windows-latest'
       uses: msys2/setup-msys2@v2
@@ -561,15 +579,61 @@ jobs:
           bc
 
     # -- Build + test: Linux / macOS ---
+    # YAML=1: libfyaml is required, and a build that cannot find it stops
+    # here rather than packaging std.yaml's stubs. Every make below gets it,
+    # so no later step rebuilds without it.
     - name: Build (Unix)
       if: matrix.os != 'windows-latest'
+      env:
+        YAML: '1'
       run: |
         make compiler
         make ae
         make stdlib
 
+    # The build's own word is not enough: run a yaml program with the ae
+    # just built and fail the job if std.yaml is the stub. Written here, not
+    # read from the tree, so a tag older than this step has nothing to lack.
+    - name: Check std.yaml is built in (Unix)
+      if: matrix.os != 'windows-latest'
+      env:
+        YAML: '1'
+      run: |
+        dir="$RUNNER_TEMP/yaml-check"
+        mkdir -p "$dir"
+        cat > "$dir/yaml_check.ae" <<'AE'
+        import std.yaml
+        import std.string
+
+        main() {
+            doc, err = yaml.parse("name: widget\nports:\n  - 8080\n")
+            if string.length(err) > 0 {
+                println("std.yaml check: ${err}")
+                return
+            }
+            defer yaml.free(doc)
+            name, _nerr = yaml.get_scalar(yaml.mapping_lookup(yaml.root(doc), "name"))
+            println("std.yaml check: ok ${name}")
+        }
+        AE
+        out="$(./build/ae run "$dir/yaml_check.ae" 2>&1)" || true
+        echo "$out"
+        case "$out" in
+            *"std.yaml check: ok widget"*) echo "std.yaml is built in" ;;
+            *) echo "::error::std.yaml is not usable in this build (no libfyaml at build time?)"; exit 1 ;;
+        esac
+        # And the toolchain itself does not need the library to start.
+        if command -v otool >/dev/null 2>&1; then deps="$(otool -L build/ae build/aetherc)"; else deps="$(ldd build/ae build/aetherc 2>&1)"; fi
+        if echo "$deps" | grep -q fyaml; then
+            echo "$deps"
+            echo "::error::ae or aetherc links libfyaml; only programs importing std.yaml should"
+            exit 1
+        fi
+
     - name: Test (Unix)
       if: matrix.os != 'windows-latest'
+      env:
+        YAML: '1'
       run: |
         make test
         make test-ae
@@ -584,6 +648,8 @@ jobs:
     - name: Build (Windows)
       if: matrix.os == 'windows-latest'
       shell: msys2 {0}
+      env:
+        YAML: '0'
       run: |
         make compiler
         make ae
@@ -592,6 +658,8 @@ jobs:
     - name: Test (Windows)
       if: matrix.os == 'windows-latest'
       shell: msys2 {0}
+      env:
+        YAML: '0'
       # The hardcoded `C:\msys64\...` probe in aether_http.c::load_windows_ca_bundle
       # doesn't match the GitHub runner's MSYS2 path (it's installed under a
       # temp dir, not C:\msys64). Export SSL_CERT_FILE explicitly using

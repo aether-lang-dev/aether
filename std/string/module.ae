@@ -4,7 +4,8 @@
 // Building strings incrementally? Do NOT loop `d = "${d}${piece}"` /
 // `string.concat(d, piece)` — each iteration re-copies the whole prefix, so the
 // loop is O(n²) in total bytes (issue #1346). Use one of the linear-cost tools:
-//   - `string.join(seq, sep)` (below) when the pieces are already a *StringSeq.
+//   - `string.join(seq, sep)` (below) when the pieces are already a *StringSeq,
+//     `string.join_strings(xs, sep)` when they are a `string[]`.
 //   - `std.strbuilder` (`strbuilder.new` / `append` / `finish`) for a growing
 //     accumulator — amortized-O(1) append via a 2×-doubling buffer, the
 //     Java-StringBuilder / Go-strings.Builder shape.
@@ -27,7 +28,7 @@ exports(
     string_seq_is_empty, string_seq_length, string_seq_retain, string_seq_free,
     string_seq_from_array, string_seq_to_array,
     string_seq_reverse, string_seq_concat, string_seq_take, string_seq_drop,
-    string_seq_join, join,
+    string_seq_join, join, join_strings,
     string_seq_each, string_seq_map, string_seq_filter, string_seq_reduce,
     string_seq_zip_each,
     string_to_cstr, string_from_int, string_from_long, string_from_float,
@@ -489,6 +490,17 @@ copy(s: string) -> string {
 }
 
 join(s: *StringSeq, sep: string) -> string {
+    return string_seq_join(s, sep)
+}
+
+// Join a string[] with `sep` between elements, as `join` joins a *StringSeq:
+//   string.join_strings(names, ", ")      // names: string[]
+// `join` itself takes a *StringSeq, and a `[...]` literal given to it is
+// built as one; a string[] value is refused there at compile time and is
+// joined with this. Linear: the elements are consed once, then joined in one
+// exact-size allocation. Empty → "".
+join_strings(items: string[], sep: string) -> string {
+    s = seq_from_strings(items)
     return string_seq_join(s, sep)
 }
 
