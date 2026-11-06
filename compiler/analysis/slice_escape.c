@@ -532,7 +532,8 @@ static void report(Esc* esc, Frame* f, ASTNode* at, const char* message) {
     AetherError e = {
         at ? at->source_file : NULL, NULL, node_line(at), node_column(at), message,
         "copy the elements into storage that lives as long as the slice (a `make([]T, n)` "
-        "buffer, or a module-level array), or use the slice only while the function runs",
+        "buffer), declare a literal of constants as `const NAMES[] = [...]` (static storage, "
+        "in the function or at module level), or use the slice only while the function runs",
         NULL, AETHER_ERR_DANGLING_VIEW
     };
     if (!e.filename && f->owner) e.filename = f->owner->source_file;
