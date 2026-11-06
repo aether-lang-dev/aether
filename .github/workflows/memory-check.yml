@@ -54,9 +54,10 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install dependencies
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make valgrind
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make valgrind
+        scope: memory-check valgrind
 
     - name: Build with debug symbols
       run: |
@@ -229,9 +230,10 @@ jobs:
       uses: actions/checkout@v5
 
     - name: Install dependencies
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make valgrind
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make valgrind
+        scope: memory-check profiling
 
     - name: Build with memory tracking
       run: |

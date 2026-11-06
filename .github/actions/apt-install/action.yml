@@ -18,6 +18,13 @@ inputs:
       same packages at once would both save one key, and the second save
       fails.
     required: true
+  options:
+    description: >
+      Options for apt-get install, before the packages: for instance
+      --no-install-recommends, which keeps the ARM cross toolchain from
+      pulling 347 MB of C++ library it never links (#2325). Part of the key.
+    required: false
+    default: ''
 runs:
   using: composite
   steps:
@@ -27,11 +34,12 @@ runs:
       env:
         PACKAGES: ${{ inputs.packages }}
         SCOPE: ${{ inputs.scope }}
+        OPTIONS: ${{ inputs.options }}
       run: |
-        # The leg, the packages and the runner image: a new image
-        # (ImageVersion) starts from the last entry for the same leg and
-        # packages, and keeps what still matches.
-        set=$(printf '%s\n%s' "$SCOPE" "$(printf '%s' "$PACKAGES" | tr -s ' ' '\n' | sort | tr '\n' ' ')" |
+        # The leg, the options, the packages and the runner image: a new
+        # image (ImageVersion) starts from the last entry for the same leg
+        # and packages, and keeps what still matches.
+        set=$(printf '%s\n%s\n%s' "$SCOPE" "$OPTIONS" "$(printf '%s' "$PACKAGES" | tr -s ' ' '\n' | sort | tr '\n' ' ')" |
               sha256sum | cut -c1-16)
         echo "prefix=apt-${ImageOS:-unknown}-$set-" >> "$GITHUB_OUTPUT"
         echo "key=apt-${ImageOS:-unknown}-$set-${ImageVersion:-0}" >> "$GITHUB_OUTPUT"
@@ -46,6 +54,7 @@ runs:
       shell: bash
       env:
         PACKAGES: ${{ inputs.packages }}
+        OPTIONS: ${{ inputs.options }}
       run: |
         # Nothing here installs from the runner's Google Chrome source, whose
         # index is at times inconsistent and fails every apt-get update
@@ -56,8 +65,10 @@ runs:
           echo "$(ls "$HOME"/.cache/aether-apt/*.deb | wc -l) cached packages offered to apt"
         fi
         sudo apt-get update
+        # noninteractive: no package may stop on a debconf question (the
+        # Wine leg ran apt-get under sudo -E for its environment).
         # shellcheck disable=SC2086
-        sudo apt-get install -y $PACKAGES
+        sudo env DEBIAN_FRONTEND=noninteractive apt-get install -y $OPTIONS $PACKAGES
         mkdir -p "$HOME/.cache/aether-apt"
         cp /var/cache/apt/archives/*.deb "$HOME/.cache/aether-apt/" 2> /dev/null || true
     - name: Save the package cache (on a miss)
