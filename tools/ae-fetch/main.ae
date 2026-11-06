@@ -116,6 +116,7 @@ tree_hash(root: string) -> (string, string) {
 
 // The one directory an archive's entries sit under (`repo-v1.2.0/`).
 single_top(stage: string) -> string {
+    strip_appledouble(stage)
     names, err = fs.list_dir(stage)
     if err != "" {
         return ""
@@ -127,6 +128,31 @@ single_top(stage: string) -> string {
     }
     fs.dir_list_free(names)
     return top
+}
+
+// macOS tar writes an AppleDouble sidecar, `._<name>`, next to each file that
+// carries extended attributes (com.apple.provenance on anything a Mac wrote).
+// Extracted anywhere else it is a stray file, and at the archive's root it is
+// a second entry beside the one top directory. Remove those under `dir`.
+// A regular file only: a directory or a symlink named `._x` is real content.
+strip_appledouble(dir: string) {
+    names, err = fs.list_dir(dir)
+    if err != "" {
+        return
+    }
+    n = fs.dir_list_count(names)
+    i = 0
+    while i < n {
+        name = string.copy(fs.dir_list_get(names, i))
+        kind = fs.dir_list_kind(names, i)
+        if kind == fs.STAT_KIND_FILE && string.starts_with(name, "._") == 1 {
+            fs.delete("${dir}/${name}")
+        } else if kind == fs.STAT_KIND_DIR {
+            strip_appledouble("${dir}/${name}")
+        }
+        i = i + 1
+    }
+    fs.dir_list_free(names)
 }
 
 // The local path a file:// URL names, or "" for any other URL. A mirror

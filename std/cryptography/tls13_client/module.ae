@@ -2353,6 +2353,7 @@ struct SessionTicket {
     hash_len: int
     max_early_data: int // early_data ext's max_early_data_size (0 = no 0-RTT)
     cipher_suite: int // the suite of the connection that got it, which 0-RTT data must use (#3339)
+    issued_ms: long // os.now_monotonic_ms when the ticket arrived; 0 = unknown, resumed with an age of 0
 }
 
 // The application data conn_get_ticket keeps for conn_recv while it waits
@@ -2438,6 +2439,8 @@ fn ticket_from_nst(c: *ClientConn, body: byte[]) -> (ptr, int, string) {
     st.hash_len = hl
     st.max_early_data = np.max_early_data
     st.cipher_suite = c.suite
+    st.issued_ms = os.now_monotonic_ms()
+    if st.issued_ms == 0 { st.issued_ms = 1 }
     return st as ptr, 0, ""
 }
 
@@ -2537,10 +2540,18 @@ fn connect_resume_ed(host: string, port: int, x25519_priv: ptr, ticket: ptr, ear
     // The PSK ClientHello (+ early_data when sending 0-RTT), its binder
     // computed over the truncated ClientHello and patched in.
     pch = tls13_hs.PskCh { buf: null, buf_len: 0, binder_off: 0, truncated_len: 0 }
-    // obfuscated_ticket_age = 0 is accepted by openssl (it doesn't enforce age
-    // for its own tickets in the common config); real freshness needs the
-    // elapsed ms + age_add, which we don't track without a clock hook here.
-    tls13_hs.client_hello_psk(rnd, bytes.view(sid)[0..32], pub, host, bytes.view(st.ticket)[0..st.ticket_len], 0, hl, want_0rtt, &pch)
+    // obfuscated_ticket_age is the ticket's age in ms plus its ticket_age_add,
+    // modulo 2^32 (RFC 8446 4.2.11.1). A server that takes 0-RTT data checks
+    // it against its own clock and refuses the data when they differ by more
+    // than its window: OpenSSL 4 does, where 3.x let a bare 0 through. A
+    // ticket with no arrival time sends 0, as before.
+    obf_age = 0
+    if st.issued_ms != 0 {
+        aged = os.now_monotonic_ms() - st.issued_ms
+        if aged < 0 { aged = 0 }
+        obf_age = ((aged + ((st.age_add as long) & 0xFFFFFFFF)) & 0xFFFFFFFF) as int
+    }
+    tls13_hs.client_hello_psk(rnd, bytes.view(sid)[0..32], pub, host, bytes.view(st.ticket)[0..st.ticket_len], obf_age, hl, want_0rtt, &pch)
     ch = pch.buf
     ch_len = pch.buf_len
     early = tls13_ks.early_secret_psk(algo, bytes.view(psk)[0..hl])
