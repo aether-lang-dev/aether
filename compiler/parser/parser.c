@@ -3035,8 +3035,22 @@ static ASTNode* parse_postfix_expression(Parser* parser) {
                 advance_token(parser); // consume '('
                 Token* tyname = expect_token(parser, TOKEN_IDENTIFIER);
                 if (!tyname) { free((void*)func_name); free_ast_node(expr); return NULL; }
-                ASTNode* heap_new = create_ast_node(AST_HEAP_NEW, tyname->value,
+                /* The struct may be another module's, `heap.new(pkg.T)`,
+                 * as in `*pkg.T` and `pkg.T { ... }`: the node names `T`,
+                 * and its parsed type keeps `pkg` as the qualifier the merge
+                 * resolves (ss_rewrite_node) and check_qualified_types holds
+                 * to a module that has the type: `*pkg.T`, the type the
+                 * checker gives the node. */
+                Type* hn_type = parse_struct_type_name(parser, tyname);
+                if (!hn_type) { free((void*)func_name); free_ast_node(expr); return NULL; }
+                ASTNode* heap_new = create_ast_node(AST_HEAP_NEW, hn_type->struct_name,
                                                     hn_line, hn_col);
+                if (hn_type->qualifier) {
+                    heap_new->node_type = create_type(TYPE_PTR);
+                    heap_new->node_type->element_type = hn_type;
+                } else {
+                    free_type(hn_type);
+                }
                 if (!expect_token(parser, TOKEN_RIGHT_PAREN)) {
                     free((void*)func_name); free_ast_node(expr);
                     free_ast_node(heap_new); return NULL;
