@@ -1781,7 +1781,12 @@ every entry point returns the error `std.yaml unavailable: this build has
 no libfyaml`, rather than failing to link, so a program that imports it
 still builds, and says so at runtime. That is also why the example below is
 compile-checked rather than run: its output depends on how the toolchain
-was built.
+was built. The Linux and macOS releases are built with libfyaml (`YAML=1`,
+which fails the build without it) and link it into a program that imports
+`std.yaml`, and only that one, so building one needs the library installed
+(`apt install libfyaml-dev`, `brew install libfyaml`); `ae` and `aetherc`
+themselves do not need it. The Windows, FreeBSD and Android releases carry
+the stubs ([std/yaml/README.md](../std/yaml/README.md)).
 
 ```aether
 import std.yaml
