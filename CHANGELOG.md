@@ -14,6 +14,72 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.893.0]
+
+### Removed
+
+- **The language bridges are removed from `contrib/host`.** `contrib.host.duktape`
+  (and its alias `contrib.host.js`), `quickjs`, `perl`, `ruby`, `tcl`, `go`,
+  `tinygo`, `java`, `factor`, `racket` and `rhombus` now live in
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages),
+  where Lua and Python already went, each copied from this tree at
+  `2609ec841` (see its `PROVENANCE.md`) and held to stunt's catalogue by
+  name. Add it with `ae add github.com/aether-lang-dev/aether-guest-languages`
+  and then write `import tcl` in place of `import contrib.host.tcl` (and so
+  on for each language). They are deleted here with no transition period,
+  along with their tests (`host_duktape_bidirectional`,
+  `host_tcl_bidirectional`, `host_racket`, `host_rhombus`, `host_tinygo`,
+  `tests/sandbox/test_shared_map_all.sh`), the `04-interop/05-hosts`
+  examples, their `make contrib` modules, the language demos of
+  `make contrib-host-check`, `ae`'s Racket and TinyGo link special cases and
+  the `js`/`rhombus` import aliases, the `--with=<lang>` layers of
+  `tools/docker/aether-build` (it now refuses `--with=`) and the `WITH_*`
+  build args of `tools/docker/Dockerfile`. `contrib.host.stunt` (the test
+  double) and `contrib.host.aether` (Aether hosting Aether) stay, as does
+  `contrib.quickjs`, the engine the QuickJS bridge imports.
+
+### Fixed
+
+- **`ae test` and `ae check` resolve `[dependencies]` and `[patch]`.** Only
+  `ae build` and `ae run` put a project's dependencies on the module search
+  path, so a project that built and ran against a package (`ae add
+  github.com/aether-lang-dev/aether-guest-languages`, then `import lua`) had
+  every test importing it fail with "FAIL (compile)" and `ae check` refuse the
+  program, the import unresolved. Both commands now go through the same
+  resolver, from any directory of the project.
+
+- **A dlopen the sandbox preload refuses leaves a `dlerror()` message.** The
+  refusal of libc or the loader without a `native` grant returned NULL with
+  `errno = EACCES` and nothing for `dlerror()`, which dlopen's contract
+  promises: Tcl 8.6's `load` formats that message with `%s` and segfaulted,
+  and Ruby's Fiddle reported a NULL handle with no reason. The refusal now
+  sets a per-thread message naming the library and the sandbox
+  (`libc.so.6: refused by the sandbox: ...`), returned once and then cleared,
+  and a later loader error is never shadowed by it.
+
+- **`string.join` no longer takes a `string[]` it cannot read, and joins a
+  `[...]` literal.** An array decayed to any typed pointer, so
+  `string.join(xs, ",")` with `xs: string[]` type-checked against
+  `join(s: *StringSeq, sep)` and the C array was walked as cons cells: one
+  element printed, or a crash. An array now decays only to `ptr` or a pointer
+  to its element, and a `string[]` given to a `*StringSeq` parameter is E0200
+  naming the fix. A `[...]` literal of strings given to one is built as a
+  sequence, as it already was for a variable or a field of that type, so
+  `string.join(["a", "b", "c"], ",")` is `"a,b,c"`; and
+  `string.join_strings(xs, sep)` joins a `string[]`.
+
+- **The Linux and macOS releases ship a working `std.yaml`.** Their runners had
+  no libfyaml, `YAML=auto` built the stubs without a word, and the 0.889.0
+  archives answered every yaml call with "std.yaml unavailable: this build has
+  no libfyaml". The release jobs now install it (apt `libfyaml-dev`, brew
+  `libfyaml`), build with `YAML=1`, which now stops `make` when pkg-config
+  cannot find libfyaml instead of acting as `auto`, and run a yaml program
+  before packaging. `ae` and `aetherc` no longer link libfyaml themselves, so a
+  toolchain built with it starts without it; a program importing `std.yaml`
+  links it, and needs it installed where it is built. Windows, FreeBSD and
+  Android releases keep the stubs (no static MSYS2 libfyaml; none in the cross
+  sysroots).
+
 ## [0.892.0]
 
 ### Changed
