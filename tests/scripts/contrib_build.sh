@@ -4,22 +4,24 @@
 # Two modes:
 #
 # 1. Default (MODULES unset) — best-effort: probe every contrib module
-#    (sqlite + host bridges). For each available dep, compile + archive.
+#    (sqlite, avcodec and the host bridges left here, stunt and aether). For each available dep, compile + archive.
 #    Skip + tally any whose dev libs aren't installed. Same shape as
 #    historical behaviour; convenient for dev boxes.
 #
 # 2. MODULES=<list> (comma-separated) — explicit, fail-hard: build ONLY
 #    the named modules; any requested module that can't compile is a
-#    hard failure (exit 1), not a silent skip. This is the mode the
-#    `aether-build --with=<lang>` path uses, where the caller has already
-#    `apt install`ed the matching -dev kit and expects the bridge to
-#    build. Silent SKIP in that path is the v0.209.0 footgun
-#    (ctr_notes.md Bug 6) we're closing here.
+#    hard failure (exit 1), not a silent skip: a caller that asked for a
+#    module expects it to build. Silent SKIP there was the v0.209.0
+#    footgun (ctr_notes.md Bug 6).
 #
 # Examples:
-#   MODULES=tcl                       # build only host_tcl; fail if it can't
-#   MODULES=perl,tcl                  # build perl AND tcl; fail if either can't
+#   MODULES=sqlite                    # build only sqlite; fail if it can't
+#   MODULES=sqlite,stunt              # build sqlite AND host_stunt
 #   (unset)                           # build-all, tolerate skips
+#
+# The language bridges (Lua, Python, Tcl, Perl, Ruby, Duktape, QuickJS, Go,
+# TinyGo, Java, Factor, Racket, Rhombus) moved to aether-guest-languages and
+# are built there.
 #
 # Writes build/contrib/MANIFEST listing one line per built archive:
 #     <module>\t<archive_path>[\t<installed name>]
@@ -215,19 +217,8 @@ build_vendored_sqlite() {
     return 0
 }
 
-# probe_<lang> echoes dev-include flags on stdout when the dep is
-# available. Returns 0 if available, 1 if not. (Mirror of the probe
-# helpers in contrib_host_demos.sh — kept in sync, not sourced, so
-# this script stays runnable even if the demos script is renamed.)
-#
-# Each probe queries the distro's REAL -dev kit via pkg-config or a
-# language-specific config tool (ruby / perl -MExtUtils::Embed).
-# The earlier vendored-fallback path
-# (`/opt/aether/include/<lang>/` populated from
-# hosted-language-headers) was removed when ctr_notes.md Bug 6 proved
-# pyconfig.h / perl.h are distro-generated multiarch
-# dispatchers that can't be portably vendored. The aether-build image
-# now apt-installs the matching -dev kit per `--with=<lang>` layer.
+# probe_<module> echoes dev-include flags on stdout when the dep is
+# available. Returns 0 if available, 1 if not.
 
 probe_sqlite() {
     # The vendored amalgamation's header, so the veneer compiles against the
@@ -275,142 +266,6 @@ probe_avcodec() {
     return 1
 }
 
-probe_ruby() {
-    # pkg-config first, when the distro ships a .pc.
-    for v in ruby-3.4 ruby-3.3 ruby-3.2 ruby-3.1 ruby-3.0 ruby; do
-        if pkg-config --exists "$v" 2>/dev/null; then
-            pkg-config --cflags-only-I "$v"
-            return 0
-        fi
-    done
-    # Fall back to asking RUBY ITSELF. Several distributions (CachyOS/Arch
-    # among them) install the headers with NO ruby.pc at all, so every
-    # pkg-config branch above fails and the bridge silently never builds —
-    # observed on the nightly box, where ruby 3.4.10 was installed and
-    # `contrib-host-check` still reported "libaether_host_ruby.a
-    # unavailable". A hardcoded version list also ages badly: this one
-    # stopped at 3.2 while the box had 3.4.
-    #
-    # rubyhdrdir + rubyarchhdrdir are what ruby's own extension builds use,
-    # so they are correct wherever ruby runs. Same principle as the soname
-    # probes in the [3/3] spec phase: ask the runtime, do not guess at the
-    # packaging.
-    if command -v ruby >/dev/null 2>&1; then
-        rb_inc="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["rubyhdrdir"]' 2>/dev/null)"
-        rb_arch="$(ruby -rrbconfig -e 'print RbConfig::CONFIG["rubyarchhdrdir"]' 2>/dev/null)"
-        if [ -n "$rb_inc" ] && [ -f "$rb_inc/ruby.h" ]; then
-            printf -- '-I%s' "$rb_inc"
-            [ -n "$rb_arch" ] && printf -- ' -I%s' "$rb_arch"
-            return 0
-        fi
-    fi
-    return 1
-}
-
-probe_perl() {
-    if command -v perl >/dev/null 2>&1; then
-        perl -MExtUtils::Embed -e ccopts 2>/dev/null && return 0
-    fi
-    return 1
-}
-
-probe_tcl() {
-    if pkg-config --exists tcl 2>/dev/null; then
-        pkg-config --cflags-only-I tcl
-        return 0
-    fi
-    sdk=$(xcrun --show-sdk-path 2>/dev/null) || true
-    if [ -n "${sdk:-}" ] && [ -f "$sdk/usr/include/tcl.h" ]; then
-        echo "-I$sdk/usr/include"
-        return 0
-    fi
-    return 1
-}
-
-probe_duktape() {
-    if pkg-config --exists duktape 2>/dev/null; then
-        pkg-config --cflags-only-I duktape
-        return 0
-    fi
-    # Fallback: header in default include path (Debian's duktape-dev
-    # installs duktape.h at /usr/include/duktape.h without a .pc file).
-    if printf '#include <duktape.h>\nint main(){return 0;}\n' | \
-        $CC -E -xc - >/dev/null 2>&1; then
-        echo ""
-        return 0
-    fi
-    return 1
-}
-
-probe_tinygo() {
-    # The bridge .c is pure dlopen via std.dl (aether_dl_*) — it does NOT
-    # need the Go toolchain at COMPILE time. libffi is the only
-    # build-time dep, and even that's conditional on AETHER_HAS_LIBFFI
-    # for the tinygo.call_dynamic escape hatch. The `go` / `tinygo`
-    # binaries are only invoked at USER-build time (aeb's tinygo_lib
-    # builder shells `go build -buildmode=c-shared` — or `tinygo build
-    # -buildmode=c-shared -target=wasm` for wasm — on the .go source).
-    #
-    # Probe shape: if libffi-dev is present, opt in to the AETHER_HAS_LIBFFI
-    # path and emit its cflags; otherwise the bridge still builds without
-    # the escape hatch.
-    if pkg-config --exists libffi 2>/dev/null; then
-        echo "-DAETHER_HAS_LIBFFI $(pkg-config --cflags libffi 2>/dev/null)"
-        return 0
-    fi
-    # No libffi: the bridge still compiles (the call_dynamic block is
-    # behind #ifdef AETHER_HAS_LIBFFI).
-    echo ""
-    return 0
-}
-
-probe_quickjs() {
-    if [ -f "$ROOT/contrib/quickjs/amalgamation/quickjs-amalgam.c" ]; then
-        echo "-I$ROOT/contrib/quickjs"
-        return 0
-    fi
-    return 1
-}
-
-probe_factor() {
-    # The bridge .c loads libfactor purely via dlopen (mirrors host/tcl
-    # after its dlopen rewrite) — it needs NO Factor dev
-    # lib at COMPILE time. The aether-lang-dev/factor-language fork's
-    # libfactor + bootstrapped factor.image are only required at RUNTIME
-    # (the host_factor integration test gates on AETHER_FACTOR_SONAME /
-    # AETHER_FACTOR_IMAGE and skips when unset). So the archive always
-    # builds; downstream just won't be able to *run* Factor code without
-    # the fork present.
-    echo ""
-    return 0
-}
-
-probe_racket() {
-    # Unlike host/factor (whose bridge needs NO headers — the fork's
-    # embedding entry points are plain dlsym'd C-string functions), the
-    # Racket CS value model is macro-based: chezscheme.h's Snil / Scons /
-    # Smake_bytevector / Sbytevector_data are tagged-pointer macros, not
-    # linkable functions, so the bridge's real (-DAETHER_HAS_RACKET) path
-    # needs the embedding headers at COMPILE time. Those headers
-    # (chezscheme.h, racketcsboot.h, api.h) live in a *built* Racket CS
-    # tree, not in any apt package — so this probes for an explicit
-    # include dir and SKIPs (no archive) when absent, rather than building
-    # a bare stub that can never work.
-    #
-    # $AETHER_RACKET_INCLUDE = the built Racket's include/ dir, holding
-    # chezscheme.h + racketcs.h + racketcsboot.h. The bridge STATIC-links
-    # libracketcs.a ($AETHER_RACKET_LIB) into the importer and boots from the
-    # images in $AETHER_RACKET_BOOT_DIR at runtime (the host_racket / _rhombus
-    # integration tests gate on those and skip when unset). Here we only need
-    # the headers to compile the bridge archive; SKIP (no archive) without them.
-    local inc="${AETHER_RACKET_INCLUDE:-}"
-    if [ -n "$inc" ] && [ -f "$inc/chezscheme.h" ] && [ -f "$inc/racketcs.h" ]; then
-        echo "-I$inc"
-        return 0
-    fi
-    return 1
-}
-
 probe_stunt() {
     # stunt, the test double (contrib/host/stunt): the bridge dlopens
     # libstunt at runtime and needs only the in-tree runtime headers + libc.
@@ -443,21 +298,11 @@ cross_class() {   # <module-name> -> echoes the class token
         # it, a libsqlite3 staged in CROSSBUILD_SYSROOT does.
         sqlite)                if [ -n "$SQLITE_VENDORED" ]; then echo "vendored"
                                else echo "tier3:sqlite3.h:sqlite3"; fi ;;
-        # Header-only dlopen bridges: they load the runtime lib via dlopen at
-        # RUNTIME ("dlopen, not -l<x>") but #include the language headers at
-        # COMPILE time. Contrib archives are .o-only (no link), so the sysroot
-        # needs only the headers — the `tier3:<hdr>:` form (empty lib) checks
-        # for the header alone. aether-crossbuild recipes/duktape.sh stages
-        # it. Cross-buildable; the target dlopen's its own libduktape.
-        host_duktape)          echo "tier3:duktape.h:" ;;
         # stunt's bridge has no dependency at all: it compiles like core.
         host_stunt)            echo "tier1" ;;
-        # host bridges whose headers are arch/config-GENERATED multiarch
-        # dispatchers (ruby/config.h / perl's config.h) that can't
-        # be portably cross-staged — ctr_notes.md Bug 6. Not cross-buildable here.
-        host_perl|host_ruby|host_tcl|\
-        host_tinygo|host_factor|host_racket|host_aether)
-                               echo "nocross" ;;
+        # The Aether host's fork+exec body is Linux/macOS only; not
+        # cross-built here.
+        host_aether)           echo "nocross" ;;
         *)                     echo "nocross" ;;
     esac
 }
@@ -563,15 +408,7 @@ build_module() {
 CATALOGUE=(
     "sqlite|sqlite       contrib/sqlite/aether_sqlite.c           AETHER_HAS_SQLITE  probe_sqlite"
     "avcodec|avcodec     contrib/avcodec/aether_avcodec.c         AETHER_HAS_AVCODEC probe_avcodec"
-    "perl|host_perl      contrib/host/perl/aether_host_perl.c     AETHER_HAS_PERL    probe_perl"
-    "ruby|host_ruby      contrib/host/ruby/aether_host_ruby.c     AETHER_HAS_RUBY    probe_ruby"
-    "duktape|host_duktape  contrib/host/duktape/aether_host_duktape.c  AETHER_HAS_DUKTAPE  probe_duktape"
-    "tcl|host_tcl        contrib/host/tcl/aether_host_tcl.c       AETHER_HAS_TCL     probe_tcl"
-    "tinygo|host_tinygo  contrib/host/tinygo/aether_host_tinygo.c AETHER_HAS_TINYGO  probe_tinygo"
-    "factor|host_factor  contrib/host/factor/aether_host_factor.c AETHER_HAS_FACTOR  probe_factor"
-    "racket|host_racket  contrib/host/racket/aether_host_racket.c AETHER_HAS_RACKET  probe_racket"
     "aether|host_aether  contrib/host/aether/aether_host_aether.c AETHER_HAS_AETHER_HOST probe_aether"
-    "quickjs|host_quickjs contrib/host/quickjs/aether_host_quickjs.c AETHER_HAS_QUICKJS probe_quickjs"
     "stunt|host_stunt    contrib/host/stunt/aether_host_stunt.c   AETHER_HAS_STUNT   probe_stunt"
 )
 
@@ -594,8 +431,7 @@ catalogue_lookup() {
 MODULES="${MODULES:-}"
 if [ -n "$MODULES" ]; then
     MODE="explicit"
-    # Comma -> space, dedupe, sort. The aether-build --with= path expects
-    # build order to be deterministic so layer caching stays effective.
+    # Comma -> space, dedupe, sort, so the build order is deterministic.
     REQUESTED=$(echo "$MODULES" | tr ',' '\n' | sort -u | xargs)
 else
     MODE="default"

@@ -206,7 +206,7 @@ const char* yaml_emit_document_raw(void* doc) {
 static void yaml_set_unavailable(void) {
     snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf),
              "std.yaml unavailable: this build has no libfyaml "
-             "(install libfyaml + rebuild, or set YAML=1)");
+             "(install libfyaml and rebuild Aether; YAML=1 makes the build require it)");
     g_yaml_err_set = 1;
 }
 

@@ -663,6 +663,14 @@ else ifneq ($(PCRE2),0)
 endif
 
 # YAML auto-detection: enables std.yaml via libfyaml.
+#   YAML=auto (default)  libfyaml if pkg-config finds it, else the stubs that
+#                        report "std.yaml unavailable" at run time;
+#   YAML=1               libfyaml REQUIRED: the build stops here without it.
+#                        The release builds pass this, so a release can no
+#                        longer ship the stubs unnoticed (0.889.0 did, on
+#                        macOS and Linux alike: auto found nothing on a
+#                        runner without libfyaml and said nothing);
+#   YAML=0               the stubs, deliberately.
 YAML ?= auto
 ifeq ($(YAML),auto)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
@@ -670,6 +678,9 @@ ifeq ($(YAML),auto)
 else ifeq ($(YAML),1)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
   YAML_LDFLAGS := $(shell pkg-config --libs libfyaml 2>/dev/null)
+  ifeq ($(YAML_LDFLAGS),)
+    $(error YAML=1 but pkg-config finds no libfyaml: install it (apt libfyaml-dev, brew libfyaml, pkg libfyaml, MSYS2 mingw-w64-x86_64-libfyaml) or build with YAML=auto / YAML=0)
+  endif
 else
   YAML_CFLAGS :=
   YAML_LDFLAGS :=
@@ -802,6 +813,15 @@ AETHER_REQUIRED_LDFLAGS = $(FREEBSD_LDFLAGS)
 else
 AETHER_REQUIRED_LDFLAGS = -lm $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS) $(NGHTTP2_LDFLAGS) $(PCRE2_LDFLAGS) $(YAML_LDFLAGS) $(CASPER_LDFLAGS) $(AUDIO_LDFLAGS) $(BROTLI_LDFLAGS) $(ZSTD_LDFLAGS)
 endif
+
+# The toolchain's own binaries (aetherc, ae, aether-lsp, apkg) link without
+# libfyaml. None of them parses YAML: aetherc leaves std.yaml's object out of
+# its link (below), and the others take std from libaether.a, which pulls it
+# in only for a caller. Linked with it, a release built against libfyaml
+# could not even start on a machine without the library. A program that
+# imports std.yaml links it, through AETHER_YAML_LIBS, and only that program.
+AETHER_TOOL_LDFLAGS = $(filter-out $(YAML_LDFLAGS),$(AETHER_REQUIRED_LDFLAGS))
+AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o,$(STD_OBJS))
 
 # Tunable link flags: sanitizers and anything else a caller passes. Empty by
 # default, so `make ... LDFLAGS="-fsanitize=address"` adds to the required set
@@ -1236,7 +1256,7 @@ AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(AETHERC_STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds): the same sources and
@@ -1252,7 +1272,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC) std/yaml/aether_yaml.c,$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1961,14 +1981,14 @@ lsp: compiler stdlib
 	@echo "==================================="
 	@echo "Building Aether LSP Server ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o $(BUILD_DIR)/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o $(BUILD_DIR)/aether-lsp$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 	@echo "✓ LSP Server built successfully: $(BUILD_DIR)/aether-lsp$(EXE_EXT)"
 
 apkg:
 	@echo "==================================="
 	@echo "Building Aether Package Manager ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/apkg$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_TOOL_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/apkg$(EXE_EXT)
 	@echo "✓ Package Manager built successfully: $(BUILD_DIR)/apkg$(EXE_EXT)"
 
 # Per-object compile for the tools driver (#1221). Static pattern rule so it
@@ -1986,7 +2006,7 @@ $(BUILD_DIR)/ae$(EXE_EXT): $(BUILD_DIR)/aetherc$(EXE_EXT) $(TOOLS_OBJS) $(MANIFE
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
+	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/ae$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
 	@echo "✓ Built successfully: $(BUILD_DIR)/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
@@ -2426,8 +2446,8 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Iinclude -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
-		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
-		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+		$(COMPILER_SRC) $(filter-out std/yaml/aether_yaml.c,$(STD_SRC)) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
+		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
 	@strip $(BUILD_DIR)/aetherc-release$(EXE_EXT)
@@ -2683,7 +2703,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 # contrib/ is a source-tree organising prefix; downstream consumes
 # individual artifacts, not a bundled lib. Each module's bridge .c
 # compiles to its own .a, named after the module — sqlite →
-# libaether_sqlite.a, host/tcl → libaether_host_tcl.a, etc.
+# libaether_sqlite.a, host/stunt → libaether_host_stunt.a, etc.
 #
 # Probe-and-build by design: machines without sqlite3-dev get no
 # libaether_sqlite.a. The same module.ae still installs (so
@@ -2693,14 +2713,14 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #
 # Modules covered (v1):
 #   - sqlite                    (-lsqlite3)
-#   - host/{perl,ruby,duktape,tcl,tinygo}
-#   - host/factor               (dlopen libfactor; archive builds bare,
-#                                runtime needs the factor-language fork)
+#   - avcodec                   (FFmpeg's decode libraries)
+#   - host/stunt                (the test double; dlopens libstunt)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
 #                                libc + in-tree sandbox runtime only)
-# Out of scope for v1: host/{java,go} (separate-process or JNI-style
-# bridges, different build shape — javac/jar and cgo c-archive don't fit
-# the cc→ar pipeline). The widget toolkit
+# The language bridges (host/{lua,python,tcl,perl,ruby,duktape,js,quickjs,
+# go,tinygo,java,factor,racket,rhombus}) moved to
+# https://github.com/aether-lang-dev/aether-guest-languages, which builds
+# them itself (`ae add` it, then `import <lang>`). The widget toolkit
 # (formerly contrib/aether_ui) spun out to
 # https://github.com/aether-lang-dev/aether-ui and is no longer in this repo.
 # The Servirtium climate-API record/replay harness (formerly
@@ -2742,14 +2762,10 @@ install-contrib: contrib
 			printf "  lib/aether/%s\n" "$$inst"; \
 		done
 	@# Mirror the contrib source tree for module.ae + headers.
-	@# Trim noise: tests, benchmarks, example .ae, build scripts,
-	@# CI scripts, and the modules we don't ship in v1
-	@# (host/{java,go} — see contrib: target comment).
-	@# host/{tinygo,factor,aether} and tinyweb ARE shipped.
+	@# Trim noise: tests, benchmarks, example .ae, build scripts and
+	@# CI scripts. host/{stunt,aether} and tinyweb ARE shipped.
 	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
-	@rm -rf $(PREFIX)/share/aether/contrib/host/java
-	@rm -rf $(PREFIX)/share/aether/contrib/host/go
 	@find $(PREFIX)/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
@@ -3321,14 +3337,12 @@ test-asan-ae:
 #     "skipped" status, never a failure.
 # -----------------------------------------------------------------
 
-# The in-process host bridges, syntax-checked (stub mode) by
-# contrib-host-check. `js` builds as duktape; `factor`, `aether` and `racket`
-# are dlopen / fork+exec bridges that still compile bare against libc + the
-# in-tree sandbox runtime, so they belong in the syntax gate too. `rhombus`
-# has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
-# the Racket VM), so it is not listed here (the check SKIPs missing-bridge
-# dirs). `stunt` is the test double (contrib/host/stunt/README.md).
-CONTRIB_HOST_LANGS = js perl ruby tcl go tinygo factor aether racket quickjs stunt
+# The host bridges left in this tree, syntax-checked by contrib-host-check:
+# `aether` (Aether hosting Aether, fork+exec) and `stunt`, the test double
+# (contrib/host/stunt/README.md). Both compile against libc + the in-tree
+# sandbox runtime alone. The language bridges moved to
+# https://github.com/aether-lang-dev/aether-guest-languages.
+CONTRIB_HOST_LANGS = aether stunt
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.
@@ -3571,7 +3585,7 @@ contrib-host-check: compiler ae stdlib stunt
 	@echo "  contrib/host bridge check"
 	@echo "==================================="
 	@echo ""
-	@echo "[1/2] Syntax check — every bridge in stub mode..."
+	@echo "[1/2] Syntax check — every bridge..."
 	@pass=0; fail=0; \
 	for lang in $(CONTRIB_HOST_LANGS); do \
 		src="contrib/host/$$lang/aether_host_$$lang.c"; \
@@ -3589,25 +3603,16 @@ contrib-host-check: compiler ae stdlib stunt
 			fail=$$((fail + 1)); \
 		fi; \
 	done; \
-	echo "  $$pass passed, $$fail failed (stub mode)"; \
+	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[2/3] Link + run — demos for bridges with dev libs available..."
-	@bash tests/scripts/contrib_host_demos.sh || exit 1
-	@echo ""
-	@echo "[3/3] Co-located bridge specs (contrib/host/*/test_*.ae)..."
+	@echo "[2/2] Co-located bridge specs (contrib/host/*/test_*.ae)..."
 	@rc=0; found=0; \
 	for t in $$(find contrib/host -maxdepth 2 -name 'test_*.ae' 2>/dev/null | sort); do \
 	  found=$$((found + 1)); \
 	  lang=$$(basename $$(dirname "$$t")); \
 	  echo "  --- $$lang ---"; \
 	  case "$$lang" in \
-	    ruby) command -v ruby >/dev/null 2>&1 && { \
-	      AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
-	      export AETHER_RUBY_SONAME; }; ;; \
-	    perl) command -v perl >/dev/null 2>&1 && { \
-	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
-	      export AETHER_PERL_SONAME; }; ;; \
 	    stunt) AETHER_STUNT_LIB="$(CURDIR)/$(STUNT_LIB)"; export AETHER_STUNT_LIB; ;; \
 	  esac; \
 	  if [ ! -f "$(BUILD_DIR)/contrib/libaether_host_$$lang.a" ]; then \

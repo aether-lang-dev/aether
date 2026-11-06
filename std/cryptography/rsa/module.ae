@@ -19,7 +19,9 @@
 //   raw_encrypt (m^e mod n) / raw_decrypt (c^d mod n)
 //   PKCS#1 v1.5 encrypt (type 2) / decrypt, sign (type 1) / verify over a
 //   caller-supplied DigestInfo blob (any std.cryptography digest composes)
-//   OAEP (SHA-256, empty label) encrypt / decrypt, PSS (SHA-256) sign / verify
+//   OAEP (SHA-256, empty label) encrypt / decrypt, and with another hash
+//   (SHA-1, SHA-384, SHA-512; MGF1 with the same hash) through
+//   encrypt_oaep_hash / decrypt_oaep_hash, PSS (SHA-256) sign / verify
 //
 // The private-key operation (raw_decrypt, and through it decrypt_pkcs1,
 // decrypt_oaep, sign_pkcs1, sign_pss) is constant time: Montgomery
@@ -44,6 +46,7 @@ import std.bignum
 import std.bytes
 import std.mem
 import std.cryptography
+import std.cryptography.sha1
 import std.cryptography.sha2
 import std.cryptography.asn1
 import std.cryptography.ct
@@ -54,7 +57,7 @@ exports(
     raw_encrypt, raw_decrypt,
     encrypt_pkcs1, decrypt_pkcs1,
     sign_pkcs1, verify_pkcs1,
-    encrypt_oaep, decrypt_oaep,
+    encrypt_oaep, decrypt_oaep, encrypt_oaep_hash, decrypt_oaep_hash,
     sign_pss, verify_pss, sign_pss_hash, verify_pss_hash
 )
 
@@ -874,21 +877,42 @@ xor_into(dst: ptr, src: byte[]) {
     }
 }
 
-// ---- RSAES-OAEP (RFC 8017 §7.1), SHA-256, empty label ----
-// Encrypt `msg` (mlen bytes). `seed` must be exactly hLen (32) random bytes
+// ---- RSAES-OAEP (RFC 8017 §7.1), empty label ----
+// Encrypt `msg` (mlen bytes) with SHA-256 and MGF1-SHA256: encrypt_oaep_hash
+// with "sha256". `seed` must be exactly hLen (32) random bytes
 // (caller-supplied for determinism/testability). Returns k-byte ciphertext,
 // or null if the message is too long (mlen > k - 2*hLen - 2).
 encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
     if msg.len < 0 { panic("rsa.encrypt_oaep: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    return encrypt_oaep_hash(k, "sha256", msg, seed)
+}
+
+// The OAEP hashes: "sha1" (OpenSSL's RSA_PKCS1_OAEP_PADDING, what MySQL's
+// caching_sha2_password and sha256_password exchanges and most older
+// protocols use), "sha256", "sha384", "sha512". MGF1 uses the same hash.
+fn oaep_hash_ok(algo: string) -> int {
+    if algo == "sha1" || algo == "sha256" || algo == "sha384" || algo == "sha512" { return 1 }
+    return 0
+}
+
+// Encrypt `msg` with RSAES-OAEP over `algo` ("sha1", "sha256", "sha384" or
+// "sha512"; MGF1 with the same hash), empty label. `seed` must be exactly
+// hLen random bytes (20 for SHA-1, 32, 48, 64), caller-supplied as for
+// encrypt_oaep. Returns the k-byte ciphertext, or null for a message too
+// long (mlen > k - 2*hLen - 2), an unknown hash, or a seed shorter than hLen.
+encrypt_oaep_hash(k: ptr, algo: string, msg: byte[], seed: ptr) -> ptr {
+    if msg.len < 0 { panic("rsa.encrypt_oaep_hash: the `msg` slice has no bound (.len -1); give it one, as `(p as byte[])[0..n]`") }
+    if oaep_hash_ok(algo) != 1 { return null }
     int mlen = msg.len
     klen = modulus_bytes(k)
-    hlen = oaep_hlen()
+    hlen = pss_hlen(algo)
+    if seed == null || bytes.length(seed) < hlen { return null }
     if mlen > klen - 2 * hlen - 2 {
         return null
     }
-    // lHash = SHA256("")  (empty label)
+    // lHash = Hash("")  (empty label)
     empty = bytes.new(0)
-    lhash = sha256b(bytes.view(empty)[0..0])
+    lhash = hashb(algo, bytes.view(empty)[0..0])
     bytes.wipe_free(empty)
 
     // DB = lHash || PS(0x00..) || 0x01 || M   (length k - hLen - 1)
@@ -903,12 +927,12 @@ encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
     bytes.wipe_free(lhash)
 
     // dbMask = MGF1(seed, dblen); maskedDB = DB ^ dbMask
-    dbmask = mgf1(bytes.view(seed)[0..hlen], dblen)
+    dbmask = mgf1_hash(algo, bytes.view(seed)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
     bytes.wipe_free(dbmask)
 
     // seedMask = MGF1(maskedDB, hLen); maskedSeed = seed ^ seedMask
-    seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
+    seedmask = mgf1_hash(algo, bytes.view(db)[0..dblen], hlen)
     mseed = bytes.new(hlen)
     bytes.copy_from_bytes(mseed, 0, seed, 0, hlen)
     xor_into(mseed, bytes.view(seedmask)[0..hlen])
@@ -926,14 +950,25 @@ encrypt_oaep(k: ptr, msg: byte[], seed: ptr) -> ptr {
     return ct
 }
 
-// Decrypt OAEP ciphertext (k bytes). Returns (plaintext, "") or
-// (null, error) on any padding/format failure. Every check reads all of the
-// block and folds into one mask (Manger's attack needs only to tell the
-// leading-byte check from the others); the verdict and the message length
-// go through ct.declassify.
-decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
+// Decrypt OAEP ciphertext (k bytes), SHA-256 and MGF1-SHA256:
+// decrypt_oaep_hash with "sha256". Returns (plaintext, "") or (null, error)
+// on any padding/format failure.
+decrypt_oaep(k: ptr, ct_bytes: ptr) -> (ptr, string) {
+    return decrypt_oaep_hash(k, "sha256", ct_bytes)
+}
+
+// Decrypt OAEP ciphertext (k bytes) over `algo` ("sha1", "sha256",
+// "sha384" or "sha512"; MGF1 with the same hash), empty label. Returns
+// (plaintext, "") or (null, error) on any padding/format failure. Every
+// check reads all of the block and folds into one mask (Manger's attack
+// needs only to tell the leading-byte check from the others); the verdict
+// and the message length go through ct.declassify.
+decrypt_oaep_hash(k: ptr, algo: string, ct_bytes: ptr) -> (ptr, string) {
+    if oaep_hash_ok(algo) != 1 {
+        return null, "unsupported OAEP hash '${algo}' (sha1, sha256, sha384, sha512)"
+    }
     klen = modulus_bytes(k)
-    hlen = oaep_hlen()
+    hlen = pss_hlen(algo)
     if bytes.length(ct_bytes) != klen {
         return null, "ciphertext length mismatch"
     }
@@ -949,7 +984,7 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
     }
 
     empty = bytes.new(0)
-    lhash = sha256b(bytes.view(empty)[0..0])
+    lhash = hashb(algo, bytes.view(empty)[0..0])
     bytes.wipe_free(empty)
 
     int good = ct.eq(bytes.get(em, 0) & 0xFF, 0) // leading byte must be 0x00
@@ -962,11 +997,11 @@ decrypt_oaep(k: ptr, ct_bytes: ptr) -> {
     bytes.copy_from_bytes(db, 0, em, 1 + hlen, dblen)
 
     // seed = maskedSeed ^ MGF1(maskedDB, hLen)
-    seedmask = mgf1(bytes.view(db)[0..dblen], hlen)
+    seedmask = mgf1_hash(algo, bytes.view(db)[0..dblen], hlen)
     xor_into(mseed, bytes.view(seedmask)[0..hlen])
     bytes.wipe_free(seedmask)
     // DB = maskedDB ^ MGF1(seed, dblen)
-    dbmask = mgf1(bytes.view(mseed)[0..hlen], dblen)
+    dbmask = mgf1_hash(algo, bytes.view(mseed)[0..hlen], dblen)
     xor_into(db, bytes.view(dbmask)[0..dblen])
     wipe_free(dbmask)
 
@@ -1024,8 +1059,10 @@ verify_pss(k: ptr, mhash: ptr, sig: byte[], slen: int) -> int {
     return verify_pss_hash(k, "sha256", mhash, sig, slen)
 }
 
-// The digest length of `algo` ("sha256", "sha384", "sha512"; 32 otherwise).
+// The digest length of `algo` ("sha1", "sha256", "sha384", "sha512"; 32
+// otherwise).
 fn pss_hlen(algo: string) -> int {
+    if algo == "sha1" { return 20 }
     if algo == "sha384" { return 48 }
     if algo == "sha512" { return 64 }
     return 32
@@ -1033,6 +1070,7 @@ fn pss_hlen(algo: string) -> int {
 
 // The `algo` digest of `data` (fresh bytes), or null.
 fn hashb(algo: string, data: byte[]) -> ptr {
+    if algo == "sha1" { return sha1.bytes(data) }
     ctx, err = sha2.new(algo)
     if err != "" { return null }
     sha2.update(ctx, data)

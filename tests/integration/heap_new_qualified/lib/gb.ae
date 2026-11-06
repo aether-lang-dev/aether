@@ -1,0 +1,14 @@
+exports(Shape, perimeter)
+
+struct Shape {
+    side: int
+    sides: int
+    name: string
+}
+
+// Not exported: heap.new(gb.Scratch) is refused.
+struct Scratch {
+    n: int
+}
+
+perimeter(s: *Shape) -> int { return s.side * s.sides }

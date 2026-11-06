@@ -5,14 +5,14 @@
 // The implementations are in std/net/aether_net.c.
 
 exports(
-    tcp_connect_raw, tcp_connect_buffered_raw, tcp_send_raw,
+    tcp_connect_raw, tcp_connect_buffered_raw, tcp_connect_timeout_raw, tcp_send_raw,
     tcp_receive_raw, tcp_receive_n_raw, tcp_close,
     tcp_listen_raw, tcp_listen_on_raw, tcp_accept_raw, tcp_server_close,
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
     tcp_available_raw, tcp_connect_unix_raw, tcp_listen_unix_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
     tcp_send_bytes_raw, tcp_receive_into_raw,
-    connect, connect_buffered, connect_unix, listen_unix, write, write_n, write_slice, write_all, read, read_n, read_into,
+    connect, connect_buffered, connect_timeout, connect_unix, listen_unix, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
     close_drained
@@ -21,6 +21,7 @@ exports(
 // Raw externs - escape hatch
 extern tcp_connect_raw(host: string, port: int) -> ptr
 extern tcp_connect_buffered_raw(host: string, port: int, read_buffer: int) -> ptr
+extern tcp_connect_timeout_raw(host: string, port: int, timeout_ms: int) -> (ptr, string)
 extern tcp_send_raw(sock: ptr, data: string) -> int
 // `data` is `ptr`, not `string`, and this is not exported (#2301): write_n
 // passes a byte[] slice's raw data pointer. A `string` parameter routes
@@ -80,6 +81,27 @@ connect_buffered(host: string, port: int, read_buffer: int) -> {
     sock = tcp_connect_buffered_raw(host, port, read_buffer)
     if sock == null {
         return null, "connect failed"
+    }
+    return sock, ""
+}
+
+// connect, giving up after `timeout_ms` milliseconds instead of the
+// kernel's own SYN retry schedule (75 s on macOS, about two minutes on
+// Linux) when the address drops the connection attempt: a firewalled port,
+// a host that is down, a container not yet listening behind a black hole.
+// The budget covers the whole dial, every address the host resolves to.
+// Returns (socket, "") or (null, error): "connect timeout" when the budget
+// ran out, "could not resolve host", "connection failed" (refused,
+// unreachable), or the sandbox's refusal. `timeout_ms` must be positive.
+// The socket is the one `connect` returns, with the same 30 s send and
+// receive timeouts.
+connect_timeout(host: string, port: int, timeout_ms: int) -> {
+    if timeout_ms <= 0 {
+        return null, "timeout_ms must be positive"
+    }
+    sock, err = tcp_connect_timeout_raw(host, port, timeout_ms)
+    if sock == null {
+        return null, err
     }
     return sock, ""
 }

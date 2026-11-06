@@ -18,8 +18,8 @@
 // The grant list is what docs/containment-sandbox.md describes: a list of
 // (category, pattern) pairs that the in-process checks in std and the
 // LD_PRELOAD library (libaether_sandbox.so) consult, and that the
-// contrib/host/<lang> modules take as their `perms` argument
-// (`tcl.run_sandboxed(worker, code)`). This module is the one place those
+// host bridges take as their `perms` argument
+// (`stunt.run_sandboxed(worker, code)`). This module is the one place those
 // category names are spelt; a hand-written "fs-read" would match nothing
 // and deny silently.
 //

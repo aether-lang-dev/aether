@@ -404,14 +404,16 @@ static const char* binimport_link(void) { return g_binimport_link ? g_binimport_
 // (libaether_host_<lang>.a) must be on the link line or the produced
 // binary fails at runtime with `undefined symbol: <lang>_run` (the
 // BRIDGE symbol, not the host language's). The user previously had to
-// repeat themselves with `link_flags = "-laether_host_tcl"` in
+// repeat themselves with `link_flags = "-laether_host_<lang>"` in
 // aether.toml — same information twice. Driven entirely by the import,
 // so a pure-Aether program with no `contrib.host.*` imports does NOT
 // link any bridge .a (critical: blanket-linking would force a
-// hello-world binary to dlopen libtcl at runtime). Empty unless
+// hello-world binary to carry a bridge it never calls). Empty unless
 // `prepare_host_bridge_imports` found a match. Not POSIX-only any more: the
-// bridges DO build on Windows, and this used to be guarded out there, which is
-// what left `import contrib.host.tinygo` linking against nothing.
+// bridges DO build on Windows, and this used to be guarded out there, which
+// left a bridge import linking against nothing. The bridges left here are
+// stunt (the test double) and aether; the language bridges live in
+// aether-guest-languages, which links its own C.
 static char g_host_bridge_link[2048] = "";
 
 // Mirror of runtime/aether_lib_meta.h's catalog structs, kept
@@ -5192,8 +5194,8 @@ void build_gcc_cmd(char* cmd, size_t size,
             manifest_obj[0] = '\0';
         /* g_host_bridge_link mirrors the POSIX branch below: without it the
          * bridge archive was found, reported, and then never passed to the
-         * linker, so `import contrib.host.tinygo` failed with undefined
-         * tinygo_call_* while the .a sat in build/contrib. */
+         * linker, so a bridge import failed with undefined symbols while the
+         * .a sat in build/contrib. */
         const char* rt_arg = ae_runtime_link_arg();
         if (!rt_arg) { free(opt); set_failing_cmd(cmd, size); return; }
         int w = snprintf(cmd, size,
@@ -6953,27 +6955,31 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
 // queue the matching bridge static archive onto the link line.
 //
 // The bridge .c (contrib/host/<lang>/aether_host_<lang>.c) compiles
-// to libaether_host_<lang>.a (see Makefile:1324). Linking the .a is
-// what supplies symbols like `tcl_run` — the BRIDGE's own ABI,
-// distinct from the host language's runtime symbols (Tcl_CreateInterp
-// et al.) that the bridge in turn calls. Without this scan, an
-// import like `import contrib.host.tcl` compiled because the
-// headers resolved, but at runtime failed with `undefined symbol:
-// tcl_run` because the .a was never linked. Users had to repeat
-// the import as `link_flags = "-laether_host_tcl"` in
-// aether.toml — busywork easily forgotten (the ctr_notes.md Bug 4
-// trace from 2026-06-03).
+// to libaether_host_<lang>.a (`make contrib`). Linking the .a is
+// what supplies the BRIDGE's own ABI (`stunt_run`, `aether_host_run`).
+// Without this scan, an import compiled because the module resolved,
+// but failed at link (or at runtime) with an undefined bridge symbol,
+// because the .a was never linked. Users had to repeat the import as
+// `link_flags = "-laether_host_<lang>"` in aether.toml — busywork easily
+// forgotten (the ctr_notes.md Bug 4 trace from 2026-06-03).
+//
+// The bridges left in this tree are `stunt` (the test double) and `aether`
+// (Aether hosting Aether). The language bridges (Lua, Python, Tcl, Perl,
+// Ruby, Duktape/JS, QuickJS, Go, TinyGo, Java, Factor, Racket, Rhombus) moved
+// to github.com/aether-lang-dev/aether-guest-languages, imported as
+// `import <lang>` after `ae add`, which builds its own C and does not come
+// through here.
 //
 // Entry-file-only: only the top-level .ae passed to `ae build` /
 // `ae run` is scanned. If a library you import in turn imports
-// `contrib.host.tcl`, you must still write the import yourself
+// `contrib.host.<lang>`, you must still write the import yourself
 // in your top-level file. Widening to transitive imports later is
 // purely additive — same predicate, more files to scan.
 //
 // Hard error if the .a is missing (the user opted in via the
 // import; silently dropping it just defers the failure to a more
 // confusing runtime error). The two search paths mirror the two
-// install layouts in tools/ae.c:1013-1017:
+// install layouts:
 //   - install layout: <lib_dir>/libaether_host_<lang>.a
 //     (Makefile install-contrib target installs here)
 //   - dev layout:     <lib_dir>/contrib/libaether_host_<lang>.a
@@ -6982,31 +6988,10 @@ static int ae_package_entry(const char* pkg, char* out, size_t outcap) {
 // build_gcc_cmd derives it from `tc.lib`.
 //
 // This used to be compiled out entirely on Windows, on the premise that "host
-// bridges aren't compiled on the Windows matrix". They are: `make contrib`
-// builds build/contrib/libaether_host_tinygo.a there like anywhere else, with
-// every tinygo_call_* symbol present. Only the AUTO-LINK was missing, so
-// `import contrib.host.tinygo` compiled and then failed at link with
-// `undefined reference to tinygo_call_int_int_int` — the archive sitting
-// unused a few directories away. That made every contrib host bridge
-// unusable on Windows for a reason that had nothing to do with the bridges.
-//
-// The machinery is path and string handling, portable as-is. The one genuinely
-// POSIX-bound part is the Racket branch's link flags (-rdynamic, -ldl,
-// -lncurses), which stays guarded below.
-// Back-compat aliases: some bridge directories were renamed for
-// clarity, but old import paths must keep resolving. `js` was
-// renamed to `duktape` (engine name; allows `--with=quickjs` etc.
-// to coexist later); `import contrib.host.js` still works by
-// linking the duktape bridge .a transparently here.
-static const char* host_bridge_lang_alias(const char* lang) {
-    if (strcmp(lang, "js") == 0) return "duktape";
-    // Rhombus is a #lang on the Racket runtime, so both import paths link
-    // the one shared bridge archive (libaether_host_racket.a — it carries
-    // both the racket_* and rhombus_* ABI). No separate rhombus .a is built.
-    if (strcmp(lang, "rhombus") == 0) return "racket";
-    return lang;
-}
-
+// bridges aren't compiled on the Windows matrix". They are, and only the
+// AUTO-LINK was missing, which made every contrib host bridge unusable on
+// Windows for a reason that had nothing to do with the bridges. The machinery
+// is path and string handling, portable as-is.
 static bool host_bridge_a_path(const char* lang, char* out, size_t outsz) {
     if (!tc.has_lib) return false;
     char lib_dir[1024];
@@ -7015,50 +7000,13 @@ static bool host_bridge_a_path(const char* lang, char* out, size_t outsz) {
     char* slash = strrchr(lib_dir, '/');
     if (slash) *slash = '\0';
 
-    const char* effective = host_bridge_lang_alias(lang);
-
     // Install layout: <lib_dir>/libaether_host_<lang>.a
-    snprintf(out, outsz, "%s/libaether_host_%s.a", lib_dir, effective);
+    snprintf(out, outsz, "%s/libaether_host_%s.a", lib_dir, lang);
     if (path_exists(out)) return true;
     // Dev layout: <lib_dir>/contrib/libaether_host_<lang>.a (build/contrib/)
-    snprintf(out, outsz, "%s/contrib/libaether_host_%s.a", lib_dir, effective);
+    snprintf(out, outsz, "%s/contrib/libaether_host_%s.a", lib_dir, lang);
     if (path_exists(out)) return true;
     return false;
-}
-
-/* Whether the static archive at `path` names the symbol `sym`, defined or
- * referenced: an object's string table holds each name NUL-terminated after
- * the previous one's NUL (ELF and COFF as written, Mach-O with a leading
- * underscore), so the name between two NULs is a symbol and the same letters
- * inside a message string are not. Read here rather than asked of
- * `nm -u ... 2>/dev/null | grep -q`: system() runs that through cmd.exe on
- * Windows, which has neither /dev/null nor grep, so the probe failed there on
- * every build and a bridge built with libffi linked without -lffi. */
-static bool archive_names_symbol(const char* path, const char* sym) {
-    FILE* f = fopen(path, "rb");
-    if (!f) return false;
-    if (fseek(f, 0, SEEK_END) != 0) { fclose(f); return false; }
-    long n = ftell(f);
-    if (n <= 0 || fseek(f, 0, SEEK_SET) != 0) { fclose(f); return false; }
-    char* buf = (char*)malloc((size_t)n);
-    if (!buf) { fclose(f); return false; }
-    size_t got = fread(buf, 1, (size_t)n, f);
-    fclose(f);
-
-    size_t len = strlen(sym);
-    bool found = false;
-    for (size_t i = 0; !found && i + len + 2 <= got; i++) {
-        if (buf[i] != '\0') continue;
-        size_t at = i + 1;
-        if (buf[at] == '_' && at + 1 + len < got &&
-            memcmp(buf + at + 1, sym, len) == 0 && buf[at + 1 + len] == '\0') {
-            found = true;
-        } else if (memcmp(buf + at, sym, len) == 0 && buf[at + len] == '\0') {
-            found = true;
-        }
-    }
-    free(buf);
-    return found;
 }
 
 static void prepare_host_bridge_imports(const char* main_file) {
@@ -7122,70 +7070,9 @@ static void prepare_host_bridge_imports(const char* main_file) {
                  sizeof(g_host_bridge_link) - off,
                  " \"%s\"", a_path);
 
-        // Per-bridge transitive link deps. The six interpreter bridges
-        // dlopen their host language at runtime and need nothing extra
-        // at link time. tinygo is the first bridge with its OWN
-        // link-time dep — `tinygo_call_dynamic` calls into libffi when
-        // the bridge .a was built with AETHER_HAS_LIBFFI. Without this
-        // append, the link fails with `undefined reference to
-        // ffi_prep_cif` whenever the bridge was compiled with libffi
-        // available (ctr_notes.md Finding 2). Users would otherwise
-        // have to add `link_flags = "-lffi"` to their aether.toml
-        // manually — exactly the kind of "import is the trigger"
-        // footgun that contrib/host/tcl/README.md promises
-        // bridges should avoid.
-        //
-        // The probe is by-symbol, not by-language: when libffi-dev
-        // wasn't present at bridge-build time the AETHER_HAS_LIBFFI
-        // block is #ifdef-out, the .a references no ffi_* symbol,
-        // and we MUST NOT pass `-lffi` (the host's link would fail
-        // with "cannot find -lffi"). archive_names_symbol reads the
-        // archive itself; see there for why it no longer asks nm.
-        const char* effective_alias = host_bridge_lang_alias(lang);
-        const char* trans_flags = NULL;
-        if (strcmp(effective_alias, "tinygo") == 0 &&
-            archive_names_symbol(a_path, "ffi_prep_cif")) {
-            trans_flags = " -lffi";
-        }
-        if (trans_flags) {
-            off = strlen(g_host_bridge_link);
-            snprintf(g_host_bridge_link + off,
-                     sizeof(g_host_bridge_link) - off, "%s", trans_flags);
-        }
-
-        // Racket (and rhombus, which aliases to it) is the first STATIC-linked
-        // host: there is no shared libracketcs to dlopen, so the importer must
-        // link the built Racket CS's libracketcs.a + -rdynamic + the runtime's
-        // system deps. The archive path comes from $AETHER_RACKET_LIB (the
-        // orchestrator owns the probe, mirroring AETHER_*_SONAME for the dlopen
-        // bridges). Without it we leave the link as-is — the bridge .a's
-        // unresolved racket_* symbols then produce a clear linker error naming
-        // the missing libracketcs, and the README documents the env var.
-#ifndef _WIN32
-        /* POSIX-only: -rdynamic, -ldl and -lncurses have no MinGW equivalent,
-         * and Racket CS is not built for this matrix. A Windows importer of
-         * contrib.host.racket still gets the bridge .a on the link line above
-         * and a clear unresolved-racket_* error, which is the same diagnostic
-         * POSIX gives when AETHER_RACKET_LIB is unset. */
-        if (strcmp(effective_alias, "racket") == 0) {
-            const char* rkt_lib = getenv("AETHER_RACKET_LIB");
-            if (rkt_lib && *rkt_lib) {
-                // libracketcs.a + -rdynamic + Racket CS's link deps. The lib
-                // list matches the RKTIO_CONFIGURE_ARGS LIBS of a stock CS
-                // build (-ldl -lm -lrt -lncurses -lz) plus -lpthread; harmless
-                // extras are dropped by the linker if unreferenced.
-                off = strlen(g_host_bridge_link);
-                snprintf(g_host_bridge_link + off,
-                         sizeof(g_host_bridge_link) - off,
-                         " \"%s\" -rdynamic -lm -ldl -lpthread -lz -lncurses",
-                         rkt_lib);
-            }
-        }
-#endif
-
         if (tc.verbose) {
-            fprintf(stderr, "ae: host bridge 'contrib.host.%s' -> %s%s\n",
-                    lang, a_path, trans_flags ? trans_flags : "");
+            fprintf(stderr, "ae: host bridge 'contrib.host.%s' -> %s\n",
+                    lang, a_path);
         }
     }
     fclose(f);
@@ -7794,6 +7681,11 @@ static int cmd_check(int argc, char** argv) {
      * Nothing runs, so the check need not go back. */
     find_and_chdir_to_aether_toml(&file);
     rebase_typed_lib_dirs();
+    /* [dependencies] and [patch] join the search path as for `ae build` and
+     * `ae run`: without them a project that built and ran clean failed its
+     * check with the dependency's import unresolved. After the walk-up, so
+     * the manifest is read from the project root. */
+    if (ae_resolve_dependencies() < 0) return 1;
     load_defines_from_toml();
 
     // Project mode
@@ -11381,6 +11273,13 @@ static int cmd_test(int argc, char** argv) {
             targets[ntargets++] = argv[i];
         }
     }
+    /* The tests compile against the project's [dependencies] and [patch], as
+     * `ae build` and `ae run` do. They used to be skipped here, so a project
+     * whose program built and ran against a dependency had every test that
+     * imported it fail to compile, the import unresolved. The manifest is
+     * found by walking up from the cwd and a [patch] path is taken relative
+     * to it, so this holds from any directory of the project. */
+    if (ae_resolve_dependencies() < 0) { free(targets); return 1; }
     load_defines_from_toml();
 
     // Collect test files. Grown as they are found rather than capped: a fixed

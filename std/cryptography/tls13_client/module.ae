@@ -81,6 +81,11 @@
 //
 //   connect(host, port, x25519_priv32) -> (ClientConn, string)
 //       perform the handshake; returns a live connection or an error.
+//   connect_socket(sock, host, cafile) / connect_socket_mtls(..., cert, len, key)
+//       the same over a socket the caller connected (a protocol that
+//       starts in the clear: Postgres' SSLRequest, MySQL's handshake);
+//       connect_socket_insecure_skip_verify and
+//       connect_socket_mtls_insecure_skip_verify skip server verification.
 //   send(conn, data, len) / recv(conn) — application-data records
 //   close(conn)
 //
@@ -139,7 +144,8 @@ exports(
     finished_key, finished_verify_data,
     hs_msg_type, hs_msg_len, hs_msg_total,
     HS_ENCRYPTED_EXTENSIONS, HS_CERTIFICATE, HS_CERTIFICATE_VERIFY, HS_FINISHED,
-    connect, connect_mtls, connect_pq, connect_socket, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
+    connect, connect_mtls, connect_pq, connect_socket, connect_socket_mtls,
+    connect_socket_insecure_skip_verify, connect_socket_mtls_insecure_skip_verify, conn_group, connect_resume, connect_resume_0rtt, close_conn, conn_send, conn_recv,
     conn_key_update, conn_early_accepted,
     conn_get_ticket, free_ticket, SessionTicket,
     ticket_len, ticket_nonce_len, ticket_lifetime, ticket_max_early_data, ticket_cipher_suite,
@@ -908,13 +914,57 @@ connect_mtls(host: string, port: int, x25519_priv: ptr, client_cert: ptr, client
 // on the connection before TLS starts, or runs TLS through a tunnel it
 // built; the BoGo shim (tests/conformance/bogo, #1298) is one.
 connect_socket(sock: @keep ptr, host: string, cafile: string) -> (ptr, string) {
+    return connect_socket_ex(sock, host, cafile, null, 0, null, 0)
+}
+
+// connect_socket with a client certificate, for a server that asks for one
+// (mutual TLS): when the server sends a CertificateRequest the client
+// presents `client_cert` (the leaf's DER, `client_cert_len` bytes) and a
+// CertificateVerify signed with `client_key` (a 32-byte ECDSA-P256 scalar),
+// as connect_mtls does on a connection it dials itself. The server is
+// verified exactly as connect_socket verifies it, against `cafile` or the
+// system store. A server that asks for no certificate gets none.
+// tls13_server.parse_cert_chain_pem and parse_ec_private_key_pem read the
+// two from PEM files.
+connect_socket_mtls(sock: @keep ptr, host: string, cafile: string, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
+    if client_cert == null || client_cert_len <= 0 || client_key == null {
+        if sock != null { tcp.close(sock) }
+        return null, "connect_socket_mtls: the client certificate or key is missing"
+    }
+    return connect_socket_ex(sock, host, cafile, client_cert, client_cert_len, client_key, 0)
+}
+
+// connect_socket WITHOUT VERIFYING THE SERVER: no certificate chain, no
+// validity window, no hostname, no CertificateVerify signature. The
+// connection is encrypted but not authenticated, so anyone on the path can
+// read and change it undetected. It is for a peer whose certificate cannot
+// be verified and that is reached over a path already trusted: a database
+// in a test container with a certificate it made itself at start-up, a
+// loopback test server. The name is long on purpose; the http client's
+// equivalent is set_insecure.
+connect_socket_insecure_skip_verify(sock: @keep ptr, host: string) -> (ptr, string) {
+    return connect_socket_ex(sock, host, "", null, 0, null, 1)
+}
+
+// connect_socket_mtls without verifying the server (see
+// connect_socket_insecure_skip_verify): the client still presents its
+// certificate and proves it holds the key.
+connect_socket_mtls_insecure_skip_verify(sock: @keep ptr, host: string, client_cert: ptr, client_cert_len: int, client_key: ptr) -> (ptr, string) {
+    if client_cert == null || client_cert_len <= 0 || client_key == null {
+        if sock != null { tcp.close(sock) }
+        return null, "connect_socket_mtls_insecure_skip_verify: the client certificate or key is missing"
+    }
+    return connect_socket_ex(sock, host, "", client_cert, client_cert_len, client_key, 1)
+}
+
+fn connect_socket_ex(sock: @keep ptr, host: string, cafile: string, client_cert: ptr, client_cert_len: int, client_key: ptr, insecure: int) -> (ptr, string) {
     if sock == null { return null, "connect_socket: the socket is null" }
     priv = rand_into(32)
     if priv == null {
         tcp.close(sock)
         return null, "no randomness for the key share"
     }
-    conn, err = connect_full(host, 443, priv, null, 0, null, sock, 0, cafile)
+    conn, err = connect_full(host, 443, priv, client_cert, client_cert_len, client_key, sock, insecure, cafile)
     bytes.wipe_free(priv)
     return conn, err
 }
@@ -1778,6 +1828,8 @@ const ALERT_DECRYPT_ERROR = 51
 const ALERT_PROTOCOL_VERSION = 70
 const ALERT_INTERNAL_ERROR = 80
 const ALERT_UNSUPPORTED_EXTENSION = 110
+// A server that requires a client certificate and got none (RFC 8446 6.2).
+const ALERT_CERTIFICATE_REQUIRED = 116
 const ALERT_NO_APPLICATION_PROTOCOL = 120
 const ALERT_USER_CANCELED = 90
 const ALERT_MISSING_EXTENSION = 109
@@ -2059,6 +2111,7 @@ fn alert_name(desc: int) -> string {
     if desc == ALERT_USER_CANCELED { return "user_canceled" }
     if desc == ALERT_MISSING_EXTENSION { return "missing_extension" }
     if desc == ALERT_RECORD_OVERFLOW { return "record_overflow" }
+    if desc == ALERT_CERTIFICATE_REQUIRED { return "certificate_required" }
     return "unknown_alert"
 }
 

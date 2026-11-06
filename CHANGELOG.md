@@ -14,6 +14,105 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.893.0]
+
+### Removed
+
+- **The language bridges are removed from `contrib/host`.** `contrib.host.duktape`
+  (and its alias `contrib.host.js`), `quickjs`, `perl`, `ruby`, `tcl`, `go`,
+  `tinygo`, `java`, `factor`, `racket` and `rhombus` now live in
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages),
+  where Lua and Python already went, each copied from this tree at
+  `2609ec841` (see its `PROVENANCE.md`) and held to stunt's catalogue by
+  name. Add it with `ae add github.com/aether-lang-dev/aether-guest-languages`
+  and then write `import tcl` in place of `import contrib.host.tcl` (and so
+  on for each language). They are deleted here with no transition period,
+  along with their tests (`host_duktape_bidirectional`,
+  `host_tcl_bidirectional`, `host_racket`, `host_rhombus`, `host_tinygo`,
+  `tests/sandbox/test_shared_map_all.sh`), the `04-interop/05-hosts`
+  examples, their `make contrib` modules, the language demos of
+  `make contrib-host-check`, `ae`'s Racket and TinyGo link special cases and
+  the `js`/`rhombus` import aliases, the `--with=<lang>` layers of
+  `tools/docker/aether-build` (it now refuses `--with=`) and the `WITH_*`
+  build args of `tools/docker/Dockerfile`. `contrib.host.stunt` (the test
+  double) and `contrib.host.aether` (Aether hosting Aether) stay, as does
+  `contrib.quickjs`, the engine the QuickJS bridge imports.
+
+### Fixed
+
+- **`ae test` and `ae check` resolve `[dependencies]` and `[patch]`.** Only
+  `ae build` and `ae run` put a project's dependencies on the module search
+  path, so a project that built and ran against a package (`ae add
+  github.com/aether-lang-dev/aether-guest-languages`, then `import lua`) had
+  every test importing it fail with "FAIL (compile)" and `ae check` refuse the
+  program, the import unresolved. Both commands now go through the same
+  resolver, from any directory of the project.
+
+- **A dlopen the sandbox preload refuses leaves a `dlerror()` message.** The
+  refusal of libc or the loader without a `native` grant returned NULL with
+  `errno = EACCES` and nothing for `dlerror()`, which dlopen's contract
+  promises: Tcl 8.6's `load` formats that message with `%s` and segfaulted,
+  and Ruby's Fiddle reported a NULL handle with no reason. The refusal now
+  sets a per-thread message naming the library and the sandbox
+  (`libc.so.6: refused by the sandbox: ...`), returned once and then cleared,
+  and a later loader error is never shadowed by it.
+
+- **`string.join` no longer takes a `string[]` it cannot read, and joins a
+  `[...]` literal.** An array decayed to any typed pointer, so
+  `string.join(xs, ",")` with `xs: string[]` type-checked against
+  `join(s: *StringSeq, sep)` and the C array was walked as cons cells: one
+  element printed, or a crash. An array now decays only to `ptr` or a pointer
+  to its element, and a `string[]` given to a `*StringSeq` parameter is E0200
+  naming the fix. A `[...]` literal of strings given to one is built as a
+  sequence, as it already was for a variable or a field of that type, so
+  `string.join(["a", "b", "c"], ",")` is `"a,b,c"`; and
+  `string.join_strings(xs, sep)` joins a `string[]`.
+
+- **The Linux and macOS releases ship a working `std.yaml`.** Their runners had
+  no libfyaml, `YAML=auto` built the stubs without a word, and the 0.889.0
+  archives answered every yaml call with "std.yaml unavailable: this build has
+  no libfyaml". The release jobs now install it (apt `libfyaml-dev`, brew
+  `libfyaml`), build with `YAML=1`, which now stops `make` when pkg-config
+  cannot find libfyaml instead of acting as `auto`, and run a yaml program
+  before packaging. `ae` and `aetherc` no longer link libfyaml themselves, so a
+  toolchain built with it starts without it; a program importing `std.yaml`
+  links it, and needs it installed where it is built. Windows, FreeBSD and
+  Android releases keep the stubs (no static MSYS2 libfyaml; none in the cross
+  sysroots).
+
+## [0.892.0]
+
+### Changed
+
+- **The test sweep says how busy the cores were (#3598).** `make test-ae` now ends with each phase's wall time and the share of the machine's cores that were working during it. That comes from `/proc/stat` on Linux and on MSYS2. Every system also gets the whole sweep's CPU, from the `times` of the shell that ran it. The slowest-test lists show 25 tests, not 10 (`AE_SWEEP_TIMING_TOP`). A leg whose cores sit idle while tests wait on servers and timeouts is told apart from one that is simply doing more work.
+
+- **CI's split test legs divide the sweep by cost, not by position (#3601).** The halves of a split leg took every other test of the list and finished minutes apart:
+  - macOS x86_64 took 13 and 21 to 26 minutes;
+  - Windows GCC took 18.6 and 22 to 28 minutes, splitting by thirds;
+  - ASan and the macOS leaks gate were 2 to 7 minutes apart.
+
+  `tests/scripts/sweep_shard.sh` now reads `tests/sweep_weights_<os>.txt`, each test's time on that system's CI. It deals the tests out heaviest first, each to the shard with the lowest total so far, and every job computes the same partition. A test the file does not name costs the median, and without the file the split is by position as before. One file per system, because a test can cost minutes on one and be skipped on another (`cross_ios`, 182 s on macOS).
+
+  On the measured costs, the halves now come out at 963.9 / 964.2 s (Linux), 2818 / 2818 s (macOS) and 2336 / 2335 s (Windows). Windows GCC's `make ci` half takes 8 of 20 shares, since it also runs `make ci`'s other stages.
+
+  The weights come from `AE_SWEEP_TIMINGS_OUT`, which writes every test's time; the main matrix and Windows GCC legs upload it. `tests/scripts/sweep_weights.sh` turns those uploads into the files. macOS's sweep timings now count whole seconds, where BSD `date` gave none.
+
+### Fixed
+
+- **The sweep's timing-ratio tests run with nothing beside them, and compare sizes eight times apart (#3604).** `lookup_index_scaling`, `order_effects_scaling`, `merge_codegen_scaling` and `loop_nest_scaling` check that one size's CPU time is within a multiple of another's, to catch a quadratic algorithm.
+
+  The sweep keeps every core busy (#3598 measured 92 to 98% on Windows). Under that load the larger case loses more to the shared caches and memory: `lookup_index_scaling` read 8x on a Windows runner, while it is linear alone, which reads about 3.6x.
+
+  - A test directory holding a `RUN_ALONE` marker now runs after the parallel shell phase, one at a time, still in its shard and its verdict. The four carry the marker, and it is documented in CONTRIBUTING.md with the sweep's other markers.
+  - Alone, `order_effects_scaling` still read 8.3x on a slow runner, against a bound of 8x for four times the size. That left a factor of two between a linear reading and the bound, and the runner used all of it. `lookup_index_scaling` (1000 / 8000 declarations), `order_effects_scaling` (2000 / 16000) and `merge_codegen_scaling` (1500 / 12000) now compare eight times the size against 24x. A linear algorithm reads about 8x (8.5 to 11x here), and the quadratic costs these tests caught would read 45x and more, so each side keeps a factor of two or more.
+  - `loop_nest_scaling` (depth 12 against 24, bound 8x, reads 1.6x) keeps its sizes and bound.
+
+### Performance
+
+- **A first `ae build` or `ae run` of a file no longer walks two directory trees (#3599).** With no depfile for a source yet, the cache key was made by hashing its directory and the working directory file by file, to look the build up. No build publishes under that key, though: each publishes under the key its depfile gives (#2500). So the lookup could never hit. It cost about 170 ms of a 620 ms first build on Windows, and it was paid by every build in a CI sweep, whose cache starts empty. The lookup is now skipped. The build asks aetherc for the depfile and publishes under its key, as before, and the second build hits. If a build ever has to publish under a tree-walk key, because no depfile could be folded, it leaves a `walk-keyed` marker in the cache directory, and first builds then look up as they used to.
+
+- **`ae build` and `ae run` ask the C compiler about its flags once, not every build (#3600).** Each build compiled an empty file to learn whether the compiler takes `-fbracket-depth` (#3574), and on Windows assembled one to learn whether the assembler takes `-muse-unaligned-vector-move` (#2476). The answers lasted one process, and ae is one process per build. They are now kept in the build cache directory, keyed by the compiler's identity (its fingerprint, and the path, size and mtime of the program the command runs). The AVX answer is also keyed by the assembler beside the compiler. A refusal is remembered only when the same compile without the flag passes. The AVX probe remembers only a "takes it", so a binutils upgrade is noticed at once. Together with #3599, a first build of a small program on Windows went from 830 to 320 ms here.
+
 ## [0.891.0]
 
 ### Fixed

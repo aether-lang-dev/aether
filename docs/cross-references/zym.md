@@ -364,8 +364,8 @@ Aether's current sandbox story is:
 What's *missing* is a **runtime-spawnable sandbox**, "an Aether program
 that wants to load *a user's untrusted Aether code* into a walled-off
 sub-VM and call functions on it." You can do something
-similar today with the in-process language hosts
-(`contrib.host.tcl.run_sandboxed(perms, code)` etc.) but Aether
+similar today with the in-process language hosts of
+aether-guest-languages (`tcl.run_sandboxed(perms, code)` etc.) but Aether
 hosting Aether currently requires a separate process. The README and
 `AGENTS.md` both note this limitation:
 

@@ -1163,8 +1163,8 @@ char* module_resolve_stdlib_path(const char* module_name) {
 
 char* module_resolve_contrib_path(const char* module_name) {
     // Same dot-to-slash conversion as the stdlib resolver — required
-    // for nested contrib modules like `contrib.host.tcl` →
-    // `contrib/host/tcl/module.ae`.
+    // for nested contrib modules like `contrib.host.stunt` →
+    // `contrib/host/stunt/module.ae`.
     char* converted = dots_to_slashes(module_name);
     char* found = resolve_pkg_path("contrib", converted);
     free(converted);

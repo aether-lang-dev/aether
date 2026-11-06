@@ -652,7 +652,6 @@ and call.
 [02-own-c](../examples/04-interop/02-own-c/main.ae) ·
 [03-callbacks](../examples/04-interop/03-callbacks.ae) ·
 [04-embedding](../examples/04-interop/04-embedding/greeter.ae) ·
-[05-hosts](../examples/04-interop/05-hosts/tcl.ae) ·
 [06-java-host](../examples/04-interop/06-java-host/aether/manifest.ae) ·
 [07-limits](../examples/04-interop/07-limits/script.ae)
 
@@ -668,9 +667,10 @@ export runs in an execution frame, so a panic, a deadline, a cancel from
 another thread or a memory budget ends the call and gives the host an
 outcome. A deadline or a cancel lands at the call's next safe point, a
 loop head, so code with no loop (straight-line code, or a long C call) runs
-on until it returns. Aether also hosts other languages under the sandbox
-of chapter 5: Tcl inside the program, a Go program as a
-child process, and a Go library built as a C shared library in-process. [C
+on until it returns. Other languages (Lua, Python, Tcl, JavaScript, Go
+and more) run under the sandbox of chapter 5 through
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages),
+a separate repository. [C
 interoperability](c-interop.md) and [emit=lib](emit-lib.md) are the
 references.
 

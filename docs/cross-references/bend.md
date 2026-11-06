@@ -116,5 +116,5 @@ with the fold work.
 
 The interaction-combinator engine, optimal reduction, and the GPU/CUDA backend.
 They need the runtime Aether rejects. If a workload ever needs true HVM-grade
-parallelism, the Aether-shaped move is to host HVM as a guest
-(`contrib.host.*`) after a license check, not to reimplement it.
+parallelism, the Aether-shaped move is to host HVM as a guest (a bridge
+in aether-guest-languages) after a license check, not to reimplement it.

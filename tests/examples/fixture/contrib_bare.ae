@@ -2,10 +2,11 @@
 //
 // Run: ae run tests/examples/fixture/contrib_bare.ae
 
-import contrib.host.tcl
+import contrib.host.stunt
 
 main() {
-    tcl.run("puts hi")
+    stunt.finalize()
+    println("hi")
 }
 
 // Output:

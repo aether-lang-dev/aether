@@ -82,11 +82,11 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.stream` | Credit-windowed streams between actors: memory stays bounded however fast the producer is. | 11 | [guide](../std/stream/README.md) · [source](../std/stream/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 47 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 49 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -904,7 +904,8 @@ Hel
 - `string.seq_concat(a, b)` → `*StringSeq` O(|a|), `a` copied, `b` shared via refcount bump
 - `string.seq_take(s, n)` → `*StringSeq` first `n` elements (clamped to length, negative yields empty); fresh independent spine
 - `string.seq_drop(s, n)` → `*StringSeq` n-th tail retained (clamped to length, negative yields `s` retained); pointer walk only, no allocations
-- `string.join(s, sep)` → `string` concatenate every element with `sep` between adjacent pairs; the complement of `split_to_seq`. **Linear cost**: two passes (sum lengths, fill one exact-size buffer), one allocation regardless of element count. Empty seq yields `""`, a single element yields itself with no separator, and both elements and separator are binary-safe. Returns a fresh owned string.
+- `string.join(s, sep)` → `string` concatenate every element with `sep` between adjacent pairs; the complement of `split_to_seq`. **Linear cost**: two passes (sum lengths, fill one exact-size buffer), one allocation regardless of element count. Empty seq yields `""`, a single element yields itself with no separator, and both elements and separator are binary-safe. Returns a fresh owned string. A `[...]` literal of strings given to it is built as a sequence (`string.join(["a", "b"], ",")` is `"a,b"`); a `string[]` value is a compile error naming the two functions below.
+- `string.join_strings(xs, sep)` → `string` the same join for a `string[]` (a slice, a runtime-built array): its elements consed once and joined in one allocation. Empty yields `""`.
 
 Pattern-match `[]` and `[h|t]` arms work directly against `*StringSeq` matched expressions:
 
@@ -1780,7 +1781,12 @@ every entry point returns the error `std.yaml unavailable: this build has
 no libfyaml`, rather than failing to link, so a program that imports it
 still builds, and says so at runtime. That is also why the example below is
 compile-checked rather than run: its output depends on how the toolchain
-was built.
+was built. The Linux and macOS releases are built with libfyaml (`YAML=1`,
+which fails the build without it) and link it into a program that imports
+`std.yaml`, and only that one, so building one needs the library installed
+(`apt install libfyaml-dev`, `brew install libfyaml`); `ae` and `aetherc`
+themselves do not need it. The Windows, FreeBSD and Android releases carry
+the stubs ([std/yaml/README.md](../std/yaml/README.md)).
 
 ```aether
 import std.yaml
@@ -2010,6 +2016,8 @@ described in its header comment):
 - `tls13_record.seal_records(ctx, content_type, plaintext)` → `ptr` - `plaintext` sealed as records of at most 2^14 bytes of content each, back to back, or null when one cannot be sealed; the TLS client and server send handshake messages and application data this way (RFC 8446 5.1, #3380).
 - `tls13_hs.ChParsed.sig_algs` - The `signature_algorithms` schemes a ClientHello offered that a server key signs with, as `SIGBIT_ECDSA_P256`, `SIGBIT_ECDSA_P384`, `SIGBIT_ECDSA_P521`, `SIGBIT_RSA_PSS_SHA256` and `SIGBIT_ED25519` bits; `saw_sig_algs` says whether the extension was there (#3326).
 - `tls13_client.connect_socket(sock, host, cafile)` → `(ptr, string)` - The verified TLS 1.3 handshake for `host` over an already-connected `std.tcp` socket, trusting the PEM bundle `cafile` (`""` for the system store); the connection owns the socket.
+- `tls13_client.connect_socket_mtls(sock, host, cafile, client_cert, client_cert_len, client_key)` → `(ptr, string)` - `connect_socket` presenting a client certificate (leaf DER) and signing its CertificateVerify with `client_key` (a 32-byte ECDSA-P256 scalar) when the server asks for one (mutual TLS); the server is verified as by `connect_socket`. `tls13_server.parse_cert_chain_pem` and `parse_ec_private_key_pem` read the pair from PEM.
+- `tls13_client.connect_socket_insecure_skip_verify(sock, host)`, `tls13_client.connect_socket_mtls_insecure_skip_verify(sock, host, client_cert, client_cert_len, client_key)` → `(ptr, string)` - The same handshakes **without verifying the server** (no chain, validity, hostname or CertificateVerify check): encrypted, not authenticated. For a peer with a certificate it made itself reached over a trusted path (a test container's database); the http client's equivalent is `set_insecure`.
 - `tls13_hs.check_extensions(kind, exts, offered)` → `(int, string)` - `(0, "")` when the extensions block `exts` of a server message of `kind` (`MSG_SERVER_HELLO`, `MSG_ENCRYPTED_EXTENSIONS`, `MSG_CERTIFICATE_ENTRY`, ...) answers only what the ClientHello offered (`OFFER_*` bits) where RFC 8446 4.2 allows it, else the alert to send and why.
 - `tls13_hs.check_certificate(body, offered)` → `(int, string)` - The same for the body of a server's Certificate message: an empty request context, at least one entry, the list filling the message, each entry's extensions allowed, a status_request holding one OCSP response.
 - `tls13_hs.check_certificate_request(body)` → `(int, string)` - The same for the body of a CertificateRequest in the handshake: an empty request context, extensions that fill the message, signature_algorithms among them (missing_extension without, #3324).
@@ -2028,6 +2036,7 @@ described in its header comment):
 - `tls13_client.transcript_retry(tr, ch1, hrr, algo)` → `ptr` - The transcript after a HelloRetryRequest: `tr` (freed) replaced by message_hash of `ch1` and then `hrr` (RFC 8446 4.4.1) (#3325).
 - `tls13_client.conn_early_accepted(conn)` → `int` - 1 when the server took the 0-RTT data `connect_resume_0rtt` sent; 0 when it was not delivered (no 0-RTT offered, refused, or a HelloRetryRequest) and the caller sends it again if it still wants it delivered (#3355).
 - `tls13_client.ticket_cipher_suite(ticket)` → `int` - The cipher suite of the connection a `SessionTicket` came on, which its 0-RTT data uses (RFC 8446 4.2.10); a ticket that names none sends no early data (#3339).
+- `rsa.encrypt_oaep_hash(k, algo, msg, seed)` → `ptr`, `rsa.decrypt_oaep_hash(k, algo, ct)` → `(ptr, string)` - RSAES-OAEP with `algo` `"sha1"`, `"sha256"`, `"sha384"` or `"sha512"` for the label hash and MGF1, empty label; `seed` is hLen random bytes (20 for SHA-1). `"sha1"` is OpenSSL's `RSA_PKCS1_OAEP_PADDING`, which MySQL's `caching_sha2_password` exchange uses; `encrypt_oaep` and `decrypt_oaep` are the `"sha256"` cases.
 - `rsa.sign_pss_hash(k, algo, mhash, salt)` → `ptr`, `rsa.verify_pss_hash(k, algo, mhash, sig, slen)` → `int` - RSASSA-PSS with `algo` `"sha256"`, `"sha384"` or `"sha512"` for the message hash and MGF1; `sign_pss` and `verify_pss` are the `"sha256"` cases (#3357).
 - `tls13_cert.sign_server_cert_verify_rsa_pss_scheme(key, scheme, transcript_hash)` → `ptr` - A server CertificateVerify signature as rsa_pss_rsae_sha256, `SCHEME_RSA_PSS_RSAE_SHA384` or `SCHEME_RSA_PSS_RSAE_SHA512`, with a salt of the hash's length; null for another scheme (#3357).
 - `tls13_cert.verify_cert_verify_rsa_pss_scheme(spki_key, scheme, transcript_hash, sig)` → `int` - 1 when `sig` is a valid rsa_pss_rsae_sha256, `_sha384` or `_sha512` CertificateVerify signature by the RSAPublicKey `spki_key`, as `sign_server_cert_verify_rsa_pss_scheme` signs; 0 otherwise, another scheme included (#3376).
@@ -2745,6 +2754,7 @@ main() {
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
 - `tcp.connect_buffered(host, port, read_buffer)` → `(ptr, string)` - Connect with the receive buffer (`SO_RCVBUF`) set to `read_buffer` bytes before the connection is made, so the window it opens with is that size; for a client meant to take little while it does not read. `tcp.set_read_buffer` on a connected socket leaves the window already advertised (#3338).
+- `tcp.connect_timeout(host, port, timeout_ms)` → `(ptr, string)` - Connect, giving up after `timeout_ms` (the whole dial, every address the host resolves to) instead of the kernel's SYN retry schedule; `"connect timeout"` when the budget runs out.
 - `tcp.connect_unix(path)` → `(ptr, string)` - Connect to the Unix-domain stream socket at `path` (a local daemon's API socket, such as Docker's `/var/run/docker.sock`). The socket is the handle `connect` returns, so every read, write, poll and close works on it. Errors name the path: `no such socket`, `connection refused: nothing is listening on the socket`, `permission denied`, a path too long for `sockaddr_un` (103 bytes on macOS and the BSDs, 107 on Linux and Windows; refused, never truncated). In an enforce block it needs `fs_write` on `path`, the kernel's own rule for connecting to a Unix socket. Windows 10 1803 and later; before that `Unix-domain sockets are not supported on this Windows`.
 - `tcp.listen_unix(path)` → `(ptr, string)` - Listen on a new Unix-domain socket file at `path`; a file already there is `address in use` (a stale one is the caller's to remove). `accept`, `server_poll` and `server_fd` work on it, `server_port` is -1, and `server_close` removes the socket file. Needs `tcp_listen` and `fs_write` on `path` in an enforce block.
 - `tcp.available(sock)` → `int` - Bytes waiting in the socket's receive buffer, readable without blocking (`FIONREAD`), or -1.
@@ -2759,7 +2769,7 @@ main() {
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_connect_unix_raw`, `tcp_listen_unix_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_connect_timeout_raw`, `tcp_connect_unix_raw`, `tcp_listen_unix_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
 
 ### UDP slices (`std.udp`)
 

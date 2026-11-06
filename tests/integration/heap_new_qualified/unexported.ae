@@ -1,0 +1,6 @@
+import gb
+
+main() {
+    p = heap.new(gb.Scratch)
+    heap.free(p)
+}

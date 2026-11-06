@@ -1,7 +1,8 @@
 // The one grant matcher. Every place that compares a grant with a resource
 // uses it: the generated in-process checker (compiler/codegen/codegen.c), the
 // LD_PRELOAD library (runtime/libaether_sandbox_preload.c), and the
-// contrib/host/<lang> bridges. They used to carry their own copies, which had
+// host bridges (contrib/host/stunt here, the language bridges of
+// aether-guest-languages). They used to carry their own copies, which had
 // already drifted (only some normalised IPv4-mapped IPv6 addresses).
 //
 // Header-only and dependency-free (string.h, stdlib.h), so generated C,

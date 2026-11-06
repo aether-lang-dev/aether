@@ -137,12 +137,11 @@ that aren't link-suitable:
 - `contrib/<X>/{tests,benchmarks,example_*.ae,test_*.sh,build.sh,
   ci.sh,*.m}`, contrib source-tree noise. `.c` files are also
   dropped EXCEPT the host-language bridges at
-  `contrib/host/<lang>/aether_host_<lang>.c`. The bridges ship as
-  source because `make install` does NOT also build/install
-  `libaether_host_<lang>.a` only `make install-contrib` does
-  that, and it's a separate opt-in step (because each bridge
-  needs the matching dev library: `libperl-dev`, `tcl-dev`,
-  etc.). Downstream apps that `import contrib.host.<lang>` from a
+  `contrib/host/<lang>/aether_host_<lang>.c` (today `stunt` and
+  `aether`; the language bridges moved to aether-guest-languages).
+  The bridges ship as source because `make install` does NOT also
+  build/install `libaether_host_<lang>.a`; only `make install-contrib`
+  does that, as a separate opt-in step. Downstream apps that `import contrib.host.<lang>` from a
   plain `make install` tree compile the bridge as source into
   their own build. The matching `libaether_<X>.a` archives carry
   the C side for everything else; only `module.ae` descriptors +

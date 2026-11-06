@@ -136,9 +136,6 @@ tests/integration/heap_leak_interp_as_arg/
 tests/integration/heap_new_pod/
 tests/integration/heap_tracker_nested_tuple_err_no_leak/
 tests/integration/heap_tracker_return_escape_no_leak/
-tests/integration/host_racket/
-tests/integration/host_rhombus/
-tests/integration/host_tinygo/
 tests/integration/http_actor_mode_release/
 tests/integration/http_server_hook_state/
 tests/integration/http_auth/
@@ -357,3 +354,9 @@ tests/integration/contrib_host_stunt/
 # #3525: print_float.ae is the program test_print_float_locale.sh builds,
 # runs and compares the output of.
 tests/integration/print_float_locale/
+# oaep_sha1.ae takes its key, ciphertext and message from the openssl run in test_crypto_rsa_oaep_sha1_openssl.sh.
+tests/integration/crypto_rsa_oaep_sha1_openssl/
+# sockclient.ae takes its mode, port and certificates from test_tls13_socket_verify_mtls.sh.
+tests/integration/crypto_tls13_socket_verify_mtls/
+# main.ae and the three error files import lib/; test_heap_new_qualified.sh runs and builds each.
+tests/integration/heap_new_qualified/

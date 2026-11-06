@@ -67,6 +67,7 @@
     <li><a href="#seq_drop">seq_drop</a></li>
     <li><a href="#seq_join">seq_join</a></li>
     <li><a href="#join">join</a></li>
+    <li><a href="#join_strings">join_strings</a></li>
     <li><a href="#seq_each">seq_each</a></li>
     <li><a href="#seq_map">seq_map</a></li>
     <li><a href="#seq_filter">seq_filter</a></li>
@@ -497,6 +498,12 @@
       <h3 class="function-name">join <span class="kind">fn</span></h3>
       <pre class="usage"><code>join(s, sep) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">s: *StringSeq, sep: string</span></p>
+    </div>
+    <div class="function" id="join_strings" data-name="join_strings">
+      <h3 class="function-name">join_strings <span class="kind">fn</span></h3>
+      <pre class="usage"><code>join_strings(items, sep) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">items: string[], sep: string</span></p>
+      <p class="doc">Join a string[] with `sep` between elements, as `join` joins a *StringSeq: string.join_strings(names, &quot;, &quot;)      // names: string[] `join` itself takes a *StringSeq, and a `[...]` literal given to it is built as one; a string[] value is refused there at compile time and is joined with this. Linear: the elements are consed once, then joined in one exact-size allocation. Empty → &quot;&quot;.</p>
     </div>
     <div class="function" id="seq_each" data-name="seq_each">
       <h3 class="function-name">seq_each <span class="kind">extern</span></h3>

@@ -6,15 +6,16 @@ launched with `LD_PRELOAD=libaether_sandbox.so` so its libc calls
 (`connect`, `open`, `execve`, `getenv`) are intercepted against a
 grant list.
 
-Unlike the Python/Ruby/Tcl host modules which embed an interpreter
-in-process, this module launches a **separate process**, because
-Aether is compiled, not interpreted.
+Unlike the language bridges (Python, Ruby, Tcl, ..., now in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)),
+which embed an interpreter in-process, this module launches a
+**separate process**, because Aether is compiled, not interpreted.
 
 ## How it differs from other host modules
 
 | Module | Mechanism | Containment |
 |---|---|---|
-| `contrib.host.tcl` | Embed Tcl interpreter in-process | Sandbox checker on libc calls |
+| `tcl` (aether-guest-languages) | Embed Tcl interpreter in-process | Sandbox checker on libc calls |
 | **`contrib.host.aether`** | **Compile to binary, fork+exec** | **LD_PRELOAD on child process** |
 
 The LD_PRELOAD approach is stronger: even if the child binary contains

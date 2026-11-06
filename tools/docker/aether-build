@@ -20,26 +20,14 @@
 #   aether-build --rebuild-image           # force image rebuild (e.g. after
 #                                          #   bumping AETHER_REF below)
 #
-# Hosted-language additions (repeatable):
-#   aether-build --with=perl hello.ae             # ae + Perl bridge
-#   aether-build --with=perl --with=ruby h.ae     # ae + Perl + CRuby bridges
+# Hosted languages: the --with=<lang> layers (perl, ruby, java, duktape,
+#   tcl, tinygo) are gone with the contrib/host bridges they built; those
+#   bridges live in aether-guest-languages now
+#   (https://github.com/aether-lang-dev/aether-guest-languages), added to a
+#   project with `ae add` and built with it. `--with=` is refused.
 #
-#   Each --with=<lang> adds an apt -dev-kit layer + a `make contrib
-#   MODULES=<lang>` layer to the generated image. Known langs:
-#     perl | ruby | java | duktape (alias: js) | tcl | tinygo
-#
-#   `tinygo` is the odd one out — it's a c-shared sidecar builder, not
-#   a host-interpreter dlopen. Its layer installs the TinyGo .deb from
-#   the upstream GitHub release (+ golang-go for cgo + libffi-dev for
-#   the bridge's call_dynamic path) instead of an apt -dev kit.
-#
-#   The bare image (no --with) contains NO hosted-language bridges.
-#   --with= entries are alpha-sorted before deriving the image name,
-#   so `--with=ruby --with=perl` and `--with=perl --with=ruby`
-#   produce IDENTICAL images (cached together by podman).
-#
-#   --image-name=<custom>                  # override the auto-derived tag
-#                                          #   (default: aether-builder[-langs]:slim)
+#   --image-name=<custom>                  # override the image tag
+#                                          #   (default: aether-builder:slim)
 #
 # Override via env vars:
 #   AETHER_BUILDER_IMAGE=aether-builder:slim     # image tag (default; same
@@ -88,35 +76,7 @@
 #   - libaether_sqlite.a (always — sqlite is a real-link bridge and
 #     libsqlite3-dev is already in the base apt-install)
 #
-# Hosted-language bridges (Perl, Ruby, JS, Tcl) are added
-# ONLY via --with=<lang> (one layer per bridge — see USAGE). The base
-# image carries NONE of them. This keeps the "just Aether" case slim
-# and avoids the previous v0.209.0 model's footgun where vendored
-# multiarch headers silently failed to build bridges (ctr_notes.md
-# Bug 6). Each --with=<lang> apt-installs the real -dev kit (so the
-# distro's actual generated headers — pyconfig.h etc. — are present)
-# then runs `make contrib MODULES=<lang>` (fail-hard if it can't
-# build, no silent skip).
-#
-# NOT in the image (deliberately):
-#   - Host-language RUNTIMES (libperl.so, libruby.so, …). The
-#     bridge .a's are dlopen-based (v0.209.0+); the resulting binary
-#     dlopens them at runtime on the DEPLOY host, not in the toolchain
-#     container. Whoever runs the binary needs the runtime on their box.
-#   - The JDK / JRE. --with=java would add it; bookworm's default JDK
-#     is 17 (the contrib.host.java FFA path wants 21+) so that bridge
-#     is pending.
-#
-#
-# ── ON THE DEPLOY HOST ─────────────────────────────────────────────
-#
-# After you copy your compiled binary off the container, the host
-# running it needs the runtime libraries for whichever host bridges
-# the binary uses. Examples:
-#   Bazzite / Fedora-derived:  rpm-ostree install ruby perl
-#   Debian / Ubuntu:           apt install ruby perl-base
-#   Alpine:                    apk add ruby perl
-# Missing runtime → "libfoo.so not found" at startup. Install and retry.
+# No hosted-language bridges: those moved to aether-guest-languages.
 #
 #
 # ── ENGINE NOTES ───────────────────────────────────────────────────
@@ -134,75 +94,15 @@ WORK="${AETHER_WORK_DIR:-$PWD}"
 OUT="${AETHER_OUT_DIR:-$PWD/out}"
 AETHER_REF="${AETHER_REF:-v0.203.0}"
 
-# HEADERS_REF (`hosted-language-headers` pin) was removed when the
-# --with=<lang> layer model superseded the vendored-multiarch headers
-# approach (ctr_notes.md Bug 6 resolution, 2026-06-04). The env var
-# was a config-only ref; nothing in the new Containerfile generation
-# consults it. If you used to set it via a wrapper, the setting is
-# now a no-op — safe to remove from your wrapper.
-
-# ── --with=<lang> additive per-bridge layers ──────────────────────
-#
-# Each --with=<lang> adds:
-#   1. an apt-install of that language's -dev kit
-#   2. a `make contrib MODULES=<lang>` + `make install-contrib`
-# to the generated Containerfile, producing
-# /usr/local/lib/aether/libaether_host_<lang>.a in the image. The
-# base image (no --with) ships ZERO hosted-language bridges
-# (sqlite is built unconditionally — it's a real-link bridge with a
-# minimal -dev kit already in the base toolchain).
-#
-# Image name auto-derives from the alpha-sorted --with set so
-# `--with=perl --with=ruby` and `--with=ruby --with=perl` produce
-# IDENTICAL image names + IDENTICAL layer hashes (the canonical
-# `--with` order is the layer order). --image-name=<custom>
-# overrides the auto-derivation.
-
-# Map a --with=<name> token to the Debian/Ubuntu apt -dev package name.
-# Keep small and explicit; one distro family for now (the base is
-# debian:bookworm-slim — see Containerfile FROM).
-with_dev_pkg() {
-    case "$1" in
-        perl)    echo "libperl-dev" ;;
-        ruby)    echo "ruby-dev" ;;
-        java)    echo "default-jdk" ;;
-        duktape) echo "duktape-dev" ;;
-        js)      echo "duktape-dev" ;;  # alias: --with=js maps to duktape
-        tcl)     echo "tcl-dev" ;;
-        # tinygo is structurally different from the apt-installed -dev
-        # kits: neither TinyGo nor a new-enough Go is in bookworm. The
-        # tinygo layer below fetches BOTH from upstream — Go from
-        # go.dev (tarball, pinnable) and TinyGo from the GitHub release
-        # (.deb). The "apt portion" here is just libffi-dev (used by
-        # the bridge's tinygo.call_dynamic path AND by TinyGo's runtime
-        # for c-shared mode) + curl + ca-certificates for the fetches.
-        # bookworm's `golang-go` is Go 1.19 — TinyGo 0.34 rejects it
-        # (its build-time Go-version gate wants ≥1.22).
-        tinygo)  echo "libffi-dev curl ca-certificates" ;;
-        *)       return 1 ;;
-    esac
-}
-
-# Collect --with= entries (sorted+deduped); record image-name override.
-WITH_LANGS_RAW=""
+# Record the image-name override; refuse the retired --with=.
 IMAGE_NAME_OVERRIDE=""
 PASSTHROUGH_ARGS=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --with=*)
-            lang="${1#--with=}"
-            if ! with_dev_pkg "$lang" >/dev/null; then
-                echo "aether-build: --with=$lang: unknown language (known: perl ruby java duktape (alias: js) tcl tinygo)" >&2
-                exit 1
-            fi
-            # Canonicalise aliases BEFORE the sort/dedupe pass so
-            # `--with=js` and `--with=duktape` collapse to the same
-            # image name + the same cached layer.
-            case "$lang" in
-                js) lang="duktape" ;;
-            esac
-            WITH_LANGS_RAW="$WITH_LANGS_RAW $lang"
-            shift
+            echo "aether-build: $1: the hosted-language layers are gone; the bridges moved to" >&2
+            echo "  https://github.com/aether-lang-dev/aether-guest-languages (ae add it in your project)" >&2
+            exit 1
             ;;
         --image-name=*)
             IMAGE_NAME_OVERRIDE="${1#--image-name=}"
@@ -217,25 +117,19 @@ while [ $# -gt 0 ]; do
     esac
 done
 
-# Canonicalise --with set: sort + dedupe. Empty if no --with given.
-WITH_LANGS="$(printf '%s\n' $WITH_LANGS_RAW | sort -u | xargs)"
-
 # Derive image name.
 #   --image-name=… wins (explicit override).
 #   else AETHER_BUILDER_IMAGE env var (pre-existing override).
-#   else: aether-builder:slim if no --with, or aether-builder-<a>-<b>-…:slim
-#         with the alpha-sorted lang set as the middle segment.
+#   else aether-builder:slim.
 if [ -n "$IMAGE_NAME_OVERRIDE" ]; then
     IMAGE="$IMAGE_NAME_OVERRIDE"
 elif [ -n "$IMAGE_OVERRIDE" ]; then
     IMAGE="$IMAGE_OVERRIDE"
-elif [ -z "$WITH_LANGS" ]; then
-    IMAGE="aether-builder:slim"
 else
-    IMAGE="aether-builder-$(echo "$WITH_LANGS" | tr ' ' '-'):slim"
+    IMAGE="aether-builder:slim"
 fi
 
-# Reinstate the original arg list (minus --with= / --image-name=) so
+# Reinstate the original arg list (minus --image-name=) so
 # the existing flag-handling case-statements still work as written.
 # shellcheck disable=SC2086
 set -- $PASSTHROUGH_ARGS
@@ -382,10 +276,7 @@ RUN mkdir -p /src && tar xzf /src.tar.gz -C /src --strip-components=1 && rm /src
 
 bootstrap_image() {
     echo "aether-build: image '$IMAGE' not present locally, building it now." >&2
-    if [ -n "$WITH_LANGS" ]; then
-        echo "aether-build: --with set: $WITH_LANGS" >&2
-    fi
-    echo "aether-build: this is a one-time setup (~5 minutes per layer, ~330 MB base)." >&2
+    echo "aether-build: this is a one-time setup (~5 minutes, ~330 MB)." >&2
 
     BUILDCTX="$(mktemp -d)"
     # The trap fires on script exit so the temp dir is cleaned up
@@ -397,96 +288,17 @@ bootstrap_image() {
     # priority list above.
     acquire_source "$BUILDCTX"
 
-    # Compose the per-language layers from $WITH_LANGS. Each layer:
-    #   1. apt-install <lang>-dev (REAL distro headers; the vendored
-    #      multiarch shims in hosted-language-headers don't work for
-    #      perl/ruby — they're Debian build products that
-    #      reference paths only -dev kits provide).
-    #   2. cd /src && make contrib MODULES=<lang> && make install-contrib
-    #      (MODULES filter is fail-hard: any requested module that
-    #      can't compile is a HARD error, not a silent SKIP — closes
-    #      the v0.209.0 "3 built 4 skipped" footgun).
-    #
-    # /src is preserved until the last layer; the post-loop cleanup
-    # layer removes it.
-    WITH_LAYERS=""
-    for lang in $WITH_LANGS; do
-        pkg=$(with_dev_pkg "$lang")
-        if [ "$lang" = "tinygo" ]; then
-            # Neither TinyGo nor a new-enough Go is in bookworm — fetch
-            # both from upstream. Go from go.dev (tarball, version
-            # pinned via --build-arg GO_VERSION). TinyGo from the
-            # GitHub release .deb (version pinned via --build-arg
-            # TINYGO_VERSION). Both arch maps use \`dpkg
-            # --print-architecture\` directly (amd64/arm64).
-            #
-            # bookworm's \`golang-go\` is Go 1.19; TinyGo 0.34.0 rejects
-            # it via its build-time Go-version gate. So we ignore the
-            # apt-packaged Go entirely and install a current one.
-            WITH_LAYERS="$WITH_LAYERS
-# --- Hosted-language layer: tinygo (Go + TinyGo from upstream + apt $pkg) ---
-# Added because aether-build was invoked with --with=tinygo. Unlike
-# the interpreter bridges, tinygo isn't a host-dlopen target — it's
-# a c-shared sidecar builder. The apt portion gives us libffi-dev
-# (bridge call_dynamic + tinygo runtime), curl + ca-certificates
-# (upstream fetches). The two RUN steps below install the cgo host
-# Go and TinyGo itself.
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends $pkg \\
- && rm -rf /var/lib/apt/lists/*
-ARG GO_VERSION=1.23.4
-RUN ARCH=\$(dpkg --print-architecture) \\
- && curl -fsSL \"https://go.dev/dl/go\${GO_VERSION}.linux-\${ARCH}.tar.gz\" \\
-      | tar -C /usr/local -xz
-ENV PATH=\"/usr/local/go/bin:\${PATH}\"
-ARG TINYGO_VERSION=0.34.0
-RUN ARCH=\$(dpkg --print-architecture) \\
- && curl -fsSL -o /tmp/tinygo.deb \\
-      \"https://github.com/tinygo-org/tinygo/releases/download/v\${TINYGO_VERSION}/tinygo_\${TINYGO_VERSION}_\${ARCH}.deb\" \\
- && apt-get update \\
- && apt-get install -y --no-install-recommends /tmp/tinygo.deb \\
- && rm -rf /var/lib/apt/lists/* /tmp/tinygo.deb
-# Sanity-check at IMAGE build time: \`tinygo version\` must succeed.
-# If either Go or TinyGo were installed wrong, fail HERE (loud) rather
-# than at first \`tinygo build\` in aeb-ctr Phase 1 (silent until then).
-RUN tinygo version
-RUN cd /src \\
- && make contrib MODULES=tinygo \\
- && make install-contrib
-"
-        else
-            WITH_LAYERS="$WITH_LAYERS
-# --- Hosted-language layer: $lang (via apt $pkg) ---
-# Added because aether-build was invoked with --with=$lang.
-# The -dev kit lays down REAL platform-specific headers
-# (pyconfig.h / perl.h etc.) that are generated build
-# products and can't be portably vendored.
-RUN apt-get update \\
- && apt-get install -y --no-install-recommends $pkg \\
- && rm -rf /var/lib/apt/lists/*
-RUN cd /src \\
- && make contrib MODULES=$lang \\
- && make install-contrib
-"
-        fi
-    done
-
     cat > "$BUILDCTX/Containerfile" <<CONTAINERFILE
 # Auto-generated by aether-build — see the embedded heredoc in that
 # script for the source of truth.
 #
 # Image name: $IMAGE
-# Hosted languages (--with set, alpha-sorted): ${WITH_LANGS:-<none>}
 
 FROM debian:bookworm-slim
 
 # Base toolchain + the -dev packages Aether-emitted C wants at
 # link time. gcc + libc6-dev (not build-essential — we don't need
 # g++ or dpkg-dev).
-#
-# Hosted-language -dev kits (libperl-dev, ruby-dev, etc.) are
-# NOT installed here — they're added per layer by --with=<lang>.
-# This keeps the base image slim for the majority "just Aether" case.
 RUN apt-get update && apt-get install -y --no-install-recommends \\
         gcc make libc6-dev ca-certificates git pkg-config \\
         libssl-dev zlib1g-dev libnghttp2-dev libpcre2-dev \\
@@ -500,7 +312,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \\
 ${SOURCE_STAGE}
 
 # Build & install Aether from the staged source. Do NOT remove /src
-# yet — any --with=<lang> layers below need it for make contrib.
+# yet — the sqlite layer below needs it for make contrib.
 RUN cd /src \\
  && make \\
  && make install
@@ -512,10 +324,8 @@ RUN cd /src \\
 RUN cd /src \\
  && make contrib MODULES=sqlite \\
  && make install-contrib
-${WITH_LAYERS}
 
-# Cleanup: /src no longer needed after the (possibly empty) per-lang
-# layer set above.
+# Cleanup: /src no longer needed.
 RUN rm -rf /src
 
 # Bind-mount points: source comes in at /work, products land at /out.
