@@ -349,7 +349,7 @@ tests in the adjacent hunk rather than three directories away.
 
 `make test-ae` hands each `tests/integration/<name>/` directory to a worker
 and runs its `test_*.sh` drivers one after another, because two drivers in
-one directory may share fixed ports or build outputs. Two markers change
+one directory may share fixed ports or build outputs. Three markers change
 that:
 
 - **`DRIVERS_INDEPENDENT`** — the directory's drivers share nothing, so each
@@ -361,6 +361,12 @@ that:
   needed and is printed when the target runs. A test that can only "pass" by
   skipping does not belong in a gate (#2132 §3); `AE_SWEEP_OPTIONAL=1 make
   test-ae` puts them back in for a run that has the toolchain.
+- **`RUN_ALONE`**: the directory's test asserts on its own timing (one size's
+  CPU time within a multiple of another's), which a machine with every core
+  busy distorts: the larger case loses more to the shared caches, and a linear
+  check read 8x (#3604). It runs after the parallel phase, one at a time,
+  still in its shard and in the verdict. The marker is for that kind of
+  assertion only: anything else that fails under load is a bug in the test.
 
 ### Files a test writes
 

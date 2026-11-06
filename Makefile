@@ -1427,6 +1427,12 @@ fuzz-cbor: compiler ae stdlib
 # so the per-test timeout is generous enough not to fail a merely contended one
 # and still short enough to catch a hang (AE_SH_TEST_TIMEOUT below).
 #
+# A test that asserts on its own timing (one size's CPU time within a multiple
+# of another's) cannot get that from a busy machine: with every core working,
+# the larger case loses more to the shared caches and memory, and a linear
+# check read 8x (#3604). A directory with a RUN_ALONE marker runs after the
+# parallel shell phase, one at a time, still in its shard and in the verdict.
+#
 # The recipe exports CC because several integration tests compile a C host
 # against libaether.a, and they default to `cc`. MSYS2's mingw64 ships a cc,
 # but WinLibs does not -- and WinLibs is the toolchain `ae` itself downloads
@@ -1471,7 +1477,9 @@ test-ae: compiler ae stdlib
 	fi; \
 	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_end; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
@@ -1491,7 +1499,17 @@ test-ae: compiler ae stdlib
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
 	  done; } | sh tests/scripts/sweep_shard.sh > "$$tmpdir/units_sh.txt"; \
-	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh.txt"; \
+	: > "$$tmpdir/units_sh_par.txt"; : > "$$tmpdir/units_sh_alone.txt"; \
+	while read -r u; do \
+	  d="$$u"; [ -d "$$d" ] || d=$$(dirname "$$u"); \
+	  if [ -f "$$d/RUN_ALONE" ]; then echo "$$u" >> "$$tmpdir/units_sh_alone.txt"; \
+	  else echo "$$u" >> "$$tmpdir/units_sh_par.txt"; fi; \
+	done < "$$tmpdir/units_sh.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_start; \
+	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh_par.txt"; \
+	xargs -P 1 -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh_alone.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_end; \
+	times > "$$tmpdir/times.txt"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -1536,6 +1554,7 @@ test-ae: compiler ae stdlib
 		echo ""; \
 	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
+	sh "$$root/tests/scripts/sweep_cpu.sh" report "$$tmpdir" $(NPROC) "$$sh_nproc"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
 	printf '%s %s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" "$$expected" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \

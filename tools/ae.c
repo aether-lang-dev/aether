@@ -3620,6 +3620,13 @@ static const char* bracket_depth_flags(const char* cc) {
     free(asked);
     asked = strdup(cc);
     answer = "";
+    /* #3600: and once per compiler, not once per build: the answer is kept
+     * in the cache directory by the compiler's identity. */
+    int known = cache_probe_memo_get(cc, AETHER_CLANG_DEPTH_CFLAGS);
+    if (known >= 0) {
+        if (known) answer = AETHER_CLANG_DEPTH_CFLAGS;
+        return answer;
+    }
     char probe_c[1100];
     snprintf(probe_c, sizeof(probe_c), "%s/ae_bracket_probe_%d.c", get_temp_dir(), (int)getpid());
     FILE* f = fopen(probe_c, "w");
@@ -3628,8 +3635,18 @@ static const char* bracket_depth_flags(const char* cc) {
     fclose(f);
     char* probe = ae_strdup_printf("%s%s -fsyntax-only \"%s\"", cc, AETHER_CLANG_DEPTH_CFLAGS,
                                    probe_c);
-    if (probe && run_cmd_quiet(probe) == 0) answer = AETHER_CLANG_DEPTH_CFLAGS;
+    int takes = probe && run_cmd_quiet(probe) == 0;
+    if (takes) answer = AETHER_CLANG_DEPTH_CFLAGS;
     free(probe);
+    /* A refusal is remembered only when the same compile without the flag
+     * passes: a compiler that could not run at all said nothing about it. */
+    int settled = takes;
+    if (!takes) {
+        char* control = ae_strdup_printf("%s -fsyntax-only \"%s\"", cc, probe_c);
+        settled = control && run_cmd_quiet(control) == 0;
+        free(control);
+    }
+    if (settled) cache_probe_memo_put(cc, AETHER_CLANG_DEPTH_CFLAGS, takes);
     remove(probe_c);
     return answer;
 }
@@ -3826,6 +3843,20 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
     if (done) return flags;
     done = 1;
 
+    /* #3600: an assembler that takes the option is remembered, per compiler
+     * and per assembler beside it (binutils updates on its own), so a build
+     * does not assemble a probe first. A refusal is asked again by each
+     * build, so the binutils that brings the option is noticed at once; so
+     * is everything when no assembler sits beside the compiler. */
+    char as_id[1400];
+    char memo_what[1500] = "";
+    if (cache_file_beside_program(s_gcc_cmd, "as.exe", as_id, sizeof(as_id)))
+        snprintf(memo_what, sizeof(memo_what), "-Wa,-muse-unaligned-vector-move %s", as_id);
+    if (memo_what[0] && cache_probe_memo_get(s_gcc_cmd, memo_what) == 1) {
+        flags = " -Wa,-muse-unaligned-vector-move";
+        return flags;
+    }
+
     char probe_c[1100], probe_out[1100], probe_o[1100], cmd[4096];
     int pid = (int)getpid();
     snprintf(probe_c, sizeof(probe_c), "%s/ae_avx_probe_%d.c", get_temp_dir(), pid);
@@ -3839,6 +3870,7 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
              s_gcc_cmd, probe_c, probe_o);
     if (run_cmd_quiet(cmd) == 0) {
         flags = " -Wa,-muse-unaligned-vector-move";
+        if (memo_what[0]) cache_probe_memo_put(s_gcc_cmd, memo_what, 1);
     } else {
         int selects_isa = 0;
         for (const char* p = user_cflags; p && *p && !selects_isa; p++) {
@@ -7555,8 +7587,16 @@ static int cmd_run(int argc, char** argv) {
     /* One salt for the lookup and the publish key below (#2500); it lives
      * for the process. */
     const char* run_key_salt = ae_define_salt(run_mode_salt());
-    unsigned long long cache_key =
-        compute_cache_key(file, extra_files, "O0", run_key_salt);
+    /* #3599: as `ae build` does, no lookup (and no tree walk) for a source
+     * with no depfile yet: nothing is published under the key it would make.
+     * aetherc writes the depfile, and the key it gives below is published. */
+    unsigned long long cache_key = 0;
+    if (!cache_lookup_can_hit(file)) {
+        if (tc.verbose) fprintf(stderr, "[cache] miss: no depfile yet, nothing to look up\n");
+        cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+    } else {
+        cache_key = compute_cache_key(file, extra_files, "O0", run_key_salt);
+    }
     if (cache_key != 0) {
         init_cache_dir();
         snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT, s_cache_dir, cache_key);
@@ -7703,6 +7743,7 @@ static int cmd_run(int argc, char** argv) {
         if (cache_publish(exe_file, cached_exe) == 0) {
             strncpy(exe_file, cached_exe, sizeof(exe_file) - 1);
             exe_file[sizeof(exe_file) - 1] = '\0';
+            cache_note_published();
             cache_enforce_limit(cached_exe, 0);
         } else {
             // Exotic-filesystem rename failure: run the private temp
@@ -10668,8 +10709,18 @@ static int cmd_build(int argc, char** argv) {
         char* build_mode_full = libs_salt ? ae_strdup_printf("%s%s", build_mode, libs_salt) : NULL;
         free(libs_salt);
         build_key_salt = ae_define_salt(build_mode_full);
-        cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
-                                      build_key_salt);
+        /* #3599: a source with no depfile yet has no entry to find (its key
+         * would come from walking two directory trees, and builds publish
+         * under the depfile's), so the lookup and its walk are skipped; the
+         * build asks aetherc for the depfile and publishes under its key. */
+        if (!cache_lookup_can_hit(file)) {
+            cache_key = 0;
+            if (tc.verbose) fprintf(stderr, "[cache] miss: no depfile yet, nothing to look up\n");
+            cache_depfile_path(file, g_emit_deps_path, sizeof(g_emit_deps_path));
+        } else {
+            cache_key = compute_cache_key(file, extra_files, quick ? "O0" : "O2",
+                                          build_key_salt);
+        }
         if (cache_key != 0) {
             init_cache_dir();
             snprintf(cached_exe, sizeof(cached_exe), "%s/%016llx" EXE_EXT,
@@ -10966,6 +11017,7 @@ static int cmd_build(int argc, char** argv) {
             if (tc.verbose) fprintf(stderr, "[cache] publish failed for %016llx\n", cache_key);
         } else {
             if (tc.verbose) fprintf(stderr, "[cache] wrote: %016llx\n", cache_key);
+            cache_note_published();
             cache_enforce_limit(cached_exe, 0);
         }
     }

@@ -16,9 +16,11 @@
 // each benchmarks/ownership program whole (BENCH_OWNERSHIP picks them, a
 // single comma for none), and adds rows of its own: an `ae run` of hello.ae
 // on a warm cache, a cold `ae build` of compile_heavy.ae (a fresh cache
-// directory each time, so it includes the C compiler), and aetherc's own
-// phases of that compile from `--time-phases` (missing from a tree whose
-// aetherc has no such flag).
+// directory each time, so it includes the C compiler), a first build of
+// hello.ae into a cache that has built compile_heavy.ae (what nearly every
+// build of the test sweep is), and aetherc's own phases of compiling
+// compile_heavy.ae from `--time-phases` (missing from a tree whose aetherc
+// has no such flag).
 //
 // The table goes to stdout, and a tab separated copy (name, unit, base,
 // branch) to BENCH_OUT, by default build/bench-core.tsv.
@@ -222,6 +224,19 @@ run_round(t: ptr, root: string, tree: string, tag: string, dir: string, progs: p
         record(t, best, "ae_build_cold_heavy", "ms", ms_since(t0))
     }
     _r = sh_run("rm -rf ${cache}")
+
+    // The first build of a program into a cache that has built another one
+    // already, as every build of the test sweep but its first is: the
+    // toolchain's fingerprints and the compiler's flag probes are kept in
+    // the cache (#3600), and no depfile exists for the new program (#3599).
+    warm = "${dir}/warm_${tag}_${round}"
+    _wu = sh_run("cd ${tree} && AETHER_CACHE_DIR=${warm} ./build/ae build ${root}/benchmarks/core/compile_heavy.ae -o ${dir}/${tag}_warmup")
+    t0 = os.now_monotonic_ns()
+    _o4, st4 = sh_run("cd ${tree} && AETHER_CACHE_DIR=${warm} ./build/ae build ${root}/benchmarks/core/hello.ae -o ${dir}/${tag}_hello_new")
+    if st4 == 0 {
+        record(t, best, "ae_build_new_program", "ms", ms_since(t0))
+    }
+    _r4 = sh_run("rm -rf ${warm}")
 
     phases, st3 = sh_run("cd ${tree} && ./build/aetherc --time-phases ${root}/benchmarks/core/compile_heavy.ae ${dir}/${tag}_heavy.c 2>&1")
     if st3 == 0 {

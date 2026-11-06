@@ -13,16 +13,19 @@
 # extern lookups, codegen's fn-pointer globals and shadowed names, the
 # merge's import prefixes), so the compile still grew with the square of the
 # chain: 8000 functions took 22 to 25 s on the release's macOS x86_64
-# runner. The chain is compiled at 4000 and at 16000 functions on the same
-# machine: four times the functions must cost less than eight times the time
-# (linear is four, the quadratic compile was thirteen), whatever the
-# runner's speed.
+# runner. The chain is compiled at 2000 and at 16000 functions on the same
+# machine: eight times the functions must cost less than 24 times the time,
+# whatever the runner's speed. Linear is eight; the quadratic compile was
+# thirteen at four times the functions, about fifty at eight.
 #
 # The time is the CPU time of the compile's phases (`aetherc --time-phases`,
 # its second column), summed over three runs of each size taken in turn,
 # not the wall clock: the sweep runs this beside other tests, many running a
 # scheduler on every core, and the longer compile's wall clock counted the
-# time it waited for a core (8.2x once on a Linux runner).
+# time it waited for a core (8.2x once on a Linux runner). CPU time moves
+# too: at four times the functions a linear compile read 8.3x, alone, on a
+# Windows runner, against a bound of 8x (#3604). Eight times the size and a
+# bound of 24x leave a factor of two or more on each side.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -91,12 +94,12 @@ compile_ms() {
     fi
 }
 
-chain 4000
+chain 2000
 chain 16000
 small=0
 large=0
 for run in 1 2 3; do
-    compile_ms 4000
+    compile_ms 2000
     small=$(( small + MS ))
     compile_ms 16000
     if [ "$MS" -gt "$LIMIT_MS" ]; then
@@ -109,8 +112,8 @@ done
 # Below 50 ms a run the clock's grain decides: Windows charges CPU time a
 # clock tick, about 15.6 ms, at a time.
 [ "$small" -lt 150 ] && small=150
-if [ "$large" -ge $(( small * 8 )) ]; then
-    echo "  [FAIL] order_effects_scaling: 4000 calls compiled in ${small} ms of CPU, 16000 in ${large} ms (three runs each): four times the functions cost $(( large / small ))x the time (linear is 4x)"
+if [ "$large" -ge $(( small * 24 )) ]; then
+    echo "  [FAIL] order_effects_scaling: 2000 calls compiled in ${small} ms of CPU, 16000 in ${large} ms (three runs each): eight times the functions cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
     exit 1
 fi
 # The read of q.n comes first, ahead of the call that writes it.
@@ -118,5 +121,5 @@ if ! grep -q "_eo[0-9]* = \|_AE_SEQ_LET" "$TMPDIR/chain16000.c"; then
     echo "  [FAIL] order_effects_scaling: q.n is not evaluated ahead of f0(p, 3)"
     exit 1
 fi
-echo "  [PASS] order_effects_scaling: 4000 calls in ${small} ms of CPU, 16000 in ${large} ms (three runs each)"
+echo "  [PASS] order_effects_scaling: 2000 calls in ${small} ms of CPU, 16000 in ${large} ms (three runs each)"
 exit 0
