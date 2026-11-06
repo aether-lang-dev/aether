@@ -40,11 +40,11 @@ printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAl
 for k in root a b; do
     ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP/$k.key"
 done
-MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -x509 -new -key "$TMP/root.key" -out "$TMP/root.pem" \
+ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -out "$TMP/root.pem" \
     -days 2 -subj "/CN=Reload Test Root" -addext "basicConstraints=critical,CA:TRUE" \
     -addext "keyUsage=critical,keyCertSign,cRLSign"
 for k in a b; do
-    MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -new -key "$TMP/$k.key" -out "$TMP/$k.csr" -subj "/CN=localhost"
+    ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/$k.key" -out "$TMP/$k.csr" -subj "/CN=localhost"
     ssl openssl x509 -req -in "$TMP/$k.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
         -days 2 -extfile "$TMP/leaf.ext" -out "$TMP/$k.pem"
 done

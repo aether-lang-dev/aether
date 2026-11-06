@@ -69,7 +69,7 @@ done
 
 fails=0
 # run_case <name> <PEER_CASE> <client expects> <peer expects>
-run_case() {
+_run_case() {
     rm -f "$TMP/port" "$TMP/peer.out"
     PEER_CASE="$2" PEER_CERT_OUT="$TMP/peer.pem" PEER_PORT_OUT="$TMP/port" "$TMP/peer" >"$TMP/peer.out" 2>&1 &
     ppid=$!
@@ -95,6 +95,17 @@ run_case() {
         fails=$((fails + 1))
     fi
 }
+
+# The cases pass per-case settings as `VAR=value run_case ...` (CL, CENV, SENV,
+# SV, POST, HRR, GROUP, EARLY). In bash an assignment before a function call
+# lasts for that call; under `sh` (bash in POSIX mode, macOS's /bin/sh) it
+# does not, and every later case inherited it, so `sh test_tls13_peer.sh`
+# failed 26-30 cases while the sweep (which runs `bash`) passed. Clear them
+# after every case so the script means the same under either shell.
+_case_reset() { CL=""; CENV=""; SENV=""; SV=""; POST=""; HRR=""; GROUP=""; EARLY=""; }
+run_case() { _run_case "$@"; _case_reset; }  # prefix-ok: clears them
+run_server_case() { _run_server_case "$@"; _case_reset; }  # prefix-ok: clears them
+run_cf_case() { _run_cf_case "$@"; _case_reset; }  # prefix-ok: clears them
 
 run_case "a clean handshake" "" "OK" "FINISHED"
 
@@ -156,7 +167,7 @@ run_case "after: a record that does not authenticate" "post=badmac" "RECVERR" "P
 run_case "after: an empty handshake record" "post=emptyhs" "RECVERR" "POST ALERT 10"
 
 # run_server_case <name> <RAW hex the client sends> <answer expected>
-run_server_case() {
+_run_server_case() {
     rm -f "$TMP/port" "$TMP/server.out"
     PEER_PORT_OUT="$TMP/port" "$TMP/server" >"$TMP/server.out" 2>&1 &
     spid=$!
@@ -231,7 +242,7 @@ run_case "CertificateRequest: an odd signature_algorithms list (#3365)" "cr=0000
 # run_cf_case <name> <PEER_CF> <answer expected> <server says>; SV names
 # another server program, SENV adds its environment, POST is PEER_POST,
 # HRR is PEER_HRR, GROUP PEER_GROUP, EARLY PEER_EARLY.
-run_cf_case() {
+_run_cf_case() {
     rm -f "$TMP/port" "$TMP/server.out"
     env $SENV PEER_PORT_OUT="$TMP/port" "$TMP/${SV:-server}" >"$TMP/server.out" 2>&1 &
     spid=$!

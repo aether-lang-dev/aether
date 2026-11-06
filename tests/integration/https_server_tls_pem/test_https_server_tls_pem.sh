@@ -52,13 +52,13 @@ printf 'basicConstraints=CA:FALSE\nkeyUsage=critical,digitalSignature\nsubjectAl
 for k in root inter leaf other; do
     ssl openssl genpkey -algorithm EC -pkeyopt ec_paramgen_curve:P-256 -out "$TMP/$k.key"
 done
-MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -x509 -new -key "$TMP/root.key" -out "$TMP/root.pem" \
+ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -out "$TMP/root.pem" \
     -days 2 -subj "/CN=PEM Test Root" -addext "basicConstraints=critical,CA:TRUE" \
     -addext "keyUsage=critical,keyCertSign,cRLSign"
-MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -new -key "$TMP/inter.key" -out "$TMP/inter.csr" -subj "/CN=PEM Test Intermediate"
+ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/inter.key" -out "$TMP/inter.csr" -subj "/CN=PEM Test Intermediate"
 ssl openssl x509 -req -in "$TMP/inter.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
     -days 2 -extfile "$TMP/ca.ext" -out "$TMP/inter.pem"
-MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -new -key "$TMP/leaf.key" -out "$TMP/leaf.csr" -subj "/CN=localhost"
+ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/leaf.key" -out "$TMP/leaf.csr" -subj "/CN=localhost"
 ssl openssl x509 -req -in "$TMP/leaf.csr" -CA "$TMP/inter.pem" -CAkey "$TMP/inter.key" -CAcreateserial \
     -days 2 -extfile "$TMP/leaf.ext" -out "$TMP/leafonly.pem"
 cat "$TMP/leafonly.pem" "$TMP/inter.pem" >"$TMP/chain.pem"

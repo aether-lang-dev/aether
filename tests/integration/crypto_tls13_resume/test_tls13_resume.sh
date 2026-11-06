@@ -250,13 +250,16 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
             fails=$((fails + 1))
         fi
     }
-    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha384" \
+    SCERT="$TMP/rc.pem"; SKEY="$TMP/rk.pem"
+    s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha384" \
         "Peer signature type: (rsa_pss_rsae_sha384|RSA-PSS)" \
         "Peer signature type: rsa_pss_rsae_sha384|Peer signing digest: SHA384" -sigalgs rsa_pss_rsae_sha384
-    SCERT="$TMP/rc.pem" SKEY="$TMP/rk.pem" s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha512" \
+    SCERT="$TMP/rc.pem"; SKEY="$TMP/rk.pem"
+    s_client_case "openssl s_client -sigalgs rsa_pss_rsae_sha512" \
         "Peer signature type: (rsa_pss_rsae_sha512|RSA-PSS)" \
         "Peer signature type: rsa_pss_rsae_sha512|Peer signing digest: SHA512" -sigalgs rsa_pss_rsae_sha512
-    SCERT="" SKEY="" s_client_case "openssl s_client -groups P-256" \
+    SCERT=""; SKEY=""
+    s_client_case "openssl s_client -groups P-256" \
         "Temp Key: ECDH, (prime256v1|P-256)" "Temp Key: ECDH, (prime256v1|P-256)" -groups P-256
 else
     echo "    skip: openssl s_server -early_data (no openssl, or no -early_data)"

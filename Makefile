@@ -2908,7 +2908,7 @@ help:
 	@echo "  make test-all       - Run both C and .ae tests"
 	@echo "  make check-standalone - Compile every standalone C main (benches, demos)"
 	@echo "  make check-docs       - Compile the documentation's complete examples"
-	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, test programs write temp files under names of their own and ask the build for the platform"
+	@echo "  make check-tests      - The test suite can fail: verdicts reach the exit code, prune list is consistent, every std module has tests, listeners bind loopback, shell tests end background programs through server_jobs.sh and compare files with same_bytes, no `VAR=x shell_function` prefix (it leaks under macOS /bin/sh), test programs write temp files under names of their own and ask the build for the platform"
 	@echo "  make check-extern-widths - Every extern bound to C in this tree agrees with the C definition on each width; no plain C long in a bound signature; no shared C function defined twice"
 	@echo "  make check-raw-calls     - No file calls or re-declares a raw C binding another module declares"
 	@echo "  make check-warnings      - Every .ae file under std and contrib type-checks without a warning"
@@ -3520,7 +3520,7 @@ test-optional: compiler ae stdlib
 
 check-tests:
 	@echo "==================================="
-	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, shell tools, temp names, platform)"
+	@echo "  test suite (verdicts, prune list, loopback listeners, shell kills, shell tools, shell function prefixes, temp names, platform)"
 	@echo "==================================="
 	@py=""; \
 	for cand in python3 python "py -3"; do \
@@ -3538,6 +3538,8 @@ check-tests:
 	    $$py tests/scripts/check_shell_kills.py && \
 	    $$py tests/scripts/test_check_shell_tools.py && \
 	    $$py tests/scripts/check_shell_tools.py && \
+	    $$py tests/scripts/test_check_shell_prefix.py && \
+	    $$py tests/scripts/check_shell_prefix.py && \
 	    $$py tests/scripts/test_check_shell_tmp.py && \
 	    $$py tests/scripts/check_shell_tmp.py && \
 	    $$py tests/scripts/test_check_ae_tmp.py && \
