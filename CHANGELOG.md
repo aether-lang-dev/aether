@@ -99,13 +99,7 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ### Fixed
 
-- **The sweep's timing-ratio tests run with nothing beside them, and compare sizes eight times apart (#3604).** `lookup_index_scaling`, `order_effects_scaling`, `merge_codegen_scaling` and `loop_nest_scaling` check that one size's CPU time is within a multiple of another's, to catch a quadratic algorithm.
-
-  The sweep keeps every core busy (#3598 measured 92 to 98% on Windows). Under that load the larger case loses more to the shared caches and memory: `lookup_index_scaling` read 8x on a Windows runner, while it is linear alone, which reads about 3.6x.
-
-  - A test directory holding a `RUN_ALONE` marker now runs after the parallel shell phase, one at a time, still in its shard and its verdict. The four carry the marker, and it is documented in CONTRIBUTING.md with the sweep's other markers.
-  - Alone, `order_effects_scaling` still read 8.3x on a slow runner, against a bound of 8x for four times the size. That left a factor of two between a linear reading and the bound, and the runner used all of it. `lookup_index_scaling` (1000 / 8000 declarations), `order_effects_scaling` (2000 / 16000) and `merge_codegen_scaling` (1500 / 12000) now compare eight times the size against 24x. A linear algorithm reads about 8x (8.5 to 11x here), and the quadratic costs these tests caught would read 45x and more, so each side keeps a factor of two or more.
-  - `loop_nest_scaling` (depth 12 against 24, bound 8x, reads 1.6x) keeps its sizes and bound.
+- **The sweep's timing-ratio tests run with nothing beside them (#3604).** `lookup_index_scaling`, `order_effects_scaling`, `merge_codegen_scaling` and `loop_nest_scaling` check that one size's CPU time is within a multiple of another's, to catch a quadratic algorithm. The sweep keeps every core busy (#3598 measured 92 to 98% on Windows). Under that load the larger case loses more to the shared caches and memory, and `lookup_index_scaling` read 8x on a Windows runner while it is linear alone, which reads about 3.6x. A test directory holding a `RUN_ALONE` marker now runs after the parallel shell phase, one at a time, still in its shard and its verdict. The four carry the marker, and it is documented in CONTRIBUTING.md with the sweep's other markers. No bound changed.
 
 ### Performance
 
