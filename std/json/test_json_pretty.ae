@@ -1,0 +1,104 @@
+// Spec for json.pretty: the layout at each indent, that the document's own
+// bytes survive (key order, number spellings, escapes, duplicate keys,
+// UTF-8), compact mode, idempotence, equivalence with the input, and the
+// errors.
+
+import std.json
+import std.string
+
+extern exit(code: int)
+
+check(name: string, got: string, want: string) -> int {
+    if got == want {
+        println("  PASS ${name}")
+        return 0
+    }
+    println("  FAIL ${name}\n    got:  [${got}]\n    want: [${want}]")
+    return 1
+}
+
+ok(name: string, src: string, indent: int, want: string) -> int {
+    got, err = json.pretty(src, indent)
+    if err != "" {
+        println("  FAIL ${name}: unexpected error ${err}")
+        return 1
+    }
+    return check(name, got, want)
+}
+
+bad(name: string, src: string, indent: int, want_in_err: string) -> int {
+    got, err = json.pretty(src, indent)
+    if err == "" || string.contains(err, want_in_err) != 1 || got != "" {
+        println("  FAIL ${name}: got [${got}] err [${err}], want an error containing [${want_in_err}]")
+        return 1
+    }
+    println("  PASS ${name}")
+    return 0
+}
+
+// The same value, as json.parse then encode sees it.
+canonical(src: string) -> string {
+    v, err = json.parse(src)
+    if err != "" { return "ERROR ${err}" }
+    out, _eerr = json.encode(v)
+    json.free(v)
+    return out
+}
+
+main() {
+    println("=== test_json_pretty ===")
+    fails = 0
+
+    fails = fails + ok("nested object and array at indent 2",
+        "{\"a\":1,\"b\":[true,null,{\"c\":\"d\"}]}", 2,
+        "{\n  \"a\": 1,\n  \"b\": [\n    true,\n    null,\n    {\n      \"c\": \"d\"\n    }\n  ]\n}")
+    fails = fails + ok("indent 4", "[1,[2]]", 4, "[\n    1,\n    [\n        2\n    ]\n]")
+    fails = fails + ok("empty object and array stay on one line",
+        "{ \"o\" : { } , \"a\" : [ \n ] }", 2, "{\n  \"o\": {},\n  \"a\": []\n}")
+    fails = fails + ok("an empty document container", " [ ] ", 2, "[]")
+    fails = fails + ok("numbers kept as spelled", "[1.0,1e3,-0,1.5E-7,12345678901234567890]", 2,
+        "[\n  1.0,\n  1e3,\n  -0,\n  1.5E-7,\n  12345678901234567890\n]")
+    fails = fails + ok("key order and duplicate keys kept", "{\"z\":1,\"a\":2,\"z\":3}", 2,
+        "{\n  \"z\": 1,\n  \"a\": 2,\n  \"z\": 3\n}")
+    fails = fails + ok("escapes and structure inside strings kept",
+        "{\"s\":\"a\\\"b\\\\c\\u00e9 {x: [1, 2]}\"}", 2,
+        "{\n  \"s\": \"a\\\"b\\\\c\\u00e9 {x: [1, 2]}\"\n}")
+    fails = fails + ok("whitespace inside strings kept", "[\"  two  spaces \\t \"]", 2, "[\n  \"  two  spaces \\t \"\n]")
+    fails = fails + ok("UTF-8 kept", "{\"név\":\"日本\"}", 2, "{\n  \"név\": \"日本\"\n}")
+    fails = fails + ok("compact at indent 0", " {\n  \"a\" : [ 1 , 2 ] ,\n  \"b\" : { \"c\" : null }\n} ", 0,
+        "{\"a\":[1,2],\"b\":{\"c\":null}}")
+    fails = fails + ok("a top-level number", "  42  ", 2, "42")
+    fails = fails + ok("a top-level string", " \"x y\" ", 2, "\"x y\"")
+    fails = fails + ok("a top-level literal", "true", 2, "true")
+
+    // Idempotent, and the same value as the input.
+    src = "{\"id\":\"7d44\",\"items\":[{\"n\":1.0,\"tags\":[]},{\"n\":2,\"tags\":[\"a\",\"b\"]}],\"meta\":{}}"
+    p1, e1 = json.pretty(src, 2)
+    p2, e2 = json.pretty(p1, 2)
+    fails = fails + check("pretty of pretty is unchanged", "${e1}${e2}${p2}", p1)
+    c1, _ = json.pretty(p1, 0)
+    fails = fails + check("compact of pretty is the compact input", c1, src)
+    fails = fails + check("the pretty text parses to the same value", canonical(p1), canonical(src))
+
+    // Deep nesting: 200 levels in, 200 out.
+    deep = ""
+    i = 0
+    while i < 200 { deep = string.concat(deep, "["); i = i + 1 }
+    i = 0
+    while i < 200 { deep = string.concat(deep, "]"); i = i + 1 }
+    dp, de = json.pretty(deep, 1)
+    fails = fails + check("200 levels deep parse back the same", "${de}${canonical(dp)}", canonical(deep))
+
+    fails = fails + bad("a missing value", "{\"a\":}", 2, " at 1:")
+    fails = fails + bad("trailing content", "[1] x", 2, "trailing")
+    fails = fails + bad("an empty document", "", 2, " at ")
+    fails = fails + bad("an unterminated string", "[\"abc", 2, " at ")
+    fails = fails + bad("indent below 0", "[1]", -1, "indent must be 0 to 16, got -1")
+    fails = fails + bad("indent above 16", "[1]", 17, "indent must be 0 to 16, got 17")
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("=== test_json_pretty passed ===")
+}
