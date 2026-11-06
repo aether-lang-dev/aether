@@ -30,8 +30,12 @@ ssl() { "$@" >"$TMP/ssl.log" 2>&1 || { sed -n '1,10p' "$TMP/ssl.log"; fail "open
 OAEP1="-pkeyopt rsa_padding_mode:oaep -pkeyopt rsa_oaep_md:sha1 -pkeyopt rsa_mgf1_md:sha1"
 
 ssl openssl genrsa -out "$TMP/k.pem" 2048
-# PKCS#1 DER (RSAPrivateKey), what rsa.key_from_pkcs1_der reads.
-ssl openssl rsa -in "$TMP/k.pem" -traditional -outform DER -out "$TMP/k.der"
+# PKCS#1 DER (RSAPrivateKey), what rsa.key_from_pkcs1_der reads. OpenSSL 3
+# writes PKCS#8 unless told -traditional; LibreSSL (macOS's /usr/bin/openssl,
+# the GitHub macOS runners) knows no such flag and writes PKCS#1 as it is.
+if ! openssl rsa -in "$TMP/k.pem" -traditional -outform DER -out "$TMP/k.der" >"$TMP/ssl.log" 2>&1; then
+    ssl openssl rsa -in "$TMP/k.pem" -outform DER -out "$TMP/k.der"
+fi
 printf 'scramble XOR password\000' >"$TMP/m.bin"
 # shellcheck disable=SC2086
 ssl openssl pkeyutl -encrypt -inkey "$TMP/k.pem" -in "$TMP/m.bin" -out "$TMP/c.bin" $OAEP1
