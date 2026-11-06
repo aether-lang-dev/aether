@@ -1522,6 +1522,107 @@ void test_scheduler_batch_wakes_parked_cores(void) {
     ASSERT_EQ(3, rounds_done);
 }
 
+// #3611: a core with messages of its own still to deliver does not park. A
+// step on core 1 sends OVERFLOW_BURST messages to an actor on core 0 while
+// core 0 is held in another step: QUEUE_SIZE of them fill core 0's queue from
+// core 1, and the rest wait in core 1's overflow buffer, which only core 1's
+// thread flushes. Core 1 then has nothing to step and idles past its spin.
+// It parked so, and the messages waited out the park: up to 32 ms each time,
+// and here, with the cores' park a minute as in #3087's test, a minute. Once
+// core 0 is let go, every message must arrive within 10 s.
+#define OVERFLOW_BURST (QUEUE_SIZE * 3)
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int in_step;
+    atomic_int release;
+} HoldActor;
+
+static void hold_step(HoldActor* h) {
+    Message msg;
+    if (mailbox_receive(&h->mailbox, &msg)) {
+        atomic_store(&h->in_step, 1);
+        for (int w = 0; w < 10000 && !atomic_load(&h->release); w++) sleep_ms(1);
+    }
+    atomic_store_explicit(&h->active, h->mailbox.count > 0, memory_order_relaxed);
+}
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* to;
+    atomic_int sent;
+} SpillActor;
+
+static void spill_step(SpillActor* b) {
+    Message msg;
+    if (mailbox_receive(&b->mailbox, &msg)) {
+        int me = atomic_load_explicit(&b->assigned_core, memory_order_relaxed);
+        for (int i = 1; i <= OVERFLOW_BURST; i++)
+            scheduler_send_remote(b->to, message_create_simple(1, 0, i), me);
+        atomic_store(&b->sent, 1);
+    }
+    atomic_store_explicit(&b->active, b->mailbox.count > 0, memory_order_relaxed);
+}
+
+static int wait_flag(atomic_int* flag) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(flag)) {
+        if ((long long)get_time_ms() > deadline) return 0;
+        sleep_ms(1);
+    }
+    return 1;
+}
+
+void test_scheduler_core_with_overflow_does_not_park(void) {
+    scheduler_init(2);
+    HoldActor* hold = (HoldActor*)scheduler_spawn_actor(0, (void (*)(void*))hold_step,
+                                                        sizeof(HoldActor));
+    CounterActor* sink = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
+                                                              sizeof(CounterActor));
+    SpillActor* burst = (SpillActor*)scheduler_spawn_actor(1, (void (*)(void*))spill_step,
+                                                           sizeof(SpillActor));
+    CounterActor* waker = (CounterActor*)scheduler_spawn_actor(1, (void (*)(void*))counter_step,
+                                                               sizeof(CounterActor));
+    ASSERT_NOT_NULL(hold);
+    ASSERT_NOT_NULL(sink);
+    ASSERT_NOT_NULL(burst);
+    ASSERT_NOT_NULL(waker);
+    atomic_store(&hold->in_step, 0);
+    atomic_store(&hold->release, 0);
+    atomic_store(&sink->count, 0);
+    atomic_store(&waker->count, 0);
+    burst->to = (ActorBase*)sink;
+    atomic_store(&burst->sent, 0);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+
+    scheduler_send_remote((ActorBase*)hold, message_create_simple(1, 0, 0), -1);
+    int held = wait_flag(&hold->in_step);
+    scheduler_send_remote((ActorBase*)burst, message_create_simple(1, 0, 0), -1);
+    int sent = held && wait_flag(&burst->sent);
+    // Core 1 idles past its 10,000 spinning turns, where it parked: its
+    // count of idle turns stops there, or goes on past it.
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (sent && !atomic_load(&schedulers[1].parked) &&
+           atomic_load(&schedulers[1].idle_cycles) < 30000 &&
+           (long long)get_time_ms() <= deadline)
+        sleep_ms(1);
+    atomic_store(&hold->release, 1);
+    int got = sent ? wait_count(&sink->count, OVERFLOW_BURST) : -1;
+
+    // Checked after the teardown, so a failure leaves no core parked for a
+    // minute under the tests that follow: a message for core 1 wakes it
+    // (sched_wake), and the teardown does not wait out its park.
+    scheduler_set_core_park_ms(0);
+    scheduler_send_remote((ActorBase*)waker, message_create_simple(1, 0, 0), -1);
+    wait_count(&waker->count, 1);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(held);
+    ASSERT_TRUE(sent);
+    ASSERT_EQ(OVERFLOW_BURST, got);
+}
+
 // #2598: an actor thread's inbox takes any number of senders at once and
 // keeps each one's order. The actor's first step holds it at a gate while
 // three threads send the first half of their 400 messages: the inbox's ring
@@ -1734,6 +1835,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler counts and places its threads by the process's CPUs", test_scheduler_places_threads_among_process_cpus, TEST_CATEGORY_RUNTIME);
 #endif
     register_test_with_category("Scheduler batch send wakes parked cores", test_scheduler_batch_wakes_parked_cores, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler core with messages to deliver does not park", test_scheduler_core_with_overflow_does_not_park, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler actor thread inbox keeps every sender's order", test_scheduler_actor_thread_inbox_keeps_order, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler drops a send to a released actor", test_scheduler_late_send_after_release, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler reuses no block with messages on their way", test_scheduler_reuse_waits_for_messages_in_flight, TEST_CATEGORY_RUNTIME);
