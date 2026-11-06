@@ -1,0 +1,40 @@
+// `ptr[] xs = []`: a typed local array of pointers, declared the way
+// `int[] xs = []` and `string[] xs = []` are. Only `ptr NAME` (#2465) was
+// taken as a declaration, so `ptr[] xs = []` and `ptr[2] xs` were
+// "Expected statement in block" at the `[` while every other scalar's
+// array declared fine.
+
+import std.list
+
+extern exit(code: int)
+
+fn check(ok: bool, what: string) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    ptr[] empty = []
+    check(empty.len == 0, "ptr[] = [] is empty")
+
+    l = list.new()
+    ptr[] two = [l, null]
+    check(two.len == 2, "ptr[] = [l, null] has two")
+    check(two[0] == l && two[1] == null, "ptr[] holds what it was given")
+
+    ptr[2] fixed
+    fixed[0] = l
+    fixed[1] = null
+    check(fixed[0] == l && fixed[1] == null, "ptr[2] stores and reads back")
+
+    ptr[] view = fixed[0..2]
+    check(view.len == 2 && view[0] == l, "ptr[] takes a slice")
+
+    // `ptr p` still declares one pointer.
+    ptr p = l
+    check(p == l, "ptr p = l")
+    list.free(l)
+    println("ok")
+}

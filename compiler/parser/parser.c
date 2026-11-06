@@ -3685,6 +3685,32 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             if (next && next->type == TOKEN_IDENTIFIER && next->line == token->line) {
                 return parse_variable_declaration(parser);
             }
+            /* `ptr[] xs = []`, `ptr[4] xs`, `ptr[][] m`: an array of
+             * pointers, declared as `int[] xs` is. Each `[...]` is empty or
+             * holds one token (a size), and a name follows on the line;
+             * `ptr[i] = v`, an element of an array named `ptr`, ends at `=`
+             * and stays an expression. */
+            {
+                int off = 1;
+                Token* b = peek_ahead(parser, off);
+                int brackets = 0;
+                while (b && b->type == TOKEN_LEFT_BRACKET) {
+                    Token* in = peek_ahead(parser, off + 1);
+                    if (in && in->type == TOKEN_RIGHT_BRACKET) {
+                        off += 2;
+                    } else if (in && peek_ahead(parser, off + 2) &&
+                               peek_ahead(parser, off + 2)->type == TOKEN_RIGHT_BRACKET) {
+                        off += 3;
+                    } else {
+                        break;
+                    }
+                    brackets++;
+                    b = peek_ahead(parser, off);
+                }
+                if (brackets > 0 && b && b->type == TOKEN_IDENTIFIER && b->line == token->line) {
+                    return parse_variable_declaration(parser);
+                }
+            }
             ASTNode* expr = parse_expression(parser);
             if (!expr) return NULL;
             match_token(parser, TOKEN_SEMICOLON);
