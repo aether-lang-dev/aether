@@ -1,9 +1,10 @@
-- **`sh tests/integration/crypto_tls13_peer/test_tls13_peer.sh` no longer fails
-  26-30 cases.** The test passes its per-case settings as `CENV=... run_case ...`
-  (also `CL`, `SENV`, `SV`, `POST`, `HRR`, `GROUP`, `EARLY`). In bash such an
-  assignment lasts for that one call, but under `sh` on macOS (bash in POSIX
-  mode) it stays set, so every later case inherited e.g. `CLIENT_TICKET=1` or
-  `SERVER_READ=1` and failed (ticket, server-alert and HelloRetryRequest cases,
-  with intermittent `send failed`). The sweep runs the test with `bash`, which
-  is why `make test-ae` passed. The test now clears the settings after each
-  case, so it behaves the same under either shell.
+- **Shell tests no longer put `NAME=value` in front of a shell function.** Under
+  macOS `/bin/sh` (bash in POSIX mode) such an assignment stays set after the
+  call, so later calls inherit it; bash, which the sweep uses, drops it. Run by
+  hand as `sh test.sh`, `crypto_tls13_peer` failed 26-30 cases (ticket,
+  server-alert and HelloRetryRequest cases got settings left by earlier ones)
+  and `aea_artifacts` failed 2. Both are fixed, along with the same idiom in
+  `crypto_tls13_mtls_signature`, `crypto_tls13_resume`,
+  `crypto_tls13_signature_check`, `https_pure_server_keys`,
+  `https_server_tls_pem` and `https_tls_reload`. `make check-tests` now runs
+  `tests/scripts/check_shell_prefix.py`, which fails on a new one and says why.

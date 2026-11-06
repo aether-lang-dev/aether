@@ -103,9 +103,9 @@ _run_case() {
 # failed 26-30 cases while the sweep (which runs `bash`) passed. Clear them
 # after every case so the script means the same under either shell.
 _case_reset() { CL=""; CENV=""; SENV=""; SV=""; POST=""; HRR=""; GROUP=""; EARLY=""; }
-run_case() { _run_case "$@"; _case_reset; }
-run_server_case() { _run_server_case "$@"; _case_reset; }
-run_cf_case() { _run_cf_case "$@"; _case_reset; }
+run_case() { _run_case "$@"; _case_reset; }  # prefix-ok: clears them
+run_server_case() { _run_server_case "$@"; _case_reset; }  # prefix-ok: clears them
+run_cf_case() { _run_cf_case "$@"; _case_reset; }  # prefix-ok: clears them
 
 run_case "a clean handshake" "" "OK" "FINISHED"
 
