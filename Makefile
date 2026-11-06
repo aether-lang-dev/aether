@@ -663,6 +663,14 @@ else ifneq ($(PCRE2),0)
 endif
 
 # YAML auto-detection: enables std.yaml via libfyaml.
+#   YAML=auto (default)  libfyaml if pkg-config finds it, else the stubs that
+#                        report "std.yaml unavailable" at run time;
+#   YAML=1               libfyaml REQUIRED: the build stops here without it.
+#                        The release builds pass this, so a release can no
+#                        longer ship the stubs unnoticed (0.889.0 did, on
+#                        macOS and Linux alike: auto found nothing on a
+#                        runner without libfyaml and said nothing);
+#   YAML=0               the stubs, deliberately.
 YAML ?= auto
 ifeq ($(YAML),auto)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
@@ -670,6 +678,9 @@ ifeq ($(YAML),auto)
 else ifeq ($(YAML),1)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
   YAML_LDFLAGS := $(shell pkg-config --libs libfyaml 2>/dev/null)
+  ifeq ($(YAML_LDFLAGS),)
+    $(error YAML=1 but pkg-config finds no libfyaml: install it (apt libfyaml-dev, brew libfyaml, pkg libfyaml, MSYS2 mingw-w64-x86_64-libfyaml) or build with YAML=auto / YAML=0)
+  endif
 else
   YAML_CFLAGS :=
   YAML_LDFLAGS :=
@@ -802,6 +813,15 @@ AETHER_REQUIRED_LDFLAGS = $(FREEBSD_LDFLAGS)
 else
 AETHER_REQUIRED_LDFLAGS = -lm $(OPENSSL_LDFLAGS) $(ZLIB_LDFLAGS) $(NGHTTP2_LDFLAGS) $(PCRE2_LDFLAGS) $(YAML_LDFLAGS) $(CASPER_LDFLAGS) $(AUDIO_LDFLAGS) $(BROTLI_LDFLAGS) $(ZSTD_LDFLAGS)
 endif
+
+# The toolchain's own binaries (aetherc, ae, aether-lsp, apkg) link without
+# libfyaml. None of them parses YAML: aetherc leaves std.yaml's object out of
+# its link (below), and the others take std from libaether.a, which pulls it
+# in only for a caller. Linked with it, a release built against libfyaml
+# could not even start on a machine without the library. A program that
+# imports std.yaml links it, through AETHER_YAML_LIBS, and only that program.
+AETHER_TOOL_LDFLAGS = $(filter-out $(YAML_LDFLAGS),$(AETHER_REQUIRED_LDFLAGS))
+AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o,$(STD_OBJS))
 
 # Tunable link flags: sanitizers and anything else a caller passes. Empty by
 # default, so `make ... LDFLAGS="-fsanitize=address"` adds to the required set
@@ -1236,7 +1256,7 @@ AETHERC_RUNTIME_OBJS = $(patsubst %.c,$(OBJ_DIR)/%.o,$(AETHERC_RUNTIME_SRC))
 
 $(BUILD_DIR)/aetherc$(EXE_EXT): $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER)
 	@echo "Linking compiler..."
-	@$(CC) $(COMPILER_OBJS) $(STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	@$(CC) $(COMPILER_OBJS) $(AETHERC_STD_OBJS) $(COLLECTIONS_OBJS) $(AETHERC_RUNTIME_OBJS) $(IO_POLLER_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 	@echo "Compiler built successfully"
 
 # Fast compiler target (monolithic, for clean builds): the same sources and
@@ -1252,7 +1272,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC),$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC) std/yaml/aether_yaml.c,$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -1427,6 +1447,12 @@ fuzz-cbor: compiler ae stdlib
 # so the per-test timeout is generous enough not to fail a merely contended one
 # and still short enough to catch a hang (AE_SH_TEST_TIMEOUT below).
 #
+# A test that asserts on its own timing (one size's CPU time within a multiple
+# of another's) cannot get that from a busy machine: with every core working,
+# the larger case loses more to the shared caches and memory, and a linear
+# check read 8x (#3604). A directory with a RUN_ALONE marker runs after the
+# parallel shell phase, one at a time, still in its shard and in the verdict.
+#
 # The recipe exports CC because several integration tests compile a C host
 # against libaether.a, and they default to `cc`. MSYS2's mingw64 ships a cc,
 # but WinLibs does not -- and WinLibs is the toolchain `ae` itself downloads
@@ -1471,7 +1497,9 @@ test-ae: compiler ae stdlib
 	fi; \
 	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_end; \
 	sh_script="$$root/tests/scripts/run_ae_sh_dir.sh"; \
 	sh_nproc=$${SH_NPROC:-$(NPROC)}; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
@@ -1491,7 +1519,17 @@ test-ae: compiler ae stdlib
 	  for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    [ -f "$$d/DRIVERS_INDEPENDENT" ] || echo "$$d"; \
 	  done; } | sh tests/scripts/sweep_shard.sh > "$$tmpdir/units_sh.txt"; \
-	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh.txt"; \
+	: > "$$tmpdir/units_sh_par.txt"; : > "$$tmpdir/units_sh_alone.txt"; \
+	while read -r u; do \
+	  d="$$u"; [ -d "$$d" ] || d=$$(dirname "$$u"); \
+	  if [ -f "$$d/RUN_ALONE" ]; then echo "$$u" >> "$$tmpdir/units_sh_alone.txt"; \
+	  else echo "$$u" >> "$$tmpdir/units_sh_par.txt"; fi; \
+	done < "$$tmpdir/units_sh.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_start; \
+	xargs -P $$sh_nproc -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh_par.txt"; \
+	xargs -P 1 -I{} sh "$$sh_script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_sh_alone.txt"; \
+	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" sh_end; \
+	times > "$$tmpdir/times.txt"; \
 	passed=$$(ls "$$tmpdir"/PASS_* 2>/dev/null | wc -l | tr -d ' '); \
 	failed=$$(ls "$$tmpdir"/FAIL_* 2>/dev/null | wc -l | tr -d ' '); \
 	skipped=$$(ls "$$tmpdir"/SKIP_* 2>/dev/null | wc -l | tr -d ' '); \
@@ -1536,6 +1574,7 @@ test-ae: compiler ae stdlib
 		echo ""; \
 	fi; \
 	sh "$$root/tests/scripts/sweep_timings.sh" "$$tmpdir"; \
+	sh "$$root/tests/scripts/sweep_cpu.sh" report "$$tmpdir" $(NPROC) "$$sh_nproc"; \
 	echo "Aether Tests: $$passed passed, $$failed failed, $$skipped skipped, $$total total"; \
 	printf '%s %s %s %s %s\n' "$$passed" "$$failed" "$$skipped" "$$total" "$$expected" > "$$root/$(BUILD_DIR)/test-ae.verdict"; \
 	rm -rf "$$tmpdir"; \
@@ -1942,14 +1981,14 @@ lsp: compiler stdlib
 	@echo "==================================="
 	@echo "Building Aether LSP Server ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o $(BUILD_DIR)/aether-lsp$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) lsp/main.c $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/libaether.a $(MANIFEST_OBJ) -Icompiler -Ilsp -Istd -Istd/collections -o $(BUILD_DIR)/aether-lsp$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 	@echo "✓ LSP Server built successfully: $(BUILD_DIR)/aether-lsp$(EXE_EXT)"
 
 apkg:
 	@echo "==================================="
 	@echo "Building Aether Package Manager ($(DETECTED_OS))"
 	@echo "==================================="
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/apkg$(EXE_EXT)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) tools/apkg/main.c tools/apkg/apkg.c tools/apkg/toml_parser.c $(AETHER_TOOL_LDFLAGS) $(LDFLAGS) -o $(BUILD_DIR)/apkg$(EXE_EXT)
 	@echo "✓ Package Manager built successfully: $(BUILD_DIR)/apkg$(EXE_EXT)"
 
 # Per-object compile for the tools driver (#1221). Static pattern rule so it
@@ -1967,7 +2006,7 @@ $(BUILD_DIR)/ae$(EXE_EXT): $(BUILD_DIR)/aetherc$(EXE_EXT) $(TOOLS_OBJS) $(MANIFE
 	@echo "==================================="
 	@echo "Building ae command-line tool ($(DETECTED_OS)) v$(VERSION)"
 	@echo "==================================="
-	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/ae$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
+	@$(CC) $(TOOLS_OBJS) $(MANIFEST_OBJ) -o $(BUILD_DIR)/ae$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS) $(if $(AETHER_ENABLE_LLM),$(LLM_LDFLAGS))
 	@echo "✓ Built successfully: $(BUILD_DIR)/ae$(EXE_EXT)"
 	@echo ""
 	@echo "Usage:"
@@ -2407,8 +2446,8 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Iinclude -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
-		$(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
-		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_REQUIRED_LDFLAGS) $(LDFLAGS)
+		$(COMPILER_SRC) $(filter-out std/yaml/aether_yaml.c,$(STD_SRC)) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
+		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."
 	@strip $(BUILD_DIR)/aetherc-release$(EXE_EXT)

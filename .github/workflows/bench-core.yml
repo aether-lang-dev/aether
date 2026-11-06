@@ -2,7 +2,8 @@ name: Core benchmarks
 
 # benchmarks/core (#3518) measures what a runtime, std or compiler change
 # costs every program: sends, asks, scheduling beside idle actors, std.string,
-# std.map, std.json, allocation from many threads, `ae run` on a warm cache
+# std.map, std.json, allocation from many threads, `ae run` on a warm cache,
+# `ae build` of a program cold and into a cache that has built before,
 # and aetherc's compile phases. On a pull request that touches those, this
 # builds the pull request and its merge base on one runner and runs both
 # through benchmarks/core/run.ae, the two trees' runs interleaved, best of 5,
@@ -79,6 +80,66 @@ jobs:
       uses: actions/upload-artifact@v6
       with:
         name: bench-core
+        path: |
+          bench-core.txt
+          build/bench-core.tsv
+        retention-days: 14
+
+  # The same comparison on Windows (MSYS2 MINGW64), on request only
+  # (workflow_dispatch: `gh workflow run bench-core.yml --ref <branch>`).
+  # Starting a process there costs several times what it does on Linux, so a
+  # change to what `ae` does around each build shows most there (#3598); on
+  # every pull request it would be one more Windows job, which is what #3598
+  # set out to cut.
+  compare-windows:
+    name: Branch vs merge base (Windows, on request)
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: windows-latest
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: msys2 {0}
+
+    steps:
+    - uses: actions/checkout@v5
+      with:
+        fetch-depth: 0
+
+    - uses: msys2/setup-msys2@v2
+      with:
+        msystem: MINGW64
+        update: false
+        install: git mingw-w64-x86_64-gcc mingw-w64-x86_64-zlib mingw-w64-x86_64-openssl mingw-w64-x86_64-ca-certificates pkg-config make bc
+
+    - name: Check out the merge base
+      run: |
+        mb=$(git merge-base HEAD origin/main)
+        echo "merge base $mb"
+        git worktree add ../base "$mb"
+
+    - name: Build the merge base
+      run: make -C ../base -j"$(nproc)" compiler ae stdlib
+
+    - name: Build this branch
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: Run both
+      run: |
+        set -o pipefail
+        make bench-core-compare BASE=../base BENCH_RUNS=5 | tee bench-core.txt
+        {
+          echo '### Core benchmarks on Windows, best of 5, lower is better'
+          echo
+          echo '```'
+          sed -n '/^best of/,$p' bench-core.txt
+          echo '```'
+        } >> "$GITHUB_STEP_SUMMARY"
+
+    - name: Upload the table
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: bench-core-windows
         path: |
           bench-core.txt
           build/bench-core.tsv

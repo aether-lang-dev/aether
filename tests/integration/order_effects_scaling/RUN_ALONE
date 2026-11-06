@@ -1,0 +1,2 @@
+Asserts on its own CPU time, one size against another: runs after the parallel
+shell phase, with nothing beside it (#3604).

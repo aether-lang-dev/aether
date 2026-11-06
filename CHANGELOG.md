@@ -14,6 +14,43 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.892.0]
+
+### Changed
+
+- **The test sweep says how busy the cores were (#3598).** `make test-ae` now ends with each phase's wall time and the share of the machine's cores that were working during it. That comes from `/proc/stat` on Linux and on MSYS2. Every system also gets the whole sweep's CPU, from the `times` of the shell that ran it. The slowest-test lists show 25 tests, not 10 (`AE_SWEEP_TIMING_TOP`). A leg whose cores sit idle while tests wait on servers and timeouts is told apart from one that is simply doing more work.
+
+- **CI's split test legs divide the sweep by cost, not by position (#3601).** The halves of a split leg took every other test of the list and finished minutes apart:
+  - macOS x86_64 took 13 and 21 to 26 minutes;
+  - Windows GCC took 18.6 and 22 to 28 minutes, splitting by thirds;
+  - ASan and the macOS leaks gate were 2 to 7 minutes apart.
+
+  `tests/scripts/sweep_shard.sh` now reads `tests/sweep_weights_<os>.txt`, each test's time on that system's CI. It deals the tests out heaviest first, each to the shard with the lowest total so far, and every job computes the same partition. A test the file does not name costs the median, and without the file the split is by position as before. One file per system, because a test can cost minutes on one and be skipped on another (`cross_ios`, 182 s on macOS).
+
+  On the measured costs, the halves now come out at 963.9 / 964.2 s (Linux), 2818 / 2818 s (macOS) and 2336 / 2335 s (Windows). Windows GCC's `make ci` half takes 8 of 20 shares, since it also runs `make ci`'s other stages.
+
+  The weights come from `AE_SWEEP_TIMINGS_OUT`, which writes every test's time; the main matrix and Windows GCC legs upload it. `tests/scripts/sweep_weights.sh` turns those uploads into the files. macOS's sweep timings now count whole seconds, where BSD `date` gave none.
+
+### Fixed
+
+- **The sweep's timing-ratio tests run with nothing beside them (#3604).** `lookup_index_scaling`, `order_effects_scaling`, `merge_codegen_scaling` and `loop_nest_scaling` check that one size's CPU time is within a multiple of another's, to catch a quadratic algorithm. The sweep keeps every core busy (#3598 measured 92 to 98% on Windows). Under that load the larger case loses more to the shared caches and memory, and `lookup_index_scaling` read 8x on a Windows runner while it is linear alone, which reads about 3.6x. A test directory holding a `RUN_ALONE` marker now runs after the parallel shell phase, one at a time, still in its shard and its verdict. The four carry the marker, and it is documented in CONTRIBUTING.md with the sweep's other markers. No bound changed.
+
+### Performance
+
+- **A first `ae build` or `ae run` of a file no longer walks two directory trees (#3599).** With no depfile for a source yet, the cache key was made by hashing its directory and the working directory file by file, to look the build up. No build publishes under that key, though: each publishes under the key its depfile gives (#2500). So the lookup could never hit. It cost about 170 ms of a 620 ms first build on Windows, and it was paid by every build in a CI sweep, whose cache starts empty. The lookup is now skipped. The build asks aetherc for the depfile and publishes under its key, as before, and the second build hits. If a build ever has to publish under a tree-walk key, because no depfile could be folded, it leaves a `walk-keyed` marker in the cache directory, and first builds then look up as they used to.
+
+- **`ae build` and `ae run` ask the C compiler about its flags once, not every build (#3600).** Each build compiled an empty file to learn whether the compiler takes `-fbracket-depth` (#3574), and on Windows assembled one to learn whether the assembler takes `-muse-unaligned-vector-move` (#2476). The answers lasted one process, and ae is one process per build. They are now kept in the build cache directory, keyed by the compiler's identity (its fingerprint, and the path, size and mtime of the program the command runs). The AVX answer is also keyed by the assembler beside the compiler. A refusal is remembered only when the same compile without the flag passes. The AVX probe remembers only a "takes it", so a binutils upgrade is noticed at once. Together with #3599, a first build of a small program on Windows went from 830 to 320 ms here.
+
+## [0.891.0]
+
+### Fixed
+
+- **`ae add` installs a package from a tarball made on a Mac.** `tar` on macOS writes an AppleDouble sidecar (`._<name>`) beside every file carrying an extended attribute, which includes anything a Mac wrote (`com.apple.provenance`). One of them at the archive's root counted as a second top-level entry, so the add failed with "the archive does not hold one top directory", and the rest would have been installed and hashed as package files. `ae-fetch` now removes regular `._*` files from the unpacked archive before looking for the top directory. `ae_add_hash_pin` pins it with an archive that holds sidecars; the three `ae_add_*` fixtures are built with `COPYFILE_DISABLE=1`.
+
+- **A TLS 1.3 0-RTT resumption sends the ticket's real age.** `std.cryptography.tls13_client` put 0 in the PSK identity's `obfuscated_ticket_age`, where RFC 8446 4.2.11.1 wants the ticket's age in milliseconds plus its `ticket_age_add`. OpenSSL 3.x let that through; OpenSSL 4 checks it and refused the early data of every resumption (the connection still resumed, with `early=0`). A ticket now records when it arrived (`os.now_monotonic_ms`) and the resumption sends `(age + ticket_age_add) mod 2^32`. `crypto_tls13_resume` against `openssl s_server -early_data` pins it.
+
+- **`crypto_tls13_resume` no longer leaks one case's ticket suite into the next on macOS.** `TSUITE=0000 run_case ...` is an assignment before a shell function, which stays set afterwards where `sh` is bash in POSIX mode (macOS). The "HRR for secp256r1 after 0-RTT data" case then sent a ticket naming no suite, so no early data. The test sets and clears `TSUITE` around the one case.
+
 ## [0.890.0]
 
 ### Fixed

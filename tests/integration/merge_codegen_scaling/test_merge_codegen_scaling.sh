@@ -9,14 +9,17 @@
 # module's name lists for every identifier of every merged body. The code
 # generator scanned the extern table, and the file's declarations, for every
 # extern call. Each phase (aetherc --time-phases, its CPU column) is timed
-# at 1500 and at 6000 declarations, past the 4096 the merge's lists once
-# held (#3545): four times the declarations must cost less than eight times
-# the time (linear is four; the scans made the merge 21 times and the code
-# generator 13 times the time).
+# at 1500 and at 12000 declarations, past the 4096 the merge's lists once
+# held (#3545): eight times the declarations must cost less than 24 times
+# the time. Linear is eight; at four times the declarations the scans made
+# the merge 21 times and the code generator 13 times the time, which at
+# eight is far past 24.
 #
 # The time is the CPU time aetherc spent, summed over three runs of each
 # size taken in turn, not the wall clock, which a busy runner stretches
-# (lookup_index_scaling).
+# (lookup_index_scaling). CPU time moves too: four times the size against
+# a bound of 8x left no room for a runner that slows the larger case
+# (#3604); eight times and 24x leave a factor of two or more on each side.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -87,7 +90,7 @@ phase_ms() {
 }
 
 program 1500
-program 6000
+program 12000
 merge_small=0
 merge_large=0
 gen_small=0
@@ -95,11 +98,11 @@ gen_large=0
 for run in 1 2 3; do
     phase_ms "$TMPDIR/m1500" merge
     merge_small=$(( merge_small + MS ))
-    phase_ms "$TMPDIR/m6000" merge
+    phase_ms "$TMPDIR/m12000" merge
     merge_large=$(( merge_large + MS ))
     phase_ms "$TMPDIR/c1500" codegen
     gen_small=$(( gen_small + MS ))
-    phase_ms "$TMPDIR/c6000" codegen
+    phase_ms "$TMPDIR/c12000" codegen
     gen_large=$(( gen_large + MS ))
 done
 
@@ -108,14 +111,14 @@ done
 [ "$merge_small" -lt 90 ] && merge_small=90
 [ "$gen_small" -lt 90 ] && gen_small=90
 fail=0
-if [ "$merge_large" -ge $(( merge_small * 8 )) ]; then
-    echo "  [FAIL] $NAME: merged 1500 declarations in ${merge_small} ms of CPU, 6000 in ${merge_large} ms (three runs each): $(( merge_large / merge_small ))x the time for four times the declarations (linear is 4x)"
+if [ "$merge_large" -ge $(( merge_small * 24 )) ]; then
+    echo "  [FAIL] $NAME: merged 1500 declarations in ${merge_small} ms of CPU, 12000 in ${merge_large} ms (three runs each): $(( merge_large / merge_small ))x the time for eight times the declarations (linear is 8x, the bound 24x)"
     fail=1
 fi
-if [ "$gen_large" -ge $(( gen_small * 8 )) ]; then
-    echo "  [FAIL] $NAME: wrote 1500 extern calls in ${gen_small} ms of CPU, 6000 in ${gen_large} ms (three runs each): $(( gen_large / gen_small ))x the time for four times the calls (linear is 4x)"
+if [ "$gen_large" -ge $(( gen_small * 24 )) ]; then
+    echo "  [FAIL] $NAME: wrote 1500 extern calls in ${gen_small} ms of CPU, 12000 in ${gen_large} ms (three runs each): $(( gen_large / gen_small ))x the time for eight times the calls (linear is 8x, the bound 24x)"
     fail=1
 fi
 [ "$fail" = 0 ] || exit 1
-echo "  [PASS] $NAME: merge 1500 / 6000 declarations ${merge_small} / ${merge_large} ms of CPU, codegen 1500 / 6000 extern calls ${gen_small} / ${gen_large} ms (three runs each)"
+echo "  [PASS] $NAME: merge 1500 / 12000 declarations ${merge_small} / ${merge_large} ms of CPU, codegen 1500 / 12000 extern calls ${gen_small} / ${gen_large} ms (three runs each)"
 exit 0

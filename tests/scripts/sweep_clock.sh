@@ -7,7 +7,7 @@
 # Windows, where starting one costs 15 to 40 ms and the sweep is already the
 # slowest there. Elsewhere GNU date gives milliseconds (dash, the Linux sh,
 # has no EPOCHREALTIME); BSD date (macOS) does not, and prints a literal
-# "3N", which the check below refuses.
+# "3N", which the check below refuses: there the clock counts whole seconds.
 sweep_clock() {
     if [ -n "${EPOCHREALTIME:-}" ]; then
         # Seconds, then the fraction's first three digits. The separator is
@@ -26,7 +26,16 @@ sweep_clock() {
     else
         sweep_ms=$(date +%s%3N 2>/dev/null)
         case $sweep_ms in
-            ''|*[!0-9]*) sweep_ms= ;;
+            ''|*[!0-9]*)
+                # BSD date: whole seconds (#3601). A test's time to the
+                # second still shows which tests a shard's time goes to,
+                # where without it macOS reported none at all.
+                sweep_ms=$(date +%s 2>/dev/null)
+                case $sweep_ms in
+                    ''|*[!0-9]*) sweep_ms= ;;
+                    *) sweep_ms=$(( sweep_ms * 1000 )) ;;
+                esac
+                ;;
         esac
     fi
 }

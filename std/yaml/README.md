@@ -42,10 +42,21 @@ name: Ada
 The block is **compiled but not run** in CI. `std.yaml` is backed by
 **libfyaml, an optional build dependency**: without it every entry point
 returns `"std.yaml unavailable: this build has no libfyaml (install libfyaml
-+ rebuild, or set YAML=1)"` and the example prints that instead. An asserted
+and rebuild Aether; YAML=1 makes the build require it)"` and the example
+prints that instead. An asserted
 `output` block would therefore pass or fail depending on how the machine
 running CI was provisioned, which is not something a documentation example
 should depend on.
+
+The release builds for Linux and macOS are made with `YAML=1`, which stops
+the build where pkg-config finds no libfyaml, and the release job runs a yaml
+program before it packages, so a published toolchain has the real module.
+It links libfyaml dynamically, and only into a program that imports
+`std.yaml`: `ae` and `aetherc` themselves start without it, and such a
+program needs the library where it is built (`apt install libfyaml-dev`,
+`brew install libfyaml`, `pkg install libfyaml`), as `std.zstd` needs libzstd.
+The Windows, FreeBSD and Android releases still carry the stubs: MSYS2 has no
+static libfyaml for the static Windows link, and the cross sysroots have none.
 
 Unlike `std.zlib`, this module exposes no `available()` probe, so a program
 that must degrade gracefully has to check the error string from `parse`.

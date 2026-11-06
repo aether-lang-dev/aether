@@ -337,7 +337,13 @@ disambiguated by the field type:
 - field typed `string[]` → static C array (existing behaviour).
 - field typed `*StringSeq` → cons chain (this addition).
 
-Both shapes are first-class; pick by what the receiver wants.
+Both shapes are first-class; pick by what the receiver wants. A call
+argument follows the same rule: a literal of strings given to a
+`*StringSeq` parameter is a cons chain, a temporary the statement drops,
+so `string.join(["a", "b", "c"], ",")` is `"a,b,c"`. A `string[]` *value*
+is not a sequence and is a compile error there (E0200, naming
+`string.seq_from_strings` and `string.join_strings`): it used to pass, and
+the callee walked the C array as cons cells.
 
 ## Refcount + structural sharing
 

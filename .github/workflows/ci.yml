@@ -82,13 +82,15 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "0"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "gcc make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           - name: Linux / Clang
             os: ubuntu-22.04
             cc: clang
             harden: "0"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y clang make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "clang make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           # Hardened gcc build (issue #396). Same OS + compiler as
           # Linux / GCC but with HARDEN=1 set in the environment, which
@@ -102,7 +104,8 @@ jobs:
             os: ubuntu-22.04
             cc: gcc
             harden: "1"
-            install: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc pkg-config libgtk-4-dev; pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+            apt: "gcc make bc pkg-config libgtk-4-dev"
+            install: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
           - name: macOS / Clang (ARM64)
             os: macos-latest
@@ -138,6 +141,15 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    # The Linux legs' packages, from a cache of their .deb files (#3602):
+    # the mirror served one leg in three at 39 kB/s, five minutes or more.
+    - name: Install packages
+      if: matrix.apt != ''
+      uses: ./.github/actions/apt-install
+      with:
+        packages: ${{ matrix.apt }}
+        scope: ci ${{ matrix.name }}
+
     - name: Install toolchain
       if: matrix.install != ''
       run: ${{ matrix.install }}
@@ -167,7 +179,17 @@ jobs:
     # AE_SWEEP_KEEP_C=1 on the Linux / GCC leg keeps the C each .ae build of
     # the sweep compiled (build/test_<name>.c), for the strict C11 step below.
     - name: Run full CI suite
-      run: HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
+      run: AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" HARDEN=${{ matrix.harden }} CC=${{ matrix.cc }} AE_SWEEP_SHARD=${{ matrix.shard }} CI_SWEEP_UNIT=${{ matrix.unit }} AE_SWEEP_KEEP_C=${{ matrix.name == 'Linux / GCC' && '1' || '0' }} make ${{ matrix.target || 'ci' }}
+
+    # Every test's time, for the cost-split shards (#3601).
+    - name: Upload the sweep's timings
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
+        retention-days: 14
 
     # The cross-version ABI matrix (#2957, docs/abi-policy.md): this tree's
     # libraries and hosts against the latest published release's, on the
@@ -541,7 +563,10 @@ jobs:
     - uses: actions/checkout@v5
 
     - name: Install toolchain
-      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc curl xz-utils file qemu-user
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make bc curl xz-utils file qemu-user
+        scope: cross-qemu
 
     - name: Restore zig + SQLite cross object cache
       id: sqlite_xcache
@@ -635,9 +660,10 @@ jobs:
     - uses: actions/checkout@v5
 
     - name: Install build tools
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make bc pkg-config
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make bc pkg-config
+        scope: contrib-host
 
     - name: Build compiler + stdlib
       run: make compiler ae stdlib
@@ -666,26 +692,28 @@ jobs:
     steps:
     - uses: actions/checkout@v5
 
+    # valgrind for the contrib memcheck tests. contrib/vulkan needs the
+    # headers to build and a driver to run: lavapipe is Mesa's CPU
+    # implementation, so the GPU path is exercised on a runner that has no
+    # GPU. Without these the test skips itself and the leg still passes,
+    # which would be silent non-coverage; the assertion below is what makes
+    # the skip visible. The presentation test opens a real window and reads
+    # the screen back: Xvfb is the display, the X11 headers let the window
+    # fixture and contrib/vulkan's VK_KHR_xlib_surface arm compile. The
+    # Wayland headers give the fixture its Wayland backend, and weston's
+    # headless backend is the compositor it presents to below (#2197).
     - name: Install build deps
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make valgrind libvulkan-dev mesa-vulkan-drivers vulkan-tools xvfb libx11-dev libwayland-dev weston
+        scope: contrib
+
+    - name: Install websockets
       run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make valgrind
         # --timeout / --retries: pip's defaults (15 s per read, 5 retries)
         # failed this job when PyPI served websockets at 13 kB/s and a read
         # stalled; a slow mirror is not a reason to fail the build.
         pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
-        # contrib/vulkan needs the headers to build and a driver to run.
-        # lavapipe is Mesa's CPU implementation, so the GPU path is exercised
-        # on a runner that has no GPU. Without these the test skips itself and
-        # the leg still passes, which would be silent non-coverage; the
-        # assertion below is what makes the skip visible.
-        sudo apt-get install -y libvulkan-dev mesa-vulkan-drivers vulkan-tools
-        # The presentation test opens a real window and reads the screen
-        # back: Xvfb is the display, the X11 headers let the window fixture
-        # and contrib/vulkan's VK_KHR_xlib_surface arm compile. The Wayland
-        # headers give the fixture its Wayland backend, and weston's headless
-        # backend is the compositor it presents to below (#2197).
-        sudo apt-get install -y xvfb libx11-dev libwayland-dev weston
 
     - name: Report the Vulkan implementation in use
       run: |
@@ -862,9 +890,10 @@ jobs:
     - uses: actions/checkout@v5
 
     - name: Install build deps, lavapipe and gdb
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y gcc make libvulkan-dev mesa-vulkan-drivers vulkan-tools gdb
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make libvulkan-dev mesa-vulkan-drivers vulkan-tools gdb
+        scope: vulkan-lavapipe ${{ matrix.arch }}
 
     # The manifest's name is Mesa's to choose (22.04's is lvp_icd.x86_64.json;
     # a guessed name on 24.04 left the loader with no driver, VkResult -9), so
@@ -1033,19 +1062,20 @@ jobs:
     # cap, not GitHub's 6 hour default (#2772).
     timeout-minutes: 35
     # Two jobs (#2757): the leg took about 23 min, most of it the test sweep
-    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
-    # the same toolchain and runs the other two thirds: `make ci`'s stages
-    # around the sweep cost [1/2] about 5 min more, so an even split left it
-    # that far behind (#2772, tests/scripts/sweep_shard.sh).
+    # on 4 cores. [1/2] runs `make ci` with part of the sweep, [2/2] builds
+    # the same toolchain and runs the rest: `make ci`'s stages around the
+    # sweep cost [1/2] about 8.6 min more (#2772, #3601). By thirds, [2/2] ran
+    # 22 to 28 min against 18.5 for [1/2]; the sweep is split by cost now
+    # (tests/sweep_weights_windows.txt, #3601), [1/2] taking 7 of 20 shares.
     strategy:
       fail-fast: false
       matrix:
         include:
           - part: "1/2"
-            shard: "1/3"
+            shard: "1,2,3,4,5,6,7/20"
             target: ci
           - part: "2/2"
-            shard: "2,3/3"
+            shard: "8,9,10,11,12,13,14,15,16,17,18,19,20/20"
             target: ci-sweep
 
     defaults:
@@ -1137,7 +1167,17 @@ jobs:
         export SSL_CERT_FILE="$(cygpath -w /mingw64/etc/ssl/certs/ca-bundle.crt)"
         echo "SSL_CERT_FILE=$SSL_CERT_FILE"
         ls -la "$(cygpath -u "$SSL_CERT_FILE")"
-        AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
+        AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" AE_SWEEP_SHARD="${{ matrix.shard }}" make ${{ matrix.target }}
+
+    # Every test's time, for the cost-split shards (#3601).
+    - name: Upload the sweep's timings
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-windows-gcc-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
+        retention-days: 14
 
   # ============================================================
   # Windows contrib series — beside `Windows / GCC (MSYS2)` rather than after
@@ -1401,7 +1441,10 @@ jobs:
     - uses: actions/checkout@v5
 
     - name: Install toolchain
-      run: sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update && sudo apt-get install -y gcc make bc valgrind
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make bc valgrind
+        scope: crypto-ct
 
     - name: Build the toolchain
       run: make -j"$(nproc)" compiler ae stdlib
@@ -1532,10 +1575,14 @@ jobs:
     # --no-install-recommends: Recommends pulls libstdc++-arm-none-eabi-newlib,
     # 347 MB of C++ library this C-only build never links, and a slow Azure
     # mirror trickled it for over forty minutes (#2325).
+    # The cache (#3602) keeps the toolchain's packages between runs: a mirror
+    # that stalled 47.7 MB into them cancelled this job at its 15 minutes.
     - name: Install ARM cross-compiler
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y --no-install-recommends gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc make gcc-arm-none-eabi libnewlib-arm-none-eabi
+        options: --no-install-recommends
+        scope: embedded-arm
 
     - name: Run embedded CI
       run: make ci-embedded
@@ -1589,13 +1636,10 @@ jobs:
     - uses: actions/checkout@v5
 
     - name: Install RISC-V cross-toolchain + qemu
-      run: |
-        sudo rm -f /etc/apt/sources.list.d/google-chrome.list; sudo apt-get update
-        sudo apt-get install -y \
-          gcc-riscv64-linux-gnu \
-          libc6-dev-riscv64-cross \
-          qemu-user-static \
-          make bc pkg-config file
+      uses: ./.github/actions/apt-install
+      with:
+        packages: gcc-riscv64-linux-gnu libc6-dev-riscv64-cross qemu-user-static make bc pkg-config file
+        scope: riscv64
 
     - name: Run RISC-V CI
       run: make ci-riscv64

@@ -11,7 +11,7 @@
 # measure work, not the sweep's elapsed time.
 set -u
 tmpdir="$1"
-top="${AE_SWEEP_TIMING_TOP:-10}"
+top="${AE_SWEEP_TIMING_TOP:-25}"
 
 ae_times="$tmpdir/.timings_ae"
 sh_times="$tmpdir/.timings_sh"
@@ -35,5 +35,12 @@ if [ -s "$sh_times" ]; then
          END { printf "  shell tests: %d, %.1f s\n", n, t / 1000 }' "$sh_times"
     echo "  Slowest shell tests:"
     sort -rn -k1,1 "$sh_times" | head -n "$top" | awk '{ printf "    %7.1f s  %s\n", $1 / 1000, $2 }'
+fi
+# AE_SWEEP_TIMINGS_OUT=<file>: every test's time, "<ms> <name>" sorted by
+# name (a .ae test's build and run together), for the cost-split shards
+# (#3601): tests/sweep_weights.txt is made from it.
+if [ -n "${AE_SWEEP_TIMINGS_OUT:-}" ]; then
+    { [ -s "$ae_times" ] && awk '{ print $1 + $2, $3 }' "$ae_times"
+      [ -s "$sh_times" ] && cat "$sh_times"; } | sort -k2,2 > "$AE_SWEEP_TIMINGS_OUT"
 fi
 rm -f "$ae_times" "$sh_times"

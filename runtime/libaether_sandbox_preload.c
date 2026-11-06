@@ -1316,15 +1316,49 @@ static void aether_find_core_handles(void) {
     aether_core_handles_found = 1;
 }
 
+// A refused dlopen's dlerror() string. dlopen's contract is that a NULL
+// return leaves a message for dlerror(), and hosts rely on it: Tcl 8.6's
+// `load` formats dlerror() with %s, so a refusal that left none (the loader
+// had nothing to report, it was never asked) crashed the interpreter on a
+// NULL, and Ruby's Fiddle reported a NULL handle with no reason. The
+// message is per thread and is returned once, then cleared, as glibc's own
+// is. dlopen calls that reach the loader clear it first, so a later
+// loader error is never shadowed by an earlier refusal.
+static char* (*real_dlerror)(void) = NULL;
+static __thread char aether_dlerror_buf[PATH_MAX + 96];
+static __thread int aether_dlerror_pending = 0;
+
+static void aether_dlopen_refused(const char* filename) {
+    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
+    // Drop any older loader message, so the next dlerror() is this one and
+    // the one after it is NULL.
+    if (real_dlerror) (void)real_dlerror();
+    snprintf(aether_dlerror_buf, sizeof(aether_dlerror_buf),
+             "%s: refused by the sandbox: dlopen of libc or the loader needs a native grant",
+             filename);
+    aether_dlerror_pending = 1;
+    errno = EACCES;
+}
+
+char* dlerror(void) {
+    if (aether_dlerror_pending) {
+        aether_dlerror_pending = 0;
+        return aether_dlerror_buf;
+    }
+    if (!real_dlerror) real_dlerror = dlsym(RTLD_NEXT, "dlerror");
+    return real_dlerror ? real_dlerror() : NULL;
+}
+
 void* dlopen(const char* filename, int flags) {
     if (!real_dlopen) real_dlopen = dlsym(RTLD_NEXT, "dlopen");
+    aether_dlerror_pending = 0;
     // NULL (the program itself) is not a load. Everything other than libc
     // and the loader (Python's .so modules, Ruby's extensions) loads: the
     // sandbox holds at the libc calls those make, which come through here.
     if (!filename || !sandbox_active) return real_dlopen(filename, flags);
     if (aether_names_libc(filename)) {
         if (!check_grant("native", filename)) {
-            errno = EACCES;
+            aether_dlopen_refused(filename);
             return NULL;
         }
         return real_dlopen(filename, flags);
@@ -1335,7 +1369,7 @@ void* dlopen(const char* filename, int flags) {
     if ((h == aether_libc_handle || h == aether_loader_handle) &&
         !check_grant("native", filename)) {
         dlclose(h);
-        errno = EACCES;
+        aether_dlopen_refused(filename);
         return NULL;
     }
     return h;

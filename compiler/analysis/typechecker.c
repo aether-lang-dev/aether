@@ -3088,21 +3088,30 @@ static void reject_struct_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
  * the callee would have read the wrong struct. Compared as an assignment
  * compares them (#1877): a bare `ptr` on either side is the universal
  * pointer, and so is a pointer to a @c_struct overlay, a `void*` in C. */
+/* An array or slice is checked here too, decaying as C decays it, to a
+ * pointer to its element only: a `string[]` given to `*StringSeq` (the
+ * `string.join(xs, ",")` report) went through, and the callee walked the C
+ * array as cons cells. */
 static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
                                     Type* param_type, int index, const char* param_name) {
-    if (!arg_type || !param_type || arg_type->kind != TYPE_PTR ||
-        param_type->kind != TYPE_PTR) return;
+    if (!arg_type || !param_type || param_type->kind != TYPE_PTR) return;
+    if (arg_type->kind != TYPE_PTR && arg_type->kind != TYPE_ARRAY) return;
     Type* want = param_type->element_type;
     Type* got = arg_type->element_type;
     if (!want || !got || want->kind == TYPE_UNKNOWN || got->kind == TYPE_UNKNOWN) return;
     if ((want->kind == TYPE_STRUCT && is_c_struct_name(want->struct_name)) ||
         (got->kind == TYPE_STRUCT && is_c_struct_name(got->struct_name))) return;
     if (is_type_compatible(arg_type, param_type)) return;
-    char emsg[512];
+    char emsg[640];
+    int seq = arg_type->kind == TYPE_ARRAY && got->kind == TYPE_STRING &&
+              want->kind == TYPE_STRUCT && want->struct_name &&
+              strcmp(want->struct_name, "StringSeq") == 0;
     snprintf(emsg, sizeof(emsg),
-             "Argument %d '%s' of '%s': expected %s, got %s",
+             "Argument %d '%s' of '%s': expected %s, got %s%s",
              index, param_name ? param_name : "?", call->value ? call->value : "?",
-             type_name(param_type), type_name(arg_type));
+             type_name(param_type), type_name(arg_type),
+             seq ? " (a string[] is not a *StringSeq: convert it with string.seq_from_strings(xs)"
+                   ", or join it with string.join_strings(xs, sep))" : "");
     type_error(emsg, arg->line, arg->column);
 }
 
@@ -3629,7 +3638,16 @@ int is_type_compatible(Type* from, Type* to) {
     // or comparison against a pointer. This already worked at call sites; the
     // rule makes it uniform so a stack-buffer-with-heap-fallback binding
     // (`ids = static_ids; ... ids = heap`) type-checks.
-    if (from->kind == TYPE_ARRAY && to->kind == TYPE_PTR) return 1;
+    //
+    // Decay is to a pointer to the ELEMENT, as in C: `byte[]` goes to `ptr`
+    // or `*byte`, and not to a typed pointer to something else. Any typed
+    // pointer used to take any array, so `string.join(xs, ",")` with
+    // `xs: string[]` type-checked against `join(s: *StringSeq, ...)`, and
+    // the C array was walked as cons cells: one element joined, or a crash.
+    if (from->kind == TYPE_ARRAY && to->kind == TYPE_PTR) {
+        if (!to->element_type) return 1;
+        return !from->element_type || is_type_compatible(from->element_type, to->element_type);
+    }
 
     // #1877: pointer compatibility, with a BARE `ptr` on either side acting as
     // the universal pointer — exactly as `void*` does in C, and exactly as the
@@ -22413,6 +22431,24 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
              * reinterpret it. Crossing the boundary is an explicit `as`. */
             if (param_type) {
                 ASTNode* darg = call->children[arg_slot];
+                /* A `[...]` literal of strings given to a `*StringSeq`
+                 * parameter is a sequence literal, as it is where a variable,
+                 * a field or a message field of that type takes it: stamped
+                 * here, it is built as a cons chain, a temporary of the
+                 * statement the call's codegen drops (seq_value_is_fresh).
+                 * It was a C array the callee walked as cons cells. */
+                if (darg && darg->type == AST_ARRAY_LITERAL && is_string_seq_ptr_type(param_type) &&
+                    !is_string_seq_ptr_type(darg->node_type)) {
+                    int all_strings = 1;
+                    for (int e = 0; all_strings && e < darg->child_count; e++) {
+                        Type* et = infer_type(darg->children[e], table);
+                        all_strings = et && (et->kind == TYPE_STRING || et->kind == TYPE_UNKNOWN);
+                    }
+                    if (all_strings) {
+                        if (darg->node_type) free_type(darg->node_type);
+                        darg->node_type = clone_type(param_type);
+                    }
+                }
                 if (darg) {
                     Type* da = infer_type(darg, table);
                     reject_tuple_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
