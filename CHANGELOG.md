@@ -14,6 +14,27 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.895.0]
+
+### Changed
+
+- **The timing-ratio tests compare sizes eight times apart against 24x (#3604, following 0.892.0's run-alone change).** Alone, `order_effects_scaling` still read 8.3x on a slow runner, against a bound of 8x for four times the size. That left a factor of two between a linear reading and the bound, and the runner used all of it. `lookup_index_scaling` (1000 / 8000 declarations), `order_effects_scaling` (2000 / 16000) and `merge_codegen_scaling` (1500 / 12000) now compare eight times the size against 24x. A linear algorithm reads about 8x (8.5 to 11x here), and the quadratic costs these tests caught would read 45x and more, so each side keeps a factor of two or more. `loop_nest_scaling` (depth 12 against 24, bound 8x, reads 1.6x) keeps its sizes and bound.
+
+### Fixed
+
+- **A scheduler core with messages still to deliver no longer parks (#3611).** When a target core's queue from a core is full, that core keeps the rest of what it sends in its overflow buffer, which only its own thread flushes, once per loop turn.
+
+  A core that then ran out of actors to step parked after its idle spin. The check before parking looks only at the queues coming in, so the buffered messages waited until the park ended: up to 32 ms each time. Meanwhile:
+  - the target's core sat idle with messages owed to it;
+  - `scheduler_wait` waited for them;
+  - a dead actor's restart in place waited on its count of messages in flight (#3606).
+
+  Now a core whose buffer holds anything yields the CPU instead of parking, so a target core that shares the CPU can make room, and it flushes again on its next turn. A core with an empty buffer parks as before.
+
+  A new runtime test sends 3,072 messages from core 1 to an actor on core 0 while core 0 is held in a step, then lets core 1 idle with the cores' park set to a minute. Every message must arrive within 10 s. Before the fix 1,023 arrived.
+
+- **`test_actor_rebirth`'s senders run until a deadline, not a number of sends (#3606).** In "a restart in place under concurrent senders", three actors send to a target that panics every 150 messages. They go on until its supervisor has restarted it three times, and they used to stop at 60,000 sends each. A restart waits until no message counted in flight for the dead target is left, and one in a core's overflow buffer arrives only when that core's thread runs again. That can be a park (#3611, now fixed) or the OS's time slice on a busy runner. Meanwhile each send to the dead target is dropped at almost no cost, so the 60,000 sends ran out within one such wait. The senders stopped with fewer than three restarts: once on macOS x86_64 in CI, and on 2 CPUs locally (one run: 1 restart after 3.5 million claim attempts). They now stop at 10 s, and the test still requires three restarts.
+
 ## [0.894.0]
 
 ### Added
