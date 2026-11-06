@@ -40,10 +40,13 @@ start(server: ptr) -> int {
 gateway(worker: int) -> ptr {
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
+    // The request timeout bounds the name lookup too: 5 seconds let a slow
+    // resolver turn the 502 into a 504 (CI, 2026-11-06). 25 stays under
+    // status_of's 30.
     if worker == 1 {
         http.server_use_middleware(s, mw_pass, 0)
     }
-    merr = proxy.mount_simple(s, "/", "http://nohost.invalid:9", 5)
+    merr = proxy.mount_simple(s, "/", "http://nohost.invalid:9", 25)
     if merr != "" {
         println("FAIL: mount: ${merr}")
         exit(1)
