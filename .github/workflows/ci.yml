@@ -202,9 +202,15 @@ jobs:
       env:
         GH_TOKEN: ${{ github.token }}
       run: |
+        # The release's shared runtime links libfyaml (std.yaml) since
+        # 0.894.0, so it cannot be loaded without it. Installed here, after
+        # `make ci`, so the build above stays as it was.
         case "${{ matrix.os }}" in
-          ubuntu*) target=linux-x86_64 ;;
-          *) target=macos-arm64 ;;
+          ubuntu*) target=linux-x86_64
+                   sudo apt-get install -y libfyaml-dev ||
+                       { sudo apt-get update && sudo apt-get install -y libfyaml-dev; } ;;
+          *) target=macos-arm64
+             brew list libfyaml >/dev/null 2>&1 || brew install libfyaml ;;
         esac
         prev="$RUNNER_TEMP/aether-prev"
         mkdir -p "$prev"
