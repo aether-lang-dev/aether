@@ -90,6 +90,40 @@ main() {
 0.1
 ```
 
+## Pretty-printing
+
+`pretty(src, indent)` re-indents a JSON document for reading or recording,
+the way `JSON.stringify(v, null, indent)` lays one out: one member or element
+per line, `"key": value`, an empty `{}` or `[]` on one line, no trailing
+newline. `indent` is 1 to 16; 0 makes the document compact instead. The
+document's own text is re-indented, not re-serialised, so key order, number
+spellings (`1.0`, `1e3`, integers past 2^53), escapes and duplicate keys come
+out exactly as they went in. A malformed document returns `""` and the
+parser's message, with its line and column.
+
+```aether,run
+import std.json
+
+main() {
+    out, err = json.pretty("{\"id\":7,\"price\":1.0,\"tags\":[\"a\",\"b\"],\"meta\":{}}", 2)
+    println(out)
+    _, bad = json.pretty("{\"id\":}", 2)
+    println(bad)
+}
+```
+```output
+{
+  "id": 7,
+  "price": 1.0,
+  "tags": [
+    "a",
+    "b"
+  ],
+  "meta": {}
+}
+unexpected character '}' at 1:7
+```
+
 ## Exports
 
 `parse`, `parse_strict`, `json_free`, `json_type`, `json_is_null`,
@@ -97,6 +131,6 @@ main() {
 `get_string`, `object_get`, `object_size`, `object_entry`,
 `json_object_has`, `json_object_key_at`, `json_object_value_at`, `array_get`,
 `json_array_size`, `obj`, `arr`, `str`, `num`, `from_int`,
-`boolean`, `null_value`, `set`, `push`, `encode`, `last_error`,
+`boolean`, `null_value`, `set`, `push`, `encode`, `pretty`, `last_error`,
 `last_error_kind`, `last_error_line`, `last_error_col`, the `KIND_*`
 constants, and the kinds `json_type` returns, `JSON_NULL` to `JSON_OBJECT`.

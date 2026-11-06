@@ -24,7 +24,7 @@ exports(
     parse, get_string,
     object_get, object_size, object_entry,
     array_get,
-    obj, arr, str, num, from_int, boolean, null_value, set, push, encode,
+    obj, arr, str, num, from_int, boolean, null_value, set, push, encode, pretty,
     parse_strict, last_error_kind, last_error_line, last_error_col,
     KIND_OK, KIND_PARSE_ERROR, KIND_OUT_OF_MEMORY, KIND_INVALID_INPUT,
     JSON_NULL, JSON_BOOL, JSON_NUMBER, JSON_STRING, JSON_ARRAY, JSON_OBJECT
@@ -63,6 +63,8 @@ extern json_last_error_line() -> int
 extern json_last_error_col() -> int
 extern json_stringify_raw(value: ptr) -> string @heap
 extern json_free(value: @frees ptr)
+
+extern json_pretty_tuple(json_str: @aether string, indent: int) -> (string @heap, string @heap)
 
 // ---- type introspection (infallible, no wrapper needed) ----
 extern json_type(value: ptr) -> int
@@ -278,6 +280,26 @@ array_add(arr: ptr, value: ptr) -> {
         return "not an array"
     }
     return ""
+}
+
+// ---- formatter ----
+
+// Re-indent a JSON document for reading or recording:
+//
+//   formatted, err = json.pretty(src, 2)
+//   if err != "" { println("Malformed JSON: ${err}") }
+//
+// indent 1..16 lays it out the way JSON.stringify(v, null, indent) does:
+// one member or element per line, `"key": value`, an empty {} or [] on one
+// line, no trailing newline. indent 0 makes it compact (every insignificant
+// space removed). The text itself is re-indented, not re-serialised, so key
+// order, number spellings (1.0, 1e3, integers past 2^53), string escapes
+// and duplicate keys come out exactly as they went in. A malformed document
+// returns ("", the parser's message with its line:col); an indent outside
+// 0..16 is an error too.
+pretty(src: string, indent: int) -> (string, string) {
+    formatted, err = json_pretty_tuple(src, indent)
+    return string_concat(formatted, ""), string_concat(err, "")
 }
 
 // ---- terse builder/encoder (issue #628) ----

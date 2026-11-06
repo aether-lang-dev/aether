@@ -2411,3 +2411,130 @@ char* json_stringify_raw(JsonValue* v) {
     if (!b.data) return (char*)string_empty();
     return (char*)string_adopt_caps_buffer(b.data, b.len, b.cap);
 }
+
+// ---------------------------------------------------------------------------
+// Pretty-print (json.pretty)
+//
+// Re-indents the document's own text rather than re-serialising a parsed
+// tree, so what a reader sees is what was sent: key order, number spellings
+// (1.0, 1e3, integers past 2^53), string escapes and duplicate keys are kept
+// byte for byte. The document is parsed first, purely to validate it (and
+// to report a malformed one with the parser's own message and position);
+// the formatting pass then only has to tell strings from structure.
+//
+// indent 1..16: JSON.stringify(v, null, indent) layout -- one member or
+// element per line, "key": value, an empty {} or [] kept on one line, no
+// trailing newline. indent 0: compact, every insignificant space removed.
+// ---------------------------------------------------------------------------
+
+static void sb_indent(StrBuf* b, int level, int indent) {
+    sb_append_char(b, '\n');
+    for (int i = 0; i < level * indent; i++) sb_append_char(b, ' ');
+}
+
+static int json_ws(char c) { return c == ' ' || c == '\t' || c == '\n' || c == '\r'; }
+
+char* json_pretty_str(const char* s, int indent, char** out_err);
+char* json_pretty_str(const char* s, int indent, char** out_err) {
+    if (out_err) *out_err = NULL;
+    if (indent < 0 || indent > 16) {
+        if (out_err) {
+            char msg[64];
+            snprintf(msg, sizeof(msg), "indent must be 0 to 16, got %d", indent);
+            *out_err = strdup(msg);
+        }
+        return NULL;
+    }
+    size_t n = 0;
+    const char* d = jv_bytes(s, &n);
+    JsonValue* v = json_parse_raw_n(d, n);
+    if (!v) {
+        if (out_err) *out_err = strdup(json_last_error());
+        return NULL;
+    }
+    json_free(v);
+
+    StrBuf b = {0};
+    int level = 0;
+    size_t i = 0;
+    while (i < n && !b.oom) {
+        char c = d[i];
+        if (json_ws(c)) { i++; continue; }
+        if (c == '"') {
+            size_t start = i++;
+            while (i < n && d[i] != '"') {
+                if (d[i] == '\\' && i + 1 < n) i++;
+                i++;
+            }
+            if (i < n) i++;   /* the closing quote (validated above) */
+            sb_append(&b, d + start, i - start);
+            continue;
+        }
+        if (c == '{' || c == '[') {
+            char close = c == '{' ? '}' : ']';
+            size_t j = i + 1;
+            while (j < n && json_ws(d[j])) j++;
+            if (j < n && d[j] == close) {
+                sb_append_char(&b, c);
+                sb_append_char(&b, close);
+                i = j + 1;
+                continue;
+            }
+            sb_append_char(&b, c);
+            level++;
+            if (indent > 0) sb_indent(&b, level, indent);
+            i++;
+            continue;
+        }
+        if (c == '}' || c == ']') {
+            level--;
+            if (indent > 0) sb_indent(&b, level, indent);
+            sb_append_char(&b, c);
+            i++;
+            continue;
+        }
+        if (c == ',') {
+            sb_append_char(&b, ',');
+            if (indent > 0) sb_indent(&b, level, indent);
+            i++;
+            continue;
+        }
+        if (c == ':') {
+            sb_append_char(&b, ':');
+            if (indent > 0) sb_append_char(&b, ' ');
+            i++;
+            continue;
+        }
+        /* A number or literal: copy the run up to the next delimiter. */
+        size_t start = i;
+        while (i < n && !json_ws(d[i]) && d[i] != ',' && d[i] != '}' && d[i] != ']' && d[i] != ':') i++;
+        sb_append(&b, d + start, i - start);
+    }
+    if (b.oom) {
+        aether_caps_free(b.data, b.cap);
+        if (out_err) *out_err = strdup("out of memory");
+        return NULL;
+    }
+    if (!b.data) return (char*)string_empty();
+    return (char*)string_adopt_caps_buffer(b.data, b.len, b.cap);
+}
+
+/* The (formatted, error) tuple json.pretty's extern returns; generated code
+ * declares the same layout. */
+typedef struct { const char* _0; const char* _1; } _json_tuple_string_string;
+
+_json_tuple_string_string json_pretty_tuple(const char* s, int indent);
+_json_tuple_string_string json_pretty_tuple(const char* s, int indent) {
+    char* err = NULL;
+    char* formatted = json_pretty_str(s, indent, &err);
+    _json_tuple_string_string out;
+    if (formatted) {
+        out._0 = formatted;
+        out._1 = "";
+    } else {
+        out._0 = (const char*)string_empty();
+        out._1 = err ? (const char*)string_new_with_length(err, strlen(err)) : "";
+        if (err) free(err);
+    }
+    return out;
+}

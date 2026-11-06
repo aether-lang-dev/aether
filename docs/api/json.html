@@ -52,6 +52,7 @@
     <li><a href="#set">set</a></li>
     <li><a href="#push">push</a></li>
     <li><a href="#encode">encode</a></li>
+    <li><a href="#pretty">pretty</a></li>
     <li><a href="#parse_strict">parse_strict</a></li>
     <li><a href="#last_error_kind">last_error_kind</a></li>
     <li><a href="#last_error_line">last_error_line</a></li>
@@ -366,6 +367,12 @@
       <pre class="usage"><code>encode(value) <span class="arrow">-&gt;</span> string!</code></pre>
       <p class="signature"><span class="sig-params">value: ptr</span></p>
       <p class="doc">Encode a JSON value tree to a compact string with all escaping handled internally. Returns (string, &quot;&quot;) on success, (&quot;&quot;, error) on failure — an alias for `stringify`.</p>
+    </div>
+    <div class="function" id="pretty" data-name="pretty">
+      <h3 class="function-name">pretty <span class="kind">fn</span></h3>
+      <pre class="usage"><code>pretty(src, indent) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">src: string, indent: int</span></p>
+      <p class="doc">Re-indent a JSON document for reading or recording: formatted, err = json.pretty(src, 2) if err != &quot;&quot; { println(&quot;Malformed JSON: ${err}&quot;) } indent 1..16 lays it out the way JSON.stringify(v, null, indent) does: one member or element per line, `&quot;key&quot;: value`, an empty {} or [] on one line, no trailing newline. indent 0 makes it compact (every insignificant space removed). The text itself is re-indented, not re-serialised, so key order, number spellings (1.0, 1e3, integers past 2^53), string escapes and duplicate keys come out exactly as they went in. A malformed document returns (&quot;&quot;, the parser's message with its line:col); an indent outside 0..16 is an error too.</p>
     </div>
     <div class="function" id="parse_strict" data-name="parse_strict">
       <h3 class="function-name">parse_strict <span class="kind">fn</span></h3>
