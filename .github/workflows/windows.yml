@@ -236,10 +236,12 @@ jobs:
     # coverage (#2673).
     #
     # Two jobs (#2757): the leg took about 25 min, most of it the test sweep
-    # on 4 cores. [1/2] runs `make ci` with a third of the sweep, [2/2] builds
-    # the same toolchain and runs the other two thirds: `make ci`'s stages
-    # around the sweep cost [1/2] about 5 min more, so an even split left it
-    # that far behind (#2772, tests/scripts/sweep_shard.sh).
+    # on 4 cores. [1/2] runs `make ci` with part of the sweep, [2/2] builds
+    # the same toolchain and runs the rest: `make ci`'s stages around the
+    # sweep cost [1/2] 3 to 5 min more (#2772). By thirds, [2/2] ran 25.6
+    # min against 17.6 for [1/2]; the sweep is split by cost now
+    # (tests/sweep_weights_windows.txt, #3601), [1/2] taking 8 of 20 shares,
+    # as ci.yml's MINGW64 leg does.
     strategy:
       fail-fast: false
       matrix:
@@ -248,13 +250,13 @@ jobs:
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
             part: "1/2"
-            shard: "1/3"
+            shard: "1,2,3,4,5,6,7,8/20"
             target: ci
           - msystem: UCRT64
             prefix: mingw-w64-ucrt-x86_64
             root: ucrt64
             part: "2/2"
-            shard: "2,3/3"
+            shard: "9,10,11,12,13,14,15,16,17,18,19,20/20"
             target: ci-sweep
 
     defaults:
