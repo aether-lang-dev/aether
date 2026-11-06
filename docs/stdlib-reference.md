@@ -82,7 +82,7 @@ header comment is the authoritative description.
 | `std.strarr` | Growable string array whose backing is a `string[]`, for sorting runtime-built lists. | 15 | [guide](../std/strarr/README.md) · [source](../std/strarr/module.ae) |
 | `std.strbuilder` | Amortised-O(1) string building. | 18 | [guide](../std/strbuilder/README.md) · [source](../std/strbuilder/module.ae) |
 | `std.stream` | Credit-windowed streams between actors: memory stays bounded however fast the producer is. | 11 | [guide](../std/stream/README.md) · [source](../std/stream/module.ae) |
-| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 100 | [full section](#strings-stdstring) |
+| `std.string` | Managed strings: construction, search, slicing, case, split and join. | 101 | [full section](#strings-stdstring) |
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
@@ -904,7 +904,8 @@ Hel
 - `string.seq_concat(a, b)` → `*StringSeq` O(|a|), `a` copied, `b` shared via refcount bump
 - `string.seq_take(s, n)` → `*StringSeq` first `n` elements (clamped to length, negative yields empty); fresh independent spine
 - `string.seq_drop(s, n)` → `*StringSeq` n-th tail retained (clamped to length, negative yields `s` retained); pointer walk only, no allocations
-- `string.join(s, sep)` → `string` concatenate every element with `sep` between adjacent pairs; the complement of `split_to_seq`. **Linear cost**: two passes (sum lengths, fill one exact-size buffer), one allocation regardless of element count. Empty seq yields `""`, a single element yields itself with no separator, and both elements and separator are binary-safe. Returns a fresh owned string.
+- `string.join(s, sep)` → `string` concatenate every element with `sep` between adjacent pairs; the complement of `split_to_seq`. **Linear cost**: two passes (sum lengths, fill one exact-size buffer), one allocation regardless of element count. Empty seq yields `""`, a single element yields itself with no separator, and both elements and separator are binary-safe. Returns a fresh owned string. A `[...]` literal of strings given to it is built as a sequence (`string.join(["a", "b"], ",")` is `"a,b"`); a `string[]` value is a compile error naming the two functions below.
+- `string.join_strings(xs, sep)` → `string` the same join for a `string[]` (a slice, a runtime-built array): its elements consed once and joined in one allocation. Empty yields `""`.
 
 Pattern-match `[]` and `[h|t]` arms work directly against `*StringSeq` matched expressions:
 

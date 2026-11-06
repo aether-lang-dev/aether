@@ -40,6 +40,37 @@ main() {
         }
     }
 
+    spec.describe(fw, "std.string.join and join_strings") {
+        spec.it("join takes a [...] literal as a sequence") callback {
+            spec.assert_str_eq(string.join(["a", "b", "c"], ","), "a,b,c", "every element")
+            spec.assert_str_eq(string.join(["a", "b", "c"], ""), "abc", "empty separator")
+            spec.assert_str_eq(string.join(["a", "b"], " <-> "), "a <-> b", "long separator")
+            spec.assert_str_eq(string.join(["solo"], ","), "solo", "one element, no separator")
+        }
+
+        spec.it("join_strings joins a string[]") callback {
+            xs = ["a", "b", "c"]
+            spec.assert_str_eq(string.join_strings(xs, ","), "a,b,c", "every element")
+            spec.assert_str_eq(string.join_strings(xs, ""), "abc", "empty separator")
+            spec.assert_str_eq(string.join_strings(xs, ", "), "a, b, c", "two-byte separator")
+            one = ["solo"]
+            spec.assert_str_eq(string.join_strings(one, "-"), "solo", "one element")
+        }
+
+        spec.it("join_strings of an empty string[] is empty") callback {
+            empty = string.seq_to_strings(string.seq_empty())
+            spec.assert_eq(empty.len, 0, "no elements")
+            spec.assert_str_eq(string.join_strings(empty, ","), "", "empty")
+        }
+
+        spec.it("join_strings joins a runtime-built string[]") callback {
+            arr = string.split("x|y|z", "|")
+            v = string.array_view(arr)
+            string.array_free(arr)
+            spec.assert_str_eq(string.join_strings(v, "+"), "x+y+z", "runtime slice")
+        }
+    }
+
     spec.describe(fw, "std.string seq/string[] bridges (#2301)") {
         spec.it("seq_from_strings builds a seq preserving order") callback {
             items = ["x", "y", "z"]
