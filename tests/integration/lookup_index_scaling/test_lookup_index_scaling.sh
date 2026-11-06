@@ -10,14 +10,18 @@
 # module's top level for the file's own declaration (and searched a list of
 # the symbols made for them), and every read of a var walked the program's
 # vars. The check (aetherc --time-phases, its typecheck phase) is timed at
-# 1000 and at 4000: four times the declarations must cost less than eight
-# times the time (linear is four, the walks made it twelve).
+# 1000 and at 8000: eight times the declarations must cost less than 24
+# times the time. Linear is eight; the walks made it twelve at four times
+# the declarations, which is about 45 at eight.
 #
 # The time is the CPU time aetherc spent, summed over three runs of each
 # size taken in turn, not the wall clock: the sweep runs this beside other
 # tests, many of them running a scheduler on every core, and the wall clock
-# of the longer compile counted the time it waited for a core. A linear
-# check read 8.9x on a busy Windows runner and 4.8x alone.
+# of the longer compile counted the time it waited for a core. CPU time
+# moves too: a linear check at four times the size read 8.9x on a busy
+# Windows runner and 4.8x alone, against a bound of 8x (#3604). Eight
+# times the size and a bound of 24x leave a factor of two or more on each
+# side, between a linear check slowed by its runner and the walks.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -78,22 +82,22 @@ check_ms() {
 }
 
 program 1000
-program 4000
+program 8000
 small=0
 large=0
 for run in 1 2 3; do
     check_ms 1000
     small=$(( small + MS ))
-    check_ms 4000
+    check_ms 8000
     large=$(( large + MS ))
 done
 
 # Below 30 ms a run the clock's grain decides: Windows charges CPU time a
 # clock tick, about 15.6 ms, at a time.
 [ "$small" -lt 90 ] && small=90
-if [ "$large" -ge $(( small * 8 )) ]; then
-    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms of CPU, 4000 in ${large} ms (three runs each): four times the declarations cost $(( large / small ))x the time (linear is 4x)"
+if [ "$large" -ge $(( small * 24 )) ]; then
+    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (three runs each): eight times the declarations cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
     exit 1
 fi
-echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms of CPU, 4000 in ${large} ms (three runs each)"
+echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (three runs each)"
 exit 0
