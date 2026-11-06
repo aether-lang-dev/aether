@@ -87,7 +87,12 @@ run_case "0-RTT taken, AES-128-GCM" 1301 "early=accept" HELLO "RESUMED early=1|S
 run_case "0-RTT taken, a ChaCha20-Poly1305 ticket" 1303 "early=accept" HELLO "RESUMED early=1|SENT|RECV 2" "EARLY HELLO|EOED|FINISHED ok|DATA AFTER"
 run_case "0-RTT taken, AES-256-GCM-SHA384" 1302 "early=accept" HELLO "RESUMED early=1|SENT|RECV 2" "EARLY HELLO|EOED|FINISHED ok|DATA AFTER"
 run_case "0-RTT refused" 1303 "" HELLO "RESUMED early=0|SENT|RECV 2" "EARLY HELLO|FINISHED ok|DATA AFTER"
-TSUITE=0000 run_case "a ticket naming no suite sends no early data" 1301 "early=accept" HELLO "RESUMED early=0" "binder=ok early=0|FINISHED ok|DATA AFTER"
+# Not `TSUITE=0000 run_case ...`: where sh is bash in POSIX mode (macOS) an
+# assignment before a function call outlives it, and the cases after this one
+# would send a ticket naming no suite.
+TSUITE=0000
+run_case "a ticket naming no suite sends no early data" 1301 "early=accept" HELLO "RESUMED early=0" "binder=ok early=0|FINISHED ok|DATA AFTER"
+TSUITE=
 run_case "0-RTT taken under another suite than the ticket's" 1301 "suite=1303;early=accept" HELLO "RESUMEERR" "EARLY HELLO|ALERT 47"
 run_case "a PSK identity never offered" 1301 "psk_id=1" "" "RESUMEERR" "ALERT 47"
 run_case "a suite of another hash than the PSK's" 1301 "suite=1302" "" "RESUMEERR" "ALERT 47"
