@@ -2423,6 +2423,16 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             if (idle_count < 10000) {
                 // Tight spin with architecture-specific pause
                 AETHER_PAUSE();
+            } else if (tls_overflow_any) {
+                // Messages of this core's still to deliver (#3611): its
+                // overflow buffer holds what the target core's queue had no
+                // room for, and only this thread flushes it, at the top of
+                // each turn. Parked, it held them until the park ended, up
+                // to PARK_MS_MAX each time: a target with nothing else to
+                // do waited, and a dead one's restart waited on its count
+                // in flight (#3606). It is not idle: it yields the CPU, so
+                // a target core sharing it can make room, and flushes again.
+                aether_sched_yield();
             } else {
                 // A free held back by a reader (another thread walking the
                 // tables, a core in a long step) is retried here, once per
