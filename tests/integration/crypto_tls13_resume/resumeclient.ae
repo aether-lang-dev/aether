@@ -72,6 +72,7 @@ fn fixed_ticket() -> ptr {
     st.hash_len = hl
     st.max_early_data = 16384
     st.cipher_suite = suite
+    st.issued_ms = 0 as long
     return st as ptr
 }
 
