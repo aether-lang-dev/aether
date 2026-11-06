@@ -14,6 +14,16 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.891.0]
+
+### Fixed
+
+- **`ae add` installs a package from a tarball made on a Mac.** `tar` on macOS writes an AppleDouble sidecar (`._<name>`) beside every file carrying an extended attribute, which includes anything a Mac wrote (`com.apple.provenance`). One of them at the archive's root counted as a second top-level entry, so the add failed with "the archive does not hold one top directory", and the rest would have been installed and hashed as package files. `ae-fetch` now removes regular `._*` files from the unpacked archive before looking for the top directory. `ae_add_hash_pin` pins it with an archive that holds sidecars; the three `ae_add_*` fixtures are built with `COPYFILE_DISABLE=1`.
+
+- **A TLS 1.3 0-RTT resumption sends the ticket's real age.** `std.cryptography.tls13_client` put 0 in the PSK identity's `obfuscated_ticket_age`, where RFC 8446 4.2.11.1 wants the ticket's age in milliseconds plus its `ticket_age_add`. OpenSSL 3.x let that through; OpenSSL 4 checks it and refused the early data of every resumption (the connection still resumed, with `early=0`). A ticket now records when it arrived (`os.now_monotonic_ms`) and the resumption sends `(age + ticket_age_add) mod 2^32`. `crypto_tls13_resume` against `openssl s_server -early_data` pins it.
+
+- **`crypto_tls13_resume` no longer leaks one case's ticket suite into the next on macOS.** `TSUITE=0000 run_case ...` is an assignment before a shell function, which stays set afterwards where `sh` is bash in POSIX mode (macOS). The "HRR for secp256r1 after 0-RTT data" case then sent a ticket naming no suite, so no early data. The test sets and clears `TSUITE` around the one case.
+
 ## [0.890.0]
 
 ### Fixed
