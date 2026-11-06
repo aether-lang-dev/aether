@@ -357,3 +357,5 @@ tests/integration/contrib_host_stunt/
 # #3525: print_float.ae is the program test_print_float_locale.sh builds,
 # runs and compares the output of.
 tests/integration/print_float_locale/
+# oaep_sha1.ae takes its key, ciphertext and message from the openssl run in test_crypto_rsa_oaep_sha1_openssl.sh.
+tests/integration/crypto_rsa_oaep_sha1_openssl/

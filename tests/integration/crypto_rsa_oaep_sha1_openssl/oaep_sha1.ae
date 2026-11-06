@@ -1,0 +1,66 @@
+// RSAES-OAEP with SHA-1 / MGF1-SHA1 against OpenSSL, for
+// test_crypto_rsa_oaep_sha1_openssl.sh. KEY names a PKCS#1 DER private key,
+// CT a ciphertext `openssl pkeyutl` made with rsa_oaep_md:sha1, MSG the
+// plaintext, OUT where to write this side's encryption of MSG for openssl
+// to decrypt.
+
+import std.os
+import std.fs
+import std.bytes
+import std.string
+import std.cryptography
+import std.cryptography.rsa
+
+extern exit(code: int)
+
+fn load(path: string) -> ptr {
+    data, n, err = fs.read_binary(path)
+    if err != "" {
+        println("FAIL: read ${path}: ${err}")
+        exit(1)
+    }
+    b = bytes.new(n)
+    if n > 0 { bytes.copy_from_slice(b, 0, string.bytes(data)[0..n]) }
+    return b
+}
+
+main() {
+    der = load(os.getenv("KEY"))
+    k, kerr = rsa.key_from_pkcs1_der(der)
+    if kerr != "" {
+        println("FAIL: key: ${kerr}")
+        exit(1)
+    }
+    msg = load(os.getenv("MSG"))
+    mlen = bytes.length(msg)
+    ct = load(os.getenv("CT"))
+
+    pt, derr = rsa.decrypt_oaep_hash(k, "sha1", ct)
+    if derr != "" {
+        println("DECRYPT FAILED: ${derr}")
+    } else if bytes.length(pt) == mlen && bytes.to_string(pt, mlen) == bytes.to_string(msg, mlen) {
+        println("decrypt: openssl's ciphertext opens to the message")
+    } else {
+        println("DECRYPT WRONG: ${bytes.length(pt)} bytes")
+    }
+
+    seed, rerr = cryptography.random_buffer(20)
+    if rerr != "" {
+        println("FAIL: ${rerr}")
+        exit(1)
+    }
+    out = rsa.encrypt_oaep_hash(k, "sha1", bytes.view(msg)[0..mlen], seed)
+    if out == null {
+        println("ENCRYPT FAILED")
+        exit(1)
+    }
+    werr = fs.write_binary(os.getenv("OUT"), bytes.view(out)[0..bytes.length(out)])
+    if werr != "" {
+        println("FAIL: write: ${werr}")
+        exit(1)
+    }
+    println("encrypt: wrote ${bytes.length(out)} bytes")
+    bytes.free(seed); bytes.free(out); bytes.free(ct); bytes.free(msg); bytes.free(der)
+    if pt != null { bytes.free(pt) }
+    rsa.key_free(k)
+}
