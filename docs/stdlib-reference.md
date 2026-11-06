@@ -86,7 +86,7 @@ header comment is the authoritative description.
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 47 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 49 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
@@ -2745,6 +2745,7 @@ main() {
 **Functions (Go-style):**
 - `tcp.connect(host, port)` → `(ptr, string)` - Connect, return `(socket, err)`
 - `tcp.connect_buffered(host, port, read_buffer)` → `(ptr, string)` - Connect with the receive buffer (`SO_RCVBUF`) set to `read_buffer` bytes before the connection is made, so the window it opens with is that size; for a client meant to take little while it does not read. `tcp.set_read_buffer` on a connected socket leaves the window already advertised (#3338).
+- `tcp.connect_timeout(host, port, timeout_ms)` → `(ptr, string)` - Connect, giving up after `timeout_ms` (the whole dial, every address the host resolves to) instead of the kernel's SYN retry schedule; `"connect timeout"` when the budget runs out.
 - `tcp.connect_unix(path)` → `(ptr, string)` - Connect to the Unix-domain stream socket at `path` (a local daemon's API socket, such as Docker's `/var/run/docker.sock`). The socket is the handle `connect` returns, so every read, write, poll and close works on it. Errors name the path: `no such socket`, `connection refused: nothing is listening on the socket`, `permission denied`, a path too long for `sockaddr_un` (103 bytes on macOS and the BSDs, 107 on Linux and Windows; refused, never truncated). In an enforce block it needs `fs_write` on `path`, the kernel's own rule for connecting to a Unix socket. Windows 10 1803 and later; before that `Unix-domain sockets are not supported on this Windows`.
 - `tcp.listen_unix(path)` → `(ptr, string)` - Listen on a new Unix-domain socket file at `path`; a file already there is `address in use` (a stale one is the caller's to remove). `accept`, `server_poll` and `server_fd` work on it, `server_port` is -1, and `server_close` removes the socket file. Needs `tcp_listen` and `fs_write` on `path` in an enforce block.
 - `tcp.available(sock)` → `int` - Bytes waiting in the socket's receive buffer, readable without blocking (`FIONREAD`), or -1.
@@ -2759,7 +2760,7 @@ main() {
 - `tcp.close(sock)` - Close socket (infallible)
 - `tcp.server_close(server)` - Close server socket
 
-Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_connect_unix_raw`, `tcp_listen_unix_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
+Raw externs: `tcp_connect_raw`, `tcp_connect_buffered_raw`, `tcp_connect_timeout_raw`, `tcp_connect_unix_raw`, `tcp_listen_unix_raw`, `tcp_available_raw`, `tcp_send_raw`, `tcp_send_n_raw`, `tcp_receive_raw`, `tcp_receive_n_raw`, `tcp_send_bytes_raw`, `tcp_receive_into_raw`, `tcp_listen_raw`, `tcp_accept_raw`.
 
 ### UDP slices (`std.udp`)
 
