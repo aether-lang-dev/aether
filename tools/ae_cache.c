@@ -998,7 +998,7 @@ static void tc_seed_lib_dirs_from_env(void) {
 /* The cold cache key's walk of a source tree: every .ae/.c/.h file under a
  * root, its path relative to the root and its CONTENT folded in. Modules live
  * in SUBDIRECTORIES of a lib dir (`std/string/module.ae`,
- * `contrib/host/tcl/module.ae`), so a top-level-only walk misses them; it
+ * `contrib/host/stunt/module.ae`), so a top-level-only walk misses them; it
  * recurses, following symlinks (#623). The relative path tells a subdir
  * module from a same-named top-level file and is stable across runs.
  * Content rather than mtime+size is what makes a same-second, same-size edit

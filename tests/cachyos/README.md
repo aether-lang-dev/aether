@@ -36,10 +36,11 @@ half of the coverage gap that actually catches that class of bug.
 ## Running it
 
 Cron isn't installed on CachyOS by default; use a **systemd --user timer** (see
-the header comment in `nightly.sh`). Provision the contrib deps first — package
-installs plus the `aether-lang-dev/factor-language` fork build — and export the
-`AETHER_*` dep env vars in the timer environment. The gate stays RED until every
-dep is present, by design.
+the header comment in `nightly.sh`). Provision the contrib deps first (package
+installs) and export the `AETHER_*` env vars in the timer environment. The gate
+stays RED until every dep is present, by design. The language bridges, and the
+Lua/Tcl/Perl/Duktape/Go/TinyGo/Racket/Factor provisioning they needed, moved to
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages).
 
 ### Why every contrib step here is fail-hard
 
@@ -52,7 +53,7 @@ hides the one below it, so all of them have to be closed:
 | --- | --- | --- |
 | A dep is absent | — | step 1's dep gate turns the run RED |
 | A module fails to **build** | `make contrib` tallies a SKIP, exits 0 | `MODULES=<all>` → fail-hard (exit 1) |
-| A bridge **archive** is missing | phase [3/3] prints SKIP, exits 0 | `CONTRIB_HOST_STRICT=1` → FAIL |
+| A bridge **archive** is missing | phase [2/2] prints SKIP, exits 0 | `CONTRIB_HOST_STRICT=1` → FAIL |
 | A spec **runs but skips its cases** | prints `⊘`, exits 0 | `skipped=0` gate → RED |
 
 The dep gate alone is not enough for the middle two: it catches "the library
@@ -62,10 +63,11 @@ In probe-and-skip mode that break reports as a skip and the nightly stays
 green.
 
 The last row is the subtlest and was found by testing rather than reasoning.
-`contrib/host/factor`'s archive builds fine with no Factor installed (the
-bridge is pure `dlopen`), so both `MODULES=` and `CONTRIB_HOST_STRICT` pass it
-— and then all six of its cases skip at runtime because `AETHER_FACTOR_SONAME`
-is unset, reporting `0 passing / 6 skipped` and exiting 0. `std.spec` states
+The Factor bridge's archive (the bridge has since moved to
+aether-guest-languages) built fine with no Factor installed (the bridge is
+pure `dlopen`), so both `MODULES=` and `CONTRIB_HOST_STRICT` passed it — and
+then all six of its cases skipped at runtime because `AETHER_FACTOR_SONAME`
+was unset, reporting `0 passing / 6 skipped` and exiting 0. `std.spec` states
 the principle directly: *"A skip that reports as a pass is worse than no skip
 at all."*
 
@@ -84,14 +86,14 @@ unaffected — only this nightly sets it.
 
 ### Dependency versions: recorded, not pinned
 
-Nothing in the repo pins any contrib dependency. `probe_racket` checks only
-that `chezscheme.h` and `racketcs.h` *exist*; the dep gate checks
-`command -v racket`; the `pacman -S` line in the header is unversioned.
+Nothing in the repo pins any contrib dependency. The dep gate checks that a
+library or command is there; the `pacman -S` line in the header is
+unversioned.
 
 **That is deliberate.** This box is rolling-release precisely so it runs
 *ahead* of CI and finds breakage early — the same rationale as its GCC 16
-against CI's GCC 11. Pinning Racket would mean never learning that a new
-Racket broke the embedding surface.
+against CI's GCC 11. Pinning FFmpeg would mean never learning that a new
+FFmpeg broke `contrib.avcodec`.
 
 What was missing is the **record**. Without it a green run does not say what
 it tested, and a red run the morning after `pacman -Syu` reads as a code
@@ -99,23 +101,11 @@ regression rather than an upstream bump — a bisect nobody should have to do.
 So each run writes `deps_<stamp>.tsv` and publishes it as a table beside the
 step timings.
 
-Measured on the box (2026-08-18), which shows why this matters:
-
-| dependency | version |
-|---|---|
-| `racket` | 9.2 |
-| `lua` | 5.5.0 |
-| `python` | 3.14.6 |
-| `node` | 26.4.0 |
-| `java` | openjdk 26.0.2 |
-| `go` | 1.26.5 |
-| `tinygo` | 0.41.1 (LLVM 20.1.1) |
-| `factor-fork` | `91a3639cf6` (a commit — it is built from source) |
-
-Racket 9.3 shipped 2026-08-13 while the box was on 9.2. The Racket CS
-embedding surface the bridge compiles against (`chezscheme.h`'s `Snil`,
-`Scons`, `Smake_bytevector`) is macro-based and has moved across majors, so
-that upgrade is exactly the kind this table makes legible.
+Measured on the box (2026-08-18), when the language bridges were still
+here, which shows why this matters: Racket 9.3 shipped 2026-08-13 while the
+box was on 9.2, and the Racket CS embedding surface the bridge compiled
+against was macro-based and had moved across majors, so that upgrade was
+exactly the kind this table makes legible.
 
 Reporting is all this step does. Whether a missing dep is fatal stays the dep
 gate's decision — duplicating that verdict here would give two sources of

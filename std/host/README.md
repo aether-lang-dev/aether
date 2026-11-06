@@ -48,7 +48,8 @@ panic, and these read the same outcome without a `try` (#2956,
 docs/emit-lib.md).
 
 The `java`, `python`, `ruby` and `go` helpers are the language-specific entry
-points; `contrib/host/<lang>/` carries the bridge for each, and
+points (the other direction, another language hosting Aether, lives in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)), and
 `docs/aether-embedded-in-host-applications.md` is the full account.
 
 ## Exports

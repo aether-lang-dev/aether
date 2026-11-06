@@ -83,8 +83,10 @@ started](../docs/getting-started.md) installs the toolchain.
 ## 4. C and other languages
 
 Aether compiles to C, so C is one declaration away in both directions.
-The host examples need that language installed; CI's contrib/host job
-builds and runs them.
+Running another language's code inside an Aether program (Lua, Python,
+Tcl, Perl, Ruby, JavaScript, Go, Java, ...) is the job of
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages),
+whose bridges carry their own examples.
 
 | Example | What it teaches | Reference |
 |---|---|---|
@@ -92,10 +94,6 @@ builds and runs them.
 | [02-own-c/main.ae](04-interop/02-own-c/main.ae) | `@source`: a C file the program ships; strings, arrays and structs into C | [@source](../docs/c-interop.md#a-module-that-ships-its-c-source) |
 | [03-callbacks.ae](04-interop/03-callbacks.ae) | `@c_callback`: C's `qsort` calling an Aether comparison | [C callbacks](../docs/c-interop.md#exporting-an-aether-function-as-a-c-callback-c_callback) |
 | [04-embedding/greeter.ae](04-interop/04-embedding/greeter.ae) | `--emit=obj`: an Aether library in a C program, strings across | [--emit=obj](../docs/emit-lib.md#--emitobj-one-object-file-for-an-existing-c-build) |
-| [05-hosts/quickjs.ae](04-interop/05-hosts/quickjs.ae) | QuickJS run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
-| [05-hosts/tcl.ae](04-interop/05-hosts/tcl.ae) | Tcl run inside the program, under the sandbox | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
-| [05-hosts/go.ae](04-interop/05-hosts/go.ae) | a Go program as a sandboxed child process | [Host modules](../docs/containment-sandbox.md#language-host-modules) |
-| [05-hosts/tinygo.ae](04-interop/05-hosts/tinygo.ae) | a Go c-shared library loaded and called in-process | [contrib/host/tinygo](../contrib/host/tinygo/README.md) |
 | [06-java-host/aether/manifest.ae](04-interop/06-java-host/aether/manifest.ae) | a namespace with a generated Java SDK, called from Java | [Embedded namespaces](../docs/embedded-namespaces-and-host-bindings.md) |
 | [07-limits/script.ae](04-interop/07-limits/script.ae) | a host's limits on the code it runs: a deadline, a cancel, a memory budget | [Per-call resource caps](../docs/emit-lib.md#per-call-resource-caps) |
 

@@ -40,12 +40,15 @@ Erlang's actor syntax, compiling via C.**
   checks libc calls against a builder-DSL grant list. A mashup of Pony
   object capabilities, Java's removed SecurityManager, and a fraction of
   gVisor.
-- **Hosts other languages in-process.** Aether `main()` embeds
-  Perl/Ruby/Tcl/JS via
-  `contrib.host.<lang>.run_sandboxed(perms, code)` (the Lua and Python
-  bridges live in aether-guest-languages);
-  Java/Go/aether-hosts-aether are separate-process. The same grant list
-  + LD_PRELOAD gates the hosted interpreter's libc calls. Guest
+- **Hosts other languages, in-process or as a child.** The language
+  bridges (Lua, Python, Perl, Ruby, Tcl, Duktape/JS, QuickJS, Go, TinyGo,
+  Java, Factor, Racket, Rhombus) live in
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages):
+  `ae add github.com/aether-lang-dev/aether-guest-languages`, then
+  `import lua` and `lua.run_sandboxed(perms, code)`. This tree keeps
+  `contrib.host.stunt` (the test double every bridge is held to) and
+  `contrib.host.aether` (aether-hosts-aether, separate-process). The same
+  grant list + LD_PRELOAD gates the hosted interpreter's libc calls. Guest
   direction: `--emit=lib` → Python ctypes / Java Panama / Ruby
   Fiddle SDKs auto-generated from `aether_describe()`.
 - **NOT quite Ruby/Smalltalk/Groovy's builder-style closures**
@@ -121,9 +124,9 @@ plays that role), no interfaces.
   not realise the module is there. Today's top-level dirs are
   `contrib/{cryptography, host, parsers, sqlite, templating, tinyweb}`:
   `parsers/xml_expat` (SAX XML via libexpat), `sqlite`,
-  `templating/{liquid,native}`, and `host/<lang>` embedded interpreters
-  for js, perl, ruby, tcl, duktape, tinygo, go, java, factor,
-  racket, rhombus, and aether-in-aether.
+  `templating/{liquid,native}`, and `host/` (`stunt`, the test double
+  for a hosted language, and `aether`, aether-in-aether; the language
+  bridges moved to aether-guest-languages).
 - `compiler/aetherc.c` CLI entry. `--emit=lib`, `--with=`, and the
   capability import gate (search for `--with=` argv parsing and the
   "Step 2.7: --emit=lib capability-empty check" enforcement block).
@@ -267,7 +270,7 @@ plays that role), no interfaces.
 - **Unqualified imports are spelt `import mod (*)`, not `import mod unqualified`.** Aether ships glob imports, `import std.math (*)` brings every public symbol into the bare namespace, no `math.` prefix. Selective form `import std.math (sqrt, pow)` is the same shape with an enumeration. There is no `unqualified` keyword and no `use mod::*` (Rust) or `from mod import *` (Python) spelling, just the parenthesised `(*)`. Applies equally to stdlib, contrib, and local modules. When a porter or doc asks for "Java-style import static" or "Rust use", point at this. (Language reference: "Glob Import" section.)
 - **`<<MARKER … MARKER` heredocs.** Literal string, no
   interpolation/escaping, reach for them to embed another language's
-  source verbatim (`contrib.host.*` snippets, SQL) so the guest's own
+  source verbatim (a guest-language snippet, SQL) so the guest's own
   `"…"` need no `\"`. Use a normal `"…"` string when you want `${}`.
   Closing marker is `MARKER` alone on its line; it MAY be indented, but
   only at or below the body's shallowest line (it sits at the content's

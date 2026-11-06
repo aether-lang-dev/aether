@@ -1,11 +1,11 @@
 // Integration spec for contrib.host.aether — co-located with the bridge,
-// written in Aether against std.spec. Companion to
-// contrib/host/ruby/test_host_ruby.ae; see that file for why these drive
-// the bridge through its `import` rather than a C harness.
+// written in Aether against std.spec, like stunt's test_host_stunt.ae: it
+// drives the bridge through its `import` rather than a C harness, so the
+// spec exercises the same link and module surface a user's program does.
 //
 // Replaces tests/integration/host_aether/, whose wrapper existed to build
 // the bridge archive, export AETHER_AE_PATH / AETHER_HOST_CHILD, and grep
-// the driver's stdout for a sentinel line. The `[3/3]` discovery phase
+// the driver's stdout for a sentinel line. The `[2/2]` discovery phase
 // already builds `libaether_host_aether.a` on demand and skips when it
 // cannot, so the only jobs left were the two env vars and the child
 // script — both of which this spec now does itself, making it runnable

@@ -151,7 +151,7 @@ fi
 assert_sourced_c_present "$CONTRIB_INSTALL" "install.sh"
 
 # Spot-check a flagship module the issue called out by name.
-for canary in sqlite tinyweb host/tcl; do
+for canary in sqlite tinyweb host/stunt; do
     if [ ! -f "$CONTRIB_INSTALL/$canary/module.ae" ]; then
         echo "  [FAIL] canary contrib module $canary not installed"
         exit 1
@@ -173,7 +173,7 @@ done
 # above MUST ship both module.ae AND the matching archive.
 #
 # Windows skip: `make install-contrib` shells `contrib_build.sh` which
-# probes for sqlite3/python/lua/perl/ruby/duktape/tcl dev libs — none
+# probes for the sqlite3 and avcodec dev libs — neither
 # are available under MSYS2/MinGW on the GitHub runner, and the suite
 # is already 4x slower on Windows (~33 min vs ~8 min on Linux). The
 # install.sh half above provides the layout coverage; the
@@ -247,7 +247,7 @@ assert_sourced_c_present "$MAKE_CONTRIB_INSTALL" "make install-contrib"
 # Same canary set as install.sh's check above — pinning the two
 # install paths to a matching ship-list defeats the tinyweb-trim
 # class of regressions.
-for canary in sqlite tinyweb host/tcl; do
+for canary in sqlite tinyweb host/stunt; do
     if [ ! -f "$MAKE_CONTRIB_INSTALL/$canary/module.ae" ]; then
         echo "  [FAIL] canary $canary missing from make install-contrib"
         exit 1
@@ -257,11 +257,11 @@ done
 # Archives — every canary that contrib_build.sh built on this runner
 # must produce a libaether_<X>.a. We skip the check when the system
 # dep was missing on the runner (recorded in MANIFEST: present = built).
-# `host/tcl` is recorded as `host_tcl` in the manifest.
-# host/factor's bridge needs no headers or libraries to build (it dlopens
-# libfactor), so its archive is there on every runner.
-if [ ! -f "$MAKE_LIB_DIR/libaether_host_factor.a" ]; then
-    echo "  [FAIL] host/factor's archive missing from make install-contrib"
+# `host/stunt` is recorded as `host_stunt` in the manifest.
+# host/stunt's bridge needs no headers or libraries to build (it dlopens
+# libstunt), so its archive is there on every runner.
+if [ ! -f "$MAKE_LIB_DIR/libaether_host_stunt.a" ]; then
+    echo "  [FAIL] host/stunt's archive missing from make install-contrib"
     exit 1
 fi
 

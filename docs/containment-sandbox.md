@@ -92,8 +92,9 @@ connection pooled outside the block does not carry one made inside it. The
 | `grant_without_landlock()` | (none) | lets `sandbox.spawn_socket` run on a kernel without Landlock |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
-child process and what the `contrib/host/<lang>` modules take as their
-`perms` argument (`tcl.run_sandboxed(worker, code)`).
+child process and what a host bridge takes as its `perms` argument
+(`stunt.run_sandboxed(worker, code)` here, `tcl.run_sandboxed(worker, code)`
+in [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)).
 
 ### The key insight
 
@@ -256,7 +257,7 @@ runtime (#2955):
 | a message sent from a block | handled with no grants: an actor is not the block. That holds when the send steps an idle receiver of the same core inline, on the block's own thread: the step puts the block's levels aside and the block has them again when the send returns (#3393) |
 | a library's export called from inside a block on the same thread (through a host service, say), one runtime | held to the block's grants; its own `enforce` only narrows them, and when it ends the block is checked as before |
 | the same, with libraries built without `--shared-runtime` (on every platform since #3481; a library linked before it, without `-Bsymbolic`, binds to the program's runtime on Linux and FreeBSD) | each library has a copy of the runtime of its own, which cannot read another copy's grants: the inner library's checked operations are refused, and the first refusal prints a message naming `--shared-runtime`. Every copy finds the others by the record it carries in its image (a PE section, an ELF note, a Mach-O section), in load order, the program first: libraries a host loads, `RTLD_LOCAL` ones included, and a program with the libraries it loads, whenever it loads them and though its executable exports nothing (Windows, or Linux without `-rdynamic`, #3445: its copy went unfound, and the library's code inside its deny-all block was allowed everything) |
-| a contrib host bridge (`tcl.run_sandboxed(perms, code)` and the others) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |
+| a host bridge (`stunt.run_sandboxed(perms, code)`, and the language bridges of aether-guest-languages) | pushes `perms` as a level of the thread, so inside an `enforce` the guest gets the intersection |
 | a panic out of a block, caught anywhere (a `try` in any code, an actor's barrier) | the levels pushed inside the catching frame end with it, so the catch is held only to the blocks still around it |
 | more than 64 levels on one thread (blocks, trusted calls, bridge calls) | the 65th is refused with a panic before its block runs |
 
@@ -674,8 +675,9 @@ interpreter is the program the spawn runs) and not the guest's script.
 The child starts with `libaether_sandbox.so` in `LD_PRELOAD`, so the
 parent has to find it wherever the parent program runs: in `ae run`'s
 build cache, in a directory `ae build -o` wrote to, or installed beside
-other programs (#3177). `spawn_sandboxed` and the contrib process hosts
-(`contrib/host/aether`, `contrib/host/go`) look in this order:
+other programs (#3177). `spawn_sandboxed`, the contrib process host
+(`contrib/host/aether`) and the go and java bridges of
+aether-guest-languages look in this order:
 
 1. `AETHER_SANDBOX_PRELOAD`, the library's own path, when it is set;
 2. beside the running program, where a deployment can ship it;
@@ -1591,99 +1593,73 @@ The Aether sandbox draws from:
 
 ## Language host modules
 
-Aether can embed foreign language runtimes and run their code inside
-sandboxes. Each hosted language is a module under `contrib/host/`.
+Aether can run foreign language runtimes and their code inside
+sandboxes, in process or as a contained child. The bridges for the
+languages live in
+[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages), a separate repository:
 
-### Available modules
-
-```
-contrib/host/duktape/, import contrib.host.duktape (Duktape ES5)
-contrib/host/js/, import contrib.host.js       (alias of duktape)
-contrib/host/quickjs/, import contrib.host.quickjs (QuickJS ES2023)
-contrib/host/perl/, import contrib.host.perl     (Perl 5.x)
-contrib/host/ruby/, import contrib.host.ruby     (CRuby 3.x)
-contrib/host/tcl/, import contrib.host.tcl      (Tcl 8.5+)
+```sh
+ae add github.com/aether-lang-dev/aether-guest-languages
 ```
 
-The Lua bridge was removed from this tree on 2026-11-04, and the Python
-bridge on 2026-11-05. They live in
-[aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages)
-(`ae add github.com/aether-lang-dev/aether-guest-languages`, then
-`import lua` or `import python`), the home for these bridges outside
-aether's tree; other languages will move there one at a time
-(`contrib/host/README.md`). There each language is held to stunt's
-catalogue by name, in-process and in a std.guest contained child, and its
-README has the resulting table. For Lua it shows, among other rows, that
-in-process `os.execute` starts `/bin/sh` under the preload with no exec
-grant, and that the contained child refuses every row it runs. For Python
-it shows that `os.environ` escapes the preload in process (CPython copies
-the environment at start), and that on macOS nothing holds Python's own
-calls in process; the contained child holds every row it runs on Linux.
+```aether,fragment
+import tcl      // in place of the contrib.host import it had here
+```
 
-`contrib/host/stunt` is a test double for these: not a language, but a C
-engine loaded the way a bridge loads an interpreter (or run as a child under
-`sandbox.spawn_socket`) that does, by name, each thing a hosted language can
-do that the sandbox has to hold: open, getenv, connect, exec, dlopen of libc,
-a raw syscall, a callback, the shared map, a loop that must be stopped. Its
-catalogue and tests (`tests/integration/contrib_host_stunt`) cover the rows
-of the tables below with no interpreter installed; see
-[`contrib/host/stunt/README.md`](../contrib/host/stunt/README.md).
+| Language | Import there | Moved from this tree |
+|---|---|---|
+| Lua | `import lua` | 2026-11-04 |
+| Python | `import python` | 2026-11-05 |
+| Duktape (ES5), with `js` its alias | `import duktape`, `import js` | 2026-11-05 |
+| QuickJS (ES2023) | `import quickjs` | 2026-11-05 |
+| Perl 5 | `import perl` | 2026-11-05 |
+| CRuby 3 | `import ruby` | 2026-11-05 |
+| Tcl 8.5+ | `import tcl` | 2026-11-05 |
+| Go (a child process), TinyGo (c-shared, in process) | `import go`, `import tinygo` | 2026-11-05 |
+| Java (a child JVM) | `import java` | 2026-11-05 |
+| Factor | `import factor` | 2026-11-05 |
+| Racket CS, Rhombus | `import racket`, `import rhombus` | 2026-11-05 |
+
+There each language is held to stunt's catalogue by name, in process and
+in a `std.guest` contained child, and its README has the resulting
+containment table: which rows the in-process bridge holds (and which it
+cannot, such as CPython's copy of the environment or Lua's `os.execute`
+under the preload) and which the contained child holds. The engine behind
+the QuickJS bridge, `contrib.quickjs`, stays in this tree.
+
+What stays in `contrib/host/` is:
+
+- `contrib/host/stunt`, a test double for a hosted language: not a
+  language, but a C engine loaded the way a bridge loads an interpreter (or
+  run as a child under `sandbox.spawn_socket`) that does, by name, each
+  thing a hosted language can do that the sandbox has to hold: open,
+  getenv, connect, exec, dlopen of libc, a raw syscall, a callback, the
+  shared map, a loop that must be stopped. Its catalogue and tests
+  (`tests/integration/contrib_host_stunt`) cover those rows with no
+  interpreter installed; see
+  [`contrib/host/stunt/README.md`](../contrib/host/stunt/README.md).
+- `contrib/host/aether`, Aether hosting Aether: a compiled Aether program
+  run as a child under the preload.
 
 ### Two containment models
 
 | Model | How it works | Used by |
 |-------|-------------|---------|
-| **LD_PRELOAD interception** | Intercept libc calls (connect, open, getenv, execve). The hosted language has ambient access to libc; we filter it. | Perl, Ruby, Tcl |
-| **Native bindings only** | The hosted engine has NO ambient access. We expose only the functions we choose (env, readFile, etc.), each with a sandbox check built in. | JS (Duktape), QuickJS |
+| **LD_PRELOAD interception** | Intercept libc calls (connect, open, getenv, execve). The hosted language has ambient access to libc; we filter it. | stunt's libc rows; in aether-guest-languages, Perl, Ruby, Tcl, Lua, Python |
+| **Native bindings only** | The hosted engine has NO ambient access. We expose only the functions we choose (env, readFile, etc.), each with a sandbox check built in. | stunt's binding rows; in aether-guest-languages, Duktape, QuickJS |
 
-The native bindings model (Duktape and QuickJS) is the purest containment: there
-is nothing to intercept because there is nothing ambient (`quickjs-libc` is omitted). The hosted
-code can only call functions we explicitly provide.
-
-### Host module matrix
-
-| | JS (Duktape) | QuickJS | Perl | Ruby | Tcl |
-|---|-------------|---------|------|------|-----|
-| **Runtime** | Duktape 2.x | QuickJS (quickjs-ng) | Perl 5.x | CRuby 3.x | Tcl 8.5+ |
-| **Dev package** | duktape-dev | (pinned amalgamation) | (ships with perl) | ruby-dev | tcl-dev |
-| **Compile flag** | AETHER_HAS_DUKTAPE | AETHER_HAS_QUICKJS | AETHER_HAS_PERL | AETHER_HAS_RUBY | AETHER_HAS_TCL |
-| **Link** | -lduktape | -lm | -lperl | -lruby-3.1 | -framework Tcl / -ltcl |
-| **Containment model** | Native bindings | Native bindings (no libc) | LD_PRELOAD | LD_PRELOAD | LD_PRELOAD |
-| **Needs LD_PRELOAD .so** | No | No | Yes | Yes | Yes |
-| **env var access** | `env()` binding (checked) | Host function grants | %ENV scrubbed at entry | ENV scrubbed at entry | ::env lazy via getenv (intercepted) |
-| **File access** | `readFile()` binding (checked) | Host function grants | libc open (intercepted) | libc open (intercepted) | libc open (intercepted) |
-| **Network** | Not exposed | Host function grants | libc connect (intercepted) | libc connect (intercepted) | libc connect (intercepted) |
-| **Process exec** | Not exposed | Host function grants | libc execve (intercepted) | libc execve (intercepted) | libc execve (intercepted) |
-| **Env cache issue** | No, no cache | No, no cache | Yes, %ENV cached; scrubbed by host module | Yes, ENV cached; scrubbed by host module | Yes, ::env cached; not auto-scrubbed |
-| **Sandbox grants honoured** | Yes | Yes | Yes | Yes | Yes |
-| **Glob patterns work** | Yes | Yes | Yes | Yes | Yes |
-| **Nested sandbox** | Yes | Yes | Yes | Yes | Yes |
-| **Guest knows it's sandboxed** | No | No | No | No | No |
-
-### Shared-interpreter behavior
-
-Perl, Ruby, and Tcl keep a single long-lived interpreter across calls.
-`run_sandboxed` scrubs the environment on entry and leaves the scrubbed
-state in place on exit, a subsequent unsandboxed `run()` in the same
-process sees the scrubbed environment. Two stable usage patterns:
-(a) one mode per process, restart the host between modes; or
-(b) have the host snapshot the environment from the guest language
-before entering the sandbox and reassign it on exit.
-JS doesn't cache the environment at all.
-
-Ruby behavior to be aware of: `Fiddle.dlopen("libc.so.6")` inside a
-sandbox succeeds and returns a handle, but any libc function invoked
-through that handle still goes through the Aether preload layer and
-respects grants. The `dlopen` succeeding isn't a sandbox escape, it's
-the expected result, since interception is on the call, not the load.
+The native bindings model is the purest containment: there is nothing to
+intercept because there is nothing ambient. The hosted code can only call
+functions we explicitly provide.
 
 ### Usage pattern
 
-All host modules follow the same pattern:
+Every host bridge follows the same pattern; here with stunt, whose
+"script" names a check from its catalogue and the outcome expected:
 
 ```aether,fragment
-import std.list
-import contrib.host.tcl   // or js, perl, ruby
+import std.sandbox
+import contrib.host.stunt
 
 // Define sandbox grants
 worker = sandbox.new("worker") {
@@ -1691,12 +1667,9 @@ worker = sandbox.new("worker") {
     grant_fs_read("/etc/hostname")
 }
 
-// Run hosted code, it uses normal APIs, has no idea it's contained
-tcl.run_sandboxed(worker, <<SCRIPT
-puts $::env(HOME)                    ;# allowed
-puts [info exists ::env(AWS_SECRET)] ;# 0, sandboxed
-SCRIPT
-)
+// Run hosted code; it uses normal APIs and has no idea it's contained
+stunt.run_sandboxed(worker, "getenv-home succeed")
+stunt.run_sandboxed(worker, "open-etc-passwd refused")
 ```
 
 ### Enforcement modes
@@ -1756,19 +1729,17 @@ the hosted code returns. A stale or guessed token returns nothing.
 
 ### Native bindings
 
-Each host module provides two bindings to the hosted language:
-
-| Language | Get | Put |
-|----------|-----|-----|
-| Lua | `aether_map_get(key)` | `aether_map_put(key, value)` |
-| JS | `aether_map_get(key)` | `aether_map_put(key, value)` |
-| Perl | `aether_map_get(key)` | `aether_map_put(key, value)` |
-| Ruby | `aether_map_get(key)` | `aether_map_put(key, value)` |
+Each host bridge provides two bindings to the hosted language,
+`aether_map_get(key)` and `aether_map_put(key, value)`: stunt's
+`map-*` checks here, and the Lua, JS, Perl, Ruby and Tcl bridges of
+aether-guest-languages under the same names.
 
 ### Example
 
+With the JS bridge of aether-guest-languages (`import js` there):
+
 ```aether,fragment
-import contrib.host.js
+import js
 
 worker = sandbox.new("worker") {
     grant_env("HOME")
@@ -1880,18 +1851,20 @@ same permissions registry and LD_PRELOAD checker either way.
   (typed-SDK story) and [`aether-embedded-in-host-applications.md`](aether-embedded-in-host-applications.md)
   (rationale + YAML/HCL/Pkl/Jsonnet/Starlark comparison), and
   [`aether-vs-hcl.md`](aether-vs-hcl.md) for HCL side by side.
-- **Aether as host**, an Aether `main()` executable embeds
-  `contrib.host.<lang>.run_sandboxed(perms, code)` for
-  Perl, Ruby, Tcl, JavaScript in-process (Lua and Python bridges now live in
-  aether-guest-languages). Java, Go, and
-  aether-hosts-aether are separate-process (Aether is compiled, so
-  aether-hosts-aether uses fork+exec with LD_PRELOAD on the child).
+- **Aether as host**, an Aether `main()` executable runs
+  `<lang>.run_sandboxed(perms, code)` for Lua, Python, Perl, Ruby, Tcl,
+  JavaScript and more in-process, through the bridges of
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages) (`ae add` it, then
+  `import <lang>`). Java, Go, and aether-hosts-aether
+  (`contrib.host.aether`, still in this tree) are separate-process
+  (Aether is compiled, so aether-hosts-aether uses fork+exec with
+  LD_PRELOAD on the child).
   `hide` / `seal except` are Aether compile-time constructs, they
   do NOT travel into hosted non-Aether interpreters, which have
   their own scoping; containment for those is grants + LD_PRELOAD
   only. `hide` / `seal except` still shape the Aether-side
-  grant-assembly block and the hosting closure. See
-  `contrib/host/<lang>/README.md` and `contrib/host/TODO.md`.
+  grant-assembly block and the hosting closure. See each language's
+  README in aether-guest-languages and `contrib/host/TODO.md`.
 
 ### What it's most like
 
@@ -1952,9 +1925,9 @@ Active work listed in [`../contrib/host/TODO.md`](../contrib/host/TODO.md):
 
 - Capturing stdout/stderr from hosted scripts, pipe rewire vs.
   shared-map key vs. pass-through, design undecided.
-- Native shared-map bindings for Perl and Ruby, currently
-  tied-hash via `eval`, which swallows writes. Tcl and
-  JS already have proper native C bindings.
+- Native shared-map bindings for Perl and Ruby (in
+  aether-guest-languages), currently tied-hash via `eval`, which
+  swallows writes. Tcl and JS already have proper native C bindings.
 - `bytes` mode on the shared map, so callers don't have to
   base64 binary payloads across the boundary.
 

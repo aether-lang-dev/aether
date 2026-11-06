@@ -58,7 +58,7 @@ a suffix starting with `*` (`"*.example.com"`), or an exact string. A grant
 list with no grants denies everything.
 
 `sandbox.new` returns a `sandbox.Grants`, an opaque type: it can be passed to
-`enforce`, to `free`, and to the `contrib/host/<lang>` `run_sandboxed` calls, but
+`enforce`, to `free`, and to a host bridge's `run_sandboxed` calls, but
 it is not a `std.list`, so code holding one cannot add entries to it. The
 grants go in through the `grant_*` calls in the trailing block.
 
@@ -131,8 +131,10 @@ The same grant list goes to:
   is the explicit way to run one with no sandbox. A foreign interpreter's
   start-up reads come from `grant_runtime("python3")`, which asks the
   interpreter for them;
-- the `contrib/host/<lang>` modules, which run embedded Ruby, Tcl and
-  others under it: `tcl.run_sandboxed(worker, code)`.
+- the host bridges, which run an embedded engine under it:
+  `contrib.host.stunt` (the test double, `stunt.run_sandboxed(worker, code)`)
+  here, and the Ruby, Tcl, Lua, Python and other bridges of
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages) (`tcl.run_sandboxed(worker, code)`).
 
 ## Paths and threads
 

@@ -55,8 +55,17 @@ if ! grep -q 'expected Token, got ptr' "$tmp/reject.log"; then
     echo "  [FAIL] missing distinct parameter diagnostic"
     exit 1
 fi
-# The original CI failures: type checking needs no installed host libraries.
-for lang in tcl go; do
-    "$AE" check "$ROOT/examples/04-interop/05-hosts/$lang.ae"
-done
-echo "  [PASS] imported distinct extern parameters and returns; raw pointers rejected; host demos checked"
+# The original CI failures: a host bridge's externs take sandbox.Grants, a
+# distinct type from another module, and type checking needs no installed
+# host libraries. stunt is the bridge that is always in the tree.
+cat > "$tmp/host_demo.ae" <<'EOF'
+import std.sandbox
+import contrib.host.stunt
+
+main() {
+    worker = sandbox.new("worker") { grant_fs_read("/srv/data/*") }
+    println(stunt.run_sandboxed(worker, "open-etc-passwd refused"))
+}
+EOF
+"$AE" check "$tmp/host_demo.ae"
+echo "  [PASS] imported distinct extern parameters and returns; raw pointers rejected; host demo checked"

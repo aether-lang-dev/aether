@@ -182,7 +182,7 @@ if [ -n "$other" ] && [ "$other" != "$bin" ]; then
     say "      put $PREFIX/bin ahead of it, or remove the other install."
 fi
 
-say "optional: native contrib modules (sqlite, host_perl, …) — from a"
+say "optional: native contrib modules (sqlite, avcodec, …) — from a"
 say "          checkout run 'make contrib && make install-contrib PREFIX=$PREFIX'"
 say "          (built only where the dev libraries are present)."
 say "done. Pin this in CI with: AETHER_REF=$REF"

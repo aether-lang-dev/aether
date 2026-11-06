@@ -2703,7 +2703,7 @@ install: $(VERSION_HEADER) release-build ae stdlib
 # contrib/ is a source-tree organising prefix; downstream consumes
 # individual artifacts, not a bundled lib. Each module's bridge .c
 # compiles to its own .a, named after the module — sqlite →
-# libaether_sqlite.a, host/tcl → libaether_host_tcl.a, etc.
+# libaether_sqlite.a, host/stunt → libaether_host_stunt.a, etc.
 #
 # Probe-and-build by design: machines without sqlite3-dev get no
 # libaether_sqlite.a. The same module.ae still installs (so
@@ -2713,14 +2713,14 @@ install: $(VERSION_HEADER) release-build ae stdlib
 #
 # Modules covered (v1):
 #   - sqlite                    (-lsqlite3)
-#   - host/{perl,ruby,duktape,tcl,tinygo}
-#   - host/factor               (dlopen libfactor; archive builds bare,
-#                                runtime needs the factor-language fork)
+#   - avcodec                   (FFmpeg's decode libraries)
+#   - host/stunt                (the test double; dlopens libstunt)
 #   - host/aether               (fork+exec sandboxed child via LD_PRELOAD;
 #                                libc + in-tree sandbox runtime only)
-# Out of scope for v1: host/{java,go} (separate-process or JNI-style
-# bridges, different build shape — javac/jar and cgo c-archive don't fit
-# the cc→ar pipeline). The widget toolkit
+# The language bridges (host/{lua,python,tcl,perl,ruby,duktape,js,quickjs,
+# go,tinygo,java,factor,racket,rhombus}) moved to
+# https://github.com/aether-lang-dev/aether-guest-languages, which builds
+# them itself (`ae add` it, then `import <lang>`). The widget toolkit
 # (formerly contrib/aether_ui) spun out to
 # https://github.com/aether-lang-dev/aether-ui and is no longer in this repo.
 # The Servirtium climate-API record/replay harness (formerly
@@ -2762,14 +2762,10 @@ install-contrib: contrib
 			printf "  lib/aether/%s\n" "$$inst"; \
 		done
 	@# Mirror the contrib source tree for module.ae + headers.
-	@# Trim noise: tests, benchmarks, example .ae, build scripts,
-	@# CI scripts, and the modules we don't ship in v1
-	@# (host/{java,go} — see contrib: target comment).
-	@# host/{tinygo,factor,aether} and tinyweb ARE shipped.
+	@# Trim noise: tests, benchmarks, example .ae, build scripts and
+	@# CI scripts. host/{stunt,aether} and tinyweb ARE shipped.
 	@-$(RM_DIR) $(PREFIX)/share/aether/contrib
 	@cp -R contrib $(PREFIX)/share/aether/
-	@rm -rf $(PREFIX)/share/aether/contrib/host/java
-	@rm -rf $(PREFIX)/share/aether/contrib/host/go
 	@find $(PREFIX)/share/aether/contrib -type d -name tests       -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type d -name benchmarks  -exec rm -rf {} + 2>/dev/null || true
 	@find $(PREFIX)/share/aether/contrib -type f -name 'example_*.ae' -delete 2>/dev/null || true
@@ -3341,14 +3337,12 @@ test-asan-ae:
 #     "skipped" status, never a failure.
 # -----------------------------------------------------------------
 
-# The in-process host bridges, syntax-checked (stub mode) by
-# contrib-host-check. `js` builds as duktape; `factor`, `aether` and `racket`
-# are dlopen / fork+exec bridges that still compile bare against libc + the
-# in-tree sandbox runtime, so they belong in the syntax gate too. `rhombus`
-# has no .c of its own (it shares the racket bridge — Rhombus is a #lang on
-# the Racket VM), so it is not listed here (the check SKIPs missing-bridge
-# dirs). `stunt` is the test double (contrib/host/stunt/README.md).
-CONTRIB_HOST_LANGS = js perl ruby tcl go tinygo factor aether racket quickjs stunt
+# The host bridges left in this tree, syntax-checked by contrib-host-check:
+# `aether` (Aether hosting Aether, fork+exec) and `stunt`, the test double
+# (contrib/host/stunt/README.md). Both compile against libc + the in-tree
+# sandbox runtime alone. The language bridges moved to
+# https://github.com/aether-lang-dev/aether-guest-languages.
+CONTRIB_HOST_LANGS = aether stunt
 
 # CONTRIB_HOST_STRICT=1 turns "bridge archive unavailable" from a SKIP into a
 # FAILURE in the co-located-spec phase of contrib-host-check.
@@ -3591,7 +3585,7 @@ contrib-host-check: compiler ae stdlib stunt
 	@echo "  contrib/host bridge check"
 	@echo "==================================="
 	@echo ""
-	@echo "[1/2] Syntax check — every bridge in stub mode..."
+	@echo "[1/2] Syntax check — every bridge..."
 	@pass=0; fail=0; \
 	for lang in $(CONTRIB_HOST_LANGS); do \
 		src="contrib/host/$$lang/aether_host_$$lang.c"; \
@@ -3609,25 +3603,16 @@ contrib-host-check: compiler ae stdlib stunt
 			fail=$$((fail + 1)); \
 		fi; \
 	done; \
-	echo "  $$pass passed, $$fail failed (stub mode)"; \
+	echo "  $$pass passed, $$fail failed"; \
 	if [ "$$fail" -gt 0 ]; then exit 1; fi
 	@echo ""
-	@echo "[2/3] Link + run — demos for bridges with dev libs available..."
-	@bash tests/scripts/contrib_host_demos.sh || exit 1
-	@echo ""
-	@echo "[3/3] Co-located bridge specs (contrib/host/*/test_*.ae)..."
+	@echo "[2/2] Co-located bridge specs (contrib/host/*/test_*.ae)..."
 	@rc=0; found=0; \
 	for t in $$(find contrib/host -maxdepth 2 -name 'test_*.ae' 2>/dev/null | sort); do \
 	  found=$$((found + 1)); \
 	  lang=$$(basename $$(dirname "$$t")); \
 	  echo "  --- $$lang ---"; \
 	  case "$$lang" in \
-	    ruby) command -v ruby >/dev/null 2>&1 && { \
-	      AETHER_RUBY_SONAME="$$(ruby -rrbconfig -e 'print RbConfig::CONFIG["LIBRUBY_SO"]' 2>/dev/null)"; \
-	      export AETHER_RUBY_SONAME; }; ;; \
-	    perl) command -v perl >/dev/null 2>&1 && { \
-	      AETHER_PERL_SONAME="$$(perl -MConfig -e 'print "$$Config{archlibexp}/CORE/$$Config{libperl}"' 2>/dev/null)"; \
-	      export AETHER_PERL_SONAME; }; ;; \
 	    stunt) AETHER_STUNT_LIB="$(CURDIR)/$(STUNT_LIB)"; export AETHER_STUNT_LIB; ;; \
 	  esac; \
 	  if [ ! -f "$(BUILD_DIR)/contrib/libaether_host_$$lang.a" ]; then \

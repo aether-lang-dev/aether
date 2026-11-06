@@ -1,10 +1,11 @@
 // Imports a contrib bridge and says what it needs: type-checked only.
 //
 // Run: ae run tests/examples/fixture/contrib_needs.ae
-// Needs: Tcl development files
+// Needs: libstunt, the test double (make stunt)
 
-import contrib.host.tcl
+import contrib.host.stunt
 
 main() {
-    tcl.run("puts hi")
+    stunt.finalize()
+    println("hi")
 }
