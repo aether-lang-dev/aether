@@ -60,7 +60,7 @@ make_pair() {
     shift
     ssl openssl genpkey "$@" -out "$TMP/$t.key"
     ssl openssl genpkey "$@" -out "$TMP/$t.other.key"
-    MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -x509 -new -key "$TMP/$t.key" -out "$TMP/$t.pem" -days 2 \
+    ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/$t.key" -out "$TMP/$t.pem" -days 2 \
         -subj "/CN=peer.example" -addext "subjectAltName=DNS:peer.example"
 }
 make_pair p256 -algorithm EC -pkeyopt ec_paramgen_curve:P-256
@@ -132,7 +132,9 @@ check rsa rsa_pss_rsae_sha512 RSA-PSS SHA512
 # key's DER).
 for c in "p256 ecdsa_secp256r1_sha256" "ed25519 ed25519" "rsa rsa_pss_rsae_sha256"; do
     set -- $c
-    SERVER_CORRUPT_KEY=1 serve "$TMP/$1.pem" "$TMP/$1.key" "$2"
+    export SERVER_CORRUPT_KEY=1
+    serve "$TMP/$1.pem" "$TMP/$1.key" "$2"
+    unset SERVER_CORRUPT_KEY
     if grep -q "REFUSED: .*changed in memory" "$TMP/server.out" && grep -qi "alert internal error\|alert number 80" "$TMP/c.log"; then
         echo "    ok: $1: a shielded key with a bit changed is not used (internal_error)"
     else

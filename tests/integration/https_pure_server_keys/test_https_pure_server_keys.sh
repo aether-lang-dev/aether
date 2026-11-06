@@ -58,7 +58,7 @@ ssl() { "$@" >"$TMP/ssl.log" 2>&1 || { sed -n '1,10p' "$TMP/ssl.log"; fail "open
 
 # A self-signed certificate for localhost over the key $1.key -> $1.pem.
 cert() {
-    MSYS2_ARG_CONV_EXCL='/CN=' ssl openssl req -x509 -new -key "$TMP/$1.key" -out "$TMP/$1.pem" \
+    ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/$1.key" -out "$TMP/$1.pem" \
         -days 2 -subj "/CN=localhost" -addext "subjectAltName=DNS:localhost"
 }
 ssl openssl ecparam -name prime256v1 -genkey -out "$TMP/p256.key"
@@ -280,7 +280,9 @@ esac
 #    and with all 8 so held the next connection waits for that.
 for sb in $BACKENDS; do
     for after in 0 80; do
-        SERVER_BACKEND="$sb" AETHER_HTTP_WORKERS=8 start_server p256 p256
+        export SERVER_BACKEND="$sb" AETHER_HTTP_WORKERS=8
+        start_server p256 p256
+        unset SERVER_BACKEND AETHER_HTTP_WORKERS
         [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the 8-worker P-256 server, backend \"$sb\", did not start"; }
         run env PORT="$S_PORT" CAFILE="$TMP/p256.pem" HELD=8 KU_AFTER_MS="$after" "$TMP/keyupdate_park"
         next_ms=$(printf '%s\n' "$OUT" | sed -n 's/^NEXT \([0-9]*\).*/\1/p' | head -1)

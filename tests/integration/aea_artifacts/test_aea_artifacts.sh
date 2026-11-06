@@ -100,6 +100,9 @@ else bad "batched artifacts differ from single ones"; fi
 # The installed compiler, run the way `ae` runs it: nothing in the working
 # directory or the environment points at another std tree.
 aec() { (cd "$T/work" && env -u AETHER_HOME -u AETHER_NO_AEA "$PFX/bin/aetherc$EXE" "$@"); }
+# aec with the trace on, in a subshell so the setting cannot outlive the call
+# (`VAR=1 aec` stays set under `sh`).
+aec_trace() ( AETHER_AEA_TRACE=1; export AETHER_AEA_TRACE; aec "$@" )
 from_source() { (cd "$T/work" && env -u AETHER_HOME AETHER_NO_AEA=1 "$PFX/bin/aetherc$EXE" "$@"); }
 
 cat > "$T/work/app.ae" <<'AE'
@@ -118,7 +121,7 @@ main() {
 AE
 
 # 1. Artifacts are used, and change nothing about the generated C.
-AETHER_AEA_TRACE=1 aec app.ae "$T/aea.c" 2>"$T/trace.txt" || {
+aec_trace app.ae "$T/aea.c" 2>"$T/trace.txt" || {
     bad "artifact build did not compile"; cat "$T/trace.txt"; exit 1
 }
 from_source app.ae "$T/src.c" 2>"$T/src_trace.txt" || {
@@ -140,7 +143,7 @@ if grep -q "^read .*/lib/aether/modules/std/cryptography/md2.aea$" "$T/deps.txt"
 else bad "--emit-deps does not list the artifact"; fi
 
 # 3. A build symbol answered differently from the artifact's parse.
-AETHER_AEA_TRACE=1 aec -D AEA_FIXTURE_ON app.ae "$T/def_aea.c" 2>"$T/def_trace.txt"
+aec_trace -D AEA_FIXTURE_ON app.ae "$T/def_aea.c" 2>"$T/def_trace.txt"
 from_source -D AEA_FIXTURE_ON app.ae "$T/def_src.c" 2>/dev/null
 if grep -q "not using .*/aeafixture.aea: a build symbol the module tests is set differently" "$T/def_trace.txt" &&
    same "$T/def_aea.c" "$T/def_src.c" && differ "$T/def_aea.c" "$T/aea.c"; then
@@ -177,7 +180,7 @@ else bad "module-internal diagnostics differ"; show_both "$T/mdiag_aea.txt" "$T/
 
 # 5. An edited installed source retires its artifact.
 printf '\n// local patch\n' >> "$SHARE/std/cryptography/md2/module.ae"
-AETHER_AEA_TRACE=1 aec app.ae "$T/edit.c" 2>"$T/edit_trace.txt"
+aec_trace app.ae "$T/edit.c" 2>"$T/edit_trace.txt"
 if grep -q "not using .*/md2.aea: source changed since the artifact was built" "$T/edit_trace.txt" &&
    grep -q "aea: using .*/sha3.aea" "$T/edit_trace.txt"; then
     ok "an edited source is parsed; its neighbours still use artifacts"
@@ -186,7 +189,7 @@ else bad "edited source not detected"; cat "$T/edit_trace.txt"; fi
 # 6. A damaged artifact is ignored, not trusted.
 head -c 200 "$MODS/std/cryptography/sha3.aea" > "$T/short.aea"
 cp "$T/short.aea" "$MODS/std/cryptography/sha3.aea"
-AETHER_AEA_TRACE=1 aec app.ae "$T/damaged.c" 2>"$T/dmg_trace.txt"
+aec_trace app.ae "$T/damaged.c" 2>"$T/dmg_trace.txt"
 from_source app.ae "$T/damaged_src.c" 2>/dev/null
 if grep -q "not using .*/sha3.aea: artifact" "$T/dmg_trace.txt" && same "$T/damaged.c" "$T/damaged_src.c"; then
     ok "a damaged artifact falls back to the source"
