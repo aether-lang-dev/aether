@@ -1079,18 +1079,18 @@ jobs:
     # Two jobs (#2757): the leg took about 23 min, most of it the test sweep
     # on 4 cores. [1/2] runs `make ci` with part of the sweep, [2/2] builds
     # the same toolchain and runs the rest: `make ci`'s stages around the
-    # sweep cost [1/2] about 3 to 5 min more (#2772). By thirds, [2/2] ran
+    # sweep cost [1/2] about 8.6 min more (#2772, #3601). By thirds, [2/2] ran
     # 22 to 28 min against 18.5 for [1/2]; the sweep is split by cost now
-    # (tests/sweep_weights_windows.txt, #3601), [1/2] taking 8 of 20 shares.
+    # (tests/sweep_weights_windows.txt, #3601), [1/2] taking 7 of 20 shares.
     strategy:
       fail-fast: false
       matrix:
         include:
           - part: "1/2"
-            shard: "1,2,3,4,5,6,7,8/20"
+            shard: "1,2,3,4,5,6,7/20"
             target: ci
           - part: "2/2"
-            shard: "9,10,11,12,13,14,15,16,17,18,19,20/20"
+            shard: "8,9,10,11,12,13,14,15,16,17,18,19,20/20"
             target: ci-sweep
 
     defaults:

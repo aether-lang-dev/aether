@@ -8,10 +8,10 @@
 #
 # Why (#2757): the long CI legs (Windows MSYS2 x2, macOS x86_64) spend most
 # of their 23 minutes in the sweep, on 4 cores. Each is split into two jobs
-# that run in parallel. On Windows one runs `make ci` with 8 of 20 shares
-# (AE_SWEEP_SHARD=1,2,...,8/20) and the other `make ci-sweep` (the toolchain
-# build and the sweep alone) with the other 12: the first also runs every
-# stage of `make ci` around the sweep, 3 to 5 minutes more on those runners,
+# that run in parallel. On Windows one runs `make ci` with 7 of 20 shares
+# (AE_SWEEP_SHARD=1,2,...,7/20) and the other `make ci-sweep` (the toolchain
+# build and the sweep alone) with the other 13: the first also runs every
+# stage of `make ci` around the sweep, about 8.6 minutes more on those runners,
 # so it takes the smaller share and the two finish together (#3601; by
 # thirds, before the split by cost, they finished 4 to 9 minutes apart). On
 # macOS x86_64 both run `make ci-sweep`, with 1/2 and 2/2, since the ARM64
