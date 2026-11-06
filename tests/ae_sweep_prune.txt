@@ -359,3 +359,5 @@ tests/integration/contrib_host_stunt/
 tests/integration/print_float_locale/
 # oaep_sha1.ae takes its key, ciphertext and message from the openssl run in test_crypto_rsa_oaep_sha1_openssl.sh.
 tests/integration/crypto_rsa_oaep_sha1_openssl/
+# sockclient.ae takes its mode, port and certificates from test_tls13_socket_verify_mtls.sh.
+tests/integration/crypto_tls13_socket_verify_mtls/
