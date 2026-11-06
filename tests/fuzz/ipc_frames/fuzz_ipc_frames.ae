@@ -1,0 +1,218 @@
+// The std.ipc frame-reader fuzz target, built --emit=obj and called from
+// fuzz_ipc_frames.c's LLVMFuzzerTestOneInput.
+//
+// The input is a byte stream delivered to ipc.read_frame_timeout over a
+// socket pair in chunks cut at fuzzer-chosen offsets, with a fuzzer-chosen
+// `max`. The reader keeps no state between calls, so what it must return is
+// a pure function of the bytes available when it is called. A model of the
+// documented contract (std/ipc/module.ae, read_frame and read_frame_timeout)
+// is run alongside and every answer is compared with it:
+//   - a whole frame available: exactly its payload, and nothing of the next;
+//   - no byte of a frame available: TIMED_OUT_BETWEEN_FRAMES, nothing consumed;
+//   - part of a frame available: TIMED_OUT_INSIDE_FRAME, the part consumed;
+//   - a header announcing more than max: "longer than max", the 4 header
+//     bytes consumed and not one byte of the payload;
+//   - the writer gone: "end of stream" at a boundary, "inside a frame header"
+//     or "inside a frame" otherwise.
+// Every payload the reader hands back then goes through cbor.parse, which may
+// fail (that is a pass) but must not crash or leak. A mismatch with the model
+// calls abort().
+//
+// A chunk is handed to the socket either before the reader is called (the
+// bytes are queued when it looks) or, when the input asks for it, from a
+// second thread while the reader is already waiting in read_frame_timeout,
+// so that ipc_fill's "read some, wait, read more" path sees bytes arrive.
+import std.ipc
+import std.os
+import std.io
+import std.bytes
+import std.string
+import std.cbor
+
+extern abort()
+
+// fuzz_ipc_frames.c: write `len` bytes at `data` to `fd` from a second
+// thread after a short delay; join waits for that thread and is harmless when
+// none is running.
+extern harness_write_late(fd: int, data: ptr, len: int)
+extern harness_write_late_join()
+
+const KIND_FRAME = 0
+const KIND_BETWEEN = 1
+const KIND_INSIDE = 2
+const KIND_OVER_MAX = 3
+const KIND_END = 4
+const KIND_END_IN_HEADER = 5
+const KIND_END_IN_FRAME = 6
+
+// How long a read may wait for bytes the writer thread is about to deliver.
+// The thread writes after about a millisecond; a reader that still times
+// out had the machine stall for two seconds, and the model's disagreement
+// then names a false failure rather than a reader fault.
+const LATE_WAIT_MS = 2000
+
+// The big-endian length in the 4 bytes of `s` at `i`, or -1 when its top
+// bit is set: such a length is over any max the harness picks, and it is
+// not shifted into an int.
+fn header_at(s: string, n: int, i: int) -> int {
+    b0 = string.char_at_n(s, n, i) & 255
+    if b0 >= 128 { return -1 }
+    b1 = string.char_at_n(s, n, i + 1) & 255
+    b2 = string.char_at_n(s, n, i + 2) & 255
+    b3 = string.char_at_n(s, n, i + 3) & 255
+    return (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+}
+
+// What one read must answer when bytes [pos, avail) of `s` are available and
+// the writer is still open (closed == 0) or gone (closed == 1): the kind, and
+// the position after the read. A frame's payload is s[pos+4 .. pos+4+len).
+fn model_kind(s: string, n: int, pos: int, avail: int, max: int, closed: int) -> int {
+    left = avail - pos
+    if left == 0 {
+        if closed == 1 { return KIND_END }
+        return KIND_BETWEEN
+    }
+    if left < 4 {
+        if closed == 1 { return KIND_END_IN_HEADER }
+        return KIND_INSIDE
+    }
+    len = header_at(s, n, pos)
+    if len < 0 || len > max { return KIND_OVER_MAX }
+    if left - 4 < len {
+        if closed == 1 { return KIND_END_IN_FRAME }
+        return KIND_INSIDE
+    }
+    return KIND_FRAME
+}
+
+fn model_next_pos(s: string, n: int, pos: int, avail: int, kind: int) -> int {
+    if kind == KIND_BETWEEN || kind == KIND_END { return pos }
+    if kind == KIND_OVER_MAX { return pos + 4 }
+    if kind == KIND_FRAME { return pos + 4 + header_at(s, n, pos) }
+    // INSIDE and the two truncations: everything available went with the
+    // call. module.ae's contract stops at "the stream is out of step: close
+    // the channel"; that every queued byte is gone, and nothing is left for
+    // a next call to misread, is what aether_ipc.c does and what the harness
+    // keeps reading past the timeout to pin down.
+    return avail
+}
+
+// The reader's answer, classified the way the model is.
+fn observed_kind(err: string) -> int {
+    if err == "" { return KIND_FRAME }
+    if err == ipc.TIMED_OUT_BETWEEN_FRAMES { return KIND_BETWEEN }
+    if err == ipc.TIMED_OUT_INSIDE_FRAME { return KIND_INSIDE }
+    if string.contains(err, "longer than max") != 0 { return KIND_OVER_MAX }
+    if string.contains(err, "inside a frame header") != 0 { return KIND_END_IN_HEADER }
+    if string.contains(err, "inside a frame") != 0 { return KIND_END_IN_FRAME }
+    if string.contains(err, "end of stream") != 0 { return KIND_END }
+    return -1
+}
+
+// A payload the reader returned: it must be the bytes the model says, and it
+// then goes to the decoder it was framed for.
+fn check_payload(got: string, s: string, n: int, pos: int) {
+    len = header_at(s, n, pos)
+    if string.length(got) != len { abort() }
+    if len > 0 && !(got == string.substring(s, pos + 4, pos + 4 + len)) { abort() }
+    v, perr = cbor.parse(got)
+    if perr == "" {
+        cbor.free(v)
+    }
+}
+
+// Read until the reader says the stream is between frames (writer open) or
+// at its end (writer gone), checking each answer. Returns the model position.
+//
+// With the writer open, `late` says the chunk ending at `avail` is being
+// written by the other thread: a read the model expects to complete waits
+// LATE_WAIT_MS for it, and before a read the model expects to time out the
+// thread is joined first, so the timeout is measured against a queue that
+// is not changing. With the writer gone, `timeout_form` picks
+// read_frame_timeout over read_frame, so its poll-then-zero-byte-read end
+// of stream is exercised too.
+fn drain(ch: int, s: string, n: int, pos: int, avail: int, max: int, closed: int,
+    late: int, timeout_form: int) -> int {
+    while true {
+        kind = model_kind(s, n, pos, avail, max, closed)
+        got = ""
+        err = ""
+        if closed == 1 {
+            if timeout_form == 1 {
+                got, err = ipc.read_frame_timeout(ch, max, LATE_WAIT_MS)
+            } else {
+                got, err = ipc.read_frame(ch, max)
+            }
+        } else if late == 1 && kind != KIND_BETWEEN && kind != KIND_INSIDE {
+            got, err = ipc.read_frame_timeout(ch, max, LATE_WAIT_MS)
+        } else {
+            if late == 1 { harness_write_late_join() }
+            got, err = ipc.read_frame_timeout(ch, max, 0)
+        }
+        if observed_kind(err) != kind { abort() }
+        if kind == KIND_FRAME {
+            check_payload(got, s, n, pos)
+        } else if string.length(got) != 0 {
+            abort()
+        }
+        pos = model_next_pos(s, n, pos, avail, kind)
+        if kind == KIND_BETWEEN || kind == KIND_END { return pos }
+    }
+}
+
+// One fuzzer input. Byte 0 picks max (1..4081 in steps of 16); byte 1's low
+// three bits the number of chunks (1..8), its bit 3 whether chunks are
+// written from the other thread while the reader waits, its bit 4 whether
+// the end of stream is read with the timeout form; the chunks - 1 bytes
+// after it are the cut offsets, and the rest is the stream.
+fuzz_target(data: ptr, len: int) {
+    if len < 2 { return }
+    x = bytes.string_from_ptr(data, len)
+    b0 = string.char_at_n(x, len, 0) & 255
+    b1 = string.char_at_n(x, len, 1) & 255
+    max = 1 + b0 * 16
+    chunks = 1 + (b1 & 7)
+    late = (b1 >> 3) & 1
+    timeout_form = (b1 >> 4) & 1
+    start = 1 + chunks
+    if start > len { start = len }
+    s = string.substring(x, start, len)
+    n = len - start
+
+    a, b, err = os.socketpair()
+    if err != "" { abort() }
+
+    pos = 0
+    avail = 0
+    i = 0
+    while i < chunks {
+        end = n
+        if i + 1 < chunks {
+            cut = string.char_at_n(x, len, 2 + i) & 255
+            end = avail + ((n - avail) * cut) / 255
+        }
+        written_late = 0
+        chunk_bytes = null
+        if end > avail {
+            chunk = string.substring(s, avail, end)
+            if late == 1 {
+                chunk_bytes = bytes.from_slice(string.bytes(chunk))
+                harness_write_late(a, bytes.data(chunk_bytes), bytes.length(chunk_bytes))
+                written_late = 1
+            } else {
+                werr = ipc.write(a, chunk)
+                if werr != "" { abort() }
+            }
+            avail = end
+        }
+        pos = drain(b, s, n, pos, avail, max, 0, written_late, timeout_form)
+        if written_late == 1 {
+            harness_write_late_join()
+            bytes.free(chunk_bytes)
+        }
+        i = i + 1
+    }
+    io.fd_close(a)
+    pos = drain(b, s, n, pos, avail, max, 1, 0, timeout_form)
+    io.fd_close(b)
+}
