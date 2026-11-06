@@ -7,6 +7,11 @@
 #if !AETHER_HAS_NETWORKING
 TcpSocket* tcp_connect_raw(const char* h, int p) { (void)h; (void)p; return NULL; }
 TcpSocket* tcp_connect_buffered_raw(const char* h, int p, int b) { (void)h; (void)p; (void)b; return NULL; }
+TcpOpenResult tcp_connect_timeout_raw(const char* h, int p, int t) {
+    (void)h; (void)p; (void)t;
+    TcpOpenResult out = { NULL, "networking disabled at build time" };
+    return out;
+}
 int tcp_send_raw(TcpSocket* s, const char* d) { (void)s; (void)d; return -1; }
 int tcp_send_n_raw(TcpSocket* s, const char* d, int n) { (void)s; (void)d; (void)n; return -1; }
 char* tcp_receive_raw(TcpSocket* s, int m) { (void)s; (void)m; return NULL; }
@@ -427,11 +432,17 @@ static void net_no_sigpipe(int fd) {
 }
 
 /* tcp_connect_raw, and with `read_buffer` > 0 the receive buffer set before
- * the connection is made (tcp_connect_buffered_raw). */
-static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer) {
+ * the connection is made (tcp_connect_buffered_raw), and with `timeout_ns` >
+ * 0 the whole dial, every address the host resolves to, held to that budget
+ * (tcp_connect_timeout_raw). NULL on failure, with why in `*why`. */
+static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer,
+                                   long long timeout_ns, const char** why) {
     // Sandbox check: is TCP connect to this host and port allowed?
     char tcp_res[300];
-    if (!aether_sandbox_check("tcp", aether_net_resource(tcp_res, sizeof tcp_res, host, port))) return NULL;
+    if (!aether_sandbox_check("tcp", aether_net_resource(tcp_res, sizeof tcp_res, host, port))) {
+        *why = "denied by sandbox";
+        return NULL;
+    }
 
     aether_net_init();
 
@@ -440,29 +451,49 @@ static TcpSocket* tcp_connect_with(const char* host, int port, int read_buffer) 
      * threads race and corrupt each other's resolved address. getaddrinfo is
      * thread-safe and returns caller-owned memory. Each address the host has,
      * IPv6 or IPv4, is tried as aether_net_dial_addrs describes. */
-    const char* why = NULL;
     AetherAddrList addrs;
-    if (aether_addr_resolve(host, port, &addrs) != 0) return NULL;
-    int sockfd = aether_net_dial_addrs(host, port, &addrs, 0, read_buffer, &why);
+    if (aether_addr_resolve(host, port, &addrs) != 0) {
+        *why = "could not resolve host";
+        return NULL;
+    }
+    int sockfd = aether_net_dial_addrs(host, port, &addrs, timeout_ns, read_buffer, why);
     if (sockfd < 0) return NULL;
 
     net_set_socket_timeouts(sockfd, 30);
     net_no_sigpipe(sockfd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
-    if (!sock) { close(sockfd); return NULL; }
+    if (!sock) { close(sockfd); *why = "out of memory"; return NULL; }
     sock->fd = sockfd;
     sock->connected = 1;
     return sock;
 }
 
 TcpSocket* tcp_connect_raw(const char* host, int port) {
-    return tcp_connect_with(host, port, 0);
+    const char* why = NULL;
+    return tcp_connect_with(host, port, 0, 0, &why);
 }
 
 TcpSocket* tcp_connect_buffered_raw(const char* host, int port, int read_buffer) {
     if (read_buffer <= 0) return NULL;
-    return tcp_connect_with(host, port, read_buffer);
+    const char* why = NULL;
+    return tcp_connect_with(host, port, read_buffer, 0, &why);
+}
+
+/* A connect that gives up after `timeout_ms`: each address is dialled
+ * non-blocking and polled (aether_net_connect_addr), so an address that
+ * drops the SYN costs the budget, not the kernel's own retry schedule
+ * (75 s on macOS, about two minutes on Linux). "connect timeout" when the
+ * budget runs out. */
+TcpOpenResult tcp_connect_timeout_raw(const char* host, int port, int timeout_ms) {
+    TcpOpenResult out = { NULL, "connection failed" };
+    if (timeout_ms <= 0) { out._1 = "timeout_ms must be positive"; return out; }
+    const char* why = "connection failed";
+    TcpSocket* sock = tcp_connect_with(host, port, 0, (long long)timeout_ms * 1000000LL, &why);
+    if (!sock) { out._1 = why ? why : "connection failed"; return out; }
+    out._0 = sock;
+    out._1 = "";
+    return out;
 }
 
 int tcp_send_raw(TcpSocket* sock, const char* data) {

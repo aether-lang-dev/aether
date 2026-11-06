@@ -1005,5 +1005,51 @@ case "$out" in
        fails=$((fails + 1)) ;;
 esac
 
+# A literal of string constants returned is refused too (the array of
+# pointers is in the frame), and the hint names the form that is not:
+# `const NAMES[] = [...]`, static storage in the function or the module.
+cat > "$TMP/names_literal.ae" <<'AE'
+names() -> string[] {
+    return ["a", "b", "c"]
+}
+
+main() {
+    println("${names().len}")
+}
+AE
+refused names_literal 2:12 "'names' returns a slice of its own storage (an array literal)"
+out=$(cd "$TMP" && "$AE" check names_literal.ae 2>&1)
+case "$out" in
+    *'const NAMES[] = [...]'*) ;;
+    *) echo "  [FAIL] names_literal: the hint does not name const NAMES[]:"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+cat > "$TMP/names_const.ae" <<'AE'
+const KINDS[] = ["x", "y"]
+
+names() -> string[] {
+    const NAMES[] = ["a", "b", "c"]
+    return NAMES
+}
+
+kinds() -> string[] {
+    return KINDS
+}
+
+main() {
+    n = names()
+    k = kinds()
+    println("const ok ${n.len} ${n[2]} ${k.len} ${k[1]}")
+}
+AE
+out=$(cd "$TMP" && AETHER_HOME="$ROOT" "$AE" run names_const.ae 2>&1)
+case "$out" in
+    *"const ok 3 c 2 y"*) ;;
+    *) echo "  [FAIL] names_const: not \"const ok 3 c 2 y\":"
+       echo "$out" | sed 's/^/        /'
+       fails=$((fails + 1)) ;;
+esac
+
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] slice_escape: a slice of a function's own storage stays in it"

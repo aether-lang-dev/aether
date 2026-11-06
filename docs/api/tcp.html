@@ -17,6 +17,7 @@
   <ul class="function-nav">
     <li><a href="#connect_raw">connect_raw</a></li>
     <li><a href="#connect_buffered_raw">connect_buffered_raw</a></li>
+    <li><a href="#connect_timeout_raw">connect_timeout_raw</a></li>
     <li><a href="#send_raw">send_raw</a></li>
     <li><a href="#receive_raw">receive_raw</a></li>
     <li><a href="#receive_n_raw">receive_n_raw</a></li>
@@ -40,6 +41,7 @@
     <li><a href="#receive_into_raw">receive_into_raw</a></li>
     <li><a href="#connect">connect</a></li>
     <li><a href="#connect_buffered">connect_buffered</a></li>
+    <li><a href="#connect_timeout">connect_timeout</a></li>
     <li><a href="#connect_unix">connect_unix</a></li>
     <li><a href="#listen_unix">listen_unix</a></li>
     <li><a href="#write">write</a></li>
@@ -177,6 +179,11 @@
       <pre class="usage"><code>connect_buffered_raw(host, port, read_buffer) <span class="arrow">-&gt;</span> ptr</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
     </div>
+    <div class="function" id="connect_timeout_raw" data-name="connect_timeout_raw">
+      <h3 class="function-name">connect_timeout_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>connect_timeout_raw(host, port, timeout_ms) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, timeout_ms: int</span></p>
+    </div>
     <div class="function" id="send_raw" data-name="send_raw">
       <h3 class="function-name">send_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>send_raw(sock, data) <span class="arrow">-&gt;</span> int</code></pre>
@@ -294,6 +301,12 @@
       <pre class="usage"><code>connect_buffered(host, port, read_buffer) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
       <p class="signature"><span class="sig-params">host: string, port: int, read_buffer: int</span></p>
       <p class="doc">connect, with the receive buffer (SO_RCVBUF) set to `read_buffer` bytes before the connection is made, so the window the connection opens with is that size. A client meant to take little while it does not read (a test of a server's send timeout) connects this way: set_read_buffer on a connected socket shrinks the buffer, but the kernel still takes the window it advertised when connecting (#3338). The size is a request: a kernel may round it up (macOS holds about 300 KB for a 16 KB request on loopback). Returns (socket, &quot;&quot;) or (null, error); `read_buffer` must be positive.</p>
+    </div>
+    <div class="function" id="connect_timeout" data-name="connect_timeout">
+      <h3 class="function-name">connect_timeout <span class="kind">fn</span></h3>
+      <pre class="usage"><code>connect_timeout(host, port, timeout_ms) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">host: string, port: int, timeout_ms: int</span></p>
+      <p class="doc">connect, giving up after `timeout_ms` milliseconds instead of the kernel's own SYN retry schedule (75 s on macOS, about two minutes on Linux) when the address drops the connection attempt: a firewalled port, a host that is down, a container not yet listening behind a black hole. The budget covers the whole dial, every address the host resolves to. Returns (socket, &quot;&quot;) or (null, error): &quot;connect timeout&quot; when the budget ran out, &quot;could not resolve host&quot;, &quot;connection failed&quot; (refused, unreachable), or the sandbox's refusal. `timeout_ms` must be positive. The socket is the one `connect` returns, with the same 30 s send and receive timeouts.</p>
     </div>
     <div class="function" id="connect_unix" data-name="connect_unix">
       <h3 class="function-name">connect_unix <span class="kind">fn</span></h3>

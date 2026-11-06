@@ -98,6 +98,11 @@ the connection is made (#3338). The size is a request a kernel may round
 up: macOS holds about 300 KB for a 16 KB request on loopback.
 `available(sock)` says how many bytes are waiting in the socket's receive
 buffer, readable without blocking (`FIONREAD`).
+`connect_timeout(host, port, timeout_ms)` is `connect` held to a budget:
+an address that drops the SYN (a firewalled port, a host that is down)
+returns `(null, "connect timeout")` after `timeout_ms` instead of after the
+kernel's own retry schedule, 75 s on macOS and about two minutes on Linux.
+The budget covers every address the host resolves to.
 `close_drained(sock)` closes once what the peer already sent is read and
 dropped (at most 256 KiB, 5 ms for each more to arrive). A socket closed with
 bytes unread ends with a reset, and a peer that gets one may discard what it
@@ -167,6 +172,6 @@ client.response_free(resp)
 
 ## Exports
 
-`connect`, `connect_buffered`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
+`connect`, `connect_buffered`, `connect_timeout`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
 `write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
 `set_read_buffer`, `fd`, `server_fd`, `close_drained`, `tcp_close`, `tcp_server_close`.

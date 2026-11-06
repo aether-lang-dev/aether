@@ -1,0 +1,23 @@
+import ga
+import gb
+
+// The program's own Shape, a third layout.
+struct Shape {
+    z: int
+}
+
+main() {
+    a = heap.new(ga.Shape)
+    a.w = 3
+    a.h = 4
+    b = heap.new(gb.Shape)
+    b.side = 2
+    b.sides = 6
+    b.name = "hex"
+    c = heap.new(Shape)
+    c.z = 9
+    println("${ga.area(a)} ${gb.perimeter(b)} ${b.name} ${c.z}")
+    heap.free(a)
+    heap.free(b)
+    heap.free(c)
+}

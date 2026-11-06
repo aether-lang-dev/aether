@@ -1,0 +1,10 @@
+// Two modules with a struct of one name, `Shape`, laid out differently:
+// heap.new(ga.Shape) and heap.new(gb.Shape) must each box their own.
+exports(Shape, area)
+
+struct Shape {
+    w: int
+    h: int
+}
+
+area(s: *Shape) -> int { return s.w * s.h }

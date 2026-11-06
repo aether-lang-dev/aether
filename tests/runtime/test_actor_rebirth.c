@@ -70,6 +70,7 @@ static atomic_int g_stale;          // handled by an incarnation it was sent bef
 static atomic_int g_restarts;
 static atomic_int g_restart_errors;
 static atomic_int g_senders_done;
+static uint64_t g_send_until;       // the senders' deadline, set before they start
 static int g_snapshot[RB_MAX_INC][RB_SENDERS];
 
 static void rb_target_step(RbTarget* self) {
@@ -159,10 +160,18 @@ static void rb_actor_step(RbActor* self) {
         int seq = atomic_load(&g_sent[self->sender]) + 1;
         rb_send_number(self->target, self->sender, seq);
         atomic_store(&g_sent[self->sender], seq);
-        // On past N until T has been restarted three times, so the test
-        // does not hang on how many messages a death window took.
-        if ((seq < RB_N || atomic_load(&g_restarts) < 3) && seq < 40 * RB_N) rb_send(self, RB_GO);
-        else atomic_fetch_add(&g_senders_done, 1);
+        // On past N until T has been restarted three times, or until a
+        // deadline. A restart waits for the messages counted in flight for T
+        // when it died, and one held in a core's overflow buffer arrives
+        // only when that core's thread runs: a time slice of the OS on a busy
+        // runner. The bound is in time for that reason (#3606): it was 40 N
+        // sends, and a send to a dead T costs next to nothing, so the 60,000
+        // were spent within one such wait and the senders stopped before
+        // the restarts came (on 2 CPUs, 1 restart after 3.5 million claims).
+        if (seq < RB_N || (atomic_load(&g_restarts) < 3 && aether_now_ns() < g_send_until))
+            rb_send(self, RB_GO);
+        else
+            atomic_fetch_add(&g_senders_done, 1);
     }
 }
 
@@ -197,6 +206,7 @@ static void test_rebirth_under_senders(void) {
     scheduler_wait();
     RbActor* senders[3];
     for (int s = 0; s < 3; s++) senders[s] = rb_actor(s, s);
+    g_send_until = aether_now_ns() + 10000ULL * 1000000ULL;
     for (int s = 0; s < 3; s++) rb_send(senders[s], RB_GO);
     for (int seq = 1; seq <= RB_N; seq++) {   // the main thread, sender 3
         rb_send_number(g_target, 3, seq);

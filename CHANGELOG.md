@@ -14,6 +14,92 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.894.0]
+
+### Added
+
+- **`tcp.connect_timeout(host, port, timeout_ms)`: a TCP dial held to a budget.** `tcp.connect` had no timeout, so a connect to an address that drops the SYN (a firewalled port, a host that is down, a container port not yet forwarded) blocked for the kernel's own retry schedule, 75 s on macOS and about two minutes on Linux. `connect_timeout` dials each address the host resolves to non-blocking and polls it, the whole dial inside `timeout_ms`, and returns `(null, "connect timeout")` when the budget runs out (`"could not resolve host"`, `"connection failed"` or the sandbox's refusal otherwise). `tcp_connect_timeout_raw` is the extern. `tests/integration/tcp_connect_timeout` dials TEST-NET-1 with 300 ms.
+
+- **RSA-OAEP with SHA-1 (and SHA-384, SHA-512).** `std.cryptography.rsa`'s OAEP was SHA-256 only, while OpenSSL's default `RSA_PKCS1_OAEP_PADDING` is SHA-1 with MGF1-SHA1, the padding MySQL's `caching_sha2_password` and `sha256_password` RSA exchange uses, so a MySQL client in Aether could not log in over a plain connection. `rsa.encrypt_oaep_hash(k, algo, msg, seed)` and `rsa.decrypt_oaep_hash(k, algo, ct)` take `"sha1"`, `"sha256"`, `"sha384"` or `"sha512"` for the label hash and MGF1, as `sign_pss_hash` does for PSS; `encrypt_oaep` and `decrypt_oaep` are the `"sha256"` cases, unchanged, and decryption keeps its constant-time padding check. `crypto_rsa_oaep_sha1_openssl` checks both directions against `openssl pkeyutl -pkeyopt rsa_oaep_md:sha1`.
+
+- **TLS 1.3 over an adopted socket: client certificates, and verification off by name.** `tls13_client.connect_socket` (TLS over a socket the program connected itself, for a protocol that starts in the clear, as Postgres' `SSLRequest` and MySQL's handshake do) always verified the server and never presented a client certificate; `connect_full` had both, but nothing exported reached them. `connect_socket_mtls(sock, host, cafile, cert, cert_len, key)` presents a client certificate (leaf DER, ECDSA-P256 key) to a server that asks for one, the server verified as before; `connect_socket_insecure_skip_verify(sock, host)` and `connect_socket_mtls_insecure_skip_verify(...)` skip server verification, named so as not to be reached for by accident. An alert 116 from the server now reads `certificate_required`, not `unknown_alert`. `crypto_tls13_socket_verify_mtls` runs each against `openssl s_server`, `-Verify 1` among them.
+
+### Changed
+
+- **E0900's hint names `const NAMES[] = [...]`.** Returning an array literal (`return ["a", "b"]`) is refused, rightly: the array is in the function's frame. The hint pointed at "a module-level array", and the forms a reader tries first, `var NAMES = [...]` and `const NAMES = [...]`, are both refused as non-constant initializers. The hint and the language reference now name the one that works, `const NAMES[] = [...]`, a static array of constants in the function or at module level, which may be returned.
+
+### Fixed
+
+- **`heap.new(pkg.T)` boxes another module's struct.** heap.new read its argument as one identifier, so a struct from an imported module could not be named as it is in every other type position (`*pkg.T`, `pkg.T { ... }`): `heap.new(pkg.Point)` stopped at the `.` with "Expected RIGHT_PAREN, got DOT", and a selective import was the only way round it, one that fails when two modules both define the name. The argument is now parsed as a type name, its qualifier resolved by the merge to that module's struct and held by the same checks as `*pkg.T` (an unknown module, a type the module does not have or does not export). `tests/integration/heap_new_qualified` boxes two modules' differently laid out `Shape`s and the program's own.
+
+- **`ptr[] xs = []` declares a local array of pointers.** A typed local declaration took `int[] xs`, `string[] xs`, `byte[] xs` and `ptr p`, but not `ptr[] xs` or `ptr[4] xs`: the `ptr` keyword is also a value name, so only `ptr NAME` was taken as a declaration and `ptr[] xs = []` was "Expected statement in block". `ptr` followed by `[]` or `[N]` groups and a name on the same line declares now; `ptr[i] = v` is still an element store. `tests/syntax/test_ptr_array_decl.ae`.
+
+## [0.893.0]
+
+### Removed
+
+- **The language bridges are removed from `contrib/host`.** `contrib.host.duktape`
+  (and its alias `contrib.host.js`), `quickjs`, `perl`, `ruby`, `tcl`, `go`,
+  `tinygo`, `java`, `factor`, `racket` and `rhombus` now live in
+  [aether-guest-languages](https://github.com/aether-lang-dev/aether-guest-languages),
+  where Lua and Python already went, each copied from this tree at
+  `2609ec841` (see its `PROVENANCE.md`) and held to stunt's catalogue by
+  name. Add it with `ae add github.com/aether-lang-dev/aether-guest-languages`
+  and then write `import tcl` in place of `import contrib.host.tcl` (and so
+  on for each language). They are deleted here with no transition period,
+  along with their tests (`host_duktape_bidirectional`,
+  `host_tcl_bidirectional`, `host_racket`, `host_rhombus`, `host_tinygo`,
+  `tests/sandbox/test_shared_map_all.sh`), the `04-interop/05-hosts`
+  examples, their `make contrib` modules, the language demos of
+  `make contrib-host-check`, `ae`'s Racket and TinyGo link special cases and
+  the `js`/`rhombus` import aliases, the `--with=<lang>` layers of
+  `tools/docker/aether-build` (it now refuses `--with=`) and the `WITH_*`
+  build args of `tools/docker/Dockerfile`. `contrib.host.stunt` (the test
+  double) and `contrib.host.aether` (Aether hosting Aether) stay, as does
+  `contrib.quickjs`, the engine the QuickJS bridge imports.
+
+### Fixed
+
+- **`ae test` and `ae check` resolve `[dependencies]` and `[patch]`.** Only
+  `ae build` and `ae run` put a project's dependencies on the module search
+  path, so a project that built and ran against a package (`ae add
+  github.com/aether-lang-dev/aether-guest-languages`, then `import lua`) had
+  every test importing it fail with "FAIL (compile)" and `ae check` refuse the
+  program, the import unresolved. Both commands now go through the same
+  resolver, from any directory of the project.
+
+- **A dlopen the sandbox preload refuses leaves a `dlerror()` message.** The
+  refusal of libc or the loader without a `native` grant returned NULL with
+  `errno = EACCES` and nothing for `dlerror()`, which dlopen's contract
+  promises: Tcl 8.6's `load` formats that message with `%s` and segfaulted,
+  and Ruby's Fiddle reported a NULL handle with no reason. The refusal now
+  sets a per-thread message naming the library and the sandbox
+  (`libc.so.6: refused by the sandbox: ...`), returned once and then cleared,
+  and a later loader error is never shadowed by it.
+
+- **`string.join` no longer takes a `string[]` it cannot read, and joins a
+  `[...]` literal.** An array decayed to any typed pointer, so
+  `string.join(xs, ",")` with `xs: string[]` type-checked against
+  `join(s: *StringSeq, sep)` and the C array was walked as cons cells: one
+  element printed, or a crash. An array now decays only to `ptr` or a pointer
+  to its element, and a `string[]` given to a `*StringSeq` parameter is E0200
+  naming the fix. A `[...]` literal of strings given to one is built as a
+  sequence, as it already was for a variable or a field of that type, so
+  `string.join(["a", "b", "c"], ",")` is `"a,b,c"`; and
+  `string.join_strings(xs, sep)` joins a `string[]`.
+
+- **The Linux and macOS releases ship a working `std.yaml`.** Their runners had
+  no libfyaml, `YAML=auto` built the stubs without a word, and the 0.889.0
+  archives answered every yaml call with "std.yaml unavailable: this build has
+  no libfyaml". The release jobs now install it (apt `libfyaml-dev`, brew
+  `libfyaml`), build with `YAML=1`, which now stops `make` when pkg-config
+  cannot find libfyaml instead of acting as `auto`, and run a yaml program
+  before packaging. `ae` and `aetherc` no longer link libfyaml themselves, so a
+  toolchain built with it starts without it; a program importing `std.yaml`
+  links it, and needs it installed where it is built. Windows, FreeBSD and
+  Android releases keep the stubs (no static MSYS2 libfyaml; none in the cross
+  sysroots).
+
 ## [0.892.0]
 
 ### Changed
