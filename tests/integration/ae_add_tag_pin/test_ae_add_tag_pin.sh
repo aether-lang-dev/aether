@@ -48,7 +48,7 @@ for spec in v0.1.0:v1 v0.2.0:v2 v0.2.1:v3 HEAD:past-the-tag; do
     tag=${spec%%:*}
     mkdir -p "$TMP/src/widget-$tag"
     printf '%s\n' "${spec#*:}" > "$TMP/src/widget-$tag/f.txt"
-    ( cd "$TMP/src" && tar -czf "$ARCH/$tag.tar.gz" "widget-$tag" ) \
+    ( cd "$TMP/src" && COPYFILE_DISABLE=1 tar -czf "$ARCH/$tag.tar.gz" "widget-$tag" ) \
         || fail "could not build the fixture archive for $tag"
 done
 printf '[{"name":"v0.2.1"},{"name":"v0.2.0"},{"name":"v0.1.0"}]\n' > "$TMP/mirror/$PKG/tags.json"
