@@ -1,0 +1,148 @@
+// A file http.serve_file sends with sendfile(2) whose body cannot be
+// delivered is cut off after its headers, and nothing else follows them.
+//
+// The fast path sends the headers and then drains the file into the socket.
+// When the drain stopped short (a client that stops reading, past the send
+// timeout) or did not exist at all (FreeBSD before sendfile(2) was wired
+// there), the server used to fall back to its buffered send and serialize
+// the WHOLE response again: a second status line and header block on the
+// wire after the first, where the client was reading the body, and no body
+// behind it either, since the fd path never loads one. A keep-alive client
+// read that second header block as body bytes. Once the headers are out the
+// response is committed: a failed drain closes the connection and sends
+// nothing more.
+//
+// One GET for a 32 MB file with a 500 ms send (idle) timeout. The client's
+// receive buffer is 16 KB, so the drain stalls almost at once and fails
+// about 500 ms in. The client starts reading 750 ms after the first byte:
+// late enough that the drain has failed, early enough that the old buffered
+// re-send, itself waiting up to 500 ms for room, got its header block out.
+// It must see exactly one status line, fewer bytes than the response, and
+// the connection closed. Listens on 127.0.0.1 and a port the kernel picks.
+
+import std.fs
+import std.http
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+const BIG = 33554432
+const READ_BUFFER = 16384
+
+handle_file(req: ptr, res: ptr, ud: ptr) {
+    http.serve_file(res, http.get_header(req, "X-File"))
+}
+
+need(label: string, err: string) {
+    if err != "" {
+        println("FAIL: ${label}: ${err}")
+        exit(1)
+    }
+}
+
+// Occurrences of "HTTP/1.1 " in `s`.
+status_lines(s: string) -> int {
+    n = 0
+    at = string.index_of_from(s, "HTTP/1.1 ", 0)
+    while at >= 0 {
+        n = n + 1
+        at = string.index_of_from(s, "HTTP/1.1 ", at + 1)
+    }
+    return n
+}
+
+main() {
+    println("=== a sendfile response cut short is not followed by a second one ===")
+    dir, derr = fs.make_temp_dir("", "aesfcut")
+    need("temp dir", derr)
+    file = "${dir}/big.bin"
+    need("write", fs.write(file, string.pad_end("", BIG, 120)))
+
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    need("keepalive", http.server_set_keepalive(s, 1, 0, 500ms))
+    http.server_get(s, "/file", handle_file, 0)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    need("start", http.server_start_background(s))
+    port = http.server_port(s)
+    sleep(100)
+
+    sock, cerr = tcp.connect_buffered("127.0.0.1", port, READ_BUFFER)
+    need("connect", cerr)
+    tcp.write(sock, "GET /file HTTP/1.1\r\nHost: x\r\nX-File: ${file}\r\n\r\n")
+    // The wait counts from the server's first byte, not from the request.
+    waited = 0
+    while waited < 300 {
+        first, _ferr = tcp.poll(sock, 100)
+        if first {
+            waited = 300
+        } else {
+            waited = waited + 1
+        }
+    }
+    sleep(750)
+
+    total = 0
+    lines = 0
+    tail = ""
+    quiet = 0
+    closed = 0
+    while quiet < 30 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 65536)
+            if rerr != "" || string.length(chunk) == 0 {
+                closed = 1
+                quiet = 30
+            } else {
+                total = total + string.length(chunk)
+                // A status line split across two reads is counted once:
+                // the 8 bytes kept from the last read cannot hold one.
+                lines = lines + status_lines("${tail}${chunk}")
+                cl = string.length(chunk)
+                if cl > 8 {
+                    tail = string.substring(chunk, cl - 8, cl)
+                } else {
+                    tail = chunk
+                }
+                quiet = 0
+            }
+        } else {
+            quiet = quiet + 1
+        }
+    }
+    tcp.close(sock)
+    http.server_stop(s)
+    http.server_free(s)
+    fs.delete(file)
+    fs.delete_dir(dir)
+
+    bad = 0
+    if lines != 1 {
+        println("  FAIL status lines on the wire: ${lines}, expected 1 (a second header block followed the first)")
+        bad = bad + 1
+    } else {
+        println("  PASS one status line")
+    }
+    if total >= BIG {
+        println("  FAIL the response arrived whole (${total} bytes): the drain was never cut, so this ran nothing")
+        bad = bad + 1
+    } else {
+        println("  PASS cut short (${total} bytes)")
+    }
+    if closed != 1 {
+        println("  FAIL the connection was left open after a response cut short")
+        bad = bad + 1
+    } else {
+        println("  PASS connection closed")
+    }
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

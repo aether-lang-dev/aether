@@ -105,16 +105,33 @@ RECV_HEX=$(od -An -tx1 -v "$RESP_BODY" | tr -d ' \n')
 # same TCP connection (default for HTTP/1.1). The second response
 # is what we verify; if Content-Length mismatched the body length,
 # its parser would either hang or read junk.
+#
+# And the second request has to go on the SAME connection: curl reconnects
+# quietly when the server closed after the first, which hid a server that
+# answered the first one wrongly and then closed (a platform with no
+# sendfile drain sent the headers twice, the second time with no body).
+# %{num_connects} is the number of new connections each transfer opened:
+# 1 then 0 when the connection was reused.
 KA1="$TMPDIR/ka1.bin"
 KA2="$TMPDIR/ka2.bin"
-curl --silent --show-error --max-time 15 \
+KA_CONNECTS=$(curl --silent --show-error --max-time 15 \
+     -w '%{num_connects} ' \
      -o "$KA1" "$URL/static/blob.bin" \
-     -o "$KA2" "$URL/static/blob.bin" 2>"$TMPDIR/c2.err" || {
+     -o "$KA2" "$URL/static/blob.bin" 2>"$TMPDIR/c2.err") || {
     echo "  [FAIL] T2 curl:"; cat "$TMPDIR/c2.err"; exit 1
+}
+KA1_HEX=$(od -An -tx1 -v "$KA1" | tr -d ' \n')
+[ "$KA1_HEX" = "$SENT_HEX" ] || {
+    echo "  [FAIL] T2 keep-alive: first response corrupted"; exit 1;
 }
 KA2_HEX=$(od -An -tx1 -v "$KA2" | tr -d ' \n')
 [ "$KA2_HEX" = "$SENT_HEX" ] || {
     echo "  [FAIL] T2 keep-alive: second response corrupted"; exit 1;
+}
+[ "$KA_CONNECTS" = "1 0 " ] || {
+    echo "  [FAIL] T2 keep-alive: new connections per request '$KA_CONNECTS', expected '1 0 '"
+    echo "         (the server closed after the first response)"
+    exit 1
 }
 
 # --- Test 3: Range request → fallback to buffered (200 + full body) ---
@@ -146,9 +163,10 @@ RNG_HEX=$(od -An -tx1 -v "$RNG_BODY" | tr -d ' \n')
 printf 'small-file-body\n' > "$ROOT_DIR/small.txt"
 SM1="$TMPDIR/sm1.txt"
 SM2="$TMPDIR/sm2.txt"
-curl --silent --show-error --max-time 5 \
+SM_CONNECTS=$(curl --silent --show-error --max-time 5 \
+     -w '%{num_connects} ' \
      -o "$SM1" "$URL/static/small.txt" \
-     -o "$SM2" "$URL/static/small.txt" 2>"$TMPDIR/c5.err" || {
+     -o "$SM2" "$URL/static/small.txt" 2>"$TMPDIR/c5.err") || {
     echo "  [FAIL] T5 small file over keep-alive did not complete within 5s:"
     cat "$TMPDIR/c5.err"
     echo "         (a sendfile response that only arrives when the connection"
@@ -160,6 +178,9 @@ curl --silent --show-error --max-time 5 \
 }
 [ "$(cat "$SM2")" = "small-file-body" ] || {
     echo "  [FAIL] T5 second response: $(cat "$SM2")"; exit 1;
+}
+[ "$SM_CONNECTS" = "1 0 " ] || {
+    echo "  [FAIL] T5 new connections per request '$SM_CONNECTS', expected '1 0 '"; exit 1;
 }
 
 # --- Test 4: 404 doesn't break further requests (no FD leak) ---
