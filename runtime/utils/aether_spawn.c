@@ -23,8 +23,12 @@ extern char** environ;
 
 #if defined(__linux__) || defined(__FreeBSD__) || defined(__NetBSD__) || defined(__OpenBSD__) || \
     defined(__DragonFly__)
-/* Declared here as well: glibc declares it only under _GNU_SOURCE. */
+#if defined(__linux__)
+/* Declared here as well: glibc declares it only under _GNU_SOURCE. The BSDs'
+ * <unistd.h> always does, NetBSD's as `int *`, which a second declaration
+ * with a bound contradicts (gcc's -Warray-parameter). */
 int pipe2(int pipefd[2], int flags);
+#endif
 #define AETHER_HAVE_PIPE2 1
 #endif
 
