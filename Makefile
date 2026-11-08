@@ -820,7 +820,13 @@ endif
 # in only for a caller. Linked with it, a release built against libfyaml
 # could not even start on a machine without the library. A program that
 # imports std.yaml links it, through AETHER_YAML_LIBS, and only that program.
-AETHER_TOOL_LDFLAGS = $(filter-out $(YAML_LDFLAGS),$(AETHER_REQUIRED_LDFLAGS))
+#
+# Cut YAML_LDFLAGS out as the one run of words it was put in as, not word by
+# word: filter-out drops every copy of each word, and pkg-config's libfyaml
+# line on FreeBSD is `-L/usr/local/lib -lpthread -lm -lfyaml -lyaml`, so it
+# took the -L/usr/local/lib that nghttp2, pcre2, brotli and zstd need too, and
+# aetherc no longer linked there.
+AETHER_TOOL_LDFLAGS = $(if $(strip $(YAML_LDFLAGS)),$(subst $(YAML_LDFLAGS),,$(AETHER_REQUIRED_LDFLAGS)),$(AETHER_REQUIRED_LDFLAGS))
 AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o,$(STD_OBJS))
 
 # Tunable link flags: sanitizers and anything else a caller passes. Empty by
