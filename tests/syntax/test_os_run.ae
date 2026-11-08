@@ -10,6 +10,7 @@
 // (GNU echo, /usr/bin/seq exists). It SKIPs on:
 //   - Windows: none of those paths exist there
 //   - macOS: /usr/bin/seq doesn't exist; /bin/echo differs (BSD vs GNU)
+//   - NetBSD, OpenBSD: true and false live in /usr/bin, not /bin
 
 import std.os
 import std.list
@@ -45,6 +46,10 @@ main() {
     }
     if string.starts_with(uname, "Darwin") == 1 {
         println("SKIP os_run: Linux-only paths (no /usr/bin/seq on macOS, BSD echo differs)")
+        return
+    }
+    if string.starts_with(uname, "NetBSD") == 1 || string.starts_with(uname, "OpenBSD") == 1 {
+        println("SKIP os_run: Linux-only paths (true and false are in /usr/bin here, not /bin)")
         return
     }
 

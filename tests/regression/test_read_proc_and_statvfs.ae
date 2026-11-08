@@ -18,7 +18,8 @@ fail(msg: string) {
 
 main() {
     // /proc is Linux-specific; if it isn't there, there's nothing to regress.
-    if fs.exists("/proc/self/status") == 0 {
+    // NetBSD mounts a /proc whose status file is one line with no "Name:".
+    if fs.exists("/proc/self/status") == 0 || os.platform() != "linux" {
         println("SKIP: no /proc (non-Linux) — read-to-EOF path not exercised here")
         return
     }
