@@ -1537,22 +1537,31 @@ static void aether_child_reset_signals(void) {
  * A descriptor marked close-on-exec on one of those numbers that is not the
  * file it was at the start is its owner's, and closes at exec as its owner
  * asked. */
+/* NetBSD and OpenBSD report every pipe as device 0, inode 0, so there a
+ * pipe that took a closed stream's number passed for it. A time each sets
+ * when the pipe is made, and never after, tells pipes apart: NetBSD's birth
+ * time, OpenBSD's change time. */
+#if defined(__NetBSD__)
+#define AETHER_STD_STREAM_MADE(st) ((st)->st_birthtimespec)
+#elif defined(__OpenBSD__)
+#define AETHER_STD_STREAM_MADE(st) ((st)->st_ctim)
+#endif
+
 static struct {
     int open; dev_t dev; ino_t ino;
-#if defined(__NetBSD__)
-    struct timespec birth;
+#ifdef AETHER_STD_STREAM_MADE
+    struct timespec made;
 #endif
 } aether_std_stream[3];
 
-/* Whether `st` is the file stream `fd` was at the start. NetBSD reports
- * every pipe as device 0, inode 0, so there a pipe that took a closed
- * stream's number passed for it; its birth time tells pipes apart. */
+/* Whether `st` is the file stream `fd` was at the start. */
 static int aether_std_stream_same(int fd, const struct stat* st) {
     if (st->st_dev != aether_std_stream[fd].dev || st->st_ino != aether_std_stream[fd].ino)
         return 0;
-#if defined(__NetBSD__)
-    if (st->st_birthtimespec.tv_sec != aether_std_stream[fd].birth.tv_sec ||
-        st->st_birthtimespec.tv_nsec != aether_std_stream[fd].birth.tv_nsec)
+#ifdef AETHER_STD_STREAM_MADE
+    if (st->st_dev == 0 && st->st_ino == 0 &&
+        (AETHER_STD_STREAM_MADE(st).tv_sec != aether_std_stream[fd].made.tv_sec ||
+         AETHER_STD_STREAM_MADE(st).tv_nsec != aether_std_stream[fd].made.tv_nsec))
         return 0;
 #endif
     return 1;
@@ -1566,8 +1575,8 @@ static void aether_record_std_streams(void) {
         aether_std_stream[fd].open = 1;
         aether_std_stream[fd].dev = st.st_dev;
         aether_std_stream[fd].ino = st.st_ino;
-#if defined(__NetBSD__)
-        aether_std_stream[fd].birth = st.st_birthtimespec;
+#ifdef AETHER_STD_STREAM_MADE
+        aether_std_stream[fd].made = AETHER_STD_STREAM_MADE(&st);
 #endif
     }
 }
