@@ -78,7 +78,7 @@ case "$(uname -s)" in
     MINGW*|MSYS*) OS_PART="windows"; EXT=".dll" ;;
 esac
 case "$(uname -m)" in
-    x86_64)        ARCH_PART="x86_64" ;;
+    x86_64|amd64)  ARCH_PART="x86_64" ;;   # FreeBSD says amd64
     aarch64|arm64) ARCH_PART="arm64" ;;
 esac
 TRIPLE="$OS_PART-$ARCH_PART"

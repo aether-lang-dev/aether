@@ -52,7 +52,7 @@ fi
 DESCRIBE_C="$TMPDIR/describe.c"
 if ! AETHER_HOME="" "$ROOT/build/aetherc" --emit-namespace-describe "$SCRIPT_DIR/manifest.ae" "$DESCRIBE_C" 2>"$TMPDIR/desc.err"; then
     echo "  [FAIL] --emit-namespace-describe failed"; cat "$TMPDIR/desc.err"; fail=$((fail + 1))
-elif ! gcc -c -fPIC "$DESCRIBE_C" -o "$TMPDIR/describe.o" 2>"$TMPDIR/gcc.err"; then
+elif ! ${CC:-cc} -c -fPIC "$DESCRIBE_C" -o "$TMPDIR/describe.o" 2>"$TMPDIR/gcc.err"; then
     echo "  [FAIL] generated describe.c does not compile"; cat "$TMPDIR/gcc.err"; fail=$((fail + 1))
 else
     echo "  [PASS] generated describe.c compiles standalone"; pass=$((pass + 1))

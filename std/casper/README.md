@@ -30,6 +30,10 @@ main() {
 available: 0
 no casper on this platform
 ```
+```output,freebsd
+available: 1
+init: true
+```
 
 **Order matters and is not recoverable.** `init` and each `service` must be
 opened before `capsicum.enter()`. A service not opened beforehand cannot be

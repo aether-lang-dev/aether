@@ -158,7 +158,7 @@ check_hung() {
 }
 
 # check_status LABEL TOOLS: a command's own status comes through the bound,
-# and one that ignores SIGTERM is killed (137) once KILL_AFTER is up.
+# and one that ignores SIGTERM is killed once KILL_AFTER is up.
 check_status() {
     label="$1"
     start=$(date +%s)
@@ -172,8 +172,14 @@ check_status() {
         || fail "$label: a command's exit status did not come through the bound: $out"
     printf '%s\n' "$out" | grep -q "^signalled=137$" \
         || fail "$label: a command SIGKILL ended did not read as 137: $out"
-    printf '%s\n' "$out" | grep -q "^stubborn=137$" \
-        || fail "$label: a command that ignores SIGTERM was not killed after KILL_AFTER (137): $out"
+    # GNU timeout(1) and the perl bound say 137 for a command they had to
+    # SIGKILL; FreeBSD's timeout(1) says 124 for any command that reached the
+    # limit (its man page, EXIT STATUS). run_stage.sh takes either as a
+    # timeout, and the elapsed-time check below shows the kill happened.
+    killed=137
+    [ "$label" = "timeout(1)" ] && [ "$(uname -s)" = FreeBSD ] && killed=124
+    printf '%s\n' "$out" | grep -q "^stubborn=$killed$" \
+        || fail "$label: a command that ignores SIGTERM was not killed after KILL_AFTER ($killed): $out"
     [ "$elapsed" -lt 20 ] \
         || fail "$label: the 2 s limit with a 1 s grace took ${elapsed}s"
 }

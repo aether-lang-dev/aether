@@ -141,7 +141,7 @@ for d in "$ROOT" "$ROOT/runtime" "$ROOT/runtime/actors" "$ROOT/runtime/scheduler
     INCLUDES="$INCLUDES -I$d"
 done
 
-if ! ${CC:-gcc} $INCLUDES -o "$tmpdir/app_bin" "$tmpdir/app.gen.c" "$tmpdir/glue.c" \
+if ! ${CC:-cc} $INCLUDES -o "$tmpdir/app_bin" "$tmpdir/app.gen.c" "$tmpdir/glue.c" \
         "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/cc.err"; then
     echo "  [FAIL] aether_cfn_proc_address: C compile returned non-zero"
     sed 's/^/    /' "$tmpdir/cc.err"

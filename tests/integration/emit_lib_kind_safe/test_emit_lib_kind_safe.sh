@@ -61,7 +61,7 @@ if [ -z "$LIB_PATH" ]; then
     exit 1
 fi
 
-if ! gcc \
+if ! ${CC:-cc} \
     -I"$ROOT/runtime" \
     "$SCRIPT_DIR/consume.c" \
     "$LIB_PATH" \

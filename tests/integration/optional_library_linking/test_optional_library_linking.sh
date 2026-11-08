@@ -14,7 +14,7 @@ cd "$WORK"
 fail() { echo "[FAIL] optional_library_linking: $*"; exit 1; }
 
 # Capture actual C compiler argv, including ae run (which need not print it).
-REAL_CC=${AE_CC:-${CC:-gcc}}
+REAL_CC=${AE_CC:-${CC:-cc}}
 export REAL_CC
 cat > cc-probe <<'EOF'
 #!/bin/sh

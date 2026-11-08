@@ -54,12 +54,12 @@ if [ "$(grep -c 'shared_cb_symbol' "$tmpdir/one.c")" -eq 0 ] || \
     echo "  [FAIL] the @c_callback symbol was not emitted into both TUs"; exit 1
 fi
 
-if ! gcc -c "$tmpdir/one.c" -o "$tmpdir/one.o" $CFLAGS -w 2>"$tmpdir/one.cc" \
-   || ! gcc -c "$tmpdir/two.c" -o "$tmpdir/two.o" $CFLAGS -w 2>"$tmpdir/two.cc"; then
+if ! ${CC:-cc} -c "$tmpdir/one.c" -o "$tmpdir/one.o" $CFLAGS -w 2>"$tmpdir/one.cc" \
+   || ! ${CC:-cc} -c "$tmpdir/two.c" -o "$tmpdir/two.o" $CFLAGS -w 2>"$tmpdir/two.cc"; then
     echo "  [FAIL] a TU failed to compile"; sed 's/^/          /' "$tmpdir"/*.cc | head -8; exit 1
 fi
 
-if ! gcc "$SCRIPT_DIR/driver.c" "$tmpdir/one.o" "$tmpdir/two.o" $CFLAGS -w \
+if ! ${CC:-cc} "$SCRIPT_DIR/driver.c" "$tmpdir/one.o" "$tmpdir/two.o" $CFLAGS -w \
         -o "$tmpdir/bin" 2>"$tmpdir/link.err"; then
     echo "  [FAIL] two TUs carrying the same @c_callback did not link (the bug)"
     grep -i "multiple definition" "$tmpdir/link.err" | sed 's/^/          /' | head -4

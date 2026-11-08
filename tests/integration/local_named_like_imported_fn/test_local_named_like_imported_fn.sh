@@ -31,7 +31,7 @@ emit_and_compile() {
         sed 's/^/    /' "$tmpdir/emit.log" | head -20
         exit 1
     fi
-    if ! gcc -c -Werror=int-conversion $inc "$tmpdir/$src.c" -o "$tmpdir/$src.o" >"$tmpdir/gcc.log" 2>&1; then
+    if ! ${CC:-cc} -c -Werror=int-conversion $inc "$tmpdir/$src.c" -o "$tmpdir/$src.o" >"$tmpdir/gcc.log" 2>&1; then
         echo "  [FAIL] $NAME: gcc -Werror=int-conversion rejected the C for $src"
         sed 's/^/    /' "$tmpdir/gcc.log" | head -20
         exit 1

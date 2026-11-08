@@ -103,7 +103,7 @@ fi
 # install, then break only the compiler.
 INST="$TMP/inst"
 mkdir -p "$INST"
-( cd "$ROOT" && make install PREFIX="$INST" ) >"$TMP/install.log" 2>&1 \
+( cd "$ROOT" && ${MAKE:-make} install PREFIX="$INST" ) >"$TMP/install.log" 2>&1 \
     || { echo "  [SKIP] version_doctor: could not stage an install to break"; exit 0; }
 cp -a "$INST" "$TMP/bad"
 cp "$AE" "$TMP/bad/bin/ae"

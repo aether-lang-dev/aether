@@ -55,7 +55,7 @@ _sweep_timeout_watchdog() {
     if [ ! -f "$_stw_out" ] || [ "$_stw_src" -nt "$_stw_out" ]; then
         mkdir -p "$1/build" 2>/dev/null
         _stw_tmp="$1/build/sweep_watchdog.$$.tmp.exe"
-        if ${CC:-gcc} -O2 -o "$_stw_tmp" "$_stw_src" >"$_stw_tmp.log" 2>&1 ||
+        if ${CC:-cc} -O2 -o "$_stw_tmp" "$_stw_src" >"$_stw_tmp.log" 2>&1 ||
            cc -O2 -o "$_stw_tmp" "$_stw_src" >>"$_stw_tmp.log" 2>&1; then
             mv -f "$_stw_tmp" "$_stw_out" 2>/dev/null
         else

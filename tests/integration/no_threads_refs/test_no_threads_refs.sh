@@ -26,7 +26,7 @@ trap 'rm -rf "$TMPDIR"' EXIT
 # "Entering directory" lines into what it echoes, so it starts clean.
 make_var() {
     printf 'ae-print-var:\n\t@echo $(%s)\n' "$1" |
-        MAKEFLAGS= MAKELEVEL= make --no-print-directory -s -f Makefile -f - ae-print-var \
+        MAKEFLAGS= MAKELEVEL= ${MAKE:-make} --no-print-directory -s -f Makefile -f - ae-print-var \
             EXTRA_CFLAGS="$2"
 }
 # The sources each build compiles: a no-threads one has the cooperative

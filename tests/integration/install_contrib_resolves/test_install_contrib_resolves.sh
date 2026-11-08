@@ -196,7 +196,7 @@ trap 'rm -rf "$TMPDIR" "$MAKE_TMP"' EXIT
 # Build + install. This shells `make install-contrib PREFIX=...` which
 # in turn invokes `make contrib` (the contrib_build.sh sweep) and then
 # the install rule. Quiet on success; we'll dump the log on failure.
-if ! make install-contrib PREFIX="$MAKE_TMP" \
+if ! ${MAKE:-make} install-contrib PREFIX="$MAKE_TMP" \
         > "$MAKE_TMP/install.log" 2>&1; then
     echo "  [FAIL] make install-contrib exited non-zero"
     tail -30 "$MAKE_TMP/install.log"

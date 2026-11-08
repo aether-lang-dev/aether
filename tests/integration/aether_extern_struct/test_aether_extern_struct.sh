@@ -279,19 +279,19 @@ done
 # - case4_glue.c contains the C side's struct
 # The Aether-emitted typedef and the C-side struct are byte-identical by
 # layout, so the pointer round-trip in main() reads the right offsets.
-if ! gcc $INCLUDES -c -o "$tmpdir/case4.gen.o" "$tmpdir/case4.gen.c" \
+if ! ${CC:-cc} $INCLUDES -c -o "$tmpdir/case4.gen.o" "$tmpdir/case4.gen.c" \
         2>"$tmpdir/case4.gcc.err"; then
     echo "  [FAIL] case 4: gcc failed compiling .gen.c"
     cat "$tmpdir/case4.gcc.err" | sed 's/^/    /'
     exit 1
 fi
-if ! gcc -c -o "$tmpdir/case4_glue.o" "$tmpdir/case4_glue.c" \
+if ! ${CC:-cc} -c -o "$tmpdir/case4_glue.o" "$tmpdir/case4_glue.c" \
         2>"$tmpdir/case4.gcc.err"; then
     echo "  [FAIL] case 4: gcc failed compiling glue.c"
     cat "$tmpdir/case4.gcc.err" | sed 's/^/    /'
     exit 1
 fi
-if ! gcc -o "$tmpdir/case4_bin" "$tmpdir/case4.gen.o" "$tmpdir/case4_glue.o" \
+if ! ${CC:-cc} -o "$tmpdir/case4_bin" "$tmpdir/case4.gen.o" "$tmpdir/case4_glue.o" \
         "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/case4.gcc.err"; then
     echo "  [FAIL] case 4: gcc failed linking"
     cat "$tmpdir/case4.gcc.err" | sed 's/^/    /'

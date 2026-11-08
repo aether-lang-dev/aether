@@ -23,7 +23,7 @@ case "$(uname -s)" in
 esac
 
 LIB_PATH="$TMPDIR/libprobe.$LIB_EXT"
-if ! cc $SHARED_FLAG -o "$LIB_PATH" "$SCRIPT_DIR/probe.c" 2>"$TMPDIR/cc.err"; then
+if ! ${CC:-cc} -fPIC $SHARED_FLAG -o "$LIB_PATH" "$SCRIPT_DIR/probe.c" 2>"$TMPDIR/cc.err"; then
     echo "  [SKIP] cannot compile shared library:"
     cat "$TMPDIR/cc.err" | head -5
     exit 0

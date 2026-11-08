@@ -1503,6 +1503,7 @@ test-ae: compiler ae stdlib
 	root=$$(pwd); \
 	script="$$root/tests/scripts/run_ae_test.sh"; \
 	CC="$${CC:-$(BASE_CC)}"; export CC; \
+	MAKE="$(MAKE_COMMAND)"; export MAKE; \
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
