@@ -23,6 +23,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <signal.h>
+#include <netinet/in.h>   /* struct sockaddr_in: FreeBSD does not pull it in from arpa/inet.h */
 #include <arpa/inet.h>
 #include <sys/socket.h>
 

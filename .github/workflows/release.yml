@@ -846,6 +846,9 @@ jobs:
         # cross-built archive could ship missing a symbol its own sources
         # define, and fail at the user's link step rather than here.
         sh scripts/check_archive_exports.sh $X/libaether.a
+        # The archive is never run here, so check std.regex has its engine:
+        # 0.897.0 shipped the FreeBSD release with the regex stub.
+        sh scripts/check_regex_engine.sh $X/libaether.a
 
     - name: Strip
       run: strip build/.alien/freebsd-x86_64/aetherc build/.alien/freebsd-x86_64/ae 2>/dev/null || true

@@ -303,12 +303,21 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
     #include <poll.h>
     #include <sys/ioctl.h>         /* FIONREAD: conn_fd_unread (#3405) */
     #include <errno.h>
-    /* Linux + macOS sendfile(2) live in different headers with
-     * different signatures. Only one is pulled in per platform. */
+    /* Linux, macOS and FreeBSD sendfile(2) live in different headers with
+     * different signatures. Only one is pulled in per platform.
+     * AETHER_HTTP_HAS_SENDFILE marks the platforms conn_sendfile_drain
+     * implements; everywhere else http_serve_file's staged file is read into
+     * the body instead (sendfile_eligible). */
     #if defined(__linux__)
         #include <sys/sendfile.h>
+        #define AETHER_HTTP_HAS_SENDFILE 1
     #elif defined(__APPLE__)
         #include <sys/uio.h>
+        #define AETHER_HTTP_HAS_SENDFILE 1
+    #elif defined(__FreeBSD__)
+        #include <sys/types.h>
+        #include <sys/uio.h>
+        #define AETHER_HTTP_HAS_SENDFILE 1
     #endif
     // I/O polling is handled by aether_io_poller (included via multicore_scheduler.h)
 #endif
@@ -840,10 +849,10 @@ static void conn_uncork_for_body(HttpConn* c) {
  * failure (caller should close the connection — partial sends
  * leave the wire in an inconsistent state for keep-alive).
  *
- * Returns -1 on platforms without sendfile (Windows, BSD variants
- * we haven't wired); the caller falls back to the buffered path.
- * Never invoked on TLS connections — handle_one_request gates the
- * call by checking conn->ssl == NULL. */
+ * Implemented on Linux, macOS and FreeBSD (AETHER_HTTP_HAS_SENDFILE).
+ * Elsewhere it returns -1, but is never reached: sendfile_eligible
+ * says no there, and the file is read into the body instead. Never
+ * invoked on TLS connections either (sendfile_eligible). */
 static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
     if (!c || c->fd < 0 || in_fd < 0 || size < 0) return -1;
     /* Non-blocking for the drain, and a client that stops reading waited on
@@ -896,17 +905,51 @@ static long long conn_sendfile_drain(HttpConn* c, int in_fd, long long size) {
     }
     conn_set_nonblocking(c, 0);
     return total;
+#elif defined(__FreeBSD__)
+    long long total = 0;
+    conn_set_nonblocking(c, 1);
+    while (total < size) {
+        off_t sbytes = 0;
+        /* nbytes 0 means "to the end of the file" to FreeBSD, which the
+         * loop condition keeps from being asked for. */
+        int rc = sendfile(in_fd, c->fd, (off_t)total, (size_t)(size - total),
+                          NULL, &sbytes, 0);
+        /* sbytes counts what went out even when the call fails with
+         * EAGAIN (a non-blocking socket that filled), EBUSY or EINTR. */
+        if (sbytes > 0) total += (long long)sbytes;
+        if (rc == 0) {
+            /* Success with nothing sent: the file ended early (it
+             * shrank since the fstat). Stop rather than spin; the
+             * caller sees the short count. */
+            if (sbytes == 0) break;
+            continue;
+        }
+        if (errno == EINTR || errno == EBUSY) continue;
+        if ((errno == EAGAIN || errno == EWOULDBLOCK) &&
+            conn_wait_io(c, POLLOUT) == 1)
+            continue;
+        total = -1;
+        break;
+    }
+    conn_set_nonblocking(c, 0);
+    return total;
 #else
-    /* Windows / FreeBSD / unsupported. */
+    /* Windows / other: no implementation; see sendfile_eligible. */
     (void)c; (void)in_fd; (void)size;
     return -1;
 #endif
 }
 
 /* Returns 1 if the connection + request can take the sendfile fast
- * path: cleartext (no TLS), HTTP/1.1 (no h2 stream), and no Range
- * request (slice-aware sendfile is v2). */
+ * path: a platform conn_sendfile_drain implements, cleartext (no TLS),
+ * HTTP/1.1 (no h2 stream), and no Range request (slice-aware sendfile
+ * is v2). Saying yes where there is no drain sent the headers and then
+ * nothing: the caller has no way back once headers are on the wire. */
 static int sendfile_eligible(HttpConn* c, HttpRequest* req) {
+#ifndef AETHER_HTTP_HAS_SENDFILE
+    (void)c; (void)req;
+    return 0;
+#else
     if (!c) return 0;
     if (c->pure_tls) return 0;
 #ifdef AETHER_HAS_OPENSSL
@@ -922,6 +965,7 @@ static int sendfile_eligible(HttpConn* c, HttpRequest* req) {
         }
     }
     return 1;
+#endif
 }
 
 /* A file http_serve_file staged on `res` (sendfile_fd), read into its body
@@ -994,14 +1038,22 @@ static char* response_serialize_wire(HttpRequest* req, HttpServerResponse* res,
  *
  * Returns 1 when the caller should force-close the connection
  * (sendfile partial-write, header-send failure, etc.); 0 when the
- * connection is safe to keep alive. */
+ * connection is safe to keep alive.
+ *
+ * Once the fast path has sent the headers, the response is committed:
+ * whatever happens to the body, nothing else may go on the wire. A
+ * buffered send after them would put a second status line and header
+ * block where the client is reading the body, with the body itself
+ * missing, since it was never loaded (the fd path's body is NULL). */
 static int send_response_with_optional_sendfile(HttpConn* conn,
                                                 HttpServerResponse* res,
                                                 HttpRequest* req) {
     if (!conn || !res) return 0;
 
     int force_close = 0;
-    int sent_via_sendfile = 0;
+    /* Set once the fast path has put anything on the wire: the buffered
+     * send below must not run after it, whether the body made it or not. */
+    int committed = 0;
     /* RFC 9110 section 9.3.2: a HEAD response carries the headers the GET
      * would have carried and no body. Sending one desynchronises a
      * persistent connection, the client reads those bytes as the start of
@@ -1021,6 +1073,9 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
             conn_cork(conn, 1);
             int header_send = conn_send(conn, hdrs, (int)resp_len);
             free(hdrs);
+            /* A failed conn_send may still have sent part of the headers,
+             * so the response is committed either way. */
+            committed = 1;
             if (header_send < 0) {
                 close(res->sendfile_fd);
                 res->sendfile_fd = -1;
@@ -1033,20 +1088,23 @@ static int send_response_with_optional_sendfile(HttpConn* conn,
                 close(res->sendfile_fd);
                 res->sendfile_fd = -1;
                 if (sent != res->sendfile_size) {
-                    /* Bytes written ≠ Content-Length — wire is
-                     * inconsistent for keep-alive. Force close. */
+                    /* Bytes written ≠ Content-Length — the response
+                     * is cut short and cannot be finished or followed
+                     * on this connection. Close it. */
                     force_close = 1;
-                } else {
-                    sent_via_sendfile = 1;
                 }
             }
+        } else {
+            /* No headers to send: nothing went out, so the buffered
+             * path can still answer, from the file read into memory. */
+            response_load_staged_file(res);
         }
     } else if (res->sendfile_fd >= 0) {
         /* Ineligible: read the fd into res->body before serializing. */
         response_load_staged_file(res);
     }
 
-    if (!sent_via_sendfile) {
+    if (!committed) {
         char*  buf = NULL;
         size_t cap = 0, resp_len = 0;
         /* A send that failed, the send timeout among the ways (#3257), left

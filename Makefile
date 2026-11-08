@@ -285,11 +285,12 @@ endif
 #     headers and FreeBSD-only libraries such as Casper and libthr.
 #   - casper libs are ALWAYS needed: std/casper/aether_casper.c is
 #     unconditionally in the build and references cap_*; the base ships them.
-#   - Optional Tier-2 libs (OpenSSL/zlib/nghttp2/PCRE2/YAML) are forced OFF
-#     for the cross build: pkg-config on the host would find the host's Linux
-#     libs and poison the FreeBSD binary. A cross build ships those std
+#   - Optional Tier-2 libs (OpenSSL/zlib/nghttp2/YAML/brotli/zstd) are forced
+#     OFF for the cross build: pkg-config on the host would find the host's
+#     Linux libs and poison the FreeBSD binary. A cross build ships those std
 #     features as their "unavailable" stubs (same as any build without them);
-#     a future crossbuild-sysroot-staged variant can re-enable them.
+#     a future crossbuild-sysroot-staged variant can re-enable them. PCRE2 is
+#     the vendored engine, so std.regex works.
 FREEBSD_CPU ?= x86_64
 FREEBSD_ABI ?= 15.0
 ifeq ($(FREEBSD),1)
@@ -308,10 +309,14 @@ ifeq ($(FREEBSD),1)
   OPENSSL := 0
   ZLIB := 0
   NGHTTP2 := 0
-  PCRE2 := 0
   YAML := 0
   BROTLI := 0
   ZSTD := 0
+  # PCRE2 has a vendored in-tree fallback (no host library involved), as the
+  # Windows and Android cross builds use. PCRE2 := 0 here shipped the FreeBSD
+  # release with std.regex as its refusing stub: every regex.compile failed
+  # with "built without libpcre2-8".
+  PCRE2 := vendored
   # Link the FreeBSD-only libraries from the base sysroot. Zig supplies the
   # CRT and libc for this target; adding the base's startup objects as well
   # would duplicate `_start`. Overrides the native LDFLAGS assembly below.
@@ -820,7 +825,13 @@ endif
 # in only for a caller. Linked with it, a release built against libfyaml
 # could not even start on a machine without the library. A program that
 # imports std.yaml links it, through AETHER_YAML_LIBS, and only that program.
-AETHER_TOOL_LDFLAGS = $(filter-out $(YAML_LDFLAGS),$(AETHER_REQUIRED_LDFLAGS))
+#
+# Cut YAML_LDFLAGS out as the one run of words it was put in as, not word by
+# word: filter-out drops every copy of each word, and pkg-config's libfyaml
+# line on FreeBSD is `-L/usr/local/lib -lpthread -lm -lfyaml -lyaml`, so it
+# took the -L/usr/local/lib that nghttp2, pcre2, brotli and zstd need too, and
+# aetherc no longer linked there.
+AETHER_TOOL_LDFLAGS = $(if $(strip $(YAML_LDFLAGS)),$(subst $(YAML_LDFLAGS),,$(AETHER_REQUIRED_LDFLAGS)),$(AETHER_REQUIRED_LDFLAGS))
 AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o,$(STD_OBJS))
 
 # Tunable link flags: sanitizers and anything else a caller passes. Empty by

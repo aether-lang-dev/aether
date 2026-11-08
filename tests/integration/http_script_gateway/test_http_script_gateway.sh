@@ -114,7 +114,7 @@ else
         Darwin) SHARED_LDFLAGS="-Wl,-undefined,dynamic_lookup" ;;
         *)      SHARED_LDFLAGS="" ;;
     esac
-    if ! gcc -fPIC -shared -O2 \
+    if ! "${CC:-cc}" -fPIC -shared -O2 \
             -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
             -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/utils" \
             -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \
@@ -219,7 +219,7 @@ cat > "$TMPDIR/empty.c" <<'EOF'
 int aether_unrelated_symbol(void) { return 0; }
 EOF
 EMPTY_SO="$TMPDIR/empty$SO_EXT"
-gcc -fPIC -shared -O0 "$TMPDIR/empty.c" -o "$EMPTY_SO" 2>"$TMPDIR/gcc_empty.err" \
+"${CC:-cc}" -fPIC -shared -O0 "$TMPDIR/empty.c" -o "$EMPTY_SO" 2>"$TMPDIR/gcc_empty.err" \
     || fail "gcc -shared empty.c"
 
 "$TMPDIR/host" "$BAD_PORT" "$EMPTY_SO" >"$TMPDIR/host_empty.log" 2>&1
