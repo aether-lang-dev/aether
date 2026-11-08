@@ -3246,7 +3246,8 @@ import std.string
 main() {
     // The C library, under the name each platform gives it: a library's
     // file name is the platform's business, which is why std.dl never
-    // guesses one. These are macOS, Windows, FreeBSD and glibc Linux.
+    // guesses one. These are macOS, Windows, FreeBSD, NetBSD, OpenBSD
+    // (whose loader takes the unversioned name) and glibc Linux.
     lib = ""
     when target.os == "darwin" {
         lib = "/usr/lib/libSystem.B.dylib"
@@ -3254,6 +3255,10 @@ main() {
         lib = "msvcrt.dll"
     } else when target.os == "freebsd" {
         lib = "libc.so.7"
+    } else when target.os == "netbsd" {
+        lib = "libc.so.12"
+    } else when target.os == "openbsd" {
+        lib = "libc.so"
     } else {
         lib = "libc.so.6"
     }

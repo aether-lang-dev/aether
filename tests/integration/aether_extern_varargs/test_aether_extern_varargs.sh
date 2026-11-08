@@ -42,7 +42,7 @@ if ! "$AETHERC" "$tmpdir/case1.ae" "$tmpdir/case1.gen.c" 2>"$tmpdir/case1.err"; 
 fi
 
 # The C prototype must include the `...` after the named param.
-if ! grep -qE 'int my_format\(const char\*,\s*\.\.\.\)' "$tmpdir/case1.gen.c"; then
+if ! grep -qE 'int my_format\(const char\*,[[:space:]]*\.\.\.\)' "$tmpdir/case1.gen.c"; then
     echo "  [FAIL] case 1: extern prototype missing '...'"
     grep my_format "$tmpdir/case1.gen.c" | sed 's/^/    /'
     exit 1

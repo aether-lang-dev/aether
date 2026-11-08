@@ -1800,14 +1800,23 @@ void test_scheduler_stop_leaves_foreign_queue_alone(void) {
         if (start < (uintptr_t)&schedulers[i].from_queues[2] ||
             start + page > (uintptr_t)&schedulers[i].foreign_lock) guarded = 0;
     }
+    const char* why = "page of this size reaches past the queues";
     if (guarded) {
-        for (int i = 0; i < 2; i++) ASSERT_EQ(0, protect_pages(pages[i], page, 1));
+        // OpenBSD refuses mprotect on a program's .data and .bss (EPERM),
+        // where `schedulers` lives: there the call runs unguarded.
+        int done = 0;
+        while (done < 2 && protect_pages(pages[done], page, 1) == 0) done++;
+        if (done < 2) {
+            while (done > 0) ASSERT_EQ(0, protect_pages(pages[--done], page, 0));
+            guarded = 0;
+            why = "the system refuses mprotect on this page";
+        }
     }
     scheduler_stop();
     if (guarded) {
         for (int i = 0; i < 2; i++) ASSERT_EQ(0, protect_pages(pages[i], page, 0));
     } else {
-        printf("    (page of %zu bytes reaches past the queues: not guarded)\n", page);
+        printf("    (%zu-byte page not guarded: %s)\n", page, why);
     }
 
     scheduler_shutdown();

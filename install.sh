@@ -455,10 +455,16 @@ if [ "$EDITOR_ONLY" -eq 0 ]; then
     # dirname and cp for each of the 120 headers, three process starts
     # apiece, which took 14 to 30 seconds on Windows; the tar takes under
     # one (#2596).
+    # OpenBSD's tar has no -T; its pax copies a list the same way.
     for tree in runtime std; do
         mkdir -p "$INCLUDE_DIR/$tree"
-        (cd "$tree" && find . -name '*.h' -print | tar cf - -T -) |
-            (cd "$INCLUDE_DIR/$tree" && tar xf -)
+        if [ "$(uname -s)" = OpenBSD ]; then
+            _dest="$(cd "$INCLUDE_DIR/$tree" && pwd)"
+            (cd "$tree" && find . -name '*.h' -print | pax -rw "$_dest")
+        else
+            (cd "$tree" && find . -name '*.h' -print | tar cf - -T -) |
+                (cd "$INCLUDE_DIR/$tree" && tar xf -)
+        fi
     done
 
     # Runtime + stdlib source (sources are the fallback the compiler

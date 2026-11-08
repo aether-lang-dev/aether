@@ -55,17 +55,27 @@
 #  define AETHER_LOCALE_WIN32 0
 #endif
 
-// BSD/macOS expose snprintf_l and friends via <xlocale.h>.
+// macOS and FreeBSD/DragonFly expose snprintf_l and friends via <xlocale.h>.
+// NetBSD declares the same functions in <stdio.h>/<stdlib.h> and has no
+// <xlocale.h>. OpenBSD has newlocale/uselocale but no _l-suffixed printf or
+// strtod at all, so it takes the uselocale bracket on both sides.
 #if AETHER_HAS_LOCALE_CONV && !AETHER_LOCALE_WIN32
-#  if defined(__APPLE__) || defined(__FreeBSD__) || defined(__DragonFly__) || \
-      defined(__NetBSD__) || defined(__OpenBSD__)
+#  if defined(__APPLE__) || defined(__FreeBSD__) || defined(__DragonFly__)
 #    include <xlocale.h>
+#    define AETHER_HAS_SNPRINTF_L 1
+#  elif defined(__NetBSD__)
 #    define AETHER_HAS_SNPRINTF_L 1
 #  else
 #    define AETHER_HAS_SNPRINTF_L 0
 #  endif
 #else
 #  define AETHER_HAS_SNPRINTF_L 0
+#endif
+
+#if AETHER_HAS_LOCALE_CONV && !AETHER_LOCALE_WIN32 && !defined(__OpenBSD__)
+#  define AETHER_HAS_STRTOD_L 1
+#else
+#  define AETHER_HAS_STRTOD_L 0
 #endif
 
 // ---------------------------------------------------------------------------
@@ -512,12 +522,27 @@ double aether_c_strtod(const char* s, char** endptr) {
         return loc ? _strtod_l(s, endptr, loc) : strtod(s, endptr);
     }
 
-#else
-    // glibc, musl and the BSDs all provide strtod_l — no uselocale needed on
-    // the parse side anywhere.
+#elif AETHER_HAS_STRTOD_L
+    // glibc, musl, macOS, FreeBSD and NetBSD provide strtod_l, so no
+    // uselocale is needed on the parse side there.
     {
         aether_loc_t loc = aether_c_locale();
         return loc ? strtod_l(s, endptr, loc) : strtod(s, endptr);
+    }
+#else
+    // OpenBSD: no strtod_l, so bracket the thread's locale as the format side
+    // does.
+    {
+        aether_loc_t loc = aether_c_locale();
+        if (!loc) return strtod(s, endptr);
+        int saved_errno = errno;
+        locale_t previous = uselocale(loc);
+        errno = saved_errno;
+        double v = strtod(s, endptr);
+        int strtod_errno = errno;
+        uselocale(previous);
+        errno = strtod_errno;
+        return v;
     }
 #endif
 }
@@ -547,10 +572,23 @@ float aether_c_strtof(const char* s, char** endptr) {
         return loc ? _strtof_l(s, endptr, loc) : strtof(s, endptr);
     }
 
-#else
+#elif AETHER_HAS_STRTOD_L
     {
         aether_loc_t loc = aether_c_locale();
         return loc ? strtof_l(s, endptr, loc) : strtof(s, endptr);
+    }
+#else
+    {
+        aether_loc_t loc = aether_c_locale();
+        if (!loc) return strtof(s, endptr);
+        int saved_errno = errno;
+        locale_t previous = uselocale(loc);
+        errno = saved_errno;
+        float v = strtof(s, endptr);
+        int strtof_errno = errno;
+        uselocale(previous);
+        errno = strtof_errno;
+        return v;
     }
 #endif
 }

@@ -3383,8 +3383,9 @@ static int upstream_dial(const char* host, int port, HttpUpstreamConn* out) {
     aether_net_order(host, port, &addrs);
     out->addr_total = addrs.n;
     out->dial_host[0] = '\0';
-    if (addrs.n > 1 && strlen(host) < sizeof(out->dial_host)) {
-        strcpy(out->dial_host, host);
+    size_t host_len = strlen(host);
+    if (addrs.n > 1 && host_len < sizeof(out->dial_host)) {
+        memcpy(out->dial_host, host, host_len + 1);
         out->dial_port = port;
     }
 

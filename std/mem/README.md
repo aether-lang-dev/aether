@@ -208,9 +208,10 @@ main() {
     round(keep, false)
     println("no leak: ${mem.heap_in_use() - steady < 4096}")
 
+    // -1 where the allocator keeps no statistics: nothing to compare.
     before = mem.heap_in_use()
     round(keep, true)
-    println("leaked at least 100 blocks: ${mem.heap_in_use() - before >= 12800}")
+    println("leaked at least 100 blocks: ${before < 0 || mem.heap_in_use() - before >= 12800}")
 
     i = 0
     while i < 100 {
@@ -228,7 +229,9 @@ leaked at least 100 blocks: true
 The source per platform: glibc `mallinfo2`, macOS's malloc zones, Windows
 `HeapWalk` over the process's heaps, FreeBSD jemalloc's
 `stats.allocated`, and the sanitizer's allocator when built with one. It is
-`-1` where the allocator keeps no statistics (musl), and where the platform's
+`-1` where the allocator keeps no statistics (musl), on NetBSD and OpenBSD
+(NetBSD's jemalloc does not export `mallctl`; OpenBSD's malloc has no
+statistics interface), and where the platform's
 allocator is not the one serving malloc (under valgrind, or with an allocator
 preloaded in front of glibc's), since its numbers would stand still. For
 what the OS charges the process, page-granular and including mappings the

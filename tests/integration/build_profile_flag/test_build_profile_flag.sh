@@ -38,7 +38,11 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 SRC="$SCRIPT_DIR/probe.ae"
 
-if ! command -v readelf >/dev/null 2>&1; then
+# OpenBSD's base readelf is binutils 2.17, which has no -p; its base
+# llvm-readelf does.
+READELF=readelf
+[ "$(uname -s)" = OpenBSD ] && command -v llvm-readelf >/dev/null 2>&1 && READELF=llvm-readelf
+if ! command -v "$READELF" >/dev/null 2>&1; then
     echo "  [SKIP] build_profile_flag: readelf not on PATH"
     exit 0
 fi
@@ -59,7 +63,7 @@ export AETHER_CACHE_DIR
 # since FreeBSD's crt1.o/crtbegin.o carry their own, so every binary linked
 # there has one whether or not the program was built with -g.
 has_debug() {
-    { readelf -p .debug_str "$1"; readelf -p .debug_line_str "$1"; } 2>/dev/null \
+    { "$READELF" -p .debug_str "$1"; "$READELF" -p .debug_line_str "$1"; } 2>/dev/null \
         | grep -c "probe" || true
 }
 
@@ -103,7 +107,7 @@ fi
 # the files: clang's -O2 debug info (location lists) outgrows its -O0 debug
 # info by more than the code shrinks, so on FreeBSD the -O2 file is bigger.
 text_size() {
-    sz=$(readelf -SW "$1" 2>/dev/null | sed -n 's/^.*\] *//p' \
+    sz=$("$READELF" -SW "$1" 2>/dev/null | sed -n 's/^.*\] *//p' \
         | awk '$1 == ".text" { print $5; exit }')
     printf '%d' "0x${sz:-0}"
 }

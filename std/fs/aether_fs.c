@@ -150,6 +150,9 @@ void fs_watch_close(void* w) { (void)w; }
 #include <sys/param.h>
 #include <sys/ucred.h>
 #include <sys/mount.h>        // getmntinfo() for fs_try_mounts
+#elif defined(__NetBSD__)
+#include <sys/param.h>
+#include <sys/mount.h>        // getmntinfo() over struct statvfs
 #endif
 
 #ifdef _WIN32
@@ -280,6 +283,23 @@ static AetherString* read_stream_to_eof(FILE* fp) {
     return string_adopt_caps_buffer(buffer, len, cap);
 }
 
+/* A stream open on a directory. fopen(dir, "r") succeeds on every POSIX
+ * libc; Linux then fails the read with EISDIR, but NetBSD's read(2) returns
+ * the directory's raw entries, so fs.read("/tmp") succeeded with bytes in
+ * it. Refused before any read, with EISDIR, on every platform. */
+static int fs_stream_is_dir(FILE* fp) {
+#ifdef _WIN32
+    (void)fp;   /* fopen refuses a directory there */
+    return 0;
+#else
+    struct stat st;
+    int fd = fileno(fp);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+    errno = EISDIR;
+    return 1;
+#endif
+}
+
 /* The whole file as a refcounted AetherString carrying its byte count, so
  * fs.read returns every byte of a file with a NUL in it (#2469). It was a
  * bare `char*`, which the Aether side measured with strlen: a 5-byte
@@ -288,6 +308,7 @@ AetherString* file_read_all_raw(File* file) {
     if (!file || !file->is_open) return NULL;
 
     FILE* fp = (FILE*)file->handle;
+    if (fs_stream_is_dir(fp)) return NULL;
 
     /* Fast path for regular, seekable files: size the buffer from the file
      * length and read once. Fall through to the EOF loop when the file isn't
@@ -1549,13 +1570,18 @@ int fs_try_mounts(void) {
     }
     fclose(fp);
     return s_mount_count;
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     /* macOS / FreeBSD / OpenBSD share the `struct statfs` getmntinfo(3).
-     * NetBSD is deliberately NOT in this list: there getmntinfo fills a
-     * `struct statvfs` and the flag field is `f_flag`, not `f_flags`, so
-     * this body would not compile. It falls through to the unsupported
-     * branch and reports the error rather than shipping a shape nobody
-     * has built, which is how the MNT_NODEV break below reached CI. */
+     * NetBSD's getmntinfo fills a `struct statvfs` whose flag field is
+     * `f_flag`, not `f_flags`, with the same names otherwise (built and
+     * run on NetBSD 11.1). */
+#if defined(__NetBSD__)
+    typedef struct statvfs ae_mnt_t;
+#define AE_MNT_FLAGS(m) ((m).f_flag)
+#else
+    typedef struct statfs ae_mnt_t;
+#define AE_MNT_FLAGS(m) ((m).f_flags)
+#endif
     /* The optional mount flags this platform actually has. A flag is listed
      * only where the OS defines it, so the table IS the platform's flag set
      * rather than a full list with substitutes for the missing entries.
@@ -1572,18 +1598,18 @@ int fs_try_mounts(void) {
 #endif
         { MNT_NOEXEC, ",noexec" },
     };
-    struct statfs* mntbuf = NULL;
+    ae_mnt_t* mntbuf = NULL;
     int n = getmntinfo(&mntbuf, MNT_NOWAIT);
     if (n <= 0) return -1;
     for (int i = 0; i < n; i++) {
         char opts[128];
         int used = snprintf(opts, sizeof(opts), "%s",
-                            (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw");
+                            (AE_MNT_FLAGS(mntbuf[i]) & MNT_RDONLY) ? "ro" : "rw");
         if (used < 0) return -1;
         for (size_t k = 0;
              k < sizeof(k_optional_mount_flags) / sizeof(k_optional_mount_flags[0]);
              k++) {
-            if (!((unsigned long long)mntbuf[i].f_flags & k_optional_mount_flags[k].mask))
+            if (!((unsigned long long)AE_MNT_FLAGS(mntbuf[i]) & k_optional_mount_flags[k].mask))
                 continue;
             int w = snprintf(opts + used, sizeof(opts) - (size_t)used, "%s",
                              k_optional_mount_flags[k].name);
@@ -1915,6 +1941,10 @@ char* fs_read_binary_raw(const char* path, int* out_len) {
     if (!fp) {
         aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, errno);
         return NULL;
+    }
+    if (fs_stream_is_dir(fp)) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_IO, EISDIR);
+        fclose(fp); return NULL;
     }
 
     errno = 0;
@@ -3267,7 +3297,7 @@ DirList* fs_glob_raw(const char* pattern) {
         char dir[4096];
         int dirlen = (int)(dstar - pattern);
         if (dirlen == 0) {
-            strcpy(dir, ".");
+            memcpy(dir, ".", 2);
         } else {
             strncpy(dir, pattern, dirlen);
             dir[dirlen] = '\0';
@@ -3327,7 +3357,7 @@ DirList* fs_glob_raw(const char* pattern) {
         char dir[4096];
         int dirlen = (int)(dstar - pattern);
         if (dirlen == 0) {
-            strcpy(dir, ".");
+            memcpy(dir, ".", 2);
         } else {
             strncpy(dir, pattern, dirlen);
             dir[dirlen] = '\0';

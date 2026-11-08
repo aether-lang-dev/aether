@@ -30,9 +30,10 @@ main() {
     if err != "" { fail("io.read_file /proc/self/status errored: ${err}") }
     if string.length(status) == 0 { fail("io.read_file /proc/self/status returned empty (#1116 regressed)") }
     // Prove we got the whole file. Linux's status has a "Name:" line;
-    // FreeBSD's procfs status is one line of fields ("comm pid ppid ...")
-    // with no names, so there the whole read is the line and its newline.
-    when target.os == "freebsd" {
+    // FreeBSD's and NetBSD's procfs status is one line of fields ("comm pid
+    // ppid ...") with no names, so there the whole read is the line and its
+    // newline.
+    when target.os == "freebsd" || target.os == "netbsd" {
         if string.ends_with(status, "\n") == 0 { fail("io.read_file /proc/self/status has no trailing newline — got a partial read?") }
     } else {
         if string.contains(status, "Name:") == 0 { fail("io.read_file content missing 'Name:' — got a partial read?") }

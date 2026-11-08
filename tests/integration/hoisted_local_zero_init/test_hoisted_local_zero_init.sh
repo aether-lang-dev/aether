@@ -60,9 +60,9 @@ for decl in 'int late = 0;' 'int n = 0;' 'const char\* s = NULL;' 'P q = {0};' '
 done
 # No bare hoisted declaration of the program's locals is left (struct
 # field declarations are excluded by name).
-if grep -Eq '^\s*(int|double|const char\*|P) (late|n|s|q|f|name);$' "$tmp/out.c"; then
+if grep -Eq '^[[:space:]]*(int|double|const char\*|P) (late|n|s|q|f|name);$' "$tmp/out.c"; then
     echo "  [FAIL] hoisted_local_zero_init: an uninitialized hoisted declaration remains:"
-    grep -En '^\s*(int|double|const char\*|P) (late|n|s|q|f|name);$' "$tmp/out.c" | head -3 | sed 's/^/        /'
+    grep -En '^[[:space:]]*(int|double|const char\*|P) (late|n|s|q|f|name);$' "$tmp/out.c" | head -3 | sed 's/^/        /'
     fail=1
 fi
 

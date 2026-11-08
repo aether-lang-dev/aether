@@ -2488,6 +2488,7 @@ static int aetherc_main(int argc, char *argv[]);
 /* The whole of aetherc, the language server included, runs on the
  * compiler's own stack (aether_compile_stack.h). */
 int main(int argc, char *argv[]) {
+    module_set_argv0(argc > 0 ? argv[0] : NULL);
     return aether_run_on_compile_stack(aetherc_main, argc, argv);
 }
 
