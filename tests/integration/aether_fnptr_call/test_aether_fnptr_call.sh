@@ -186,7 +186,7 @@ for d in "$ROOT" "$ROOT/runtime" "$ROOT/runtime/actors" "$ROOT/runtime/scheduler
     INCLUDES="$INCLUDES -I$d"
 done
 
-if ! gcc $INCLUDES -o "$tmpdir/case4_bin" \
+if ! ${CC:-cc} $INCLUDES -o "$tmpdir/case4_bin" \
         "$tmpdir/case4.gen.c" "$tmpdir/case4_glue.c" \
         "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/case4.gcc.err"; then
     echo "  [FAIL] case 4: gcc returned non-zero"

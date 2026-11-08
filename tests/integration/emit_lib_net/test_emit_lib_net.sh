@@ -31,7 +31,7 @@ fi
 [ -f "$TMPDIR/libnetmod$LIB_EXT" ] || fail "no shared object produced"
 
 # Compile the C driver and run it against the .so.
-if ! gcc "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
+if ! ${CC:-cc} "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
     echo "--- gcc log:"; cat "$TMPDIR/gcc.log"; fail "could not compile consume.c"
 fi
 if ! OUT="$("$TMPDIR/consume" "$TMPDIR/libnetmod$LIB_EXT" 2>&1)"; then

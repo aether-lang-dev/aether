@@ -102,7 +102,7 @@ if [ -z "$LIB_PATH" ]; then
     exit 1
 fi
 # shellcheck disable=SC2086
-if ! gcc "$SCRIPT_DIR/host.c" $LDL -o "$TMPDIR/host" 2>"$TMPDIR/gcc.log"; then
+if ! ${CC:-cc} "$SCRIPT_DIR/host.c" $LDL -o "$TMPDIR/host" 2>"$TMPDIR/gcc.log"; then
     echo "  [FAIL] gcc could not compile host.c:"
     sed 's/^/        /' "$TMPDIR/gcc.log" | head -10
     exit 1

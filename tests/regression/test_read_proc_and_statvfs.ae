@@ -1,8 +1,9 @@
 // Regression: #1116 (io.read_file / fs.read no longer silently return "" for
 // /proc seq-files) and #1117 (fs.statvfs exact byte counts).
 //
-// Linux-only: /proc and statvfs. Skips cleanly elsewhere (macOS lacks /proc;
-// Windows has neither) so it stays green across the POSIX matrix.
+// /proc is Linux's and FreeBSD's (procfs, where mounted). Skips cleanly
+// elsewhere (macOS lacks /proc; Windows has neither) so it stays green across
+// the POSIX matrix.
 
 import std.io
 import std.fs
@@ -18,8 +19,7 @@ fail(msg: string) {
 
 main() {
     // /proc is Linux-specific; if it isn't there, there's nothing to regress.
-    // NetBSD mounts a /proc whose status file is one line with no "Name:".
-    if fs.exists("/proc/self/status") == 0 || os.platform() != "linux" {
+    if fs.exists("/proc/self/status") == 0 {
         println("SKIP: no /proc (non-Linux) — read-to-EOF path not exercised here")
         return
     }
@@ -29,8 +29,15 @@ main() {
     status, err = io.read_file("/proc/self/status")
     if err != "" { fail("io.read_file /proc/self/status errored: ${err}") }
     if string.length(status) == 0 { fail("io.read_file /proc/self/status returned empty (#1116 regressed)") }
-    // Every /proc/<pid>/status has a "Name:" line — prove we got real content.
-    if string.contains(status, "Name:") == 0 { fail("io.read_file content missing 'Name:' — got a partial read?") }
+    // Prove we got the whole file. Linux's status has a "Name:" line;
+    // FreeBSD's and NetBSD's procfs status is one line of fields ("comm pid
+    // ppid ...") with no names, so there the whole read is the line and its
+    // newline.
+    when target.os == "freebsd" || target.os == "netbsd" {
+        if string.ends_with(status, "\n") == 0 { fail("io.read_file /proc/self/status has no trailing newline — got a partial read?") }
+    } else {
+        if string.contains(status, "Name:") == 0 { fail("io.read_file content missing 'Name:' — got a partial read?") }
+    }
 
     // --- #1116 via the fs.read (open → file_read_all → close) path too.
     fstatus, ferr = fs.read("/proc/self/status")

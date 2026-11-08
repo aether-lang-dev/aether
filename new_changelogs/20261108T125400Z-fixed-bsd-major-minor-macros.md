@@ -1,1 +1,0 @@
-- **A function named `major`, `minor` or `makedev` compiles on the BSDs.** Their `<sys/types.h>`, which `<stdlib.h>` includes, defines these as function-like macros, so the C compiler saw the preprocessor's rewrite of the declaration. They are now mangled like the other libc names.

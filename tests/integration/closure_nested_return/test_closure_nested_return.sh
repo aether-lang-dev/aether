@@ -27,7 +27,7 @@ fi
 # closure's return type, causing a static int with no return path.
 # `-Werror=return-type` alone (not a blanket -Wall -Wextra -Werror)
 # avoids blessing the compiler's other warning decisions.
-if ! gcc -Werror=return-type \
+if ! ${CC:-cc} -Werror=return-type \
          -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
          -I"$ROOT/std" -I"$ROOT/std/io" -I"$ROOT/std/collections" \
          -c "$C_FILE" -o "$TMPDIR/out.o" 2>"$TMPDIR/gcc.log"; then

@@ -41,7 +41,7 @@ fi
 ng="$tmp/${name}_nogcc.c"
 { echo "#define AETHER_GCC_COMPAT 0"; sed '/^#line /d' "$c"; } > "$ng"
 # shellcheck disable=SC2086
-gcc -fsyntax-only -std=c11 -pedantic -Wno-unused-label $flags "$ng" > "$tmp/$name.log" 2>&1
+${CC:-cc} -fsyntax-only -std=c11 -pedantic -Wno-unused-label $flags "$ng" > "$tmp/$name.log" 2>&1
 
 found=""
 grep -q "braced-groups" "$tmp/$name.log" && found="a GNU statement expression"

@@ -41,6 +41,7 @@ else echo "  [SKIP] ae_add_release_artifact: no sha256 tool"; exit 0; fi
 # to git — nothing to assert here.
 case "$(uname -s)-$(uname -m)" in
     Linux-x86_64|Linux-aarch64|Linux-arm64|Darwin-arm64|Darwin-x86_64) ;;
+    FreeBSD-amd64|FreeBSD-arm64|FreeBSD-aarch64) ;;
     *) echo "  [SKIP] ae_add_release_artifact: no release triple for this host"; exit 0 ;;
 esac
 
@@ -64,9 +65,10 @@ fail() {
 case "$(uname -s)" in
     Linux)  OS_PART="linux" ;;
     Darwin) OS_PART="macos" ;;
+    FreeBSD) OS_PART="freebsd" ;;
 esac
 case "$(uname -m)" in
-    x86_64)          ARCH_PART="x86_64" ;;
+    x86_64|amd64)    ARCH_PART="x86_64" ;;   # FreeBSD says amd64
     aarch64|arm64)   ARCH_PART="arm64" ;;
 esac
 TRIPLE="$OS_PART-$ARCH_PART"

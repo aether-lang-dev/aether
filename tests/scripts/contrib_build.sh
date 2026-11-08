@@ -53,7 +53,7 @@ trap 'rm -rf "$STAGE"' EXIT
 # publish NAME: puts $STAGE/NAME in place as $OUT/NAME, in one rename.
 publish() { mv -f "$STAGE/$1" "$OUT/$1"; }
 
-CC="${CC:-gcc}"
+CC="${CC:-cc}"
 BASE_CFLAGS=(
     -O2 -fPIC -Wall -Wextra -Wno-unused-parameter -Wno-unused-function
     -DAETHER_HAS_SANDBOX

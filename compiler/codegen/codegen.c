@@ -2678,10 +2678,10 @@ int is_c_reserved_word(const char* name) {
         "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph",
         "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit",
         "tolower", "toupper",
-        /* The BSDs' <sys/types.h>, which their <stdlib.h> includes, defines
-           these as function-like macros (glibc keeps them in
-           <sys/sysmacros.h>). A user `major(seg: string)` was rewritten by
-           the preprocessor on NetBSD and OpenBSD and did not compile. */
+        /* The BSDs' <sys/types.h> (FreeBSD's, NetBSD's and OpenBSD's, which
+           their <stdlib.h> includes; glibc's before 2.28) defines these as
+           function-like macros, so a user `major(seg: string)` was rewritten
+           by the preprocessor and did not compile. */
         "major", "minor", "makedev",
         NULL
     };

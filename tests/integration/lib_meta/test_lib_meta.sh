@@ -49,7 +49,7 @@ fi
 
 # Compile the emitted C into a shared library.
 SO_PATH="$TMPDIR/script$SO_EXT"
-if ! gcc -fPIC -shared -O2 \
+if ! ${CC:-cc} -fPIC -shared -O2 \
         -I"$ROOT/runtime" -I"$ROOT/runtime/actors" \
         -I"$ROOT/runtime/scheduler" -I"$ROOT/runtime/utils" \
         -I"$ROOT/runtime/memory" -I"$ROOT/runtime/config" \

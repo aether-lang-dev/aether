@@ -11,7 +11,8 @@ ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] nul_literal_to_c: ae not built"; exit 0; }
-command -v gcc >/dev/null 2>&1 || { echo "  [SKIP] nul_literal_to_c: no gcc"; exit 0; }
+cc_cmd=${CC:-cc}
+command -v "${cc_cmd%% *}" >/dev/null 2>&1 || { echo "  [SKIP] nul_literal_to_c: no C compiler (${CC:-cc})"; exit 0; }
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) EXE=".exe" ;;
@@ -47,7 +48,7 @@ cd "$TMP" || exit 1
 "$AETHERC" nul.ae nul.c >aetherc.log 2>&1 || {
     echo "  [FAIL] nul_literal_to_c: aetherc refused nul.ae"; sed 's/^/    /' aetherc.log; exit 1; }
 # shellcheck disable=SC2046
-if ! gcc -fsyntax-only -Wall -Werror $(AETHER_HOME="$ROOT" "$AE" cflags --cflags) nul.c >gcc.log 2>&1; then
+if ! ${CC:-cc} -fsyntax-only -Wall -Werror $(AETHER_HOME="$ROOT" "$AE" cflags --cflags) nul.c >gcc.log 2>&1; then
     echo "  [FAIL] nul_literal_to_c: the generated C does not compile with -Wall -Werror"
     sed 's/^/    /' gcc.log | head -12
     exit 1

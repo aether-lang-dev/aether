@@ -21,10 +21,13 @@ TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 : > "$TMP/empty.grants"
 fail=0
+# true(1) is /bin/true on Linux, /usr/bin/true on FreeBSD.
+TRUE_BIN=/bin/true
+[ -x "$TRUE_BIN" ] || TRUE_BIN=/usr/bin/true
 
 LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/empty.grants" \
     AETHER_SANDBOX_LOG=none AETHER_SANDBOX_VERBOSE=0 \
-    /bin/true 2>"$TMP/zero.err"
+    "$TRUE_BIN" 2>"$TMP/zero.err"
 if grep -q '^AETHER_SANDBOX:' "$TMP/zero.err"; then
     echo "  [FAIL] AETHER_SANDBOX_VERBOSE=0 enabled stderr logging"
     fail=1
@@ -34,7 +37,7 @@ fi
 
 LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/empty.grants" \
     AETHER_SANDBOX_LOG=none AETHER_SANDBOX_VERBOSE=1 \
-    /bin/true 2>"$TMP/one.err"
+    "$TRUE_BIN" 2>"$TMP/one.err"
 if grep -q '^AETHER_SANDBOX: active with 0 grants$' "$TMP/one.err"; then
     echo "  [PASS] AETHER_SANDBOX_VERBOSE=1 enables stderr logging"
 else

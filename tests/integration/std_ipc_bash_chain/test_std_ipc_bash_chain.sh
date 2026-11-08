@@ -25,10 +25,15 @@ if [ ! -x "$AE" ]; then
     exit 0
 fi
 
-if [ ! -x /bin/bash ]; then
-    echo "  [SKIP] std_ipc_bash_chain: /bin/bash not available"
-    exit 0
-fi
+# bash is /bin/bash on Linux and macOS, /usr/local/bin/bash on FreeBSD
+# (a package). The probe runs the one named here.
+STD_IPC_BASH="$(command -v bash 2>/dev/null)"
+case "$STD_IPC_BASH" in
+    /*) ;;
+    *) echo "  [SKIP] std_ipc_bash_chain: bash not available"
+       exit 0 ;;
+esac
+export STD_IPC_BASH
 
 cd "$ROOT" || exit 1
 

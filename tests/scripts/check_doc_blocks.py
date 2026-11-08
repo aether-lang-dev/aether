@@ -42,6 +42,11 @@ A `run` block is followed by its expected output:
     hi
     ```
 
+Where one platform prints something else (a FreeBSD-only module that reports
+itself unavailable everywhere but FreeBSD), an ```output,<os> fence after the
+plain one holds that platform's output, and the check on that platform uses
+it: <os> is freebsd, linux, macos or windows.
+
 Compiling proves a function exists; running proves it does what the prose
 claims. The base64 example that shipped wrong in two files would have been
 caught by either, but an example whose OUTPUT drifted needs the second.
@@ -72,6 +77,18 @@ FENCE = re.compile(r"^```(aether[^\n]*)\n(.*?)^```", re.S | re.M)
 ENTRY = re.compile(r"^[ \t]*main\s*\(", re.M)
 KNOWN = {"", "run", "fragment", "fails", "nolink"}
 OUTPUT_FENCE = re.compile(r"\A\s*```output\n(.*?)^```", re.S | re.M)
+OS_OUTPUT_FENCE = re.compile(r"\A\s*```output,(\w+)\n(.*?)^```", re.S | re.M)
+
+
+def host_os():
+    """The <os> of an ```output,<os> fence that applies on this host."""
+    if sys.platform.startswith("freebsd"):
+        return "freebsd"
+    if sys.platform == "darwin":
+        return "macos"
+    if os.name == "nt" or sys.platform in ("cygwin", "msys"):
+        return "windows"
+    return "linux"
 
 
 def doc_files(root):
@@ -118,13 +135,19 @@ def blocks_in(path):
         tail = src[m.end():]
         om = OUTPUT_FENCE.match(tail)
         expected = om.group(1) if om else None
+        # Then any ```output,<os> fences: this host's replaces the plain one.
+        while om:
+            tail = tail[om.end():]
+            om = OS_OUTPUT_FENCE.match(tail)
+            if om and om.group(1) == host_os():
+                expected = om.group(2)
         yield line, label, m.group(2), expected
 
 
 LINK_ONLY_MARKERS = (
     "Undefined symbols",           # Apple ld
-    "undefined reference to",      # GNU ld
-    "undefined symbol: ",          # lld (OpenBSD's system linker)
+    "undefined reference to",      # GNU ld / lld in its GNU dialect
+    "error: undefined symbol:",    # lld (FreeBSD's ld)
     "unresolved external symbol",  # MSVC link
 )
 

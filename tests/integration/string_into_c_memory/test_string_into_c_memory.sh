@@ -148,7 +148,7 @@ else
 fi
 if [ "$(uname -s)" != Darwin ]; then
     WRAP="-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned"
-    if (cd "$TMP" && AETHER_HOME="$ROOT" AE_CC="${AE_CC:-gcc} $WRAP" "$AE" build "$SCRIPT_DIR/prog.ae" \
+    if (cd "$TMP" && AETHER_HOME="$ROOT" AE_CC="${AE_CC:-${CC:-cc}} $WRAP" "$AE" build "$SCRIPT_DIR/prog.ae" \
             --extra "$ROOT/tests/ownership_grid/poison_alloc.c" -o "$TMP/poisoned") > "$TMP/pbuild.log" 2>&1; then
         out="$(OWNERSHIP_GRID_POISON=1 "$TMP/poisoned" 2>&1)"
         if [ "$out" != "ok" ]; then

@@ -45,7 +45,7 @@ else
     else
         # Step 2: compile the C consumer
         # shellcheck disable=SC2086
-        if ! gcc "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
+        if ! ${CC:-cc} "$SCRIPT_DIR/consume.c" $LDL -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
             echo "  [FAIL] gcc could not compile consume.c"
             cat "$TMPDIR/gcc.log"
             fail=$((fail + 1))

@@ -33,7 +33,7 @@ gcc_log="$tmpdir/gcc.log"
 # int↔ptr conversions emitted by the builder/ctx lowering. The sink isn't
 # under test here, so don't bother linking — the regression is purely about
 # the generated C being clean under the harder warning.
-if ! gcc -c -Werror=int-conversion $inc "$c_file" -o "$tmpdir/probe.o" >"$gcc_log" 2>&1; then
+if ! ${CC:-cc} -c -Werror=int-conversion $inc "$c_file" -o "$tmpdir/probe.o" >"$gcc_log" 2>&1; then
     echo "  [FAIL] builder_int_factory_void_ptr_cast: gcc -Werror=int-conversion rejected the generated C"
     sed 's/^/    /' "$gcc_log" | head -40
     exit 1

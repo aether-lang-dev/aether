@@ -13,12 +13,12 @@
 
 set -e
 
-# The runtime captures a trace with backtrace() on glibc and macOS, and with
-# CaptureStackBackTrace on Windows (runtime/actors/aether_panic.c). NetBSD
-# keeps backtrace() in libexecinfo, which programs do not link, and OpenBSD
-# has none: there a panic prints its reason without a trace.
+# The runtime captures a trace with backtrace() (libc, or libexecinfo opened
+# when needed on FreeBSD and NetBSD) and CaptureStackBackTrace on Windows
+# (runtime/actors/aether_panic.c). OpenBSD has no backtrace(): there a panic
+# prints its reason without a trace.
 case "$(uname -s 2>/dev/null)" in
-    NetBSD|OpenBSD)
+    OpenBSD)
         echo "  [SKIP] panic_stack_trace: no stack-trace capture on $(uname -s)"
         exit 0 ;;
 esac

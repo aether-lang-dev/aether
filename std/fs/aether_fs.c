@@ -2783,7 +2783,18 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #else
-    if (chmod(path, (mode_t)(mode & 07777)) != 0) {
+    mode_t bits = (mode_t)(mode & 07777);
+    int rc = chmod(path, bits);
+#ifdef EFTYPE
+    /* FreeBSD (and the other BSDs) refuse the sticky bit on a
+     * non-directory for a non-root caller with EFTYPE; Linux and
+     * macOS accept it and ignore it. The bit means nothing on a file,
+     * so drop it and set the rest, as the other platforms do. */
+    if (rc != 0 && errno == EFTYPE && (bits & S_ISVTX)) {
+        rc = chmod(path, bits & (mode_t)~S_ISVTX);
+    }
+#endif
+    if (rc != 0) {
         int kind = aether_fs_errno_to_kind(errno);
         return aether_fs_iks_err(kind, "chmod failed");
     }

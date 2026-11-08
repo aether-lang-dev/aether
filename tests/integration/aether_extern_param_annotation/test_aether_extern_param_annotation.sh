@@ -86,7 +86,7 @@ fi
 
 # Runtime check.
 INC=$(find "$PREFIX/include/aether" -type d 2>/dev/null | sed 's|^|-I|' | tr '\n' ' ')
-gcc -O2 -Wall -Wextra -Werror $INC \
+${CC:-cc} -O2 -Wall -Wextra -Werror $INC \
     "$tmpdir/positive.c" "$tmpdir/helper.c" \
     -L"$PREFIX/lib/aether" -laether \
     -pthread -lm -ldl \

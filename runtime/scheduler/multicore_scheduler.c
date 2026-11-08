@@ -4517,17 +4517,22 @@ void* scheduler_ask_message_status(ActorBase* target, void* msg_data, size_t msg
     }
 
     /* The replier lets go of the slot just after it wakes this thread, from
-     * its own thread. Answered or failed, the ask waits for that, a few
-     * instructions, and lets go of the slot here, which is then free for
-     * this thread's next ask (#3245, #3533). A timed out ask does not wait;
-     * its replier lets the slot go when it comes, and neither does one its
-     * killed asker gave up: until then the next ask takes another. */
+     * its own thread. Answered or failed, the ask spins a moment for that,
+     * so the slot is free for this thread's next ask (#3533), and lets go
+     * of it here either way. It does not wait any longer: a replier
+     * preempted between its unlock and its decref may not run again for a
+     * time slice or more, and waiting it out (#3245 waited until it came,
+     * yielding) held the asker for up to 3.5 s on an oversubscribed
+     * FreeBSD host, where sched_yield gives the CPU to nothing on another
+     * run queue, and failed test_ask_slot_reuse. #3245 waited so the slot
+     * was freed before the ask returned; slots are lent, not freed, since
+     * #3533, so a slot the replier still holds is simply let go by it, as a
+     * timed out ask's is, and the next ask takes another meanwhile. A timed
+     * out ask, and one its killed asker gave up, do not spin at all. */
     if (*status != AETHER_ASK_TIMED_OUT && *status != AETHER_ASK_KILLED) {
-        int spins = 0;
-        while (atomic_load_explicit(&slot->refcount, memory_order_acquire) > 1) {
-            if (++spins < 256) AETHER_PAUSE();
-            else aether_sched_yield();
-        }
+        for (int spins = 0; spins < 256 &&
+             atomic_load_explicit(&slot->refcount, memory_order_acquire) > 1; spins++)
+            AETHER_PAUSE();
     }
     reply_slot_decref(slot);
     return result;

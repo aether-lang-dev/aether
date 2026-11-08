@@ -45,7 +45,7 @@ check_rejected reject_negative \
 
 for cc in default strict; do
     if [ "$cc" = strict ]; then
-        export AE_CC="${CC:-gcc} -DAETHER_GCC_COMPAT=0"
+        export AE_CC="${CC:-cc} -DAETHER_GCC_COMPAT=0"
     else
         unset AE_CC
     fi

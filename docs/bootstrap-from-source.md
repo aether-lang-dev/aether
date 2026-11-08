@@ -133,9 +133,9 @@ Known gaps:
   only. Listen on `0.0.0.0` as well for IPv4.
 - **No sendfile(2)** on either: `http.serve_file` reads the file into the
   response body, as on Windows.
-- **No stack trace on a panic**: the runtime captures one on glibc, macOS
-  and Windows; NetBSD's `backtrace()` is in libexecinfo, which programs do
-  not link, and OpenBSD has none. The panic's reason is still printed.
+- **No stack trace on a panic on OpenBSD**, which has no `backtrace()`
+  (NetBSD's libexecinfo is opened when a trace is needed, as FreeBSD's is).
+  The panic's reason is still printed.
 
 ---
 

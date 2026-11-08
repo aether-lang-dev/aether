@@ -27,7 +27,7 @@ else
     done
     if [ -z "$LIB_PATH" ]; then
         echo "  [FAIL] no lib produced"; fail=$((fail + 1))
-    elif ! gcc -I"$ROOT/runtime" "$SCRIPT_DIR/consume.c" "$LIB_PATH" $LINK_FLAGS -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
+    elif ! ${CC:-cc} -I"$ROOT/runtime" "$SCRIPT_DIR/consume.c" "$LIB_PATH" $LINK_FLAGS -o "$TMPDIR/consume" 2>"$TMPDIR/gcc.log"; then
         echo "  [FAIL] gcc consume.c"; cat "$TMPDIR/gcc.log"; fail=$((fail + 1))
     elif "$TMPDIR/consume" "$LIB_PATH" >"$TMPDIR/run.out" 2>&1; then
         echo "  [PASS] notify() claim-check round-trip"; pass=$((pass + 1))

@@ -29,7 +29,7 @@ fi
 tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
-if ! gcc -o "$tmpdir/harness" "$SCRIPT_DIR/harness.c" \
+if ! ${CC:-cc} -o "$tmpdir/harness" "$SCRIPT_DIR/harness.c" \
         "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/gcc.err"; then
     echo "  [FAIL] could not link the harness against libaether.a"
     sed 's/^/          /' "$tmpdir/gcc.err" | head -8

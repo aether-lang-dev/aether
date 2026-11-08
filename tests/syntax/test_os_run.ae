@@ -5,22 +5,30 @@
 // argv items are passed verbatim, so paths-with-spaces, $variables, |, ;,
 // *, and other shell metacharacters are not interpreted.
 //
-// Platform note: this test hardcodes Linux paths (/bin/true, /bin/false,
-// /bin/echo, /usr/bin/env, /usr/bin/seq) and Linux-specific behavior
-// (GNU echo, /usr/bin/seq exists). It SKIPs on:
+// Platform note: the programs are run by absolute path, found on PATH first
+// (true and false are /bin on Linux but /usr/bin on FreeBSD). It SKIPs on:
 //   - Windows: none of those paths exist there
 //   - macOS: /usr/bin/seq doesn't exist; /bin/echo differs (BSD vs GNU)
-//   - NetBSD, OpenBSD: true and false live in /usr/bin, not /bin
 
 import std.os
 import std.list
 import std.string
 
 extern exit(code: int)
+extern os_which(name: string) -> string @heap
 
 fail(msg: string) {
     println("FAIL: ${msg}")
     exit(1)
+}
+
+// The absolute path of a system program, which the test runs by that path.
+bin(name: string) -> string {
+    path = os_which(name)
+    if string.starts_with(path, "/") != 1 {
+        fail("${name} is not on PATH")
+    }
+    return path
 }
 
 // The program's stdout, failing the test if it could not be run.
@@ -48,26 +56,22 @@ main() {
         println("SKIP os_run: Linux-only paths (no /usr/bin/seq on macOS, BSD echo differs)")
         return
     }
-    if string.starts_with(uname, "NetBSD") == 1 || string.starts_with(uname, "OpenBSD") == 1 {
-        println("SKIP os_run: Linux-only paths (true and false are in /usr/bin here, not /bin)")
-        return
-    }
 
-    // 1. /bin/true should exit 0
+    // 1. true should exit 0
     argv = list.new()
-    if os.run("/bin/true", argv, null) != 0 { fail("/bin/true should return 0") }
+    if os.run(bin("true"), argv, null) != 0 { fail("true should return 0") }
 
-    // 2. /bin/false should exit 1
+    // 2. false should exit 1
     list.free(argv)
     argv = list.new()
-    if os.run("/bin/false", argv, null) != 1 { fail("/bin/false should return 1") }
+    if os.run(bin("false"), argv, null) != 1 { fail("false should return 1") }
 
-    // 3. /bin/echo with arguments, captured stdout
+    // 3. echo with arguments, captured stdout
     list.free(argv)
     argv = list.new()
     _a1 = list.add(argv, "hello")
     _a2 = list.add(argv, "world")
-    if capture("/bin/echo", argv, null) != "hello world\n" {
+    if capture(bin("echo"), argv, null) != "hello world\n" {
         fail("echo hello world produced unexpected output")
     }
 
@@ -79,7 +83,7 @@ main() {
     _a5 = list.add(argv, "*")
     _a6 = list.add(argv, ";")
     _a7 = list.add(argv, "rm -rf /")
-    if capture("/bin/echo", argv, null) != "$HOME | * ; rm -rf /\n" {
+    if capture(bin("echo"), argv, null) != "$HOME | * ; rm -rf /\n" {
         fail("shell metachars were interpreted instead of passed verbatim")
     }
 
@@ -88,7 +92,7 @@ main() {
     argv = list.new()
     _a8 = list.add(argv, "two words")
     _a9 = list.add(argv, "and another two")
-    if capture("/bin/echo", argv, null) != "two words and another two\n" {
+    if capture(bin("echo"), argv, null) != "two words and another two\n" {
         fail("spaces in argv items were not preserved")
     }
 
@@ -98,7 +102,7 @@ main() {
     env = list.new()
     _e1 = list.add(env, "FOO=bar")
     _e2 = list.add(env, "BAZ=qux")
-    out = capture("/usr/bin/env", argv, env)
+    out = capture(bin("env"), argv, env)
     if string.contains(out, "FOO=bar") == 0 { fail("FOO=bar not in env output") }
     if string.contains(out, "BAZ=qux") == 0 { fail("BAZ=qux not in env output") }
     list.free(env)
@@ -106,7 +110,7 @@ main() {
     // 7. A null env inherits the parent's environment.
     list.free(argv)
     argv = list.new()
-    if string.contains(capture("/usr/bin/env", argv, null), "PATH=") == 0 {
+    if string.contains(capture(bin("env"), argv, null), "PATH=") == 0 {
         fail("inherited env should include PATH")
     }
 
@@ -134,7 +138,7 @@ main() {
     argv = list.new()
     _a10 = list.add(argv, "1")
     _a11 = list.add(argv, "2000")
-    out = capture("/usr/bin/seq", argv, null)
+    out = capture(bin("seq"), argv, null)
     if string.length(out) < 5 { fail("seq output too short") }
     if string.index_of(out, "2000\n") < 0 {
         fail("seq output missing terminal '2000\\n'")
