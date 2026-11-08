@@ -56,8 +56,8 @@ export AETHER_CACHE_DIR
 
 has_debug() {
     case "$(uname -s)" in
-        NetBSD)
-            # NetBSD's crt0.o carries DWARF of its own, so every binary has a
+        NetBSD|OpenBSD)
+            # Their crt0.o carries DWARF of its own, so every binary has a
             # .debug_info section: look for the program's own compile unit.
             readelf --debug-dump=info "$1" 2>/dev/null | grep -c 'DW_AT_name.*probe\.c' || true ;;
         *)
