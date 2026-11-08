@@ -33,12 +33,14 @@ static void* lib_open(const char* p) { return (void*)LoadLibraryA(p); }
 static void* lib_open_global(const char* p) { return lib_open(p); }
 static void* lib_sym(void* h, const char* n) { return (void*)GetProcAddress((HMODULE)h, n); }
 static int lib_close(void* h) { return FreeLibrary((HMODULE)h) ? 0 : -1; }
+static void lib_why(void) { fprintf(stderr, "LoadLibrary error %lu\n", (unsigned long)GetLastError()); }
 #else
 #include <dlfcn.h>
 static void* lib_open(const char* p) { return dlopen(p, RTLD_NOW | RTLD_LOCAL); }
 static void* lib_open_global(const char* p) { return dlopen(p, RTLD_NOW | RTLD_GLOBAL); }
 static void* lib_sym(void* h, const char* n) { return dlsym(h, n); }
 static int lib_close(void* h) { return dlclose(h); }
+static void lib_why(void) { const char* e = dlerror(); fprintf(stderr, "%s\n", e ? e : "(no dlerror)"); }
 #endif
 
 #ifdef AETHER_HOST_ABI
@@ -96,9 +98,9 @@ int main(int argc, char** argv) {
      * image of its name), and the runtime's functions are in it; otherwise
      * they are the library's own copy. */
     void* rt = argc > 2 ? lib_open_global(argv[2]) : NULL;
-    if (argc > 2 && !rt) { printf("cannot load the runtime %s\n", argv[2]); return 2; }
+    if (argc > 2 && !rt) { lib_why(); printf("cannot load the runtime %s\n", argv[2]); return 2; }
     void* h = lib_open(argv[1]);
-    if (!h) { printf("cannot load the library\n"); return 2; }
+    if (!h) { lib_why(); printf("cannot load the library\n"); return 2; }
     if (!rt) rt = h;
 
     const AetherLibMeta* m = ((meta_fn)need(h, "aether_lib_meta"))();

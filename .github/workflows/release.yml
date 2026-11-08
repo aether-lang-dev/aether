@@ -686,6 +686,16 @@ jobs:
         GH_TOKEN: ${{ github.token }}
       run: |
         [ -f tests/integration/abi_matrix/test_abi_matrix.sh ] || exit 0
+        # The previous release's shared runtime links a system libfyaml
+        # (0.894.0 to 0.899.0), so it cannot be loaded without it, and the
+        # setup above installs none since std.yaml's is vendored (#3628):
+        # 0.900.0's matrix failed on "cannot load the runtime". Installed
+        # here, after this build and its tests, as ci.yml's matrix step does.
+        case "${{ matrix.os }}" in
+          ubuntu*) sudo apt-get install -y libfyaml-dev ||
+                       { sudo apt-get update && sudo apt-get install -y libfyaml-dev; } ;;
+          macos*) brew list libfyaml >/dev/null 2>&1 || brew install libfyaml ;;
+        esac
         prev="$RUNNER_TEMP/aether-prev"
         mkdir -p "$prev"
         gh release download --repo "${{ github.repository }}" --pattern "aether-*-${{ matrix.target }}.tar.gz" --dir "$RUNNER_TEMP"

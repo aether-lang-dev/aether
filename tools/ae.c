@@ -5797,10 +5797,18 @@ static void* ae_lib_sym(void* h, const char* name) {
     return (void*)GetProcAddress((HMODULE)h, name);
 }
 static void ae_lib_close(void* h) { FreeLibrary((HMODULE)h); }
+static void ae_lib_why(const char* path) {
+    fprintf(stderr, "note: %s is there to import, but could not be loaded (LoadLibrary error %lu)\n",
+            path, (unsigned long)GetLastError());
+}
 #else
 static void* ae_lib_open(const char* path) { return dlopen(path, RTLD_LAZY | RTLD_LOCAL); }
 static void* ae_lib_sym(void* h, const char* name) { return dlsym(h, name); }
 static void ae_lib_close(void* h) { dlclose(h); }
+static void ae_lib_why(const char* path) {
+    const char* e = dlerror();
+    fprintf(stderr, "note: %s is there to import, but could not be loaded: %s\n", path, e ? e : "(no reason given)");
+}
 #endif
 
 /* The directories of the binary libraries this build links, for staging
@@ -6082,7 +6090,10 @@ static int ae_refuse_split_ownership(const _AeLibInfoMeta* m, int minor, const c
  * modules and always declared. */
 static int ae_generate_binimport_stub(const char* so_path, const char* module, FILE* out) {
     void* h = ae_lib_open(so_path);
-    if (!h) return -1;
+    /* Said, or the import fails as "no module of that name" with the
+     * library right there: one whose dependencies the loader cannot find
+     * (an older release's shared runtime, linked to a system libfyaml). */
+    if (!h) { ae_lib_why(so_path); return -1; }
     ae_meta_fn_t mf = (ae_meta_fn_t)ae_lib_sym(h, "aether_lib_meta");
     if (!mf) { ae_lib_close(h); return -1; }
     const _AeLibInfoMeta* m = mf();
