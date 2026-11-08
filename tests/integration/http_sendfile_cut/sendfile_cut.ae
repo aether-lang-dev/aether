@@ -21,6 +21,7 @@
 // the connection closed. Listens on 127.0.0.1 and a port the kernel picks.
 
 import std.fs
+import std.os
 import std.http
 import std.string
 import std.tcp
@@ -54,6 +55,13 @@ status_lines(s: string) -> int {
 
 main() {
     println("=== a sendfile response cut short is not followed by a second one ===")
+    // Windows has no sendfile drain (http.serve_file never stages an fd
+    // there): the file is buffered into the body, so there is no drain to
+    // cut and nothing for this to test.
+    if os.platform() == "windows" {
+        println("  SKIP: no sendfile(2) fast path on Windows; serve_file buffers")
+        exit(0)
+    }
     dir, derr = fs.make_temp_dir("", "aesfcut")
     need("temp dir", derr)
     file = "${dir}/big.bin"
