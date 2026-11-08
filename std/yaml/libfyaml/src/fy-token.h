@@ -1,0 +1,529 @@
+/*
+ * fy-token.h - YAML token methods header
+ *
+ * Copyright (c) 2019 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#ifndef FY_TOKEN_H
+#define FY_TOKEN_H
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stdio.h>
+#include <stdarg.h>
+
+#include <libfyaml.h>
+
+#include "fy-typelist.h"
+#include "fy-utils.h"
+#include "fy-atom.h"
+
+extern const char *fy_token_type_txt[FYTT_COUNT];
+
+struct fy_document;
+struct fy_path_expr;
+
+static inline bool fy_token_type_is_sequence_start(enum fy_token_type type)
+{
+	return type == FYTT_BLOCK_SEQUENCE_START || type == FYTT_FLOW_SEQUENCE_START;
+}
+
+static inline bool fy_token_type_is_sequence_end(enum fy_token_type type)
+{
+	return type == FYTT_BLOCK_END || type == FYTT_FLOW_SEQUENCE_END;
+}
+
+static inline bool fy_token_type_is_sequence_marker(enum fy_token_type type)
+{
+	return fy_token_type_is_sequence_start(type) || fy_token_type_is_sequence_end(type);
+}
+
+static inline bool fy_token_type_is_mapping_start(enum fy_token_type type)
+{
+	return type == FYTT_BLOCK_MAPPING_START || type == FYTT_FLOW_MAPPING_START;
+}
+
+static inline bool fy_token_type_is_mapping_end(enum fy_token_type type)
+{
+	return type == FYTT_BLOCK_END || type == FYTT_FLOW_MAPPING_END;
+}
+
+static inline bool fy_token_type_is_mapping_marker(enum fy_token_type type)
+{
+	return fy_token_type_is_mapping_start(type) || fy_token_type_is_mapping_end(type);
+}
+
+static inline bool fy_token_type_is_text(enum fy_token_type type)
+{
+	return type == FYTT_SCALAR || type == FYTT_TAG ||
+	       type == FYTT_ANCHOR || type == FYTT_ALIAS;
+}
+
+struct fy_token_comment {
+	struct fy_token_comment *next;
+	enum fy_comment_placement placement;
+	struct fy_atom handle;
+	char *comment;
+};
+
+FY_TYPE_FWD_DECL_LIST(token);
+struct fy_token {
+	struct list_head node;
+	enum fy_token_type type;
+	int refs;		/* when on document, we switch to reference counting */
+	size_t text_len;
+	const char *text;
+	char *text0;		/* this is allocated */
+	struct fy_atom handle;
+	struct fy_token_comment *token_comment;
+	char *comments;		/* this is allocated */
+	union  {
+		struct {
+			unsigned int tag_length;	/* from start */
+			unsigned int uri_length;	/* from end */
+			char *prefix0;
+			char *handle0;
+			struct fy_tag tag;
+			bool is_default;		/* true when default */
+		} tag_directive;
+		struct {
+			enum fy_scalar_style style;
+			struct fy_mark style_start;
+			struct fy_mark style_end;
+			bool is_null;		/* special case; the scalar was NULL */
+		} scalar;
+		struct {
+			unsigned int skip;
+			unsigned int handle_length;
+			unsigned int suffix_length;
+			struct fy_token *fyt_td;
+			char *handle0;	/* zero terminated and allocated, only used by binding */
+			char *suffix0;
+			unsigned int short_length;
+			char *short0;	/* zero terminated and allocated for when the short tag is requested */
+			struct fy_tag tag;	/* prefix is now suffix */
+		} tag;
+		struct {
+			struct fy_version vers;		/* parsed version number */
+		} version_directive;
+		/* path expressions */
+		struct {
+			struct fy_document *fyd;	/* when key is complex */
+		} map_key;
+		struct {
+			int index;
+		} seq_index;
+		struct {
+			int start_index;
+			int end_index;
+		} seq_slice;
+		struct {
+			struct fy_mark style_start;
+			struct fy_path_expr *expr;
+		} alias;
+		struct {
+			struct fy_mark style_start;
+		} anchor;
+		struct {
+			int flow_level;
+		} key;
+	};
+};
+FY_TYPE_DECL_LIST(token);
+
+static inline bool fy_token_text_is_direct(struct fy_token *fyt)
+{
+	if (!fyt || !fyt->text)
+		return false;
+	return fyt->text && fyt->text != fyt->text0;
+}
+
+void fy_token_clean_rl(struct fy_token_list *fytl, struct fy_token *fyt);
+void fy_token_list_unref_all_rl(struct fy_token_list *fytl, struct fy_token_list *fytl_tofree);
+
+static inline FY_ALWAYS_INLINE struct fy_token *
+fy_token_alloc_rl(struct fy_token_list *fytl)
+{
+	struct fy_token *fyt;
+
+	fyt = NULL;
+	if (fytl)
+		fyt = fy_token_list_pop(fytl);
+	if (!fyt) {
+		fyt = malloc(sizeof(*fyt));
+		if (!fyt)
+			return NULL;
+	}
+
+	fyt->type = FYTT_NONE;
+	fyt->refs = 1;
+	fyt->text_len = 0;
+	fyt->text = NULL;
+	fyt->text0 = NULL;
+	fyt->token_comment = NULL;
+	fyt->comments = NULL;
+	fy_atom_reset(&fyt->handle);
+
+	return fyt;
+}
+
+static inline FY_ALWAYS_INLINE void
+fy_token_free_rl(struct fy_token_list *fytl, struct fy_token *fyt)
+{
+	if (!fyt)
+		return;
+
+	fy_token_clean_rl(fytl, fyt);
+
+	if (fytl)
+		fy_token_list_push(fytl, fyt);
+	else
+		free(fyt);
+}
+
+static inline FY_ALWAYS_INLINE void
+fy_token_unref_rl(struct fy_token_list *fytl, struct fy_token *fyt)
+{
+	if (!fyt)
+		return;
+
+	assert(fyt->refs > 0);
+
+	if (--fyt->refs == 0)
+		fy_token_free_rl(fytl, fyt);
+}
+
+static inline FY_ALWAYS_INLINE struct fy_token *
+fy_token_alloc(void)
+{
+	return fy_token_alloc_rl(NULL);
+}
+
+static inline FY_ALWAYS_INLINE void
+fy_token_clean(struct fy_token *fyt)
+{
+	fy_token_clean_rl(NULL, fyt);
+}
+
+static inline FY_ALWAYS_INLINE void
+fy_token_free(struct fy_token *fyt)
+{
+	fy_token_free_rl(NULL, fyt);
+}
+
+static inline FY_ALWAYS_INLINE struct fy_token *
+fy_token_ref(struct fy_token *fyt)
+{
+	/* take care of overflow */
+	if (!fyt)
+		return NULL;
+	assert(fyt->refs + 1 > 0);
+	fyt->refs++;
+
+	return fyt;
+}
+
+static inline FY_ALWAYS_INLINE void
+fy_token_unref(struct fy_token *fyt)
+{
+	fy_token_unref_rl(NULL, fyt);
+}
+
+static inline void
+fy_token_list_unref_all(struct fy_token_list *fytl_tofree)
+{
+	fy_token_list_unref_all_rl(NULL, fytl_tofree);
+}
+
+/* recycling aware */
+struct fy_token *fy_token_vcreate_rl(struct fy_token_list *fytl, enum fy_token_type type, va_list ap);
+struct fy_token *fy_token_create_rl(struct fy_token_list *fytl, enum fy_token_type type, ...);
+
+struct fy_token *fy_token_vcreate(enum fy_token_type type, va_list ap);
+struct fy_token *fy_token_create(enum fy_token_type type, ...);
+
+static inline struct fy_token *
+fy_token_list_vqueue(struct fy_token_list *fytl, enum fy_token_type type, va_list ap)
+{
+	struct fy_token *fyt;
+
+	fyt = fy_token_vcreate(type, ap);
+	if (!fyt)
+		return NULL;
+	fy_token_list_add_tail(fytl, fyt);
+	return fyt;
+}
+
+static inline struct fy_token *
+fy_token_list_queue(struct fy_token_list *fytl, enum fy_token_type type, ...)
+{
+	va_list ap;
+	struct fy_token *fyt;
+
+	va_start(ap, type);
+	fyt = fy_token_list_vqueue(fytl, type, ap);
+	va_end(ap);
+
+	return fyt;
+}
+
+size_t fy_tag_token_format_text_length(const struct fy_token *fyt);
+const char *fy_tag_token_format_text(const struct fy_token *fyt, char *buf, size_t maxsz);
+size_t fy_token_format_utf8_length(struct fy_token *fyt);
+
+size_t fy_token_format_text_length(struct fy_token *fyt);
+const char *fy_token_format_text(struct fy_token *fyt, char *buf, size_t maxsz);
+
+/* non-parser token methods */
+struct fy_atom *fy_token_atom(struct fy_token *fyt);
+
+static inline size_t fy_token_start_pos(struct fy_token *fyt)
+{
+	const struct fy_mark *start_mark;
+
+	if (!fyt)
+		return (size_t)-1;
+
+	start_mark = fy_token_start_mark(fyt);
+	return start_mark ? start_mark->input_pos : (size_t)-1;
+}
+
+static inline size_t fy_token_end_pos(struct fy_token *fyt)
+{
+	const struct fy_mark *end_mark;
+
+	if (!fyt)
+		return (size_t)-1;
+
+	end_mark = fy_token_end_mark(fyt);
+	return end_mark ? end_mark->input_pos : (size_t)-1;
+}
+
+static inline int fy_token_start_line(struct fy_token *fyt)
+{
+	const struct fy_mark *start_mark;
+
+	if (!fyt)
+		return -1;
+
+	start_mark = fy_token_start_mark(fyt);
+	return start_mark ? start_mark->line : -1;
+}
+
+static inline int fy_token_start_column(struct fy_token *fyt)
+{
+	const struct fy_mark *start_mark;
+
+	if (!fyt)
+		return -1;
+
+	start_mark = fy_token_start_mark(fyt);
+	return start_mark ? start_mark->column : -1;
+}
+
+static inline int fy_token_end_line(struct fy_token *fyt)
+{
+	const struct fy_mark *end_mark;
+
+	if (!fyt)
+		return -1;
+
+	end_mark = fy_token_end_mark(fyt);
+	return end_mark ? end_mark->line : -1;
+}
+
+static inline int fy_token_end_column(struct fy_token *fyt)
+{
+	const struct fy_mark *end_mark;
+
+	if (!fyt)
+		return -1;
+
+	end_mark = fy_token_end_mark(fyt);
+	return end_mark ? end_mark->column : -1;
+}
+
+static inline bool fy_token_is_multiline(struct fy_token *fyt)
+{
+	const struct fy_mark *start_mark, *end_mark;
+
+	if (!fyt)
+		return false;
+
+	start_mark = fy_token_start_mark(fyt);
+	end_mark = fy_token_end_mark(fyt);
+	return start_mark && end_mark ? end_mark->line > start_mark->line : false;
+}
+
+const char *fy_token_get_direct_output(struct fy_token *fyt, size_t *sizep);
+const char *fy_token_get_direct_simple_output(struct fy_token *fyt, size_t *sizep);
+
+static inline struct fy_input *fy_token_get_input(struct fy_token *fyt)
+{
+	return fyt ? fyt->handle.fyi : NULL;
+}
+
+static inline enum fy_atom_style fy_token_atom_style(struct fy_token *fyt)
+{
+	if (!fyt)
+		return FYAS_PLAIN;
+
+	if (fyt->type == FYTT_TAG)
+		return FYAS_URI;
+
+	return fyt->handle.style;
+}
+
+static inline bool fy_token_atom_json_mode(struct fy_token *fyt)
+{
+	if (!fyt)
+		return false;
+
+	return fy_atom_json_mode(&fyt->handle);
+}
+
+static inline enum fy_lb_mode fy_token_atom_lb_mode(struct fy_token *fyt)
+{
+	if (!fyt)
+		return fylb_cr_nl;
+
+	return fy_atom_lb_mode(&fyt->handle);
+}
+
+static inline enum fy_flow_ws_mode fy_token_atom_flow_ws_mode(struct fy_token *fyt)
+{
+	if (!fyt)
+		return fyfws_space_tab;
+
+	return fy_atom_flow_ws_mode(&fyt->handle);
+}
+
+static inline bool fy_token_is_lb(struct fy_token *fyt, int c)
+{
+	if (!fyt)
+		return false;
+
+	return fy_atom_is_lb(&fyt->handle, c);
+}
+
+static inline bool fy_token_is_flow_ws(struct fy_token *fyt, int c)
+{
+	if (!fyt)
+		return false;
+
+	return fy_atom_is_flow_ws(&fyt->handle, c);
+}
+
+const struct fy_text_analysis *fy_token_text_analyze(struct fy_token *fyt);
+
+void fy_analyze_scalar_content(const char *data, size_t size,
+			       enum fy_scalar_style sstyle,
+			       enum fy_lb_mode lb_mode, struct fy_text_analysis *analysis);
+
+/* must be freed */
+char *fy_token_debug_text(struct fy_token *fyt);
+
+#ifdef _MSC_VER
+/* MSVC version using thread-local buffer */
+#define FY_TOKEN_DEBUG_TEXT_A_BUFSZ 4096
+static __declspec(thread) char fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ];
+static __inline const char *fy_token_debug_text_a_impl(struct fy_token *fyt)
+{
+	char *buf = fy_token_debug_text(fyt);
+	if (!buf) return "";
+	strncpy(fy_token_debug_text_a_buf, buf, FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1);
+	fy_token_debug_text_a_buf[FY_TOKEN_DEBUG_TEXT_A_BUFSZ - 1] = '\0';
+	free(buf);
+	return fy_token_debug_text_a_buf;
+}
+#define fy_token_debug_text_a(_fyt) fy_token_debug_text_a_impl(_fyt)
+#else
+#define fy_token_debug_text_a(_fyt) \
+	({ \
+		struct fy_token *__fyt = (_fyt); \
+		char *_buf, *_rbuf = ""; \
+		size_t _len; \
+		_buf = fy_token_debug_text(__fyt); \
+		if (_buf) { \
+			_len = strlen(_buf); \
+			_rbuf = alloca(_len + 1); \
+			memcpy(_rbuf, _buf, _len + 1); \
+			free(_buf); \
+		} \
+		_rbuf; \
+	})
+#endif
+
+int fy_token_memcmp(struct fy_token *fyt, const void *ptr, size_t len);
+int fy_token_strcmp(struct fy_token *fyt, const char *str);
+int fy_token_cmp(struct fy_token *fyt1, struct fy_token *fyt2);
+
+struct fy_token_iter {
+	struct fy_token *fyt;
+	struct fy_iter_chunk ic;	/* direct mode */
+	struct fy_atom_iter atom_iter;
+	int unget_c;
+};
+
+void fy_token_iter_start(struct fy_token *fyt, struct fy_token_iter *iter);
+void fy_token_iter_finish(struct fy_token_iter *iter);
+
+const char *fy_tag_token_get_directive_handle(struct fy_token *fyt, size_t *td_handle_sizep);
+const char *fy_tag_token_get_directive_prefix(struct fy_token *fyt, size_t *td_prefix_sizep);
+
+static inline bool fy_token_is_number(struct fy_token *fyt)
+{
+	struct fy_atom *atom;
+
+	if (!fyt || fyt->type != FYTT_SCALAR || fyt->scalar.style != FYSS_PLAIN)
+		return false;
+	atom = fy_token_atom(fyt);
+	if (!atom)
+		return false;
+	return fy_atom_is_number(atom);
+}
+
+struct fy_atom *fy_token_comment_handle(struct fy_token *fyt, enum fy_comment_placement placement, bool alloc);
+bool fy_token_has_any_comment(struct fy_token *fyt);
+
+char *fy_token_get_scalar_path_key(struct fy_token *fyt, size_t *lenp);
+
+struct fy_atom *fy_token_comment_handle(struct fy_token *fyt, enum fy_comment_placement placement, bool alloc);
+
+static inline FY_ALWAYS_INLINE enum fy_scalar_style
+fy_token_scalar_style_inline(struct fy_token *fyt)
+{
+	if (!fyt || fyt->type != FYTT_SCALAR)
+		return FYSS_PLAIN;
+
+	if (fyt->type == FYTT_SCALAR)
+		return fyt->scalar.style;
+
+	return FYSS_PLAIN;
+}
+
+static inline FY_ALWAYS_INLINE enum fy_token_type
+fy_token_get_type_inline(struct fy_token *fyt)
+{
+	return fyt ? fyt->type : FYTT_NONE;
+}
+
+/* needs fy_input_unref(handle->fyi) */
+struct fy_atom *
+fy_token_get_style_atom(struct fy_token *fyt, struct fy_atom *dst_handle);
+
+/* return the token this handle is embedded to (if token_atom is set) */
+static inline struct fy_token *
+fy_atom_to_token(struct fy_atom *handle)
+{
+	return handle && handle->token_atom ?
+		container_of(handle, struct fy_token, handle) :
+		NULL;
+}
+
+#endif

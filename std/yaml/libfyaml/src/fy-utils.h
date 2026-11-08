@@ -1,0 +1,316 @@
+/*
+ * fy-utils.h - internal utilities header file
+ *
+ * Copyright (c) 2019 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+#ifndef FY_UTILS_H
+#define FY_UTILS_H
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <stdio.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+#include <assert.h>
+#include <stdlib.h>
+#include <string.h>
+
+#ifndef _WIN32
+#include <unistd.h>
+#include <termios.h>
+#include <sys/uio.h>
+#endif
+
+#include "fy-win32.h"
+
+/*
+ * Define FY_CPP_SHORT_NAMES to use shortened macro names in the implementation.
+ * This significantly reduces expansion buffer usage during recursive macro expansion,
+ * which can help avoid internal compiler errors and speed up compilation.
+ *
+ * The public API (FY_CPP_*) remains the same regardless of this setting.
+ */
+
+#define FY_CPP_SHORT_NAMES
+
+#if defined(__linux__)
+#include <sys/sysmacros.h>
+#endif
+
+#include <libfyaml/libfyaml-util.h>
+
+#if !defined(NDEBUG) && defined(HAVE_DEVMODE) && HAVE_DEVMODE
+#define FY_DEVMODE
+#else
+#undef FY_DEVMODE
+#endif
+
+#ifdef FY_DEVMODE
+#define __FY_DEBUG_UNUSED__	/* nothing */
+#else
+#if defined(__GNUC__) && __GNUC__ >= 4
+#define __FY_DEBUG_UNUSED__	__attribute__((__unused__))
+#else
+#define __FY_DEBUG_UNUSED__	/* nothing */
+#endif
+#endif
+
+#if defined(__APPLE__) && (_POSIX_C_SOURCE < 200809L)
+FILE *open_memstream(char **ptr, size_t *sizeloc);
+#endif
+
+int fy_tag_handle_length(const char *data, size_t len);
+bool fy_tag_uri_is_valid(const char *data, size_t len);
+int fy_tag_uri_length(const char *data, size_t len);
+
+struct fy_tag_scan_info {
+	int total_length;
+	int handle_length;
+	int uri_length;
+	int prefix_length;
+	int suffix_length;
+};
+
+int fy_tag_scan(const char *data, size_t len, struct fy_tag_scan_info *info);
+
+/* the non raw methods will set the terminal to raw and then restore */
+int fy_term_query_size(int fd, int *rows, int *cols);
+
+struct fy_comment_iter {
+	const char *start;
+	size_t size;
+	const char *end;
+	const char *next;
+	int line;
+};
+
+int fy_comment_iter_begin(const char *comment, size_t size, struct fy_comment_iter *iter);
+const char *fy_comment_iter_next_line(struct fy_comment_iter *iter, size_t *lenp);
+void fy_comment_iter_end(struct fy_comment_iter *iter);
+
+char *fy_get_cooked_comment(const char *raw_comment, size_t size);
+
+struct fy_keyword_iter {
+	const char *keyword;
+	size_t keyword_len;
+	const char *start;
+	size_t size;
+	const char *end;
+	const char *next;
+	int pc;
+};
+
+int fy_keyword_iter_begin(const char *text, size_t size, const char *keyword, struct fy_keyword_iter *iter);
+const char *fy_keyword_iter_next(struct fy_keyword_iter *iter);
+void fy_keyword_iter_advance(struct fy_keyword_iter *iter, size_t advance);
+void fy_keyword_iter_end(struct fy_keyword_iter *iter);
+
+#if !defined(S_ISREG) && defined(S_IFMT) && defined(S_IFREG)
+#define S_ISREG(m) (((m) & S_IFMT) == S_IFREG)
+#endif
+
+#if !defined(S_ISDIR) && defined(S_IFMT) && defined(S_IFDIR)
+#define S_ISDIR(m) (((m) & S_IFMT) == S_IFDIR)
+#endif
+
+static inline void fy_strip_trailing_nl(char *str)
+{
+	char *s;
+
+	if (str) {
+		s = str + strlen(str);
+		while (s > str && s[-1] == '\n')
+			*--s = '\0';
+	}
+}
+
+static inline size_t
+fy_iovec_size(const struct iovec *iov, int iovcnt)
+{
+	size_t size;
+	int i;
+
+	size = 0;
+	for (i = 0; i < iovcnt; i++) {
+#ifndef _MSC_VER
+		if (FY_ADD_OVERFLOW(size, iov[i].iov_len, &size))
+			return SIZE_MAX;
+#else
+		/* MSVC is hopeless, just open code it */
+		if ((ssize_t)iov[i].iov_len < 0)
+			return SIZE_MAX;
+		size += iov[i].iov_len;
+		if ((ssize_t)size < 0)
+			return SIZE_MAX;
+#endif
+	}
+	return size;
+}
+
+static inline void *
+fy_iovec_copy_from(const struct iovec *iov, int iovcnt, void *dst)
+{
+	size_t size;
+	int i;
+
+	for (i = 0; i < iovcnt; i++, dst = (void *)((char *)dst + size)) {
+		size = iov[i].iov_len;
+		if (!size)
+			continue;
+		memcpy(dst, iov[i].iov_base, size);
+	}
+	return dst;
+}
+
+static inline const void *
+fy_iovec_copy_to(const struct iovec *iov, int iovcnt, const void *src)
+{
+	size_t size;
+	int i;
+
+	for (i = 0; i < iovcnt; i++, src = (const void *)((const char *)src + size)) {
+		size = iov[i].iov_len;
+		if (!size)
+			continue;
+		memcpy(iov[i].iov_base, src, size);
+	}
+	return src;
+}
+
+static inline int
+fy_iovec_cmp(const struct iovec *iov, int iovcnt, const void *data)
+{
+	const void *s = data;
+	size_t size;
+	int i, ret;
+
+	for (i = 0; i < iovcnt; i++, s = (const void *)((const char *)s + size)) {
+		size = iov[i].iov_len;
+		if (!size)
+			continue;
+		ret = memcmp(iov[i].iov_base, s, size);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
+
+uint64_t fy_iovec_xxhash64(const struct iovec *iov, int iovcnt);
+
+/* detect whether we're running under asan */
+static inline bool
+fy_is_asan_enabled(void)
+{
+#if defined(__clang__) || defined(__GNUC__)
+#ifdef __SANITIZE_ADDRESS__
+	return true;
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+	return true;
+#else
+	return false;
+#endif
+#else
+	/*
+	 * On Apple a plain weak reference to an undefined symbol does not
+	 * resolve to NULL, it must be a weak_import; elsewhere use weak.
+	 */
+#if defined(__APPLE__)
+	extern void __asan_init(void) __attribute__((weak_import));
+#else
+	extern void __asan_init(void) __attribute__((weak));
+#endif
+	return __asan_init != NULL;
+#endif
+#else
+	return false;
+#endif
+}
+
+/* wrapper for memstream, on all platforms */
+struct fy_memstream;	// opaque
+
+struct fy_memstream *fy_memstream_open(FILE **fpp);
+char *fy_memstream_close(struct fy_memstream *fyms, size_t *sizep);
+
+#ifdef _WIN32
+wchar_t *fy_win32_u8tow(const char *s);
+char *fy_win32_wtou8(const wchar_t *w);
+#endif
+
+/* wrapper for creating a temporary file, on all platforms */
+FILE *fy_tmpfile(char *path, size_t pathsz);
+int fy_create_tmpfile(char *path, size_t pathsz, const void *data, size_t datasz);
+
+/* wrapper for a file rename (atomic if possible on most platforms) */
+int fy_rename(const char *old_file, const char *new_file, bool no_replace);
+
+/* atomically exchange two existing paths (RENAME_EXCHANGE); -1/ENOSYS if unsupported */
+int fy_rename_exchange(const char *file_a, const char *file_b);
+
+/* true if fy_rename_exchange() is available on this platform */
+bool fy_rename_exchange_supported(void);
+
+/* wrapper for realpath */
+const char *fy_realpath(const char *path, char *buf, size_t bufsize);
+
+/* the tmp directory, uses realpath to make absolute path */
+const char *fy_tmpdir(char *buf, size_t size);
+
+/* XDG_CACHE_HOME/${HOME}.config or LOCALAPPDATA on windows */
+/* uses realpath to make sure it's an absolute path */
+const char *fy_cachedir(char *buf, size_t size);
+
+#ifndef _WIN32
+int fy_win32_mktemp(char *tmpl, bool is_dir);
+#endif
+
+/* provide a working mkstemp/mkdtemp even on windows */
+int fy_mkstemp(char *tmpl);
+char *fy_mkdtemp(char *tmpl);
+
+/* default fixed virtual base for the @region'th large fixed-base mmap region. */
+uint64_t fy_default_fixed_vm_base(unsigned int region);
+
+/*default reserved size for the @region'th large fixed-base mmap region. */
+uint64_t fy_default_fixed_vm_size(unsigned int region);
+
+/* filesystem of @fd safe for cross-process, file-backed shared atomics check */
+bool fy_fd_fs_is_local(int fd);
+
+/* path separator */
+#ifndef _WIN32
+#define FY_PS	"/"
+#define FY_PSC	'/'
+#else
+#define FY_PS	"\\"
+#define FY_PSC	'\\'
+#endif
+
+/* portable file pre-allocation like posix_fallocate() */
+int fy_fallocate(int fd, off_t offset, off_t len);
+
+/*
+ * Portable mmap abstraction. The FY_MMAP_* flags below map onto the native
+ * mmap() flags, except FY_MMAP_FIXED_NOREPLACE which is platform specific.
+ */
+#define FY_MMAP_SHARED		FY_BIT(0)	/* MAP_SHARED (else MAP_PRIVATE) */
+#define FY_MMAP_ANON		FY_BIT(1)	/* MAP_ANONYMOUS */
+#define FY_MMAP_NORESERVE	FY_BIT(2)	/* MAP_NORESERVE (advisory) */
+#define FY_MMAP_FIXED		FY_BIT(3)	/* MAP_FIXED (map at addr, replace) */
+#define FY_MMAP_FIXED_NOREPLACE	FY_BIT(4)	/* map at addr, fail if occupied */
+
+void *fy_mmap(void *addr, size_t len, int prot, unsigned int flags,
+	      int fd, off_t offset);
+int fy_munmap(void *addr, size_t len);
+
+/* portable way to find size of the current thread's stack */
+size_t fy_stack_size(void);
+
+#endif

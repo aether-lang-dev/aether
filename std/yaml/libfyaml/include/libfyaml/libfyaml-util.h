@@ -1,0 +1,1083 @@
+/*
+ * libfyaml-util.h - Various utilities for libfyaml
+ *
+ * Copyright (c) 2019-2025 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
+ *
+ * Permission is hereby granted, free of charge, to any person obtaining a copy
+ * of this software and associated documentation files (the "Software"), to deal
+ * in the Software without restriction, including without limitation the rights
+ * to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+ * copies of the Software, and to permit persons to whom the Software is
+ * furnished to do so, subject to the following conditions:
+ *
+ * The above copyright notice and this permission notice shall be included in all
+ * copies or substantial portions of the Software.
+ *
+ * THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+ * IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+ * FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+ * AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+ * LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+ * OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+ * SOFTWARE.
+ *
+ * SPDX-License-Identifier: MIT
+ */
+
+/*
+ * NOTE: This file contains internals that are not part of the public API.
+ * Things may change at any time. Use at your own peril.
+ */
+
+#ifndef LIBFYAML_UTIL_H
+#define LIBFYAML_UTIL_H
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+#include <stdint.h>
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdarg.h>
+#include <stdio.h>
+#include <string.h>
+#include <stdlib.h>
+#include <limits.h>
+#include <assert.h>
+#include <float.h>
+#ifdef __sun
+/* illumos/Solaris declare alloca() only in <alloca.h> */
+#include <alloca.h>
+#endif
+
+#if defined (__unix__) || (defined (__APPLE__) && defined (__MACH__))
+#include <unistd.h>
+#include <sys/uio.h>
+#elif defined(_WIN32)
+/* Windows compatibility definitions */
+#ifndef _SSIZE_T_DEFINED
+#define _SSIZE_T_DEFINED
+#ifdef _WIN64
+typedef __int64 ssize_t;
+#else
+typedef int ssize_t;
+#endif
+#endif
+/* Windows doesn't have sys/uio.h, provide iovec definition */
+#ifndef _FY_IOVEC_DEFINED
+#define _FY_IOVEC_DEFINED
+struct iovec {
+	void *iov_base;
+	size_t iov_len;
+};
+#endif
+#else
+#include <sys/uio.h>
+#endif
+
+/**
+ * DOC: General-purpose utility macros and portability helpers
+ *
+ * This header provides the low-level building blocks shared by all other
+ * libfyaml public headers.  It has no libfyaml dependencies of its own and
+ * is safe to include in isolation.
+ *
+ * **Platform portability**
+ *
+ * - ``ssize_t`` shim for MSVC / Windows toolchains
+ * - ``struct iovec`` shim for Windows (``sys/uio.h`` substitute)
+ * - ``FY_EXPORT`` / ``FY_DEPRECATED`` / ``FY_FORMAT`` — symbol visibility
+ *   and compiler-attribute portability macros
+ * - ``FY_UNUSED``, ``FY_ALWAYS_INLINE``, ``FY_DEBUG_UNUSED`` — compiler hint
+ *   wrappers with safe fallbacks on non-GCC/Clang toolchains
+ * - ``FY_CONSTRUCTOR`` / ``FY_DESTRUCTOR`` — GCC-style constructor/destructor
+ *   attributes with availability guards (``FY_HAS_CONSTRUCTOR``,
+ *   ``FY_HAS_DESTRUCTOR``)
+ *
+ * **Core constants and sentinel values**
+ *
+ * - ``FY_BIT(x)``   — single-bit mask (``1U << x``)
+ * - ``FY_NT``       — sentinel meaning "null-terminated"; pass as a length
+ *   argument to indicate that the string length should be inferred via strlen
+ *
+ * **Memory helpers**
+ *
+ * - ``FY_ALLOCA_COPY_FREE`` / ``FY_ALLOCA_COPY_FREE_NO_NULL`` — copy a
+ *   malloc-returned string onto the stack and immediately free the heap
+ *   allocation; produces an alloca-lifetime copy in a single expression
+ * - ``fy_vsprintfa`` / ``fy_sprintfa`` — printf-style formatting into a
+ *   stack-allocated (alloca) buffer; the result is valid for the lifetime
+ *   of the enclosing function
+ *
+ * **Container and array helpers**
+ *
+ * - ``container_of`` — recover a pointer to an enclosing struct from a
+ *   pointer to one of its members
+ * - ``ARRAY_SIZE``   — number of elements in a stack-allocated array
+ *
+ * **Type safety and compile-time checks**
+ *
+ * - ``FY_SAME_TYPE`` / ``FY_CHECK_SAME_TYPE`` — assert two expressions share
+ *   the same C type (wraps ``__builtin_types_compatible_p`` with a fallback)
+ * - ``FY_COMPILE_ERROR_ON_ZERO`` — produce a compile-time error when the
+ *   argument evaluates to zero; used for macro-level static assertions
+ *
+ * **Overflow-safe arithmetic**
+ *
+ * - ``FY_ADD_OVERFLOW``, ``FY_SUB_OVERFLOW``, ``FY_MUL_OVERFLOW`` — wrappers
+ *   around ``__builtin_*_overflow`` with portable fallback implementations
+ *
+ * **Miscellaneous**
+ *
+ * - ``FY_IMPOSSIBLE_ABORT`` — mark unreachable code paths; aborts at runtime
+ * - ``FY_STACK_SAVE`` / ``FY_STACK_RESTORE`` — save and restore the stack
+ *   pointer for alloca-based temporary arenas
+ * - Lambda / closure macros and a CPP metaprogramming framework for
+ *   building variadic generic APIs
+ * - Diagnostic helpers and floating-point precision constants
+ */
+
+/* make things fail easy on non GCC/clang */
+#ifndef __has_builtin
+/**
+ * __has_builtin() - Fallback for compilers that do not provide __has_builtin.
+ *
+ * Always evaluates to 0 (false) so that all ``#if __has_builtin(...)`` guards
+ * safely fall back to the portable implementation.
+ *
+ * @x: The builtin name to query.
+ *
+ * Returns: 0.
+ */
+#define __has_builtin(x) 0
+#endif
+
+/**
+ * FY_BIT() - Produce an unsigned bitmask with bit @x set.
+ *
+ * @x: Zero-based bit position (0–31 for a 32-bit result).
+ *
+ * Returns: ``1U << x``.
+ */
+#ifndef FY_BIT
+#define FY_BIT(x) (1U << (x))
+#endif
+
+/**
+ * FY_NT - Sentinel value meaning "null-terminated; compute length at runtime".
+ *
+ * Pass as the @len argument to any libfyaml function that accepts a
+ * ``(const char *str, size_t len)`` pair to indicate that @str is a
+ * NUL-terminated C string whose length should be determined with ``strlen()``.
+ *
+ * Value: ``(size_t)-1``
+ */
+/* NULL terminated string length specifier */
+#define FY_NT	((size_t)-1)
+
+/**
+ * fy_str_empty() - Test whether a string is missing or empty.
+ *
+ * A NULL string is empty. The function evaluates @str once.
+ *
+ * @str: String to test; may be NULL.
+ *
+ * Returns:
+ * true if @str is NULL or holds no characters.
+ */
+static inline bool fy_str_empty(const char *str)
+{
+	return str == NULL || *str == '\0';
+}
+
+#if defined(__GNUC__) && __GNUC__ >= 4
+/**
+ * FY_EXPORT - Mark a symbol as part of the shared-library public ABI.
+ *
+ * On GCC/Clang (version >= 4) expands to ``__attribute__((visibility("default")))``,
+ * overriding ``-fvisibility=hidden`` for the annotated symbol.
+ * On other compilers expands to nothing (all symbols are visible by default).
+ */
+#define FY_EXPORT __attribute__ ((visibility ("default")))
+/**
+ * FY_DEPRECATED - Mark a function or variable as deprecated.
+ *
+ * On GCC/Clang expands to ``__attribute__((deprecated))``, causing a
+ * compile-time warning whenever the annotated symbol is used.
+ * On other compilers expands to nothing.
+ */
+#define FY_DEPRECATED __attribute__ ((deprecated))
+/**
+ * FY_FORMAT() - Annotate a function with printf-style format checking.
+ *
+ * On GCC/Clang expands to ``__attribute__((format(_t, _x, _y)))``, enabling
+ * the compiler to type-check the format string and variadic arguments.
+ *
+ * @_t: Format type token (e.g. ``printf``, ``scanf``, ``strftime``).
+ * @_x: 1-based index of the format-string parameter.
+ * @_y: 1-based index of the first variadic argument (0 for ``va_list`` wrappers).
+ */
+#define FY_FORMAT(_t, _x, _y) __attribute__ ((format(_t, _x, _y)))
+#else
+#define FY_EXPORT /* nothing */
+#define FY_DEPRECATED /* nothing */
+#define FY_FORMAT(_t, x, y)	/* nothing */
+#endif
+
+#ifdef _MSC_VER
+/*
+ * MSVC doesn't support GCC statement expressions, so we provide
+ * function-based alternatives using thread-local storage.
+ */
+#define FY_ALLOCA_COPY_FREE_BUFSZ 8192
+static __declspec(thread) char fy_alloca_copy_free_buf[FY_ALLOCA_COPY_FREE_BUFSZ];
+
+static __inline const char *fy_alloca_copy_free_impl(char *str, size_t len)
+{
+	size_t actual_len;
+	if (!str)
+		return NULL;
+	actual_len = (len == FY_NT) ? strlen(str) : len;
+	if (actual_len >= FY_ALLOCA_COPY_FREE_BUFSZ)
+		actual_len = FY_ALLOCA_COPY_FREE_BUFSZ - 1;
+	memcpy(fy_alloca_copy_free_buf, str, actual_len);
+	fy_alloca_copy_free_buf[actual_len] = '\0';
+	free(str);
+	return fy_alloca_copy_free_buf;
+}
+
+#define FY_ALLOCA_COPY_FREE(_str, _len) \
+	fy_alloca_copy_free_impl((_str), (size_t)(_len))
+
+#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len) \
+	(fy_alloca_copy_free_impl((_str), (size_t)(_len)) ? fy_alloca_copy_free_buf : "")
+
+#else
+
+/**
+ * FY_ALLOCA_COPY_FREE() - Copy a heap string onto the stack and free the original.
+ *
+ * Expands to a statement expression that:
+ * 1. Copies @_str (up to @_len bytes, or the full NUL-terminated length when
+ *    @_len is %FY_NT) into a NUL-terminated stack buffer via ``alloca()``.
+ * 2. Calls ``free(@_str)`` to release the heap allocation.
+ * 3. Evaluates to a ``const char *`` pointing to the stack copy.
+ *
+ * When @_str is NULL the macro evaluates to NULL and performs no copy or free.
+ *
+ * The stack buffer is valid only for the lifetime of the enclosing function.
+ * Do not call this in a loop — each invocation grows the stack frame.
+ *
+ * @_str: Heap-allocated string to copy and free (may be NULL).
+ * @_len: Length in bytes, or %FY_NT to use ``strlen()``.
+ *
+ * Returns: ``const char *`` to the stack copy, or NULL if @_str was NULL.
+ */
+#define FY_ALLOCA_COPY_FREE(_str, _len)				\
+        ({							\
+                char *__str = (_str), *__stra = NULL;		\
+                size_t __len = (size_t)(_len);			\
+								\
+		if (__str) {					\
+			if (__len == FY_NT) 			\
+				__len = strlen(__str);		\
+			__stra = alloca(__len + 1);		\
+			memcpy(__stra, __str, __len);		\
+			__stra[__len] = '\0';			\
+			free(__str);				\
+		}						\
+                (const char *)__stra;				\
+        })
+
+/**
+ * FY_ALLOCA_COPY_FREE_NO_NULL() - Like FY_ALLOCA_COPY_FREE() but returns "" for NULL.
+ *
+ * Identical to %FY_ALLOCA_COPY_FREE but substitutes an empty string literal
+ * ``""`` when @_str is NULL, so callers never receive a NULL pointer.
+ *
+ * @_str: Heap-allocated string to copy and free (may be NULL).
+ * @_len: Length in bytes, or %FY_NT to use ``strlen()``.
+ *
+ * Returns: ``const char *`` to the stack copy, or ``""`` if @_str was NULL.
+ */
+#ifndef FY_ALLOCA_COPY_FREE_NO_NULL
+#define FY_ALLOCA_COPY_FREE_NO_NULL(_str, _len)			\
+        ({							\
+                const char *__strb;				\
+								\
+		__strb = FY_ALLOCA_COPY_FREE(_str, _len);	\
+		if (!__strb)					\
+			__strb = "";				\
+		__strb;						\
+        })
+#endif
+#endif
+
+/**
+ * container_of() - Recover a pointer to a containing struct from a member pointer.
+ *
+ * Given a pointer @ptr to a field named @member inside a struct of type @type,
+ * returns a pointer to the enclosing @type instance.
+ *
+ * Uses ``__typeof__`` to catch type mismatches at compile time (GCC/Clang).
+ *
+ * @ptr:    Pointer to the member field.
+ * @type:   Type of the containing struct.
+ * @member: Name of the member field within @type.
+ *
+ * Returns: Pointer to the containing struct of type @type.
+ */
+#ifndef container_of
+#if defined(_MSC_VER)
+#define container_of(ptr, type, member) \
+	((type *)((char *)(ptr) - offsetof(type, member)))
+#else
+#define container_of(ptr, type, member) \
+	({ \
+		const __typeof__(((type *)0)->member) *__mptr = (ptr); \
+		(type *)((void *)__mptr - offsetof(type,member)); \
+	 })
+#endif /* _MSC_VER */
+#endif /* container_of */
+
+/**
+ * ARRAY_SIZE() - Compute the number of elements in a stack-allocated array.
+ *
+ * Evaluates to a compile-time constant. Only valid for arrays with a known
+ * size at compile time (not pointers or VLAs).
+ *
+ * @x: The array expression.
+ *
+ * Returns: Number of elements, as a ``size_t``.
+ */
+#ifndef ARRAY_SIZE
+#define ARRAY_SIZE(x) ((sizeof(x)/sizeof((x)[0])))
+#endif
+
+/*
+ * FY_UNUSED - Suppress "unused variable/parameter" warnings.
+ *
+ * On GCC/Clang (version >= 4) expands to ``__attribute__((unused))``.
+ * On other compilers expands to nothing.
+ *
+ * Use on parameters or local variables that are intentionally unreferenced,
+ * e.g. in debug-only code paths.
+ */
+#if defined(__GNUC__) && __GNUC__ >= 4
+#define FY_UNUSED __attribute__((unused))
+#else
+#define FY_UNUSED /* nothing */
+#endif
+
+#if defined(__GNUC__) && __GNUC__ >= 4
+/**
+ * FY_CONSTRUCTOR - Run a function automatically before main().
+ *
+ * On GCC/Clang expands to ``__attribute__((constructor))``. Also defines
+ * %FY_HAS_CONSTRUCTOR so callers can detect support at compile time.
+ * On other compilers expands to nothing and %FY_HAS_CONSTRUCTOR is not defined.
+ */
+#define FY_CONSTRUCTOR __attribute__((constructor))
+/**
+ * FY_DESTRUCTOR - Run a function automatically after main() (or on exit()).
+ *
+ * On GCC/Clang expands to ``__attribute__((destructor))``. Also defines
+ * %FY_HAS_DESTRUCTOR so callers can detect support at compile time.
+ * On other compilers expands to nothing and %FY_HAS_DESTRUCTOR is not defined.
+ */
+#define FY_DESTRUCTOR __attribute__((destructor))
+#define FY_HAS_CONSTRUCTOR
+#define FY_HAS_DESTRUCTOR
+#else
+#define FY_CONSTRUCTOR /* nothing */
+#define FY_DESTRUCTOR /* nothing */
+#endif
+
+/*
+ * FY_ALWAYS_INLINE - Force inlining of a function regardless of optimisation level.
+ *
+ * Expands to __attribute__((always_inline)) on GCC/Clang when NDEBUG
+ * is defined (i.e. in release builds). In debug builds expands to nothing so
+ * that functions remain visible to the debugger.
+ */
+#if defined(NDEBUG) && (defined(__GNUC__) && __GNUC__ >= 4)
+#define FY_ALWAYS_INLINE __attribute__((always_inline))
+#else
+#define FY_ALWAYS_INLINE /* nothing */
+#endif
+
+/**
+ * FY_DEBUG_UNUSED - Mark a variable as potentially unused in non-debug builds.
+ *
+ * Expands to ``__attribute__((unused))`` on GCC/Clang when ``NDEBUG`` is
+ * defined, silencing warnings for variables that are only referenced inside
+ * ``assert()`` calls (which disappear in release builds).
+ * In debug builds (``NDEBUG`` not set) expands to nothing.
+ */
+#if defined(NDEBUG) && defined(__GNUC__) && __GNUC__ >= 4
+#define FY_DEBUG_UNUSED __attribute__((unused))
+#else
+#define FY_DEBUG_UNUSED /* nothing */
+#endif
+
+/*
+ * FY_DESTRUCTOR_SHOW_LEFTOVERS - Defined when destructor-based leak reporting is active.
+ *
+ * Defined when both %FY_DESTRUCTOR (constructor/destructor attribute support)
+ * and ``NDEBUG`` are in effect. Internal subsystems use this flag to register
+ * ``FY_DESTRUCTOR`` functions that log any objects still alive at process exit,
+ * providing a lightweight leak summary in release builds.
+ */
+#if defined(FY_DESTRUCTOR) && defined(NDEBUG)
+#define FY_DESTRUCTOR_SHOW_LEFTOVERS
+#endif
+
+/**
+ * FY_IMPOSSIBLE_ABORT() - Assert that an unreachable code path has been reached.
+ *
+ * Calls ``assert(0)`` followed by ``abort()`` to terminate the process
+ * immediately. Use to mark code paths that must never execute in a correct
+ * program, such as the default branch of a switch that covers all enum values.
+ *
+ * The double invocation ensures termination even when assertions are disabled
+ * (``NDEBUG``).
+ */
+/* something impossible is happening, assert/abort */
+#define FY_IMPOSSIBLE_ABORT() \
+	do { \
+		assert(0); \
+		abort(); \
+	} while(0)
+
+/**
+ * FY_COMPILE_ERROR_ON_ZERO() - Trigger a compile error if expression @_e is zero.
+ *
+ * Evaluates @_e at compile time. If @_e is zero, ``sizeof(char[-1])`` is
+ * ill-formed and the build fails. If @_e is non-zero, the expression is a
+ * no-op void cast.
+ *
+ * Prefer %FY_CHECK_SAME_TYPE or ``static_assert`` for clearer error messages;
+ * use this primitive when a compile-time boolean is needed in a macro context.
+ *
+ * @_e: Compile-time expression that must be non-zero.
+ */
+/* if expression is zero, then the build will break */
+#define FY_COMPILE_ERROR_ON_ZERO(_e) ((void)(sizeof(char[1 - 2*!!(_e)])))
+
+/**
+ * FY_SAME_TYPE() - Test whether two expressions have the same type.
+ *
+ * On GCC/Clang uses ``__builtin_types_compatible_p`` to compare the types of
+ * @_a and @_b (via ``__typeof__``). On compilers without this builtin always
+ * evaluates to true to avoid false negatives.
+ *
+ * @_a: First expression.
+ * @_b: Second expression.
+ *
+ * Returns: Non-zero (true) if the types match, zero (false) otherwise.
+ */
+/* true, if types are the same, false otherwise (depends on builtin_types_compatible_p) */
+#if __has_builtin(__builtin_types_compatible_p)
+#define FY_SAME_TYPE(_a, _b) __builtin_types_compatible_p(__typeof__(_a), __typeof__(_b))
+#else
+#define FY_SAME_TYPE(_a, _b) true
+#endif
+
+/**
+ * FY_CHECK_SAME_TYPE() - Trigger a compile error if two expressions have different types.
+ *
+ * Combines %FY_SAME_TYPE and %FY_COMPILE_ERROR_ON_ZERO. Use in macros that
+ * require two operands to have the same type (e.g. overflow-safe arithmetic).
+ *
+ * @_a: First expression.
+ * @_b: Second expression.
+ */
+/* compile error if types are not the same */
+#define FY_CHECK_SAME_TYPE(_a, _b) \
+    FY_COMPILE_ERROR_ON_ZERO(!FY_SAME_TYPE(_a, _b))
+
+/* type test that does not trigger type-limits warnings */
+#define FY_TYPE_IS_UNSIGNED(_x) \
+	(((__typeof__(_x))0 - (__typeof__(_x))1) > (__typeof__(_x))0)
+
+#define FY_SIGN_BIT(_x) \
+	(((__typeof__(_x))1) << (sizeof(__typeof__(_x)) * CHAR_BIT - 1))
+
+/**
+ * FY_ADD_OVERFLOW() - Checked addition: detect signed/unsigned integer overflow.
+ *
+ * On GCC/Clang maps directly to ``__builtin_add_overflow(_a, _b, _resp)``,
+ * which is a single compiler intrinsic with full type generality.
+ *
+ * On other compilers a portable fallback is used that:
+ * - Requires @_a and @_b to have the same type (enforced at compile time via
+ *   %FY_CHECK_SAME_TYPE).
+ * - Computes ``*_resp = _a + _b`` and returns true if the addition wrapped.
+ *
+ * @_a:    First operand.
+ * @_b:    Second operand (must have the same type as @_a).
+ * @_resp: Pointer to receive the result (written even on overflow).
+ *
+ * Returns: true if the addition overflowed, false otherwise.
+ */
+/* type safe add overflow */
+#if __has_builtin(__builtin_add_overflow)
+#define FY_ADD_OVERFLOW(_a, _b, _resp) __builtin_add_overflow(_a, _b, _resp)
+#else
+#ifndef _MSC_VER
+#define FY_ADD_OVERFLOW(_a, _b, _resp) \
+({ \
+	__typeof__(_a) __a = (_a), __res; \
+	__typeof__(_b) __b = (_b); \
+	bool __overflow; \
+	\
+	FY_CHECK_SAME_TYPE(__a, __b); \
+	\
+	__res = __a + __b; \
+	__overflow = __builtin_choose_expr(FY_TYPE_IS_UNSIGNED(__a), \
+		(__res < __a), \
+		((!((__a ^ __b) & FY_SIGN_BIT(__a))) && (((__a ^ __res) & FY_SIGN_BIT(__a)) != 0))); \
+	*(_resp) = __res; \
+	__overflow; \
+})
+#else
+/* no overflow checks for MSVC; tread carefully */
+#define FY_ADD_OVERFLOW(_a, _b, _resp) \
+	(*(_resp) = (_a) + (_b), false)
+#endif
+#endif
+
+/**
+ * FY_SUB_OVERFLOW() - Checked subtraction: detect signed/unsigned integer overflow.
+ *
+ * On GCC/Clang maps to ``__builtin_sub_overflow(_a, _b, _resp)``.
+ * The portable fallback requires @_a and @_b to have the same type.
+ *
+ * @_a:    Minuend.
+ * @_b:    Subtrahend (must have the same type as @_a).
+ * @_resp: Pointer to receive the result (written even on overflow).
+ *
+ * Returns: true if the subtraction overflowed, false otherwise.
+ */
+/* type safe sub overflow */
+#if __has_builtin(__builtin_sub_overflow)
+#define FY_SUB_OVERFLOW(_a, _b, _resp) __builtin_sub_overflow(_a, _b, _resp)
+#else
+#ifndef _MSC_VER
+#define FY_SUB_OVERFLOW(_a, _b, _resp) \
+({ \
+	__typeof__(_a) __a = (_a), __res; \
+	__typeof__(_b) __b = (_b); \
+	bool __overflow; \
+	\
+	FY_CHECK_SAME_TYPE(__a, __b); \
+	\
+	__res = __a - __b; \
+	__overflow = __builtin_choose_expr(FY_TYPE_IS_UNSIGNED(__a), \
+		(__a < __b), \
+		((((__a ^ __b) & FY_SIGN_BIT(__a)) != 0) && (((__a ^ __res) & FY_SIGN_BIT(__a)) != 0))); \
+	*(_resp) = __res; \
+	__overflow; \
+})
+#else
+/* no overflow checks for MSVC; tread carefully */
+#define FY_SUB_OVERFLOW(_a, _b, _resp) \
+	(*(_resp) = (_a) - (_b), false)
+#endif
+#endif
+
+/**
+ * FY_MUL_OVERFLOW() - Checked multiplication: detect signed/unsigned integer overflow.
+ *
+ * On GCC/Clang maps to ``__builtin_mul_overflow(_a, _b, _resp)``.
+ * The portable fallback requires @_a and @_b to have the same type and detects
+ * overflow by dividing the product back and comparing with the original operand.
+ *
+ * @_a:    First factor.
+ * @_b:    Second factor (must have the same type as @_a).
+ * @_resp: Pointer to receive the result (written even on overflow).
+ *
+ * Returns: true if the multiplication overflowed, false otherwise.
+ */
+/* type safe multiply overflow */
+#if __has_builtin(__builtin_mul_overflow)
+#define FY_MUL_OVERFLOW(_a, _b, _resp) __builtin_mul_overflow(_a, _b, _resp)
+#else
+#ifndef _MSC_VER
+#define FY_MUL_OVERFLOW(_a, _b, _resp) \
+({ \
+	__typeof__(_a) __a = (_a), __res; \
+	__typeof__(_b) __b = (_b); \
+	bool __overflow; \
+	\
+	FY_CHECK_SAME_TYPE(__a, __b); \
+	\
+	if (!__a || !__b) { \
+	    __overflow = false; \
+	    __res = 0; \
+	} else { \
+	    __res = __a * __b; \
+	    /* overflow when division of the result differs */ \
+	    __overflow = __builtin_choose_expr(FY_TYPE_IS_UNSIGNED(__a), \
+		    (__b > ((__typeof__(__a))~(__typeof__(__a))0 / __a)), \
+		    ((__res / __a) != __b)); \
+	} \
+	*(_resp) = __res; \
+	__overflow; \
+})
+#else
+/* no overflow checks for MSVC; tread carefully */
+#define FY_MUL_OVERFLOW(_a, _b, _resp) \
+	(*(_resp) = (_a) * (_b), false)
+#endif
+#endif
+
+/**
+ * DOC: fy_vsprintfa() - Format a string into a stack buffer using a va_list
+ *
+ * ``fy_vsprintfa(_fmt, _ap)`` expands to a statement expression that first
+ * measures the required output length with ``vsnprintf()``, then allocates a
+ * stack buffer with ``alloca()``, formats into it, and evaluates to a
+ * NUL-terminated ``char *``.
+ *
+ * The returned pointer is valid only for the lifetime of the enclosing
+ * function. The ``va_list`` argument is consumed and must not be reused
+ * afterwards.
+ */
+/* Call snprintf() with an optional argument list. Use "%s" when the list is
+ * empty to prevent a nonliteral-format warning.
+ */
+#define _fy_snprintf_fmt_(_buf, _sz, _fmt)		snprintf((_buf), (_sz), "%s", (_fmt))
+#define _fy_snprintf_fmt_1(_buf, _sz, _fmt, ...)	snprintf((_buf), (_sz), (_fmt), __VA_ARGS__)
+#define fy_snprintf_fmt(_buf, _sz, _fmt, ...) \
+	FY_CONCAT(_fy_snprintf_fmt_, __VA_OPT__(1))((_buf), (_sz), (_fmt) __VA_OPT__(,) __VA_ARGS__)
+
+/* alloca formatted print methods */
+#ifdef _MSC_VER
+/*
+ * MSVC doesn't support GCC statement expressions, so we provide
+ * function-based alternatives. These use a static thread-local buffer
+ * which is less flexible but works for typical use cases.
+ */
+#define FY_ALLOCA_SPRINTF_BUFSZ 4096
+
+static __declspec(thread) char fy_alloca_sprintf_buf[FY_ALLOCA_SPRINTF_BUFSZ];
+
+static inline char *fy_alloca_vsprintf_impl(const char *fmt, va_list ap)
+{
+	va_list ap_copy;
+	int len;
+	char *s;
+
+	va_copy(ap_copy, ap);
+	len = vsnprintf(fy_alloca_sprintf_buf, FY_ALLOCA_SPRINTF_BUFSZ, fmt, ap_copy);
+	va_end(ap_copy);
+	if (len < 0)
+		return NULL;
+	/* strip trailing newlines */
+	s = fy_alloca_sprintf_buf + strlen(fy_alloca_sprintf_buf);
+	while (s > fy_alloca_sprintf_buf && s[-1] == '\n')
+		*--s = '\0';
+	return fy_alloca_sprintf_buf;
+}
+
+/* For MSVC, we can't use variadic macros that return values easily,
+ * so fy_vsprintfa needs a different approach
+ * This is not very efficient and wastes memory but it's the best
+ * we can do with the potato compiler
+ */
+#define fy_vsprintfa(_fmt, _ap) \
+	strcpy(alloca(FY_ALLOCA_SPRINTF_BUFSZ + 1), \
+			fy_alloca_vsprintf_impl((_fmt), (_ap)))
+#define fy_sprintfa(_fmt, ...) \
+	strcpy(alloca(FY_ALLOCA_SPRINTF_BUFSZ + 1), \
+			(fy_snprintf_fmt(fy_alloca_sprintf_buf, FY_ALLOCA_SPRINTF_BUFSZ, (_fmt) __VA_OPT__(,) __VA_ARGS__) < 0 ? \
+				"" : fy_alloca_sprintf_buf))
+#else
+/* GCC/Clang version with statement expressions */
+#define fy_vsprintfa(_fmt, _ap) \
+	({ \
+		const char *__fmt = (_fmt); \
+		va_list _ap_orig; \
+		int _size; \
+		char *_buf; \
+		\
+		va_copy(_ap_orig, (_ap)); \
+		_size = vsnprintf(NULL, 0, __fmt, _ap_orig); \
+		va_end(_ap_orig); \
+		_buf = alloca(_size + 1); \
+		(void)vsnprintf(_buf, _size + 1, __fmt, (_ap)); \
+		_buf; \
+	})
+
+/**
+ * fy_sprintfa() - Format a string into a stack buffer using inline arguments.
+ *
+ * Like fy_vsprintfa() but accepts arguments directly (uses ``__VA_ARGS__``).
+ * Two calls to ``snprintf()`` are made: the first with a NULL buffer to
+ * measure the required length, the second to write the result into a
+ * stack-allocated buffer.
+ *
+ * The returned pointer is valid only for the lifetime of the enclosing function.
+ *
+ * @_fmt: printf-style format string.
+ * @...:  Format arguments.
+ *
+ * Returns: ``char *`` to a NUL-terminated stack buffer.
+ */
+#define fy_sprintfa(_fmt, ...) \
+	({ \
+		const char *__fmt = (_fmt); \
+		int _size; \
+		char *_buf; \
+		\
+		/* Let the compiler check the original format and arguments. \
+		 */ \
+		if (0) \
+			(void)fy_snprintf_fmt((char *)NULL, 0, (_fmt) __VA_OPT__(,) __VA_ARGS__); \
+		_size = fy_snprintf_fmt(NULL, 0, __fmt __VA_OPT__(,) __VA_ARGS__); \
+		_buf = alloca(_size + 1); \
+		(void)fy_snprintf_fmt(_buf, _size + 1, __fmt __VA_OPT__(,) __VA_ARGS__); \
+		_buf; \
+	})
+#endif
+
+#include <libfyaml/libfyaml-cpp.h>
+
+/**
+ * FY_CONCAT() - Token-paste two arguments after full macro expansion.
+ *
+ * Unlike the raw ``##`` operator, this macro forces both @_a and @_b to be
+ * fully expanded before concatenation, so macro arguments are substituted
+ * correctly.
+ *
+ * @_a: Left token (expanded before pasting).
+ * @_b: Right token (expanded before pasting).
+ */
+#define FY_CONCAT(_a, _b) FY_CONCAT_INNER(_a, _b)
+#define FY_CONCAT_INNER(_a, _b) _a ## _b
+
+/**
+ * FY_UNIQUE() - Generate a unique identifier using ``__COUNTER__``.
+ *
+ * Concatenates @_base with the current value of the ``__COUNTER__``
+ * preprocessor counter, which increments by one for each use in a
+ * translation unit. Guarantees unique names across multiple macro expansions
+ * in the same file.
+ *
+ * @_base: Identifier prefix.
+ */
+#define FY_UNIQUE(_base) FY_CONCAT(_base, __COUNTER__)
+
+/**
+ * FY_LUNIQUE() - Generate a unique identifier using ``__LINE__``.
+ *
+ * Like FY_UNIQUE() but uses the current source line number instead of
+ * ``__COUNTER__``. Sufficient when only one such identifier is needed per
+ * source line; prefer FY_UNIQUE() in general.
+ *
+ * @_base: Identifier prefix.
+ */
+#define FY_LUNIQUE(_base) FY_CONCAT(_base, __LINE__)
+
+#if __has_builtin(__builtin_stack_save) && __has_builtin(__builtin_stack_restore)
+/**
+ * FY_STACK_SAVE() - Save the current stack pointer.
+ *
+ * On compilers that provide ``__builtin_stack_save()`` (GCC, Clang) returns
+ * the current stack pointer as a ``void *``, allowing it to be restored later
+ * with FY_STACK_RESTORE(). On other compilers returns ``(void *)NULL``.
+ *
+ * Use together with FY_STACK_RESTORE() to bound the stack growth of a loop
+ * that calls ``alloca()`` on each iteration.
+ *
+ * Returns: Opaque stack pointer value, or NULL if unsupported.
+ */
+#define FY_STACK_SAVE()		__builtin_stack_save()
+/**
+ * FY_STACK_RESTORE() - Restore the stack pointer to a previously saved value.
+ *
+ * On compilers that provide ``__builtin_stack_restore()`` rewinds the stack
+ * pointer to the value captured by FY_STACK_SAVE(). On other compilers this
+ * is a no-op that discards @_x.
+ *
+ * @_x: Value previously returned by FY_STACK_SAVE().
+ */
+#define FY_STACK_RESTORE(_x)	__builtin_stack_restore((_x))
+#else
+/* no builtin? just ignore */
+#define FY_STACK_SAVE()		((void *)NULL)
+#define FY_STACK_RESTORE(_x)	do { (void)(_x); } while(0)
+#endif
+
+/* possible have lambdas, either gcc or clang with block support */
+#ifdef __clang__
+#ifdef __BLOCKS__
+/**
+ * FY_HAVE_LAMBDAS - Defined when the compiler supports anonymous functions.
+ *
+ * Set when either:
+ * - Clang is compiling with ``-fblocks`` (Blocks extension) — also sets
+ *   %FY_HAVE_BLOCK_LAMBDAS; or
+ * - GCC is in use — also sets %FY_HAVE_NESTED_FUNC_LAMBDAS (nested functions).
+ *
+ * Code using lambdas should guard against this macro and provide a fallback
+ * for environments where it is not defined.
+ */
+#define FY_HAVE_LAMBDAS 1
+/**
+ * FY_HAVE_BLOCK_LAMBDAS - Defined when Clang Block lambdas are available.
+ *
+ * Set on Clang when compiled with ``-fblocks``. Implies %FY_HAVE_LAMBDAS.
+ * Block lambdas use the ``^(args){ body }`` syntax.
+ */
+#define FY_HAVE_BLOCK_LAMBDAS 1
+#endif
+#elif defined(__GNUC__)
+/* FY_HAVE_LAMBDAS is documented in the __clang__ branch above */
+#define FY_HAVE_LAMBDAS 1
+/**
+ * FY_HAVE_NESTED_FUNC_LAMBDAS - Defined when GCC nested-function lambdas are available.
+ *
+ * Set on GCC. Implies %FY_HAVE_LAMBDAS. Nested function lambdas are defined
+ * as local functions inside the enclosing function and cannot outlive it.
+ */
+#define FY_HAVE_NESTED_FUNC_LAMBDAS 1
+#endif
+
+/**
+ * DOC: Compiler diagnostic control helpers
+ *
+ * Portable wrappers around GCC/Clang ``#pragma GCC diagnostic`` directives.
+ * Use FY_DIAG_PUSH() and FY_DIAG_POP() to bracket a region where a specific
+ * warning is suppressed::
+ *
+ *   FY_DIAG_PUSH
+ *   FY_DIAG_IGNORE_ARRAY_BOUNDS
+ *   ... code that triggers -Warray-bounds ...
+ *   FY_DIAG_POP
+ *
+ * On compilers other than GCC/Clang all macros in this group expand to nothing.
+ * GCC releases before 13 also expand these to nothing because statement-form
+ * ``_Pragma()`` use at the current call sites is not accepted reliably enough
+ * for us to depend on it.
+ */
+
+/* Compiler diagnostic helpers */
+
+#if defined(__clang__) || (defined(__GNUC__) && __GNUC__ >= 13)
+/**
+ * FY_DIAG_PUSH - Save the current diagnostic state onto the compiler's stack.
+ *
+ * Always paired with FY_DIAG_POP.
+ */
+#define FY_DIAG_PUSH           _Pragma("GCC diagnostic push")
+/**
+ * FY_DIAG_POP - Restore the diagnostic state saved by the last FY_DIAG_PUSH.
+ */
+#define FY_DIAG_POP            _Pragma("GCC diagnostic pop")
+/**
+ * FY_DIAG_IGNORE() - Suppress a specific warning by pragma string.
+ *
+ * @_warn: A string literal suitable for use in a ``_Pragma()`` call,
+ *         e.g. ``"GCC diagnostic ignored \"-Wsomething\""`` .
+ */
+#define FY_DIAG_IGNORE(_warn)   _Pragma(_warn)
+/**
+ * FY_DIAG_IGNORE_ARRAY_BOUNDS - Suppress ``-Warray-bounds`` in the current region.
+ */
+#define FY_DIAG_IGNORE_ARRAY_BOUNDS \
+	_Pragma("GCC diagnostic ignored \"-Warray-bounds\"")
+/**
+ * FY_DIAG_IGNORE_UNUSED_VARIABLE - Suppress ``-Wunused-variable`` in the current region.
+ */
+#define FY_DIAG_IGNORE_UNUSED_VARIABLE \
+	_Pragma("GCC diagnostic ignored \"-Wunused-variable\"")
+/**
+ * FY_DIAG_IGNORE_UNUSED_PARAMETER - Suppress ``-Wunused-parameter`` in the current region.
+ */
+#define FY_DIAG_IGNORE_UNUSED_PARAMETER \
+	_Pragma("GCC diagnostic ignored \"-Wunused-parameter\"")
+
+/**
+ * FY_DIAG_IGNORE_TYPE_LIMITS - Suppress ``-Wtype-limits`` in the current region.
+ */
+#define FY_DIAG_IGNORE_TYPE_LIMITS \
+	_Pragma("GCC diagnostic ignored \"-Wtype-limits\"")
+
+#else
+#define FY_DIAG_PUSH
+#define FY_DIAG_POP
+#define FY_DIAG_IGNORE(_warn)
+
+#define FY_DIAG_IGNORE_ARRAY_BOUNDS /* nothing */
+#define FY_DIAG_IGNORE_UNUSED_VARIABLE /* nothing */
+#define FY_DIAG_IGNORE_UNUSED_PARAMETER /* nothing */
+#define FY_DIAG_IGNORE_TYPE_LIMITS /* nothing */
+
+#endif
+
+/**
+ * DOC: Floating-point precision constants
+ *
+ * Portable wrappers for the mantissa-digit and decimal-digit counts of
+ * ``float``, ``double``, and ``long double``.  Each macro tries three
+ * sources in order:
+ *
+ * 1. The standard ``<float.h>`` macro (e.g. ``FLT_MANT_DIG``).
+ * 2. The GCC/Clang predefined macro (e.g. ``__FLT_MANT_DIG__``).
+ * 3. A conservative hard-coded fallback.
+ *
+ * These constants are used when formatting floating-point values as YAML
+ * scalars to ensure round-trip fidelity.
+ */
+
+/**
+ * FY_FLT_MANT_DIG - Number of base-2 mantissa digits in a ``float``.
+ *
+ * Typically 24 (IEEE 754 single precision). Fallback: 9.
+ */
+/* float point digits abstraction */
+#if defined(FLT_MANT_DIG)
+#define FY_FLT_MANT_DIG	FLT_MANT_DIG
+#elif defined(__FLT_MANT_DIG__)
+#define FY_FLT_MANT_DIG	__FLT_MANT_DIG__
+#else
+#define FY_FLT_MANT_DIG	9
+#endif
+
+/**
+ * FY_DBL_MANT_DIG - Number of base-2 mantissa digits in a ``double``.
+ *
+ * Typically 53 (IEEE 754 double precision). Fallback: 17.
+ */
+#if defined(DBL_MANT_DIG)
+#define FY_DBL_MANT_DIG	DBL_MANT_DIG
+#elif defined(__DBL_MANT_DIG__)
+#define FY_DBL_MANT_DIG	__DBL_MANT_DIG__
+#else
+#define FY_DBL_MANT_DIG	17
+#endif
+
+/**
+ * FY_LDBL_MANT_DIG - Number of base-2 mantissa digits in a ``long double``.
+ *
+ * Varies by platform (64-bit x87 extended: 64; MSVC/ARM ``== double``: 53).
+ * Fallback: 17.
+ */
+#if defined(LDBL_MANT_DIG)
+#define FY_LDBL_MANT_DIG	LDBL_MANT_DIG
+#elif defined(__LDBL_MANT_DIG__)
+#define FY_LDBL_MANT_DIG	__LDBL_MANT_DIG__
+#else
+#define FY_LDBL_MANT_DIG	17
+#endif
+
+/**
+ * FY_FLT_DECIMAL_DIG - Decimal digits required for a round-trip ``float``.
+ *
+ * The minimum number of significant decimal digits such that converting
+ * a ``float`` to decimal and back recovers the original value exactly.
+ * Typically 9. Fallback: 9.
+ */
+#if defined(FLT_DECIMAL_DIG)
+#define FY_FLT_DECIMAL_DIG	FLT_DECIMAL_DIG
+#elif defined(__FLT_DECIMAL_DIG__)
+#define FY_FLT_DECIMAL_DIG	__FLT_DECIMAL_DIG__
+#else
+#define FY_FLT_DECIMAL_DIG	9
+#endif
+
+/**
+ * FY_DBL_DECIMAL_DIG - Decimal digits required for a round-trip ``double``.
+ *
+ * Typically 17. Fallback: 17.
+ */
+#if defined(DBL_DECIMAL_DIG)
+#define FY_DBL_DECIMAL_DIG	DBL_DECIMAL_DIG
+#elif defined(__DBL_DECIMAL_DIG__)
+#define FY_DBL_DECIMAL_DIG	__DBL_DECIMAL_DIG__
+#else
+#define FY_DBL_DECIMAL_DIG	17
+#endif
+
+/**
+ * FY_LDBL_DECIMAL_DIG - Decimal digits required for a round-trip ``long double``.
+ *
+ * Varies by platform; same as double on most non-x87 targets. Fallback: 17.
+ */
+#if defined(LDBL_DECIMAL_DIG)
+#define FY_LDBL_DECIMAL_DIG	LDBL_DECIMAL_DIG
+#elif defined(__LDBL_DECIMAL_DIG__)
+#define FY_LDBL_DECIMAL_DIG	__LDBL_DECIMAL_DIG__
+#else
+#define FY_LDBL_DECIMAL_DIG	17	// same as double
+#endif
+
+/* platform detection - needed by both reflection and generic sections */
+// define FY_HAS_FP16 if __fp16 is available
+#if defined(__is_identifier)
+#if ! __is_identifier(__fp16)
+#define FY_HAS_FP16
+#endif
+#endif
+
+// define FY_HAS_FLOAT128 if __fp128 is available
+#if defined(__SIZEOF_FLOAT128__)
+#if __SIZEOF_FLOAT128__ == 16
+#define FY_HAS_FLOAT128
+#endif
+#endif
+
+// define FY_HAS_INT128 if __int128 is available
+#if defined(__SIZEOF_INT128__)
+#if __SIZEOF_INT128__ == 16
+#define FY_HAS_INT128
+#endif
+#endif
+
+#ifdef UINTPTR_MAX
+#if UINTPTR_MAX == 0xffffffff
+#define FY_HAS_32BIT_PTR
+#elif UINTPTR_MAX == 0xffffffffffffffff
+#define FY_HAS_64BIT_PTR
+#endif
+#endif
+
+// windows is the crazy one still
+#if defined(_WIN64) || defined(_WIN32) || defined(__CYGWIN__) || defined(__MSYS__)
+#define FY_VA_ARG_SIZE_T(ap)  ((size_t)va_arg(ap, unsigned int))
+#define FY_VA_ARG_SSIZE_T(ap)  ((ssize_t)va_arg(ap, int))
+#else
+#define FY_VA_ARG_SIZE_T(ap)  ((size_t)va_arg(ap, size_t))
+#define FY_VA_ARG_SSIZE_T(ap)  ((ssize_t)va_arg(ap, ssize_t))
+#endif
+
+/* Windows provides _alloca in <malloc.h>; avoid dragging windows.h into a public header. */
+#ifdef _WIN32
+#include <malloc.h>
+#ifndef alloca
+#define alloca _alloca
+#endif
+#endif
+
+/* supported static array params i.e. char p[static 1] */
+#if !defined(__cplusplus) && \
+	defined(__STDC_VERSION__) && (__STDC_VERSION__ >= 201112L) && \
+	(defined(__clang__) || defined(__GNUC__))
+#define FY_HAS_STATIC_ARRAY_PARAMS
+#endif
+
+/* wrap it in a portable way */
+#ifdef FY_HAS_STATIC_ARRAY_PARAMS
+#define FY_STATIC_ARRAY_PARAM(_x)	static _x
+#else
+#define FY_STATIC_ARRAY_PARAM(_x)	_x
+#endif
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif	// LIBFYAML_UTIL_H
