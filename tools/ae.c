@@ -1927,8 +1927,30 @@ static int dir_has_header(const char* dir) {
  * longer flag still makes a shorter command than -I on every one of them.
  * A quoted include still finds a header next to the file that includes it
  * first. */
+/* The vendored libfyaml's directories are left off the walk. Its build
+ * (aether_libfyaml_vendored.c) names std/yaml/libfyaml/include with -I,
+ * first on the line, so its <libfyaml.h> wins over a system libfyaml's, and
+ * gcc drops a -I directory that also appears as -idirafter (it keeps the
+ * system-chain entry): with the walk's -idirafter of the same directory,
+ * /usr/include/libfyaml.h (another version) won and the source fallback
+ * failed to compile on a box with libfyaml-dev. No program includes these
+ * headers; std.yaml's own code reaches them through that -I. */
+static int walk_skips_dir(const char* dir) {
+    static const char* const skip[] = {
+        "/yaml/libfyaml", "/yaml/libfyaml_compat",
+        "\\yaml\\libfyaml", "\\yaml\\libfyaml_compat", NULL
+    };
+    size_t n = strlen(dir);
+    for (int i = 0; skip[i]; i++) {
+        size_t k = strlen(skip[i]);
+        if (n >= k && strcmp(dir + n - k, skip[i]) == 0) return 1;
+    }
+    return 0;
+}
+
 static int walk_dirs_emit_includes(const char* root, char** out, size_t* out_size, size_t* pos) {
     if (!root || !*root) return 1;
+    if (walk_skips_dir(root)) return 1;
     // The root itself first.
     if (dir_has_header(root) &&
         !append_include_flag(out, out_size, pos, "-idirafter ", root)) return 0;
