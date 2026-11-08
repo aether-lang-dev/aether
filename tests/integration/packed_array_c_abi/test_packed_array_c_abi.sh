@@ -22,7 +22,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
-CC="${CC:-gcc}"
+CC="${CC:-cc}"
 
 [ -x "$AE" ] || { echo "  [SKIP] packed_array_c_abi: ae not built"; exit 0; }
 command -v "$CC" >/dev/null 2>&1 || { echo "  [SKIP] packed_array_c_abi: no C compiler ($CC)"; exit 0; }

@@ -47,7 +47,7 @@ run() {
 }
 
 run default ""
-run no-gcc-compat "${CC:-gcc} -DAETHER_GCC_COMPAT=0"
+run no-gcc-compat "${CC:-cc} -DAETHER_GCC_COMPAT=0"
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] $NAME: shared fields published, string fields copied, on both C paths"

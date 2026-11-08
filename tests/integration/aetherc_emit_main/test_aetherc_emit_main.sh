@@ -53,7 +53,7 @@ fi
 
 # Compile to a binary and run it. Should print the message and exit 7.
 gcc_args="-O0 -I$ROOT -I$ROOT/runtime -I$ROOT/runtime/actors -I$ROOT/runtime/scheduler -I$ROOT/runtime/utils -I$ROOT/runtime/memory -I$ROOT/runtime/config -I$ROOT/std -I$ROOT/std/string -I$ROOT/std/io -I$ROOT/std/math -I$ROOT/std/net -I$ROOT/std/collections -I$ROOT/std/json"
-if ! gcc $gcc_args "$tmpdir/svc.c" "$LIBAETHER" -o "$tmpdir/svc" -pthread -lm >"$tmpdir/gcc.log" 2>&1; then
+if ! ${CC:-cc} $gcc_args "$tmpdir/svc.c" "$LIBAETHER" -o "$tmpdir/svc" -pthread -lm >"$tmpdir/gcc.log" 2>&1; then
     echo "  [FAIL] aetherc_emit_main: gcc failed to link the dual-emit output"
     cat "$tmpdir/gcc.log"
     exit 1

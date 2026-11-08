@@ -84,7 +84,7 @@ fi
 # 3. Compile the wrapper into a Python extension module linked against our lib.
 PY_INCLUDE="$(python3-config --includes)"
 PY_LDFLAGS="$(python3-config --ldflags)"
-if ! gcc -fPIC -shared $PY_INCLUDE aether_lib_wrap.c "$LIB_PATH" $PY_LDFLAGS -o "_aether_lib${PY_EXT}" 2>"$TMPDIR/gcc.log"; then
+if ! ${CC:-cc} -fPIC -shared $PY_INCLUDE aether_lib_wrap.c "$LIB_PATH" $PY_LDFLAGS -o "_aether_lib${PY_EXT}" 2>"$TMPDIR/gcc.log"; then
     echo "  [FAIL] gcc could not build the Python extension"
     cat "$TMPDIR/gcc.log"
     fail=$((fail + 1))
