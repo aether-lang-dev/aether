@@ -14,6 +14,32 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.901.0]
+
+### Fixed
+
+- **The release's ABI matrix can load the previous release's shared runtime
+  again, and an import that cannot load a library says why.** 0.894.0 to
+  0.899.0 ship a shared runtime linked to a system libfyaml; since std.yaml's
+  libfyaml is vendored the release workflow installs none, so 0.900.0's
+  matrix failed on "cannot load the runtime" (no ABI break: with libfyaml
+  present the matrix passes against 0.899.0). The step now installs it, as
+  ci.yml's already did, and the matrix prints the loader's reason. `ae
+  build` importing a binary library the loader refuses (a dependency
+  missing) now prints the loader's error before the "unresolved import",
+  which alone said no such module existed with the library right there.
+
+- **`mem.steady_growth` on Windows no longer charges a round with the
+  parallel loader's ~1 KB.** The loader's second worker thread first runs
+  some tens of milliseconds into a process and allocates 1048 bytes (136 +
+  912) of the process heap; the loader reports no thread event for its
+  workers, so `mem.thread_epoch()` did not move and a round it overlapped
+  showed the growth (`test_string_keep_registry_steady` failed about 2 runs
+  in 100 on Windows 11). `thread_epoch` now also moves with the CPU time of
+  threads the loader does not report, and a run spoiled by a thread no
+  longer uses up one of `steady_growth`'s tries (up to 8 such reruns), so
+  `tries` 1 compares one clean run.
+
 ## [0.900.0]
 
 ### Changed
