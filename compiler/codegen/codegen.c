@@ -2678,6 +2678,11 @@ int is_c_reserved_word(const char* name) {
         "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph",
         "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit",
         "tolower", "toupper",
+        /* The BSDs' <sys/types.h>, which their <stdlib.h> includes, defines
+           these as function-like macros (glibc keeps them in
+           <sys/sysmacros.h>). A user `major(seg: string)` was rewritten by
+           the preprocessor on NetBSD and OpenBSD and did not compile. */
+        "major", "minor", "makedev",
         NULL
     };
     static const char** sorted = NULL;
