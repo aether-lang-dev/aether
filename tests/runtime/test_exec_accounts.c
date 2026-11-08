@@ -339,3 +339,23 @@ TEST_CATEGORY(accounts_unknown_parent_refused, TEST_CATEGORY_RUNTIME) {
     ASSERT_NULL(under_freed);
     ASSERT_NULL(under_foreign);
 }
+
+/* A realloc to no bytes is a free: the account the block was charged to is
+ * credited with it. It read as a failed realloc, which charged the account
+ * for the freed block again (gcc 12's -Wuse-after-free at the realloc_end
+ * call, seen first on NetBSD). */
+TEST_CATEGORY(accounts_realloc_to_zero_is_a_free, TEST_CATEGORY_RUNTIME) {
+    AetherExecAccount* a = ea_new(0, 0, AETHER_DEADLINE_ELAPSED, NULL);
+    ASSERT_NOT_NULL(a);
+    aether_exec_use(a, NULL);
+    void* b = aether_caps_malloc(1000);
+    uint64_t charged = aether_exec_account_used(a);
+    void* r = aether_caps_realloc(b, 1000, 0);
+    uint64_t after = aether_exec_account_used(a);
+    aether_exec_use(NULL, NULL);
+    if (r) free(r);
+    aether_exec_account_free(a);
+    ASSERT_TRUE(charged >= 1000);
+    ASSERT_NULL(r);
+    ASSERT_EQ(charged - 1000, after);
+}

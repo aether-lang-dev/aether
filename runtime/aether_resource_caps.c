@@ -1591,6 +1591,14 @@ void* aether_caps_calloc(size_t n, size_t size) {
 }
 
 void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
+    /* A realloc to no bytes is a free, on every libc. glibc's realloc(p, 0)
+     * frees p and returns NULL, which read below as a failed realloc and put
+     * the freed block back on its account's books; the BSDs' and macOS's
+     * return a fresh block the accounts never saw. */
+    if (new_bytes == 0) {
+        aether_caps_free(p, old_bytes);
+        return NULL;
+    }
     unsigned slow = atomic_load_explicit(&aether_caps_slow, memory_order_acquire);
     if ((slow & CAPS_SLOW_TEST) && new_bytes > old_bytes && aether_alloc_test_refuses()) {
         aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
@@ -1614,18 +1622,19 @@ void* aether_caps_realloc(void* p, size_t old_bytes, size_t new_bytes) {
         aether_alloc_failed(AETHER_STOP_MEMORY_CAP);
         return NULL;
     }
-    /* The old address, as a key only: the accounts read it again when the
-     * realloc failed and the old block is still the one they charged. */
-    uintptr_t old_key = (uintptr_t)p;
     void* np = realloc(p, new_bytes);
-    if (accounted)
-        accounts()->realloc_end((void*)old_key, new_bytes ? np : NULL, old_bytes, new_bytes, old_owner,
-                                now_in_use);
+    /* The old block goes back to the accounts only when the realloc failed,
+     * the one case it is still the block they charged; after a realloc that
+     * succeeded, p is not to be read at all. */
+    if (accounted) {
+        if (np) accounts()->realloc_end(NULL, np, old_bytes, new_bytes, old_owner, now_in_use);
+        else accounts()->realloc_end(p, NULL, old_bytes, new_bytes, old_owner, now_in_use);
+    }
     if (!np) {
         if (new_bytes > old_bytes) {
             aether_caps_account_free(new_bytes - old_bytes);
         }
-        if (new_bytes) aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
+        aether_alloc_failed(AETHER_STOP_OUT_OF_MEMORY);
         return NULL;
     }
     if (new_bytes < old_bytes) {
