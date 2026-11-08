@@ -34,6 +34,7 @@ fi
 sha256_of() {
     if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1
     elif command -v shasum >/dev/null 2>&1; then shasum -a 256 "$1" | cut -d' ' -f1
+    elif [ "$(uname -s)" = OpenBSD ]; then sha256 -q "$1"   # base, no sha256sum
     else echo "fetch-sqlite: neither sha256sum nor shasum is installed" >&2; return 1
     fi
 }
