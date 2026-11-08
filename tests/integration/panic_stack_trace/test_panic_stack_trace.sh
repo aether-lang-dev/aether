@@ -14,11 +14,12 @@
 set -e
 
 # The runtime captures a trace with backtrace() (libc, or libexecinfo opened
-# when needed on FreeBSD and NetBSD) and CaptureStackBackTrace on Windows
-# (runtime/actors/aether_panic.c). OpenBSD has no backtrace(): there a panic
-# prints its reason without a trace.
+# when needed on FreeBSD) and CaptureStackBackTrace on Windows
+# (runtime/actors/aether_panic.c). OpenBSD has no backtrace(), and NetBSD's
+# libexecinfo returns no frames when it is opened with dlopen rather than
+# linked: there a panic prints its reason without a trace.
 case "$(uname -s 2>/dev/null)" in
-    OpenBSD)
+    NetBSD|OpenBSD)
         echo "  [SKIP] panic_stack_trace: no stack-trace capture on $(uname -s)"
         exit 0 ;;
 esac

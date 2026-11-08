@@ -21,7 +21,7 @@
 //   - Windows / MinGW: CaptureStackBackTrace from kernel32 plus
 //                     SymInitialize + SymFromAddr from dbghelp.dll,
 //                     loaded when a trace is printed (no link flag).
-//   - FreeBSD, NetBSD: the same two calls, from libexecinfo, which is in
+//   - FreeBSD:        the same two calls, from libexecinfo, which is in
 //                     the base system but not linked by default (GhostBSD
 //                     ships only its libexecinfo.so.1, with no link-time
 //                     symlink). Loaded with dlopen when a trace is first
@@ -35,7 +35,7 @@
   #define AETHER_STACK_TRACE_BACKTRACE 1
   #define AETHER_STACK_TRACE_WIN32     0
   #include <execinfo.h>
-#elif defined(__FreeBSD__) || defined(__NetBSD__)
+#elif defined(__FreeBSD__)
   #define AETHER_STACK_TRACE_BACKTRACE 1
   #define AETHER_STACK_TRACE_WIN32     0
   #define AETHER_STACK_TRACE_DLOPEN    1
@@ -195,7 +195,6 @@ static _Atomic(aether_backtrace_symbols_fn) aether_execinfo_symbols;
 static void aether_execinfo_load(void) {
     if (atomic_load(&aether_execinfo_backtrace)) return;
     void* h = dlopen("libexecinfo.so.1", RTLD_NOW | RTLD_LOCAL);
-    if (!h) h = dlopen("libexecinfo.so.0", RTLD_NOW | RTLD_LOCAL);   /* NetBSD */
     if (!h) h = dlopen("libexecinfo.so", RTLD_NOW | RTLD_LOCAL);
     if (!h) return;
     aether_backtrace_symbols_fn sy =

@@ -1,5 +1,5 @@
-- **A panic prints its stack trace on FreeBSD and NetBSD.** The trace came from
-  `backtrace()`, which the runtime used only on glibc and macOS; on FreeBSD and NetBSD it
+- **A panic prints its stack trace on FreeBSD.** The trace came from
+  `backtrace()`, which the runtime used only on glibc and macOS; on FreeBSD it
   lives in libexecinfo, which programs do not link (and GhostBSD ships only
   its `libexecinfo.so.1`, with no `-lexecinfo` symlink). The runtime now loads
   libexecinfo with `dlopen` when a panic first needs a trace, as glibc loads
