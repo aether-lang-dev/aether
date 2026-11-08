@@ -54,7 +54,7 @@ case "$LIB_EXT" in
     *)    LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl" ;;
 esac
 # shellcheck disable=SC2086
-if ! gcc \
+if ! ${CC:-cc} \
     -I"$ROOT/runtime" \
     "$SCRIPT_DIR/consume.c" \
     "$LIB_PATH" \

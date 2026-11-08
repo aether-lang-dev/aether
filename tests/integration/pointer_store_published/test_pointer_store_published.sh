@@ -46,7 +46,7 @@ run() {
 }
 
 run default ""
-run no-gcc-compat "${CC:-gcc} -DAETHER_GCC_COMPAT=0"
+run no-gcc-compat "${CC:-cc} -DAETHER_GCC_COMPAT=0"
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] $NAME: every store through a pointer, a slice or a reference publishes, on both C paths"

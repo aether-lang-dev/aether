@@ -26,8 +26,8 @@ fail=0
 # --- 1. YAML=1 without libfyaml stops the build; the others do not ---------
 # An empty pkg-config search path stands for a machine without it. make -n:
 # the check is at parse time, so nothing is built either way.
-if command -v make >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1; then
-    out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" make -n YAML=1 compiler 2>&1)"
+if command -v "${MAKE:-make}" >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1; then
+    out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" ${MAKE:-make} -n YAML=1 compiler 2>&1)"
     rc=$?
     case "$out" in
         *"YAML=1 but pkg-config finds no libfyaml"*) [ "$rc" -ne 0 ] || {
@@ -36,13 +36,13 @@ if command -v make >/dev/null 2>&1 && command -v pkg-config >/dev/null 2>&1; the
            echo "$out" | tail -3 | sed 's/^/        /'; fail=1 ;;
     esac
     for mode in 0 auto vendored; do
-        if ! (cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" make -n YAML=$mode compiler >/dev/null 2>&1); then
+        if ! (cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" ${MAKE:-make} -n YAML=$mode compiler >/dev/null 2>&1); then
             echo "  [FAIL] yaml_build_requirement: YAML=$mode without libfyaml stopped the build"; fail=1
         fi
     done
     # auto without a system library is the vendored build, not the stubs:
     # -B so make -n prints the compile even when the object is up to date.
-    out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" make -n -B YAML=auto build/obj/std/yaml/aether_yaml.o 2>&1 || true)"
+    out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" ${MAKE:-make} -n -B YAML=auto build/obj/std/yaml/aether_yaml.o 2>&1 || true)"
     case "$out" in
         *-DAETHER_VENDOR_YAML*) ;;
         *) echo "  [FAIL] yaml_build_requirement: YAML=auto without libfyaml did not pick the vendored copy"; fail=1 ;;

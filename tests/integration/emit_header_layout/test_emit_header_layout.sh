@@ -38,10 +38,12 @@ fi
 # The host is compiled as docs/c-embedding.md says a host is: against the
 # header, with the include flags `ae cflags --cflags` prints plus the tree
 # root the header's own includes are relative to (as public_headers does).
-# The shim includes "probe.h" from its own directory.
+# The shim includes "probe.h" from its own directory. It is -fPIC because
+# `ae build` links executables -pie off macOS and Windows; Linux compilers
+# default to PIE code, FreeBSD's clang does not.
 cp "$SCRIPT_DIR/shim.c" "$TMPDIR/shim.c"
 CFLAGS_ALL=$("$AE" cflags --cflags 2>/dev/null)
-if ! "${CC:-cc}" -I"$ROOT" $CFLAGS_ALL -c "$TMPDIR/shim.c" -o "$TMPDIR/shim.o" >"$TMPDIR/host.log" 2>&1; then
+if ! "${CC:-cc}" -fPIC -I"$ROOT" $CFLAGS_ALL -c "$TMPDIR/shim.c" -o "$TMPDIR/shim.o" >"$TMPDIR/host.log" 2>&1; then
     echo "  [FAIL] emit_header_layout: the host does not compile against the header"
     sed 's/^/    /' "$TMPDIR/host.log" | head -15
     exit 1

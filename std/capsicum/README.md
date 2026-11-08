@@ -31,6 +31,10 @@ main() {
 available: 0
 not sandboxing on this platform
 ```
+```output,freebsd
+available: 1
+entered: 0
+```
 
 `rights_limit` narrows what a specific descriptor may do (read but not write,
 say), which is how a process keeps an fd it needs while giving up the

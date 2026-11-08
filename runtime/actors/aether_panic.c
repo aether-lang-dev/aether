@@ -21,6 +21,11 @@
 //   - Windows / MinGW: CaptureStackBackTrace from kernel32 plus
 //                     SymInitialize + SymFromAddr from dbghelp.dll,
 //                     loaded when a trace is printed (no link flag).
+//   - FreeBSD:        the same two calls, from libexecinfo, which is in
+//                     the base system but not linked by default (GhostBSD
+//                     ships only its libexecinfo.so.1, with no link-time
+//                     symlink). Loaded with dlopen when a trace is first
+//                     needed, so no consumer's link line changes.
 //   - Everything else (musl, wasm, freestanding): no-op stubs.
 //
 // Each path captures into the same TLS slot at the call site
@@ -30,6 +35,11 @@
   #define AETHER_STACK_TRACE_BACKTRACE 1
   #define AETHER_STACK_TRACE_WIN32     0
   #include <execinfo.h>
+#elif defined(__FreeBSD__)
+  #define AETHER_STACK_TRACE_BACKTRACE 1
+  #define AETHER_STACK_TRACE_WIN32     0
+  #define AETHER_STACK_TRACE_DLOPEN    1
+  #include <dlfcn.h>
 #elif defined(_WIN32)
   #define AETHER_STACK_TRACE_BACKTRACE 0
   #define AETHER_STACK_TRACE_WIN32     1
@@ -172,8 +182,46 @@ static void unwind_sandbox_levels(void) {
 static AETHER_TLS_SHARED void* tls_panic_trace[AETHER_PANIC_TRACE_MAX];
 static AETHER_TLS_SHARED int   tls_panic_trace_n = 0;
 
+#if defined(AETHER_STACK_TRACE_DLOPEN)
+// libexecinfo's backtrace/backtrace_symbols, resolved on first use. glibc's
+// own backtrace() dlopens libgcc_s lazily the same way. A failed load (a
+// static binary, a sandbox that refuses the dlopen) leaves both NULL, and
+// the panic prints its reason without a trace, as on musl.
+typedef size_t (*aether_backtrace_fn)(void**, size_t);
+typedef char** (*aether_backtrace_symbols_fn)(void* const*, size_t);
+static _Atomic(aether_backtrace_fn)         aether_execinfo_backtrace;
+static _Atomic(aether_backtrace_symbols_fn) aether_execinfo_symbols;
+
+static void aether_execinfo_load(void) {
+    if (atomic_load(&aether_execinfo_backtrace)) return;
+    void* h = dlopen("libexecinfo.so.1", RTLD_NOW | RTLD_LOCAL);
+    if (!h) h = dlopen("libexecinfo.so", RTLD_NOW | RTLD_LOCAL);
+    if (!h) return;
+    aether_backtrace_symbols_fn sy =
+        (aether_backtrace_symbols_fn)dlsym(h, "backtrace_symbols");
+    aether_backtrace_fn bt = (aether_backtrace_fn)dlsym(h, "backtrace");
+    if (!bt || !sy) return;
+    atomic_store(&aether_execinfo_symbols, sy);
+    atomic_store(&aether_execinfo_backtrace, bt);
+}
+
+static int aether_backtrace(void** frames, int max) {
+    aether_execinfo_load();
+    aether_backtrace_fn bt = atomic_load(&aether_execinfo_backtrace);
+    return bt ? (int)bt(frames, (size_t)max) : 0;
+}
+
+static char** aether_backtrace_symbols(void* const* frames, int n) {
+    aether_backtrace_symbols_fn sy = atomic_load(&aether_execinfo_symbols);
+    return sy ? sy(frames, (size_t)n) : NULL;
+}
+#else
+#define aether_backtrace(frames, max)       backtrace((frames), (max))
+#define aether_backtrace_symbols(frames, n) backtrace_symbols((frames), (n))
+#endif
+
 void aether_panic_capture_stack(void) {
-    tls_panic_trace_n = backtrace(tls_panic_trace, AETHER_PANIC_TRACE_MAX);
+    tls_panic_trace_n = aether_backtrace(tls_panic_trace, AETHER_PANIC_TRACE_MAX);
 }
 
 // Locate the symbol name inside a backtrace_symbols() line. Returns
@@ -187,8 +235,25 @@ void aether_panic_capture_stack(void) {
 //                 → no symbol; return NULL
 //   - macOS Mach-O: "<n>   binary   0xADDR   symbol + offset"
 //                 → symbol is the 4th whitespace-separated field
+//   - FreeBSD libexecinfo: "0xADDR <symbol+OFFSET> at binary"
+//                 → symbol is between '<' and '+' (or '>')
 static const char* aether_locate_symbol(const char* line, size_t* out_len) {
     if (!line || !out_len) return NULL;
+
+#if defined(AETHER_STACK_TRACE_DLOPEN)
+    // libexecinfo-shape: "0xADDR <symbol+0xOFF> at /path". Checked before
+    // the glibc shape, since the path after "at" may hold a '('.
+    const char* langle = strchr(line, '<');
+    if (langle) {
+        const char* start = langle + 1;
+        const char* end   = start;
+        while (*end && *end != '+' && *end != '>') end++;
+        if (end > start && *end) {
+            *out_len = (size_t)(end - start);
+            return start;
+        }
+    }
+#endif
 
     // glibc-shape: look for '('
     const char* lparen = strchr(line, '(');
@@ -279,12 +344,12 @@ static void aether_print_stack_trace_to_stderr(void) {
         frames = tls_panic_trace;
         n      = tls_panic_trace_n;
     } else {
-        n = backtrace(raw_frames, MAX_FRAMES);
+        n = aether_backtrace(raw_frames, MAX_FRAMES);
         if (n <= 0) return;
         frames = raw_frames;
     }
 
-    char** symbols = backtrace_symbols(frames, n);
+    char** symbols = aether_backtrace_symbols(frames, n);
     if (!symbols) return;
 
     fprintf(stderr, "\nStack trace (most recent call first):\n");

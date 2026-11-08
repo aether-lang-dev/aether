@@ -35,7 +35,7 @@ probe_sqlite_available() {
 #include <sqlite3.h>
 int main(void) { sqlite3* db; return sqlite3_open(0, &db); }
 EOF
-    gcc "$probe_c" -lsqlite3 -o "$TMPDIR/probe_sqlite" >/dev/null 2>&1
+    ${CC:-cc} "$probe_c" -lsqlite3 -o "$TMPDIR/probe_sqlite" >/dev/null 2>&1
 }
 
 if ! probe_sqlite_available; then

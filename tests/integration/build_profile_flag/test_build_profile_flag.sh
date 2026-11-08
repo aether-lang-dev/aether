@@ -54,8 +54,13 @@ trap cleanup EXIT INT TERM
 AETHER_CACHE_DIR="$TMP/cache"
 export AETHER_CACHE_DIR
 
+# Debug info for the program itself: its compile unit names probe.ae / the
+# generated ae_build_*_probe.c. A bare `.debug_info` section is not enough,
+# since FreeBSD's crt1.o/crtbegin.o carry their own, so every binary linked
+# there has one whether or not the program was built with -g.
 has_debug() {
-    readelf -S "$1" 2>/dev/null | grep -c "debug_info" || true
+    { readelf -p .debug_str "$1"; readelf -p .debug_line_str "$1"; } 2>/dev/null \
+        | grep -c "probe" || true
 }
 
 build() {   # build <out> [flags...]
@@ -94,13 +99,20 @@ fi
 # --profile must be optimised. If it silently became -O0 it would still
 # pass the debug-info check above while reporting hot spots the shipped
 # binary does not have, which is the failure this whole flag exists to
-# avoid. -O2 output is dramatically smaller than -O0.
-QSIZE=$(wc -c < "$TMP/quick")
-PSIZE=$(wc -c < "$TMP/prof")
-if [ "$PSIZE" -ge "$QSIZE" ]; then
-    echo "  [FAIL] build_profile_flag: --profile ($PSIZE bytes) is not smaller"
-    echo "         than --quick ($QSIZE bytes) — it looks like -O0, not -O2"
+# avoid. -O2 code is dramatically smaller than -O0. Compare the code, not
+# the files: clang's -O2 debug info (location lists) outgrows its -O0 debug
+# info by more than the code shrinks, so on FreeBSD the -O2 file is bigger.
+text_size() {
+    sz=$(readelf -SW "$1" 2>/dev/null | sed -n 's/^.*\] *//p' \
+        | awk '$1 == ".text" { print $5; exit }')
+    printf '%d' "0x${sz:-0}"
+}
+QSIZE=$(text_size "$TMP/quick")
+PSIZE=$(text_size "$TMP/prof")
+if [ "$QSIZE" -eq 0 ] || [ "$PSIZE" -ge "$QSIZE" ]; then
+    echo "  [FAIL] build_profile_flag: --profile's .text ($PSIZE bytes) is not smaller"
+    echo "         than --quick's ($QSIZE bytes) — it looks like -O0, not -O2"
     exit 1
 fi
 
-echo "  [PASS] build_profile_flag: default has no debug info; --quick and --profile do; --profile is -O2 (${PSIZE}B vs --quick ${QSIZE}B)"
+echo "  [PASS] build_profile_flag: default has no debug info; --quick and --profile do; --profile is -O2 (.text ${PSIZE}B vs --quick ${QSIZE}B)"

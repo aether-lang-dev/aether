@@ -27,15 +27,33 @@
 #include <sys/socket.h>
 #include <sys/time.h>
 
+/* A connect the kernel turned away because the listen queue was full is
+ * tried again, for up to 5 s. The client opens its connections faster than
+ * a server on a loaded host accepts them, and what happens past the queue
+ * differs: Linux drops the SYN and the client's kernel retransmits it, so
+ * the connect only waits, while FreeBSD (syncookies on, as by default)
+ * resets it and connect fails with ECONNRESET. Retrying here does on
+ * FreeBSD what the kernel does on Linux; it does not excuse a server that
+ * never accepts, which still fails once the 5 s are up. */
 static int dial(int port) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return -1;
     struct sockaddr_in a;
     memset(&a, 0, sizeof(a));
     a.sin_family = AF_INET;
     a.sin_port = htons((unsigned short)port);
     inet_pton(AF_INET, "127.0.0.1", &a.sin_addr);
-    if (connect(fd, (struct sockaddr*)&a, sizeof(a)) != 0) { close(fd); return -1; }
+    int fd = -1;
+    for (int attempt = 0; ; attempt++) {
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return -1;
+        if (connect(fd, (struct sockaddr*)&a, sizeof(a)) == 0) break;
+        int e = errno;
+        close(fd);
+        if ((e != ECONNRESET && e != ECONNREFUSED) || attempt >= 50) {
+            errno = e;
+            return -1;
+        }
+        usleep(100 * 1000);
+    }
     struct timeval tv = { .tv_sec = 20, .tv_usec = 0 };
     setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof(tv));
     setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof(tv));

@@ -93,7 +93,7 @@ main() {
     }
 
     // ---- Combined condition with ||. --------------------------------------
-    when target.os == "darwin" || target.os == "linux" || target.os == "windows" {
+    when target.os == "darwin" || target.os == "linux" || target.os == "windows" || target.os == "freebsd" {
         println("  PASS: combined `||` condition selected a mainstream-OS arm")
     } else {
         only_on_exotic_os()
