@@ -1,0 +1,1 @@
+- **No linker warnings in a program's build output on OpenBSD.** OpenBSD's linker warns about every `strcpy` it links, and the sandbox path helper and three std modules had one, so `ae build --emit=lib`, a C host and several examples printed `strcpy() is almost always misused`. Each length was already checked; they are `memcpy` now.

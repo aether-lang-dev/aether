@@ -66,14 +66,16 @@ static int aether_sandbox_canon_path(const char* in, char* out, size_t out_size)
     if (!in || !*in || !out || out_size < 2) return 0;
     char full[PATH_MAX];
     if (in[0] == '/') {
-        if (strlen(in) >= sizeof(full)) return 0;
-        strcpy(full, in);
+        size_t il = strlen(in);
+        if (il >= sizeof(full)) return 0;
+        memcpy(full, in, il + 1);
     } else {
         if (!getcwd(full, sizeof(full))) return 0;
         size_t cl = strlen(full);
-        if (cl + 1 + strlen(in) + 1 > sizeof(full)) return 0;
+        size_t il = strlen(in);
+        if (cl + 1 + il + 1 > sizeof(full)) return 0;
         full[cl] = '/';
-        strcpy(full + cl + 1, in);
+        memcpy(full + cl + 1, in, il + 1);
     }
 
     char res[PATH_MAX];
@@ -154,10 +156,11 @@ static int aether_sandbox_canon_pattern(const char* pat, char* out, size_t out_s
     const char sepch = '/';
 #endif
     int sep = !(rl > 0 && (rdir[rl - 1] == '/' || rdir[rl - 1] == '\\'));
-    if (rl + (size_t)sep + strlen(tail) + 1 > out_size) return 0;
+    size_t tl = strlen(tail);
+    if (rl + (size_t)sep + tl + 1 > out_size) return 0;
     memcpy(out, rdir, rl);
     if (sep) out[rl++] = sepch;
-    strcpy(out + rl, tail);
+    memcpy(out + rl, tail, tl + 1);
     return 1;
 }
 

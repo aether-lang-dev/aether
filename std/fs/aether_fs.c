@@ -3286,7 +3286,7 @@ DirList* fs_glob_raw(const char* pattern) {
         char dir[4096];
         int dirlen = (int)(dstar - pattern);
         if (dirlen == 0) {
-            strcpy(dir, ".");
+            memcpy(dir, ".", 2);
         } else {
             strncpy(dir, pattern, dirlen);
             dir[dirlen] = '\0';
@@ -3346,7 +3346,7 @@ DirList* fs_glob_raw(const char* pattern) {
         char dir[4096];
         int dirlen = (int)(dstar - pattern);
         if (dirlen == 0) {
-            strcpy(dir, ".");
+            memcpy(dir, ".", 2);
         } else {
             strncpy(dir, pattern, dirlen);
             dir[dirlen] = '\0';

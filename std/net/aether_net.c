@@ -200,7 +200,7 @@ void aether_net_note_family(const char* host, int port, int family) {
     if (slot < 0) {
         slot = net_family_memo_next;
         net_family_memo_next = (net_family_memo_next + 1) % NET_FAMILY_MEMO_SLOTS;
-        strcpy(net_family_memo[slot].host, host);
+        memcpy(net_family_memo[slot].host, host, strlen(host) + 1);   /* fits: checked above */
         net_family_memo[slot].port = port;
     }
     net_family_memo[slot].family = family;
