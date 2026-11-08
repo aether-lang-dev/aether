@@ -409,7 +409,9 @@ extern aether_thread_epoch() -> long
 
 // A number that changes whenever a thread starts or ends in the process. On
 // Windows it counts every start and end the loader reports: the program's
-// threads and the ones the system starts in it (a thread-pool worker). On
+// threads and the ones the system starts in it (a thread-pool worker); and
+// it moves when a thread the loader does not report runs (the parallel
+// loader's workers, whose first run allocates about 1 KB). On
 // Linux, macOS and FreeBSD it is the number of threads, which a start and an
 // end between two reads leave as it was. -1 where the platform gives
 // neither. A thread holds heap blocks of its own while it lives (the OS's
@@ -420,18 +422,20 @@ thread_epoch() -> long {
 }
 
 // The growth heap_in_use() shows for one run of `round`, once the work has
-// reached its steady state: `round` runs up to `tries` times, each run
-// between two reads, and the answer is 0 as soon as one run leaves the
+// reached its steady state: `round` is compared up to `tries` times, each
+// run between two reads, and the answer is 0 as soon as one run leaves the
 // count exactly as it found it. A run during which a thread started or
-// ended (thread_epoch) is not compared. A leak grows every run, so then the
-// answer is the growth of the last run compared (of the last run, if none
-// could be); a one-time allocation, or a buffer still growing to its
-// high-water mark, lands in some runs and then settles. Meaningful where
-// heap_in_use_exact() is true.
+// ended (thread_epoch) is not compared, and does not use up a try: it is
+// run again, up to 8 such runs in all, so `tries` 1 still compares one run
+//. A leak grows every run, so then the answer is the growth of the
+// last run compared (of the last run, if none could be); a one-time
+// allocation, or a buffer still growing to its high-water mark, lands in
+// some runs and then settles. Meaningful where heap_in_use_exact() is true.
 steady_growth(round: fn, tries: int) -> long {
     long last = 0
     compared = 0
     i = 0
+    spoiled = 0
     while i < tries {
         e0 = aether_thread_epoch()
         h0 = aether_heap_in_use()
@@ -442,10 +446,16 @@ steady_growth(round: fn, tries: int) -> long {
             if h1 == h0 { return 0 }
             last = h1 - h0
             compared = 1
-        } else if compared == 0 {
-            last = h1 - h0
+            i = i + 1
+        } else {
+            if compared == 0 {
+                last = h1 - h0
+            }
+            spoiled = spoiled + 1
+            if spoiled >= 8 {
+                i = i + 1
+            }
         }
-        i = i + 1
     }
     return last
 }

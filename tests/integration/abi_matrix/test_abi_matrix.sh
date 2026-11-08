@@ -227,6 +227,14 @@ run_shared() {
         DYLD_LIBRARY_PATH="$1${DYLD_LIBRARY_PATH:+:$DYLD_LIBRARY_PATH}" \
         "./host_new$exe" "$1/libmlib.$ext" "$(rt_file "$1")" "${4:-}" 2>"$1/err" | norm)
 }
+# A runtime the loader would not take: say why (dlerror). The release's
+# shared runtime links its own dependencies (0.894.0 to 0.899.0: libfyaml),
+# which the machine running this must have.
+loader_why() {
+    case "$1" in
+        "cannot load"*) [ -s "$2/err" ] && { echo "      loader:"; tail -4 "$2/err" | sed 's/^/        /'; } ;;
+    esac
+}
 if [ -n "$(rt_file "$ROOT/build/shared")" ] && [ -n "$(rt_file "$OLD_HOME/lib/shared")" ]; then
     build_lib "$TMP/newsh" "$ROOT" "$AE" "--shared-runtime" &&
     build_lib "$TMP/oldsh" "$OLD_HOME" "$OLD_AE" "--shared-runtime" && {
@@ -234,6 +242,7 @@ if [ -n "$(rt_file "$ROOT/build/shared")" ] && [ -n "$(rt_file "$OLD_HOME/lib/sh
         got="$(run_shared "$TMP/sh_oo" "$TMP/oldsh" "$OLD_HOME/lib/shared")"
         if [ "$old_level" = 0 ]; then want="$level0"; else want="$level1"; fi
         expect "the $old_version library on its shared runtime" "$got" "$want"
+        loader_why "$got" "$TMP/sh_oo"
         # The latest published release can have this tree's ABI (especially
         # just after a release). Read the IDs the libraries actually record:
         # equal versions alone would miss a revision or layout-flag change.
@@ -255,12 +264,14 @@ if [ -n "$(rt_file "$ROOT/build/shared")" ] && [ -n "$(rt_file "$OLD_HOME/lib/sh
                 "catalog: schema 1.x, host ABI level 1
 preflight: refused, the library was made for Aether runtime "*) ;;
                 *) bad "this library on the $old_version shared runtime is not refused:"
-                   printf '%s\n' "$got" | sed 's/^/        /' ;;
+                   printf '%s\n' "$got" | sed 's/^/        /'
+                   loader_why "$got" "$TMP/sh_no" ;;
             esac
             if (cd "$TMP/oldsh" && cp "$SCRIPT_DIR/app.ae" . && AETHER_HOME="$ROOT" "$AE" build app.ae -o app > app_build.log 2>&1); then
                 bad "this importer took the $old_version shared-runtime library"
             elif ! grep -q "host ABI level 0\|was made for the Aether runtime" "$TMP/oldsh/app_build.log"; then
                 bad "this importer's refusal of the $old_version shared-runtime library says why" "$TMP/oldsh/app_build.log"
+                grep -A2 '^note: .* could not be loaded' "$TMP/oldsh/app_build.log" | sed 's/^/        /'
             fi
         fi
         shared_note=", and on the shared runtimes"
