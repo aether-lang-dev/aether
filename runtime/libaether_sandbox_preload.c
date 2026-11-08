@@ -30,7 +30,9 @@
 #include <netdb.h>
 #include <stdarg.h>
 #include <spawn.h>
-#include <wordexp.h>
+#if !defined(__OpenBSD__)
+#include <wordexp.h>             // OpenBSD's libc has no wordexp to intercept
+#endif
 #if defined(__FreeBSD__)
 #include <sys/user.h>            // struct kinfo_file, for fexecve's F_KINFO
 #include <sys/syscall.h>         // SYS_fork, which libthr's fork issues itself
@@ -1180,7 +1182,9 @@ FILE* popen(const char* command, const char* mode) {
 // plain words still expand. FreeBSD's wordexp runs /bin/sh for every call,
 // WRDE_NOCMD or not: there it is refused outright, with WRDE_CMDSUB, an
 // error after which POSIX leaves `we` as it was (after WRDE_NOSPACE a
-// caller would wordfree it, and it was never filled).
+// caller would wordfree it, and it was never filled). OpenBSD's libc has
+// no wordexp at all (deliberately), so there is nothing to wrap there.
+#if !defined(__OpenBSD__)
 static int (*real_wordexp)(const char*, wordexp_t*, int) = NULL;
 int wordexp(const char* words, wordexp_t* we, int flags) {
     if (!real_wordexp) real_wordexp = dlsym(RTLD_NEXT, "wordexp");
@@ -1191,6 +1195,7 @@ int wordexp(const char* words, wordexp_t* we, int flags) {
 #endif
     return real_wordexp(words, we, flags);
 }
+#endif // !__OpenBSD__ (wordexp)
 
 // mmap — block PROT_EXEC to prevent shellcode execution from byte arrays
 void* mmap(void* addr, size_t length, int prot, int flags, int fd, off_t offset) {
@@ -1380,8 +1385,10 @@ void* dlopen(const char* filename, int flags) {
 //
 // The prototype differs by platform and must match the libc declaration
 // exactly or the override is a compile error: glibc declares
-// `long syscall(long, ...)`, FreeBSD declares `int syscall(int, ...)`.
-#if defined(__FreeBSD__)
+// `long syscall(long, ...)`, FreeBSD and NetBSD declare
+// `int syscall(int, ...)`. OpenBSD's libc no longer has syscall(), so the
+// definition there is the only one.
+#if defined(__FreeBSD__) || defined(__NetBSD__)
 typedef int aether_syscall_arg_t;
 #else
 typedef long aether_syscall_arg_t;
