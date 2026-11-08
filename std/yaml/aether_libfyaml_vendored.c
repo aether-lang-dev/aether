@@ -63,7 +63,12 @@
  * left out, as is libclang.
  *
  * Unity-build fixes, wrapper-side, with no vendored file edited:
- *   - -Wchar-subscripts is off for this TU (NetBSD only; see below).
+ *   - -Wchar-subscripts is off for this TU (NetBSD only; see below), and
+ *     -Wformat on mingw, where gcc checks %zu against msvcrt's printf.
+ *   - mingw: _WIN32_WINNT raised to Windows 10 for
+ *     GetCurrentThreadStackLimits(), mingw's stdio selected, and an
+ *     __has_feature for gcc < 14 so the ASan probe needs no weak symbol.
+ *   - Android below API 30: renameat2() as the raw syscall.
  *   - fy-allocator-mremap.c and fy-allocator-auto.c each define a static
  *     `default_cfg` of a different type; the second is renamed around its
  *     #include.
@@ -81,6 +86,30 @@
 
 #ifndef _GNU_SOURCE
 #define _GNU_SOURCE 1
+#endif
+
+#if defined(__MINGW32__)
+/* mingw-w64: fy-utils.c sizes the stack with GetCurrentThreadStackLimits(),
+ * which <windows.h> declares from Windows 8 (0x0602) on; MSYS2's gcc
+ * defaults lower and fails the build on an implicit declaration. Aether's
+ * Windows floor is 10. And the library's diagnostics print size_t with
+ * %zu: mingw's own stdio (as the Makefile already selects for Windows
+ * builds) formats it, where an old msvcrt.dll would not. */
+#  if !defined(_WIN32_WINNT) || _WIN32_WINNT < 0x0602
+#    undef _WIN32_WINNT
+#    define _WIN32_WINNT 0x0A00
+#  endif
+#  ifndef __USE_MINGW_ANSI_STDIO
+#    define __USE_MINGW_ANSI_STDIO 1
+#  endif
+/* gcc before 14 has no __has_feature, so fy-utils.h's ASan probe falls
+ * back to a weak reference to __asan_init, which a PE link cannot leave
+ * undefined (MSYS2's gcc 14+ never gets there). An ASan build defines
+ * __SANITIZE_ADDRESS__, which the probe checks first, so this only tells
+ * the probe what it would have found: no ASan. */
+#  if !defined(__clang__) && !defined(__has_feature)
+#    define __has_feature(x) 0
+#  endif
 #endif
 /* After _GNU_SOURCE, before testing for glibc: <limits.h> brings in the
  * libc's feature header, which defines __GLIBC__ there. */
@@ -121,6 +150,34 @@
  * call, left as it is. */
 #if defined(__GNUC__)
 #pragma GCC diagnostic ignored "-Wchar-subscripts"
+#endif
+
+/* mingw-w64 gcc checks format(printf) attributes against msvcrt's printf
+ * (ms_printf), which knows no %z, whatever stdio the program actually
+ * links: libfyaml's diagnostic macros pass size_t as %zu, and gcc -Werror
+ * failed the Windows build on it. At run time those calls go through
+ * mingw's stdio (__USE_MINGW_ANSI_STDIO, above), which does format %zu, so
+ * only the checker is wrong. Off for this TU on mingw only. */
+#if defined(__MINGW32__) && defined(__GNUC__)
+#pragma GCC diagnostic ignored "-Wformat"
+#pragma GCC diagnostic ignored "-Wformat-extra-args"
+#endif
+
+/* Android before API 30 (the Android release builds for 29) has the
+ * kernel's RENAME_NOREPLACE in its headers but no renameat2() in bionic,
+ * so fy-utils.c's first branch calls an undeclared function. Its second
+ * branch is the raw syscall; this gives the first the same body. */
+#if defined(__ANDROID__) && defined(__ANDROID_API__) && __ANDROID_API__ < 30
+#include <fcntl.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+static int aether_fy_android_renameat2(int olddirfd, const char *oldpath,
+                                       int newdirfd, const char *newpath,
+                                       unsigned int flags)
+{
+    return (int)syscall(__NR_renameat2, olddirfd, oldpath, newdirfd, newpath, flags);
+}
+#define renameat2 aether_fy_android_renameat2
 #endif
 
 #include "libfyaml/src/fy-parse.c"
