@@ -18,7 +18,7 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] yaml_build_requirement: ae not built"; exit 0; }
-command -v make >/dev/null 2>&1 || { echo "  [SKIP] yaml_build_requirement: no make"; exit 0; }
+command -v "${MAKE:-make}" >/dev/null 2>&1 || { echo "  [SKIP] yaml_build_requirement: no make"; exit 0; }
 command -v pkg-config >/dev/null 2>&1 || { echo "  [SKIP] yaml_build_requirement: no pkg-config"; exit 0; }
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*) echo "  [SKIP] yaml_build_requirement: the Windows build has no libfyaml leg"; exit 0 ;;
@@ -31,7 +31,7 @@ fail=0
 # --- 1. YAML=1 without libfyaml stops the build --------------------------
 # An empty pkg-config search path stands for a machine without it. make -n:
 # the check is at parse time, so nothing is built either way.
-out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" make -n YAML=1 compiler 2>&1)"
+out="$(cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" ${MAKE:-make} -n YAML=1 compiler 2>&1)"
 rc=$?
 case "$out" in
     *"YAML=1 but pkg-config finds no libfyaml"*) [ "$rc" -ne 0 ] || {
@@ -41,7 +41,7 @@ case "$out" in
 esac
 # YAML=0 and auto still build without it.
 for mode in 0 auto; do
-    if ! (cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" make -n YAML=$mode compiler >/dev/null 2>&1); then
+    if ! (cd "$ROOT" && PKG_CONFIG_PATH= PKG_CONFIG_LIBDIR="$tmp/none" ${MAKE:-make} -n YAML=$mode compiler >/dev/null 2>&1); then
         echo "  [FAIL] yaml_build_requirement: YAML=$mode without libfyaml stopped the build"; fail=1
     fi
 done
