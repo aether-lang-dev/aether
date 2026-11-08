@@ -598,6 +598,10 @@ static int c_dlopen_libm(st_vm* vm, char* d, size_t cap) {
     return try_dlopen("libm.so.5", d, cap);
 #elif defined(__APPLE__)
     return try_dlopen("/usr/lib/libm.dylib", d, cap);
+#elif defined(__NetBSD__)
+    return try_dlopen("libm.so.0", d, cap);
+#elif defined(__OpenBSD__)
+    return try_dlopen("libm.so", d, cap);   /* its loader takes the newest */
 #else
     return try_dlopen("libm.so.6", d, cap);
 #endif
