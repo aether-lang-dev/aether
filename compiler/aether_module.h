@@ -289,5 +289,10 @@ void module_mark_unreachable(ASTNode* program);
 void module_sweep_unreachable(ASTNode* program);
 void module_prune_unreachable(ASTNode* program);
 
+/* The compiler's argv[0], given by main() before anything changes
+ * directory. Only OpenBSD reads it: it has no kernel query for a process's
+ * own executable, which is how the stdlib beside an install is found. */
+void module_set_argv0(const char* argv0);
+
 #endif // AETHER_MODULE_H
 

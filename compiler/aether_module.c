@@ -26,10 +26,11 @@
     #include <sys/stat.h>
 #endif
 #include <dirent.h>
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__NetBSD__)
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
+#include <limits.h>   /* PATH_MAX: OpenBSD's argv[0] resolution */
 #ifdef __APPLE__
     #include <mach-o/dyld.h>
 #endif
@@ -1065,6 +1066,36 @@ static const char* get_user_home_dir(void) {
     return NULL;
 }
 
+#if defined(__OpenBSD__)
+static char g_module_self_path[PATH_MAX];
+#endif
+
+void module_set_argv0(const char* argv0) {
+#if defined(__OpenBSD__)
+    char resolved[PATH_MAX];
+    if (!argv0 || !argv0[0]) return;
+    if (strchr(argv0, '/')) {
+        if (realpath(argv0, resolved))
+            snprintf(g_module_self_path, sizeof(g_module_self_path), "%s", resolved);
+        return;
+    }
+    const char* path = getenv("PATH");
+    while (path && *path) {
+        const char* end = strchr(path, ':');
+        size_t len = end ? (size_t)(end - path) : strlen(path);
+        char probe[PATH_MAX];
+        int w = snprintf(probe, sizeof(probe), "%.*s/%s", (int)len, len ? path : ".", argv0);
+        if (w > 0 && (size_t)w < sizeof(probe) && access(probe, X_OK) == 0 && realpath(probe, resolved)) {
+            snprintf(g_module_self_path, sizeof(g_module_self_path), "%s", resolved);
+            return;
+        }
+        path = end ? end + 1 : NULL;
+    }
+#else
+    (void)argv0;
+#endif
+}
+
 static int get_exe_directory(char* buf, size_t bufsz) {
 #ifdef _WIN32
     DWORD n = GetModuleFileNameA(NULL, buf, (DWORD)bufsz);
@@ -1082,6 +1113,15 @@ static int get_exe_directory(char* buf, size_t bufsz) {
         if (pn <= 0 || (size_t)pn >= bufsz - 1) return 0;
         buf[pn] = '\0';
     }
+#elif defined(__NetBSD__)
+    int mib[4] = { CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME };
+    size_t nb_len = bufsz;
+    if (sysctl(mib, 4, buf, &nb_len, NULL, 0) != 0 || nb_len <= 1) return 0;
+    buf[bufsz - 1] = '\0';
+#elif defined(__OpenBSD__)
+    size_t ob_len = strlen(g_module_self_path);
+    if (ob_len == 0 || ob_len >= bufsz) return 0;
+    memcpy(buf, g_module_self_path, ob_len + 1);
 #elif defined(__linux__)
     ssize_t n = readlink("/proc/self/exe", buf, bufsz - 1);
     if (n <= 0 || (size_t)n >= bufsz - 1) return 0;   /* #3545: filled, it may be cut */
