@@ -1,5 +1,6 @@
 #include <stdio.h>
 #include <string.h>
+#include <unistd.h>
 
 extern int aether_spawn_sandboxed(void* grant_list, const char* program, const char* arg);
 extern void* list_new(void);
@@ -23,7 +24,10 @@ int main(void) {
             return 1;
         }
     }
-    int rc = aether_spawn_sandboxed(grants, "/bin/true", "");
+    /* A program that exists (/usr/bin/true on FreeBSD), so a -1 means the
+     * grant list was refused, not that the exec failed. */
+    const char* true_bin = access("/bin/true", X_OK) == 0 ? "/bin/true" : "/usr/bin/true";
+    int rc = aether_spawn_sandboxed(grants, true_bin, "");
     if (rc == -1) {
         printf("PASS: oversized grant list denied\n");
         return 0;
