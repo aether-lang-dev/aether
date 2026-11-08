@@ -31,7 +31,7 @@ main() {
 }
 ```
 
-With libfyaml present that prints:
+That prints:
 
 ```
 err=''
@@ -39,24 +39,23 @@ entries: 2
 name: Ada
 ```
 
-The block is **compiled but not run** in CI. `std.yaml` is backed by
-**libfyaml, an optional build dependency**: without it every entry point
-returns `"std.yaml unavailable: this build has no libfyaml (install libfyaml
-and rebuild Aether; YAML=1 makes the build require it)"` and the example
-prints that instead. An asserted
-`output` block would therefore pass or fail depending on how the machine
-running CI was provisioned, which is not something a documentation example
-should depend on.
+`std.yaml` is backed by **libfyaml, vendored**: `std/yaml/libfyaml/` is a
+pinned, unmodified subset of upstream libfyaml (see its `VENDOR.md`),
+compiled into `libaether.a` by `aether_libfyaml_vendored.c`, as `std.regex`
+does with PCRE2. No system libfyaml is needed to build or run a program, and
+nothing links `-lfyaml`. Every release has it: Linux, macOS, Windows,
+FreeBSD and Android, and `ae build --target ...` cross builds, except wasi
+(no mmap or threads for it) and iOS (libfyaml calls `mach_vm_map()`, which
+the iOS SDK marks unsupported), where `std.yaml` is the stub. Its symbols are all renamed
+`aether_<name>`, so a program can also link a system libfyaml of another
+version without the two meeting.
 
-The release builds for Linux and macOS are made with `YAML=1`, which stops
-the build where pkg-config finds no libfyaml, and the release job runs a yaml
-program before it packages, so a published toolchain has the real module.
-It links libfyaml dynamically, and only into a program that imports
-`std.yaml`: `ae` and `aetherc` themselves start without it, and such a
-program needs the library where it is built (`apt install libfyaml-dev`,
-`brew install libfyaml`, `pkg install libfyaml`), as `std.zstd` needs libzstd.
-The Windows, FreeBSD and Android releases still carry the stubs: MSYS2 has no
-static libfyaml for the static Windows link, and the cross sysroots have none.
+The Makefile's `YAML` picks the library: `vendored` (the default), `1` (a
+system libfyaml found by pkg-config, required; a program importing
+`std.yaml` then links `-lfyaml`), `auto` (the system one if found, else
+vendored), or `0` (stubs: every entry point returns `"std.yaml unavailable:
+this build has no libfyaml ..."`). The block above is **compiled but not
+run** in CI, since a `YAML=0` build prints that error instead.
 
 Unlike `std.zlib`, this module exposes no `available()` probe, so a program
 that must degrade gracefully has to check the error string from `parse`.

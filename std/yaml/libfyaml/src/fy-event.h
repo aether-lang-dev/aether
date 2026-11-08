@@ -1,0 +1,76 @@
+/*
+ * fy-event.h - YAML parser private event definition
+ *
+ * Copyright (c) 2019 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#ifndef FY_EVENT_H
+#define FY_EVENT_H
+
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <stdbool.h>
+
+#include <libfyaml.h>
+
+#include "fy-list.h"
+#include "fy-typelist.h"
+
+/* private event type */
+FY_TYPE_FWD_DECL_LIST(eventp);
+struct fy_eventp {
+	struct list_head node;
+	struct fy_event e;
+};
+FY_TYPE_DECL_LIST(eventp);
+
+struct fy_eventp *fy_eventp_alloc(void);
+void fy_eventp_free(struct fy_eventp *fyep);
+
+/* called from internal emitter */
+void fy_eventp_release(struct fy_eventp *fyep);
+
+struct fy_eventp *fy_parse_eventp_alloc(struct fy_parser *fyp);
+void fy_parse_eventp_recycle(struct fy_parser *fyp, struct fy_eventp *fyep);
+
+struct fy_eventp *fy_emit_eventp_alloc(struct fy_emitter *fye);
+void fy_emit_eventp_recycle(struct fy_emitter *emit, struct fy_eventp *fyep);
+
+struct fy_eventp *fy_parse_eventp_clone(struct fy_parser *fyp, struct fy_eventp *fyep_src, bool strip_anchors);
+struct fy_token *fy_event_get_and_clear_anchor_token(struct fy_event *fye);
+const char *fy_event_get_anchor(struct fy_event *fye, size_t *anchor_lenp);
+
+struct fy_eventp *
+fy_eventp_vcreate_internal(struct fy_eventp_list *recycled_list, struct fy_diag *diag,
+			   struct fy_document_state *fyds, enum fy_event_type type, va_list ap);
+
+struct fy_token_list;
+
+void fy_eventp_clean_rl(struct fy_token_list *fytl, struct fy_eventp *fyep);
+
+/* convert to event dump string, string is malloc'ed */
+char *fy_event_to_string(struct fy_event *fye);
+
+struct fy_document_iterator;
+
+struct fy_eventp *fy_document_iterator_eventp_alloc(struct fy_document_iterator *fydi);
+void fy_document_iterator_eventp_recycle(struct fy_document_iterator *fydi, struct fy_eventp *fyep);
+struct fy_event *fy_document_iterator_event_create(struct fy_document_iterator *document_iterator, enum fy_event_type type, ...);
+struct fy_event *fy_document_iterator_event_vcreate(struct fy_document_iterator *document_iterator, enum fy_event_type type, va_list ap);
+void fy_document_iterator_event_free(struct fy_document_iterator *document_iterator, struct fy_event *fye);
+
+struct fy_generic_iterator;
+
+struct fy_eventp *fy_generic_iterator_eventp_alloc(struct fy_generic_iterator *fygi);
+void fy_generic_iterator_eventp_recycle(struct fy_generic_iterator *fygi, struct fy_eventp *fyep);
+struct fy_event *fy_generic_iterator_event_create(struct fy_generic_iterator *fygi, enum fy_event_type type, ...);
+struct fy_event *fy_generic_iterator_event_vcreate(struct fy_generic_iterator *fygi, enum fy_event_type type, va_list ap);
+void fy_generic_iterator_event_free(struct fy_generic_iterator *fygi, struct fy_event *fye);
+
+struct fy_token_list;
+struct document_state;
+
+#endif

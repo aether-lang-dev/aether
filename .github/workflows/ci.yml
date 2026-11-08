@@ -509,6 +509,8 @@ jobs:
         # std.regex has to be the vendored engine, not the stub (0.897.0's
         # FreeBSD release shipped the stub).
         sh scripts/check_regex_engine.sh $X/libaether.a
+        # Likewise std.yaml's vendored libfyaml, and none of its symbols unprefixed.
+        sh scripts/check_yaml_engine.sh $X/libaether.a
 
   # Android cross-compile gate: the release builds an android-aarch64
   # toolchain with the NDK (Makefile ANDROID=1); this catches a bionic break

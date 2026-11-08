@@ -420,10 +420,12 @@ static bool cross_find_manifest(char* manifest, size_t msz,
  * complete libaether.a does. Library-backed features (TLS, real crypto,
  * zlib, HTTP/2) then report unavailable at runtime on the target,
  * exactly like a native build on a host without those libraries, while
- * pure helpers such as base64 (std.encoding) keep working. std.regex is
- * the exception (#1389): its engine is vendored (std/regex/pcre2/,
- * compiled by the aether_pcre2_vendored.c TU in this same list), so it
- * works on every cross target with no sysroot. */
+ * pure helpers such as base64 (std.encoding) keep working. std.regex and
+ * std.yaml are the exceptions: their libraries are vendored (#1389's
+ * std/regex/pcre2/ and std/yaml/libfyaml/, compiled by the
+ * aether_pcre2_vendored.c and aether_libfyaml_vendored.c TUs in this same
+ * list), so they work on every cross target with no sysroot (std.yaml on
+ * every one but wasi and iOS). */
 #define CROSS_SRC_PATH_MAX 1024
 static int cross_collect_core_list(char out[][CROSS_SRC_PATH_MAX], int max,
                                    const char* manifest, const char* base) {
@@ -503,8 +505,9 @@ bool cross_uses_unsupported_module(const char* file, char* which, size_t wsz) {
     if (aetherc_capture_stdout("--emit=inspect", file, NULL, out, sizeof(out)) != 0)
         return false;
     static const char* mods[] = {
-        /* std.regex is NOT here: its engine is vendored (#1389), so cross
-         * builds get a working regex with no sysroot — nothing to warn about. */
+        /* std.regex and std.yaml are NOT here: their libraries are vendored
+         * (#1389), so cross builds get them with no sysroot — nothing to
+         * warn about. */
         "std.http", "std.net", "std.cryptography", "std.zlib",
         "std.encoding", NULL   /* base64 in std.encoding is openssl-backed */
     };
@@ -1488,6 +1491,36 @@ int run_cross_build(const char* c_file, const char* out_file,
         strncat(feature_defs, " -DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2",
                 sizeof(feature_defs) - strlen(feature_defs) - 1);
     }
+    /* std.yaml likewise needs no sysroot: AETHER_VENDOR_YAML turns
+     * std/yaml/aether_libfyaml_vendored.c (in the MANIFEST compile loop
+     * below) into the vendored libfyaml and aether_yaml.c into the real
+     * bindings. The library includes <libfyaml.h>, so its include/ goes on
+     * the path (as -I, ahead of any other include directory), and
+     * libfyaml_compat stands in for the <mach/mach_vm.h> zig's macOS headers
+     * lack (as -idirafter, behind any real one). No -l: the library is in
+     * the archive. Not for wasi, which has no mmap or threads for it, nor
+     * for iOS (device or simulator; Mac Catalyst builds against the macOS
+     * SDK and keeps it): libfyaml calls mach_vm_map(), whose header the iOS
+     * SDK marks `#error mach_vm.h unsupported`. std.yaml stays the stub on
+     * both. */
+    bool yaml_ios = strstr(ztriple, "-ios") && !cross_target_is_macabi(ztriple);
+    /* The -I goes first on the compile line (yaml_inc), ahead of the
+     * sysroot's and CROSSBUILD_SYSROOT's include directories. */
+    char yaml_inc[sizeof(base) + 64];
+    yaml_inc[0] = '\0';
+    if (!cross_target_is_wasi(ztriple) && !yaml_ios) {
+        char ydefs[sizeof(base) + 128];
+        snprintf(ydefs, sizeof(ydefs),
+                 " -DAETHER_HAS_YAML -DAETHER_VENDOR_YAML"
+                 " -idirafter \"%s/std/yaml/libfyaml_compat\"", base);
+        if (strlen(feature_defs) + strlen(ydefs) >= sizeof(feature_defs)) {
+            /* A cut include path would fail the compile obscurely. */
+            fprintf(stderr, "Error: the toolchain path is too long for the cross-compile flags: %s\n", base);
+            return 1;
+        }
+        strcat(feature_defs, ydefs);
+        snprintf(yaml_inc, sizeof(yaml_inc), " -I\"%s/std/yaml/libfyaml/include\"", base);
+    }
     /* Heap-grown rather than fixed: the command line is dominated by
      * tc.include_flags, which is itself heap-grown and scales with the install
      * prefix length and the module count. A fixed buffer turned a longer-than-
@@ -1523,8 +1556,8 @@ int run_cross_build(const char* c_file, const char* out_file,
             snprintf(objpath, sizeof(objpath), "%s/%.*so", objdir,
                      (int)(strlen(bn) - 1), bn);
             if (!cross_cmd_fmt(&cmd, &cmd_cap,
-                "%s %s%s %s %s %s %s -c \"%s\" -o \"%s\"",
-                cc_cmd, sysroot_flag, lib_pic, opt, feature_defs, user_cflags, tc.include_flags,
+                "%s%s %s%s %s %s %s %s -c \"%s\" -o \"%s\"",
+                cc_cmd, yaml_inc, sysroot_flag, lib_pic, opt, feature_defs, user_cflags, tc.include_flags,
                 srcs[i], objpath)) {
                 fprintf(stderr, "Error: out of memory building the cross-compile command.\n");
                 compile_failed = true;

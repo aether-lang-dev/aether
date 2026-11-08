@@ -1,0 +1,951 @@
+/*
+ * fy-allocator.c - allocators
+ *
+ * Copyright (c) 2023 Pantelis Antoniou <pantelis.antoniou@konsulko.com>
+ *
+ * SPDX-License-Identifier: MIT
+ */
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
+#include <string.h>
+#include <stdlib.h>
+#include <stdalign.h>
+#include <time.h>
+#include <inttypes.h>
+#include <math.h>
+
+#include <stdio.h>
+
+#ifndef _WIN32
+#include <sys/mman.h>
+#include <pthread.h>
+#endif
+
+/* for container_of */
+#include "fy-list.h"
+#include "fy-utils.h"
+#include "fy-align.h"
+#include "fy-win32.h"
+
+#include "fy-allocator.h"
+#include "fy-allocator-linear.h"
+#include "fy-allocator-malloc.h"
+#include "fy-allocator-mremap.h"
+#include "fy-allocator-dedup.h"
+#include "fy-allocator-auto.h"
+#include "fy-allocator-durable.h"
+
+static struct fy_registered_allocator_entry_list allocator_registry_list;
+static bool allocator_registry_initialized = false;
+static bool allocator_registry_locked = false;
+
+#ifndef FY_NON_LOCKING_REGISTRY
+
+#if !defined(_WIN32)
+
+static pthread_mutex_t allocator_registry_mutex = PTHREAD_MUTEX_INITIALIZER;
+static inline void allocator_registry_lock(void)
+{
+	int rc FY_DEBUG_UNUSED;
+
+	rc = pthread_mutex_lock(&allocator_registry_mutex);
+	assert(!rc);
+
+	assert(!allocator_registry_locked);
+	allocator_registry_locked = true;
+}
+
+static inline void allocator_registry_unlock(void)
+{
+	int rc FY_DEBUG_UNUSED;
+
+	assert(allocator_registry_locked);
+	allocator_registry_locked = false;
+
+	rc = pthread_mutex_unlock(&allocator_registry_mutex);
+	assert(!rc);
+}
+
+#else	// _WIN32
+
+static CRITICAL_SECTION allocator_registry_mutex;
+static LONG allocator_registry_mutex_initialized = 0;
+static inline void allocator_registry_lock(void)
+{
+	/* Initialize on first use using interlocked operation */
+	if (InterlockedCompareExchange(&allocator_registry_mutex_initialized, 1, 0) == 0)
+		InitializeCriticalSection(&allocator_registry_mutex);
+	EnterCriticalSection(&allocator_registry_mutex);
+	assert(!allocator_registry_locked);
+	allocator_registry_locked = true;
+}
+
+static inline void allocator_registry_unlock(void)
+{
+	assert(allocator_registry_locked);
+	allocator_registry_locked = false;
+	LeaveCriticalSection(&allocator_registry_mutex);
+}
+
+#endif
+
+#else	// FY_NON_LOCKING_REGISTRY
+
+static inline void allocator_registry_lock(void)
+{
+	/* nothing */
+}
+static inline void allocator_registry_unlock(void)
+{
+
+	/* nothing */
+}
+#endif
+
+static inline void allocator_registry_init(void)
+{
+	if (allocator_registry_initialized)
+		return;
+
+	fy_registered_allocator_entry_list_init(&allocator_registry_list);
+
+	allocator_registry_initialized = true;
+}
+
+static struct fy_registered_allocator_entry *
+fy_registered_allocator_entry_create(const char *name, const struct fy_allocator_ops *ops)
+{
+	struct fy_registered_allocator_entry *ae;
+
+	ae = malloc(sizeof(*ae));
+	if (!ae)
+		return NULL;
+	memset(ae, 0, sizeof(*ae));
+	ae->name = name;
+	ae->ops = ops;
+
+	return ae;
+}
+
+static void fy_registered_allocator_entry_destroy(struct fy_registered_allocator_entry *ae)
+{
+	if (!ae)
+		return;
+	free(ae);
+}
+
+static const struct {
+	const char *name;
+	const struct fy_allocator_ops *ops;
+} builtin_allocators[] = {
+	{
+		.name = "linear",
+		.ops = &fy_linear_allocator_ops,
+	}, {
+		.name = "malloc",
+		.ops = &fy_malloc_allocator_ops,
+	}, {
+		.name = "mremap",
+		.ops = &fy_mremap_allocator_ops,
+	}, {
+		.name = "dedup",
+		.ops = &fy_dedup_allocator_ops,
+	}, {
+		.name = "auto",
+		.ops = &fy_auto_allocator_ops,
+#ifndef _WIN32
+	}, {
+		.name = "durable",
+		.ops = &fy_durable_allocator_ops,
+#endif
+	}
+};
+
+int fy_allocator_register(const char *name, const struct fy_allocator_ops *ops)
+{
+	struct fy_registered_allocator_entry *ae;
+	unsigned int i;
+	int ret;
+
+	if (!name || !ops ||
+		!ops->setup ||
+		!ops->cleanup ||
+		!ops->create ||
+		!ops->destroy ||
+		!ops->dump ||
+		!ops->alloc ||
+		!ops->free ||
+		!ops->update_stats ||
+		!ops->storev ||
+		!ops->lookupv ||
+		!ops->release |
+		!ops->get_tag ||
+		!ops->release_tag ||
+		!ops->get_tag_count ||
+		!ops->set_tag_count ||
+		!ops->trim_tag ||
+		!ops->reset_tag ||
+		!ops->get_info ||
+		!ops->get_caps ||
+		!ops->contains)
+		return  -1;
+
+	allocator_registry_lock();
+	allocator_registry_init();
+
+	ret = -1;
+
+	/* must not clash with the builtins */
+	for (i = 0; i < ARRAY_SIZE(builtin_allocators); i++) {
+		if (!strcmp(builtin_allocators[i].name, name))
+			goto out_unlock;
+	}
+
+	/* must not clash with the other entries */
+	for (ae = fy_registered_allocator_entry_list_head(&allocator_registry_list); ae;
+			ae = fy_registered_allocator_entry_next(&allocator_registry_list, ae)) {
+		if (!strcmp(ae->name, name))
+			goto out_unlock;
+	}
+
+	/* OK, create the entry */
+	ae = fy_registered_allocator_entry_create(name, ops);
+	if (!ae)
+		goto out_unlock;
+
+	/* and add it to the list */
+	fy_registered_allocator_entry_list_add(&allocator_registry_list, ae);
+
+	/* all clear */
+	ret = 0;
+
+out_unlock:
+	allocator_registry_unlock();
+
+	return ret;
+}
+
+int fy_allocator_unregister(const char *name)
+{
+	struct fy_registered_allocator_entry *ae;
+	unsigned int i;
+	int ret;
+
+	ret = -1;
+
+	allocator_registry_lock();
+	allocator_registry_init();
+
+	/* must not try to unregister a builtin */
+	for (i = 0; i < ARRAY_SIZE(builtin_allocators); i++) {
+		if (!strcmp(builtin_allocators[i].name, name))
+			goto out_unlock;
+	}
+
+	/* find the entry now */
+	for (ae = fy_registered_allocator_entry_list_head(&allocator_registry_list); ae;
+			ae = fy_registered_allocator_entry_next(&allocator_registry_list, ae)) {
+		if (!strcmp(ae->name, name))
+			break;
+	}
+	if (!ae)
+		goto out_unlock;
+
+	fy_registered_allocator_entry_list_del(&allocator_registry_list, ae);
+
+	/* and destroy it */
+	fy_registered_allocator_entry_destroy(ae);
+
+	ret = 0;
+
+out_unlock:
+	allocator_registry_unlock();
+
+	return ret;
+}
+
+struct fy_allocator *
+fy_allocator_create_internal(const char *name, struct fy_allocator *parent, int parent_tag, const void *cfg)
+{
+	struct fy_registered_allocator_entry *ae;
+	const struct fy_allocator_ops *ops = NULL;
+	unsigned int i;
+
+	if (!name)
+		name = builtin_allocators[0].name;
+
+	allocator_registry_lock();
+	allocator_registry_init();
+
+	/* try the builtins first */
+	for (i = 0; i < ARRAY_SIZE(builtin_allocators); i++) {
+		if (!strcmp(builtin_allocators[i].name, name)) {
+			ops = builtin_allocators[i].ops;
+			break;
+		}
+	}
+
+	/* if not found there, try the registry */
+	if (!ops) {
+		for (ae = fy_registered_allocator_entry_list_head(&allocator_registry_list); ae;
+				ae = fy_registered_allocator_entry_next(&allocator_registry_list, ae)) {
+			if (!strcmp(ae->name, name)) {
+				ops = ae->ops;
+				break;
+			}
+		}
+	}
+	allocator_registry_unlock();
+	if (!ops)
+		return NULL;
+
+	/* XXX just malloc for now */
+	return ops->create(parent, parent_tag, cfg);
+}
+
+struct fy_allocator *fy_allocator_create(const char *name, const void *cfg)
+{
+	/* for now just use internal */
+	return fy_allocator_create_internal(name, NULL, FY_ALLOC_TAG_DEFAULT, cfg);
+}
+
+/* special in place allocator */
+struct fy_allocator *
+fy_linear_allocator_create_in_place(void *buffer, size_t size)
+{
+	const struct fy_allocator_ops *ops = &fy_linear_allocator_ops;
+	struct fy_linear_allocator_cfg cfg = { .buf = buffer, .size = size };
+
+	if (!buffer || size < FY_LINEAR_ALLOCATOR_IN_PLACE_MIN_SIZE)
+		return NULL;
+
+	return ops->create(FY_PARENT_ALLOCATOR_INPLACE, FY_ALLOC_TAG_DEFAULT, &cfg);
+}
+
+struct fy_allocator *
+fy_dedup_allocator_create_in_place(void *buffer, size_t size)
+{
+	struct fy_allocator *pa;
+	struct fy_dedup_allocator_cfg dcfg;
+	size_t dedup_available;
+
+	if (!buffer || size < FY_DEDUP_ALLOCATOR_IN_PLACE_MIN_SIZE)
+		return NULL;
+
+	pa = fy_linear_allocator_create_in_place(buffer, size);
+	if (!pa)
+		return NULL;
+
+	/* try to size the dedup structures to about 10% of the available space */
+	dedup_available = size - FY_LINEAR_ALLOCATOR_IN_PLACE_MIN_SIZE;
+
+	memset(&dcfg, 0, sizeof(dcfg));
+	dcfg.parent_allocator = pa;
+	dcfg.bloom_filter_bits = 0;	/* use default */
+	dcfg.bucket_count_bits = 0;
+	dcfg.estimated_content_size = dedup_available;
+	dcfg.minimum_bucket_occupancy = 1.0;	/* will never grow */
+
+	return fy_allocator_create_internal("dedup", pa, 0, &dcfg);
+}
+
+void fy_allocator_registry_cleanup_internal(bool show_leftovers)
+{
+	struct fy_registered_allocator_entry *ae;
+
+	if (!allocator_registry_initialized)
+		return;
+
+	allocator_registry_lock();
+	while ((ae = fy_registered_allocator_entry_list_pop(&allocator_registry_list)) != NULL) {
+		if (show_leftovers)
+			fprintf(stderr, "%s: destroying %s\n", __func__, ae->name);
+		fy_registered_allocator_entry_destroy(ae);
+	}
+	allocator_registry_unlock();
+}
+
+void fy_allocator_registry_cleanup(void)
+{
+	fy_allocator_registry_cleanup_internal(false);
+}
+
+#ifdef FY_HAS_CONSTRUCTOR
+static FY_CONSTRUCTOR void fy_allocator_registry_constructor(void)
+{
+	allocator_registry_init();
+}
+#endif
+
+#ifdef FY_HAS_DESTRUCTOR
+static FY_DESTRUCTOR void fy_allocator_registry_destructor(void)
+{
+	bool show_leftovers = false;
+
+#ifdef FY_DESTRUCTOR_SHOW_LEFTOVERS
+	show_leftovers = true;
+#endif
+
+	/* make sure the registry is not locked because we will hang */
+	if (allocator_registry_locked) {
+		if (show_leftovers)
+			fprintf(stderr, "%s: refusing to work on locked registry\n", __func__);
+		return;
+	}
+
+	fy_allocator_registry_cleanup_internal(show_leftovers);
+}
+#endif
+
+static const char **create_allocator_array_names(void)
+{
+	unsigned int i, j, count;
+	struct fy_registered_allocator_entry *ae;
+	const char **names = NULL;
+
+	allocator_registry_lock();
+
+	/* two passes */
+	for (j = 0; j < 2; j++) {
+
+		count = 0;
+
+		/* try the builtins first */
+		for (i = 0; i < ARRAY_SIZE(builtin_allocators); i++) {
+			if (j)
+				names[count] = builtin_allocators[i].name;
+			count++;
+
+		}
+		for (ae = fy_registered_allocator_entry_list_head(&allocator_registry_list); ae;
+				ae = fy_registered_allocator_entry_next(&allocator_registry_list, ae)) {
+			if (j)
+				names[count] = ae->name;
+			count++;
+		}
+
+		if (!j) {
+			names = malloc(sizeof(*names) * (count + 1));
+			if (!names)
+				return NULL;
+			memset(names, 0, sizeof(*names) * (count + 1));
+		} else
+			names[count++] = NULL;
+
+	}
+
+	allocator_registry_unlock();
+
+	return names;
+}
+
+const char *fy_allocator_iterate(const char **prevp)
+{
+	unsigned int i;
+	const char **names;
+
+	if (!prevp)
+		return NULL;
+
+	/* yeah, it's not fast, but should be negligible */
+	names = create_allocator_array_names();
+	if (!names)
+		return NULL;
+
+	i = 0;
+	if (*prevp) {
+		while (names[i] && strcmp(*prevp, names[i]))
+			i++;
+		if (names[i])
+			i++;
+	}
+
+	*prevp = names[i];
+
+	free(names);
+
+	return *prevp;
+}
+
+bool fy_allocator_is_available(const char *allocator)
+{
+	const char *name, *prev;
+
+	prev = NULL;
+	while ((name = fy_allocator_iterate(&prev)) != NULL) {
+		if (!strcmp(allocator, name))
+			return true;
+	}
+	return false;
+}
+
+char *fy_allocator_get_names(void)
+{
+	const char *name, *prev;
+	size_t size, len;
+	char *names, *s;
+
+	size = 0;
+	prev = NULL;
+	while ((name = fy_allocator_iterate(&prev)) != NULL)
+		size += strlen(name) + 1;
+
+	names = malloc(size + 1);
+	if (!names)
+		return NULL;
+
+	s = names;
+	prev = NULL;
+	while ((name = fy_allocator_iterate(&prev)) != NULL) {
+		len = strlen(name);
+		assert((size_t)(s + len + 1 - names) <= size);
+		memcpy(s, name, len);
+		s += len;
+		*s++ = ' ';
+	}
+	if (s > names && s[-1] == ' ')
+		s[-1] = '\0';
+	return names;
+}
+
+ssize_t fy_allocator_get_tag_linear_size(struct fy_allocator *a, int tag)
+{
+	struct fy_allocator_info *info;
+	struct fy_allocator_tag_info *tag_info;
+	struct fy_allocator_arena_info *arena_info;
+	unsigned int i, j;
+	size_t size;
+
+	if (!a || tag == FY_ALLOC_TAG_NONE)
+		return -1;
+
+	info = fy_allocator_get_info(a, tag);
+	if (!info)
+		return -1;
+
+	size = 0;
+	for (i = 0; i < info->num_tag_infos; i++) {
+		tag_info = &info->tag_infos[i];
+
+		for (j = 0; j < tag_info->num_arena_infos; j++) {
+			arena_info = &tag_info->arena_infos[j];
+
+			size = fy_size_t_align(size, 16);	/* align at 16 always */
+			size += arena_info->size;
+		}
+	}
+
+	free(info);
+
+	/* too large? really? */
+	if ((ssize_t)size < 0)
+		return -1;
+
+	return (ssize_t)size;
+}
+
+const void *fy_allocator_get_tag_single_linear(struct fy_allocator *a, int tag, size_t *sizep)
+{
+	struct fy_allocator_info *info;
+	struct fy_allocator_arena_info *arena_info;
+	const void *data;
+
+	if (!a || tag == FY_ALLOC_TAG_NONE || !sizep)
+		return NULL;
+
+	*sizep = 0;
+	data = NULL;
+
+	info = fy_allocator_get_info(a, tag);
+	if (!info)
+		return NULL;
+
+	/* this is great, everything is linear */
+	if (info->num_tag_infos == 1 && info->tag_infos[0].num_arena_infos == 1) {
+		arena_info = &info->tag_infos[0].arena_infos[0];
+		data = arena_info->data;
+		*sizep = arena_info->size;
+	}
+
+	free(info);
+
+	return data;
+}
+
+void fy_allocator_destroy(struct fy_allocator *a)
+{
+	if (!a)
+		return;
+	fy_allocator_destroy_nocheck(a);
+}
+
+void fy_allocator_dump(struct fy_allocator *a)
+{
+	if (!a)
+		return;
+	fy_allocator_dump_nocheck(a);
+}
+
+int fy_allocator_update_stats(struct fy_allocator *a, int tag, struct fy_allocator_stats *stats)
+{
+	if (!a || !stats)
+		return -1;
+	return fy_allocator_update_stats_nocheck(a, tag, stats);
+}
+
+void *fy_allocator_alloc(struct fy_allocator *a, int tag, size_t size, size_t align)
+{
+	if (!a)
+		return NULL;
+	return fy_allocator_alloc_nocheck(a, tag, size, align);
+}
+
+void fy_allocator_free(struct fy_allocator *a, int tag, void *ptr)
+{
+	if (!a || !ptr)
+		return;
+	fy_allocator_free_nocheck(a, tag, ptr);
+}
+
+const void *fy_allocator_storev_hash(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align, uint64_t hash)
+{
+	if (!a || !iov)
+		return NULL;
+	return fy_allocator_storev_hash_nocheck(a, tag, iov, iovcnt, align, hash);
+}
+
+const void *fy_allocator_store(struct fy_allocator *a, int tag, const void *data, size_t size, size_t align)
+{
+	struct iovec iov[1];
+
+	if (!a || !data)
+		return NULL;
+
+	/* just call the storev */
+	iov[0].iov_base = (void *)data;
+	iov[0].iov_len = size;
+
+	return fy_allocator_storev_hash_nocheck(a, tag, iov, 1, align, 0);
+}
+
+const void *fy_allocator_storev(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align)
+{
+	if (!a || !iov)
+		return NULL;
+	return fy_allocator_storev_nocheck(a, tag, iov, iovcnt, align);
+}
+
+const void *fy_allocator_lookupv_hash(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align, uint64_t hash)
+{
+	if (!a || !iov)
+		return NULL;
+	return fy_allocator_lookupv_nocheck(a, tag, iov, iovcnt, align, hash);
+}
+
+const void *fy_allocator_lookupv(struct fy_allocator *a, int tag, const struct iovec *iov, int iovcnt, size_t align)
+{
+	if (!a || !iov)
+		return NULL;
+	return fy_allocator_lookupv_nocheck(a, tag, iov, iovcnt, align, 0);
+}
+
+const void *fy_allocator_lookup(struct fy_allocator *a, int tag, const void *data, size_t size, size_t align)
+{
+	struct iovec iov[1];
+
+	if (!a || !data)
+		return NULL;
+
+	/* just call the storev */
+	iov[0].iov_base = (void *)data;
+	iov[0].iov_len = size;
+
+	return fy_allocator_lookupv_nocheck(a, tag, iov, 1, align, 0);
+}
+
+void fy_allocator_release(struct fy_allocator *a, int tag, const void *ptr, size_t size)
+{
+	if (!a || !ptr)
+		return;
+	fy_allocator_release(a, tag, ptr, size);
+}
+
+int fy_allocator_get_tag(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_get_tag_nocheck(a);
+}
+
+void fy_allocator_release_tag(struct fy_allocator *a, int tag)
+{
+	if (!a)
+		return;
+	fy_allocator_release_tag_nocheck(a, tag);
+}
+
+int fy_allocator_get_tag_count(struct fy_allocator *a)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_get_tag_count_nocheck(a);
+}
+
+int fy_allocator_set_tag_count(struct fy_allocator *a, unsigned int count)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_set_tag_count_nocheck(a, count);
+}
+
+void fy_allocator_trim_tag(struct fy_allocator *a, int tag)
+{
+	if (!a)
+		return;
+	fy_allocator_trim_tag_nocheck(a, tag);
+}
+
+void fy_allocator_reset_tag(struct fy_allocator *a, int tag)
+{
+	if (!a)
+		return;
+	fy_allocator_reset_tag_nocheck(a, tag);
+}
+
+int fy_allocator_sync(struct fy_allocator *a)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_sync_nocheck(a);
+}
+
+uint64_t fy_allocator_refs_get(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_refs_get_nocheck(a);
+}
+
+int fy_allocator_refs_publish(struct fy_allocator *a, uint64_t expected,
+			      uint64_t desired, unsigned int flags)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_refs_publish_nocheck(a, expected, desired, flags);
+}
+
+uint64_t fy_allocator_generation(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_generation_nocheck(a);
+}
+
+unsigned int fy_allocator_chunk_count(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_chunk_count_nocheck(a);
+}
+
+uint64_t fy_allocator_region_base(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_region_base_nocheck(a);
+}
+
+uint64_t fy_allocator_region_size(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_region_size_nocheck(a);
+}
+
+uint64_t fy_allocator_index_region_base(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_index_region_base_nocheck(a);
+}
+
+uint64_t fy_allocator_index_region_size(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+	return fy_allocator_index_region_size_nocheck(a);
+}
+
+struct fy_allocator_info *
+fy_allocator_get_info(struct fy_allocator *a, int tag)
+{
+	if (!a)
+		return NULL;
+	return fy_allocator_get_info_nocheck(a, tag);
+}
+
+int
+fy_allocator_get_usage(struct fy_allocator *a, int tag,
+		       struct fy_allocator_usage *usage)
+{
+	struct fy_allocator_info *info;
+
+	if (!usage)
+		return -1;
+	memset(usage, 0, sizeof(*usage));
+
+	if (!a)
+		return -1;
+
+	info = fy_allocator_get_info_nocheck(a, tag);
+	if (!info)
+		return -1;
+
+	usage->free = info->free;
+	usage->used = info->used;
+	usage->total = info->total;
+	free(info);
+	return 0;
+}
+
+enum fy_allocator_cap_flags
+fy_allocator_get_caps(struct fy_allocator *a)
+{
+	if (!a)
+		return 0;
+
+	return fy_allocator_get_caps_nocheck(a);
+}
+
+bool
+fy_allocator_contains(struct fy_allocator *a, int tag, const void *ptr)
+{
+	if (!a || !ptr)
+		return false;
+
+	return fy_allocator_contains_nocheck(a, tag, ptr);
+}
+
+int
+fy_allocator_checkpoint(struct fy_allocator *a)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_checkpoint_nocheck(a);
+}
+
+int
+fy_allocator_verify(struct fy_allocator *a)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_verify_nocheck(a);
+}
+
+int
+fy_allocator_checkpoint_iterate(struct fy_allocator *a,
+				fy_alloc_checkpoint_iter_fn cb,
+				void *arg)
+{
+	if (!a || !cb)
+		return -1;
+	return fy_allocator_checkpoint_iterate_nocheck(a, cb, arg);
+}
+
+int
+fy_allocator_checkpoint_recover(struct fy_allocator *a,
+				uint64_t slot_gen)
+{
+	if (!a)
+		return -1;
+	return fy_allocator_checkpoint_recover_nocheck(a, slot_gen);
+}
+
+/* respects the parent allocator (or uses posix_memalign if NULL) */
+void *fy_early_parent_allocator_alloc(struct fy_allocator *parent, int parent_tag, size_t size, size_t align)
+{
+	/* yeah, not gonna work */
+	if (parent == FY_PARENT_ALLOCATOR_INPLACE)
+		return NULL;
+
+	if (!align)
+		align = _Alignof(max_align_t);
+
+	if (parent)
+		return fy_allocator_alloc(parent, parent_tag, size, align);
+
+	return fy_align_alloc(align, size);
+}
+
+void fy_early_parent_allocator_free(struct fy_allocator *parent, int parent_tag, void *ptr)
+{
+	if (!ptr || parent == FY_PARENT_ALLOCATOR_INPLACE)
+		return;
+
+	if (parent)
+		fy_allocator_free(parent, parent_tag, ptr);
+	else
+		fy_align_free(ptr);
+}
+
+const struct fy_arena_reloc *
+fy_arena_locate_by_src(const struct fy_arena_reloc *arenas, unsigned int count, const void *ptr)
+{
+	uintptr_t p = (uintptr_t)ptr;
+	unsigned int mid;
+
+	while (count > 0) {
+		mid = count / 2;
+		if (p >= arenas[mid].src.i) {
+			if (p < arenas[mid].srce.i)
+				return &arenas[mid];
+			arenas += mid + 1;
+			count -= mid + 1;
+		} else
+			count = mid;
+	}
+
+	return NULL;
+}
+
+void *fy_arena_reloc_ptr(const struct fy_arena_reloc *arenas, unsigned int count,
+			 const void *start, size_t size, const void *ptr)
+{
+	const struct fy_arena_reloc *arena;
+	uintptr_t off;
+
+	if (!ptr)
+		return NULL;
+
+	arena = fy_arena_locate_by_src(arenas, count, ptr);
+	if (arena) {
+		off = (uintptr_t)ptr - arena->src.i;
+		return (void *)(arena->dst.i + off);
+	}
+
+	/* already pointing at the destination image (fixed-base no-op) */
+	if (ptr >= start && ptr < (const void *)((const char *)start + size))
+		return (void *)(uintptr_t)ptr;
+
+	/* not in any source range and not in the destination - error */
+	return NULL;
+}
+
+/* respects the parent allocator (or uses posix_memalign if NULL) */
+void *fy_parent_allocator_alloc(struct fy_allocator *a, size_t size, size_t align)
+{
+	if (!a)
+		return NULL;
+
+	return fy_early_parent_allocator_alloc(a->parent, a->parent_tag, size, align);
+}
+
+void fy_parent_allocator_free(struct fy_allocator *a, void *ptr)
+{
+	if (!a || !ptr)
+		return;
+
+	fy_early_parent_allocator_free(a->parent, a->parent_tag, ptr);
+}
