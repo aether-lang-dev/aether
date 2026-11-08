@@ -70,7 +70,7 @@ cd aether
 ./install.sh
 ```
 
-Installs to `~/.aether` and adds `ae` to your PATH. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`. Add `--contrib-too` (`./install.sh --contrib-too`) to also build and install the native contrib modules (sqlite, avcodec, …) whose dev libraries your machine has.
+Installs to `~/.aether` and adds `ae` to your PATH. On NetBSD and OpenBSD, see [Building on NetBSD / OpenBSD](docs/bootstrap-from-source.md#building-on-netbsd--openbsd) for the packages and `gmake CC=cc`. Restart your terminal or run `source ~/.bashrc`, `~/.zshrc`, or `~/.bash_profile`. Add `--contrib-too` (`./install.sh --contrib-too`) to also build and install the native contrib modules (sqlite, avcodec, …) whose dev libraries your machine has.
 
 **Windows, download and run:**
 

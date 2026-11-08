@@ -84,6 +84,56 @@ are not built here: they live in
 On Windows, build under MSYS2 (`pacman -S mingw-w64-x86_64-gcc make git`);
 see the README "Building on Windows" section.
 
+### Building on NetBSD / OpenBSD
+
+There are no release archives for these two, so `ae install` / `ae upgrade`
+do not apply (`ae version` reports the platform as unsupported): build from
+a clone. Checked on NetBSD 11.1 and OpenBSD 8.0, amd64.
+
+| | NetBSD | OpenBSD |
+|---|---|---|
+| System compiler (`cc`) | gcc 12 | clang |
+| GNU make | `gmake` (pkgsrc) | `gmake` (ports) |
+| In base already | OpenSSL, zlib | LibreSSL, zlib, pkg-config |
+
+```sh
+# NetBSD (as root)
+pkgin install git gmake pkgconf pcre2 nghttp2
+# OpenBSD (as root)
+pkg_add git gmake pcre2 nghttp2
+```
+
+`pcre2` (`std.regex`) and `nghttp2` (HTTP/2) are optional, as on any
+platform. To run the test suite as well, add `bash` and `python3`.
+
+```sh
+git clone https://github.com/aether-lang-dev/aether.git
+cd aether
+gmake CC=cc ae stdlib     # or ./install.sh, which picks gmake and a compiler itself
+./build/ae run examples/01-language/01-hello.ae
+gmake CC=cc test test-ae  # optional: the C unit tests and the .ae suite
+```
+
+`make` there is BSD make, which cannot read this Makefile; always `gmake`.
+`CC=cc` names the system compiler (the Makefile's default is `gcc`, which
+OpenBSD does not have).
+
+Known gaps:
+
+- **No libc-level sandbox layer.** `spawn_sandboxed` and the
+  `libaether_sandbox.so` LD_PRELOAD shim are Linux and FreeBSD only; the
+  compile-time (`--emit=lib --with=`) and scope (`hide` / `seal except`)
+  layers work. The preload's source compiles on both, but nothing builds or
+  loads it there. On OpenBSD it would also see less: libc calls its own
+  internal symbols, so an interposed `open` does not catch `fopen`, and
+  libc has no `wordexp` or `syscall` to wrap.
+- **`mem.heap_in_use()` is -1**: NetBSD's jemalloc does not export
+  `mallctl`, and OpenBSD's malloc keeps no statistics.
+- **OpenBSD has no IPv4-mapped IPv6 sockets**: a listener on `::` takes IPv6
+  only. Listen on `0.0.0.0` as well for IPv4.
+- **No sendfile(2)** on either: `http.serve_file` reads the file into the
+  response body, as on Windows.
+
 ---
 
 ## Step by step
