@@ -1,1 +1,0 @@
-- **`aether_caps_realloc(p, n, 0)` frees the block and credits its account.** It read glibc's NULL from `realloc(p, 0)` as a failed realloc and charged the account for the freed block again; on the BSDs and macOS the fresh block `realloc` returned was never on the books. gcc 12's `-Wuse-after-free` pointed at it on NetBSD.

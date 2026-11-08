@@ -1,1 +1,0 @@
-- **A function named `major`, `minor` or `makedev` compiles on NetBSD and OpenBSD too.** Their `<sys/types.h>` defines the same function-like macros as FreeBSD's; the renaming that 0.899.0 lists for FreeBSD covers them.

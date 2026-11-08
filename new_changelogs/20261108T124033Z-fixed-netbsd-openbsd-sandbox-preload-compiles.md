@@ -1,1 +1,0 @@
-- **The sandbox preload's source compiles on NetBSD and OpenBSD.** NetBSD declares `int syscall(int, ...)` as FreeBSD does, and OpenBSD has no `<wordexp.h>` (nor a `wordexp` to intercept). The preload is still built and used on Linux and FreeBSD only: `spawn_sandboxed` has no NetBSD or OpenBSD backend.
