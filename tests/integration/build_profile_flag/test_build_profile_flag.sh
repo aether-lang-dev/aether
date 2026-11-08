@@ -55,7 +55,14 @@ AETHER_CACHE_DIR="$TMP/cache"
 export AETHER_CACHE_DIR
 
 has_debug() {
-    readelf -S "$1" 2>/dev/null | grep -c "debug_info" || true
+    case "$(uname -s)" in
+        NetBSD)
+            # NetBSD's crt0.o carries DWARF of its own, so every binary has a
+            # .debug_info section: look for the program's own compile unit.
+            readelf --debug-dump=info "$1" 2>/dev/null | grep -c 'DW_AT_name.*probe\.c' || true ;;
+        *)
+            readelf -S "$1" 2>/dev/null | grep -c "debug_info" || true ;;
+    esac
 }
 
 build() {   # build <out> [flags...]
