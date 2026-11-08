@@ -1659,7 +1659,7 @@ check-archive-exports: stdlib
 # macOS leaks gate) read is exactly what it was. The list is found by grep,
 # so a new source that branches on AETHER_HAS_ZLIB is covered without
 # anyone remembering to add it.
-ZLIB_DEPENDENT_SRCS = $(shell grep -rl --include='*.c' 'AETHER_HAS_ZLIB' std)
+ZLIB_DEPENDENT_SRCS = $(shell find std -name '*.c' -exec grep -l 'AETHER_HAS_ZLIB' {} +)
 
 .PHONY: check-archive-exports-nozlib
 check-archive-exports-nozlib: stdlib
