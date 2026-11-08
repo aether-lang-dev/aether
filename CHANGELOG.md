@@ -14,6 +14,43 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.899.0]
+
+### Fixed
+
+- **`fs.chmod` with the sticky bit on a file succeeds on FreeBSD.** FreeBSD's
+  `chmod(2)` refuses `S_ISVTX` on a non-directory for a non-root caller
+  (`EFTYPE`), so `fs.chmod(file, 0o17777)` came back `KIND_IO` there while
+  Linux and macOS accept the bit and ignore it. On `EFTYPE` it now retries
+  without the sticky bit, which means nothing on a file. Test:
+  `tests/regression/test_fs_chmod.ae` (case 3).
+
+- **A panic prints its stack trace on FreeBSD.** The trace came from
+  `backtrace()`, which the runtime used only on glibc and macOS; on FreeBSD it
+  lives in libexecinfo, which programs do not link (and GhostBSD ships only
+  its `libexecinfo.so.1`, with no `-lexecinfo` symlink). The runtime now loads
+  libexecinfo with `dlopen` when a panic first needs a trace, as glibc loads
+  libgcc_s for its own `backtrace()`, and reads FreeBSD's
+  `0xADDR <symbol+OFF> at binary` lines. No link line changes. Test:
+  `tests/integration/panic_stack_trace`.
+
+- **A function named `major`, `minor` or `makedev` compiles on FreeBSD.**
+  FreeBSD's `<sys/types.h>` (and glibc's before 2.28) defines all three as
+  function-like macros, so the generated C for a user `major(seg: string)`
+  became `__major(seg)` and failed against `dev_t`. They join the C names
+  codegen renames (`ae_major`). Test:
+  `tests/regression/test_string_local_returned_as_ptr.ae`.
+
+- **An answered ask no longer waits on a preempted replier.** After its reply
+  arrived, an ask waited, yielding, until the replier had let go of the reply
+  slot. A replier preempted between waking the asker and letting go could hold
+  it for a time slice or more: on an oversubscribed FreeBSD host, where
+  `sched_yield` runs nothing from another run queue, asks waited up to 3.5 s
+  and `test_ask_slot_reuse` timed out in about half of its runs under 8-way
+  load. The ask now spins a moment and then lets go of its half; the replier
+  frees the slot when it lets go, as for a timed out ask. 2400 of 2400 runs
+  pass under the same load. Test: `tests/regression/test_ask_slot_reuse.ae`.
+
 ## [0.898.0]
 
 ### Fixed
