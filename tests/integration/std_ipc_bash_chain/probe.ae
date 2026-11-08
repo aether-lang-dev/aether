@@ -66,7 +66,9 @@ main() {
         argv = list.new()
         list.add(argv, "-c")
         list.add(argv, "echo PRE; '${child_bin}'; rc=$?; echo POST; exit $rc")
-        payload, exit_code, err = os.run_pipe_drain_and_wait("/bin/bash", argv, null)
+        bash = os.getenv("STD_IPC_BASH")
+        if bash == "" { bash = "/bin/bash" }
+        payload, exit_code, err = os.run_pipe_drain_and_wait(bash, argv, null)
         list.free(argv)
         if err != "" {
             println("  [1] FAIL: err=${err}")
