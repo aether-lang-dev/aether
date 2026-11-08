@@ -24,18 +24,28 @@ static void* volatile g_sink;
  * past every allocator's small-block cache and (on glibc) its mmap
  * threshold, so both the arena and the mapped-chunk paths are exercised
  * across the platforms this runs on. */
+/* This is the binary's first test, run while the Windows loader's workers
+ * can still be making their first run, each allocating about 1 KB (a free
+ * then shows as less than the block): a try during which the thread epoch
+ * moved is made again, a bounded number of times. */
 TEST_CATEGORY(heap_in_use_sees_a_block_and_its_free, TEST_CATEGORY_RUNTIME) {
-    int64_t before = aether_heap_in_use();
-    if (before < 0) return;   /* no statistics: musl, or valgrind serving malloc */
+    if (aether_heap_in_use() < 0) return;   /* no statistics: musl, or valgrind serving malloc */
     size_t n = 1u << 20;
-    char* p = (char*)malloc(n);
-    ASSERT_NOT_NULL(p);
-    g_sink = p;
-    memset(p, 1, n);
-    int64_t held = aether_heap_in_use();
+    int64_t before = 0, held = 0, after = 0;
+    for (int attempt = 0; attempt < 8; attempt++) {
+        int64_t e0 = aether_thread_epoch();
+        before = aether_heap_in_use();
+        char* p = (char*)malloc(n);
+        ASSERT_NOT_NULL(p);
+        g_sink = p;
+        memset(p, 1, n);
+        held = aether_heap_in_use();
+        free(p);
+        after = aether_heap_in_use();
+        if (aether_thread_epoch() == e0) break;
+        sleep_ms(5);
+    }
     ASSERT_TRUE(held - before >= (int64_t)n);
-    free(p);
-    int64_t after = aether_heap_in_use();
     ASSERT_TRUE(held - after >= (int64_t)n);
 }
 
@@ -130,3 +140,67 @@ TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RU
     }
     ASSERT_TRUE(ended != running);
 }
+
+#ifdef _WIN32
+/* The parallel loader's workers are started with thread notifications off,
+ * so no DLL_THREAD_ATTACH reports them, and their first run allocates: the
+ * epoch moves with the CPU time of threads the loader has not reported.
+ * Such a thread is made here the way the loader makes its own
+ * (NtCreateThreadEx, THREAD_CREATE_FLAGS_SKIP_THREAD_ATTACH), and the epoch
+ * stays a non-negative number through every start and end (it is -1 only
+ * where there is no answer). */
+typedef LONG (NTAPI *nt_create_thread_ex_fn)(PHANDLE, ACCESS_MASK, PVOID, HANDLE, PVOID, PVOID,
+                                             ULONG, SIZE_T, SIZE_T, SIZE_T, PVOID);
+static HANDLE g_unreported_go = NULL;
+static volatile LONG g_unreported_done = 0;
+static DWORD WINAPI unreported_body(LPVOID arg) {
+    (void)arg;
+    WaitForSingleObject(g_unreported_go, INFINITE);
+    volatile unsigned long spin = 0;
+    for (unsigned long i = 0; i < 20000000ul; i++) spin += i;
+    InterlockedExchange(&g_unreported_done, 1);
+    return 0;
+}
+
+TEST_CATEGORY(thread_epoch_moves_when_an_unreported_thread_runs, TEST_CATEGORY_RUNTIME) {
+    for (int i = 0; i < 8; i++) {
+        pthread_t t;
+        g_release_waiter = 1;
+        g_waiter_running = 0;
+        ASSERT_TRUE(pthread_create(&t, NULL, epoch_waiter, NULL) == 0);
+        pthread_join(t, NULL);
+        ASSERT_TRUE(aether_thread_epoch() >= 0);
+    }
+    nt_create_thread_ex_fn create = (nt_create_thread_ex_fn)(void*)GetProcAddress(
+        GetModuleHandleA("ntdll.dll"), "NtCreateThreadEx");
+    /* Without NtGetNextThread (an old Wine) the runtime cannot walk them. */
+    if (!create || !GetProcAddress(GetModuleHandleA("ntdll.dll"), "NtGetNextThread")) return;
+    HANDLE h = NULL;
+    g_unreported_go = CreateEventA(NULL, TRUE, FALSE, NULL);
+    ASSERT_TRUE(g_unreported_go != NULL);
+    g_unreported_done = 0;
+    ASSERT_TRUE(create(&h, THREAD_ALL_ACCESS, NULL, GetCurrentProcess(), (PVOID)unreported_body,
+                       NULL, 0x2 /* SKIP_THREAD_ATTACH */, 0, 0, 0, NULL) >= 0);
+    /* Blocked on the event, it holds still: the epoch does too. */
+    /* (The loader's own workers can still be running: wait, a bounded
+     * while, for 20 reads 1 ms apart to agree.) */
+    int64_t before = aether_thread_epoch();
+    ASSERT_TRUE(before >= 0);
+    int stable = 0;
+    for (int i = 0; stable < 20 && i < 3000; i++) {
+        sleep_ms(1);
+        int64_t now = aether_thread_epoch();
+        if (now == before) stable++;
+        else { before = now; stable = 0; }
+    }
+    ASSERT_TRUE(stable >= 20);
+    SetEvent(g_unreported_go);
+    while (!g_unreported_done) sleep_ms(1);
+    int64_t after = aether_thread_epoch();
+    ASSERT_TRUE(after >= 0);
+    ASSERT_TRUE(after != before);
+    WaitForSingleObject(h, INFINITE);
+    CloseHandle(h);
+    CloseHandle(g_unreported_go);
+}
+#endif

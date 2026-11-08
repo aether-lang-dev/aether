@@ -311,8 +311,13 @@ PIMAGE_TLS_CALLBACK aether_thread_event_callback = aether_thread_event;
 
 int64_t aether_thread_epoch(void) {
 #if defined(_WIN32)
+    /* Mixed so a start or an end and an unreported thread's cycles cannot
+     * cancel, and kept to 63 bits: the epoch is never negative (-1 is "no
+     * answer"). A change of one event moves it by the odd multiplier, which
+     * is never 0 modulo 2^63. */
     uint64_t events = (uint64_t)InterlockedCompareExchange(&g_thread_events, 0, 0);
-    return (int64_t)(events * 0x9E3779B97F4A7C15ull + unreported_thread_cycles());
+    uint64_t mixed = events * 0x9E3779B97F4A7C15ull + unreported_thread_cycles();
+    return (int64_t)(mixed & 0x7FFFFFFFFFFFFFFFull);
 #elif defined(__APPLE__)
     thread_act_array_t list;
     mach_msg_type_number_t count = 0;
