@@ -280,6 +280,23 @@ static AetherString* read_stream_to_eof(FILE* fp) {
     return string_adopt_caps_buffer(buffer, len, cap);
 }
 
+/* A stream open on a directory. fopen(dir, "r") succeeds on every POSIX
+ * libc; Linux then fails the read with EISDIR, but NetBSD's read(2) returns
+ * the directory's raw entries, so fs.read("/tmp") succeeded with bytes in
+ * it. Refused before any read, with EISDIR, on every platform. */
+static int fs_stream_is_dir(FILE* fp) {
+#ifdef _WIN32
+    (void)fp;   /* fopen refuses a directory there */
+    return 0;
+#else
+    struct stat st;
+    int fd = fileno(fp);
+    if (fd < 0 || fstat(fd, &st) != 0 || !S_ISDIR(st.st_mode)) return 0;
+    errno = EISDIR;
+    return 1;
+#endif
+}
+
 /* The whole file as a refcounted AetherString carrying its byte count, so
  * fs.read returns every byte of a file with a NUL in it (#2469). It was a
  * bare `char*`, which the Aether side measured with strlen: a 5-byte
@@ -288,6 +305,7 @@ AetherString* file_read_all_raw(File* file) {
     if (!file || !file->is_open) return NULL;
 
     FILE* fp = (FILE*)file->handle;
+    if (fs_stream_is_dir(fp)) return NULL;
 
     /* Fast path for regular, seekable files: size the buffer from the file
      * length and read once. Fall through to the EOF loop when the file isn't
@@ -1915,6 +1933,10 @@ char* fs_read_binary_raw(const char* path, int* out_len) {
     if (!fp) {
         aether_fs_read_fail_set(AETHER_FS_READ_FAIL_OPEN, errno);
         return NULL;
+    }
+    if (fs_stream_is_dir(fp)) {
+        aether_fs_read_fail_set(AETHER_FS_READ_FAIL_IO, EISDIR);
+        fclose(fp); return NULL;
     }
 
     errno = 0;

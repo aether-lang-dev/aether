@@ -1,0 +1,1 @@
+- **`fs.read` and `fs.read_binary` of a directory fail with EISDIR everywhere.** On NetBSD `read(2)` of a directory returns its raw entries, so `fs.read("/tmp")` succeeded with that binary content. The stream is now checked with `fstat` before any read.
