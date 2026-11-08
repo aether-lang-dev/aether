@@ -41,8 +41,11 @@ checked=0
 # public headers: upstream pcre2.h refuses to compile unless the consumer
 # defines PCRE2_CODE_UNIT_WIDTH first, by design. Consumers use std.regex;
 # nothing may include these directly, so the standalone-compile contract
-# does not apply to them.
-for h in $(cd std && find . -path './regex/pcre2' -prune -o -name '*.h' -print | sed 's|^\./||' | sort) ; do
+# does not apply to them. std/yaml/libfyaml/ likewise (vendored libfyaml,
+# whose sources include one another by quoted name, compiled only through
+# aether_libfyaml_vendored.c), and std/yaml/libfyaml_compat/, a stand-in for
+# a macOS SDK header that only that build reads.
+for h in $(cd std && find . \( -path './regex/pcre2' -o -path './yaml/libfyaml' -o -path './yaml/libfyaml_compat' \) -prune -o -name '*.h' -print | sed 's|^\./||' | sort) ; do
     checked=$((checked + 1))
     printf '#include "std/%s"\nint main(void){return 0;}\n' "$h" > "$TMP/probe.c"
     if ! "${CC:-cc}" -I. $CFLAGS_ALL -c "$TMP/probe.c" -o /dev/null 2>"$TMP/err.txt"; then

@@ -4967,6 +4967,31 @@ static char* ae_precompile_runtime_srcs(const char* cc, const char* cflags, cons
     return ok ? list : NULL;
 }
 
+/* Source fallback (no libaether.a): the defines that compile the vendored
+ * engines from the MANIFEST sources instead of trusting this box to have the
+ * libraries the toolchain's build box had. PCRE2 (#1389) turns
+ * aether_pcre2_vendored.c into the full engine and switches aether_regex.c to
+ * the in-tree pcre2.h. libfyaml does the same for aether_libfyaml_vendored.c
+ * and aether_yaml.c, and needs its public include/ on the path (the library
+ * includes <libfyaml.h>), ahead of any system libfyaml's headers (callers
+ * put these first on the line, before a -I of the user's), plus the
+ * <mach/mach_vm.h> stand-in that zig's macOS headers lack (after every system
+ * directory). The -l flags are dropped by the callers: the symbols come from
+ * the compiled sources, and a baked-in -lpcre2-8 or -lfyaml fails the link
+ * outright on a box without the library. */
+static const char* ae_vendored_src_defs(void) {
+    static char defs[2 * sizeof(tc.root) + 256];
+    if (defs[0]) return defs;
+    const char* std_dir = tc.dev_mode ? "std" : "share/aether/std";
+    snprintf(defs, sizeof(defs),
+             "-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 "
+             "-DAETHER_HAS_YAML -DAETHER_VENDOR_YAML "
+             "-I\"%s/%s/yaml/libfyaml/include\" "
+             "-idirafter \"%s/%s/yaml/libfyaml_compat\" ",
+             tc.root, std_dir, tc.root, std_dir);
+    return defs;
+}
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -5083,18 +5108,14 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* zstd_libs = "";
 #endif
     /* Source-fallback (no libaether.a): compile the VENDORED pcre2
-     * engine (#1389) instead of trusting this box to have the library
-     * the toolchain's build box had. The defines turn the MANIFEST's
-     * aether_pcre2_vendored.c into the full engine and switch
-     * aether_regex.c to the in-tree pcre2.h; the -l is dropped because
-     * the symbols now come from the compiled sources (and a baked-in
-     * -lpcre2-8 fails the link outright on a box without the library).
+     * engine (#1389) and libfyaml instead of trusting this box to have the
+     * libraries the toolchain's build box had; see ae_vendored_src_defs.
      * Previously this path compiled aether_regex.c with no feature
      * define at all, silently stubbing std.regex even on boxes WITH
      * libpcre2-8 — the vg-incident failure mode. */
-    const char* pcre2_src_defs = "";
+    const char* vendored_src_defs = "";
     if (!tc.has_lib) {
-        pcre2_src_defs = "-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 ";
+        vendored_src_defs = ae_vendored_src_defs();
         pcre2_libs = "";
     }
 #ifdef AETHER_AUDIO_LIBS
@@ -5109,6 +5130,8 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
+    /* The source fallback compiles the vendored libfyaml (above). */
+    if (!tc.has_lib) yaml_libs = "";
     char* opt;   /* the flags, with user cflags of any length (#2534) */
     const char* trace_def = g_trace ? " -DAETHER_TRACE" : "";
     /* --emit=lib: a DLL. -shared, and --export-all-symbols (#993) because
@@ -5210,8 +5233,10 @@ void build_gcc_cmd(char* cmd, size_t size,
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
-            char* rt_cflags = ae_strdup_printf("%s %s %s %s", opt, tc.include_flags,
-                                               ae_includes, pcre2_src_defs);
+            /* The vendored defines first: their -I has to come ahead of
+             * any other include directory (see ae_vendored_src_defs). */
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s", vendored_src_defs, opt,
+                                               tc.include_flags, ae_includes);
             if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(s_gcc_cmd, rt_cflags, tc.runtime_srcs);
             free(rt_cflags);
         }
@@ -5219,8 +5244,8 @@ void build_gcc_cmd(char* cmd, size_t size,
          * references runtime symbols defined in tc.runtime_srcs, so it must
          * come BEFORE that source list on the command line. */
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s %s %s%s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
-            s_gcc_cmd, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
+            "%s %s%s %s %s \"%s\"%s %s %s %s -o \"%s\" %s %s %s %s %s %s %s %s %s %s %s",
+            s_gcc_cmd, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, audio_libs, yaml_libs, win_link_libs, ae_link, link_flags);
         free(rt_objs);
         if (w >= (int)size) {
             cmd_too_long(cmd, size, w);
@@ -5422,12 +5447,13 @@ void build_gcc_cmd(char* cmd, size_t size,
     const char* zstd_libs = "";
 #endif
     // Source-fallback (no libaether.a): compile the VENDORED pcre2 engine
-    // (#1389) — see the Windows branch above for the full rationale. The
-    // defines activate aether_pcre2_vendored.c from the MANIFEST list; the
-    // -l is dropped because the symbols come from the compiled sources.
-    const char* pcre2_src_defs = "";
+    // (#1389) and libfyaml — see ae_vendored_src_defs for the rationale. The
+    // defines activate aether_pcre2_vendored.c and aether_libfyaml_vendored.c
+    // from the MANIFEST list; the -l flags are dropped because the symbols
+    // come from the compiled sources.
+    const char* vendored_src_defs = "";
     if (!tc.has_lib) {
-        pcre2_src_defs = "-DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2 ";
+        vendored_src_defs = ae_vendored_src_defs();
         pcre2_libs = "";
     }
 
@@ -5452,6 +5478,8 @@ void build_gcc_cmd(char* cmd, size_t size,
 #else
     const char* yaml_libs = "";
 #endif
+    /* The source fallback compiles the vendored libfyaml (above). */
+    if (!tc.has_lib) yaml_libs = "";
 
     if (tc.has_lib) {
         char lib_dir[1024];
@@ -5500,8 +5528,10 @@ void build_gcc_cmd(char* cmd, size_t size,
          * that can be done; else the sources, compiled by this command. */
         char* rt_objs = NULL;
         if (!g_emit_obj && !g_emit_csrc) {
-            char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", opt, tc.include_flags,
-                                               ae_includes, pcre2_src_defs,
+            /* The vendored defines first: their -I has to come ahead of
+             * any other include directory (see ae_vendored_src_defs). */
+            char* rt_cflags = ae_strdup_printf("%s %s %s %s %s", vendored_src_defs, opt,
+                                               tc.include_flags, ae_includes,
                                                macos_homebrew_flags(0));
             if (rt_cflags) rt_objs = ae_precompile_runtime_srcs(cc, rt_cflags, tc.runtime_srcs);
             free(rt_cflags);
@@ -5510,8 +5540,8 @@ void build_gcc_cmd(char* cmd, size_t size,
         // symbols defined in tc.runtime_srcs (aether_shared_map_*,
         // etc.), so they appear BEFORE the runtime source list.
         int w = snprintf(cmd, size,
-            "%s %s %s %s \"%s\"%s %s %s %s%s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
-            cc, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, pcre2_src_defs, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
+            "%s %s%s %s %s \"%s\"%s %s %s %s -rdynamic -o \"%s\" -pthread -lm %s %s %s %s %s %s %s %s %s %s %s %s%s",
+            cc, vendored_src_defs, opt, tc.include_flags, ae_includes, c_file, config_c, extra, g_host_bridge_link, rt_objs ? rt_objs : tc.runtime_srcs, out_file, openssl_libs, zlib_libs, nghttp2_libs, pcre2_libs, brotli_libs, zstd_libs, casper_libs, audio_libs, yaml_libs, ae_link, link_flags, binimport_link(),
             macos_homebrew_flags(!g_emit_obj && !g_emit_csrc));
         free(rt_objs);
         if (w >= (int)size) {

@@ -285,12 +285,12 @@ endif
 #     headers and FreeBSD-only libraries such as Casper and libthr.
 #   - casper libs are ALWAYS needed: std/casper/aether_casper.c is
 #     unconditionally in the build and references cap_*; the base ships them.
-#   - Optional Tier-2 libs (OpenSSL/zlib/nghttp2/YAML/brotli/zstd) are forced
+#   - Optional Tier-2 libs (OpenSSL/zlib/nghttp2/brotli/zstd) are forced
 #     OFF for the cross build: pkg-config on the host would find the host's
 #     Linux libs and poison the FreeBSD binary. A cross build ships those std
 #     features as their "unavailable" stubs (same as any build without them);
-#     a future crossbuild-sysroot-staged variant can re-enable them. PCRE2 is
-#     the vendored engine, so std.regex works.
+#     a future crossbuild-sysroot-staged variant can re-enable them. PCRE2 and
+#     libfyaml are the vendored copies, so std.regex and std.yaml work.
 FREEBSD_CPU ?= x86_64
 FREEBSD_ABI ?= 15.0
 ifeq ($(FREEBSD),1)
@@ -309,9 +309,11 @@ ifeq ($(FREEBSD),1)
   OPENSSL := 0
   ZLIB := 0
   NGHTTP2 := 0
-  YAML := 0
   BROTLI := 0
   ZSTD := 0
+  # std.yaml's libfyaml is vendored too, so the cross build has it with no
+  # host library involved (it shipped the stubs before).
+  YAML := vendored
   # PCRE2 has a vendored in-tree fallback (no host library involved), as the
   # Windows and Android cross builds use. PCRE2 := 0 here shipped the FreeBSD
   # release with std.regex as its refusing stub: every regex.compile failed
@@ -346,7 +348,8 @@ endif
 # find the host's Linux libs and poison the Windows binary. Cross-compiling
 # OpenSSL/nghttp2 for windows-gnu is the genuinely expensive part and is out
 # of scope; std ships those features as their "unavailable" stubs. Vendored
-# PCRE2 needs no host library, so std.regex stays available.
+# PCRE2 and libfyaml need no host library, so std.regex and std.yaml stay
+# available.
 WINDOWS_CPU ?= x86_64
 ifeq ($(WINDOWS),1)
   ifeq ($(ZIG),)
@@ -359,8 +362,9 @@ ifeq ($(WINDOWS),1)
   OPENSSL := 0
   ZLIB := 0
   NGHTTP2 := 0
-  YAML := 0
-  # Same reason as the four above: the HOST's pkg-config would happily report
+  # std.yaml's libfyaml is vendored: no host library involved.
+  YAML := vendored
+  # Same reason as the three above: the HOST's pkg-config would happily report
   # a libbrotlienc/libzstd that the cross toolchain has no headers for, and
   # the source then #includes a header zig cannot find. Both stub cleanly.
   BROTLI := 0
@@ -388,8 +392,8 @@ endif
 #
 # Capability-lean like the other cross builds, for the same reason: the host's
 # pkg-config would report the host's libraries. The optional Tier-2 libs are
-# off (std ships those features as their "unavailable" stubs); PCRE2 is the
-# vendored copy, so std.regex survives. The result is built, not tested: no
+# off (std ships those features as their "unavailable" stubs); PCRE2 and
+# libfyaml are the vendored copies, so std.regex and std.yaml survive. The result is built, not tested: no
 # Android runner runs the suite.
 ANDROID_CPU ?= aarch64
 ANDROID_API ?= 29
@@ -409,10 +413,10 @@ ifeq ($(ANDROID),1)
   OPENSSL := 0
   ZLIB := 0
   NGHTTP2 := 0
-  YAML := 0
   BROTLI := 0
   ZSTD := 0
   PCRE2 := vendored
+  YAML := vendored
 endif
 
 # Objects and archives of different targets do not mix (a native link against
@@ -667,31 +671,61 @@ else ifneq ($(PCRE2),0)
   PCRE2_CFLAGS := -DAETHER_HAS_PCRE2 -DAETHER_VENDOR_PCRE2
 endif
 
-# YAML auto-detection: enables std.yaml via libfyaml.
-#   YAML=auto (default)  libfyaml if pkg-config finds it, else the stubs that
-#                        report "std.yaml unavailable" at run time;
-#   YAML=1               libfyaml REQUIRED: the build stops here without it.
-#                        The release builds pass this, so a release can no
-#                        longer ship the stubs unnoticed (0.889.0 did, on
-#                        macOS and Linux alike: auto found nothing on a
-#                        runner without libfyaml and said nothing);
-#   YAML=0               the stubs, deliberately.
-YAML ?= auto
+# YAML: std.yaml's libfyaml.
+#   YAML=vendored (default)  the in-tree copy in std/yaml/libfyaml/, compiled
+#                        into libaether.a by std/yaml/aether_libfyaml_vendored.c,
+#                        as std.regex does with PCRE2. No system library and
+#                        no -lfyaml anywhere: before this, a release built
+#                        against a system libfyaml put -lfyaml in `ae cflags
+#                        --libs`, so every program on a machine without the
+#                        library failed to link, hello-world included.
+#   YAML=1               a system libfyaml, REQUIRED: the build stops here
+#                        without it. Programs importing std.yaml link -lfyaml.
+#   YAML=auto            a system libfyaml if pkg-config finds one, else the
+#                        vendored copy (PCRE2=auto's rule).
+#   YAML=0               the stubs, deliberately: every entry point reports
+#                        "std.yaml unavailable" at run time.
+YAML ?= vendored
+# YAML_MODE is YAML with auto resolved: a variable given on the command line
+# cannot be reassigned inside the Makefile, so YAML itself is never changed.
+YAML_MODE := $(YAML)
 ifeq ($(YAML),auto)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
   YAML_LDFLAGS := $(shell pkg-config --libs libfyaml 2>/dev/null)
+  ifeq ($(YAML_LDFLAGS),)
+    YAML_MODE := vendored
+  endif
 else ifeq ($(YAML),1)
   YAML_CFLAGS := $(shell pkg-config --cflags libfyaml 2>/dev/null)
   YAML_LDFLAGS := $(shell pkg-config --libs libfyaml 2>/dev/null)
   ifeq ($(YAML_LDFLAGS),)
-    $(error YAML=1 but pkg-config finds no libfyaml: install it (apt libfyaml-dev, brew libfyaml, pkg libfyaml, MSYS2 mingw-w64-x86_64-libfyaml) or build with YAML=auto / YAML=0)
+    $(error YAML=1 but pkg-config finds no libfyaml: install it (apt libfyaml-dev, brew libfyaml, pkg libfyaml, MSYS2 mingw-w64-x86_64-libfyaml) or build with YAML=vendored (the default) / YAML=0)
   endif
+else ifeq ($(YAML),vendored)
+else ifeq ($(YAML),0)
 else
-  YAML_CFLAGS :=
-  YAML_LDFLAGS :=
+  $(error YAML=$(YAML): use vendored (the default), 1, auto or 0)
 endif
-ifneq ($(YAML_LDFLAGS),)
-  # libfyaml found (auto/1): compile the real bindings + link it.
+ifeq ($(YAML_MODE),vendored)
+  # AETHER_VENDOR_YAML turns std/yaml/aether_libfyaml_vendored.c from an
+  # empty TU into the whole library, and makes aether_yaml.c use its renamed
+  # (aether_fy_*) symbols. The library includes its public headers as
+  # <libfyaml.h>, so its include/ goes on the path, as YAML_VENDOR_INC: it
+  # sits in AETHER_REQUIRED_CFLAGS ahead of every pkg-config -I, since one of
+  # those can be the directory a system libfyaml's headers (another version)
+  # are in. FreeBSD's -I/usr/local/include from nghttp2 and friends did
+  # exactly that with pkg's libfyaml 0.9 installed. The
+  # -idirafter directory stands in for <mach/mach_vm.h> where a toolchain
+  # has none (zig's macOS headers), after every system directory.
+  # YAML_LDFLAGS stays empty on purpose: the library is inside libaether.a,
+  # so no -l flag may be emitted anywhere (AETHER_YAML_LIBS's emptiness is
+  # what keeps -lfyaml out of `ae cflags --libs` and every link).
+  YAML_CFLAGS := -DAETHER_HAS_YAML -DAETHER_VENDOR_YAML -idirafter std/yaml/libfyaml_compat
+  YAML_VENDOR_INC := -Istd/yaml/libfyaml/include
+  YAML_LDFLAGS :=
+else ifneq ($(YAML_LDFLAGS),)
+  # A system libfyaml (YAML=1, or auto that found one): compile the real
+  # bindings + link it.
   YAML_CFLAGS += -DAETHER_HAS_YAML
   # #1896: on MinGW/MSYS2 the link line carries -static (WIN_LINK_LIBS below),
   # which avoids libwinpthread/libgcc DLL dependencies in release binaries.
@@ -702,16 +736,13 @@ ifneq ($(YAML_LDFLAGS),)
   # fyaml is the only one of our dependencies with no static archive there
   # (openssl, zlib, nghttp2, pcre2, brotli and zstd all have both), so scope
   # the exception to it rather than dropping -static and giving every Windows
-  # binary a DLL tail.
+  # binary a DLL tail. (The vendored default avoids this altogether.)
   ifneq ($(findstring MINGW,$(DETECTED_OS))$(findstring MSYS,$(DETECTED_OS))$(findstring CYGWIN,$(DETECTED_OS)),)
     YAML_LDFLAGS := -Wl,-Bdynamic $(YAML_LDFLAGS) -Wl,-Bstatic
   endif
 else
-  # libfyaml absent (or YAML=0): define NOTHING and link NOTHING, so
-  # aether_yaml.c compiles its unavailable-stub path and the build works
-  # everywhere. (The old `else` forced -lfyaml + -DAETHER_HAS_YAML here,
-  # which broke every build without libfyaml — the whole stdlib failed on
-  # `#include <libfyaml.h>: No such file`.)
+  # YAML=0: define NOTHING and link NOTHING, so aether_yaml.c compiles its
+  # unavailable-stub path and aether_libfyaml_vendored.c an empty TU.
   YAML_CFLAGS :=
   YAML_LDFLAGS :=
 endif
@@ -765,7 +796,7 @@ YAML_LDFLAGS    := $(call cellar_to_opt,$(YAML_LDFLAGS))
 #
 # Recipes use `$(AETHER_REQUIRED_CFLAGS) $(CFLAGS)` so tuning one cannot
 # silently delete the other.
-AETHER_REQUIRED_CFLAGS = -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS)
+AETHER_REQUIRED_CFLAGS = -fPIC -Iinclude -Icompiler -Iruntime -Iruntime/actors -Iruntime/scheduler -Iruntime/utils -Iruntime/memory -Iruntime/config -Istd -Istd/string -Istd/io -Istd/math -Istd/net -Istd/collections -Istd/json -Istd/yaml $(YAML_VENDOR_INC) -MMD -MP -DAETHER_VERSION=\"$(VERSION)\" -DAETHER_HAS_SANDBOX $(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS)
 
 CFLAGS = -O2 -Wall -Wextra -Wstrict-prototypes -Wno-unused-parameter -Wno-unused-function $(EXTRA_CFLAGS)
 # Casper link libraries (FreeBSD only) — std.casper delegates DNS /
@@ -832,7 +863,7 @@ endif
 # took the -L/usr/local/lib that nghttp2, pcre2, brotli and zstd need too, and
 # aetherc no longer linked there.
 AETHER_TOOL_LDFLAGS = $(if $(strip $(YAML_LDFLAGS)),$(subst $(YAML_LDFLAGS),,$(AETHER_REQUIRED_LDFLAGS)),$(AETHER_REQUIRED_LDFLAGS))
-AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o,$(STD_OBJS))
+AETHERC_STD_OBJS = $(filter-out $(OBJ_DIR)/std/yaml/aether_yaml.o $(OBJ_DIR)/std/yaml/aether_libfyaml_vendored.o,$(STD_OBJS))
 
 # Tunable link flags: sanitizers and anything else a caller passes. Empty by
 # default, so `make ... LDFLAGS="-fsanitize=address"` adds to the required set
@@ -905,7 +936,7 @@ endif
 COMPILER_SRC = compiler/aetherc.c compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c compiler/aether_compile_stack.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 COMPILER_LIB_SRC = compiler/parser/lexer.c compiler/parser/parser.c compiler/ast.c compiler/analysis/typechecker.c compiler/analysis/contract_eval.c compiler/analysis/derive.c compiler/analysis/actor_reply.c compiler/analysis/missing_return.c compiler/analysis/actor_protocol.c compiler/analysis/free_check.c compiler/analysis/slice_escape.c compiler/analysis/slice_own.c compiler/analysis/hoist.c compiler/analysis/slice_coerce.c compiler/analysis/sandbox_trust.c compiler/analysis/quote.c compiler/aether_defines.c compiler/codegen/codegen.c compiler/codegen/codegen_expr.c compiler/codegen/codegen_stmt.c compiler/codegen/codegen_actor.c compiler/codegen/codegen_func.c compiler/codegen/codegen_schema.c compiler/codegen/codegen_own.c compiler/aether_error.c compiler/aether_module.c compiler/aether_aea.c compiler/analysis/type_inference.c compiler/codegen/optimizer.c compiler/aether_diagnostics.c compiler/aether_strmap.c compiler/aether_compile_stack.c runtime/actors/aether_message_registry.c lsp/aether_lsp.c
 RUNTIME_SRC = $(SCHEDULER_SRC) runtime/scheduler/scheduler_optimizations.c runtime/scheduler/aether_io_poller_epoll.c runtime/scheduler/aether_io_poller_kqueue.c runtime/scheduler/aether_io_poller_poll.c runtime/config/aether_optimization_config.c runtime/memory/aether_arena.c runtime/memory/aether_pool.c runtime/memory/aether_memory_stats.c runtime/utils/aether_trace.c runtime/utils/aether_spawn.c runtime/utils/aether_bounds_check.c runtime/utils/aether_test.c runtime/memory/aether_arena_optimized.c runtime/aether_runtime_types.c runtime/aether_locale_num.c runtime/utils/aether_cpu_detect.c runtime/utils/aether_simd_vectorized.c runtime/aether_runtime.c runtime/aether_numa.c runtime/aether_sandbox.c runtime/sandbox/spawn_sandboxed_linux.c runtime/sandbox/aether_sandbox_kernel_linux.c runtime/sandbox/spawn_sandboxed_bsd.c runtime/sandbox/spawn_sandboxed_stub.c runtime/sandbox/capsicum_autosandbox.c runtime/sandbox/aether_audit.c runtime/aether_shared_map.c runtime/aether_observe.c runtime/aether_schema.c runtime/aether_process_mem.c runtime/aether_host.c runtime/aether_exec.c runtime/aether_resource_caps.c runtime/libaether_caps.c runtime/actors/aether_send_buffer.c runtime/actors/aether_send_message.c runtime/actors/aether_actor_thread.c runtime/actors/aether_panic.c runtime/actors/aether_unwind.c runtime/actors/aether_supervision.c runtime/aether_callbacks.c
-STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_tls_trust.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/quote/aether_quote.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
+STD_SRC = std/string/aether_string.c std/math/aether_math.c std/net/aether_http.c std/net/aether_tls_trust.c std/net/aether_http_server.c std/net/aether_http_pool.c std/net/aether_http_park.c std/net/aether_http_evloop.c std/net/aether_net.c std/udp/aether_udp.c std/collections/aether_collections.c std/intmap/aether_intmap.c std/json/aether_json.c std/yaml/aether_yaml.c std/yaml/aether_libfyaml_vendored.c std/xml/aether_xml.c std/fs/aether_fs.c std/log/aether_log.c std/io/aether_io.c std/os/aether_os.c std/ipc/aether_ipc.c std/mem/aether_mem.c std/cryptography/aether_cryptography.c std/cryptography/aes/aether_aes.c std/zlib/aether_zlib.c std/brotli/aether_brotli.c std/zstd/aether_zstd.c std/lzf/lzf_c.c std/lzf/lzf_d.c std/lzf/aether_lzf.c std/dl/aether_dl.c std/http/middleware/aether_middleware.c std/http/server/h2/aether_h2.c std/http/proxy/aether_proxy_pool.c std/http/proxy/aether_proxy_lb.c std/http/proxy/aether_proxy_breaker.c std/http/proxy/aether_proxy_health.c std/http/proxy/aether_proxy_cache.c std/http/proxy/aether_proxy_opts.c std/http/proxy/aether_proxy_metrics.c std/http/proxy/aether_proxy_middleware.c std/http/script_gateway/aether_script_gateway.c std/bytes/aether_bytes.c std/bytes/cursor/aether_bytes_cursor.c std/strbuilder/aether_strbuilder.c std/config/aether_config.c std/actors/aether_actor_registry.c std/regex/aether_regex.c std/regex/aether_pcre2_vendored.c std/capsicum/aether_capsicum.c std/casper/aether_casper.c std/snapshot/aether_snapshot.c std/sync/aether_sync.c std/audio/aether_audio.c std/worker/aether_worker.c std/alloc/aether_alloc.c std/tracking/aether_tracking.c std/tar/aether_tar.c std/quote/aether_quote.c std/unicode/aether_unicode.c std/unicode/utf8proc/utf8proc.c
 # Stdlib sources that reference scheduler internals (scheduler_io_register,
 # g_sync_step_actor, current_core_id). Excluded from the compiler binary
 # because aetherc does not link the runtime scheduler, but included in
@@ -1283,7 +1314,7 @@ ifdef WINDOWS_NATIVE
 else
 	@$(MKDIR) $(BUILD_DIR)
 endif
-	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC) std/yaml/aether_yaml.c,$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
+	$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(COMPILER_SRC) $(filter-out $(COMPILER_FAST_OWN_SRC) std/yaml/aether_yaml.c std/yaml/aether_libfyaml_vendored.c,$(STD_SRC)) $(COMPILER_FAST_OWN_OBJS) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(IO_POLLER_SRC) $(MANIFEST_OBJ) -o $(BUILD_DIR)/aetherc$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 
 test: $(TEST_OBJS) $(COMPILER_LIB_OBJS) $(RUNTIME_OBJS) $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS)
 	@echo "==================================="
@@ -2457,7 +2488,7 @@ $(BUILD_DIR)/aetherc-release$(EXE_EXT): $(COMPILER_SRC) $(STD_SRC) $(COLLECTIONS
 	@$(CC) -O3 -DNDEBUG $(LTO_FLAG) -Werror -Iinclude -Icompiler -Iruntime -Istd -Istd/collections \
 		-DAETHER_VERSION=\"$(VERSION)\" \
 		$(OPENSSL_CFLAGS) $(ZLIB_CFLAGS) $(NGHTTP2_CFLAGS) $(PCRE2_CFLAGS) $(YAML_CFLAGS) $(BROTLI_CFLAGS) $(ZSTD_CFLAGS) \
-		$(COMPILER_SRC) $(filter-out std/yaml/aether_yaml.c,$(STD_SRC)) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
+		$(COMPILER_SRC) $(filter-out std/yaml/aether_yaml.c std/yaml/aether_libfyaml_vendored.c,$(STD_SRC)) $(COLLECTIONS_SRC) $(AETHERC_RUNTIME_SRC) $(MANIFEST_OBJ) \
 		-o $(BUILD_DIR)/aetherc-release$(EXE_EXT) $(AETHER_TOOL_LDFLAGS) $(LDFLAGS)
 ifeq ($(DETECTED_OS),Linux)
 	@echo "Stripping debug symbols..."

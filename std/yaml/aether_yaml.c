@@ -1,18 +1,28 @@
 // aether_yaml.c — Bindings for std.yaml using libfyaml.
 //
-// libfyaml is an OPTIONAL dependency: the Makefile defines AETHER_HAS_YAML
-// (and links -lfyaml) only when pkg-config finds libfyaml. When it's absent
-// this file must still compile — otherwise std.yaml being in STD_SRC would
-// break the whole stdlib build on any machine without libfyaml. So the
-// libfyaml-backed bodies live under `#ifdef AETHER_HAS_YAML`; the `#else`
-// branch provides stubs that report "unavailable" at runtime, exactly like
-// the OpenSSL/zlib/pcre2 stubs elsewhere in std/.
+// libfyaml comes one of three ways, chosen by the Makefile's YAML setting:
+//   - vendored (the default): the in-tree copy in std/yaml/libfyaml/,
+//     compiled into libaether.a by aether_libfyaml_vendored.c. The build
+//     defines AETHER_HAS_YAML and AETHER_VENDOR_YAML and passes
+//     -I<std>/yaml/libfyaml/include; no program links -lfyaml.
+//   - a system libfyaml (YAML=1, or YAML=auto when pkg-config finds one):
+//     AETHER_HAS_YAML alone, and -lfyaml for programs that import std.yaml.
+//   - none (YAML=0): this file must still compile, since it is in STD_SRC.
+//     The libfyaml-backed bodies live under `#ifdef AETHER_HAS_YAML`; the
+//     `#else` branch provides stubs that report "unavailable" at runtime,
+//     like the OpenSSL/zlib stubs elsewhere in std/.
 
 #include <stddef.h>
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #ifdef AETHER_HAS_YAML
+#ifdef AETHER_VENDOR_YAML
+/* The vendored library's symbols are all renamed aether_<name> (see
+ * aether_libfyaml_vendored.c); this header makes the fy_* calls below use
+ * those names. It has to come before <libfyaml.h>. */
+#include "aether_libfyaml_names.h"
+#endif
 #include <libfyaml.h>
 #endif
 
@@ -206,7 +216,7 @@ const char* yaml_emit_document_raw(void* doc) {
 static void yaml_set_unavailable(void) {
     snprintf(g_yaml_err_buf, sizeof(g_yaml_err_buf),
              "std.yaml unavailable: this build has no libfyaml "
-             "(install libfyaml and rebuild Aether; YAML=1 makes the build require it)");
+             "(it was built with YAML=0; rebuild Aether with the default YAML=vendored)");
     g_yaml_err_set = 1;
 }
 

@@ -1776,17 +1776,13 @@ Read-only YAML parsing plus emission, over libfyaml. A document is a handle
 you free; nodes inside it are borrowed from the document and must not
 outlive it.
 
-**This module needs libfyaml at build time.** Where the library is absent
-every entry point returns the error `std.yaml unavailable: this build has
-no libfyaml`, rather than failing to link, so a program that imports it
-still builds, and says so at runtime. That is also why the example below is
-compile-checked rather than run: its output depends on how the toolchain
-was built. The Linux and macOS releases are built with libfyaml (`YAML=1`,
-which fails the build without it) and link it into a program that imports
-`std.yaml`, and only that one, so building one needs the library installed
-(`apt install libfyaml-dev`, `brew install libfyaml`); `ae` and `aetherc`
-themselves do not need it. The Windows, FreeBSD and Android releases carry
-the stubs ([std/yaml/README.md](../std/yaml/README.md)).
+**libfyaml is vendored** (`std/yaml/libfyaml/`, compiled into
+`libaether.a`), so `std.yaml` needs no system library and no program links
+`-lfyaml`; every release has it, as do `ae build --target` cross builds other
+than wasi and iOS. A toolchain built with `YAML=0` has stubs instead: every entry
+point returns the error `std.yaml unavailable: this build has no libfyaml`,
+rather than failing to link. That is why the example below is
+compile-checked rather than run ([std/yaml/README.md](../std/yaml/README.md)).
 
 ```aether
 import std.yaml

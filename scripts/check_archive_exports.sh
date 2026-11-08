@@ -37,14 +37,15 @@ grep -rhoE '^extern[[:space:]]+[A-Za-z_][A-Za-z0-9_]*' \
     "$ROOT"/std/*/module.ae "$ROOT"/std/*/*/module.ae 2>/dev/null \
     | awk '{print $2}' | sort -u > "$declared"
 
-# Names a std C source actually defines at file scope. std/regex/pcre2/ is
-# excluded: it is vendored third-party code compiled only as textual includes
-# of aether_pcre2_vendored.c (#1389), no module.ae extern ever binds to it —
+# Names a std C source actually defines at file scope. std/regex/pcre2/ and
+# std/yaml/libfyaml/ are excluded: they are vendored third-party code compiled
+# only as textual includes of aether_pcre2_vendored.c (#1389) and
+# aether_libfyaml_vendored.c, no module.ae extern ever binds to them —
 # and pcre2's house style puts statement bodies at column 0, so lines like
 # `return malloc(size);` false-positive the definition heuristic (that exact
 # line made the checker demand the archive export malloc).
 grep -rhoE '^[A-Za-z_][A-Za-z0-9_ *]*[ *]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\(' \
-    $(find "$ROOT"/std -name '*.c' -not -path '*/regex/pcre2/*') 2>/dev/null \
+    $(find "$ROOT"/std -name '*.c' -not -path '*/regex/pcre2/*' -not -path '*/yaml/libfyaml/*') 2>/dev/null \
     | sed -E 's/.*[ *]([A-Za-z_][A-Za-z0-9_]*)[[:space:]]*\($/\1/' | sort -u > "$defined"
 
 missing=0
