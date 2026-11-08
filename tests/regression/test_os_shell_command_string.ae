@@ -1,0 +1,58 @@
+// os.system and os.exec hand their command to `sh -c` as the command
+// string, on every sh.
+//
+// They ran `sh -c -- CMD`. POSIX reads the `--` as the end of sh's options,
+// and dash and bash do, but FreeBSD's /bin/sh takes the `--` itself as the
+// command string: every os.system there was 127 ("--: not found") and every
+// os.exec empty, which stopped a stock aeb at its first helper build. A
+// command that starts with '-' still has to be the command, not sh options,
+// on every sh: it gets a leading space now instead of the `--`.
+
+import std.os
+
+extern exit(code: int)
+
+main() {
+    println("=== os.system / os.exec: the command is sh -c's command string ===")
+    fails = 0
+
+    rc = os.system("exit 7")
+    if rc != 7 {
+        println("  FAIL os.system(\"exit 7\") = ${rc}, expected 7 (127 is sh not finding a command named --)")
+        fails = fails + 1
+    } else {
+        println("  PASS os.system runs its command")
+    }
+
+    out, err = os.exec("echo hi")
+    if err != "" || out != "hi\n" {
+        println("  FAIL os.exec(\"echo hi\") = '${out}' err '${err}', expected 'hi'")
+        fails = fails + 1
+    } else {
+        println("  PASS os.exec runs its command")
+    }
+
+    // A leading '-': sh must look for a command named -n, not take -n
+    // (no-exec) and the rest as its own options.
+    rc2 = os.system("-n 2>/dev/null")
+    if rc2 != 127 {
+        println("  FAIL os.system(\"-n ...\") = ${rc2}, expected 127 (the command -n, not found)")
+        fails = fails + 1
+    } else {
+        println("  PASS a command starting with '-' is the command, not sh options")
+    }
+
+    out2, err2 = os.exec("-x 2>/dev/null; echo ran")
+    if out2 != "ran\n" {
+        println("  FAIL os.exec(\"-x ...; echo ran\") = '${out2}' err '${err2}', expected 'ran'")
+        fails = fails + 1
+    } else {
+        println("  PASS os.exec with a leading '-' runs it as a command")
+    }
+
+    if fails > 0 {
+        println("FAIL: ${fails} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

@@ -327,6 +327,31 @@ static int aether_os_shell_wait(pid_t pid) {
     return status;
 }
 
+/* The argv of `sh -c CMD`, in argv[4]. `sh -c -- CMD` is how POSIX says
+ * "CMD is the command string even if it starts with '-'", and dash and bash
+ * take it, but FreeBSD's sh takes the `--` itself as the command string and
+ * fails every command with "--: not found" (rc 127). A command string that
+ * starts with '-' or '+' gets a leading space instead, which every sh reads
+ * as the same command and none as an option. Returns the copy that space
+ * needed, for the caller to free once the child is forked (NULL when none
+ * was), or sets *failed when it could not be made. */
+static char* aether_sh_argv(char* argv[4], const char* cmd, int* failed) {
+    char* owned = NULL;
+    *failed = 0;
+    if (cmd[0] == '-' || cmd[0] == '+') {
+        size_t n = strlen(cmd);
+        owned = (char*)malloc(n + 2);
+        if (!owned) { *failed = 1; return NULL; }
+        owned[0] = ' ';
+        memcpy(owned + 1, cmd, n + 1);
+    }
+    argv[0] = (char*)"sh";
+    argv[1] = (char*)"-c";
+    argv[2] = owned ? owned : (char*)cmd;
+    argv[3] = NULL;
+    return owned;
+}
+
 /* popen(cmd, "r"): the shell's stdout is a close-on-exec pipe's write
  * end, made its stdout as every capture here makes it; its stdin, stderr,
  * signal dispositions and mask are this process's, as popen leaves them.
@@ -341,9 +366,19 @@ static FILE* aether_os_shell_open(const char* cmd, pid_t* out_pid) {
         close(pipefd[1]);
         return NULL;
     }
-    char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
+    char* sh_argv[4];
+    int sh_failed = 0;
+    char* sh_owned = aether_sh_argv(sh_argv, cmd, &sh_failed);
+    if (sh_failed) {
+        close(pipefd[0]);
+        close(pipefd[1]);
+        close(errp[0]);
+        close(errp[1]);
+        return NULL;
+    }
     /* environ is read in the child, after the fork: see aether_child_exec. */
     pid_t pid = aether_fork();
+    if (pid != 0) free(sh_owned);
     if (pid < 0) {
         close(pipefd[0]);
         close(pipefd[1]);
@@ -420,9 +455,12 @@ static int aether_os_system_posix(const char* cmd) {
     memset(&dfl, 0, sizeof dfl);
     dfl.sa_handler = SIG_DFL;
     sigemptyset(&dfl.sa_mask);
-    char* sh_argv[] = { (char*)"sh", (char*)"-c", (char*)"--", (char*)cmd, NULL };
+    char* sh_argv[4];
+    int sh_failed = 0;
+    char* sh_owned = aether_sh_argv(sh_argv, cmd, &sh_failed);
     /* environ is read in the child, after the fork: see aether_child_exec. */
-    pid_t pid = aether_fork();
+    pid_t pid = sh_failed ? -1 : aether_fork();
+    if (pid != 0) free(sh_owned);
     if (pid == 0) {
         if (!intr_ignored) sigaction(SIGINT, &dfl, NULL);
         if (!quit_ignored) sigaction(SIGQUIT, &dfl, NULL);
