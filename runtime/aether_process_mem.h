@@ -50,7 +50,9 @@ int64_t aether_process_private(void);
 /* A number that changes whenever a thread starts or ends in the process.
  * On Windows, a count of every start and end the loader reports, through a
  * TLS callback: the program's threads and the ones the system starts in
- * it (a thread-pool worker). On Linux, macOS and FreeBSD, the number of
+ * it (a thread-pool worker), and the CPU time used by the threads it
+ * does not report (the parallel loader's workers, whose first run
+ * allocates). On Linux, macOS and FreeBSD, the number of
  * threads, which a start and an end between two reads leave as it was.
  * -1 where the platform gives neither. Every thread holds heap blocks of
  * its own while it lives (the OS's, the C runtime's), so a heap count is

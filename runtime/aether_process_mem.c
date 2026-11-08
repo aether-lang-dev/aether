@@ -218,11 +218,74 @@ int64_t aether_process_resident(void) {
  * hands to the loader; winpthreads registers its own the same way. */
 static volatile LONG g_thread_events = 0;
 
+/* The threads the loader has reported (the one that ran the process's
+ * attach, and every one started since), by ID: the others are threads it
+ * started with thread notifications off, the parallel loader's workers
+ * (ntdll's TppWorkerThread). Those come up in the first tens of
+ * milliseconds and their first run allocates about 1 KB of the process
+ * heap (136 and 912 bytes, measured on Windows 11), whenever it is
+ * scheduled: a steady round of the main thread's work would show it as
+ * growth, with no thread event to excuse it. They are counted by
+ * the CPU time they have used instead. Slots are IDs, 0 free; a thread
+ * past the last slot is counted like an unreported one, which only makes a
+ * run during which it ran not compared. */
+#define AETHER_SEEN_THREADS 256
+static volatile LONG g_seen_threads[AETHER_SEEN_THREADS];
+
+static void seen_thread(DWORD id, int add) {
+    for (int i = 0; i < AETHER_SEEN_THREADS; i++) {
+        if (add ? InterlockedCompareExchange(&g_seen_threads[i], (LONG)id, 0) == 0
+                : InterlockedCompareExchange(&g_seen_threads[i], 0, (LONG)id) == (LONG)id)
+            return;
+    }
+}
+
+static int thread_was_seen(DWORD id) {
+    for (int i = 0; i < AETHER_SEEN_THREADS; i++)
+        if ((DWORD)g_seen_threads[i] == id) return 1;
+    return 0;
+}
+
 static void NTAPI aether_thread_event(PVOID module, DWORD reason, PVOID reserved) {
     (void)module;
     (void)reserved;
+    if (reason == DLL_PROCESS_ATTACH || reason == DLL_THREAD_ATTACH)
+        seen_thread(GetCurrentThreadId(), 1);
+    else if (reason == DLL_THREAD_DETACH)
+        seen_thread(GetCurrentThreadId(), 0);
     if (reason == DLL_THREAD_ATTACH || reason == DLL_THREAD_DETACH)
         InterlockedIncrement(&g_thread_events);
+}
+
+/* The CPU cycles used so far by the process's threads the loader has not
+ * reported, other than the caller. NtGetNextThread walks the process's
+ * threads with no allocation (a snapshot of the system's would allocate
+ * what it counts), and QueryThreadCycleTime is a system call. 0 where
+ * NtGetNextThread is missing. */
+typedef LONG (NTAPI *aether_next_thread_fn)(HANDLE, HANDLE, ACCESS_MASK, ULONG, ULONG, PHANDLE);
+
+static uint64_t unreported_thread_cycles(void) {
+    static aether_next_thread_fn next_thread = NULL;
+    static volatile LONG looked = 0;
+    if (!looked) {
+        HMODULE ntdll = GetModuleHandleA("ntdll.dll");
+        if (ntdll) next_thread = (aether_next_thread_fn)(void*)GetProcAddress(ntdll, "NtGetNextThread");
+        InterlockedExchange(&looked, 1);
+    }
+    if (!next_thread) return 0;
+    DWORD self = GetCurrentThreadId();
+    uint64_t total = 0;
+    HANDLE t = NULL, n = NULL;
+    while (next_thread(GetCurrentProcess(), t, THREAD_QUERY_LIMITED_INFORMATION, 0, 0, &n) >= 0) {
+        if (t) CloseHandle(t);
+        t = n;
+        DWORD id = GetThreadId(t);
+        ULONG64 cycles = 0;
+        if (id != self && !thread_was_seen(id) && QueryThreadCycleTime(t, &cycles))
+            total += (uint64_t)cycles;
+    }
+    if (t) CloseHandle(t);
+    return total;
 }
 
 #  if defined(_MSC_VER)
@@ -248,7 +311,8 @@ PIMAGE_TLS_CALLBACK aether_thread_event_callback = aether_thread_event;
 
 int64_t aether_thread_epoch(void) {
 #if defined(_WIN32)
-    return (int64_t)InterlockedCompareExchange(&g_thread_events, 0, 0);
+    uint64_t events = (uint64_t)InterlockedCompareExchange(&g_thread_events, 0, 0);
+    return (int64_t)(events * 0x9E3779B97F4A7C15ull + unreported_thread_cycles());
 #elif defined(__APPLE__)
     thread_act_array_t list;
     mach_msg_type_number_t count = 0;

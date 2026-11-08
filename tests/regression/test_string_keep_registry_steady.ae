@@ -15,6 +15,13 @@
 // back its names, so the names land at other addresses, and every round
 // after the first keep is checked on its own: on the code before, the
 // first rounds grew the heap by one table or more each.
+//
+// One compared run a round: a run during which another thread ran is run
+// again. On Windows the parallel loader's second worker first runs some tens
+// of milliseconds in and allocates 1048 bytes of the process heap, unseen by
+// the loader's thread notifications; CI's Windows runs failed on it now and
+// then ("round 5 ... grew the heap by 1048 bytes") until thread_epoch
+// counted those workers' CPU time and a spoiled run stopped using up the try.
 
 import std.mem
 import std.string

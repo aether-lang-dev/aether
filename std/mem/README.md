@@ -162,11 +162,14 @@ a leak tool (`leaks`, valgrind, LeakSanitizer).
 A thread holds heap blocks of its own while it lives, the OS's and the C
 runtime's (about 1 KB on Windows), so the count moves when one starts,
 whoever starts it, and on Windows the system starts thread-pool workers in a
-process. `mem.thread_epoch()` changes whenever a thread starts or ends.
-`mem.steady_growth(round, tries)` runs a round of work up to `tries` times,
-each run between two reads, compares only the runs in which no thread
-started or ended, and returns 0 as soon as one leaves the count exactly as
-it found it. A leak grows every run, so the answer is then what a run
+process. `mem.thread_epoch()` changes whenever a thread starts or ends; on
+Windows also when one of the parallel loader's workers runs, threads the
+loader starts without telling the program, whose first run, some tens of
+milliseconds into the process, allocates about 1 KB.
+`mem.steady_growth(round, tries)` runs a round of work between two reads,
+compares only the runs in which no thread started or ended (one that did is
+run again, and does not use up a try), up to `tries` compared runs, and
+returns 0 as soon as one leaves the count exactly as it found it. A leak grows every run, so the answer is then what a run
 leaks; a one-time allocation, or a buffer still growing to its high-water
 mark, lands in some runs and settles.
 
