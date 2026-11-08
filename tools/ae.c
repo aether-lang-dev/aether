@@ -58,7 +58,7 @@ extern char** environ;
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
 #endif
-#ifdef __FreeBSD__
+#if defined(__FreeBSD__) || defined(__NetBSD__)
 #include <sys/types.h>
 #include <sys/sysctl.h>
 #endif
@@ -1787,6 +1787,37 @@ static char* get_basename(const char* path) {
  * the key already covered aetherc's mtime, but a rebuilt `ae` (whose
  * codegen-driving flags such as -Wformat live here) served stale
  * binaries until `ae cache clear`. */
+#if defined(__OpenBSD__)
+/* OpenBSD has no way to ask the kernel for a process's executable, so ae
+ * takes it from argv[0] as main() received it: a name with a slash is a
+ * path from the starting directory, one without is looked up in PATH as
+ * the shell did. Resolved once in main(), before anything can chdir. */
+static char g_ae_self_path[PATH_MAX];
+
+static void ae_resolve_self(const char* argv0) {
+    char resolved[PATH_MAX];
+    if (!argv0 || !argv0[0]) return;
+    if (strchr(argv0, '/')) {
+        if (realpath(argv0, resolved)) snprintf(g_ae_self_path, sizeof(g_ae_self_path), "%s", resolved);
+        return;
+    }
+    const char* path = getenv("PATH");
+    if (!path) return;
+    while (*path) {
+        const char* end = strchr(path, ':');
+        size_t len = end ? (size_t)(end - path) : strlen(path);
+        char probe[PATH_MAX];
+        int w = snprintf(probe, sizeof(probe), "%.*s/%s", (int)len, len ? path : ".", argv0);
+        if (w > 0 && (size_t)w < sizeof(probe) && access(probe, X_OK) == 0 && realpath(probe, resolved)) {
+            snprintf(g_ae_self_path, sizeof(g_ae_self_path), "%s", resolved);
+            return;
+        }
+        if (!end) break;
+        path = end + 1;
+    }
+}
+#endif
+
 bool get_exe_path(char* buf, size_t size) {
 #ifdef __APPLE__
     uint32_t sz = (uint32_t)size;
@@ -1815,6 +1846,21 @@ bool get_exe_path(char* buf, size_t size) {
     ssize_t plen = readlink("/proc/curproc/file", buf, size - 1);
     if (plen > 0) {
         buf[plen] = '\0';
+        return true;
+    }
+#elif defined(__NetBSD__)
+    /* NetBSD mounts no /proc by default; its sysctl names the executable
+     * by pid (-1 = this process) under KERN_PROC_ARGS. */
+    int mib[4] = { CTL_KERN, KERN_PROC_ARGS, -1, KERN_PROC_PATHNAME };
+    size_t len_nb = size;
+    if (sysctl(mib, 4, buf, &len_nb, NULL, 0) == 0 && len_nb > 1) {
+        buf[size - 1] = '\0';
+        return true;
+    }
+#elif defined(__OpenBSD__)
+    size_t len_ob = strlen(g_ae_self_path);
+    if (len_ob > 0 && len_ob < size) {
+        memcpy(buf, g_ae_self_path, len_ob + 1);
         return true;
     }
 #elif defined(__linux__)
@@ -13755,6 +13801,9 @@ static void ae_console_restore(void) {
 #endif
 
 int main(int argc, char** argv) {
+#if defined(__OpenBSD__)
+    ae_resolve_self(argc > 0 ? argv[0] : NULL);
+#endif
 #ifdef _WIN32
     // Set UTF-8 console codepage so Aether programs can print Unicode correctly
     // on Windows CMD and PowerShell (default CP1252/OEM is not UTF-8).
