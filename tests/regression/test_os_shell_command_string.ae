@@ -33,21 +33,26 @@ main() {
     }
 
     // A leading '-': sh must look for a command named -n, not take -n
-    // (no-exec) and the rest as its own options.
-    rc2 = os.system("-n 2>/dev/null")
-    if rc2 != 127 {
-        println("  FAIL os.system(\"-n ...\") = ${rc2}, expected 127 (the command -n, not found)")
-        fails = fails + 1
+    // (no-exec) and the rest as its own options. POSIX only: on Windows the
+    // command goes to cmd.exe, which has no such options to mistake it for.
+    if os.platform() == "windows" {
+        println("  SKIP leading '-' cases: Windows runs commands with cmd.exe, not sh")
     } else {
-        println("  PASS a command starting with '-' is the command, not sh options")
-    }
+        rc2 = os.system("-n 2>/dev/null")
+        if rc2 != 127 {
+            println("  FAIL os.system(\"-n ...\") = ${rc2}, expected 127 (the command -n, not found)")
+            fails = fails + 1
+        } else {
+            println("  PASS a command starting with '-' is the command, not sh options")
+        }
 
-    out2, err2 = os.exec("-x 2>/dev/null; echo ran")
-    if out2 != "ran\n" {
-        println("  FAIL os.exec(\"-x ...; echo ran\") = '${out2}' err '${err2}', expected 'ran'")
-        fails = fails + 1
-    } else {
-        println("  PASS os.exec with a leading '-' runs it as a command")
+        out2, err2 = os.exec("-x 2>/dev/null; echo ran")
+        if out2 != "ran\n" {
+            println("  FAIL os.exec(\"-x ...; echo ran\") = '${out2}' err '${err2}', expected 'ran'")
+            fails = fails + 1
+        } else {
+            println("  PASS os.exec with a leading '-' runs it as a command")
+        }
     }
 
     if fails > 0 {
