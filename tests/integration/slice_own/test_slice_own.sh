@@ -423,6 +423,10 @@ main() {
         round(leak)
     }
     h0 = mem.heap_in_use()
+    if h0 < 0 {
+        println("no heap count")   // -1: musl, NetBSD, OpenBSD
+        return
+    }
     for i in 0..200 {
         round(leak)
     }
@@ -430,7 +434,10 @@ main() {
     println("grew ${grew} MB")
 }
 AE
-if (cd "$TMP" && AETHER_HOME="$ROOT" "$AE" build grow.ae -o grow >/dev/null 2>&1); then
+if (cd "$TMP" && AETHER_HOME="$ROOT" "$AE" build grow.ae -o grow >/dev/null 2>&1) &&
+   [ "$("$TMP/grow")" = "no heap count" ]; then
+    echo "  [SKIP] grow: mem.heap_in_use() has no count on this platform"
+elif [ -x "$TMP/grow" ]; then
     owned=$("$TMP/grow" | sed -n 's/^grew \(-*[0-9]*\) MB$/\1/p')
     # The control leaks on purpose. Under ASan (the sweep's AETHER_SANITIZER
     # =asan run) LeakSanitizer is told so for that one run, whose leak is the
