@@ -1,1 +1,0 @@
-- **An installed `aetherc` finds the stdlib beside it on NetBSD and OpenBSD.** It looked for its own directory through `/proc/self/exe` or FreeBSD's sysctl, so outside a source tree every `import std.X` was unresolved. NetBSD asks its `KERN_PROC_PATHNAME` sysctl; OpenBSD resolves `argv[0]` at startup.

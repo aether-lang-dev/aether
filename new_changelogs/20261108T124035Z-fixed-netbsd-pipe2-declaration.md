@@ -1,1 +1,0 @@
-- **`runtime/utils/aether_spawn.c` builds under `-Werror` with NetBSD's gcc.** It redeclared `pipe2(int[2], int)` on every BSD, contradicting NetBSD's `int *` prototype (`-Warray-parameter`). The fallback declaration is now glibc's alone.

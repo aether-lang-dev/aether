@@ -1,1 +1,0 @@
-- **`./install.sh` works on OpenBSD.** It copied the runtime and stdlib headers with `tar cf - -T -`, and OpenBSD's tar has no `-T`, so the install stopped there. It uses `pax -rw` on OpenBSD.

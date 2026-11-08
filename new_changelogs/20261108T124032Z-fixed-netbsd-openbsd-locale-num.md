@@ -1,1 +1,0 @@
-- **The runtime builds on NetBSD and OpenBSD.** `runtime/aether_locale_num.c` included `<xlocale.h>` there, which only macOS and FreeBSD have. NetBSD declares `vsnprintf_l`/`strtod_l` in `<stdio.h>`/`<stdlib.h>`; OpenBSD has no `_l` functions, so float text there goes through the `uselocale` bracket on both the format and the parse side.
