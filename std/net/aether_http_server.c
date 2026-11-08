@@ -766,6 +766,13 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
 #endif
     const char* p = (const char*)buf;
     int sent = 0;
+#if defined(__NetBSD__)
+    /* NetBSD's send(2) does not take MSG_DONTWAIT on a TCP socket: a send to
+     * a client that stopped reading blocked until SO_SNDTIMEO, then again
+     * for the rest, so conn_wait_io never bounded it. Non-blocking for the
+     * write instead, and blocking again after it. */
+    conn_set_nonblocking(c, 1);
+#endif
     while (sent < len) {
 #ifdef _WIN32
         int n = (int)send(c->fd, p + sent, (size_t)(len - sent), AE_SEND_NOSIGNAL);
@@ -786,8 +793,12 @@ static int conn_send(HttpConn* c, const void* buf, int len) {
             conn_wait_io(c, POLLOUT) == 1)
             continue;
 #endif
-        return -1;
+        sent = -1;
+        break;
     }
+#if defined(__NetBSD__)
+    conn_set_nonblocking(c, 0);   /* a descriptor handed on stays as it was */
+#endif
     return sent;
 }
 

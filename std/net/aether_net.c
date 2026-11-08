@@ -666,6 +666,23 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
 #ifndef _WIN32
     NetSendWait wait = { -1, 0, 0 };
 #endif
+#if defined(__NetBSD__)
+    /* NetBSD's send(2) does not take MSG_DONTWAIT on a TCP socket: a send
+     * to a full buffer blocked until SO_SNDTIMEO, or for good with none, so
+     * the wait below never ran. The socket is non-blocking for the loop. */
+    int nb_flags = fcntl(sock->fd, F_GETFL, 0);
+    int nb_set = 0;
+    if (nb_flags >= 0 && !(nb_flags & O_NONBLOCK)) {
+        /* The wait's bound is read now, while the socket is still blocking:
+         * net_wait_writable takes a non-blocking one as a caller's
+         * "do not wait". */
+        struct timeval tv = { 0, 0 };
+        socklen_t tl = sizeof tv;
+        wait.timeout_ms = getsockopt(sock->fd, SOL_SOCKET, SO_SNDTIMEO, &tv, &tl) == 0
+                        ? (long long)tv.tv_sec * 1000 + (tv.tv_usec + 999) / 1000 : 0;
+        nb_set = fcntl(sock->fd, F_SETFL, nb_flags | O_NONBLOCK) == 0;
+    }
+#endif
     while (sent < length) {
 #ifdef _WIN32
         int n = send(sock->fd, p + sent, (size_t)(length - sent), AE_NET_NOSIGNAL);
@@ -688,6 +705,13 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
 #endif
         break;
     }
+#if defined(__NetBSD__)
+    if (nb_set) {
+        int saved = errno;
+        (void)fcntl(sock->fd, F_SETFL, nb_flags);
+        errno = saved;
+    }
+#endif
     return sent;
 }
 
