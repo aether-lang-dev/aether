@@ -123,7 +123,8 @@ def blocks_in(path):
 
 LINK_ONLY_MARKERS = (
     "Undefined symbols",           # Apple ld
-    "undefined reference to",      # GNU ld / lld
+    "undefined reference to",      # GNU ld
+    "undefined symbol: ",          # lld (OpenBSD's system linker)
     "unresolved external symbol",  # MSVC link
 )
 
