@@ -1,0 +1,1 @@
+- **`fs.mounts()` works on NetBSD.** It reported "cannot enumerate mounts": the getmntinfo backend was written for `struct statfs`, and NetBSD's fills a `struct statvfs` whose flag field is `f_flag`. The same backend now takes either.

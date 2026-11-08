@@ -150,6 +150,9 @@ void fs_watch_close(void* w) { (void)w; }
 #include <sys/param.h>
 #include <sys/ucred.h>
 #include <sys/mount.h>        // getmntinfo() for fs_try_mounts
+#elif defined(__NetBSD__)
+#include <sys/param.h>
+#include <sys/mount.h>        // getmntinfo() over struct statvfs
 #endif
 
 #ifdef _WIN32
@@ -1567,13 +1570,18 @@ int fs_try_mounts(void) {
     }
     fclose(fp);
     return s_mount_count;
-#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__)
+#elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
     /* macOS / FreeBSD / OpenBSD share the `struct statfs` getmntinfo(3).
-     * NetBSD is deliberately NOT in this list: there getmntinfo fills a
-     * `struct statvfs` and the flag field is `f_flag`, not `f_flags`, so
-     * this body would not compile. It falls through to the unsupported
-     * branch and reports the error rather than shipping a shape nobody
-     * has built, which is how the MNT_NODEV break below reached CI. */
+     * NetBSD's getmntinfo fills a `struct statvfs` whose flag field is
+     * `f_flag`, not `f_flags`, with the same names otherwise (built and
+     * run on NetBSD 11.1). */
+#if defined(__NetBSD__)
+    typedef struct statvfs ae_mnt_t;
+#define AE_MNT_FLAGS(m) ((m).f_flag)
+#else
+    typedef struct statfs ae_mnt_t;
+#define AE_MNT_FLAGS(m) ((m).f_flags)
+#endif
     /* The optional mount flags this platform actually has. A flag is listed
      * only where the OS defines it, so the table IS the platform's flag set
      * rather than a full list with substitutes for the missing entries.
@@ -1590,18 +1598,18 @@ int fs_try_mounts(void) {
 #endif
         { MNT_NOEXEC, ",noexec" },
     };
-    struct statfs* mntbuf = NULL;
+    ae_mnt_t* mntbuf = NULL;
     int n = getmntinfo(&mntbuf, MNT_NOWAIT);
     if (n <= 0) return -1;
     for (int i = 0; i < n; i++) {
         char opts[128];
         int used = snprintf(opts, sizeof(opts), "%s",
-                            (mntbuf[i].f_flags & MNT_RDONLY) ? "ro" : "rw");
+                            (AE_MNT_FLAGS(mntbuf[i]) & MNT_RDONLY) ? "ro" : "rw");
         if (used < 0) return -1;
         for (size_t k = 0;
              k < sizeof(k_optional_mount_flags) / sizeof(k_optional_mount_flags[0]);
              k++) {
-            if (!((unsigned long long)mntbuf[i].f_flags & k_optional_mount_flags[k].mask))
+            if (!((unsigned long long)AE_MNT_FLAGS(mntbuf[i]) & k_optional_mount_flags[k].mask))
                 continue;
             int w = snprintf(opts + used, sizeof(opts) - (size_t)used, "%s",
                              k_optional_mount_flags[k].name);
