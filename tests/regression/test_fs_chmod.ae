@@ -48,13 +48,15 @@ main() {
     println("  PASS 2: chmod 0o400 succeeds")
 
     // --- Case 3: high bits ignored (only 07777 honoured) ---
-    // 0o17777 has set-uid (0o4000) + sgid + sticky + 0o7777 — the
-    // 0o10000 high bit is stripped by the (mode & 07777) mask in C.
-    ok3, kind3, msg3 = fs.chmod(src1, 0o17777)
+    // 0o16777 has set-uid (0o4000) + sgid + 0o777 — the 0o10000 high
+    // bit is stripped by the (mode & 07777) mask in C. Not the sticky
+    // bit: NetBSD and OpenBSD refuse it on a regular file for a non-root
+    // caller (EFTYPE), which is the kernel's rule, not the mask's.
+    ok3, kind3, msg3 = fs.chmod(src1, 0o16777)
     if kind3 != fs.KIND_OK {
         println("FAIL 3: kind=${kind3} msg=${msg3}, expected KIND_OK"); exit(1)
     }
-    println("  PASS 3: high bits masked, 0o17777 accepted")
+    println("  PASS 3: high bits masked, 0o16777 accepted")
 
     // Restore writable mode for cleanup.
     ok_restore, _kr, _mr = fs.chmod(src1, 0o600)
