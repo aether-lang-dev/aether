@@ -70,8 +70,12 @@ main() {
     when target.os != "windows" {
         s4, e4 = tcp.listen_on("::", 0) // loopback-ok: dual-stack needs the wildcard (not built on Windows)
         fail_if(round_trip(s4, e4, "::", "::1"))
-        s5, e5 = tcp.listen_on("::", 0) // loopback-ok: as above
-        fail_if(round_trip(s5, e5, "::", "127.0.0.1"))
+        // OpenBSD has no IPv4-mapped IPv6 sockets (IPV6_V6ONLY cannot be
+        // turned off), so a listener on :: takes IPv6 only there.
+        when target.os != "openbsd" {
+            s5, e5 = tcp.listen_on("::", 0) // loopback-ok: as above
+            fail_if(round_trip(s5, e5, "::", "127.0.0.1"))
+        }
     }
     // A name is still refused as a listen address.
     _named, nerr = tcp.listen_on("localhost", 0) // loopback-ok: refused before any bind
