@@ -2678,6 +2678,10 @@ int is_c_reserved_word(const char* name) {
         "isalnum", "isalpha", "isblank", "iscntrl", "isdigit", "isgraph",
         "islower", "isprint", "ispunct", "isspace", "isupper", "isxdigit",
         "tolower", "toupper",
+        /* <sys/types.h> on FreeBSD (and glibc before 2.28) defines these as
+           function-like macros, so a user `major(seg: string)` was expanded
+           into `__major(seg)` and failed to compile against dev_t. */
+        "major", "minor", "makedev",
         NULL
     };
     static const char** sorted = NULL;
