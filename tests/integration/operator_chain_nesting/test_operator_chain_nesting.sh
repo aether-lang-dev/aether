@@ -118,13 +118,19 @@ fi
 
 # The deepest ( [ { of a line, with the sequence macros spelled as a
 # GCC-compatible compiler (Clang among them) expands them.
+# Linear in the line: keep only the brackets, then walk them as an array.
+# A substr() a character on the whole line is quadratic in FreeBSD's awk,
+# whose substr and length count UTF-8 characters from the start each call:
+# the 1000-link lines took this test past the sweep's 420 s limit there.
 max_seq_depth() {
-    awk '{ gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
+    LC_ALL=C awk '{ gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
+           gsub(/[^][(){}]/, "")
+           n = split($0, ch, "")
            d = 0; m = 0
-           for (i = 1; i <= length($0); i++) {
-               c = substr($0, i, 1)
+           for (i = 1; i <= n; i++) {
+               c = ch[i]
                if (c == "(" || c == "[" || c == "{") d++
-               if (c == ")" || c == "]" || c == "}") d--
+               else d--
                if (d > m) m = d
            }
            print m }'
