@@ -19,6 +19,42 @@ import std.tcp
 import std.http.client
 
 extern exit(code: int)
+extern calloc(n: int, size: int) -> ptr
+extern free(p: ptr)
+
+// Winsock keeps the context of a closed socket (two 256-byte blocks of the
+// process heap, ws2_32's and mswsock's) and gives it to the next socket; it
+// makes new ones only when more sockets are open at once than it has
+// contexts for, closing ones included until the system lets them go. On
+// Windows (where heap_in_use is exact) a round whose sockets overlapped more
+// than any before it grew the heap by their contexts, 512 bytes a socket,
+// with nothing leaked: v0.901.0's release failed on 1024 in every run. So
+// before the rounds are measured, `n` connections are held open at once,
+// both ends, which leaves Winsock more contexts than a round can use.
+fn warm_socket_contexts(n: int) {
+    lsrv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" { return }
+    port = tcp.server_port(lsrv)
+    cs = calloc(n, 8)
+    ss = calloc(n, 8)
+    i = 0
+    while i < n {
+        c, cerr = tcp.connect("127.0.0.1", port)
+        if cerr == "" { (cs as ptr[])[i] = c }
+        a, aerr = tcp.accept(lsrv)
+        if aerr == "" { (ss as ptr[])[i] = a }
+        i = i + 1
+    }
+    i = 0
+    while i < n {
+        if (cs as ptr[])[i] != null { tcp.close((cs as ptr[])[i]) }
+        if (ss as ptr[])[i] != null { tcp.close((ss as ptr[])[i]) }
+        i = i + 1
+    }
+    free(cs)
+    free(ss)
+    tcp.server_close(lsrv)
+}
 
 // One request to `url`, which must fail to connect. 1 when it did.
 fn dial_fails(url: string) -> int {
@@ -61,6 +97,7 @@ main() {
         exit(1)
     }
     if mem.heap_in_use_exact() {
+        warm_socket_contexts(16)
         grown = mem.steady_growth(|| {
                 fails = fails + requests(url, 3)
             }, 5)
