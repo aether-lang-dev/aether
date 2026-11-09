@@ -451,6 +451,7 @@
       <h3 class="function-name">server_start_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_start_raw(server) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">A start of a server that is already running is refused (-1, the reason in http_server_error).</p>
     </div>
     <div class="function" id="server_set_host" data-name="server_set_host">
       <h3 class="function-name">server_set_host <span class="kind">fn</span></h3>
@@ -467,6 +468,7 @@
       <h3 class="function-name">server_stop <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_stop(server)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
+      <p class="doc">Stop waits until the server's run is over, whichever start began it and on whatever thread, so a free may follow at once. On one of the server's own threads (a handler, the monitor) it only signals, and a free there is fatal: free it from the thread that started it.</p>
     </div>
     <div class="function" id="server_free" data-name="server_free">
       <h3 class="function-name">server_free <span class="kind">extern</span></h3>
@@ -795,7 +797,7 @@
     </div>
     <div class="function" id="server_start_background" data-name="server_start_background">
       <h3 class="function-name">server_start_background <span class="kind">fn</span></h3>
-      <pre class="usage"><code>server_start_background(server) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>server_start_background(server)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr</span></p>
       <p class="doc">Start a server on a detached native thread. Useful for integration tests and embedding hosts that need multiple local servers in one process without tying up the Aether actor scheduler.</p>
     </div>

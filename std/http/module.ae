@@ -274,8 +274,14 @@ extern http_server_port(server: ptr) -> int
 // loopback binds. A host name binds the IPv4 address it resolves to,
 // and one that does not resolve fails the bind (#2639).
 extern http_server_set_host(server: ptr, host: string)
+// A start of a server that is already running is refused (-1, the reason in
+// http_server_error).
 extern http_server_start_raw(server: ptr) -> int
 extern http_server_start_background_raw(server: ptr) -> int
+// Stop waits until the server's run is over, whichever start began it and on
+// whatever thread, so a free may follow at once. On one of the server's own
+// threads (a handler, the monitor) it only signals, and a free there is fatal:
+// free it from the thread that started it.
 extern http_server_stop(server: ptr)
 extern http_server_free(server: @frees ptr)
 // TLS termination (#260 Tier 0). Loads the cert+key (PEM-encoded);
@@ -872,7 +878,7 @@ server_start(server: ptr) -> {
 server_start_background(server: ptr) -> {
     rc = http_server_start_background_raw(server)
     if rc < 0 {
-        return "server background start failed"
+        return server_error_or(server, "server background start failed")
     }
     return ""
 }

@@ -175,6 +175,7 @@ tests/integration/http_serve_and_dial/
 tests/integration/http_server_actor_dispatch/
 tests/integration/http_server_background_quiet/
 tests/integration/http_server_monitor/
+tests/integration/http_server_stop_waits/
 tests/integration/http_server_multi_accept/
 tests/integration/http_server_connect_tunnel/
 tests/integration/http_server_h2_middleware/
