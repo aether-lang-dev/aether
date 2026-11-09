@@ -1,5 +1,6 @@
 #include "aether_config.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../string/aether_string.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -36,9 +37,17 @@ static void ae_cfg_rwlock_wrunlock(ae_cfg_rwlock_t* lk) { pthread_rwlock_unlock(
                               case the porter doc described. Chains
                               handle bucket overflow gracefully. */
 
+/* A value is a counted AetherString, published (atomically counted) before
+ * it is stored, so a `get` on another thread can take a reference of its
+ * own under the read lock. The store holds one reference; a `put` that
+ * replaces the value, or a `clear`, drops it after unlocking, and the bytes
+ * live on for as long as any reader still holds what `get` gave it. A
+ * borrowed `char*` (what `get` returned before) dangled the moment another
+ * thread's `put` of the same key freed it, between the read unlock and the
+ * caller's own copy. */
 typedef struct ae_cfg_entry {
     char* key;
-    char* value;
+    AetherString* value;
     struct ae_cfg_entry* next;
 } ae_cfg_entry;
 
@@ -75,9 +84,11 @@ static ae_cfg_entry* find_in_bucket(ae_cfg_entry* head, const char* key) {
 void aether_config_store_put(const char* key, const char* value) {
     if (!key || !value) return;
 
-    char* new_value = dup_str(value);
+    AetherString* new_value = string_new(value);
     if (!new_value) return;  /* OOM — silent (matches stdlib's other
                                 infallible-in-practice paths) */
+    /* Reachable from every thread once stored: count it atomically. */
+    aether_string_publish(new_value);
 
     uint32_t h = fnv1a(key);
     int idx = (int)(h & (AE_CFG_BUCKETS - 1));
@@ -85,24 +96,25 @@ void aether_config_store_put(const char* key, const char* value) {
     ae_cfg_rwlock_wrlock(&g_lock);
     ae_cfg_entry* existing = find_in_bucket(g_buckets[idx], key);
     if (existing) {
-        aether_caps_free(existing->value, strlen(existing->value) + 1);
+        AetherString* old = existing->value;
         existing->value = new_value;
         ae_cfg_rwlock_wrunlock(&g_lock);
+        string_release(old);   /* the store's reference; a reader may hold more */
         return;
     }
     /* New entry. Allocate under the write lock to keep insertion
      * atomic with the bucket-head update. */
     ae_cfg_entry* e = (ae_cfg_entry*)aether_caps_malloc(sizeof(ae_cfg_entry));
     if (!e) {
-        aether_caps_free(new_value, strlen(new_value) + 1);
         ae_cfg_rwlock_wrunlock(&g_lock);
+        string_release(new_value);
         return;
     }
     e->key = dup_str(key);
     if (!e->key) {
-        aether_caps_free(new_value, strlen(new_value) + 1);
         aether_caps_free(e, sizeof(ae_cfg_entry));
         ae_cfg_rwlock_wrunlock(&g_lock);
+        string_release(new_value);
         return;
     }
     e->value = new_value;
@@ -113,29 +125,36 @@ void aether_config_store_put(const char* key, const char* value) {
 }
 
 const char* aether_config_store_get(const char* key) {
-    if (!key) return "";
+    if (!key) return (const char*)string_empty();
     uint32_t h = fnv1a(key);
     int idx = (int)(h & (AE_CFG_BUCKETS - 1));
 
     ae_cfg_rwlock_rdlock(&g_lock);
     ae_cfg_entry* e = find_in_bucket(g_buckets[idx], key);
-    const char* v = e ? e->value : "";
+    AetherString* v = NULL;
+    if (e) {
+        v = e->value;
+        string_retain(v);   /* under the lock: no put can drop it first */
+    }
     ae_cfg_rwlock_rdunlock(&g_lock);
-    return v;
+    return v ? (const char*)v : (const char*)string_empty();
 }
 
 const char* aether_config_store_get_or(const char* key, const char* default_value) {
-    if (!key) return default_value ? default_value : "";
+    if (!key) return (const char*)string_new(default_value ? default_value : "");
     uint32_t h = fnv1a(key);
     int idx = (int)(h & (AE_CFG_BUCKETS - 1));
 
     ae_cfg_rwlock_rdlock(&g_lock);
     ae_cfg_entry* e = find_in_bucket(g_buckets[idx], key);
-    const char* v;
-    if (e) v = e->value;
-    else   v = default_value ? default_value : "";
+    AetherString* v = NULL;
+    if (e) {
+        v = e->value;
+        string_retain(v);
+    }
     ae_cfg_rwlock_rdunlock(&g_lock);
-    return v;
+    if (v) return (const char*)v;
+    return (const char*)string_new(default_value ? default_value : "");
 }
 
 int aether_config_store_has(const char* key) {
@@ -158,18 +177,25 @@ int aether_config_store_size(void) {
 }
 
 void aether_config_store_clear(void) {
+    /* Unlink every chain under the lock, release outside it: a value's last
+     * reference may be a reader's, and either way the lock is not held over
+     * the frees. */
+    ae_cfg_entry* chains[AE_CFG_BUCKETS];
     ae_cfg_rwlock_wrlock(&g_lock);
     for (int i = 0; i < AE_CFG_BUCKETS; i++) {
-        ae_cfg_entry* e = g_buckets[i];
-        while (e) {
-            ae_cfg_entry* next = e->next;
-            aether_caps_free(e->key, strlen(e->key) + 1);
-            aether_caps_free(e->value, strlen(e->value) + 1);
-            aether_caps_free(e, sizeof(ae_cfg_entry));
-            e = next;
-        }
+        chains[i] = g_buckets[i];
         g_buckets[i] = NULL;
     }
     g_size = 0;
     ae_cfg_rwlock_wrunlock(&g_lock);
+    for (int i = 0; i < AE_CFG_BUCKETS; i++) {
+        ae_cfg_entry* e = chains[i];
+        while (e) {
+            ae_cfg_entry* next = e->next;
+            aether_caps_free(e->key, strlen(e->key) + 1);
+            string_release(e->value);
+            aether_caps_free(e, sizeof(ae_cfg_entry));
+            e = next;
+        }
+    }
 }

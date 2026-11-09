@@ -1,0 +1,92 @@
+// Regression test: std.config.get under a concurrent put of the same key.
+//
+// get() used to hand back a borrowed pointer into the store. The module
+// wrapper copied it, but only after the store's read lock was released,
+// so a put of the same key on another thread could free the value in
+// between: the copy read freed (and often reused) memory, and a reader
+// saw a value that was neither the old one nor the new one. Found in a
+// servirtium-vcr refactor. get() now returns a reference of the
+// caller's own, taken under the read lock (a retained counted string).
+//
+// What this test guards:
+//   1. A writer alternating two values while three readers get() the key
+//      never lets a reader see anything but one of the two values
+//      (before the fix, every run saw torn or freed values)
+//   2. get_or() of a set key, the same way
+//   3. A value got before a put, then held across it, keeps its content
+//      on the same thread
+
+import std.config
+import std.string
+import std.worker
+
+extern exit(code: int)
+
+const N = 100000
+
+// 1 if `s` is 200 copies of one character, 0 otherwise.
+uniform(s: string) -> int {
+    n = string.length(s)
+    if n != 200 { return 0 }
+    c = string.char_at(s, 0)
+    i = 1
+    while i < n {
+        if string.char_at(s, i) != c { return 0 }
+        i = i + 1
+    }
+    return 1
+}
+
+rep(c: string) -> string {
+    s = string.copy("")
+    i = 0
+    while i < 200 { s = string_concat(s, c); i = i + 1 }
+    return s
+}
+
+main() {
+    a = rep("A")
+    b = rep("B")
+    config.put("k", a)
+    worker.pool_size(4)
+    worker.run(|| {
+            i = 0
+            while i < N {
+                if i % 2 == 0 { config.put("k", a) } else { config.put("k", b) }
+                i = i + 1
+            }
+            return null
+        }, | r: @keep ptr | {})
+    k = 0
+    while k < 3 {
+        worker.run(|| {
+                bad = 0
+                i = 0
+                while i < N {
+                    v = string.copy(config.get("k"))
+                    if uniform(v) == 0 { bad = bad + 1 }
+                    w = config.get_or("k", "")
+                    if uniform(w) == 0 { bad = bad + 1 }
+                    i = i + 1
+                }
+                if bad > 0 {
+                    println("FAIL 1/2: a reader saw ${bad} torn or freed values")
+                    exit(1)
+                }
+                return null
+            }, | r: @keep ptr | {})
+        k = k + 1
+    }
+    worker.wait()
+
+    // Case 3: held across a put on this thread.
+    config.put("h", a)
+    held = config.get("h")
+    config.put("h", b)
+    config.put("h2", b)
+    if held != a {
+        println("FAIL 3: a value held across a put changed")
+        exit(1)
+    }
+    println("PASS: config.get is safe under a concurrent put")
+}
