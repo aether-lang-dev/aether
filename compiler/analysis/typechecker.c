@@ -3115,6 +3115,50 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
     type_error(emsg, arg->line, arg->column);
 }
 
+/* A typed pointer or a struct passed where a `string` goes, or a string
+ * where a typed pointer goes. Argument checking is lenient, and a string is
+ * a pointer in the generated C, so `f(s: string)` called as `f(vc)` with
+ * `vc: *Vcr` passed `ae check` and reached C as a `Vcr*` given to a
+ * `const char*`: an error under gcc 14, only a warning under clang, and the
+ * callee read the struct's bytes as characters. A refactor that turns a
+ * string key into a struct handle (servirtium-vcr: ~165 functions) leaves
+ * exactly these call sites behind. A binding and a `return` already refused
+ * them. A bare `ptr` stays the universal pointer, both ways (an extern's
+ * `-> ptr` result read as a string, a string handed to a `ptr` parameter),
+ * and so does a pointer to a @c_struct overlay, a `void*` in C. */
+static void reject_string_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
+                                           Type* param_type, int index,
+                                           const char* param_name) {
+    if (!arg_type || !param_type) return;
+    int typed_ptr_arg = arg_type->kind == TYPE_PTR && arg_type->element_type &&
+                        arg_type->element_type->kind != TYPE_UNKNOWN &&
+                        !(arg_type->element_type->kind == TYPE_STRUCT &&
+                          is_c_struct_name(arg_type->element_type->struct_name));
+    int struct_arg = (arg_type->kind == TYPE_STRUCT || arg_type->kind == TYPE_SUM) &&
+                     arg_type->struct_name && !is_c_struct_name(arg_type->struct_name);
+    int typed_ptr_param = param_type->kind == TYPE_PTR && param_type->element_type &&
+                          param_type->element_type->kind == TYPE_STRUCT &&
+                          param_type->element_type->struct_name &&
+                          !is_c_struct_name(param_type->element_type->struct_name);
+    int bad = (param_type->kind == TYPE_STRING && (typed_ptr_arg || struct_arg)) ||
+              (typed_ptr_param && arg_type->kind == TYPE_STRING &&
+               arg->type != AST_NULL_LITERAL);
+    if (!bad) return;
+    char emsg[640];
+    char want[160];
+    snprintf(want, sizeof(want), "%s", type_spelled(param_type));  /* rotating buffer */
+    snprintf(emsg, sizeof(emsg), "Argument %d '%s' of '%s': expected %s, got %s",
+             index, param_name ? param_name : "?", call->value ? call->value : "?",
+             want, type_spelled(arg_type));
+    type_error_hint(emsg,
+                    param_type->kind == TYPE_STRING
+                        ? "a pointer or struct is not a string: pass the string field "
+                          "you mean (e.g. `v.name`), or convert the value explicitly"
+                        : "a string is not a struct pointer: pass the struct handle, "
+                          "or declare the parameter `string` (or `ptr`) if it takes text",
+                    arg->line, arg->column);
+}
+
 /* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? A
  * builder's block supplies it, so the call gives one argument fewer than the
  * parameters (`input("order", "map")` for `input(_ctx, name, type)`), or
@@ -22456,6 +22500,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_fn_mode_argument(table, call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_string_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     /* A builder's `_ctx` that the trailing block injects has no
                      * argument, and the arguments after it sit one slot earlier
                      * than this loop's position (`vstack(4) { ... }` is one
