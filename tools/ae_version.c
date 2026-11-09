@@ -6,6 +6,7 @@
  */
 
 #include "ae_internal.h"
+#include "ae_sha256.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -90,14 +91,13 @@ static const char* ae_platform_name(void) {
  * is at the old address. */
 #define AE_GITHUB_REPO "aether-lang-dev/aether"
 
-// Download url → dest file. Uses curl/wget on POSIX, PowerShell on Windows.
-// Creates parent directories of dest if they don't exist.
 /* max_seconds caps the whole transfer; 0 means no cap, for release archives
  * whose size makes any fixed ceiling wrong. The connect timeout and the stall
  * detector below apply either way: without them a network that accepts the
  * connection and then drops every packet, a captive portal or a firewall that
  * blackholes, hangs the command indefinitely rather than failing. */
-int ae_download_ex(const char* url, const char* dest, int max_seconds) {
+static int ae_download_raw(const char* url, const char* dest, int max_seconds,
+                           int octet_stream, const char* token) {
     // Ensure parent directory exists (e.g. ~/.aether/ for releases.json)
     {
         char parent[1024];
@@ -115,6 +115,11 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     FILE* ps = fopen(ps_path, "w");
     if (!ps) return 1;
     char ps_timeout[48] = "";
+    char ps_hdrs[1100];
+    snprintf(ps_hdrs, sizeof(ps_hdrs), "@{'User-Agent'='ae-cli'%s%s%s%s}",
+             octet_stream ? ";'Accept'='application/octet-stream'" : "",
+             token ? ";'Authorization'='Bearer " : "", token ? token : "",
+             token ? "'" : "");
     if (max_seconds > 0)
         snprintf(ps_timeout, sizeof(ps_timeout), " -TimeoutSec %d", max_seconds);
     /* #2530: Stop makes a failed request (a 404 included) end the script
@@ -125,8 +130,8 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
         "$ProgressPreference='SilentlyContinue'\n"
         "$ErrorActionPreference='Stop'\n"
         "Invoke-WebRequest -Uri '%s' -OutFile '%s' "
-        "-Headers @{'User-Agent'='ae-cli'}%s\n",
-        url, dest, ps_timeout);
+        "-Headers %s%s\n",
+        url, dest, ps_hdrs, ps_timeout);
     fclose(ps);
     char cmd[2048];
     snprintf(cmd, sizeof(cmd),
@@ -136,24 +141,230 @@ int ae_download_ex(const char* url, const char* dest, int max_seconds) {
     return r;
 #else
     char cap[32] = "";
+    char hdr[256] = "";
     char cmd[2048];
+    /* The token rides in the environment and is expanded by the shell, so it
+     * never appears in the command line (ps) and needs no quoting. curl and
+     * wget both drop Authorization on the cross-host redirect to the CDN. */
+    if (token) setenv("AE_DL_AUTH", token, 1);
     if (system("curl --version >/dev/null 2>&1") == 0) {
         if (max_seconds > 0) snprintf(cap, sizeof(cap), " --max-time %d", max_seconds);
+        snprintf(hdr, sizeof(hdr), "%s%s",
+                 octet_stream ? " -H 'Accept: application/octet-stream'" : "",
+                 token ? " -H \"Authorization: Bearer $AE_DL_AUTH\"" : "");
         snprintf(cmd, sizeof(cmd),
-                 "curl -fsSL --connect-timeout 5 --speed-limit 1024 --speed-time 20%s"
-                 " -o \"%s\" \"%s\" 2>/dev/null", cap, dest, url);
+                 "curl -fsSL --connect-timeout 5 --speed-limit 1024 --speed-time 20%s%s"
+                 " -o \"%s\" \"%s\" 2>/dev/null", cap, hdr, dest, url);
     } else {
         if (max_seconds > 0) snprintf(cap, sizeof(cap), " --read-timeout=%d", max_seconds);
+        snprintf(hdr, sizeof(hdr), "%s%s",
+                 octet_stream ? " --header='Accept: application/octet-stream'" : "",
+                 token ? " --header=\"Authorization: Bearer $AE_DL_AUTH\"" : "");
         snprintf(cmd, sizeof(cmd),
-                 "wget -q --no-verbose --timeout=5 --tries=2%s"
-                 " -O \"%s\" \"%s\" 2>/dev/null", cap, dest, url);
+                 "wget -q --no-verbose --timeout=5 --tries=2%s%s"
+                 " -O \"%s\" \"%s\" 2>/dev/null", cap, hdr, dest, url);
     }
-    return system(cmd);
+    int rc = system(cmd);
+    if (token) unsetenv("AE_DL_AUTH");
+    return rc;
 #endif
 }
 
 int ae_download(const char* url, const char* dest) {
     return ae_download_ex(url, dest, 0);
+}
+
+
+/* ---- GitHub release downloads: web endpoint first, REST API second --------
+ *
+ * https://github.com/<owner>/<repo>/releases/download/<tag>/<asset> is served
+ * by a different backend from the REST API, and it can fail while the API is
+ * fine (a repo-specific HTTP 504 on it was seen on 2026-11-09). The same bytes
+ * come from the API: look the asset up in /releases/tags/<tag>, then fetch
+ * /releases/assets/<id> with Accept: application/octet-stream, which redirects
+ * to the CDN. Unauthenticated use is allowed (60 requests an hour); GITHUB_TOKEN
+ * or GH_TOKEN, when set, is sent as a Bearer token to raise that. The API lists
+ * a sha256 `digest` for each asset, which the fallback checks the file against.
+ *
+ * AE_GITHUB_WEB_BASE and AE_GITHUB_API_BASE move the two endpoints, which is
+ * how the tests force the first to fail and the second to be a local server. */
+
+static const char* gh_web_base(void) {
+    const char* e = getenv("AE_GITHUB_WEB_BASE");
+    return (e && *e) ? e : "https://github.com";
+}
+static const char* gh_api_base(void) {
+    const char* e = getenv("AE_GITHUB_API_BASE");
+    return (e && *e) ? e : "https://api.github.com";
+}
+
+/* A token worth sending: only characters a GitHub token can contain, so it is
+ * safe in a header and in the PowerShell script. */
+static const char* gh_token(void) {
+    const char* t = getenv("GITHUB_TOKEN");
+    if (!t || !*t) t = getenv("GH_TOKEN");
+    if (!t || !*t || strlen(t) > 255) return NULL;
+    for (const char* c = t; *c; c++)
+        if (!((*c >= 'A' && *c <= 'Z') || (*c >= 'a' && *c <= 'z') ||
+              (*c >= '0' && *c <= '9') || *c == '_' || *c == '-' || *c == '.'))
+            return NULL;
+    return t;
+}
+
+static int gh_name_ok(const char* s) {
+    if (!*s) return 0;
+    for (; *s; s++)
+        if (!((*s >= 'A' && *s <= 'Z') || (*s >= 'a' && *s <= 'z') ||
+              (*s >= '0' && *s <= '9') || *s == '_' || *s == '-' || *s == '.' || *s == '+'))
+            return 0;
+    return 1;
+}
+
+/* Split <web-base>/<owner>/<repo>/releases/download/<tag>/<file>. */
+static int gh_parse_release_url(const char* url, char* owner, char* repo,
+                                char* tag, char* file, size_t sz) {
+    const char* base = gh_web_base();
+    size_t bl = strlen(base);
+    if (strncmp(url, base, bl) != 0 || url[bl] != '/') return 0;
+    char parts[5][256];
+    const char* p = url + bl + 1;
+    for (int i = 0; i < 6; i++) {
+        const char* slash = strchr(p, '/');
+        size_t n = slash ? (size_t)(slash - p) : strlen(p);
+        if (i == 2 || i == 3) {
+            /* the literal "releases" "download" segments */
+            if (n != 8 || strncmp(p, i == 2 ? "releases" : "download", 8) != 0) return 0;
+        } else {
+            int k = i < 2 ? i : i - 2;   /* 0 owner 1 repo 2 tag 3 file */
+            if (n == 0 || n >= sizeof(parts[0])) return 0;
+            memcpy(parts[k], p, n); parts[k][n] = '\0';
+            if (!gh_name_ok(parts[k])) return 0;
+        }
+        if (i < 5) { if (!slash) return 0; p = slash + 1; }
+        else if (slash) return 0;
+    }
+    snprintf(owner, sz, "%s", parts[0]); snprintf(repo, sz, "%s", parts[1]);
+    snprintf(tag, sz, "%s", parts[2]);   snprintf(file, sz, "%s", parts[3]);
+    return 1;
+}
+
+/* Find the asset called `file` in a release's JSON: its id (digits) and its
+ * digest hex, when it has one. The asset object is url, id, node_id, name, ...
+ * digest, so the nearest "id" before the name is the asset's own. */
+static int gh_find_asset(const char* json, const char* file,
+                         char* id, size_t idsz, char* digest, size_t dsz) {
+    char needle[512];
+    snprintf(needle, sizeof(needle), "\"%s\"", file);
+    const char* p = json;
+    while ((p = strstr(p, needle)) != NULL) {
+        /* must be the value of a "name" key */
+        const char* k = p;
+        while (k > json && (k[-1] == ' ' || k[-1] == '\n' || k[-1] == '\t' || k[-1] == '\r')) k--;
+        if (k > json && k[-1] == ':') {
+            k--;
+            while (k > json && (k[-1] == ' ' || k[-1] == '\n' || k[-1] == '\t' || k[-1] == '\r')) k--;
+            if (k - json >= 6 && strncmp(k - 6, "\"name\"", 6) == 0) break;
+        }
+        p += strlen(needle);
+    }
+    if (!p) return 0;
+    const char* q = p;
+    const char* idp = NULL;
+    while (q > json) {
+        q--;
+        if (strncmp(q, "\"id\"", 4) == 0) { idp = q + 4; break; }
+    }
+    if (!idp) return 0;
+    while (*idp == ' ' || *idp == ':' || *idp == '\n' || *idp == '\t' || *idp == '\r') idp++;
+    size_t n = 0;
+    while (idp[n] >= '0' && idp[n] <= '9' && n + 1 < idsz) { id[n] = idp[n]; n++; }
+    id[n] = '\0';
+    if (n == 0) return 0;
+    digest[0] = '\0';
+    const char* after = p + strlen(needle);
+    const char* nextname = strstr(after, "\"name\"");
+    const char* d = strstr(after, "\"digest\"");
+    if (d && (!nextname || d < nextname)) {
+        d = strstr(d, "sha256:");
+        if (d) {
+            d += 7;
+            size_t m = 0;
+            while (((d[m] >= '0' && d[m] <= '9') || (d[m] >= 'a' && d[m] <= 'f')) && m + 1 < dsz) {
+                digest[m] = d[m]; m++;
+            }
+            digest[m] = '\0';
+            if (m != 64) digest[0] = '\0';
+        }
+    }
+    return 1;
+}
+
+/* Fetch the release asset through the REST API. 0 on success; on failure a
+ * one-line reason is left in why. */
+static int gh_download_via_api(const char* owner, const char* repo, const char* tag,
+                               const char* file, const char* dest,
+                               char* why, size_t whysz) {
+    const char* token = gh_token();
+    char json_path[512], url[768];
+    snprintf(json_path, sizeof(json_path), "%s/ae_ghrel_%d.json", get_temp_dir(), (int)getpid());
+    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/tags/%s",
+             gh_api_base(), owner, repo, tag);
+    if (ae_download_raw(url, json_path, 30, 0, token) != 0) {
+        remove(json_path);
+        snprintf(why, whysz, "the API could not be read for %s (no network, no such release, or its rate limit)", tag);
+        return 1;
+    }
+    char* json = NULL;
+    FILE* f = fopen(json_path, "rb");
+    if (f) {
+        fseek(f, 0, SEEK_END);
+        long n = ftell(f);
+        fseek(f, 0, SEEK_SET);
+        json = n > 0 ? (char*)malloc((size_t)n + 1) : NULL;
+        if (json) { size_t got = fread(json, 1, (size_t)n, f); json[got] = '\0'; }
+        fclose(f);
+    }
+    remove(json_path);
+    char id[32], digest[72];
+    int found = json && gh_find_asset(json, file, id, sizeof(id), digest, sizeof(digest));
+    free(json);
+    if (!found) {
+        snprintf(why, whysz, "the %s release lists no asset called %s", tag, file);
+        return 1;
+    }
+    snprintf(url, sizeof(url), "%s/repos/%s/%s/releases/assets/%s",
+             gh_api_base(), owner, repo, id);
+    if (ae_download_raw(url, dest, 0, 1, token) != 0) {
+        remove(dest);
+        snprintf(why, whysz, "the API asset download failed");
+        return 1;
+    }
+    if (digest[0]) {
+        char got[65];
+        if (ae_sha256_file_hex(dest, got) != 0 || strcmp(got, digest) != 0) {
+            remove(dest);
+            snprintf(why, whysz, "the API download does not match the sha256 digest GitHub lists for %s", file);
+            return 1;
+        }
+    }
+    return 0;
+}
+
+// Download url → dest file. Uses curl/wget on POSIX, PowerShell on Windows.
+// Creates parent directories of dest if they don't exist.
+/* A GitHub release-asset URL that fails is retried through the REST API (see
+ * above); every other URL is a plain download. */
+int ae_download_ex(const char* url, const char* dest, int max_seconds) {
+    if (ae_download_raw(url, dest, max_seconds, 0, NULL) == 0) return 0;
+    char owner[256], repo[256], tag[256], file[256];
+    if (!gh_parse_release_url(url, owner, repo, tag, file, 256)) return 1;
+    remove(dest);
+    char why[256];
+    fprintf(stderr, "ae: %s failed; retrying through the GitHub API\n", url);
+    if (gh_download_via_api(owner, repo, tag, file, dest, why, sizeof(why)) == 0) return 0;
+    fprintf(stderr, "ae: both ways of fetching %s failed: the release URL, and the GitHub API (%s).\n",
+            file, why);
+    return 1;
 }
 
 // Extract archive → dest_dir.
@@ -504,8 +715,8 @@ static int cmd_version_install(const char* version) {
     snprintf(filename, sizeof(filename),
         "aether-%s-%s" AE_ARCHIVE_EXT, ver, plat);
     snprintf(url, sizeof(url),
-        "https://github.com/" AE_GITHUB_REPO "/releases/download/%s/%s",
-        vtag, filename);
+        "%s/" AE_GITHUB_REPO "/releases/download/%s/%s",
+        gh_web_base(), vtag, filename);
     snprintf(archive, sizeof(archive), "%s/.aether/%s", home, filename);
 
     printf("Downloading Aether %s for %s...\n", vtag, plat);
