@@ -58,6 +58,40 @@ aGVsbG8=
 hello
 ```
 
+## Base64url
+
+`base64url_encode` is RFC 4648 §5: the same codec over the URL- and
+filename-safe alphabet (`-` and `_` in place of `+` and `/`), without padding,
+the form JWT and JWS use. `base64url_encode_padded` adds the `=` tail for APIs
+that want it. `base64url_decode` accepts padded or unpadded input and rejects
+`+`, `/` and anything else outside the alphabet, with the same structural
+checks as `base64_decode`. Output is binary-safe (embedded NULs survive).
+
+```aether,run
+import std.encoding
+import std.string
+
+main() {
+    msg = "hello?>"
+
+    println(encoding.base64_encode(string.bytes(msg)))
+    println(encoding.base64url_encode(string.bytes(msg)))
+    println(encoding.base64url_encode_padded(string.bytes(msg)))
+
+    decoded = encoding.base64url_decode("aGVsbG8_Pg") or {
+        println("not valid base64url")
+        return
+    }
+    println(decoded)
+}
+```
+```output
+aGVsbG8/Pg
+aGVsbG8_Pg
+aGVsbG8_Pg==
+hello?>
+```
+
 ## Base32
 
 `base32_encode` emits the standard RFC 4648 alphabet with `=` padding. The
@@ -68,5 +102,6 @@ complete the last group to 8, or non-zero bits after the last byte.
 ## Exports
 
 `hex_encode`, `hex_decode`, `base64_encode`, `base64_encode_padded`,
-`base64_decode`, `base32_encode`, `base32_decode`, `csv_split`, `csv_count`,
+`base64_decode`, `base64url_encode`, `base64url_encode_padded`,
+`base64url_decode`, `base32_encode`, `base32_decode`, `csv_split`, `csv_count`,
 `csv_field`, `csv_free`.

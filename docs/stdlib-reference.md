@@ -32,7 +32,7 @@ header comment is the authoritative description.
 | `std.deque` | Fixed-capacity double-ended queue over `long` values. | 16 | [guide](../std/deque/README.md) · [source](../std/deque/module.ae) |
 | `std.dir` | Directory operations, re-exported from `std.fs`. | 11 | [guide](../std/dir/README.md) · [source](../std/dir/module.ae) |
 | `std.dl` | Dynamic library loader over dlopen and LoadLibrary. | 8 | [guide](../std/dl/README.md) · [source](../std/dl/module.ae) |
-| `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 11 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
+| `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 14 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
 | `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
@@ -1973,6 +1973,9 @@ main() {
 - `encoding.base64_encode(data: byte[])` → `string` - Encode the bytes of `data`, **unpadded** output.
 - `encoding.base64_encode_padded(data: byte[])` → `string` - Encode the bytes of `data`, **with `=` padding** to a multiple of 4. Reach for this when the wire format on the other end requires padding; most non-strict decoders accept either.
 - `encoding.base64_decode(b64)` → `string!` - Decode, destructured as `(bytes, err)`. `err` is non-empty on malformed input: `=` anywhere but as trailing padding completing a multiple of 4, a 1-character final group, or non-zero leftover bits. Accepts both padded and unpadded input, and skips line breaks; `bytes` is an AetherString preserving embedded NULs.
+- `encoding.base64url_encode(data: byte[])` → `string` - RFC 4648 §5 URL-safe alphabet (`-_`), **no padding** (the JWT/JWS form).
+- `encoding.base64url_encode_padded(data: byte[])` → `string` - Same alphabet **with `=` padding** to a multiple of 4.
+- `encoding.base64url_decode(s)` → `string!` - Accepts padded or unpadded url-safe input; `+`, `/` and other characters outside `A-Za-z0-9-_` are an error, as are the structural errors `base64_decode` rejects. Binary-safe.
 
 Base64 lives in `std.encoding`, not `std.cryptography`: encoding is not a
 security primitive, and the split keeps that honest. `std.cryptography` keeps

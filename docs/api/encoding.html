@@ -20,6 +20,9 @@
     <li><a href="#base64_encode">base64_encode</a></li>
     <li><a href="#base64_encode_padded">base64_encode_padded</a></li>
     <li><a href="#base64_decode">base64_decode</a></li>
+    <li><a href="#base64url_encode">base64url_encode</a></li>
+    <li><a href="#base64url_encode_padded">base64url_encode_padded</a></li>
+    <li><a href="#base64url_decode">base64url_decode</a></li>
     <li><a href="#base32_encode">base32_encode</a></li>
     <li><a href="#base32_decode">base32_decode</a></li>
     <li><a href="#csv_split">csv_split</a></li>
@@ -159,6 +162,24 @@
       <pre class="usage"><code>base64_decode(b64) <span class="arrow">-&gt;</span> string!</code></pre>
       <p class="signature"><span class="sig-params">b64: string</span></p>
       <p class="doc">Decode a base64 string (accepts padded and unpadded standard-alphabet input) to its bytes. Returns the decoded bytes on success, a non-empty error on malformed input.</p>
+    </div>
+    <div class="function" id="base64url_encode" data-name="base64url_encode">
+      <h3 class="function-name">base64url_encode <span class="kind">fn</span></h3>
+      <pre class="usage"><code>base64url_encode(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">base64url WITHOUT padding: the form JWT/JWS use (RFC 7515 §2).</p>
+    </div>
+    <div class="function" id="base64url_encode_padded" data-name="base64url_encode_padded">
+      <h3 class="function-name">base64url_encode_padded <span class="kind">fn</span></h3>
+      <pre class="usage"><code>base64url_encode_padded(data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">data: byte[]</span></p>
+      <p class="doc">base64url WITH `=` padding to a multiple of 4, for APIs that want it.</p>
+    </div>
+    <div class="function" id="base64url_decode" data-name="base64url_decode">
+      <h3 class="function-name">base64url_decode <span class="kind">fn</span></h3>
+      <pre class="usage"><code>base64url_decode(s) <span class="arrow">-&gt;</span> string!</code></pre>
+      <p class="signature"><span class="sig-params">s: string</span></p>
+      <p class="doc">Decode base64url (padded or unpadded) to its bytes. `+` and `/` belong to the standard alphabet and are rejected, as is anything else outside `A-Za-z0-9-_` (line breaks and spaces are skipped, as in base64_decode).</p>
     </div>
     <div class="function" id="base32_encode" data-name="base32_encode">
       <h3 class="function-name">base32_encode <span class="kind">fn</span></h3>

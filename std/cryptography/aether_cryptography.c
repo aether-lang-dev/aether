@@ -442,13 +442,18 @@ void cryptography_digest_free_raw(void* handle) {
 
 static const char AE_B64_ALPHA[] =
     "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+/* RFC 4648 §5: the URL- and filename-safe alphabet, `-_` for `+/`. */
+static const char AE_B64URL_ALPHA[] =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-static int ae_b64_value(unsigned char c) {
+/* Value of `c` in the chosen alphabet (url != 0: `-_`), or -1. The two
+ * alphabets share 62 characters; each rejects the other's last two. */
+static int ae_b64_value(unsigned char c, int url) {
     if (c >= 'A' && c <= 'Z') return c - 'A';
     if (c >= 'a' && c <= 'z') return c - 'a' + 26;
     if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
+    if (c == (url ? '-' : '+')) return 62;
+    if (c == (url ? '_' : '/')) return 63;
     return -1;
 }
 
@@ -459,7 +464,8 @@ static int ae_b64_value(unsigned char c) {
  * raw input beginning DE C0 57 AE would be read as one, encoding from a
  * `data` pointer taken out of the bytes that follow it. A WebSocket client
  * can grind a Sec-WebSocket-Key whose SHA-1 digest starts that way. */
-static char* ae_b64_encode(const char* data, int length, int pad) {
+static char* ae_b64_encode(const char* data, int length, int pad, int url) {
+    const char* AE_ALPHA = url ? AE_B64URL_ALPHA : AE_B64_ALPHA;
     if (length < 0) return NULL;
     size_t want = (size_t)length;
     const unsigned char* bytes = (const unsigned char*)data;
@@ -474,23 +480,23 @@ static char* ae_b64_encode(const char* data, int length, int pad) {
         unsigned v = ((unsigned)bytes[i] << 16) |
                      ((unsigned)bytes[i + 1] << 8) |
                       (unsigned)bytes[i + 2];
-        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
-        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
-        out[o++] = AE_B64_ALPHA[(v >> 6) & 63];
-        out[o++] = AE_B64_ALPHA[v & 63];
+        out[o++] = AE_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_ALPHA[(v >> 12) & 63];
+        out[o++] = AE_ALPHA[(v >> 6) & 63];
+        out[o++] = AE_ALPHA[v & 63];
         i += 3;
     }
     size_t rem = want - i;
     if (rem == 1) {
         unsigned v = (unsigned)bytes[i] << 16;
-        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
-        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
+        out[o++] = AE_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_ALPHA[(v >> 12) & 63];
         if (pad) { out[o++] = '='; out[o++] = '='; }
     } else if (rem == 2) {
         unsigned v = ((unsigned)bytes[i] << 16) | ((unsigned)bytes[i + 1] << 8);
-        out[o++] = AE_B64_ALPHA[(v >> 18) & 63];
-        out[o++] = AE_B64_ALPHA[(v >> 12) & 63];
-        out[o++] = AE_B64_ALPHA[(v >> 6) & 63];
+        out[o++] = AE_ALPHA[(v >> 18) & 63];
+        out[o++] = AE_ALPHA[(v >> 12) & 63];
+        out[o++] = AE_ALPHA[(v >> 6) & 63];
         if (pad) out[o++] = '=';
     }
     out[o] = '\0';
@@ -498,45 +504,37 @@ static char* ae_b64_encode(const char* data, int length, int pad) {
 }
 
 char* cryptography_base64_encode_raw(const char* data, int length) {
-    return ae_b64_encode(data, length, 0);
+    return ae_b64_encode(data, length, 0, 0);
 }
 
 char* cryptography_base64_encode_padded_raw(const char* data, int length) {
-    return ae_b64_encode(data, length, 1);
+    return ae_b64_encode(data, length, 1, 0);
 }
 
-/* Thread-local decode buffer, mirroring std.fs.read_binary's split-accessor
- * shape: the result lives until the next decode on the same thread, and the
- * Aether wrapper copies it out. */
-static __thread unsigned char* g_b64_buf = NULL;
-static __thread size_t         g_b64_cap = 0;
-static __thread int            g_b64_len = 0;
-
-static void release_b64_locked(void) {
-    if (g_b64_buf) aether_caps_free(g_b64_buf, g_b64_cap);
-    g_b64_buf = NULL;
-    g_b64_cap = 0;
-    g_b64_len = 0;
+char* cryptography_base64url_encode_raw(const char* data, int length) {
+    return ae_b64_encode(data, length, 0, 1);
 }
 
-void cryptography_release_base64_decode(void) {
-    release_b64_locked();
+char* cryptography_base64url_encode_padded_raw(const char* data, int length) {
+    return ae_b64_encode(data, length, 1, 1);
 }
 
-int cryptography_base64_decode_raw(const char* b64) {
-    release_b64_locked();
-    if (!b64) return 0;
+/* Decode in the chosen alphabet. The result is handed straight back as an
+ * owned, length-carrying AetherString (embedded NULs and high bytes intact),
+ * or NULL for malformed input / OOM: no shared state between calls, so
+ * concurrent decodes cannot see each other. */
+static char* ae_b64_decode(const char* b64, int url) {
+    if (!b64) return NULL;
 
     size_t in_len;
     const unsigned char* in = cryptography_unwrap_bytes(b64, -1, &in_len);
-    if (in_len > 0 && !in) return 0;
+    if (in_len > 0 && !in) return NULL;
 
-    /* Decoding "" is a valid request yielding zero bytes; allocate one byte
-     * so the caller can tell "decoded nothing" from "no data". */
-    size_t out_alloc = (in_len / 4) * 3 + 3;
-    if (out_alloc == 0) out_alloc = 1;
+    /* Decoding "" is a valid request yielding zero bytes. +1 for the NUL
+     * string_adopt_caps_buffer expects after the payload. */
+    size_t out_alloc = (in_len / 4) * 3 + 3 + 1;
     unsigned char* out = (unsigned char*)aether_caps_malloc(out_alloc);
-    if (!out) return 0;
+    if (!out) return NULL;
 
     /* Whitespace (line-wrapped input) is skipped. `=` is padding only: it
      * may appear only after the last data character, at most twice, and
@@ -555,14 +553,14 @@ int cryptography_base64_decode_raw(const char* b64) {
         unsigned char c = in[i];
         if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
         if (c == '=') { pad_chars++; continue; }
-        int v = ae_b64_value(c);
+        int v = ae_b64_value(c, url);
         if (v < 0 || pad_chars > 0) { bad = 1; break; }   /* data after padding */
         data_chars++;
         acc = (acc << 6) | (unsigned)v;
         nbits += 6;
         if (nbits >= 8) {
             nbits -= 8;
-            if (o < out_alloc) out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
+            if (o < out_alloc - 1) out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
         }
     }
     if (!bad && (data_chars % 4 == 1 || pad_chars > 2 ||
@@ -570,20 +568,18 @@ int cryptography_base64_decode_raw(const char* b64) {
                  (acc & ((1u << nbits) - 1u)) != 0)) {
         bad = 1;
     }
-    if (bad) { aether_caps_free(out, out_alloc); return 0; }
+    if (bad) { aether_caps_free(out, out_alloc); return NULL; }
 
-    g_b64_buf = out;
-    g_b64_cap = out_alloc;
-    g_b64_len = (int)o;
-    return 1;
+    out[o] = '\0';
+    return (char*)string_adopt_caps_buffer((char*)out, o, out_alloc);
 }
 
-const char* cryptography_get_base64_decode(void) {
-    return g_b64_buf ? (const char*)g_b64_buf : "";
+char* cryptography_base64_decode_owned(const char* b64) {
+    return ae_b64_decode(b64, 0);
 }
 
-int cryptography_get_base64_decode_length(void) {
-    return g_b64_len;
+char* cryptography_base64url_decode_owned(const char* b64) {
+    return ae_b64_decode(b64, 1);
 }
 
 

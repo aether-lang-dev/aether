@@ -1,0 +1,67 @@
+// Concurrency regression: base64 / base64url decodes on several actor workers
+// at once must not see each other's results. The decoder used to publish its
+// output through a thread-local stash and read it back with accessor calls;
+// it now returns the decoded string straight to the caller.
+//
+// Run with: ae run std/encoding/test_encoding_concurrency.ae
+
+import std.encoding
+import std.string
+
+message DecodeJob { worker: int, rounds: int, reply_to: ptr }
+message DecodeDone { worker: int, bad: int }
+
+actor Decoder {
+    receive {
+        DecodeJob(worker, rounds, reply_to) -> {
+            // Each worker owns a distinct payload (its id and a
+            // derived number) so a crossed result is detectable.
+            payload = "w${worker}-payload-${worker * 7919}"
+            std_b64 = encoding.base64_encode_padded(string.bytes(payload))
+            url_b64 = encoding.base64url_encode(string.bytes(payload))
+            bad = 0
+            i = 0
+            while i < rounds {
+                a, ae1 = encoding.base64_decode(std_b64)
+                if ae1 != "" || a != payload { bad = bad + 1 }
+                b, be1 = encoding.base64url_decode(url_b64)
+                if be1 != "" || b != payload { bad = bad + 1 }
+                _, ce1 = encoding.base64url_decode("+/+/")
+                if ce1 == "" { bad = bad + 1 }
+                i = i + 1
+            }
+            reply_to ! DecodeDone { worker: worker, bad: bad }
+        }
+    }
+}
+
+actor Collector {
+    state remaining = 8
+    state failures = 0
+
+    receive {
+        DecodeDone(worker, bad) -> {
+            failures = failures + bad
+            remaining = remaining - 1
+            if remaining == 0 {
+                if failures != 0 {
+                    println("FAIL: concurrent base64 decode (${failures} mismatch(es))")
+                    exit(1)
+                }
+                println("PASS: test_encoding_concurrency")
+                exit(0)
+            }
+        }
+    }
+}
+
+main() {
+    collector = spawn(Collector())
+    w = 0
+    while w < 8 {
+        d = spawn(Decoder())
+        d ! DecodeJob { worker: w, rounds: 20000, reply_to: collector }
+        w = w + 1
+    }
+    sleep(60000)
+}
