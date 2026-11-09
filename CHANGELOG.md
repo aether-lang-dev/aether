@@ -14,6 +14,12 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.905.0]
+
+### Added
+
+- **`std.encoding` — base64url (RFC 4648 §5)** (`std/encoding/module.ae`, `std/cryptography/aether_cryptography.c`). New `base64url_encode` (unpadded, the JWT/JWS form), `base64url_encode_padded` and `base64url_decode` (accepts padded or unpadded input; rejects `+`, `/` and other characters outside the `-_` alphabet; binary-safe). Callers needing JWT/JWS or Azure Key Vault encodings no longer convert by `string.replace_all` and strip padding. The standard and url-safe codecs share one C implementation parameterised by alphabet. Also: base64 decode no longer stashes its result in a thread-local buffer read back through `cryptography_get_base64_decode` / `_length` / `cryptography_release_base64_decode`; `cryptography_base64_decode_owned` / `cryptography_base64url_decode_owned` return the owned length-carrying string directly (NULL on error), and the stash externs are removed. Tests in `std/encoding/test_encoding.ae` (RFC 4648 §10 vectors, the `+/` vs `-_` alphabet, all 256 byte values, random binary with NULs, rejection cases) and `std/encoding/test_encoding_concurrency.ae` (concurrent decodes on actor workers).
+
 ## [0.904.0]
 
 ### Fixed
