@@ -144,7 +144,10 @@ Declarations by what R1 does to them:
 |---|---|---|---|---|
 | `cryptography_base64_encode_padded_raw` |  | borrowed | B | return counted; `@heap` |
 | `cryptography_base64_encode_raw` |  | borrowed | B | return counted; `@heap` |
-| `cryptography_get_base64_decode` |  | borrowed | C/D | borrowed |
+| `cryptography_base64_decode_owned` |  | borrowed | B | return counted; `@heap` |
+| `cryptography_base64url_decode_owned` |  | borrowed | B | return counted; `@heap` |
+| `cryptography_base64url_encode_padded_raw` |  | borrowed | B | return counted; `@heap` |
+| `cryptography_base64url_encode_raw` |  | borrowed | B | return counted; `@heap` |
 
 ### std.file
 

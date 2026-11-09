@@ -6,7 +6,7 @@
  *   hash_hex(algo, data, length) — algorithm-by-name dispatcher
  *   hash_supported(algo)         — config-time probe; 1/0 answer
  *   base64_encode(data, length)  — RFC 4648 §4 standard alphabet, unpadded
- *   base64_decode(b64)           — bytes + length via TLS split-accessor
+ *   base64_decode(b64)           — owned length-carrying string, NULL on error
  *
  * Streaming (incremental) digests are supported via the digest-context
  * API (digest_new / digest_update / digest_final_*). Key derivation,
@@ -145,17 +145,17 @@ char* cryptography_base64_encode_raw(const char* data, int length);
  * caller releases the returned string. Returns NULL on OOM. */
 char* cryptography_base64_encode_padded_raw(const char* data, int length);
 
-/* Decode a Base64 string. Returns 1 on success, 0 on failure
- * (malformed input / OOM / no OpenSSL). On success, the decoded
- * bytes live in a thread-local buffer accessible via
- * cryptography_get_base64_decode() and ..._length(); they remain
- * valid until the next call to cryptography_base64_decode_raw()
- * on the same thread. Same TLS split-accessor pattern as
- * std.fs.read_binary. */
-int cryptography_base64_decode_raw(const char* b64);
-const char* cryptography_get_base64_decode(void);
-int cryptography_get_base64_decode_length(void);
-void cryptography_release_base64_decode(void);
+/* RFC 4648 §5 URL-safe siblings (`-_` alphabet): unpadded / padded. */
+char* cryptography_base64url_encode_raw(const char* data, int length);
+char* cryptography_base64url_encode_padded_raw(const char* data, int length);
+
+/* Decode Base64 (standard alphabet) / Base64url. Returns an owned,
+ * length-carrying AetherString holding the decoded bytes (embedded NULs
+ * preserved), or NULL on malformed input / OOM. No shared state: the
+ * result belongs to the caller alone. Both accept padded or unpadded
+ * input and skip line breaks. */
+char* cryptography_base64_decode_owned(const char* b64);
+char* cryptography_base64url_decode_owned(const char* b64);
 
 /* CSPRNG (#630). The cryptographically-secure RNG missing from
  * std.math (which is a seedable PRNG, fine for sampling, NOT for

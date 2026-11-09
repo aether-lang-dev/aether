@@ -7,6 +7,7 @@
 
 import std.encoding
 import std.string
+import std.bytes
 
 extern exit(code: int)
 
@@ -120,6 +121,133 @@ main() {
     fails = fails + check(hround == msg, "hex round-trip")
     bround, _ = encoding.base64_decode(encoding.base64_encode(string.bytes(msg)[0..mlen]))
     fails = fails + check(bround == msg, "base64 round-trip")
+
+    // ---- base64url (RFC 4648 §5; §10 vectors in the `-_` alphabet) ----
+    fails = fails + check(encoding.base64url_encode(string.bytes("")) == "", "b64url encode empty")
+    fails = fails + check(encoding.base64url_encode(string.bytes("f")) == "Zg", "b64url encode f")
+    fails = fails + check(encoding.base64url_encode(string.bytes("fo")) == "Zm8", "b64url encode fo")
+    fails = fails + check(encoding.base64url_encode(string.bytes("foo")) == "Zm9v", "b64url encode foo")
+    fails = fails + check(encoding.base64url_encode(string.bytes("foob")) == "Zm9vYg", "b64url encode foob")
+    fails = fails + check(encoding.base64url_encode(string.bytes("fooba")) == "Zm9vYmE", "b64url encode fooba")
+    fails = fails + check(encoding.base64url_encode(string.bytes("foobar")) == "Zm9vYmFy", "b64url encode foobar")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("")) == "", "b64url padded empty")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("f")) == "Zg==", "b64url padded f")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("fo")) == "Zm8=", "b64url padded fo")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("foo")) == "Zm9v", "b64url padded foo")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("foob")) == "Zm9vYg==", "b64url padded foob")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("fooba")) == "Zm9vYmE=", "b64url padded fooba")
+    fails = fails + check(encoding.base64url_encode_padded(string.bytes("foobar")) == "Zm9vYmFy", "b64url padded foobar")
+
+    // bytes 0xfb 0xff 0xbf: standard is "+/+/", url-safe is "-_-_"
+    ab = bytes.new(3)
+    bytes.set(ab, 0, 251)
+    bytes.set(ab, 1, 255)
+    bytes.set(ab, 2, 191)
+    abv = bytes.view(ab)
+    fails = fails + check(encoding.base64_encode(abv) == "+/+/", "alphabet: standard has +/")
+    fails = fails + check(encoding.base64url_encode(abv) == "-_-_", "alphabet: url-safe has -_")
+    ad, ae1 = encoding.base64url_decode("-_-_")
+    fails = fails + check(ae1 == "" && string.length(ad) == 3, "b64url decode -_ length")
+    fails = fails + check(encoding.base64_encode(string.bytes(ad)[0..3]) == "+/+/", "b64url decode -_ bytes")
+    bytes.free(ab)
+
+    // decode: padded and unpadded
+    ud1, ue1 = encoding.base64url_decode("Zm9vYmFy")
+    fails = fails + check(ue1 == "" && ud1 == "foobar", "b64url decode foobar")
+    ud2, ue2 = encoding.base64url_decode("Zg==")
+    fails = fails + check(ue2 == "" && ud2 == "f", "b64url decode padded f")
+    ud3, ue3 = encoding.base64url_decode("Zg")
+    fails = fails + check(ue3 == "" && ud3 == "f", "b64url decode unpadded f")
+    ud4, ue4 = encoding.base64url_decode("Zm8=")
+    fails = fails + check(ue4 == "" && ud4 == "fo", "b64url decode padded fo")
+    ud5, ue5 = encoding.base64url_decode("Zm8")
+    fails = fails + check(ue5 == "" && ud5 == "fo", "b64url decode unpadded fo")
+    ud6, ue6 = encoding.base64url_decode("")
+    fails = fails + check(ue6 == "" && ud6 == "", "b64url decode empty")
+
+    // decode errors: the standard alphabet's `+` `/`, junk, bad lengths
+    _, ue7 = encoding.base64url_decode("+/+/")
+    fails = fails + check(ue7 != "", "b64url rejects + and /")
+    _, ue8 = encoding.base64url_decode("ab+d")
+    fails = fails + check(ue8 != "", "b64url rejects +")
+    _, ue9 = encoding.base64url_decode("ab/d")
+    fails = fails + check(ue9 != "", "b64url rejects /")
+    _, ue10 = encoding.base64url_decode("Zm9v!mFy")
+    fails = fails + check(ue10 != "", "b64url rejects bad char")
+    _, ue11 = encoding.base64url_decode("Z")
+    fails = fails + check(ue11 != "", "b64url 1-char group rejected")
+    _, ue12 = encoding.base64url_decode("Zm9vY")
+    fails = fails + check(ue12 != "", "b64url 5-char input rejected")
+    _, ue13 = encoding.base64url_decode("Zg=")
+    fails = fails + check(ue13 != "", "b64url short padding rejected")
+    _, ue14 = encoding.base64url_decode("Zh==")
+    fails = fails + check(ue14 != "", "b64url non-zero trailing bits rejected")
+    _, ue15 = encoding.base64url_decode("Zm9v=Zm9v")
+    fails = fails + check(ue15 != "", "b64url '=' before data rejected")
+    // and the standard decoder rejects the url-safe characters
+    _, se1 = encoding.base64_decode("-_-_")
+    fails = fails + check(se1 != "", "b64 rejects - and _")
+    sd1, se2 = encoding.base64_decode("+/+/")
+    fails = fails + check(se2 == "" && string.length(sd1) == 3, "b64 still accepts +/")
+
+    // all 256 byte values, every alphabet/padding combination
+    allb = bytes.new(256)
+    k = 0
+    while k < 256 {
+        bytes.set(allb, k, k)
+        k = k + 1
+    }
+    allv = bytes.view(allb)
+    for_each_len = 0
+    while for_each_len < 5 {
+        // prefixes of length 252..256 cover every remainder mod 3
+        n = 252 + for_each_len
+        sl = allv[0..n]
+        r1, re1 = encoding.base64url_decode(encoding.base64url_encode(sl))
+        fails = fails + check(re1 == "" && string.length(r1) == n && encoding.hex_encode(string.bytes(r1)[0..n]) == encoding.hex_encode(sl), "b64url round-trip unpadded n=${n}")
+        r2, re2 = encoding.base64url_decode(encoding.base64url_encode_padded(sl))
+        fails = fails + check(re2 == "" && string.length(r2) == n && encoding.hex_encode(string.bytes(r2)[0..n]) == encoding.hex_encode(sl), "b64url round-trip padded n=${n}")
+        r3, re3 = encoding.base64_decode(encoding.base64_encode(sl))
+        fails = fails + check(re3 == "" && string.length(r3) == n && encoding.hex_encode(string.bytes(r3)[0..n]) == encoding.hex_encode(sl), "b64 round-trip n=${n}")
+        for_each_len = for_each_len + 1
+    }
+    full = encoding.base64url_encode(allv)
+    fails = fails + check(string.index_of(full, "+") < 0 && string.index_of(full, "/") < 0, "b64url output has no + or /")
+    fd, fe = encoding.base64url_decode(full)
+    fails = fails + check(fe == "" && string.length(fd) == 256, "b64url 256-byte length")
+    fails = fails + check(encoding.hex_encode(string.bytes(fd)[0..256]) == encoding.hex_encode(allv), "b64url 256-byte content")
+    bytes.free(allb)
+
+    // pseudo-random binary with embedded NULs, lengths 0..299
+    seed = 12345
+    rl = 0
+    while rl < 300 {
+        rb = bytes.new(rl + 1)
+        q = 0
+        while q < rl {
+            seed = (seed * 1103515245 + 12345) & 2147483647
+            v = (seed >> 8) & 255
+            if q % 7 == 3 { v = 0 }
+            bytes.set(rb, q, v)
+            q = q + 1
+        }
+        rv = bytes.view(rb)[0..rl]
+        want = encoding.hex_encode(rv)
+        ru, rue = encoding.base64url_decode(encoding.base64url_encode(rv))
+        if rue != "" || string.length(ru) != rl || encoding.hex_encode(string.bytes(ru)[0..rl]) != want {
+            fails = fails + check(false, "b64url random round-trip len ${rl}")
+        }
+        rp, rpe = encoding.base64url_decode(encoding.base64url_encode_padded(rv))
+        if rpe != "" || string.length(rp) != rl || encoding.hex_encode(string.bytes(rp)[0..rl]) != want {
+            fails = fails + check(false, "b64url random padded round-trip len ${rl}")
+        }
+        rs, rse = encoding.base64_decode(encoding.base64_encode(rv))
+        if rse != "" || string.length(rs) != rl || encoding.hex_encode(string.bytes(rs)[0..rl]) != want {
+            fails = fails + check(false, "b64 random round-trip len ${rl}")
+        }
+        bytes.free(rb)
+        rl = rl + 1
+    }
 
     // ---- csv (vectors from c3 encoding/csv test) ----
     // comma-separated

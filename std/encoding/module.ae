@@ -9,7 +9,7 @@
 // fallible decode returns `string!` — the value on success, a non-empty
 // error on malformed input.
 //
-// hex is RFC 4648 §8; base64 is §4; base32 is §6. The hex and base32
+// hex is RFC 4648 §8; base64 is §4 and base64url §5; base32 is §6. The hex and base32
 // codecs are direct ports of C3's `std::encoding::{hex,base32}` (RFC 4648,
 // https://rfc-editor.org/rfc/rfc4648) — Copyright (c) 2022-2026 Christoffer
 // Lernö and contributors, MIT (the c3c stdlib), re-expressed in Aether.
@@ -25,6 +25,7 @@ import std.bytes
 exports(
     hex_encode, hex_decode,
     base64_encode, base64_encode_padded, base64_decode,
+    base64url_encode, base64url_encode_padded, base64url_decode,
     base32_encode, base32_decode,
     csv_split, csv_count, csv_field, csv_free
 )
@@ -104,11 +105,10 @@ hex_decode(s: string) -> string! {
 // unwrap — misreading a payload that begins with the header's magic bytes.
 extern cryptography_base64_encode_raw(data: ptr, length: int) -> string @heap
 extern cryptography_base64_encode_padded_raw(data: ptr, length: int) -> string @heap
-extern cryptography_base64_decode_raw(b64: string) -> int
-extern cryptography_get_base64_decode() -> ptr
-extern cryptography_get_base64_decode_length() -> int
-extern cryptography_release_base64_decode()
-extern string_new_with_length(data: ptr, length: size_t) -> string @heap
+extern cryptography_base64url_encode_raw(data: ptr, length: int) -> string @heap
+extern cryptography_base64url_encode_padded_raw(data: ptr, length: int) -> string @heap
+extern cryptography_base64_decode_owned(b64: string) -> string @heap
+extern cryptography_base64url_decode_owned(b64: string) -> string @heap
 
 // Standard-alphabet base64 WITHOUT padding (RFC 4648 §4, the `+/` alphabet;
 // no trailing `=`). Encodes the bytes of `data`.
@@ -132,15 +132,40 @@ base64_encode_padded(data: byte[]) -> string {
 // error on malformed input.
 base64_decode(b64: string) -> string! {
     if string.length(b64) == 0 { return "" }
-    ok = cryptography_base64_decode_raw(b64)
-    if ok == 0 {
+    out = cryptography_base64_decode_owned(b64)
+    if out == null {
         return "", "base64: invalid input"
     }
-    raw = cryptography_get_base64_decode()
-    n = cryptography_get_base64_decode_length()
-    owned = string_new_with_length(raw, n)
-    cryptography_release_base64_decode()
-    return owned
+    return out
+}
+
+// base64url (RFC 4648 §5): the URL- and filename-safe alphabet, `-` and `_`
+// in place of `+` and `/`. Same codec as base64 above, other alphabet.
+
+// base64url WITHOUT padding: the form JWT/JWS use (RFC 7515 §2).
+base64url_encode(data: byte[]) -> string {
+    if data.len < 0 { unbounded("base64url_encode") }
+    if data.len == 0 { return "" }
+    return cryptography_base64url_encode_raw(data, data.len)
+}
+
+// base64url WITH `=` padding to a multiple of 4, for APIs that want it.
+base64url_encode_padded(data: byte[]) -> string {
+    if data.len < 0 { unbounded("base64url_encode_padded") }
+    if data.len == 0 { return "" }
+    return cryptography_base64url_encode_padded_raw(data, data.len)
+}
+
+// Decode base64url (padded or unpadded) to its bytes. `+` and `/` belong
+// to the standard alphabet and are rejected, as is anything else outside
+// `A-Za-z0-9-_` (line breaks and spaces are skipped, as in base64_decode).
+base64url_decode(s: string) -> string! {
+    if string.length(s) == 0 { return "" }
+    out = cryptography_base64url_decode_owned(s)
+    if out == null {
+        return "", "base64url: invalid input"
+    }
+    return out
 }
 
 // ---------------------------------------------------------------------------
