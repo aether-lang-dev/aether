@@ -14,6 +14,29 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.906.0]
+
+### Fixed
+
+- **`http_server_stop` waits for a foreground server too, so a free after it
+  is safe.** Stop waited only for a server started with
+  `http_server_start_background_raw`. A foreground `http_server_start_raw`
+  run on another thread (an actor's) was signalled and left running, and the
+  `http_server_free` that followed released it under its accept loop and a
+  pool worker still serving a keep-alive connection: a segfault in
+  `conn_recv_request_start` / `http_resolve_route` on macOS and Linux (found
+  by servirtium-vcr). Now a stop waits until the run is over, whichever start
+  began it. On one of the server's own threads (a handler, the monitor, an
+  HTTP/2 dispatch worker, the proxy driver's middleware) it only signals,
+  since the run waits for that thread: a background server stopped from a
+  handler used to hang there. `http_server_free` on such a thread while the
+  server runs is a fatal error rather than a use after free, and a start of
+  a running server is refused with the reason in `http_server_error`.
+
+- **`ae build` on macOS no longer prints an `ld: warning` for every Homebrew dylib it links.** With `MACOSX_DEPLOYMENT_TARGET` unset, the toolchain targeted the installed SDK's macOS, which can trail the running OS; Homebrew builds its dylibs for the running OS, so each link of a program using nghttp2 (or any newer-built dylib) warned "building for macOS-27.0, but linking with dylib ... built for newer version 27.2", and the warning landed in the output of `ae run`. A native `ae build` now defaults the deployment target to the running OS; a `MACOSX_DEPLOYMENT_TARGET` you set still wins, and cross builds are unchanged. `ae cflags --libs` adds the same `-mmacosx-version-min=` for a build that drives its own compiler.
+
+- **`bytes.string_from_ptr` refuses a bytes handle instead of copying its header** (`std/bytes/aether_bytes.c`, `std/bytes/module.ae`). `string_from_ptr(src, n)` wants a raw data pointer (`bytes.data(b)` or a C buffer), but a bytes handle is also a `ptr`, so `bytes.string_from_ptr(b, 4)` compiled and silently returned the `AetherBytes` struct header as text (it produced garbage keys in servirtium-vcr's Azure Key Vault test). `AetherBytes` now carries an 8-byte tag (cleared on free) and `string_from_ptr` panics on a live handle with a message naming `bytes.to_string(b, n)` and `bytes.data(b)`; the check reads one byte of a raw buffer unless the tag matches, so short C buffers are never over-read. The module comment, `std/bytes/README.md` and `docs/api` say `src` must be a raw data pointer. Test: `tests/regression/test_bytes_string_from_ptr_handle.ae` (the handle is refused; `to_string` and `string_from_ptr(bytes.data(b), n)` stay binary-safe over NUL and 0xff).
+
 ## [0.905.0]
 
 ### Added
