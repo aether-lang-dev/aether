@@ -22,10 +22,10 @@
 // Storage: a single process-global hashmap behind a reader/writer
 // lock. Reads are concurrent (no contention with each other);
 // writes serialize. Values are duplicated on `put`, so the caller's
-// string lifetime doesn't matter. Returned strings from `get` are
-// borrowed — they remain valid until the next `put` / `clear` that
-// touches the same key. For "set once at startup, read everywhere"
-// usage (the design intent) this is fine.
+// string lifetime doesn't matter. A string `get` / `get_or` returns is
+// the caller's own reference, taken under the read lock, so it stays
+// valid after a later `put` or `clear` of the same key, on this thread
+// or another one, and is released at scope exit like any owned string.
 //
 // Section 2 of nuther-ask-of-aether-team.md / Nico's reply.
 
@@ -35,8 +35,10 @@ exports(
 
 // ---- Raw externs ----
 extern aether_config_store_put(key: string, value: string)
-extern aether_config_store_get(key: string) -> string
-extern aether_config_store_get_or(key: string, default_value: string) -> string
+// `@heap`: each returns a reference of the caller's own (a retained
+// counted string), so a concurrent `put` of the key cannot free it.
+extern aether_config_store_get(key: string) -> string @heap
+extern aether_config_store_get_or(key: string, default_value: string) -> string @heap
 extern aether_config_store_has(key: string) -> int
 extern aether_config_store_size() -> int
 extern aether_config_store_clear()

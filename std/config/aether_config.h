@@ -18,11 +18,9 @@
  * "set during init, read everywhere".
  *
  * Values are duplicated on put so the caller's string lifetime
- * doesn't matter. Returned values from get are *borrowed* — they
- * remain valid until the next put or clear that touches the same
- * key. For "set once at startup, never mutate" usage this is fine;
- * if you need to update keys mid-flight, copy the result via
- * string_concat(get(key), "") before the next put.
+ * doesn't matter. Values returned from get / get_or are the
+ * caller's own references (counted AetherStrings), so they stay
+ * valid across a later put or clear of the same key on any thread.
  *
  * Thread-safe. NUL-terminated values only — for binary content,
  * encode (base64, hex) or use a different mechanism. */
@@ -33,14 +31,15 @@ void aether_config_store_put(const char* key, const char* value);
 
 /* Retrieve. Returns the empty string "" if the key isn't set
  * (matches Aether's Go-style "" = absent convention) — never
- * returns NULL. The pointer is borrowed from the registry's
- * internal storage; it stays valid until the next put / clear
- * touching the same key. */
+ * returns NULL. The result is an owned, counted AetherString (the
+ * `@heap` return contract): a reference of the caller's own, taken
+ * under the read lock, so a put / clear of the same key on any
+ * thread cannot free it. Release it with string_release. */
 const char* aether_config_store_get(const char* key);
 
 /* Retrieve with a fallback. Returns the registered value if set,
- * otherwise the caller's `default_value`. NULL default is treated
- * as "". */
+ * otherwise a copy of the caller's `default_value`. NULL default is
+ * treated as "". Owned, as aether_config_store_get's result is. */
 const char* aether_config_store_get_or(const char* key, const char* default_value);
 
 /* Membership test. 1 if key has been put, 0 otherwise. */
