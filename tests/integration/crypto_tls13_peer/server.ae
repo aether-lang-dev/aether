@@ -52,7 +52,12 @@ main() {
     tls13_server.free_private_key(key)
     if err != "" {
         println("REFUSED: ${err}")
-        tcp.close(sock)
+        // Drained, as the library's own entry closes a failed handshake
+        // (#3465): what the client sent after the record refused (a second
+        // change_cipher_spec, say) is still unread, and a plain close ends
+        // with a reset, which on Windows can take the alert from the client
+        // before it reads it ("HRR CLOSED" for "HRR ALERT 10").
+        tcp.close_drained(sock)
         tls13_server.free_cert_chain(chain, lens)
         tcp.server_close(srv)
         exit(0)
