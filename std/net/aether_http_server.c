@@ -149,6 +149,8 @@ const char* http_server_set_keepalive_raw(HttpServer* s, int e, int m, int64_t i
     (void)s; (void)e; (void)m; (void)i; return "keep-alive unavailable: networking not built in";
 }
 void http_server_drain_connection(HttpServer* s, int fd) { (void)s; (void)fd; }
+void http_server_thread_enter(HttpServer* s) { (void)s; }
+void http_server_thread_leave(HttpServer* s) { (void)s; }
 const char* http_server_shutdown_graceful_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return ""; }
 const char* http_server_set_health_probes_raw(HttpServer* s, const char* lp, const char* rp,
                                               HttpReadyCheck rc, void* ud) {
@@ -1486,6 +1488,12 @@ HttpServer* http_server_create(int port) {
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
     pthread_mutex_init(&server->tls_config_lock, NULL);
+    pthread_mutex_init(&server->run_lock, NULL);
+    pthread_cond_init(&server->run_done, NULL);
+    server->serving = 0;
+    server->server_tids = NULL;
+    server->server_tid_count = 0;
+    server->server_tid_cap = 0;
     server->live_fds = NULL;
     server->live_count = 0;
     server->live_cap = 0;
@@ -7521,22 +7529,94 @@ static void* accept_thread_fn(void* arg) {
 static int http_server_run(HttpServer* server);
 static int http_server_serve(HttpServer* server);
 
-int http_server_start_raw(HttpServer* server) {
+/* The thread is one of the server's own for the run (see server_tids). A
+ * thread that could not say so would have a stop on it wait for itself, so
+ * running out of memory here is fatal rather than quietly skipped. */
+void http_server_thread_enter(HttpServer* server) {
+    pthread_mutex_lock(&server->run_lock);
+    if (server->server_tid_count == server->server_tid_cap) {
+        int cap = server->server_tid_cap ? server->server_tid_cap * 2 : 16;
+        aether_tid_t* grown = realloc(server->server_tids, (size_t)cap * sizeof(aether_tid_t));
+        if (!grown) {
+            aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
+            fprintf(stderr, "aether: out of memory recording an HTTP server thread\n");  /* silent-ok: last line before abort */
+            abort();
+        }
+        server->server_tids = grown;
+        server->server_tid_cap = cap;
+    }
+    server->server_tids[server->server_tid_count++] = aether_tid_self();
+    pthread_mutex_unlock(&server->run_lock);
+}
+
+void http_server_thread_leave(HttpServer* server) {
+    aether_tid_t self = aether_tid_self();
+    pthread_mutex_lock(&server->run_lock);
+    for (int i = 0; i < server->server_tid_count; i++) {
+        if (aether_tid_equal(server->server_tids[i], self)) {
+            server->server_tids[i] = server->server_tids[--server->server_tid_count];
+            break;
+        }
+    }
+    pthread_mutex_unlock(&server->run_lock);
+}
+
+/* Whether the calling thread is one of the server's own; run_lock held. */
+static int server_thread_is_own_locked(HttpServer* server) {
+    aether_tid_t self = aether_tid_self();
+    for (int i = 0; i < server->server_tid_count; i++) {
+        if (aether_tid_equal(server->server_tids[i], self)) return 1;
+    }
+    return 0;
+}
+
+/* Begin a run, from either start: refused while one is on, so a second start
+ * cannot run a server twice over the same socket, pool and lists. */
+static int server_run_begin(HttpServer* server) {
+    pthread_mutex_lock(&server->run_lock);
+    if (server->serving) {
+        pthread_mutex_unlock(&server->run_lock);
+        return server_fail(server, "the server is already running");
+    }
+    server->serving = 1;
     server->error[0] = '\0';
     server->is_running = 1;
     atomic_store(&server->stopping, 0);
+    pthread_mutex_unlock(&server->run_lock);
+    return 0;
+}
+
+/* The run is over: a stop waiting for it may return, and the server may be
+ * freed from here on, so the calling thread touches it no more after this. */
+static void server_run_end(HttpServer* server) {
+    pthread_mutex_lock(&server->run_lock);
+    server->serving = 0;
+    pthread_cond_broadcast(&server->run_done);
+    pthread_mutex_unlock(&server->run_lock);
+}
+
+int http_server_start_raw(HttpServer* server) {
+    if (!server) return -1;
+    if (server_run_begin(server) < 0) return -1;
     return http_server_run(server);
 }
 
-/* The server's body, with is_running already set by whoever started it:
- * http_server_start_raw on the calling thread, or
+/* The server's body, on the thread that runs it, with the run already begun
+ * by whoever started it: http_server_start_raw on the calling thread, or
  * http_server_start_background_raw before it spawns the thread. Never here,
  * on the server's own thread: a stop issued between the spawn and this
  * thread's first line was then overwritten by its `is_running = 1`, the loop
- * ran forever, and http_server_stop, which joins the thread (#2672), hung. */
+ * ran forever, and http_server_stop, which waits for the run (#2672), hung.
+ * A stop that came first has set stopping, and wins. */
 static int http_server_run(HttpServer* server) {
-    int rc = http_server_serve(server);
-    monitor_stopped(server);
+    int rc = 0;
+    http_server_thread_enter(server);
+    if (!atomic_load(&server->stopping)) {
+        rc = http_server_serve(server);
+        monitor_stopped(server);
+    }
+    http_server_thread_leave(server);
+    server_run_end(server);
     return rc;
 }
 
@@ -7813,10 +7893,22 @@ static int http_server_serve(HttpServer* server) {
     return 0;
 }
 
+#if AETHER_HAS_THREADS
+/* Join the background thread of a run that is over, if one is left: taken
+ * under run_lock, so of two callers one joins it, and joined outside it,
+ * since the thread ends its run under it. */
+static void server_join_background(HttpServer* server) {
+    pthread_mutex_lock(&server->run_lock);
+    int joinable = server->background_joinable;
+    pthread_t thread = server->background_thread;
+    server->background_joinable = 0;
+    pthread_mutex_unlock(&server->run_lock);
+    if (joinable) pthread_join(thread, NULL);
+}
+#endif
+
 static void* http_server_background_main(void* arg) {
     HttpServer* server = (HttpServer*)arg;
-    server->background_tid = aether_tid_self();
-    server->background_tid_set = 1;
 #if !defined(_WIN32)
     /* Embedded/background server: block async signals on this thread and
      * every thread it spawns (the accept thread + pool workers inherit
@@ -7839,9 +7931,7 @@ static void* http_server_background_main(void* arg) {
     sigdelset(&block, SIGILL);
     pthread_sigmask(SIG_BLOCK, &block, NULL);
 #endif
-    /* is_running was set before this thread was spawned; a stop that came
-     * first has already cleared it and set stopping, and must win. */
-    if (!atomic_load(&server->stopping)) http_server_run(server);
+    http_server_run(server);
     return NULL;
 }
 
@@ -7856,21 +7946,26 @@ int http_server_start_background_raw(HttpServer* server) {
     (void)http_server_background_main;
     return -1;
 #else
-    /* Mark embedded mode before the thread starts so http_server_start_raw
-     * suppresses the interactive "Press Ctrl+C to stop" banner. */
-    server->background = 1;
-    server->background_tid_set = 0;
     /* Running from here, not from the thread's first line: a stop issued as
      * soon as this returns must find a running server to stop, and nothing
      * the thread does later may undo it (see http_server_run). */
-    server->is_running = 1;
-    atomic_store(&server->stopping, 0);
-    if (pthread_create(&server->background_thread, NULL, http_server_background_main, server) != 0) {
+    if (server_run_begin(server) < 0) return -1;
+    /* A thread left from an earlier run whose stop came from one of its own
+     * threads (a handler), which could not join it; that run is over. */
+    server_join_background(server);
+    /* Embedded mode, set before the thread starts: no interactive banner. */
+    server->background = 1;
+    pthread_mutex_lock(&server->run_lock);
+    int created = pthread_create(&server->background_thread, NULL,
+                                 http_server_background_main, server) == 0;
+    server->background_joinable = created;   /* joined by http_server_stop */
+    pthread_mutex_unlock(&server->run_lock);
+    if (!created) {
         server->background = 0;
         server->is_running = 0;
-        return -1;
+        server_run_end(server);
+        return server_fail(server, "cannot start the server thread");
     }
-    server->background_joinable = 1;   /* joined by http_server_stop */
     return 0;
 #endif
 }
@@ -7937,17 +8032,23 @@ void http_server_stop(HttpServer* server) {
     }
     pthread_mutex_unlock(&server->live_lock);
 
-#if AETHER_HAS_THREADS
-    /* A background server is stopped when its thread is done: the closed
-     * socket ends its accept loop (at most its one-second poll on POSIX),
-     * and the loop shuts its pool down before it returns. Not from the
-     * thread itself, as when a handler stops the server it runs in. */
-    if (server->background_joinable &&
-        !(server->background_tid_set &&
-          aether_tid_equal(aether_tid_self(), server->background_tid))) {
-        server->background_joinable = 0;
-        pthread_join(server->background_thread, NULL);
+    /* Wait for the run to be over, whichever start began it and on whatever
+     * thread: the closed socket and the wake pipe end its accept loop, and
+     * the loop joins its workers, which finish the request each is in, before
+     * it returns. Not on one of the run's own threads (a handler, the
+     * monitor), which the run waits for in turn: there the stop only
+     * signals, and the run ends once this call has returned. */
+    pthread_mutex_lock(&server->run_lock);
+    int own = server_thread_is_own_locked(server);
+    if (!own) {
+        while (server->serving) pthread_cond_wait(&server->run_done, &server->run_lock);
     }
+    pthread_mutex_unlock(&server->run_lock);
+
+#if AETHER_HAS_THREADS
+    /* A background run's thread, once its run is over: it does nothing
+     * after ending it, so this is quick. */
+    if (!own) server_join_background(server);
 #endif
 }
 
@@ -7955,6 +8056,18 @@ void http_server_free(HttpServer* server) {
     if (!server) return;
 
     http_server_stop(server);
+    /* Still running only when this is one of the run's own threads, where
+     * the stop could not wait: the run is still using the server. */
+    pthread_mutex_lock(&server->run_lock);
+    int running = server->serving;
+    pthread_mutex_unlock(&server->run_lock);
+    if (running) {
+        aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
+        fprintf(stderr, "aether: http_server_free called on one of the server's own threads "  /* silent-ok: last line before abort */
+                        "(a handler or its monitor) while it runs; stop it there and free it "
+                        "from the thread that started it\n");
+        abort();
+    }
     http_server_monitor_null_raw(server);   /* gives back the closures' environments */
 
 
@@ -8037,6 +8150,9 @@ void http_server_free(HttpServer* server) {
 #endif
 
     free(server->live_fds);
+    free(server->server_tids);
+    pthread_cond_destroy(&server->run_done);
+    pthread_mutex_destroy(&server->run_lock);
     pthread_mutex_destroy(&server->live_lock);
     pthread_mutex_destroy(&server->tls_lock);
     pthread_mutex_destroy(&server->tls_config_lock);

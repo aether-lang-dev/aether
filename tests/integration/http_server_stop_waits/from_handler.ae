@@ -1,0 +1,97 @@
+// http_server_stop_waits: a stop from a handler, which runs on one of the
+// server's own pool workers, and the start that is refused while a server
+// runs.
+//
+// A stop waits for the server's run to be over, but the run joins its
+// workers, so on one of them it only signals; the thread that started the
+// server, or any other, then stops (waiting) and frees it. A background
+// server stopped from a handler used to hang: the stop joined the server
+// thread, which was joining the worker the stop ran on.
+
+import std.http
+import std.string
+
+extern http_server_port(server: ptr) -> int
+extern http_server_free(server: ptr)
+extern exit(code: int)
+
+message Run { srv: ptr }
+actor Runner {
+    state runs = 0
+    receive {
+        Run(srv) -> {
+            runs = runs + 1
+            http.server_start(srv)
+        }
+    }
+}
+
+stop_handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "stopping")
+    http.server_stop(ud)
+}
+
+// A server with /stop, on 127.0.0.1 and a port the kernel picks, bound.
+make_server() -> ptr {
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    http.null_monitor(s)
+    http.server_get(s, "/stop", stop_handler, s)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    return s
+}
+
+ask_stop(s: ptr, what: string) {
+    port = http_server_port(s)
+    body, err = http.get("http://127.0.0.1:${port}/stop")
+    if err != "" || body != "stopping" {
+        println("FAIL ${what}: /stop answered '${body}' (${err})")
+        exit(1)
+    }
+}
+
+main() {
+    i = 0
+    while i < 5 {
+        // Foreground, on an actor.
+        s = make_server()
+        runner = spawn(Runner())
+        runner ! Run { srv: s }
+        ask_stop(s, "foreground")
+        http_server_free(s)
+
+        // Background.
+        b = make_server()
+        if http.server_start_background(b) != "" {
+            println("FAIL: start_background")
+            exit(1)
+        }
+        ask_stop(b, "background")
+        http_server_free(b)
+        i = i + 1
+    }
+
+    // A start while the server runs is refused, whichever start it is.
+    r = make_server()
+    if http.server_start_background(r) != "" {
+        println("FAIL: start_background")
+        exit(1)
+    }
+    again = http.server_start_background(r)
+    if string.index_of(again, "already running") < 0 {
+        println("FAIL: a second background start was not refused: '${again}'")
+        exit(1)
+    }
+    fg = http.server_start(r)
+    if string.index_of(fg, "already running") < 0 {
+        println("FAIL: a foreground start of a running server was not refused: '${fg}'")
+        exit(1)
+    }
+    ask_stop(r, "refused-start server")
+    http_server_free(r)
+    println("FROM-HANDLER-OK")
+}

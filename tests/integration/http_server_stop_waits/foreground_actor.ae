@@ -1,0 +1,120 @@
+// http_server_stop_waits: a foreground server (http.server_start, so
+// http_server_start_raw) run by an actor, so on another thread, with a
+// keep-alive connection held open across the stop, then freed at once, round
+// after round.
+//
+// http_server_stop used to wait only for a server started in the
+// background. For a foreground one on another thread it signalled and
+// returned, and the free that followed released the server while its accept
+// loop and a pool worker, woken from waiting on the held connection, were
+// still in it: a segfault in the worker (conn_recv_request_start,
+// http_resolve_route) on macOS and on Linux. Now stop waits for the run,
+// whichever start began it, so the server's monitor has reported stopped by
+// the time stop returns, which each round checks, and the free is safe.
+
+import std.http
+import std.os
+import std.fs
+import std.string
+import std.tcp
+
+extern http_server_stop(server: ptr)
+extern http_server_free(server: ptr)
+extern http_server_port(server: ptr) -> int
+extern sleep(ms: int)
+extern exit(code: int)
+
+message Run { srv: ptr }
+actor Runner {
+    state runs = 0
+    receive {
+        Run(srv) -> {
+            runs = runs + 1
+            http.server_start(srv)
+        }
+    }
+}
+
+handler(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "ok")
+}
+
+// One request on a connection the caller keeps: the server holds it open
+// for the next request, so a pool worker waits on it. "" when the answer
+// came back, else what went wrong.
+ask(sock: ptr) -> string {
+    tcp.write(sock, "GET /ok HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+    wire = ""
+    waited = 0
+    while string.index_of(wire, "\r\n\r\nok") < 0 && waited < 50 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                return "connection closed before the answer"
+            }
+            wire = string.concat(wire, chunk)
+        }
+        waited = waited + 1
+    }
+    if string.index_of(wire, "HTTP/1.1 200") != 0 {
+        return "no 200 answer"
+    }
+    return ""
+}
+
+main() {
+    dir = os.getenv("STOP_WAITS_DIR")
+    if dir == "" {
+        dir = "."
+    }
+    rounds = 10
+    i = 0
+    while i < rounds {
+        marker = "${dir}/stopped-${i}"
+        fs.delete(marker)
+        s = http.server_create(0)
+        http.server_set_host(s, "127.0.0.1")
+        http.server_get(s, "/ok", handler, null)
+        http.monitor(s) {
+            listening() | host: string, port: int | {}
+            stopped() | host: string, port: int | {
+                fs.write(marker, "stopped")
+            }
+        }
+        if http.server_bind(s, "127.0.0.1", 0) != "" {
+            println("FAIL round ${i}: bind")
+            exit(1)
+        }
+        port = http_server_port(s)
+        runner = spawn(Runner())
+        runner ! Run { srv: s }
+
+        // The actor may not have started the server yet: the socket is
+        // bound, so the connect is queued and answered once it has.
+        sock, cerr = tcp.connect("127.0.0.1", port)
+        if cerr != "" {
+            println("FAIL round ${i}: connect: ${cerr}")
+            exit(1)
+        }
+        why = ask(sock)
+        if why != "" {
+            println("FAIL round ${i}: ${why}")
+            exit(1)
+        }
+
+        // The connection stays open across the stop and the free.
+        http_server_stop(s)
+        if fs.exists(marker) == 0 {
+            println("FAIL round ${i}: http_server_stop returned before the server stopped")
+            exit(1)
+        }
+        http_server_free(s)
+        sleep(50)
+        tcp.close(sock)
+        fs.delete(marker)
+        i = i + 1
+    }
+    println("FOREGROUND-OK ${rounds}")
+}

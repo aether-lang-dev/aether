@@ -324,7 +324,7 @@
       <h3 class="function-name">string_from_ptr <span class="kind">fn</span></h3>
       <pre class="usage"><code>string_from_ptr(src, length) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">src: ptr, length: int</span></p>
-      <p class="doc">One-call ptr -&gt; string crossing: a fresh refcounted binary string copying `length` bytes from a raw pointer `src`, without an intermediate bytes. The direct answer to &quot;I have a ptr + len, I want a string&quot; (issue #1782).</p>
+      <p class="doc">One-call ptr -&gt; string crossing: a fresh refcounted binary string copying `length` bytes from a raw pointer `src`, without an intermediate bytes. The direct answer to &quot;I have a ptr + len, I want a string&quot; (issue #1782). `src` must be a RAW data pointer: `bytes.data(b)` or a C buffer. A bytes handle is also a `ptr` but is refused (panic): for a handle use `bytes.to_string(b, n)`.</p>
     </div>
     <div class="function" id="view" data-name="view">
       <h3 class="function-name">view <span class="kind">fn</span></h3>

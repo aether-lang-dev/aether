@@ -57,6 +57,7 @@ extern char** environ;
 
 #ifdef __APPLE__
 #include <mach-o/dyld.h>
+#include <sys/sysctl.h>
 #endif
 #if defined(__FreeBSD__) || defined(__NetBSD__)
 #include <sys/types.h>
@@ -5060,6 +5061,34 @@ static const char* ae_vendored_src_defs(void) {
     return defs;
 }
 
+#ifdef __APPLE__
+/* A program built here runs here. With MACOSX_DEPLOYMENT_TARGET unset, Apple's
+ * toolchain targets the SDK's macOS, which a Command Line Tools or Xcode
+ * install often leaves behind the running OS; Homebrew builds its dylibs for
+ * the running OS, and ld then warns on every link ("building for macOS-27.0,
+ * but linking with dylib ... built for newer version 27.2"). The warning goes
+ * to the build's stderr, so it lands in the output of `ae run`. Default the
+ * target to the running OS's major.minor; a value the caller set wins, so a
+ * build that deliberately targets an older macOS keeps doing so. Native
+ * builds only: the zig cross path names its own target. */
+static bool running_macos_target(char* out, size_t size) {
+    char ver[64];
+    size_t len = sizeof(ver);
+    if (sysctlbyname("kern.osproductversion", ver, &len, NULL, 0) != 0) return false;
+    int major = 0, minor = 0;
+    if (sscanf(ver, "%d.%d", &major, &minor) < 1 || major < 11) return false;
+    snprintf(out, size, "%d.%d", major, minor);
+    return true;
+}
+
+static void default_macos_deployment_target(void) {
+    if (getenv("MACOSX_DEPLOYMENT_TARGET")) return;
+    char target[32];
+    if (running_macos_target(target, sizeof(target)))
+        setenv("MACOSX_DEPLOYMENT_TARGET", target, 0);
+}
+#endif
+
 void build_gcc_cmd(char* cmd, size_t size,
                           const char* c_file, const char* out_file,
                           bool optimize, const char* extra_files) {
@@ -5365,6 +5394,9 @@ void build_gcc_cmd(char* cmd, size_t size,
             return;
         }
     }
+#ifdef __APPLE__
+    default_macos_deployment_target();
+#endif
     /* contrib.sqlite with no archive here: compile it (see
      * vendored_sqlite_link). */
     ae_link = vendored_sqlite_link(cc, ae_link, user_cflags);
@@ -13137,6 +13169,18 @@ static int cmd_cflags(int argc, char** argv) {
         if (wrote_anything) fputc(' ', stdout);
         fputs("-pthread -lm", stdout);
         wrote_anything = 1;
+#ifdef __APPLE__
+        /* The same default `ae build` applies (default_macos_deployment_target),
+         * for the caller's own compiler, which `ae` cannot set an environment
+         * for: without it ld warns when a Homebrew dylib named below was built
+         * for a newer macOS than the SDK's. Omitted when the caller set
+         * MACOSX_DEPLOYMENT_TARGET, which the compiler reads itself. */
+        if (!getenv("MACOSX_DEPLOYMENT_TARGET")) {
+            char target[32];
+            if (running_macos_target(target, sizeof(target)))
+                printf(" -mmacosx-version-min=%s", target);
+        }
+#endif
 
         /* Windows system libraries. libaether references Winsock, the Crypto
          * API and dbghelp's symboliser regardless of which std modules the

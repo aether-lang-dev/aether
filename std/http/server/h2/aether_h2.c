@@ -604,8 +604,12 @@ static void h2_task_run(void* arg) {
     /* Route table + middleware are read-only after startup, so running the
      * handler here (off the connection thread) is safe across any number of
      * sessions; nghttp2_session is NEVER touched here. Each task owns its
-     * own (req, res). */
+     * own (req, res). The worker is one of the server's own threads for the
+     * handler: its connection thread waits for this task, so a stop from the
+     * handler must not wait for the run. */
+    http_server_thread_enter(sess->server);
     http_server_dispatch_for_h2(sess->server, task->req, task->res);
+    http_server_thread_leave(sess->server);
 
     /* Push to the session's ready queue + wake its connection thread. The
      * session's in_flight counter (bumped before submit) keeps `sess` alive

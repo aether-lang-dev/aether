@@ -349,16 +349,30 @@ typedef struct HttpServer {
     // intercept a process-directed signal meant for the host application.
     // std-http-server-background-sigurg-poisons-harness.md
     int background;
-    // The background server's thread, which http_server_stop joins so the
-    // accept loop and its workers are done before stop returns: left
-    // detached, they were still in Winsock calls when the program went on
-    // to exit (an access violation on Windows). background_tid is set by
-    // the thread itself, so a stop called from a handler does not join
-    // the thread it runs on.
+    // The background server's thread, which http_server_stop joins once the
+    // run is over (see `serving`): left detached, it was still in Winsock
+    // calls when the program went on to exit (an access violation on
+    // Windows).
     pthread_t background_thread;
     int background_joinable;
-    int background_tid_set;
-    aether_tid_t background_tid;
+    // The run, whichever start began it. `serving` is set by the start,
+    // under run_lock, and cleared once the run is over: its accept loop has
+    // returned and its workers, event loop and parking lot are joined and
+    // freed; run_done is broadcast then. http_server_stop waits for it, so
+    // when stop returns nothing of the server is running on any thread and
+    // http_server_free may free it. A foreground start on another thread (an
+    // actor's) used to be signalled but not waited for, and the free that
+    // followed released the server under a worker still serving a keep-alive
+    // connection. server_tids are the threads the run owns (the one running
+    // it, its pool workers, the event loop's drivers): a stop called on one
+    // of them, from a handler or the monitor, cannot wait for a run that
+    // waits for it, so it only signals, and a free there is refused.
+    pthread_mutex_t run_lock;
+    pthread_cond_t run_done;
+    int serving;
+    aether_tid_t* server_tids;
+    int server_tid_count;
+    int server_tid_cap;
     // Multi-accept: one accept thread per core with SO_REUSEPORT (opt-in)
     int multi_accept;               // 0 = single accept (default), 1 = SO_REUSEPORT multi-accept
     int accept_thread_count;
@@ -434,10 +448,26 @@ int  http_server_has_monitor(HttpServer* server);
 // that does not resolve fails the bind (#2639). No-op if `host` is NULL
 // or empty.
 void http_server_set_host(HttpServer* server, const char* host);
+// Start the server on the calling thread (returns when it stops) or on a
+// thread of its own (returns at once). Either refuses, -1 with the reason in
+// http_server_error, a server that is already running.
 int http_server_start_raw(HttpServer* server);
 int http_server_start_background_raw(HttpServer* server);
+// Stop the server and wait until its run is over, whichever start began it
+// and whichever thread it runs on: when stop returns, its accept loop and
+// every worker are done, and the server may be freed or started again.
+// Called on one of the server's own threads (a handler, the monitor), it
+// only signals: the run ends once that call returns.
 void http_server_stop(HttpServer* server);
+// Stop (as above) and free the server. Fatal on one of the server's own
+// threads while it runs, since the run still uses it: stop it there and
+// free it from the thread that started it.
 void http_server_free(HttpServer* server);
+// The run's threads say they are the server's, for the duration of the
+// run, so a stop on them does not wait for itself. Internal to std.net:
+// the pool workers and the event loop's drivers call them.
+void http_server_thread_enter(HttpServer* server);
+void http_server_thread_leave(HttpServer* server);
 
 // Enable HTTP/1.1 keep-alive on this server (#260 Tier 0). When
 // `enabled` is non-zero, the connection handler reads multiple

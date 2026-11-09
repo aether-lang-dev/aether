@@ -130,6 +130,10 @@ int http_pool_default_workers(void) {
 
 static void* http_pool_worker(void* arg) {
     HttpConnectionPool* pool = (HttpConnectionPool*)arg;
+    /* One of the server's own threads while the run lasts: a handler here
+     * that stops the server must not wait for the run, which joins this
+     * thread. */
+    http_server_thread_enter(pool->server);
     while (1) {
         pthread_mutex_lock(&pool->lock);
         while (pool->count == 0 && !pool->shutdown) {
@@ -151,6 +155,7 @@ static void* http_pool_worker(void* arg) {
         else           http_server_drain_connection(pool->server, item.fd);
         atomic_fetch_sub(&http_pool_busy_workers, 1);
     }
+    http_server_thread_leave(pool->server);
     return NULL;
 }
 

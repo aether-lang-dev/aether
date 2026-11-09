@@ -11,7 +11,16 @@ AE="$ROOT/build/ae"
 
 fail() { echo "  [FAIL] http_server_monitor: $1"; exit 1; }
 
-run() { MONITOR_MODE="$1" AETHER_HOME="$ROOT" "$AE" run "$SCRIPT_DIR/$2" 2>&1; }
+# Build, then run: the build's output (a linker warning about a Homebrew dylib,
+# say) is not the program's, and only the program's is under test. A build
+# that fails shows its own output.
+BUILD_DIR="$(mktemp -d)"; trap 'rm -rf "$BUILD_DIR"' EXIT
+run() {
+    _exe="$BUILD_DIR/$(basename "$2" .ae)"
+    AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/$2" -o "$_exe" >"$BUILD_DIR/build.log" 2>&1 \
+        || { cat "$BUILD_DIR/build.log"; return 1; }
+    MONITOR_MODE="$1" "$_exe" 2>&1
+}
 
 OUT="$(run - monitor.ae)" || { echo "$OUT"; fail "the monitor program failed"; }
 [ "$OUT" = "MONITOR-OK" ] || { echo "$OUT"; fail "a background server or a failed bind printed something"; }
@@ -34,7 +43,7 @@ FG-DONE"
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) ;;
     *)
-        TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
+        TMPDIR="$BUILD_DIR"
         AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/actor_mode.ae" -o "$TMPDIR/actor_mode" \
             --extra "$SCRIPT_DIR/actor_shim.c" >"$TMPDIR/build.log" 2>&1 \
             || { cat "$TMPDIR/build.log"; fail "the actor-mode program did not build"; }

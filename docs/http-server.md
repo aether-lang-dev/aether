@@ -913,6 +913,19 @@ any connection; a keep-alive connection waiting for its client's next
 request, or parked, is closed at once rather than after its idle
 timeout.
 
+A stop waits for the server's run to be over, whichever start began it
+and whichever thread it runs on (the caller's for `server_start`, an
+actor's, or the server's own for `server_start_background`): when
+`http_server_stop` returns, the accept loop, its workers and the
+parking lot are done, so the server can be freed at once, or started
+again. Called on one of the server's own threads (a handler, the
+monitor), a stop cannot wait for a run that waits for that thread, so
+it only signals, and the run ends once the call returns;
+`http_server_free` there is a fatal error, since the run still uses
+the server: free it from the thread that started it, whose own stop
+waits. A start of a server that is already running is refused, with
+the reason in `http_server_error`.
+
 ---
 
 ## Embedded / background servers
@@ -920,10 +933,7 @@ timeout.
 `http_server_start_background_raw(server)` runs the accept loop on a
 thread of its own and returns immediately, so a host can keep serving
 while doing other work (and stop it later with `http_server_stop`).
-Stop waits for that thread: when it returns, the accept loop, its
-workers and the parking lot are done, so the server can be freed at
-once, and another started in the same process. This is the *embedded*
-mode and behaves like a library, not a CLI:
+This is the *embedded* mode and behaves like a library, not a CLI:
 
 - **No banner.** It has no monitor unless the program gives it one, so
   it prints nothing: an embedded server is controlled by

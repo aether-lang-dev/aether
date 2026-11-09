@@ -1991,6 +1991,10 @@ static void* ev_driver_main(void* arg) {
     EvDriver* d = (EvDriver*)arg;
     AetherIoEvent events[64];
 
+    /* One of the server's own threads while the run lasts: the middleware
+     * ahead of the proxy runs here, and one that stops the server must not
+     * wait for the run, which joins this thread. */
+    http_server_thread_enter(d->loop->server);
     aether_io_poller_add(&d->poller, d->wake_r, NULL, AETHER_IO_READ);
 
     while (!atomic_load(&d->loop->stopping)) {
@@ -2041,6 +2045,7 @@ static void* ev_driver_main(void* arg) {
         EvConn* c = d->by_fd[fd];
         if (c && c->client_fd == fd) ev_conn_close(d, c);
     }
+    http_server_thread_leave(d->loop->server);
     return NULL;
 }
 
