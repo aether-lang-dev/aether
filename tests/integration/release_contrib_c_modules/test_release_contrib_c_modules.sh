@@ -151,7 +151,14 @@ main() { println("collate=${collate.compare("en", "cafe", "café")}") }' "collat
 # Not on Windows: `ae` links -static there, and MSYS2's static FFmpeg needs
 # its whole dependency closure (soxr, the codecs, ...), which only
 # `pkg-config --static --libs` knows; that goes in [build] link_flags.
-if [ "$EXE" != ".exe" ] && command -v pkg-config >/dev/null 2>&1 &&
+# Windows by the system, not by $EXE: MSYS2's `test -x build/ae` finds
+# build/ae.exe, so $EXE is empty there, and this ran (and failed to link)
+# wherever MSYS2's FFmpeg is installed.
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) on_windows=1 ;;
+    *) on_windows=0 ;;
+esac
+if [ "$EXE" != ".exe" ] && [ "$on_windows" = 0 ] && command -v pkg-config >/dev/null 2>&1 &&
    pkg-config --exists libavcodec libavformat libavutil libswscale libswresample 2>/dev/null; then
     check avcodec 'import contrib.avcodec
 main() {
