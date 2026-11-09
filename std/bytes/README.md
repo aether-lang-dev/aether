@@ -42,7 +42,7 @@ There is deliberately no `ptr as string` cast (they are different types).
 
 ```aether,fragment
 // ptr -> string  (I have a raw buffer + length, I want a binary string)
-s = bytes.string_from_ptr(p, n)
+s = bytes.string_from_ptr(p, n)   // p: bytes.data(b) or a C buffer, NOT a bytes handle
 
 // string -> ptr  (I have a string, I want a raw pointer to walk)
 n = string.length(s)
@@ -51,6 +51,12 @@ _ = bytes.copy_from_string(b, 0, s, n)
 p = bytes.data(b)
 // ... use p ...  (keep `b` alive as long as you use `p`)
 ```
+
+`src` must be a raw data pointer. A bytes handle is also a `ptr`, so the
+compiler cannot tell the two apart, but `string_from_ptr` recognises a handle
+and panics rather than copy its header as text. To turn a handle into a
+string use `bytes.to_string(b, n)`; to use the handle's payload as a raw
+pointer, `bytes.string_from_ptr(bytes.data(b), n)`.
 
 The longhand still works and is useful when you build a buffer incrementally:
 

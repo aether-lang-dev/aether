@@ -160,6 +160,9 @@ from_ptr(src: ptr, length: int) -> ptr {
 // One-call ptr -> string crossing: a fresh refcounted binary string copying
 // `length` bytes from a raw pointer `src`, without an intermediate bytes.
 // The direct answer to "I have a ptr + len, I want a string" (issue #1782).
+// `src` must be a RAW data pointer: `bytes.data(b)` or a C buffer. A bytes
+// handle is also a `ptr` but is refused (panic): for a handle use
+// `bytes.to_string(b, n)`.
 string_from_ptr(src: ptr, length: int) -> string {
     return aether_bytes_string_from_ptr(src, length)
 }

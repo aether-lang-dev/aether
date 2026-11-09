@@ -2,6 +2,7 @@
 #include "../string/aether_string.h"
 #include "../../runtime/aether_resource_caps.h"
 #include "../../runtime/utils/aether_wipe.h"
+#include "../../runtime/actors/aether_panic.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -16,10 +17,32 @@
  * AetherBytes would need length == 0xAE57C0DE (~2.9GB) to collide, and the
  * header plausibility checks inside is_aether_string reject that too. */
 struct AetherBytes {
+    /* Handle tag, so a bytes HANDLE handed to aether_bytes_string_from_ptr
+     * (which wants the raw data pointer) can be told from a data pointer.
+     * Cleared on free. */
+    unsigned char tag[8];
     size_t length;
     size_t capacity;
     char*  data;
 };
+
+static const unsigned char BYTES_TAG[8] = {0xAE, 'B', 'Y', 'T', 'E', 'S', 0x01, 0xFF};
+
+/* Is `p` a live AetherBytes handle? Compares byte by byte with a short
+ * circuit, so a raw buffer whose first byte differs (the near-certain case) is
+ * read for exactly one byte and a short allocation is never over-read. A full
+ * tag match is then checked for a plausible header. */
+static int is_aether_bytes(const void* p) {
+    if (!p) return 0;
+    const unsigned char* q = (const unsigned char*)p;
+    for (int i = 0; i < 8; i++) {
+        if (q[i] != BYTES_TAG[i]) return 0;
+    }
+    const AetherBytes* b = (const AetherBytes*)p;
+    if (b->capacity < b->length) return 0;
+    if (b->capacity > 0 && !b->data) return 0;
+    return 1;
+}
 
 /* Grow the underlying buffer so it has at least `min_capacity` bytes.
  * Doubles each time to keep amortised-O(1) append cost; falls back to
@@ -59,6 +82,7 @@ AetherBytes* aether_bytes_new(int initial_capacity) {
     if (initial_capacity < 0) return NULL;
     AetherBytes* b = (AetherBytes*)aether_caps_malloc(sizeof(AetherBytes));
     if (!b) return NULL;
+    memcpy(b->tag, BYTES_TAG, sizeof b->tag);
     b->length = 0;
     b->capacity = 0;
     b->data = NULL;
@@ -92,6 +116,13 @@ AetherBytes* aether_bytes_from_ptr(void* src, int length) {
  * I want a length-aware binary string". */
 void* aether_bytes_string_from_ptr(void* src, int length) {
     if (length < 0) return NULL;
+    /* `src` is the raw DATA pointer (bytes.data(b), or a C buffer). A bytes
+     * handle is also a `ptr`, so the type system cannot tell; copying it would
+     * yield the struct header as text. Refuse it loudly (the std style for a
+     * misuse that has no failure value to return: aether_panic). */
+    if (is_aether_bytes(src))
+        aether_panic("bytes.string_from_ptr: `src` is a bytes handle, not a raw data pointer; "
+                     "use bytes.to_string(b, n), or pass bytes.data(b)");
     if (length == 0 || !src) return (void*)string_new_with_length("", 0);
     return (void*)string_new_with_length((const char*)src, (size_t)length);
 }
@@ -470,6 +501,7 @@ void aether_bytes_free(AetherBytes* b) {
      * so the resource accounting balances the aether_caps_malloc /
      * aether_caps_realloc above. */
     aether_caps_free(b->data, b->capacity);
+    memset(b->tag, 0, sizeof b->tag);
     aether_caps_free(b, sizeof(AetherBytes));
 }
 

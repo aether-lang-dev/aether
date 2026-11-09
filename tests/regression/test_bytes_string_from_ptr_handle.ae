@@ -1,0 +1,50 @@
+// Regression: bytes.string_from_ptr wants a raw data pointer, but a bytes
+// handle is also a `ptr`, so passing the handle silently copied the
+// AetherBytes struct header as text (servirtium-vcr's Azure Key Vault test
+// got garbage keys). A handle is now refused with a panic; the correct
+// forms (to_string on the handle, string_from_ptr on bytes.data) still work,
+// binary-safe (NUL and 0xff bytes).
+
+import std.bytes
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    b = bytes.new(8)
+    _ = bytes.set(b, 0, 65)
+    _ = bytes.set(b, 1, 0)
+    _ = bytes.set(b, 2, 255)
+    _ = bytes.set(b, 3, 66)
+    _ = bytes.set_length(b, 4)
+
+    s1 = bytes.to_string(b, 4)
+    check(string.length(s1) == 4, "to_string length")
+    check(string.char_at(s1, 0) == 65 && string.char_at(s1, 1) == 0, "to_string bytes 0,1")
+    check(string.char_at(s1, 2) == 255 && string.char_at(s1, 3) == 66, "to_string bytes 2,3")
+
+    s2 = bytes.string_from_ptr(bytes.data(b), 4)
+    check(string.length(s2) == 4, "string_from_ptr(data) length")
+    check(string.char_at(s2, 0) == 65 && string.char_at(s2, 1) == 0, "string_from_ptr(data) bytes 0,1")
+    check(string.char_at(s2, 2) == 255 && string.char_at(s2, 3) == 66, "string_from_ptr(data) bytes 2,3")
+
+    // The trap: the handle itself is refused, not copied as header bytes.
+    refused = 0
+    try {
+        bad = bytes.string_from_ptr(b, 4)
+        println("FAIL: handle accepted, length ${string.length(bad)}")
+    } catch e {
+        if string.contains(e, "bytes.to_string") == 1 { refused = 1 }
+    }
+    check(refused == 1, "string_from_ptr(handle) must panic naming bytes.to_string")
+
+    bytes.free(b)
+    println("PASS: string_from_ptr refuses a bytes handle; data/raw forms work")
+}
