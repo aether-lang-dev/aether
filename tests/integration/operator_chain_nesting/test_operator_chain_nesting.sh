@@ -55,7 +55,7 @@ if [ "$got" != "$want" ]; then
 fi
 
 max_depth() {
-    awk '{ d = 0; m = 0
+    LC_ALL=C awk '{ d = 0; m = 0
            for (i = 1; i <= length($0); i++) {
                c = substr($0, i, 1)
                if (c == "(") d++

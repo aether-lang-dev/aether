@@ -70,7 +70,12 @@ case "$got" in
 esac
 
 AETHER_HOME="$ROOT" "$AETHERC" "$WORK/consts.ae" "$WORK/consts.c" >/dev/null 2>&1
-d="$(awk 'BEGIN { d = 0; m = 0 }
+# LC_ALL=C: under a UTF-8 locale gawk's substr counts characters from the
+# start of the line on every call, so this walk is quadratic in a line, and
+# consts.c has lines of 245 KB: 361 s of the test on the win11 lab host and
+# 292 s on CI's Windows runner, against 6 s in the C locale. The walk only
+# compares ASCII, which a UTF-8 multibyte character never contains.
+d="$(LC_ALL=C awk 'BEGIN { d = 0; m = 0 }
           /^[ \t]*#/ { next }
           { gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
             # One split, not a substr($0, i, 1) per character: the awk of OpenBSD
