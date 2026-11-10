@@ -14,6 +14,16 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.907.0]
+
+### Changed
+
+- **The shell test suite runs on OpenBSD** (`tests/lib/portable.sh`, `tests/lib/syslibs.sh`, `tests/lib/test_openssl_conf.sh`, and the tests that use them). Hand-written C link lines name `-ldl`/`-lrt` only on Linux (`$AE_DL_LIBS`, `$AE_RT_LIBS`); `head -c`, `sha256sum`/`shasum`, `tar -T`, `nm -D`, `od -tu` (OpenBSD zero-pads it) and `file` (which prints `data` for wasm, COFF and Mach-O, and `AArch64` for `aarch64`) go through `head_c`, `sha256_of`, `copy_listed`, `dyn_syms`, `od_uint` and `file_desc`; the 75 `grep "a\|b"` alternations, which OpenBSD's grep reads as a literal `|` (so a "warning filter" let warnings into compared output), are `grep -E`; `\b` and `\s` are POSIX classes; `grep -r --exclude` is `find` (OpenBSD matches `--exclude` against the whole path). `x509 -req` is told `-sha256`: LibreSSL signs with SHA-1 by default and the pure TLS stack rightly refuses that. Tests whose subject cannot exist on the host skip and say why: `ae version install` where there is no release build, musl targets where zig cannot build musl's libc.a, dual-stack `::` where sockets are IPv6-only, the poisoning allocator where libc has no `malloc_usable_size`, FORTIFY where libc has no `__*_chk`, `spawn_sandboxed` off Linux and FreeBSD, and the checks that need OpenSSL's `ssl_conf`, `s_server -cert_chain`, `s_client -sigalgs` or Ed25519 certificates in TLS.
+
+### Fixed
+
+- **OpenBSD: four toolchain and runtime gaps the test suite exposed** (`tools/ae.c`, `tools/ae_checksec.c`, `std/os/aether_os.c`, `std/net/aether_http.c`). A program importing `std.audio` no longer fails to link with "unable to find library -ldl": OpenBSD keeps `dlopen` in libc, and `ae` now leaves the `-ldl` that codegen's link table names for `std.audio` off the link line there (as it already does on MinGW). `ae checksec` reads OpenBSD's RETGUARD return-address cookies (`__retguard_*`, and `__stack_smash_handler`) as the stack canary; it reported `canary no` for every OpenBSD binary because that clang does not emit `__stack_chk_fail` for a plain stack array. A spawned child no longer keeps a close-on-exec pipe that took a closed stdout's number as its stdout on OpenBSD and NetBSD: their pipes all report device 0, inode 0, and the pipe time that told them apart is the kernel's coarse clock (10 ms), so a spawn pipe made within a tick of the process start was taken for the stream itself; a stream that was not close-on-exec at start can no longer match a close-on-exec one (`os_spawn_stdio_slot` failed there). The OpenSSL-backed HTTPS client now honours `SSL_CERT_FILE` and `SSL_CERT_DIR` when built against LibreSSL, which ignores both in `SSL_CTX_set_default_verify_paths` (the pure-Aether client and OpenSSL already did).
+
 ## [0.906.0]
 
 ### Fixed
