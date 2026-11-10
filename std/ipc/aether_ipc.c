@@ -34,7 +34,10 @@
  * wait (PeekNamedPipe), sleeping briefly between asks.
  *
  * os.run_stdio's channel is the child's own stdin and stdout (its env
- * carries AETHER_IPC_KIND=stdio, and no AETHER_IPC_FD). */
+ * carries AETHER_IPC_KIND=stdio, and no AETHER_IPC_FD). stdio_channel()
+ * claims that pair for frames: it moves fd 0 and fd 1 to fresh close-on-exec
+ * descriptors, then points fd 0 at the null device and fd 1 at stderr, so a
+ * stray print or a library reading stdin cannot touch the channel. */
 
 #include "../../runtime/config/aether_optimization_config.h"
 
@@ -50,6 +53,13 @@ typedef struct { const char* _0; const char* _1; } _tuple_string_string;
 typedef struct { int _0; const char* _1; const char* _2; } _tuple_int_string_string;
 typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
 typedef struct { int _0; const char* _1; } _tuple_int_string;
+typedef struct { int _0; int _1; const char* _2; } _tuple_int_int_string;
+
+static _tuple_int_int_string ipc_stdio_failed(const char* err) {
+    _tuple_int_int_string out = { -1, -1, err };
+    return out;
+}
+
 #if AETHER_HAS_FILESYSTEM
 /* AETHER_IPC_KIND=stdio: os.run_stdio started this process. */
 static int ipc_env_says_stdio(void) {
@@ -132,6 +142,9 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
 _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
     (void)ch; (void)timeout_ms;
     return ipc_wait_failed("ipc.wait_readable: unavailable in this build");
+}
+_tuple_int_int_string ipc_stdio_channel_raw(void) {
+    return ipc_stdio_failed("ipc.stdio_channel: unavailable in this build");
 }
 
 #elif !defined(_WIN32)
@@ -602,6 +615,70 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
 #endif
 }
 
+#if IPC_HAS_SOCKETS
+/* Set once stdio_channel has claimed fd 0 and fd 1: a second claim would
+ * take the null device and stderr for a channel. */
+static int ipc_stdio_claimed = 0;
+
+/* ipc.stdio_channel: fd 0 and fd 1 become the channel (two fresh
+ * close-on-exec descriptors, numbered 3 or above); fd 0 then reads the null
+ * device and fd 1 writes where fd 2 does (the null device when fd 2 is not
+ * open). Each step that fails puts back what the steps before it changed. */
+_tuple_int_int_string ipc_stdio_channel_raw(void) {
+    if (__atomic_exchange_n(&ipc_stdio_claimed, 1, __ATOMIC_ACQ_REL)) {
+        return ipc_stdio_failed("ipc.stdio_channel: already claimed");
+    }
+    /* Whatever was printed before the claim goes out ahead of the first
+     * frame, not after it into stderr. */
+    fflush(stdout);
+    int in = fcntl(0, F_DUPFD_CLOEXEC, 3);
+    if (in < 0) {
+        int e = errno;
+        __atomic_store_n(&ipc_stdio_claimed, 0, __ATOMIC_RELEASE);
+        return ipc_stdio_failed(ipc_errno_msg("ipc.stdio_channel: stdin", e));
+    }
+    int out = fcntl(1, F_DUPFD_CLOEXEC, 3);
+    if (out < 0) {
+        int e = errno;
+        close(in);
+        __atomic_store_n(&ipc_stdio_claimed, 0, __ATOMIC_RELEASE);
+        return ipc_stdio_failed(ipc_errno_msg("ipc.stdio_channel: stdout", e));
+    }
+    int err_open = fcntl(2, F_GETFD) >= 0;
+    int nul = open("/dev/null", O_RDWR | O_CLOEXEC);
+    /* With fd 2 closed the null device lands there: it stays as stderr. */
+    if (nul >= 0 && nul <= 2) fcntl(nul, F_SETFD, 0);
+    int e = 0;
+    if (nul < 0) {
+        e = errno;
+    } else if (dup2(nul, 0) < 0) {
+        e = errno;
+    } else if (dup2(err_open ? 2 : nul, 1) < 0) {
+        e = errno;
+        dup2(in, 0);   /* put stdin back */
+    }
+    if (nul > 2) close(nul);
+    if (e) {
+        close(in);
+        close(out);
+        __atomic_store_n(&ipc_stdio_claimed, 0, __ATOMIC_RELEASE);
+        return ipc_stdio_failed(ipc_errno_msg("ipc.stdio_channel", e));
+    }
+    /* C stdio's stdin may hold bytes it read ahead; they were the channel's
+     * and are gone with the claim. Clear its end-of-file and error state so
+     * a later read sees the null device. */
+    clearerr(stdin);
+    /* A child of this process is no longer on the channel. */
+    if (ipc_env_says_stdio()) unsetenv("AETHER_IPC_KIND");
+    _tuple_int_int_string r = { in, out, "" };
+    return r;
+}
+#else
+_tuple_int_int_string ipc_stdio_channel_raw(void) {
+    return ipc_stdio_failed("ipc.stdio_channel: unavailable in this build (no processes)");
+}
+#endif
+
 #else /* _WIN32 */
 
 #include <fcntl.h>
@@ -615,7 +692,7 @@ int ipc_parent_channel_raw(void) {
      * set, there's no portable way to verify the descriptor is
      * open as a pipe via the Win32 CRT layer. v1 ships POSIX-only;
      * Windows consumers fall back to file-marker patterns, or the stdio
-     * channel (os.run_stdio). */
+     * channel (os.run_stdio, stdio_channel). */
     return -1;
 }
 
@@ -797,6 +874,98 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
 _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     (void)ch; (void)max;
     return ipc_recv_failed("ipc.recv_fd: unsupported on Windows");
+}
+
+static volatile LONG ipc_stdio_claimed = 0;
+
+/* A CRT descriptor of its own on a non-inheritable duplicate of `fd`'s
+ * handle, in binary mode; -1 when `fd` has none. */
+static int ipc_dup_private(int fd, int flags) {
+    intptr_t osh = _get_osfhandle(fd);
+    if (osh == -1 || osh == -2 || osh == 0) return -1;
+    HANDLE dup = NULL;
+    if (!DuplicateHandle(GetCurrentProcess(), (HANDLE)osh, GetCurrentProcess(), &dup,
+                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+        return -1;
+    }
+    int nfd = _open_osfhandle((intptr_t)dup, flags | _O_BINARY);
+    if (nfd < 0) CloseHandle(dup);
+    return nfd;
+}
+
+/* Point CRT descriptor `target` (0 or 1) and its Win32 std handle at
+ * `src`'s handle. _dup2 sets the std handle itself in a console program;
+ * SetStdHandle makes sure of it, so GetStdHandle-based writers follow. */
+static int ipc_redirect(int src, int target, DWORD which) {
+    if (_dup2(src, target) != 0) return -1;
+    intptr_t osh = _get_osfhandle(target);
+    if (osh != -1 && osh != -2) SetStdHandle(which, (HANDLE)osh);
+    return 0;
+}
+
+/* ipc.stdio_channel on Windows: the CRT's fd 0 and fd 1 and the Win32
+ * standard handles alike. The channel is two non-inheritable duplicates of
+ * fd 0's and fd 1's handles, as binary CRT descriptors; fd 0 and
+ * STD_INPUT_HANDLE then read NUL, fd 1 and STD_OUTPUT_HANDLE write where
+ * stderr does (NUL when there is no stderr). */
+_tuple_int_int_string ipc_stdio_channel_raw(void) {
+    if (InterlockedExchange(&ipc_stdio_claimed, 1)) {
+        return ipc_stdio_failed("ipc.stdio_channel: already claimed");
+    }
+    fflush(stdout);
+    int in = ipc_dup_private(0, _O_RDONLY);
+    if (in < 0) {
+        InterlockedExchange(&ipc_stdio_claimed, 0);
+        return ipc_stdio_failed("ipc.stdio_channel: stdin has no handle");
+    }
+    int out = ipc_dup_private(1, _O_WRONLY);
+    if (out < 0) {
+        _close(in);
+        InterlockedExchange(&ipc_stdio_claimed, 0);
+        return ipc_stdio_failed("ipc.stdio_channel: stdout has no handle");
+    }
+    HANDLE old_in = GetStdHandle(STD_INPUT_HANDLE);
+    int nul = _open("NUL", _O_RDWR | _O_BINARY | _O_NOINHERIT);
+    /* stderr: fd 2's handle, else STD_ERROR_HANDLE's, else NUL. */
+    int err = ipc_dup_private(2, _O_WRONLY);
+    if (err < 0) {
+        HANDLE h = GetStdHandle(STD_ERROR_HANDLE);
+        HANDLE dup = NULL;
+        if (h && h != INVALID_HANDLE_VALUE &&
+            DuplicateHandle(GetCurrentProcess(), h, GetCurrentProcess(), &dup, 0, FALSE,
+                            DUPLICATE_SAME_ACCESS)) {
+            err = _open_osfhandle((intptr_t)dup, _O_WRONLY | _O_BINARY);
+            if (err < 0) CloseHandle(dup);
+        }
+    }
+    const char* why = NULL;
+    if (nul < 0) {
+        why = "ipc.stdio_channel: cannot open NUL";
+    } else if (ipc_redirect(nul, 0, STD_INPUT_HANDLE) != 0) {
+        why = "ipc.stdio_channel: cannot redirect stdin";
+    } else if (ipc_redirect(err >= 0 ? err : nul, 1, STD_OUTPUT_HANDLE) != 0) {
+        why = "ipc.stdio_channel: cannot redirect stdout";
+        _dup2(in, 0);   /* put stdin back */
+        SetStdHandle(STD_INPUT_HANDLE, old_in);
+    }
+    if (nul >= 0) _close(nul);
+    if (err >= 0) _close(err);
+    if (why) {
+        _close(in);
+        _close(out);
+        InterlockedExchange(&ipc_stdio_claimed, 0);
+        return ipc_stdio_failed(why);
+    }
+    /* fd 1 keeps the text mode stdout has by default: a stray line on stderr
+     * reads as one there. */
+    _setmode(1, _O_TEXT);
+    clearerr(stdin);
+    if (ipc_env_says_stdio()) {
+        SetEnvironmentVariableW(L"AETHER_IPC_KIND", NULL);
+        _putenv("AETHER_IPC_KIND=");
+    }
+    _tuple_int_int_string r = { in, out, "" };
+    return r;
 }
 
 #endif /* AETHER_HAS_FILESYSTEM / _WIN32 */

@@ -25,8 +25,10 @@
     <li><a href="#write_frame_raw">write_frame_raw</a></li>
     <li><a href="#read_frame_raw">read_frame_raw</a></li>
     <li><a href="#wait_readable_raw">wait_readable_raw</a></li>
+    <li><a href="#stdio_channel_raw">stdio_channel_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
     <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
+    <li><a href="#stdio_channel">stdio_channel</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_close">write_close</a></li>
     <li><a href="#read">read</a></li>
@@ -192,6 +194,10 @@
       <pre class="usage"><code>wait_readable_raw(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
     </div>
+    <div class="function" id="stdio_channel_raw" data-name="stdio_channel_raw">
+      <h3 class="function-name">stdio_channel_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stdio_channel_raw() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+    </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
@@ -200,7 +206,12 @@
     <div class="function" id="parent_channel_kind" data-name="parent_channel_kind">
       <h3 class="function-name">parent_channel_kind <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel_kind() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">&quot;socket&quot; for a channel from os.run_socket (two-way, can pass descriptors), &quot;pipe&quot; for one from os.run_pipe (write-only from the child), &quot;stdio&quot; in a child of os.run_stdio (AETHER_IPC_KIND=stdio in its environment; parent_channel() is -1 there, the channel being stdin and stdout), &quot;&quot; otherwise.</p>
+      <p class="doc">&quot;socket&quot; for a channel from os.run_socket (two-way, can pass descriptors), &quot;pipe&quot; for one from os.run_pipe (write-only from the child), &quot;stdio&quot; in a child of os.run_stdio (AETHER_IPC_KIND=stdio in its environment; parent_channel() is -1 there, the channel being stdin and stdout: claim it with stdio_channel()), &quot;&quot; otherwise.</p>
+    </div>
+    <div class="function" id="stdio_channel" data-name="stdio_channel">
+      <h3 class="function-name">stdio_channel <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stdio_channel() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="doc">Claim this process's stdin and stdout as a channel, for a child that os.run_stdio (or anything else that hands it two pipes as stdin and stdout, such as a container runtime run with -i) talks frames to. Call it first thing in main. Returns (in_fd, out_fd, &quot;&quot;) on success: read frames from in_fd, write them to out_fd. (-1, -1, err) on failure, with nothing changed; a second call is &quot;ipc.stdio_channel: already claimed&quot;. It flushes stdout, moves fd 0 and fd 1 to two new close-on-exec descriptors (non-inheritable handles on Windows), the channel, then points fd 0 at the null device (/dev/null, NUL), so nothing else reads the channel's bytes (a read of stdin gets end of file at once), and fd 1 at stderr (the null device when there is none), so a later print, println, library diagnostic or panic message lands on stderr instead of in the middle of a frame. On Windows the Win32 standard handles are pointed the same way (SetStdHandle), so writers that use GetStdHandle follow too. AETHER_IPC_KIND is cleared, so the children of this process do not think they are on a channel. What it cannot mask: anything written to stdout before the call (flushed out ahead of the first frame: a child must print nothing first), bytes C stdio read ahead from stdin before the call (lost), and code that holds its own copy of fd 1 or of the old stdout handle, such as a descriptor dup'd before the call or a child process started before it, which still writes into the channel. It works whether or not os.run_stdio set AETHER_IPC_KIND (a container runtime does not pass it through).</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>

@@ -203,22 +203,53 @@ descriptor for each direction: `write_frame(to_child_fd, ...)`,
 on `from_child_fd`. There is no descriptor passing over this channel: the
 pipes carry bytes only (use `os.run_socket` for that).
 
-An Aether child does the same on fd 0 and fd 1. Anything else it prints to
-stdout lands on the channel too, so it keeps stdout for frames and logs to
-stderr:
+With the channel on stdout, anything else the child prints there lands in
+the middle of the frames, and anything else that reads stdin takes frame
+bytes. An Aether child therefore claims the pair first thing in `main`
+with `stdio_channel()`, which returns two fresh descriptors for the channel
+and then points fd 0 at the null device and fd 1 at stderr:
 
 ```aether,fragment
 import std.ipc
 
-// The child: answer each request frame on stdin, until stdin ends.
-serve() {
+// The child: answer each request frame, until the parent closes its end.
+main() {
+    inp, out, err = ipc.stdio_channel()
+    if err != "" {
+        ipc.write(2, "${err}\n")
+        exit(1)
+    }
+    println("started")   // goes to stderr, not into a frame
     while true {
-        req, err = ipc.read_frame(0, 65536)
-        if err != "" { return }
-        ipc.write_frame(1, "ok ${req}")
+        req, rerr = ipc.read_frame(inp, 65536)
+        if rerr != "" { return }
+        ipc.write_frame(out, "ok ${req}")
     }
 }
 ```
+
+`stdio_channel()` returns `(in_fd, out_fd, "")`, or `(-1, -1, err)` with
+nothing changed. It flushes stdout, moves fd 0 and fd 1 to two new
+close-on-exec descriptors (non-inheritable handles on Windows), points fd 0
+at `/dev/null` (`NUL` on Windows), so a read of stdin gets end of file at
+once, and fd 1 at stderr (the null device when there is none), so a later
+`print`, a library diagnostic or a panic message goes to stderr. On Windows
+the Win32 standard handles are pointed the same way (`SetStdHandle`), so
+code that writes through `GetStdHandle` follows too. It clears
+`AETHER_IPC_KIND`, so this process's own children do not think they are on
+the channel. A second call fails with `"ipc.stdio_channel: already
+claimed"`. It does not need `AETHER_IPC_KIND`: a container runtime does not
+pass it through, and the claim works the same.
+
+What it cannot mask:
+
+- output written to stdout **before** the call: it is flushed out ahead of
+  the first frame, where the parent reads it as a (bad) frame header. A
+  child prints nothing before it claims;
+- bytes C stdio read ahead from stdin before the call: they are lost;
+- code holding its own copy of fd 1 or of the old stdout handle (a
+  descriptor dup'd before the call, a child process started before it, a
+  library that cached the handle), which still writes into the channel.
 
 Closing `to_child_fd` with `io.fd_close` gives the child end of stream on
 its channel; `from_child_fd` reads end of stream once the child (and
@@ -277,7 +308,7 @@ bounds how many descriptors one message is looked at for.
   `read`, `write_frame` and `read_frame` are plain CRT descriptor I/O, with
   the descriptor put in binary mode (a child's fd 0 is in text mode by
   default, which would turn CR LF into LF and stop at a `0x1a` byte).
-  `os.run_stdio` works, and `wait_readable` and
+  `os.run_stdio` and `stdio_channel()` work, and `wait_readable` and
   `read_frame_timeout` work on anonymous pipes such as theirs: a CRT
   descriptor has no `poll`, so they ask the pipe how many bytes wait
   (`PeekNamedPipe`), sleeping 1 to 8 ms between asks.
