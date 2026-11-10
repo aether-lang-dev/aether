@@ -3411,6 +3411,12 @@ static const char* get_aether_link_flags(const char* c_file, unsigned* required)
                  * by the toolchain; only -lm can need re-placing there. */
                 if (tlen != 3 || strncmp(p + start, "-lm", 3) != 0) continue;
 #endif
+#ifdef __OpenBSD__
+                /* OpenBSD keeps dlopen in libc and ships no libdl: the link
+                 * fails with "unable to find library -ldl" (std.audio's row
+                 * in codegen's link table names it for every host). */
+                if (tlen == 4 && strncmp(p + start, "-ldl", 4) == 0) continue;
+#endif
                 if (tlen < sizeof(platform[0]) && nplatform < 3) {
                     memcpy(platform[nplatform], p + start, tlen);
                     platform[nplatform++][tlen] = '\0';

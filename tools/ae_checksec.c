@@ -174,7 +174,17 @@ static int inspect_elf(const unsigned char* b, size_t len, Checksec* out) {
         if (e_type == 3 && !saw_interp) out->pie = PROP_YES;
     }
     out->relro = saw_relro ? (bind_now ? PROP_YES : PROP_PARTIAL) : PROP_NO;
-    out->canary  = has_name(b, len, "__stack_chk_fail") ? PROP_YES : PROP_NO;
+    /* OpenBSD's clang does not emit the __stack_chk_fail canary for a plain
+     * stack array: it guards every return with RETGUARD, a per-function
+     * random cookie (the __retguard_N symbols) xored into the return address
+     * and checked before ret. That is its answer to the same attack, and it
+     * is what -fstack-protector builds there carry. Where the SSP check is
+     * emitted instead, its failure handler is __stack_smash_handler. A
+     * binary stripped of .symtab loses the cookies' names but keeps the
+     * handler in .dynsym. */
+    out->canary  = has_name(b, len, "__stack_chk_fail") ||
+                   has_name(b, len, "__stack_smash_handler") ||
+                   has_name(b, len, "__retguard_") ? PROP_YES : PROP_NO;
     out->fortify = has_fortified_call(b, len) ? PROP_YES : PROP_NO;
     /* .symtab is dropped by strip; .dynsym survives, so the presence of the
      * section-header string ".symtab" is the readable signal. */
