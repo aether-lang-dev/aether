@@ -72,7 +72,7 @@ pread 6 true
 crlf 6 true
 append  size 8
 wt true '
-got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" -- "$tmp" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" -- "$tmp" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] fs_open_binary_mode: output differs"
     printf '%s\n' "$got" | head -8 | sed 's/^/        /'

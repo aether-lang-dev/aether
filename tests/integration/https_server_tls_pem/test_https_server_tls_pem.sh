@@ -57,10 +57,10 @@ ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -
     -addext "keyUsage=critical,keyCertSign,cRLSign"
 ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/inter.key" -out "$TMP/inter.csr" -subj "/CN=PEM Test Intermediate"
 ssl openssl x509 -req -in "$TMP/inter.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
-    -days 2 -extfile "$TMP/ca.ext" -out "$TMP/inter.pem"
+    -days 2 -sha256 -extfile "$TMP/ca.ext" -out "$TMP/inter.pem"
 ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/leaf.key" -out "$TMP/leaf.csr" -subj "/CN=localhost"
 ssl openssl x509 -req -in "$TMP/leaf.csr" -CA "$TMP/inter.pem" -CAkey "$TMP/inter.key" -CAcreateserial \
-    -days 2 -extfile "$TMP/leaf.ext" -out "$TMP/leafonly.pem"
+    -days 2 -sha256 -extfile "$TMP/leaf.ext" -out "$TMP/leafonly.pem"
 cat "$TMP/leafonly.pem" "$TMP/inter.pem" >"$TMP/chain.pem"
 ssl openssl verify -CAfile "$TMP/root.pem" -untrusted "$TMP/inter.pem" "$TMP/leafonly.pem"
 ssl openssl pkey -in "$TMP/leaf.key" -aes256 -passout pass:secret -out "$TMP/enc.key"
@@ -104,7 +104,7 @@ start_server() {
     PIDS="$PIDS $spid"
     i=0
     while [ "$i" -lt 300 ]; do
-        grep -q 'READY\|FAIL' "$log" 2>/dev/null && break
+        grep -q -E 'READY|FAIL' "$log" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done

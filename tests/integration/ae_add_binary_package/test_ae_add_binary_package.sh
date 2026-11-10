@@ -31,6 +31,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
 
@@ -43,9 +44,7 @@ case "$(uname -s)" in
     *) command -v curl >/dev/null 2>&1 ||
            { echo "  [SKIP] ae_add_binary_package: curl needed for the file:// forge"; exit 0; } ;;
 esac
-if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
-elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
-else echo "  [SKIP] ae_add_binary_package: no sha256 tool"; exit 0; fi
+SHA=sha256_of
 
 # The binary-package path is per-host-triple; on a host we can't name a triple
 # for, ae_host_triple() returns NULL and everything correctly falls to git.
@@ -107,7 +106,7 @@ mk_binpkg() {
     asset="$STEM-$tag-$TRIPLE$EXT"
     # A small but real binary payload (not a real dlopen target — this test
     # exercises ae add's FETCH + INSTALL, not loading).
-    head -c 4096 /dev/urandom > "$d/$asset"
+    head_c 4096 /dev/urandom > "$d/$asset"
     if [ "$mode" = "badsum" ]; then
         echo "0000000000000000000000000000000000000000000000000000000000000000  $asset" > "$d/$asset.sha256"
     elif [ "$mode" = "nosum" ]; then
@@ -122,7 +121,7 @@ mk_binpkg() {
         *)            FT="linux-x86_64";  FEXT=".so" ;;
     esac
     fasset="$STEM-$tag-$FT$FEXT"
-    head -c 4096 /dev/urandom > "$d/$fasset"
+    head_c 4096 /dev/urandom > "$d/$fasset"
     ( cd "$d" && $SHA "$fasset" | awk -v n="$fasset" '{print $1"  "n}' > "$fasset.sha256" )
 }
 mk_binpkg v1.0.0 ok

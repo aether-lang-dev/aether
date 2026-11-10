@@ -39,7 +39,7 @@ depths=""
 # The deepest ( [ { of a C file outside literals, comments and directives,
 # with the sequence macros spelled as a GCC-compatible compiler has them.
 c_depth() {
-    awk 'BEGIN { d = 0; m = 0; com = 0 }
+    LC_ALL=C awk 'BEGIN { d = 0; m = 0; com = 0 }
          /^[ \t]*#/ { next }
          { gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
            n = length($0); str = 0

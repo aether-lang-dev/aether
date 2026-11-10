@@ -100,7 +100,7 @@ masks -1 0 true
 splat 0 -1 true
 f64mask 0 -1 true false 4.5
 unary -1 0 -1 -4 -8'
-got="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] lane_types: program output differs"
     printf '%s\n' "$got" | head -10 | sed 's/^/        /'

@@ -36,7 +36,7 @@ if [ $rc -eq 0 ]; then
 elif [ "$first" != "$want" ] || [ "$at" != "2:12" ]; then
     echo "  [FAIL] missing: expected '$want' at 2:12, got '$first' at $at"
     fail=1
-elif printf '%s\n' "$out" | grep -a -q '#error\|^error: select'; then
+elif printf '%s\n' "$out" | grep -a -q -E '#error|^error: select'; then
     echo "  [FAIL] missing: the build went on to C:"
     printf '%s\n' "$out" | sed 's/^/        /' | head -8
     fail=1

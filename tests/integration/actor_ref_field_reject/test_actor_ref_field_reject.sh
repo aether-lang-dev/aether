@@ -24,7 +24,7 @@ refused() {
         fail "aetherc accepted $1" "$TMPDIR/err.log"
     fi
     grep -q "$2" "$TMPDIR/err.log" || fail "$1: no error containing '$2'" "$TMPDIR/err.log"
-    if grep -q "request for member\|not a structure or union" "$TMPDIR/err.log"; then
+    if grep -q -E "request for member|not a structure or union" "$TMPDIR/err.log"; then
         fail "$1 reached the C compiler" "$TMPDIR/err.log"
     fi
 }

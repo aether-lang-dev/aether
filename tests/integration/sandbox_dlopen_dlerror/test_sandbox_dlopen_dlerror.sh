@@ -20,6 +20,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 LIB="$ROOT/build/libaether_sandbox.so"
 
 case "$(uname -s 2>/dev/null)" in
@@ -36,7 +37,7 @@ fi
 TMP="$(cd "$(mktemp -d)" && pwd -P)"
 trap 'rm -rf "$TMP"' EXIT
 if ! ${CC:-cc} -std=c11 -Wall -Wextra -Werror \
-        "$SCRIPT_DIR/probe.c" -o "$TMP/probe" -ldl -pthread; then
+        "$SCRIPT_DIR/probe.c" -o "$TMP/probe" $AE_DL_LIBS -pthread; then
     echo "  [FAIL] sandbox_dlopen_dlerror: probe did not compile"
     exit 1
 fi

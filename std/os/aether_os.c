@@ -1551,18 +1551,31 @@ static struct {
     int open; dev_t dev; ino_t ino;
 #ifdef AETHER_STD_STREAM_MADE
     struct timespec made;
+    int cloexec;   /* close-on-exec when the process started */
 #endif
 } aether_std_stream[3];
 
-/* Whether `st` is the file stream `fd` was at the start. */
-static int aether_std_stream_same(int fd, const struct stat* st) {
+/* Whether `st` is the file stream `fd` was at the start. `fl` is the
+ * descriptor's flags now, and the caller only asks about a close-on-exec one. */
+static int aether_std_stream_same(int fd, const struct stat* st, int fl) {
+    (void)fl;
     if (st->st_dev != aether_std_stream[fd].dev || st->st_ino != aether_std_stream[fd].ino)
         return 0;
 #ifdef AETHER_STD_STREAM_MADE
-    if (st->st_dev == 0 && st->st_ino == 0 &&
-        (AETHER_STD_STREAM_MADE(st).tv_sec != aether_std_stream[fd].made.tv_sec ||
-         AETHER_STD_STREAM_MADE(st).tv_nsec != aether_std_stream[fd].made.tv_nsec))
-        return 0;
+    if (st->st_dev == 0 && st->st_ino == 0) {
+        if (AETHER_STD_STREAM_MADE(st).tv_sec != aether_std_stream[fd].made.tv_sec ||
+            AETHER_STD_STREAM_MADE(st).tv_nsec != aether_std_stream[fd].made.tv_nsec)
+            return 0;
+        /* The pipe's time is the kernel's coarse clock (10 ms on OpenBSD),
+         * so two pipes made within a tick report the same one: a spawn pipe
+         * that took the number of a closed stdout a few milliseconds after
+         * the process started looked like the stream itself. Of the two
+         * that cannot be told apart, only one is close-on-exec if the
+         * stream was not when the process started: the parent that marks its
+         * streams (Node) has done so before this library loads. */
+        if ((fl & FD_CLOEXEC) && !aether_std_stream[fd].cloexec)
+            return 0;
+    }
 #endif
     return 1;
 }
@@ -1577,6 +1590,7 @@ static void aether_record_std_streams(void) {
         aether_std_stream[fd].ino = st.st_ino;
 #ifdef AETHER_STD_STREAM_MADE
         aether_std_stream[fd].made = AETHER_STD_STREAM_MADE(&st);
+        aether_std_stream[fd].cloexec = (fcntl(fd, F_GETFD) & FD_CLOEXEC) != 0;
 #endif
     }
 }
@@ -1587,7 +1601,7 @@ static void aether_child_keep_stdio(void) {
         int fl = fcntl(fd, F_GETFD);
         if (fl < 0 || !(fl & FD_CLOEXEC) || !aether_std_stream[fd].open) continue;
         struct stat st;
-        if (fstat(fd, &st) != 0 || !aether_std_stream_same(fd, &st))
+        if (fstat(fd, &st) != 0 || !aether_std_stream_same(fd, &st, fl))
             continue;
         fcntl(fd, F_SETFD, fl & ~FD_CLOEXEC);
     }

@@ -33,6 +33,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
@@ -112,9 +113,9 @@ fi
 # string-interpolation builder may produce different lengths under
 # different builds; the prefix check is enough to prove the
 # pipeline worked end-to-end.
-if ! gunzip -c "$BODY_GZ" | head -c 36 | grep -q '^abcdefghijklmnopqrstuvwxyz0123456789$'; then
+if ! gunzip -c "$BODY_GZ" | head_c 36 | grep -q '^abcdefghijklmnopqrstuvwxyz0123456789$'; then
     echo "  [FAIL] decompressed body prefix mismatch:"
-    gunzip -c "$BODY_GZ" 2>&1 | head -c 100; echo
+    gunzip -c "$BODY_GZ" 2>&1 | head_c 100; echo
     exit 1
 fi
 

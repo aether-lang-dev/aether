@@ -26,7 +26,7 @@ log="$tmpdir/cc.log"
 if ! grep -q '^error' "$log"; then
     echo "  [FAIL] leading-|| condition reported no error"
     fail=1
-elif ! grep -qi "closure parameters" "$log" || ! grep -qi "previous line\|parenthesise\|wrapped condition" "$log"; then
+elif ! grep -qi "closure parameters" "$log" || ! grep -Eqi "previous line|parenthesise|wrapped condition" "$log"; then
     echo "  [FAIL] leading-|| error doesn't explain the wrapped-condition cause + fix"
     echo "        got:"; sed 's/^/          /' "$log" | head -4
     fail=1

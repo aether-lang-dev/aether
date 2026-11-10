@@ -46,7 +46,7 @@ for h in $HEADERS; do
             "$TMP/$name.c" > "$TMP/$name.log" 2>&1; then
         echo "  [PASS] $h compiles under -std=c11 -pedantic -Werror"
     else
-        grep -v "In file included\|^ *from " "$TMP/$name.log" | sed 's/^/          /' | head -10
+        grep -v -E "In file included|^ *from " "$TMP/$name.log" | sed 's/^/          /' | head -10
         echo "  [FAIL] $h does not compile under -std=c11 -pedantic -Werror"
         fail=1
     fi

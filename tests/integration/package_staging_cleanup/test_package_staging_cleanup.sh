@@ -11,6 +11,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -104,7 +105,7 @@ case "$(uname -s)" in
             seg=$((room - 1))
             [ "$seg" -gt 200 ] && seg=200
             [ $((room - seg - 1)) -eq 1 ] && seg=$((seg - 1))
-            long="$long/$(head -c "$seg" /dev/zero | tr '\0' d)"
+            long="$long/$(head_c "$seg" /dev/zero | tr '\0' d)"
         done
         if [ ${#long} -ne 1023 ] || ! mkdir -p "$long" 2>/dev/null; then
             echo "  [SKIP] long temp path: cannot make a 1023-byte directory here"

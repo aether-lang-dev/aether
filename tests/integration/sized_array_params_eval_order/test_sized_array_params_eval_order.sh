@@ -30,7 +30,7 @@ export AETHER_HOME="$ROOT"
 fail=0
 
 run_want() {  # file, want, label
-    got="$("$AE" run "$1" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+    got="$("$AE" run "$1" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
     if [ "$got" != "$2" ]; then
         echo "  [FAIL] sized_array_params_eval_order: $3"
         printf 'got:\n%s\nwant:\n%s\n' "$got" "$2" | sed 's/^/        /'

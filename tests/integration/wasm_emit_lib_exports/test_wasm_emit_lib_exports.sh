@@ -28,6 +28,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 SRC="$SCRIPT_DIR/mylib.ae"
 READ="$SCRIPT_DIR/read_exports.py"
@@ -60,9 +61,9 @@ if ! "$AE" build --target=wasm32-wasi --emit=lib "$SRC" -o "$TMP/all.wasm" \
     cat "$TMP/log"
     fail "--target=wasm32-wasi --emit=lib was rejected"
 fi
-case "$(file "$TMP/all.wasm")" in
+case "$(file_desc "$TMP/all.wasm")" in
     *WebAssembly*) ;;
-    *) fail "output is not a wasm module: $(file "$TMP/all.wasm")" ;;
+    *) fail "output is not a wasm module: $(file_desc "$TMP/all.wasm")" ;;
 esac
 
 python3 "$READ" "$TMP/all.wasm" > "$TMP/all.txt" || fail "could not read the export section"

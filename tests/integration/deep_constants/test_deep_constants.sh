@@ -70,14 +70,22 @@ case "$got" in
 esac
 
 AETHER_HOME="$ROOT" "$AETHERC" "$WORK/consts.ae" "$WORK/consts.c" >/dev/null 2>&1
-d="$(awk 'BEGIN { d = 0; m = 0 }
+# LC_ALL=C: under a UTF-8 locale gawk's substr counts characters from the
+# start of the line on every call, so this walk is quadratic in a line, and
+# consts.c has lines of 245 KB: 361 s of the test on the win11 lab host and
+# 292 s on CI's Windows runner, against 6 s in the C locale. The walk only
+# compares ASCII, which a UTF-8 multibyte character never contains.
+d="$(LC_ALL=C awk 'BEGIN { d = 0; m = 0 }
           /^[ \t]*#/ { next }
           { gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
-            n = length($0); str = 0
+            # One split, not a substr($0, i, 1) per character: the awk of OpenBSD
+            # rescans the line from its start on every substr, so a long line
+            # (these hold 1000-link chains) took six minutes to scan there.
+            n = split($0, ch, ""); str = 0
             for (i = 1; i <= n; i++) {
-                c = substr($0, i, 1)
+                c = ch[i]
                 if (str) { if (c == "\\") { i++; continue } if (c == q) str = 0; continue }
-                if (c == "/" && substr($0, i + 1, 1) == "/") break
+                if (c == "/" && ch[i + 1] == "/") break
                 if (c == "\"" || c == "\047") { str = 1; q = c; continue }
                 if (c == "(" || c == "[" || c == "{") { d++; if (d > m) m = d }
                 else if (c == ")" || c == "]" || c == "}") d--

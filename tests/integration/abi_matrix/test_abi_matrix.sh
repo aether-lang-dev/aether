@@ -41,6 +41,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 CC="${CC:-cc}"
 export AETHER_STACK_TRACE=0
@@ -269,7 +270,7 @@ preflight: refused, the library was made for Aether runtime "*) ;;
             esac
             if (cd "$TMP/oldsh" && cp "$SCRIPT_DIR/app.ae" . && AETHER_HOME="$ROOT" "$AE" build app.ae -o app > app_build.log 2>&1); then
                 bad "this importer took the $old_version shared-runtime library"
-            elif ! grep -q "host ABI level 0\|was made for the Aether runtime" "$TMP/oldsh/app_build.log"; then
+            elif ! grep -q -E "host ABI level 0|was made for the Aether runtime" "$TMP/oldsh/app_build.log"; then
                 bad "this importer's refusal of the $old_version shared-runtime library says why" "$TMP/oldsh/app_build.log"
                 grep -A2 '^note: .* could not be loaded' "$TMP/oldsh/app_build.log" | sed 's/^/        /'
             fi

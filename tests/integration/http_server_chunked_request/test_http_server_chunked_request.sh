@@ -14,6 +14,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 PORT=18407
@@ -149,7 +150,7 @@ expect_400 "a Content-Length that is not a number" \
 # into a 256 byte buffer and parsed what fit, so 300 zeros and a 5 read as an
 # empty body here and as five bytes to anything reading the whole value. More
 # digits than any length this server takes is refused, padding or not.
-ZEROS=$(head -c 300 /dev/zero | tr '\0' '0')
+ZEROS=$(head_c 300 /dev/zero | tr '\0' '0')
 expect_400 "a Content-Length of 300 zeros and a 5" \
     "POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: ${ZEROS}5\r\nConnection: close\r\n\r\nhello"
 
@@ -198,13 +199,13 @@ expect_400 "an obs-fold continuation line" \
 # over-long one used to be copied in anyway, off the end of the stack frame,
 # which any client could reach with a long URL or a long header value. The
 # assertion is as much that the server is still answering afterwards.
-LONG_PATH=$(head -c 5000 /dev/zero | tr '\0' 'A')
+LONG_PATH=$(head_c 5000 /dev/zero | tr '\0' 'A')
 printf 'GET /%s HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n' "$LONG_PATH" > "$TMPDIR/longline.req"
 send "$TMPDIR/longline.req" "$TMPDIR/longline.out"
 grep -q "^HTTP/1.1 414" "$TMPDIR/longline.out" \
     || { head -2 "$TMPDIR/longline.out"; fail "an over-long request line was not answered 414"; }
 
-LONG_HDR=$(head -c 3000 /dev/zero | tr '\0' 'B')
+LONG_HDR=$(head_c 3000 /dev/zero | tr '\0' 'B')
 printf 'GET /upload HTTP/1.1\r\nHost: x\r\nX-Long: %s\r\nConnection: close\r\n\r\n' "$LONG_HDR" > "$TMPDIR/longhdr.req"
 send "$TMPDIR/longhdr.req" "$TMPDIR/longhdr.out"
 grep -q "^HTTP/1.1 431" "$TMPDIR/longhdr.out" \

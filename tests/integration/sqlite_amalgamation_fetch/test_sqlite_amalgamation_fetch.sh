@@ -16,6 +16,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 FETCH="$ROOT/scripts/fetch-sqlite-amalgamation.sh"
 
 command -v curl >/dev/null 2>&1 || { echo "  [SKIP] sqlite_amalgamation_fetch: needs curl for file:// URLs"; exit 0; }
@@ -40,7 +41,7 @@ with zipfile.ZipFile(sys.argv[1], "w") as z:
         z.writestr("sqlite-amalgamation-9990000/" + name, "/* fixture " + name + " */\n")
 PY
 }
-sha() { if command -v sha256sum >/dev/null 2>&1; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
+sha() { sha256_of "$1"; }
 lock() {  # lock URL SHA
     printf 'SQLITE_VERSION=9.99.0\nSQLITE_URL=%s\nSQLITE_SHA256=%s\nSQLITE_CFLAGS="-DX"\n' "$1" "$2" > "$T/lock"
 }

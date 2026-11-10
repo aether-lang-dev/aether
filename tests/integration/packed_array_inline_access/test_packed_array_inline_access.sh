@@ -140,7 +140,7 @@ main() {
 }
 AE
 
-out="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+out="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 for want in "same true" "int 42"; do
     if ! printf '%s\n' "$out" | grep -q "^$want$"; then
         echo "  [FAIL] packed_array_inline_access: expected '$want'"

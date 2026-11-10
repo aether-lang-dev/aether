@@ -52,7 +52,7 @@ main() {
 }
 AE
 
-got="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$" | tr '\n' ' ')"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$" | tr '\n' ' ')"
 if [ "$got" != "float-exact true 14 1 0.05 0.2 2.15 0.4 0.05 -0.05 0.05 -0.05 true " ]; then
     echo "  [FAIL] f32_arithmetic: program output (got '$got')"
     fail=1

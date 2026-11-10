@@ -117,7 +117,7 @@ if [ "$large" -ge $(( small * 24 )) ]; then
     exit 1
 fi
 # The read of q.n comes first, ahead of the call that writes it.
-if ! grep -q "_eo[0-9]* = \|_AE_SEQ_LET" "$TMPDIR/chain16000.c"; then
+if ! grep -q -E "_eo[0-9]* = |_AE_SEQ_LET" "$TMPDIR/chain16000.c"; then
     echo "  [FAIL] order_effects_scaling: q.n is not evaluated ahead of f0(p, 3)"
     exit 1
 fi

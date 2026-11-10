@@ -27,6 +27,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ] && [ ! -x "$AE.exe" ]; then
@@ -34,7 +35,7 @@ if [ ! -x "$AE" ] && [ ! -x "$AE.exe" ]; then
     exit 0
 fi
 
-LDL="-ldl"
+LDL="$AE_DL_LIBS"
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll"; LDL="" ;;

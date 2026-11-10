@@ -59,7 +59,7 @@ runs matches "matches 0"
 
 # The deepest ( [ { of the C of the matches, outside literals and comments.
 AETHER_HOME="$ROOT" "$AETHERC" "$WORK/matches.ae" "$WORK/matches.c" >/dev/null 2>&1
-d="$(awk 'BEGIN { d = 0; m = 0 }
+d="$(LC_ALL=C awk 'BEGIN { d = 0; m = 0 }
           /^[ \t]*#/ { next }
           { n = length($0); str = 0
             for (i = 1; i <= n; i++) {

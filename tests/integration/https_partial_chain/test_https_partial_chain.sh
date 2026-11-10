@@ -30,6 +30,11 @@ NAME=https_partial_chain
 
 [ -x "$AE" ] || { echo "  [SKIP] $NAME: ae not built"; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] $NAME: no openssl to make certificates"; exit 0; }
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+if ! openssl_has_option s_server -cert_chain; then
+    echo "  [SKIP] $NAME: $(openssl version) s_server has no -cert_chain to send an intermediate"
+    exit 0
+fi
 
 unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
 

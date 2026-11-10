@@ -5,6 +5,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s 2>/dev/null)" in
     Linux|FreeBSD) ;;
@@ -29,7 +30,7 @@ if ! ${CC:-cc} -o "$TMP/harness" "$SCRIPT_DIR/harness.c" \
         -lpthread -lm 2>"$TMP/cc.err"; then
     if ! ${CC:-cc} -o "$TMP/harness" "$SCRIPT_DIR/harness.c" \
             "$ROOT/build/libaether.a" -Wl,--wrap=aether_fork \
-            -lpthread -ldl -lm -lrt -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
+            -lpthread $AE_DL_LIBS -lm $AE_RT_LIBS -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
         echo "  [FAIL] could not link the concurrent spawn harness"
         sed 's/^/          /' "$TMP/cc.err" | head -8
         exit 1

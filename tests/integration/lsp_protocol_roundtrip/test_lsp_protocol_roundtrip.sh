@@ -13,6 +13,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 LSP="$ROOT/build/aether-lsp"
 [ -x "$LSP" ] || LSP="$ROOT/build/aether-lsp.exe"
 if [ ! -x "$LSP" ]; then
@@ -60,18 +61,18 @@ fi
 # what makes the declared length exact.
 first_len="$(tr -d '\r' < "$tmp/out.bin" | sed -n '1s/^Content-Length: \([0-9]*\)$/\1/p')"
 line3="$(tr -d '\r' < "$tmp/out.bin" | sed -n '3p')"
-first_body="$(printf '%s' "$line3" | head -c "${first_len:-0}")"
+first_body="$(printf '%s' "$line3" | head_c "${first_len:-0}")"
 rest="$(printf '%s' "$line3" | tail -c +"$((${first_len:-0} + 1))")"
 case "$rest" in
     ""|Content-Length:*) ;;
     *) echo "  [FAIL] lsp_protocol_roundtrip: the first message's Content-Length ($first_len) does not match its body"
-       printf '%s\n' "$rest" | head -c 80 | sed 's/^/        /'; echo
+       printf '%s\n' "$rest" | head_c 80 | sed 's/^/        /'; echo
        fail=1 ;;
 esac
 
 if ! printf '%s' "$first_body" | grep -q '"id":1,"result":{"capabilities"'; then
     echo "  [FAIL] lsp_protocol_roundtrip: initialize was not answered with capabilities"
-    printf '%s\n' "$first_body" | head -c 200 | sed 's/^/        /'; echo
+    printf '%s\n' "$first_body" | head_c 200 | sed 's/^/        /'; echo
     fail=1
 fi
 if ! grep -q 'textDocument/publishDiagnostics' "$tmp/out.bin"; then

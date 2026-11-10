@@ -112,7 +112,7 @@ holds_none() {
     case "$b" in
         *aether_unwind_track*|*aether_slice_release*|*aether_slice_set*)
             echo "  [FAIL] $1: a local of views of uncounted memory holds a reference"
-            echo "$b" | grep -n "aether_unwind_track\|aether_slice_release\|aether_slice_set" |
+            echo "$b" | grep -n -E "aether_unwind_track|aether_slice_release|aether_slice_set" |
                 sed 's/^/        /'
             fails=$((fails + 1)) ;;
     esac

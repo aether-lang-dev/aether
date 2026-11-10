@@ -11,6 +11,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AETHERC="$ROOT/build/aetherc"
 [ -f "$AETHERC.exe" ] && AETHERC="$AETHERC.exe"
 EXE=""
@@ -187,7 +188,7 @@ if grep -q "not using .*/md2.aea: source changed since the artifact was built" "
 else bad "edited source not detected"; cat "$T/edit_trace.txt"; fi
 
 # 6. A damaged artifact is ignored, not trusted.
-head -c 200 "$MODS/std/cryptography/sha3.aea" > "$T/short.aea"
+head_c 200 "$MODS/std/cryptography/sha3.aea" > "$T/short.aea"
 cp "$T/short.aea" "$MODS/std/cryptography/sha3.aea"
 aec_trace app.ae "$T/damaged.c" 2>"$T/dmg_trace.txt"
 from_source app.ae "$T/damaged_src.c" 2>/dev/null

@@ -75,7 +75,7 @@ idle 0
 echo:hi|nodelay=true
 bad true listen failed
 nullport -1 nullpoll -1'
-got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] tcp_listen_on: output differs"
     printf '%s\n' "$got" | head -8 | sed 's/^/        /'

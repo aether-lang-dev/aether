@@ -14,6 +14,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AETHERC="$ROOT/build/aetherc"
 
 if [ ! -x "$AETHERC" ]; then
@@ -89,7 +90,7 @@ INC=$(find "$PREFIX/include/aether" -type d 2>/dev/null | sed 's|^|-I|' | tr '\n
 ${CC:-cc} -O2 -Wall -Wextra -Werror $INC \
     "$tmpdir/positive.c" "$tmpdir/helper.c" \
     -L"$PREFIX/lib/aether" -laether \
-    -pthread -lm -ldl \
+    -pthread -lm $AE_DL_LIBS \
     -o "$tmpdir/positive" >/dev/null 2>"$tmpdir/link.err" || {
     echo "  [FAIL] positive case link failed"
     head -3 "$tmpdir/link.err"

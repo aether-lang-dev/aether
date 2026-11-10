@@ -62,9 +62,26 @@ cleanup() {
 trap cleanup EXIT
 fail() { echo "  [FAIL] $NAME: $1"; exit 1; }
 
+# The seven programs build at once, and at -O0 (--quick): each is the whole
+# pure TLS stack in one C file, which GCC on Windows took 18-23 s to compile
+# at -O2 (2-4 s on macOS), so the builds alone came to 168 s of the test's
+# 440 on the win11 lab host, and to past the sweep's 420 s limit under its
+# load. At -O0 they take 7-9 s each there, and the cases, which check what
+# goes over the wire, run in the same time (about 1 s a handshake).
+bpids=""
 for p in peer client server rawclient peerclient kuclient kuserver; do
-    "$AE" build "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 \
-        || { sed -n '1,12p' "$TMP/b_$p.log"; fail "$p did not build"; }
+    "$AE" build --quick "$SCRIPT_DIR/$p.ae" -o "$TMP/$p" >"$TMP/b_$p.log" 2>&1 &
+    bpids="$bpids $p:$!"
+done
+# Every build is waited for before one that failed ends the test, so none
+# is left writing into $TMP as the trap removes it.
+bfail=""
+for bp in $bpids; do
+    wait "${bp#*:}" || bfail="$bfail ${bp%%:*}"
+done
+for p in $bfail; do
+    sed -n '1,12p' "$TMP/b_$p.log"
+    fail "$p did not build"
 done
 
 fails=0

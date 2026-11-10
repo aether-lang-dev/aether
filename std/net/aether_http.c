@@ -539,7 +539,26 @@ static SSL_CTX* get_ssl_ctx(void) {
 #else
     // Linux/macOS: the system trust store lives at the path OpenSSL was
     // compiled with — /etc/ssl/certs and the macOS keychain bridge.
+#ifdef LIBRESSL_VERSION_NUMBER
+    // LibreSSL (OpenBSD's libcrypto) does not read SSL_CERT_FILE or
+    // SSL_CERT_DIR in SSL_CTX_set_default_verify_paths, where OpenSSL does and
+    // the pure-Aether client does. Name them here, with the same rule: when
+    // either is set it is the whole store, and one that cannot be loaded
+    // leaves no anchors, so the handshake fails closed.
+    const char* env_file = getenv("SSL_CERT_FILE");
+    const char* env_dir = getenv("SSL_CERT_DIR");
+    if (env_file && !env_file[0]) env_file = NULL;
+    if (env_dir && !env_dir[0]) env_dir = NULL;
+    if (env_file || env_dir) {
+        if (env_file) SSL_CTX_load_verify_locations(ctx, env_file, NULL);
+        if (env_dir) SSL_CTX_load_verify_locations(ctx, NULL, env_dir);
+        ERR_clear_error();
+    } else {
+        SSL_CTX_set_default_verify_paths(ctx);
+    }
+#else
     SSL_CTX_set_default_verify_paths(ctx);
+#endif
 #endif
 
     SSL_CTX* expected = NULL;

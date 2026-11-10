@@ -246,7 +246,7 @@ if command -v openssl >/dev/null 2>&1 && openssl s_server -help 2>&1 | grep -q -
            grep -q ACCEPTED "$TMP/server.out"; then
             echo "    ok: $sc_name"
         else
-            echo "    FAIL: $sc_name: server said [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'peer sig\|temp key\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+            echo "    FAIL: $sc_name: server said [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i -E 'peer sig|temp key|alert|error' "$TMP/c.log" | tr '\n' '|')]"
             fails=$((fails + 1))
         fi
     }

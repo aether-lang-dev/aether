@@ -86,8 +86,8 @@ for src in main.c main_nogcc.c; do
         sed 's/^/    /' "$tmp/cc.log" | head -20
         fail "$src does not compile"
     fi
-    if grep -qi "discards\|volatile" "$tmp/cc.log"; then
-        grep -i "discards\|volatile" "$tmp/cc.log" | sed 's/^/    /' | head -10
+    if grep -qi -E "discards|volatile" "$tmp/cc.log"; then
+        grep -i -E "discards|volatile" "$tmp/cc.log" | sed 's/^/    /' | head -10
         fail "$src: a volatile array is passed where a plain one is expected"
     fi
 done

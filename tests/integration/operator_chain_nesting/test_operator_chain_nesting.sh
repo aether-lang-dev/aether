@@ -55,7 +55,7 @@ if [ "$got" != "$want" ]; then
 fi
 
 max_depth() {
-    awk '{ d = 0; m = 0
+    LC_ALL=C awk '{ d = 0; m = 0
            for (i = 1; i <= length($0); i++) {
                c = substr($0, i, 1)
                if (c == "(") d++
@@ -122,10 +122,13 @@ fi
 # A substr() a character on the whole line is quadratic in FreeBSD's awk,
 # whose substr and length count UTF-8 characters from the start each call:
 # the 1000-link lines took this test past the sweep's 420 s limit there.
+# The brackets are kept by sed and tr, not by an awk gsub: MSYS2's gawk
+# 5.4.0 took 32 s for gsub(/[^][(){}]/, "") on one 150 KB line (0.4 s in
+# 5.4.1), seven such lines, and the test ran 262 s alone on Windows and past
+# the 420 s limit under the sweep's load.
 max_seq_depth() {
-    LC_ALL=C awk '{ gsub(/_AE_SEQ_OPEN/, "({"); gsub(/_AE_SEQ_CLOSE/, "; })")
-           gsub(/[^][(){}]/, "")
-           n = split($0, ch, "")
+    sed 's/_AE_SEQ_OPEN/({/g; s/_AE_SEQ_CLOSE/; })/g' | LC_ALL=C tr -cd '()[]{}\n' |
+        LC_ALL=C awk '{ n = split($0, ch, "")
            d = 0; m = 0
            for (i = 1; i <= n; i++) {
                c = ch[i]

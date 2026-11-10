@@ -126,7 +126,7 @@ main() {
 }
 AE
 want="5 18446744073709551615 5000000000 -3 5 250"
-got="$("$AE" run main.ae 2>&1 | tr -d '\r' | grep -v "^warning\|^hint\|^ *-->\|^ *[0-9]* |\|^ *|\|^$")"
+got="$("$AE" run main.ae 2>&1 | tr -d '\r' | grep -v -E "^warning|^hint|^ *-->|^ *[0-9]* [|]|^ *[|]|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] written_type_sibling_branch: a value the written type holds"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

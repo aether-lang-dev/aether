@@ -9,6 +9,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -27,7 +28,7 @@ if ! ${CC:-cc} -o "$tmpdir/harness" "$SCRIPT_DIR/harness.c" \
         "$ROOT/build/libaether.a" -lpthread -lm 2>"$tmpdir/cc.err"; then
     # The runtime links more libraries on some platforms; try the full set.
     if ! ${CC:-cc} -o "$tmpdir/harness" "$SCRIPT_DIR/harness.c" \
-            "$ROOT/build/libaether.a" -lpthread -ldl -lm -lz -lssl -lcrypto 2>"$tmpdir/cc.err"; then
+            "$ROOT/build/libaether.a" -lpthread $AE_DL_LIBS -lm -lz -lssl -lcrypto 2>"$tmpdir/cc.err"; then
         echo "  [FAIL] could not link the harness against libaether.a"
         sed 's/^/          /' "$tmpdir/cc.err" | head -8
         exit 1

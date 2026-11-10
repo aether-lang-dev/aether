@@ -69,7 +69,7 @@ AE
 
 want="v 30
 hops 3 3"
-got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] actor_state_ref_name_not_type: wrong output"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'
@@ -172,7 +172,7 @@ main() {
     println("hits ${s.hits} ${t.hits} tally ${m} greeted ${gh} ${hh}")
 }
 AE
-got="$("$AE" run "$tmp/uses.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/uses.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "hits 10 2 tally 42 greeted 1 1" ]; then
     echo "  [FAIL] actor_state_ref_name_not_type: a reference field used from outside the actor"
     printf 'got:\n%s\nwant:\nhits 10 2 tally 42 greeted 1 1\n' "$got" | sed 's/^/        /'

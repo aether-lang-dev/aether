@@ -22,6 +22,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] sqlite_vendored_cross: ae not built"; exit 0; }
 command -v zig >/dev/null 2>&1 || { echo "  [SKIP] sqlite_vendored_cross: zig not on PATH (scripts/get-zig.sh)"; exit 0; }
@@ -42,7 +43,7 @@ HOST_ARCH="$(uname -m)"
 
 fail() {
     echo "  [FAIL] sqlite_vendored_cross: $1"
-    [ -n "${2:-}" ] && printf '%s\n' "$2" | grep -vE '^\s*$' | tail -12 | sed 's/^/    /'
+    [ -n "${2:-}" ] && printf '%s\n' "$2" | grep -vE '^[[:space:]]*$' | tail -12 | sed 's/^/    /'
     exit 1
 }
 
@@ -82,8 +83,12 @@ for target in $TARGETS; do
 
     cold=1
     ls "$AETHER_CACHE_DIR" | grep -q "^sqlite3-$target-.*\.o$" && cold=0
-    FIRST=$(cd "$T" && "$AE" build --target="$target" version.ae -o "version-$target" 2>&1) \
-        || fail "version.ae did not build for $target" "$FIRST"
+    FIRST=$(cd "$T" && "$AE" build --target="$target" version.ae -o "version-$target" 2>&1) || {
+        case "$FIRST" in
+            *"sub-compilation of musl libc.a failed"*)
+                echo "  [SKIP] sqlite_vendored_cross: zig cannot build musl libc.a on this host"; exit 0 ;;
+        esac
+        fail "version.ae did not build for $target" "$FIRST"; }
     if [ "$cold" = 1 ]; then
         case "$FIRST" in *"Compiling SQLite for $target"*) ;;
             *) fail "a cold cache did not compile SQLite for $target" "$FIRST" ;; esac
@@ -97,7 +102,7 @@ for target in $TARGETS; do
     case "$SPEC_OUT" in *"Compiling SQLite"*) fail "a warm cache recompiled SQLite for $target" "$SPEC_OUT" ;; esac
 
     if command -v file >/dev/null 2>&1; then
-        desc="$(file -b "$T/version-$target")"
+        desc="$(file_desc "$T/version-$target")"
         printf '%s' "$desc" | grep -q "$want_file" || fail "$target binary has the wrong arch" "$desc"
         printf '%s' "$desc" | grep -q "statically linked" || fail "$target binary is not static" "$desc"
     fi

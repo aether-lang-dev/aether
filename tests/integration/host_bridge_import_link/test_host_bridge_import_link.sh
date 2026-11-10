@@ -103,7 +103,7 @@ elif ! grep -q "libaether_host_definitelynothere.a" "$tmpdir/c.log"; then
     echo "  [FAIL] host_bridge_import_link C: error did not name the missing .a"
     sed 's/^/    /' "$tmpdir/c.log" | head -5
     fail=1
-elif ! grep -q "make contrib\|install-contrib" "$tmpdir/c.log"; then
+elif ! grep -q -E "make contrib|install-contrib" "$tmpdir/c.log"; then
     echo "  [FAIL] host_bridge_import_link C: error did not point at remediation"
     sed 's/^/    /' "$tmpdir/c.log" | head -5
     fail=1

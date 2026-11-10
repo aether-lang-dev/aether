@@ -8,6 +8,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 # The host loads the library by path: dlopen (-ldl on Linux), or
 # LoadLibrary on Windows.
@@ -15,7 +16,7 @@ LDL=""
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll" ;;
     Darwin) LIB_EXT=".dylib" ;;
-    *)      LIB_EXT=".so"; LDL="-ldl" ;;
+    *)      LIB_EXT=".so"; LDL="$AE_DL_LIBS" ;;
 esac
 
 TMPDIR="$(mktemp -d)"

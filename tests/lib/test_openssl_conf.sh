@@ -21,3 +21,13 @@ test_openssl_conf() {
     fi
     export OPENSSL_CONF
 }
+
+# What this machine's openssl CLI and TLS library are. OpenBSD's is LibreSSL:
+# it has no ssl_conf configuration module, `s_server -cert_chain` or
+# `s_client -sigalgs`, reads no SSL_CERT_FILE of its own, prints its protocol
+# version differently, and cannot do Ed25519 certificates in TLS. A test whose
+# subject is one of those asks, and skips with the reason, rather than failing
+# on a tool that cannot do what it asks of it.
+openssl_is_libressl() { openssl version 2>/dev/null | grep -q '^LibreSSL'; }
+# openssl_has_option SUBCOMMAND OPTION: the subcommand's usage names the option.
+openssl_has_option() { openssl "$1" -help 2>&1 | grep -q -- "$2"; }

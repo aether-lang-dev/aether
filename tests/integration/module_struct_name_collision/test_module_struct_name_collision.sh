@@ -86,7 +86,7 @@ fi
 # declares may be an unprefixed name. Checked against the header, so a name
 # added later is caught before it reaches anyone's program.
 hdr="$ROOT/std/collections/aether_arr_inline.h"
-bad="$(grep -E '^(struct|typedef struct|typedef)' "$hdr" | grep -vE '\bAether[A-Za-z0-9_]+' || true)"
+bad="$(grep -E '^(struct|typedef struct|typedef)' "$hdr" | grep -vE '(^|[^A-Za-z0-9_])Aether[A-Za-z0-9_]+' || true)"
 if [ -n "$bad" ]; then
     echo "  [FAIL] module_struct_name_collision: the injected header declares an unprefixed type"
     printf '%s\n' "$bad" | sed 's/^/        /'

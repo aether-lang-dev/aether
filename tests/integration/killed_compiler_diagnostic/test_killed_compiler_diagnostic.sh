@@ -50,13 +50,15 @@ killed="kill case: not stageable on this platform, skipped"
 if [ "$WINDOWS" = 0 ]; then
     cat > "$tmp/suicidal-cc" <<'EOF'
 #!/bin/sh
-# Stand in for a C compiler the OS takes away mid-build.
-kill -TERM $$
+# Stand in for a C compiler the OS takes away mid-build. SIGKILL, which no
+# shell can catch: OpenBSD's ksh answers a SIGTERM sent to itself by exiting
+# with status 143, which is an exit, not a death by signal.
+kill -KILL $$
 sleep 5
 EOF
     chmod +x "$tmp/suicidal-cc"
     out="$(AE_CC="$tmp/suicidal-cc" "$AE" run "$tmp/good.ae" 2>&1)"
-    if printf '%s\n' "$out" | grep -q 'Build failed\. (killed by signal 15'; then
+    if printf '%s\n' "$out" | grep -q 'Build failed\. (killed by signal 9'; then
         killed="a killed compile step names its signal"
     else
         echo "  [FAIL] killed_compiler_diagnostic: a killed compile step did not name its signal"

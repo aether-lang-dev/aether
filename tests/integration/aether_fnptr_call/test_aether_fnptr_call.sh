@@ -18,6 +18,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AETHERC="$ROOT/build/aetherc"
 
 if [ ! -x "$AETHERC" ]; then
@@ -188,7 +189,7 @@ done
 
 if ! ${CC:-cc} $INCLUDES -o "$tmpdir/case4_bin" \
         "$tmpdir/case4.gen.c" "$tmpdir/case4_glue.c" \
-        "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/case4.gcc.err"; then
+        "$ROOT/build/libaether.a" -lpthread $AE_DL_LIBS -lm 2>"$tmpdir/case4.gcc.err"; then
     echo "  [FAIL] case 4: gcc returned non-zero"
     cat "$tmpdir/case4.gcc.err" | sed 's/^/    /'
     exit 1

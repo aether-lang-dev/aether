@@ -61,7 +61,7 @@ main() {
 }
 AE
 
-out="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+out="$("$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 expected="sqrt4 3 4 5 1.5
 abs4 3.5 0 14.25
 sqrt2 9 2.5

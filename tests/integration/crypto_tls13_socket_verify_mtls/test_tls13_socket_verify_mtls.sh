@@ -57,7 +57,7 @@ ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -
 for k in srv cli; do
     ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/$k.key" -out "$TMP/$k.csr" -subj "/CN=$k"
     ssl openssl x509 -req -in "$TMP/$k.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
-        -days 2 -extfile "$TMP/$k.ext" -out "$TMP/$k.pem"
+        -days 2 -sha256 -extfile "$TMP/$k.ext" -out "$TMP/$k.pem"
 done
 # A self-signed localhost certificate nothing trusts.
 ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/self.key" -out "$TMP/self.pem" -days 2 \
@@ -103,7 +103,7 @@ expect() {
     label=$1; pat=$2
     case "$got" in
         $pat) echo "    ok: $label" ;;
-        *) echo "    FAIL: $label: client [$got], server [$(grep -i 'error\|alert\|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
+        *) echo "    FAIL: $label: client [$got], server [$(grep -i -E 'error|alert|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
     esac
 }
 

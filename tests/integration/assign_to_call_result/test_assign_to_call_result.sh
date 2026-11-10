@@ -128,7 +128,7 @@ main() {
     println("${q.x} ${q.y} ${g.cells[1]}")
 }
 AE
-got="$("$AE" run good.ae 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run good.ae 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "5 7 20" ]; then
     echo "  [FAIL] assign_to_call_result: an assignment through a returned pointer stopped working"
     printf 'got:\n%s\nwant:\n5 7 20\n' "$got" | sed 's/^/        /'
