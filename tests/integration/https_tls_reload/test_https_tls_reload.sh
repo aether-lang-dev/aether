@@ -46,7 +46,7 @@ ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -
 for k in a b; do
     ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/$k.key" -out "$TMP/$k.csr" -subj "/CN=localhost"
     ssl openssl x509 -req -in "$TMP/$k.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
-        -days 2 -extfile "$TMP/leaf.ext" -out "$TMP/$k.pem"
+        -days 2 -sha256 -extfile "$TMP/leaf.ext" -out "$TMP/$k.pem"
 done
 
 "$AE" build "$SCRIPT_DIR/reload.ae" -o "$TMP/reload" >"$TMP/build.log" 2>&1 \

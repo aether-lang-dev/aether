@@ -63,7 +63,7 @@ if ! openssl req -newkey rsa:2048 -keyout "$KEY" -out "$TMPDIR/leaf.csr" \
         -nodes -subj "/CN=127.0.0.1" 2>"$TMPDIR/o2.err" \
    || ! printf 'subjectAltName=IP:127.0.0.1\n' > "$TMPDIR/ext.cnf" \
    || ! openssl x509 -req -in "$TMPDIR/leaf.csr" -CA "$CA" -CAkey "$CAKEY" \
-        -CAcreateserial -out "$CERT" -days 1 -extfile "$TMPDIR/ext.cnf" \
+        -CAcreateserial -out "$CERT" -days 1 -sha256 -extfile "$TMPDIR/ext.cnf" \
         2>"$TMPDIR/o3.err"; then
     echo "  [SKIP] openssl (sign leaf) failed:"; head -5 "$TMPDIR/o3.err"; exit 0
 fi

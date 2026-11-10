@@ -45,6 +45,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 . "$ROOT/tests/lib/same_bytes.sh"
@@ -203,8 +204,8 @@ if [ "$ACTUAL_SIZE" != "$EXPECTED_SIZE" ]; then
     exit 1
 fi
 # Spot-check the content pattern.
-head -c 64 "$BIG" | grep -q '^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$' || {
-    echo "  [FAIL] /big content prefix mismatch"; head -c 64 "$BIG"; echo; exit 1
+head_c 64 "$BIG" | grep -q '^0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef$' || {
+    echo "  [FAIL] /big content prefix mismatch"; head_c 64 "$BIG"; echo; exit 1
 }
 
 # ----------------------------------------------------------------
@@ -215,7 +216,7 @@ head -c 64 "$BIG" | grep -q '^0123456789abcdef0123456789abcdef0123456789abcdef01
 POST_BODY="$TMPDIR/post.in"
 POST_RESP="$TMPDIR/post.out"
 # Generate a 1 MiB payload deterministically for byte-equality check.
-yes 'large-body-segment-1234567890' 2>/dev/null | head -c 1048576 >"$POST_BODY"
+yes 'large-body-segment-1234567890' 2>/dev/null | head_c 1048576 >"$POST_BODY"
 curl --silent --show-error --max-time 30 \
      --http2-prior-knowledge \
      -X POST \
@@ -314,7 +315,7 @@ while [ $i -lt 50 ]; do
 done
 if [ "$mismatches" -gt 0 ]; then
     echo "  [FAIL] $mismatches stress streams returned wrong body"
-    head -c 200 "$STRESS_DIR/n0" 2>/dev/null
+    head_c 200 "$STRESS_DIR/n0" 2>/dev/null
     exit 1
 fi
 
@@ -376,9 +377,9 @@ PY
         cat "$TMPDIR/upgrade.err"
         exit 1
     fi
-    if ! head -c 64 "$UPGRADE_OUT" | grep -q '^HTTP/1.1 101'; then
+    if ! head_c 64 "$UPGRADE_OUT" | grep -q '^HTTP/1.1 101'; then
         echo "  [FAIL] h2c upgrade did not get 101 reply:"
-        head -c 200 "$UPGRADE_OUT"; echo
+        head_c 200 "$UPGRADE_OUT"; echo
         exit 1
     fi
 fi

@@ -28,6 +28,12 @@ NAME=https_openssl_policy
 
 [ -x "$AE" ] || { echo "  [SKIP] $NAME: ae not built"; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] $NAME: no openssl to make certificates"; exit 0; }
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+if openssl_is_libressl; then
+    # The test sets the peer's policy through OpenSSL's ssl_conf module.
+    echo "  [SKIP] $NAME: $(openssl version) has no ssl_conf configuration module"
+    exit 0
+fi
 
 unset SSL_CERT_FILE SSL_CERT_DIR AETHER_PURE_TLS || :
 
@@ -150,7 +156,7 @@ if [ "$HAVE_OPENSSL" = 1 ]; then
     PIDS="$PIDS $wpid"
     i=0
     while [ "$i" -lt 100 ]; do
-        grep -q 'READY\|FAIL' "$TMP/srv_weak.log" 2>/dev/null && break
+        grep -q -E 'READY|FAIL' "$TMP/srv_weak.log" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done
@@ -160,7 +166,7 @@ if [ "$HAVE_OPENSSL" = 1 ]; then
     PIDS="$PIDS $!"
     i=0
     while [ "$i" -lt 100 ]; do
-        grep -q 'READY\|FAIL' "$TMP/srv_strong.log" 2>/dev/null && break
+        grep -q -E 'READY|FAIL' "$TMP/srv_strong.log" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done

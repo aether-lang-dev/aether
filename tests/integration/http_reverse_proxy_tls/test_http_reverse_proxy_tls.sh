@@ -13,6 +13,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 UPSTREAM_SRC="$ROOT/tests/integration/http_reverse_proxy/server.ae"
 PROXY_SRC="$SCRIPT_DIR/tls_proxy.ae"
@@ -91,7 +92,7 @@ case "$HDRS" in
 esac
 
 # 3 — a POST body survives the TLS leg byte for byte.
-yes 'tls-payload-0123456789' 2>/dev/null | head -c 4096 > "$TMPDIR/post.in"
+yes 'tls-payload-0123456789' 2>/dev/null | head_c 4096 > "$TMPDIR/post.in"
 curl -sk --max-time 5 -X POST --data-binary "@$TMPDIR/post.in" \
      -o "$TMPDIR/post.out" "https://127.0.0.1:$PROXY_PORT/echo" 2>/dev/null || {
     echo "  [FAIL] T3 POST failed"; exit 1; }

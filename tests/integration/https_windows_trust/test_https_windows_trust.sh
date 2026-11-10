@@ -62,7 +62,7 @@ gen req -x509 $EC -keyout "$TMP/ca.key" -out "$TMP/ca.pem" -days 2 -nodes \
 gen req $EC -keyout "$TMP/leaf.key" -out "$TMP/leaf.csr" -nodes -subj "/CN=localhost"
 printf 'subjectAltName=DNS:localhost\nbasicConstraints=CA:FALSE\n' > "$TMP/leaf.ext"
 gen x509 -req -in "$TMP/leaf.csr" -CA "$TMP/ca.pem" -CAkey "$TMP/ca.key" -CAcreateserial \
-    -out "$TMP/leaf.pem" -days 2 -extfile "$TMP/leaf.ext"
+    -out "$TMP/leaf.pem" -days 2 -sha256 -extfile "$TMP/leaf.ext"
 # A CA that signed nothing here.
 gen req -x509 $EC -keyout "$TMP/other.key" -out "$TMP/other.pem" -days 2 -nodes \
     -subj "/CN=Aether Unrelated Test CA" \

@@ -36,6 +36,9 @@ NAME=crypto_tls13_signature_check
 [ -x "$AE" ] || { echo "  [SKIP] $NAME: ae not built"; exit 0; }
 command -v openssl >/dev/null 2>&1 || { echo "  [SKIP] $NAME: no openssl"; exit 0; }
 unset SSL_CERT_FILE SSL_CERT_DIR || :
+. "$ROOT/tests/lib/test_openssl_conf.sh"
+openssl_has_option s_client -sigalgs || {
+    echo "  [SKIP] $NAME: $(openssl version) s_client has no -sigalgs to pin one scheme"; exit 0; }
 
 TMP="$(mktemp -d)"
 . "$ROOT/tests/lib/test_openssl_conf.sh"
@@ -105,14 +108,14 @@ check() {
     if signed_with "$2" "$3" "$4" && grep -q ACCEPTED "$TMP/server.out"; then
         echo "    ok: $2: its own key's signature is sent"
     else
-        echo "    FAIL: $2, its own key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'signature type\|signing digest\|alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+        echo "    FAIL: $2, its own key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i -E 'signature type|signing digest|alert|error' "$TMP/c.log" | tr '\n' '|')]"
         fails=$((fails + 1))
     fi
     serve "$TMP/$1.pem" "$TMP/$1.other.key" "$2"
-    if grep -q "REFUSED: .*not sent" "$TMP/server.out" && grep -qi "alert internal error\|alert number 80" "$TMP/c.log"; then
+    if grep -q "REFUSED: .*not sent" "$TMP/server.out" && grep -qi -E "alert internal error|alert number 80" "$TMP/c.log"; then
         echo "    ok: $2: a signature that does not verify is not sent (internal_error)"
     else
-        echo "    FAIL: $2, another key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+        echo "    FAIL: $2, another key: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i -E 'alert|error' "$TMP/c.log" | tr '\n' '|')]"
         fails=$((fails + 1))
     fi
 }
@@ -135,10 +138,10 @@ for c in "p256 ecdsa_secp256r1_sha256" "ed25519 ed25519" "rsa rsa_pss_rsae_sha25
     export SERVER_CORRUPT_KEY=1
     serve "$TMP/$1.pem" "$TMP/$1.key" "$2"
     unset SERVER_CORRUPT_KEY
-    if grep -q "REFUSED: .*changed in memory" "$TMP/server.out" && grep -qi "alert internal error\|alert number 80" "$TMP/c.log"; then
+    if grep -q "REFUSED: .*changed in memory" "$TMP/server.out" && grep -qi -E "alert internal error|alert number 80" "$TMP/c.log"; then
         echo "    ok: $1: a shielded key with a bit changed is not used (internal_error)"
     else
-        echo "    FAIL: $1, corrupted shield: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i 'alert\|error' "$TMP/c.log" | tr '\n' '|')]"
+        echo "    FAIL: $1, corrupted shield: server [$(tr '\n' '|' <"$TMP/server.out")], s_client [$(grep -i -E 'alert|error' "$TMP/c.log" | tr '\n' '|')]"
         fails=$((fails + 1))
     fi
 done

@@ -80,7 +80,7 @@ start_server() { # name backend -> PORT
     PIDS="$PIDS $!"
     i=0
     while [ "$i" -lt 100 ]; do
-        grep -q 'READY\|BACKEND-ERR\|FAIL' "$TMP/$1.log" 2>/dev/null && break
+        grep -q -E 'READY|BACKEND-ERR|FAIL' "$TMP/$1.log" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done
@@ -110,15 +110,17 @@ done
 if [ "$HAVE_OPENSSL" = 1 ] && openssl s_client -help 2>&1 | grep -q -- '-tls1_2'; then
     # 2. The server backend really is the one chosen: a TLS 1.2-only client
     #    completes a handshake with OpenSSL and not with the pure server
-    #    (s_client prints "New, TLSv1.2, Cipher is ..." only on success).
+    #    (s_client prints "New, TLSv1.2, Cipher is ..." only on success;
+    #    LibreSSL's prints "New, TLSv1/SSLv3, Cipher is ..." on success and
+    #    "New, (NONE), Cipher is (NONE)" on failure, whatever the version).
     S12A=$(echo | openssl s_client -tls1_2 -connect "127.0.0.1:$PORT_aether" 2>&1 || :)
     S12O=$(echo | openssl s_client -tls1_2 -connect "127.0.0.1:$PORT_openssl" 2>&1 || :)
     case "$S12O" in
-        *"New, TLSv1.2"*) echo "    ok: the \"openssl\" server speaks TLS 1.2" ;;
+        *"New, TLSv1.2"*|*"New, TLSv1/SSLv3, Cipher is "[A-Za-z0-9]*) echo "    ok: the \"openssl\" server speaks TLS 1.2" ;;
         *) printf '%s\n' "$S12O" | sed -n '1,8p'; fail "the \"openssl\" server refused TLS 1.2" ;;
     esac
     case "$S12A" in
-        *"New, TLSv1.2"*) fail "the \"aether\" server negotiated TLS 1.2: it is not the pure server" ;;
+        *"New, TLSv1.2"*|*"New, TLSv1/SSLv3, Cipher is "[A-Za-z0-9]*) fail "the \"aether\" server negotiated TLS 1.2: it is not the pure server" ;;
         *) echo "    ok: the \"aether\" server refuses TLS 1.2 (the pure stack)" ;;
     esac
 fi

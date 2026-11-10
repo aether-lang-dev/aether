@@ -130,7 +130,7 @@ start_server() {
     PIDS="$PIDS $spid"
     i=0
     while [ "$i" -lt 300 ]; do
-        grep -q 'READY\|FAIL' "$slog" 2>/dev/null && break
+        grep -q -E 'READY|FAIL' "$slog" 2>/dev/null && break
         sleep 0.1
         i=$((i + 1))
     done
@@ -147,6 +147,10 @@ for k in p256 p384 p521 ed25519 rsa rsa1; do
     start_server "$k" "$k"
     [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the $k server did not start"; }
     for b in $BACKENDS; do
+        if [ "$k" = ed25519 ] && [ "$b" = openssl ] && openssl_is_libressl; then
+            echo "    skip: $k key, client \"$b\" ($(openssl version) has no Ed25519 certificates in TLS)"
+            continue
+        fi
         run env URL="https://localhost:$S_PORT/" CAFILE="$TMP/$k.pem" BACKEND="$b" "$TMP/client"
         case "$OUT" in
             *"STATUS 200 BODY keys-ok"*) echo "    ok: $k key, client \"$b\"" ;;
@@ -171,13 +175,17 @@ refused_at_setup p256 enc "encrypted" "an encrypted key"
 refused_at_setup p256 missing "cannot read the TLS private key" "a missing key file"
 
 # 3. No scheme in common: the RSA server and a client that offers ECDSA-P256 only.
-start_server rsa rsa
-[ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the RSA server did not start"; }
-openssl s_client -connect "127.0.0.1:$S_PORT" -servername localhost -tls1_3 \
-    -sigalgs ecdsa_secp256r1_sha256 </dev/null >"$TMP/sclient.log" 2>&1 || :
-grep -qi "handshake failure\|alert number 40" "$TMP/sclient.log" \
-    || { sed -n '1,15p' "$TMP/sclient.log"; fail "no handshake_failure for a client without the key's scheme"; }
-echo "    ok: a client without the key's scheme gets handshake_failure"
+if openssl_has_option s_client -sigalgs; then
+    start_server rsa rsa
+    [ -n "$S_PORT" ] || { echo "    got: $OUT"; fail "the RSA server did not start"; }
+    openssl s_client -connect "127.0.0.1:$S_PORT" -servername localhost -tls1_3 \
+        -sigalgs ecdsa_secp256r1_sha256 </dev/null >"$TMP/sclient.log" 2>&1 || :
+    grep -qi -E "handshake failure|alert number 40" "$TMP/sclient.log" \
+        || { sed -n '1,15p' "$TMP/sclient.log"; fail "no handshake_failure for a client without the key's scheme"; }
+    echo "    ok: a client without the key's scheme gets handshake_failure"
+else
+    echo "    skip: a client without the key's scheme ($(openssl version) s_client has no -sigalgs)"
+fi
 
 # 4. The chain is exactly the certificates in the certificate text (#3378):
 #    a key between two certificates, and a combined key-and-certificate file

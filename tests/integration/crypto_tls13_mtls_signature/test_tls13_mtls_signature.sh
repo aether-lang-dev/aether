@@ -53,7 +53,7 @@ ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -x509 -new -key "$TMP/root.key" -
 for k in srv cli; do
     ssl env MSYS2_ARG_CONV_EXCL='/CN=' openssl req -new -key "$TMP/$k.key" -out "$TMP/$k.csr" -subj "/CN=$k"
     ssl openssl x509 -req -in "$TMP/$k.csr" -CA "$TMP/root.pem" -CAkey "$TMP/root.key" -CAcreateserial \
-        -days 2 -extfile "$TMP/$k.ext" -out "$TMP/$k.pem"
+        -days 2 -sha256 -extfile "$TMP/$k.ext" -out "$TMP/$k.pem"
 done
 
 "$AE" build "$SCRIPT_DIR/mtls.ae" -o "$TMP/mtls" >"$TMP/b_mtls.log" 2>&1 \
@@ -90,21 +90,21 @@ for round in 1 2; do
     serve "$TMP/cli.key"
     case "$got" in
         *"GOT HTTP/1.0 200 ok"*) echo "    ok: its own key, round $round: the server took the signature and answered" ;;
-        *) echo "    FAIL: its own key, round $round: client [$got], server [$(grep -i 'error\|alert\|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
+        *) echo "    FAIL: its own key, round $round: client [$got], server [$(grep -i -E 'error|alert|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
     esac
 done
 
 serve "$TMP/other.key"
 case "$got" in
     *"REFUSED: "*"not sent"*)
-        if grep -qi "internal error\|alert number 80" "$TMP/s.log"; then
+        if grep -qi -E "internal error|alert number 80" "$TMP/s.log"; then
             echo "    ok: another key: the client did not send the signature, and the server got internal_error"
         else
-            echo "    FAIL: another key: the server's log has no internal_error: [$(grep -i 'error\|alert' "$TMP/s.log" | tr '\n' '|')]"
+            echo "    FAIL: another key: the server's log has no internal_error: [$(grep -i -E 'error|alert' "$TMP/s.log" | tr '\n' '|')]"
             fails=$((fails + 1))
         fi
         ;;
-    *) echo "    FAIL: another key: client [$got], server [$(grep -i 'error\|alert\|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
+    *) echo "    FAIL: another key: client [$got], server [$(grep -i -E 'error|alert|verify' "$TMP/s.log" | tr '\n' '|')]"; fails=$((fails + 1)) ;;
 esac
 
 [ "$fails" = 0 ] || fail "$fails case(s)"
