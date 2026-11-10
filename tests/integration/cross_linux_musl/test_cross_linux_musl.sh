@@ -23,6 +23,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] cross_linux_musl: ae not built"; exit 0; }
@@ -37,9 +38,13 @@ printf 'main() {\n    println("musl-ok")\n    return 0\n}\n' > "$TMP/hello.ae"
 
 # --- x86_64 musl: the full set of claims -----------------------------------
 "$AE" build "$TMP/hello.ae" --target=x86_64-linux-musl -o "$TMP/x64" \
-    >"$TMP/b1.log" 2>&1 || { sed -n '1,10p' "$TMP/b1.log"; fail "x86_64-linux-musl did not build"; }
+    >"$TMP/b1.log" 2>&1 || {
+        if zig_musl_unavailable "$TMP/b1.log"; then
+            echo "  [SKIP] cross_linux_musl: zig cannot build musl libc.a on this host"; exit 0
+        fi
+        sed -n '1,10p' "$TMP/b1.log"; fail "x86_64-linux-musl did not build"; }
 
-desc=$(file -b "$TMP/x64" 2>/dev/null || echo "")
+desc=$(file_desc "$TMP/x64" 2>/dev/null || echo "")
 case "$desc" in
     *"statically linked"*) ;;
     *) fail "x86_64-linux-musl is not statically linked: $desc" ;;
@@ -58,7 +63,7 @@ fi
 # --- the gnu target must be unchanged --------------------------------------
 "$AE" build "$TMP/hello.ae" --target=x86_64-linux -o "$TMP/gnu" \
     >"$TMP/b2.log" 2>&1 || { sed -n '1,10p' "$TMP/b2.log"; fail "x86_64-linux did not build"; }
-case "$(file -b "$TMP/gnu" 2>/dev/null)" in
+case "$(file_desc "$TMP/gnu" 2>/dev/null)" in
     *"dynamically linked"*) ;;
     *) fail "x86_64-linux should still be dynamically linked (musl rows changed it)" ;;
 esac
@@ -66,7 +71,7 @@ esac
 # --- aarch64 musl ----------------------------------------------------------
 "$AE" build "$TMP/hello.ae" --target=aarch64-linux-musl -o "$TMP/a64" \
     >"$TMP/b3.log" 2>&1 || { sed -n '1,10p' "$TMP/b3.log"; fail "aarch64-linux-musl did not build"; }
-desc=$(file -b "$TMP/a64" 2>/dev/null || echo "")
+desc=$(file_desc "$TMP/a64" 2>/dev/null || echo "")
 case "$desc" in
     *"statically linked"*) ;;
     *) fail "aarch64-linux-musl is not statically linked: $desc" ;;

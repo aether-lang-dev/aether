@@ -33,6 +33,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v zig >/dev/null 2>&1; then
@@ -60,7 +61,7 @@ if [ ! -f "$TMPDIR_T/libgreet.so" ]; then
     exit 1
 fi
 
-DESC=$(file "$TMPDIR_T/libgreet.so" 2>/dev/null || echo "")
+DESC=$(file_desc "$TMPDIR_T/libgreet.so" 2>/dev/null || echo "")
 case "$DESC" in
     *"shared object"*aarch64*) ;;
     *)
@@ -73,9 +74,9 @@ esac
 # The symbol has to be there. A stripped-to-nothing .so links fine and is
 # useless to the consumer this feature exists for.
 if command -v nm >/dev/null 2>&1; then
-    if ! nm -D --defined-only "$TMPDIR_T/libgreet.so" 2>/dev/null | grep -q "aether_greet"; then
+    if ! dyn_syms "$TMPDIR_T/libgreet.so" | grep -q "aether_greet"; then
         echo "  [FAIL] cross_emit_lib: aether_greet not exported from the .so"
-        nm -D --defined-only "$TMPDIR_T/libgreet.so" 2>/dev/null | head -10 | sed 's/^/    /'
+        dyn_syms "$TMPDIR_T/libgreet.so" | head -10 | sed 's/^/    /'
         exit 1
     fi
 fi
@@ -100,7 +101,7 @@ if [ ! -f "$TMPDIR_T/greet.dll" ]; then
     exit 1
 fi
 
-DESC=$(file "$TMPDIR_T/greet.dll" 2>/dev/null || echo "")
+DESC=$(file_desc "$TMPDIR_T/greet.dll" 2>/dev/null || echo "")
 case "$DESC" in
     *DLL*) ;;
     *)
@@ -186,8 +187,8 @@ fi
 # executable (e_type 2) beside a shared object (e_type 3), or a PE image
 # beside one with the IMAGE_FILE_DLL bit.
 if [ "$BOTH_KIND" = elf ]; then
-    et_exe=$(od -An -tu2 -j16 -N2 "$TMPDIR_T/$BOTH_EXE" | tr -d ' ')
-    et_lib=$(od -An -tu2 -j16 -N2 "$TMPDIR_T/$BOTH_LIB" | tr -d ' ')
+    et_exe=$(od_uint "$TMPDIR_T/$BOTH_EXE" 16 2)
+    et_lib=$(od_uint "$TMPDIR_T/$BOTH_LIB" 16 2)
     if [ "$et_exe" != 2 ] && [ "$et_exe" != 3 ]; then
         echo "  [FAIL] cross_emit_lib: --emit=both's executable is not an ELF image (e_type $et_exe)"; exit 1
     fi
@@ -196,8 +197,8 @@ if [ "$BOTH_KIND" = elf ]; then
     fi
 else
     pe_chars() {
-        off=$(od -An -tu4 -j60 -N4 "$1" | tr -d ' ')
-        od -An -tu2 -j$((off + 22)) -N2 "$1" | tr -d ' '
+        off=$(od_uint "$1" 60 4)
+        od_uint "$1" $((off + 22)) 2
     }
     c_exe=$(pe_chars "$TMPDIR_T/$BOTH_EXE")
     c_lib=$(pe_chars "$TMPDIR_T/$BOTH_LIB")
@@ -255,6 +256,14 @@ case "$(uname -s)/$(uname -m)" in
         SL_LIBS="-lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp" ;;
     Linux/x86_64|*)       SL_TARGET=x86_64-linux-musl ;;
 esac
+# Nothing here can run a Linux, macOS or Windows binary: no triple to match.
+case "$(uname -s)" in
+    OpenBSD|NetBSD)
+        echo "  [PASS] cross_emit_lib: aarch64 .so with exports, PE .dll named correctly,"
+        echo "         --emit=both builds both, named for the target"
+        echo "         (static archive link-and-run skipped: $(uname -s) has no target triple whose binary runs here)"
+        exit 0 ;;
+esac
 if ! "$AE" build --target="$SL_TARGET" --emit=staticlib "$LIB" \
         -o "$TMPDIR_T/libgreet.a" > "$TMPDIR_T/sl.log" 2>&1; then
     echo "  [FAIL] cross_emit_lib: --emit=staticlib did not build"
@@ -276,7 +285,7 @@ if grep -q 'install_name_tool' "$TMPDIR_T/elf.log"; then
     exit 1
 fi
 
-DESC=$(file "$TMPDIR_T/libgreet.a" 2>/dev/null || echo "")
+DESC=$(file_desc "$TMPDIR_T/libgreet.a" 2>/dev/null || echo "")
 case "$DESC" in
     *archive*) ;;
     *)

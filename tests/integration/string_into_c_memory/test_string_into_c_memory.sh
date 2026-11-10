@@ -146,7 +146,12 @@ else
         fails=$((fails + 1))
     fi
 fi
-if [ "$(uname -s)" != Darwin ]; then
+# The poisoning allocator needs the size of the block it poisons. macOS's
+# linker has no --wrap, and OpenBSD's libc has no malloc_usable_size (or any
+# other way to ask a block's size), so neither can build poison_alloc.c.
+case "$(uname -s)" in
+    Darwin|OpenBSD) echo "    skip: poisoning allocator (needs ld --wrap and malloc_usable_size)" ;;
+    *)
     WRAP="-Wl,--wrap=free,--wrap=realloc,--wrap=aether_numa_free,--wrap=aether_numa_free_aligned"
     if (cd "$TMP" && AETHER_HOME="$ROOT" AE_CC="${AE_CC:-${CC:-cc}} $WRAP" "$AE" build "$SCRIPT_DIR/prog.ae" \
             --extra "$ROOT/tests/ownership_grid/poison_alloc.c" -o "$TMP/poisoned") > "$TMP/pbuild.log" 2>&1; then
@@ -160,7 +165,8 @@ if [ "$(uname -s)" != Darwin ]; then
         sed 's/^/        /' "$TMP/pbuild.log" | head -8
         fails=$((fails + 1))
     fi
-fi
+    ;;
+esac
 
 [ "$fails" -eq 0 ] || exit 1
 echo "  [PASS] string_into_c_memory: a string into C memory that outlives the function goes through string.keep; block-local memory takes a local"

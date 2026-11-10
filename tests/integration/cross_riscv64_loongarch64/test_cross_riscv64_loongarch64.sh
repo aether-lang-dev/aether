@@ -18,6 +18,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 [ -x "$AE" ] || { echo "  [SKIP] cross_riscv64_loongarch64: ae not built"; exit 0; }
@@ -64,9 +65,12 @@ ran=""
 skipped=""
 check() {   # <target> <file(1) machine text> <qemu arch> <min qemu major> <min minor>
     t="$1"
-    "$AE" build "$TMP/ping.ae" --target="$t" -o "$TMP/$t" > "$TMP/$t.log" 2>&1 ||
-        { sed -n '1,10p' "$TMP/$t.log"; fail "$t did not build"; }
-    desc=$(file -b "$TMP/$t" 2>/dev/null || echo "")
+    "$AE" build "$TMP/ping.ae" --target="$t" -o "$TMP/$t" > "$TMP/$t.log" 2>&1 || {
+        if zig_musl_unavailable "$TMP/$t.log"; then
+            echo "  [SKIP] cross_riscv64_loongarch64: zig cannot build musl libc.a on this host"; exit 0
+        fi
+        sed -n '1,10p' "$TMP/$t.log"; fail "$t did not build"; }
+    desc=$(file_desc "$TMP/$t" 2>/dev/null || echo "")
     case "$desc" in *"statically linked"*) ;; *) fail "$t is not statically linked: $desc" ;; esac
     case "$desc" in *"$2"*) ;; *) fail "$t produced the wrong machine: $desc" ;; esac
     # The first of qemu-<arch>-static / qemu-<arch> on PATH that is new enough:

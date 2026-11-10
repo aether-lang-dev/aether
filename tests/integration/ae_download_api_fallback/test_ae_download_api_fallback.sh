@@ -19,6 +19,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
@@ -40,6 +41,9 @@ fail() {
 
 PLAT="$("$AE" version 2>&1 | sed -n 's/^Platform:[[:space:]]*//p' | head -1)"
 [ -n "$PLAT" ] || { echo "  [SKIP] ae_download_api_fallback: cannot read the platform from 'ae version'"; exit 0; }
+# A host with no release build (OpenBSD, NetBSD, ...) has no asset to serve:
+# `ae version` says "unsupported" and `ae version install` takes the source path.
+[ "$PLAT" = unsupported ] && { echo "  [SKIP] ae_download_api_fallback: no release build for this host ($(uname -s))"; exit 0; }
 case "$PLAT" in windows*) echo "  [SKIP] ae_download_api_fallback: zip archives, not covered here"; exit 0 ;; esac
 
 # A release archive that passes ae's post-extract checks: flat layout, a
@@ -49,8 +53,8 @@ ASSET="aether-9.9.9-$PLAT.tar.gz"
 mkdir -p "$TMP/pkg/bin" "$TMP/pkg/lib/aether" "$TMP/pkg/share/aether" "$TMP/rel"
 printf '#!/bin/sh\necho aetherc 9.9.9\n' > "$TMP/pkg/bin/aetherc"
 chmod 755 "$TMP/pkg/bin/aetherc"; cp "$TMP/pkg/bin/aetherc" "$TMP/pkg/bin/ae"
-{ printf '!<arch>\n'; head -c 70000 /dev/urandom; } > "$TMP/pkg/lib/aether/libaether.a"
-head -c 20000 /dev/urandom > "$TMP/pkg/share/aether/pad.bin"
+{ printf '!<arch>\n'; head_c 70000 /dev/urandom; } > "$TMP/pkg/lib/aether/libaether.a"
+head_c 20000 /dev/urandom > "$TMP/pkg/share/aether/pad.bin"
 echo 9.9.9 > "$TMP/pkg/VERSION"
 ( cd "$TMP/pkg" && COPYFILE_DISABLE=1 tar -czf "$TMP/rel/$ASSET" . )
 

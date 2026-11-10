@@ -21,6 +21,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s 2>/dev/null)" in
     MINGW*|MSYS*|CYGWIN*|Windows_NT)
@@ -29,6 +30,12 @@ case "$(uname -s 2>/dev/null)" in
     Darwin)
         # spawn_sandboxed uses fork/shm_open/LD_PRELOAD — Linux-only.
         echo "  [SKIP] sandbox preload is Linux-only (LD_PRELOAD)"
+        exit 0 ;;
+    Linux|FreeBSD) ;;
+    *)
+        # NetBSD, OpenBSD: ae's spawn_sandboxed answers "only available on
+        # Linux and FreeBSD", so there is no sandboxed child to build in.
+        echo "  [SKIP] spawn_sandboxed is Linux and FreeBSD only"
         exit 0 ;;
 esac
 
@@ -47,7 +54,7 @@ TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR" || true' EXIT
 
 # 1. Build the preload (matches what install.sh does for downstreams).
-cc -shared -fPIC -o "$TMPDIR/libaether_sandbox.so" "$PRELOAD_SRC" -ldl -lrt 2>"$TMPDIR/preload-cc.log" || {
+cc -shared -fPIC -o "$TMPDIR/libaether_sandbox.so" "$PRELOAD_SRC" $AE_DL_LIBS $AE_RT_LIBS 2>"$TMPDIR/preload-cc.log" || {
     echo "  [FAIL] preload .so build failed:"
     cat "$TMPDIR/preload-cc.log"
     exit 1

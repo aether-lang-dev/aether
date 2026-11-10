@@ -2092,6 +2092,9 @@ write_report(results_in: ptr, modes: ptr, wall_ms: long, jobs: int, check_text: 
     if conf(C_SYSTEM) == "Darwin" {
         strbuilder.append(b, "\nThe poisoning allocator was not built: this linker has no `--wrap` (macOS), so no cell is UAF here.\n")
     }
+    if conf(C_SYSTEM) == "OpenBSD" {
+        strbuilder.append(b, "\nThe poisoning allocator was not built: OpenBSD's libc has no malloc_usable_size, so no cell is UAF here.\n")
+    }
     if any_status(results, "UNMEASURED") {
         strbuilder.append(b, "\n**The heap count is not exact on this platform: growth was not measured, so this run checks values and use after free only.**\n")
     }
@@ -2947,7 +2950,7 @@ main() {
     } else {
         collections.string_list_add(modes, mode)
     }
-    if conf(C_SYSTEM) != "Darwin" && !no_shim {
+    if conf(C_SYSTEM) != "Darwin" && conf(C_SYSTEM) != "OpenBSD" && !no_shim {
         g_use_shim = 1
     }
     cells = list.new()

@@ -12,6 +12,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
@@ -128,9 +129,11 @@ cross="cross build: zig not on PATH, skipped"
 if command -v zig >/dev/null 2>&1; then
     if (cd "$tmp/proj" && "$AE" build --lib "$tmp/my lib" main.ae --target=x86_64-linux-musl -o "$tmp/cross_main" >"$tmp/cross.log" 2>&1) && [ -f "$tmp/cross_main" ]; then
         cross="cross build links the module C"
+    elif zig_musl_unavailable "$tmp/cross.log"; then
+        cross="cross build skipped: zig cannot build musl libc.a on this host"
     else
         echo "  [FAIL] source_directive: ae build --target=x86_64-linux-musl did not link the module's C"
-        grep -i "undefined\|error" "$tmp/cross.log" | head -3 | sed 's/^/        /'
+        grep -i -E "undefined|error" "$tmp/cross.log" | head -3 | sed 's/^/        /'
         fail=1
     fi
 fi

@@ -157,22 +157,33 @@ esac
 # Apple libc, all of them non-zero); an unfortified one writes past the object
 # and prints. Both halves are asserted, because a process that dies for some
 # other reason would otherwise look like a pass.
-if ! "$AE" build "$TMP/overflow.ae" --extra "$TMP/probe_copy.c" -o "$TMP/overflow" \
-        >"$TMP/overflow_build.log" 2>&1; then
-    sed 's/^/        /' "$TMP/overflow_build.log" | head -10
-    fail "the overflow probe did not build"
-fi
-OVERFLOW="$(sed -n 's/^Built[^:]*: //p' "$TMP/overflow_build.log" | tail -1)"
-[ -n "$OVERFLOW" ] || fail "the overflow build printed no artifact path"
-
-overflow_out="$("$OVERFLOW" 2>&1)"
-overflow_rc=$?
-[ "$overflow_rc" -ne 0 ] \
-    || fail "the overflow completed with exit 0: FORTIFY did not catch a 32-byte write into a 16-byte object"
-case "$overflow_out" in
-    *"overflow not caught"*)
-        fail "the overflow ran to completion (output: $overflow_out): FORTIFY is not in effect" ;;
+# OpenBSD's libc has no __*_chk functions and its compiler no _FORTIFY_SOURCE
+# lowering to them: there is nothing to fortify there, so the overflow below
+# completes by design, and checksec must say so (a "no", not a "yes" or an
+# "n/a") rather than the test pretending the protection exists.
+case "$(uname -s)" in
+    OpenBSD) HAS_FORTIFY=no ;;
+    *)       HAS_FORTIFY=yes ;;
 esac
+
+if [ "$HAS_FORTIFY" = yes ]; then
+    if ! "$AE" build "$TMP/overflow.ae" --extra "$TMP/probe_copy.c" -o "$TMP/overflow" \
+            >"$TMP/overflow_build.log" 2>&1; then
+        sed 's/^/        /' "$TMP/overflow_build.log" | head -10
+        fail "the overflow probe did not build"
+    fi
+    OVERFLOW="$(sed -n 's/^Built[^:]*: //p' "$TMP/overflow_build.log" | tail -1)"
+    [ -n "$OVERFLOW" ] || fail "the overflow build printed no artifact path"
+
+    overflow_out="$("$OVERFLOW" 2>&1)"
+    overflow_rc=$?
+    [ "$overflow_rc" -ne 0 ] \
+        || fail "the overflow completed with exit 0: FORTIFY did not catch a 32-byte write into a 16-byte object"
+    case "$overflow_out" in
+        *"overflow not caught"*)
+            fail "the overflow ran to completion (output: $overflow_out): FORTIFY is not in effect" ;;
+    esac
+fi
 
 # And what checksec reads back agrees. glibc and Apple libc leave a __*_chk
 # call to find; mingw-w64 inlines the check, so a PE with no symbol table has
@@ -184,13 +195,15 @@ case "$fmt" in
               yes|n/a) ;;
               *) fail "FORTIFY is '$fortify' on PE, expected yes or n/a" ;;
           esac ;;
-    *)    [ "$fortify" = "yes" ] || fail "FORTIFY is '$fortify' on $fmt, expected yes" ;;
+    *)    [ "$fortify" = "$HAS_FORTIFY" ] || fail "FORTIFY is '$fortify' on $fmt, expected $HAS_FORTIFY" ;;
 esac
 
 # The gate agrees with the report, and it is the same gate everywhere: a
 # property the format cannot express reports n/a and satisfies --require, so
 # `relro-full` is in this list on Mach-O and PE too.
-"$AE" checksec --require "pie,nx,relro-full,canary,fortify" "$PROBE" >/dev/null 2>&1 \
+REQUIRE="pie,nx,relro-full,canary"
+[ "$HAS_FORTIFY" = yes ] && REQUIRE="$REQUIRE,fortify"
+"$AE" checksec --require "$REQUIRE" "$PROBE" >/dev/null 2>&1 \
     || fail "--require rejected a binary the report says is hardened"
 
 # And the gate is a gate: something the report says the binary lacks must fail

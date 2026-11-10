@@ -67,7 +67,7 @@ start() {
     SRV_PID=$!
     _i=0
     while [ "$_i" -lt 100 ]; do
-        grep -q "READY\|BIND FAILED" "$_log" 2>/dev/null && break
+        grep -q -E "READY|BIND FAILED" "$_log" 2>/dev/null && break
         sleep 0.1
         _i=$((_i + 1))
     done
@@ -130,9 +130,13 @@ stop_server "$SRV_PID"; SRV_PID=""
 
 # The "::" wildcard is what dual-stack means, and on Windows each new
 # executable listening on it opens a firewall prompt (#2639). There the
-# dual-stack parts are left out and TLS runs over ::1 alone.
+# dual-stack parts are left out and TLS runs over ::1 alone. OpenBSD has no
+# dual-stack at all (inet6(4): an AF_INET6 socket is IPv6-only, and
+# IPV6_V6ONLY cannot be cleared), so "::" there answers [::1] and never
+# 127.0.0.1: the same parts are left out, for that reason.
 case "$(uname -s)" in
-    MINGW*|MSYS*|CYGWIN*) WILDCARD=no ;;
+    MINGW*|MSYS*|CYGWIN*) WILDCARD=no; WILDCARD_WHY="Windows (wildcard listener)" ;;
+    OpenBSD) WILDCARD=no; WILDCARD_WHY="OpenBSD (no dual-stack sockets)" ;;
     *) WILDCARD=yes ;;
 esac
 
@@ -144,7 +148,7 @@ if [ "$WILDCARD" = yes ]; then
     stop_server "$SRV_PID"; SRV_PID=""
     DUAL_NOTE="dual-stack ::"
 else
-    DUAL_NOTE="dual-stack skipped on Windows (wildcard listener)"
+    DUAL_NOTE="dual-stack skipped on $WILDCARD_WHY"
 fi
 
 # --- 3. "localhost" still means 127.0.0.1 ---
@@ -181,7 +185,7 @@ fi
 
 # --- 5. TinyWeb WebSocket, SSE and long poll ---
 if [ "$WILDCARD" = no ]; then
-    STREAMS_NOTE="TinyWeb streams skipped on Windows (wildcard listener)"
+    STREAMS_NOTE="TinyWeb streams skipped on $WILDCARD_WHY"
 else
     streams "plain HTTP"
     STREAMS_NOTE="ws/SSE/long poll over HTTP"
