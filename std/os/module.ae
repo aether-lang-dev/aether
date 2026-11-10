@@ -25,6 +25,7 @@ exports(
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     os_run_socket_raw, os_socketpair_raw, run_socket, socketpair,
+    os_run_stdio_raw, run_stdio,
     spawn_proc, wait, wait_any, wait_any_timeout,
     os_spawn_to_raw, spawn_proc_to,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
@@ -109,6 +110,11 @@ extern os_run_capture_status_raw(prog: string, argv: ptr, env: ptr) -> (string @
 extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 extern os_socketpair_raw() -> (int, int, string)
+
+// Spawn `prog` with its stdin and stdout each a pipe the caller keeps;
+// stderr is inherited. Returns (to_child_fd, from_child_fd, pid, "") or
+// (-1, -1, -1, reason) with no child to reap. See run_stdio.
+extern os_run_stdio_raw(prog: string, argv: ptr, env: ptr) -> (int, int, int, string)
 
 // Wait for a child to exit and reap it. Companion to
 // os_run_pipe_raw. Returns (exit_code, err). Calling this
@@ -360,6 +366,45 @@ run_pipe(prog: string, argv: ptr, env: ptr) -> {
 // On Windows / non-filesystem targets, returns (-1, -1, "unsupported on Windows" or error).
 run_socket(prog: string, argv: ptr, env: ptr) -> {
     return os_run_socket_raw(prog, argv, env)
+}
+
+// Spawn `prog` with the child's stdin and stdout each a pipe this process
+// keeps, and its stderr this process's. Returns
+// (to_child_fd, from_child_fd, pid, "") on success, or (-1, -1, -1, err)
+// with no child to reap: "program not found" for a missing program, as
+// every spawn here gives it, "denied by sandbox" when the "exec" capability
+// is not granted. `argv` and `env` are as run_socket takes them: a list of
+// strings, and env null to inherit this process's environment. Either way
+// the child's environment gets AETHER_IPC_KIND=stdio (so its
+// ipc.parent_channel_kind() is "stdio") and loses any AETHER_IPC_FD: the
+// channel is the child's own stdin and stdout, so a program in any
+// language, or a container runtime that passes them through, such as
+// `wslc run -i` or `docker run -i`, can sit at the other end.
+//
+// Write to to_child_fd and read from from_child_fd with std.ipc: write,
+// read, write_frame, read_frame, read_frame_timeout and wait_readable all
+// take them. Both are close-on-exec (not inherited by any other child).
+// Close to_child_fd with io.fd_close to give the child end of input;
+// from_child_fd reads end of stream once the child (and anything it
+// passed its stdout to) has exited. The caller MUST reap `pid` with
+// os.wait_pid (or bound the wait with os.wait_pid_timeout, or end the
+// child with os.kill): it is a spawn token those take on every platform,
+// the real pid on POSIX and a process-table token on Windows.
+//
+// No descriptors pass over these pipes; use run_socket for that (POSIX).
+//
+// An Aether child claims the pair with ipc.stdio_channel() first thing in
+// main and reads and writes frames on the two descriptors it returns, so a
+// stray print goes to stderr rather than into a frame.
+//
+// Windows: the pipes are anonymous pipes, handed back as binary CRT
+// descriptors; the child inherits its two pipe ends and stderr and no
+// other handle. std.ipc puts a CRT descriptor in binary mode before it
+// uses it, so CR/LF and 0x1a bytes go through as they are. wait_readable
+// and read_frame_timeout poll the pipe (PeekNamedPipe), so they notice
+// bytes and deadlines within about a timer tick (~16 ms).
+run_stdio(prog: string, argv: ptr, env: ptr) -> {
+    return os_run_stdio_raw(prog, argv, env)
 }
 
 // Create a connected pair of Unix domain sockets (AF_UNIX, SOCK_STREAM).

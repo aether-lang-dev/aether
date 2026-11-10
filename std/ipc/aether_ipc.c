@@ -29,7 +29,12 @@
  *
  * Frames (write_frame / read_frame) are a 4-byte big-endian length and
  * that many bytes, the reader capped by the caller's max. wait_readable and
- * the timeout form of read_frame bound a wait with poll(). */
+ * the timeout form of read_frame bound a wait with poll(); on Windows, where
+ * a CRT descriptor has no poll(), they ask an anonymous pipe how many bytes
+ * wait (PeekNamedPipe), sleeping briefly between asks.
+ *
+ * os.run_stdio's channel is the child's own stdin and stdout (its env
+ * carries AETHER_IPC_KIND=stdio, and no AETHER_IPC_FD). */
 
 #include "../../runtime/config/aether_optimization_config.h"
 
@@ -45,6 +50,13 @@ typedef struct { const char* _0; const char* _1; } _tuple_string_string;
 typedef struct { int _0; const char* _1; const char* _2; } _tuple_int_string_string;
 typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
 typedef struct { int _0; const char* _1; } _tuple_int_string;
+#if AETHER_HAS_FILESYSTEM
+/* AETHER_IPC_KIND=stdio: os.run_stdio started this process. */
+static int ipc_env_says_stdio(void) {
+    const char* k = getenv("AETHER_IPC_KIND");
+    return k && strcmp(k, "stdio") == 0;
+}
+#endif
 
 #if AETHER_HAS_FILESYSTEM
 #include <stdint.h>
@@ -133,6 +145,8 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
  * neither: write and read stay plain descriptor I/O there. */
 #if AETHER_HAS_PROCESS && !defined(__wasi__)
 #define IPC_HAS_SOCKETS 1
+#include <pthread.h>
+#include <signal.h>
 #include <sys/socket.h>
 #else
 #define IPC_HAS_SOCKETS 0
@@ -187,23 +201,55 @@ int ipc_parent_channel_raw(void) {
 }
 
 const char* ipc_parent_channel_kind_raw(void) {
+    if (ipc_env_says_stdio()) return "stdio";
     if (ipc_parent_channel_raw() < 0) return "";
     const char* k = getenv("AETHER_IPC_KIND");
     if (k && strcmp(k, "socket") == 0) return "socket";
     return "pipe";
 }
 
+#if IPC_HAS_SOCKETS
+/* write(2) to a pipe with SIGPIPE held off this thread: a reader that has
+ * gone is EPIPE, not a signal that ends the process (a pipe has no
+ * MSG_NOSIGNAL or SO_NOSIGPIPE). SIGPIPE is blocked for the call; when the
+ * write raised one that was not already pending, it is taken off again with
+ * sigwait (it is pending, so that returns at once) before the old mask comes
+ * back. A SIGPIPE pending before the call is left for its owner. */
+static ssize_t ipc_write_nosigpipe(int fd, const void* buf, size_t len) {
+    sigset_t pipe_only, old, pending;
+    sigemptyset(&pipe_only);
+    sigaddset(&pipe_only, SIGPIPE);
+    sigemptyset(&pending);
+    sigpending(&pending);
+    int was_pending = sigismember(&pending, SIGPIPE) == 1;
+    if (pthread_sigmask(SIG_BLOCK, &pipe_only, &old) != 0) return write(fd, buf, len);
+    ssize_t n = write(fd, buf, len);
+    int e = errno;
+    if (n < 0 && e == EPIPE && !was_pending) {
+        sigemptyset(&pending);
+        if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
+            int sig = 0;
+            sigwait(&pipe_only, &sig);
+        }
+    }
+    pthread_sigmask(SIG_SETMASK, &old, NULL);
+    errno = e;
+    return n;
+}
+#endif
+
 /* Write all `len` bytes: short writes continue where they stopped and EINTR
  * retries, so success always means every byte went. A socket is written with
  * send(MSG_NOSIGNAL), so a gone peer is EPIPE rather than SIGPIPE; a pipe
- * (send says ENOTSOCK) with write(), as std.net's fd_write does. */
+ * (send says ENOTSOCK) with write() under ipc_write_nosigpipe, so a gone
+ * reader is EPIPE there too. */
 static const char* ipc_write_all(int fd, const char* data, size_t len, const char* what) {
     int is_socket = IPC_HAS_SOCKETS;
     size_t done = 0;
     while (done < len) {
 #if IPC_HAS_SOCKETS
         ssize_t n = is_socket ? send(fd, data + done, len - done, IPC_NOSIGNAL)
-                              : write(fd, data + done, len - done);
+                              : ipc_write_nosigpipe(fd, data + done, len - done);
 #else
         ssize_t n = write(fd, data + done, len - done);
 #endif
@@ -558,7 +604,9 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
 
 #else /* _WIN32 */
 
+#include <fcntl.h>
 #include <io.h>
+#include <windows.h>
 
 int ipc_parent_channel_raw(void) {
     /* Windows handle inheritance for fd-mapped pipes is
@@ -566,11 +614,12 @@ int ipc_parent_channel_raw(void) {
      * + _open_osfhandle on both sides). Even if AETHER_IPC_FD is
      * set, there's no portable way to verify the descriptor is
      * open as a pipe via the Win32 CRT layer. v1 ships POSIX-only;
-     * Windows consumers fall back to file-marker patterns. */
+     * Windows consumers fall back to file-marker patterns, or the stdio
+     * channel (os.run_stdio). */
     return -1;
 }
 
-const char* ipc_parent_channel_kind_raw(void) { return ""; }
+const char* ipc_parent_channel_kind_raw(void) { return ipc_env_says_stdio() ? "stdio" : ""; }
 
 /* write and read stay plain CRT descriptor I/O here, as std.net's fd_write
  * is; the socket channel and descriptor passing are POSIX-only (Windows
@@ -583,7 +632,16 @@ static const char* ipc_errno_msg(const char* what, int err) {
     return msg;
 }
 
+/* A CRT descriptor starts in text mode, a child's fd 0 and fd 1 included:
+ * a read turns CR LF into LF and stops at a 0x1a byte, a write turns LF into
+ * CR LF. Bytes on a channel are bytes, so every call here puts the
+ * descriptor in binary mode before it uses it. */
+static void ipc_binary(int fd) {
+    if (fd >= 0) _setmode(fd, _O_BINARY);
+}
+
 static const char* ipc_write_all(int fd, const char* data, size_t len, const char* what) {
+    ipc_binary(fd);
     size_t done = 0;
     while (done < len) {
         unsigned chunk = (len - done) > 0x7fffffffu ? 0x7fffffffu : (unsigned)(len - done);
@@ -608,6 +666,7 @@ const char* ipc_write_raw(int fd, const void* bytes) {
 _tuple_string_string ipc_read_raw(int fd, int max) {
     if (fd < 0) return ipc_read_failed("ipc.read: invalid descriptor");
     if (max <= 0) return ipc_read_failed("ipc.read: max must be positive");
+    ipc_binary(fd);
     char* buf = (char*)malloc((size_t)max);
     if (!buf) return ipc_read_failed("ipc.read: out of memory");
     int n = _read(fd, buf, (unsigned)max);
@@ -632,25 +691,89 @@ _tuple_string_int_string ipc_recv_raw(int ch, int max) {
     return ipc_recv_msg_failed("ipc.recv: unsupported on Windows");
 }
 
-/* The frame code below over CRT descriptors. A deadline needs poll(), which
- * a CRT descriptor has no answer to: the calls that take one report that. */
-#include <windows.h>
-
+/* The frame code below over CRT descriptors. A CRT descriptor has no
+ * poll(); a deadline is kept on a pipe by asking it how many bytes wait. */
 static long long ipc_now_ms(void) { return (long long)GetTickCount64(); }
+
+/* ipc_pipe_wait's answers past 1 (ready) and 0 (timed out). */
+#define IPC_WAIT_BAD_FD (-1)
+#define IPC_WAIT_NOT_PIPE (-2)
+#define IPC_WAIT_FAILED (-3)
+
+#define IPC_NOT_A_PIPE "not a pipe (a wait on Windows needs a pipe, such as os.run_stdio's)"
+
+/* Wait up to `ms` (negative: forever; 0: ask once) for a byte to read on
+ * the pipe under CRT descriptor `fd`. 1 when one waits, or when the writer
+ * has closed (the read then gives end of stream), 0 at the deadline, else
+ * one of IPC_WAIT_*. *avail_out, when given, is how many bytes wait (0 on a
+ * closed pipe). PeekNamedPipe does not block, so this sleeps between asks,
+ * 1 ms doubling to 8: Sleep rounds up to the system timer tick (about
+ * 15.6 ms unless something raised the timer resolution), so a byte or the
+ * deadline is noticed within about a tick. */
+static int ipc_pipe_wait(int fd, long long ms, DWORD* avail_out) {
+    if (avail_out) *avail_out = 0;
+    intptr_t osh = _get_osfhandle(fd);
+    if (osh == -1 || osh == -2) return IPC_WAIT_BAD_FD;
+    HANDLE h = (HANDLE)osh;
+    if (GetFileType(h) != FILE_TYPE_PIPE) return IPC_WAIT_NOT_PIPE;
+    long long end = ms < 0 ? -1 : ipc_now_ms() + ms;
+    DWORD nap = 1;
+    for (;;) {
+        DWORD avail = 0;
+        if (!PeekNamedPipe(h, NULL, 0, NULL, &avail, NULL)) {
+            DWORD le = GetLastError();
+            if (le == ERROR_BROKEN_PIPE || le == ERROR_PIPE_NOT_CONNECTED || le == ERROR_NO_DATA) {
+                return 1;
+            }
+            /* A socket handed in as a CRT descriptor is FILE_TYPE_PIPE too,
+             * and PeekNamedPipe refuses it. */
+            return le == ERROR_INVALID_FUNCTION || le == ERROR_INVALID_PARAMETER ? IPC_WAIT_NOT_PIPE
+                                                                                 : IPC_WAIT_FAILED;
+        }
+        if (avail > 0) {
+            if (avail_out) *avail_out = avail;
+            return 1;
+        }
+        if (end >= 0) {
+            long long left = end - ipc_now_ms();
+            if (left <= 0) return 0;
+            if ((long long)nap > left) nap = (DWORD)left;
+        }
+        Sleep(nap);
+        if (nap < 8) nap *= 2;
+    }
+}
+
+static const char* ipc_wait_msg(const char* what, int r) {
+    static char msg[160];
+    const char* why = r == IPC_WAIT_BAD_FD ? "invalid descriptor"
+                    : r == IPC_WAIT_NOT_PIPE ? IPC_NOT_A_PIPE
+                    : "PeekNamedPipe failed";
+    snprintf(msg, sizeof msg, "%s: %s", what, why);
+    return msg;
+}
 
 #define IPC_FILL_OK 0
 #define IPC_FILL_EOF 1
 #define IPC_FILL_TIMEOUT 2
 #define IPC_FILL_ERR 3
 
+/* An *err below 0 is an ipc_pipe_wait answer, not an errno. */
 static int ipc_fill(int fd, char* dst, size_t len, long long deadline_ms, size_t* got, int* err) {
     *got = 0;
-    if (deadline_ms >= 0) {
-        *err = ENOSYS;
-        return IPC_FILL_ERR;
-    }
+    ipc_binary(fd);
     while (*got < len) {
         size_t want = len - *got;
+        if (deadline_ms >= 0) {
+            long long left = deadline_ms - ipc_now_ms();
+            DWORD avail = 0;
+            int r = ipc_pipe_wait(fd, left < 0 ? 0 : left, &avail);
+            if (r == 0) return IPC_FILL_TIMEOUT;
+            if (r < 0) { *err = r; return IPC_FILL_ERR; }
+            /* Never more than waits, so the read cannot block past the
+             * deadline; 0 waiting is a closed writer, and the read says so. */
+            if (avail > 0 && want > avail) want = avail;
+        }
         int n = _read(fd, dst + *got, want > 0x7fffffffu ? 0x7fffffffu : (unsigned)want);
         if (n < 0) {
             if (errno == EINTR) continue;
@@ -664,8 +787,11 @@ static int ipc_fill(int fd, char* dst, size_t len, long long deadline_ms, size_t
 }
 
 _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
-    (void)ch; (void)timeout_ms;
-    return ipc_wait_failed("ipc.wait_readable: unsupported on Windows");
+    if (ch < 0) return ipc_wait_failed("ipc.wait_readable: invalid descriptor");
+    int r = ipc_pipe_wait(ch, timeout_ms, NULL);
+    if (r < 0) return ipc_wait_failed(ipc_wait_msg("ipc.wait_readable", r));
+    _tuple_int_string out = { r, "" };
+    return out;
 }
 
 _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
@@ -717,6 +843,15 @@ const char* ipc_write_frame_raw(int ch, const void* data) {
  * are std.ipc's TIMED_OUT_BETWEEN_FRAMES and TIMED_OUT_INSIDE_FRAME. */
 #define IPC_TIMED_OUT_BETWEEN "ipc.read_frame: timed out before a frame began"
 #define IPC_TIMED_OUT_INSIDE "ipc.read_frame: timed out inside a frame; the stream is out of step"
+
+/* ipc_fill's error: an errno, or (Windows) an ipc_pipe_wait answer. */
+static const char* ipc_fill_msg(int e) {
+    if (e == ENOSYS) return "ipc.read_frame: a timeout is unavailable here";
+#ifdef _WIN32
+    if (e < 0) return ipc_wait_msg("ipc.read_frame", e);
+#endif
+    return ipc_errno_msg("ipc.read_frame", e);
+}
 _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
     if (ch < 0) return ipc_read_failed("ipc.read_frame: invalid descriptor");
     if (max <= 0) return ipc_read_failed("ipc.read_frame: max must be positive");
@@ -733,10 +868,7 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
     if (st == IPC_FILL_TIMEOUT) {
         return ipc_read_failed(got == 0 ? IPC_TIMED_OUT_BETWEEN : IPC_TIMED_OUT_INSIDE);
     }
-    if (st == IPC_FILL_ERR) {
-        if (e == ENOSYS) return ipc_read_failed("ipc.read_frame: a timeout is unavailable here");
-        return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
-    }
+    if (st == IPC_FILL_ERR) return ipc_read_failed(ipc_fill_msg(e));
     uint32_t len = ((uint32_t)hdr[0] << 24) | ((uint32_t)hdr[1] << 16) |
                    ((uint32_t)hdr[2] << 8) | (uint32_t)hdr[3];
     if ((uint64_t)len > (uint64_t)max) {
@@ -753,7 +885,7 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
         free(buf);
         if (st == IPC_FILL_EOF) return ipc_read_failed("ipc.read_frame: stream ended inside a frame");
         if (st == IPC_FILL_TIMEOUT) return ipc_read_failed(IPC_TIMED_OUT_INSIDE);
-        return ipc_read_failed(ipc_errno_msg("ipc.read_frame", e));
+        return ipc_read_failed(ipc_fill_msg(e));
     }
     AetherString* s = string_new_with_length(buf, len);
     free(buf);

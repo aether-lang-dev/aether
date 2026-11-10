@@ -76,10 +76,12 @@ main() {
                 spec.assert_err(rerr, "ipc.recv_fd")
                 _d, _f, cerr = ipc.recv(3, 16)
                 spec.assert_err(cerr, "ipc.recv")
+                // wait_readable and read_frame_timeout wait on anonymous
+                // pipes there (tests/integration/os_run_stdio); fd 3 is none.
                 _r, werr = ipc.wait_readable(3, 10)
-                spec.assert_err(werr, "ipc.wait_readable")
+                spec.assert_err(werr, "ipc.wait_readable on no pipe")
                 _fd, terr = ipc.read_frame_timeout(3, 16, 10)
-                spec.assert_err(terr, "ipc.read_frame_timeout needs a poll")
+                spec.assert_err(terr, "ipc.read_frame_timeout on no pipe")
             }
         }
         return spec.run_summary(fw)

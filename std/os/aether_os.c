@@ -98,6 +98,11 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
     _tuple_int_int_int_string out = { -1, -1, 0, "os.wait_any_timeout unavailable" };
     return out;
 }
+_tuple_int_int_int_string os_run_stdio_raw(const char* p, void* a, void* e) {
+    (void)p; (void)a; (void)e;
+    _tuple_int_int_int_string out = { -1, -1, -1, "os.run_stdio unavailable" };
+    return out;
+}
 int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
 _tuple_int_int_string os_wait_pid_timeout_raw(int pid, int secs) {
     (void)pid; (void)secs;
@@ -199,6 +204,8 @@ extern const char* aether_string_data(const void* s);
 #include <windows.h>
 #include <wchar.h>
 #include <process.h>  /* _getpid */
+#include <io.h>       /* _open_osfhandle: os.run_stdio's CRT descriptors */
+#include <fcntl.h>    /* _O_BINARY, _O_RDONLY, _O_WRONLY */
 #endif
 
 // libaether.a list operations — declared extern so this file doesn't have
@@ -1992,6 +1999,21 @@ static char** aether_ipc_socket_env(char** base, const char* const* extra, int n
     return env;
 }
 
+/* os.run_stdio's child env: `base` (or environ) with AETHER_IPC_KIND=stdio,
+ * which ipc.parent_channel_kind() reads, and without AETHER_IPC_FD: this
+ * child has no fd-3 channel, whatever its parent was given. */
+static char** aether_ipc_stdio_env(char** base) {
+    static const char* const ipc[] = { "AETHER_IPC_KIND=stdio" };
+    char** env = aether_spawn_env(base ? base : aether_environ, ipc, 1);
+    if (!env) return NULL;
+    size_t k = 0;
+    for (size_t i = 0; env[i]; i++) {
+        if (strncmp(env[i], "AETHER_IPC_FD=", 14) != 0) env[k++] = env[i];
+    }
+    env[k] = NULL;
+    return env;
+}
+
 /* A connected AF_UNIX stream pair, both ends close-on-exec, for a process
  * to use itself (std.ipc's tests do) or to hand one end to a child it
  * spawns some other way. Returns (fd_a, fd_b, err). */
@@ -2187,6 +2209,121 @@ int aether_os_run_socket_hooked(const char* prog, void* argv_list, void* env_lis
     if (pid) *pid = r._1;
     if (errmsg) *errmsg = r._2;
     return r._2 && r._2[0] ? -1 : 0;
+}
+
+/* os.run_stdio: spawn `prog` with its stdin and stdout each a pipe this
+ * process keeps; stderr is inherited. Returns (to_child_fd, from_child_fd,
+ * pid, "") or (-1, -1, -1, reason) with nothing left to reap. Both of the
+ * parent's ends are close-on-exec, so a child started later (by this or
+ * another thread) does not hold the conversation open. The env is the one
+ * given, or this process's, with AETHER_IPC_KIND=stdio and no AETHER_IPC_FD:
+ * the channel is the child's own stdin and stdout, which a program in any
+ * language (or a container runtime passing them through) reads and writes
+ * as they are.
+ *
+ * The discipline is aether_spawn_channel_raw's: pipes from
+ * aether_pipe_cloexec, the program resolved and argv and env built before
+ * aether_fork, only async-signal-safe calls in the child, and a program
+ * that cannot start reported through the exec-error pipe in this call's
+ * own shape (#3170). */
+_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list) {
+    _tuple_int_int_int_string out = { -1, -1, -1, "" };
+    if (!prog) {
+        out._3 = "null prog";
+        return out;
+    }
+    if (!aether_sandbox_check("exec", prog)) {
+        out._3 = "denied by sandbox";
+        return out;
+    }
+
+    /* inp: the child reads [0] as its stdin, the parent writes [1].
+     * outp: the child writes [1] as its stdout, the parent reads [0]. */
+    int inp[2], outp[2], errp[2];
+    if (aether_pipe_cloexec(inp) != 0) {
+        out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
+        return out;
+    }
+    if (aether_pipe_cloexec(outp) != 0) {
+        out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
+        close(inp[0]); close(inp[1]);
+        return out;
+    }
+    if (aether_pipe_cloexec(errp) != 0) {
+        out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
+        close(inp[0]); close(inp[1]);
+        close(outp[0]); close(outp[1]);
+        return out;
+    }
+
+    AetherExec x;
+    const char* xerr = aether_exec_prepare(&x, prog, argv_list, env_list);
+    if (xerr) {
+        close(inp[0]); close(inp[1]);
+        close(outp[0]); close(outp[1]);
+        close(errp[0]); close(errp[1]);
+        out._3 = xerr;
+        return out;
+    }
+    /* The child's env: the one given, or environ, with AETHER_IPC_KIND=stdio
+     * and without AETHER_IPC_FD. Borrowed strings, as run_socket's. */
+    char** spliced = aether_ipc_stdio_env(x.envp);
+    free(x.envp);
+    x.envp = spliced;
+    x.env = spliced;
+    if (!spliced) {
+        close(inp[0]); close(inp[1]);
+        close(outp[0]); close(outp[1]);
+        close(errp[0]); close(errp[1]);
+        aether_exec_release(&x);
+        out._3 = "env build failed";
+        return out;
+    }
+
+    pid_t pid = aether_fork();
+    if (pid < 0) {
+        close(inp[0]); close(inp[1]);
+        close(outp[0]); close(outp[1]);
+        close(errp[0]); close(errp[1]);
+        aether_exec_release(&x);
+        out._3 = "fork failed";
+        return out;
+    }
+    if (pid == 0) {
+        /* Child: inp[0] onto 0, outp[1] onto 1; stderr stays the parent's.
+         * Every end is lifted off 0..3 first (#3199), so installing one
+         * cannot overwrite another still to be installed. */
+        aether_child_reset_signals();
+        aether_child_keep_stdio();
+        close(inp[1]);
+        close(outp[0]);
+        close(errp[0]);
+        int ef = aether_child_lift_fd(errp[1]);
+        int in_fd = aether_child_lift_fd(inp[0]);
+        int out_fd = aether_child_lift_fd(outp[1]);
+        if (in_fd < 0 || out_fd < 0) aether_child_exec_failed(ef);
+        if (aether_child_fd(in_fd, 0) < 0) aether_child_exec_failed(ef);
+        if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        close(in_fd);
+        close(out_fd);
+        aether_child_exec(&x);
+        aether_child_exec_failed(ef);
+    }
+    close(inp[0]);
+    close(outp[1]);
+    aether_exec_release(&x);
+    int exec_err = aether_exec_errno(errp);
+    if (exec_err) {
+        close(inp[1]);
+        close(outp[0]);
+        aether_reap_failed(pid);
+        out._3 = aether_exec_failure(exec_err);
+        return out;
+    }
+    out._0 = inp[1];
+    out._1 = outp[0];
+    out._2 = (int)pid;
+    return out;
 }
 
 /* Wait for a child, return (exit_code, err). Reaps the child so
@@ -3216,6 +3353,48 @@ static wchar_t* build_command_line(const char* prog, void* argv_list) {
     return b.data;
 }
 
+/* Does env entry `e` ("NAME=...") name `name`? Windows names ignore case. */
+static int win_env_names(const wchar_t* e, const wchar_t* name) {
+    size_t n = wcslen(name);
+    return _wcsnicmp(e, name, n) == 0 && e[n] == L'=';
+}
+
+/* os.run_stdio's environment block: the list given, or this process's
+ * environment, without AETHER_IPC_KIND or AETHER_IPC_FD, then
+ * AETHER_IPC_KIND=stdio. Never NULL for "inherit": the marker has to be
+ * added either way. NULL only when out of memory. */
+static wchar_t* build_stdio_environ_block(void* env_list) {
+    WBuf b; wbuf_init(&b);
+    if (env_list) {
+        int n = list_size(env_list);
+        for (int i = 0; i < n; i++) {
+            const char* item = aether_string_data(list_get_raw(env_list, i));
+            if (!item) continue;
+            wchar_t* w = utf8_to_wide(item);
+            if (!w) { free(b.data); return NULL; }
+            if (!win_env_names(w, L"AETHER_IPC_KIND") && !win_env_names(w, L"AETHER_IPC_FD")) {
+                wbuf_append(&b, w);
+                wbuf_append_char(&b, L'\0');
+            }
+            free(w);
+        }
+    } else {
+        wchar_t* all = GetEnvironmentStringsW();
+        if (!all) return NULL;
+        for (const wchar_t* e = all; *e; e += wcslen(e) + 1) {
+            if (win_env_names(e, L"AETHER_IPC_KIND") || win_env_names(e, L"AETHER_IPC_FD")) continue;
+            wbuf_append(&b, e);
+            wbuf_append_char(&b, L'\0');
+        }
+        FreeEnvironmentStringsW(all);
+    }
+    wbuf_append(&b, L"AETHER_IPC_KIND=stdio");
+    wbuf_append_char(&b, L'\0');
+    wbuf_append_char(&b, L'\0');
+    if (b.oom) { free(b.data); return NULL; }
+    return b.data;
+}
+
 // Build a UTF-16 environment block from a list of "KEY=VALUE" strings.
 // Format: key1=val1\0key2=val2\0\0. Returns NULL if env_list is NULL
 // (inherit parent env) or on allocation failure.
@@ -3797,34 +3976,58 @@ static void winproc_remove(int token) {
 
 /* Front half of win_launch: spawn without waiting. Returns the process
  * HANDLE, or NULL on failure. hThread is closed here (never needed by the
- * caller); hProcess is the caller's to wait on and close. */
-static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
+ * caller); hProcess is the caller's to wait on and close.
+ *
+ * `stdio` is NULL for a child that inherits nothing (os_spawn_raw), or the
+ * child's stdin, stdout and stderr (os_run_stdio_raw): each must be
+ * inheritable, and the child inherits those three and nothing else (#2917). */
+static HANDLE win_spawn_stdio(const char* prog, void* argv_list, void* env_list,
+                              const HANDLE* stdio) {
     wchar_t* app = NULL;
     wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
     if (!cmdline) return NULL;
-    wchar_t* wenv = build_environ_block(env_list);
+    /* os.run_stdio's child is told so (AETHER_IPC_KIND=stdio). */
+    wchar_t* wenv = stdio ? build_stdio_environ_block(env_list) : build_environ_block(env_list);
+    if (stdio && !wenv) {
+        free(app);
+        free(cmdline);
+        g_win_launch_err = "env build failed";
+        return NULL;
+    }
 
     STARTUPINFOW si;
     memset(&si, 0, sizeof(si));
     si.cb = sizeof(si);
+    if (stdio) {
+        si.dwFlags = STARTF_USESTDHANDLES;
+        si.hStdInput  = stdio[0];
+        si.hStdOutput = stdio[1];
+        si.hStdError  = stdio[2];
+    }
 
     PROCESS_INFORMATION pi;
     memset(&pi, 0, sizeof(pi));
 
     /* Same CreateProcessW contract as win_launch: the resolved absolute
-     * program (#2171); no handle inheritance (no pipe), inherit parent env
-     * when wenv is NULL. */
-    BOOL ok = CreateProcessW(
-        app, cmdline, NULL, NULL, FALSE,
-        CREATE_UNICODE_ENVIRONMENT, wenv, NULL, &si, &pi);
+     * program (#2171); inherit parent env when wenv is NULL. Without stdio
+     * the handle list is empty and the child inherits no handle at all. */
+    BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT, wenv,
+                                            &si, stdio, stdio ? 3 : 0, &pi);
 
     free(app);
     free(cmdline);
     free(wenv);
 
-    if (!ok) return NULL;
+    if (!ok) {
+        if (!g_win_launch_err) g_win_launch_err = "spawn failed";
+        return NULL;
+    }
     CloseHandle(pi.hThread);   /* thread handle never used */
     return pi.hProcess;
+}
+
+static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
+    return win_spawn_stdio(prog, argv_list, env_list, NULL);
 }
 
 /* Working-directory accessors — Windows. UTF-8 path in / UTF-8 path out,
@@ -4148,6 +4351,82 @@ _tuple_int_int_string os_run_pipe_raw(const char* prog, void* argv_list, void* e
 _tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void* env_list) {
     (void)prog; (void)argv_list; (void)env_list;
     _tuple_int_int_string out = { -1, -1, "unsupported on Windows" };
+    return out;
+}
+
+/* os.run_stdio on Windows: the child's stdin and stdout are anonymous pipes
+ * whose other ends this process keeps, its stderr this process's. The
+ * parent's ends are made non-inheritable before the spawn and handed back
+ * as binary CRT descriptors (_open_osfhandle), which std.ipc's write, read
+ * and frame calls take as they take any; the child inherits its two pipe
+ * ends and stderr and nothing else (#2917). The pid is a spawn token, as
+ * os_spawn_raw's: os_wait_pid_raw, os_wait_pid_timeout_raw and os_kill_raw
+ * take it. Returns (to_child_fd, from_child_fd, token, "") or
+ * (-1, -1, -1, reason) with nothing left to reap. */
+_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list) {
+    _tuple_int_int_int_string out = { -1, -1, -1, "" };
+    if (!prog) { out._3 = "null prog"; return out; }
+    if (!aether_sandbox_check("exec", prog)) { out._3 = "denied by sandbox"; return out; }
+
+    SECURITY_ATTRIBUTES sa;
+    memset(&sa, 0, sizeof sa);
+    sa.nLength = sizeof sa;
+    sa.bInheritHandle = TRUE;
+    HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL;
+    if (!CreatePipe(&in_r, &in_w, &sa, 0)) { out._3 = "os.run_stdio: pipe failed"; return out; }
+    if (!CreatePipe(&out_r, &out_w, &sa, 0)) {
+        CloseHandle(in_r); CloseHandle(in_w);
+        out._3 = "os.run_stdio: pipe failed";
+        return out;
+    }
+    /* The parent's ends are never inherited, by this child or any other. */
+    if (!SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0) ||
+        !SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0)) {
+        CloseHandle(in_r); CloseHandle(in_w); CloseHandle(out_r); CloseHandle(out_w);
+        out._3 = "os.run_stdio: pipe failed";
+        return out;
+    }
+
+    HANDLE stdio[3] = { in_r, out_w, GetStdHandle(STD_ERROR_HANDLE) };
+    HANDLE h = win_spawn_stdio(prog, argv_list, env_list, stdio);
+    /* The child's ends are its own now: closed here, so the parent's read
+     * sees end of stream when the child exits and the child's sees it when
+     * the parent closes to_child_fd. */
+    CloseHandle(in_r);
+    CloseHandle(out_w);
+    if (!h) {
+        CloseHandle(in_w); CloseHandle(out_r);
+        out._3 = win_launch_error();
+        return out;
+    }
+
+    int to_fd = _open_osfhandle((intptr_t)in_w, _O_WRONLY | _O_BINARY);
+    int from_fd = to_fd < 0 ? -1 : _open_osfhandle((intptr_t)out_r, _O_RDONLY | _O_BINARY);
+    if (to_fd < 0 || from_fd < 0) {
+        /* The child is running with its ends: end it rather than leave it
+         * talking to nobody. _close on a descriptor closes its handle. */
+        if (to_fd >= 0) _close(to_fd); else CloseHandle(in_w);
+        CloseHandle(out_r);
+        TerminateProcess(h, 1);
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+        out._3 = "os.run_stdio: too many open descriptors";
+        return out;
+    }
+
+    int tok = winproc_register(h);
+    if (tok < 0) {
+        _close(to_fd);
+        _close(from_fd);
+        TerminateProcess(h, 1);
+        WaitForSingleObject(h, INFINITE);
+        CloseHandle(h);
+        out._3 = "process table full";
+        return out;
+    }
+    out._0 = to_fd;
+    out._1 = from_fd;
+    out._2 = tok;
     return out;
 }
 
