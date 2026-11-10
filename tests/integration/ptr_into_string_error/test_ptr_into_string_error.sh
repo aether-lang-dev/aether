@@ -163,7 +163,7 @@ fi
 compiles_and_runs() {
     name="$1"; want="$2"
     out=$(cd "$TMP" && "$AE" check "$name.ae" 2>&1)
-    if [ $? -ne 0 ] || printf '%s' "$out" | grep -q "E0202\|W1005"; then
+    if [ $? -ne 0 ] || printf '%s' "$out" | grep -q -E "E0202|W1005"; then
         echo "  [FAIL] $name: refused, or reported E0202/W1005"
         echo "$out" | sed 's/^/        /'
         fails=$((fails + 1)); return

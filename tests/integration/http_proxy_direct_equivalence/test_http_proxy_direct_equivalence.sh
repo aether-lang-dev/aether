@@ -14,6 +14,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 SRC="$ROOT/tests/integration/http_reverse_proxy/server.ae"
 
@@ -35,7 +36,7 @@ if ! AETHER_HOME="$ROOT" "$AE" build "$SRC" -o "$TMPDIR/server" >"$TMPDIR/build.
     echo "  [FAIL] build:"; head -20 "$TMPDIR/build.log"; exit 1
 fi
 
-head -c 2048 /dev/urandom > "$TMPDIR/post.in" 2>/dev/null || \
+head_c 2048 /dev/urandom > "$TMPDIR/post.in" 2>/dev/null || \
     { i=0; while [ $i -lt 64 ]; do printf 'payload-0123456789abcdef'; i=$((i+1)); done > "$TMPDIR/post.in"; }
 
 wait_ready() {
@@ -56,6 +57,14 @@ AETHER_HOME="$ROOT" "$TMPDIR/server" upstream >"$TMPDIR/up.log" 2>&1 &
 UP_PID=$!
 wait_ready "$UP_PID" "$TMPDIR/up.log" upstream
 UP_PORT=$(read_ready_port "$TMPDIR/up.log") || exit 1
+
+# fix_length <header-file> <delta>: add delta to the file's Content-Length.
+fix_length() {
+    LC_ALL=C awk -v d="$2" '
+        tolower(substr($0, 1, 15)) == "content-length:" {
+            printf "%s %d\r\n", substr($0, 1, 15), substr($0, 16) + d; next }
+        { print }' "$1" > "$1.norm" && mv "$1.norm" "$1"
+}
 
 # capture <label> — run the proxy and record every response shape.
 capture() {
@@ -86,10 +95,26 @@ capture() {
     # client dialled. That one number is the only byte that may legitimately
     # differ, so it is replaced in both captures and everything else is still
     # compared exactly.
-    for f in "$TMPDIR/$label".*.h "$TMPDIR/$label".*.b; do
+    #
+    # The echoed body holds that port, so its Content-Length does too: 117
+    # bytes for a five-digit port and 116 for a four-digit one, and a kernel
+    # whose ephemeral range starts below 10000 (OpenBSD's: 1024) hands out
+    # both. The header is corrected by what replacing the port did to the
+    # body, so the length is still compared, to the byte, against the body.
+    for f in "$TMPDIR/$label".*.b; do
         [ -f "$f" ] || continue
         # LC_ALL=C: two of the captured bodies are binary, and BSD sed
         # refuses a byte sequence that is not valid in the ambient locale.
+        old=$(wc -c < "$f" | tr -d ' ')
+        LC_ALL=C sed "s/:$PX_PORT/:PROXY_PORT/g" "$f" > "$f.norm" && mv "$f.norm" "$f"
+        new=$(wc -c < "$f" | tr -d ' ')
+        h="${f%.b}.h"
+        if [ "$new" != "$old" ] && [ -f "$h" ]; then
+            fix_length "$h" $((new - old))
+        fi
+    done
+    for f in "$TMPDIR/$label".*.h; do
+        [ -f "$f" ] || continue
         LC_ALL=C sed "s/:$PX_PORT/:PROXY_PORT/g" "$f" > "$f.norm" && mv "$f.norm" "$f"
     done
 }

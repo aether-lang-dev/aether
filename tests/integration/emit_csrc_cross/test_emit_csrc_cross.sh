@@ -21,6 +21,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 SRC="$SCRIPT_DIR/mylib.ae"
 
@@ -86,7 +87,7 @@ if command -v zig >/dev/null 2>&1; then
             fail "--target=$t --emit=obj was rejected"
         fi
         [ -s "$TMP/o_$t.o" ] || fail "no object emitted for $t"
-        desc="$(file "$TMP/o_$t.o")"
+        desc="$(file_desc "$TMP/o_$t.o")"
         case "$desc" in
             *"$want"*) ;;
             *) fail "$t object is not $want format: $desc" ;;
@@ -121,9 +122,9 @@ if command -v zig >/dev/null 2>&1; then
         || fail "wasm32-wasi csrc differs; csrc is meant to be target-neutral"
 
     "$AE" build --target=wasm32-wasi --emit=obj "$SRC" -o "$TMP/wasi.o"         >"$TMP/wasiobj" 2>&1 || { cat "$TMP/wasiobj"; fail "wasm32-wasi --emit=obj was rejected"; }
-    case "$(file "$TMP/wasi.o")" in
+    case "$(file_desc "$TMP/wasi.o")" in
         *WebAssembly*) ;;
-        *) fail "wasm32-wasi object is not a wasm module: $(file "$TMP/wasi.o")" ;;
+        *) fail "wasm32-wasi object is not a wasm module: $(file_desc "$TMP/wasi.o")" ;;
     esac
 
     # A full executable link now WORKS for wasm32-wasi (#1655). It was rejected
@@ -135,9 +136,9 @@ if command -v zig >/dev/null 2>&1; then
         cat "$TMP/wasiexe"
         fail "wasm32-wasi executable link failed"
     fi
-    case "$(file "$TMP/app.wasm")" in
+    case "$(file_desc "$TMP/app.wasm")" in
         *WebAssembly*) ;;
-        *) fail "wasi exe is not a wasm module: $(file "$TMP/app.wasm")" ;;
+        *) fail "wasi exe is not a wasm module: $(file_desc "$TMP/app.wasm")" ;;
     esac
 
     # An ACTOR program must link too. This is the case that caught the real

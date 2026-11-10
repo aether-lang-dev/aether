@@ -10,6 +10,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AETHERC="$ROOT/build/aetherc"
 AE="$ROOT/build/ae"
 
@@ -86,7 +87,7 @@ if ! (cd "$tmpdir" && gcc --coverage -O0 -g $INC_FLAGS \
 fi
 if ! (cd "$tmpdir" && gcc --coverage cov_demo.o \
         -L"$PREFIX/lib/aether" -laether \
-        -lpthread -lm -ldl \
+        -lpthread -lm $AE_DL_LIBS \
         -o cov_demo 2>"$tmpdir/link.err"); then
     echo "  [FAIL] ci_coverage_smoke: gcc --coverage link failed"
     head -5 "$tmpdir/link.err"

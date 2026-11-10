@@ -38,7 +38,7 @@ expect_reject() {
     grep -qF "$2" "$1.txt" || fail "$1: missing '$2'" "$1.txt"
     grep -qF -- "--> main.ae:5:10" "$1.txt" || fail "$1: not reported at the argument" "$1.txt"
     grep -qF "$3" "$1.txt" || fail "$1: missing help '$3'" "$1.txt"
-    if grep -q "has no member named\|not a structure or union" "$1.txt"; then
+    if grep -q -E "has no member named|not a structure or union" "$1.txt"; then
         fail "$1: still reported by the C compiler" "$1.txt"
     fi
 }
@@ -105,7 +105,7 @@ main() {
 AE
 want="boxed 4
 2 6 11 6 8"
-got="$("$AE" run main.ae 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run main.ae 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] call_non_closure_reject: a closure callee stopped working"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

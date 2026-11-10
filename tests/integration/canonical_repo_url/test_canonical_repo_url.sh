@@ -33,13 +33,12 @@ STALE_OWNERS="nicolasmd87 aether-lang-${ORG_SUFFIX}"
 hits=""
 for owner in $STALE_OWNERS; do
     stale="$owner/aether"
-    found=$(grep -rn "$stale" \
-            --exclude-dir=.git \
-            --exclude-dir=build \
-            --exclude-dir=target \
-            --exclude=CHANGELOG.md \
-            --exclude=CHANGELOG-archive.md \
-            . 2>/dev/null | grep -Ev '^\.?/?benchmarks/json/corpus/')
+    # find, not `grep -r --exclude`: OpenBSD's grep matches --exclude against
+    # the whole path ("./CHANGELOG.md"), so the changelogs were not excluded.
+    found=$(find . \( -name .git -o -name build -o -name target \) -prune -o \
+            -type f ! -name CHANGELOG.md ! -name CHANGELOG-archive.md \
+            ! -path './benchmarks/json/corpus/*' \
+            -exec grep -n "$stale" /dev/null {} + 2>/dev/null)
     [ -n "$found" ] && hits="${hits}${found}
 "
 done

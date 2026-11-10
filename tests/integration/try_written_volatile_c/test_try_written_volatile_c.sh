@@ -62,8 +62,8 @@ for name in test_try_written_param test_try_written_struct_local test_catch_bind
                 sed 's/^/    /' "$tmp/cc.log" | head -20
                 fail "$c does not compile at $opt"
             fi
-            if grep -qi "discards\|volatile\|qualifier" "$tmp/cc.log"; then
-                grep -i "discards\|volatile\|qualifier" "$tmp/cc.log" | sed 's/^/    /' | head -10
+            if grep -qi -E "discards|volatile|qualifier" "$tmp/cc.log"; then
+                grep -i -E "discards|volatile|qualifier" "$tmp/cc.log" | sed 's/^/    /' | head -10
                 fail "$c at $opt: a volatile value is passed where a plain one is expected"
             fi
         done

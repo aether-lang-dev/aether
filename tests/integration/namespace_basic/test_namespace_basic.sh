@@ -2,6 +2,7 @@
 # Minimal namespace round-trip — manifest + one script.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
@@ -15,7 +16,7 @@ pass=0; fail=0
 # consume.c loads the library with dlopen, or LoadLibrary on Windows, where
 # the DLL is found beside the consumer and so needs no rpath and no -ldl.
 LINK_FLAGS=""
-[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl"
+[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR $AE_DL_LIBS"
 
 # Copy the manifest+script into TMPDIR so the build artifact lands there
 # and doesn't pollute the source tree.

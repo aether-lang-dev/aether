@@ -13,6 +13,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 # /proc/self/status is Linux-specific, and the fix is a POSIX fork/exec path;
 # skip cleanly elsewhere (Windows has no fork; other Unixes lack /proc SigBlk).
@@ -30,7 +31,7 @@ tmpdir="$(mktemp -d)"
 trap 'rm -rf "$tmpdir"' EXIT
 
 if ! ${CC:-cc} -o "$tmpdir/harness" "$SCRIPT_DIR/harness.c" \
-        "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/gcc.err"; then
+        "$ROOT/build/libaether.a" -lpthread $AE_DL_LIBS -lm 2>"$tmpdir/gcc.err"; then
     echo "  [FAIL] could not link the harness against libaether.a"
     sed 's/^/          /' "$tmpdir/gcc.err" | head -8
     exit 1

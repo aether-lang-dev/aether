@@ -237,7 +237,7 @@ jobs="${LEAKS_JOBS:-$(sysctl -n hw.ncpu 2>/dev/null || echo 2)}"
 echo "$(printf '%s\n' $TESTS | wc -l | tr -d ' ') programs, $jobs at a time"
 printf '%s\n' $TESTS | xargs -P "$jobs" -I{} sh "$0" --one {} "$tmpdir"
 
-covered=$(ls "$tmpdir" | grep -c '^pass_\|^fail_')
+covered=$(ls "$tmpdir" | grep -c -E '^pass_|^fail_')
 excluded=$(ls "$tmpdir" | grep -c '^skip_')
 fails=$(ls "$tmpdir" | grep -c '^fail_')
 

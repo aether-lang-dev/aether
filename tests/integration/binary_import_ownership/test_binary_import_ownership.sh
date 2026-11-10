@@ -17,6 +17,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 [ -x "$AE" ] || [ -x "$AE.exe" ] || { echo "  [SKIP] binary_import_ownership: ae not built"; exit 0; }
 CC="${CC:-cc}"

@@ -9,6 +9,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s 2>/dev/null)" in
     Linux) ;;
@@ -42,7 +43,7 @@ if ! ${CC:-cc} $INC -I"$ROOT/contrib/host/aether" \
     # shellcheck disable=SC2086
     if ! ${CC:-cc} $INC -I"$ROOT/contrib/host/aether" \
             -o "$TMP/harness" $SRC "$ROOT/build/libaether.a" \
-            -lpthread -ldl -lm -lrt -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
+            -lpthread $AE_DL_LIBS -lm $AE_RT_LIBS -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
         echo "  [FAIL] could not link the harness against the host and libaether.a"
         sed 's/^/          /' "$TMP/cc.err" | head -8
         exit 1

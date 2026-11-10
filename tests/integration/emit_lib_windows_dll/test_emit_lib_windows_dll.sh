@@ -38,7 +38,7 @@ AE
 #    <root>/build, so name it)
 if ! (cd "$tmp" && "$AE" build --emit=lib mathlib.ae -o "$tmp/libmathlib.dll" > "$tmp/build.log" 2>&1); then
     echo "  [FAIL] emit_lib_windows_dll: ae build --emit=lib failed"
-    grep -i "undefined\|error" "$tmp/build.log" | head -3 | sed 's/^/        /'
+    grep -i -E "undefined|error" "$tmp/build.log" | head -3 | sed 's/^/        /'
     exit 1
 fi
 dll="$(find "$tmp" -name 'libmathlib.dll' | head -1)"
@@ -101,7 +101,7 @@ mkdir -p "$tmp/ns"
 cp "$ROOT/tests/integration/namespace_basic/manifest.ae" "$ROOT/tests/integration/namespace_basic/hello.ae" "$tmp/ns/"
 if ! (cd "$tmp/ns" && AETHER_HOME="$ROOT" "$AE" build --namespace . > "$tmp/ns.log" 2>&1); then
     echo "  [FAIL] emit_lib_windows_dll: ae build --namespace . failed"
-    grep -iv "^\s*$" "$tmp/ns.log" | head -4 | sed 's/^/        /'
+    grep -iv "^[[:space:]]*$" "$tmp/ns.log" | head -4 | sed 's/^/        /'
     fail=1
 elif [ ! -f "$tmp/ns/libgreet.dll" ]; then
     echo "  [FAIL] emit_lib_windows_dll: --namespace did not produce libgreet.dll (named from the manifest)"

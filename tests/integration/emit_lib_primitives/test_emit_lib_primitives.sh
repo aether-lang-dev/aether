@@ -2,6 +2,7 @@
 # int64/bool/float primitive round-trip for --emit=lib.
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 # The host loads the library by path (dlopen, LoadLibrary on Windows) and
 # links it; Windows finds the DLL beside the host, with no rpath or -ldl.
@@ -13,7 +14,7 @@ esac
 
 TMPDIR="$(mktemp -d)"; trap 'rm -rf "$TMPDIR"' EXIT
 LINK_FLAGS=""
-[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl"
+[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR $AE_DL_LIBS"
 pass=0; fail=0
 
 cd "$SCRIPT_DIR"

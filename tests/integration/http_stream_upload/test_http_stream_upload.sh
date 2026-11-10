@@ -20,12 +20,13 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 
 command -v curl >/dev/null 2>&1 || { echo "  [SKIP] curl not on PATH"; exit 0; }
-command -v sha256sum >/dev/null 2>&1 && SHA=sha256sum || SHA="shasum -a 256"
+SHA=sha256_of
 
 TMPDIR="$(mktemp -d)"
 SRV_PID=""
@@ -38,7 +39,7 @@ trap cleanup EXIT
 # 3 MiB of random bytes — ~192 streaming windows at 64 KiB each, and far
 # beyond anything that fits in the 16 KiB connection buffer.
 PAYLOAD="$TMPDIR/payload.bin"
-head -c 3145728 /dev/urandom > "$PAYLOAD"
+head_c 3145728 /dev/urandom > "$PAYLOAD"
 WANT_SHA=$($SHA "$PAYLOAD" | awk '{print $1}')
 WANT_LEN=$(wc -c < "$PAYLOAD" | tr -d ' ')
 
@@ -146,7 +147,7 @@ fi
 
 # Small (buffered, < 16 KiB) body: complete at entry by construction.
 SMALL="$TMPDIR/small.bin"
-head -c 512 /dev/urandom > "$SMALL"
+head_c 512 /dev/urandom > "$SMALL"
 SMALL_LEN=$(wc -c < "$SMALL" | tr -d ' ')
 RESP3=$(curl --silent --show-error --max-time 10 \
             --data-binary "@$SMALL" \

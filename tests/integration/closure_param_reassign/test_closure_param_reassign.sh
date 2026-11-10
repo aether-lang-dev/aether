@@ -61,7 +61,7 @@ k 12
 in!
 outer
 left 0"
-got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] closure_param_reassign: wrong output"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

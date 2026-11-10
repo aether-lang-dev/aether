@@ -15,6 +15,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 
 fail() { echo "  [FAIL] cache_key_runtime_headers: $1"; exit 1; }
 
@@ -35,8 +36,8 @@ for f in "ae$EXE" "aetherc$EXE" libaether.a aether_manifest.o; do
 done
 # The headers, in one process (each process costs tens of milliseconds on
 # Windows).
-(cd "$ROOT" && find runtime std include -name '*.h' 2>/dev/null | tar cf - -T -) |
-    (cd "$TREE" && tar xf -) || fail "could not copy the headers"
+(cd "$ROOT" && find runtime std include -name '*.h' 2>/dev/null | copy_listed "$TREE") ||
+    fail "could not copy the headers"
 
 AE="$TREE/build/ae$EXE"
 probe="$TREE/runtime/utils/zz_cache_key_probe.h"

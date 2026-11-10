@@ -44,6 +44,8 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
@@ -60,17 +62,15 @@ pass=0; fail=0
 ok()  { echo "  [PASS] $1"; pass=$((pass + 1)); }
 bad() { echo "  [FAIL] $1"; fail=$((fail + 1)); }
 
-# Dynamic symbols, portably: a DLL's export table (objdump -p), GNU nm -D,
-# else macOS nm -gU (leading '_').
+# Dynamic symbols, portably: a DLL's export table (objdump -p), else
+# dyn_syms (tests/lib/portable.sh: GNU nm -D, macOS nm -gU, OpenBSD nm -g).
 syms() {
     case "$1" in
         *.dll)
             objdump -p "$1" 2>/dev/null | sed -n '/\[Ordinal\/Name Pointer\] Table/,/^$/p'
             return ;;
     esac
-    s="$(nm -D --defined-only "$1" 2>/dev/null || true)"
-    [ -n "$s" ] || s="$(nm -gU "$1" 2>/dev/null || true)"
-    printf '%s\n' "$s"
+    dyn_syms "$1"
 }
 exports() {  # exports <lib> <symbol>
     syms "$1" | grep -E "[[:space:]]_?$2\$" >/dev/null

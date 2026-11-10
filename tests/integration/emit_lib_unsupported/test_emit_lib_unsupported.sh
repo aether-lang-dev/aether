@@ -42,7 +42,7 @@ else
 
     # Check (c) — a warning mentions the skipped function.
     if grep -q "takes_optional" "$TMPDIR/stderr.log" && \
-       grep -q "skipping alias stub\|representable in the" "$TMPDIR/stderr.log"; then
+       grep -q -E "skipping alias stub|representable in the" "$TMPDIR/stderr.log"; then
         echo "  [PASS] warning emitted for unsupported param type"
         pass=$((pass + 1))
     else

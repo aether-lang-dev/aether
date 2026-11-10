@@ -156,7 +156,7 @@ heap 72 24
 slice 0 1 8 36
 bounds true"
 
-filter() { grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$"; }
+filter() { grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$"; }
 
 out="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | filter)"
 if [ "$out" != "$expected" ]; then

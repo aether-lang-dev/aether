@@ -30,6 +30,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 case "$(uname -s 2>/dev/null)" in
     Linux|FreeBSD) ;;
     *)

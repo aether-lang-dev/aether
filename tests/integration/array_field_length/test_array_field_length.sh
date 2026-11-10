@@ -90,7 +90,7 @@ main() {
     println("${v.xs[3]} ${w.xs[1]} ${w.xs[3]} ${s.names[0]} ${string.length(s.names[2])} ${t.names[2]}")
 }
 AE
-got="$("$AE" run "$tmp/ok.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/ok.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "4 6 0 x 0 c" ]; then
     echo "  [FAIL] array_field_length: arrays of the field's length and shorter literals"
     printf 'got:\n%s\nwant:\n4 6 0 x 0 c\n' "$got" | sed 's/^/        /'

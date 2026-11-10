@@ -23,6 +23,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -68,11 +69,7 @@ OUT=$("$TMPDIR_T/app" 2>&1) || { echo "  [FAIL] size_mode: --size binary did not
 # if neither form works -- an inconclusive probe must not masquerade as a
 # regression.
 if "$AE" build --emit=lib --size "$LIB" -o "$TMPDIR_T/lib.so" >/dev/null 2>&1; then
-    SYMS=""
-    case "$(uname -s 2>/dev/null)" in
-        Darwin) SYMS=$(nm -gU "$TMPDIR_T/lib.so" 2>/dev/null || true) ;;
-        *)      SYMS=$(nm -D --defined-only "$TMPDIR_T/lib.so" 2>/dev/null || true) ;;
-    esac
+    SYMS=$(dyn_syms "$TMPDIR_T/lib.so")
     if [ -n "$SYMS" ]; then
         if ! printf '%s' "$SYMS" | grep -q 'safe'; then
             echo "  [FAIL] size_mode: --emit=lib --size dropped the exported symbols"
@@ -124,11 +121,11 @@ if [ "$SIZED_SZ" -ge $((BASE_SZ / 4)) ]; then
 fi
 
 # Smaller is worthless if it is no longer a wasm module.
-case "$(file -b "$SIZED" 2>/dev/null)" in
+case "$(file_desc "$SIZED" 2>/dev/null)" in
     *WebAssembly*) ;;
     *)
         echo "  [FAIL] size_mode: --size output is not a wasm module:"
-        echo "         $(file -b "$SIZED" 2>/dev/null)"
+        echo "         $(file_desc "$SIZED" 2>/dev/null)"
         exit 1
         ;;
 esac

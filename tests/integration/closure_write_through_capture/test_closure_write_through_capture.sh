@@ -171,7 +171,7 @@ nested 6 100
 loop 2 2 1 1
 float 4
 string a aab!!"
-got="$("$AE" run "$tmp/arrays.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/arrays.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want_arrays" ]; then
     echo "  [FAIL] closure_write_through_capture: a write to a captured array did not reach the caller"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want_arrays" | sed 's/^/        /'
@@ -212,7 +212,7 @@ main() {
     println("state ${n}")
 }
 AE
-got="$("$AE" run "$tmp/actor.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/actor.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "state 704" ]; then
     echo "  [FAIL] closure_write_through_capture: a handler-local array written by a closure"
     printf '%s\n' "$got" | head -5 | sed 's/^/        /'
@@ -252,7 +252,7 @@ field 7 nested 15
 element 9
 rec ab!+ 2
 box n2"
-got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] closure_write_through_capture: wrong values"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

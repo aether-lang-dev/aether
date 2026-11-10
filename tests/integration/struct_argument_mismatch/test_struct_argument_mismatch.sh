@@ -150,7 +150,7 @@ want="14
 2 4 6
 3 12
 7 10 1"
-got="$("$AE" run good.ae 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run good.ae 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] struct_argument_mismatch: a valid struct argument stopped working"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

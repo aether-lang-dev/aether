@@ -14,6 +14,7 @@
 set -e
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] sqlite_vendored_native: ae not built"; exit 0; }
 if [ ! -f "$ROOT/build/contrib/libsqlite3.a" ] || [ ! -f "$ROOT/build/contrib/libaether_sqlite.a" ]; then

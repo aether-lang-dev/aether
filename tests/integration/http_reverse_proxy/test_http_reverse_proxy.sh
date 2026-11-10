@@ -27,6 +27,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 if ! command -v curl >/dev/null 2>&1; then
@@ -201,7 +202,7 @@ fi
 # Test 7 — POST body round-trip.
 BODY_IN="$TMPDIR/post.in"
 BODY_OUT="$TMPDIR/post.out"
-yes 'binary-payload-1234567890' 2>/dev/null | head -c 1024 > "$BODY_IN"
+yes 'binary-payload-1234567890' 2>/dev/null | head_c 1024 > "$BODY_IN"
 curl --silent --show-error --max-time 5 \
      -X POST -H 'Content-Type: application/octet-stream' \
      --data-binary "@$BODY_IN" \

@@ -28,6 +28,7 @@
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 . "$ROOT/tests/lib/same_bytes.sh"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"
 
@@ -157,7 +158,7 @@ find examples tests -name '*.ae' -type f 2>/dev/null | LC_ALL=C sort | \
 # custom_lib_dir/.mylib; and what --check lists is then the sample's path.
 mkdir "$TMPDIR/idem"
 TOTAL=$(awk 'END { print NR }' "$TMPDIR/sample.txt")
-if ! tar cf - -T "$TMPDIR/sample.txt" | (cd "$TMPDIR/idem" && tar xf -) ||
+if ! copy_listed "$TMPDIR/idem" < "$TMPDIR/sample.txt" ||
    [ "$(find "$TMPDIR/idem" -type f | wc -l | tr -d ' ')" != "$TOTAL" ]; then
     echo "  [FAIL] fmt_gate: could not copy the $TOTAL sampled files for the idempotence tier"
     exit 1

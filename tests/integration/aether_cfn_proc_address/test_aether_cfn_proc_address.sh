@@ -22,6 +22,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AETHERC="$ROOT/build/aetherc"
 
 if [ ! -x "$AETHERC" ]; then
@@ -142,7 +143,7 @@ for d in "$ROOT" "$ROOT/runtime" "$ROOT/runtime/actors" "$ROOT/runtime/scheduler
 done
 
 if ! ${CC:-cc} $INCLUDES -o "$tmpdir/app_bin" "$tmpdir/app.gen.c" "$tmpdir/glue.c" \
-        "$ROOT/build/libaether.a" -lpthread -ldl -lm 2>"$tmpdir/cc.err"; then
+        "$ROOT/build/libaether.a" -lpthread $AE_DL_LIBS -lm 2>"$tmpdir/cc.err"; then
     echo "  [FAIL] aether_cfn_proc_address: C compile returned non-zero"
     sed 's/^/    /' "$tmpdir/cc.err"
     exit 1

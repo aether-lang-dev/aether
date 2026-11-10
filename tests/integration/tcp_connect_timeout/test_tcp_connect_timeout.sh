@@ -91,7 +91,7 @@ main() {
     println("zero ${z == null} ${zerr}")
 }
 AE
-got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" 2>&1 | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$(AETHER_HOME="$ROOT" "$AE" run "$tmp/main.ae" 2>&1 | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 printf '%s\n' "$got" | grep '^refused' | sed 's/^/    note: /'
 refused_want='refused true connection failed fast true bounded true'
 case "$(uname -s)" in

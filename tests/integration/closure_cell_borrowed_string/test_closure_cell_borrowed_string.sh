@@ -74,7 +74,7 @@ want="3 ab7
 3 ab7
 ab7 ab7? ab7
 ab7/3 ab7"
-got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$")"
+got="$("$AE" run "$tmp/main.ae" 2>&1 | tr -d '\r' | grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$")"
 if [ "$got" != "$want" ]; then
     echo "  [FAIL] closure_cell_borrowed_string: the caller's string did not survive the closure's store"
     printf 'got:\n%s\nwant:\n%s\n' "$got" "$want" | sed 's/^/        /'

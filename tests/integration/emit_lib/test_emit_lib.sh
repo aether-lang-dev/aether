@@ -5,12 +5,13 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 pass=0
 fail=0
 
 # Platform: Linux uses .so, macOS .dylib, Windows .dll (which needs no -ldl)
-LDL="-ldl"
+LDL="$AE_DL_LIBS"
 case "$(uname -s 2>/dev/null)" in
     Darwin) LIB_EXT=".dylib" ;;
     MINGW*|MSYS*|CYGWIN*|Windows_NT) LIB_EXT=".dll"; LDL="" ;;

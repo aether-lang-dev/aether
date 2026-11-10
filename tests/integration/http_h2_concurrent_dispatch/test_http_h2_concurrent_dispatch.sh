@@ -35,6 +35,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/wait_port.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
@@ -147,7 +148,7 @@ run_parallel() {
     while [ $j -lt "$n" ]; do
         if ! grep -q "^slow:s=$j\$" "$PAR_DIR/n$j" 2>/dev/null; then
             echo "  [WARN] parallel x$n stream $j body mismatch on attempt $label:" >&2
-            head -c 200 "$PAR_DIR/n$j" >&2
+            head_c 200 "$PAR_DIR/n$j" >&2
             echo >&2
             return 1
         fi

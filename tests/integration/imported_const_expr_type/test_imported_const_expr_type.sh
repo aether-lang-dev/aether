@@ -117,7 +117,7 @@ run() {
     if grep -q "unresolved type in codegen" "$1.txt"; then
         fail "$1: still warns 'unresolved type in codegen'" "$1.txt"
     fi
-    got="$(grep -v "^warning\|^ *-->\|^ *[0-9]* |\|^ *|\|^Type checking\|^$" "$1.txt")"
+    got="$(grep -v -E "^warning|^ *-->|^ *[0-9]* [|]|^ *[|]|^Type checking|^$" "$1.txt")"
     if [ "$got" != "$2" ]; then
         printf '  [FAIL] imported_const_expr_type: %s\ngot:\n%s\nwant:\n%s\n' \
             "$1" "$got" "$2" | sed '2,$s/^/        /'

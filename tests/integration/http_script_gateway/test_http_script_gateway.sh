@@ -38,6 +38,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 AETHERC="$ROOT/build/aetherc"

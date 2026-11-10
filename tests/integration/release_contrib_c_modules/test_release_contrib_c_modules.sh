@@ -34,7 +34,7 @@ trap 'rm -rf "$TMP" || true' EXIT
 rel="$TMP/release"
 
 if ! sh "$ROOT/scripts/stage-release.sh" "$ROOT/build" "$rel" --contrib-archives > "$TMP/stage.log" 2>&1; then
-    if grep -q "fetch-\(sqlite\|quickjs\)" "$TMP/stage.log"; then
+    if grep -q -E "fetch-(sqlite|quickjs)" "$TMP/stage.log"; then
         echo "  [SKIP] $NAME: the amalgamations could not be fetched (offline?)"
         exit 0
     fi

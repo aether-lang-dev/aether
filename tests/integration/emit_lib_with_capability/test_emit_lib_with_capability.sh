@@ -40,7 +40,7 @@ run_case() {
             fail=$((fail + 1))
         fi
     else
-        if [ "$rc" -ne 0 ] && grep -q "capability-empty\|--with=" "$TMPDIR/stderr"; then
+        if [ "$rc" -ne 0 ] && grep -q -E "capability-empty|--with=" "$TMPDIR/stderr"; then
             echo "  [PASS] $label"; pass=$((pass + 1))
         else
             echo "  [FAIL] $label — expected reject (rc=$rc, stderr:)"

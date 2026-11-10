@@ -483,7 +483,7 @@ if [ -n "$use_gcc" ] && [ "${MSVC_COMPAT_SWEEP:-0}" = 1 ]; then
         for b in "$SWEEP_TMP"/bad_*; do
             n="${b#"$SWEEP_TMP"/bad_}"
             echo "    $(cat "$b")"
-            grep -B1 -A2 "braced-groups\|fatal error" "$SWEEP_TMP/$n.log" 2>/dev/null | head -8 | sed 's/^/      /'
+            grep -B1 -A2 -E "braced-groups|fatal error" "$SWEEP_TMP/$n.log" 2>/dev/null | head -8 | sed 's/^/      /'
         done
         echo "  [FAIL] $bad of the sweep's programs have GCC extensions on the non-GCC path"
         exit 1

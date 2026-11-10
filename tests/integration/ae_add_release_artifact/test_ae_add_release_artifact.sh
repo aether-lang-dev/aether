@@ -25,6 +25,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 . "$ROOT/tests/lib/server_jobs.sh"
 AE="$ROOT/build/ae"
 [ -n "${EXE_EXT:-}" ] && AE="$AE$EXE_EXT"
@@ -32,9 +33,7 @@ AE="$ROOT/build/ae"
 [ -x "$AE" ] || { echo "  [SKIP] ae_add_release_artifact: ae not built"; exit 0; }
 command -v python3 >/dev/null 2>&1 || { echo "  [SKIP] ae_add_release_artifact: python3 needed to serve fixtures"; exit 0; }
 command -v tar >/dev/null 2>&1 || { echo "  [SKIP] ae_add_release_artifact: tar needed"; exit 0; }
-if command -v sha256sum >/dev/null 2>&1; then SHA="sha256sum"
-elif command -v shasum >/dev/null 2>&1; then SHA="shasum -a 256"
-else echo "  [SKIP] ae_add_release_artifact: no sha256 tool"; exit 0; fi
+SHA=sha256_of
 
 # The artifact path is per-host-triple; on a host we publish no assets
 # for, ae_host_triple() returns NULL and everything correctly falls back

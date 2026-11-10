@@ -20,6 +20,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 # The host loads the library by path (dlopen, LoadLibrary on Windows) and
 # links it for the aether_value_* accessors. Windows finds the DLL beside
@@ -33,7 +34,7 @@ esac
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 LINK_FLAGS=""
-[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl"
+[ "$LIB_EXT" = .dll ] || LINK_FLAGS="-Wl,-rpath,$TMPDIR $AE_DL_LIBS"
 
 pass=0
 fail=0

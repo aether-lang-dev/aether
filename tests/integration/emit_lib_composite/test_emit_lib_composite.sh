@@ -9,6 +9,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 LINK_FLAGS=""
 case "$(uname -s 2>/dev/null)" in
@@ -51,7 +52,7 @@ fi
 # Windows the DLL is found beside the consumer; elsewhere through the rpath.
 case "$LIB_EXT" in
     .dll) ;;
-    *)    LINK_FLAGS="-Wl,-rpath,$TMPDIR -ldl" ;;
+    *)    LINK_FLAGS="-Wl,-rpath,$TMPDIR $AE_DL_LIBS" ;;
 esac
 # shellcheck disable=SC2086
 if ! ${CC:-cc} \

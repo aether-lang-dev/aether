@@ -6,6 +6,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 
 case "$(uname -s 2>/dev/null)" in
     Linux|FreeBSD) ;;
@@ -34,7 +35,7 @@ if ! ${CC:-cc} -std=c11 -Wall -Wextra -Werror \
     if ! ${CC:-cc} -std=c11 -Wall -Wextra -Werror \
             -o "$TMP/harness" "$SCRIPT_DIR/harness.c" \
             "$ROOT/build/libaether.a" \
-            -lpthread -ldl -lm -lrt -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
+            -lpthread $AE_DL_LIBS -lm $AE_RT_LIBS -lz -lssl -lcrypto 2>"$TMP/cc.err"; then
         echo "  [FAIL] sandbox_empty_grants: harness did not link"
         sed 's/^/          /' "$TMP/cc.err" | head -8
         exit 1

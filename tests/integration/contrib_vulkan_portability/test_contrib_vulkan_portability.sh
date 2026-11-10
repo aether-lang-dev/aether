@@ -92,7 +92,7 @@ if ! "$NM_WIN" -u "$TMP/win.o" | grep -q 'LoadLibraryA'; then
     echo "        the _WIN32 arm was compiled out"
     exit 1
 fi
-if "$NM_WIN" -u "$TMP/win.o" | grep -q '\bdlopen\b'; then
+if "$NM_WIN" -u "$TMP/win.o" | grep -qE '(^|[^A-Za-z0-9_])dlopen([^A-Za-z0-9_]|$)'; then
     echo "  [FAIL] contrib_vulkan_portability: the Windows object references dlopen"
     exit 1
 fi

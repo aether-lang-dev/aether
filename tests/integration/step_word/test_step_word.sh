@@ -13,6 +13,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/syslibs.sh"
 AE="$ROOT/build/ae"
 CC="${CC:-cc}"
 export AETHER_HOME="$ROOT"

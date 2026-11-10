@@ -43,7 +43,7 @@ expect_reject() {
     tr -d '\r' < "$1.log" > "$1.txt"
     grep -qF "$2" "$1.txt" || fail "$1: missing '$2'" "$1.txt"
     grep -qF -- "--> main.ae:$3" "$1.txt" || fail "$1: not reported at the slot ($3)" "$1.txt"
-    if grep -q "makes pointer from integer\|incompatible types" "$1.txt"; then
+    if grep -q -E "makes pointer from integer|incompatible types" "$1.txt"; then
         fail "$1: still reported by the C compiler" "$1.txt"
     fi
 }

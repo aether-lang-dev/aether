@@ -6,6 +6,7 @@
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 TMPDIR="$(mktemp -d)"
@@ -140,7 +141,7 @@ main() {
 }
 EOF
 out=$("$AE" help "$TMPDIR/json.ae" --json 2>&1)
-first=$(printf '%s' "$out" | head -c 1)
+first=$(printf '%s' "$out" | head_c 1)
 last=$(printf '%s' "$out" | tr -d '\n' | tail -c 1)
 if [ "$first" = "{" ] && [ "$last" = "}" ]; then
     echo "  [PASS] --json emits a single JSON object"

@@ -28,6 +28,7 @@ set -e
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
+. "$ROOT/tests/lib/portable.sh"
 AE="$ROOT/build/ae"
 
 if [ ! -x "$AE" ]; then
@@ -50,7 +51,7 @@ if ! "$AE" build --target=wasm32-wasi --emit=lib \
         "$SCRIPT_DIR/paniclib.ae" -o "$OUT" >"$BUILD_LOG" 2>&1; then
     echo "  [FAIL] wasi_panic_link: cross build failed"
     # The regression's signature, surfaced directly when it recurs.
-    if grep -q '_longjmp\|_setjmp' "$BUILD_LOG"; then
+    if grep -q -E '_longjmp|_setjmp' "$BUILD_LOG"; then
         echo "         setjmp selection regressed: aether_panic.h's macro"
         echo "         arms must special-case __wasi__ (see the header)."
     fi
@@ -61,11 +62,11 @@ fi
 [ -f "$OUT" ] || { echo "  [FAIL] wasi_panic_link: no output at $OUT"; exit 1; }
 
 # A real wasm module, not an empty file or a host artifact.
-case "$(file -b "$OUT" 2>/dev/null)" in
+case "$(file_desc "$OUT" 2>/dev/null)" in
     *WebAssembly*) ;;
     *)
         echo "  [FAIL] wasi_panic_link: not a wasm module:"
-        echo "         $(file -b "$OUT" 2>/dev/null)"
+        echo "         $(file_desc "$OUT" 2>/dev/null)"
         exit 1
         ;;
 esac
