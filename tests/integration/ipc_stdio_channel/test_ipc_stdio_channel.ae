@@ -1,0 +1,131 @@
+// ipc.stdio_channel: a child of os.run_stdio claims its stdin and stdout as
+// the channel, so a stray print cannot corrupt the frames and nothing else
+// can read the channel's bytes from stdin.
+//
+// Three processes, the same program in three roles, on every platform:
+//   the test   runs the host with os.run_full, capturing the host's stdout
+//              and stderr (which the child inherits);
+//   "host"     starts the child with os.run_stdio, talks frames to it and
+//              prints "host: ok" or what went wrong to stdout;
+//   "child"    claims stdio first thing, then prints to stdout (println and
+//              a raw write to fd 1) around every frame it answers.
+//
+// What it locks in: frames arrive intact although the child printed to
+// stdout after the claim; that stray text shows up on stderr, not in the
+// channel or on stdout; a read of stdin after the claim gets end of file at
+// once; a second claim fails with "ipc.stdio_channel: already claimed";
+// parent_channel_kind() is "stdio" before the claim and "" after it.
+
+import std.spec
+import std.ipc
+import std.os
+import std.io
+import std.string
+import std.list
+
+const MAX = 65536
+
+child_main() {
+    kind_before = ipc.parent_channel_kind()
+    inp, out, err = ipc.stdio_channel()
+    if err != "" {
+        ipc.write(2, "child: ${err}\n")
+        exit(3)
+    }
+    _a, _b, again = ipc.stdio_channel()
+    println("STRAY-AFTER-CLAIM")
+    ipc.write(1, "STRAY-FD1\n")
+    data, rerr = ipc.read(0, 16)
+    kind_after = ipc.parent_channel_kind()
+    ipc.write_frame(out, "before=${kind_before}|again=${again}|stdin=${string.length(data)}:${rerr}|after=${kind_after}")
+    while true {
+        req, ferr = ipc.read_frame(inp, MAX)
+        if ferr != "" {
+            if ferr == "ipc.read_frame: end of stream" { exit(0) }
+            ipc.write(2, "child: ${ferr}\n")
+            exit(4)
+        }
+        println("STRAY-${req}")
+        ipc.write_frame(out, req)
+        print("STRAY-NO-NEWLINE")
+    }
+}
+
+// "" when `got` is `want`, else a line saying what came instead.
+check(what: string, got: string, want: string) -> string {
+    if got == want { return "" }
+    return "host: ${what}: got [${got}], want [${want}]\n"
+}
+
+// One frame to the child and its echo back: "" when it came back whole.
+echo(to: int, from: int, m: string) -> string {
+    werr = ipc.write_frame(to, m)
+    bad = check("write [${m}]", werr, "")
+    back, berr = ipc.read_frame_timeout(from, MAX, 10000)
+    bad = string.concat(bad, check("read [${m}] error", berr, ""))
+    return string.concat(bad, check("echo", back, m))
+}
+
+host_main() -> int {
+    argv = list.new()
+    list.add(argv, "child")
+    to, from, pid, err = os.run_stdio(os.argv0(), argv, null)
+    list.free(argv)
+    if err != "" {
+        println("host: run_stdio: ${err}")
+        return 1
+    }
+    bad = ""
+    hello, herr = ipc.read_frame_timeout(from, MAX, 10000)
+    bad = string.concat(bad, check("first frame error", herr, ""))
+    bad = string.concat(bad, check("first frame",
+            hello, "before=stdio|again=ipc.stdio_channel: already claimed|stdin=0:|after="))
+    bad = string.concat(bad, echo(to, from, "one"))
+    bad = string.concat(bad, echo(to, from, ""))
+    bad = string.concat(bad, echo(to, from, "three\nwith a newline and STRAY in it"))
+    io.fd_close(to)
+    _e, eerr = ipc.read_frame_timeout(from, MAX, 10000)
+    bad = string.concat(bad, check("after the last frame", eerr, "ipc.read_frame: end of stream"))
+    code, wait_err = os.wait_pid(pid)
+    bad = string.concat(bad, check("wait_pid", wait_err, ""))
+    if code != 0 { bad = string.concat(bad, "host: child exited ${code}\n") }
+    io.fd_close(from)
+    if bad != "" {
+        print(bad)
+        return 1
+    }
+    println("host: ok")
+    return 0
+}
+
+main() {
+    if os.args_count() > 1 {
+        role = os.args_get(1)
+        if role == "child" {
+            child_main()
+            return
+        }
+        if role == "host" {
+            exit(host_main())
+        }
+    }
+
+    fw = spec.init()
+    spec.describe(fw, "ipc.stdio_channel") {
+        spec.it("keeps the frames clean while the child prints to stdout") callback {
+            argv = list.new()
+            list.add(argv, "host")
+            out, errout, code, err = os.run_full(os.argv0(), argv, null, "")
+            list.free(argv)
+            spec.assert_ok(err, "run the host")
+            spec.assert_str_eq(out, "host: ok\n", "every frame intact, both ways")
+            spec.assert_eq(code, 0, "the host's verdict")
+            spec.assert_true(string.contains(errout, "STRAY-AFTER-CLAIM"), "println after the claim went to stderr")
+            spec.assert_true(string.contains(errout, "STRAY-FD1"), "a write to fd 1 went to stderr")
+            spec.assert_true(string.contains(errout, "STRAY-one"), "prints between frames went to stderr")
+            spec.assert_true(string.contains(errout, "STRAY-NO-NEWLINE"), "a print with no newline went to stderr")
+            spec.assert_false(string.contains(out, "STRAY"), "nothing stray on the host's stdout")
+        }
+    }
+    return spec.run_summary(fw)
+}

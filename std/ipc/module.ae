@@ -7,6 +7,14 @@
 // std.ipc.parent_channel() to find the fd of the inherited channel,
 // and parent_channel_kind() to learn which kind it is.
 //
+// os.run_stdio's pair is the other channel: the child's own stdin and
+// stdout, two pipes the parent writes (to_child_fd) and reads
+// (from_child_fd). Frames work over it as over a socket, on every
+// platform, Windows included. No descriptor passes over it. The child
+// claims the pair with stdio_channel() first thing in main, so a stray
+// print goes to stderr instead of into the frames (parent_channel_kind()
+// is "stdio" in a child of os.run_stdio until then).
+//
 // Models the brief in
 // `~/scm/aetherBuild/asks/lightweight-ipc-dx.md` (DX shape) +
 // `lightweight-ipc-dx-aether-reply.md` (proposed surface) +
@@ -15,7 +23,8 @@
 // Primitives:
 //
 //   parent_channel() -> int                    find fd or -1
-//   parent_channel_kind() -> string            "pipe", "socket" or ""
+//   parent_channel_kind() -> string            "pipe", "socket", "stdio" or ""
+//   stdio_channel() -> (in_fd, out_fd, err)    claim stdin/stdout as a channel
 //   write(fd, bytes) -> string                 write all; "" or err
 //   write_close(fd, bytes) -> string           write + close; "" or err
 //   read(fd, max) -> (data, err)               one read; ("", "") at EOF
@@ -37,10 +46,13 @@
 // the parent's end from os.run_socket and both ends of os.socketpair
 // included, not only on parent_channel(). send_fd / recv_fd are POSIX-only;
 // on Windows they, and parent_channel(), report that there is none.
-// recv and wait_readable are the same; write_frame, read_frame and
-// read_frame_timeout work on Windows over plain descriptors (read_frame_timeout
-// and wait_readable need poll(), which a CRT descriptor lacks, so with a
-// deadline they report that).
+// recv is the same; write, read, write_frame and read_frame work on Windows
+// over plain CRT descriptors, which std.ipc puts in binary mode. On Windows
+// wait_readable and read_frame_timeout wait on an anonymous pipe
+// (os.run_stdio's pair): a CRT descriptor has no poll(), so they ask the
+// pipe how many bytes wait (PeekNamedPipe) with a short sleep between asks,
+// noticing bytes and deadlines within about one timer tick (~16 ms). On any
+// other descriptor there they return a "not a pipe" error.
 //
 // A descriptor never travels up a channel: the parent end os.run_socket
 // returns refuses any descriptor its child sends, in recv and recv_fd. The
@@ -61,7 +73,8 @@ exports(
     ipc_parent_channel_raw, ipc_parent_channel_kind_raw,
     ipc_write_raw, ipc_read_raw, ipc_send_fd_raw, ipc_recv_fd_raw,
     ipc_recv_raw, ipc_write_frame_raw, ipc_read_frame_raw, ipc_wait_readable_raw,
-    parent_channel, parent_channel_kind, write, write_close, read, send_fd, recv_fd,
+    ipc_stdio_channel_raw,
+    parent_channel, parent_channel_kind, stdio_channel, write, write_close, read, send_fd, recv_fd,
     recv, write_frame, read_frame, read_frame_timeout, wait_readable,
     TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME
 )
@@ -82,6 +95,7 @@ extern ipc_recv_raw(ch: int, max: int) -> (string @heap, int, string)
 extern ipc_write_frame_raw(ch: int, data: @aether string) -> string
 extern ipc_read_frame_raw(ch: int, max: int, timeout_ms: int) -> (string @heap, string)
 extern ipc_wait_readable_raw(ch: int, timeout_ms: int) -> (int, string)
+extern ipc_stdio_channel_raw() -> (int, int, string)
 
 // Aether-side wrappers. parent_channel returns the raw int from
 // the extern; -1 sentinel for "no parent channel."
@@ -89,14 +103,47 @@ parent_channel() -> int { return ipc_parent_channel_raw() }
 
 // "socket" for a channel from os.run_socket (two-way, can pass
 // descriptors), "pipe" for one from os.run_pipe (write-only from the
-// child), "" when parent_channel() finds none.
+// child), "stdio" in a child of os.run_stdio (AETHER_IPC_KIND=stdio in its
+// environment; parent_channel() is -1 there, the channel being stdin and
+// stdout: claim it with stdio_channel()), "" otherwise.
 parent_channel_kind() -> string { return ipc_parent_channel_kind_raw() }
+
+// Claim this process's stdin and stdout as a channel, for a child that
+// os.run_stdio (or anything else that hands it two pipes as stdin and
+// stdout, such as a container runtime run with -i) talks frames to. Call it
+// first thing in main. Returns (in_fd, out_fd, "") on success: read frames
+// from in_fd, write them to out_fd. (-1, -1, err) on failure, with nothing
+// changed; a second call is "ipc.stdio_channel: already claimed".
+//
+// It flushes stdout, moves fd 0 and fd 1 to two new close-on-exec
+// descriptors (non-inheritable handles on Windows), the channel, then
+// points fd 0 at the null device (/dev/null, NUL), so nothing else reads
+// the channel's bytes (a read of stdin gets end of file at once), and fd 1
+// at stderr (the null device when there is none), so a later print,
+// println, library diagnostic or panic message lands on stderr instead of
+// in the middle of a frame. On Windows the Win32 standard handles are
+// pointed the same way (SetStdHandle), so writers that use GetStdHandle
+// follow too. AETHER_IPC_KIND is cleared, so the children of this process
+// do not think they are on a channel.
+//
+// What it cannot mask: anything written to stdout before the call (flushed
+// out ahead of the first frame: a child must print nothing first), bytes
+// C stdio read ahead from stdin before the call (lost), and code that holds
+// its own copy of fd 1 or of the old stdout handle, such as a descriptor
+// dup'd before the call or a child process started before it, which still
+// writes into the channel.
+//
+// It works whether or not os.run_stdio set AETHER_IPC_KIND (a container
+// runtime does not pass it through).
+stdio_channel() -> {
+    return ipc_stdio_channel_raw()
+}
 
 // Write all of `bytes` to `fd`. Returns "" on success, non-empty
 // error string on failure. A short write continues where it stopped
 // and an interrupted one retries, so "" means every byte went; a
-// string with a zero byte in it goes whole. On a socket whose peer has
-// gone this is an error, not SIGPIPE.
+// string with a zero byte in it goes whole. On a socket or a pipe whose
+// peer has gone this is an error, not SIGPIPE.
 //
 // For the common case where the child writes one payload and
 // exits, prefer write_close so the parent's read_all loop sees
@@ -205,8 +252,10 @@ const TIMED_OUT_INSIDE_FRAME = "ipc.read_frame: timed out inside a frame; the st
 // as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES
 // when no byte of a frame had arrived (the stream is intact; carry on using
 // it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other
-// error leaves the stream unusable too. Not available on Windows (an error
-// there, unless the timeout is negative).
+// error leaves the stream unusable too. On Windows the channel must be an
+// anonymous pipe, such as os.run_stdio's (any other descriptor is a "not a
+// pipe" error, unless the timeout is negative), and the deadline is kept
+// to within about a timer tick (~16 ms).
 read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
     return ipc_read_frame_raw(ch, max, timeout_ms)
 }
@@ -217,7 +266,11 @@ read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
 // negative timeout waits forever; 0 asks without waiting. Bounds the wait for
 // the first byte of read or recv. Frames need no wait first:
 // read_frame_timeout tells a timeout between frames from one inside a frame.
-// An error on Windows.
+// On Windows only an anonymous pipe, such as os.run_stdio's from_child_fd,
+// can be waited on (any other descriptor is a "not a pipe" error); a peer
+// that has closed reads as ready there too. It polls the pipe, so bytes
+// and the deadline are noticed within about a timer tick (~16 ms); 0 asks
+// once without sleeping.
 wait_readable(ch: int, timeout_ms: int) -> {
     return ipc_wait_readable_raw(ch, timeout_ms)
 }

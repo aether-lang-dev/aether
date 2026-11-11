@@ -15,10 +15,15 @@ which the parent may be capturing for other reasons.
 | `"pipe"` | `os.run_pipe`, `os.run_pipe_drain_and_wait` | child to parent | no |
 | `"socket"` | `os.run_socket` | both ways | yes |
 
+`os.run_stdio` makes a third, separate channel: the child's own stdin and
+stdout (see [The stdio channel](#the-stdio-channel)). It is not a
+`parent_channel()`.
+
 `parent_channel()` returns the inherited descriptor, or `-1` when there is
 none; not being spawned with one is a normal outcome, not an error.
-`parent_channel_kind()` says which kind it is: `"pipe"`, `"socket"`, or
-`""` when there is none.
+`parent_channel_kind()` says which kind it is: `"pipe"`, `"socket"`,
+`"stdio"` in a child of `os.run_stdio` (whose `parent_channel()` is `-1`:
+its channel is stdin and stdout), or `""` when there is none.
 
 The example **compiles but is not run** in CI: it needs a parent that opened
 the channel, and outside one `parent_channel` reports that there is none.
@@ -181,6 +186,79 @@ answer_from(ch: int) -> string {
 }
 ```
 
+## The stdio channel
+
+`os.run_stdio(prog, argv, env)` spawns the child with its stdin and stdout
+each a pipe the parent keeps (stderr is inherited) and returns
+`(to_child_fd, from_child_fd, pid, err)`. Both descriptors are
+close-on-exec; `pid` is reaped with `os.wait_pid` (or bounded with
+`os.wait_pid_timeout`, ended with `os.kill`). The child's environment
+carries `AETHER_IPC_KIND=stdio` and no `AETHER_IPC_FD`. The other end can be
+a program in any language, or a container runtime that passes its stdin and
+stdout through (`wslc run --rm -i`, `docker run -i`).
+
+The frames above work over the pair as they do over a socket, one
+descriptor for each direction: `write_frame(to_child_fd, ...)`,
+`read_frame(from_child_fd, max)`, `read_frame_timeout` and `wait_readable`
+on `from_child_fd`. There is no descriptor passing over this channel: the
+pipes carry bytes only (use `os.run_socket` for that).
+
+With the channel on stdout, anything else the child prints there lands in
+the middle of the frames, and anything else that reads stdin takes frame
+bytes. An Aether child therefore claims the pair first thing in `main`
+with `stdio_channel()`, which returns two fresh descriptors for the channel
+and then points fd 0 at the null device and fd 1 at stderr:
+
+```aether,fragment
+import std.ipc
+
+// The child: answer each request frame, until the parent closes its end.
+main() {
+    inp, out, err = ipc.stdio_channel()
+    if err != "" {
+        ipc.write(2, "${err}\n")
+        exit(1)
+    }
+    println("started")   // goes to stderr, not into a frame
+    while true {
+        req, rerr = ipc.read_frame(inp, 65536)
+        if rerr != "" { return }
+        ipc.write_frame(out, "ok ${req}")
+    }
+}
+```
+
+`stdio_channel()` returns `(in_fd, out_fd, "")`, or `(-1, -1, err)` with
+nothing changed. It flushes stdout, moves fd 0 and fd 1 to two new
+close-on-exec descriptors (non-inheritable handles on Windows), points fd 0
+at `/dev/null` (`NUL` on Windows), so a read of stdin gets end of file at
+once, and fd 1 at stderr (the null device when there is none), so a later
+`print`, a library diagnostic or a panic message goes to stderr. On Windows
+the Win32 standard handles are pointed the same way (`SetStdHandle`), so
+code that writes through `GetStdHandle` follows too. It clears
+`AETHER_IPC_KIND`, so this process's own children do not think they are on
+the channel. A second call fails with `"ipc.stdio_channel: already
+claimed"`. It does not need `AETHER_IPC_KIND`: a container runtime does not
+pass it through, and the claim works the same.
+
+What it cannot mask:
+
+- output written to stdout **before** the call: it is flushed out ahead of
+  the first frame, where the parent reads it as a (bad) frame header. A
+  child prints nothing before it claims;
+- bytes C stdio read ahead from stdin before the call: they are lost;
+- code holding its own copy of fd 1 or of the old stdout handle (a
+  descriptor dup'd before the call, a child process started before it, a
+  library that cached the handle), which still writes into the channel.
+
+Closing `to_child_fd` with `io.fd_close` gives the child end of stream on
+its channel; `from_child_fd` reads end of stream once the child (and
+whatever it passed its stdout to) has exited. Writing to a child that has
+gone is an error, not SIGPIPE.
+
+It works on Windows too (anonymous pipes, handed back as binary CRT
+descriptors), which is why a host that has to run there uses it.
+
 ## Descriptors only go down
 
 A descriptor travels from the parent to a child, never the other way. The
@@ -223,13 +301,25 @@ bounds how many descriptors one message is looked at for.
 
 ## Platforms
 
-- **Linux, FreeBSD, macOS:** both kinds of channel and descriptor passing.
+- **Linux, FreeBSD, macOS:** both kinds of channel, the stdio channel, and
+  descriptor passing. A write to a pipe whose reader has gone is `EPIPE`,
+  not SIGPIPE: std.ipc holds SIGPIPE off the writing thread for the write.
 - **Windows:** no parent channel (`parent_channel()` is `-1`); `write`,
-  `read`, `write_frame` and `read_frame` are plain descriptor I/O;
-  `os.run_socket`, `os.socketpair`, `send_fd`, `recv_fd` and `recv` report
-  that they are unsupported, as do `wait_readable` and `read_frame_timeout`
-  with a timeout (a CRT descriptor has no `poll`). Windows passes
-  handles with `DuplicateHandle`, a different shape.
+  `read`, `write_frame` and `read_frame` are plain CRT descriptor I/O, with
+  the descriptor put in binary mode (a child's fd 0 is in text mode by
+  default, which would turn CR LF into LF and stop at a `0x1a` byte).
+  `os.run_stdio` and `stdio_channel()` work, and `wait_readable` and
+  `read_frame_timeout` work on anonymous pipes such as theirs: a CRT
+  descriptor has no `poll`, so they ask the pipe how many bytes wait
+  (`PeekNamedPipe`), sleeping 1 to 8 ms between asks.
+  `Sleep` rounds up to the system timer tick (about 15.6 ms by default), so
+  bytes and deadlines are noticed within about a tick; a timeout of 0 asks
+  once and does not sleep. A writer that has closed reads as ready, and the
+  read then gives end of stream. On any descriptor other than a pipe they
+  return a `not a pipe` error rather than guess. `os.run_socket`,
+  `os.socketpair`, `send_fd`, `recv_fd` and `recv` report that they are
+  unsupported; Windows passes handles with `DuplicateHandle`, a different
+  shape.
 - **Builds without a filesystem** (WASM, embedded): every function
   exists and reports that it is unavailable.
 

@@ -79,6 +79,8 @@
     <li><a href="#socketpair_raw">socketpair_raw</a></li>
     <li><a href="#run_socket">run_socket</a></li>
     <li><a href="#socketpair">socketpair</a></li>
+    <li><a href="#run_stdio_raw">run_stdio_raw</a></li>
+    <li><a href="#run_stdio">run_stdio</a></li>
     <li><a href="#spawn_proc">spawn_proc</a></li>
     <li><a href="#wait">wait</a></li>
     <li><a href="#wait_any">wait_any</a></li>
@@ -530,6 +532,18 @@
       <h3 class="function-name">socketpair <span class="kind">fn</span></h3>
       <pre class="usage"><code>socketpair() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="doc">Create a connected pair of Unix domain sockets (AF_UNIX, SOCK_STREAM). Returns (fd_a, fd_b, err). Both ends are close-on-exec. On Windows / non-filesystem targets, returns (-1, -1, &quot;unsupported on Windows&quot; or error).</p>
+    </div>
+    <div class="function" id="run_stdio_raw" data-name="run_stdio_raw">
+      <h3 class="function-name">run_stdio_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>run_stdio_raw(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Spawn `prog` with its stdin and stdout each a pipe the caller keeps; stderr is inherited. Returns (to_child_fd, from_child_fd, pid, &quot;&quot;) or (-1, -1, -1, reason) with no child to reap. See run_stdio.</p>
+    </div>
+    <div class="function" id="run_stdio" data-name="run_stdio">
+      <h3 class="function-name">run_stdio <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run_stdio(prog, argv, env) <span class="arrow">-&gt;</span> (int, int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: string, argv: ptr, env: ptr</span></p>
+      <p class="doc">Spawn `prog` with the child's stdin and stdout each a pipe this process keeps, and its stderr this process's. Returns (to_child_fd, from_child_fd, pid, &quot;&quot;) on success, or (-1, -1, -1, err) with no child to reap: &quot;program not found&quot; for a missing program, as every spawn here gives it, &quot;denied by sandbox&quot; when the &quot;exec&quot; capability is not granted. `argv` and `env` are as run_socket takes them: a list of strings, and env null to inherit this process's environment. Either way the child's environment gets AETHER_IPC_KIND=stdio (so its ipc.parent_channel_kind() is &quot;stdio&quot;) and loses any AETHER_IPC_FD: the channel is the child's own stdin and stdout, so a program in any language, or a container runtime that passes them through, such as `wslc run -i` or `docker run -i`, can sit at the other end. Write to to_child_fd and read from from_child_fd with std.ipc: write, read, write_frame, read_frame, read_frame_timeout and wait_readable all take them. Both are close-on-exec (not inherited by any other child). Close to_child_fd with io.fd_close to give the child end of input; from_child_fd reads end of stream once the child (and anything it passed its stdout to) has exited. The caller MUST reap `pid` with os.wait_pid (or bound the wait with os.wait_pid_timeout, or end the child with os.kill): it is a spawn token those take on every platform, the real pid on POSIX and a process-table token on Windows. No descriptors pass over these pipes; use run_socket for that (POSIX). An Aether child claims the pair with ipc.stdio_channel() first thing in main and reads and writes frames on the two descriptors it returns, so a stray print goes to stderr rather than into a frame. Windows: the pipes are anonymous pipes, handed back as binary CRT descriptors; the child inherits its two pipe ends and stderr and no other handle. std.ipc puts a CRT descriptor in binary mode before it uses it, so CR/LF and 0x1a bytes go through as they are. wait_readable and read_frame_timeout poll the pipe (PeekNamedPipe), so they notice bytes and deadlines within about a timer tick (~16 ms).</p>
     </div>
     <div class="function" id="spawn_proc" data-name="spawn_proc">
       <h3 class="function-name">spawn_proc <span class="kind">fn</span></h3>

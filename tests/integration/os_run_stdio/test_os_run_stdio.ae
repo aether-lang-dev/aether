@@ -1,0 +1,282 @@
+// os.run_stdio, with std.ipc's frames over the child's stdin and stdout.
+//
+// The test spawns itself as the child (argument "child"): the child reads
+// frames from fd 0 and answers on fd 1, so the same program is both ends on
+// every platform, Windows included, where the pipes are anonymous pipes
+// handed back as CRT descriptors.
+//
+// What it locks in:
+//   - frames both ways, binary bytes (NUL, CR LF, 0x1a, 0xff), a 0-length
+//     frame, a frame split across writes in each direction, and one larger
+//     than any pipe buffer;
+//   - ipc.wait_readable with 0 and a small timeout, ready and not ready, and
+//     read_frame_timeout's two timeouts, TIMED_OUT_BETWEEN_FRAMES and
+//     TIMED_OUT_INSIDE_FRAME. On Windows these said "unsupported" before
+//     std.ipc learned to wait on an anonymous pipe (PeekNamedPipe);
+//   - end of stream when the child exits, and wait_pid reaping its status;
+//     wait_pid_timeout and kill on the token;
+//   - a write to a child that is gone is an error, not SIGPIPE (a pipe has
+//     no MSG_NOSIGNAL: std.ipc blocks SIGPIPE for the write);
+//   - the parent's ends are not inherited (POSIX), a missing program fails
+//     the spawn with nothing to reap;
+//   - the child's env carries AETHER_IPC_KIND=stdio and no AETHER_IPC_FD,
+//     even when this process has one.
+
+import std.spec
+import std.ipc
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.list
+
+const MAX = 1048576
+
+// 10 bytes with a zero byte, CR LF, Ctrl-Z (0x1a, end of file to a CRT
+// descriptor in text mode) and a high byte in them.
+const BINARY = "E\0\r\nz\x1a\xff\r\n!"
+
+// A frame by hand, not by write_frame: the 4-byte big-endian length of
+// `payload` (under 65536), then it.
+frame_of(payload: string) -> string {
+    n = string.length(payload)
+    head = string.concat(string.from_char(0), string.from_char(0))
+    head = string.concat(head, string.from_char(n / 256))
+    head = string.concat(head, string.from_char(n % 256))
+    return string.concat(head, payload)
+}
+
+// The child: answer each frame on stdin, on stdout, until stdin ends; then
+// exit 7, so the parent's wait_pid shows it reaped this child.
+//   ""    a 0-length frame back
+//   "E…"  the same bytes back
+//   "S"   a reply frame written in two parts, 100 ms apart
+//   "D"   nothing until the next frame arrives, then "late"
+//   "H"   two bytes of a frame, then a pause of 1.5 s, then the rest
+//   "K"   ipc.parent_channel_kind(), then "/" and AETHER_IPC_FD (or "-")
+child_main() {
+    while true {
+        req, err = ipc.read_frame(0, MAX)
+        if err != "" {
+            if err != "ipc.read_frame: end of stream" {
+                ipc.write(2, "child: ${err}\n")
+                exit(3)
+            }
+            exit(7)
+        }
+        n = string.length(req)
+        if n == 0 {
+            ipc.write_frame(1, "")
+        } else {
+            first = string.substring(req, 0, 1)
+            if first == "E" {
+                ipc.write_frame(1, req)
+            } else if first == "S" {
+                wire = frame_of("split-reply")
+                ipc.write(1, string.substring(wire, 0, 2))
+                sleep(100)
+                ipc.write(1, string.substring(wire, 2, string.length(wire)))
+            } else if first == "D" {
+                _go, _gerr = ipc.read_frame(0, MAX)
+                ipc.write_frame(1, "late")
+            } else if first == "K" {
+                fd = os.getenv("AETHER_IPC_FD")
+                if fd == null { fd = "-" }
+                ipc.write_frame(1, "${ipc.parent_channel_kind()}/${fd}")
+            } else if first == "H" {
+                wire = frame_of("never-whole")
+                ipc.write(1, string.substring(wire, 0, 2))
+                sleep(1500)
+                ipc.write(1, string.substring(wire, 2, string.length(wire)))
+            } else {
+                ipc.write(2, "child: unknown request\n")
+                exit(4)
+            }
+        }
+    }
+}
+
+// 0 when a child process inherits `fd` (POSIX): the shell's redirection
+// from it fails otherwise.
+child_sees_fd(fd: int) -> int {
+    argv = list.new()
+    list.add(argv, "-c")
+    list.add(argv, "exec 2>/dev/null; exec 9>&${fd}")
+    _out, code, _err = os.run_capture("/bin/sh", argv, null)
+    list.free(argv)
+    return code
+}
+
+big_payload() -> string {
+    s = "E0123456789abcdef0123456789abcdef"
+    while string.length(s) < 262144 {
+        s = string.concat(s, s)
+    }
+    return s
+}
+
+spawn_child() -> (int, int, int, string) {
+    argv = list.new()
+    list.add(argv, "child")
+    to, from, pid, err = os.run_stdio(os.argv0(), argv, null)
+    list.free(argv)
+    return to, from, pid, err
+}
+
+main() {
+    if os.args_count() > 1 {
+        if os.args_get(1) == "child" {
+            child_main()
+            return
+        }
+    }
+
+    fw = spec.init()
+    on_windows = os.platform() == "windows"
+
+    spec.describe(fw, "os.run_stdio") {
+        spec.it("refuses a program that cannot start, with nothing to reap") callback {
+            to, from, pid, err = os.run_stdio("this_program_does_not_exist_xyz", null, null)
+            spec.assert_eq(to, -1, "no to_child_fd")
+            spec.assert_eq(from, -1, "no from_child_fd")
+            spec.assert_eq(pid, -1, "no pid")
+            spec.assert_str_eq(err, "program not found", "the reason")
+        }
+
+        spec.it("talks frames to a child over its stdin and stdout") callback {
+            // A stale AETHER_IPC_FD here must not reach the child.
+            os.setenv("AETHER_IPC_FD", "3")
+            to, from, pid, err = spawn_child()
+            os.unsetenv("AETHER_IPC_FD")
+            spec.assert_ok(err, "spawn")
+            spec.assert_true(to >= 0 && from >= 0 && pid > 0, "two descriptors and a pid")
+            if !on_windows {
+                spec.assert_not_eq(child_sees_fd(to), 0, "to_child_fd is close-on-exec")
+                spec.assert_not_eq(child_sees_fd(from), 0, "from_child_fd is close-on-exec")
+            }
+
+            // Nothing sent yet: not readable, at once or after a short wait.
+            r0, e0 = ipc.wait_readable(from, 0)
+            spec.assert_ok(e0, "wait_readable 0 on an idle pipe")
+            spec.assert_eq(r0, 0, "not readable before the child says anything")
+
+            // The child is told what it is on, and has no fd-3 channel.
+            spec.assert_ok(ipc.write_frame(to, "K"), "ask the child's channel kind")
+            kind, kerr = ipc.read_frame(from, MAX)
+            spec.assert_ok(kerr, "read the kind")
+            spec.assert_str_eq(kind, "stdio/-", "AETHER_IPC_KIND=stdio, no AETHER_IPC_FD")
+
+            // Binary bytes, and a 0-length frame, both ways.
+            spec.assert_ok(ipc.write_frame(to, BINARY), "write binary")
+            got, gerr = ipc.read_frame(from, MAX)
+            spec.assert_ok(gerr, "read binary echo")
+            spec.assert_eq(string.length(got), 10, "every byte came back")
+            spec.assert_true(got == BINARY, "the bytes sent, CR LF and 0x1a included")
+
+            spec.assert_ok(ipc.write_frame(to, ""), "write a 0-length frame")
+            empty, eerr = ipc.read_frame_timeout(from, MAX, 5000)
+            spec.assert_ok(eerr, "read the 0-length reply")
+            spec.assert_eq(string.length(empty), 0, "a frame of no bytes")
+
+            // A frame split across two writes, parent to child.
+            wire = frame_of("E-split-up")
+            spec.assert_ok(ipc.write(to, string.substring(wire, 0, 3)), "first part")
+            sleep(50)
+            spec.assert_ok(ipc.write(to, string.substring(wire, 3, string.length(wire))), "rest")
+            up, uerr = ipc.read_frame(from, MAX)
+            spec.assert_ok(uerr, "echo of a frame split on the way up")
+            spec.assert_str_eq(up, "E-split-up", "whole")
+
+            // And child to parent, under a deadline that outlasts the pause.
+            spec.assert_ok(ipc.write_frame(to, "S"), "ask for a split reply")
+            down, derr = ipc.read_frame_timeout(from, MAX, 5000)
+            spec.assert_ok(derr, "read a frame split on the way down")
+            spec.assert_str_eq(down, "split-reply", "whole")
+
+            // Larger than any pipe buffer, each way.
+            big = big_payload()
+            spec.assert_ok(ipc.write_frame(to, big), "write 256 KiB")
+            back, berr = ipc.read_frame_timeout(from, MAX, 20000)
+            spec.assert_ok(berr, "read 256 KiB")
+            spec.assert_eq(string.length(back), string.length(big), "every byte")
+            spec.assert_true(back == big, "in order")
+
+            // Readiness, and the timeout between frames: the child answers
+            // "D" only once the next frame arrives, so nothing is coming.
+            spec.assert_ok(ipc.write_frame(to, "D"), "ask for a late reply")
+            n0, ne0 = ipc.wait_readable(from, 0)
+            spec.assert_ok(ne0, "wait_readable 0")
+            spec.assert_eq(n0, 0, "not ready, at once")
+            n1, ne1 = ipc.wait_readable(from, 50)
+            spec.assert_ok(ne1, "wait_readable 50")
+            spec.assert_eq(n1, 0, "not ready within 50 ms")
+            _t, terr = ipc.read_frame_timeout(from, MAX, 50)
+            spec.assert_str_eq(terr, ipc.TIMED_OUT_BETWEEN_FRAMES, "a timeout before a frame began")
+            spec.assert_ok(ipc.write_frame(to, "go"), "release the reply")
+            y1, ye1 = ipc.wait_readable(from, 5000)
+            spec.assert_ok(ye1, "wait_readable for the reply")
+            spec.assert_eq(y1, 1, "ready once the child writes")
+            y0, ye0 = ipc.wait_readable(from, 0)
+            spec.assert_ok(ye0, "wait_readable 0 with bytes waiting")
+            spec.assert_eq(y0, 1, "still ready: nothing was taken")
+            y2, ye2 = ipc.wait_readable(from, 50)
+            spec.assert_ok(ye2, "wait_readable 50 with bytes waiting")
+            spec.assert_eq(y2, 1, "ready within 50 ms")
+            late, lerr = ipc.read_frame_timeout(from, MAX, 50)
+            spec.assert_ok(lerr, "the stream was still in step after the timeout")
+            spec.assert_str_eq(late, "late", "the reply")
+
+            // End of input: the child exits 7; its stdout ends with it.
+            io.fd_close(to)
+            ready, rerr = ipc.wait_readable(from, 10000)
+            spec.assert_ok(rerr, "wait_readable at the end")
+            spec.assert_eq(ready, 1, "end of stream reads as readable")
+            _d, enderr = ipc.read_frame_timeout(from, MAX, 10000)
+            spec.assert_str_eq(enderr, "ipc.read_frame: end of stream", "end of stream")
+            code, werr = os.wait_pid(pid)
+            spec.assert_ok(werr, "wait_pid")
+            spec.assert_eq(code, 7, "reaped this child, with its status")
+            io.fd_close(from)
+        }
+
+        spec.it("times out inside a frame, and a bounded wait, a kill and a write to the gone child behave") callback {
+            to, from, pid, err = spawn_child()
+            spec.assert_ok(err, "spawn")
+            spec.assert_ok(ipc.write_frame(to, "H"), "ask for a stalled frame")
+            _h, herr = ipc.read_frame_timeout(from, MAX, 300)
+            spec.assert_str_eq(herr, ipc.TIMED_OUT_INSIDE_FRAME, "a timeout inside a frame")
+
+            // The child waits on its stdin for good now.
+            _s, timed_out, terr = os.wait_pid_timeout(pid, 1)
+            spec.assert_ok(terr, "wait_pid_timeout")
+            spec.assert_eq(timed_out, 1, "still running")
+            spec.assert_eq(os.kill(pid, 9), 0, "kill the token")
+            code, werr = os.wait_pid(pid)
+            spec.assert_ok(werr, "wait_pid after kill")
+            spec.assert_eq(code, 137, "128 + 9")
+
+            // Without the SIGPIPE guard this ends the test process on POSIX.
+            gone = ipc.write_frame(to, "anyone there?")
+            spec.assert_err_contains(gone, "ipc.write_frame", "an error naming the call")
+            io.fd_close(to)
+            io.fd_close(from)
+        }
+
+        if on_windows {
+            spec.it("refuses a wait on a descriptor that is not a pipe (Windows)") callback {
+                path = "${os.temp_dir()}/os_run_stdio_${os.getpid()}.txt"
+                fs.write_atomic(path, string.bytes("x"))
+                f, ferr = io.fd_open_read(path)
+                spec.assert_ok(ferr, "open a file")
+                _r, werr = ipc.wait_readable(f, 0)
+                spec.assert_err_contains(werr, "not a pipe", "wait_readable says why")
+                _d, rerr = ipc.read_frame_timeout(f, MAX, 10)
+                spec.assert_err_contains(rerr, "not a pipe", "read_frame_timeout says why")
+                io.fd_close(f)
+                fs.delete(path)
+            }
+        }
+    }
+
+    return spec.run_summary(fw)
+}

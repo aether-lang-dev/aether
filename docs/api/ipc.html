@@ -25,8 +25,10 @@
     <li><a href="#write_frame_raw">write_frame_raw</a></li>
     <li><a href="#read_frame_raw">read_frame_raw</a></li>
     <li><a href="#wait_readable_raw">wait_readable_raw</a></li>
+    <li><a href="#stdio_channel_raw">stdio_channel_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
     <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
+    <li><a href="#stdio_channel">stdio_channel</a></li>
     <li><a href="#write">write</a></li>
     <li><a href="#write_close">write_close</a></li>
     <li><a href="#read">read</a></li>
@@ -192,6 +194,10 @@
       <pre class="usage"><code>wait_readable_raw(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
     </div>
+    <div class="function" id="stdio_channel_raw" data-name="stdio_channel_raw">
+      <h3 class="function-name">stdio_channel_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stdio_channel_raw() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+    </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
@@ -200,13 +206,18 @@
     <div class="function" id="parent_channel_kind" data-name="parent_channel_kind">
       <h3 class="function-name">parent_channel_kind <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel_kind() <span class="arrow">-&gt;</span> string</code></pre>
-      <p class="doc">&quot;socket&quot; for a channel from os.run_socket (two-way, can pass descriptors), &quot;pipe&quot; for one from os.run_pipe (write-only from the child), &quot;&quot; when parent_channel() finds none.</p>
+      <p class="doc">&quot;socket&quot; for a channel from os.run_socket (two-way, can pass descriptors), &quot;pipe&quot; for one from os.run_pipe (write-only from the child), &quot;stdio&quot; in a child of os.run_stdio (AETHER_IPC_KIND=stdio in its environment; parent_channel() is -1 there, the channel being stdin and stdout: claim it with stdio_channel()), &quot;&quot; otherwise.</p>
+    </div>
+    <div class="function" id="stdio_channel" data-name="stdio_channel">
+      <h3 class="function-name">stdio_channel <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stdio_channel() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="doc">Claim this process's stdin and stdout as a channel, for a child that os.run_stdio (or anything else that hands it two pipes as stdin and stdout, such as a container runtime run with -i) talks frames to. Call it first thing in main. Returns (in_fd, out_fd, &quot;&quot;) on success: read frames from in_fd, write them to out_fd. (-1, -1, err) on failure, with nothing changed; a second call is &quot;ipc.stdio_channel: already claimed&quot;. It flushes stdout, moves fd 0 and fd 1 to two new close-on-exec descriptors (non-inheritable handles on Windows), the channel, then points fd 0 at the null device (/dev/null, NUL), so nothing else reads the channel's bytes (a read of stdin gets end of file at once), and fd 1 at stderr (the null device when there is none), so a later print, println, library diagnostic or panic message lands on stderr instead of in the middle of a frame. On Windows the Win32 standard handles are pointed the same way (SetStdHandle), so writers that use GetStdHandle follow too. AETHER_IPC_KIND is cleared, so the children of this process do not think they are on a channel. What it cannot mask: anything written to stdout before the call (flushed out ahead of the first frame: a child must print nothing first), bytes C stdio read ahead from stdin before the call (lost), and code that holds its own copy of fd 1 or of the old stdout handle, such as a descriptor dup'd before the call or a child process started before it, which still writes into the channel. It works whether or not os.run_stdio set AETHER_IPC_KIND (a container runtime does not pass it through).</p>
     </div>
     <div class="function" id="write" data-name="write">
       <h3 class="function-name">write <span class="kind">fn</span></h3>
       <pre class="usage"><code>write(fd, bytes) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">fd: int, bytes: string</span></p>
-      <p class="doc">Write all of `bytes` to `fd`. Returns &quot;&quot; on success, non-empty error string on failure. A short write continues where it stopped and an interrupted one retries, so &quot;&quot; means every byte went; a string with a zero byte in it goes whole. On a socket whose peer has gone this is an error, not SIGPIPE. For the common case where the child writes one payload and exits, prefer write_close so the parent's read_all loop sees EOF promptly.</p>
+      <p class="doc">Write all of `bytes` to `fd`. Returns &quot;&quot; on success, non-empty error string on failure. A short write continues where it stopped and an interrupted one retries, so &quot;&quot; means every byte went; a string with a zero byte in it goes whole. On a socket or a pipe whose peer has gone this is an error, not SIGPIPE. For the common case where the child writes one payload and exits, prefer write_close so the parent's read_all loop sees EOF promptly.</p>
     </div>
     <div class="function" id="write_close" data-name="write_close">
       <h3 class="function-name">write_close <span class="kind">fn</span></h3>
@@ -254,13 +265,13 @@
       <h3 class="function-name">read_frame_timeout <span class="kind">fn</span></h3>
       <pre class="usage"><code>read_frame_timeout(ch, max, timeout_ms) <span class="arrow">-&gt;</span> (string, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, max: int, timeout_ms: int</span></p>
-      <p class="doc">read_frame with a deadline: `timeout_ms` bounds the whole frame, header and payload together, so a peer that sends a header and stalls, or drips bytes, cannot hold the reader past it. A negative timeout waits forever, as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES when no byte of a frame had arrived (the stream is intact; carry on using it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other error leaves the stream unusable too. Not available on Windows (an error there, unless the timeout is negative).</p>
+      <p class="doc">read_frame with a deadline: `timeout_ms` bounds the whole frame, header and payload together, so a peer that sends a header and stalls, or drips bytes, cannot hold the reader past it. A negative timeout waits forever, as read_frame does. A timeout is one of two errors: TIMED_OUT_BETWEEN_FRAMES when no byte of a frame had arrived (the stream is intact; carry on using it), TIMED_OUT_INSIDE_FRAME when one had (close the channel). Any other error leaves the stream unusable too. On Windows the channel must be an anonymous pipe, such as os.run_stdio's (any other descriptor is a &quot;not a pipe&quot; error, unless the timeout is negative), and the deadline is kept to within about a timer tick (~16 ms).</p>
     </div>
     <div class="function" id="wait_readable" data-name="wait_readable">
       <h3 class="function-name">wait_readable <span class="kind">fn</span></h3>
       <pre class="usage"><code>wait_readable(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
-      <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read or recv. Frames need no wait first: read_frame_timeout tells a timeout between frames from one inside a frame. An error on Windows.</p>
+      <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read or recv. Frames need no wait first: read_frame_timeout tells a timeout between frames from one inside a frame. On Windows only an anonymous pipe, such as os.run_stdio's from_child_fd, can be waited on (any other descriptor is a &quot;not a pipe&quot; error); a peer that has closed reads as ready there too. It polls the pipe, so bytes and the deadline are noticed within about a timer tick (~16 ms); 0 asks once without sleeping.</p>
     </div>
     <div class="function" id="TIMED_OUT_BETWEEN_FRAMES" data-name="TIMED_OUT_BETWEEN_FRAMES">
       <h3 class="function-name">TIMED_OUT_BETWEEN_FRAMES <span class="kind">const</span></h3>

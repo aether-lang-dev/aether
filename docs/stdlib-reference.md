@@ -44,7 +44,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
-| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 24 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
+| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 26 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 52 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
@@ -64,7 +64,7 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 64 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 9 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 84 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 86 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 10 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -3141,6 +3141,7 @@ spawned child exited 5
 - `os.run_supervised(prog, argv, env, new_process_group, forward_signals, timeout_secs, reap_group)` → `(int, string)` - The whole job-control pattern in one call: the child in its own process group, Ctrl-C forwarded to it, a deadline (exit status 124, as GNU `timeout` reports), and anything it leaked cleaned up afterwards. The flags are 1 or 0; returns the exit status and an outcome of `"exited"`, `"signalled"`, `"timeout"` or `"error"`, or -1 and the reason when the child could not start
 - `os.run_pipe(prog, argv, env)` → `(int, int, string)`, `os.wait_pid(pid)` → `(int, string)`, `os.run_pipe_drain_and_wait(prog, argv, env)` → `(string, int, string)` - Spawn with the [`std.ipc`](#child-to-parent-reports-stdipc) back-channel (POSIX only). A program that cannot start is an `err` with no child to reap; an explicit `env` is the child's whole environment, with `AETHER_IPC_FD=3` in place of any it gives
 - `os.run_socket(prog, argv, env)` → `(int, int, string)` - Spawn with a two-way [`std.ipc`](#child-to-parent-reports-stdipc) socket channel (POSIX only): the child's end of an `AF_UNIX` stream pair at fd 3, with `AETHER_IPC_FD=3` and `AETHER_IPC_KIND=socket`; returns the parent's end, close-on-exec, and the child to reap with `os.wait_pid`
+- `os.run_stdio(prog, argv, env)` → `(int, int, int, string)` - Spawn with the child's stdin and stdout each a pipe the parent keeps, stderr inherited: `(to_child_fd, from_child_fd, pid, "")`, or `(-1, -1, -1, err)` with nothing to reap. Both descriptors are close-on-exec and take [`std.ipc`](#child-to-parent-reports-stdipc)'s writes, reads and frames; the child reads fd 0 and writes fd 1 (an Aether child claims them with `ipc.stdio_channel()`), so it can be any program or a container runtime passing its stdio through. The child's environment carries `AETHER_IPC_KIND=stdio` and no `AETHER_IPC_FD`. Reap `pid` with `os.wait_pid` (it is a spawn token that `wait_pid_timeout` and `kill` take too). Works on Windows (anonymous pipes as binary CRT descriptors)
 - `os.socketpair()` → `(int, int, string)` - A connected `AF_UNIX` stream pair within one process, both ends close-on-exec (POSIX only)
 - `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
@@ -3189,8 +3190,9 @@ main() {
 
 **Functions:**
 - `ipc.parent_channel()` → `int` - The inherited back-channel descriptor, or -1 when there is none
-- `ipc.parent_channel_kind()` → `string` - `"pipe"` (from `os.run_pipe`), `"socket"` (from `os.run_socket`), or `""` when there is none
-- `ipc.write(fd, bytes)` → `string` - Write every byte; `""` or an error. On a socket whose peer has gone, an error rather than SIGPIPE
+- `ipc.parent_channel_kind()` → `string` - `"pipe"` (from `os.run_pipe`), `"socket"` (from `os.run_socket`), `"stdio"` in a child of `os.run_stdio` until it calls `stdio_channel`, or `""` when there is none
+- `ipc.stdio_channel()` → `(int, int, string)` - Claim stdin and stdout as a channel, first thing in `main` of a child of `os.run_stdio`: `(in_fd, out_fd, "")`, two new close-on-exec descriptors, after which fd 0 reads the null device and fd 1 writes to stderr, so a stray print cannot corrupt a frame. A second call is `"ipc.stdio_channel: already claimed"`. Output written before the call, and code holding its own copy of fd 1, still reach the channel
+- `ipc.write(fd, bytes)` → `string` - Write every byte; `""` or an error. On a socket or pipe whose peer has gone, an error rather than SIGPIPE
 - `ipc.write_close(fd, bytes)` → `string` - Write and close, for the common one-report-at-exit shape
 - `ipc.read(fd, max)` → `(string, string)` - One binary-safe read of up to `max` bytes; `("", "")` at end of stream
 - `ipc.send_fd(ch, fd, payload)` → `string` - Pass an open descriptor over a socket channel, attached to a payload of at least one byte (POSIX only)
@@ -3198,8 +3200,8 @@ main() {
 - `ipc.recv(ch, max)` → `(string, int, string)` - One receive: the bytes and the descriptor that came with them, `-1` when none. At most one descriptor; the parent end of an `os.run_socket` channel takes none from its child (POSIX only)
 - `ipc.write_frame(ch, data)` → `string` - One frame: a 4-byte big-endian length, then the bytes (any bytes, NUL and newline included)
 - `ipc.read_frame(ch, max)` → `(string, string)` - One whole frame; a header announcing more than `max` is an error and nothing is buffered. End of stream is an error, so `("", "")` is an empty frame
-- `ipc.read_frame_timeout(ch, max, timeout_ms)` → `(string, string)` - `read_frame` with a deadline over the whole frame (POSIX only when the timeout is not negative). A timeout is `ipc.TIMED_OUT_BETWEEN_FRAMES` when no byte of a frame had arrived (the stream is still usable) or `ipc.TIMED_OUT_INSIDE_FRAME` when one had (close the channel)
-- `ipc.wait_readable(ch, timeout_ms)` → `(int, string)` - `poll`: 1 when a read will not block, 0 on a timeout (POSIX only)
+- `ipc.read_frame_timeout(ch, max, timeout_ms)` → `(string, string)` - `read_frame` with a deadline over the whole frame (on Windows, with a timeout that is not negative, only on an anonymous pipe such as `os.run_stdio`'s, to within about a timer tick). A timeout is `ipc.TIMED_OUT_BETWEEN_FRAMES` when no byte of a frame had arrived (the stream is still usable) or `ipc.TIMED_OUT_INSIDE_FRAME` when one had (close the channel)
+- `ipc.wait_readable(ch, timeout_ms)` → `(int, string)` - `poll`: 1 when a read will not block (a closed peer included), 0 on a timeout. On Windows only on an anonymous pipe such as `os.run_stdio`'s (`PeekNamedPipe`, polled to within about a timer tick); any other descriptor there is a `not a pipe` error
 
 ### Signal numbers (`std.signal`)
 
