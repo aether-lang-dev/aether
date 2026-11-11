@@ -217,6 +217,27 @@ static int qualified_prefix_blocked(SymbolTable* table, const char* prefix) {
     return 0;
 }
 
+// Returns 1 if a `hide ns.member` between `table` and the root blocks
+// `member` of namespace `ns` (`hide ui.open_url` against `ui.open_url`),
+// leaving the rest of `ns` visible. As for a hidden prefix, a value bound
+// to `ns` at or below the hiding scope makes `ns.member` a field of that
+// value, which the hide is not about.
+static int qualified_member_blocked(SymbolTable* table, const char* ns, const char* member) {
+    char stack[256];
+    int n = snprintf(stack, sizeof(stack), "%s.%s", ns, member);
+    if (n < 0 || (size_t)n >= sizeof(stack)) return 0;  /* no hide names one this long */
+    for (SymbolTable* t = table; t; t = t->parent) {
+        if (scope_name_is_hidden(t, stack)) {
+            for (SymbolTable* c = table; c; c = c->parent) {
+                if (lookup_symbol_local(c, ns)) return 0;
+                if (c == t) break;
+            }
+            return 1;
+        }
+    }
+    return 0;
+}
+
 // The member half of a qualified name whose prefix has already passed
 // qualified_prefix_blocked(): `fs.exists` resolves through the mangled
 // `fs_exists`, a name the user never wrote and could never whitelist.
@@ -1077,7 +1098,8 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         // `hide http` must block both bare `http` AND `http.get(url)`, in
         // the hiding block and in every block, closure and trailing block
         // nested inside it.
-        if (qualified_prefix_blocked(table, prefix)) {
+        if (qualified_prefix_blocked(table, prefix) ||
+            qualified_member_blocked(table, prefix, suffix)) {
             if (name_heap) free(name_copy);
             return NULL;
         }
@@ -1085,6 +1107,11 @@ Symbol* lookup_qualified_symbol(SymbolTable* table, const char* qualified_name) 
         // Check if prefix is a module alias
         Symbol* alias_sym = resolve_module_alias(table, prefix);
         if (alias_sym && alias_sym->alias_target) {
+            /* `hide ui.open_url` holds under `import ui as u` too. */
+            if (qualified_member_blocked(table, module_namespace_of(alias_sym->alias_target), suffix)) {
+                if (name_heap) free(name_copy);
+                return NULL;
+            }
             // Reconstruct with actual module name
             const char* resolved_name = aether_internf("%s.%s", alias_sym->alias_target, suffix);
             if (name_heap) free(name_copy);
@@ -18309,6 +18336,18 @@ int typecheck_expression(ASTNode* expr, SymbolTable* table) {
                 expr->children[0]->type == AST_IDENTIFIER && expr->children[0]->value &&
                 !value_hides_namespace(table, expr->children[0]->value) &&
                 is_visible_namespace(expr->children[0]->value, table) && expr->value) {
+                /* `hide fs` / `hide ui.open_url` refuse a namespace's
+                 * constant or function taken as a value (`f = ui.open_url`)
+                 * as they refuse a call through it. This path resolved it
+                 * without asking, so the value walked past the hide. */
+                if (qualified_prefix_blocked(table, expr->children[0]->value) ||
+                    qualified_member_blocked(table, expr->children[0]->value, expr->value)) {
+                    const char* msg = "";
+                    msg = aether_internf("'%s.%s' is hidden in this scope by `hide` or `seal except`",
+                             expr->children[0]->value, expr->value);
+                    type_error(msg, expr->line, expr->column);
+                    return 0;
+                }
                 // Enforce export visibility for constants
                 if (is_export_blocked(expr->children[0]->value, expr->value)) {
                     const char* msg = "";
@@ -21844,6 +21883,17 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
             char* tmp = strdup(call->value);
             char* dot = strchr(tmp, '.');
             *dot = '\0';
+            /* Refused by a `hide` (of the namespace, or of this one member):
+             * say so, as for a hidden bare name, not that it is undefined. */
+            if (qualified_prefix_blocked(table, tmp) ||
+                qualified_member_blocked(table, tmp, dot + 1)) {
+                error_msg = aether_internf(
+                         "'%s' is hidden in this scope by `hide` or `seal except`",
+                         call->value);
+                free(tmp);
+                type_error(error_msg, call->line, call->column);
+                return 0;
+            }
             const char* hint = missing_import_hint(tmp, table);
             if (hint) {
                 error_msg = aether_internf(

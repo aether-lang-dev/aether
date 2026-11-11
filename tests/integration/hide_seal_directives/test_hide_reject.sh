@@ -25,6 +25,24 @@ run_reject() {
     fi
 }
 
+# Rejected, and for the hide: the diagnostic names the hidden name, so a
+# compiler that cannot parse the case does not pass it.
+run_reject_hidden() {
+    case_name="$1"
+    src_file="$2"
+    if AETHER_HOME="" "$ROOT/build/ae" build "$src_file" -o $AE_TMP/ae_hide_out > $AE_TMP/ae_hide_log 2>&1; then
+        echo "  [FAIL] $case_name should have been rejected"
+        fail=$((fail + 1))
+    elif grep -q "is hidden in this scope" $AE_TMP/ae_hide_log; then
+        echo "  [PASS] $case_name correctly rejected as hidden"
+        pass=$((pass + 1))
+    else
+        echo "  [FAIL] $case_name was rejected, but not as hidden:"
+        sed 's/^/      /' $AE_TMP/ae_hide_log | head -5
+        fail=$((fail + 1))
+    fi
+}
+
 run_accept() {
     case_name="$1"
     src_file="$2"
@@ -370,8 +388,146 @@ main() {
 EOF
 run_accept "seal except permits local tuple-destructure bindings" $AE_TMP/ae_seal_local_destructure.ae
 
+# One member of a module: `hide ns.member` and `import ns hiding (member)`
+# deny that member and leave the rest of the module visible (sae's kernel
+# imports all of ui but ui.open_url). A module of our own, beside the files.
+mkdir -p $AE_TMP/member/shell $AE_TMP/member/kernel
+cat > $AE_TMP/member/shell/module.ae << 'EOF'
+open_url(u: string) -> int { return 7 }
+window(t: string) -> int { return 3 }
+EOF
+
+cat > $AE_TMP/member/hide_member_call.ae << 'EOF'
+import shell
+main() {
+    {
+        hide shell.open_url
+        println("${shell.open_url("u")}")
+    }
+}
+EOF
+run_reject_hidden "hide ns.member blocks a call to that member" $AE_TMP/member/hide_member_call.ae
+
+cat > $AE_TMP/member/hide_member_rest.ae << 'EOF'
+import shell
+main() {
+    println("${shell.open_url("u")}")
+    {
+        hide shell.open_url
+        println("${shell.window("t")}")
+    }
+}
+EOF
+run_accept "hide ns.member leaves the module's other members" $AE_TMP/member/hide_member_rest.ae
+
+cat > $AE_TMP/member/hide_member_value.ae << 'EOF'
+import shell
+main() {
+    hide shell.open_url
+    f = shell.open_url
+}
+EOF
+run_reject_hidden "hide ns.member blocks the member taken as a value" $AE_TMP/member/hide_member_value.ae
+
+cat > $AE_TMP/member/hide_ns_value.ae << 'EOF'
+import shell
+main() {
+    hide shell
+    f = shell.window
+}
+EOF
+run_reject_hidden "hide ns blocks a member taken as a value" $AE_TMP/member/hide_ns_value.ae
+
+cat > $AE_TMP/member/hide_member_alias.ae << 'EOF'
+import shell as sh
+main() {
+    hide shell.open_url
+    println("${sh.open_url("u")}")
+}
+EOF
+run_reject_hidden "hide ns.member holds through an import alias" $AE_TMP/member/hide_member_alias.ae
+
+cat > $AE_TMP/member/hiding_call.ae << 'EOF'
+import shell hiding (open_url)
+main() {
+    println("${shell.open_url("u")}")
+}
+EOF
+run_reject_hidden "import hiding blocks the member" $AE_TMP/member/hiding_call.ae
+
+cat > $AE_TMP/member/hiding_closure.ae << 'EOF'
+import shell hiding (open_url)
+run(code: fn) { call(code, null) }
+main() {
+    run() callback {
+        x = shell.open_url("u")
+    }
+}
+EOF
+run_reject_hidden "import hiding blocks the member in a trailing block" $AE_TMP/member/hiding_closure.ae
+
+cat > $AE_TMP/member/hiding_actor.ae << 'EOF'
+import shell hiding (open_url)
+actor A {
+    state n = 0
+    receive {
+        Ping() -> { n = shell.open_url("a") }
+    }
+}
+main() { println("x") }
+EOF
+run_reject_hidden "import hiding blocks the member in a receive arm" $AE_TMP/member/hiding_actor.ae
+
+cat > $AE_TMP/member/hiding_alias.ae << 'EOF'
+import shell as sh hiding (open_url)
+main() {
+    println("${sh.open_url("u")}")
+}
+EOF
+run_reject_hidden "import as alias hiding blocks the member" $AE_TMP/member/hiding_alias.ae
+
+cat > $AE_TMP/member/hiding_rest.ae << 'EOF'
+import shell hiding (open_url)
+twice() -> int {
+    if shell.window("a") == 3 { return 6 }
+    return 0
+}
+main() {
+    println("${shell.window("t")} ${twice()}")
+}
+EOF
+run_accept "import hiding leaves the module's other members" $AE_TMP/member/hiding_rest.ae
+
+cat > $AE_TMP/member/hiding_select.ae << 'EOF'
+import shell (window) hiding (open_url)
+main() { println("x") }
+EOF
+run_reject "import hiding is not combined with a selective list" $AE_TMP/member/hiding_select.ae
+
+# The kernel module hides open_url from itself; the program that imports
+# it may still call shell.open_url, since the hide is the kernel file's.
+# kernel finds shell where the compile runs, so these two run from there.
+cd $AE_TMP/member
+cat > $AE_TMP/member/kernel/module.ae << 'EOF'
+import shell hiding (open_url)
+boot() -> int { return shell.window("k") }
+EOF
+cat > $AE_TMP/member/hiding_per_file.ae << 'EOF'
+import kernel
+import shell
+main() { println("${kernel.boot()} ${shell.open_url("u")}") }
+EOF
+run_accept "import hiding is the importing file's alone" $AE_TMP/member/hiding_per_file.ae
+
+cat > $AE_TMP/member/kernel/module.ae << 'EOF'
+import shell hiding (open_url)
+boot() -> int { return shell.open_url("k") }
+EOF
+run_reject_hidden "import hiding in a module blocks the member there" $AE_TMP/member/hiding_per_file.ae
+cd "$ROOT"
+
 # Cleanup
-rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out
+rm -f $AE_TMP/ae_hide_*.ae $AE_TMP/ae_seal_*.ae $AE_TMP/ae_hide_out $AE_TMP/ae_hide_log
 
 echo ""
 echo "Hide/seal rejection tests: $pass passed, $fail failed"
