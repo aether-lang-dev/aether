@@ -14,6 +14,95 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.909.0]
+
+### Added
+
+- **std.ipc and std.tcp can write without waiting on the reader.** Every
+  `ipc.write`, `ipc.write_frame` and `tcp.write` waited until the peer took
+  the bytes, so a program writing to a pipe or socket whose reader had
+  stopped reading froze until it read, exited or was killed; sae ran a
+  writer thread per channel to keep its window alive. New in std.ipc:
+  `wait_writable(fd, ms)` (`poll` for room; on Windows the pipe's free
+  room, `WriteQuotaAvailable`), `write_some(fd, bytes, offset) -> (n, err)`
+  (what fits now, never waiting, without changing the descriptor's flags),
+  and a frame writer (`frame_writer(fd)`, `frame_writer_put`,
+  `frame_writer_flush(w, ms)`, `frame_writer_pending`, `frame_writer_free`)
+  that queues frames in a queue of its own and writes them as the reader
+  takes them, resuming inside a frame, so a UI tick can flush with a
+  timeout of 0. On Windows a pipe is written no more than its free room,
+  and, when a reader waiting in a large read makes an empty pipe report
+  none, in `PIPE_NOWAIT` mode for those writes and back after: no thread,
+  and nothing left changed on a pipe someone else created. New in std.tcp: `wait_writable(sock, ms)`
+  and `write_some(sock, byte[]) -> (n, err)`; macOS's `send` waits for
+  room even with `MSG_DONTWAIT` once part of a send has gone, so there (as
+  on NetBSD and Windows) the socket is non-blocking for the one send.
+
+### Fixed
+
+- **`*.localhost` names are loopback on every platform, with no DNS query.**
+  `app.localhost` said no such host on Windows and FreeBSD (FreeBSD after
+  asking its DNS server), and a Linux host without systemd-resolved's stub
+  sent the query to its DNS server too, so a client and a server naming a
+  service by it met only on macOS and most Linux desktops. std.net's dial,
+  the HTTP client (and its proxy event loop's resolver), the WebSocket dial
+  and the HTTP server's listen now answer a name ending in `.localhost`, and
+  the rooted `localhost.`, as `::1` then `127.0.0.1` (a listener binds
+  `127.0.0.1`), as RFC 6761 6.3 asks. Plain `localhost` still goes to the
+  system resolver, which answers it from its hosts file.
+
+- **The `no_threads_refs` test no longer times out on Windows.** It took
+  five to six minutes under MSYS2, past the sweep's limit inside a full run:
+  it parsed the Makefile once per variable (nine times, seven seconds each
+  there), started a shell and a `tr` per source file and an `nm` per object,
+  and wrote a dependency file and temporaries for each of 226 compiles. One
+  `make` run per build now compiles the sources from rules of its own, with
+  `-pipe` and no dependency files, and one `nm` reads every object: 324 s to
+  143 s on the win11 lab VM, what is left being gcc itself.
+
+- **The FreeBSD release ships `lib/contrib/` like the Linux and macOS
+  ones.** Its archive had no `libaether_sqlite.a` or `libsqlite3.a`, because
+  those are built natively by each leg and the FreeBSD leg is cross-built,
+  so a program linked with `-laether_sqlite -lsqlite3` (aeb's link, an
+  `aether.toml` `link_flags` list: sae on FreeBSD) failed with "unable to
+  find library". `scripts/stage-release.sh --contrib-target <triple>` now
+  builds the two archives with zig for the target (`-fPIC`, as the others),
+  checks their objects are for it, and the FreeBSD leg passes it; PR CI's
+  FreeBSD cross job stages them the same way. The cross-mode architecture
+  check in `contrib_build.sh` looked for "FreeBSD" in `file`'s description
+  of a relocatable object, which names no OS, so it refused every FreeBSD
+  archive; it checks ELF and the machine now. And a `FREEBSD=1` cross build
+  from a macOS host now gives a toolchain that works on FreeBSD: archives
+  are written with `zig ar` (macOS's `ar` indexed no ELF symbol, leaving
+  `libaether.a` empty) and programs are not linked with the host's CoreAudio
+  frameworks.
+
+### Security
+
+- **An owner-only mode is now owner-only on Windows.** `fs.chmod` there only
+  toggled the read-only attribute, so a file a program made 0o600 (a key, a
+  token) stayed as readable to other users as its folder let it be, and
+  `fs.create_dir_with_mode` ignored its mode. A mode with no group or other
+  bit (0o600, 0o700, 0o400) now gives the file or directory a protected DACL
+  admitting only the current user, SYSTEM and Administrators (OpenSSH for
+  Windows' rule for a private key), inherited by what is created in such a
+  directory, and set as `create_dir_with_mode` creates it; a mode with a
+  group or other bit puts back what the folder grants. The read-only toggle
+  is unchanged. On a volume without ACLs an owner-only mode fails with
+  `KIND_IO` instead of quietly leaving the file readable.
+
+- **`fs.copy` of an owner-only file stays owner-only on Windows.** After
+  `fs.chmod(path, 0o600)` gave a file a protected DACL, a copy of it was
+  readable by the destination folder's users: CopyFileExW gives a new file
+  its folder's DACL (Users' read among them on most volumes) and keeps an
+  existing destination's. On POSIX the copy takes the source's mode bits.
+  Now a source with a protected DACL gives an owner-only copy (the current
+  user, SYSTEM, Administrators), made so before its bytes go in, whether the
+  destination is new or overwritten; a copy of a file that inherits takes
+  the destination folder's access, as `chmod 0o644` would. When the
+  destination cannot be made owner-only, nothing is copied and the call
+  fails (`KIND_IO`, or `KIND_PERMISSION_DENIED`).
+
 ## [0.908.0]
 
 ### Added
