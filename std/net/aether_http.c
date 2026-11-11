@@ -2425,11 +2425,16 @@ int http_resolver_answer(HttpResolver* r, const char* host, int port,
 }
 
 /* `host`:`port` into `out` without asking a resolver: a lookup with
- * AI_NUMERICHOST only parses. 1 for a numeric address, else 0. */
+ * AI_NUMERICHOST only parses, and a localhost. name is loopback. 1 for
+ * either, else 0. */
 static int resolve_numeric(const char* host, int port, AetherAddrList* out) {
     char bare[256];
     out->n = 0;
     if (!aether_addr_unbracket(host, bare, sizeof bare) || !bare[0]) return 0;
+    if (aether_addr_is_localhost_name(bare)) {
+        aether_addr_loopback(port, out);
+        return 1;
+    }
     char port_str[16];
     snprintf(port_str, sizeof port_str, "%d", port);
     struct addrinfo hints, *res = NULL;

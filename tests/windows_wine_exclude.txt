@@ -26,3 +26,10 @@ tests/regression/test_https_client.ae
 # is the legacy one, and the UTF-8 path behaviour this test asserts exists only
 # in the native (windres) build, which the MSYS2 lanes run.
 tests/regression/test_utf8_paths.ae
+
+# WINE-GAP: asserts the file's DACL. Wine accepts SetNamedSecurityInfo and
+# returns success but keeps nothing: GetNamedSecurityInfo afterwards reports
+# the same synthesized DACL (SYSTEM, the user, Everyone read) as before, so a
+# protected owner-only DACL can neither be set nor read back there. Real
+# Windows runs it in the MSYS2 lanes.
+tests/regression/test_fs_owner_only.ae

@@ -1,0 +1,152 @@
+// fs.chmod and fs.create_dir_with_mode make an owner-only mode true on
+// Windows, where it used to toggle the read-only attribute and nothing else,
+// so a 0o600 key file stayed as readable as its folder made it.
+//
+// On Windows the file's DACL is read back as SDDL (PowerShell's Get-Acl,
+// which names principals by SID, so the check holds in any locale):
+//   - chmod 0o600: a protected DACL ("D:P"), nothing inherited, three
+//     entries (the user, SYSTEM, Administrators), no Users / Authenticated
+//     Users / Everyone
+//   - chmod 0o644 afterwards: the folder's inherited entries are back
+//   - chmod 0o400: still owner-only, and read-only
+//   - create_dir_with_mode 0o700: the directory is owner-only, and a file
+//     created in it inherits exactly those three entries
+// Elsewhere the same calls are checked against stat's mode bits.
+
+import std.fs
+import std.os
+import std.string
+import std.list
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+// The DACL part of `path`'s security descriptor, in SDDL.
+fn dacl_of(path: string) -> string {
+    av = list.new()
+    list.add(av, "-NoProfile")
+    list.add(av, "-NonInteractive")
+    list.add(av, "-Command")
+    list.add(av, "(Get-Acl -LiteralPath '${path}').Sddl")
+    out, status, err = os.run_capture("powershell.exe", av, null)
+    list.free(av)
+    check(err == "" && status == 0, "Get-Acl ${path}: status=${status} err='${err}' out='${out}'")
+    at = string.index_of(out, "D:")
+    check(at >= 0, "no DACL in '${out}'")
+    return string.trim(string.substring(out, at, string.length(out)))
+}
+
+// How many access entries an SDDL DACL holds.
+fn aces(dacl: string) -> int {
+    n = 0
+    at = string.index_of_from(dacl, "(", 0)
+    while at >= 0 {
+        n = n + 1
+        at = string.index_of_from(dacl, "(", at + 1)
+    }
+    return n
+}
+
+fn owner_only(what: string, dacl: string, inherited: bool) {
+    if inherited {
+        check(string.contains(dacl, ";ID;") == 1 || string.contains(dacl, "ID;") == 1,
+            "${what}: expected inherited entries, got ${dacl}")
+    } else {
+        check(string.starts_with(dacl, "D:P") == 1, "${what}: DACL not protected: ${dacl}")
+        check(string.contains(dacl, "ID;") == 0, "${what}: inherited entries left: ${dacl}")
+    }
+    check(aces(dacl) == 3, "${what}: expected 3 entries, got ${dacl}")
+    check(string.contains(dacl, ";;;SY)") == 1, "${what}: no SYSTEM entry: ${dacl}")
+    check(string.contains(dacl, ";;;BA)") == 1, "${what}: no Administrators entry: ${dacl}")
+    check(string.contains(dacl, ";;;BU)") == 0, "${what}: Users admitted: ${dacl}")
+    check(string.contains(dacl, ";;;AU)") == 0, "${what}: Authenticated Users admitted: ${dacl}")
+    check(string.contains(dacl, ";;;WD)") == 0, "${what}: Everyone admitted: ${dacl}")
+}
+
+main() {
+    println("=== owner-only files ===")
+    dir = "${os.temp_dir()}/aether_owner_only_${os.getpid()}"
+    fs.mkdir_p(dir)
+    f = "${dir}/key.txt"
+    check(fs.write(f, "secret") == "", "write ${f}")
+
+    when target.os == "windows" {
+        before = dacl_of(f)
+        check(string.contains(before, "ID;") == 1, "a new file should inherit: ${before}")
+
+        ok, kind, msg = fs.chmod(f, 0o600)
+        check(ok == 1 && kind == fs.KIND_OK, "chmod 0o600: ${msg}")
+        owner_only("chmod 0o600", dacl_of(f), false)
+        got, rerr = fs.read(f)
+        check(rerr == "" && got == "secret", "the owner reads it back: '${got}' ${rerr}")
+        println("  PASS: chmod 0o600 leaves the user, SYSTEM and Administrators only")
+
+        ok2, _k2, msg2 = fs.chmod(f, 0o644)
+        check(ok2 == 1, "chmod 0o644: ${msg2}")
+        after = dacl_of(f)
+        check(string.starts_with(after, "D:P") == 0, "chmod 0o644 left it protected: ${after}")
+        check(string.contains(after, "ID;") == 1, "chmod 0o644 inherits nothing: ${after}")
+        println("  PASS: chmod 0o644 puts back what the folder grants")
+
+        ok3, _k3, msg3 = fs.chmod(f, 0o400)
+        check(ok3 == 1, "chmod 0o400: ${msg3}")
+        owner_only("chmod 0o400", dacl_of(f), false)
+        check(fs.write(f, "x") != "", "0o400 should be read-only")
+        ok4, _k4, msg4 = fs.chmod(f, 0o600)
+        check(ok4 == 1, "chmod back to 0o600: ${msg4}")
+        println("  PASS: chmod 0o400 is owner-only and read-only")
+
+        keys = "${dir}/keys"
+        check(fs.create_dir_with_mode(keys, 0o700) == "", "create_dir_with_mode 0o700")
+        kd = dacl_of(keys)
+        owner_only("create_dir_with_mode 0o700", kd, false)
+        check(string.contains(kd, "OICI") == 1, "the directory's entries are not inheritable: ${kd}")
+        inner = "${keys}/inner.txt"
+        check(fs.write(inner, "k") == "", "write ${inner}")
+        owner_only("a file in the 0o700 directory", dacl_of(inner), true)
+        println("  PASS: create_dir_with_mode 0o700 is owner-only, and so is what is made in it")
+
+        open_dir = "${dir}/open"
+        check(fs.create_dir_with_mode(open_dir, 0o755) == "", "create_dir_with_mode 0o755")
+        check(string.contains(dacl_of(open_dir), "ID;") == 1, "0o755 should inherit")
+        println("  PASS: create_dir_with_mode 0o755 inherits its folder's access")
+
+        fs.delete(inner)
+        fs.delete_dir(keys)
+        fs.delete_dir(open_dir)
+    } else {
+        ok, _k, msg = fs.chmod(f, 0o600)
+        check(ok == 1, "chmod 0o600: ${msg}")
+        la = list_of("-c", "ls -l '${f}'")
+        st, sstatus, serr = os.run_capture("/bin/sh", la, null)
+        list.free(la)
+        check(serr == "" && sstatus == 0 && string.starts_with(st, "-rw-------") == 1,
+            "mode after 0o600: ${st}")
+        keys = "${dir}/keys"
+        check(fs.create_dir_with_mode(keys, 0o700) == "", "create_dir_with_mode 0o700")
+        lb = list_of("-c", "ls -ld '${keys}'")
+        ks, kstatus, kerr = os.run_capture("/bin/sh", lb, null)
+        list.free(lb)
+        check(kerr == "" && kstatus == 0 && string.starts_with(ks, "drwx------") == 1,
+            "mode after 0o700: ${ks}")
+        fs.delete_dir(keys)
+        println("  PASS: chmod 0o600 and create_dir_with_mode 0o700 (POSIX mode bits)")
+    }
+
+    fs.delete(f)
+    fs.delete_dir(dir)
+    println("=== All cases passed ===")
+}
+
+fn list_of(a: string, b: string) -> ptr {
+    l = list.new()
+    list.add(l, a)
+    list.add(l, b)
+    return l
+}

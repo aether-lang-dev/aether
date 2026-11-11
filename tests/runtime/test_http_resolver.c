@@ -142,6 +142,26 @@ TEST(http_resolver_never_waits_on_a_lookup) {
     http_resolver_free(r);
 }
 
+/* A localhost. name is answered at once, loopback, like a numeric address:
+ * no lookup is queued for it (RFC 6761 6.3), where it used to wait on one
+ * that failed on Windows and FreeBSD. */
+TEST(http_resolver_answers_localhost_names_itself) {
+    rs_reset(0, 0);
+    HttpResolver* r = http_resolver_new(rs_on_answer, NULL);
+    if (!r) return;                      /* a build without threads has no loop */
+    http_resolver_set_lookup(r, rs_lookup);
+    struct AetherAddrList a;
+    ASSERT_EQ(1, http_resolver_answer(r, "api.localhost", 8091, &a));
+    ASSERT_EQ(2, a.n);
+    ASSERT_EQ(AF_INET6, a.ss[0].ss_family);
+    ASSERT_EQ(AF_INET, a.ss[1].ss_family);
+    ASSERT_EQ(8091, aether_addr_port(&a.ss[1]));
+    ASSERT_EQ(1, http_resolver_answer(r, "A.B.LOCALHOST.", 8091, &a));
+    ASSERT_EQ(0, rs_lookups);
+    rs_let_go();
+    http_resolver_free(r);
+}
+
 /* Names never take each other's place. The resolve cache was 64 slots, one
  * name each, so two upstreams whose names fell in one slot evicted each
  * other, and each request that met an evicted name moved its whole client

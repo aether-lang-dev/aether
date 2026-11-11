@@ -56,6 +56,19 @@ A hardcoded `/tmp` is fine on POSIX and wrong on Windows, where it may not
 exist. Resolve `TEMP`, then `TMPDIR`, then `/tmp`: see #1702 for the
 accessor that will make that one call.
 
+## Private files on Windows
+
+Windows keeps no mode bits, so `chmod` and `create_dir_with_mode` emulate
+what a mode means there. The owner-write bit (0o200) clears or sets the
+read-only attribute. A mode with no group or other bit (0o600, 0o700, 0o400)
+gives the file or directory a protected DACL that inherits nothing from its
+folder and admits only the current user, SYSTEM and the Administrators group
+(OpenSSH for Windows' rule for a private key), so another user cannot open
+it; a directory passes that on to what is created in it. A mode with a group
+or other bit (0o644) puts back what the folder grants. On a volume without
+ACLs (FAT, exFAT) an owner-only mode fails with `KIND_IO` instead of leaving
+the file readable.
+
 ## Exports
 
 `read`, `write`, `write_binary`, `write_atomic`, `read_binary`, `pread`,

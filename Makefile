@@ -1043,6 +1043,7 @@ TEST_SRC = tests/runtime/test_harness.c \
            tests/runtime/test_win_mutex_no_debug_info.c \
            tests/runtime/test_http_server.c \
            tests/runtime/test_http_resolver.c \
+           tests/runtime/test_net_localhost.c \
            tests/runtime/test_resource_caps.c \
            tests/runtime/test_libaether_caps.c \
            tests/memory/test_memory_arena.c \

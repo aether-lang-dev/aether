@@ -813,7 +813,7 @@
       <h3 class="function-name">create_dir_with_mode <span class="kind">fn</span></h3>
       <pre class="usage"><code>create_dir_with_mode(path, mode) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
-      <p class="doc">Like `create_dir` but with an explicit POSIX-style mode (0777-masked). Use this when the directory needs to be private — e.g. `fs.create_dir_with_mode(&quot;/run/myapp/keys&quot;, 448)` for 0o700 — without the mkdir-then-chmod race the &quot;always 0755 + shell out to chmod&quot; workaround would open. Windows ignores the mode at the directory layer; the parameter is accepted for API portability.</p>
+      <p class="doc">Like `create_dir` but with an explicit POSIX-style mode (0777-masked). Use this when the directory needs to be private — e.g. `fs.create_dir_with_mode(&quot;/run/myapp/keys&quot;, 448)` for 0o700 — without the mkdir-then-chmod race the &quot;always 0755 + shell out to chmod&quot; workaround would open. On Windows a mode with no group or other bit (0o700) creates the directory with an owner-only DACL (the current user, SYSTEM and Administrators; see `chmod`), inherited by what is made in it; any other mode inherits the parent folder's access.</p>
     </div>
     <div class="function" id="delete_dir" data-name="delete_dir">
       <h3 class="function-name">delete_dir <span class="kind">fn</span></h3>
@@ -945,7 +945,7 @@
       <h3 class="function-name">chmod_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>chmod_raw(path, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
-      <p class="doc">fs_chmod_raw — POSIX chmod(2). On Windows only the user-write bit (0o200) is honoured (matches Python's os.chmod docs). Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+      <p class="doc">fs_chmod_raw — POSIX chmod(2). On Windows the user-write bit (0o200) toggles read-only, and a mode with no group/other bit sets an owner-only DACL (see `chmod`). Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
     </div>
     <div class="function" id="copy" data-name="copy">
       <h3 class="function-name">copy <span class="kind">fn</span></h3>
@@ -969,7 +969,7 @@
       <h3 class="function-name">chmod <span class="kind">fn</span></h3>
       <pre class="usage"><code>chmod(path, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
-      <p class="doc">Change the permission bits at `path`. POSIX chmod(2) — follows symlinks. On Windows only the user-write bit (0o200) is honoured; every other bit is silently ignored (matches Python's os.chmod docs). `mode` is masked with 07777 internally. Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+      <p class="doc">Change the permission bits at `path`. POSIX chmod(2) — follows symlinks. `mode` is masked with 07777 internally. Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg). Windows has no mode bits, so two things are emulated there. The user-write bit (0o200) clears or sets the read-only attribute, as Python's os.chmod does. And a mode with no group or other bit (0o600, 0o700, 0o400) makes the file owner-only: a protected DACL, inheriting nothing from its folder, that admits the current user, SYSTEM and the Administrators group (OpenSSH for Windows' rule for a private key; the counterpart of &quot;the owner, and root&quot;), so another user is refused. A mode with any group or other bit (0o644) puts back what the folder grants. On a volume with no ACLs (FAT, exFAT) an owner-only mode fails with KIND_IO rather than leave the file readable. The execute bits mean nothing there.</p>
     </div>
     <div class="function" id="copy_tree" data-name="copy_tree">
       <h3 class="function-name">copy_tree <span class="kind">fn</span></h3>
