@@ -14,6 +14,14 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.908.0]
+
+### Added
+
+- **`os.run_stdio`: a child whose stdin and stdout are the channel, on every platform, and std.ipc's bounded waits on Windows pipes** (`std/os/aether_os.c`, `std/ipc/aether_ipc.c`). `os.run_stdio(prog, argv, env)` spawns the child with its stdin and stdout each a pipe the parent keeps (stderr inherited) and returns `(to_child_fd, from_child_fd, pid, "")`, or `(-1, -1, -1, err)` with nothing to reap. Both descriptors are close-on-exec, and `pid` is a spawn token `os.wait_pid`, `os.wait_pid_timeout` and `os.kill` take, as `os.run_socket`'s is. The child's environment carries `AETHER_IPC_KIND=stdio` (its `ipc.parent_channel_kind()` is `"stdio"`) and no `AETHER_IPC_FD`. std.ipc's frames run over the pair as over a socket, so a host can talk to a backend in any language, or through a container runtime that passes stdio through (`wslc run -i`, `docker run -i`), where `os.run_socket`'s fd 3 does not reach and which Windows lacks. On Windows the pipes are anonymous pipes handed back as binary CRT descriptors, and `ipc.wait_readable` and `ipc.read_frame_timeout`, which reported "unsupported on Windows", now wait on them (`PeekNamedPipe`, polled to within about a timer tick; a closed writer reads as ready, then end of stream), with both of `read_frame_timeout`'s timeouts kept apart; any other descriptor there is a "not a pipe" error. std.ipc puts a CRT descriptor in binary mode before using it, so a child's fd 0 no longer turns CR LF into LF or stops at a 0x1a byte. A std.ipc write to a pipe whose reader has gone is now an error (EPIPE) rather than a SIGPIPE that ended the writing process, as a socket's already was. `tests/integration/os_run_stdio`.
+
+- **`ipc.stdio_channel()`: a child of `os.run_stdio` claims its stdin and stdout, so a stray print cannot corrupt the frames** (`std/ipc/aether_ipc.c`). With `os.run_stdio` the child's stdout is the channel, so a `println`, a library diagnostic or a panic message landed in the middle of a frame, and anything else reading stdin took frame bytes. `ipc.stdio_channel()`, called first thing in `main`, returns `(in_fd, out_fd, "")`: fd 0 and fd 1 moved to two new close-on-exec descriptors (non-inheritable handles on Windows), after which fd 0 reads the null device (a read of stdin gets end of file at once) and fd 1 writes to stderr. On Windows the CRT descriptors and the Win32 standard handles (`SetStdHandle`) are redirected alike. A second call fails with `"ipc.stdio_channel: already claimed"`; output written before the call, and code holding its own copy of fd 1, still reach the channel. `tests/integration/ipc_stdio_channel`.
+
 ## [0.907.0]
 
 ### Changed
