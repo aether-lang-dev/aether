@@ -305,6 +305,11 @@ ifeq ($(FREEBSD),1)
   # libraries. Target-root -L paths are resolved beneath --sysroot; passing the
   # already-prefixed host paths makes Zig prefix the sysroot a second time.
   CC := $(ZIG) cc -target $(FREEBSD_CPU)-freebsd.$(FREEBSD_ABI) --sysroot=$(AETHER_SYSROOT) -I$(AETHER_SYSROOT)/usr/include
+  # zig's archiver, as WINDOWS=1 uses: macOS's ar writes no symbol index for
+  # ELF objects, and FreeBSD's linker then found nothing in a libaether.a
+  # cross-built from a Mac (GNU ar on the Linux release runner did).
+  AR := $(ZIG) ar
+  RANLIB := $(ZIG) ranlib
   # Host pkg-config is wrong for the target — force the optional libs off.
   OPENSSL := 0
   ZLIB := 0
@@ -828,6 +833,11 @@ ifeq ($(WINDOWS),1)
 else ifeq ($(ANDROID),1)
   # bionic has threads in libc (no separate libpthread to link).
   AUDIO_LDFLAGS := -ldl -lm
+else ifeq ($(FREEBSD),1)
+  # A FreeBSD cross build takes FreeBSD's, whatever the host: from macOS the
+  # host's CoreAudio frameworks went into the cross-built ae's link line, and
+  # every `ae build` on FreeBSD failed on -framework.
+  AUDIO_LDFLAGS := -lpthread -lm
 else ifeq ($(shell uname -s),Linux)
   AUDIO_LDFLAGS := -lpthread -ldl -lm
 else ifeq ($(shell uname -s),FreeBSD)
@@ -2239,7 +2249,7 @@ $(BUILD_DIR)/libaether_main.a: runtime/windows/aether_lib_main.c $(BUILD_FLAGS_S
 	@mkdir -p $(OBJ_DIR)/runtime/windows
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c runtime/windows/aether_lib_main.c -o $(OBJ_DIR)/runtime/windows/aether_lib_main.o
 	@rm -f $@.tmp
-	@ar rcs $@.tmp $(OBJ_DIR)/runtime/windows/aether_lib_main.o
+	@$(AR) rcs $@.tmp $(OBJ_DIR)/runtime/windows/aether_lib_main.o
 	@mv $@.tmp $@
 
 $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether.manifest
@@ -2261,7 +2271,7 @@ $(BUILD_DIR)/aether_manifest.o: runtime/windows/aether.rc runtime/windows/aether
 $(BUILD_DIR)/libaether.a: $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS) $(BUILD_DIR)/libaether_compiler.a $(BUILD_DIR)/MANIFEST | $(VERSION_HEADER)
 	@echo "Creating precompiled stdlib archive..."
 	@rm -f $(BUILD_DIR)/libaether.a.tmp
-	@ar rcs $(BUILD_DIR)/libaether.a.tmp $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS)
+	@$(AR) rcs $(BUILD_DIR)/libaether.a.tmp $(STD_OBJS) $(STD_REACTOR_OBJS) $(COLLECTIONS_OBJS) $(RUNTIME_OBJS)
 	@mv $(BUILD_DIR)/libaether.a.tmp $(BUILD_DIR)/libaether.a
 	@echo "✓ Stdlib archive created: $(BUILD_DIR)/libaether.a"
 
@@ -2312,7 +2322,7 @@ $(BUILD_DIR)/MANIFEST: Makefile | $(BUILD_DIR)
 # from libaether.a because user programs never need the compiler embedded.
 $(BUILD_DIR)/libaether_compiler.a: $(COMPILER_LIB_OBJS)
 	@echo "Creating compiler-as-library archive..."
-	@ar rcs $@ $(COMPILER_LIB_OBJS)
+	@$(AR) rcs $@ $(COMPILER_LIB_OBJS)
 	@echo "✓ Compiler-lib archive created: $@"
 
 # Sanitizer / debug-flavoured archives.

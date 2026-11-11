@@ -4,7 +4,7 @@
 # `make test-release-archive`, so what CI checks is what ships.
 #
 #   scripts/stage-release.sh <bin-dir> <out-dir> [--module-artifacts <aetherc>]
-#                            [--contrib-archives]
+#                            [--contrib-archives | --contrib-target <triple>]
 #
 # <bin-dir> holds the built aetherc and ae (.exe on Windows), libaether.a,
 # MANIFEST and, when built, shared/ (build/, or build/.alien/<target> for a
@@ -18,6 +18,12 @@
 # libaether_sqlite.a and libsqlite3.a (the dev layout's build/contrib, which
 # `ae build` and aeb's own link both put on -L). Only a NATIVE stage may pass
 # it: a cross-build's archives would be for the wrong machine.
+# --contrib-target <triple> builds the same two archives for a cross-built
+# release instead, with `zig cc -target <triple>` (zig on PATH, and for a
+# FreeBSD triple the base sysroot in AETHER_SYSROOT, as the cross-build
+# itself takes them), -fPIC like the native ones, and checks each object is
+# for that target. The FreeBSD release shipped without lib/contrib/ until
+# its leg passed this, so `-laether_sqlite` failed to link against it.
 #
 # The packaging used to be written out three times in release.yml (Unix,
 # Windows, FreeBSD) and a fourth time, differently, in the Makefile's smoke
@@ -31,11 +37,14 @@ set -eu
 bin="$1"; out="$2"; shift 2
 modules_aetherc=""
 contrib_archives=""
+contrib_target=""
 while [ $# -gt 0 ]; do
     case "$1" in
         --module-artifacts) [ $# -ge 2 ] || { echo "$0: --module-artifacts needs an aetherc" >&2; exit 2; }
                             modules_aetherc="$2"; shift 2 ;;
         --contrib-archives) contrib_archives=1; shift ;;
+        --contrib-target)   [ $# -ge 2 ] || { echo "$0: --contrib-target needs a target triple" >&2; exit 2; }
+                            contrib_archives=1; contrib_target="$2"; shift 2 ;;
         *) echo "$0: unknown argument '$1'" >&2; exit 2 ;;
     esac
 done
@@ -121,14 +130,41 @@ fi
 # `-laether_sqlite -lsqlite3` itself and reads no source, so a release that
 # ships only the source (above) fails it with "library 'aether_sqlite' not
 # found". `ae build` finds the same archives and keeps them in place of
-# compiling the veneer. Native stages only (see the header).
+# compiling the veneer. Native stages, or a cross stage with its target named
+# (see the header).
 if [ -n "$contrib_archives" ]; then
     cdir="$(mktemp -d)"
-    if ! MODULES=sqlite CONTRIB_OUT="$cdir" bash tests/scripts/contrib_build.sh >"$cdir/build.log" 2>&1 \
+    if ! CONTRIB_TARGET="$contrib_target" MODULES=sqlite CONTRIB_OUT="$cdir" \
+            bash tests/scripts/contrib_build.sh >"$cdir/build.log" 2>&1 \
        || [ ! -f "$cdir/libaether_sqlite.a" ] || [ ! -f "$cdir/libsqlite3.a" ]; then
         sed 's/^/    /' "$cdir/build.log" >&2
-        echo "$0: could not build the contrib.sqlite archives (the vendored libsqlite3.a is required)" >&2
+        echo "$0: could not build the contrib.sqlite archives${contrib_target:+ for $contrib_target} (the vendored libsqlite3.a is required)" >&2
         rm -rf "$cdir"; exit 1
+    fi
+    # A cross stage's archives must hold objects for the target: contrib_build
+    # checks the veneer's, and this the vendored SQLite's as well.
+    if [ -n "$contrib_target" ]; then
+        # A relocatable object names no OS (FreeBSD's mark is the linker's),
+        # so an ELF target is checked by its machine.
+        case "$contrib_target" in
+            *windows*)       want="COFF" ;;
+            *macos*)         want="Mach-O" ;;
+            x86_64-*)        want="ELF 64-bit LSB relocatable, x86-64" ;;
+            aarch64-*)       want="ELF 64-bit LSB relocatable, ARM aarch64" ;;
+            *)               want="ELF" ;;
+        esac
+        for a in libaether_sqlite.a libsqlite3.a; do
+            xd="$cdir/x.$a"
+            mkdir -p "$xd"
+            (cd "$xd" && zig ar x "$cdir/$a") || { echo "$0: cannot unpack $a" >&2; rm -rf "$cdir"; exit 1; }
+            for o in "$xd"/*.o; do
+                if ! file -b "$o" | grep -q "$want"; then
+                    echo "$0: $a holds $(basename "$o"), not a $want object: $(file -b "$o")" >&2
+                    rm -rf "$cdir"; exit 1
+                fi
+            done
+            rm -rf "$xd"
+        done
     fi
     mkdir -p "$out/lib/contrib"
     cp "$cdir/libaether_sqlite.a" "$cdir/libsqlite3.a" "$out/lib/contrib/"

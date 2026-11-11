@@ -512,6 +512,15 @@ jobs:
         # Likewise std.yaml's vendored libfyaml, and none of its symbols unprefixed.
         sh scripts/check_yaml_engine.sh $X/libaether.a
 
+    # The release's FreeBSD leg stages contrib.sqlite's archives for FreeBSD
+    # (--contrib-target); this stages them the same way, so a break shows on
+    # the pull request and not at release.
+    - name: FreeBSD release stage ships lib/contrib
+      run: |
+        PATH="$(dirname "${{ steps.prov.outputs.zig }}"):$PATH" \
+          AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}" \
+          bash tests/integration/release_cross_contrib_archives/test_release_cross_contrib_archives.sh
+
   # Android cross-compile gate: the release builds an android-aarch64
   # toolchain with the NDK (Makefile ANDROID=1); this catches a bionic break
   # (no shm_open, no pthread_setaffinity_np, ...) on the PR, not at release.
