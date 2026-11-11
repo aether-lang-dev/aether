@@ -21,42 +21,44 @@ CC="${CC:-cc}"
 TMPDIR="$(mktemp -d)"
 trap 'rm -rf "$TMPDIR"' EXIT
 
-# A value of the Makefile's own, for a build with EXTRA_CFLAGS=$2. Run under
-# `make` (the sweep is), the inner make inherits MAKEFLAGS and prints
-# "Entering directory" lines into what it echoes, so it starts clean.
-make_var() {
-    printf 'ae-print-var:\n\t@echo $(%s)\n' "$1" |
-        MAKEFLAGS= MAKELEVEL= ${MAKE:-make} --no-print-directory -s -f Makefile -f - ae-print-var \
-            EXTRA_CFLAGS="$2"
-}
-# The sources each build compiles: a no-threads one has the cooperative
-# scheduler in place of the threaded one.
-srcs_of() {
-    echo "$(make_var RUNTIME_SRC "$1") $(make_var STD_SRC "$1") $(make_var STD_REACTOR_SRC "$1") $(make_var COLLECTIONS_SRC "$1")"
-}
-CFLAGS_REQ="$(make_var AETHER_REQUIRED_CFLAGS "")"
-if [ -z "$(srcs_of "")" ] || [ -z "$CFLAGS_REQ" ]; then
-    echo "  [FAIL] no_threads_refs: could not read the libaether sources from the Makefile"
-    exit 1
-fi
-
+# Each build is one `make` run over the Makefile's own variables -- its
+# lists of libaether sources and its required flags, the no-threads one with
+# the cooperative scheduler in place of the threaded one -- with a rule per
+# source compiling it at -O0 into $TMPDIR/<mode>/. One run, not a `make` per
+# variable and a shell per source: on Windows (MSYS2) each process start
+# costs tens of milliseconds and each parse of the Makefile seconds, and that
+# is where the old way spent most of its five-plus minutes there, past the
+# sweep's timeout. Run under `make` (the sweep is), the inner make inherits
+# MAKEFLAGS and prints "Entering directory" lines, so it starts clean.
+#
 # $1 = mode (threads | coop), $2 = extra flag
 compile_all() {
-    mkdir -p "$TMPDIR/$1"
-    for src in $(srcs_of "$2"); do echo "$src"; done |
-        xargs -P 4 -I{} sh -c 'o="$0/$(echo "$1" | tr / _).o"; $2 -c -O0 $3 $4 "$1" -o "$o" 2>>"$0.err" || echo "$1" >>"$0.failed"' \
-            "$TMPDIR/$1" {} "$CC" "$2" "$CFLAGS_REQ"
-    if [ -s "$TMPDIR/$1.failed" ]; then
+    out="$TMPDIR/$1"
+    mkdir -p "$out"
+    printf '%b\n' \
+        'NTR_SRCS := $(RUNTIME_SRC) $(STD_SRC) $(STD_REACTOR_SRC) $(COLLECTIONS_SRC)' \
+        '$(if $(strip $(NTR_SRCS)),,$(error no libaether sources in the Makefile))' \
+        '$(if $(strip $(AETHER_REQUIRED_CFLAGS)),,$(error no AETHER_REQUIRED_CFLAGS in the Makefile))' \
+        'ntr_obj = $(NTR_OUT)/$(subst /,_,$(1:.c=.o))' \
+        'define ntr_rule' \
+        '$(call ntr_obj,$(1)): $(1)' \
+        '\t$(NTR_CC) -c -O0 -pipe $(filter-out -MMD -MP,$(AETHER_REQUIRED_CFLAGS)) $(NTR_FLAG) $(1) -o $(call ntr_obj,$(1))' \
+        'endef' \
+        '$(foreach s,$(NTR_SRCS),$(eval $(call ntr_rule,$(s))))' \
+        'ntr-all: $(foreach s,$(NTR_SRCS),$(call ntr_obj,$(s)))' |
+        MAKEFLAGS= MAKELEVEL= ${MAKE:-make} --no-print-directory -s -k -j4 -f Makefile -f - ntr-all \
+            NTR_CC="$CC" EXTRA_CFLAGS="$2" NTR_FLAG="$2" NTR_OUT="$out" >"$TMPDIR/$1.log" 2>&1
+    if [ $? -ne 0 ]; then
         echo "  [FAIL] no_threads_refs: $1 build did not compile:"
-        sed 's/^/        /' "$TMPDIR/$1.failed" | head -5
-        grep -m 5 'error' "$TMPDIR/$1.err" | sed 's/^/        /'
+        grep -m 8 -i 'error' "$TMPDIR/$1.log" | sed 's/^/        /'
         exit 1
     fi
 }
 
-# Defined (D) and undefined (U) external symbols of the objects in $1.
+# Defined (D) and undefined (U) external symbols of the objects in $1, from
+# one nm over them all (its "file.o:" headers are one field, so skipped).
 symbols() {
-    for o in "$TMPDIR/$1"/*.o; do nm -g "$o"; done |
+    nm -g "$TMPDIR/$1"/*.o |
         awk '$1 == "U" { print "U " $2; next } NF == 3 && $2 != "U" { print "D " $3 }' | sort -u
 }
 
