@@ -11,6 +11,10 @@
 //   - chmod 0o400: still owner-only, and read-only
 //   - create_dir_with_mode 0o700: the directory is owner-only, and a file
 //     created in it inherits exactly those three entries
+//   - fs.copy of an owner-only file: a new copy, and a copy over an existing
+//     file that inherits, are owner-only too (CopyFileExW alone gave a new
+//     copy its folder's entries, Users' read among them); a copy of a file
+//     that inherits, over an owner-only one, takes its folder's entries back
 // Elsewhere the same calls are checked against stat's mode bits.
 
 import std.fs
@@ -112,6 +116,30 @@ main() {
         owner_only("a file in the 0o700 directory", dacl_of(inner), true)
         println("  PASS: create_dir_with_mode 0o700 is owner-only, and so is what is made in it")
 
+        copy_new = "${dir}/key_copy.txt"
+        cn, ck, cm = fs.copy(f, copy_new)
+        check(ck == fs.KIND_OK && cn == 6, "copy to a new file: ${cm}")
+        owner_only("a new copy of an owner-only file", dacl_of(copy_new), false)
+        plain = "${dir}/plain.txt"
+        check(fs.write(plain, "public") == "", "write ${plain}")
+        check(string.contains(dacl_of(plain), "ID;") == 1, "a plain file should inherit")
+        co, cok, com = fs.copy(f, plain)
+        check(cok == fs.KIND_OK && co == 6, "copy over a file that inherits: ${com}")
+        owner_only("an owner-only file copied over one that inherits", dacl_of(plain), false)
+        got2, rerr2 = fs.read(plain)
+        check(rerr2 == "" && got2 == "secret", "the copy reads back: '${got2}' ${rerr2}")
+        open_src = "${dir}/open_src.txt"
+        check(fs.write(open_src, "hello") == "", "write ${open_src}")
+        cb, cbk, cbm = fs.copy(open_src, copy_new)
+        check(cbk == fs.KIND_OK && cb == 5, "copy over an owner-only file: ${cbm}")
+        back = dacl_of(copy_new)
+        check(string.starts_with(back, "D:P") == 0, "a copy of a file that inherits stayed protected: ${back}")
+        check(string.contains(back, "ID;") == 1, "a copy of a file that inherits inherits nothing: ${back}")
+        fs.delete(copy_new)
+        fs.delete(plain)
+        fs.delete(open_src)
+        println("  PASS: fs.copy keeps an owner-only file owner-only, and a plain one plain")
+
         open_dir = "${dir}/open"
         check(fs.create_dir_with_mode(open_dir, 0o755) == "", "create_dir_with_mode 0o755")
         check(string.contains(dacl_of(open_dir), "ID;") == 1, "0o755 should inherit")
@@ -136,7 +164,16 @@ main() {
         check(kerr == "" && kstatus == 0 && string.starts_with(ks, "drwx------") == 1,
             "mode after 0o700: ${ks}")
         fs.delete_dir(keys)
-        println("  PASS: chmod 0o600 and create_dir_with_mode 0o700 (POSIX mode bits)")
+        copy_new = "${dir}/key_copy.txt"
+        cn, ck, cm = fs.copy(f, copy_new)
+        check(ck == fs.KIND_OK && cn == 6, "copy to a new file: ${cm}")
+        lc = list_of("-c", "ls -l '${copy_new}'")
+        cs, cstatus, cerr = os.run_capture("/bin/sh", lc, null)
+        list.free(lc)
+        check(cerr == "" && cstatus == 0 && string.starts_with(cs, "-rw-------") == 1,
+            "mode of a copy of a 0o600 file: ${cs}")
+        fs.delete(copy_new)
+        println("  PASS: chmod 0o600, create_dir_with_mode 0o700 and fs.copy (POSIX mode bits)")
     }
 
     fs.delete(f)

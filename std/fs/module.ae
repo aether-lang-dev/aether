@@ -1001,6 +1001,12 @@ read_binary(path: string) -> {
 // the call returns KIND_IS_DIR — we do not nest into it. `src` and
 // `dst` must differ lexically; the call returns KIND_INVALID otherwise.
 //
+// On Windows, where there are no mode bits, a copy of an owner-only file
+// (a protected DACL, what chmod 0o600 leaves) is owner-only, made so before
+// its bytes go in; a copy of any other file takes its folder's access. When
+// the destination cannot be made owner-only nothing is copied, and the
+// result is KIND_IO (KIND_PERMISSION_DENIED when access was refused).
+//
 // Performance: zero-copy primitives are tried in order
 // (copy_file_range → sendfile on Linux; fcopyfile on macOS;
 // CopyFileExW on Windows). An 8 MiB read/write loop is the portable

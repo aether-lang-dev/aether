@@ -304,6 +304,49 @@ static DWORD fs_win_apply_mode_acl(const wchar_t* wpath, int mode, int is_dir) {
     LocalFree(sd);
     return rc;
 }
+
+/* 1 when `wpath`'s DACL is protected (inherits nothing from its folder),
+ * which is what an owner-only mode leaves (fs_win_apply_mode_acl); 0 when
+ * it is not, or cannot be read. */
+static int fs_win_dacl_protected(const wchar_t* wpath) {
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                              NULL, NULL, &dacl, NULL, &sd) != ERROR_SUCCESS) {
+        return 0;
+    }
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    DWORD rev = 0;
+    int prot = GetSecurityDescriptorControl(sd, &ctl, &rev) && (ctl & SE_DACL_PROTECTED);
+    LocalFree(sd);
+    return prot;
+}
+
+/* fs.copy's destination, before a byte of an owner-only source lands in it:
+ * made owner-only the way chmod 0o600 makes a file. A new file is created
+ * with that DACL (CREATE_NEW, in the one call, so it is never readable with
+ * its folder's entries); an existing one gets it first. CopyFileExW then
+ * writes into it and keeps the DACL the destination has (it gives a new file
+ * its folder's). Returns 0 or a Win32 error; `*created` is 1 when this made
+ * the file, for the caller to remove on a later failure. */
+static DWORD fs_win_private_dest(const wchar_t* wdst, int* created) {
+    *created = 0;
+    PSECURITY_DESCRIPTOR sd = fs_win_private_sd(0);
+    if (!sd) return GetLastError() ? GetLastError() : ERROR_INVALID_SECURITY_DESCR;
+    SECURITY_ATTRIBUTES sa = { sizeof sa, sd, FALSE };
+    HANDLE h = CreateFileW(wdst, GENERIC_WRITE, 0, &sa, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL);
+    DWORD rc = ERROR_SUCCESS;
+    if (h != INVALID_HANDLE_VALUE) {
+        CloseHandle(h);
+        *created = 1;
+    } else if (GetLastError() == ERROR_FILE_EXISTS || GetLastError() == ERROR_ALREADY_EXISTS) {
+        rc = fs_win_apply_mode_acl(wdst, 0600, 0);
+    } else {
+        rc = GetLastError();
+    }
+    LocalFree(sd);
+    return rc;
+}
 #endif
 
 // The payload+length for write_binary / write_atomic. `data` is always raw
@@ -2459,10 +2502,33 @@ _tuple_int_int_string fs_copy_raw(const char* src, const char* dst) {
         aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
         return aether_fs_iks_err(AETHER_FS_KIND_IS_DIR, "dst is a directory");
     }
+    /* The mode bits the POSIX path copies, as Windows keeps them: a source
+     * with a protected DACL (chmod 0o600's owner-only) gives an owner-only
+     * copy, made so before the bytes go in; another source gives a copy
+     * that takes its folder's entries, as a 0o644 chmod would. CopyFileExW
+     * gives a new file its folder's DACL and keeps an existing one's, so on
+     * its own a copy of a private key landed readable by Users. */
+    int src_private = fs_win_dacl_protected(wsrc);
+    int dst_created = 0;
+    if (src_private) {
+        DWORD perr = fs_win_private_dest(wdst, &dst_created);
+        if (perr != ERROR_SUCCESS) {
+            aether_fs_note_os_error((int)perr);
+            if (dst_created) DeleteFileW(wdst);
+            aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
+            return aether_fs_iks_err(perr == ERROR_ACCESS_DENIED ? AETHER_FS_KIND_PERMISSION_DENIED
+                                                                 : AETHER_FS_KIND_IO,
+                                     "cannot make the copy of an owner-only file owner-only");
+        }
+    }
     /* bFailIfExists=FALSE → match POSIX cp: overwrite. */
     BOOL ok = CopyFileExW(wsrc, wdst, NULL, NULL, NULL, 0);
     DWORD win_err = GetLastError();
     aether_fs_note_os_error((int)win_err);
+    if (!ok && dst_created) DeleteFileW(wdst);
+    /* Not fatal, as the POSIX path's fchmod is not: the bytes are copied,
+     * and a copy left owner-only is the narrower outcome. */
+    if (ok && !src_private && fs_win_dacl_protected(wdst)) (void)fs_win_apply_mode_acl(wdst, 0644, 0);
     aether_caps_free(wsrc, wsrc_bytes); aether_caps_free(wdst, wdst_bytes);
     if (!ok) {
         int kind = AETHER_FS_KIND_IO;
