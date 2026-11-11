@@ -143,6 +143,25 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
     (void)ch; (void)timeout_ms;
     return ipc_wait_failed("ipc.wait_readable: unavailable in this build");
 }
+_tuple_int_string ipc_wait_writable_raw(int ch, int timeout_ms) {
+    (void)ch; (void)timeout_ms;
+    return ipc_wait_failed("ipc.wait_writable: unavailable in this build");
+}
+_tuple_int_string ipc_write_some_raw(int fd, const void* bytes, int offset) {
+    (void)fd; (void)bytes; (void)offset;
+    return ipc_wait_failed("ipc.write_some: unavailable in this build");
+}
+void* ipc_frame_writer_new_raw(int fd) { (void)fd; return NULL; }
+const char* ipc_frame_writer_put_raw(void* w, const void* data) {
+    (void)w; (void)data;
+    return "ipc.frame_writer_put: unavailable in this build";
+}
+const char* ipc_frame_writer_flush_raw(void* w, int timeout_ms) {
+    (void)w; (void)timeout_ms;
+    return "ipc.frame_writer_flush: unavailable in this build";
+}
+long long ipc_frame_writer_pending_raw(void* w) { (void)w; return 0; }
+void ipc_frame_writer_free_raw(void* w) { (void)w; }
 _tuple_int_int_string ipc_stdio_channel_raw(void) {
     return ipc_stdio_failed("ipc.stdio_channel: unavailable in this build");
 }
@@ -616,6 +635,133 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
 }
 
 #if IPC_HAS_SOCKETS
+#include <limits.h>
+#ifndef PIPE_BUF
+#define PIPE_BUF 512
+#endif
+
+/* poll(2) for room to write for up to `ms` (negative: forever). 1 writable
+ * (or errored or hung up: the write then says why), 0 timed out, -1 failed
+ * with errno set. */
+static int ipc_poll_out(int fd, long long ms) {
+    long long end = ms < 0 ? -1 : ipc_now_ms() + ms;
+    for (;;) {
+        int wait = -1;
+        if (end >= 0) {
+            long long left = end - ipc_now_ms();
+            wait = left <= 0 ? 0 : (left > 0x7fffffff ? 0x7fffffff : (int)left);
+        }
+        struct pollfd p;
+        p.fd = fd;
+        p.events = POLLOUT;
+        p.revents = 0;
+        int r = poll(&p, 1, wait);
+        if (r < 0) {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) {
+            if (end >= 0 && ipc_now_ms() < end) continue;   /* woke early */
+            return 0;
+        }
+        if (p.revents & POLLNVAL) {
+            errno = EBADF;
+            return -1;
+        }
+        return 1;
+    }
+}
+
+/* Write what `fd` takes now of `len` bytes, never waiting for room, and
+ * never changing the descriptor's flags (another holder of the same open
+ * pipe would see them). *done is how many went. A socket is sent to with
+ * MSG_DONTWAIT. A pipe, or anything else, is written PIPE_BUF bytes at a
+ * time while poll() says there is room: a blocking write of up to PIPE_BUF
+ * bytes to a pipe with room does not wait (Linux keeps a free page then, the
+ * BSDs and macOS at least PIPE_BUF bytes), where a larger one would wait for
+ * the rest. A descriptor its owner made non-blocking is written straight.
+ * MSG_DONTWAIT is used only where it keeps a send from waiting, Linux and
+ * FreeBSD: macOS sends what fits and then waits for room for the rest (up
+ * to the send timeout), and NetBSD ignores it on a TCP socket (std.net's
+ * #3108 note), so elsewhere a socket goes the poll way too, where room for
+ * PIPE_BUF bytes is room for the send (a socket is writable once its
+ * low-water mark, 2048 bytes by default, is free). "" or the error; *done
+ * counts the bytes that went before it. */
+static const char* ipc_write_nowait(int fd, const char* data, size_t len, size_t* done,
+                                    const char* what) {
+    *done = 0;
+    if (len == 0) return "";
+#if defined(__linux__) || defined(__FreeBSD__)
+    for (;;) {
+        ssize_t n = send(fd, data + *done, len - *done, MSG_DONTWAIT | IPC_NOSIGNAL);
+        if (n > 0) {
+            *done += (size_t)n;
+            if (*done == len) return "";
+            continue;
+        }
+        if (n < 0 && errno == EINTR) continue;
+        if (n < 0 && (errno == EAGAIN || errno == EWOULDBLOCK)) return "";
+        if (n < 0 && errno == ENOTSOCK) break;
+        if (n == 0) return "";
+        return ipc_errno_msg(what, errno);
+    }
+#endif
+    int flags = fcntl(fd, F_GETFL, 0);
+    if (flags < 0) return ipc_errno_msg(what, errno);
+    int nonblocking = (flags & O_NONBLOCK) != 0;
+    while (*done < len) {
+        size_t want = len - *done;
+        if (!nonblocking) {
+            int r = ipc_poll_out(fd, 0);
+            if (r < 0) return ipc_errno_msg(what, errno);
+            if (r == 0) return "";
+            if (want > PIPE_BUF) want = PIPE_BUF;
+        }
+        ssize_t n = ipc_write_nosigpipe(fd, data + *done, want);
+        if (n < 0) {
+            if (errno == EINTR) continue;
+            if (errno == EAGAIN || errno == EWOULDBLOCK) return "";
+            return ipc_errno_msg(what, errno);
+        }
+        if (n == 0) return "";
+        *done += (size_t)n;
+    }
+    return "";
+}
+
+/* For the frame writer's flush: wait up to `ms` for room. 1 room (or an
+ * error the write will report), 0 none by then, -1 failed (errno). */
+static int ipc_room_wait(int fd, long long ms, unsigned* nap) {
+    (void)nap;
+    return ipc_poll_out(fd, ms);
+}
+
+_tuple_int_string ipc_wait_writable_raw(int ch, int timeout_ms) {
+    if (ch < 0) return ipc_wait_failed("ipc.wait_writable: invalid descriptor");
+    int r = ipc_poll_out(ch, timeout_ms);
+    if (r < 0) return ipc_wait_failed(ipc_errno_msg("ipc.wait_writable", errno));
+    _tuple_int_string out = { r, "" };
+    return out;
+}
+#else
+static const char* ipc_write_nowait(int fd, const char* data, size_t len, size_t* done,
+                                    const char* what) {
+    (void)fd; (void)data; (void)len; (void)what;
+    *done = 0;
+    return "a write that does not wait is unavailable in this build (no poll)";
+}
+static int ipc_room_wait(int fd, long long ms, unsigned* nap) {
+    (void)fd; (void)ms; (void)nap;
+    errno = ENOSYS;
+    return -1;
+}
+_tuple_int_string ipc_wait_writable_raw(int ch, int timeout_ms) {
+    (void)ch; (void)timeout_ms;
+    return ipc_wait_failed("ipc.wait_writable: unavailable in this build (no sockets)");
+}
+#endif
+
+#if IPC_HAS_SOCKETS
 /* Set once stdio_channel has claimed fd 0 and fd 1: a second claim would
  * take the null device and stderr for a channel. */
 static int ipc_stdio_claimed = 0;
@@ -871,6 +1017,214 @@ _tuple_int_string ipc_wait_readable_raw(int ch, int timeout_ms) {
     return out;
 }
 
+/* Writing without waiting, on Windows.
+ *
+ * An anonymous pipe (os.run_stdio's, or a child's stdin and stdout) has no
+ * readiness to wait on and cannot be opened for overlapped I/O after the
+ * fact, and the child end of a channel is a pipe someone else made. Two
+ * things every pipe handle does give, probed on win11:
+ *
+ * - its free room, WriteQuotaAvailable (NtQueryInformationFile,
+ *   FilePipeLocalInformation). A blocking WriteFile of no more than that
+ *   is buffered at once, so it does not wait. Windows takes a waiting
+ *   reader's read off that room, though: a reader blocked in a read as
+ *   large as the pipe's buffer (4096 bytes for os.run_stdio's) makes an
+ *   empty pipe report none;
+ * - PIPE_NOWAIT (SetNamedPipeHandleState), under which a WriteFile never
+ *   waits. It is all or nothing past the room (a 200000-byte write to an
+ *   empty 4096-byte pipe wrote 0 bytes, a 1000-byte one all of it, one to a
+ *   full pipe ERROR_PIPE_BUSY), and the mode can be set only while the pipe
+ *   holds no bytes: with 4000 bytes queued, setting it failed with
+ *   ERROR_PIPE_BUSY. A reader with a read waiting is given bytes straight
+ *   away under it.
+ *
+ * So a write that must not wait writes what the room says, with the pipe
+ * left as it is; and when the room says none, it tries PIPE_NOWAIT for its
+ * own WriteFile calls (halving a refused write, down to one byte), which
+ * the pipe takes only when it is empty, which is when a reader may be
+ * waiting, and puts PIPE_WAIT back before returning. Nothing is left
+ * changed, but a blocking writer on another thread at the same moment would
+ * see the no-wait mode: do not share the descriptor between threads.
+ *
+ * wait_writable is the room: it can time out on that empty pipe whose
+ * reader waits in a large read, while a write would go. The frame writer
+ * does not rely on it: it tries the write itself, a timer tick apart. */
+typedef struct {
+    ULONG NamedPipeType, NamedPipeConfiguration, MaximumInstances, CurrentInstances,
+          InboundQuota, ReadDataAvailable, OutboundQuota, WriteQuotaAvailable,
+          NamedPipeState, NamedPipeEnd;
+} IpcPipeLocalInfo;
+typedef struct { union { LONG Status; PVOID Pointer; } u; ULONG_PTR Information; } IpcIoStatus;
+typedef LONG (WINAPI *IpcQueryInfoFile)(HANDLE, IpcIoStatus*, PVOID, ULONG, ULONG);
+#define IPC_FILE_PIPE_LOCAL_INFORMATION 24
+#define IPC_PIPE_CLOSING_STATE 4
+
+/* Room in the pipe under `h`: its WriteQuotaAvailable in *room, and 1 in
+ * *closing when the reader has gone. 0, or -1 when it cannot be asked. */
+static int ipc_pipe_room(HANDLE h, DWORD* room, int* closing) {
+    static IpcQueryInfoFile query = NULL;
+    if (!query) {
+        HMODULE nt = GetModuleHandleW(L"ntdll.dll");
+        query = nt ? (IpcQueryInfoFile)(void*)GetProcAddress(nt, "NtQueryInformationFile") : NULL;
+        if (!query) return -1;
+    }
+    IpcIoStatus io;
+    IpcPipeLocalInfo info;
+    memset(&info, 0, sizeof info);
+    if (query(h, &io, &info, sizeof info, IPC_FILE_PIPE_LOCAL_INFORMATION) < 0) return -1;
+    *room = info.WriteQuotaAvailable;
+    *closing = info.NamedPipeState == IPC_PIPE_CLOSING_STATE;
+    return 0;
+}
+
+/* "<what>: <why>" for a Win32 error from a pipe write. */
+static const char* ipc_win_write_msg(const char* what, DWORD le) {
+    static char msg[160];
+    if (le == ERROR_NO_DATA || le == ERROR_BROKEN_PIPE) {
+        snprintf(msg, sizeof msg, "%s: the reader has gone (broken pipe)", what);
+    } else {
+        snprintf(msg, sizeof msg, "%s: WriteFile failed (Windows error %lu)", what, (unsigned long)le);
+    }
+    return msg;
+}
+
+/* A no-wait write of up to `len` bytes to an empty pipe in PIPE_WAIT
+ * mode: PIPE_NOWAIT for the WriteFile calls, halving a refused write, then
+ * PIPE_WAIT again. *wrote is what went; "" when the pipe would not take the
+ * mode (it holds bytes: it is full, not waited on), or the error. */
+static const char* ipc_pipe_try_nowait(HANDLE h, DWORD state, const char* data, size_t len,
+                                       size_t* wrote, const char* what) {
+    *wrote = 0;
+    int set = !(state & PIPE_NOWAIT);
+    if (set) {
+        DWORD mode = (state & PIPE_READMODE_MESSAGE) | PIPE_NOWAIT;
+        if (!SetNamedPipeHandleState(h, &mode, NULL, NULL)) {
+            DWORD le = GetLastError();
+            return le == ERROR_PIPE_BUSY ? "" : ipc_win_write_msg(what, le);
+        }
+    }
+    const char* err = "";
+    size_t chunk = len > 0x40000000u ? 0x40000000u : len;
+    while (*wrote < len) {
+        if (chunk > len - *wrote) chunk = len - *wrote;
+        DWORD n = 0;
+        if (!WriteFile(h, data + *wrote, (DWORD)chunk, &n, NULL)) {
+            DWORD le = GetLastError();
+            if (le != ERROR_PIPE_BUSY) {
+                err = ipc_win_write_msg(what, le);
+                break;
+            }
+            n = 0;
+        }
+        if (n > 0) {
+            *wrote += n;
+            continue;
+        }
+        if (chunk == 1) break;          /* full */
+        chunk /= 2;
+    }
+    if (set) {
+        DWORD mode = (state & PIPE_READMODE_MESSAGE) | PIPE_WAIT;
+        SetNamedPipeHandleState(h, &mode, NULL, NULL);
+    }
+    return err;
+}
+
+static const char* ipc_write_nowait(int fd, const char* data, size_t len, size_t* done,
+                                    const char* what) {
+    *done = 0;
+    if (len == 0) return "";
+    intptr_t osh = _get_osfhandle(fd);
+    if (osh == -1 || osh == -2) return ipc_wait_msg(what, IPC_WAIT_BAD_FD);
+    HANDLE h = (HANDLE)osh;
+    if (GetFileType(h) != FILE_TYPE_PIPE) {
+        /* A file or a console does not wait on a reader: written whole. */
+        const char* err = ipc_write_all(fd, data, len, what);
+        if (!*err) *done = len;
+        return err;
+    }
+    DWORD state = 0;
+    if (!GetNamedPipeHandleState(h, &state, NULL, NULL, NULL, NULL, 0)) {
+        return ipc_wait_msg(what, IPC_WAIT_NOT_PIPE);   /* a socket, say */
+    }
+    while (*done < len) {
+        DWORD room = 0;
+        int closing = 0;
+        if (ipc_pipe_room(h, &room, &closing) != 0) return ipc_wait_msg(what, IPC_WAIT_NOT_PIPE);
+        if (closing) return ipc_win_write_msg(what, ERROR_NO_DATA);
+        size_t rest = len - *done;
+        if (room > 0) {
+            /* Fits in the free room: buffered at once, in either mode. */
+            DWORD want = rest < room ? (DWORD)rest : room;
+            DWORD n = 0;
+            if (!WriteFile(h, data + *done, want, &n, NULL)) {
+                DWORD le = GetLastError();
+                if (le == ERROR_PIPE_BUSY) break;   /* a no-wait handle, full after all */
+                return ipc_win_write_msg(what, le);
+            }
+            if (n == 0) break;
+            *done += n;
+            continue;
+        }
+        /* No room: full, or a reader waits in a read larger than the room. */
+        size_t wrote = 0;
+        const char* err = ipc_pipe_try_nowait(h, state, data + *done, rest, &wrote, what);
+        *done += wrote;
+        if (*err) return err;
+        if (wrote == 0) break;
+    }
+    return "";
+}
+
+/* For the frame writer's flush: a pipe has nothing to wait on (above), so
+ * sleep a little, 1 ms doubling to 8 (about a timer tick), and let the
+ * caller try the write again. 1 try again, 0 out of time. */
+static int ipc_room_wait(int fd, long long ms, unsigned* nap) {
+    (void)fd;
+    if (ms == 0) return 0;
+    DWORD d = *nap ? *nap : 1;
+    if (ms > 0 && (long long)d > ms) d = (DWORD)ms;
+    Sleep(d);
+    if (*nap < 8) *nap = *nap ? *nap * 2 : 2;
+    return 1;
+}
+
+_tuple_int_string ipc_wait_writable_raw(int ch, int timeout_ms) {
+    if (ch < 0) return ipc_wait_failed("ipc.wait_writable: invalid descriptor");
+    intptr_t osh = _get_osfhandle(ch);
+    if (osh == -1 || osh == -2) return ipc_wait_failed("ipc.wait_writable: invalid descriptor");
+    HANDLE h = (HANDLE)osh;
+    DWORD type = GetFileType(h);
+    if (type == FILE_TYPE_DISK || type == FILE_TYPE_CHAR) {
+        _tuple_int_string ready = { 1, "" };   /* nothing to wait for */
+        return ready;
+    }
+    if (type != FILE_TYPE_PIPE) return ipc_wait_failed(ipc_wait_msg("ipc.wait_writable", IPC_WAIT_NOT_PIPE));
+    long long end = timeout_ms < 0 ? -1 : ipc_now_ms() + timeout_ms;
+    DWORD nap = 1;
+    for (;;) {
+        DWORD room = 0;
+        int closing = 0;
+        if (ipc_pipe_room(h, &room, &closing) != 0) {
+            return ipc_wait_failed(ipc_wait_msg("ipc.wait_writable", IPC_WAIT_NOT_PIPE));
+        }
+        if (room > 0 || closing) {
+            _tuple_int_string out = { 1, "" };
+            return out;
+        }
+        if (end >= 0) {
+            long long left = end - ipc_now_ms();
+            if (left <= 0) {
+                _tuple_int_string out = { 0, "" };
+                return out;
+            }
+            if ((long long)nap > left) nap = (DWORD)left;
+        }
+        Sleep(nap);
+        if (nap < 8) nap *= 2;
+    }
+}
+
 _tuple_int_string_string ipc_recv_fd_raw(int ch, int max) {
     (void)ch; (void)max;
     return ipc_recv_failed("ipc.recv_fd: unsupported on Windows");
@@ -1061,5 +1415,129 @@ _tuple_string_string ipc_read_frame_raw(int ch, int max, int timeout_ms) {
     if (!s) return ipc_read_failed("ipc.read_frame: out of memory");
     _tuple_string_string out = { (const char*)s, "" };
     return out;
+}
+
+/* ipc.write_some: the bytes of `bytes` from `offset` on that `fd` takes now,
+ * without waiting (ipc_write_nowait). (count, "") or (count, err), the count
+ * being what went before the error. */
+_tuple_int_string ipc_write_some_raw(int fd, const void* bytes, int offset) {
+    _tuple_int_string out = { 0, "" };
+    if (fd < 0) { out._1 = "ipc.write_some: invalid descriptor"; return out; }
+    size_t len = 0;
+    const char* data = ipc_bytes(bytes, &len);
+    if (offset < 0 || (size_t)offset > len) { out._1 = "ipc.write_some: offset outside the bytes"; return out; }
+    size_t rest = len - (size_t)offset;
+    if (rest > 0x7fffffffu) rest = 0x7fffffffu;   /* the count is an int */
+    size_t done = 0;
+    out._1 = ipc_write_nowait(fd, data + offset, rest, &done, "ipc.write_some");
+    out._0 = (int)done;
+    return out;
+}
+
+/* A frame writer: frames queued in a buffer of its own and written as the
+ * descriptor takes them, so a caller on a UI thread never waits on a reader.
+ * Each writer holds its own queue and place; nothing is shared between
+ * writers, and the descriptor stays the caller's (free does not close it). A
+ * frame partly written by one flush carries on where it stopped in the next,
+ * so the peer reads whole frames in order. One thread at a time. */
+typedef struct {
+    int fd;
+    unsigned char* buf;   /* queued bytes: [off, len) are still to write */
+    size_t off, len, cap;
+} IpcFrameWriter;
+
+void* ipc_frame_writer_new_raw(int fd) {
+    if (fd < 0) return NULL;
+    IpcFrameWriter* w = (IpcFrameWriter*)calloc(1, sizeof(IpcFrameWriter));
+    if (!w) return NULL;
+    w->fd = fd;
+    return w;
+}
+
+void ipc_frame_writer_free_raw(void* p) {
+    IpcFrameWriter* w = (IpcFrameWriter*)p;
+    if (!w) return;
+    free(w->buf);
+    free(w);
+}
+
+long long ipc_frame_writer_pending_raw(void* p) {
+    IpcFrameWriter* w = (IpcFrameWriter*)p;
+    return w ? (long long)(w->len - w->off) : 0;
+}
+
+/* Queue `data` as one frame (header and payload, as write_frame writes
+ * them). Writes nothing. */
+const char* ipc_frame_writer_put_raw(void* p, const void* data) {
+    IpcFrameWriter* w = (IpcFrameWriter*)p;
+    if (!w) return "ipc.frame_writer_put: no writer";
+    size_t len = 0;
+    const char* bytes = ipc_bytes(data, &len);
+    if (len > 0xffffffffu) return "ipc.frame_writer_put: payload longer than a frame can announce (4 GiB - 1)";
+    if (w->off > 0 && w->off == w->len) w->off = w->len = 0;
+    size_t need = len + IPC_FRAME_HEADER;
+    if (w->len + need > w->cap) {
+        /* What has been written goes first, then the buffer grows. */
+        if (w->off > 0) {
+            memmove(w->buf, w->buf + w->off, w->len - w->off);
+            w->len -= w->off;
+            w->off = 0;
+        }
+        if (w->len + need > w->cap) {
+            size_t cap = w->cap ? w->cap : 256;
+            while (cap < w->len + need) {
+                if (cap > ((size_t)-1) / 2) return "ipc.frame_writer_put: out of memory";
+                cap *= 2;
+            }
+            unsigned char* nb = (unsigned char*)realloc(w->buf, cap);
+            if (!nb) return "ipc.frame_writer_put: out of memory";
+            w->buf = nb;
+            w->cap = cap;
+        }
+    }
+    unsigned char* h = w->buf + w->len;
+    h[0] = (unsigned char)(len >> 24);
+    h[1] = (unsigned char)(len >> 16);
+    h[2] = (unsigned char)(len >> 8);
+    h[3] = (unsigned char)len;
+    if (len) memcpy(h + IPC_FRAME_HEADER, bytes, len);
+    w->len += need;
+    return "";
+}
+
+/* Write what is queued. timeout_ms 0: what the descriptor takes now, never
+ * waiting; above 0: wait for room up to that long in all; below 0: until
+ * everything is written. "" when it is written or the time ran out (the
+ * rest stays queued: frame_writer_pending), or the error that stopped it
+ * (the peer gone, say), the rest still queued. */
+const char* ipc_frame_writer_flush_raw(void* p, int timeout_ms) {
+    IpcFrameWriter* w = (IpcFrameWriter*)p;
+    if (!w) return "ipc.frame_writer_flush: no writer";
+    long long end = timeout_ms < 0 ? -1 : ipc_now_ms() + timeout_ms;
+    unsigned nap = 0;
+    while (w->off < w->len) {
+        size_t done = 0;
+        const char* err = ipc_write_nowait(w->fd, (const char*)w->buf + w->off, w->len - w->off,
+                                           &done, "ipc.frame_writer_flush");
+        w->off += done;
+        if (*err) return err;
+        if (w->off == w->len) break;
+        long long left = -1;
+        if (end >= 0) {
+            left = end - ipc_now_ms();
+            if (left <= 0) break;
+        }
+        int r = ipc_room_wait(w->fd, left, &nap);
+        if (r < 0) {
+#ifdef _WIN32
+            return "ipc.frame_writer_flush: cannot wait for room";
+#else
+            return ipc_errno_msg("ipc.frame_writer_flush", errno);
+#endif
+        }
+        if (r == 0) break;
+    }
+    if (w->off == w->len) w->off = w->len = 0;
+    return "";
 }
 #endif /* AETHER_HAS_FILESYSTEM */

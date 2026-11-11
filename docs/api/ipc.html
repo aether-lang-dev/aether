@@ -26,6 +26,13 @@
     <li><a href="#read_frame_raw">read_frame_raw</a></li>
     <li><a href="#wait_readable_raw">wait_readable_raw</a></li>
     <li><a href="#stdio_channel_raw">stdio_channel_raw</a></li>
+    <li><a href="#wait_writable_raw">wait_writable_raw</a></li>
+    <li><a href="#write_some_raw">write_some_raw</a></li>
+    <li><a href="#frame_writer_new_raw">frame_writer_new_raw</a></li>
+    <li><a href="#frame_writer_put_raw">frame_writer_put_raw</a></li>
+    <li><a href="#frame_writer_flush_raw">frame_writer_flush_raw</a></li>
+    <li><a href="#frame_writer_pending_raw">frame_writer_pending_raw</a></li>
+    <li><a href="#frame_writer_free_raw">frame_writer_free_raw</a></li>
     <li><a href="#parent_channel">parent_channel</a></li>
     <li><a href="#parent_channel_kind">parent_channel_kind</a></li>
     <li><a href="#stdio_channel">stdio_channel</a></li>
@@ -39,6 +46,13 @@
     <li><a href="#read_frame">read_frame</a></li>
     <li><a href="#read_frame_timeout">read_frame_timeout</a></li>
     <li><a href="#wait_readable">wait_readable</a></li>
+    <li><a href="#wait_writable">wait_writable</a></li>
+    <li><a href="#write_some">write_some</a></li>
+    <li><a href="#frame_writer">frame_writer</a></li>
+    <li><a href="#frame_writer_put">frame_writer_put</a></li>
+    <li><a href="#frame_writer_flush">frame_writer_flush</a></li>
+    <li><a href="#frame_writer_pending">frame_writer_pending</a></li>
+    <li><a href="#frame_writer_free">frame_writer_free</a></li>
     <li><a href="#TIMED_OUT_BETWEEN_FRAMES">TIMED_OUT_BETWEEN_FRAMES</a></li>
     <li><a href="#TIMED_OUT_INSIDE_FRAME">TIMED_OUT_INSIDE_FRAME</a></li>
   </ul>
@@ -198,6 +212,41 @@
       <h3 class="function-name">stdio_channel_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>stdio_channel_raw() <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
     </div>
+    <div class="function" id="wait_writable_raw" data-name="wait_writable_raw">
+      <h3 class="function-name">wait_writable_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_writable_raw(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="write_some_raw" data-name="write_some_raw">
+      <h3 class="function-name">write_some_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>write_some_raw(fd, bytes, offset) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, bytes: string, offset: int</span></p>
+    </div>
+    <div class="function" id="frame_writer_new_raw" data-name="frame_writer_new_raw">
+      <h3 class="function-name">frame_writer_new_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>frame_writer_new_raw(fd) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="frame_writer_put_raw" data-name="frame_writer_put_raw">
+      <h3 class="function-name">frame_writer_put_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>frame_writer_put_raw(w, data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr, data: string</span></p>
+    </div>
+    <div class="function" id="frame_writer_flush_raw" data-name="frame_writer_flush_raw">
+      <h3 class="function-name">frame_writer_flush_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>frame_writer_flush_raw(w, timeout_ms) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="frame_writer_pending_raw" data-name="frame_writer_pending_raw">
+      <h3 class="function-name">frame_writer_pending_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>frame_writer_pending_raw(w) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr</span></p>
+    </div>
+    <div class="function" id="frame_writer_free_raw" data-name="frame_writer_free_raw">
+      <h3 class="function-name">frame_writer_free_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>frame_writer_free_raw(w)</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr</span></p>
+    </div>
     <div class="function" id="parent_channel" data-name="parent_channel">
       <h3 class="function-name">parent_channel <span class="kind">fn</span></h3>
       <pre class="usage"><code>parent_channel() <span class="arrow">-&gt;</span> int</code></pre>
@@ -272,6 +321,48 @@
       <pre class="usage"><code>wait_readable(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
       <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
       <p class="doc">Wait up to `timeout_ms` for `ch` to be readable (poll): (1, &quot;&quot;) when a read will not block, which includes the peer having closed (the read then gives end of stream), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. Bounds the wait for the first byte of read or recv. Frames need no wait first: read_frame_timeout tells a timeout between frames from one inside a frame. On Windows only an anonymous pipe, such as os.run_stdio's from_child_fd, can be waited on (any other descriptor is a &quot;not a pipe&quot; error); a peer that has closed reads as ready there too. It polls the pipe, so bytes and the deadline are noticed within about a timer tick (~16 ms); 0 asks once without sleeping.</p>
+    </div>
+    <div class="function" id="wait_writable" data-name="wait_writable">
+      <h3 class="function-name">wait_writable <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait_writable(ch, timeout_ms) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">ch: int, timeout_ms: int</span></p>
+      <p class="doc">Wait up to `timeout_ms` for room to write on `ch` (poll for POLLOUT): (1, &quot;&quot;) when a write_some will take bytes, which includes the reader having gone (the write then says so), (0, &quot;&quot;) on a timeout, (0, err) on a failure. A negative timeout waits forever; 0 asks without waiting. On a pipe, room means at least PIPE_BUF bytes (512 on macOS and the BSDs, 4096 on Linux): a plain write of more can still wait, so write with write_some or a frame writer. On Windows an anonymous pipe has no readiness to poll: this asks the pipe how many bytes it holds free (WriteQuotaAvailable), a timer tick apart (~16 ms). Windows counts a reader's waiting read against that room, so a reader blocked in a read as large as the pipe's buffer (4096 bytes for os.run_stdio's pipes) makes an empty pipe look full: wait_writable times out there although a write would go. A frame writer does not depend on it. A file or a console is always ready; another descriptor is a &quot;not a pipe&quot; error.</p>
+    </div>
+    <div class="function" id="write_some" data-name="write_some">
+      <h3 class="function-name">write_some <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_some(fd, bytes, offset) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, bytes: string, offset: int</span></p>
+      <p class="doc">Write the bytes of `bytes` from `offset` on that `fd` takes now, and return without waiting for the rest: (n, &quot;&quot;) with n the count written, which may be 0 (the pipe or socket is full) or anything up to the rest; (n, err) when a write failed after n bytes, the reader having gone included (an error, not SIGPIPE). Call it again with offset + n when there is room (wait_writable). Binary-safe; nothing is copied. It does not change the descriptor's flags. On POSIX a socket is sent to with MSG_DONTWAIT; a pipe is written PIPE_BUF bytes at a time while poll says there is room, which a blocking write of that size never waits for; a descriptor already non-blocking is written straight. On Windows a pipe is written no more than its free room (WriteQuotaAvailable), which never waits; when it reports none and holds no bytes (a reader waiting in a large read), the pipe is put in PIPE_NOWAIT mode for this call's writes and back in PIPE_WAIT before it returns. A file or a console is written whole. Do not write the same descriptor from another thread at the same time.</p>
+    </div>
+    <div class="function" id="frame_writer" data-name="frame_writer">
+      <h3 class="function-name">frame_writer <span class="kind">fn</span></h3>
+      <pre class="usage"><code>frame_writer(fd) <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">A frame writer on `fd`: frames are queued (frame_writer_put) and written as the reader takes them (frame_writer_flush), so a thread that must not wait on a reader, a UI thread, writes frames without a thread of its own. A frame cut short by a full pipe goes on where it stopped at the next flush, so the reader gets whole frames, in order. Each writer has its own queue; the descriptor stays the caller's to close (frame_writer_free does not close it). null when `fd` is negative or memory ran out. Use it from one thread at a time, and do not write to `fd` around it.</p>
+    </div>
+    <div class="function" id="frame_writer_put" data-name="frame_writer_put">
+      <h3 class="function-name">frame_writer_put <span class="kind">fn</span></h3>
+      <pre class="usage"><code>frame_writer_put(w, data) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr, data: string</span></p>
+      <p class="doc">Queue `data` as one frame (the bytes write_frame would write); nothing is written. &quot;&quot; or an error (a payload of 4 GiB or more, out of memory).</p>
+    </div>
+    <div class="function" id="frame_writer_flush" data-name="frame_writer_flush">
+      <h3 class="function-name">frame_writer_flush <span class="kind">fn</span></h3>
+      <pre class="usage"><code>frame_writer_flush(w, timeout_ms) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr, timeout_ms: int</span></p>
+      <p class="doc">Write what is queued, waiting for room at most `timeout_ms` in all: 0 writes what the descriptor takes now and never waits, a negative timeout waits until all of it is written. &quot;&quot; when it was all written or the time ran out (frame_writer_pending says which), or the error that stopped it, such as the reader having gone; what was not written stays queued. A peer that takes nothing for long enough is the caller's to give up on (close the descriptor, free the writer).</p>
+    </div>
+    <div class="function" id="frame_writer_pending" data-name="frame_writer_pending">
+      <h3 class="function-name">frame_writer_pending <span class="kind">fn</span></h3>
+      <pre class="usage"><code>frame_writer_pending(w) <span class="arrow">-&gt;</span> long</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr</span></p>
+      <p class="doc">How many queued bytes are not written yet (frame headers included).</p>
+    </div>
+    <div class="function" id="frame_writer_free" data-name="frame_writer_free">
+      <h3 class="function-name">frame_writer_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>frame_writer_free(w)</code></pre>
+      <p class="signature"><span class="sig-params">w: ptr</span></p>
+      <p class="doc">Free a frame writer and what it still has queued. The descriptor is not closed.</p>
     </div>
     <div class="function" id="TIMED_OUT_BETWEEN_FRAMES" data-name="TIMED_OUT_BETWEEN_FRAMES">
       <h3 class="function-name">TIMED_OUT_BETWEEN_FRAMES <span class="kind">const</span></h3>

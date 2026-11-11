@@ -49,6 +49,8 @@ int tcp_server_fd_raw(TcpServer* s) { (void)s; return -1; }
 TcpSocket* tcp_socket_from_fd_owned(int fd) { (void)fd; return NULL; }
 int tcp_poll_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t; return -1; }
+int tcp_wait_writable_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
+int tcp_send_some_raw(TcpSocket* s, const void* d, int n) { (void)s; (void)d; (void)n; return -1; }
 void aether_net_init(void) {}
 int aether_net_wouldblock(void) { return 0; }
 #else
@@ -1168,6 +1170,76 @@ int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int timeout_ms) {
     if (idx_a >= 0 && (pfds[idx_a].revents & mask)) ready |= 1;
     if (idx_b >= 0 && (pfds[idx_b].revents & mask)) ready |= 2;
     return ready;
+}
+
+/* Wait until a socket has room to send: 1 when a send will take bytes (or
+ * the socket has an error or hangup, which the send then reports), 0 on
+ * timeout, -1 on a null/closed handle or a poll error. Sends nothing. */
+int tcp_wait_writable_raw(TcpSocket* sock, int timeout_ms) {
+    if (!sock || !sock->connected) return -1;
+    AE_POLLFD pfd;
+    pfd.fd = sock->fd;
+    pfd.events = POLLOUT;
+    pfd.revents = 0;
+    int rc = ae_poll(&pfd, (ae_nfds_t)1, timeout_ms);
+    if (rc < 0) {
+        if (aether_net_wouldblock()) return 0;   /* EINTR: treat as no-event */
+        return -1;
+    }
+    if (rc == 0) return 0;
+    if (pfd.revents & POLLNVAL) return -1;
+    return 1;
+}
+
+/* What the socket takes now of `length` bytes, never waiting for room (the
+ * write side of a UI thread's loop, which must not wait on a peer that has
+ * stopped reading): the count, 0 when the send buffer is full, -1 on an
+ * error (which marks the socket dead, as a failed receive does).
+ *
+ * POSIX sends with MSG_DONTWAIT, except where it does not keep a send from
+ * waiting: NetBSD ignores it on a TCP socket (tcp_send_all_raw's note), and
+ * macOS sends what fits and then waits for room for the rest, up to the
+ * send timeout (a 64 KiB send to a full loopback connection took 35 s).
+ * There, and on Windows, which has no such flag, the socket is made
+ * non-blocking for the one send and put back.
+ * Windows cannot read that mode back; std.tcp's sockets are blocking, so it
+ * is put back blocking. Do not send on the socket from another thread at
+ * the same time. */
+int tcp_send_some_raw(TcpSocket* sock, const void* data, int length) {
+    if (!sock || !sock->connected || length < 0) return -1;
+    if (length == 0) return 0;
+    if (!data) return -1;
+    int n;
+#if defined(_WIN32)
+    u_long on = 1, off = 0;
+    if (ioctlsocket(sock->fd, FIONBIO, &on) != 0) return -1;
+    n = send(sock->fd, (const char*)data, length, 0);
+    int werr = n < 0 ? WSAGetLastError() : 0;
+    ioctlsocket(sock->fd, FIONBIO, &off);
+    if (n < 0) {
+        if (werr == WSAEWOULDBLOCK || werr == WSAEINTR) return 0;
+        sock->connected = 0;
+        return -1;
+    }
+    return n;
+#else
+#if defined(__NetBSD__) || defined(__APPLE__)
+    int fl = fcntl(sock->fd, F_GETFL, 0);
+    int set = fl >= 0 && !(fl & O_NONBLOCK) && fcntl(sock->fd, F_SETFL, fl | O_NONBLOCK) == 0;
+    do { n = (int)send(sock->fd, data, (size_t)length, AE_NET_NOSIGNAL); } while (n < 0 && errno == EINTR);
+    int e = errno;
+    if (set) (void)fcntl(sock->fd, F_SETFL, fl);
+    errno = e;
+#else
+    do { n = (int)send(sock->fd, data, (size_t)length, MSG_DONTWAIT | AE_NET_NOSIGNAL); } while (n < 0 && errno == EINTR);
+#endif
+    if (n < 0) {
+        if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+        sock->connected = 0;
+        return -1;
+    }
+    return n;
+#endif
 }
 
 #endif // AETHER_HAS_NETWORKING

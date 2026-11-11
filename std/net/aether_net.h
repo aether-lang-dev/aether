@@ -109,6 +109,17 @@ TcpSocket* tcp_socket_from_fd_owned(int fd);
 int tcp_poll_raw(TcpSocket* sock, int timeout_ms);
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int timeout_ms);
 
+// The write side of the same: a socket write that cannot wait on a peer
+// that has stopped reading.
+// tcp_wait_writable_raw: 1 = room to send (or an error or hangup the send
+//                will report), 0 = timeout, -1 = null/closed handle or poll
+//                error. timeout_ms as tcp_poll_raw's.
+// tcp_send_some_raw: what the socket takes now of `length` bytes from
+//                `data`, never waiting for room: the count (0 when the send
+//                buffer is full), or -1 on an error (the connection gone).
+int tcp_wait_writable_raw(TcpSocket* sock, int timeout_ms);
+int tcp_send_some_raw(TcpSocket* sock, const void* data, int length);
+
 // Shared by std.udp (#2201): one-time platform socket init (WSAStartup on
 // Windows, a no-op elsewhere), and the "was that EAGAIN/EWOULDBLOCK/EINTR"
 // test both modules apply after a recv/send that returned < 0.

@@ -44,7 +44,7 @@ header comment is the authoritative description.
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
 | `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
-| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 26 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
+| `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 40 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 52 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
 | `std.ksuid` | KSUID: 160-bit lexicographically sortable identifier. | 1 | [guide](../std/ksuid/README.md) · [source](../std/ksuid/module.ae) |
@@ -86,7 +86,7 @@ header comment is the authoritative description.
 | `std.supervise` | Supervisors that restart dead actors in place, by strategy and within a restart budget. | 9 | [guide](../std/supervise/README.md) · [source](../std/supervise/module.ae) |
 | `std.sync` | Atomic 64-bit integer cell (load, store, add, sub, compare-and-swap) for refcounts and lock-free reclamation. | 7 | [guide](../std/sync/README.md) · [source](../std/sync/module.ae) |
 | `std.tar` | Streaming tar archives: a ustar writer, a ustar, pax and GNU reader. | 24 | [full section](#posix-ustar-archives-stdtar) |
-| `std.tcp` | TCP sockets, re-exported from `std.net`. | 49 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
+| `std.tcp` | TCP sockets, re-exported from `std.net`. | 53 | [guide](../std/tcp/README.md) · [source](../std/tcp/module.ae) |
 | `std.udp` | Datagram sockets for game networking: non-blocking bind, send_to, recv_from, poll, and address values. | 40 | [guide](../std/udp/README.md) · [source](../std/udp/module.ae) |
 | `std.time` | Civil date and time over Unix epoch seconds (UTC). | 22 | [guide](../std/time/README.md) · [source](../std/time/module.ae) |
 | `std.tracking` | Leak-detecting allocator wrapper. | 5 | [guide](../std/tracking/README.md) · [source](../std/tracking/module.ae) |
