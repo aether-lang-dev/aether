@@ -161,6 +161,11 @@ void fs_watch_close(void* w) { (void)w; }
     #include <process.h>       // _getpid (for fs_write_atomic_raw tmp path)
     #include <windows.h>
     #include <winioctl.h>      // FSCTL_GET_REPARSE_POINT for fs_readlink_raw
+    #include <aclapi.h>        // SetNamedSecurityInfoW: owner-only files
+    #include <sddl.h>          // ConvertSidToStringSidW and the SDDL parser
+    #ifdef _MSC_VER
+        #pragma comment(lib, "advapi32.lib")
+    #endif
     #define mkdir(path, mode) _mkdir(path)
     #define rmdir _rmdir
     #define stat _stat
@@ -190,6 +195,115 @@ void fs_watch_close(void* w) { (void)w; }
         #include <copyfile.h>
     #endif
     #include <limits.h>           // INT_MAX (saturate the byte count)
+#endif
+
+#if defined(_WIN32) && AETHER_HAS_FILESYSTEM
+/* Owner-only files and directories on Windows.
+ *
+ * Windows keeps no POSIX mode bits: who may open a file is its DACL, which a
+ * new file inherits from its folder (on a user's own profile that already
+ * keeps other users out; under C:\ProgramData, C:\Users\Public or a shared
+ * drive it does not). So a mode with no group or other bits -- 0600, 0700,
+ * 0400 -- is made true by giving the object a *protected* DACL, one that
+ * inherits nothing from its folder, with three entries: the current user,
+ * SYSTEM and the Administrators group, each with full control. That is the
+ * set OpenSSH for Windows accepts on a private key file, and the nearest
+ * Windows has to POSIX's "the owner, and root": SYSTEM is the OS itself
+ * (backup, indexing, antivirus), and an elevated administrator can take
+ * ownership of any file whatever its DACL, so leaving Administrators out
+ * would break administration while keeping nobody out. Another, ordinary
+ * user's token matches none of the three and is refused.
+ *
+ * A directory's entries are inherited by what is created in it (OI)(CI),
+ * so a file made in a 0700 directory is private from its first byte.
+ *
+ * The current user is the process token's user, not the file's recorded
+ * owner: an administrator's new files are owned by the Administrators
+ * group, and "only me" means the account running the program. */
+
+static wchar_t* fs_win_wide(const char* utf8, size_t* bytes);
+
+/* The SDDL for an owner-only object: "D:P" a protected DACL, then an
+ * allow-full-control entry each for the user, SYSTEM and Administrators;
+ * `inherit` adds (OI)(CI) for a directory. NULL when the process token's
+ * user cannot be read. The caller LocalFree's the result. */
+static wchar_t* fs_win_private_sddl(int inherit) {
+    HANDLE tok = NULL;
+    if (!OpenProcessToken(GetCurrentProcess(), TOKEN_QUERY, &tok)) return NULL;
+    DWORD need = 0;
+    GetTokenInformation(tok, TokenUser, NULL, 0, &need);
+    TOKEN_USER* tu = need ? (TOKEN_USER*)LocalAlloc(LMEM_FIXED, need) : NULL;
+    wchar_t* sid = NULL;
+    if (tu && GetTokenInformation(tok, TokenUser, tu, need, &need)) {
+        ConvertSidToStringSidW(tu->User.Sid, &sid);
+    }
+    if (tu) LocalFree(tu);
+    CloseHandle(tok);
+    if (!sid) return NULL;
+    const wchar_t* fl = inherit ? L"OICI" : L"";
+    size_t cap = wcslen(sid) + 96;
+    wchar_t* sddl = (wchar_t*)LocalAlloc(LMEM_FIXED, cap * sizeof(wchar_t));
+    if (sddl) {
+        _snwprintf(sddl, cap, L"D:P(A;%ls;FA;;;%ls)(A;%ls;FA;;;SY)(A;%ls;FA;;;BA)",
+                   fl, sid, fl, fl);
+        sddl[cap - 1] = L'\0';
+    }
+    LocalFree(sid);
+    return sddl;
+}
+
+/* A security descriptor for an owner-only object, for CreateDirectoryW or
+ * SetNamedSecurityInfoW. NULL on failure, with GetLastError set. The caller
+ * LocalFree's it. */
+static PSECURITY_DESCRIPTOR fs_win_private_sd(int inherit) {
+    wchar_t* sddl = fs_win_private_sddl(inherit);
+    if (!sddl) return NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if (!ConvertStringSecurityDescriptorToSecurityDescriptorW(sddl, SDDL_REVISION_1, &sd, NULL)) {
+        sd = NULL;
+    }
+    LocalFree(sddl);
+    return sd;
+}
+
+/* Apply `mode`'s group/other intent to `wpath`. With no group or other bit
+ * the object gets the owner-only DACL above. With any of them, a DACL this
+ * call (or anyone) protected is unprotected again, so the object takes its
+ * folder's inherited entries back, which is what 0644 after 0600 means; an
+ * unprotected DACL is left as it is, so a chmod that only toggles the write
+ * bit changes no one's access. Returns 0 (ERROR_SUCCESS) or a Win32 error. */
+static DWORD fs_win_apply_mode_acl(const wchar_t* wpath, int mode, int is_dir) {
+    if ((mode & 077) == 0) {
+        PSECURITY_DESCRIPTOR sd = fs_win_private_sd(is_dir);
+        if (!sd) return GetLastError() ? GetLastError() : ERROR_INVALID_SECURITY_DESCR;
+        BOOL present = FALSE, defaulted = FALSE;
+        PACL dacl = NULL;
+        DWORD rc = ERROR_INVALID_SECURITY_DESCR;
+        if (GetSecurityDescriptorDacl(sd, &present, &dacl, &defaulted) && present) {
+            rc = SetNamedSecurityInfoW((LPWSTR)wpath, SE_FILE_OBJECT,
+                                       DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+                                       NULL, NULL, dacl, NULL);
+        }
+        LocalFree(sd);
+        return rc;
+    }
+    PACL dacl = NULL;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    DWORD rc = GetNamedSecurityInfoW(wpath, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+                                     NULL, NULL, &dacl, NULL, &sd);
+    if (rc != ERROR_SUCCESS) return rc;
+    SECURITY_DESCRIPTOR_CONTROL ctl = 0;
+    DWORD rev = 0;
+    if (GetSecurityDescriptorControl(sd, &ctl, &rev) && (ctl & SE_DACL_PROTECTED) && dacl) {
+        /* Inherited entries in `dacl` are dropped and recomputed from the
+         * folder; the explicit ones stay. */
+        rc = SetNamedSecurityInfoW((LPWSTR)wpath, SE_FILE_OBJECT,
+                                   DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+                                   NULL, NULL, dacl, NULL);
+    }
+    LocalFree(sd);
+    return rc;
+}
 #endif
 
 // The payload+length for write_binary / write_atomic. `data` is always raw
@@ -704,14 +818,36 @@ int dir_create_raw(const char* path) {
 // mkdir-then-chmod race window the previous "always 0755 + shell out
 // to chmod" workaround opened. Mode is masked with 0777 to keep
 // callers from accidentally setting bits the kernel would reinterpret.
-// Windows `mkdir` ignores mode (Win32 doesn't have POSIX permission
-// bits at the directory layer); the parameter is accepted for API
-// portability and discarded there.
+// Windows has no POSIX permission bits; there a mode with no group or
+// other bit (0700) creates the directory with the owner-only DACL
+// fs_chmod_raw describes, in the same CreateDirectoryW call, so it is
+// never visible with its folder's broader entries. Any other mode is
+// a plain mkdir that inherits its folder's.
 int dir_create_mode_raw(const char* path, int mode) {
 #ifdef _WIN32
-    (void)mode;
     if (!path) return 0;
-    return _mkdir(path) == 0 ? 1 : 0;
+    if ((mode & 077) != 0) return _mkdir(path) == 0 ? 1 : 0;
+    size_t wbytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wbytes);
+    if (!wpath) { errno = EINVAL; return 0; }
+    PSECURITY_DESCRIPTOR sd = fs_win_private_sd(1);
+    BOOL ok = FALSE;
+    DWORD err = ERROR_INVALID_SECURITY_DESCR;
+    if (sd) {
+        SECURITY_ATTRIBUTES sa = { sizeof sa, sd, FALSE };
+        ok = CreateDirectoryW(wpath, &sa);
+        err = ok ? ERROR_SUCCESS : GetLastError();
+        LocalFree(sd);
+    }
+    aether_caps_free(wpath, wbytes);
+    if (!ok) {
+        /* errno for the callers that read it, as _mkdir would set it. */
+        errno = err == ERROR_ALREADY_EXISTS ? EEXIST
+              : (err == ERROR_PATH_NOT_FOUND || err == ERROR_FILE_NOT_FOUND) ? ENOENT
+              : err == ERROR_ACCESS_DENIED ? EACCES : EIO;
+        return 0;
+    }
+    return 1;
 #else
     if (!path) return 0;
     return mkdir(path, (mode_t)(mode & 0777)) == 0 ? 1 : 0;
@@ -2721,12 +2857,14 @@ _tuple_string_int_string fs_realpath_raw(const char* path) {
 
 /* fs_chmod_raw — change permission bits on `path`. POSIX chmod(2)
  * follows symlinks (matches what a shell `chmod` does). Windows has
- * no concept of POSIX mode bits at the filesystem layer, so we
- * emulate the user-write bit only via SetFileAttributesW: the
- * read-only attribute is toggled by 0o200; every other bit is
- * silently ignored. This matches the documented behaviour of
- * Python's `os.chmod`. Returns (1, KIND_OK, "") on success or
- * (0, KIND_*, msg) on failure. */
+ * no concept of POSIX mode bits at the filesystem layer, so two
+ * things are emulated there: the read-only attribute is toggled by
+ * 0o200 (as Python's `os.chmod` does), and a mode with no group or
+ * other bit (0o600, 0o700, 0o400) gives the object an owner-only
+ * DACL, while a mode with any of them puts back what the folder
+ * grants (see fs_win_apply_mode_acl). The execute and the remaining
+ * owner bits mean nothing there. Returns (1, KIND_OK, "") on success
+ * or (0, KIND_*, msg) on failure. */
 _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     s_last_os_error = 0;   /* #1378: report only this call's code */
     if (!path) {
@@ -2764,7 +2902,26 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
         }
         return aether_fs_iks_err(kind, msg);
     }
-    /* Owner-write (0o200) sets clear; all other bits ignored. */
+    /* Group/other bits: none means owner-only, made true with a DACL (see
+     * fs_win_apply_mode_acl). A volume with no ACLs (FAT, exFAT) cannot keep
+     * a file private, and saying so beats a silent success the caller would
+     * take for privacy; it only matters when privacy was asked for. */
+    DWORD acl_err = fs_win_apply_mode_acl(wpath, mode,
+                                          (attrs & FILE_ATTRIBUTE_DIRECTORY) != 0);
+    if (acl_err != ERROR_SUCCESS) {
+        int unsupported = acl_err == ERROR_NOT_SUPPORTED || acl_err == ERROR_INVALID_FUNCTION;
+        if (!unsupported || (mode & 077) == 0) {
+            aether_caps_free(wpath, wpath_bytes);
+            aether_fs_note_os_error((int)acl_err);
+            if (acl_err == ERROR_ACCESS_DENIED) {
+                return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED, "access denied");
+            }
+            return aether_fs_iks_err(AETHER_FS_KIND_IO,
+                                     unsupported ? "owner-only permissions not supported on this volume"
+                                                 : "chmod failed");
+        }
+    }
+    /* Owner-write (0o200) sets clear; all other owner bits ignored. */
     if (mode & 0200) {
         attrs &= ~FILE_ATTRIBUTE_READONLY;
     } else {
