@@ -35,6 +35,7 @@ fn dacl_of(path: string) -> string {
     list.add(av, "-Command")
     list.add(av, "(Get-Acl -LiteralPath '${path}').Sddl")
     out, status, err = os.run_capture("powershell.exe", av, null)
+    list.free(av)
     check(err == "" && status == 0, "Get-Acl ${path}: status=${status} err='${err}' out='${out}'")
     at = string.index_of(out, "D:")
     check(at >= 0, "no DACL in '${out}'")
@@ -122,12 +123,16 @@ main() {
     } else {
         ok, _k, msg = fs.chmod(f, 0o600)
         check(ok == 1, "chmod 0o600: ${msg}")
-        st, sstatus, serr = os.run_capture("/bin/sh", list_of("-c", "ls -l '${f}'"), null)
+        la = list_of("-c", "ls -l '${f}'")
+        st, sstatus, serr = os.run_capture("/bin/sh", la, null)
+        list.free(la)
         check(serr == "" && sstatus == 0 && string.starts_with(st, "-rw-------") == 1,
             "mode after 0o600: ${st}")
         keys = "${dir}/keys"
         check(fs.create_dir_with_mode(keys, 0o700) == "", "create_dir_with_mode 0o700")
-        ks, kstatus, kerr = os.run_capture("/bin/sh", list_of("-c", "ls -ld '${keys}'"), null)
+        lb = list_of("-c", "ls -ld '${keys}'")
+        ks, kstatus, kerr = os.run_capture("/bin/sh", lb, null)
+        list.free(lb)
         check(kerr == "" && kstatus == 0 && string.starts_with(ks, "drwx------") == 1,
             "mode after 0o700: ${ks}")
         fs.delete_dir(keys)
