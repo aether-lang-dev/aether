@@ -186,6 +186,76 @@ answer_from(ch: int) -> string {
 }
 ```
 
+## Bounding a write
+
+Every `write` and `write_frame` writes all of its bytes, waiting as long as
+that takes; once a peer stops reading, a pipe fills (16 to 64 KiB) and the
+write waits until the peer reads, exits or is killed. On a UI thread that is
+a frozen window. Three calls write without waiting on the reader:
+
+- `wait_writable(ch, timeout_ms) -> (ready, err)` is `wait_readable`'s
+  twin: `(1, "")` when a `write_some` will take bytes (or the reader has
+  gone and the write will say so), `(0, "")` on a timeout.
+- `write_some(fd, bytes, offset) -> (n, err)` writes what fits now of the
+  bytes from `offset` on and returns: `n` may be 0 (full) or anything up to
+  the rest; call it again from `offset + n`. It changes nothing about the
+  descriptor (no `O_NONBLOCK` left behind for another holder of the same
+  pipe to trip on): a socket is sent to with `MSG_DONTWAIT` (Linux,
+  FreeBSD), and a pipe, or a socket elsewhere, is written `PIPE_BUF` bytes
+  at a time while `poll` says there is room, which a blocking write of that
+  size never waits for.
+- A frame writer queues frames and writes them as the reader takes them,
+  keeping its place inside a frame, so the reader gets whole frames in
+  order however the pipe cut them. Each writer has its own queue: no state
+  is shared between writers or hidden in the module.
+
+```aether,fragment
+import std.ipc
+
+// Once, for the channel:
+w = ipc.frame_writer(to_child)            // null if to_child < 0
+
+// Whenever there is something to say: queued, never written here.
+ipc.frame_writer_put(w, "answer")
+
+// From the UI tick: write what the pipe takes now, wait for nothing.
+err = ipc.frame_writer_flush(w, 0)
+if err != "" {
+    // the reader has gone: drop the channel
+}
+if ipc.frame_writer_pending(w) > 16777216 {
+    // the reader has stopped reading: drop it
+}
+
+// At the end; the descriptor stays the caller's to close.
+ipc.frame_writer_free(w)
+```
+
+`frame_writer_flush(w, ms)` with `ms > 0` waits for room up to `ms` in all,
+and with `ms < 0` until everything is written; it returns `""` when the time
+ran out too, with the rest still queued (`frame_writer_pending`). A writer is
+for one thread at a time, and nothing else should write to its descriptor.
+
+On Windows an anonymous pipe has no readiness to poll and cannot be made
+overlapped after the fact (and the child end of a channel is a pipe someone
+else created). What a pipe does give is its free room (`WriteQuotaAvailable`):
+a write of no more than that is buffered at once, so `write_some` writes
+that much and leaves the pipe as it is. Windows takes a waiting reader's read
+off the room, so a reader blocked in a read as large as the pipe's buffer
+(4096 bytes for `os.run_stdio`'s) makes an empty pipe report none; then
+`write_some` puts the pipe in `PIPE_NOWAIT` mode for its own writes (which
+hand bytes straight to the waiting reader) and back in `PIPE_WAIT` before it
+returns. The mode can only be set while the pipe holds no bytes (with 4000
+bytes queued, win11 refused it), which is exactly that case, and a no-wait
+write is all or nothing past the room, so a refused one is retried with half
+as many bytes. A flush with a deadline tries the write a timer tick apart
+(~16 ms). `wait_writable` there is the room, so it can time out on that
+empty pipe whose reader waits in a large read although a write would go; the
+frame writer does not rely on it. The other mechanisms were worse: an
+overlapped named pipe would have to be created by `os.run_stdio` and still
+leave a child's own stdout blocking, and a writer thread inside std.ipc is
+the thread this removes.
+
 ## The stdio channel
 
 `os.run_stdio(prog, argv, env)` spawns the child with its stdin and stdout
@@ -330,5 +400,7 @@ does: passing descriptors hands out authority.
 
 `parent_channel`, `parent_channel_kind`, `write`, `write_close`, `read`,
 `send_fd`, `recv_fd`, `recv`, `write_frame`, `read_frame`,
-`read_frame_timeout`, `wait_readable`, and the constants
+`read_frame_timeout`, `wait_readable`, `wait_writable`, `write_some`,
+`frame_writer`, `frame_writer_put`, `frame_writer_flush`,
+`frame_writer_pending`, `frame_writer_free`, and the constants
 `TIMED_OUT_BETWEEN_FRAMES` and `TIMED_OUT_INSIDE_FRAME`.

@@ -1,0 +1,140 @@
+// std.tcp: wait_writable and write_some, a socket write that never waits on
+// a peer that has stopped reading.
+//
+// tcp.write, write_n and write_all wait for room, up to the socket's 30 s
+// send timeout per send, so a server answering on a UI thread froze while a
+// local client sent a request and then did not read its answer (sae's
+// control bus). write_some takes what fits and returns; wait_writable says
+// when there is room again.
+//
+// Over loopback, with a client that connected with a small receive buffer
+// and reads nothing: the server's write_some fills the connection and comes
+// back at once each time, then takes 0 bytes; wait_writable says no room,
+// at once and after a short wait; once the client reads, there is room
+// again and the bytes that went arrive in order; once the client has
+// closed, write_some fails. A write that waited fails the timing checks.
+
+import std.tcp
+import std.string
+import std.time
+import std.bytes
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    check(lerr == "", "listen_on: ${lerr}")
+    port = tcp.server_port(srv)
+    conn, cerr = tcp.connect_buffered("127.0.0.1", port, 16384)
+    check(cerr == "", "connect_buffered: ${cerr}")
+    peer, aerr = tcp.accept(srv)
+    check(aerr == "", "accept: ${aerr}")
+
+    ok, werr = tcp.wait_writable(peer, 0)
+    check(werr == "" && ok, "a fresh connection has room: ${werr}")
+
+    // 64 KiB of a counting pattern, sent again and again from where the last
+    // write_some stopped, so what arrives can be checked byte for byte.
+    chunk = 65536
+    buf = bytes.new(chunk)
+    i = 0
+    while i < chunk {
+        bytes.set(buf, i, i % 251)
+        i = i + 1
+    }
+    data = bytes.capacity_view(buf)[0..chunk]
+
+    // Fill it. A kernel may still move bytes on to the client (loopback
+    // windows grow on their own), so fill again until a 150 ms wait finds
+    // no room.
+    sent = 0
+    calls = 0
+    long slowest = 0
+    settled = 0
+    long waited = 0
+    rounds = 0
+    t0 = time.now_ms()
+    while settled == 0 && rounds < 50 && time.now_ms() - t0 < 20000 {
+        full = 0
+        while full == 0 && time.now_ms() - t0 < 20000 {
+            at = sent % chunk
+            c0 = time.now_ms()
+            n, serr = tcp.write_some(peer, data[at..chunk])
+            d = time.now_ms() - c0
+            if d > slowest { slowest = d }
+            check(serr == "", "write_some: ${serr}")
+            if n == 0 {
+                full = 1
+            }
+            sent = sent + n
+            calls = calls + 1
+        }
+        ready, rerr = tcp.wait_writable(peer, 0)
+        check(rerr == "", "wait_writable 0: ${rerr}")
+        if !ready {
+            w0 = time.now_ms()
+            ready2, rerr2 = tcp.wait_writable(peer, 150)
+            waited = time.now_ms() - w0
+            check(rerr2 == "", "wait_writable 150: ${rerr2}")
+            if !ready2 {
+                settled = 1
+            }
+        }
+        rounds = rounds + 1
+    }
+    check(settled == 1, "the connection never stayed full (${sent} bytes in ${calls} calls)")
+    check(slowest < 500, "a write_some waited on the reader (${slowest} ms)")
+    check(waited >= 100 && waited < 1500, "wait_writable waited about 150 ms (${waited})")
+
+    // The client reads it all: every byte in order, and room comes back.
+    rbuf = bytes.new(chunk)
+    rview = bytes.capacity_view(rbuf)[0..chunk]
+    got = 0
+    bad = -1
+    r0 = time.now_ms()
+    while got < sent && time.now_ms() - r0 < 20000 {
+        m, merr = tcp.read_into(conn, rview)
+        if merr == "" {
+            j = 0
+            while j < m && bad < 0 {
+                if rview[j] != (got + j) % chunk % 251 {
+                    bad = got + j
+                }
+                j = j + 1
+            }
+            got = got + m
+        }
+    }
+    check(got == sent, "the client read ${got} of ${sent} bytes")
+    check(bad < 0, "byte ${bad} was not the one sent")
+    ready3, rerr3 = tcp.wait_writable(peer, 2000)
+    check(rerr3 == "" && ready3, "no room after the client read everything")
+
+    // The client goes: sending fails, sooner or later (the first send may
+    // still be taken before the reset comes back).
+    tcp.close(conn)
+    failed = 0
+    f0 = time.now_ms()
+    while failed == 0 && time.now_ms() - f0 < 5000 {
+        _n2, ferr = tcp.write_some(peer, data[0..1024])
+        if ferr != "" {
+            failed = 1
+        } else {
+            _r, _e = tcp.wait_writable(peer, 50)
+        }
+    }
+    check(failed == 1, "write_some to a closed client never failed")
+
+    bytes.free(buf)
+    bytes.free(rbuf)
+    tcp.close(peer)
+    tcp.server_close(srv)
+    println("OK")
+}

@@ -11,10 +11,11 @@ exports(
     tcp_server_port_raw, tcp_server_poll_raw, tcp_set_nodelay_raw, tcp_set_read_buffer_raw,
     tcp_available_raw, tcp_connect_unix_raw, tcp_listen_unix_raw,
     tcp_fd_raw, tcp_server_fd_raw, tcp_poll_raw, tcp_poll2_raw,
-    tcp_send_bytes_raw, tcp_receive_into_raw,
+    tcp_send_bytes_raw, tcp_receive_into_raw, tcp_wait_writable_raw, tcp_send_some_raw,
     connect, connect_buffered, connect_timeout, connect_unix, listen_unix, write, write_n, write_slice, write_all, read, read_n, read_into,
     listen, listen_on, accept, fd, server_fd,
     server_port, server_poll, set_nodelay, set_read_buffer, available, poll, poll2,
+    wait_writable, write_some,
     close_drained
 )
 
@@ -52,6 +53,8 @@ extern tcp_fd_raw(sock: ptr) -> int
 extern tcp_server_fd_raw(server: ptr) -> int
 extern tcp_poll_raw(sock: ptr, timeout_ms: int) -> int
 extern tcp_poll2_raw(a: ptr, b: ptr, timeout_ms: int) -> int
+extern tcp_wait_writable_raw(sock: ptr, timeout_ms: int) -> int
+extern tcp_send_some_raw(sock: ptr, data: ptr, length: int) -> int
 extern tcp_connect_unix_raw(path: string) -> (ptr, string)
 extern tcp_listen_unix_raw(path: string) -> (ptr, string)
 
@@ -277,6 +280,41 @@ poll(sock: ptr, timeout_ms: int) -> {
         return false, ""
     }
     return true, ""
+}
+
+// Wait until `sock` has room to send, up to timeout_ms (-1 blocks, 0 asks
+// without waiting, >0 waits that many ms): (true, "") when write_some will
+// take bytes, which includes a connection that has failed (write_some then
+// reports it), (false, "") on timeout, (false, error) for a closed handle
+// or a failed poll. Sends nothing. With write_some, a loop on a thread that
+// must not wait (a UI thread answering a client that has stopped reading)
+// writes what fits and comes back for the rest.
+wait_writable(sock: ptr, timeout_ms: int) -> {
+    rc = tcp_wait_writable_raw(sock, timeout_ms)
+    if rc < 0 {
+        return false, "poll failed"
+    }
+    return rc == 1, ""
+}
+
+// Send what the socket takes now of a `byte[]` slice, never waiting for
+// room: (n, "") with n from 0 (the send buffer is full: wait_writable, then
+// send the rest, `data[n..]`) to data.len, or (0, "send failed") when the
+// connection has failed. Where write, write_n and write_all wait for room
+// (up to the socket's 30 s send timeout, for each send), this returns at
+// once. An empty slice sends nothing and returns (0, ""); a slice with no
+// bound panics. On Windows and NetBSD the socket is non-blocking for the
+// one send; do not send on it from another thread at the same time.
+write_some(sock: ptr, data: byte[]) -> {
+    need_bound("write_some", data)
+    if data.len == 0 {
+        return 0, ""
+    }
+    n = tcp_send_some_raw(sock, data, data.len)
+    if n < 0 {
+        return 0, "send failed"
+    }
+    return n, ""
 }
 
 // Wait on two sockets at once — the full-duplex relay primitive. Returns

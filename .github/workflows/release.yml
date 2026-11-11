@@ -869,8 +869,15 @@ jobs:
         VERSION=$(cat VERSION | tr -d '[:space:]')
         TARGET=freebsd-x86_64
         # The cross-built aetherc cannot run here, so no module artifacts:
-        # the FreeBSD archive's imports parse the sources.
-        sh scripts/stage-release.sh build/.alien/freebsd-x86_64 release
+        # the FreeBSD archive's imports parse the sources. contrib.sqlite's
+        # archives (lib/contrib/libaether_sqlite.a, libsqlite3.a) are built
+        # for FreeBSD with the same zig and sysroot, as the Linux and macOS
+        # legs build theirs natively: without them `-laether_sqlite` failed
+        # against a FreeBSD release (sae on ghostbsd, 2026-11-11).
+        PATH="$(dirname "${{ steps.prov.outputs.zig }}"):$PATH" \
+          AETHER_SYSROOT="${{ steps.prov.outputs.sysroot }}" \
+          sh scripts/stage-release.sh build/.alien/freebsd-x86_64 release --contrib-target x86_64-freebsd.15.0
+        ls -l release/lib/contrib/libaether_sqlite.a release/lib/contrib/libsqlite3.a
         # Note the cross-build in the archive so downstream users know it was
         # not run through the test suite on FreeBSD.
         echo "Cross-built for FreeBSD with zig cc; not run through the test suite on FreeBSD." \

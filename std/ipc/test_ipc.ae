@@ -486,5 +486,50 @@ main() {
         }
     }
 
+    spec.describe(fw, "ipc.write_some and ipc.wait_writable on a socket") {
+        spec.it("take what fits, never wait, and resume from an offset") callback {
+            a, b, _ = os.socketpair()
+            r0, e0 = ipc.wait_writable(a, 0)
+            spec.assert_ok(e0, "wait_writable on an empty socket")
+            spec.assert_eq(r0, 1, "room at first")
+            chunk = "0123456789abcdef"
+            while string.length(chunk) < 65536 {
+                chunk = string.concat(chunk, chunk)
+            }
+            total = 0
+            more = 1
+            rounds = 0
+            while more > 0 && rounds < 10000 {
+                more, err = ipc.write_some(a, chunk, 0)
+                spec.assert_ok(err, "write_some")
+                total = total + more
+                rounds = rounds + 1
+            }
+            spec.assert_true(total > 0 && more == 0, "it filled (${total} bytes) and then took nothing")
+            r1, _e1 = ipc.wait_writable(a, 50)
+            spec.assert_eq(r1, 0, "no room once full")
+            // The reader takes it all (Linux counts a Unix socket writable
+            // only once most of what it sent is read); then there is room,
+            // and the rest of a string goes from an offset.
+            got = 0
+            rerr = ""
+            while got < total && rerr == "" {
+                part, perr = ipc.read(b, 65536)
+                rerr = perr
+                got = got + string.length(part)
+            }
+            spec.assert_ok(rerr, "read it all")
+            r2, _e2 = ipc.wait_writable(a, 2000)
+            spec.assert_eq(r2, 1, "room again")
+            n, werr = ipc.write_some(a, "xyz", 1)
+            spec.assert_ok(werr, "write_some from an offset")
+            spec.assert_true(n >= 0 && n <= 2, "at most the two bytes after the offset")
+            io.fd_close(b)
+            _n2, gerr = ipc.write_some(a, "x", 0)
+            spec.assert_err_contains(gerr, "ipc.write_some", "the peer gone is an error, not SIGPIPE")
+            io.fd_close(a)
+        }
+    }
+
     return spec.run_summary(fw)
 }

@@ -69,6 +69,14 @@ or other bit (0o644) puts back what the folder grants. On a volume without
 ACLs (FAT, exFAT) an owner-only mode fails with `KIND_IO` instead of leaving
 the file readable.
 
+`copy` carries that over as it carries mode bits on POSIX: a copy of an
+owner-only file (one with a protected DACL) is owner-only, made so before
+its bytes go in, whether it is a new file or overwrites one; a copy of a
+file that inherits its folder's access takes the destination folder's
+access, as `chmod 0o644` would. When the destination cannot be made
+owner-only, nothing is copied and the call fails (`KIND_IO`, or
+`KIND_PERMISSION_DENIED`).
+
 ## Exports
 
 `read`, `write`, `write_binary`, `write_atomic`, `read_binary`, `pread`,

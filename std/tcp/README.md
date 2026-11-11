@@ -170,8 +170,34 @@ while going == 1 {
 client.response_free(resp)
 ```
 
+## Writing without waiting on the peer
+
+`write`, `write_n` and `write_all` wait for room in the socket's send
+buffer, up to the 30 s send timeout for each send, so a server answering
+on a thread that must not wait (a UI thread) stalls while a client that sent
+a request does not read the answer. `write_some(sock, s)` sends what the
+socket takes now of a `byte[]` slice and returns at once: `(n, "")` with
+`n` from 0 (the buffer is full) to `s.len`, or `(0, "send failed")` when the
+connection has failed. `wait_writable(sock, timeout_ms)` is `poll`'s twin
+for the write side: `(true, "")` when there is room (or the connection has
+failed, which the next `write_some` reports), `(false, "")` on a timeout.
+
+```aether,fragment
+// From a UI tick: send what fits of `answer[sent..]`, come back for the
+// rest on the next tick, and give up on a client that takes nothing for 5 s.
+n, err = tcp.write_some(sock, answer[sent..answer.len])
+if err != "" { drop(sock) }
+sent = sent + n
+```
+
+Linux and FreeBSD send with `MSG_DONTWAIT`. macOS sends what fits and then
+waits for the rest even with that flag, and NetBSD ignores it on a TCP
+socket, so there, and on Windows, the socket is non-blocking for the one
+send and put back (blocking, on Windows, which cannot read the mode back).
+Do not send on the same socket from another thread at the same time.
+
 ## Exports
 
 `connect`, `connect_buffered`, `connect_timeout`, `connect_unix`, `listen`, `listen_on`, `listen_unix`, `accept`, `available`, `read`, `read_n`, `read_into`,
-`write`, `write_n`, `write_slice`, `write_all`, `poll`, `poll2`, `server_poll`, `server_port`, `set_nodelay`,
+`write`, `write_n`, `write_slice`, `write_all`, `write_some`, `poll`, `poll2`, `wait_writable`, `server_poll`, `server_port`, `set_nodelay`,
 `set_read_buffer`, `fd`, `server_fd`, `close_drained`, `tcp_close`, `tcp_server_close`.

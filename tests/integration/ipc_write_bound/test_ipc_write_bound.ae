@@ -1,0 +1,246 @@
+// std.ipc's bounded writes: wait_writable, write_some and the frame writer,
+// over os.run_stdio's pipes to a child that stops reading, on every
+// platform, Windows included (anonymous pipes there).
+//
+// The program spawns itself as the child (argument "deaf" or "slow"):
+//   deaf  reads nothing, ever; exits after 3 s, so a write that waited on it
+//         returns then (and the test sees how long it waited)
+//   slow  reads frames a few milliseconds apart until a frame "end", checks
+//         each is the one expected next (its size, and every byte the
+//         letter for its place), then answers "<frames>/<bytes>/<ok>"
+//
+// What it locks in:
+//   - wait_writable: ready on a pipe with room, not ready (at once, and
+//     after a short wait) on one a deaf child has let fill, ready again
+//     once the reader has gone;
+//   - write_some to a deaf child returns at once with what fit, 0 once
+//     the pipe is full, and an error (not SIGPIPE) once the reader has gone.
+//     Before it every std.ipc write waited until the reader read or went
+//     (3 s here); a write that waits fails the timing check;
+//   - a frame writer: frames queued, flushed a tick at a time (each flush
+//     returning at once) to a reader slower than the writer, frames larger
+//     than the pipe cut and resumed, every frame arriving whole and in
+//     order; a flush with a deadline to a deaf child returns at the deadline
+//     with the rest queued, and an error once the child is gone;
+//   - write_some refuses an offset past the bytes.
+
+import std.spec
+import std.ipc
+import std.os
+import std.io
+import std.string
+import std.list
+import std.time
+
+extern exit(code: int)
+
+const MAX = 4194304
+
+// Frame i: (i * 7919) % 70000 + 1 bytes, every byte the letter for i, so a
+// frame cut short, merged with the next or out of order shows.
+frame_len(i: int) -> int {
+    return (i * 7919) % 70000 + 1
+}
+
+frame_body(i: int) -> string {
+    letter = string.from_char(97 + i % 26)
+    n = frame_len(i)
+    s = letter
+    while string.length(s) * 2 <= n {
+        s = string.concat(s, s)
+    }
+    while string.length(s) < n {
+        s = string.concat(s, letter)
+    }
+    return s
+}
+
+const FRAMES = 60
+
+slow_main() {
+    i = 0
+    total = 0
+    ok = 1
+    going = 1
+    while going == 1 {
+        f, err = ipc.read_frame(0, MAX)
+        if err != "" {
+            ipc.write(2, "child: ${err}\n")
+            exit(3)
+        }
+        if f == "end" {
+            going = 0
+        } else {
+            if string.length(f) != frame_len(i) || f != frame_body(i) {
+                ok = 0
+            }
+            total = total + string.length(f)
+            i = i + 1
+            sleep(5)
+        }
+    }
+    ipc.write_frame(1, "${i}/${total}/${ok}")
+    exit(0)
+}
+
+start_child(mode: string) -> (int, int, int, string) {
+    argv = list.new()
+    list.add(argv, mode)
+    to, from, pid, err = os.run_stdio(os.argv0(), argv, null)
+    list.free(argv)
+    return to, from, pid, err
+}
+
+// 256 KiB, more than any pipe buffer here.
+big() -> string {
+    s = "0123456789abcdef"
+    while string.length(s) < 262144 {
+        s = string.concat(s, s)
+    }
+    return s
+}
+
+main() {
+    if os.args_count() > 1 {
+        mode = os.args_get(1)
+        if mode == "deaf" {
+            sleep(3000)
+            exit(0)
+        }
+        if mode == "slow" {
+            slow_main()
+            return
+        }
+    }
+
+    fw = spec.init()
+
+    spec.describe(fw, "write_some and wait_writable to a child that does not read") {
+        spec.it("write what fits at once, then wait for room, then fail") callback {
+            to, from, pid, err = start_child("deaf")
+            spec.assert_ok(err, "spawn")
+
+            r0, e0 = ipc.wait_writable(to, 0)
+            spec.assert_ok(e0, "wait_writable on an empty pipe")
+            spec.assert_eq(r0, 1, "an empty pipe has room")
+
+            data = big()
+            t0 = time.now_ms()
+            n, werr = ipc.write_some(to, data, 0)
+            took = time.now_ms() - t0
+            spec.assert_ok(werr, "write_some")
+            spec.assert_true(n > 0 && n < string.length(data), "part of 256 KiB went: ${n}")
+            spec.assert_true(took < 1000, "write_some returned at once, not when the child went (${took} ms)")
+
+            // Fill what is left; then nothing more fits.
+            off = n
+            more = 1
+            rounds = 0
+            while more > 0 && rounds < 100000 {
+                more, merr = ipc.write_some(to, data, off % string.length(data))
+                spec.assert_ok(merr, "write_some while filling")
+                off = off + more
+                rounds = rounds + 1
+            }
+            z, zerr = ipc.write_some(to, data, 0)
+            spec.assert_ok(zerr, "write_some to a full pipe")
+            spec.assert_eq(z, 0, "a full pipe takes nothing")
+
+            r1, e1 = ipc.wait_writable(to, 0)
+            spec.assert_ok(e1, "wait_writable on a full pipe")
+            spec.assert_eq(r1, 0, "a full pipe has no room")
+            t1 = time.now_ms()
+            r2, e2 = ipc.wait_writable(to, 150)
+            waited = time.now_ms() - t1
+            spec.assert_ok(e2, "wait_writable 150 ms")
+            spec.assert_eq(r2, 0, "still no room")
+            spec.assert_true(waited >= 100 && waited < 1500, "it waited about 150 ms (${waited})")
+
+            // The child exits at 3 s: the pipe has no reader then.
+            _st, _werr = os.wait_pid(pid)
+            r3, e3 = ipc.wait_writable(to, 2000)
+            spec.assert_ok(e3, "wait_writable with the reader gone")
+            spec.assert_eq(r3, 1, "ready: the write will say the reader is gone")
+            g, gerr = ipc.write_some(to, "x", 0)
+            spec.assert_eq(g, 0, "nothing went")
+            spec.assert_err_contains(gerr, "ipc.write_some", "an error, not SIGPIPE")
+
+            _o, oerr = ipc.write_some(to, "abc", 4)
+            spec.assert_err_contains(oerr, "offset", "an offset past the bytes")
+            io.fd_close(to)
+            io.fd_close(from)
+        }
+    }
+
+    spec.describe(fw, "a frame writer") {
+        spec.it("hands a slow reader every frame whole, a tick at a time") callback {
+            to, from, pid, err = start_child("slow")
+            spec.assert_ok(err, "spawn")
+            w = ipc.frame_writer(to)
+            spec.assert_true(w != null, "a writer")
+            queued = 0
+            i = 0
+            while i < FRAMES {
+                spec.assert_ok(ipc.frame_writer_put(w, frame_body(i)), "put frame ${i}")
+                queued = queued + 4 + frame_len(i)
+                i = i + 1
+            }
+            spec.assert_ok(ipc.frame_writer_put(w, "end"), "put end")
+            queued = queued + 7
+            spec.assert_true(ipc.frame_writer_pending(w) == queued, "all of it queued, nothing written")
+
+            long slowest = 0
+            ticks = 0
+            t0 = time.now_ms()
+            while ipc.frame_writer_pending(w) > 0 && time.now_ms() - t0 < 30000 {
+                f0 = time.now_ms()
+                spec.assert_ok(ipc.frame_writer_flush(w, 0), "flush")
+                d = time.now_ms() - f0
+                if d > slowest { slowest = d }
+                ticks = ticks + 1
+                sleep(10)
+            }
+            spec.assert_true(ipc.frame_writer_pending(w) == 0, "all of it written")
+            spec.assert_true(ticks > 2, "it took more than one tick (${ticks}): the reader was slower")
+            spec.assert_true(slowest < 500, "no flush waited on the reader (slowest ${slowest} ms)")
+
+            summary, serr = ipc.read_frame_timeout(from, 256, 20000)
+            spec.assert_ok(serr, "the child's summary")
+            total = 0
+            j = 0
+            while j < FRAMES {
+                total = total + frame_len(j)
+                j = j + 1
+            }
+            spec.assert_str_eq(summary, "${FRAMES}/${total}/1", "every frame whole, in order")
+            ipc.frame_writer_free(w)
+            _st, _werr = os.wait_pid(pid)
+            io.fd_close(to)
+            io.fd_close(from)
+        }
+
+        spec.it("stops at its deadline with a deaf reader, and fails when it is gone") callback {
+            to, from, pid, err = start_child("deaf")
+            spec.assert_ok(err, "spawn")
+            w = ipc.frame_writer(to)
+            spec.assert_ok(ipc.frame_writer_put(w, big()), "put 256 KiB")
+            spec.assert_ok(ipc.frame_writer_put(w, big()), "and again")
+            t0 = time.now_ms()
+            spec.assert_ok(ipc.frame_writer_flush(w, 200), "flush with a 200 ms deadline")
+            took = time.now_ms() - t0
+            left = ipc.frame_writer_pending(w)
+            spec.assert_true(left > 0, "the rest is still queued")
+            spec.assert_true(took >= 150 && took < 2000, "it gave up at the deadline (${took} ms)")
+
+            _st, _werr = os.wait_pid(pid)
+            ferr = ipc.frame_writer_flush(w, 2000)
+            spec.assert_err_contains(ferr, "ipc.frame_writer_flush", "the reader has gone")
+            spec.assert_true(ipc.frame_writer_pending(w) > 0, "what was not written stays queued")
+            ipc.frame_writer_free(w)
+            io.fd_close(to)
+            io.fd_close(from)
+        }
+    }
+
+    return spec.run_summary(fw)
+}

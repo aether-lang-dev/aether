@@ -78,6 +78,7 @@ BASE_CFLAGS=(
 CONTRIB_TARGET="${CONTRIB_TARGET:-}"
 CROSS_MODE=""
 CROSS_ARCH_WANT=""     # a `file`(1) substring the produced archive must match
+CROSS_MACH_WANT=""     # and, for an ELF target, its machine's
 if [ -n "$CONTRIB_TARGET" ]; then
     CROSS_MODE=1
     command -v zig >/dev/null 2>&1 || {
@@ -102,7 +103,10 @@ if [ -n "$CONTRIB_TARGET" ]; then
                 -I"$AETHER_SYSROOT/usr/include"
                 -L"$AETHER_SYSROOT/usr/lib" -L"$AETHER_SYSROOT/lib"
             )
-            CROSS_ARCH_WANT="FreeBSD"
+            # A relocatable object carries no OS mark (zig leaves EI_OSABI at
+            # SYSV, and the FreeBSD note is the linker's), so `file` names no
+            # FreeBSD in a .o: what can be checked is ELF and the machine.
+            CROSS_ARCH_WANT="ELF"
             ;;
         *linux*)   CROSS_ARCH_WANT="ELF" ;;
         *macos*)   CROSS_ARCH_WANT="Mach-O" ;;
@@ -110,6 +114,12 @@ if [ -n "$CONTRIB_TARGET" ]; then
         # MinGW-w64 target — no sysroot. A contrib .o member is a PE/COFF object.
         *windows*) CROSS_ARCH_WANT="COFF" ;;
     esac
+    if [ "$CROSS_ARCH_WANT" = ELF ]; then
+        case "$CONTRIB_TARGET" in
+            x86_64-*)  CROSS_MACH_WANT="x86-64" ;;
+            aarch64-*) CROSS_MACH_WANT="aarch64" ;;
+        esac
+    fi
 
     # Tier-2/3 deps: point compiles at the crossbuild sysroot, NOT host libs.
     if [ -n "${CROSSBUILD_SYSROOT:-}" ] && [ -d "$CROSSBUILD_SYSROOT" ]; then
@@ -373,8 +383,9 @@ build_module() {
         local member; member=$(find "$ck" -name '*.o' 2>/dev/null | head -1)
         if [ -n "$member" ]; then
             local desc; desc=$(file -b "$member")
-            if ! printf '%s' "$desc" | grep -q "$CROSS_ARCH_WANT"; then
-                printf "  %-18s FAIL (wrong arch: '%s', want '%s')\n" "$name" "$desc" "$CROSS_ARCH_WANT"
+            if ! printf '%s' "$desc" | grep -q "$CROSS_ARCH_WANT" \
+               || ! printf '%s' "$desc" | grep -q "$CROSS_MACH_WANT"; then
+                printf "  %-18s FAIL (wrong arch: '%s', want '%s %s')\n" "$name" "$desc" "$CROSS_ARCH_WANT" "$CROSS_MACH_WANT"
                 rm -rf "$ck"
                 return 2
             fi

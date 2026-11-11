@@ -36,6 +36,13 @@
 //   read_frame_timeout(ch, max, ms) -> (data, err)   the same, bounded
 //   TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME  its two timeouts
 //   wait_readable(ch, ms) -> (ready, err)      bound a wait with poll()
+//   wait_writable(ch, ms) -> (ready, err)      wait for room to write
+//   write_some(fd, bytes, offset) -> (n, err)  what fits now, never waiting
+//   frame_writer(fd) -> ptr                    frames queued, written as
+//   frame_writer_put(w, data) -> string          the reader takes them,
+//   frame_writer_flush(w, ms) -> string          without ever waiting
+//   frame_writer_pending(w) -> long              longer than the caller
+//   frame_writer_free(w)                         says
 //
 // (write/write_close were originally named `send`/`send_close` per the
 // design discussion; renamed because `send` is a reserved keyword in
@@ -73,9 +80,13 @@ exports(
     ipc_parent_channel_raw, ipc_parent_channel_kind_raw,
     ipc_write_raw, ipc_read_raw, ipc_send_fd_raw, ipc_recv_fd_raw,
     ipc_recv_raw, ipc_write_frame_raw, ipc_read_frame_raw, ipc_wait_readable_raw,
-    ipc_stdio_channel_raw,
+    ipc_stdio_channel_raw, ipc_wait_writable_raw, ipc_write_some_raw,
+    ipc_frame_writer_new_raw, ipc_frame_writer_put_raw, ipc_frame_writer_flush_raw,
+    ipc_frame_writer_pending_raw, ipc_frame_writer_free_raw,
     parent_channel, parent_channel_kind, stdio_channel, write, write_close, read, send_fd, recv_fd,
     recv, write_frame, read_frame, read_frame_timeout, wait_readable,
+    wait_writable, write_some, frame_writer, frame_writer_put, frame_writer_flush,
+    frame_writer_pending, frame_writer_free,
     TIMED_OUT_BETWEEN_FRAMES, TIMED_OUT_INSIDE_FRAME
 )
 
@@ -96,6 +107,13 @@ extern ipc_write_frame_raw(ch: int, data: @aether string) -> string
 extern ipc_read_frame_raw(ch: int, max: int, timeout_ms: int) -> (string @heap, string)
 extern ipc_wait_readable_raw(ch: int, timeout_ms: int) -> (int, string)
 extern ipc_stdio_channel_raw() -> (int, int, string)
+extern ipc_wait_writable_raw(ch: int, timeout_ms: int) -> (int, string)
+extern ipc_write_some_raw(fd: int, bytes: @aether string, offset: int) -> (int, string)
+extern ipc_frame_writer_new_raw(fd: int) -> ptr
+extern ipc_frame_writer_put_raw(w: ptr, data: @aether string) -> string
+extern ipc_frame_writer_flush_raw(w: ptr, timeout_ms: int) -> string
+extern ipc_frame_writer_pending_raw(w: ptr) -> long
+extern ipc_frame_writer_free_raw(w: @frees ptr)
 
 // Aether-side wrappers. parent_channel returns the raw int from
 // the extern; -1 sentinel for "no parent channel."
@@ -273,4 +291,85 @@ read_frame_timeout(ch: int, max: int, timeout_ms: int) -> {
 // once without sleeping.
 wait_readable(ch: int, timeout_ms: int) -> {
     return ipc_wait_readable_raw(ch, timeout_ms)
+}
+
+// Wait up to `timeout_ms` for room to write on `ch` (poll for POLLOUT):
+// (1, "") when a write_some will take bytes, which includes the reader
+// having gone (the write then says so), (0, "") on a timeout, (0, err) on a
+// failure. A negative timeout waits forever; 0 asks without waiting. On a
+// pipe, room means at least PIPE_BUF bytes (512 on macOS and the BSDs, 4096
+// on Linux): a plain write of more can still wait, so write with write_some
+// or a frame writer.
+//
+// On Windows an anonymous pipe has no readiness to poll: this asks the pipe
+// how many bytes it holds free (WriteQuotaAvailable), a timer tick apart
+// (~16 ms). Windows counts a reader's waiting read against that room, so a
+// reader blocked in a read as large as the pipe's buffer (4096 bytes for
+// os.run_stdio's pipes) makes an empty pipe look full: wait_writable times
+// out there although a write would go. A frame writer does not depend on
+// it. A file or a console is always ready; another descriptor is a "not a
+// pipe" error.
+wait_writable(ch: int, timeout_ms: int) -> {
+    return ipc_wait_writable_raw(ch, timeout_ms)
+}
+
+// Write the bytes of `bytes` from `offset` on that `fd` takes now, and
+// return without waiting for the rest: (n, "") with n the count written,
+// which may be 0 (the pipe or socket is full) or anything up to the rest;
+// (n, err) when a write failed after n bytes, the reader having gone
+// included (an error, not SIGPIPE). Call it again with offset + n when
+// there is room (wait_writable). Binary-safe; nothing is copied.
+//
+// It does not change the descriptor's flags. On POSIX a socket is sent to
+// with MSG_DONTWAIT; a pipe is written PIPE_BUF bytes at a time while poll
+// says there is room, which a blocking write of that size never waits for;
+// a descriptor already non-blocking is written straight. On Windows a pipe
+// is written no more than its free room (WriteQuotaAvailable), which never
+// waits; when it reports none and holds no bytes (a reader waiting in a
+// large read), the pipe is put in PIPE_NOWAIT mode for this call's writes
+// and back in PIPE_WAIT before it returns. A file or a console is written
+// whole. Do not write the same descriptor from another thread at the same
+// time.
+write_some(fd: int, bytes: string, offset: int) -> {
+    return ipc_write_some_raw(fd, bytes, offset)
+}
+
+// A frame writer on `fd`: frames are queued (frame_writer_put) and written
+// as the reader takes them (frame_writer_flush), so a thread that must not
+// wait on a reader, a UI thread, writes frames without a thread of its own.
+// A frame cut short by a full pipe goes on where it stopped at the next
+// flush, so the reader gets whole frames, in order. Each writer has its own
+// queue; the descriptor stays the caller's to close (frame_writer_free does
+// not close it). null when `fd` is negative or memory ran out. Use it from
+// one thread at a time, and do not write to `fd` around it.
+frame_writer(fd: int) -> ptr {
+    return ipc_frame_writer_new_raw(fd)
+}
+
+// Queue `data` as one frame (the bytes write_frame would write); nothing is
+// written. "" or an error (a payload of 4 GiB or more, out of memory).
+frame_writer_put(w: ptr, data: string) -> string {
+    return ipc_frame_writer_put_raw(w, data)
+}
+
+// Write what is queued, waiting for room at most `timeout_ms` in all: 0
+// writes what the descriptor takes now and never waits, a negative timeout
+// waits until all of it is written. "" when it was all written or the time
+// ran out (frame_writer_pending says which), or the error that stopped it,
+// such as the reader having gone; what was not written stays queued. A
+// peer that takes nothing for long enough is the caller's to give up on
+// (close the descriptor, free the writer).
+frame_writer_flush(w: ptr, timeout_ms: int) -> string {
+    return ipc_frame_writer_flush_raw(w, timeout_ms)
+}
+
+// How many queued bytes are not written yet (frame headers included).
+frame_writer_pending(w: ptr) -> long {
+    return ipc_frame_writer_pending_raw(w)
+}
+
+// Free a frame writer and what it still has queued. The descriptor is not
+// closed.
+frame_writer_free(w: ptr) {
+    ipc_frame_writer_free_raw(w)
 }

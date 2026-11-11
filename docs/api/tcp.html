@@ -39,6 +39,8 @@
     <li><a href="#poll2_raw">poll2_raw</a></li>
     <li><a href="#send_bytes_raw">send_bytes_raw</a></li>
     <li><a href="#receive_into_raw">receive_into_raw</a></li>
+    <li><a href="#wait_writable_raw">wait_writable_raw</a></li>
+    <li><a href="#send_some_raw">send_some_raw</a></li>
     <li><a href="#connect">connect</a></li>
     <li><a href="#connect_buffered">connect_buffered</a></li>
     <li><a href="#connect_timeout">connect_timeout</a></li>
@@ -63,6 +65,8 @@
     <li><a href="#available">available</a></li>
     <li><a href="#poll">poll</a></li>
     <li><a href="#poll2">poll2</a></li>
+    <li><a href="#wait_writable">wait_writable</a></li>
+    <li><a href="#write_some">write_some</a></li>
     <li><a href="#close_drained">close_drained</a></li>
   </ul>
   <hr>
@@ -290,6 +294,16 @@
       <pre class="usage"><code>receive_into_raw(sock, buf, cap) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">sock: ptr, buf: ptr, cap: int</span></p>
     </div>
+    <div class="function" id="wait_writable_raw" data-name="wait_writable_raw">
+      <h3 class="function-name">wait_writable_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>wait_writable_raw(sock, timeout_ms) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, timeout_ms: int</span></p>
+    </div>
+    <div class="function" id="send_some_raw" data-name="send_some_raw">
+      <h3 class="function-name">send_some_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>send_some_raw(sock, data, length) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, data: ptr, length: int</span></p>
+    </div>
     <div class="function" id="connect" data-name="connect">
       <h3 class="function-name">connect <span class="kind">fn</span></h3>
       <pre class="usage"><code>connect(host, port) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
@@ -433,6 +447,18 @@
       <pre class="usage"><code>poll2(a, b, timeout_ms) <span class="arrow">-&gt;</span> (_0, _1, string)</code></pre>
       <p class="signature"><span class="sig-params">a: ptr, b: ptr, timeout_ms: int</span></p>
       <p class="doc">Wait on two sockets at once — the full-duplex relay primitive. Returns (a_ready, b_ready, &quot;&quot;) where each flag is true when that side is readable (both may be true); (false, false, &quot;&quot;) on timeout; (false, false, error) if both handles are closed or poll failed. Service whichever side is ready with read_n, then re-poll.</p>
+    </div>
+    <div class="function" id="wait_writable" data-name="wait_writable">
+      <h3 class="function-name">wait_writable <span class="kind">fn</span></h3>
+      <pre class="usage"><code>wait_writable(sock, timeout_ms) <span class="arrow">-&gt;</span> (_0, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, timeout_ms: int</span></p>
+      <p class="doc">Wait until `sock` has room to send, up to timeout_ms (-1 blocks, 0 asks without waiting, &gt;0 waits that many ms): (true, &quot;&quot;) when write_some will take bytes, which includes a connection that has failed (write_some then reports it), (false, &quot;&quot;) on timeout, (false, error) for a closed handle or a failed poll. Sends nothing. With write_some, a loop on a thread that must not wait (a UI thread answering a client that has stopped reading) writes what fits and comes back for the rest.</p>
+    </div>
+    <div class="function" id="write_some" data-name="write_some">
+      <h3 class="function-name">write_some <span class="kind">fn</span></h3>
+      <pre class="usage"><code>write_some(sock, data) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">sock: ptr, data: byte[]</span></p>
+      <p class="doc">Send what the socket takes now of a `byte[]` slice, never waiting for room: (n, &quot;&quot;) with n from 0 (the send buffer is full: wait_writable, then send the rest, `data[n..]`) to data.len, or (0, &quot;send failed&quot;) when the connection has failed. Where write, write_n and write_all wait for room (up to the socket's 30 s send timeout, for each send), this returns at once. An empty slice sends nothing and returns (0, &quot;&quot;); a slice with no bound panics. On Windows and NetBSD the socket is non-blocking for the one send; do not send on it from another thread at the same time.</p>
     </div>
     <div class="function" id="close_drained" data-name="close_drained">
       <h3 class="function-name">close_drained <span class="kind">fn</span></h3>
