@@ -1,0 +1,45 @@
+// A name under localhost. is loopback (RFC 6761 6.3), on every platform and
+// without asking DNS: "app.localhost" said no such host on Windows and
+// FreeBSD (FreeBSD after querying its DNS server), so a server and a client
+// that name a service by it, as sae's pages do ("api.localhost"), could not
+// meet there. Checked through std.tcp: a listener on 127.0.0.1 (listen_on
+// takes numeric addresses only), dialled as "app.localhost", "A.B.LOCALHOST"
+// and the rooted "app.localhost.", bytes both ways each time.
+
+import std.tcp
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn round_trip(srv: ptr, name: string, port: int) {
+    c, cerr = tcp.connect(name, port)
+    check(cerr == "" && c != null, "connect ${name}:${port}: ${cerr}")
+    s, aerr = tcp.accept(srv)
+    check(aerr == "", "accept for ${name}: ${aerr}")
+    _n, werr = tcp.write(c, "ping ${name}")
+    check(werr == "", "write to ${name}: ${werr}")
+    got, rerr = tcp.read(s, 256)
+    check(rerr == "" && got == "ping ${name}", "read from ${name}: '${got}' ${rerr}")
+    tcp_close(c)
+    tcp_close(s)
+    println("  PASS: ${name} reaches the loopback listener")
+}
+
+main() {
+    println("=== localhost. names ===")
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    check(lerr == "" && srv != null, "listen_on 127.0.0.1: ${lerr}")
+    port = tcp.server_port(srv)
+    check(port > 0, "server_port: ${port}")
+    round_trip(srv, "app.localhost", port)
+    round_trip(srv, "A.B.LOCALHOST", port)
+    round_trip(srv, "app.localhost.", port)
+    tcp_server_close(srv)
+    println("=== All cases passed ===")
+}

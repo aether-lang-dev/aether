@@ -125,14 +125,61 @@ static inline int aether_addr_split_authority(const char* a, size_t alen, char* 
     return 0;
 }
 
+/* 1 when `name` is a localhost. name answered here rather than by a
+ * resolver: one ending in ".localhost" ("app.localhost", "a.b.LOCALHOST",
+ * "app.localhost."), or the fully qualified "localhost.". RFC 6761 6.3 has
+ * every such name be loopback, answered without asking DNS. macOS does
+ * that, and Linux where systemd-resolved is the stub; FreeBSD and Windows
+ * say no such host (FreeBSD after asking its DNS server), and a glibc host
+ * without the stub asks its DNS server too. Plain "localhost" still goes to
+ * the system resolver, which answers it from its hosts file everywhere. */
+static inline int aether_addr_is_localhost_name(const char* name) {
+    size_t n = strlen(name);
+    int rooted = n > 0 && name[n - 1] == '.';
+    if (rooted) n--;
+    if (n < 9) return 0;
+    const char* t = name + n - 9;
+    for (size_t i = 0; i < 9; i++) {
+        char c = t[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != "localhost"[i]) return 0;
+    }
+    if (n == 9) return rooted;          /* "localhost." yes, "localhost" no */
+    return n > 10 && t[-1] == '.';      /* a non-empty label before it */
+}
+
+/* The loopback addresses, port filled in: ::1 then 127.0.0.1, the order
+ * getaddrinfo gives "localhost" on a host with IPv6 (RFC 6724). */
+static inline void aether_addr_loopback(int port, AetherAddrList* out) {
+    struct sockaddr_in6* a6 = (struct sockaddr_in6*)&out->ss[0];
+    memset(&out->ss[0], 0, sizeof out->ss[0]);
+    a6->sin6_family = AF_INET6;
+    a6->sin6_port = htons((unsigned short)port);
+    a6->sin6_addr.s6_addr[15] = 1;
+    out->len[0] = (socklen_t)sizeof *a6;
+    struct sockaddr_in* a4 = (struct sockaddr_in*)&out->ss[1];
+    memset(&out->ss[1], 0, sizeof out->ss[1]);
+    a4->sin_family = AF_INET;
+    a4->sin_port = htons((unsigned short)port);
+    a4->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    out->len[1] = (socklen_t)sizeof *a4;
+    out->n = 2;
+}
+
 /* Every address `host` resolves to, port filled in, for dialling. Returns 0;
  * -2 when the resolver says the name does not exist (EAI_NONAME, or
  * EAI_NODATA where there is one), which a cache drops the name for; or -1
- * for any other failure, a resolver that did not answer among them. */
+ * for any other failure, a resolver that did not answer among them. A
+ * localhost. name (aether_addr_is_localhost_name) is loopback, and no
+ * resolver is asked. */
 static inline int aether_addr_resolve(const char* host, int port, AetherAddrList* out) {
     char bare[256];
     out->n = 0;
     if (!aether_addr_unbracket(host, bare, sizeof bare) || !bare[0]) return -1;
+    if (aether_addr_is_localhost_name(bare)) {
+        aether_addr_loopback(port, out);
+        return 0;
+    }
     char port_str[16];
     snprintf(port_str, sizeof port_str, "%d", port);
     struct addrinfo hints, *res = NULL;
@@ -175,6 +222,15 @@ static inline int aether_addr_bind(const char* host, int port, struct sockaddr_s
     }
     char bare[256];
     if (!aether_addr_unbracket(host, bare, sizeof bare) || !bare[0]) return -1;
+    if (aether_addr_is_localhost_name(bare)) {
+        /* Loopback, IPv4 as for any name ("localhost" binds 127.0.0.1). */
+        struct sockaddr_in* a = (struct sockaddr_in*)out;
+        a->sin_family = AF_INET;
+        a->sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        a->sin_port = htons((unsigned short)port);
+        *len = sizeof *a;
+        return 0;
+    }
     char port_str[16];
     snprintf(port_str, sizeof port_str, "%d", port);
     static const int families[2] = { AF_INET, AF_INET6 };
