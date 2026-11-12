@@ -103,7 +103,7 @@ fn count_via_spy(target: actor_ref, n: int) -> int {
     // Still -2: a Drain is on its way, and the cell must outlive it.
     if got == -2 { return -1 }
     sync.atomic_free(cell)
-    int answer = got   // a count, well inside an int
+    int answer = got // a count, well inside an int
     return answer
 }
 
