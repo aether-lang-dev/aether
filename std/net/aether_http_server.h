@@ -193,7 +193,9 @@ typedef struct HttpServer {
     int socket_fd;
     int port;
     char* host;
-    int is_running;
+    /* Cleared by http_server_stop on any thread, read by the server's accept
+     * loops on theirs, so atomic. */
+    _Atomic int is_running;
 
     // Server-side TLS (#260 Tier 0). When tls_enabled == 1, every
     // accepted connection is wrapped in SSL_accept before the HTTP
