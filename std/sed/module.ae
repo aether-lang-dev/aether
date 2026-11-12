@@ -1,0 +1,2597 @@
+// std.sed — FreeBSD's sed (usr.bin/sed) as a library.
+// Import with: import std.sed
+//
+// std.sed is a port of FreeBSD's sed, and carries its licence:
+//
+// SPDX-License-Identifier: BSD-3-Clause
+//
+// Copyright (c) 2013 Johann 'Myrkraverk' Oskarsson.
+// Copyright (c) 1992 Diomidis Spinellis.
+// Copyright (c) 1992, 1993, 1994
+//	The Regents of the University of California.  All rights reserved.
+//
+// This code is derived from software contributed to Berkeley by
+// Diomidis Spinellis of Imperial College, University of London.
+//
+// Redistribution and use in source and binary forms, with or without
+// modification, are permitted provided that the following conditions
+// are met:
+// 1. Redistributions of source code must retain the above copyright
+//    notice, this list of conditions and the following disclaimer.
+// 2. Redistributions in binary form must reproduce the above copyright
+//    notice, this list of conditions and the following disclaimer in the
+//    documentation and/or other materials provided with the distribution.
+// 3. Neither the name of the University nor the names of its contributors
+//    may be used to endorse or promote products derived from this software
+//    without specific prior written permission.
+//
+// THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+// ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+// IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+// ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+// FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+// DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+// OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+// HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+// LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+// OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+// SUCH DAMAGE.
+//
+//
+// A file-by-file port of FreeBSD's sed (compile.c, process.c, main.c,
+// misc.c, defs.h, extern.h; see PROVENANCE.md) on std.posix.regex, reshaped
+// as a library: a compiled program is a value, every run keeps its state in
+// its own stream, errors come back as values instead of exit(), and the w and
+// r commands and in-place editing reach files only through closures the
+// caller grants. Without a grant the module touches no file at all, so it
+// works in an `--emit=lib` build with no capabilities.
+//
+// Quick example:
+//
+//   import std.sed
+//
+//   main() {
+//       prog = sed.compile("s/[0-9][0-9]*/<&>/g", null) or { return }
+//       out, err = sed.run(prog, "a1b22\nc333\n")
+//       print(out)                  // a<1>b<22>\nc<333>\n
+//       sed.free(prog)
+//   }
+//
+// The sections below follow FreeBSD's files: "compile.c" parses a script
+// into a command list, "process.c" runs it over the input, "main.c" is the
+// input reader (cu_fgets over script units, mf_fgets over input files) and
+// "misc.c" the regerror wrapper. Where the C keeps globals, the port keeps
+// the same values in a SedParse (while compiling), a SedProgram (the result)
+// or a SedStream (one run).
+
+import std.posix.regex
+import std.string
+import std.strbuilder
+import std.longarr
+
+exports(
+    // options (the command line's flags)
+    options, options_free, quiet, extended, separate, in_place, in_place_span,
+    delay_wfiles, line_wrap, grant_files, add_expression, add_script,
+
+    // compile
+    compile, compile_units, free, warnings,
+
+    // run
+    run, run_files,
+    stream_new, stream_write, stream_close, stream_done, stream_free
+)
+
+// ---- defs.h ---------------------------------------------------------------
+
+// Address types (enum e_atype).
+const AT_RE = 1 // Line that match RE
+const AT_LINE = 2 // Specific line
+const AT_RELLINE = 3 // Relative line
+const AT_LAST = 4 // Last line
+
+// Argument types (enum e_args).
+const A_EMPTY = 0 // d D g G h H l n N p P q x = \0
+const A_TEXT = 1 // a c i
+const A_NONSEL = 2 // !
+const A_GROUP = 3 // {
+const A_ENDGROUP = 4 // }
+const A_COMMENT = 5 // #
+const A_BRANCH = 6 // b t
+const A_LABEL = 7 // :
+const A_RFILE = 8 // r
+const A_WFILE = 9 // w
+const A_SUBST = 10 // s
+const A_TR = 11 // y
+
+// Append types (struct s_appends).
+const AP_STRING = 0
+const AP_FILE = 1
+
+struct SedAddr {
+    kind: int // Address type
+    line: long // Line number
+    re: ptr // Regular expression (null: the last one used)
+}
+
+struct SedSubst {
+    n: int // Occurrence to subst.
+    p: int // True if p flag
+    icase: int // True if I flag
+    wfile: string // "" if no wfile
+    re: ptr // Regular expression (null: the last one used)
+    maxbref: int // Largest backreference.
+    linenum: long // Line number.
+    repl: string // Replacement text ("new" in the C)
+}
+
+// One multibyte mapping of a y command (struct trmulti).
+struct SedTrMulti {
+    next: *SedTrMulti
+    from: string
+    to: string
+}
+
+struct SedTr {
+    bytetab: ptr // longarr of 256: the byte a byte becomes; 0 means "look in multis"
+    multis: *SedTrMulti
+}
+
+struct SedCmd {
+    next: *SedCmd // Pointer to next command
+    a1: *SedAddr // Start address
+    a2: *SedAddr // End address
+    idx: int // Slot of this command's range state in a stream
+    t: string // Text for : a c i r w
+    has_t: int // t was given (b and t with no label have none)
+    c: *SedCmd // Command(s) for b t {
+    s: *SedSubst // Substitute command
+    y: *SedTr // Replace command array
+    code: int // Command code
+    nonsel: int // True if !
+    stack: *SedCmd // the { stack while compiling (the C reuses next)
+    all: *SedCmd // every command, for free
+}
+
+// Labels (struct labhash, a list rather than a hash table).
+struct SedLabel {
+    next: *SedLabel
+    cmd: *SedCmd
+    ref: int
+}
+
+// Every regex a program owns, for free.
+struct SedRe {
+    next: *SedRe
+    re: ptr
+}
+
+// Script units (struct s_compunit): -e strings and -f files.
+struct SedUnit {
+    next: *SedUnit
+    is_file: int
+    name: string
+    text: string
+}
+
+// The w files a program names, opened (truncated) when a run starts.
+struct SedWFile {
+    next: *SedWFile
+    name: string
+}
+
+// File access the caller grants: closures over its own file system.
+//   exists |path: string| -> int     1 when path can be read
+//   read   |path: string| -> string  path's bytes
+//   write  |path: string, data: string, truncate: int| -> string
+//          truncate 1: replace the file with data (creating it);
+//          truncate 0: append data. Returns "" or an error message.
+struct SedFiles {
+    exists: fn
+    read: fn
+    write: fn
+}
+
+// The command line's flags.
+struct SedOptions {
+    nflag: int // -n
+    rflags: int // -E
+    separate: int // -s
+    inplace: int // -i / -I
+    suffix: string // their backup extension
+    ispan: int // -I: in-place editing spans files
+    aflag: int // -a
+    wrap: int // l's line length
+    files: *SedFiles
+    units: *SedUnit
+    units_tail: *SedUnit
+}
+
+// A compiled program (prog and the compile-time globals of the C).
+struct SedProgram {
+    prog: *SedCmd
+    all: *SedCmd
+    ncmds: int
+    maxnsub: int
+    maxre: ptr // the regex with maxnsub groups, to size match buffers
+    res: *SedRe
+    appendnum: int
+    nflag: int
+    rflags: int
+    separate: int
+    inplace: int
+    suffix: string
+    ispan: int
+    aflag: int
+    wrap: int
+    files: *SedFiles
+    wfiles: *SedWFile
+    warn: string // warnx() output, one per line
+}
+
+// Compile-time state (compile.c's statics and main.c's cu_fgets state).
+struct SedParse {
+    pg: *SedProgram
+    unit: *SedUnit // script: the current compilation unit
+    st: int // cu_fgets state: 0 ST_EOF, 1 ST_FILE, 2 ST_STRING
+    ustr: string // the unit's text
+    upos: int // read position in it
+    more: int
+    linenum: long
+    fname: string
+    line: string // the current line (lbuf)
+    p: int // the parse position in line (char *p)
+    err: string
+    labels: *SedLabel
+    link_owner: *SedCmd // link: where the next command goes
+    link_kind: int // 0 prog, 1 owner.next, 2 owner.c
+    last: *SedCmd
+}
+
+// ---- options --------------------------------------------------------------
+
+// Default options: what `sed script` does with no flags.
+options() -> ptr {
+    o = heap.new(SedOptions)
+    o.nflag = 0
+    o.rflags = 0
+    o.separate = 0
+    o.inplace = 0
+    o.suffix = ""
+    o.ispan = 0
+    o.aflag = 0
+    o.wrap = 60
+    o.files = null
+    o.units = null
+    o.units_tail = null
+    return o as ptr
+}
+
+options_free(op: @frees ptr) {
+    if op == null { return }
+    o = op as *SedOptions
+    u = o.units
+    while u != null {
+        nx = u.next
+        heap.free(u)
+        u = nx
+    }
+    if o.files != null { heap.free(o.files) }
+    heap.free(o)
+}
+
+// -n: print only what the script prints.
+quiet(op: ptr) { (op as *SedOptions).nflag = 1 }
+
+// -E: Extended regular expressions.
+extended(op: ptr) { (op as *SedOptions).rflags = regex.EXTENDED }
+
+// -s: each input file on its own: line numbers restart, $ is each file's
+// last line, and the hold space and ranges reset, as -i treats files.
+separate(op: ptr) { (op as *SedOptions).separate = 1 }
+
+// -i suffix: edit the files run_files is given in place, one at a time
+// (implies separate), keeping a copy of each as name + suffix unless suffix
+// is "". Needs grant_files.
+in_place(op: ptr, suffix: string) {
+    o = op as *SedOptions
+    o.inplace = 1
+    o.suffix = suffix
+    o.ispan = 0
+}
+
+// -I suffix: as in_place, but line numbers, $ and the hold space span the
+// files, as if they were one input.
+in_place_span(op: ptr, suffix: string) {
+    o = op as *SedOptions
+    o.inplace = 1
+    o.suffix = suffix
+    o.ispan = 1
+}
+
+// -a: create (truncate) w files when first written, not when a run starts.
+delay_wfiles(op: ptr) { (op as *SedOptions).aflag = 1 }
+
+// The line length the l command folds at (FreeBSD: COLUMNS, the terminal's
+// width, or 60 when output is not a terminal; here 60 unless set).
+line_wrap(op: ptr, n: int) { (op as *SedOptions).wrap = n }
+
+// Grant file access for r, w and the w flag of s, and for run_files and
+// in-place editing. See SedFiles for the three closures.
+grant_files(op: ptr, exists_fn: @keep fn, read_fn: @keep fn, write_fn: @keep fn) {
+    o = op as *SedOptions
+    f = heap.new(SedFiles)
+    f.exists = exists_fn
+    f.read = read_fn
+    f.write = write_fn
+    if o.files != null { heap.free(o.files) }
+    o.files = f
+}
+
+add_unit(o: *SedOptions, is_file: int, name: string, text: string) {
+    u = heap.new(SedUnit)
+    u.next = null
+    u.is_file = is_file
+    u.name = name
+    u.text = text
+    if o.units_tail == null {
+        o.units = u
+    } else {
+        o.units_tail.next = u
+    }
+    o.units_tail = u
+}
+
+// -e text: a script unit for compile_units (a newline is added, as sed does).
+add_expression(op: ptr, text: string) {
+    add_unit(op as *SedOptions, 0, "", "${text}\n")
+}
+
+// -f name: a script file's contents as a unit for compile_units; name is
+// what error messages call it.
+add_script(op: ptr, name: string, text: string) {
+    add_unit(op as *SedOptions, 1, name, text)
+}
+
+// ---- misc.c ---------------------------------------------------------------
+
+isspace_b(c: int) -> int {
+    if c == 32 || (c >= 9 && c <= 13) { return 1 }
+    return 0
+}
+
+isdigit_b(c: int) -> int {
+    if c >= 48 && c <= 57 { return 1 }
+    return 0
+}
+
+// The byte at i, or 0 (C's terminating NUL) past the end.
+ch(s: string, i: int) -> int {
+    if i < 0 || i >= string.length(s) { return 0 }
+    return string.char_at(s, i)
+}
+
+one(c: int) -> string {
+    return string.from_char(c)
+}
+
+// UTF-8 sequence length at s[i] (mbrlen): 1-4, or -1 for an invalid or
+// truncated sequence.
+u8len(s: string, i: int) -> int {
+    c = ch(s, i)
+    n = 0
+    if c < 128 {
+        return 1
+    } else if c >= 194 && c <= 223 {
+        n = 2
+    } else if c >= 224 && c <= 239 {
+        n = 3
+    } else if c >= 240 && c <= 244 {
+        n = 4
+    } else {
+        return -1
+    }
+    k = 1
+    while k < n {
+        d = ch(s, i + k)
+        if d < 128 || d > 191 { return -1 }
+        k = k + 1
+    }
+    c1 = ch(s, i + 1)
+    if c == 224 && c1 < 160 { return -1 }
+    if c == 237 && c1 > 159 { return -1 }
+    if c == 240 && c1 < 144 { return -1 }
+    if c == 244 && c1 > 143 { return -1 }
+    return n
+}
+
+// ---- main.c: cu_fgets -----------------------------------------------------
+
+// The string_ident of a string unit: the text in quotes, cut to fit the
+// C's 30-byte buffer with " ...\"".
+string_ident(s: string) -> string {
+    q = "\"${s}\""
+    if string.length(q) >= 29 {
+        return "${string.substring(q, 0, 24)} ...\""
+    }
+    return q
+}
+
+// Like fgets, but go through the chain of compilation units chaining them
+// together. Empty strings and files are ignored. Returns 1 with ctx.line
+// set, or 0 at the end of the script.
+cu_fgets(ctx: *SedParse) -> int {
+    while 1 == 1 {
+        if ctx.st == 0 {
+            // ST_EOF
+            if ctx.unit == null {
+                ctx.more = 0
+                return 0
+            }
+            ctx.linenum = 0
+            ctx.ustr = ctx.unit.text
+            ctx.upos = 0
+            if ctx.unit.is_file == 1 {
+                ctx.fname = ctx.unit.name
+                ctx.st = 1
+            } else {
+                ctx.fname = string_ident(ctx.unit.text)
+                ctx.st = 2
+            }
+            continue
+        }
+        n = string.length(ctx.ustr)
+        if ctx.st == 2 && ctx.linenum == 0 && ch(ctx.ustr, ctx.upos) == 35 && ch(ctx.ustr, ctx.upos + 1) == 110 {
+            ctx.pg.nflag = 1
+        }
+        if ctx.upos >= n {
+            // The end of this unit. A file (fgets) just ends; a string that
+            // was not empty gives one more, empty, line first, as the C's
+            // ST_STRING does when it reaches the NUL after a newline.
+            ctx.unit = ctx.unit.next
+            if ctx.st == 2 && ctx.upos > 0 {
+                ctx.st = 0
+                ctx.line = ""
+                ctx.linenum = ctx.linenum + 1
+                ctx.more = 0
+                ctx.p = 0
+                return 1
+            }
+            ctx.st = 0
+            continue
+        }
+        e = ctx.upos
+        while e < n && string.char_at(ctx.ustr, e) != 10 { e = e + 1 }
+        nl = 0
+        if e < n {
+            e = e + 1
+            nl = 1
+        }
+        ctx.line = string.substring(ctx.ustr, ctx.upos, e)
+        ctx.upos = e
+        ctx.linenum = ctx.linenum + 1
+        if ctx.st == 1 {
+            if ctx.linenum == 1 && ch(ctx.line, 0) == 35 && ch(ctx.line, 1) == 110 {
+                ctx.pg.nflag = 1
+            }
+            // !feof(f): fgets hits the end only on a line with no newline
+            ctx.more = nl
+        } else {
+            ctx.more = 0
+            if nl == 0 {
+                // the string ended without a newline: this was its last line
+                ctx.unit = ctx.unit.next
+                ctx.st = 0
+            }
+        }
+        ctx.p = 0
+        return 1
+    }
+}
+
+// ---- compile.c ------------------------------------------------------------
+
+// errx(): the first error wins, as the C stops at it.
+cerr(ctx: *SedParse, msg: string) {
+    if ctx.err == "" { ctx.err = "${ctx.linenum}: ${ctx.fname}: ${msg}" }
+}
+
+warnx(pg: *SedProgram, msg: string) {
+    pg.warn = "${pg.warn}${msg}\n"
+}
+
+eatspace(ctx: *SedParse) {
+    while isspace_b(ch(ctx.line, ctx.p)) == 1 { ctx.p = ctx.p + 1 }
+}
+
+// Command specification (cmd_fmts): the number of addresses, and the
+// argument type; -1 when c is no command.
+cmd_naddr(c: int) -> int {
+    match (c) {
+        123 -> { return 2 } // {
+        125 -> { return 0 } // }
+        97 -> { return 1 } // a
+        105 -> { return 1 } // i
+        113 -> { return 1 } // q
+        114 -> { return 1 } // r
+        61 -> { return 1 } // =
+        58 -> { return 0 } // :
+        35 -> { return 0 } // #
+        98 -> { return 2 } // b
+        99 -> { return 2 } // c
+        100 -> { return 2 } // d
+        68 -> { return 2 } // D
+        103 -> { return 2 } // g
+        71 -> { return 2 } // G
+        104 -> { return 2 } // h
+        72 -> { return 2 } // H
+        108 -> { return 2 } // l
+        110 -> { return 2 } // n
+        78 -> { return 2 } // N
+        112 -> { return 2 } // p
+        80 -> { return 2 } // P
+        115 -> { return 2 } // s
+        116 -> { return 2 } // t
+        119 -> { return 2 } // w
+        120 -> { return 2 } // x
+        121 -> { return 2 } // y
+        33 -> { return 2 } // !
+        _ -> { return -1 }
+    }
+}
+
+cmd_args(c: int) -> int {
+    match (c) {
+        123 -> { return A_GROUP }
+        125 -> { return A_ENDGROUP }
+        97 -> { return A_TEXT }
+        99 -> { return A_TEXT }
+        105 -> { return A_TEXT }
+        98 -> { return A_BRANCH }
+        116 -> { return A_BRANCH }
+        114 -> { return A_RFILE }
+        119 -> { return A_WFILE }
+        115 -> { return A_SUBST }
+        121 -> { return A_TR }
+        33 -> { return A_NONSEL }
+        58 -> { return A_LABEL }
+        35 -> { return A_COMMENT }
+        _ -> { return A_EMPTY }
+    }
+}
+
+new_cmd(ctx: *SedParse) -> *SedCmd {
+    cmd = heap.new(SedCmd)
+    cmd.next = null
+    cmd.a1 = null
+    cmd.a2 = null
+    cmd.idx = ctx.pg.ncmds
+    cmd.t = ""
+    cmd.has_t = 0
+    cmd.c = null
+    cmd.s = null
+    cmd.y = null
+    cmd.code = 0
+    cmd.nonsel = 0
+    cmd.stack = null
+    cmd.all = ctx.pg.all
+    ctx.pg.all = cmd
+    ctx.pg.ncmds = ctx.pg.ncmds + 1
+    return cmd
+}
+
+// *link = cmd
+set_link(ctx: *SedParse, cmd: *SedCmd) {
+    if ctx.link_kind == 0 {
+        ctx.pg.prog = cmd
+    } else if ctx.link_kind == 1 {
+        ctx.link_owner.next = cmd
+    } else {
+        ctx.link_owner.c = cmd
+    }
+}
+
+new_addr() -> *SedAddr {
+    a = heap.new(SedAddr)
+    a.kind = 0
+    a.line = 0
+    a.re = null
+    return a
+}
+
+// addrchar(): valid characters to start an address.
+addrchar(c: int) -> int {
+    if c == 0 { return 0 }
+    if isdigit_b(c) == 1 || c == 47 || c == 92 || c == 36 { return 1 }
+    return 0
+}
+
+compile_stream(ctx: *SedParse) {
+    var stack: *SedCmd = null
+    while 1 == 1 {
+        if cu_fgets(ctx) == 0 {
+            if stack != null { cerr(ctx, "unexpected EOF (pending }'s)") }
+            return
+        }
+        // semicolon: the commands on this line, one per pass
+        again = 1
+        while again == 1 {
+            again = 0
+            eatspace(ctx)
+            c0 = ch(ctx.line, ctx.p)
+            if c0 == 35 || c0 == 0 { break }
+            if c0 == 59 {
+                ctx.p = ctx.p + 1
+                again = 1
+                continue
+            }
+            cmd = new_cmd(ctx)
+            set_link(ctx, cmd)
+            ctx.link_owner = cmd
+            ctx.link_kind = 1
+
+            // First parse the addresses
+            naddr = 0
+            if addrchar(c0) == 1 {
+                naddr = naddr + 1
+                cmd.a1 = new_addr()
+                compile_addr(ctx, cmd.a1)
+                if ctx.err != "" { return }
+                eatspace(ctx) // EXTENSION
+                if ch(ctx.line, ctx.p) == 44 {
+                    ctx.p = ctx.p + 1
+                    eatspace(ctx) // EXTENSION
+                    naddr = naddr + 1
+                    cmd.a2 = new_addr()
+                    compile_addr(ctx, cmd.a2)
+                    if ctx.err != "" { return }
+                    eatspace(ctx)
+                }
+            }
+
+            // nonsel: Now parse the command
+            args = 0
+            parsing = 1
+            while parsing == 1 {
+                c = ch(ctx.line, ctx.p)
+                if c == 0 {
+                    cerr(ctx, "command expected")
+                    return
+                }
+                cmd.code = c
+                na = cmd_naddr(c)
+                if na < 0 {
+                    cerr(ctx, "invalid command code ${one(c)}")
+                    return
+                }
+                if naddr > na {
+                    cerr(ctx, "command ${one(c)} expects up to ${na} address(es), found ${naddr}")
+                    return
+                }
+                args = cmd_args(c)
+                if args == A_NONSEL {
+                    ctx.p = ctx.p + 1
+                    eatspace(ctx)
+                    cmd.nonsel = 1
+                } else {
+                    parsing = 0
+                }
+            }
+
+            if args == A_GROUP {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                cmd.stack = stack
+                stack = cmd
+                ctx.link_owner = cmd
+                ctx.link_kind = 2
+                if ch(ctx.line, ctx.p) != 0 { again = 1 }
+            } else if args == A_ENDGROUP || args == A_EMPTY {
+                if args == A_ENDGROUP {
+                    // Short-circuit command processing, since end of
+                    // group is really just a noop.
+                    cmd.nonsel = 1
+                    if stack == null {
+                        cerr(ctx, "unexpected }")
+                        return
+                    }
+                    cmd2 = stack
+                    stack = cmd2.stack
+                    cmd2.next = cmd
+                }
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) == 59 {
+                    ctx.p = ctx.p + 1
+                    again = 1
+                } else if ch(ctx.line, ctx.p) != 0 {
+                    cerr(ctx, "extra characters at the end of ${one(cmd.code)} command")
+                    return
+                }
+            } else if args == A_TEXT {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) != 92 {
+                    cerr(ctx, "command ${one(cmd.code)} expects \\ followed by text")
+                    return
+                }
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) != 0 {
+                    cerr(ctx, "extra characters after \\ at the end of ${one(cmd.code)} command")
+                    return
+                }
+                cmd.t = compile_text(ctx)
+                cmd.has_t = 1
+            } else if args == A_WFILE {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) == 0 {
+                    cerr(ctx, "filename expected")
+                    return
+                }
+                cmd.t = duptoeol(ctx, "w command")
+                cmd.has_t = 1
+                add_wfile(ctx.pg, cmd.t)
+            } else if args == A_RFILE {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) == 0 {
+                    cerr(ctx, "filename expected")
+                    return
+                }
+                cmd.t = duptoeol(ctx, "read command")
+                cmd.has_t = 1
+            } else if args == A_BRANCH {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) != 0 {
+                    cmd.t = duptoeol(ctx, "branch")
+                    cmd.has_t = 1
+                }
+            } else if args == A_LABEL {
+                ctx.p = ctx.p + 1
+                eatspace(ctx)
+                cmd.t = duptoeol(ctx, "label")
+                cmd.has_t = 1
+                if string.length(cmd.t) == 0 {
+                    cerr(ctx, "empty label")
+                    return
+                }
+                enterlabel(ctx, cmd)
+                if ctx.err != "" { return }
+            } else if args == A_SUBST {
+                ctx.p = ctx.p + 1
+                d = ch(ctx.line, ctx.p)
+                if d == 0 || d == 92 {
+                    cerr(ctx, "substitute pattern can not be delimited by newline or backslash")
+                    return
+                }
+                sub = heap.new(SedSubst)
+                sub.n = 1
+                sub.p = 0
+                sub.icase = 0
+                sub.wfile = ""
+                sub.re = null
+                sub.maxbref = 0
+                sub.linenum = 0
+                sub.repl = ""
+                cmd.s = sub
+                re = compile_delimited(ctx, 0)
+                if ctx.err != "" { return }
+                if ctx.p < 0 {
+                    ctx.p = 0
+                    cerr(ctx, "unterminated substitute pattern")
+                    return
+                }
+                // Compile RE with no case sensitivity temporarily
+                if string.length(re) > 0 {
+                    sub.re = compile_re(ctx, re, 0)
+                    if ctx.err != "" { return }
+                }
+                ctx.p = ctx.p - 1
+                compile_subst(ctx, sub)
+                if ctx.err != "" { return }
+                compile_flags(ctx, sub)
+                if ctx.err != "" { return }
+                // Recompile RE with case sensitivity from "I" flag if any
+                if sub.re != null {
+                    forget_re(ctx.pg, sub.re)
+                    sub.re = compile_re(ctx, re, sub.icase)
+                    if ctx.err != "" { return }
+                }
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) == 59 {
+                    ctx.p = ctx.p + 1
+                    again = 1
+                }
+            } else if args == A_TR {
+                ctx.p = ctx.p + 1
+                cmd.y = compile_tr(ctx)
+                if ctx.err != "" { return }
+                eatspace(ctx)
+                if ch(ctx.line, ctx.p) == 59 {
+                    ctx.p = ctx.p + 1
+                    again = 1
+                } else if ch(ctx.line, ctx.p) != 0 {
+                    cerr(ctx, "extra text at the end of a transform command")
+                    return
+                }
+            }
+            // A_COMMENT: nothing
+        }
+    }
+}
+
+hexdigit(c: int) -> int {
+    if isdigit_b(c) == 1 { return 1 }
+    if (c >= 97 && c <= 102) || (c >= 65 && c <= 70) { return 1 }
+    return 0
+}
+
+hexval(c: int) -> int {
+    if isdigit_b(c) == 1 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    return c - 55
+}
+
+// dohex(): one or two hex digits at s[i]. Returns value + 256 * length, or
+// -1 when s[i] is no hex digit.
+dohex(s: string, i: int) -> int {
+    if hexdigit(ch(s, i)) == 0 { return -1 }
+    if hexdigit(ch(s, i + 1)) == 1 {
+        return hexval(ch(s, i)) * 16 + hexval(ch(s, i + 1)) + 512
+    }
+    return hexval(ch(s, i)) + 256
+}
+
+// Get a delimited string. ctx.p is at the delimiter of the string. Newline
+// and delimiter escapes are processed; other escapes are ignored. Returns
+// the processed string with ctx.p just after the final delimiter, or sets
+// ctx.p to -1 for a non-terminated string.
+compile_delimited(ctx: *SedParse, is_tr: int) -> string {
+    line = ctx.line
+    p = ctx.p
+    c = ch(line, p)
+    p = p + 1
+    if c == 0 {
+        ctx.p = -1
+        return ""
+    } else if c == 92 {
+        cerr(ctx, "\\ can not be used as a string delimiter")
+        return ""
+    } else if c == 10 {
+        cerr(ctx, "newline can not be used as a string delimiter")
+        return ""
+    }
+    d = strbuilder.new(64)
+    while ch(line, p) != 0 {
+        cp = ch(line, p)
+        cp1 = ch(line, p + 1)
+        if cp == 91 && cp != c {
+            if is_tr == 0 {
+                np = compile_ccl(line, p, d)
+                if np < 0 {
+                    strbuilder.free(d)
+                    cerr(ctx, "unbalanced brackets ([])")
+                    return ""
+                }
+                p = np
+                continue
+            }
+        } else if cp == 92 && cp1 == 91 {
+            if is_tr == 1 {
+                p = p + 1
+            } else {
+                strbuilder.append_byte(d, cp)
+                p = p + 1
+            }
+        } else if cp == 92 && cp1 == c {
+            p = p + 1
+        } else if cp == 92 && (cp1 == 110 || cp1 == 114 || cp1 == 116) {
+            if cp1 == 110 {
+                strbuilder.append_byte(d, 10)
+            } else if cp1 == 114 {
+                strbuilder.append_byte(d, 13)
+            } else {
+                strbuilder.append_byte(d, 9)
+            }
+            p = p + 2
+            continue
+        } else if cp == 92 && cp1 == 120 {
+            hx = dohex(line, p + 2)
+            if hx >= 0 {
+                strbuilder.append_byte(d, hx % 256)
+                p = p + hx / 256 + 2
+                continue
+            }
+        } else if cp == 92 && cp1 == 92 {
+            if is_tr == 1 {
+                p = p + 1
+            } else {
+                strbuilder.append_byte(d, cp)
+                p = p + 1
+            }
+        } else if cp == c {
+            ctx.p = p + 1
+            return strbuilder.finish(d)
+        }
+        strbuilder.append_byte(d, ch(line, p))
+        p = p + 1
+    }
+    strbuilder.free(d)
+    ctx.p = -1
+    return ""
+}
+
+// compile_ccl: expand a POSIX character class. s[i] is the '['; appends to
+// t and returns the index after the ']', or -1 when it is unbalanced.
+compile_ccl(s: string, i0: int, t: ptr) -> int {
+    i = i0
+    strbuilder.append_byte(t, ch(s, i))
+    i = i + 1
+    if ch(s, i) == 94 {
+        strbuilder.append_byte(t, 94)
+        i = i + 1
+    }
+    if ch(s, i) == 93 {
+        strbuilder.append_byte(t, 93)
+        i = i + 1
+    }
+    while ch(s, i) != 0 && ch(s, i) != 93 {
+        c = ch(s, i)
+        d = ch(s, i + 1)
+        if c == 91 && (d == 46 || d == 58 || d == 61) {
+            // [. .], [: :], [= =]: copied whole
+            strbuilder.append_byte(t, c)
+            strbuilder.append_byte(t, d)
+            i = i + 2
+            prev = d
+            closed = 0
+            while closed == 0 {
+                x = ch(s, i)
+                if x == 0 { return -1 }
+                strbuilder.append_byte(t, x)
+                if x == 93 && prev == d { closed = 1 }
+                prev = x
+                i = i + 1
+            }
+            continue
+        } else if c == 92 {
+            if d == 110 {
+                strbuilder.append_byte(t, 10)
+                i = i + 2
+                continue
+            } else if d == 114 {
+                strbuilder.append_byte(t, 13)
+                i = i + 2
+                continue
+            } else if d == 116 {
+                strbuilder.append_byte(t, 9)
+                i = i + 2
+                continue
+            } else if d == 120 {
+                hx = dohex(s, i + 2)
+                if hx >= 0 {
+                    strbuilder.append_byte(t, hx % 256)
+                    i = i + hx / 256 + 2
+                    continue
+                }
+            }
+        }
+        strbuilder.append_byte(t, c)
+        i = i + 1
+    }
+    if ch(s, i) != 93 { return -1 }
+    strbuilder.append_byte(t, 93)
+    return i + 1
+}
+
+// Remember a compiled regex so free() releases it.
+keep_re(pg: *SedProgram, re: @keep ptr) {
+    r = heap.new(SedRe)
+    r.re = re
+    r.next = pg.res
+    pg.res = r
+}
+
+// Release a regex the program will not use after all.
+forget_re(pg: *SedProgram, re: ptr) {
+    var prev: *SedRe = null
+    r = pg.res
+    while r != null {
+        if r.re == re {
+            if prev == null { pg.res = r.next } else { prev.next = r.next }
+            if pg.maxre == re { pg.maxre = null }
+            regex.free(re)
+            heap.free(r)
+            return
+        }
+        prev = r
+        r = r.next
+    }
+}
+
+// Compiles the regular expression in re and returns it.
+compile_re(ctx: *SedParse, re: string, case_insensitive: int) -> ptr {
+    flags = ctx.pg.rflags
+    if case_insensitive == 1 { flags = flags | regex.ICASE }
+    rep, err = regex.compile(re, flags)
+    if err != "" {
+        cerr(ctx, "RE error: ${err}")
+        return null
+    }
+    keep_re(ctx.pg, rep)
+    if ctx.pg.maxre == null || ctx.pg.maxnsub < regex.nsub(rep) {
+        if ctx.pg.maxnsub < regex.nsub(rep) { ctx.pg.maxnsub = regex.nsub(rep) }
+        ctx.pg.maxre = rep
+    }
+    return rep
+}
+
+// Compile the substitution string of a regular expression into s.repl.
+// ctx.p is at the terminator (the s command's delimiter).
+compile_subst(ctx: *SedParse, s: *SedSubst) {
+    c = ch(ctx.line, ctx.p) // Terminator character
+    ctx.p = ctx.p + 1
+    if c == 0 { return }
+    s.maxbref = 0
+    s.linenum = ctx.linenum
+    sp = strbuilder.new(64)
+    sawesc = 0
+    while 1 == 1 {
+        while ch(ctx.line, ctx.p) != 0 {
+            cur = ch(ctx.line, ctx.p)
+            if cur == 92 || sawesc == 1 {
+                // If this is a continuation from the last buffer, we
+                // won't have a character to skip over.
+                if sawesc == 1 {
+                    sawesc = 0
+                } else {
+                    ctx.p = ctx.p + 1
+                }
+                cur = ch(ctx.line, ctx.p)
+                if cur == 0 {
+                    // This escaped character is continued in the next
+                    // part of the line.
+                    sawesc = 1
+                    continue
+                } else if cur >= 49 && cur <= 57 {
+                    strbuilder.append_byte(sp, 92)
+                    ref = cur - 48
+                    if s.re != null && ref > regex.nsub(s.re) {
+                        strbuilder.free(sp)
+                        cerr(ctx, "\\${one(cur)} not defined in the RE")
+                        return
+                    }
+                    if s.maxbref < ref { s.maxbref = ref }
+                } else if cur == 38 || cur == 92 {
+                    strbuilder.append_byte(sp, 92)
+                } else if cur == 110 {
+                    cur = 10
+                } else if cur == 114 {
+                    cur = 13
+                } else if cur == 116 {
+                    cur = 9
+                } else if cur == 120 {
+                    hx = dohex(ctx.line, ctx.p + 1)
+                    if hx >= 0 {
+                        cur = hx % 256
+                        ctx.p = ctx.p + hx / 256
+                    }
+                }
+            } else if cur == c {
+                ctx.p = ctx.p + 1
+                if ch(ctx.line, ctx.p) == 0 && ctx.more == 1 {
+                    if cu_fgets(ctx) == 1 { ctx.p = 0 }
+                }
+                s.repl = strbuilder.finish(sp)
+                return
+            } else if cur == 10 {
+                strbuilder.free(sp)
+                cerr(ctx, "unescaped newline inside substitute pattern")
+                return
+            }
+            strbuilder.append_byte(sp, cur)
+            ctx.p = ctx.p + 1
+        }
+        if cu_fgets(ctx) == 0 { break }
+    }
+    strbuilder.free(sp)
+    cerr(ctx, "unterminated substitute in regular expression")
+}
+
+// Compile the flags of the s command
+compile_flags(ctx: *SedParse, s: *SedSubst) {
+    s.n = 1 // Default
+    s.p = 0
+    s.wfile = ""
+    s.icase = 0
+    gn = 0 // True if we have seen g or n
+    while 1 == 1 {
+        eatspace(ctx) // EXTENSION
+        c = ch(ctx.line, ctx.p)
+        if c == 103 {
+            if gn == 1 {
+                cerr(ctx, "more than one number or 'g' in substitute flags")
+                return
+            }
+            gn = 1
+            s.n = 0
+        } else if c == 0 || c == 10 || c == 59 {
+            return
+        } else if c == 112 {
+            s.p = 1
+        } else if c == 105 || c == 73 {
+            s.icase = 1
+        } else if c >= 49 && c <= 57 {
+            if gn == 1 {
+                cerr(ctx, "more than one number or 'g' in substitute flags")
+                return
+            }
+            gn = 1
+            var nval: long = 0
+            while isdigit_b(ch(ctx.line, ctx.p)) == 1 {
+                nval = nval * 10 + (ch(ctx.line, ctx.p) - 48)
+                if nval > 2147483647 {
+                    cerr(ctx, "overflow in the 'N' substitute flag")
+                    return
+                }
+                ctx.p = ctx.p + 1
+            }
+            s.n = nval as int
+            ctx.p = ctx.p - 1
+        } else if c == 119 {
+            ctx.p = ctx.p + 1
+            eatspace(ctx)
+            st = ctx.p
+            while ch(ctx.line, ctx.p) != 0 && ch(ctx.line, ctx.p) != 10 { ctx.p = ctx.p + 1 }
+            if ctx.p == st {
+                cerr(ctx, "no wfile specified")
+                return
+            }
+            s.wfile = string.substring(ctx.line, st, ctx.p)
+            add_wfile(ctx.pg, s.wfile)
+            return
+        } else {
+            cerr(ctx, "bad flag in substitute command: '${one(c)}'")
+            return
+        }
+        ctx.p = ctx.p + 1
+    }
+}
+
+// The number of UTF-8 characters in s (mbsrtowcs), or -1 when s is not UTF-8.
+u8count(s: string) -> int {
+    n = 0
+    i = 0
+    while i < string.length(s) {
+        if string.char_at(s, i) == 0 { return n }
+        k = u8len(s, i)
+        if k < 0 { return -1 }
+        i = i + k
+        n = n + 1
+    }
+    return n
+}
+
+// Compile a translation set of strings into a lookup table.
+compile_tr(ctx: *SedParse) -> *SedTr {
+    c = ch(ctx.line, ctx.p)
+    if c == 0 || c == 92 {
+        cerr(ctx, "transform pattern can not be delimited by newline or backslash")
+        return null
+    }
+    old = compile_delimited(ctx, 1)
+    if ctx.err != "" { return null }
+    if ctx.p < 0 {
+        ctx.p = 0
+        cerr(ctx, "unterminated transform source string")
+        return null
+    }
+    ctx.p = ctx.p - 1
+    nw = compile_delimited(ctx, 1)
+    if ctx.err != "" { return null }
+    if ctx.p < 0 {
+        ctx.p = 0
+        cerr(ctx, "unterminated transform target string")
+        return null
+    }
+    eatspace(ctx)
+    oldlen = u8count(old)
+    newlen = u8count(nw)
+    if oldlen < 0 || newlen < 0 {
+        cerr(ctx, "Illegal byte sequence")
+        return null
+    }
+    if newlen != oldlen {
+        cerr(ctx, "transform strings are not the same length")
+        return null
+    }
+    y = heap.new(SedTr)
+    y.multis = null
+    // Generate a lookup table for single-byte characters. The first bytes
+    // of multi-byte characters have their entries set to 0, which makes
+    // do_tr() search the multibyte mappings.
+    tab = longarr.longarr_new_filled_raw(256, 0)
+    i = 0
+    while i < 128 {
+        longarr.longarr_set_raw(tab, i, i)
+        i = i + 1
+    }
+    y.bytetab = tab
+    op = 0
+    np = 0
+    while ch(old, op) != 0 {
+        oclen = u8len(old, op)
+        nclen = u8len(nw, np)
+        if oclen == 1 && nclen == 1 {
+            longarr.longarr_set_raw(tab, ch(old, op), ch(nw, np))
+        } else {
+            longarr.longarr_set_raw(tab, ch(old, op), 0)
+            m = heap.new(SedTrMulti)
+            m.from = string.substring(old, op, op + oclen)
+            m.to = string.substring(nw, np, np + nclen)
+            m.next = null
+            // keep the C's order: later entries after earlier ones
+            if y.multis == null {
+                y.multis = m
+            } else {
+                last = y.multis
+                while last.next != null { last = last.next }
+                last.next = m
+            }
+        }
+        op = op + oclen
+        np = np + nclen
+    }
+    return y
+}
+
+// Compile the text following an a, c, or i command.
+compile_text(ctx: *SedParse) -> string {
+    text = strbuilder.new(64)
+    while cu_fgets(ctx) == 1 {
+        p = 0
+        esc_nl = 0
+        while ch(ctx.line, p) != 0 {
+            c = ch(ctx.line, p)
+            if c == 92 && ch(ctx.line, p + 1) != 0 {
+                p = p + 1
+                c = ch(ctx.line, p)
+                if c == 10 { esc_nl = 1 }
+            }
+            strbuilder.append_byte(text, c)
+            p = p + 1
+        }
+        if esc_nl == 0 { break }
+    }
+    ctx.p = string.length(ctx.line)
+    return strbuilder.finish(text)
+}
+
+// strtol(p, &end, 10) on the line: returns the value, leaves ctx.p at end.
+strtol10(ctx: *SedParse) -> long {
+    i = ctx.p
+    while isspace_b(ch(ctx.line, i)) == 1 { i = i + 1 }
+    neg = 0
+    if ch(ctx.line, i) == 43 || ch(ctx.line, i) == 45 {
+        if ch(ctx.line, i) == 45 { neg = 1 }
+        i = i + 1
+    }
+    if isdigit_b(ch(ctx.line, i)) == 0 { return 0 }
+    var v: long = 0
+    while isdigit_b(ch(ctx.line, i)) == 1 {
+        v = v * 10 + (ch(ctx.line, i) - 48)
+        i = i + 1
+    }
+    ctx.p = i
+    if neg == 1 { return 0 - v }
+    return v
+}
+
+// Get an address; ctx.p moves past it.
+compile_addr(ctx: *SedParse, a: *SedAddr) {
+    a.kind = 0
+    c = ch(ctx.line, ctx.p)
+    if c == 92 || c == 47 {
+        // Context address
+        if c == 92 { ctx.p = ctx.p + 1 }
+        re = compile_delimited(ctx, 0)
+        if ctx.err != "" { return }
+        if ctx.p < 0 {
+            ctx.p = 0
+            cerr(ctx, "unterminated regular expression")
+            return
+        }
+        // Check for case insensitive regexp flag
+        icase = 0
+        if ch(ctx.line, ctx.p) == 73 {
+            icase = 1
+            ctx.p = ctx.p + 1
+        }
+        if string.length(re) > 0 {
+            a.re = compile_re(ctx, re, icase)
+        }
+        a.kind = AT_RE
+        return
+    }
+    if c == 36 {
+        // Last line
+        a.kind = AT_LAST
+        ctx.p = ctx.p + 1
+        return
+    }
+    if c == 43 {
+        // Relative line number
+        a.kind = AT_RELLINE
+        ctx.p = ctx.p + 1
+    }
+    if c == 43 || isdigit_b(c) == 1 {
+        if a.kind == 0 { a.kind = AT_LINE }
+        a.line = strtol10(ctx)
+        return
+    }
+    cerr(ctx, "expected context address")
+}
+
+// Return a copy of all the characters up to \n or the end of the line.
+duptoeol(ctx: *SedParse, ctype: string) -> string {
+    st = ctx.p
+    ws = 0
+    while ch(ctx.line, ctx.p) != 0 && ch(ctx.line, ctx.p) != 10 {
+        ws = isspace_b(ch(ctx.line, ctx.p))
+        ctx.p = ctx.p + 1
+    }
+    out = string.substring(ctx.line, st, ctx.p)
+    if ws == 1 { warnx(ctx.pg, "${ctx.linenum}: ${ctx.fname}: whitespace after ${ctype}") }
+    // the C ends the line here (*s = '\0')
+    ctx.p = string.length(ctx.line)
+    return out
+}
+
+add_wfile(pg: *SedProgram, name: string) {
+    w = heap.new(SedWFile)
+    w.name = name
+    w.next = null
+    if pg.wfiles == null {
+        pg.wfiles = w
+    } else {
+        last = pg.wfiles
+        while last.next != null { last = last.next }
+        last.next = w
+    }
+}
+
+// Convert goto label names to addresses, and count a and r commands, in
+// the given subset of the script.
+fixuplabel(ctx: *SedParse, cp0: *SedCmd, end: *SedCmd) {
+    cp = cp0
+    while cp != end && cp != null {
+        c = cp.code
+        if c == 97 || c == 114 {
+            ctx.pg.appendnum = ctx.pg.appendnum + 1
+        } else if c == 98 || c == 116 {
+            // Resolve branch target.
+            if cp.has_t == 0 {
+                cp.c = null
+            } else {
+                cp.c = findlabel(ctx, cp.t)
+                if cp.c == null {
+                    cerr(ctx, "undefined label '${cp.t}'")
+                    return
+                }
+            }
+        } else if c == 123 {
+            // Do interior commands.
+            fixuplabel(ctx, cp.c, cp.next)
+            if ctx.err != "" { return }
+        }
+        cp = cp.next
+    }
+}
+
+// Associate the given command label for later lookup.
+enterlabel(ctx: *SedParse, cp: *SedCmd) {
+    lh = ctx.labels
+    while lh != null {
+        if lh.cmd.t == cp.t {
+            cerr(ctx, "duplicate label '${cp.t}'")
+            return
+        }
+        lh = lh.next
+    }
+    n = heap.new(SedLabel)
+    n.cmd = cp
+    n.ref = 0
+    n.next = ctx.labels
+    ctx.labels = n
+}
+
+findlabel(ctx: *SedParse, name: string) -> *SedCmd {
+    lh = ctx.labels
+    while lh != null {
+        if lh.cmd.t == name {
+            lh.ref = 1
+            return lh.cmd
+        }
+        lh = lh.next
+    }
+    return null
+}
+
+// Warn about any unused labels, and release the label list.
+uselabel(ctx: *SedParse) {
+    lh = ctx.labels
+    while lh != null {
+        nx = lh.next
+        if lh.ref == 0 { warnx(ctx.pg, "${ctx.linenum}: ${ctx.fname}: unused label '${lh.cmd.t}'") }
+        heap.free(lh)
+        lh = nx
+    }
+    ctx.labels = null
+}
+
+new_program(o: *SedOptions) -> *SedProgram {
+    pg = heap.new(SedProgram)
+    pg.prog = null
+    pg.all = null
+    pg.ncmds = 0
+    pg.maxnsub = 0
+    pg.maxre = null
+    pg.res = null
+    pg.appendnum = 0
+    pg.nflag = 0
+    pg.rflags = 0
+    pg.separate = 0
+    pg.inplace = 0
+    pg.suffix = ""
+    pg.ispan = 0
+    pg.aflag = 0
+    pg.wrap = 60
+    pg.files = null
+    pg.wfiles = null
+    pg.warn = ""
+    if o != null {
+        pg.nflag = o.nflag
+        pg.rflags = o.rflags
+        pg.separate = o.separate
+        pg.inplace = o.inplace
+        pg.suffix = o.suffix
+        pg.ispan = o.ispan
+        pg.aflag = o.aflag
+        pg.wrap = o.wrap
+        if o.files != null {
+            f = heap.new(SedFiles)
+            f.exists = o.files.exists
+            f.read = o.files.read
+            f.write = o.files.write
+            pg.files = f
+        }
+    }
+    return pg
+}
+
+// compile(): units to a program.
+compile_from(o: *SedOptions, units: *SedUnit) -> ptr! {
+    pg = new_program(o)
+    ctx = heap.new(SedParse)
+    ctx.pg = pg
+    ctx.unit = units
+    ctx.st = 0
+    ctx.ustr = ""
+    ctx.upos = 0
+    ctx.more = 0
+    ctx.linenum = 0
+    ctx.fname = ""
+    ctx.line = ""
+    ctx.p = 0
+    ctx.err = ""
+    ctx.labels = null
+    ctx.link_owner = null
+    ctx.link_kind = 0
+    ctx.last = null
+    compile_stream(ctx)
+    if ctx.err == "" { fixuplabel(ctx, pg.prog, null) }
+    if ctx.err == "" { uselabel(ctx) }
+    err = ctx.err
+    lh = ctx.labels
+    while lh != null {
+        nx = lh.next
+        heap.free(lh)
+        lh = nx
+    }
+    heap.free(ctx)
+    if err != "" {
+        free(pg as ptr)
+        return null, err
+    }
+    return pg as ptr, ""
+}
+
+// Compile one script, as `sed script` (or `sed -e script`) does. opts is
+// from options(), or null for the defaults. Returns (prog, "") or
+// (null, err), err in sed's words ("1: \"s/a\": unterminated substitute
+// pattern"). Warnings (an unused label, ...) are in warnings(prog).
+compile(script: string, opts: ptr) -> ptr! {
+    u = heap.new(SedUnit)
+    u.next = null
+    u.is_file = 0
+    u.name = ""
+    u.text = "${script}\n"
+    prog, err = compile_from(opts as *SedOptions, u)
+    heap.free(u)
+    return prog, err
+}
+
+// Compile the units added to opts with add_expression and add_script, in
+// order, as `sed -e ... -f ...` does.
+compile_units(opts: ptr) -> ptr! {
+    o = opts as *SedOptions
+    if o == null || o.units == null { return null, "no script" }
+    return compile_from(o, o.units)
+}
+
+// What sed would have written to stderr while compiling: one warning a line.
+warnings(prog: ptr) -> string {
+    if prog == null { return "" }
+    return (prog as *SedProgram).warn
+}
+
+// Release a program. Safe on null.
+free(prog: @frees ptr) {
+    if prog == null { return }
+    pg = prog as *SedProgram
+    cp = pg.all
+    while cp != null {
+        nx = cp.all
+        if cp.a1 != null { heap.free(cp.a1) }
+        if cp.a2 != null { heap.free(cp.a2) }
+        if cp.s != null { heap.free(cp.s) }
+        if cp.y != null {
+            m = cp.y.multis
+            while m != null {
+                mn = m.next
+                heap.free(m)
+                m = mn
+            }
+            longarr.longarr_free(cp.y.bytetab)
+            heap.free(cp.y)
+        }
+        heap.free(cp)
+        cp = nx
+    }
+    r = pg.res
+    while r != null {
+        rn = r.next
+        regex.free(r.re)
+        heap.free(r)
+        r = rn
+    }
+    w = pg.wfiles
+    while w != null {
+        wn = w.next
+        heap.free(w)
+        w = wn
+    }
+    if pg.files != null { heap.free(pg.files) }
+    heap.free(pg)
+}
+
+// ---- process.c ------------------------------------------------------------
+
+// The state of one run (process.c's and main.c's statics).
+struct SedInFile {
+    next: *SedInFile
+    name: string
+    data: string
+    ok: int
+}
+
+struct SedAppend {
+    next: *SedAppend
+    kind: int
+    s: string
+}
+
+struct SedWOpen {
+    next: *SedWOpen
+    name: string
+}
+
+// Cycle states: the run stops at a read whose line has not arrived yet and
+// picks up there on the next stream_write.
+const SS_TOP = 0 // read a line to start a cycle
+const SS_RUN = 1 // run commands from rcp
+const SS_NREAD = 2 // n is waiting for its line
+const SS_NNREAD = 3 // N is waiting for its line
+const SS_DONE = 4
+
+// What exec() ended on.
+const EX_NEW = 0 // end of cycle (new:)
+const EX_TOP = 1 // D: restart without reading (top:)
+const EX_WAIT_N = 2 // n needs a line
+const EX_WAIT_NN = 3 // N needs a line
+const EX_EXIT = 4 // exit(0)
+const EX_ERR = 5
+
+struct SedStream {
+    pg: *SedProgram
+    startline: ptr // longarr: each command's range start, 0 when out of range
+    ps: string // pattern space
+    pd: int // deleted
+    psanl: int // append newline
+    hs: string // hold space
+    hs_null: int
+    linenum: long
+    lastaddr: int
+    sdone: int
+    defpreg: ptr
+    mbuf: ptr // maxnsub + 1 slots
+    mone: ptr // one slot, for addresses
+    appends: *SedAppend
+    appends_tail: *SedAppend
+    quit: int
+    state: int
+    rcp: *SedCmd
+    err: string
+    warn: string
+    out: ptr // what sed writes to stdout
+    fout: ptr // the in-place output of the current file, or null
+    wopen: *SedWOpen
+    // input (mf_fgets)
+    stdin_mode: int
+    files: *SedInFile
+    cur: *SedInFile
+    started: int
+    firstfile: int
+    infile_open: int
+    buf: string
+    pos: int
+    complete: int
+    fname: string
+}
+
+out_target(st: *SedStream) -> ptr {
+    if st.fout != null { return st.fout }
+    return st.out
+}
+
+emit(st: *SedStream, s: string) {
+    strbuilder.append(out_target(st), s)
+}
+
+// OUT()
+out_ps(st: *SedStream) {
+    o = out_target(st)
+    strbuilder.append(o, st.ps)
+    if st.psanl == 1 { strbuilder.append_byte(o, 10) }
+}
+
+serr(st: *SedStream, msg: string) {
+    if st.err == "" { st.err = msg }
+}
+
+// A byte offset of c in s from i, or -1 (memchr).
+find_byte(s: string, c: int, i0: int) -> int {
+    i = i0
+    n = string.length(s)
+    while i < n {
+        if string.char_at(s, i) == c { return i }
+        i = i + 1
+    }
+    return -1
+}
+
+files_of(st: *SedStream) -> *SedFiles {
+    return st.pg.files
+}
+
+// Write data to the w file name (opened, i.e. truncated, on first use when
+// it was not opened at the start of the run).
+wwrite(st: *SedStream, name: string, data: string) {
+    f = files_of(st)
+    if f == null {
+        serr(st, "${name}: no file access granted")
+        return
+    }
+    seen = 0
+    w = st.wopen
+    while w != null {
+        if w.name == name { seen = 1 }
+        w = w.next
+    }
+    if seen == 0 {
+        string e0 = call(f.write, name, "", 1)
+        if e0 != "" {
+            serr(st, "${name}: ${e0}")
+            return
+        }
+        n = heap.new(SedWOpen)
+        n.name = name
+        n.next = st.wopen
+        st.wopen = n
+    }
+    string e = call(f.write, name, data, 0)
+    if e != "" { serr(st, "${name}: ${e}") }
+}
+
+add_append(st: *SedStream, kind: int, s: string) {
+    a = heap.new(SedAppend)
+    a.kind = kind
+    a.s = s
+    a.next = null
+    if st.appends_tail == null {
+        st.appends = a
+    } else {
+        st.appends_tail.next = a
+    }
+    st.appends_tail = a
+}
+
+// Flush append requests. Always called before reading a line, therefore it
+// also resets the substitution done (sdone) flag.
+flush_appends(st: *SedStream) {
+    a = st.appends
+    while a != null {
+        nx = a.next
+        if a.kind == AP_STRING {
+            emit(st, a.s)
+        } else {
+            // It's not an error to read a non-existent file.
+            f = files_of(st)
+            if f != null {
+                if call(f.exists, a.s) == 1 {
+                    string data = call(f.read, a.s)
+                    emit(st, data)
+                }
+            }
+        }
+        heap.free(a)
+        a = nx
+    }
+    st.appends = null
+    st.appends_tail = null
+    st.sdone = 0
+}
+
+regexec_e(st: *SedStream, preg: @keep ptr, eflags: int, nomatch: int, start: int, stop: int) -> int {
+    if preg == null {
+        if st.defpreg == null {
+            serr(st, "first RE may not be empty")
+            return 0
+        }
+    } else {
+        st.defpreg = preg
+    }
+    m = st.mbuf
+    if nomatch == 1 { m = st.mone }
+    ok, e = regex.exec_range(st.defpreg, st.ps, start, stop, eflags, m)
+    if e != "" {
+        serr(st, "RE error: ${e}")
+        return 0
+    }
+    return ok
+}
+
+// MATCH(a)
+addr_match(st: *SedStream, a: *SedAddr) -> int {
+    if a.kind == AT_RE { return regexec_e(st, a.re, 0, 1, 0, string.length(st.ps)) }
+    if a.kind == AT_LINE {
+        if st.linenum == a.line { return 1 }
+        return 0
+    }
+    return lastline(st)
+}
+
+// TRUE if the address passed matches the current program state. Sets the
+// start line for process ranges. Interprets the non-select (``!'') flag.
+applies(st: *SedStream, cp: *SedCmd) -> int {
+    r = 0
+    st.lastaddr = 0
+    if cp.a1 == null && cp.a2 == null {
+        r = 1
+    } else if cp.a2 != null {
+        sl = longarr.longarr_get_raw(st.startline, cp.idx)
+        if sl > 0 {
+            if cp.a2.kind == AT_RELLINE {
+                if st.linenum - sl <= cp.a2.line {
+                    r = 1
+                } else {
+                    longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                    r = 0
+                }
+            } else if addr_match(st, cp.a2) == 1 {
+                longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                st.lastaddr = 1
+                r = 1
+            } else if cp.a2.kind == AT_LINE && st.linenum > cp.a2.line {
+                // We missed the 2nd address due to a branch, so just
+                // close the range and return false.
+                longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                r = 0
+            } else {
+                r = 1
+            }
+        } else if cp.a1 != null && addr_match(st, cp.a1) == 1 {
+            // If the second address is a number less than or equal to the
+            // line number first selected, only one line shall be selected.
+            //	-- POSIX 1003.2
+            // Likewise if the relative second line address is zero.
+            if (cp.a2.kind == AT_LINE && st.linenum >= cp.a2.line) || (cp.a2.kind == AT_RELLINE && cp.a2.line == 0) {
+                st.lastaddr = 1
+            } else {
+                longarr.longarr_set_raw(st.startline, cp.idx, st.linenum)
+            }
+            r = 1
+        } else {
+            r = 0
+        }
+    } else {
+        r = addr_match(st, cp.a1)
+    }
+    if cp.nonsel == 1 {
+        if r == 1 { return 0 }
+        return 1
+    }
+    return r
+}
+
+// Reset the sed processor to its initial state.
+resetstate(st: *SedStream) {
+    // Reset all in-range markers.
+    longarr.longarr_fill(st.startline, 0)
+    // Clear out the hold space.
+    st.hs = ""
+    st.hs_null = 0
+}
+
+// regsub - perform substitutions after a regexp match (Henry Spencer).
+regsub(st: *SedStream, sp: ptr, s: string, src: string) {
+    i = 0
+    while ch(src, i) != 0 {
+        c = ch(src, i)
+        i = i + 1
+        no = -1
+        if c == 38 {
+            no = 0
+        } else if c == 92 && isdigit_b(ch(src, i)) == 1 {
+            no = ch(src, i) - 48
+            i = i + 1
+        }
+        if no < 0 {
+            // Ordinary character.
+            if c == 92 && (ch(src, i) == 92 || ch(src, i) == 38) {
+                c = ch(src, i)
+                i = i + 1
+            }
+            strbuilder.append_byte(sp, c)
+        } else {
+            so = regex.match_start(st.mbuf, no)
+            eo = regex.match_end(st.mbuf, no)
+            if so != -1 && eo != -1 {
+                strbuilder.append(sp, string.substring(s, so, eo))
+            }
+        }
+    }
+}
+
+// substitute: do substitutions in the pattern space, building the new
+// pattern space in a fresh buffer.
+substitute(st: *SedStream, cp: *SedCmd) -> int {
+    sub = cp.s
+    re = sub.re
+    ps = st.ps
+    psl = string.length(ps)
+    if re == null {
+        if st.defpreg != null && sub.maxbref > regex.nsub(st.defpreg) {
+            st.linenum = sub.linenum
+            serr(st, "${st.linenum}: ${st.fname}: \\${sub.maxbref} not defined in the RE")
+            return 0
+        }
+    }
+    if regexec_e(st, re, 0, 0, 0, psl) == 0 { return 0 }
+
+    ss = strbuilder.new(psl + 16)
+    spos = 0
+    slen = psl
+    n = sub.n
+    lastempty = 1
+    le = 0
+    going = 1
+    while going == 1 {
+        so = regex.match_start(st.mbuf, 0)
+        eo = regex.match_end(st.mbuf, 0)
+        // Copy the leading retained string.
+        if n <= 1 && so > le { strbuilder.append(ss, string.substring(ps, spos, spos + so - le)) }
+
+        // Skip zero-length matches right after other matches.
+        if lastempty == 1 || so - le != 0 || so != eo {
+            if n <= 1 {
+                // Want this match: append replacement.
+                regsub(st, ss, ps, sub.repl)
+                if n == 1 { n = -1 }
+            } else {
+                // Want a later match: append original.
+                if eo - le > 0 { strbuilder.append(ss, string.substring(ps, spos, spos + eo - le)) }
+                n = n - 1
+            }
+        }
+
+        // Move past this match.
+        spos = eo
+        slen = psl - eo
+        le = eo
+
+        // After a zero-length match, advance one byte, and at the end of
+        // the line, terminate.
+        if so == eo {
+            if slen > 0 {
+                strbuilder.append(ss, string.substring(ps, spos, spos + 1))
+                spos = spos + 1
+                slen = slen - 1
+                le = le + 1
+            } else {
+                slen = -1
+            }
+            lastempty = 1
+        } else {
+            lastempty = 0
+        }
+        going = 0
+        if n >= 0 && slen >= 0 {
+            if regexec_e(st, re, regex.NOTBOL, 0, le, psl) == 1 { going = 1 }
+        }
+    }
+    if st.err != "" {
+        strbuilder.free(ss)
+        return 0
+    }
+
+    // Did not find the requested number of matches.
+    if n > 0 {
+        strbuilder.free(ss)
+        return 0
+    }
+
+    // Copy the trailing retained string.
+    if slen > 0 { strbuilder.append(ss, string.substring(ps, spos, spos + slen)) }
+    st.ps = strbuilder.finish(ss)
+
+    // Handle the 'p' flag.
+    if sub.p == 1 { out_ps(st) }
+
+    // Handle the 'w' flag.
+    if sub.wfile != "" && st.pd == 0 { wwrite(st, sub.wfile, "${st.ps}\n") }
+    return 1
+}
+
+// do_tr: perform translation ('y' command) in the pattern space.
+do_tr(st: *SedStream, y: *SedTr) {
+    ps = st.ps
+    left = string.length(ps)
+    ys = strbuilder.new(left + 1)
+    p = 0
+    while p < left {
+        b = string.char_at(ps, p)
+        c = longarr.longarr_get_raw(y.bytetab, b) as int
+        if c != 0 {
+            strbuilder.append_byte(ys, c)
+            p = p + 1
+            continue
+        }
+        var found: *SedTrMulti = null
+        m = y.multis
+        while m != null && found == null {
+            fl = string.length(m.from)
+            if left - p >= fl && string.substring(ps, p, p + fl) == m.from { found = m }
+            m = m.next
+        }
+        if found != null {
+            strbuilder.append(ys, found.to)
+            p = p + string.length(found.from)
+        } else {
+            strbuilder.append_byte(ys, b)
+            p = p + 1
+        }
+    }
+    st.ps = strbuilder.finish(ys)
+}
+
+// The display width of a printable code point (wcwidth), approximately:
+// 2 for the East Asian wide and fullwidth blocks, else 1.
+cp_width(c: int) -> int {
+    if (c >= 4352 && c <= 4447) || (c >= 11904 && c <= 42191) || (c >= 44032 && c <= 55203) || (c >= 63744 && c <= 64255) || (c >= 65040 && c <= 65103) || (c >= 65280 && c <= 65376) || (c >= 65504 && c <= 65510) || (c >= 131072 && c <= 262141) {
+        return 2
+    }
+    return 1
+}
+
+// lputs: the l command. Printable characters as they are, \\ \a \b \f \r
+// \t \v as escapes, anything else (bytes that are not UTF-8 included) as
+// octal, folded at the line length with a trailing backslash, and $ at the
+// end.
+lputs(st: *SedStream, s: string) {
+    o = out_target(st)
+    termwidth = st.pg.wrap
+    if termwidth <= 0 { termwidth = 1 }
+    // backslash, BEL, BS, FF, CR, HT, VT: the C's "\\\a\b\f\r\t\v"
+    escapes = "\\${one(7)}${one(8)}${one(12)}${one(13)}${one(9)}${one(11)}"
+    names = "\\abfrtv"
+    col = 0
+    len = string.length(s)
+    i = 0
+    while i < len {
+        b = string.char_at(s, i)
+        clen = 1
+        wc = b
+        valid = 1
+        if b >= 128 {
+            k = u8len(s, i)
+            if k < 0 {
+                valid = 0
+            } else {
+                clen = k
+                wc = b & (255 >> (k + 1))
+                j = 1
+                while j < k {
+                    wc = wc * 64 + (string.char_at(s, i + j) & 63)
+                    j = j + 1
+                }
+            }
+        }
+        printable = 0
+        if valid == 1 {
+            if (wc >= 32 && wc <= 126) || (wc >= 160 && wc != 173) { printable = 1 }
+        }
+        esc = -1
+        if b < 128 && b != 0 { esc = find_byte(escapes, b, 0) }
+        if wc == 10 {
+            if col + 1 >= termwidth { strbuilder.append(o, "\\\n") }
+            strbuilder.append(o, "$\n")
+            col = 0
+        } else if printable == 1 {
+            width = cp_width(wc)
+            if col + width >= termwidth {
+                strbuilder.append(o, "\\\n")
+                col = 0
+            }
+            strbuilder.append(o, string.substring(s, i, i + clen))
+            col = col + width
+        } else if esc >= 0 {
+            if col + 2 >= termwidth {
+                strbuilder.append(o, "\\\n")
+                col = 0
+            }
+            strbuilder.append_byte(o, 92)
+            strbuilder.append_byte(o, string.char_at(names, esc))
+            col = col + 2
+        } else {
+            if col + 4 * clen >= termwidth {
+                strbuilder.append(o, "\\\n")
+                col = 0
+            }
+            j = 0
+            while j < clen {
+                v = string.char_at(s, i + j)
+                strbuilder.append_byte(o, 92)
+                strbuilder.append_byte(o, 48 + v / 64)
+                strbuilder.append_byte(o, 48 + (v / 8) % 8)
+                strbuilder.append_byte(o, 48 + v % 8)
+                j = j + 1
+            }
+            col = col + 4 * clen
+        }
+        i = i + clen
+    }
+    if col + 1 >= termwidth { strbuilder.append(o, "\\\n") }
+    strbuilder.append(o, "$\n")
+}
+
+// Run commands from st.rcp until the cycle ends or a read must wait.
+exec(st: *SedStream) -> int {
+    cp = st.rcp
+    pg = st.pg
+    while cp != null {
+        if applies(st, cp) == 0 {
+            if st.err != "" { return EX_ERR }
+            cp = cp.next
+            continue
+        }
+        if st.err != "" { return EX_ERR }
+        c = cp.code
+        if c == 123 || c == 98 {
+            // { and b
+            cp = cp.c
+            continue
+        } else if c == 97 {
+            add_append(st, AP_STRING, cp.t)
+        } else if c == 99 {
+            st.pd = 1
+            st.ps = ""
+            if cp.a2 == null || st.lastaddr == 1 || lastline(st) == 1 { emit(st, cp.t) }
+            return EX_NEW
+        } else if c == 100 {
+            st.pd = 1
+            return EX_NEW
+        } else if c == 68 {
+            if st.pd == 1 { return EX_NEW }
+            nl = find_byte(st.ps, 10, 0)
+            if string.length(st.ps) == 0 || nl < 0 {
+                st.pd = 1
+                return EX_NEW
+            }
+            st.ps = string.substring(st.ps, nl + 1, string.length(st.ps))
+            return EX_TOP
+        } else if c == 103 {
+            st.ps = st.hs
+        } else if c == 71 {
+            st.ps = "${st.ps}\n${st.hs}"
+        } else if c == 104 {
+            st.hs = st.ps
+            st.hs_null = 0
+        } else if c == 72 {
+            st.hs = "${st.hs}\n${st.ps}"
+            st.hs_null = 0
+        } else if c == 105 {
+            emit(st, cp.t)
+        } else if c == 108 {
+            lputs(st, st.ps)
+        } else if c == 110 {
+            if pg.nflag == 0 && st.pd == 0 { out_ps(st) }
+            flush_appends(st)
+            st.rcp = cp
+            return EX_WAIT_N
+        } else if c == 78 {
+            flush_appends(st)
+            st.ps = "${st.ps}\n"
+            st.rcp = cp
+            return EX_WAIT_NN
+        } else if c == 112 {
+            if st.pd == 0 { out_ps(st) }
+        } else if c == 80 {
+            if st.pd == 0 {
+                nl = find_byte(st.ps, 10, 0)
+                if nl >= 0 {
+                    emit(st, string.substring(st.ps, 0, nl))
+                    emit(st, "\n")
+                } else {
+                    out_ps(st)
+                }
+            }
+        } else if c == 113 {
+            if pg.inplace == 0 {
+                if pg.nflag == 0 && st.pd == 0 { out_ps(st) }
+                flush_appends(st)
+                return EX_EXIT
+            }
+            st.quit = 1
+        } else if c == 114 {
+            add_append(st, AP_FILE, cp.t)
+        } else if c == 115 {
+            st.sdone = st.sdone | substitute(st, cp)
+            if st.err != "" { return EX_ERR }
+        } else if c == 116 {
+            if st.sdone == 1 {
+                st.sdone = 0
+                cp = cp.c
+                continue
+            }
+        } else if c == 119 {
+            if st.pd == 0 {
+                wwrite(st, cp.t, "${st.ps}\n")
+                if st.err != "" { return EX_ERR }
+            }
+        } else if c == 120 {
+            // If the hold space is null, make it empty but not null.
+            tmp = st.ps
+            st.ps = st.hs
+            st.hs = tmp
+            st.hs_null = 0
+        } else if c == 121 {
+            if st.pd == 0 && string.length(st.ps) > 0 { do_tr(st, cp.y) }
+        } else if c == 61 {
+            emit(st, "${st.linenum}\n")
+        }
+        // : and } do nothing
+        cp = cp.next
+    }
+    return EX_NEW
+}
+
+// ---- main.c: mf_fgets and lastline ----------------------------------------
+
+next_files_have_lines(st: *SedStream) -> int {
+    if st.cur == null { return 0 }
+    f = st.cur.next
+    while f != null {
+        if f.ok == 1 && string.length(f.data) > 0 { return 1 }
+        f = f.next
+    }
+    return 0
+}
+
+per_file(st: *SedStream) -> int {
+    if st.pg.separate == 1 { return 1 }
+    if st.pg.inplace == 1 && st.pg.ispan == 0 { return 1 }
+    return 0
+}
+
+lastline(st: *SedStream) -> int {
+    if st.pos < string.length(st.buf) { return 0 }
+    if per_file(st) == 0 && next_files_have_lines(st) == 1 { return 0 }
+    return 1
+}
+
+// The current in-place file is done: keep the original as name + suffix
+// when there is a suffix, then replace the file with the output.
+finish_inplace(st: *SedStream) {
+    if st.fout == null { return }
+    data = strbuilder.finish(st.fout)
+    st.fout = null
+    f = files_of(st)
+    if st.pg.suffix != "" {
+        string e = call(f.write, "${st.cur.name}${st.pg.suffix}", st.cur.data, 1)
+        if e != "" {
+            serr(st, "${st.cur.name}${st.pg.suffix}: ${e}")
+            return
+        }
+    }
+    string e2 = call(f.write, st.cur.name, data, 1)
+    if e2 != "" { serr(st, "${st.cur.name}: ${e2}") }
+}
+
+// Like fgets, but go through the list of files chaining them together.
+// Returns 1 with the line in the pattern space (replacing it, or appended
+// when append is 1), 0 at the end of the input, 2 when the line (or the
+// byte after it, which says whether it is the last) has not arrived yet.
+mf_fgets(st: *SedStream, append: int) -> int {
+    if st.started == 0 {
+        st.started = 1
+        if st.stdin_mode == 1 {
+            if st.pg.inplace == 1 {
+                serr(st, "-I or -i may not be used with stdin")
+                return 0
+            }
+            st.infile_open = 1
+            st.fname = "stdin"
+        }
+        st.firstfile = 1
+    }
+    while 1 == 1 {
+        if st.infile_open == 1 && st.quit == 0 {
+            if st.pos < string.length(st.buf) { break }
+            if st.complete == 0 { return 2 }
+        }
+        // If we are here then either eof or no files are open yet
+        if st.stdin_mode == 1 {
+            if append == 0 { st.ps = "" }
+            return 0
+        }
+        if st.infile_open == 1 {
+            st.infile_open = 0
+            if st.pg.inplace == 1 { finish_inplace(st) }
+            if st.err != "" { return 0 }
+        }
+        if st.firstfile == 0 {
+            st.cur = st.cur.next
+        } else {
+            st.firstfile = 0
+            st.cur = st.files
+        }
+        if st.cur == null {
+            if append == 0 { st.ps = "" }
+            return 0
+        }
+        st.fname = st.cur.name
+        if st.pg.inplace == 1 {
+            if st.cur.ok == 0 {
+                serr(st, "${st.fname}: No such file or directory")
+                return 0
+            }
+            st.fout = strbuilder.new(string.length(st.cur.data) + 16)
+        }
+        if per_file(st) == 1 {
+            st.linenum = 0
+            resetstate(st)
+        }
+        if st.cur.ok == 0 {
+            st.warn = "${st.warn}${st.fname}: No such file or directory\n"
+            continue
+        }
+        st.infile_open = 1
+        st.buf = st.cur.data
+        st.pos = 0
+        st.complete = 1
+    }
+    // A line, and enough after it to know whether it is the last.
+    nl = find_byte(st.buf, 10, st.pos)
+    if st.complete == 0 {
+        if nl < 0 || nl + 1 >= string.length(st.buf) { return 2 }
+    }
+    line = ""
+    anl = 0
+    if nl >= 0 {
+        line = string.substring(st.buf, st.pos, nl)
+        st.pos = nl + 1
+        anl = 1
+    } else {
+        line = string.substring(st.buf, st.pos, string.length(st.buf))
+        st.pos = string.length(st.buf)
+        if lastline(st) == 0 { anl = 1 }
+    }
+    if append == 1 {
+        st.ps = "${st.ps}${line}"
+    } else {
+        st.ps = line
+    }
+    st.psanl = anl
+    st.linenum = st.linenum + 1
+    return 1
+}
+
+// ---- the run loop -----------------------------------------------------------
+
+// process(): run cycles until the input runs out or a read has to wait.
+run_cycles(st: *SedStream) {
+    while st.state != SS_DONE {
+        if st.err != "" {
+            st.state = SS_DONE
+            return
+        }
+        if st.state == SS_TOP {
+            r = mf_fgets(st, 0)
+            if r == 2 { return }
+            if r == 0 {
+                st.state = SS_DONE
+                continue
+            }
+            st.pd = 0
+            st.rcp = st.pg.prog
+            st.state = SS_RUN
+        } else if st.state == SS_NREAD {
+            r = mf_fgets(st, 0)
+            if r == 2 { return }
+            if r == 0 {
+                st.state = SS_DONE
+                continue
+            }
+            st.pd = 0
+            st.rcp = st.rcp.next
+            st.state = SS_RUN
+        } else if st.state == SS_NNREAD {
+            r = mf_fgets(st, 1)
+            if r == 2 { return }
+            if r == 0 {
+                st.state = SS_DONE
+                continue
+            }
+            st.rcp = st.rcp.next
+            st.state = SS_RUN
+        } else {
+            x = exec(st)
+            if x == EX_TOP {
+                st.rcp = st.pg.prog
+            } else if x == EX_WAIT_N {
+                st.state = SS_NREAD
+            } else if x == EX_WAIT_NN {
+                st.state = SS_NNREAD
+            } else if x == EX_EXIT || x == EX_ERR {
+                st.state = SS_DONE
+            } else {
+                // new:
+                if st.pg.nflag == 0 && st.pd == 0 { out_ps(st) }
+                flush_appends(st)
+                st.state = SS_TOP
+            }
+        }
+    }
+}
+
+new_stream(pg: *SedProgram) -> *SedStream {
+    st = heap.new(SedStream)
+    st.pg = pg
+    n = pg.ncmds
+    if n < 1 { n = 1 }
+    st.startline = longarr.longarr_new_filled_raw(n, 0)
+    st.ps = ""
+    st.pd = 0
+    st.psanl = 0
+    st.hs = ""
+    st.hs_null = 1
+    st.linenum = 0
+    st.lastaddr = 0
+    st.sdone = 0
+    st.defpreg = null
+    st.mbuf = regex.match_new(pg.maxre)
+    st.mone = regex.match_new(null)
+    st.appends = null
+    st.appends_tail = null
+    st.quit = 0
+    st.state = SS_TOP
+    st.rcp = null
+    st.err = ""
+    st.warn = ""
+    st.out = strbuilder.new(256)
+    st.fout = null
+    st.wopen = null
+    st.stdin_mode = 1
+    st.files = null
+    st.cur = null
+    st.started = 0
+    st.firstfile = 1
+    st.infile_open = 0
+    st.buf = ""
+    st.pos = 0
+    st.complete = 0
+    st.fname = "stdin"
+    // FreeBSD opens (truncates) every w file when it compiles the script,
+    // unless -a.
+    if pg.aflag == 0 {
+        w = pg.wfiles
+        while w != null && st.err == "" {
+            f = files_of(st)
+            if f == null {
+                serr(st, "${w.name}: no file access granted")
+            } else {
+                seen = 0
+                o = st.wopen
+                while o != null {
+                    if o.name == w.name { seen = 1 }
+                    o = o.next
+                }
+                if seen == 0 {
+                    string e = call(f.write, w.name, "", 1)
+                    if e != "" { serr(st, "${w.name}: ${e}") }
+                    on = heap.new(SedWOpen)
+                    on.name = w.name
+                    on.next = st.wopen
+                    st.wopen = on
+                }
+            }
+            w = w.next
+        }
+    }
+    return st
+}
+
+// Hand over what has been written to stdout so far.
+drain(st: *SedStream) -> string {
+    s = strbuilder.finish(st.out)
+    st.out = strbuilder.new(256)
+    return s
+}
+
+// A stream over input that arrives in pieces (sed reading its stdin).
+// Returns (stream, "") or (null, err): err when the program opens w files
+// it has no grant for, or edits in place (which needs run_files).
+stream_new(prog: ptr) -> ptr! {
+    if prog == null { return null, "no program" }
+    st = new_stream(prog as *SedProgram)
+    if st.err != "" {
+        e = st.err
+        stream_free(st as ptr)
+        return null, e
+    }
+    if st.pg.inplace == 1 {
+        stream_free(st as ptr)
+        return null, "-I or -i may not be used with stdin"
+    }
+    return st as ptr, ""
+}
+
+// Feed the next piece of input. Returns (output, err): the output the
+// lines so far produced. A line is run once the byte after it has arrived
+// (or stream_close says there is none), since $ depends on it.
+stream_write(stream: ptr, chunk: string) -> (string, string) {
+    st = stream as *SedStream
+    if st.state != SS_DONE {
+        if st.pos > 0 {
+            st.buf = string.substring(st.buf, st.pos, string.length(st.buf))
+            st.pos = 0
+        }
+        st.buf = "${st.buf}${chunk}"
+        run_cycles(st)
+    }
+    out = drain(st)
+    return out, st.err
+}
+
+// The input is complete: run what is left. Returns (output, err).
+stream_close(stream: ptr) -> (string, string) {
+    st = stream as *SedStream
+    st.complete = 1
+    run_cycles(st)
+    out = drain(st)
+    return out, st.err
+}
+
+// 1 when the program has finished (q, the end of the input, an error):
+// more input would produce nothing.
+stream_done(stream: ptr) -> int {
+    if (stream as *SedStream).state == SS_DONE { return 1 }
+    return 0
+}
+
+stream_free(stream: @frees ptr) {
+    if stream == null { return }
+    st = stream as *SedStream
+    a = st.appends
+    while a != null {
+        an = a.next
+        heap.free(a)
+        a = an
+    }
+    w = st.wopen
+    while w != null {
+        wn = w.next
+        heap.free(w)
+        w = wn
+    }
+    f = st.files
+    while f != null {
+        fnx = f.next
+        heap.free(f)
+        f = fnx
+    }
+    if st.fout != null { strbuilder.free(st.fout) }
+    strbuilder.free(st.out)
+    regex.match_free(st.mbuf)
+    regex.match_free(st.mone)
+    longarr.longarr_free(st.startline)
+    heap.free(st)
+}
+
+// Run prog over input, as `sed script < input`. Returns (output, err).
+run(prog: ptr, input: string) -> (string, string) {
+    st, err = stream_new(prog)
+    if err != "" { return "", err }
+    a, e1 = stream_write(st, input)
+    b, e2 = stream_close(st)
+    stream_free(st)
+    e = e1
+    if e == "" { e = e2 }
+    return "${a}${b}", e
+}
+
+// Run prog over files, as `sed script file...`, reading them through the
+// closures grant_files gave. Returns (output, err). With in_place the output
+// goes back into the files instead. A file that cannot be read is skipped
+// and named in err (sed's warning and exit status 1), and the rest are still
+// run, as sed does.
+run_files(prog: ptr, names: *StringSeq) -> (string, string) {
+    if prog == null { return "", "no program" }
+    pg = prog as *SedProgram
+    if pg.files == null { return "", "no file access granted" }
+    st = new_stream(pg)
+    if st.err != "" {
+        e0 = st.err
+        stream_free(st as ptr)
+        return "", e0
+    }
+    st.stdin_mode = 0
+    st.complete = 1
+    var tail: *SedInFile = null
+    rest = names
+    while string.seq_is_empty(rest) == 0 {
+        nm = string.seq_head(rest)
+        fi = heap.new(SedInFile)
+        fi.name = nm
+        fi.next = null
+        fi.ok = call(pg.files.exists, nm)
+        fi.data = ""
+        if fi.ok == 1 {
+            string fdata = call(pg.files.read, nm)
+            fi.data = fdata
+        }
+        if tail == null { st.files = fi } else { tail.next = fi }
+        tail = fi
+        rest = string.seq_tail(rest)
+    }
+    run_cycles(st)
+    out = drain(st)
+    e = st.err
+    if e == "" && st.warn != "" { e = st.warn }
+    stream_free(st as ptr)
+    return out, e
+}

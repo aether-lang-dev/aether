@@ -1,0 +1,377 @@
+// std.sed: FreeBSD's sed tests through the library, on every target.
+//
+// FreeBSD's own scripts (tests/integration/sed_parity/freebsd/sed/) run
+// through a sed command line in tests/integration/sed_parity/; this runs the
+// same cases through std.sed's API instead, with files in memory, so they
+// also run where there is no POSIX shell (Windows):
+//   - regress.sh's 26 tests, against its regress.*.out files;
+//   - sed2_test.sh's ATF cases (in-place with q, escapes, hex, y with [,
+//     -e, c, D, scripts from several units);
+//   - the stream API: input fed a byte at a time gives the same output as
+//     one run, including N, D and $;
+//   - errors as values, and no file access without a grant.
+
+import std.sed
+import std.string
+import std.fs
+import std.map
+
+extern exit(code: int)
+
+const DATA = "tests/integration/sed_parity/freebsd/sed"
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+file(name: string) -> string {
+    text, err = fs.read("${DATA}/${name}")
+    if err != "" { fail("read ${name}: ${err}") }
+    return text
+}
+
+// Compile one script and run it over input (as `sed script < input`).
+sed1(script: string, input: string) -> string {
+    prog, err = sed.compile(script, null)
+    if err != "" { fail("compile '${script}': ${err}") }
+    out, rerr = sed.run(prog, input)
+    if rerr != "" { fail("run '${script}': ${rerr}") }
+    sed.free(prog)
+    return out
+}
+
+// Compile with options (-n, -E) and run.
+sed_o(script: string, quiet: int, ere: int, input: string) -> string {
+    o = sed.options()
+    if quiet == 1 { sed.quiet(o) }
+    if ere == 1 { sed.extended(o) }
+    prog, err = sed.compile(script, o)
+    sed.options_free(o)
+    if err != "" { fail("compile '${script}': ${err}") }
+    out, rerr = sed.run(prog, input)
+    if rerr != "" { fail("run '${script}': ${rerr}") }
+    sed.free(prog)
+    return out
+}
+
+same(name: string, got: string, want: string) {
+    if got != want { fail("${name}:\n--- want\n${want}\n--- got\n${got}") }
+}
+
+// The input fed one byte at a time must give what one run gives.
+streamed(script: string, input: string) -> string {
+    prog, err = sed.compile(script, null)
+    if err != "" { fail("compile '${script}': ${err}") }
+    st, serr = sed.stream_new(prog)
+    if serr != "" { fail("stream_new: ${serr}") }
+    out = ""
+    i = 0
+    while i < string.length(input) {
+        o, werr = sed.stream_write(st, string.substring(input, i, i + 1))
+        if werr != "" { fail("stream_write: ${werr}") }
+        out = "${out}${o}"
+        i = i + 1
+    }
+    o2, cerr = sed.stream_close(st)
+    if cerr != "" { fail("stream_close: ${cerr}") }
+    sed.stream_free(st)
+    sed.free(prog)
+    return "${out}${o2}"
+}
+
+xs(n: int) -> string {
+    out = ""
+    i = 0
+    while i < n {
+        out = "${out}x"
+        i = i + 1
+    }
+    return out
+}
+
+// regress.sh, test by test.
+regress() {
+    input = file("regress.in")
+    same("G", sed1("G", input), file("regress.G.out"))
+    same("P", sed1("P", input), file("regress.P.out"))
+    same("psl", sed1("$!g;P;D", input), file("regress.psl.out"))
+    same("bcb", sed1("s/X/${xs(2043)}\\\\zz/", input), file("regress.bcb.out"))
+    same("y", sed1("y/o/O/", "foo"), file("regress.y.out"))
+    same("sg", sed1("s/,*/,/g", "foo\n"), file("regress.sg.out"))
+    same("s3", sed1("s/,*/,/3", "foo\n"), file("regress.s3.out"))
+    same("s4", sed1("s/,*/,/4", "foo\n"), file("regress.s4.out"))
+    same("s5", sed1("s/,*/,/5", "foo\n"), file("regress.s5.out"))
+    same("c0", sed1("c\\\nfoo\n", input), file("regress.c0.out"))
+    same("c1", sed1("4,$c\\\nfoo\n", input), file("regress.c1.out"))
+    same("c2", sed1("3,9c\\\nfoo\n", input), file("regress.c2.out"))
+    same("c3", sed1("3,/no such string/c\\\nfoo\n", input), file("regress.c3.out"))
+    same("b2a", sed1("2,3b\n1,2d", input), file("regress.b2a.out"))
+    same("icase1", sed1("/SED/Id", input), file("regress.icase1.out"))
+    same("icase2", sed1("s/SED/Foo/I", input), file("regress.icase2.out"))
+    same("icase3", sed1("s/SED/Foo/", input), file("regress.icase3.out"))
+    same("icase4", sed1("s/SED/Foo/i", input), file("regress.icase4.out"))
+    same("not", sed1("1!!s/foo/bar/", "foo\n"), file("regress.not.out"))
+
+    o = sed.options()
+    sed.add_script(o, "hanoi.sed", file("hanoi.sed"))
+    hp, herr = sed.compile_units(o)
+    sed.options_free(o)
+    if herr != "" { fail("hanoi.sed: ${herr}") }
+    hout, _ = sed.run(hp, ":abcd: : :\n")
+    sed.free(hp)
+    same("hanoi", hout, file("regress.hanoi.out"))
+
+    o2 = sed.options()
+    sed.add_script(o2, "math.sed", file("math.sed"))
+    mp, merr = sed.compile_units(o2)
+    sed.options_free(o2)
+    if merr != "" { fail("math.sed: ${merr}") }
+    mout, _ = sed.run(mp, "4+7*3+2^7/3\n")
+    sed.free(mp)
+    same("math", mout, file("regress.math.out"))
+    println("  PASS: regress.sh's output tests (21)")
+}
+
+// jot -w "l${n}_%d" 9
+lines_of(n: int) -> string {
+    out = ""
+    i = 1
+    while i <= 9 {
+        out = "${out}l${n}_${i}\n"
+        i = i + 1
+    }
+    return out
+}
+
+// regress.sh's inplace_test: -i and -I over five files in memory must give
+// what sed gives each file alone (-i) and all of them as one input (-I).
+inplace_test(expr: string) {
+    fsm = map.map_new()
+    ex = | p: string | { return map.map_has(fsm, p) }
+    rd = | p: string | {
+        v, _e = map.get_string(fsm, p)
+        return v
+    }
+    wr = | p: string, d: string, t: int | {
+        if t == 1 {
+            map.map_put(fsm, p, d)
+        } else {
+            old, _e2 = map.get_string(fsm, p)
+            map.map_put(fsm, p, "${old}${d}")
+        }
+        return ""
+    }
+    names = string.seq_empty()
+    _names = string.seq_empty()
+    all = ""
+    n = 5
+    while n >= 1 {
+        map.map_put(fsm, "lines.in.${n}", lines_of(n))
+        map.map_put(fsm, "lines._in.${n}", lines_of(n))
+        names = string.seq_cons("lines.in.${n}", names)
+        _names = string.seq_cons("lines._in.${n}", _names)
+        n = n - 1
+    }
+    k = 1
+    while k <= 5 {
+        all = "${all}${lines_of(k)}"
+        k = k + 1
+    }
+
+    oi = sed.options()
+    sed.in_place(oi, "")
+    sed.grant_files(oi, ex, rd, wr)
+    pi, perr = sed.compile(expr, oi)
+    if perr != "" { fail("inplace ${expr}: ${perr}") }
+    out, rerr = sed.run_files(pi, names)
+    if rerr != "" || out != "" { fail("inplace -i ${expr}: '${rerr}' '${out}'") }
+    sed.free(pi)
+    sed.options_free(oi)
+
+    oI = sed.options()
+    sed.in_place_span(oI, "")
+    sed.grant_files(oI, ex, rd, wr)
+    pI, perr2 = sed.compile(expr, oI)
+    if perr2 != "" { fail("inplace ${expr}: ${perr2}") }
+    out2, rerr2 = sed.run_files(pI, _names)
+    if rerr2 != "" || out2 != "" { fail("inplace -I ${expr}: '${rerr2}'") }
+    sed.free(pI)
+    sed.options_free(oI)
+
+    spanned = ""
+    m = 1
+    while m <= 5 {
+        got, _g = map.get_string(fsm, "lines.in.${m}")
+        same("inplace -i ${expr} file ${m}", got, sed1(expr, lines_of(m)))
+        g2, _g2 = map.get_string(fsm, "lines._in.${m}")
+        spanned = "${spanned}${g2}"
+        m = m + 1
+    }
+    same("inplace -I ${expr}", spanned, sed1(expr, all))
+    map.map_free(fsm)
+}
+
+inplace() {
+    inplace_test("3,6d")
+    inplace_test("8,30d")
+    inplace_test("20,99d")
+    inplace_test("{;{;8,30d;};}")
+    inplace_test("3x;6G")
+    println("  PASS: regress.sh's in-place tests (5)")
+}
+
+// sed2_test.sh's ATF cases.
+sed2() {
+    // inplace_command_q: -i.bak with q keeps the backup and the lines so far
+    fsm = map.map_new()
+    ex = | p: string | { return map.map_has(fsm, p) }
+    rd = | p: string | {
+        v, _e = map.get_string(fsm, p)
+        return v
+    }
+    wr = | p: string, d: string, t: int | {
+        if t == 1 {
+            map.map_put(fsm, p, d)
+        } else {
+            old, _e2 = map.get_string(fsm, p)
+            map.map_put(fsm, p, "${old}${d}")
+        }
+        return ""
+    }
+    map.map_put(fsm, "a", "1\n2\n3\n")
+    same("inplace_command_q stdout", sed1("2q", "1\n2\n3\n"), "1\n2\n")
+    o = sed.options()
+    sed.in_place(o, ".bak")
+    sed.grant_files(o, ex, rd, wr)
+    p, err = sed.compile("2q", o)
+    if err != "" { fail("2q: ${err}") }
+    _out, rerr = sed.run_files(p, string.seq_cons("a", string.seq_empty()))
+    if rerr != "" { fail("inplace q: ${rerr}") }
+    a, _ea = map.get_string(fsm, "a")
+    bak, _eb = map.get_string(fsm, "a.bak")
+    same("inplace_command_q a", a, "1\n2\n")
+    same("inplace_command_q a.bak", bak, "1\n2\n3\n")
+    sed.free(p)
+    sed.options_free(o)
+    map.map_free(fsm)
+
+    // escape_subst
+    a2 = "a\nt\\t\n\tb\n\t\tc\r\n"
+    same("escape 1", sed1("/\\t/d", a2), "a\nt\\t\n")
+    same("escape 2", sed1("s/\\t/    /g", a2), "a\nt\\t\n    b\n        c\r\n")
+    same("escape 3", sed1("s/\\t/\\t\\t/g", a2), "a\nt\\t\n\t\tb\n\t\t\t\tc\r\n")
+    same("escape 4", sed1("s/\\\\t//g", a2), "a\nt\n\tb\n\t\tc\r\n")
+    same("escape 5", sed1("s/\\r//", a2), "a\nt\\t\n\tb\n\t\tc\n")
+    same("escape 6", sed1("s/[ \\r\\t]//g", "a\tb c\rx\n"), "abcx\n")
+
+    // hex_subst
+    same("hex 1", sed1("s/\\x27/\"/g", "test='foo'"), "test=\"foo\"")
+    same("hex 2", sed1("s/test/\\x27test\\x27/g", "test='foo'"), "'test'='foo'")
+    same("hex 3", sed1("s/\\x2727/\"/g", "test='27foo'"), "test=\"foo'")
+    same("hex 4", sed1("s/\\xd/x/", "\rn"), "xn")
+    _bp, berr = sed.compile("s/\\xx//", null)
+    if berr == "" { fail("hex 5: s/\\xx// compiled") }
+
+    // bracket_y
+    // sed2_test.sh says "zyx", but its atf_check checks echo's output, not
+    // sed's (the pipe is outside it); FreeBSD's and macOS's sed both give
+    // "zxy", which is what the mapping says.
+    same("bracket_y 1", sed1("y/[a]/xyz/", "][a\n"), "zxy\n")
+    same("bracket_y 2", sed1("y/[]/ct/", "bra[ke]\n"), "bracket\n")
+    same("bracket_y 3", sed1("y[\\[][ct[", "bra[ke]\n"), "bracket\n")
+    sed1("y/[/x/", "\n")
+    sed1("y/[]/xy/", "\n")
+
+    // minus_e: -e and the script operand are the same
+    same("minus_e", sed1("1 i\\\n--", "ab\n"), "--\nab\n")
+    o3 = sed.options()
+    sed.add_expression(o3, "1 i\\\n--")
+    p3, e3 = sed.compile_units(o3)
+    if e3 != "" { fail("minus_e -e: ${e3}") }
+    out3, _r3 = sed.run(p3, "ab\n")
+    same("minus_e -e", out3, "--\nab\n")
+    sed.free(p3)
+    sed.options_free(o3)
+
+    // command_c: c starts a new cycle
+    six = "a\nb\nc\nd\ne\nf\n"
+    same("command_c 1", sed1("\n/a/,/b/c\\\nx\n", six), "x\nc\nd\ne\nf\n")
+    same("command_c 2", sed1("\n/a/,/b/c\\\nx\n$!N\n", six), "x\nc\nd\ne\nf\n")
+
+    // command_D: an empty pattern space
+    hw = "hello\n\nworld\n"
+    same("command_D 1", sed1("s/^//;P;D", hw), hw)
+    same("command_D 2", sed1("s/^//;$!N;P;D", hw), hw)
+
+    // commands_on_stdin: units chain like -f a -f - -f ./-
+    o4 = sed.options()
+    sed.add_script(o4, "a_to_b", "s/a/b/\n")
+    sed.add_script(o4, "-", "s/b/c/\n")
+    sed.add_script(o4, "./-", "s/c/d/\n")
+    p4, e4 = sed.compile_units(o4)
+    if e4 != "" { fail("commands_on_stdin: ${e4}") }
+    out4, _r4 = sed.run(p4, "a\n")
+    same("commands_on_stdin", out4, "d\n")
+    sed.free(p4)
+    sed.options_free(o4)
+    println("  PASS: sed2_test.sh's cases")
+}
+
+stream() {
+    cases = ["s/a/b/g", "$!N;P;D", "N;N;s/\\n/+/g", "$p", "n;d", "1~0p", "2q", "$!d", "=", "l"]
+    input = "a1\nab2\n\nabc3\nlast"
+    i = 0
+    while i < 10 {
+        sc = cases[i]
+        _p, cerr = sed.compile(sc, null)
+        if cerr == "" {
+            sed.free(_p)
+            same("stream ${sc}", streamed(sc, input), sed1(sc, input))
+        }
+        i = i + 1
+    }
+    // the N at the end of input quits without printing, as BSD sed does
+    same("N at end", sed1("N", "a\nb\nc\n"), "a\nb\n")
+    println("  PASS: byte-at-a-time streams match whole runs")
+}
+
+errors() {
+    bad = ["{", "/hello/", "1,/hello/", "-5p", "/jj", "a hello", "a \\ hello", "b foo", "d hello",
+        "s/aa", "s/aa/", "s/a/b", "s/a/b/c/d", "s/a/b/ 1 2", "s/a/b/ 1 g", "s/a/b/w", "y/aa",
+        "y/aa/b/", "y/aa/", "y/a/b", "y/a/b/c/d", "!", "supercalifrangolisticexprialidociussupercalifrangolisticexcius"]
+    i = 0
+    while i < 23 {
+        p, err = sed.compile(bad[i], null)
+        if err == "" {
+            sed.free(p)
+            fail("'${bad[i]}' compiled; sed rejects it")
+        }
+        i = i + 1
+    }
+    _p, e = sed.compile("s/a", null)
+    same("error text", e, "1: \"s/a\n\": unterminated substitute pattern")
+    // w with no grant fails when the run starts, not at compile
+    wp, werr = sed.compile("w out.txt", null)
+    if werr != "" { fail("w compile: ${werr}") }
+    _o, rerr = sed.run(wp, "x\n")
+    same("w without a grant", rerr, "out.txt: no file access granted")
+    sed.free(wp)
+    // r with no grant reads nothing, as sed does for a file it cannot read
+    same("r without a grant", sed1("r in.txt", "x\n"), "x\n")
+    // warnings are a value too
+    lp, _le = sed.compile(":a\np", null)
+    same("unused label", sed.warnings(lp), "3: \":a\np\n\": unused label 'a'\n")
+    sed.free(lp)
+    println("  PASS: errors and warnings as values")
+}
+
+main() {
+    println("=== std.sed ===")
+    regress()
+    inplace()
+    sed2()
+    stream()
+    errors()
+    println("PASS")
+}

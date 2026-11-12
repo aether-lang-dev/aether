@@ -1,0 +1,218 @@
+// aesed: FreeBSD sed's command line (main.c's main()) on std.sed.
+//
+// The parity tests run FreeBSD's own sed test scripts (multi_test.sh,
+// regress.sh) with this program standing in for sed, so its job is to be
+// `sed` exactly as main.c is: getopt("EI:ae:f:i:lnru"), the first operand as
+// the script when there is no -e or -f, the remaining operands as files or
+// else standard input, "sed: ..." on standard error and exit status 1 for a
+// bad script or an unreadable file. It is a test fixture, not a tool std
+// ships; std.sed itself never touches a file but through the closures
+// granted here.
+
+import std.sed
+import std.string
+import std.fs
+import std.io
+import std.os
+
+extern exit(code: int)
+
+usage() {
+    io.stderr_write("usage: sed script [-Ealnru] [-i extension] [file ...]\n\tsed [-Ealnu] [-i extension] [-e script] ... [-f script_file] ... [file ...]\n")
+    exit(1)
+}
+
+die(msg: string) {
+    io.stderr_write("sed: ${msg}\n")
+    exit(1)
+}
+
+// The whole of standard input.
+read_stdin() -> string {
+    all = ""
+    going = 1
+    while going == 1 {
+        chunk, _cnt, err = io.fd_read_n(0, 65536)
+        if err != "" || string.length(chunk) == 0 {
+            going = 0
+        } else {
+            all = "${all}${chunk}"
+        }
+    }
+    return all
+}
+
+// The file access std.sed is granted: the real file system, with
+// /dev/stdout and /dev/stderr as the streams.
+grant(o: ptr) {
+    ex = | p: string | {
+        if fs.file_exists(p) == 1 { return 1 }
+        return 0
+    }
+    rd = | p: string | {
+        data, err = fs.read(p)
+        if err != "" { return "" }
+        return data
+    }
+    wr = | p: string, d: string, trunc: int | {
+        if p == "/dev/stdout" {
+            io.stdout_write(d)
+            return ""
+        }
+        if p == "/dev/stderr" {
+            io.stderr_write(d)
+            return ""
+        }
+        mode = "ab"
+        if trunc == 1 { mode = "wb" }
+        h = fs.file_open_raw(p, mode)
+        if h == null { return "cannot open for writing" }
+        if string.length(d) > 0 {
+            if fs.file_write_raw(h, d, string.length(d)) == 0 {
+                fs.file_close_raw(h)
+                return "write failed"
+            }
+        }
+        fs.file_close_raw(h)
+        return ""
+    }
+    sed.grant_files(o, ex, rd, wr)
+}
+
+main() {
+    o = sed.options()
+    grant(o)
+    argc = os.args_count()
+    eflag = 0
+    fflag = 0
+    fflagstdin = 0
+    i = 1
+    // getopt(argc, argv, "EI:ae:f:i:lnru"): options until the first operand
+    // or "--"; letters may be clustered; an option's argument is the rest of
+    // its word or else the next word.
+    in_opts = 1
+    while i < argc && in_opts == 1 {
+        a = os.args_get(i)
+        if a == "--" {
+            i = i + 1
+            in_opts = 0
+        } else if string.length(a) < 2 || string.char_at(a, 0) != 45 {
+            in_opts = 0
+        } else {
+            i = i + 1
+            k = 1
+            while k < string.length(a) {
+                c = string.char_at(a, k)
+                k = k + 1
+                needs = 0
+                if c == 73 || c == 101 || c == 102 || c == 105 { needs = 1 }
+                optarg = ""
+                if needs == 1 {
+                    if k < string.length(a) {
+                        optarg = string.substring(a, k, string.length(a))
+                    } else {
+                        if i >= argc { usage() }
+                        optarg = os.args_get(i)
+                        i = i + 1
+                    }
+                    k = string.length(a)
+                }
+                if c == 114 || c == 69 {
+                    sed.extended(o)
+                } else if c == 73 {
+                    sed.in_place_span(o, optarg)
+                } else if c == 97 {
+                    sed.delay_wfiles(o)
+                } else if c == 101 {
+                    eflag = 1
+                    sed.add_expression(o, optarg)
+                } else if c == 102 {
+                    fflag = 1
+                    if optarg == "-" {
+                        fflagstdin = 1
+                        sed.add_script(o, "stdin", read_stdin())
+                    } else {
+                        if fs.file_exists(optarg) == 0 { die("${optarg}: No such file or directory") }
+                        text, rerr = fs.read(optarg)
+                        if rerr != "" { die("${optarg}: ${rerr}") }
+                        sed.add_script(o, optarg, text)
+                    }
+                } else if c == 105 {
+                    sed.in_place(o, optarg)
+                } else if c == 108 || c == 117 {
+                    // line-buffered / unbuffered stdout: aesed writes as it goes
+                } else if c == 110 {
+                    sed.quiet(o)
+                } else {
+                    usage()
+                }
+            }
+        }
+    }
+
+    // First usage case; script is the first arg
+    if eflag == 0 && fflag == 0 && i < argc {
+        sed.add_expression(o, os.args_get(i))
+        i = i + 1
+    }
+    prog, cerr = sed.compile_units(o)
+    if cerr != "" {
+        if cerr == "no script" { usage() }
+        die(cerr)
+    }
+    warn = sed.warnings(prog)
+    if warn != "" {
+        lines = string.split(warn, "\n")
+        j = 0
+        while j < string.array_size(lines) {
+            w = string.array_get(lines, j)
+            if string.length(w) > 0 { io.stderr_write("sed: ${w}\n") }
+            j = j + 1
+        }
+        string.array_free(lines)
+    }
+
+    status = 0
+    if i < argc {
+        names = string.seq_empty()
+        k2 = argc - 1
+        while k2 >= i {
+            names = string.seq_cons(os.args_get(k2), names)
+            k2 = k2 - 1
+        }
+        out, rerr = sed.run_files(prog, names)
+        io.stdout_write(out)
+        if rerr != "" {
+            errs = string.split(rerr, "\n")
+            j = 0
+            while j < string.array_size(errs) {
+                e = string.array_get(errs, j)
+                if string.length(e) > 0 { io.stderr_write("sed: ${e}\n") }
+                j = j + 1
+            }
+            string.array_free(errs)
+            status = 1
+        }
+    } else if fflagstdin == 0 {
+        st, serr = sed.stream_new(prog)
+        if serr != "" { die(serr) }
+        going = 1
+        while going == 1 && sed.stream_done(st) == 0 {
+            chunk, _cnt, err = io.fd_read_n(0, 65536)
+            if err != "" || string.length(chunk) == 0 {
+                going = 0
+            } else {
+                out, werr = sed.stream_write(st, chunk)
+                io.stdout_write(out)
+                if werr != "" { die(werr) }
+            }
+        }
+        out2, cerr2 = sed.stream_close(st)
+        io.stdout_write(out2)
+        if cerr2 != "" { die(cerr2) }
+        sed.stream_free(st)
+    }
+    sed.free(prog)
+    sed.options_free(o)
+    exit(status)
+}
