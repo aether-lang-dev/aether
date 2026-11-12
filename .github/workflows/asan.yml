@@ -91,6 +91,10 @@ jobs:
 
     - name: Upload the sweep's timings
       if: always()
+      # Data for the shard weights (#3601), not a check: a failed upload
+      # (the runner could not reach the artifact service, ENOTFOUND on a
+      # macOS runner of PR #3671) does not fail a job whose tests passed.
+      continue-on-error: true
       uses: actions/upload-artifact@v6
       with:
         name: sweep-timings-asan-${{ strategy.job-index }}
