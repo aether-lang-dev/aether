@@ -19,9 +19,11 @@ set -e
 # naming the reproducer.
 #
 # FUZZ_REPLAY=1 builds the same harness with $CC (default cc) and no
-# libFuzzer, linked to tests/fuzz/replay_main.c, and runs every seed once
-# (plus any files or directories named in FUZZ_REPLAY_INPUTS). It works where
-# clang has no libFuzzer, Windows among them, and finds nothing new.
+# libFuzzer, linked to tests/fuzz/replay_main.c, reads the target's dictionary
+# as libFuzzer reads it (failing on a line libFuzzer would refuse) and runs
+# each entry, then every seed once (plus any files or directories named in
+# FUZZ_REPLAY_INPUTS). It works where clang has no libFuzzer, Windows among
+# them, and finds nothing new.
 #
 # The Makefile's fuzz-<target> rules pass the flags the std sources are
 # compiled with (FUZZ_STD_CFLAGS); run by hand, the script takes them from
@@ -72,9 +74,11 @@ if [ "${FUZZ_REPLAY:-0}" = "1" ]; then
     "$CC" -g -O1 -o "$OUT/replay_$TARGET$EXE" \
         "$SCRIPT_DIR/replay_main.c" "$HARNESS" $SOURCES \
         $FUZZ_STD_CFLAGS $AE_CFLAGS
-    echo "==> Replaying the seeds${FUZZ_REPLAY_INPUTS:+ and $FUZZ_REPLAY_INPUTS}..."
+    echo "==> Replaying the dictionary and the seeds${FUZZ_REPLAY_INPUTS:+ and $FUZZ_REPLAY_INPUTS}..."
+    # -dict reads the dictionary as libFuzzer does and fails on a line it
+    # would refuse, so a bad entry fails here and not only on CI.
     # shellcheck disable=SC2086
-    "$OUT/replay_$TARGET$EXE" "$CORPUS_DIR" ${FUZZ_REPLAY_INPUTS:-}
+    "$OUT/replay_$TARGET$EXE" -dict="$DICT_FILE" "$CORPUS_DIR" ${FUZZ_REPLAY_INPUTS:-}
     exit $?
 fi
 

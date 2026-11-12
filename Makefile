@@ -1539,14 +1539,19 @@ fuzz-json: compiler ae stdlib
 	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh json
 
 .PHONY: fuzz-replay
-# The C-parser harnesses built with $(CC) and no libFuzzer, each seed run
-# through its property checks once: what can be checked where clang has no
-# libFuzzer (Windows among them).
+# The C-parser harnesses built with $(CC) and no libFuzzer, each dictionary
+# entry and each seed run through its property checks once: what can be
+# checked where clang has no libFuzzer (Windows among them). Every
+# dictionary, the CBOR and frame-reader ones too, is read as libFuzzer reads
+# it, so an entry it would refuse fails here rather than only on CI.
 fuzz-replay: compiler ae stdlib
 	@for t in $(FUZZ_C_TARGETS); do \
 	    FUZZ_REPLAY=1 CC='$(CC)' FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' \
 	        sh tests/fuzz/run_fuzz_c.sh $$t || exit 1; \
 	done
+	@./$(BUILD_DIR)/fuzz/json/replay_json$(EXE_EXT) \
+	    -check_dict=tests/fuzz/cbor/cbor.dict \
+	    -check_dict=tests/fuzz/ipc_frames/ipc_frames.dict
 
 .PHONY: fuzz-ci
 # Every fuzz target, FUZZ_SECONDS each (default 60): what the fuzz workflow

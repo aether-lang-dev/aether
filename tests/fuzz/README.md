@@ -216,10 +216,15 @@ make fuzz-corpus                       # after editing a gen_corpus.ae
 
 `FUZZ_REPLAY=1` builds a C target with `$CC` and no libFuzzer, linked to
 **`replay_main.c`**, a `main` that feeds each file it is given, or each file
-in a directory it is given, to `LLVMFuzzerTestOneInput` once. `make
-fuzz-replay` runs every seed of the four targets through their property
-checks that way; it works where clang has no libFuzzer, Windows (MinGW)
-among them, and finds nothing new. It also replays a reproducer:
+in a directory it is given, to `LLVMFuzzerTestOneInput` once. With
+`-dict=FILE` it reads a dictionary as libFuzzer reads it (`name="value"` or
+`"value"`, printable bytes, the escapes `\\`, `\"` and `\xNN` only), fails
+on a line libFuzzer would refuse to start on, naming it, and runs each entry
+as an input. `make fuzz-replay` runs every dictionary entry and every seed
+of the four targets through their property checks that way, and reads the
+CBOR and frame-reader dictionaries too (`-check_dict=`); it works where clang
+has no libFuzzer, Windows (MinGW) among them, and finds nothing new. It also
+replays a reproducer:
 
 ```sh
 make fuzz-replay
