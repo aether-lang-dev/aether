@@ -4002,10 +4002,20 @@ static void loop_plan_make(HttpServer* server, HttpLoopPlan* plan) {
     /* The loop carries a client's TLS through OpenSSL only. A server on the
      * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
      * no OpenSSL context: the loop closed every connection it took for one,
-     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
-    if (server->tls_enabled) {
+     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). The
+     * three fields are read together under tls_lock, which tls_apply_pem
+     * swaps them under: a certificate reload from another thread while the
+     * loop makes its plan raced with this read (TSan, #3542). */
+    pthread_mutex_lock(&server->tls_lock);
+    int tls_on = server->tls_enabled;
 #ifdef AETHER_HAS_OPENSSL
-        if (server->is_pure_tls || !server->tls_ctx) plan->chain_ok = 0;
+    int tls_pure = server->is_pure_tls;
+    int has_ctx = server->tls_ctx != NULL;
+#endif
+    pthread_mutex_unlock(&server->tls_lock);
+    if (tls_on) {
+#ifdef AETHER_HAS_OPENSSL
+        if (tls_pure || !has_ctx) plan->chain_ok = 0;
 #else
         plan->chain_ok = 0;
 #endif

@@ -212,7 +212,10 @@ typedef struct HttpServer {
     // parse begins. tls_ctx is an SSL_CTX*, declared here as void*
     // so this header doesn't pull in <openssl/ssl.h> for callers
     // that don't need it. Lazy-allocated by http_server_set_tls.
-    int tls_enabled;
+    // Set from 0 to 1 by a certificate's first apply (under tls_lock and
+    // tls_config_lock) and read by the accept paths of the server's and the
+    // event loop's threads without them, so atomic (TSan, #3542).
+    _Atomic int tls_enabled;
     void* tls_ctx;
     int is_pure_tls;
     int tls_backend;            /* 0 default (AETHER_PURE_TLS, then the build),
