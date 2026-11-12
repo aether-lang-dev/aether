@@ -1,0 +1,389 @@
+// The AT&T regex conformance data, run on std.posix.regex as FreeBSD runs it.
+//
+// FreeBSD's lib/libc/tests/regex builds NetBSD's t_regex_att.c with
+// -DREGEX_SPENCER -DSKIP_LEFTASSOC over the Glenn Fowler / AT&T data files in
+// std/posix/regex/tests/data/att/ (copied unchanged, see
+// tests/data/PROVENANCE.md). This is att_test() ported to Aether with the
+// REGEX_SPENCER tables: the same known-bug list (bug()), the same
+// unsupported-feature list (unsupported(), optional()), the same flags
+// (getflags()), and checkmatches()' "(so,eo)(so,eo)..." comparison.
+// leftassoc is an expected failure there (atf_tc_expect_fail: Spencer's
+// engine is right-associative), so it is one here: it must fail.
+//
+// One difference: std.posix.regex is UTF-8 only, where FreeBSD's test runs in
+// the C locale. The only line that notices is basic.dat's `.*` against the
+// bytes \x01\xff: \xff is not UTF-8, so the match stops before it, (0,1)
+// rather than (0,2). That is what FreeBSD's own regexec answers in a UTF-8
+// locale (checked on FreeBSD 15.1 with C.UTF-8 and en_US.UTF-8), so the line
+// is held to (0,1) here.
+
+import std.posix.regex
+import std.string
+import std.fs
+
+extern exit(code: int)
+
+// bug(): the REGEX_SPENCER known-failure list, pattern then input.
+is_bug(p: string, inp: string) -> int {
+    bugs = ["a[-]?c", "ac",
+        "(a*)*", "a",
+        "(aba|a*b)*", "ababa",
+        "\\(a\\(b\\)*\\)*\\2", "abab",
+        "(a*)*", "aaaaaa",
+        "(a*)*", "aaaaaax",
+        "(a*)+", "a",
+        "(a*)+", "aaaaaa",
+        "(a*)+", "aaaaaax",
+        "([a]*)*", "a",
+        "([a]*)*", "aaaaaa",
+        "([a]*)*", "aaaaaax",
+        "([a]*)+", "a",
+        "([a]*)+", "aaaaaa",
+        "([a]*)+", "aaaaaax",
+        "([^b]*)*", "a",
+        "([^b]*)*", "aaaaaa",
+        "([^b]*)*", "aaaaaab",
+        "([ab]*)*", "a",
+        "([ab]*)*", "aaaaaa",
+        "([ab]*)*", "ababab",
+        "([ab]*)*", "bababa",
+        "([ab]*)*", "b",
+        "([ab]*)*", "bbbbbb",
+        "([ab]*)*", "aaaabcde",
+        "([^a]*)*", "b",
+        "([^a]*)*", "bbbbbb",
+        "([^ab]*)*", "ccccxx",
+        "\\(a*\\)*\\(x\\)", "ax",
+        "\\(a*\\)*\\(x\\)", "axa",
+        "\\(a*\\)*\\(x\\)\\(\\1\\)", "x",
+        "\\(a*\\)*\\(x\\)\\(\\1\\)", "ax",
+        "\\(a*\\)*\\(x\\)\\(\\1\\)\\(x\\)", "axxa",
+        "(a*)*(x)", "ax",
+        "(a*)*(x)", "axa",
+        "(a*)+(x)", "ax",
+        "(a*)+(x)", "axa",
+        "((a|ab)(c|bcd))(d*)", "abcd",
+        "((a|ab)(bcd|c))(d*)", "abcd",
+        "((ab|a)(c|bcd))(d*)", "abcd",
+        "((ab|a)(bcd|c))(d*)", "abcd",
+        "((a*)(b|abc))(c*)", "abc",
+        "((a*)(abc|b))(c*)", "abc",
+        "((..)|(.)){2}", "aaa",
+        "((..)|(.)){3}", "aaa",
+        "((..)|(.)){3}", "aaaa",
+        "((..)|(.)){3}", "aaaaa",
+        "X(.?){0,}Y", "X1234567Y",
+        "X(.?){1,}Y", "X1234567Y",
+        "X(.?){2,}Y", "X1234567Y",
+        "X(.?){3,}Y", "X1234567Y",
+        "X(.?){4,}Y", "X1234567Y",
+        "X(.?){5,}Y", "X1234567Y",
+        "X(.?){6,}Y", "X1234567Y",
+        "X(.?){7,}Y", "X1234567Y",
+        "X(.?){0,8}Y", "X1234567Y",
+        "X(.?){1,8}Y", "X1234567Y",
+        "X(.?){2,8}Y", "X1234567Y",
+        "X(.?){3,8}Y", "X1234567Y",
+        "X(.?){4,8}Y", "X1234567Y",
+        "X(.?){5,8}Y", "X1234567Y",
+        "X(.?){6,8}Y", "X1234567Y",
+        "X(.?){7,8}Y", "X1234567Y",
+        "(a|ab|c|bcd){0,}(d*)", "ababcd",
+        "(a|ab|c|bcd){1,}(d*)", "ababcd",
+        "(a|ab|c|bcd){2,}(d*)", "ababcd",
+        "(a|ab|c|bcd){3,}(d*)", "ababcd",
+        "(a|ab|c|bcd){1,10}(d*)", "ababcd",
+        "(a|ab|c|bcd){2,10}(d*)", "ababcd",
+        "(a|ab|c|bcd){3,10}(d*)", "ababcd",
+        "(a|ab|c|bcd)*(d*)", "ababcd",
+        "(a|ab|c|bcd)+(d*)", "ababcd",
+        "(ab|a|c|bcd){0,}(d*)", "ababcd",
+        "(ab|a|c|bcd){1,}(d*)", "ababcd",
+        "(ab|a|c|bcd){2,}(d*)", "ababcd",
+        "(ab|a|c|bcd){3,}(d*)", "ababcd",
+        "(ab|a|c|bcd){1,10}(d*)", "ababcd",
+        "(ab|a|c|bcd){2,10}(d*)", "ababcd",
+        "(ab|a|c|bcd){3,10}(d*)", "ababcd",
+        "(ab|a|c|bcd)*(d*)", "ababcd",
+        "(ab|a|c|bcd)+(d*)", "ababcd"]
+    i = 0
+    while i < 162 {
+        if bugs[i] == p && bugs[i + 1] == inp { return 1 }
+        i = i + 2
+    }
+    return 0
+}
+
+// unsupported(): the REGEX_SPENCER list, after leading '#' and spaces.
+is_unsupported(c_in: string) -> int {
+    c = c_in
+    while string.length(c) > 0 && (string.char_at(c, 0) == 35 || string.char_at(c, 0) == 32) {
+        c = string.substring(c, 1, string.length(c))
+    }
+    match (c) {
+        "ASSOCIATIVITY=left" -> { return 1 }
+        "SUBEXPRESSION=precedence" -> { return 1 }
+        "REPEAT_LONGEST=last" -> { return 1 }
+        "BUG=alternation-order" -> { return 1 }
+        "BUG=first-match" -> { return 1 }
+        "BUG=nomatch-match" -> { return 1 }
+        "BUG=repeat-any" -> { return 1 }
+        "BUG=range-null" -> { return 1 }
+        "BUG=repeat-null-unknown" -> { return 1 }
+        "BUG=repeat-null" -> { return 1 }
+        "BUG=repeat-artifact" -> { return 1 }
+        "BUG=subexpression-first" -> { return 1 }
+        _ -> { return 0 }
+    }
+}
+
+hexval(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+// strunvis() for the escapes the data files use: \n \t \r \\ \xHH.
+unvis(s: string) -> string {
+    out = ""
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 92 && i + 1 < n {
+            d = string.char_at(s, i + 1)
+            if d == 110 {
+                out = "${out}\n"
+                i = i + 2
+            } else if d == 116 {
+                out = "${out}\t"
+                i = i + 2
+            } else if d == 114 {
+                out = "${out}\r"
+                i = i + 2
+            } else if d == 120 {
+                v = 0
+                j = i + 2
+                while j < n && j < i + 4 && hexval(string.char_at(s, j)) >= 0 {
+                    v = v * 16 + hexval(string.char_at(s, j))
+                    j = j + 1
+                }
+                out = "${out}${string.from_char(v)}"
+                i = j
+            } else {
+                out = "${out}${string.from_char(d)}"
+                i = i + 2
+            }
+        } else {
+            out = "${out}${string.from_char(c)}"
+            i = i + 1
+        }
+    }
+    return out
+}
+
+count_parens(s: string) -> int {
+    n = 0
+    i = 0
+    while i < string.length(s) {
+        if string.char_at(s, i) == 40 { n = n + 1 }
+        i = i + 1
+    }
+    return n
+}
+
+// One regcomp/regexec of the data, as att_test's inner loop does it.
+// Returns 1 on a mismatch.
+run_one(lineno: int, pattern: string, flags: int, input: string, matches: string) -> int {
+    expect_comp_err = 0
+    expect_nomatch = 0
+    if string.length(matches) == 0 || string.char_at(matches, 0) != 40 {
+        if matches == "NOMATCH" {
+            expect_nomatch = 1
+        } else if matches != "OK" {
+            expect_comp_err = 1
+        }
+    }
+    re, cerr = regex.compile(pattern, flags)
+    if cerr != "" {
+        if expect_comp_err == 1 { return 0 }
+        println("  line ${lineno}: regcomp failed (${cerr}) for ${pattern}")
+        return 1
+    }
+    if expect_comp_err == 1 {
+        println("  line ${lineno}: regcomp succeeded for ${pattern}, expected ${matches}")
+        regex.free(re)
+        return 1
+    }
+    m = regex.match_new(re)
+    ok, _e = regex.exec_into(re, input, 0, m)
+    bad = 0
+    if expect_nomatch == 1 {
+        if ok == 1 {
+            println("  line ${lineno}: ${pattern} matched ${input}, expected NOMATCH")
+            bad = 1
+        }
+    } else if string.char_at(matches, 0) == 40 {
+        if ok == 0 {
+            println("  line ${lineno}: ${pattern} did not match ${input}, expected ${matches}")
+            bad = 1
+        } else {
+            nm = count_parens(matches)
+            res = ""
+            k = 0
+            while k < nm {
+                so = regex.match_start(m, k)
+                eo = regex.match_end(m, k)
+                if so == -1 && eo == -1 {
+                    res = "${res}(?,?)"
+                } else {
+                    res = "${res}(${so},${eo})"
+                }
+                k = k + 1
+            }
+            if res != matches {
+                println("  line ${lineno}: ${pattern} on ${input}: got ${res}, expected ${matches}")
+                bad = 1
+            }
+        }
+    }
+    regex.match_free(m)
+    regex.free(re)
+    return bad
+}
+
+// att_test() over one file. Returns (cases, failures).
+att_test(name: string) -> (int, int) {
+    text, err = fs.read("std/posix/regex/tests/data/att/${name}.dat")
+    if err != "" {
+        println("FAIL: read ${name}.dat: ${err}")
+        exit(1)
+    }
+    lines = string.split(text, "\n")
+    nl = string.array_size(lines)
+    cases = 0
+    fails = 0
+    skipping = 0
+    lastpattern = ""
+    li = 0
+    while li < nl {
+        raw = string.array_get(lines, li)
+        lineno = li + 1
+        li = li + 1
+        toks = string.split(raw, "\t")
+        nt = string.array_size(toks)
+        // strtok(line, "\r\n\t"): the non-empty fields
+        f = ["", "", "", "", ""]
+        nf = 0
+        ti = 0
+        while ti < nt && nf < 5 {
+            tk = string.array_get(toks, ti)
+            if string.length(tk) > 0 && tk != "\r" {
+                f[nf] = string.copy(tk)
+                nf = nf + 1
+            }
+            ti = ti + 1
+        }
+        string.array_free(toks)
+        if nf == 0 { continue }
+        fname = f[0]
+        c0 = string.char_at(fname, 0)
+        if c0 == 125 {
+            skipping = 0
+            continue
+        }
+        if skipping == 1 { continue }
+        if c0 == 59 || c0 == 35 || fname == "NOTE" { continue }
+        if c0 == 58 {
+            k = string.index_of_from(fname, ":", 1)
+            fname = string.substring(fname, k + 1, string.length(fname))
+        }
+        pattern = f[1]
+        input = f[2]
+        if string.index_of(fname, "$") >= 0 {
+            pattern = unvis(pattern)
+            input = unvis(input)
+        }
+        if input == "NULL" { input = "" }
+        if pattern == "SAME" {
+            // A copy: assigning lastpattern itself to the loop-local
+            // pattern frees lastpattern's string when the iteration ends.
+            pattern = string.copy(lastpattern)
+        } else {
+            lastpattern = pattern
+        }
+        matches = f[3]
+        if pattern == ".*" && input == "${string.from_char(1)}${string.from_char(255)}" {
+            matches = "(0,1)"
+        }
+        comment = f[4]
+        lead = string.char_at(fname, 0)
+        if lead == 123 {
+            // optional(): Spencer has braces, not minimal match operators
+            if comment == "no *? +? mimimal match ops" {
+                skipping = 1
+                continue
+            }
+            fname = string.substring(fname, 1, string.length(fname))
+        } else if lead == 63 || lead == 124 {
+            if is_unsupported(comment) == 1 { continue }
+            fname = string.substring(fname, 1, string.length(fname))
+        }
+        if is_bug(pattern, input) == 1 { continue }
+
+        // getflags(): i is REG_ICASE; a digit, i, $ or n ends the type letters
+        iflags = 0
+        if string.index_of(fname, "i") >= 0 { iflags = regex.ICASE }
+        k2 = 0
+        while k2 < string.length(fname) {
+            ch = string.char_at(fname, k2)
+            if ch == 66 {
+                cases = cases + 1
+                fails = fails + run_one(lineno, pattern, regex.BASIC | iflags, input, matches)
+            } else if ch == 69 {
+                cases = cases + 1
+                fails = fails + run_one(lineno, pattern, regex.EXTENDED | iflags, input, matches)
+            } else if ch == 76 {
+                cases = cases + 1
+                fails = fails + run_one(lineno, pattern, regex.NOSPEC | iflags, input, matches)
+            } else {
+                break
+            }
+            k2 = k2 + 1
+        }
+    }
+    string.array_free(lines)
+    return cases, fails
+}
+
+main() {
+    println("=== std.posix.regex: AT&T regex conformance data ===")
+    names = ["basic", "categorization", "nullsubexpr", "rightassoc", "forcedassoc", "repetition"]
+    total = 0
+    bad = 0
+    i = 0
+    while i < 6 {
+        c, f = att_test(names[i])
+        if f == 0 {
+            println("  PASS: ${names[i]} (${c} cases)")
+        } else {
+            println("  FAIL: ${names[i]}: ${f} of ${c} cases")
+        }
+        total = total + c
+        bad = bad + f
+        i = i + 1
+    }
+    lc, lf = att_test("leftassoc")
+    if lf == 0 {
+        println("  FAIL: leftassoc passed; FreeBSD expects it to fail (right-associative engine)")
+        bad = bad + 1
+    } else {
+        println("  PASS: leftassoc fails as FreeBSD expects (${lf} of ${lc} cases)")
+    }
+    if bad != 0 {
+        println("FAIL: ${bad} of ${total} cases")
+        exit(1)
+    }
+    println("PASS: all ${total} cases")
+}

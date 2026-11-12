@@ -1,0 +1,119 @@
+# POSIX conformance cases for std.posix.regex.
+#
+# One case per line, four tab-separated fields:
+#   flags     B (BRE) or E (ERE), then any of: i ICASE, n NEWLINE,
+#             ^ NOTBOL, $ NOTEOL
+#   pattern   \n is a newline, \t a tab, \\ a backslash; any other
+#             backslash is the pattern's own
+#   subject   the same escapes; "" is the empty string
+#   expected  (so,eo) for the whole match and each subexpression, (?,?)
+#             for one that did not take part; NOMATCH; or ERROR (regcomp
+#             rejects the pattern)
+#
+# The expected column is POSIX.1-2017 (XBD 9, regcomp/regexec) as FreeBSD's
+# engine implements it. test_posix_regex.ae checks it on every target;
+# tests/integration/posix_regex_system/ checks it against the host's own
+# regcomp where there is one (macOS, FreeBSD, Linux).
+#
+# --- leftmost-longest, alternation
+E	a|ab	abcd	(0,2)
+E	ab|a	abcd	(0,2)
+E	ab|abc|abcd	abcde	(0,4)
+E	(wee|week)(knights|night)	weeknights	(0,10)(0,3)(3,10)
+E	x(a|ab)	xabc	(0,3)(1,3)
+E	(a|b)*c	abac	(0,4)(2,3)
+E	(fo|foo)	foo	(0,3)(0,3)
+E	b|abc	xabcx	(1,4)
+E	(a*)(b|abc)	abc	(0,3)(0,0)(0,3)
+# --- the leftmost match wins over a longer one further right
+E	b+|a	abbb	(0,1)
+E	a*	baaa	(0,0)
+# --- BRE against ERE
+B	a+	a+	(0,2)
+E	a+	aaa	(0,3)
+B	a?	a?	(0,2)
+B	a|b	a|b	(0,3)
+E	a|b	b	(0,1)
+B	a\{2\}	aaa	(0,2)
+E	a{2}	aaa	(0,2)
+B	a{2}	a{2}	(0,4)
+B	\(ab\)c	abc	(0,3)(0,2)
+E	\(ab\)c	(ab)c	(0,5)
+E	(ab)c	abc	(0,3)(0,2)
+B	(ab)c	(ab)c	(0,5)
+B	*a	*a	(0,2)
+B	^*	*	(0,1)
+B	a\{1,2\}b	aaab	(1,4)
+E	a{1,2}b	aaab	(1,4)
+B	\(a\)*	aaa	(0,3)(2,3)
+# --- back-references
+B	\(a*\)b\1	aabaa	(0,5)(0,2)
+B	\(.\)\1	xyzzy	(2,4)(2,3)
+B	\(a\)\(b\)\2\1	xabba	(1,5)(1,2)(2,3)
+B	\([a-c]*\)\1	abcabc	(0,6)(0,3)
+B	\(a\)\1	ab	NOMATCH
+B	\(ab*\)c\1	abbcabb	(0,7)(0,3)
+B	\(x\)\2	x	ERROR
+# --- REG_NEWLINE
+En	^b	a\nb	(2,3)
+E	^b	a\nb	NOMATCH
+En	a$	a\nb	(0,1)
+E	a$	a\nb	NOMATCH
+En	a.b	a\nb	NOMATCH
+E	a.b	a\nb	(0,3)
+En	a[^x]b	a\nb	NOMATCH
+E	a[^x]b	a\nb	(0,3)
+Bn	^b$	a\nb\nc	(2,3)
+# --- REG_ICASE
+Ei	ABC	xabcx	(1,4)
+Bi	a[b-d]e	ADE	(0,3)
+Ei	[^a]	A	NOMATCH
+# a back-reference repeats the bytes it matched, ICASE or not (FreeBSD, macOS)
+Bi	\(a\)\1	aA	NOMATCH
+Bi	\(a\)\1	AA	(0,2)(0,1)
+Ei	Straße	STRAßE	(0,7)
+Ei	é+	xÉéÉ!	(1,7)
+# --- REG_NOTBOL, REG_NOTEOL
+E^	^a	a	NOMATCH
+E$	a$	a	NOMATCH
+En^	^a	b\na	(2,3)
+En$	a$	a\nb	(0,1)
+E^	a	a	(0,1)
+# --- brackets and classes
+E	[[:digit:]]+	ab123c	(2,5)
+E	[[:alpha:]]+	12abc3	(2,5)
+E	[[:space:]]	a\tb	(1,2)
+E	[[:upper:]][[:lower:]]	aBc	(1,3)
+E	[[:punct:]]+	a.,!b	(1,4)
+E	[[:xdigit:]]+	xFe0z	(1,4)
+E	[]a]+	]a]b	(0,3)
+E	[^]a]	]ab	(2,3)
+E	[a-]+	-a-	(0,3)
+E	[[.hyphen.]]	-	(0,1)
+E	[[=a=]]	bab	(1,2)
+E	[[:foo:]]	a	ERROR
+E	[z-a]	a	ERROR
+# --- UTF-8: a character is a code point, not a byte
+E	.	é	(0,2)
+E	^.$	é	(0,2)
+E	^..$	é	NOMATCH
+E	[é]	xé	(1,3)
+E	[à-ä]+	âäx	(0,4)
+E	[^a]	é	(0,2)
+E	é{2}	éé	(0,4)
+E	[[:alpha:]]+	1héllo2	(1,7)
+# --- empty matches and anchors
+E	a*	bbb	(0,0)
+E	^$	""	(0,0)
+E	x*$	abc	(3,3)
+E	(a*)+	b	(0,0)(0,0)
+B	\(\)	x	(0,0)(0,0)
+# --- errors
+E	(	x	ERROR
+E	a)	a)	(0,2)
+B	\(a	x	ERROR
+E	[a	x	ERROR
+E	a{1	x	ERROR
+B	a\{3,2\}	x	ERROR
+E	*a	x	ERROR
+E	a\	x	ERROR

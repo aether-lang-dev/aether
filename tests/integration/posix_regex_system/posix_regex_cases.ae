@@ -1,0 +1,98 @@
+// std.posix.regex over std/posix/regex/tests/conformance.txt (the path is the
+// first argument), printing one "<line>\t<result>" per case in the notation
+// system_regex_oracle.c prints for the host's regcomp. Driven by
+// test_posix_regex_system.sh; not a standalone test.
+
+import std.posix.regex
+import std.string
+import std.fs
+import std.os
+
+extern exit(code: int)
+
+unescape(s: string) -> string {
+    if s == "\"\"" { return "" }
+    out = ""
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 92 && i + 1 < n && string.char_at(s, i + 1) == 110 {
+            out = "${out}\n"
+            i = i + 2
+        } else if c == 92 && i + 1 < n && string.char_at(s, i + 1) == 116 {
+            out = "${out}\t"
+            i = i + 2
+        } else if c == 92 && i + 1 < n && string.char_at(s, i + 1) == 92 {
+            out = "${out}\\"
+            i = i + 2
+        } else {
+            out = "${out}${string.from_char(c)}"
+            i = i + 1
+        }
+    }
+    return out
+}
+
+has(s: string, c: string) -> int {
+    if string.index_of(s, c) >= 0 { return 1 }
+    return 0
+}
+
+result(flags: string, pat: string, subj: string) -> string {
+    cflags = regex.BASIC
+    if has(flags, "E") == 1 { cflags = regex.EXTENDED }
+    if has(flags, "i") == 1 { cflags = cflags | regex.ICASE }
+    if has(flags, "n") == 1 { cflags = cflags | regex.NEWLINE }
+    eflags = 0
+    if has(flags, "^") == 1 { eflags = eflags | regex.NOTBOL }
+    if has(flags, "$") == 1 { eflags = eflags | regex.NOTEOL }
+    re, err = regex.compile(pat, cflags)
+    if err != "" { return "ERROR" }
+    m, xerr = regex.exec(re, subj, eflags)
+    if xerr != "" {
+        regex.free(re)
+        return "EXEC ${xerr}"
+    }
+    if m == null {
+        regex.free(re)
+        return "NOMATCH"
+    }
+    out = ""
+    k = 0
+    while k < regex.match_count(m) {
+        so = regex.match_start(m, k)
+        if so == -1 {
+            out = "${out}(?,?)"
+        } else {
+            out = "${out}(${so},${regex.match_end(m, k)})"
+        }
+        k = k + 1
+    }
+    regex.match_free(m)
+    regex.free(re)
+    return out
+}
+
+main() {
+    path = os.args_get(1)
+    text, err = fs.read(path)
+    if err != "" {
+        println("read ${path}: ${err}")
+        exit(2)
+    }
+    lines = string.split(text, "\n")
+    n = string.array_size(lines)
+    i = 0
+    while i < n {
+        ln = string.array_get(lines, i)
+        i = i + 1
+        if string.length(ln) == 0 { continue }
+        if string.char_at(ln, 0) == 35 { continue }
+        f = string.split(ln, "\t")
+        r = result(string.array_get(f, 0), unescape(string.array_get(f, 1)), unescape(string.array_get(f, 2)))
+        println("${i}\t${r}")
+        string.array_free(f)
+    }
+    string.array_free(lines)
+}

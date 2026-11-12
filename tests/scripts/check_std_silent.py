@@ -15,7 +15,9 @@ Comments and string literals are set aside first.
 
 Not checked:
   * modules whose output is the product: std/io and std/log;
-  * vendored sources (PCRE2, utf8proc, miniaudio, libfyaml).
+  * vendored sources (PCRE2, utf8proc, miniaudio, libfyaml, FreeBSD's regex,
+    whose only writes are REDEBUG / REG_TRACE debugging that regexec
+    strips out).
 
 A write that is exempt by the rule (output the program asked for, or the
 last line before abort() or a panic) carries `silent-ok: <why>` on the line
@@ -35,7 +37,7 @@ WAIVER = "silent-ok:"
 PRODUCT = ("std/io/", "std/log/")
 # Third-party sources, kept as their upstream wrote them.
 VENDORED = ("std/regex/pcre2/", "std/unicode/utf8proc/", "std/audio/miniaudio.h",
-            "std/yaml/libfyaml/")
+            "std/yaml/libfyaml/", "std/posix/regex/freebsd/")
 
 ALWAYS = re.compile(r"\b(printf|puts|putchar|perror|vprintf)\s*\(")
 TO_STREAM = re.compile(r"\b(fprintf|fputs|fputc|putc|fwrite|vfprintf)\s*\(")

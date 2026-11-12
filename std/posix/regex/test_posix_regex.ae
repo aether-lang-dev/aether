@@ -1,0 +1,269 @@
+// std.posix.regex: the API, and POSIX conformance on every target.
+//
+// The conformance half runs std/posix/regex/tests/conformance.txt (POSIX
+// leftmost-longest with alternation, BRE against ERE, back-references,
+// REG_NEWLINE, REG_ICASE, NOTBOL/NOTEOL, classes, UTF-8) against its expected
+// column. Windows has no regcomp of its own, so there this is the whole check;
+// tests/integration/posix_regex_system/ also holds the same cases against the
+// host's regcomp where it has one.
+//
+// The last section is why the module exists: std.regex (PCRE2, leftmost-first)
+// and std.posix.regex (leftmost-longest) pick different matches for the same
+// alternation.
+
+import std.posix.regex
+import std.regex as pcre
+import std.string
+import std.fs
+
+extern exit(code: int)
+
+fail(msg: string) {
+    println("FAIL: ${msg}")
+    exit(1)
+}
+
+// \n, \t and \\ escapes, and "" for the empty string; any other backslash
+// is left for the pattern.
+unescape(s: string) -> string {
+    if s == "\"\"" { return "" }
+    out = ""
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 92 && i + 1 < n {
+            d = string.char_at(s, i + 1)
+            if d == 110 {
+                out = "${out}\n"
+                i = i + 2
+            } else if d == 116 {
+                out = "${out}\t"
+                i = i + 2
+            } else if d == 92 {
+                out = "${out}\\"
+                i = i + 2
+            } else {
+                // any other backslash is the pattern's own
+                out = "${out}\\"
+                i = i + 1
+            }
+        } else {
+            out = "${out}${string.from_char(c)}"
+            i = i + 1
+        }
+    }
+    return out
+}
+
+has(s: string, c: string) -> int {
+    if string.index_of(s, c) >= 0 { return 1 }
+    return 0
+}
+
+// Run one case the way the expected column spells its answer.
+run_case(flags: string, pat: string, subj: string) -> string {
+    cflags = regex.BASIC
+    if has(flags, "E") == 1 { cflags = regex.EXTENDED }
+    if has(flags, "i") == 1 { cflags = cflags | regex.ICASE }
+    if has(flags, "n") == 1 { cflags = cflags | regex.NEWLINE }
+    eflags = 0
+    if has(flags, "^") == 1 { eflags = eflags | regex.NOTBOL }
+    if has(flags, "$") == 1 { eflags = eflags | regex.NOTEOL }
+    re, err = regex.compile(pat, cflags)
+    if err != "" { return "ERROR" }
+    m, xerr = regex.exec(re, subj, eflags)
+    if xerr != "" {
+        regex.free(re)
+        return "EXEC ${xerr}"
+    }
+    if m == null {
+        regex.free(re)
+        return "NOMATCH"
+    }
+    out = ""
+    k = 0
+    while k < regex.match_count(m) {
+        so = regex.match_start(m, k)
+        eo = regex.match_end(m, k)
+        if so == -1 {
+            out = "${out}(?,?)"
+        } else {
+            out = "${out}(${so},${eo})"
+        }
+        k = k + 1
+    }
+    regex.match_free(m)
+    regex.free(re)
+    return out
+}
+
+conformance() {
+    text, err = fs.read("std/posix/regex/tests/conformance.txt")
+    if err != "" { fail("read conformance.txt: ${err}") }
+    lines = string.split(text, "\n")
+    n = string.array_size(lines)
+    cases = 0
+    bad = 0
+    i = 0
+    while i < n {
+        ln = string.array_get(lines, i)
+        i = i + 1
+        if string.length(ln) == 0 { continue }
+        if string.char_at(ln, 0) == 35 { continue }
+        f = string.split(ln, "\t")
+        if string.array_size(f) != 4 { fail("conformance.txt line ${i}: want 4 fields") }
+        flags = string.array_get(f, 0)
+        pat = unescape(string.array_get(f, 1))
+        subj = unescape(string.array_get(f, 2))
+        want = string.array_get(f, 3)
+        got = run_case(flags, pat, subj)
+        cases = cases + 1
+        if got != want {
+            println("  line ${i}: ${flags} /${string.array_get(f, 1)}/ on '${string.array_get(f, 2)}': got ${got}, want ${want}")
+            bad = bad + 1
+        }
+        string.array_free(f)
+    }
+    string.array_free(lines)
+    if bad != 0 { fail("${bad} of ${cases} conformance cases") }
+    println("  PASS: ${cases} conformance cases")
+}
+
+api() {
+    // compile errors are regerror's text, and a value, not a crash
+    bad, berr = regex.compile("a\\(b", regex.BASIC)
+    if bad != null { fail("unbalanced \\( compiled") }
+    if berr != "parentheses not balanced" { fail("compile err text: '${berr}'") }
+    bad2, berr2 = regex.compile("[[:nope:]]", regex.EXTENDED)
+    if bad2 != null || berr2 != "invalid character class" { fail("class err: '${berr2}'") }
+    println("  PASS: compile errors carry regerror's text")
+
+    // nsub, and slots beyond a group that did not take part
+    re = regex.compile("(a)|(b)", regex.EXTENDED) or { fail("compile (a)|(b)") return }
+    if regex.nsub(re) != 2 { fail("nsub ${regex.nsub(re)}") }
+    m, _ = regex.exec(re, "b", 0)
+    if m == null { fail("(a)|(b) on b") }
+    if regex.match_count(m) != 3 { fail("match_count ${regex.match_count(m)}") }
+    if regex.match_start(m, 1) != -1 || regex.match_end(m, 1) != -1 { fail("unset group 1") }
+    if regex.match_start(m, 2) != 0 || regex.match_end(m, 2) != 1 { fail("group 2") }
+    if regex.match_start(m, 3) != -1 { fail("slot past nsub") }
+    regex.match_free(m)
+
+    // no match is (null, ""), not an error
+    nm, nerr = regex.exec(re, "c", 0)
+    if nm != null || nerr != "" { fail("no match: '${nerr}'") }
+    if regex.matches(re, "xxbxx", 0) != 1 { fail("matches") }
+    if regex.matches(re, "xxx", 0) != 0 { fail("matches false positive") }
+    regex.free(re)
+    println("  PASS: nsub, unset groups, no-match")
+
+    // one match buffer reused; exec_range with REG_STARTEND offsets
+    w = regex.compile("[0-9]+", regex.EXTENDED) or { fail("compile [0-9]+") return }
+    buf = regex.match_new(w)
+    subj = "a1b22c333"
+    pos = 0
+    seen = ""
+    while pos < string.length(subj) {
+        ok, xerr = regex.exec_range(w, subj, pos, -1, 0, buf)
+        if xerr != "" { fail("exec_range: ${xerr}") }
+        if ok == 0 { break }
+        st = regex.match_start(buf, 0)
+        en = regex.match_end(buf, 0)
+        seen = "${seen}[${st},${en}]"
+        pos = en
+    }
+    if seen != "[1,2][3,5][6,9]" { fail("scan: ${seen}") }
+    // a range that cuts the subject short
+    ok2, _ = regex.exec_range(w, subj, 3, 4, 0, buf)
+    if ok2 != 1 || regex.match_end(buf, 0) != 4 { fail("range end not honoured") }
+    regex.match_free(buf)
+    regex.free(w)
+    println("  PASS: match buffer reuse and exec_range")
+
+    // ^ at a range start is a line start unless NOTBOL says otherwise
+    caret = regex.compile("^b", regex.EXTENDED) or { fail("compile ^b") return }
+    cb = regex.match_new(caret)
+    r1, _ = regex.exec_range(caret, "abc", 1, -1, 0, cb)
+    r2, _ = regex.exec_range(caret, "abc", 1, -1, regex.NOTBOL, cb)
+    if r1 != 1 || r2 != 0 { fail("^ at range start: ${r1} ${r2}") }
+    regex.match_free(cb)
+    regex.free(caret)
+    println("  PASS: ^ at a range start, NOTBOL")
+
+    // NOSUB: matched, but no offsets
+    ns = regex.compile("(a)(b)", regex.EXTENDED | regex.NOSUB) or { fail("compile NOSUB") return }
+    nsm, _ = regex.exec(ns, "xab", 0)
+    if nsm == null { fail("NOSUB did not match") }
+    if regex.match_count(nsm) != 0 || regex.match_start(nsm, 0) != -1 { fail("NOSUB reported offsets") }
+    regex.match_free(nsm)
+    regex.free(ns)
+    println("  PASS: NOSUB")
+
+    // NUL is an ordinary byte, in subject and in pattern
+    z = string.from_char(0)
+    zre = regex.compile("a.b", regex.EXTENDED) or { fail("compile a.b") return }
+    zm, _ = regex.exec(zre, "xa${z}b", 0)
+    if zm == null || regex.match_start(zm, 0) != 1 || regex.match_end(zm, 0) != 4 { fail("NUL in subject") }
+    regex.match_free(zm)
+    regex.free(zre)
+    pz = regex.compile("a${z}b", regex.EXTENDED) or { fail("compile with NUL") return }
+    if regex.matches(pz, "a${z}b", 0) != 1 { fail("NUL in pattern") }
+    if regex.matches(pz, "ab", 0) != 0 { fail("NUL in pattern ignored") }
+    regex.free(pz)
+    println("  PASS: embedded NUL")
+
+    // NOSPEC: the pattern is a literal
+    lit = regex.compile("a*b", regex.NOSPEC) or { fail("compile NOSPEC") return }
+    if regex.matches(lit, "xa*b", 0) != 1 || regex.matches(lit, "aab", 0) != 0 { fail("NOSPEC") }
+    regex.free(lit)
+    println("  PASS: NOSPEC")
+
+    // invalid UTF-8: an error in a pattern, unmatched by . in a subject
+    ff = string.from_char(255)
+    _iu, iuerr = regex.compile("a${ff}", regex.EXTENDED)
+    if iuerr != "illegal byte sequence" { fail("invalid UTF-8 pattern: '${iuerr}'") }
+    dot = regex.compile("^a.$", regex.EXTENDED) or { fail("compile ^a.$") return }
+    if regex.matches(dot, "a${ff}", 0) != 0 { fail(". matched an invalid byte") }
+    if regex.matches(dot, "aé", 0) != 1 { fail(". did not match é") }
+    regex.free(dot)
+    println("  PASS: invalid UTF-8")
+
+    // two handles are independent: errors and matches do not leak between them
+    h1 = regex.compile("x+", regex.EXTENDED) or { fail("h1") return }
+    h2, e2 = regex.compile("(", regex.EXTENDED)
+    if h2 != null || e2 == "" { fail("h2 should fail") }
+    if regex.matches(h1, "xx", 0) != 1 { fail("h1 after h2's error") }
+    regex.free(h1)
+    regex.free(null)
+    println("  PASS: independent handles")
+}
+
+// The point of the module: PCRE2 is leftmost-first, POSIX leftmost-longest.
+versus_pcre() {
+    p = regex.compile("a|ab", regex.EXTENDED) or { fail("posix a|ab") return }
+    m, _ = regex.exec(p, "abcd", 0)
+    if m == null { fail("posix a|ab: no match") }
+    posix_end = regex.match_end(m, 0)
+    regex.match_free(m)
+    regex.free(p)
+
+    q, qerr = pcre.compile("a|ab")
+    if q == null {
+        println("  [SKIP] std.regex unavailable: ${qerr}")
+        return
+    }
+    _st, pcre_end, _e = pcre.find(q, "abcd")
+    pcre.free(q)
+    if posix_end != 2 { fail("posix a|ab on abcd ends at ${posix_end}, want 2 (\"ab\")") }
+    if pcre_end != 1 { fail("pcre a|ab on abcd ends at ${pcre_end}, want 1 (\"a\")") }
+    println("  PASS: a|ab on abcd: POSIX takes \"ab\", std.regex takes \"a\"")
+}
+
+main() {
+    println("=== std.posix.regex ===")
+    api()
+    conformance()
+    versus_pcre()
+    println("PASS")
+}

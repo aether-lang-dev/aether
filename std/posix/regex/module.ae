@@ -1,0 +1,160 @@
+// std.posix.regex — POSIX regular expressions (FreeBSD's libc engine).
+// Import with: import std.posix.regex
+//
+// Basic (BRE, the default) and Extended (ERE) syntax, POSIX leftmost-longest
+// matching, and back-references, from Henry Spencer's engine as FreeBSD
+// carries it, vendored in std/posix/regex/freebsd/. The same engine runs on
+// every target, Windows included, and does not follow the process locale:
+// patterns and subjects are UTF-8.
+//
+// std.regex (PCRE2) is the general-purpose engine. This one is for POSIX
+// tools and faithful ports of C that calls regcomp/regexec: the two disagree
+// on which match wins once a pattern has alternation (`a|ab` on "abcd" is
+// "ab" here, "a" under PCRE2), and BRE syntax has no PCRE2 equivalent.
+//
+// Quick example:
+//
+//   import std.posix.regex
+//
+//   main() {
+//       re = regex.compile("\\(ab\\)*c", 0) or { return }   // a BRE
+//       m, err = regex.exec(re, "xxababc", 0)
+//       if m != null {
+//           println("${regex.match_start(m, 0)}..${regex.match_end(m, 0)}")
+//           regex.match_free(m)
+//       }
+//       regex.free(re)
+//   }
+//
+// Ownership: a compiled pattern and a match are caller-owned handles, freed
+// with free and match_free. Nothing is kept in module or thread-local state,
+// so separate handles are independent and safe to use from different
+// threads; one handle is not to be shared by two threads at once.
+
+exports(
+    compile, free, nsub,
+    exec, matches, match_new, exec_into, exec_range,
+    match_count, match_start, match_end, match_free,
+
+    // regcomp flags (FreeBSD's <regex.h> values)
+    BASIC, EXTENDED, ICASE, NOSUB, NEWLINE, NOSPEC,
+    // regexec flags
+    NOTBOL, NOTEOL
+)
+
+const BASIC = 0 // Basic regular expressions (the default)
+const EXTENDED = 1 // Extended regular expressions
+const ICASE = 2 // ignore case
+const NOSUB = 4 // report only whether it matched, no offsets
+const NEWLINE = 8 // newline is a line separator: . and [^...] skip it, ^ and $ match at it
+const NOSPEC = 16 // the whole pattern is a literal string (FreeBSD's REG_NOSPEC; not with EXTENDED)
+
+const NOTBOL = 1 // the subject's start is not the start of a line
+const NOTEOL = 2 // the subject's end is not the end of a line
+
+// ---- Raw externs (std/posix/regex/aether_posix_regex.c, aether_posix_regerror.c).
+
+extern aether_posix_regex_compile(pattern: @aether string, cflags: int) -> ptr
+extern aether_posix_regex_compile_code(re: ptr) -> int
+extern aether_posix_regex_errtext(code: int) -> string
+extern aether_posix_regex_nsub(re: ptr) -> int
+extern aether_posix_regex_free(re: @frees ptr)
+
+extern aether_posix_regex_match_new(re: ptr) -> ptr
+extern aether_posix_regex_match_free(m: @frees ptr)
+extern aether_posix_regex_exec_into(re: ptr, subject: @aether string, start: int, end: int, eflags: int, m: ptr) -> int
+extern aether_posix_regex_match_count(m: ptr) -> int
+extern aether_posix_regex_match_start(m: ptr, i: int) -> int
+extern aether_posix_regex_match_end(m: ptr, i: int) -> int
+
+// ---- Compile --------------------------------------------------------
+
+// Compile a pattern: a BRE unless flags has EXTENDED; ICASE, NOSUB,
+// NEWLINE and NOSPEC as regcomp takes them. Returns (re, "") or (null, err) with err
+// regerror's text ("parentheses not balanced", ...).
+compile(pattern: string, flags: int) -> ptr! {
+    re = aether_posix_regex_compile(pattern, flags)
+    if re == null { return null, aether_posix_regex_errtext(12) }
+    code = aether_posix_regex_compile_code(re)
+    if code != 0 {
+        aether_posix_regex_free(re)
+        return null, aether_posix_regex_errtext(code)
+    }
+    return re, ""
+}
+
+// Free a compiled pattern. Safe to call with null.
+free(re: @frees ptr) {
+    aether_posix_regex_free(re)
+}
+
+// The number of parenthesized subexpressions in re.
+nsub(re: ptr) -> int {
+    return aether_posix_regex_nsub(re)
+}
+
+// ---- Match ----------------------------------------------------------
+
+// A match buffer for re: room for the whole match and every subexpression.
+// Reuse it across exec_into / exec_range calls; free it with match_free.
+match_new(re: ptr) -> ptr {
+    return aether_posix_regex_match_new(re)
+}
+
+match_free(m: @frees ptr) {
+    aether_posix_regex_match_free(m)
+}
+
+// Match subject. Returns (m, "") on a match, m a new match the caller frees
+// with match_free; (null, "") when there is no match; (null, err) when the
+// engine fails (out of memory).
+exec(re: ptr, subject: string, eflags: int) -> ptr! {
+    m = aether_posix_regex_match_new(re)
+    if m == null { return null, aether_posix_regex_errtext(12) }
+    rc = aether_posix_regex_exec_into(re, subject, 0, -1, eflags, m)
+    if rc == 1 { return m, "" }
+    aether_posix_regex_match_free(m)
+    if rc == 0 { return null, "" }
+    return null, aether_posix_regex_errtext(0 - rc)
+}
+
+// 1 when re matches anywhere in subject, 0 when not (or on an engine error).
+matches(re: ptr, subject: string, eflags: int) -> int {
+    m = aether_posix_regex_match_new(re)
+    if m == null { return 0 }
+    rc = aether_posix_regex_exec_into(re, subject, 0, -1, eflags, m)
+    aether_posix_regex_match_free(m)
+    if rc == 1 { return 1 }
+    return 0
+}
+
+// Match subject into m, a buffer from match_new. Returns (1, "") on a match,
+// (0, "") on none, (0, err) on an engine error.
+exec_into(re: ptr, subject: string, eflags: int, m: ptr) -> (int, string) {
+    return exec_range(re, subject, 0, -1, eflags, m)
+}
+
+// Match only subject's bytes [start, end) (end -1: to the end), as regexec's
+// REG_STARTEND does; offsets in m stay relative to the start of subject. A
+// start past 0 is still the start of a line for ^ unless eflags has NOTBOL.
+exec_range(re: ptr, subject: string, start: int, end: int, eflags: int, m: ptr) -> (int, string) {
+    rc = aether_posix_regex_exec_into(re, subject, start, end, eflags, m)
+    if rc >= 0 { return rc, "" }
+    return 0, aether_posix_regex_errtext(0 - rc)
+}
+
+// The number of slots the last successful match filled: nsub(re) + 1, or 0
+// for a pattern compiled with NOSUB.
+match_count(m: ptr) -> int {
+    return aether_posix_regex_match_count(m)
+}
+
+// Byte offsets of slot i (0 is the whole match, 1.. the subexpressions):
+// -1 when slot i did not take part in the match or is out of range.
+match_start(m: ptr, i: int) -> int {
+    return aether_posix_regex_match_start(m, i)
+}
+
+match_end(m: ptr, i: int) -> int {
+    return aether_posix_regex_match_end(m, i)
+}

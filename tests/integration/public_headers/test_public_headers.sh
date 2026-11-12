@@ -44,8 +44,10 @@ checked=0
 # does not apply to them. std/yaml/libfyaml/ likewise (vendored libfyaml,
 # whose sources include one another by quoted name, compiled only through
 # aether_libfyaml_vendored.c), and std/yaml/libfyaml_compat/, a stand-in for
-# a macOS SDK header that only that build reads.
-for h in $(cd std && find . \( -path './regex/pcre2' -o -path './yaml/libfyaml' -o -path './yaml/libfyaml_compat' \) -prune -o -name '*.h' -print | sed 's|^\./||' | sort) ; do
+# a macOS SDK header that only that build reads. std/posix/regex/freebsd/
+# too: FreeBSD's regex headers, without include guards and read only
+# through the aether_posix_reg*.c wrappers that set up their environment.
+for h in $(cd std && find . \( -path './regex/pcre2' -o -path './posix/regex/freebsd' -o -path './yaml/libfyaml' -o -path './yaml/libfyaml_compat' \) -prune -o -name '*.h' -print | sed 's|^\./||' | sort) ; do
     checked=$((checked + 1))
     printf '#include "std/%s"\nint main(void){return 0;}\n' "$h" > "$TMP/probe.c"
     if ! "${CC:-cc}" -I. $CFLAGS_ALL -c "$TMP/probe.c" -o /dev/null 2>"$TMP/err.txt"; then

@@ -362,3 +362,4 @@ tests/integration/crypto_rsa_oaep_sha1_openssl/
 tests/integration/crypto_tls13_socket_verify_mtls/
 # main.ae and the three error files import lib/; test_heap_new_qualified.sh runs and builds each.
 tests/integration/heap_new_qualified/
+tests/integration/posix_regex_system/
