@@ -565,8 +565,18 @@ static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
             /* Another place holds the buffer too: it keeps it, and `s`
              * goes on in storage of its own, each element a copy that holds
              * what it held. */
-            memcpy(n, h, AETHER_SLICE_HEAD + (size_t)len * elem_size);
+            /* The header field by field, never the count: other holders
+             * change it at the same time (atomically), and a memcpy of the
+             * header read it with a plain load. The new buffer's count is
+             * its own, 1. */
+            memset(n, 0, AETHER_SLICE_HEAD);
             n->refs = 1;
+            n->reserved = h->reserved;
+            n->len = h->len;
+            n->elem_size = h->elem_size;
+            n->ops = h->ops;
+            memcpy((char*)n + AETHER_SLICE_HEAD, (const char*)h + AETHER_SLICE_HEAD,
+                   (size_t)len * elem_size);
             if (n->ops && n->ops->copy) {
                 char* e = (char*)n + AETHER_SLICE_HEAD;
                 for (uint64_t i = 0; i < len; i++) n->ops->copy(e + i * elem_size);
