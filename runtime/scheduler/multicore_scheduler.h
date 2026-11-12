@@ -137,53 +137,125 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
  * scheduler is handed a pointer to it and casts. Anything that mirrors this
  * layout by hand drifts the moment a field is added here, and the corruption
  * is silent, so the fields live in one macro and every mirror expands it. */
+/* The fields after the mailbox are in three groups of one cache line each
+ * (#3540), on x86_64 and every other target whose pointers are 8 bytes: the
+ * actor's block is 64-byte aligned (AETHER_ACTOR_ALIGN) and the mailbox
+ * ends 40 bytes before a line, so
+ *  - the end of that line holds what the core stepping the actor writes or
+ *    reads at every step and no other thread touches on a send (the step,
+ *    the step lock, the payload in hand), beside the mailbox's head, tail
+ *    and count, which only that core writes;
+ *  - the next line holds what a sender on another core reads or writes on
+ *    every send (dead, the mailbox bound, assigned_core, auto_process,
+ *    inflight, migrate_to, the bound's count), which the stepping core
+ *    pulls back once per delivery anyway, as it uncounts inflight there;
+ *  - the last holds what changes at spawn, death or a receive timeout.
+ * Senders' reads of assigned_core and dead used to share the lines the
+ * stepping core writes at every step (the mailbox count's, step_lock's), so
+ * each send from another core cost the next step transfers of those lines
+ * back to its core. sizeof(ActorBase) is 1712, as before, so an actor's
+ * state starts where it did. On a target with 4-byte pointers the groups
+ * fall elsewhere on their lines; nothing reads a field by its offset. */
 #define AETHER_ACTOR_BASE_FIELDS \
     atomic_int active; \
     int id; \
     Mailbox mailbox; \
+    /* ---- The stepping core's, beside the mailbox's head, tail, count ---- */ \
     void (*step)(void*); \
-    pthread_t thread; \
-    int auto_process; \
-    atomic_int assigned_core; \
-    /* Affinity hint: core to migrate to (-1 = none) */ \
-    atomic_int migrate_to; \
+    /* The payload of the message a handler is running on (its heap copy, \
+     * or the actor's copy of one that travelled in the message, as \
+     * step_inline says), and its type: the generated step sets them around \
+     * the handler call and clears the payload after it. A panic out of the \
+     * handler skips the release that follows, so the step barrier drops \
+     * the message (#3142). NULL between handlers. */ \
+    void* step_payload; \
+    /* Non-NULL only while an ask/reply is in flight */ \
+    _Atomic(ActorReplySlot*) reply_slot; \
     /* Where the actor sits in its core's timer heap (#3540), index + 1, \
      * 0 while it is in none: its receive timeout is not armed, or the \
      * core has not been told yet. Written by its core's thread only; the \
-     * reclaim reads it, and keeps a released block while it is not 0. In \
-     * the padding after migrate_to on 64-bit targets: no field moves. */ \
+     * reclaim reads it, and keeps a released block while it is not 0. */ \
     atomic_int timer_slot; \
-    /* NULL: the send buffer's same-core batches went here, outside every \
-     * ordering rule, and were drained only while the mailbox held \
-     * something; it sends through scheduler_send_many now (#3292). Kept \
-     * for the layout; an actor's end frees one a C caller set. */ \
-    SPSCQueue* spsc_queue; \
-    /* Non-NULL only while an ask/reply is in flight */ \
-    _Atomic(ActorReplySlot*) reply_slot; \
+    int step_type; \
     /* Prevents concurrent step() calls during work-steal handoff. \
      * Set (TAS) by the thread about to call step(); cleared (release) after. \
      * Work-stealing threads that find this set retry next outer iteration. */ \
     atomic_flag step_lock; \
-    /* AETHER_EXIT_* bits (#2974). In the padding after step_lock. */ \
-    _Atomic(unsigned char) exit_flags; \
     /* #3534: 1 while step_payload is the actor's own copy of a payload \
      * that travelled in its message (a generated actor's \
      * _aether_step_inline, at the end of its struct), which the step \
      * barrier reads but never frees; 0 while it is a heap copy. Written \
-     * and read only by the thread stepping the actor. In the padding after \
-     * exit_flags, so no field moves for it. */ \
+     * and read only by the thread stepping the actor. */ \
     unsigned char step_inline; \
+    /* AETHER_EXIT_* bits (#2974). */ \
+    _Atomic(unsigned char) exit_flags; \
     /* 1 while one entry for the actor waits in a core's ready list \
      * (#3540), the list its core's loop looks at instead of every actor \
      * it has: set by whoever pushes the entry, cleared by the core that \
-     * takes it, both with an exchange. In the padding after step_inline: \
-     * no field moves for it. */ \
+     * takes it, both with an exchange. Its own core pushes and takes it; \
+     * another thread pushes it seldom (a move, a steal, a restart). */ \
     _Atomic(unsigned char) ready_queued; \
+    /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
+     * then frees; 0 for one a caller passed to scheduler_register_actor, \
+     * whose memory stays the caller's. Written before the actor is \
+     * published, never after. */ \
+    int scheduler_owned; \
+    /* ---- What a send from another core reads or writes ---- */ \
+    /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
+     * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
+     * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
+     * auto_process actor's) has left its loop, AETHER_ACTOR_KILLED once a \
+     * kill or a linked actor's death ended it, AETHER_ACTOR_STOPPED once \
+     * it stopped itself (#2974). Non-zero actors are skipped by the \
+     * scheduler and incoming messages are dropped. Bits are only ever \
+     * set, but by a restart in place (#2974), which clears the death \
+     * bits (never RELEASED) once the new incarnation is ready. */ \
+    atomic_int dead; \
     /* The mailbox bound (#2974, `@mailbox(bound: N)`): at most this many \
      * messages accepted for the actor and not yet taken by its step, 0 for \
-     * none. Set by the generated spawn; read by every send. In the padding \
-     * after step_lock, on the line `dead` is on: no field moves for it. */ \
+     * none. Set by the generated spawn; read by every send. */ \
     atomic_int mailbox_bound; \
+    atomic_int assigned_core; \
+    int auto_process; \
+    /* Messages for this actor on their way through a core's queues or a \
+     * sender's overflow buffer: counted before the sender reads \
+     * assigned_core, uncounted when the message reaches the mailbox or \
+     * the actor's overflow (#3090, #3093, #3241). The actor moves to \
+     * another core only while this is \
+     * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
+     * left behind on the core it leaves. */ \
+    atomic_int inflight; \
+    /* Affinity hint: core to migrate to (-1 = none) */ \
+    atomic_int migrate_to; \
+    /* With a mailbox bound (#2974): the messages accepted for it and not \
+     * yet taken by its step or dropped, wherever they are (a core's queue, \
+     * a sender's deferred sends, its overflow, its mailbox). System \
+     * messages (Down, IoReady) are neither counted nor refused. */ \
+    atomic_int mailbox_pending; \
+    /* Plain sends dropped because its mailbox was full (#2974). */ \
+    atomic_uint full_drops; \
+    /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
+     * sender that has just put a message in the inbox and reads 1 wakes \
+     * the thread. */ \
+    atomic_int thread_parked; \
+    /* How many times the actor was restarted in place, under the same ref \
+     * (#2974): 0 for the actor spawned, one more at each rebirth. */ \
+    atomic_int incarnation; \
+    /* An auto_process actor's inbox (#2598): every sender puts its \
+     * messages here and only the actor's thread takes them. Made by the \
+     * first send, NULL until then. For an actor a core runs, its overflow \
+     * (#3241): a waiting core's relief starts it with the messages a full \
+     * mailbox could not take, every delivery goes behind it while it holds \
+     * anything, and each step refills the mailbox from it. Made by the \
+     * first such relief, NULL until then. */ \
+    _Atomic(struct ActorInbox*) inbox; \
+    /* Its death notices (#2974): the actors that monitor it or are linked \
+     * to it, the ones it monitors, and why it ended \
+     * (runtime/actors/aether_supervision.c, aether_actor_death_reason). \
+     * Made by the first monitor, link or death, freed with the actor. */ \
+    _Atomic(struct AetherWatch*) death_watch; \
+    pthread_t thread; \
+    /* ---- Set at spawn, death or a receive timeout ---- */ \
     /* Receive timeout (#3162): the interval a `receive ... after` names, \
      * in ns, set at spawn and kept; 0 = the actor has none. Atomic, as \
      * last_activity_ns is: scheduler_wait reads both on its own thread. */ \
@@ -195,24 +267,6 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * armed countdown (has_pending_actor_timeout) on the waiting thread: \
      * atomic, both sides, or the scan raced the step. */ \
     _Atomic uint64_t last_activity_ns; \
-    /* The payload of the message a handler is running on (its heap copy, \
-     * or the actor's copy of one that travelled in the message, as \
-     * step_inline says), and its type: the generated step sets them around \
-     * the handler call and clears the payload after it. A panic out of the \
-     * handler skips the release that follows, so the step barrier drops \
-     * the message (#3142). NULL between handlers. */ \
-    void* step_payload; \
-    int step_type; \
-    /* Bits (#2517): AETHER_ACTOR_PANICKED once the actor's step() unwound \
-     * via aether_panic() or a caught signal, AETHER_ACTOR_RELEASED once it \
-     * was released, AETHER_ACTOR_THREAD_GONE once its own thread (an \
-     * auto_process actor's) has left its loop, AETHER_ACTOR_KILLED once a \
-     * kill or a linked actor's death ended it, AETHER_ACTOR_STOPPED once \
-     * it stopped itself (#2974). Non-zero actors are skipped by the \
-     * scheduler and incoming messages are dropped. Bits are only ever \
-     * set, but by a restart in place (#2974), which clears the death \
-     * bits (never RELEASED) once the new incarnation is ready. */ \
-    atomic_int dead; \
     /* Full allocation size passed to scheduler_spawn_actor. numa_free() unmaps \
      * exactly [ptr, ptr+size), so freeing a derived actor with \
      * sizeof(ActorBase) would leak the derived-struct tail under libnuma. */ \
@@ -230,52 +284,11 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * caller, or in a program whose messages own nothing. Called through \
      * aether_message_drop() only (#3142). */ \
     void (*release_message)(int type, void* payload); \
-    /* 1 when scheduler_spawn_actor allocated the actor, which the scheduler \
-     * then frees; 0 for one a caller passed to scheduler_register_actor, \
-     * whose memory stays the caller's. Written before the actor is \
-     * published, never after. */ \
-    int scheduler_owned; \
-    /* How many times the actor was restarted in place, under the same ref \
-     * (#2974): 0 for the actor spawned, one more at each rebirth. In the \
-     * padding before inbox. */ \
-    atomic_int incarnation; \
-    /* An auto_process actor's inbox (#2598): every sender puts its \
-     * messages here and only the actor's thread takes them. Made by the \
-     * first send, NULL until then. For an actor a core runs, its overflow \
-     * (#3241): a waiting core's relief starts it with the messages a full \
-     * mailbox could not take, every delivery goes behind it while it holds \
-     * anything, and each step refills the mailbox from it. Made by the \
-     * first such relief, NULL until then. */ \
-    _Atomic(struct ActorInbox*) inbox; \
-    /* 1 while the actor's own thread sleeps in its idle park (#2592): a \
-     * sender that has just put a message in the inbox and reads 1 wakes \
-     * the thread. */ \
-    atomic_int thread_parked; \
-    /* Messages for this actor on their way through a core's queues or a \
-     * sender's overflow buffer: counted before the sender reads \
-     * assigned_core, uncounted when the message reaches the mailbox or \
-     * the actor's overflow (#3090, #3093, #3241). The actor moves to \
-     * another core only while this is \
-     * 0, with AETHER_INFLIGHT_MOVING set for the move, so no message is \
-     * left behind on the core it leaves. */ \
-    atomic_int inflight; \
-    /* Its death notices (#2974): the actors that monitor it or are linked \
-     * to it, the ones it monitors, and why it ended \
-     * (runtime/actors/aether_supervision.c, aether_actor_death_reason). \
-     * Made by the first monitor, link or death, freed with the actor. \
-     * \
-     * The fields #2974 added take 16 bytes past `inflight` and none of \
-     * the earlier ones moved: an actor's state starts on the cache line it \
-     * started on, which the step of a small actor touches (thread_ring \
-     * and skynet lost 6% when it moved to the next one). */ \
-    _Atomic(struct AetherWatch*) death_watch; \
-    /* With a mailbox bound (#2974): the messages accepted for it and not \
-     * yet taken by its step or dropped, wherever they are (a core's queue, \
-     * a sender's deferred sends, its overflow, its mailbox). System \
-     * messages (Down, IoReady) are neither counted nor refused. */ \
-    atomic_int mailbox_pending; \
-    /* Plain sends dropped because its mailbox was full (#2974). */ \
-    atomic_uint full_drops;
+    /* NULL: the send buffer's same-core batches went here, outside every \
+     * ordering rule, and were drained only while the mailbox held \
+     * something; it sends through scheduler_send_many now (#3292). Kept \
+     * for the layout; an actor's end frees one a C caller set. */ \
+    SPSCQueue* spsc_queue;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS

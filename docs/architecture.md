@@ -219,7 +219,7 @@ rejects timestamp macros outright.
        int count;                       // the actor's own state follows
    } CounterActor;
    ```
-   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `timer_slot`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `step_inline`, `ready_queued`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `step_payload`, `reply_slot`, `timer_slot`, `step_type`, `step_lock`, `step_inline`, `exit_flags`, `ready_queued`, `scheduler_owned`, `dead`, `mailbox_bound`, `assigned_core`, `auto_process`, `inflight`, `migrate_to`, `mailbox_pending`, `full_drops`, `thread_parked`, `incarnation`, `inbox`, `death_watch`, `thread`, `timeout_ns`, `last_activity_ns`, `alloc_size`, `destroy_state`, `release_message`, `spsc_queue`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c
