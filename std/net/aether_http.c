@@ -2967,16 +2967,54 @@ const char* http_find_header_end(const char* buf, size_t len) {
     return NULL;
 }
 
+/* The status of the head at `p`, whose header section ends at `end`: the
+ * three digits after the first SP of its status line, 0 if there are none.
+ * Bounded, as the buffer need not be NUL-terminated yet. */
+static int head_status_bounded(const char* p, const char* end) {
+    const char* sp = (const char*)memchr(p, ' ', (size_t)(end - p));
+    if (!sp || end - sp < 5) return 0;
+    const unsigned char* d = (const unsigned char*)sp + 1;
+    if (!isdigit(d[0]) || !isdigit(d[1]) || !isdigit(d[2]) || isdigit(d[3])) return 0;
+    return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
+}
+
+/* How many bytes at the front of `buf` are whole interim responses: heads
+ * with a 1xx status other than 101 (100 Continue, 102, 103 Early Hints).
+ * A client parses any number of those before the final response and
+ * otherwise ignores them (RFC 9110 15.2); 101 Switching Protocols is
+ * final. Read as the response, a `100 Continue` sent to a request with
+ * `Expect: 100-continue` came back as the answer, and the real one was
+ * left unread. Each skipped head is repaired as a final one is (#3572). */
+static size_t http_interim_scan(const char* buf, size_t len) {
+    size_t off = 0;
+    for (;;) {
+        const char* hend = http_find_header_end(buf + off, len - off);
+        if (!hend) return off;
+        int st = head_status_bounded(buf + off, hend);
+        if (st < 100 || st > 199 || st == 101) return off;
+        off = (size_t)((hend + 4) - buf);
+    }
+}
+
+static size_t http_interim_prefix(char* buf, size_t len) {
+    size_t off = http_interim_scan(buf, len);
+    http_head_section_repair(buf, off);
+    return off;
+}
+
 static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                                      const char* method) {
     if (!f->header_bytes) {
-        char* hend = (char*)http_find_header_end(buf, len);
+        /* The final response's head, past any interim ones. */
+        size_t skip = http_interim_prefix(buf, len);
+        char* hend = (char*)http_find_header_end(buf + skip, len - skip);
         if (!hend) return 0;
         f->header_bytes = (size_t)((hend + 4) - buf);
         /* Read with its NULs and bare CRs as SP (#3572), here where the
          * section is first whole, so the framing and every reader after it
          * read the same fields. */
-        http_head_section_repair(buf, f->header_bytes);
+        http_head_section_repair(buf + skip, f->header_bytes - skip);
+        const char* head = buf + skip;
 
         /* Read Transfer-Encoding where it lies. Copying it out meant an
          * allocation and a free per response, and any buffer it was copied
@@ -2984,7 +3022,7 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
          * decide how the body is framed. */
         const char* te = NULL;
         size_t te_len = 0;
-        http_find_header_span(buf, hend, "Transfer-Encoding",
+        http_find_header_span(head, hend, "Transfer-Encoding",
                               NULL, 0, NULL, &te, &te_len);
         if (te && http_value_has_chunked_n(te, te_len)) {
             f->chunked = 1;
@@ -2998,7 +3036,7 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
             int differing = 0;
             const char* clv = NULL;
             size_t clv_len = 0;
-            int count = http_find_header_span(buf, hend, "Content-Length",
+            int count = http_find_header_span(head, hend, "Content-Length",
                                               cl, sizeof(cl), &differing,
                                               &clv, &clv_len);
             if (count > 0) {
@@ -3015,7 +3053,7 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
                 }
             }
         }
-        if (no_body_expected(response_status_of(buf), method)) {
+        if (no_body_expected(response_status_of(head), method)) {
             f->body_target = f->header_bytes;
             f->definite = 1;
             f->chunked = 0;
@@ -3194,6 +3232,10 @@ char* http_build_request_head_into(const HttpReqHead* p,
  */
 void http_response_fill_from_bytes(HttpResponse* response,
                                           char* buf, size_t len) {
+    /* The final response, past any interim 1xx ones (http_interim_prefix). */
+    size_t interim = http_interim_prefix(buf, len);
+    buf += interim;
+    len -= interim;
     /* Found as the framing found it, past any NUL (#3556): strstr stopped at
      * one, and the whole response came back as the body of a status-0
      * response with no error. */
@@ -3571,6 +3613,11 @@ static int http_span_has_ci(const char* v, size_t vl, const char* needle) {
  * allocation on each one that had the header (#3281). */
 int http_response_head_keeps_conn(const char* head, size_t header_bytes) {
     if (!head || header_bytes < 4) return 0;
+    /* The final response's head decides, not an interim one before it. */
+    size_t interim = http_interim_scan(head, header_bytes);
+    head += interim;
+    header_bytes -= interim;
+    if (header_bytes < 4) return 0;
     const char* end = head + header_bytes - 4;
     const char* status_end = (const char*)memchr(head, '\n', (size_t)(end - head));
     const char* v = NULL;
@@ -3997,6 +4044,14 @@ send_request:
             /* Found past any NUL, as the buffered reader finds it (#3556):
              * strstr stopped at a NUL in the header section, and this kept
              * reading for an end it had already been sent. */
+            /* Interim 1xx heads first (http_interim_prefix): dropped, and
+             * the final head read after them. */
+            size_t interim = http_interim_scan(hb, hlen);
+            if (interim) {
+                memmove(hb, hb + interim, hlen - interim);
+                hlen -= interim;
+                hb[hlen] = '\0';
+            }
             hend = (char*)http_find_header_end(hb, hlen);
             if (hend) break;
         }
