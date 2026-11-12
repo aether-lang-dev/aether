@@ -63,12 +63,18 @@ case "$(uname -s 2>/dev/null)" in
                 fails=$((fails + 1))
             fi
             # Bounded by a watchdog: the old fflush waited for ever. Not under
-            # TSan (#3542): its interceptor of abort() flushes every stdio
-            # stream first (fflush(NULL), compiler-rt tsan_interceptors_posix),
-            # which waits for the lock this case holds for ever, so the abort
-            # it checks is TSan's, not the program's. Every other leg runs it.
+            # TSan (#3542): its interceptor of abort() flushes stdout and stderr
+            # before the real abort (FlushStreams, called by
+            # TSAN_INTERCEPTOR(void, abort, ...): llvm-project release/14.x,
+            # compiler-rt/lib/tsan/rtl/tsan_interceptors_posix.cpp lines
+            # 1851-1862, the clang 14 the TSan job uses; its own comment says it
+            # "may freeze the process if a child thread is performing file
+            # stream operations"). That fflush(stdout) waits for the lock this
+            # case holds for ever, after the program's bounded flush has already
+            # given up, so the abort it checks is TSan's, not the program's.
+            # Every other leg runs it.
             if [ "${AETHER_SANITIZER:-}" = tsan ]; then
-                held_note=" (another thread holding stdout for ever: not under TSan, whose abort flushes every stream)"
+                held_note=" (another thread holding stdout for ever: not under TSan, whose abort flushes stdout first)"
             else
                 "$T/held" -1 > "$T/held_out2.txt" 2> "$T/held_err2.txt" &
                 pid=$!
