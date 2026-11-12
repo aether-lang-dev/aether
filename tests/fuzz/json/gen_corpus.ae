@@ -102,6 +102,10 @@ main() {
     doc(dir, "num_ints", "[0, -0, 1, -1, 9007199254740993, 9223372036854775807, -9223372036854775808, 9223372036854775808]")
     doc(dir, "num_doubles", "[0.1, 1.0, 1e0, 1E+2, 2.5e-3, 1.7976931348623157e308, 5e-324, 2.2250738585072014e-308]")
     doc(dir, "num_out_of_range", "[1e400, -1e400, 1e-400, 123456789012345678901234567890]")
+    // CI's first fuzz_json find (#3543): -1e0 is the double -1, written "-1"
+    // and read back as the integer -1, which the harness took for a change.
+    doc(dir, "num_negative_whole_doubles", "[1e400, -1e400, 1e-400, 12347671e400, -1e0]")
+    doc(dir, "num_signed_whole_doubles", "[-1e0, -2.0, -3E+2, -0e0, -0.0, 0.0, 4.0e0, -9007199254740992.0]")
     doc(dir, "num_long_mantissa", "0.12345678901234567890123456789012345678901234567890123456789012345678901234567890")
     doc(dir, "num_leading_zero", "01")
     doc(dir, "num_plus", "+1")

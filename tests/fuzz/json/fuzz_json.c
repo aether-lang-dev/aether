@@ -215,11 +215,16 @@ static int same_value(JsonValue* a, JsonValue* b, char* why, size_t cap) {
             return 1;
         case JSON_NUMBER:
             /* A double with no fraction is written as JavaScript writes it,
-             * with no fraction ("1.0" and "1e0" as "1"), and reads back as
-             * the integer of the same value. */
+             * with no fraction ("1.0" and "-1e0" as "1" and "-1"), and reads
+             * back as the integer of the same value, negative ones included.
+             * Only a negative zero would lose something as an integer (its
+             * sign); it is written "-0", which reads back as a double, so
+             * it never gets here, and if it did that would be a change. The
+             * check refused every negative value here (signbit), which is
+             * what CI's first fuzz_json run found on "-1e0" (#3543). */
             if (!json_is_integer(a) && json_is_integer(b)) {
                 double x = json_get_number(a);
-                if ((double)json_get_long(b) != x || signbit(x)) {
+                if ((double)json_get_long(b) != x || (x == 0 && signbit(x))) {
                     snprintf(why, cap, "%.17g came back as the integer %lld", x, json_get_long(b));
                     return 0;
                 }
