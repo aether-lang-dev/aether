@@ -2401,6 +2401,13 @@ static int ready_service(Scheduler* sched, ActorBase* actor) {
         if (core >= 0 && core < num_cores) ready_push(actor);
         return 1;
     }
+    // Read again after the clear: a push made before it found the entry
+    // here and added none, and what it was told of is seen now. A restart
+    // in place tells the core while the actor is still dead, then clears
+    // the bits and pushes again (scheduler_spawn_ready); the death read
+    // above, before that push, took its countdown out of the heap with
+    // nothing to put it back (#3540).
+    dead = atomic_load_explicit(&actor->dead, memory_order_acquire);
     if (unlikely(dead != 0) || unlikely(!actor->step)) {
         // Ended (its finalize drains what waits) or never stepped: its
         // countdown will not fire. A restart in place pushes it again.

@@ -407,7 +407,94 @@ static void test_rebirth_batched_send_during_claim(void) {
     ASSERT_EQ(0, handled);   // the new incarnation never saw it
 }
 
+/* A reborn actor's receive timeout (an `after`) is in its core's timer heap
+ * once the restart returns (#3540). The restart tells the core of the
+ * countdown while the actor is still dead (scheduler_spawn_ready), then
+ * clears the death bits and tells it again (scheduler_actor_revived). A core
+ * that read the death for the first entry, and took the entry after the
+ * second push had found it there and added none, went by the death it had
+ * read: the countdown left the heap and nothing put it back, so the `after`
+ * never fired. First whole restarts, each followed by the countdown in the
+ * heap; then the death and the revival alone, as the restart makes them,
+ * without the finalize and the claim between, so the core meets the two
+ * pushes some hundred thousand times, a varied moment apart. */
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    int ready;
+} RbTimed;
+
+static void rb_timed_step(RbTimed* self) {
+    Message msg;
+    (void)mailbox_receive(&self->mailbox, &msg);
+}
+
+static void rb_arm(ActorBase* t) {
+    t->timeout_ns = 60000ULL * 1000000ULL;   // a minute: in the heap, never due here
+    t->last_activity_ns = aether_now_ns();
+}
+
+static ActorBase* rb_spawn_timed(int core) {
+    RbTimed* t = (RbTimed*)scheduler_spawn_actor(core, (void (*)(void*))rb_timed_step,
+                                                 sizeof(RbTimed));
+    rb_arm((ActorBase*)t);
+    t->ready = 1;
+    scheduler_spawn_ready((ActorBase*)t);
+    return (ActorBase*)t;
+}
+
+static int rb_wait_until(ActorBase* a, int finalized, int ms) {
+    uint64_t until = aether_now_ns() + (uint64_t)ms * 1000000ULL;
+    for (;;) {
+        int ok = finalized ? (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0
+                           : atomic_load(&a->ready_queued) == 0 && atomic_load(&a->timer_slot) != 0;
+        if (ok) return 1;
+        if (aether_now_ns() > until) return 0;
+    }
+}
+
+static void test_rebirth_keeps_receive_timeout(void) {
+    scheduler_init(1);
+    scheduler_start();
+    ActorBase* t = rb_spawn_timed(0);
+    int armed_first = rb_wait_until(t, 0, 3000);
+    int restarts = 0, errors = 0, lost = 0;
+    for (; restarts < 200; restarts++) {
+        aether_actor_kill(t);
+        if (!rb_wait_until(t, 1, 3000)) { errors++; break; }
+        int claimed = 0;
+        for (int w = 0; w < 1000000 && (claimed = aether_actor_rebirth_begin(t)) == 0; w++) {
+        }
+        if (claimed != 1) { errors++; break; }
+        ActorBase* again = rb_spawn_timed(0);
+        if (again != t || aether_actor_rebirth_end(t) != 1) { errors++; break; }
+        if (!rb_wait_until(t, 0, 1000)) { lost++; break; }
+    }
+    int revivals = 0;
+    uint64_t until = aether_now_ns() + 2000ULL * 1000000ULL;
+    for (; !lost && !errors && revivals < 400000 && aether_now_ns() < until; revivals++) {
+        atomic_fetch_or(&t->dead, AETHER_ACTOR_KILLED);
+        rb_arm(t);
+        scheduler_timeout_armed(t);   // told while dead, as scheduler_spawn_ready does
+        for (volatile int k = 0; k < (revivals * 37) % 4000; k++) {
+        }
+        atomic_fetch_and(&t->dead, ~AETHER_ACTOR_KILLED);
+        scheduler_actor_revived(t);
+        if (!rb_wait_until(t, 0, 200)) lost++;
+    }
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_TRUE(armed_first);
+    ASSERT_EQ(0, errors);
+    if (lost) printf("    (the countdown was lost after %d restarts, %d revivals)\n", restarts, revivals);
+    ASSERT_EQ(0, lost);
+    ASSERT_EQ(200, restarts);
+    ASSERT_TRUE(revivals > 1000);
+}
+
 void register_actor_rebirth_tests(void) {
+    register_test_with_category("Rebirth: a reborn actor's receive timeout stays in its core's heap",
+        test_rebirth_keeps_receive_timeout, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: a batch flushed during a claim drops what it sends the child",
         test_rebirth_batched_send_during_claim, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Rebirth: the death notice list survives a restart",
