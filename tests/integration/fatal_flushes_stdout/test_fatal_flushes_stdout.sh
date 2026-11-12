@@ -62,24 +62,32 @@ case "$(uname -s 2>/dev/null)" in
                 echo "    FAIL: another thread holding stdout for 50 ms: exit $rc, stdout [$got]"
                 fails=$((fails + 1))
             fi
-            # Bounded by a watchdog: the old fflush waited for ever.
-            "$T/held" -1 > "$T/held_out2.txt" 2> "$T/held_err2.txt" &
-            pid=$!
-            i=0
-            while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
-            if kill -0 "$pid" 2>/dev/null; then
-                # kill-ok: this case runs on POSIX only (skipped on Windows); $pid is held, still running
-                kill -9 "$pid" 2>/dev/null
-                echo "    FAIL: another thread holding stdout for ever: the abort waited past 10 s"
-                fails=$((fails + 1))
+            # Bounded by a watchdog: the old fflush waited for ever. Not under
+            # TSan (#3542): its interceptor of abort() flushes every stdio
+            # stream first (fflush(NULL), compiler-rt tsan_interceptors_posix),
+            # which waits for the lock this case holds for ever, so the abort
+            # it checks is TSan's, not the program's. Every other leg runs it.
+            if [ "${AETHER_SANITIZER:-}" = tsan ]; then
+                held_note=" (another thread holding stdout for ever: not under TSan, whose abort flushes every stream)"
             else
-                wait "$pid"
-                rc=$?
-                if [ "$rc" -ne 0 ] && [ -s "$T/held_err2.txt" ]; then
-                    echo "    ok: another thread holding stdout for ever: the flush gave up, the abort came (exit $rc)"
-                else
-                    echo "    FAIL: another thread holding stdout for ever: exit $rc, stderr [$(head -2 "$T/held_err2.txt" | tr '\n' '|')]"
+                "$T/held" -1 > "$T/held_out2.txt" 2> "$T/held_err2.txt" &
+                pid=$!
+                i=0
+                while kill -0 "$pid" 2>/dev/null && [ $i -lt 100 ]; do sleep 0.1; i=$((i + 1)); done
+                if kill -0 "$pid" 2>/dev/null; then
+                    # kill-ok: this case runs on POSIX only (skipped on Windows); $pid is held, still running
+                    kill -9 "$pid" 2>/dev/null
+                    echo "    FAIL: another thread holding stdout for ever: the abort waited past 10 s"
                     fails=$((fails + 1))
+                else
+                    wait "$pid"
+                    rc=$?
+                    if [ "$rc" -ne 0 ] && [ -s "$T/held_err2.txt" ]; then
+                        echo "    ok: another thread holding stdout for ever: the flush gave up, the abort came (exit $rc)"
+                    else
+                        echo "    FAIL: another thread holding stdout for ever: exit $rc, stderr [$(head -2 "$T/held_err2.txt" | tr '\n' '|')]"
+                        fails=$((fails + 1))
+                    fi
                 fi
             fi
         fi ;;
