@@ -1423,7 +1423,10 @@ static const char* http_strcasestr(const char* haystack, const char* needle) {
     return NULL;
 }
 
-static int http_server_initialized = 0;
+/* Read and set by whichever thread makes a server or a client first, so
+ * atomic. Two threads that both find it clear both start Winsock, which
+ * counts its starts; neither goes on before its own start has returned. */
+static _Atomic int http_server_initialized = 0;
 
 static void http_server_init(void) {
     if (http_server_initialized) return;
