@@ -75,14 +75,11 @@ void* aether_actor_thread(void* arg) {
                 // scheduler_wait (and with it scheduler_shutdown) waits
                 // forever on a message an actor thread handled; and only a
                 // step that took one (not a dead actor's) is credited, or the
-                // handled count passes the sent count (#3464). Release, as
-                // the wait's reading of it is acquire.
+                // handled count passes the sent count (#3464). Into the
+                // count that threads which are no core's share: a core's own
+                // is written by its thread alone (#3541).
                 int took = scheduler_step_actor(actor);
-                int core = actor->assigned_core;
-                if (took && core >= 0 && core < num_cores) {
-                    atomic_fetch_add_explicit(&schedulers[core].messages_processed, 1,
-                                              memory_order_release);
-                }
+                if (took) scheduler_count_processed(1);
             }
             continue;
         }

@@ -153,8 +153,8 @@ sender -> scheduler_send_local -> mailbox (direct) -> actor step
 
 ```c
 // Per-core counters in Scheduler struct
-uint64_t messages_sent;      // Incremented on send (no atomic)
-uint64_t messages_processed; // Incremented on process (no atomic)
+_Atomic uint64_t messages_sent;      // Added to by its own core's thread alone,
+_Atomic uint64_t messages_processed; // with a load and a release store (#3541)
 
 // scheduler_wait() sums across cores
 while (total_sent != total_processed) {
@@ -162,7 +162,7 @@ while (total_sent != total_processed) {
 }
 ```
 
-Messages sent from the main thread (before scheduler threads start) use a separate atomic counter. This path is infrequent.
+Messages sent from the main thread, or handled on a thread that is no core'"'"'s, use separate atomic counters. These paths are infrequent.
 
 ## Core Assignment and Migration
 

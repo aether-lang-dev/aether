@@ -119,6 +119,20 @@ typedef struct {
     // happens-before: A's message-data write → A's count++ (release) →
     // B's count read (acquire) → B's message-data read.  Without this, B can
     // read stale or torn message data on ARM64 (weakly-ordered architectures).
+    //
+    // The count stays a read-modify-write on both sides (#3541): a move
+    // between cores hands a mailbox over on its owner's thread (#3090), but
+    // two paths still let one thread produce while another consumes, and the
+    // atomic count is what keeps that one-producer, one-consumer handoff
+    // whole. scheduler_register_actor gives a caller's actor carried over a
+    // scheduler restart a core while the core its last lifecycle left in
+    // assigned_core may be delivering messages sent to it since
+    // scheduler_init, and the scheduler loop delivers a message for an actor
+    // with no valid core into its mailbox from whichever core dequeued it.
+    // With a plain load and store on each side, tests/integration/
+    // sched_foreign_send_lifecycle lost 1 to 11 of some 90,000 messages
+    // (the wait never ended). The count can become the owner's own once
+    // both paths hand the actor over as a move does.
     _Atomic int count;
 #ifdef AETHER_DEBUG_MAILBOX
     atomic_flag _send_guard;

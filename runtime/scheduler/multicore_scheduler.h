@@ -377,14 +377,20 @@ typedef struct {
     LockFreeQueue from_queues[MAX_CORES + 1];
     pthread_mutex_t foreign_lock;
     atomic_int running;
-    atomic_int work_count;  // Approximate in-flight message count (used for load reporting)
+    // The messages this core has taken from its queues, a measure of its
+    // load for placement and work stealing. Counted by the core itself as it
+    // drains (#3541), its one writer: a sender added to it on every send,
+    // an atomic add on a line of the receiving core's.
+    atomic_int work_count;
     atomic_int steal_attempts;  // Cumulative count of successful work-steal operations
     atomic_int idle_cycles;     // Track how long core has been idle
     OptimizedSpinlock actor_lock;  // Serializes every writer of actor_table / actor_count
 
-    // Per-core message counters — only written by owning core, but read
-    // cross-thread by count_pending_messages(), so must be _Atomic to avoid
-    // torn reads on weakly-ordered architectures (e.g. ARM64).
+    // Per-core message counters, read cross-thread by
+    // count_pending_messages(), so _Atomic to avoid torn reads on
+    // weakly-ordered architectures (e.g. ARM64). Both are written by this
+    // core's thread alone, with a load and a release store (#3541); other
+    // threads count on shared atomic counters (count_sent, count_processed).
     _Atomic uint64_t messages_sent;      // Messages sent FROM this core
     _Atomic uint64_t messages_processed; // Messages processed ON this core
     char counter_padding[48];    // Cache line padding to prevent false sharing
@@ -411,6 +417,13 @@ typedef struct {
     pthread_mutex_t park_mutex;
     pthread_cond_t  park_cond;
     atomic_int      parked;
+    // 1 once a message went into one of this core's queues since the core
+    // last drained them (#3541): its loops that step an actor many times
+    // read this one word to yield to the queues, not the head and tail of
+    // all of them. Set by sched_wake, on the line the producer reads
+    // `parked` from, and by this core's own requeues; cleared by the core
+    // as it drains. A hint: the park still reads every queue.
+    atomic_int      inbound;
 
     // How many asks this core's thread is blocked in (#3220): while one is,
     // the core's loop does not run, so no actor is moved onto it
@@ -787,6 +800,11 @@ int scheduler_step_actor(ActorBase* actor);
  * disarmed the countdown. */
 void scheduler_countdown_enter(void);
 void scheduler_countdown_leave(void);
+/* `n` messages handled (or dropped) on this thread, for scheduler_wait()'s
+ * count (#3541): a core's thread counts on its own core, any other thread on
+ * a count those threads share. An actor thread credits each step that took
+ * a message here. */
+void scheduler_count_processed(int n);
 /* Puts `msg` in an auto_process actor's inbox and wakes its thread if it
  * sleeps (#2598, #2592). From any thread; the message is counted as sent by
  * the caller. Every send to such an actor ends here. */

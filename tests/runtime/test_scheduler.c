@@ -543,10 +543,8 @@ static void relay_step(void* self) {
     RelayActor* a = (RelayActor*)self;
     Message msg;
     if (mailbox_receive(&a->mailbox, &msg)) {
-        // Credited here as the core loop credits a step it runs itself:
-        // scheduler_wait() balances sent against processed.
-        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
-                                  memory_order_relaxed);
+        // Counted handled by the actor thread's loop, which steps it (#3464;
+        // a core's count is its own thread's to write, #3541).
         Message fwd = {1, 0, 0, NULL, {NULL, 0, 0}, NULL};
         scheduler_send_remote(a->target, fwd, -1);   // the core steps it
         atomic_store(&a->stepped, 1);
@@ -564,9 +562,7 @@ static void quitter_step(void* self) {
     ChurnActor* a = (ChurnActor*)self;
     Message msg;
     if (mailbox_receive(&a->mailbox, &msg)) {
-        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
-                                  memory_order_relaxed);
-        atomic_fetch_add(&g_churn_handled, 1);
+        atomic_fetch_add(&g_churn_handled, 1);   // counted handled by its thread's loop
         scheduler_release_actor((ActorBase*)a);   // from its own thread's step
     }
 }
@@ -2235,6 +2231,71 @@ void test_ready_list_duplicates_do_not_double_step(void) {
     ASSERT_EQ(0, queued_after);
 }
 
+// #3541: a loop that steps one actor many times yields to the core's queues
+// once a message for another actor comes in, now on a hint word that senders
+// set rather than on every queue's head and tail. An actor ticks itself, a
+// millisecond a tick; a Look from the main thread to a second actor of its
+// core is handled within a few ticks, not after the loop's 64 (a message to
+// the ticking actor itself would end the loop anyway: counted in flight, it
+// sends the actor's next tick behind it, #3093).
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int ticks;
+    atomic_int stop;
+} TickerActor;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    TickerActor* ticker;
+    atomic_int seen_at;   // the ticker's ticks when Look was handled, -1 before
+} WatcherActor;
+
+static void ticker_step(void* self) {
+    TickerActor* t = (TickerActor*)self;
+    Message msg;
+    if (!mailbox_receive(&t->mailbox, &msg)) return;
+    if (atomic_load(&t->stop)) return;
+    atomic_fetch_add(&t->ticks, 1);
+    sleep_ms(1);
+    scheduler_send_local((ActorBase*)t, message_create_simple(1, 0, 0));
+}
+
+static void watcher_step(void* self) {
+    WatcherActor* w = (WatcherActor*)self;
+    Message msg;
+    if (!mailbox_receive(&w->mailbox, &msg)) return;
+    atomic_store(&w->seen_at, atomic_load(&w->ticker->ticks));
+    atomic_store(&w->ticker->stop, 1);
+}
+
+void test_scheduler_stepping_loop_yields_to_queues(void) {
+    scheduler_init(1);
+    scheduler_start();
+    TickerActor* t = (TickerActor*)scheduler_spawn_actor(0, ticker_step, sizeof(TickerActor));
+    WatcherActor* w = (WatcherActor*)scheduler_spawn_actor(0, watcher_step, sizeof(WatcherActor));
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(w);
+    atomic_init(&t->ticks, 0);
+    atomic_init(&t->stop, 0);
+    w->ticker = t;
+    atomic_init(&w->seen_at, -1);
+    scheduler_send_remote((ActorBase*)t, message_create_simple(1, 0, 0), -1);
+    int ticked = wait_count(&t->ticks, 10);
+    int at_send = atomic_load(&t->ticks);
+    scheduler_send_remote((ActorBase*)w, message_create_simple(2, 0, 0), -1);
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(&w->seen_at) < 0 && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    int seen_at = atomic_load(&w->seen_at);
+    atomic_store(&t->stop, 1);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(ticked >= 10);
+    ASSERT_TRUE(seen_at >= at_send);
+    // The tick under way when Look came, and slack for a slow timer: far
+    // below the loop's 64.
+    ASSERT_TRUE(seen_at - at_send <= 8);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2272,4 +2333,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: no lost wakeup under concurrent senders", test_ready_list_no_lost_wakeup_under_concurrent_senders, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: duplicates do not double-step", test_ready_list_duplicates_do_not_double_step, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a moved actor is stepped on its new core", test_ready_list_moved_actor_stepped_on_new_core, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler stepping loop yields to its queues", test_scheduler_stepping_loop_yields_to_queues, TEST_CATEGORY_RUNTIME);
 }
