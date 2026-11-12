@@ -30,6 +30,7 @@ on:
       - 'tests/ubsan/**'
       - 'tests/scripts/sanitizer_sweep.sh'
       - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/sweep_select.sh'
       - 'tests/scripts/run_ae_test.sh'
       - 'tests/scripts/run_ae_sh_dir.sh'
       - 'tests/lib/sweep_timeout.sh'

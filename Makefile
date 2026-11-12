@@ -1552,6 +1552,11 @@ fuzz-ipc-frames-corpus: compiler ae stdlib
 # trailing slash pins a directory (as in tests/ae_sweep_prune.txt). The shell
 # test directories are matched with a slash appended: dirname prints none, so
 # a pinned directory matched no shell test (#3539).
+#
+# AE_SWEEP_SELECT names a select file that keeps only the .ae programs and
+# shell test directories it picks, by path or by what their source does
+# (tests/scripts/sweep_select.sh). `make test-tsan` runs the actor, scheduler
+# and std.net tests this way (#3542); without it the sweep takes everything.
 ifdef WINDOWS_NATIVE
 test-ae: compiler ae stdlib
 	@echo ===================================
@@ -1576,7 +1581,8 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
+	[ -z "$(AE_SWEEP_SELECT)" ] || echo "  Select list: $(AE_SWEEP_SELECT)"; \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" "$(AE_SWEEP_SELECT)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
 	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
@@ -1593,7 +1599,7 @@ test-ae: compiler ae stdlib
 	    | sed 's|/$$||' \
 	    | { if [ -n "$(AE_SWEEP_OPTIONAL)" ]; then cat; else \
 	          while read -r d; do [ -f "$$d/NEEDS_EXTERNAL_TOOLCHAIN" ] || echo "$$d"; done; fi; } \
-	    > "$$tmpdir/shdirs.txt"; \
+	    | sh tests/scripts/sweep_select.sh "$(AE_SWEEP_SELECT)" > "$$tmpdir/shdirs.txt"; \
 	{ for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    if [ -f "$$d/DRIVERS_INDEPENDENT" ]; then find "$$d" -maxdepth 1 -name 'test_*.sh' | sort; fi; \
 	  done; \
@@ -3022,6 +3028,7 @@ help:
 	@echo "  make test-valgrind  - Run tests with Valgrind"
 	@echo "  make test-asan      - Run tests with AddressSanitizer"
 	@echo "  make test-ubsan     - C unit tests + .ae corpus with everything under UBSan; fails on any report (Linux, macOS)"
+	@echo "  make test-tsan      - C unit tests + the actor, scheduler and std.net .ae tests under TSan (clang); fails on any report (Linux, macOS)"
 	@echo "  make self-test      - Test compiler on complex examples"
 	@echo ""
 	@echo "CI/CD Targets:"
@@ -3410,6 +3417,24 @@ SAN_LEAKS ?= fail
 .PHONY: test-asan-ae
 test-asan-ae:
 	@SAN=asan SAN_LEAKS="$(SAN_LEAKS)" MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
+
+# The same under ThreadSanitizer (#3542), with clang (TSAN_CC names another):
+# aetherc, ae, libaether, std and the C test runner built with
+# -fsanitize=thread -g -O1, then the whole C unit runner and the part of the
+# .ae corpus that puts two threads on the same memory, the actor, scheduler
+# and std.net tests (tests/tsan_sweep_select.txt, less
+# tests/ae_sweep_prune_tsan.txt). A data race, a lock-order inversion, a
+# thread never joined or a signal-unsafe call in a handler stops the program
+# that made it, and the run fails on it, with the reports in
+# build/tsan/reports grouped by the two places that raced. The TSan options
+# are in tests/scripts/sanitizer_sweep.sh, the suppressions (third-party code
+# only, never ours) in tests/tsan/suppressions.txt. AE_SWEEP_SHARD=k/n splits
+# the corpus (tsan.yml runs it in shards). Linux or macOS, not under
+# `ulimit -v`: TSan maps its shadow memory at fixed addresses.
+TSAN_CC ?= clang
+.PHONY: test-tsan
+test-tsan:
+	@SAN=tsan TSAN_CC="$(TSAN_CC)" MAKE="$(MAKE)" NPROC=$(NPROC) sh tests/scripts/sanitizer_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

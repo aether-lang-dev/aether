@@ -1,0 +1,16 @@
+# ThreadSanitizer suppressions for `make test-tsan` (#3542), passed as
+# TSAN_OPTIONS=suppressions=<this file> by tests/scripts/sanitizer_sweep.sh.
+#
+# Only for code this repository does not own: a system library or a vendored
+# third-party source whose race is that project's to fix. A report in our
+# code (compiler/, runtime/, std/ outside the vendored trees, tools/, the
+# generated C of a program) is never suppressed; it is a bug, filed and fixed.
+#
+# Each entry carries a comment above it: what the report is, why the code is
+# not ours, and the upstream issue when there is one. The forms TSan reads:
+#   race:<function, file or library>
+#   race_top:<the same, matched against the top frame only>
+#   called_from_lib:<a library not built with TSan>
+#   deadlock:, mutex:, signal:, thread:  the other report kinds
+#
+# No entry yet: the first runs decide what, if anything, belongs here.

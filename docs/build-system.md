@@ -615,7 +615,11 @@ Layer an extra exclusion list onto a sweep with
 `make test-ae AE_SWEEP_EXTRA_PRUNE=<file>` (applies to both the `.ae` and
 `.sh` sweeps, to `make test-ae-opt-diff`, which reads the same list of
 `.ae` programs from `tests/scripts/ae_sweep_list.sh`, and to `make
-test-ubsan`, whose sweep is `test-ae` itself).
+test-ubsan`, whose sweep is `test-ae` itself). `make test-ae
+AE_SWEEP_SELECT=<file>` goes the other way and keeps only the tests a select
+file picks, by path or by what their source does
+(`tests/scripts/sweep_select.sh`); `make test-tsan` runs the actor, scheduler
+and std.net tests that way, from `tests/tsan_sweep_select.txt`.
 
 The sweep ends with its timings, just above the `Aether Tests:` line: the
 build and run time summed over the `.ae` tests, the shell tests' time, and

@@ -248,6 +248,11 @@ make test-asan
 # The C unit tests and the whole .ae corpus with everything under UBSan
 # (Linux, macOS); fails on any report, listed in build/ubsan/reports
 make test-ubsan
+
+# The C unit tests and the actor, scheduler and std.net .ae tests under
+# ThreadSanitizer, with clang (Linux, macOS, not under ulimit -v); fails on any
+# report, listed in build/tsan/reports
+make test-tsan
 ```
 
 ### Prove the test can fail
@@ -516,6 +521,7 @@ treat `.github/workflows/` as authoritative and this as the shape.)
 | **`ci-coop`** | `gcc`, `AETHER_NO_THREADING` | Cooperative scheduler only, tests that assume pthreads / `spawn` semantics may behave differently |
 | **AddressSanitizer** | Clang/GCC | Any use-after-free / leak in your new C code (runs on Linux and macOS) |
 | **UBSan** (`ubsan.yml`) | `gcc`, `make test-ubsan` | Undefined behaviour in the C you add or the C a program compiles to: signed shifts that overflow, misaligned loads, null stores. Runs on PRs touching compiler/, runtime/, std/, tools/ or the Makefile, and nightly |
+| **TSan** (`tsan.yml`) | `clang`, `make test-tsan` | A data race, a lock-order inversion or a thread never joined in the actors, the scheduler or std.net, in the C you add or the C a program compiles to. Runs on PRs touching compiler/, runtime/, std/, tools/ or the Makefile, and nightly |
 | **Valgrind** | Linux | Same, slower, catches a slightly different set |
 
 (A local `make ci-windows` cross-builds with `x86_64-w64-mingw32-gcc`;
