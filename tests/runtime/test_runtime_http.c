@@ -802,6 +802,33 @@ TEST_CATEGORY(http_resolve_location_redirect_rules, TEST_CATEGORY_NETWORK) {
     free(got);
 }
 
+/* A URL's host is written as it is into the Host header, a proxy's
+ * absolute-form request line and a CONNECT line. parse_url took any bytes up
+ * to the port, path, query or fragment, so a URL from untrusted input
+ * carried a header of its own into the request (CWE-93), and a space split
+ * the request line a proxy was sent (found by tests/fuzz/url). A host holds
+ * neither (RFC 3986 3.2.2). */
+TEST_CATEGORY(http_url_host_holds_no_control_byte_or_space, TEST_CATEGORY_NETWORK) {
+    char host[256];
+    int port = 0, tls = 0;
+    char path[64];
+    ASSERT_EQ(0, parse_url("http://evil\r\nX-Injected: 1\r\n/", host, sizeof host, &port,
+                           path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a b/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a\tb/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://[::1\n]/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a\x7f/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://pro xy:3128", host, sizeof host, &port));
+    /* Hosts as they come, past ASCII included, still parse. */
+    ASSERT_EQ(1, parse_url("http://caf\xc3\xa9.example:8080/x", host, sizeof host, &port,
+                           path, sizeof path, &tls));
+    ASSERT_STREQ("caf\xc3\xa9.example", host);
+    ASSERT_EQ(8080, port);
+    ASSERT_EQ(1, parse_url("https://[::1]/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(443, port);
+}
+
 TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
     char host[256];
     int port = 0;
