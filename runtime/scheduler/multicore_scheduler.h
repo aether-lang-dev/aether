@@ -185,12 +185,16 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * after step_lock, on the line `dead` is on: no field moves for it. */ \
     atomic_int mailbox_bound; \
     /* Receive timeout (#3162): the interval a `receive ... after` names, \
-     * in ns, set at spawn and kept; 0 = the actor has none. */ \
-    uint64_t timeout_ns; \
+     * in ns, set at spawn and kept; 0 = the actor has none. Atomic, as \
+     * last_activity_ns is: scheduler_wait reads both on its own thread. */ \
+    _Atomic uint64_t timeout_ns; \
     /* When its countdown was armed, 0 while it is not: the spawn and the \
      * end of each message's handling arm it, a message and the firing \
-     * disarm it (the generated step function does all three). */ \
-    uint64_t last_activity_ns; \
+     * disarm it (the generated step function does all three). Written on \
+     * the thread that steps the actor, read by scheduler_wait's scan for an \
+     * armed countdown (has_pending_actor_timeout) on the waiting thread: \
+     * atomic, both sides, or the scan raced the step. */ \
+    _Atomic uint64_t last_activity_ns; \
     /* The payload of the message a handler is running on (its heap copy, \
      * or the actor's copy of one that travelled in the message, as \
      * step_inline says), and its type: the generated step sets them around \
