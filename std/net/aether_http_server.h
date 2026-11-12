@@ -194,7 +194,15 @@ typedef struct HttpServer {
     /* The port: read by any thread (http_server_port) while the thread that
      * runs the server may be binding it, so atomic. */
     _Atomic int port;
+    /* The host to bind, as the program set it: replaced under run_lock
+     * (http_server_set_host, a bind), and copied there into run_host as a
+     * run begins. */
     char* host;
+    /* The run's own copy of host, made by server_run_begin before the run's
+     * thread starts and freed by server_run_end: what the run binds and its
+     * monitor reports, which a host set while it runs does not change. NULL
+     * between runs. */
+    char* run_host;
     /* Cleared by http_server_stop on any thread, read by the server's accept
      * loops on theirs, so atomic. */
     _Atomic int is_running;
@@ -457,7 +465,9 @@ int  http_server_has_monitor(HttpServer* server);
 // interfaces). Pass "127.0.0.1" to bind loopback only — useful in
 // tests because macOS / Windows firewalls don't prompt on loopback
 // binds. A host name binds the IPv4 address it resolves to, and one
-// that does not resolve fails the bind (#2639). No-op if `host` is NULL
+// that does not resolve fails the bind (#2639). Set while the server runs,
+// it takes effect at the next start: a run binds and reports the host it
+// started with. No-op if `host` is NULL
 // or empty.
 void http_server_set_host(HttpServer* server, const char* host);
 // Start the server on the calling thread (returns when it stops) or on a

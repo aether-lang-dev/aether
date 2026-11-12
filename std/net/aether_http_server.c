@@ -1629,7 +1629,7 @@ int http_server_has_monitor(HttpServer* server) {
 }
 
 static void monitor_call_host_port(HttpMonitorClosure c, HttpServer* server) {
-    if (c.fn) ((void (*)(void*, const char*, int))c.fn)(c.env, server->host, server->port);
+    if (c.fn) ((void (*)(void*, const char*, int))c.fn)(c.env, server->run_host, server->port);
 }
 
 /* The server is accepting connections.
@@ -2588,12 +2588,24 @@ const char* http_server_set_h2_concurrent_dispatch_raw(HttpServer* server,
 #endif
 }
 
+/* server->host, replaced under run_lock: a run copies it there as it begins
+ * (server_run_begin), and the run's own bind replaces it from the run's
+ * thread, so a program that sets it, or binds, while a run is on does not
+ * free it under that copy or under the run's bind. The old string is freed
+ * outside the lock. */
+static void server_replace_host(HttpServer* server, char* copy) {
+    pthread_mutex_lock(&server->run_lock);
+    char* old = server->host;
+    server->host = copy;
+    pthread_mutex_unlock(&server->run_lock);
+    free(old);
+}
+
 void http_server_set_host(HttpServer* server, const char* host) {
     if (!server || !host || !*host) return;
     char* copy = strdup(host);
     if (!copy) return;
-    if (server->host) free(server->host);
-    server->host = copy;
+    server_replace_host(server, copy);
 }
 
 /* The last socket call's failure, as text: errno's on POSIX, the Winsock
@@ -2687,12 +2699,9 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     }
     server_set_listener(server, fd);
     
-    // Update host and port (make copy of host string first)
+    // Update the host (a copy first: `host` may be the run's own copy).
     char* new_host = strdup(host);
-    if (server->host) {
-        free(server->host);
-    }
-    server->host = new_host;
+    if (new_host) server_replace_host(server, new_host);
 
     // Resolve an OS-assigned port (port 0): the kernel picked a real
     // port at bind() time, but `port` is still 0 here. getsockname() the
@@ -7720,6 +7729,18 @@ static int server_run_begin(HttpServer* server) {
         pthread_mutex_unlock(&server->run_lock);
         return server_fail(server, "the server is already running");
     }
+    /* The run's own copy of the host, made here, on the starting thread,
+     * before any thread of the run exists, and under run_lock, where the
+     * program's thread changes server->host (http_server_set_host, a bind).
+     * What the run binds and what its monitor reports is this copy, which
+     * nothing changes while it runs: server->host may be set again while
+     * the run is on, for the next start. */
+    char* run_host = strdup(server->host ? server->host : "0.0.0.0");
+    if (!run_host) {
+        pthread_mutex_unlock(&server->run_lock);
+        return server_fail(server, "out of memory for the host");
+    }
+    server->run_host = run_host;
     server->serving = 1;
     server->error[0] = '\0';
     server->is_running = 1;
@@ -7733,6 +7754,8 @@ static int server_run_begin(HttpServer* server) {
 static void server_run_end(HttpServer* server) {
     pthread_mutex_lock(&server->run_lock);
     server->serving = 0;
+    free(server->run_host);
+    server->run_host = NULL;
     pthread_cond_broadcast(&server->run_done);
     pthread_mutex_unlock(&server->run_lock);
 }
@@ -7837,7 +7860,7 @@ static int http_server_serve(HttpServer* server) {
             int opt = 1;
             if (setsockopt(bound_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
                 server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
-                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            aether_addr_authority(where, sizeof where, server->run_host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, 0);
                 server_set_listener(server, bound_fd);   /* still the server's, as server_bind left it */
@@ -7849,7 +7872,7 @@ static int http_server_serve(HttpServer* server) {
             server->accept_listen_fds[0] = bound_fd;   /* closed with the rest */
         } else {
             server->accept_listen_fds[0] = create_reuseport_socket(
-                server->host, server->port, server->max_connections);
+                server->run_host, server->port, server->max_connections);
             if (server->accept_listen_fds[0] >= 0 && server->port == 0) {
                 struct sockaddr_storage bound;
                 socklen_t blen = sizeof bound;
@@ -7861,11 +7884,11 @@ static int http_server_serve(HttpServer* server) {
         for (int i = 0; i < n_threads; i++) {
             if (i > 0) {
                 server->accept_listen_fds[i] = create_reuseport_socket(
-                    server->host, server->port, server->max_connections);
+                    server->run_host, server->port, server->max_connections);
             }
             if (server->accept_listen_fds[i] < 0) {
                 server_fail(server, "cannot open SO_REUSEPORT listener %d on %s: %s", i,
-                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            aether_addr_authority(where, sizeof where, server->run_host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, i);
                 return -1;
@@ -7919,7 +7942,7 @@ static int http_server_serve(HttpServer* server) {
         // port back via http_server_port before starting the background
         // accept loop) — re-binding an open socket would fail.
         if (server->socket_fd < 0 &&
-            http_server_bind_raw(server, server->host, server->port) < 0) {
+            http_server_bind_raw(server, server->run_host, server->port) < 0) {
             return -1;
         }
 
@@ -7943,7 +7966,7 @@ static int http_server_serve(HttpServer* server) {
         // Skip the bind if already bound synchronously (see the
         // use_actor_mode branch above for the embedding rationale).
         if (server->socket_fd < 0 &&
-            http_server_bind_raw(server, server->host, server->port) < 0) {
+            http_server_bind_raw(server, server->run_host, server->port) < 0) {
             return -1;
         }
 
