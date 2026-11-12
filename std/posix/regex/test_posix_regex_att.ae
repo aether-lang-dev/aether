@@ -307,9 +307,7 @@ att_test(name: string) -> (int, int) {
         }
         if input == "NULL" { input = "" }
         if pattern == "SAME" {
-            // A copy: assigning lastpattern itself to the loop-local
-            // pattern frees lastpattern's string when the iteration ends.
-            pattern = string.copy(lastpattern)
+            pattern = lastpattern
         } else {
             lastpattern = pattern
         }
