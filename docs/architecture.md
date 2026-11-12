@@ -219,7 +219,7 @@ rejects timestamp macros outright.
        int count;                       // the actor's own state follows
    } CounterActor;
    ```
-   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `step_inline`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
+   The fields, in order: `active`, `id`, `mailbox`, `step`, `thread`, `auto_process`, `assigned_core`, `migrate_to`, `timer_slot`, `spsc_queue`, `reply_slot`, `step_lock`, `exit_flags`, `step_inline`, `ready_queued`, `mailbox_bound`, `timeout_ns`, `last_activity_ns`, `step_payload`, `step_type`, `dead`, `alloc_size`, `destroy_state`, `release_message`, `scheduler_owned`, `incarnation`, `inbox`, `thread_parked`, `inflight`, `death_watch`, `mailbox_pending`, `full_drops`. The header comments each one.
 
 2. **Message Structure** (`runtime/actors/actor_state_machine.h`)
    ```c
@@ -273,7 +273,7 @@ rejects timestamp macros outright.
 
 **Message-Driven Migration:**
 1. Cross-core sender sets `migrate_to` hint on target actor, requesting migration to the sender's core
-2. Owning scheduler checks migration hints after coalesce-buffer processing (targeted, O(batch_size)) and during idle actor scans (full, O(actor_count))
+2. Owning scheduler checks migration hints after coalesce-buffer processing (targeted, O(batch_size)) and when it takes the actor from its ready list (#3540): a work steal pushes the actor it asks for there, and a move that fails is pushed again and asked on the next pass
 3. Actor relocated using ascending core-id lock ordering with non-blocking try-lock
 4. Migrated-actor messages forwarded with spin-retry to prevent drops
 
@@ -325,7 +325,7 @@ For platforms without pthreads (WebAssembly, embedded, bare-metal), the cooperat
 
 ### Actor Timeouts
 
-Actors with `receive { ... } after N -> { ... }` carry `timeout_ns` and `last_activity_ns` fields in `ActorBase`. The generated step function checks `_aether_clock_ns()` before `mailbox_receive()`. If the idle duration exceeds the threshold, the timeout handler fires (one-shot, cancelled when any message arrives). Both schedulers poll timeout-active actors even when their mailbox is empty.
+Actors with `receive { ... } after N -> { ... }` carry `timeout_ns` and `last_activity_ns` fields in `ActorBase`. The generated step function checks `_aether_clock_ns()` before `mailbox_receive()`. If the idle duration exceeds the threshold, the timeout handler fires (one-shot, cancelled when any message arrives). The cooperative scheduler polls timeout-active actors even when their mailbox is empty; the multicore one keeps each core's armed countdowns in a min-heap of deadlines (#3540), fires the due ones each pass, and parks no longer than until the earliest.
 
 ### Cooperative Preemption (Opt-In)
 

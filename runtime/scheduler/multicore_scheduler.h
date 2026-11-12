@@ -147,6 +147,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
     atomic_int assigned_core; \
     /* Affinity hint: core to migrate to (-1 = none) */ \
     atomic_int migrate_to; \
+    /* Where the actor sits in its core's timer heap (#3540), index + 1, \
+     * 0 while it is in none: its receive timeout is not armed, or the \
+     * core has not been told yet. Written by its core's thread only; the \
+     * reclaim reads it, and keeps a released block while it is not 0. In \
+     * the padding after migrate_to on 64-bit targets: no field moves. */ \
+    atomic_int timer_slot; \
     /* NULL: the send buffer's same-core batches went here, outside every \
      * ordering rule, and were drained only while the mailbox held \
      * something; it sends through scheduler_send_many now (#3292). Kept \
@@ -167,6 +173,12 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * and read only by the thread stepping the actor. In the padding after \
      * exit_flags, so no field moves for it. */ \
     unsigned char step_inline; \
+    /* 1 while one entry for the actor waits in a core's ready list \
+     * (#3540), the list its core's loop looks at instead of every actor \
+     * it has: set by whoever pushes the entry, cleared by the core that \
+     * takes it, both with an exchange. In the padding after step_inline: \
+     * no field moves for it. */ \
+    _Atomic(unsigned char) ready_queued; \
     /* The mailbox bound (#2974, `@mailbox(bound: N)`): at most this many \
      * messages accepted for the actor and not yet taken by its step, 0 for \
      * none. Set by the generated spawn; read by every send. In the padding \
@@ -428,6 +440,29 @@ typedef struct {
     AetherIoEntry* io_map;            // fd → actor mapping (heap-allocated, grows on demand)
     int io_map_capacity;              // Current allocated size of io_map
     int io_registered_count;          // Number of active I/O registrations
+
+    // The ready list and the timer heap (#3540): what the core's loop looks
+    // at instead of every actor it has. See the notes above scheduler_thread
+    // in multicore_scheduler.c. All of it but `ready_in` is this core's
+    // thread's alone.
+    ActorBase** ready;                // the actors to look at in the next pass
+    int ready_count;
+    int ready_cap;
+    ActorBase** ready_work;           // the pass under way: [ready_at, ready_work_count)
+    int ready_work_count;
+    int ready_work_cap;
+    int ready_at;
+    struct AetherTimer* timers;       // a min-heap of receive timeout deadlines
+    int timer_count;
+    int timer_cap;
+    // Entries pushed by other threads, under `lock`; taken into `ready` by
+    // the core. On a line of their own: other threads write it.
+    struct {
+        atomic_flag lock;
+        atomic_int count;
+        ActorBase** list;
+        int cap;
+    } AETHER_ALIGNED(64) ready_in;
 } Scheduler;
 
 extern Scheduler schedulers[MAX_CORES];
@@ -466,6 +501,11 @@ void scheduler_cleanup(void);
  * may be registered again after a shutdown; its count of messages in
  * flight carries over (#3090). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
+/* Out of its core's table. An entry for it may still wait in the core's
+ * ready list or timer heap (#3540), which the core takes and drops once it
+ * sees the actor released: scheduler_release_actor, which ends an actor
+ * through this, keeps the block until then. A caller that deregisters an
+ * actor with work left and frees it at once leaves the core that entry. */
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);
@@ -662,8 +702,16 @@ typedef struct {
 int  aether_spawn_put_aside(AetherSpawnAside* s);
 void aether_spawn_give_back(const AetherSpawnAside* s);
 void aether_spawn_step_panicked(void);
-/* The scheduler's part once a reborn actor is alive (wake its core). */
+/* The scheduler's part once a reborn actor is alive: its core is told, and
+ * looks at it (its receive timeout, its mailbox). */
 void scheduler_actor_revived(ActorBase* actor);
+/* A receive timeout armed outside the actor's own step: its core is told,
+ * which fires it once it is due (#3540). A core looks only at the actors it
+ * was told of, not at every actor it has, so a countdown armed by its step
+ * needs nothing (the core reads it after the step), and the generated
+ * spawn's arming is told by scheduler_spawn_ready. C code that arms an
+ * actor's timeout_ns and last_activity_ns by hand calls this after. */
+void scheduler_timeout_armed(ActorBase* actor);
 /* Live restart claims and spawn captures, on any thread, are counted in
  * aether_caps_slow (aether_spawn_watched, aether_resource_caps.h). */
 /* The child a supervisor's factory spawned (#2974): the first actor that

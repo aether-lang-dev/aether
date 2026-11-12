@@ -145,7 +145,7 @@ When a cross-core send occurs, the sender sets a `migrate_to` hint on the target
 
 1. **After coalesce-buffer processing** (targeted, O(batch_size)): Immediately after delivering and processing messages from the coalesce buffer, the scheduler checks `migrate_to` on each actor it just processed. This provides fast migration response without scanning the full actor list.
 
-2. **During idle actor scan** (full scan, O(actor_count)): When no messages arrived from cross-core queues, the scheduler scans all local actors for pending migration hints. This catches any hints that were not processed in the targeted path.
+2. **From the ready list** (O(actors with work), #3540): a hint the targeted path could not act on (the move failed: a lock was taken, a message of the actor was in flight) pushes the actor on its core's ready list, and a work steal pushes the actor it asks for, so the core asks the move again on its next pass. The scheduler used to scan all local actors for pending hints whenever no message arrived through its queues, which loaded every actor of the core, idle ones included, on every idle pass.
 
 Migration uses ascending core-id lock ordering to prevent deadlock between concurrent migration and work-stealing operations. Both locks are acquired via non-blocking try-lock, if either lock is contended, migration is deferred to the next iteration. The actor is always processed before migration is attempted, ensuring progress even under constant migration pressure.
 
@@ -550,7 +550,7 @@ if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }
 
 **Implementation:** `compiler/codegen/codegen_actor.c`, `runtime/scheduler/multicore_scheduler.h`
 
-`ActorBase` carries `timeout_ns` and `last_activity_ns`. The generated step function checks the nanosecond clock before `mailbox_receive()`. The scheduler polls timeout-active actors even when their mailbox is empty.
+`ActorBase` carries `timeout_ns` and `last_activity_ns`. The generated step function checks the nanosecond clock before `mailbox_receive()`. Each core keeps its actors' armed countdowns in a min-heap of deadlines (#3540) and steps an actor whose deadline has passed, with no message to step it for; it parks no longer than until the earliest deadline.
 
 ## References
 
