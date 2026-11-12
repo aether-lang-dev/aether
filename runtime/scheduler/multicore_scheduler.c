@@ -903,9 +903,10 @@ static void overflow_release(Scheduler* sched) {
         OverflowBuf* b = &tls_overflow[t];
         for (int i = b->head; i < b->head + b->count; i++) {
             ActorBase* actor = b->actors[i];
-            if (actor && !actor->auto_process) inflight_leave(actor, 1);
+            int counted = actor && !actor->auto_process;
             // Not a death's drop: the cores are stopping.
             release_undelivered(actor, &b->msgs[i]);
+            if (counted) inflight_leave(actor, 1);
             count_processed(1);
             dropped++;
         }
@@ -1003,8 +1004,9 @@ static void overflow_flush_ex(int from_core, int own) {
                     // core loop drops one (#1301), and uncounted (#3090). Put in
                     // the mailbox of a released actor, it was never processed,
                     // and scheduler_wait() waited for it.
-                    if (!actor->auto_process) inflight_leave(actor, 1);
+                    int counted = !actor->auto_process;
                     scheduler_drop_dead_message(&schedulers[from_core], actor, &msg);
+                    if (counted) inflight_leave(actor, 1);   // after the drop, which reads it
                     flushed++;
                 } else if (ac == from_core && !actor->auto_process) {
                     if (deliver_owned(actor, msg)) {
@@ -2676,8 +2678,15 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // payload/slot cleanup and a processed credit, or the
             // sent/processed balance never converges (#1301 drain test).
             if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
-                if (!actor->auto_process) inflight_leave(actor, 1);
+                /* The drop reads the actor (its release function, its death
+                 * bits); the count is what keeps its block from a new spawn
+                 * (tombstone_take), so it is given back after. And the entry
+                 * goes: the move pass below reads the batch's actors again, by
+                 * when the block can be another actor's. */
+                int counted = !actor->auto_process;
+                sched->coalesce_buffer.actors[i] = NULL;
                 scheduler_drop_dead_message(sched, actor, &msg);
+                if (counted) inflight_leave(actor, 1);
                 work_done = 1;
                 continue;
             }
@@ -2777,13 +2786,13 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             for (int k = placed; k < run_end; k++) {
                 // Dead, or never stepped (no handler): it takes no more
                 // messages, as a send to a dead actor is dropped.
-                inflight_leave(actor, 1);
                 if (actor->step) {
                     scheduler_drop_dead_message(sched, actor, &sched->coalesce_buffer.messages[k]);
                 } else {
                     release_undelivered(actor, &sched->coalesce_buffer.messages[k]);
                     count_processed(1);
                 }
+                inflight_leave(actor, 1);   // after the drop, which reads it
             }
             int delivered = placed - i;
             i = run_end - 1;
@@ -4198,8 +4207,8 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
          * not reborn (scheduler restart), so none reaches a later
          * incarnation; one counted after it drops itself here. */
         if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire) != 0)) {
-            inflight_leave(actor, 1);
             send_to_dead_actor(actor, &msg);
+            inflight_leave(actor, 1);   // after the drop, which reads it
             count_processed(1);
             return;
         }
@@ -4478,8 +4487,8 @@ void scheduler_send_batch_flush(void) {
         if (unlikely((atomic_load_explicit(&aether_caps_slow, memory_order_seq_cst) &
                       AETHER_CAPS_SPAWN_MASK) != 0) &&
             atomic_load_explicit(&g_batch_buffer->actors[i]->dead, memory_order_acquire) != 0) {
-            inflight_leave(g_batch_buffer->actors[i], 1);
             send_to_dead_actor(g_batch_buffer->actors[i], &g_batch_buffer->messages[i]);
+            inflight_leave(g_batch_buffer->actors[i], 1);   // after the drop, which reads it
             targets[i] = -1;
             continue;
         }
@@ -4880,8 +4889,9 @@ static int relief_claim_batch(Scheduler* sched) {
  * wait for the loop. */
 static int relief_place(Scheduler* sched, ActorBase* actor, Message* msg) {
     if (atomic_load_explicit(&actor->dead, memory_order_acquire)) {
-        if (!actor->auto_process) inflight_leave(actor, 1);
+        int counted = !actor->auto_process;
         scheduler_drop_dead_message(sched, actor, msg);
+        if (counted) inflight_leave(actor, 1);   // after the drop, which reads it
         return 1;
     }
     if (relief_batch_holds(sched, actor)) return 0;
