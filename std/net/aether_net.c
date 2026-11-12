@@ -129,7 +129,10 @@ struct TcpServer {
     char* unix_path;
 };
 
-static int net_initialized = 0;
+/* Read and set by whichever thread opens the first socket, so atomic, as
+ * the HTTP server's is (#3680). Two threads that both find it clear both
+ * start Winsock, which counts its starts. */
+static _Atomic int net_initialized = 0;
 
 void aether_net_init(void) {
     if (net_initialized) return;

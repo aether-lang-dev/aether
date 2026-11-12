@@ -387,7 +387,10 @@ static int http_client_use_pure_tls(const HttpClientRequest* req);
 #endif
 #endif
 
-static int http_initialized = 0;
+/* Read and set by whichever thread makes the first request, so atomic, as
+ * the server's is (#3680). Two threads that both find it clear both start
+ * Winsock, which counts its starts. */
+static _Atomic int http_initialized = 0;
 
 static void http_init(void) {
     if (http_initialized) return;
