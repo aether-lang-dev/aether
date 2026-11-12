@@ -1,0 +1,290 @@
+// Regression: returning a local optional `T?` whose `T` owns something (a
+// struct with a string field, a sum whose variant holds one, a tuple with a
+// string part, a struct nesting such a struct) handed the caller a value
+// whose strings the local's scope-exit drop had just freed.
+//
+// `return k` (k: Key) from `-> Key?` wrapped `k` into the result by a bare
+// copy, then `k`'s exit drop released the string the copy shared; `return e`
+// (e: Key?) did the same through `_ae_drop_ae_opt_Key`. A plain `-> Key`
+// return moves the local out, and a tuple or sum result takes its value
+// (emit_composite_passthrough_return); an optional result did neither.
+// Now an optional result is taken as they are: a struct local moved into
+// the wrapper, an optional local retained before its exit drop. An `if`
+// over the local and `none` is taken arm by arm (wrapped whole, its `none`
+// arm became the payload and the C did not compile).
+//
+// A call result of such an optional (or of a sum) thrown away is dropped:
+// once the return handed it over, a bare discard leaked it.
+//
+// After each call, fresh strings (`burn`) reuse what was freed, so a dead
+// return reads another string. The leak check runs where the heap count is
+// exact (mem.heap_in_use_exact): some window of the same work grows by 0.
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Key {
+    cp: int
+    text: string
+}
+
+struct Outer {
+    key: Key
+    tag: string
+}
+
+struct Press {
+    key: string
+}
+
+struct Paste {
+    body: string
+    n: int
+}
+
+type Event = Press | Paste
+
+burn() -> int {
+    total = 0
+    i = 0
+    while i < 50 {
+        t = string.concat("burn-burn-", "burn-burn-burn")
+        total = total + string.length(t)
+        i = i + 1
+    }
+    return total
+}
+
+// A struct local wrapped by the return.
+struct_local(s: string) -> Key? {
+    k = Key { cp: 1, text: string.substring(s, 1, 2) }
+    return k
+}
+
+// An optional local.
+opt_local(s: string) -> Key? {
+    let e: Key? = Key { cp: 2, text: string.concat(s, "-opt") }
+    return e
+}
+
+mk(s: string) -> Key? {
+    if s == "" {
+        return none
+    }
+    return Key { cp: 3, text: string.concat(s, "-mk") }
+}
+
+// An optional local bound from a call, after an early `return none`.
+via_call(s: string) -> Key? {
+    e = mk(s)
+    if e == none {
+        return none
+    }
+    return e
+}
+
+// A `some` binding re-wrapped at the return.
+rewrap(s: string) -> Key? {
+    e = mk(s)
+    match e {
+        none -> {
+            return none
+        }
+        some(v) -> {
+            return v
+        }
+    }
+}
+
+// Returned from inside a loop.
+in_loop(s: string, n: int) -> Key? {
+    i = 0
+    while i < n {
+        k = Key { cp: i, text: string.concat(s, "-loop") }
+        if i == n - 1 {
+            return k
+        }
+        i = i + 1
+    }
+    return none
+}
+
+// From a nested block.
+nested(s: string) -> Key? {
+    if string.length(s) > 0 {
+        let e: Key? = Key { cp: 4, text: string.concat(s, "-nested") }
+        if e != none {
+            return e
+        }
+    }
+    return none
+}
+
+// An `if` and a `match` that pick the local or `none`.
+by_if(s: string, n: int) -> Key? {
+    k = Key { cp: 6, text: string.concat(s, "-if") }
+    return if n > 0 { k } else { none }
+}
+
+by_match(s: string, n: int) -> Key? {
+    k = Key { cp: 7, text: string.concat(s, "-match") }
+    return match n {
+        0 -> none
+        _ -> k
+    }
+}
+
+// A struct that holds an owning struct by value.
+outer_local(s: string) -> Outer? {
+    o = Outer { key: Key { cp: 5, text: string.concat(s, "-in") }, tag: string.concat(s, "-tag") }
+    return o
+}
+
+// A sum whose variants own strings.
+event_local(s: string) -> Event? {
+    let e: Event? = Paste { body: string.concat(s, "-paste"), n: 7 }
+    return e
+}
+
+event_variant(s: string) -> Event? {
+    p = Press { key: string.concat(s, "-press") }
+    return p
+}
+
+// A tuple with a string part.
+tuple_local(s: string) -> (string, int)? {
+    let t: (string, int)? = (string.concat(s, "-tup"), 9)
+    return t
+}
+
+// A closure that captured a string.
+closure_local(s: string) -> fn? {
+    t = string.concat(s, "-cl")
+    let c: fn? = || {
+        return t
+    }
+    return c
+}
+
+closure_text(c: fn?) -> string {
+    if c == none {
+        return "none"
+    }
+    string r = call(c!)
+    return r
+}
+
+key_text(k: Key?) -> string {
+    match k {
+        none -> {
+            return "none"
+        }
+        some(v) -> {
+            return string.copy(v.text)
+        }
+    }
+}
+
+event_text(e: Event?) -> string {
+    match e {
+        none -> {
+            return "none"
+        }
+        some(v) -> {
+            return match v {
+                Press -> string.copy(v.key)
+                Paste -> "${v.body}/${v.n}"
+            }
+        }
+    }
+}
+
+tuple_text(t: (string, int)?) -> string {
+    if t == none {
+        return "none"
+    }
+    s, k = t!
+    return "${s}/${k}"
+}
+
+fn round() {
+    i = 0
+    while i < 20 {
+        a = struct_local("xyz")
+        b = opt_local("b")
+        c = via_call("c")
+        d = rewrap("d")
+        e = in_loop("e", 3)
+        f = nested("f")
+        g = outer_local("g")
+        h = event_local("h")
+        j = event_variant("j")
+        t = tuple_local("t")
+        u = closure_local("u")
+        p = by_if("p", 1)
+        q = by_match("q", 1)
+        by_if("drop", 0)
+        by_match("drop", 0)
+        struct_local("drop")
+        opt_local("drop")
+        event_local("drop")
+        burn()
+        check(key_text(a) == "y" && key_text(b) == "b-opt" && key_text(c) == "c-mk" &&
+            key_text(d) == "d-mk" && key_text(e) == "e-loop" && key_text(f) == "f-nested" &&
+            key_text(p) == "p-if" && key_text(q) == "q-match", "the keys returned in a round")
+        check(g!.tag == "g-tag" && event_text(h) == "h-paste/7" && event_text(j) == "j-press" &&
+            tuple_text(t) == "t-tup/9" && closure_text(u) == "u-cl", "the composites returned in a round")
+        i = i + 1
+    }
+}
+
+main() {
+    println("=== test_optional_owning_local_return ===")
+    a = struct_local("xyz")
+    b = opt_local("b")
+    c = via_call("c")
+    n = via_call("")
+    d = rewrap("d")
+    e = in_loop("e", 3)
+    f = nested("f")
+    g = outer_local("g")
+    h = event_local("h")
+    j = event_variant("j")
+    t = tuple_local("t")
+    u = closure_local("u")
+    p = by_if("p", 1)
+    p0 = by_if("p", 0)
+    q = by_match("q", 1)
+    q0 = by_match("q", 0)
+    burn()
+    check(key_text(a) == "y", "a struct local wrapped by the return ([${key_text(a)}])")
+    check(key_text(b) == "b-opt", "an optional local ([${key_text(b)}])")
+    check(key_text(c) == "c-mk" && n == none, "a local bound from a call ([${key_text(c)}])")
+    check(key_text(d) == "d-mk", "a some binding re-wrapped ([${key_text(d)}])")
+    check(key_text(e) == "e-loop", "returned from a loop ([${key_text(e)}])")
+    check(key_text(f) == "f-nested", "returned from a nested block ([${key_text(f)}])")
+    check(g!.key.text == "g-in" && g!.tag == "g-tag", "a struct nesting an owning struct ([${g!.key.text}] [${g!.tag}])")
+    check(event_text(h) == "h-paste/7", "a sum local ([${event_text(h)}])")
+    check(event_text(j) == "j-press", "a variant wrapped by the return ([${event_text(j)}])")
+    check(tuple_text(t) == "t-tup/9", "a tuple local ([${tuple_text(t)}])")
+    check(key_text(p) == "p-if" && p0 == none, "an if over the local and none ([${key_text(p)}])")
+    check(key_text(q) == "q-match" && q0 == none, "a match over the local and none ([${key_text(q)}])")
+    check(closure_text(u) == "u-cl", "a closure local ([${closure_text(u)}])")
+    round()
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round()
+            }, 5)
+        check(grown == 0, "20 rounds of returns grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_optional_owning_local_return passed ===")
+}

@@ -1,0 +1,229 @@
+// Regression: a local's only read, inside a loop, was taken as its last
+// use and moved, so the loop's later runs read the emptied local.
+//
+// alias_source_must_copy judged "last use" by counting the reads of the
+// name in the function: one read meant moving it out (left empty). A read
+// in a loop body runs once per iteration, and a function's locals live
+// for the whole function, so the second run found nothing:
+//
+//   blank = mk(); for i in 0..n { cells[i] = blank }   -> [ ][][]
+//   x = "x";      for i in 0..3 { names[i] = x }       -> [x][][]
+//   while ... { if same { pattern = lastpattern } else { lastpattern = pattern } }
+//                                                       -> pattern '' the second time
+//
+// Now a read a loop (or a closure body) runs again is taken (retained or
+// copied), unless the loop body binds the local unconditionally ahead of
+// it, so each run has a value of its own to move. Covered: a string and
+// an owning struct into slice elements, from `for` and `while`, a struct
+// literal field and a field store through a pointer in a loop, an outer
+// string handed to a loop local (std.posix.regex's AT&T test met that),
+// nested loops, a binding only under a condition, and the cases that must
+// still move: bound at the top of each run, and a `return match`'s result,
+// which the codegen reads once on the way out (no read of it in the source). The leak check runs where the
+// heap count is exact (mem.heap_in_use_exact).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct Cell {
+    g: string
+    w: int
+}
+
+struct Grid {
+    cells: Cell[]
+}
+
+struct Holder {
+    name: string
+}
+
+mk(s: string) -> Cell {
+    return Cell { g: string.concat(s, "!"), w: 1 }
+}
+
+fill(gr: *Grid, n: int) {
+    cells = make([]Cell, n)
+    blank = mk(" ")
+    for i in 0..n {
+        cells[i] = blank
+    }
+    gr.cells = cells
+}
+
+strings_for(s: string) -> string {
+    names = make([]string, 3)
+    x = string.concat(s, "x")
+    for i in 0..3 {
+        names[i] = x
+    }
+    return "[${names[0]}][${names[1]}][${names[2]}]"
+}
+
+strings_while(s: string) -> string {
+    names = make([]string, 3)
+    x = string.concat(s, "w")
+    i = 0
+    while i < 3 {
+        names[i] = x
+        i = i + 1
+    }
+    return "[${names[0]}][${names[1]}][${names[2]}]"
+}
+
+structs_local(s: string) -> string {
+    cells = make([]Cell, 3)
+    blank = mk(s)
+    i = 0
+    while i < 3 {
+        cells[i] = blank
+        i = i + 1
+    }
+    return "[${cells[0].g}][${cells[1].g}][${cells[2].g}]"
+}
+
+literal_field(s: string) -> string {
+    cells = make([]Cell, 3)
+    g = string.concat(s, "l")
+    for i in 0..3 {
+        cells[i] = Cell { g: g, w: i }
+    }
+    return "[${cells[0].g}][${cells[1].g}][${cells[2].g}]"
+}
+
+field_store(s: string) -> string {
+    hs = make([]Holder, 3)
+    name = string.concat(s, "f")
+    for i in 0..3 {
+        h = heap.new(Holder)
+        h.name = name
+        hs[i] = Holder { name: h.name }
+        heap.free(h)
+    }
+    return "[${hs[0].name}][${hs[1].name}][${hs[2].name}]"
+}
+
+nested(s: string) -> string {
+    names = make([]string, 4)
+    k = 0
+    for i in 0..2 {
+        x = string.concat(s, string.from_int(i))
+        for j in 0..2 {
+            names[k] = x
+            k = k + 1
+        }
+    }
+    return "[${names[0]}][${names[1]}][${names[2]}][${names[3]}]"
+}
+
+conditional(s: string) -> string {
+    names = make([]string, 3)
+    i = 0
+    while i < 3 {
+        if i == 0 {
+            x = string.concat(s, "c")
+        }
+        names[i] = x
+        i = i + 1
+    }
+    return "[${names[0]}][${names[1]}][${names[2]}]"
+}
+
+// The case that still moves: bound at the top of every run.
+rebound(s: string) -> string {
+    names = make([]string, 3)
+    for i in 0..3 {
+        x = string.concat(s, string.from_int(i))
+        names[i] = x
+    }
+    return "[${names[0]}][${names[1]}][${names[2]}]"
+}
+
+// An outer string handed to a loop local (the std.posix.regex AT&T test).
+outer_alias() -> string {
+    toks = ["(a*)*", "SAME", "SAME", "(b)", "SAME"]
+    out = ""
+    lastpattern = ""
+    i = 0
+    while i < 5 {
+        pattern = string.copy(toks[i])
+        i = i + 1
+        if pattern == "SAME" {
+            pattern = lastpattern
+        } else {
+            lastpattern = pattern
+        }
+        if i == 1 {
+            continue
+        }
+        out = "${out}[${pattern}]"
+    }
+    return out
+}
+
+// A `return match` whose arms build strings: its result is read once,
+// by the return the codegen makes for it, which must still move it out
+// (taken there, it leaked one string per call).
+picked(n: int) -> string {
+    return match n {
+        0 -> string.copy("zero")
+        _ -> "n=${n}"
+    }
+}
+
+fn round() {
+    gr = heap.new(Grid)
+    fill(gr, 3)
+    check(gr.cells[0].g == " !" && gr.cells[1].g == " !" && gr.cells[2].g == " !",
+        "a struct local into slice elements in a for, kept in a field")
+    check(strings_for("a") == "[ax][ax][ax]", "round: strings from a for")
+    check(strings_while("a") == "[aw][aw][aw]", "round: strings from a while")
+    check(structs_local("b") == "[b!][b!][b!]", "round: structs")
+    check(literal_field("c") == "[cl][cl][cl]", "round: literal field")
+    check(field_store("d") == "[df][df][df]", "round: field store")
+    check(nested("e") == "[e0][e0][e1][e1]", "round: nested")
+    check(conditional("f") == "[fc][fc][fc]", "round: conditional")
+    check(rebound("g") == "[g0][g1][g2]", "round: rebound")
+    check(outer_alias() == "[(a*)*][(a*)*][(b)][(b)]", "round: outer alias")
+    k = 0
+    while k < 20 {
+        check(string.length(picked(k)) > 2, "round: return match")
+        k = k + 1
+    }
+    heap.free(gr)
+}
+
+main() {
+    println("=== test_loop_sole_read_not_moved ===")
+    gr = heap.new(Grid)
+    fill(gr, 3)
+    check(gr.cells[0].g == " !" && gr.cells[1].g == " !" && gr.cells[2].g == " !",
+        "a struct local into slice elements in a for ([${gr.cells[0].g}][${gr.cells[1].g}][${gr.cells[2].g}])")
+    heap.free(gr)
+    check(strings_for("a") == "[ax][ax][ax]", "a string local in a for (${strings_for("a")})")
+    check(strings_while("a") == "[aw][aw][aw]", "a string local in a while (${strings_while("a")})")
+    check(structs_local("b") == "[b!][b!][b!]", "a struct local in a while (${structs_local("b")})")
+    check(literal_field("c") == "[cl][cl][cl]", "a struct literal's field (${literal_field("c")})")
+    check(field_store("d") == "[df][df][df]", "a field store through a pointer (${field_store("d")})")
+    check(nested("e") == "[e0][e0][e1][e1]", "an inner loop (${nested("e")})")
+    check(conditional("f") == "[fc][fc][fc]", "bound under a condition (${conditional("f")})")
+    check(rebound("g") == "[g0][g1][g2]", "bound at the top of each run (${rebound("g")})")
+    check(outer_alias() == "[(a*)*][(a*)*][(b)][(b)]", "an outer string to a loop local (${outer_alias()})")
+    round()
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                round()
+            }, 5)
+        check(grown == 0, "rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_loop_sole_read_not_moved passed ===")
+}

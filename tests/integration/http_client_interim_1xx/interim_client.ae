@@ -1,0 +1,82 @@
+// The client against interim_upstream.c (MODE is its mode). An interim 1xx
+// response (other than 101) is not the answer: the client reads past it to
+// the final response (RFC 9110 15.2). It returned `100 Continue` with an
+// empty body as the final response, and left the real one unread.
+
+import std.http.client
+import std.io
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+put(url: string, method: string, stream: int) -> (int, string, string) {
+    req = client.request(method, url)
+    client.set_timeout(req, 5s)
+    client.set_header(req, "Expect", "100-continue")
+    client.set_body(req, string.bytes("0123456789"), "application/octet-stream")
+    if stream != 0 {
+        client.set_stream(req, 1)
+    }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        return 0, "", err
+    }
+    status = client.response_status(resp)
+    body = ""
+    if stream != 0 {
+        chunk = client.response_read(resp, 65536)
+        while string.length(chunk) > 0 {
+            body = string.concat(body, chunk)
+            chunk = client.response_read(resp, 65536)
+        }
+    } else {
+        body = string.concat(client.response_body(resp), "")
+    }
+    client.response_free(resp)
+    return status, body, ""
+}
+
+main() {
+    port = io.getenv("UPSTREAM_PORT")
+    mode = io.getenv("MODE")
+    stream_env = io.getenv("STREAM")
+    if port == 0 || mode == 0 {
+        println("FAIL: UPSTREAM_PORT and MODE must be set")
+        exit(1)
+    }
+    stream = 0
+    if stream_env != 0 && string.equals(stream_env, "1") != 0 {
+        stream = 1
+    }
+    url = "http://127.0.0.1:${port}/c/b"
+    status, body, err = put(url, "PUT", stream)
+    match mode {
+        "continue" -> {
+            check(err == "", "send failed: ${err}")
+            check(status == 201 && body == "made", "status ${status} body '${body}', want 201 'made'")
+            if stream == 0 {
+                // The same connection again: the interim head left nothing behind.
+                s2, b2, e2 = put(url, "PUT", 0)
+                check(e2 == "" && s2 == 200 && b2 == "second",
+                    "second request: status ${s2} body '${b2}' err '${e2}'")
+            }
+        }
+        "multi" -> {
+            check(err == "", "send failed: ${err}")
+            check(status == 200 && body == "ok", "status ${status} body '${body}', want 200 'ok'")
+        }
+        _ -> {
+            check(err == "", "send failed: ${err}")
+            check(status == 101, "status ${status}, want 101 (final, not skipped)")
+        }
+    }
+    println("PASS: ${mode}")
+}
