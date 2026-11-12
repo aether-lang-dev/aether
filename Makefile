@@ -1351,9 +1351,14 @@ else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
 else
 	./$(BUILD_DIR)/test_runner$(EXE_EXT)
 endif
+ifndef WINDOWS_NATIVE
 	@# Every test registered by hand is registered in every mode of the
 	@# runner, not only the full run (--category=NAME once left them out).
+	@# A shell script, so not under mingw32-make with cmd.exe, which may have
+	@# no sh: the check reads the sources, the same on every system, and every
+	@# other build runs it.
 	@sh tests/scripts/check_test_runner_list.sh ./$(BUILD_DIR)/test_runner$(EXE_EXT) $(filter %.c,$(TEST_SRC))
+endif
 
 # Fast test target (monolithic)
 test-fast: compiler-fast
