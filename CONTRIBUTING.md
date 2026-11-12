@@ -235,7 +235,8 @@ make test
 # micro-benchmarks, demos). They rot silently otherwise; this compiles each.
 make check-standalone
 
-# Specific category (when implemented)
+# One category (compiler, runtime, network, memory, ...); --list names every
+# test and its category without running any
 ./build/test_runner --category=collections
 
 # With Valgrind

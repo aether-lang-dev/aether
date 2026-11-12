@@ -1351,6 +1351,9 @@ else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
 else
 	./$(BUILD_DIR)/test_runner$(EXE_EXT)
 endif
+	@# Every test registered by hand is registered in every mode of the
+	@# runner, not only the full run (--category=NAME once left them out).
+	@sh tests/scripts/check_test_runner_list.sh ./$(BUILD_DIR)/test_runner$(EXE_EXT) $(filter %.c,$(TEST_SRC))
 
 # Fast test target (monolithic)
 test-fast: compiler-fast

@@ -59,6 +59,7 @@ void register_test(const char* name, TestFunction func);
 void register_test_with_category(const char* name, TestFunction func, TestCategory category);
 void run_all_tests(void);
 void run_tests_by_category(TestCategory category);
+void list_tests(void);
 int get_test_count(void);
 int get_passed_count(void);
 int get_failed_count(void);
