@@ -393,6 +393,12 @@ typedef struct {
 void http_te_codings_add(HttpTeCodings* t, const char* v, size_t n);
 int  http_te_is_chunked(const HttpTeCodings* t);
 
+/* Every Transfer-Encoding field of the header block [block, end) read into
+ * one HttpTeCodings: the number of fields, and in *chunked (may be NULL)
+ * whether the body is chunked. With fields and *chunked 0, the body runs to
+ * the close of the connection, whatever Content-Length says (RFC 9112 6.3). */
+int  http_te_in_block(const char* block, const char* end, int* chunked);
+
 
 /* Chunked transfer-coding, shared by the client and the server because a
  * request body and a response body are chunked the same way and two decoders

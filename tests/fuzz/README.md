@@ -165,7 +165,9 @@ documented contract, and a failed check `abort()`s naming what disagreed:
   (a token) SP target (no control byte) SP `HTTP/1.0` or `HTTP/1.1`, the
   headers are the same lines with the same names and trimmed values, and the
   body is exactly the Content-Length bytes or the decoded chunks, NUL bytes
-  included. Every request is freed.
+  included. The client's reader of a response's Transfer-Encoding fields
+  (`http_te_in_block`) reads the same lines as the head check. Every request
+  is freed.
 - **`http_chunked`**: a chunked body as it arrives. `http_chunked_frame` and
   `http_dechunk` give what a reference reading of RFC 9112 7.1 written in
   the harness gives (sizes of 1 to 16 hex digits read exactly, at most
@@ -173,7 +175,11 @@ documented contract, and a failed check `abort()`s naming what disagreed:
   chunk's data; trailers to the empty line; lines of at most 1024 bytes),
   decoding exactly what frames to the same bytes. The answer does not depend
   on where the bytes were cut: every prefix of a whole body needs more, every
-  longer buffer frames the same length, and a refusal stays a refusal.
+  longer buffer frames the same length, and a refusal stays a refusal. The
+  same bytes as the body of a response (`http_response_fill_from_bytes`),
+  under a handful of Transfer-Encoding fields, are decoded to the same
+  payload when the codings end in chunked and the body frames, and come back
+  as they came otherwise (RFC 9112 6.3).
 - **`url`**: a URL, then optionally a NUL and a Location. `parse_url` gives
   the host, port, target and scheme a reading of its contract gives (the
   authority ends at the first `/`, `?` or `#`; a bracketed IPv6 host comes

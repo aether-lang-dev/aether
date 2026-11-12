@@ -144,22 +144,82 @@ fn name_is(nb: ptr, name: string) -> int {
     return 1
 }
 
-// Does a stored header-value bytes buffer contain the ASCII substring `needle`
-// (case-insensitive)? Used for Transfer-Encoding: chunked.
-fn value_contains_ci(vb: ptr, needle: string) -> int {
-    vlen = bytes.length(vb)
-    nlen = string_length(needle)
-    if nlen == 0 { return 1 }
+// The byte at `i` of a stored value, as an unsigned int.
+fn vbyte(vb: ptr, i: int) -> int { return bytes.get(vb, i) & 0xFF }
+
+fn is_ows(c: int) -> int {
+    if c == 32 || c == 9 { return 1 }
+    return 0
+}
+
+// The Transfer-Encoding fields' codings, read as one comma-separated list
+// across every field (RFC 9110 5.3), as std.net reads them
+// (http_te_codings_add, #3670). An element is a coding's name (a token), then
+// its parameters after a ';'; an empty element is none. Returns 1 when
+// chunked is the final coding, named once and with no parameters, and every
+// element is a coding; 0 otherwise, and then a body runs to the close
+// (RFC 9112 6.3). The reader searched the first field for the word
+// "chunked", so "xchunked" and "chunked, gzip" were decoded and chunked in a
+// second field was not.
+fn te_is_chunked(r: *HttpResponse) -> int {
+    n = list_size(r.header_names)
+    chunked = 0
+    last = 0
+    bad = 0
     i = 0
-    while i + nlen <= vlen {
-        j = 0
-        ok = 1
-        while j < nlen {
-            if lc(bytes.get(vb, i + j) & 0xFF) != lc(string_char_at_n(needle, nlen, j) & 0xFF) { ok = 0; j = nlen } else { j = j + 1 }
+    while i < n {
+        if name_is(list.at(r.header_names, i), "transfer-encoding") == 1 {
+            vb = list.at(r.header_values, i)
+            vlen = bytes.length(vb)
+            p = 0
+            while p <= vlen {
+                a = p
+                while p < vlen {
+                    if vbyte(vb, p) == 44 { break }
+                    p = p + 1
+                }
+                b = p
+                p = p + 1
+                while a < b {
+                    if is_ows(vbyte(vb, a)) == 0 { break }
+                    a = a + 1
+                }
+                while b > a {
+                    if is_ows(vbyte(vb, b - 1)) == 0 { break }
+                    b = b - 1
+                }
+                if b > a {
+                    e = a
+                    while e < b {
+                        if is_tchar(vbyte(vb, e)) == 0 { break }
+                        e = e + 1
+                    }
+                    is_ch = 0
+                    if e - a == 7 {
+                        is_ch = 1
+                        k = 0
+                        while k < 7 {
+                            if lc(vbyte(vb, a + k)) != string_char_at_n("chunked", 7, k) { is_ch = 0 }
+                            k = k + 1
+                        }
+                    }
+                    q = e
+                    while q < b {
+                        if is_ows(vbyte(vb, q)) == 0 { break }
+                        q = q + 1
+                    }
+                    if e == a { bad = 1 }
+                    if q < b {
+                        if vbyte(vb, q) != 59 || is_ch == 1 { bad = 1 }
+                    }
+                    chunked = chunked + is_ch
+                    last = is_ch
+                }
+            }
         }
-        if ok == 1 { return 1 }
         i = i + 1
     }
+    if bad == 0 && chunked == 1 && last == 1 { return 1 }
     return 0
 }
 
@@ -570,13 +630,18 @@ parse_response(r: *HttpResponse, buf: byte[], is_eof: int) -> string {
         r.headers_done = 1
     }
 
-    // Body framing: chunked > content-length > close-delimited.
+    // Body framing: chunked > content-length > close-delimited. With a
+    // Transfer-Encoding whose final coding is not chunked, the body runs to
+    // the close and Content-Length is not read (RFC 9112 6.3, #3670).
     te = header_bytes(r, "transfer-encoding")
     cl = header_bytes(r, "content-length")
     body_start = r.header_end
 
     is_chunked = 0
-    if te != null { is_chunked = value_contains_ci(te, "chunked") }
+    if te != null {
+        is_chunked = te_is_chunked(r)
+        cl = null
+    }
     want = -1
     nobody = no_body_expected(r)
     if is_chunked == 0 && cl != null {

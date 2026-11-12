@@ -24,6 +24,19 @@ fn refused(label: string, msg: string) -> int {
     bytes.free(m)
     return got
 }
+// 1 when `msg`, fed at once with the connection closed after it, frames the
+// body `want`.
+fn framed(label: string, msg: string, want: string) -> int {
+    r = http1.response_new()
+    m = sb(msg)
+    e = http1.feed(r, bytes.view(m), 1)
+    got = 0
+    if string.equals(e, "") == 1 && string.equals(body_str(r), want) == 1 { got = 1 }
+    if got == 1 { println("ok   framed: ${label}") } else { println("FAIL framed: ${label} (err='${e}' body='${body_str(r)}')") }
+    http1.response_free(r)
+    bytes.free(m)
+    return got
+}
 // 1 when `msg`, the response to a `method` request fed at once with more to
 // come, is complete with status `status` and no body.
 fn no_body(label: string, method: string, msg: string, status: int) -> int {
@@ -171,6 +184,18 @@ main() {
     if string.equals(e8, "") == 1 && string.equals(body_str(r8), "hello world") == 1 { println("ok   chunk extensions read and ignored") } else { println("FAIL chunk extensions err='${e8}' body='${body_str(r8)}'"); ok = 0 }
     http1.response_free(r8)
     bytes.free(m8)
+
+    // 9. Transfer-Encoding is one list across its fields, the body chunked
+    // only when chunked is the final coding, named once (RFC 9112 6.3,
+    // #3670). The reader searched the first field for the word, so
+    // "xchunked" and "chunked, gzip" were decoded and chunked in a second
+    // field was not. Any other final coding is a body read to the close,
+    // Content-Length aside.
+    ok = ok & framed("chunked in a second field", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello")
+    ok = ok & framed("gzip, chunked", "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip, chunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "hello")
+    ok = ok & framed("xchunked, to the close", "HTTP/1.1 200 OK\r\nTransfer-Encoding: xchunked\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n")
+    ok = ok & framed("chunked, gzip, to the close", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked, gzip\r\nContent-Length: 3\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n")
+    ok = ok & framed("chunked then identity, to the close", "HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n5\r\nhello\r\n0\r\n\r\n", "5\r\nhello\r\n0\r\n\r\n")
 
     if ok == 1 { println("http1: all checks pass") } else { println("http1: FAILURES"); exit(1) }
 }

@@ -923,6 +923,49 @@ TEST_CATEGORY(http_response_head_reads_nul_and_bare_cr_as_sp, TEST_CATEGORY_NETW
     http_response_free(r);
 }
 
+/* A response's Transfer-Encoding is one list of codings across all its
+ * fields, and its body is chunked only when chunked is the final coding,
+ * named once (RFC 9112 6.3, #3670). The client searched the first field for
+ * the word, so "xchunked" and "chunked, gzip" were decoded and chunked in a
+ * second field was not. A body whose final coding is not chunked is the
+ * bytes up to the close, as they came. */
+static int body_is(HttpResponse* r, const char* want) {
+    size_t n = strlen(want);
+    return r && r->body && aether_string_length(r->body) == n &&
+           memcmp(aether_string_data(r->body), want, n) == 0;
+}
+
+TEST_CATEGORY(http_response_transfer_encoding_is_one_list, TEST_CATEGORY_NETWORK) {
+    static const char chunks[] = "5\r\nhello\r\n0\r\n\r\n";
+    static const struct { const char* head; int decoded; } cases[] = {
+        { "Transfer-Encoding: chunked\r\n", 1 },
+        { "Transfer-Encoding: CHUNKED\r\n", 1 },
+        { "Transfer-Encoding: gzip, chunked\r\n", 1 },
+        { "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n", 1 },
+        { "Transfer-Encoding: xchunked\r\n", 0 },
+        { "Transfer-Encoding: chunked, gzip\r\n", 0 },
+        { "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n", 0 },
+        { "Transfer-Encoding: chunked, chunked\r\n", 0 },
+        { "Transfer-Encoding: chunked;x=1\r\n", 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char msg[256];
+        int n = snprintf(msg, sizeof msg, "HTTP/1.1 200 OK\r\n%s\r\n%s", cases[i].head, chunks);
+        HttpResponse* r = filled(msg, (size_t)n);
+        ASSERT_NULL(r->error);
+        ASSERT_TRUE(body_is(r, cases[i].decoded ? "hello" : chunks));
+        http_response_free(r);
+    }
+
+    int chunked = -1;
+    static const char two[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nX: y\r\ntransfer-encoding: chunked";
+    ASSERT_EQ(2, http_te_in_block(two, two + sizeof two - 1, &chunked));
+    ASSERT_EQ(1, chunked);
+    static const char none[] = "HTTP/1.1 200 OK\r\nX-Transfer-Encoding: chunked\r\nX: Transfer-Encoding: chunked";
+    ASSERT_EQ(0, http_te_in_block(none, none + sizeof none - 1, &chunked));
+    ASSERT_EQ(0, chunked);
+}
+
 /* A control byte in a reference, read as a browser reads it (#3572, WHATWG
  * URL): a TAB, an LF and a CR removed, and any other control byte in the
  * path, the query or the fragment percent-encoded, so no request line

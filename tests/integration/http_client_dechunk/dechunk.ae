@@ -10,6 +10,12 @@
 // record/replay assertions live there now (core_tests/chunked_*), but
 // the client de-chunk behaviour is a pure Aether-stdlib concern and
 // keeps its coverage here, with no VCR dependency.
+//
+// And only a chunked one (#3670): Transfer-Encoding is one list across its
+// fields, chunked when chunked is the final coding. The client searched the
+// first field for the word, so "xchunked" and "chunked, gzip" were decoded
+// and chunked in a second field was not; each is checked buffered and
+// streamed.
 
 import std.http.client
 import std.io
@@ -18,6 +24,50 @@ import std.string
 extern exit(code: int)
 
 const BODY = "hello-from-upstream"
+const FRAMED = "5\r\nhello\r\n0\r\n\r\n"
+
+// The body of GET `url`, buffered or streamed.
+fn fetch(url: string, stream: int) -> string {
+    req = client.request("GET", url)
+    client.set_timeout(req, 5s)
+    if stream == 1 { _s = client.set_stream(req, 1) }
+    resp, err = client.send_request(req)
+    client.request_free(req)
+    if err != "" {
+        println("FAIL: transport ${err} for ${url}")
+        exit(1)
+    }
+    got = ""
+    if stream == 1 {
+        done = 0
+        while done == 0 {
+            ch = client.response_read(resp, 4096)
+            if string.length(ch) == 0 { done = 1 } else { got = string.concat(got, ch) }
+        }
+    } else {
+        got = string.concat(client.response_body(resp), "")
+    }
+    client.response_free(resp)
+    return got
+}
+
+fn expect(base: string, path: string, want: string, what: string) -> int {
+    fails = 0
+    mode = 0
+    while mode < 2 {
+        got = fetch("${base}${path}", mode)
+        how = "buffered"
+        if mode == 1 { how = "streamed" }
+        if got != want {
+            println("FAIL: ${path} ${how}: ${what}; got '${got}'")
+            fails = fails + 1
+        } else {
+            println("  PASS: ${path} ${how}: ${what}")
+        }
+        mode = mode + 1
+    }
+    return fails
+}
 
 main() {
     println("=== std.http.client de-chunk ===")
@@ -27,24 +77,13 @@ main() {
         println("FAIL: UPSTREAM_PORT not set")
         exit(1)
     }
-    url = "http://127.0.0.1:${up_port}/chunked"
+    base = "http://127.0.0.1:${up_port}"
 
-    req = client.request("GET", url)
-    client.set_timeout(req, 5s)
-    resp, err = client.send_request(req)
-    client.request_free(req)
-    if err != "" {
-        println("FAIL: transport ${err} for ${url}")
-        exit(1)
-    }
-    got = string.concat(client.response_body(resp), "")
-    client.response_free(resp)
-
-    if got != BODY {
-        println("FAIL: client did not de-chunk; got '${got}'")
-        exit(1)
-    }
-    println("  PASS: client de-chunks Transfer-Encoding: chunked")
+    fails = expect(base, "/chunked", BODY, "Transfer-Encoding: chunked is de-chunked")
+    fails = fails + expect(base, "/two-fields", "hello", "chunked in a second field is de-chunked")
+    fails = fails + expect(base, "/xchunked", FRAMED, "xchunked is no chunked: the bytes to the close")
+    fails = fails + expect(base, "/chunked-gzip", FRAMED, "chunked, gzip is not chunked last: the bytes to the close, Content-Length aside")
+    if fails > 0 { exit(1) }
     println("PASS")
     exit(0)
 }

@@ -22,7 +22,13 @@
  *       with the same length, and once a prefix answers -1 every longer one
  *       does. This is what the server relies on, calling the check after
  *       every read.
- *   C4  Nothing leaks (LeakSanitizer). */
+ *   C4  The client reads the same body in a response
+ *       (http_response_fill_from_bytes) under each of a handful of
+ *       Transfer-Encoding fields: decoded to the reference's payload when
+ *       the codings, read as one list, end in chunked and the body frames,
+ *       and the bytes as they came otherwise, chunked or not (RFC 9112 6.3,
+ *       #3670).
+ *   C5  Nothing leaks (LeakSanitizer). */
 #include <stdint.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -30,6 +36,8 @@
 #include <string.h>
 
 #include "aether_http.h"
+#include "aether_http_internal.h"
+#include "aether_string.h"
 
 #define C_LINE_MAX 1024
 #define C_SIZE_MAX ((uint64_t)INT64_MAX)
@@ -193,6 +201,38 @@ int LLVMFuzzerTestOneInput(const uint8_t* data, size_t size) {
         if (pr == -1 && refused_at < 0) refused_at = (int)k;
         if (refused_at >= 0) CHECK(pr == -1, "refused at %d bytes, %zu bytes answered %d", refused_at, k, pr);
         if (step > 1 && k + step > size && k != size) k = size - step;
+    }
+
+    /* C4: the input as the body of a response, under each set of fields. */
+    static const struct { const char* fields; int chunked; } te[] = {
+        { "Transfer-Encoding: chunked\r\n", 1 },
+        { "Transfer-Encoding: gzip, chunked\r\n", 1 },
+        { "Transfer-Encoding: gzip\r\ntransfer-encoding: CHUNKED\r\n", 1 },
+        { "Transfer-Encoding: xchunked\r\n", 0 },
+        { "Transfer-Encoding: chunked, gzip\r\nContent-Length: 1\r\n", 0 },
+        { "Transfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n", 0 },
+    };
+    for (size_t t = 0; t < sizeof te / sizeof te[0]; t++) {
+        char head[160];
+        int hl = snprintf(head, sizeof head, "HTTP/1.1 200 OK\r\n%s\r\n", te[t].fields);
+        char* msg = (char*)malloc((size_t)hl + size + 1);
+        CHECK(msg != NULL, "out of memory");
+        memcpy(msg, head, (size_t)hl);
+        memcpy(msg + hl, in, size);
+        msg[(size_t)hl + size] = '\0';
+        HttpResponse* resp = http_response_alloc_empty();
+        CHECK(resp != NULL, "out of memory");
+        http_response_fill_from_bytes(resp, msg, (size_t)hl + size);
+        int decoded = te[t].chunked && ref == 1;
+        const char* want = decoded ? ref_out : in;
+        size_t want_len = decoded ? ref_len : size;
+        size_t got_len = resp->body ? aether_string_length(resp->body) : 0;
+        CHECK(resp->body && got_len == want_len &&
+              memcmp(aether_string_data(resp->body), want, want_len) == 0,
+              "under \"%s\" the client's body is %zu bytes, the %s %zu", te[t].fields, got_len,
+              decoded ? "decoded chunks are" : "bytes as they came are", want_len);
+        http_response_free(resp);
+        free(msg);
     }
     free(ref_out);
     return 0;

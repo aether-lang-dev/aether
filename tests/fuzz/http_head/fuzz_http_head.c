@@ -20,7 +20,8 @@
  *       beside a Content-Length, and Transfer-Encoding fields whose codings,
  *       read as one list, do not end in chunked, name it twice, or hold
  *       something that is not a coding. A Content-Length it accepts is that
- *       exact decimal value.
+ *       exact decimal value, and the client's reader of a response's
+ *       Transfer-Encoding fields (http_te_in_block) reads them as it does.
  *   H3  A chunked body that frames decodes, to no more bytes than its
  *       framing, and a body that does not frame is refused, not decoded.
  *   H4  http_parse_request_n reads the head the head check passed the way
@@ -86,6 +87,7 @@ typedef struct {
     int   rc;
     long  content_length;
     int   chunked;
+    int   te_count;        /* Transfer-Encoding fields */
     int   count;
     Field f[H_MAX_HEADERS];
 } HeadModel;
@@ -206,6 +208,7 @@ static void model_head(const char* h, size_t n, HeadModel* m) {
         if (!eol) break;
         at = end + 1;
     }
+    m->te_count = te_count;
     if (cl_count > 0) {
         if (cl_differ || model_count(cl_v, cl_n, &m->content_length) != 0) {
             m->rc = HTTP_HEAD_BAD_FRAMING;
@@ -279,6 +282,17 @@ static size_t one_request(const char* in, size_t n) {
     if (rc != HTTP_HEAD_OK) return 0;
     CHECK(cl == m.content_length, "Content-Length read as %ld, it says %ld", cl, m.content_length);
     CHECK(chunked == m.chunked, "chunked read as %d, the head says %d", chunked, m.chunked);
+    /* The client's reader of a response's Transfer-Encoding fields
+     * (http_te_in_block, #3670) reads the same header lines the same way. */
+    {
+        const char* fields = (const char*)memchr(in, '\n', (size_t)(hdr_end - in));
+        int te_chunked = -1;
+        int te_fields = fields ? http_te_in_block(fields + 1, hdr_end, &te_chunked)
+                               : http_te_in_block(hdr_end, hdr_end, &te_chunked);
+        CHECK((te_fields > 0) == (m.te_count > 0) && te_chunked == chunked,
+              "the client's reader found %d Transfer-Encoding fields, chunked %d; the head check %d, %d",
+              te_fields, te_chunked, m.te_count, chunked);
+    }
     /* A body past one buffer is streamed off the socket, not parsed here. */
     if (cl > HTTP_CONN_BUF_CAP) return 0;
 
