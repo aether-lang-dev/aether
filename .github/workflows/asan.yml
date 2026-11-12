@@ -75,8 +75,23 @@ jobs:
     - name: Install toolchain
       run: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
+    # Every test's time under ASan, kept (#3601): the shards split the corpus
+    # by each test's cost, and ASan's costs are not the plain Linux leg's (a
+    # build costs 1299 ms on average in one shard and 850 in the other there),
+    # so these times are what tests/sweep_weights_linux_asan.txt is made of
+    # (tests/scripts/sweep_weights.sh).
     - name: make test-asan-ae
-      run: AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
+      run: |
+        AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" \
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
+
+    - name: Upload the sweep's timings
+      if: always()
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-asan-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
 
     - name: Upload the ASan reports
       if: failure()
