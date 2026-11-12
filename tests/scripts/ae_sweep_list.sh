@@ -25,6 +25,12 @@ if [ -n "${1:-}" ]; then
     sed '/^#/d;/^$/d' "$1" >> "$prune"
 fi
 
+# A select file the selector refuses stops the list here: inside the pipe
+# below its status is lost, and the list would come out empty and pass.
+if [ -n "${2:-}" ]; then
+    sh "$(dirname "$0")/sweep_select.sh" "$2" < /dev/null > /dev/null || exit 2
+fi
+
 { find tests/syntax tests/compiler tests/integration tests/regression -name '*.ae' -print 2>/dev/null
   find std -name 'test_*.ae' -print 2>/dev/null; } \
     | grep -v -F -f "$prune" | sh "$(dirname "$0")/sweep_select.sh" "${2:-}" | sort

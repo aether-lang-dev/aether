@@ -1642,6 +1642,9 @@ test-ae: compiler ae stdlib
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
 	[ -z "$(AE_SWEEP_SELECT)" ] || echo "  Select list: $(AE_SWEEP_SELECT)"; \
+	if [ -n "$(AE_SWEEP_SELECT)" ] && ! sh tests/scripts/sweep_select.sh "$(AE_SWEEP_SELECT)" < /dev/null > /dev/null; then \
+	    echo "  The select list is not readable or not well formed: nothing would run."; exit 2; \
+	fi; \
 	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" "$(AE_SWEEP_SELECT)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
 	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
