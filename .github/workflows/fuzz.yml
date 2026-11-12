@@ -28,6 +28,12 @@ on:
       - 'std/json/**'
       - 'std/cbor/**'
       - 'std/ipc/**'
+      # The harnesses link the runtime and std.string and take their flags
+      # from the Makefile (FUZZ_STD_CFLAGS): a change there changes what is
+      # fuzzed.
+      - 'runtime/**'
+      - 'std/string/**'
+      - 'Makefile'
       - 'tests/fuzz/**'
       - '.github/workflows/fuzz.yml'
   workflow_dispatch:
