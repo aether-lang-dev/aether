@@ -318,6 +318,13 @@ struct AetherWatch;  /* runtime/actors/aether_supervision.c */
  * told), which happens once. */
 #define AETHER_EXIT_TRAP      1
 #define AETHER_EXIT_FINALIZED 2
+/* A caller's actor that a core may be delivering to while it is in no table
+ * (#3673): one carried over a scheduler restart (teardown sets it, and its
+ * assigned_core still names the core its messages go to), or one a core
+ * took because its assigned_core named no core. scheduler_register_actor
+ * keeps such an actor on that core, which is the one writer of its mailbox,
+ * and clears the bit. */
+#define AETHER_EXIT_ROUTED    4
 
 /* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
  * another; the counts of messages in flight sit below it. */

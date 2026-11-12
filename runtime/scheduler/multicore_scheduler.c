@@ -2670,6 +2670,21 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // it was routed (move_begin waits for none), so this is a message
             // routed by a stale read or one of the runtime's own: forward it,
             // still counted, to the actor's core.
+            // An actor whose assigned_core names no core of this lifecycle (a
+            // caller's actor carried over a restart into fewer cores, or one
+            // sent to before its registration): this core takes it and is
+            // its mailbox's one writer from then on (#3673). Delivered here
+            // while it stayed no core's, as it was, the core its
+            // registration gave it wrote the mailbox too. The bit first, so
+            // the registration that reads this core's id keeps it here.
+            {
+                int ac = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+                if (unlikely(ac < 0 || ac >= num_cores) && !actor->auto_process) {
+                    atomic_fetch_or_explicit(&actor->exit_flags, AETHER_EXIT_ROUTED, memory_order_seq_cst);
+                    atomic_compare_exchange_strong_explicit(&actor->assigned_core, &ac, sched->core_id,
+                                                            memory_order_seq_cst, memory_order_acquire);
+                }
+            }
             if (unlikely(atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != sched->core_id)) {
                 int new_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
 #ifdef AETHER_DEBUG_ORDERING
@@ -2693,15 +2708,15 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                         AETHER_PAUSE();
                     }
                     if (!forwarded) overflow_append(new_core, actor, msg);
+                } else if (actor->auto_process) {
+                    // An actor with a thread of its own and no core: its
+                    // thread takes every message in its inbox (#2598), its
+                    // mailbox is the thread's alone.
+                    scheduler_actor_thread_deliver(actor, msg);
                 } else {
-                    // Actor has an invalid assigned_core — deliver directly to mailbox
-                    // to prevent silent message loss.
-                    if (!deliver_owned(actor, msg)) {
-                        requeue_own(sched->core_id, actor, msg);
-                    } else if (!actor->auto_process) {
-                        inflight_leave(actor, 1);
-                    }
-                    atomic_store_explicit(&actor->active, 1, memory_order_relaxed);
+                    // Taken by no core above (another value since?): it waits
+                    // here, counted, until it has one (#3673).
+                    requeue_own(sched->core_id, actor, msg);
                 }
                 work_done = 1;
                 continue;
@@ -3541,6 +3556,14 @@ static void scheduler_free_core_tables(void) {
                 // send is refused while the scheduler is not running, and
                 // the last foreign one has finished, above).
                 atomic_store_explicit(&actor->inflight, 0, memory_order_relaxed);
+                // In no ready list or timer heap: they go with the tables
+                // (#3540). And the core it is on stays its core (#3673): a
+                // send made after the next scheduler_init and before its
+                // registration goes there, and that core delivers it, so
+                // the registration keeps it there (AETHER_EXIT_ROUTED).
+                atomic_store_explicit(&actor->ready_queued, 0, memory_order_relaxed);
+                atomic_store_explicit(&actor->timer_slot, 0, memory_order_relaxed);
+                atomic_fetch_or_explicit(&actor->exit_flags, AETHER_EXIT_ROUTED, memory_order_release);
                 // Its overflow (#3241) is the runtime's and goes with the
                 // queues, what it holds dropped as a release drops it: the
                 // caller frees the actor's memory, which is all it knows of.
@@ -3636,6 +3659,7 @@ void scheduler_cleanup(void) {
 }
 
 static int register_actor(ActorBase* actor, int preferred_core);
+static int register_actor_ex(ActorBase* actor, int preferred_core, int expect, int check);
 
 // An actor the caller allocated: the scheduler runs it and never frees it.
 // Its count of messages in flight is left as it is: a caller's actor can be
@@ -3650,22 +3674,61 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
     actor->release_message = NULL;   // its messages are the caller's (#3142)
     actor->step_payload = NULL;
-    atomic_init(&actor->inbox, NULL);
     atomic_init(&actor->thread_parked, 0);
     atomic_init(&actor->death_watch, NULL);         // #2974
-    atomic_init(&actor->exit_flags, 0);
     atomic_init(&actor->incarnation, 0);
     atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
     atomic_init(&actor->mailbox_pending, 0);
     atomic_init(&actor->full_drops, 0);
-    // In no ready list and no timer heap (#3540): those of a lifecycle the
-    // actor was registered in before went with its tables.
-    atomic_init(&actor->ready_queued, 0);
-    atomic_init(&actor->timer_slot, 0);
-    return register_actor(actor, preferred_core);
+    /* An actor a core may already be delivering to keeps that core (#3673):
+     * one carried over a restart, whose messages since scheduler_init went
+     * to the core its last lifecycle left in assigned_core, and one a core
+     * took because its assigned_core named none (AETHER_EXIT_ROUTED, set
+     * before that core stored its id). That core is its mailbox's one
+     * writer; giving the actor another core here, as the registration did,
+     * had both write it, the second while the first was still delivering.
+     * It goes into the table of the core it is on, and a core the caller
+     * asked for is asked of that core as a move (migrate_to), which hands
+     * the actor over with nothing of it in flight, as every move does
+     * (#3090). Read in this order, against a core's take of it (the bit,
+     * then its id): a core id read here that a take stored has the bit
+     * with it. */
+    for (;;) {
+        int cur = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
+        int routed = atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_ROUTED;
+        if (routed && cur >= 0 && cur < num_cores) {
+            int core = register_actor_ex(actor, cur, 0, 0);
+            atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
+            if (core >= 0 && preferred_core >= 0 && preferred_core < num_cores && preferred_core != core) {
+                atomic_store_explicit(&actor->migrate_to, preferred_core, memory_order_relaxed);
+                ready_push(actor);
+            }
+            return core;
+        }
+        // No core delivers to it (a new actor) or none can yet (its core is
+        // past this lifecycle's count): placed as any actor is, unless a
+        // core takes it first, which the compare-and-swap sees.
+        if (!routed) {
+            // In no list (#3540) and with no overflow: those of a
+            // lifecycle it was registered in before went with its tables.
+            atomic_init(&actor->inbox, NULL);
+            atomic_init(&actor->ready_queued, 0);
+            atomic_init(&actor->timer_slot, 0);
+        }
+        int core = register_actor_ex(actor, preferred_core, cur, 1);
+        if (core == -2) continue;   // a core took it meanwhile: it keeps it
+        atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
+        return core;
+    }
+}
+static int register_actor(ActorBase* actor, int preferred_core) {
+    return register_actor_ex(actor, preferred_core, 0, 0);
 }
 
-static int register_actor(ActorBase* actor, int preferred_core) {
+/* With `check`, assigned_core is set only if it still reads `expect` (a
+ * compare-and-swap, under the core's lock): -2 when a core took the actor
+ * meanwhile (#3673), and nothing is changed. */
+static int register_actor_ex(ActorBase* actor, int preferred_core, int expect, int check) {
     // Default placement: pick the worker with the lowest combined
     // load right now. The previous shape — `actor_id % num_cores` —
     // gave perfect distribution only on long actor sequences; on
@@ -3717,7 +3780,16 @@ static int register_actor(ActorBase* actor, int preferred_core) {
         return -1;
     }
 
-    atomic_store_explicit(&actor->assigned_core, preferred_core, memory_order_relaxed);
+    if (check) {
+        int seen = expect;
+        if (!atomic_compare_exchange_strong_explicit(&actor->assigned_core, &seen, preferred_core,
+                                                     memory_order_acq_rel, memory_order_acquire)) {
+            spinlock_unlock(&sched->actor_lock);
+            return -2;
+        }
+    } else {
+        atomic_store_explicit(&actor->assigned_core, preferred_core, memory_order_relaxed);
+    }
 
     // The SPSC queue and an actor thread's inbox are both made on first use
     // (saves 3 KB/actor).

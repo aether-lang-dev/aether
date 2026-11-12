@@ -2296,6 +2296,106 @@ void test_scheduler_stepping_loop_yields_to_queues(void) {
     ASSERT_TRUE(seen_at - at_send <= 8);
 }
 
+// #3673: a caller's actor carried over scheduler restarts, with a thread no
+// core owns sending to it all along. Between a restart's scheduler_init and
+// the actor's registration, the sends go to the core its last lifecycle left
+// in assigned_core, and that core delivers them; the registration then gave
+// the actor the least loaded core, and both cores wrote its mailbox. Each
+// message carries a sequence; every one must arrive once, in order.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int got;
+    atomic_int out_of_order;
+    int next;
+} CarriedActor;
+
+static atomic_int g_carry_stop;
+static atomic_int g_carry_sending;
+static atomic_int g_carry_paused;
+static atomic_int g_carry_sent;   // sends the scheduler took (a refused one is not)
+
+static void carried_step(void* self) {
+    CarriedActor* a = (CarriedActor*)self;
+    Message msg;
+    if (!mailbox_receive(&a->mailbox, &msg)) return;
+    if (msg.payload_int != a->next) atomic_fetch_add(&a->out_of_order, 1);
+    a->next = (int)msg.payload_int + 1;
+    atomic_fetch_add(&a->got, 1);
+}
+
+static void* carry_sender(void* arg) {
+    ActorBase* a = (ActorBase*)arg;
+    int seq = 0;
+    while (!atomic_load(&g_carry_stop)) {
+        if (!atomic_load(&g_carry_sending)) {
+            atomic_store(&g_carry_paused, 1);
+            continue;
+        }
+        atomic_store(&g_carry_paused, 0);
+        uint64_t refused = scheduler_stopped_sends();
+        scheduler_send_remote(a, message_create_simple(1, 0, seq), -1);
+        // A send refused while the scheduler was down is no message: the
+        // sequence goes on from it.
+        if (scheduler_stopped_sends() == refused) {
+            seq++;
+            atomic_fetch_add(&g_carry_sent, 1);
+        }
+    }
+    return NULL;
+}
+
+static void carry_pause(void) {
+    atomic_store(&g_carry_sending, 0);
+    while (!atomic_load(&g_carry_paused)) {
+    }
+}
+
+void test_scheduler_restart_hands_carried_actor_over(void) {
+    CarriedActor* a = (CarriedActor*)calloc(1, sizeof(CarriedActor));
+    ASSERT_NOT_NULL(a);
+    mailbox_init(&a->mailbox);
+    a->step = carried_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_store(&g_carry_stop, 0);
+    atomic_store(&g_carry_paused, 0);
+    atomic_store(&g_carry_sent, 0);
+    scheduler_init(2);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, -1);
+    atomic_store(&g_carry_sending, 1);
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, carry_sender, a));
+    int lost = 0;
+    for (int round = 0; round < 20 && !lost; round++) {
+        sleep_ms(2);
+        carry_pause();
+        scheduler_shutdown();
+        if (atomic_load(&a->got) != atomic_load(&g_carry_sent)) lost = 1;
+        atomic_store(&g_carry_paused, 0);
+        atomic_store(&g_carry_sending, 1);
+        // Messages sent from here until the registration go to the core
+        // the actor had.
+        scheduler_init(2);
+        scheduler_start();
+        sleep_ms(1);
+        scheduler_register_actor((ActorBase*)a, -1);
+    }
+    sleep_ms(2);
+    carry_pause();
+    scheduler_shutdown();
+    int got = atomic_load(&a->got), sent = atomic_load(&g_carry_sent);
+    int bad = atomic_load(&a->out_of_order);
+    atomic_store(&g_carry_stop, 1);
+    atomic_store(&g_carry_sending, 1);
+    pthread_join(t, NULL);
+    scheduler_cleanup();
+    free(a);
+    ASSERT_EQ(0, lost);
+    ASSERT_EQ(sent, got);
+    ASSERT_EQ(0, bad);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2334,4 +2434,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: duplicates do not double-step", test_ready_list_duplicates_do_not_double_step, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a moved actor is stepped on its new core", test_ready_list_moved_actor_stepped_on_new_core, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler stepping loop yields to its queues", test_scheduler_stepping_loop_yields_to_queues, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler restart hands a carried actor over", test_scheduler_restart_hands_carried_actor_over, TEST_CATEGORY_RUNTIME);
 }
