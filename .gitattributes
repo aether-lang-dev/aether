@@ -12,6 +12,7 @@
 # is byte-identical.
 tests/**/expected_output.txt text eol=lf
 tests/**/*.txt text eol=lf
+std/posix/regex/tests/** text eol=lf
 
 # Documentation
 *.md linguist-documentation

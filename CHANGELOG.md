@@ -14,6 +14,99 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.912.0]
+
+### Added
+
+- **std.posix.regex: POSIX regular expressions beside PCRE2 (#3652).** Basic
+  (the default) and Extended syntax, POSIX leftmost-longest matching and
+  back-references, from Henry Spencer's engine as FreeBSD's libc carries it,
+  vendored in `std/posix/regex/freebsd/` and built into libaether.a. std.regex
+  (PCRE2, leftmost-first) cannot stand in for it: `a|ab` on "abcd" is "ab"
+  under POSIX and "a" under PCRE2, so a sed or grep built on PCRE2 gives
+  different output for real scripts, and BRE syntax (`\(`, `\{m,n\}`, literal
+  `+ ? |`) has no PCRE2 spelling. The engine is the same on every target,
+  Windows included, where there is no `regcomp` at all; it is trimmed to
+  UTF-8 only (no locale or collation tables, so a pattern means the same
+  whatever `setlocale` says) and its symbols are prefixed `aether_posix_*`, so
+  it cannot clash with a host libc's `regcomp`. `regex.compile(pattern,
+  flags) -> (re, err)` takes `EXTENDED`, `ICASE`, `NOSUB`, `NEWLINE` and
+  FreeBSD's `NOSPEC`, with regerror's text as `err`; `regex.exec(re, subject,
+  eflags)` (`NOTBOL`, `NOTEOL`) returns a caller-owned match of submatch
+  offsets, and `match_new` / `exec_into` / `exec_range` reuse one buffer and
+  match a byte range (`REG_STARTEND`). No module or thread-local state.
+  FreeBSD's regex regression data (507 cases) and the AT&T conformance data
+  it runs (394 cases, its known-bug list included) pass; a POSIX case table
+  agrees with the system `regcomp` on FreeBSD and macOS. libaether.a grows by
+  about 52 KB.
+
+## [0.911.0]
+
+### Added
+
+- **`hide ns.member` and `import ns hiding (a, b)` deny one member of a
+  module and leave the rest of it visible.** `hide` worked on whole names and
+  on a namespace as a prefix, so a file that imported `ui` to build a window
+  could not be held away from `ui.open_url` except by a grep (sae's kernel).
+  `hide ui.open_url` refuses that member in a block, at any depth and through
+  an import alias; `import ui hiding (open_url)` does it for every body in the
+  file, the file's own rule. A hidden qualified call is now reported as hidden
+  (`E0304`) rather than undefined (`E0301`), and a namespace's member or
+  constant taken as a value (`f = ui.open_url`) is refused under `hide ui`,
+  which it used to walk past.
+
+## [0.910.0]
+
+### Fixed
+
+- **Returning a local as an optional whose value owns a string no longer
+  returns freed memory.** `k = Key { text: ... }; return k` from `-> Key?`
+  (or `return e` for a `Key?` local, a `some(v)` re-wrapped, an `if` or
+  `match` picking the local or `none`) copied the local into the result and
+  then ran its scope-exit drop, which released the string the caller had
+  just been handed; the next allocation reused it. The same held for an
+  optional sum, tuple, closure or struct nesting an owning struct. An
+  optional result is now taken as a tuple or sum result is: a struct local
+  moved into it, an optional local retained before its drop, an `if` arm
+  by arm (wrapped whole, its `none` arm did not compile), and a returned
+  `match` result is initialised and dropped like a tuple's (it was declared
+  uninitialised, and the first arm's store dropped garbage). A call
+  statement that throws such an optional or an owning sum away now drops
+  it (it leaked). Found by
+  nib-code's `ae/term` port.
+
+- **A local read once, inside a loop, is no longer moved out on the first
+  run.** A local's only read counted as its last use, so it was moved (left
+  empty) there; in a loop body that read runs again and found nothing.
+  `blank = mk(); for i in 0..n { cells[i] = blank }` filled only the first
+  element, `x = "x"` stored into a `string[]` slice the same way, and
+  `pattern = lastpattern` in a loop emptied `lastpattern` for the next
+  time round. The same held for a struct literal's field, a field store
+  and an inner loop. Such a read is now taken (retained or copied), unless
+  the loop body binds the local unconditionally ahead of it, which still
+  moves. Found by nib-code's `ae/term` port and the std.posix.regex AT&T
+  conformance test.
+
+- **std.http.client reads past interim 1xx responses to the real one.** A
+  request sent with `Expect: 100-continue` to a server that honours it
+  (Node's http server, Azurite) got `100 Continue` back as its response,
+  status 100 with an empty body, and the final response was never read;
+  RFC 9110 15.2 has a client parse any number of 1xx responses before the
+  final one. The buffered reader, the streaming reader (`set_stream`) and
+  the proxy's event loop now skip every interim head (1xx other than 101,
+  which is final) before framing the response, and a connection reused
+  after one is framed from the final head. Found by servirtium-vcr's Azure
+  SDK harness.
+
+- **tests/integration/http_ipv6 no longer fails when a test beside it gets
+  the same port on the other family.** It checked that a server on `::1`
+  is not reachable at `127.0.0.1` on its port (and the reverse for one on
+  `localhost`), but nothing kept that port free on the other family, and
+  in CI `crypto_tls13_peer` was handed it and answered. The check now
+  holds the port there, bound and not listening (`hold_port.c`), while it
+  runs, and starts the server again on a new port when the other family
+  has it already.
+
 ## [0.909.0]
 
 ### Added

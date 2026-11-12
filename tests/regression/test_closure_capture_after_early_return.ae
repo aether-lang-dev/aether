@@ -1,0 +1,83 @@
+// Regression (sae asks/aether-closure-capture-early-return.md): a string a
+// trailing block assigns, declared after an early return in the function.
+//
+// The captured string lives in a heap cell declared where the variable is,
+// but its heap-string flag was declared at the top of the function, and an
+// early return before the declaration emitted the string's cleanup on a name
+// that did not exist yet (and, after it, on the cell as if a string): the C
+// did not compile ("use of undeclared identifier"). sae's services/files ran
+// each file operation in `sandbox.enforce` this way and had to declare what
+// the block set before any return. Already fixed on 0.909.0; this keeps it.
+//
+// The strings are runtime heap strings (read from a file, or concatenated
+// from a parameter) so the macOS leaks gate sees each cell's last holder
+// free what it holds, on every return path.
+
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+run(code: fn) {
+    call(code, null)
+}
+
+check(label: string, got: string, want: string) {
+    if got != want {
+        println("  FAIL: ${label} got=${got} want=${want}")
+        exit(1)
+    }
+}
+
+// The ask's shape: an early return, then a captured string the block sets.
+reader(p: string) -> (string, string) {
+    if p == "" { return "", "no path" }
+    t = ""
+    run() callback {
+        rt, _re = fs.read(p)
+        t = rt
+    }
+    return t, ""
+}
+
+// Two captured strings, returns before and after the block, and a result
+// built from what the block set.
+tagged(p: string, k: int) -> (string, string) {
+    if p == "" { return "", "no path" }
+    t = ""
+    err = ""
+    if k == 1 { return string.concat(p, ":early"), "" }
+    run() callback {
+        t = string.concat(p, ":read")
+        err = string.concat(p, ":none")
+    }
+    if k == 2 { return string.concat(t, "!"), err }
+    return t, err
+}
+
+main() {
+    path = "test_closure_capture_after_early_return.tmp"
+    fs.write(path, "twelve bytes")
+    got, why = reader(path)
+    check("read", got, "twelve bytes")
+    check("read why", why, "")
+    empty, why2 = reader("")
+    check("early", empty, "")
+    check("early why", why2, "no path")
+    fs.delete(path)
+
+    a, ae = tagged("p", 0)
+    check("tagged 0", a, "p:read")
+    check("tagged 0 err", ae, "p:none")
+    b, be = tagged("p", 1)
+    check("tagged 1", b, "p:early")
+    check("tagged 1 err", be, "")
+    c, ce = tagged("p", 2)
+    check("tagged 2", c, "p:read!")
+    check("tagged 2 err", ce, "p:none")
+    d, de = tagged("", 0)
+    check("tagged none", d, "")
+    check("tagged none err", de, "no path")
+
+    println("ok")
+}

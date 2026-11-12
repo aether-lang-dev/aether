@@ -138,14 +138,53 @@ import std.http
 ```
 
 The hidden prefix is refused before namespace resolution, so the call
-never resolves. The diagnostic on a hidden dotted call reports the name
-as undefined (`E0301: Undefined function 'http.get'`) rather than the
-`E0304` you get for a hidden bare name, the qualified lookup returns no
-symbol once the prefix is denied. Either way the access is blocked.
+never resolves, and the diagnostic is `E0304: 'http.get' is hidden in this
+scope`, as for a hidden bare name. A member taken as a value
+(`f = http.get`) or a module constant (`http.STATUS_OK`) is refused the
+same way. (A qualified call used to be reported as an undefined
+function, `E0301`, and a member taken as a value was not refused at all.)
 
 (Don't reach for a built-in type keyword like `string` here: `hide
 string` fails earlier with `E0100`, because `string` is a reserved
 keyword and can't be used as an identifier at all.)
+
+### One member of a module
+
+`hide ns.member` hides one member of an imported module and leaves the
+rest of it visible:
+
+```aether,fragment
+import ui
+build_chrome() {
+    hide ui.open_url
+    w = ui.window("sae")          // fine: every other ui.* is visible
+    ui.open_url("https://...")    // E0304: 'ui.open_url' is hidden
+}
+```
+
+It holds at any depth below the block, through an import alias
+(`import ui as u` then `u.open_url`), and against the member taken as a
+value. A value bound to `ui` at or below the hiding scope is a value, and
+`ui.open_url` is then that value's field, which the hide is not about.
+A bare binding a selective import made (`import ui (open_url)`) is a name
+of its own: hide it as `open_url`.
+
+To hold a whole file to "all of `ui` but this", write it on the import:
+
+```aether,fragment
+import ui hiding (open_url, quit)
+import std.fs as files hiding (delete)
+```
+
+The file imports `ui` whole except those members: it is as if each body
+the file defines (each function, method and receive arm) began with
+`hide ui.open_url, ui.quit`. With an `as` name, the hide is on that name
+(`files.delete`). The rule is the importing file's own: in a module, it
+binds that module's code and not the program importing the module, and
+another file importing `ui` sees all of it. `hiding` takes no selective
+or glob list beside it (`import ui (window) hiding (open_url)` is an
+error); it is not a keyword anywhere else.
+
 
 ### Works inside actor receive arms
 

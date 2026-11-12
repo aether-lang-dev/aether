@@ -20,6 +20,13 @@
 #      127.0.0.1 and ::ffff:127.0.0.1 but not ::1, and one for [::1] admits
 #      ::1 alone: a grant for one family never opens the other
 #
+# The "other family refuses" checks in 1 and 3 hold that family's port bound
+# but not listening (hold_port.c) while they run: a test beside this one
+# could otherwise be handed the same port number on the other family and
+# answer (crypto_tls13_peer did, in CI run 43124040748). A port already
+# taken there is not one the check can use, so the server is started again
+# on a new one.
+#
 # Skips, and says so, when this host cannot bind ::1.
 
 set -e
@@ -34,7 +41,9 @@ AE="$ROOT/build/ae"
 
 TMP="$(mktemp -d)"
 SRV_PID=""
+HOLD_PID=""
 cleanup() {
+    stop_server "$HOLD_PID"
     stop_server "$SRV_PID"
     rm -rf "$TMP" || :
     return 0
@@ -48,6 +57,12 @@ fail() { echo "  [FAIL] http_ipv6: $1"; exit 1; }
     || { sed -n '1,12p' "$TMP/b2.log"; fail "client did not build"; }
 "$AE" build "$SCRIPT_DIR/dial.ae" -o "$TMP/dial" >"$TMP/b3.log" 2>&1 \
     || { sed -n '1,12p' "$TMP/b3.log"; fail "dial did not build"; }
+RAW_SOCKET_LIBS=""
+case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*) RAW_SOCKET_LIBS="-lws2_32" ;;
+esac
+${CC:-cc} -I"$ROOT/tests/lib" "$SCRIPT_DIR/hold_port.c" -o "$TMP/hold" $RAW_SOCKET_LIBS >"$TMP/b5.log" 2>&1 \
+    || { sed -n '1,12p' "$TMP/b5.log"; fail "hold_port did not build"; }
 AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/streams.ae" --lib "$ROOT/contrib" -o "$TMP/streams" >"$TMP/b4.log" 2>&1 \
     || { sed -n '1,12p' "$TMP/b4.log"; fail "streams did not build"; }
 
@@ -77,6 +92,40 @@ start() {
     fi
     grep -q READY "$_log" || { sed -n '1,10p' "$_log"; fail "server on $_host never became READY"; }
     PORT=$(read_ready_port "$_log") || exit 1
+}
+
+# hold HOST PORT: keep HOST:PORT bound and not listening (hold_port.c) in
+# HOLD_PID, or return 3 when something else already has it.
+hold() {
+    "$TMP/hold" "$1" "$2" >"$TMP/hold.log" 2>&1 </dev/null &
+    HOLD_PID=$!
+    _i=0
+    while [ "$_i" -lt 100 ]; do
+        grep -q -E "HELD|BIND FAILED" "$TMP/hold.log" 2>/dev/null && break
+        sleep 0.05
+        _i=$((_i + 1))
+    done
+    if grep -q HELD "$TMP/hold.log"; then
+        return 0
+    fi
+    stop_server "$HOLD_PID"; HOLD_PID=""
+    return 3
+}
+
+# start_held HOST OTHER LOG: start the server on HOST, and hold the same
+# port on OTHER, the other family's loopback, starting again on a new port
+# while OTHER has it already. Returns 3 when HOST can't be bound.
+start_held() {
+    _try=0
+    while [ "$_try" -lt 10 ]; do
+        start "$1" "$3" || return 3
+        if hold "$2" "$PORT"; then
+            return 0
+        fi
+        stop_server "$SRV_PID"; SRV_PID=""
+        _try=$((_try + 1))
+    done
+    fail "could not hold $2 at the port of a server on $1 in 10 tries"
 }
 
 # get URL EXPECTED [env...]: GET URL and require EXPECTED in the output.
@@ -119,13 +168,14 @@ if [ "$HAS_V6" = no ]; then
 fi
 
 # --- 1. IPv6 loopback ---
-if ! start "::1" "$TMP/s1.log"; then
+if ! start_held "::1" "127.0.0.1" "$TMP/s1.log"; then
     [ "$HAS_V6" = yes ] && fail "the server could not bind ::1, which this host has"
     echo "  [SKIP] http_ipv6: this host cannot bind ::1 (no IPv6)"
     exit 0
 fi
 get "http://[::1]:$PORT/" "STATUS 200 BODY ipv6-ok peer=::1"
 get_fails "http://127.0.0.1:$PORT/"
+stop_server "$HOLD_PID"; HOLD_PID=""
 stop_server "$SRV_PID"; SRV_PID=""
 
 # The "::" wildcard is what dual-stack means, and on Windows each new
@@ -152,9 +202,10 @@ else
 fi
 
 # --- 3. "localhost" still means 127.0.0.1 ---
-start "localhost" "$TMP/s3.log" || fail "could not bind localhost"
+start_held "localhost" "::1" "$TMP/s3.log" || fail "could not bind localhost"
 get "http://127.0.0.1:$PORT/" "STATUS 200 BODY ipv6-ok peer=127.0.0.1"
 get_fails "http://[::1]:$PORT/"
+stop_server "$HOLD_PID"; HOLD_PID=""
 stop_server "$SRV_PID"; SRV_PID=""
 
 # --- 4. dual-stack over pure TLS 1.3 ---

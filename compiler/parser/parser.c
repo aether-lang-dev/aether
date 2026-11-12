@@ -38,6 +38,8 @@ static char* parser_strf(const char* fmt, ...) {
     return s;
 }
 
+static int is_module_name_token(Token* token);
+
 Parser* create_parser(Token** tokens, int token_count) {
     Parser* parser = malloc(sizeof(Parser));
     if (!parser) return NULL;
@@ -3623,10 +3625,29 @@ static ASTNode* parse_statement_inner(Parser* parser) {
             advance_token(parser); // consume 'hide'
             ASTNode* node = create_ast_node(AST_HIDE_DIRECTIVE, NULL, hline, hcol);
             for (;;) {
-                Token* hname = expect_token(parser, TOKEN_IDENTIFIER);
-                if (!hname) return NULL;
-                ASTNode* id = create_ast_node(AST_IDENTIFIER, hname->value, hname->line, hname->column);
-                add_child(node, id);
+                /* `hide ns.member` hides one member of an imported module
+                 * and leaves the rest of it visible. The namespace may be
+                 * spelled as a keyword is (`string.length`), as a call
+                 * through it is. */
+                Token* first = peek_token(parser);
+                Token* after = peek_ahead(parser, 1);
+                if (first && after && after->type == TOKEN_DOT &&
+                    is_module_name_token(first)) {
+                    advance_token(parser);  // the namespace
+                    advance_token(parser);  // '.'
+                    Token* member = expect_token(parser, TOKEN_IDENTIFIER);
+                    if (!member) return NULL;
+                    char* qualified = parser_strf("%s.%s", first->value, member->value);
+                    ASTNode* id = create_ast_node(AST_IDENTIFIER, qualified,
+                                                  first->line, first->column);
+                    free(qualified);
+                    add_child(node, id);
+                } else {
+                    Token* hname = expect_token(parser, TOKEN_IDENTIFIER);
+                    if (!hname) return NULL;
+                    ASTNode* id = create_ast_node(AST_IDENTIFIER, hname->value, hname->line, hname->column);
+                    add_child(node, id);
+                }
                 if (!match_token(parser, TOKEN_COMMA)) break;
             }
             match_token(parser, TOKEN_SEMICOLON);
@@ -4977,6 +4998,50 @@ static int is_module_name_token(Token* token) {
 // Syntax: import module.name
 // Syntax: import module.name (symbol1, symbol2)
 // Syntax: import module.name as alias
+/* `hiding (a, b)` after an import's module name (or its `as` name), as
+ * Haskell writes it: the module is imported whole except those members.
+ * `hiding` is not a keyword; it is read here only. The names ride on the
+ * import as a `hiding:a,b` annotation, which parse_program spends. */
+static void parse_import_hiding(Parser* parser, ASTNode* import_stmt) {
+    Token* kw = peek_token(parser);
+    Token* paren = peek_ahead(parser, 1);
+    if (!kw || kw->type != TOKEN_IDENTIFIER || !kw->value ||
+        strcmp(kw->value, "hiding") != 0 ||
+        !paren || paren->type != TOKEN_LEFT_PAREN) return;
+    advance_token(parser);  // 'hiding'
+    advance_token(parser);  // '('
+    if (import_stmt->annotation &&
+        strncmp(import_stmt->annotation, "hiding:", 7) == 0) {
+        parser_error(parser, "an import has one `hiding (...)` list");
+        return;
+    }
+    int selected = 0;
+    for (int i = 0; i < import_stmt->child_count; i++) {
+        ASTNode* c = import_stmt->children[i];
+        if (!(c && c->annotation && strcmp(c->annotation, "module_alias") == 0)) selected = 1;
+    }
+    if (import_stmt->annotation || selected) {
+        parser_error(parser, "`hiding (...)` imports a module whole but those members: not with a selective `(a, b)` or glob `(*)` list");
+        return;
+    }
+    char* list = NULL;
+    while (peek_token(parser) && peek_token(parser)->type != TOKEN_RIGHT_PAREN) {
+        Token* name = expect_token(parser, TOKEN_IDENTIFIER);
+        if (!name) break;
+        char* grown = list ? parser_strf("%s,%s", list, name->value)
+                           : parser_strf("hiding:%s", name->value);
+        free(list);
+        list = grown;
+        if (!match_token(parser, TOKEN_COMMA)) break;
+    }
+    expect_token(parser, TOKEN_RIGHT_PAREN);
+    if (!list) {
+        parser_error(parser, "`hiding ()` names no member: list what the import leaves out, or drop it");
+        return;
+    }
+    import_stmt->annotation = list;
+}
+
 ASTNode* parse_import_statement(Parser* parser) {
     Token* import_token = advance_token(parser);  // consume 'import'
 
@@ -5047,6 +5112,11 @@ ASTNode* parse_import_statement(Parser* parser) {
         }
     }
     
+    // `import mod hiding (a, b)`: all of mod but a and b (before or after
+    // an `as`). Carried as a `hiding:a,b` annotation until parse_program
+    // turns it into a `hide mod.a, mod.b` in each body of the file.
+    parse_import_hiding(parser, import_stmt);
+
     // Check for alias: import mod as alias
     Token* next = peek_token(parser);
     if (next && next->type == TOKEN_AS) {
@@ -5062,6 +5132,7 @@ ASTNode* parse_import_statement(Parser* parser) {
             // Store alias as last child
             add_child(import_stmt, alias_node);
         }
+        parse_import_hiding(parser, import_stmt);
     }
     
     return import_stmt;
@@ -8377,6 +8448,10 @@ ASTNode* parse_top_level_decl(Parser* parser) {
                         parser_error(parser, "@target expects the instruction set a module is compiled for again: \"avx2\", the one that changes an f32x8's width");
                         return imp;
                     }
+                    if (imp->annotation && strncmp(imp->annotation, "hiding:", 7) == 0) {
+                        parser_error(parser, "@target(\"avx2\") imports a second copy of a module whole: not with `hiding (...)`");
+                        return imp;
+                    }
                     if (imp->annotation) {
                         parser_error(parser, "@target(\"avx2\") imports a module whole, under its `as` name: not as a glob import");
                         return imp;
@@ -9267,6 +9342,65 @@ static void parse_when_region(Parser* parser, ASTNode* program) {
     }
 }
 
+/* Add `hide` to every outermost block under `node`: a function's body, an
+ * actor's receive arms and methods. A block nested in one of those already
+ * sees the hide, as every nested scope does. */
+static void hide_in_outer_blocks(ASTNode* node, ASTNode* hide) {
+    if (!node) return;
+    for (int i = 0; i < node->child_count; i++) {
+        ASTNode* c = node->children[i];
+        if (!c) continue;
+        if (c->type == AST_BLOCK) {
+            /* First in the block: a pass that reads a body's last
+             * statement (its return) still finds it last. */
+            add_child(c, clone_ast_node(hide));
+            ASTNode* added = c->children[c->child_count - 1];
+            memmove(&c->children[1], &c->children[0],
+                    (size_t)(c->child_count - 1) * sizeof(ASTNode*));
+            c->children[0] = added;
+        } else {
+            hide_in_outer_blocks(c, hide);
+        }
+    }
+}
+
+/* `import ui hiding (open_url)`: the file sees all of ui but ui.open_url.
+ * The names become one `hide ui.open_url` (the import's `as` name when it
+ * has one) in each body the file defines, so the rule is the one `hide`
+ * already keeps, in every scope of the file, merged into a program or not.
+ * The import itself is then an ordinary whole import. */
+static void apply_import_hiding(ASTNode* program) {
+    for (int i = 0; i < program->child_count; i++) {
+        ASTNode* imp = program->children[i];
+        if (!imp || imp->type != AST_IMPORT_STATEMENT || !imp->value ||
+            !imp->annotation || strncmp(imp->annotation, "hiding:", 7) != 0) continue;
+        const char* ns = imp->value;
+        const char* dot = strrchr(ns, '.');
+        if (dot) ns = dot + 1;
+        for (int k = 0; k < imp->child_count; k++) {
+            ASTNode* c = imp->children[k];
+            if (c && c->value && c->annotation &&
+                strcmp(c->annotation, "module_alias") == 0) ns = c->value;
+        }
+        ASTNode* hide = create_ast_node(AST_HIDE_DIRECTIVE, NULL, imp->line, imp->column);
+        char* names = strdup(imp->annotation + 7);
+        for (char* name = strtok(names, ","); name; name = strtok(NULL, ",")) {
+            char* qualified = parser_strf("%s.%s", ns, name);
+            add_child(hide, create_ast_node(AST_IDENTIFIER, qualified, imp->line, imp->column));
+            free(qualified);
+        }
+        free(names);
+        free(imp->annotation);
+        imp->annotation = NULL;
+        for (int j = 0; j < program->child_count; j++) {
+            ASTNode* decl = program->children[j];
+            if (!decl || decl->type == AST_IMPORT_STATEMENT) continue;
+            hide_in_outer_blocks(decl, hide);
+        }
+        free_ast_node(hide);
+    }
+}
+
 ASTNode* parse_program(Parser* parser) {
     ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
 
@@ -9289,5 +9423,6 @@ ASTNode* parse_program(Parser* parser) {
         if (parser->current_token == start_token) advance_token(parser);
     }
 
+    apply_import_hiding(program);
     return program;
 }
