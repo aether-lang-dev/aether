@@ -2595,6 +2595,28 @@ const char* http_server_error(HttpServer* server) {
     return server ? server->error : "server is null";
 }
 
+/* The listening socket, as live_lock guards it (HttpServer.socket_fd): a
+ * stop reads it there from any thread. */
+static void server_set_listener(HttpServer* server, int fd) {
+    pthread_mutex_lock(&server->live_lock);
+    server->socket_fd = fd;
+    pthread_mutex_unlock(&server->live_lock);
+}
+
+/* Takes the listening socket out of the server, then closes it. */
+static void server_close_listener(HttpServer* server) {
+    pthread_mutex_lock(&server->live_lock);
+    int fd = server->socket_fd;
+    server->socket_fd = -1;
+    pthread_mutex_unlock(&server->live_lock);
+    if (fd < 0) return;
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+}
+
 int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     /* A name binds the address it resolves to, never every interface
      * (#2639); "::" binds both families. See aether_addr_bind. */
@@ -2605,27 +2627,33 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     if (aether_addr_bind(host, port, &addr, &addr_len) != 0)
         return server_fail(server, "cannot resolve host %s", host);
 
-    server->socket_fd = aether_addr_listen_socket(&addr);
-    if (server->socket_fd < 0)
+    /* Made in a local and published under live_lock once it listens: a stop
+     * on another thread reads the field there, and a failed bind leaves it
+     * -1, as it did. */
+    int fd = aether_addr_listen_socket(&addr);
+    if (fd < 0) {
+        server_set_listener(server, -1);
         return server_fail(server, "cannot create socket: %s", socket_error_text(why, sizeof why));
+    }
 
-    if (bind(server->socket_fd, (struct sockaddr*)&addr, addr_len) < 0) {
+    if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
         char where[300];
         server_fail(server, "cannot bind %s: %s", aether_addr_authority(where, sizeof where, host, port),
                     socket_error_text(why, sizeof why));
-        close(server->socket_fd);
-        server->socket_fd = -1;
+        close(fd);
+        server_set_listener(server, -1);
         return -1;
     }
-    
-    if (listen(server->socket_fd, server->max_connections) < 0) {
+
+    if (listen(fd, server->max_connections) < 0) {
         char where[300];
         server_fail(server, "cannot listen on %s: %s", aether_addr_authority(where, sizeof where, host, port),
                     socket_error_text(why, sizeof why));
-        close(server->socket_fd);
-        server->socket_fd = -1;
+        close(fd);
+        server_set_listener(server, -1);
         return -1;
     }
+    server_set_listener(server, fd);
     
     // Update host and port (make copy of host string first)
     char* new_host = strdup(host);
@@ -2645,7 +2673,7 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     if (port == 0) {
         struct sockaddr_storage bound;
         socklen_t blen = sizeof(bound);
-        if (getsockname(server->socket_fd, (struct sockaddr*)&bound, &blen) == 0) {
+        if (getsockname(fd, (struct sockaddr*)&bound, &blen) == 0) {
             bound_port = aether_addr_port(&bound);
         }
     }
@@ -7698,6 +7726,10 @@ static int http_server_run(HttpServer* server) {
         monitor_stopped(server);
     }
     http_server_thread_leave(server);
+    /* A stop came: the listening socket is the run's to close now that no
+     * loop of it polls the socket any more (see http_server_stop). A run that
+     * ended without one (a failed start) leaves it as the bind left it. */
+    if (atomic_load(&server->stopping)) server_close_listener(server);
     server_run_end(server);
     return rc;
 }
@@ -7776,7 +7808,7 @@ static int http_server_serve(HttpServer* server) {
                             aether_addr_authority(where, sizeof where, server->host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, 0);
-                server->socket_fd = bound_fd;   /* still the server's, as server_bind left it */
+                server_set_listener(server, bound_fd);   /* still the server's, as server_bind left it */
                 return -1;
             }
 #endif
@@ -8091,22 +8123,32 @@ void http_server_stop(HttpServer* server) {
      * A WSACleanup here ran under the server's own threads, which were still
      * returning from accept or closing a connection.
      *
-     * The socket is taken under live_lock, as multi-accept takes it to make
-     * it a listener: one of the two closes it. */
-    pthread_mutex_lock(&server->live_lock);
-    int listen_fd = server->socket_fd;
-    server->socket_fd = -1;
-    pthread_mutex_unlock(&server->live_lock);
-    if (listen_fd >= 0) {
+     * The listening socket, taken under live_lock (multi-accept takes it
+     * there to make it a listener, and a bind publishes it there). While a
+     * run is on, its accept loop polls and accepts on it, on the server's
+     * thread: the stop only shuts it down, which wakes a poll() on it at once
+     * where the platform does (Linux; the wake pipe does it everywhere), and
+     * the run closes it once its loop is over (http_server_run). Closed here
+     * under a running loop, as it was, its number could go to a socket or
+     * file another thread opened next, and the loop's next poll() or
+     * accept() used that one. With no run on, the stop closes it. Windows
+     * closes it either way: there the loop waits in accept() itself, which
+     * only a close ends. The run closes it under live_lock before it ends
+     * under run_lock, so a stop that finds the run on finds the socket open
+     * or already taken, never closed under its shutdown. */
 #ifdef _WIN32
-        closesocket(listen_fd);
+    server_close_listener(server);
 #else
-        /* Wakes a poll() on it at once where the platform does (Linux);
-         * close() alone leaves the loop to its one-second timeout. */
-        shutdown(listen_fd, SHUT_RDWR);
-        close(listen_fd);
-#endif
+    pthread_mutex_lock(&server->run_lock);
+    int running = server->serving;
+    if (running) {
+        pthread_mutex_lock(&server->live_lock);
+        if (server->socket_fd >= 0) shutdown(server->socket_fd, SHUT_RDWR);
+        pthread_mutex_unlock(&server->live_lock);
     }
+    pthread_mutex_unlock(&server->run_lock);
+    if (!running) server_close_listener(server);
+#endif
 
     /* Wake every worker waiting for a client's next request: that read
      * waits up to the idle timeout, and the pool (and the join below) would
