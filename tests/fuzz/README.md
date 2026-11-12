@@ -44,9 +44,9 @@ make fuzz-cbor                                   # 60 seconds
 FUZZ_SECONDS=1800 sh tests/fuzz/cbor/run_fuzz_cbor.sh
 ```
 
-It is not part of `make test` or CI. The binary, the working corpus (which
-grows from run to run) and any reproducer stay in `build/fuzz/cbor/`;
-`FUZZ_OUT` moves them.
+It is not part of `make test`; CI runs it in `make fuzz-ci` (see below). The
+binary, the working corpus (which grows from run to run) and any reproducer
+stay in `build/fuzz/cbor/`; `FUZZ_OUT` moves them.
 
 ### Reproducing and minimising a crash
 
@@ -137,6 +137,104 @@ sh tests/fuzz/ipc_frames/prove_mutants.sh
 make fuzz-ipc-frames-corpus                            # after editing gen_corpus.ae
 ```
 
-Not part of `make test` or CI. Output stays in `build/fuzz/ipc_frames/`
-(`FUZZ_OUT` moves it). A reproducer is run and minimised as for the CBOR
-fuzzer, with `build/fuzz/ipc_frames/fuzz_ipc_frames`.
+Not part of `make test`; CI runs it in `make fuzz-ci`. Output stays in
+`build/fuzz/ipc_frames/` (`FUZZ_OUT` moves it). A reproducer is run and
+minimised as for the CBOR fuzzer, with `build/fuzz/ipc_frames/fuzz_ipc_frames`.
+
+## C-parser fuzzers (`tests/fuzz/http_head/`, `http_chunked/`, `url/`, `json/`)
+
+HTTP is where most of std.net's closed bugs were, and each of these parsers
+reads what a peer sends. Each target is a C harness (`fuzz_<target>.c`,
+`LLVMFuzzerTestOneInput`) that compiles the std sources it tests into itself
+with the flags std objects are built with, so libFuzzer steers by the
+parsers' own branches and ASan and UBSan watch them; the rest of the runtime
+comes from `build/libaether.a`. Each checks properties of the parser's
+documented contract, and a failed check `abort()`s naming what disagreed:
+
+- **`http_head`**: the bytes a client sent on one connection, taken as the
+  worker does (`std/net/aether_http_server.c`): `http_find_header_end`,
+  `http_request_head_check`, the chunked body, `http_parse_request_n`, for
+  each pipelined request. The head check gives the answer a model of its
+  contract gives (a NUL or a CR or LF outside a CR LF is malformed; the
+  request line and header line limits; obs-fold, whitespace before a colon,
+  a name that is not a token; Content-Length a plain decimal that fits a
+  `long`, duplicates equal; Transfer-Encoding read as one list across its
+  fields, chunked last and once, never beside a Content-Length), and the
+  Content-Length it accepts is that exact value. The parser then reads the
+  head as the check did: it parses exactly when the request line is method
+  (a token) SP target (no control byte) SP `HTTP/1.0` or `HTTP/1.1`, the
+  headers are the same lines with the same names and trimmed values, and the
+  body is exactly the Content-Length bytes or the decoded chunks, NUL bytes
+  included. Every request is freed.
+- **`http_chunked`**: a chunked body as it arrives. `http_chunked_frame` and
+  `http_dechunk` give what a reference reading of RFC 9112 7.1 written in
+  the harness gives (sizes of 1 to 16 hex digits read exactly, at most
+  `INT64_MAX`; the chunk-ext grammar; CR LF after every line and every
+  chunk's data; trailers to the empty line; lines of at most 1024 bytes),
+  decoding exactly what frames to the same bytes. The answer does not depend
+  on where the bytes were cut: every prefix of a whole body needs more, every
+  longer buffer frames the same length, and a refusal stays a refusal.
+- **`url`**: a URL, then optionally a NUL and a Location. `parse_url` gives
+  the host, port, target and scheme a reading of its contract gives (the
+  authority ends at the first `/`, `?` or `#`; a bracketed IPv6 host comes
+  back bare; a port is 1 to 5 digits naming 1..65535; the target keeps the
+  query and drops the fragment), and a host never holds a control byte or a
+  space, since it is written into the Host header as it is. What it accepts
+  parses the same when written back from its pieces, `http_parse_proxy_url`
+  agrees with it, and a resolved Location (`http_resolve_location`) is an
+  absolute URI with a lower-case scheme, no control byte, nothing unescaped
+  outside its authority, and resolves to itself.
+- **`json`**: a document, every byte of it. `json_parse_raw_n` accepts
+  exactly what an RFC 8259 validator written in the harness accepts (no
+  trailing commas, leading zeros, comments, lone surrogates, bad UTF-8 or
+  bare control bytes), with nesting as deep as `JSON_MAX_DEPTH`; a refusal
+  carries an error kind, a position and a message. A parsed value serializes,
+  reads back to the same value (the same double or integer, strings and keys
+  byte for byte, members in order; an infinity as null, a double with no
+  fraction as the integer of that value) and serializes to the same text.
+
+Each directory holds the harness, **`gen_corpus.ae`**, which writes
+**`corpus/`** (`make fuzz-corpus`; edit the generator, not the seeds), and a
+dictionary, **`<target>.dict`**. The seeds are committed as binary
+(`.gitattributes`), so an HTTP seed keeps its CR LF line ends on every
+checkout. **`run_fuzz_c.sh <target>`** builds and runs one target as the
+CBOR script does, its output in `build/fuzz/<target>/`.
+
+```sh
+make fuzz-http-head                    # or fuzz-http-chunked, fuzz-url, fuzz-json; 60 s
+FUZZ_SECONDS=1800 make fuzz-json
+make fuzz-corpus                       # after editing a gen_corpus.ae
+```
+
+### Without libFuzzer
+
+`FUZZ_REPLAY=1` builds a C target with `$CC` and no libFuzzer, linked to
+**`replay_main.c`**, a `main` that feeds each file it is given, or each file
+in a directory it is given, to `LLVMFuzzerTestOneInput` once. `make
+fuzz-replay` runs every seed of the four targets through their property
+checks that way; it works where clang has no libFuzzer, Windows (MinGW)
+among them, and finds nothing new. It also replays a reproducer:
+
+```sh
+make fuzz-replay
+FUZZ_REPLAY=1 FUZZ_REPLAY_INPUTS=crash-1234 sh tests/fuzz/run_fuzz_c.sh http_head
+```
+
+A reproducer from CI is minimised with the target's libFuzzer binary as for
+the CBOR fuzzer; add it to the target's `gen_corpus.ae` and a regression test
+beside the module's own (`tests/runtime/test_http_server.c`,
+`tests/runtime/test_runtime_http.c`, `tests/regression/test_json_*.ae`).
+
+## In CI (`make fuzz-ci`)
+
+**`fuzz_ci.sh`** runs every target, the CBOR and frame-reader fuzzers
+included, for `FUZZ_SECONDS` each (default 60), one after another; a target
+that fails does not stop the rest, and the script names each that failed.
+`.github/workflows/fuzz.yml` runs it on Linux with clang 18 on every push to
+main and on the PRs that change `std/net`, `std/json`, `std/cbor`,
+`std/ipc`, `tests/fuzz` or the workflow: about 6 minutes of fuzzing and 4 of
+building. On a failure it uploads the reproducers as the `fuzz-reproducers`
+artifact.
+
+Not fuzzed yet: TLS record and handshake parsing, h2, YAML and the archive
+readers.

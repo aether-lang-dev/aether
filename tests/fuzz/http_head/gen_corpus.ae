@@ -1,0 +1,166 @@
+// Writes the seed corpus for the HTTP/1 request head fuzz target into the
+// directory named on the command line (corpus/ beside this file, as
+// `make fuzz-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is what a client sent on one connection: well-formed requests of
+// each framing, pipelined ones, and the shapes the head check refuses or
+// the parser has read differently from it.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+// `hex` holds pairs of hex digits; each becomes one byte of `b`.
+fn put_hex(b: ptr, hex: string) {
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: bad hex ${hex}\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+}
+
+fn put_repeat(b: ptr, byte: int, count: int) {
+    i = 0
+    while i < count {
+        _a = strbuilder.append_byte(b, byte)
+        i = i + 1
+    }
+}
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A seed that is the text `s`, escapes and all.
+fn text(dir: string, name: string, s: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, s)
+    write_seed(dir, name, b)
+}
+
+// `head`, then the bytes of `hex`, then `tail`: for a NUL, which a literal
+// cannot carry.
+fn mixed(dir: string, name: string, head: string, hex: string, tail: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, head)
+    put_hex(b, hex)
+    _c = strbuilder.append(b, tail)
+    write_seed(dir, name, b)
+}
+
+const GET = "GET / HTTP/1.1\r\nHost: a\r\n\r\n"
+const CHUNKED_HEAD = "POST /c HTTP/1.1\r\nHost: a\r\nTransfer-Encoding: chunked\r\n\r\n"
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Well-formed requests.
+    text(dir, "get_minimal", GET)
+    text(dir, "get_query_http10", "GET /p/q?x=1&y=%20 HTTP/1.0\r\nHost: a\r\nAccept: */*\r\n\r\n")
+    text(dir, "options_star", "OPTIONS * HTTP/1.1\r\nHost: a\r\n\r\n")
+    text(dir, "absolute_form", "GET http://a:8080/b?c HTTP/1.1\r\nHost: a:8080\r\n\r\n")
+    text(dir, "post_content_length", "POST /u HTTP/1.1\r\nHost: a\r\nContent-Length: 5\r\nContent-Type: text/plain\r\n\r\nhello")
+    mixed(dir, "post_binary_body", "POST /u HTTP/1.1\r\nContent-Length: 6\r\n\r\n", "6100620d0a63", "")
+    text(dir, "value_whitespace", "GET / HTTP/1.1\r\nHost:a\r\nX-A: \t spaced \t \r\nX-B:\r\n\r\n")
+    text(dir, "chunked", "${CHUNKED_HEAD}5\r\nhello\r\n6\r\n world\r\n0\r\n\r\n")
+    text(dir, "chunked_ext_trailer", "${CHUNKED_HEAD}3;a=b;q=\"x\\\"y\"\r\nabc\r\n0\r\nX-T: 1\r\n\r\n")
+    mixed(dir, "chunked_binary", "${CHUNKED_HEAD}4\r\n", "61000062", "\r\n0\r\n\r\n")
+    text(dir, "te_gzip_chunked", "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked\r\n\r\n2\r\nab\r\n0\r\n\r\n")
+
+    // Pipelined.
+    text(dir, "pipelined_gets", "${GET}GET /2 HTTP/1.1\r\nHost: a\r\n\r\nGET /3 HTTP/1.0\r\n\r\n")
+    text(dir, "pipelined_post_get", "POST / HTTP/1.1\r\nContent-Length: 3\r\n\r\nabc${GET}")
+    text(dir, "pipelined_chunked_get", "${CHUNKED_HEAD}1\r\nx\r\n0\r\n\r\n${GET}")
+
+    // Framing the head check refuses (400).
+    text(dir, "cl_same_twice", "POST / HTTP/1.1\r\nContent-Length: 3\r\ncontent-length: 3\r\n\r\nabc")
+    text(dir, "cl_differ", "POST / HTTP/1.1\r\nContent-Length: 3\r\nContent-Length: 4\r\n\r\nabcd")
+    text(dir, "cl_sign", "POST / HTTP/1.1\r\nContent-Length: +3\r\n\r\nabc")
+    text(dir, "cl_hex", "POST / HTTP/1.1\r\nContent-Length: 0x3\r\n\r\nabc")
+    text(dir, "cl_huge", "POST / HTTP/1.1\r\nContent-Length: 99999999999999999999\r\n\r\n")
+    text(dir, "cl_padded", "POST / HTTP/1.1\r\nContent-Length: 00000000000000000000003\r\n\r\nabc")
+    text(dir, "cl_list", "POST / HTTP/1.1\r\nContent-Length: 3, 3\r\n\r\nabc")
+    text(dir, "te_and_cl", "POST / HTTP/1.1\r\nContent-Length: 3\r\nTransfer-Encoding: chunked\r\n\r\n0\r\n\r\n")
+    text(dir, "te_gzip", "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\n\r\nabc")
+    text(dir, "te_xchunked", "POST / HTTP/1.1\r\nTransfer-Encoding: xchunked\r\n\r\n0\r\n\r\n")
+    text(dir, "te_chunked_not_last", "POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip\r\n\r\n0\r\n\r\n")
+    text(dir, "te_two_fields", "POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\n\r\n0\r\n\r\n")
+    text(dir, "obs_fold", "GET / HTTP/1.1\r\nX-A: a\r\n b\r\n\r\n")
+    text(dir, "space_before_colon", "POST / HTTP/1.1\r\nContent-Length : 3\r\n\r\nabc")
+    text(dir, "no_colon", "GET / HTTP/1.1\r\nHost a\r\n\r\n")
+    text(dir, "name_not_token", "GET / HTTP/1.1\r\nX Y: 1\r\n\r\n")
+    mixed(dir, "nul_in_head", "GET / HTTP/1.1\r\nX-A: a", "00", "b\r\n\r\n")
+
+    // Lines a reader might end differently.
+    text(dir, "bare_lf_header", "POST / HTTP/1.1\r\nHost: a\nContent-Length: 2\r\n\r\nab")
+    text(dir, "bare_cr_value", "GET / HTTP/1.1\r\nX-A: a\rb\r\n\r\n")
+    text(dir, "bare_lf_request_line", "GET / HTTP/1.1\nHost: a\r\n\r\n")
+
+    // Request lines the parser refuses, and ones it should.
+    text(dir, "version_http2", "GET / HTTP/2.0\r\n\r\n")
+    text(dir, "version_lower", "GET / http/1.1\r\n\r\n")
+    text(dir, "not_http", "THIS IS NOT HTTP\r\n\r\n")
+    text(dir, "method_not_token", "G@T / HTTP/1.1\r\n\r\n")
+    text(dir, "method_empty", " / HTTP/1.1\r\n\r\n")
+    text(dir, "target_tab", "GET /a\tb HTTP/1.1\r\n\r\n")
+    text(dir, "double_space", "GET  / HTTP/1.1\r\n\r\n")
+    text(dir, "request_line_no_version", "GET /x\r\nHost: a\r\n\r\n")
+
+    // Incomplete, empty, and at the limits.
+    text(dir, "empty", "")
+    text(dir, "blank_lines", "\r\n\r\n")
+    text(dir, "head_unfinished", "GET / HTTP/1.1\r\nHost: a\r\n")
+    text(dir, "body_short", "POST / HTTP/1.1\r\nContent-Length: 10\r\n\r\nabc")
+
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, "GET /")
+    put_repeat(b, 120, 2050)
+    _b = strbuilder.append(b, " HTTP/1.1\r\n\r\n")
+    write_seed(dir, "request_line_too_long", b)
+
+    b = strbuilder.new(0)
+    _c = strbuilder.append(b, "GET / HTTP/1.1\r\nX-Long: ")
+    put_repeat(b, 121, 1020)
+    _d = strbuilder.append(b, "\r\n\r\n")
+    write_seed(dir, "header_line_too_long", b)
+
+    b = strbuilder.new(0)
+    _e = strbuilder.append(b, "GET / HTTP/1.1\r\n")
+    i = 0
+    while i < 51 {
+        _f = strbuilder.append(b, "X-H${i}: v\r\n")
+        i = i + 1
+    }
+    _g = strbuilder.append(b, "\r\n")
+    write_seed(dir, "headers_51", b)
+}

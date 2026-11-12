@@ -1513,6 +1513,61 @@ fuzz-ipc-frames-corpus: compiler ae stdlib
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/ipc_frames/gen_corpus.ae 	    -o $(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT)
 	@./$(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT) tests/fuzz/ipc_frames/corpus
 
+# The C-parser fuzz targets (tests/fuzz/run_fuzz_c.sh): each harness compiles
+# the std sources it tests into itself, with the flags std objects are built
+# with, so those carry the fuzzer's coverage and the sanitizers.
+FUZZ_C_TARGETS = http_head http_chunked url json
+FUZZ_STD_CFLAGS = $(filter-out -MMD -MP -DAETHER_VERSION=%,$(AETHER_REQUIRED_CFLAGS))
+
+.PHONY: print-fuzz-std-cflags
+print-fuzz-std-cflags:
+	@echo '$(FUZZ_STD_CFLAGS)'
+
+.PHONY: fuzz-http-head fuzz-http-chunked fuzz-url fuzz-json
+# Coverage-guided fuzzing of the HTTP/1 request head on the server's path
+# (head check, chunked body, parse), the chunked body decoder, the client's
+# URL and Location parsers, and std.json, each checked against properties of
+# its contract (needs clang with libFuzzer). FUZZ_SECONDS sets the run time
+# (default 60).
+fuzz-http-head: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh http_head
+fuzz-http-chunked: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh http_chunked
+fuzz-url: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh url
+fuzz-json: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh json
+
+.PHONY: fuzz-replay
+# The C-parser harnesses built with $(CC) and no libFuzzer, each seed run
+# through its property checks once: what can be checked where clang has no
+# libFuzzer (Windows among them).
+fuzz-replay: compiler ae stdlib
+	@for t in $(FUZZ_C_TARGETS); do \
+	    FUZZ_REPLAY=1 CC='$(CC)' FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' \
+	        sh tests/fuzz/run_fuzz_c.sh $$t || exit 1; \
+	done
+
+.PHONY: fuzz-ci
+# Every fuzz target, FUZZ_SECONDS each (default 60): what the fuzz workflow
+# runs. Each runs even when an earlier one failed; reproducers stay in
+# build/fuzz/<target>/.
+fuzz-ci: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/fuzz_ci.sh
+
+.PHONY: fuzz-corpus
+# Rewrite the C-parser fuzzers' seed corpora from their generators
+# (tests/fuzz/<target>/gen_corpus.ae); the seeds are committed, so this is
+# only for when a generator changes.
+fuzz-corpus: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/fuzz
+	@for t in $(FUZZ_C_TARGETS); do \
+	    ./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/$$t/gen_corpus.ae \
+	        -o $(BUILD_DIR)/fuzz/gen_$${t}_corpus$(EXE_EXT) || exit 1; \
+	    rm -rf tests/fuzz/$$t/corpus; \
+	    ./$(BUILD_DIR)/fuzz/gen_$${t}_corpus$(EXE_EXT) tests/fuzz/$$t/corpus || exit 1; \
+	done
+
 # Test .ae source files - compiles and runs each test file.
 #
 # The shell tests run $(NPROC) at a time (SH_NPROC overrides). They were serial

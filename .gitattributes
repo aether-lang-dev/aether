@@ -37,3 +37,8 @@ examples/07-applications/01-word-count/sample.md text eol=lf
 # Fuzz seeds are raw CBOR: a seed of one 0x0a byte reads as text to git and
 # would become 0d 0a under autocrlf.
 tests/fuzz/cbor/corpus/** binary
+
+# Fuzz seeds are bytes, CR LF and all (tests/fuzz/*/corpus): a line ending
+# converted on commit or checkout is another input, an HTTP head with bare
+# LFs where the generator wrote CR LF.
+tests/fuzz/**/corpus/** binary
