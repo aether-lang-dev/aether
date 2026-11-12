@@ -4657,6 +4657,14 @@ static char* http_uri_resolve_parts(const char* base, const HttpUriParts* bp, co
 static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_fragment) {
     HttpUriParts b;
     if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme) return NULL;
+    /* The base's authority is copied into the result as it is, as the
+     * reference's is, so it is held to the same rule below: one with a
+     * control byte is no URI, and a relative Location against it resolved
+     * to a URI carrying that byte (found by tests/fuzz/url). */
+    for (size_t i = 0; b.has_authority && i < b.authority_len; i++) {
+        unsigned char c = (unsigned char)b.authority[i];
+        if (c < 0x20 || c == 0x7f) return NULL;
+    }
     /* A Location went into the next hop's request line as it was, so a
      * control byte in it ended or split that line (#3556). It is read as a
      * browser reads it (#3572): a TAB, an LF or a CR is removed

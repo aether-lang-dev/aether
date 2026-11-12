@@ -808,6 +808,24 @@ TEST_CATEGORY(http_resolve_location_redirect_rules, TEST_CATEGORY_NETWORK) {
  * carried a header of its own into the request (CWE-93), and a space split
  * the request line a proxy was sent (found by tests/fuzz/url). A host holds
  * neither (RFC 3986 3.2.2). */
+/* http_uri_resolve is NULL when either input is not a URI reference, and an
+ * authority holding a control byte is not one. Only the reference's
+ * authority was checked, and a relative reference takes the base's, so
+ * "/x" against "http://a\x01b/" resolved to "http://a\x01b/x" (found by
+ * tests/fuzz/url). */
+TEST_CATEGORY(http_uri_resolve_refuses_a_base_authority_with_a_control_byte, TEST_CATEGORY_NETWORK) {
+    ASSERT_NULL(http_uri_resolve("http://a\x01" "b/", "/x"));
+    ASSERT_NULL(http_uri_resolve("http://a\rb/p", "q"));
+    ASSERT_NULL(http_resolve_location("a\x7f:80/p", "?y"));
+    /* The reference's own authority replaces the base's, and is held to the
+     * same rule. */
+    ASSERT_NULL(http_uri_resolve("http://ok/", "//a\x01" "b/x"));
+    char* got = http_uri_resolve("http://ok/p", "//other/x");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://other/x", got);
+    free(got);
+}
+
 TEST_CATEGORY(http_url_host_holds_no_control_byte_or_space, TEST_CATEGORY_NETWORK) {
     char host[256];
     int port = 0, tls = 0;
