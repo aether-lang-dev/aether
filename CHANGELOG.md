@@ -14,6 +14,58 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.910.0]
+
+### Fixed
+
+- **Returning a local as an optional whose value owns a string no longer
+  returns freed memory.** `k = Key { text: ... }; return k` from `-> Key?`
+  (or `return e` for a `Key?` local, a `some(v)` re-wrapped, an `if` or
+  `match` picking the local or `none`) copied the local into the result and
+  then ran its scope-exit drop, which released the string the caller had
+  just been handed; the next allocation reused it. The same held for an
+  optional sum, tuple, closure or struct nesting an owning struct. An
+  optional result is now taken as a tuple or sum result is: a struct local
+  moved into it, an optional local retained before its drop, an `if` arm
+  by arm (wrapped whole, its `none` arm did not compile), and a returned
+  `match` result is initialised and dropped like a tuple's (it was declared
+  uninitialised, and the first arm's store dropped garbage). A call
+  statement that throws such an optional or an owning sum away now drops
+  it (it leaked). Found by
+  nib-code's `ae/term` port.
+
+- **A local read once, inside a loop, is no longer moved out on the first
+  run.** A local's only read counted as its last use, so it was moved (left
+  empty) there; in a loop body that read runs again and found nothing.
+  `blank = mk(); for i in 0..n { cells[i] = blank }` filled only the first
+  element, `x = "x"` stored into a `string[]` slice the same way, and
+  `pattern = lastpattern` in a loop emptied `lastpattern` for the next
+  time round. The same held for a struct literal's field, a field store
+  and an inner loop. Such a read is now taken (retained or copied), unless
+  the loop body binds the local unconditionally ahead of it, which still
+  moves. Found by nib-code's `ae/term` port and the std.posix.regex AT&T
+  conformance test.
+
+- **std.http.client reads past interim 1xx responses to the real one.** A
+  request sent with `Expect: 100-continue` to a server that honours it
+  (Node's http server, Azurite) got `100 Continue` back as its response,
+  status 100 with an empty body, and the final response was never read;
+  RFC 9110 15.2 has a client parse any number of 1xx responses before the
+  final one. The buffered reader, the streaming reader (`set_stream`) and
+  the proxy's event loop now skip every interim head (1xx other than 101,
+  which is final) before framing the response, and a connection reused
+  after one is framed from the final head. Found by servirtium-vcr's Azure
+  SDK harness.
+
+- **tests/integration/http_ipv6 no longer fails when a test beside it gets
+  the same port on the other family.** It checked that a server on `::1`
+  is not reachable at `127.0.0.1` on its port (and the reverse for one on
+  `localhost`), but nothing kept that port free on the other family, and
+  in CI `crypto_tls13_peer` was handed it and answered. The check now
+  holds the port there, bound and not listening (`hold_port.c`), while it
+  runs, and starts the server again on a new port when the other family
+  has it already.
+
 ## [0.909.0]
 
 ### Added
