@@ -1,5 +1,5 @@
 - **Actors: a core that has just been handed an actor sees its mailbox as the
-  previous core left it.** A send from a core checked that the target was
+  previous core left it (#3683).** A send from a core checked that the target was
   its own with a relaxed load of the actor's core, then wrote the mailbox,
   whose one writer is the core that has the actor. Right after a move, that
   read did not order the new core's write after the old core's last

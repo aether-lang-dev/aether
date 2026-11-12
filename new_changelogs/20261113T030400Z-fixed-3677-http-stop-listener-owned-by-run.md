@@ -1,5 +1,5 @@
 - **std.net: stopping a running server no longer closes the listening socket
-  under its accept loop.** `http_server_stop` closed the socket while the
+  under its accept loop (#3677).** `http_server_stop` closed the socket while the
   server's thread could still be about to `poll()` or `accept()` on its
   number, which by then the system could have given to a socket or file
   another thread opened: the loop would wait on, or accept from, that one.
