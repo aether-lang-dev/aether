@@ -3368,6 +3368,21 @@ static void send_local_admitted(ActorBase* actor, Message msg) {
         return;
     }
 
+    /* Only the actor's own core thread writes its mailbox: a send from any
+     * other thread (a C host's main thread, a core thread sending to an
+     * actor of another core) goes the way scheduler_send_remote takes it,
+     * through the target core's queues. Written here, as it was from a
+     * thread that is no core's, it was a second producer on the mailbox's
+     * single producer ring, beside the core thread's own deliveries: a
+     * message overwrote another or was taken twice. */
+    if (unlikely(!actor->auto_process &&
+                 (current_core_id < 0 ||
+                  current_core_id != atomic_load_explicit(&actor->assigned_core,
+                                                          memory_order_relaxed)))) {
+        send_remote_admitted(actor, msg, current_core_id);
+        return;
+    }
+
     // NOTE: Inline mode optimization is handled by the existing WORK INLINING
     // code below (lines 590+), which is safe because it checks for scheduler
     // thread context (current_core_id >= 0 && actor->assigned_core == current_core_id).
@@ -3402,21 +3417,15 @@ static void send_local_admitted(ActorBase* actor, Message msg) {
         // its mailbox full when it was sent, is older, and one put in the
         // mailbox past it was stepped first. Otherwise queued behind it.
         // With nothing queued, behind what its overflow holds (#3241).
-        int queued = current_core_id >= 0 &&
-                     atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0;
+        int queued = atomic_load_explicit(&actor->inflight, memory_order_relaxed) != 0;
         if (unlikely(queued || !deliver_owned(actor, msg))) {
             // Mailbox full: re-queue via self-channel or overflow buffer.
             // Without this, the message is lost but messages_sent was already
-            // incremented, causing scheduler_wait to hang forever.
-            int core = current_core_id;
-            if (core >= 0 && core < num_cores) {
-                // Into the queues: counted as every such message is (#3090).
-                inflight_enter(actor, 1);
-                requeue_own(core, actor, msg);
-            } else {
-                // Main thread: spin-retry mailbox (rare, small mailbox pressure)
-                while (!deliver_owned(actor, msg)) { AETHER_PAUSE(); }
-            }
+            // incremented, causing scheduler_wait to hang forever. This is
+            // the actor's core thread (above). Into the queues: counted as
+            // every such message is (#3090).
+            inflight_enter(actor, 1);
+            requeue_own(current_core_id, actor, msg);
         }
     }
 

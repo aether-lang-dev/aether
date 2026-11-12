@@ -1823,6 +1823,83 @@ void test_scheduler_stop_leaves_foreign_queue_alone(void) {
     scheduler_cleanup();
 }
 
+// A scheduler_send_local from a thread that is not the actor's core thread
+// (the main thread of a C host) wrote straight into the actor's mailbox while
+// the core thread delivered into it too: two producers on a single producer
+// ring, so messages were lost or delivered twice. The target counts each
+// sender's sequence; the main thread and an actor of the target's core send
+// at once.
+#define LS_EACH 100000
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int got;
+    atomic_int out_of_order;
+    int next[2];
+} LsTarget;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* target;
+    atomic_int done;
+} LsSender;
+
+static void ls_target_step(void* self) {
+    LsTarget* t = (LsTarget*)self;
+    Message msg;
+    if (!mailbox_receive(&t->mailbox, &msg)) return;
+    int from = msg.sender_id;
+    if (from < 0 || from > 1 || msg.payload_int != t->next[from]) {
+        atomic_fetch_add(&t->out_of_order, 1);
+        if (from >= 0 && from <= 1) t->next[from] = (int)msg.payload_int + 1;
+    } else {
+        t->next[from]++;
+    }
+    atomic_fetch_add(&t->got, 1);
+}
+
+static void ls_sender_step(void* self) {
+    LsSender* s = (LsSender*)self;
+    Message msg;
+    if (!mailbox_receive(&s->mailbox, &msg)) return;
+    // On the target's core thread: the same-core path.
+    for (int i = 0; i < LS_EACH; i++)
+        scheduler_send_local(s->target, message_create_simple(2, 1, i));
+    atomic_store(&s->done, 1);
+}
+
+void test_scheduler_send_local_from_foreign_thread(void) {
+    scheduler_init(1);
+    scheduler_start();
+    LsTarget* t = (LsTarget*)scheduler_spawn_actor(0, ls_target_step, sizeof(LsTarget));
+    LsSender* s = (LsSender*)scheduler_spawn_actor(0, ls_sender_step, sizeof(LsSender));
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(s);
+    atomic_init(&t->got, 0);
+    atomic_init(&t->out_of_order, 0);
+    t->next[0] = t->next[1] = 0;
+    s->target = (ActorBase*)t;
+    atomic_init(&s->done, 0);
+
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    for (int i = 0; i < LS_EACH; i++)
+        scheduler_send_local((ActorBase*)t, message_create_simple(2, 0, i));
+    ASSERT_EQ(1, wait_count(&s->done, 1));
+    int got = wait_count(&t->got, 2 * LS_EACH);
+    scheduler_wait();
+    int late = atomic_load(&t->got) - 2 * LS_EACH;   // delivered twice
+    int bad = atomic_load(&t->out_of_order);
+    int next0 = t->next[0], next1 = t->next[1];
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_EQ(2 * LS_EACH, got);
+    ASSERT_EQ(0, late);
+    ASSERT_EQ(0, bad);
+    ASSERT_EQ(LS_EACH, next0);
+    ASSERT_EQ(LS_EACH, next1);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1854,4 +1931,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler clean exit", test_scheduler_exit_clean, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler high throughput", test_scheduler_high_throughput, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler backpressure handling", test_scheduler_backpressure, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler send_local from a foreign thread loses nothing", test_scheduler_send_local_from_foreign_thread, TEST_CATEGORY_RUNTIME);
 }
