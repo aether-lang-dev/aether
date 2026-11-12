@@ -60,10 +60,16 @@ suite() {
     # a script that loops cannot hang the sweep. (macOS has no timeout(1).)
     ( cd "$TMPDIR/$1" && PATH="$2$PATH" exec sh "$3" ) >"$TMPDIR/$1.tap" 2>&1 &
     suite_pid=$!
-    ( sleep "${SUITE_TIMEOUT:-300}"; echo "  sed_parity: suite $1 timed out" >&2; pkill -KILL -P "$suite_pid" 2>/dev/null; kill -KILL "$suite_pid" 2>/dev/null ) &
+    (
+        trap 'kill "$sleep_pid" 2>/dev/null; exit 0' TERM
+        sleep "${SUITE_TIMEOUT:-300}" & sleep_pid=$!
+        wait "$sleep_pid" || exit 0
+        echo "  sed_parity: suite $1 timed out" >&2
+        pkill -KILL -P "$suite_pid" 2>/dev/null; kill -KILL "$suite_pid" 2>/dev/null
+    ) &
     watchdog_pid=$!
     wait "$suite_pid"
-    pkill -P "$watchdog_pid" 2>/dev/null; kill "$watchdog_pid" 2>/dev/null
+    kill "$watchdog_pid" 2>/dev/null
     wait "$watchdog_pid" 2>/dev/null
     grep '^not ok' "$TMPDIR/$1.tap" | sed -e 's/^not ok [0-9]* *-* *//' -e 's/ #.*//' | sort >"$TMPDIR/$1.fail"
 }
