@@ -2878,7 +2878,12 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     char* path_start = space + 1;
     char* path_end = strchr(path_start, ' ');
     if (!path_end) {
+        /* Released and forgotten: http_parse_request_n frees what a failed
+         * parse left in the request, and a request line with no version
+         * ("GET /x") had it free the method a second time, corrupting the
+         * heap on one line from any client (found by tests/fuzz/http_head). */
         req_release(req, req->method);
+        req->method = NULL;
         return NULL;
     }
 

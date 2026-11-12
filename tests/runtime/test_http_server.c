@@ -394,6 +394,30 @@ TEST(http_server_post_with_oversized_content_length_clamps_safely) {
     http_request_free(req);
 }
 
+TEST(http_server_request_line_without_version_is_refused_once) {
+    /* "GET /x" has a method and a target and no version. The parser released
+     * the method it had copied without forgetting it, and
+     * http_parse_request_n then freed it again with the rest of the failed
+     * request: heap corruption from one request line any client can send
+     * (found by tests/fuzz/http_head; ASan reports the double free, a plain
+     * build on Windows died with 0xC0000374). */
+    ASSERT_NULL(http_parse_request("GET /x\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /x\r\nHost: a\r\n\r\n"));
+
+    /* Parsed into a request the caller reuses, the failure leaves nothing
+     * of itself behind for the caller's own free. */
+    HttpRequest req;
+    memset(&req, 0, sizeof req);
+    ASSERT_NULL(http_parse_request_into(&req, "GET /x\r\n\r\n", 10));
+    ASSERT_NULL(req.method);
+    http_request_reset(&req);
+    ASSERT_NOT_NULL(http_parse_request_into(&req, "GET /y HTTP/1.1\r\n\r\n", 19));
+    ASSERT_STREQ("/y", req.path);
+    http_request_reset(&req);
+    free(req.header_keys);
+    free(req.header_values);
+}
+
 /* Combined Log Format timestamps must be locale-independent.
  *
  * The month in CLF is the English three-letter abbreviation; it is a parseable
