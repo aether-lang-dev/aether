@@ -452,6 +452,22 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
     ASSERT_EQ(0, (int)cl);
 }
 
+TEST(http_server_header_value_loses_the_whitespace_around_it) {
+    /* field-line = field-name ":" OWS field-value OWS (RFC 9112 5), OWS a
+     * space or a tab. The parser dropped leading spaces only, so these were
+     * "\t tabbed", "trailing \t" and "\t" while the head check, reading the
+     * same lines, had "tabbed", "trailing" and "" (found by
+     * tests/fuzz/http_head). A space inside a value stays. */
+    HttpRequest* req = http_parse_request(
+        "GET / HTTP/1.1\r\nX-A:\t tabbed\r\nX-B: trailing \t\r\nX-C:\t\r\nX-D:  in side  \r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("tabbed", http_get_header(req, "X-A"));
+    ASSERT_STREQ("trailing", http_get_header(req, "X-B"));
+    ASSERT_STREQ("", http_get_header(req, "X-C"));
+    ASSERT_STREQ("in side", http_get_header(req, "X-D"));
+    http_request_free(req);
+}
+
 TEST(http_server_body_without_content_length_keeps_nul_bytes) {
     /* The worker decodes a chunked upload in place and hands the parser the
      * head and the decoded payload, with no Content-Length, `len` counting
@@ -584,6 +600,50 @@ TEST(http_server_middleware_chain) {
     ASSERT_NOT_NULL(server->middleware_chain->next);
 
     http_server_free(server);
+}
+
+static int bearer_accepts_good(const char* token, void* ud) {
+    (void)ud;
+    return strcmp(token, "good") == 0;
+}
+
+/* The challenge a request's Authorization value gets from bearer_auth. */
+static const char* bearer_challenge_for(const char* raw, char* out, size_t cap) {
+    AetherBearerAuthOpts* o = aether_bearer_auth_opts_new("api", bearer_accepts_good, NULL);
+    HttpRequest* req = http_parse_request(raw);
+    HttpServerResponse* res = http_response_create();
+    out[0] = '\0';
+    if (o && req && res && aether_middleware_bearer_auth(req, res, o) == 0) {
+        for (int i = 0; i < res->header_count; i++)
+            if (strcasecmp(res->header_keys[i], "WWW-Authenticate") == 0)
+                snprintf(out, cap, "%s", res->header_values[i]);
+    } else {
+        snprintf(out, cap, "passed");
+    }
+    http_server_response_free(res);
+    http_request_free(req);
+    aether_bearer_auth_opts_free(o);
+    return out;
+}
+
+TEST(http_bearer_auth_reads_a_scheme_with_no_token) {
+    /* "Authorization: Bearer " is the scheme with no token, a malformed
+     * credential answered with error="invalid_token". The parser now trims
+     * the space after a value (RFC 9112 5), so the middleware sees "Bearer"
+     * and took it for no credential at all. */
+    char got[256];
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer \r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: bearer\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer bad\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearerx\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("passed",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer good \r\n\r\n", got, sizeof got));
 }
 
 TEST(http_response_serialize_long_status_text) {

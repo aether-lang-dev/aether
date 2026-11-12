@@ -2980,8 +2980,16 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
             char* key = header_line;
             char* value = colon + 1;
 
-            // Trim whitespace from value
-            while (*value == ' ') value++;
+            /* The value without the optional whitespace around it, a space
+             * or a tab on either side (RFC 9112 5: field-name ":" OWS
+             * field-value OWS), as the head check reads it. Only leading
+             * spaces went, so "X:\tv \t" was "\tv \t" here and "v" there, and
+             * a handler or an upstream comparing a value whole saw another
+             * one (found by tests/fuzz/http_head). */
+            while (*value == ' ' || *value == '\t') value++;
+            char* value_end = value + strlen(value);
+            while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
+            *value_end = '\0';
 
             // Store only if both copies succeed; a NULL key/value would later
             // crash header lookup (strcasecmp) or serialization (strlen).
