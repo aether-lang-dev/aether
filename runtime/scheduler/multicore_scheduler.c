@@ -4175,7 +4175,10 @@ static void send_through_core(ActorBase* actor, Message msg, int from_core) {
     // Counted sent: a core's thread on its own counter, with no atomic add
     // (#3541), any other thread on the shared one.
     count_sent(1);
-    int target_core = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
+    // Acquire, as in send_local_admitted (#3683): the direct delivery below
+    // writes the mailbox when this core has the actor, after the core that
+    // had it before moved it here with a release store of the id.
+    int target_core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
 
     // Guard against uninitialized or invalid assigned_core
     if (unlikely(target_core < 0 || target_core >= num_cores)) {
