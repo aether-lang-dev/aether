@@ -137,8 +137,12 @@ void aether_sandbox_hooks_remove(const AetherSandboxHooks* h) {
  * (#3438): aether_sandbox.c's, set when that file is loaded, and called by
  * scheduler_init. NULL in a copy without the sandbox, which has no level to
  * see. This copy's own: a constructor sets it, which runs in every image
- * whatever the interposition (aether_sandbox.c). */
-AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void) = NULL;
+ * whatever the interposition (aether_sandbox.c). NULL until then as every
+ * object of static storage is: no `= NULL`, which clang 14 refuses for an
+ * _Atomic function pointer under -fsanitize=thread (a cast of (void*)0 is
+ * not a constant there).
+ */
+AETHER_COPY_LOCAL void (*_Atomic aether_sandbox_join)(void);
 
 /* Every copy's levels pushed inside the frame the panic leaves: each copy
  * keeps its own, and the try depth is the one every copy reads. */
