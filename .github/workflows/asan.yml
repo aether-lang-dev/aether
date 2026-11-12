@@ -33,6 +33,7 @@ on:
       - 'tests/scripts/ae_sweep_list.sh'
       - 'tests/scripts/sweep_shard.sh'
       - 'tests/sweep_weights_linux.txt'
+      - 'tests/sweep_weights_linux_asan.txt'
       - 'tests/scripts/run_ae_test.sh'
       - 'tests/scripts/run_ae_sh_dir.sh'
       - 'tests/lib/sweep_timeout.sh'
@@ -75,13 +76,15 @@ jobs:
     - name: Install toolchain
       run: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
-    # Every test's time under ASan, kept (#3601): the shards split the corpus
-    # by each test's cost, and ASan's costs are not the plain Linux leg's (a
-    # build costs 1299 ms on average in one shard and 850 in the other there),
-    # so these times are what tests/sweep_weights_linux_asan.txt is made of
-    # (tests/scripts/sweep_weights.sh).
+    # The shards split the corpus by each test's cost under ASan (#3601):
+    # tests/sweep_weights_linux_asan.txt, made by tests/scripts/sweep_weights.sh
+    # from the timings this job uploads. The plain Linux leg's weights do not
+    # say what ASan costs (a build cost 1299 ms on average in one shard and
+    # 850 in the other with them): priced at ASan's measured costs, they split
+    # the corpus 3,192 / 2,773 CPU seconds, and ASan's own 2,982 / 2,982.
     - name: make test-asan-ae
       run: |
+        AE_SWEEP_WEIGHTS="$GITHUB_WORKSPACE/tests/sweep_weights_linux_asan.txt" \
         AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" \
         AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
 

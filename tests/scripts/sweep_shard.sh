@@ -46,7 +46,9 @@ done
 # the median of those it does. Every job splits the same list the same way
 # (ties go by position), and each shard's units come out heaviest first, which
 # also lets its workers start the long ones early. AE_SWEEP_WEIGHTS names
-# another file; set and empty, it splits by position, as without the file.
+# another file, for a leg whose costs differ from its system's plain leg:
+# the ASan legs use tests/sweep_weights_linux_asan.txt (asan.yml, #3601). Set
+# and empty, it splits by position, as without the file.
 case "$(uname -s 2>/dev/null)" in
     Darwin) os=macos ;;
     MINGW*|MSYS*|CYGWIN*) os=windows ;;
