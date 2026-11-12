@@ -207,6 +207,18 @@ expect_400 "a header line ended by a bare LF" \
     'POST /upload HTTP/1.1\r\nHost: x\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
 expect_400 "a bare CR in a header value" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nX-A: a\rb\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+# Transfer-Encoding is a list of codings across all its fields, and the body
+# is chunked only when chunked is the last of them (RFC 9112 6.3). The first
+# field was searched for the word, so each of these was decoded as chunked.
+expect_400 "a coding that only contains the word chunked" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: xchunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_400 "chunked ahead of another coding" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_400 "chunked followed by a second Transfer-Encoding field" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_body "chunked in a second Transfer-Encoding field was not decoded" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n' \
+    'len=5 body=\[hello\]'
 # A request line with no version: the parser freed the method it had copied
 # twice, and the worker's heap was corrupted.
 expect_400 "a request line with no version" \

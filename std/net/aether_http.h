@@ -377,6 +377,22 @@ int http_header_value_ok(const char* value);
 int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* out);
 int http_parse_port(const char* s, size_t n);
 
+/* The transfer codings a message's Transfer-Encoding fields name, read one
+ * field value at a time (`n` bytes at `v`) into a zeroed HttpTeCodings: all
+ * of them make one list (RFC 9110 5.3). http_te_is_chunked: 1 when chunked
+ * is the final coding and named once, every element a coding's name (a
+ * token) with no parameters on chunked, which is when a body's end is where
+ * its chunks say (RFC 9112 6.3); 0 for anything else, a message whose length
+ * cannot be known. */
+typedef struct {
+    int codings;        /* elements read */
+    int chunked;        /* of them chunked */
+    int chunked_last;   /* the last one read was chunked */
+    int malformed;      /* an element that is not a coding */
+} HttpTeCodings;
+void http_te_codings_add(HttpTeCodings* t, const char* v, size_t n);
+int  http_te_is_chunked(const HttpTeCodings* t);
+
 
 /* Chunked transfer-coding, shared by the client and the server because a
  * request body and a response body are chunked the same way and two decoders

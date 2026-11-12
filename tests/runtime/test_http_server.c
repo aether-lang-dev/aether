@@ -452,6 +452,36 @@ TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
     ASSERT_EQ(0, (int)cl);
 }
 
+TEST(http_request_head_check_reads_transfer_encoding_as_one_list) {
+    /* The check searched the first Transfer-Encoding field for the word
+     * "chunked", so a coding that only contains it, chunked ahead of another
+     * coding, and chunked undone by a second field were all decoded as
+     * chunked, where a front end that reads the codings as RFC 9112 6.3 does
+     * finds no length (found by tests/fuzz/http_head). */
+    long cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: xchunked", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked;x=1", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: \"chunked\"", &cl, &chunked));
+
+    /* chunked last, alone, after other codings, or in a second field. */
+    const char* ok[] = {
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: CHUNKED",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip;q=1 ,, chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
+        chunked = -1;
+        ASSERT_EQ(HTTP_HEAD_OK, head_check_of(ok[i], &cl, &chunked));
+        ASSERT_EQ(1, chunked);
+    }
+}
+
 TEST(http_server_header_value_loses_the_whitespace_around_it) {
     /* field-line = field-name ":" OWS field-value OWS (RFC 9112 5), OWS a
      * space or a tab. The parser dropped leading spaces only, so these were

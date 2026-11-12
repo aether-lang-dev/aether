@@ -127,6 +127,40 @@ int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* 
     return 0;
 }
 
+/* One Transfer-Encoding field value's codings, read on top of the fields
+ * before it: a field that may appear more than once is one comma-separated
+ * list across all of them (RFC 9110 5.3). An element is a coding's name, a
+ * token, then its parameters after a ';'; an empty element is no element
+ * (RFC 9110 5.6.1). chunked takes no parameters (RFC 9112 7). */
+void http_te_codings_add(HttpTeCodings* t, const char* v, size_t n) {
+    size_t i = 0;
+    while (i <= n) {
+        size_t a = i;
+        while (i < n && v[i] != ',') i++;
+        size_t b = i++;
+        while (a < b && (v[a] == ' ' || v[a] == '\t')) a++;
+        while (b > a && (v[b - 1] == ' ' || v[b - 1] == '\t')) b--;
+        if (a == b) continue;
+        size_t e = a;
+        while (e < b && http_tchar[(unsigned char)v[e]]) e++;
+        /* Case-insensitive: of the token bytes, only a letter becomes one
+         * with 0x20 set. */
+        int chunked = e - a == 7;
+        for (size_t k = 0; chunked && k < 7; k++)
+            chunked = (v[a + k] | 0x20) == "chunked"[k];
+        size_t p = e;
+        while (p < b && (v[p] == ' ' || v[p] == '\t')) p++;
+        if (e == a || (p < b && (v[p] != ';' || chunked))) t->malformed = 1;
+        t->codings++;
+        t->chunked += chunked;
+        t->chunked_last = chunked;
+    }
+}
+
+int http_te_is_chunked(const HttpTeCodings* t) {
+    return !t->malformed && t->chunked == 1 && t->chunked_last;
+}
+
 int http_parse_port(const char* s, size_t n) {
     uint64_t v = 0;
     if (http_parse_count(s, n, 10, 65535, &v) != 0 || v == 0) return -1;

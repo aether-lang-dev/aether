@@ -5851,11 +5851,11 @@ int http_request_head_check(const char* head, const char* hdr_end,
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
 
     /* The first Content-Length where it lies in the head, compared whole
-     * with any later one. Transfer-Encoding is copied: a copy cut short can
-     * only lose the word "chunked", which refuses the request. */
+     * with any later one, and every Transfer-Encoding's codings, read where
+     * they lie as one list. */
     const char* cl_value = NULL;
     size_t cl_len = 0;
-    char te_value[256] = "";
+    HttpTeCodings te = { 0, 0, 0, 0 };
     int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
     for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
         const char* eol = (const char*)memchr(line, '\n', (size_t)(hdr_end - line));
@@ -5893,11 +5893,8 @@ int http_request_head_check(const char* head, const char* hdr_end,
                 }
             } else if (head_line_value(line, line_len, "Transfer-Encoding", 17,
                                        &value, &value_len)) {
-                if (te_count++ == 0) {
-                    size_t n = value_len < sizeof te_value - 1 ? value_len : sizeof te_value - 1;
-                    memcpy(te_value, value, n);
-                    te_value[n] = '\0';
-                }
+                te_count++;
+                http_te_codings_add(&te, value, value_len);
             }
         }
         if (!eol) break;
@@ -5931,7 +5928,15 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
     if (te_count > 0) {
-        *chunked = http_strcasestr(te_value, "chunked") != NULL;
+        /* chunked is the final coding, and named once, or the length of the
+         * body is not known (RFC 9112 6.3). The first field was searched for
+         * the word: "xchunked" and "chunked, gzip" were read as chunked,
+         * and a second field ("chunked", then "identity") was not read at
+         * all, where a front end reading the list whole finds no length and
+         * refuses, or reads to the close (found by tests/fuzz/http_head).
+         * Codings ahead of chunked ("gzip, chunked") stay the handler's to
+         * undo, as before. */
+        *chunked = http_te_is_chunked(&te);
         /* Both lengths present, or a coding this server cannot decode: refuse
          * the message rather than pick one of the two answers. */
         if (cl_count > 0 || !*chunked) return HTTP_HEAD_BAD_FRAMING;
