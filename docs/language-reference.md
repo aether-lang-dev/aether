@@ -2065,7 +2065,9 @@ boundaries, though: a visible function can still use hidden names via its own
 lexical chain, since this is name-resolution denial, not an effect system. Local
 bindings created inside the block stay visible, because directives only affect
 lookups that walk out to parent scopes. Qualified names are covered too, so
-`hide http` also blocks `http.get(url)`. The directives work inside actor receive
+`hide http` also blocks `http.get(url)`. `hide http.get` blocks that one member
+and leaves the rest of `http` visible, and `import http hiding (get)` does that
+for every body in the file. The directives work inside actor receive
 arms (handler bodies are block scopes), and a hidden name cannot be redeclared in
 the same scope, though a nested child scope may.
 
@@ -4300,6 +4302,12 @@ main() {
     b = math.pow(2.0, 3.0)    // qualified, always available, even un-selected
 }
 ```
+
+The one way to take members **out** of the qualified surface is `hiding`:
+`import ui hiding (open_url)` imports `ui` whole but `ui.open_url`, which no
+code in this file can call or take as a value (`E0304`). It is the file's own
+rule (another file importing `ui` sees all of it) and it does not combine with a
+selective or glob list. See [hide-and-seal.md](hide-and-seal.md#one-member-of-a-module).
 
 **A type can be qualified the same way.** `mod.T` and `*mod.T` are types
 wherever a type is written (a parameter, a return type, a struct field, an
