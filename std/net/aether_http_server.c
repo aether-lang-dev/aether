@@ -1437,6 +1437,36 @@ static void http_server_init(void) {
     http_server_initialized = 1;
 }
 
+#if defined(_WIN32)
+/* The accept loop's wake on Windows, as the wake pipe is on POSIX: a UDP
+ * socket bound to loopback and connected to its own address, so one byte
+ * a stop sends to it makes it readable, and the loop's WSAPoll on it and
+ * the listening socket returns at once. Windows has no pipe a WSAPoll can
+ * wait on. Not inherited by children, non-blocking so the loop drains it
+ * without waiting. -1 when it cannot be made: the loop then sees a stop at
+ * its one-second timeout. */
+static int http_wake_socket_open(void) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return -1;
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    int alen = (int)sizeof a;
+    u_long nonblocking = 1;
+    if (bind(s, (struct sockaddr*)&a, (int)sizeof a) != 0 ||
+        getsockname(s, (struct sockaddr*)&a, &alen) != 0 ||
+        connect(s, (struct sockaddr*)&a, (int)sizeof a) != 0 ||
+        ioctlsocket(s, FIONBIO, &nonblocking) != 0) {
+        closesocket(s);
+        return -1;
+    }
+    return (int)s;
+}
+#endif
+
 HttpServer* http_server_create(int port) {
     http_server_init();
 
@@ -1514,6 +1544,8 @@ HttpServer* http_server_create(int port) {
     } else {
         server->wake_fds[0] = server->wake_fds[1] = -1;
     }
+#elif defined(_WIN32)
+    server->wake_fds[0] = http_wake_socket_open();   /* wake_fds[1] unused */
 #endif
     server->request_hook_chain = NULL;
     server->sse_routes = NULL;
@@ -7964,6 +7996,25 @@ static int http_server_serve(HttpServer* server) {
                 while (read(server->wake_fds[0], drain, sizeof(drain)) > 0) { }
             }
             if (!(pfd[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+#else
+            /* Windows, the same: the listening socket and the wake socket
+             * (http_wake_socket_open) in one WSAPoll. A stop sends a byte to
+             * the wake socket and leaves the listening socket open; it used
+             * to close it to end an accept() blocked on it, and the loop's
+             * next accept() could then take a socket another thread opened
+             * under the same number. The run closes it once this loop is
+             * over (http_server_run). */
+            WSAPOLLFD pfd[2] = {
+                { .fd = (SOCKET)server->socket_fd, .events = POLLRDNORM },
+                { .fd = (SOCKET)server->wake_fds[0], .events = POLLRDNORM },
+            };
+            int ready = WSAPoll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
+            if (ready <= 0) continue;
+            if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLRDNORM)) {
+                char drain[64];
+                while (recv((SOCKET)server->wake_fds[0], drain, (int)sizeof drain, 0) > 0) { }
+            }
+            if (!(pfd[0].revents & (POLLRDNORM | POLLERR | POLLHUP))) continue;
 #endif
 
             struct sockaddr_storage client_addr;
@@ -8105,6 +8156,12 @@ void http_server_stop(HttpServer* server) {
         ssize_t w = write(server->wake_fds[1], &b, 1);
         (void)w;   /* full pipe: a wake is already pending */
     }
+#elif defined(_WIN32)
+    /* Wake the WSAPoll loop the same way, through its wake socket. */
+    if (server->wake_fds[0] >= 0) {
+        char b = 1;
+        send((SOCKET)server->wake_fds[0], &b, 1, 0);   /* a full buffer: a wake is pending */
+    }
 #endif
 
     /* The accept pollers of actor dispatch mode, and multi-accept's listeners
@@ -8126,29 +8183,28 @@ void http_server_stop(HttpServer* server) {
      * The listening socket, taken under live_lock (multi-accept takes it
      * there to make it a listener, and a bind publishes it there). While a
      * run is on, its accept loop polls and accepts on it, on the server's
-     * thread: the stop only shuts it down, which wakes a poll() on it at once
-     * where the platform does (Linux; the wake pipe does it everywhere), and
-     * the run closes it once its loop is over (http_server_run). Closed here
-     * under a running loop, as it was, its number could go to a socket or
+     * thread: the stop leaves it open, and the run closes it once its loop
+     * is over (http_server_run). The wake above ends the loop: the wake
+     * pipe on POSIX, the wake socket on Windows; on POSIX the stop also
+     * shuts the socket down, which wakes a poll() on it at once on Linux.
+     * Closed here under a running loop, as it was (on Windows always, to
+     * end an accept() blocked on it), its number could go to a socket or
      * file another thread opened next, and the loop's next poll() or
-     * accept() used that one. With no run on, the stop closes it. Windows
-     * closes it either way: there the loop waits in accept() itself, which
-     * only a close ends. The run closes it under live_lock before it ends
-     * under run_lock, so a stop that finds the run on finds the socket open
-     * or already taken, never closed under its shutdown. */
-#ifdef _WIN32
-    server_close_listener(server);
-#else
+     * accept() used that one. With no run on, the stop closes it. The run
+     * closes it under live_lock before it ends under run_lock, so a stop
+     * that finds the run on finds the socket open or already taken, never
+     * closed under its shutdown. */
     pthread_mutex_lock(&server->run_lock);
     int running = server->serving;
     if (running) {
         pthread_mutex_lock(&server->live_lock);
+#ifndef _WIN32
         if (server->socket_fd >= 0) shutdown(server->socket_fd, SHUT_RDWR);
+#endif
         pthread_mutex_unlock(&server->live_lock);
     }
     pthread_mutex_unlock(&server->run_lock);
     if (!running) server_close_listener(server);
-#endif
 
     /* Wake every worker waiting for a client's next request: that read
      * waits up to the idle timeout, and the pool (and the join below) would
@@ -8292,6 +8348,8 @@ void http_server_free(HttpServer* server) {
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);
+#elif defined(_WIN32)
+    if (server->wake_fds[0] >= 0) closesocket((SOCKET)server->wake_fds[0]);
 #endif
     free(server);
 }

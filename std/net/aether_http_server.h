@@ -392,7 +392,10 @@ typedef struct HttpServer {
     // byte to wake_fds[1] so the accept loop's poll() returns at once. Linux
     // wakes a poll() on a socket that is shut down, but macOS and the BSDs
     // do not, and each stop waited out the loop's one-second timeout.
-    // -1 where there is none (Windows, WASI, or pipe() failed).
+    // On Windows wake_fds[0] is a loopback UDP socket connected to itself,
+    // which http_server_stop sends a byte to (WSAPoll cannot wait on a pipe),
+    // and wake_fds[1] is unused. -1 where there is none (WASI, or the pipe or
+    // socket could not be made).
     int wake_fds[2];
     // Why the last bind or start failed, "" when it did not (#3131). The
     // library reports through this and the return value, never by printing.
