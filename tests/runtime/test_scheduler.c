@@ -2666,6 +2666,58 @@ void test_ready_list_deregister_then_free_with_countdown(void) {
     ASSERT_EQ(0, fired);
 }
 
+static void park_sender_step(void* self) {
+    LsSender* s = (LsSender*)self;
+    Message msg;
+    if (!mailbox_receive(&s->mailbox, &msg)) return;
+    scheduler_send_remote(s->target, message_create_simple(RL_SEQ, 0, 0), aether_core_id_get());
+}
+
+static int wait_parked(int core) {
+    long long deadline = (long long)get_time_ms() + 3000;
+    while ((long long)get_time_ms() <= deadline) {
+        if (atomic_load(&schedulers[core].parked)) return 1;
+    }
+    return 0;
+}
+
+// A caller's actor carried over a restart, before its registration: its
+// core delivers to it, but it is in no table. A sender on another core asks
+// it to move there (#3090); no move can take an actor that is in no table,
+// and the core asked again on every pass, never parking (#3540). The scan
+// never asked: it looked only at its table. The move waits for the
+// registration.
+void test_ready_list_move_of_actor_in_no_table_lets_core_park(void) {
+    RlActor* t = (RlActor*)caller_actor(sizeof(RlActor), rl_step);
+    ASSERT_NOT_NULL(t);
+    scheduler_init(2);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)t, 0);
+    scheduler_shutdown();
+
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    LsSender* s = (LsSender*)scheduler_spawn_actor(1, park_sender_step, sizeof(LsSender));
+    ASSERT_NOT_NULL(s);
+    s->target = (ActorBase*)t;
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    int handled = wait_count(&t->handled, 1);
+    int asked = atomic_load(&t->migrate_to) == 1;
+    int parked = wait_parked(0);
+    scheduler_register_actor((ActorBase*)t, -1);
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    int handled_after = wait_count(&t->handled, 2);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(t);
+    ASSERT_EQ(1, handled);
+    ASSERT_TRUE(asked);
+    ASSERT_TRUE(parked);
+    ASSERT_EQ(2, handled_after);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2709,4 +2761,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: a registration finds an armed countdown", test_ready_list_registration_finds_armed_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a countdown follows a deregister and a registration", test_ready_list_deregister_then_register_moves_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a deregistered actor's block is not read again", test_ready_list_deregister_then_free_with_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a move of an actor in no table lets its core park", test_ready_list_move_of_actor_in_no_table_lets_core_park, TEST_CATEGORY_RUNTIME);
 }

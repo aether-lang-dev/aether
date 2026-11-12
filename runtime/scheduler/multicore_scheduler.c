@@ -2317,13 +2317,16 @@ static int core_outbound_idle(int core) {
 // lock, then move_begin: no message for it may be on its way through any
 // core. Returns 1 when moved; the new core is woken to step whatever is in
 // the mailbox that moved with it. Returns 0, the actor where it was, when a
-// lock is taken or a message is in flight. `onto_waiter`: a relief's move
-// (#3197), which may take the actor onto a core blocked in an ask when that
-// ask waits on this very actor.
+// lock is taken or a message is in flight: a move to ask again. Returns -1
+// when no move is to be made from here: the actor is in no table of this
+// core (deregistered, or carried over a restart and not registered yet,
+// #3540), ended, its own thread's, or `dst` names no other core.
+// `onto_waiter`: a relief's move (#3197), which may take the actor onto a
+// core blocked in an ask when that ask waits on this very actor.
 static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint, int onto_waiter) {
     if (dst < 0 || dst >= num_cores || dst == sched->core_id || actor->auto_process ||
         atomic_load_explicit(&actor->dead, memory_order_acquire))
-        return 0;
+        return -1;
     /* What the actor sent from here and is still on its way leaves no
      * order behind it: moved, its next messages leave from another core's
      * queues, which a receiver may drain first (#3240). */
@@ -2355,7 +2358,9 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
         return 0;
     }
     int moved = 0;
-    int at = actor_table_has_room_locked(to) ? actor_table_find_locked(sched, actor, slot_hint) : -1;
+    int at = actor_table_find_locked(sched, actor, slot_hint);
+    int in_table = at >= 0;
+    if (!actor_table_has_room_locked(to)) at = -1;
     if (at >= 0 && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
         if (move_begin(actor)) {
             // Its countdown leaves this core's timer heap before the actor
@@ -2390,7 +2395,7 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     // through its ready list (#3540), which wakes it. An entry still in this
     // core's lists is forwarded there when this core takes it.
     if (moved) ready_push(actor);
-    return moved;
+    return moved ? 1 : (in_table ? 0 : -1);
 }
 
 // Step `actor`, this core's, once to make room in its full mailbox, so a
@@ -2502,12 +2507,16 @@ static int ready_service(Scheduler* sched, ActorBase* actor) {
     // steal, #3090). Processing first ensures the actor makes progress even
     // under constant migration pressure. move_actor moves it only with no
     // message of it in flight; one that cannot move now is asked again on
-    // the next pass while the request stands, as the scan asked it.
+    // the next pass while the request stands, as the scan asked it. One
+    // that is in no table here is not asked again: the scan never saw it,
+    // and the push on every pass kept its core from parking (#3540). Its
+    // registration pushes it, and the move is asked then.
     int mig = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
     if (unlikely(mig >= 0 && mig != me) &&
         atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me) {
-        did = 1;
-        if (!move_actor(sched, actor, mig, -1, 0)) ready_push(actor);
+        int moved = move_actor(sched, actor, mig, -1, 0);
+        if (moved >= 0) did = 1;
+        if (moved == 0) ready_push(actor);
     }
     // Its countdown, as the step or a spawn left it.
     if (actor->timeout_ns != 0 &&
@@ -2898,7 +2907,7 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // as it used to be, each actor took the place its sender had just
             // left, and the chain only shifted.
             int ask = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
-            if (ask >= 0 && ask != sched->core_id && move_actor(sched, actor, ask, -1, 0)) {
+            if (ask >= 0 && ask != sched->core_id && move_actor(sched, actor, ask, -1, 0) > 0) {
                 continue;
             }
 
@@ -2951,8 +2960,9 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             int mig_to = atomic_load_explicit(&mig_actor->migrate_to, memory_order_relaxed);
             if (unlikely(mig_to >= 0 && mig_to != sched->core_id &&
                          atomic_load_explicit(&mig_actor->assigned_core, memory_order_relaxed) == sched->core_id)) {
-                // Asked again on the next pass while the ask stands (#3540).
-                if (!move_actor(sched, mig_actor, mig_to, -1, 0)) ready_push(mig_actor);
+                // Asked again on the next pass while the ask stands (#3540),
+                // unless no move can be made from here (in no table).
+                if (move_actor(sched, mig_actor, mig_to, -1, 0) == 0) ready_push(mig_actor);
             }
         }
 
@@ -5178,7 +5188,7 @@ static int relief_evacuate(Scheduler* sched) {
                     now - armed >= actor->timeout_ns);
         if (!work) continue;
         int dst = relief_destination(sched, actor);
-        if (dst >= 0 && move_actor(sched, actor, dst, i, 1)) moved++;
+        if (dst >= 0 && move_actor(sched, actor, dst, i, 1) > 0) moved++;
     }
     sched->relief_cursor = (start + looked) % n;
     return moved;
