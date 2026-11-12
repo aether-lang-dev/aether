@@ -267,9 +267,68 @@ static int count_var_identifier_uses(ASTNode* node, const char* var_name) {
 // move would have sufficed; we never wrongly move. With no function
 // context, default to the take. A struct literal's field takes a local
 // by the same rule (#2602).
+/* The path from `node` down to the first identifier read of `name`, root
+ * first, into `path` (at most `cap` nodes); its length, 0 if there is
+ * none, -1 if the tree is deeper than `cap`. */
+static int path_to_var_read(ASTNode* node, const char* name, ASTNode** path, int depth, int cap) {
+    if (!node) return 0;
+    if (depth >= cap) return -1;
+    path[depth] = node;
+    if (node->type == AST_IDENTIFIER && node->value && strcmp(node->value, name) == 0)
+        return depth + 1;
+    for (int i = 0; i < node->child_count; i++) {
+        int n = path_to_var_read(node->children[i], name, path, depth + 1, cap);
+        if (n) return n;
+    }
+    return 0;
+}
+
+/* Is `s` a statement that binds `name` outright (`name = e`, a
+ * declaration), not under a condition? */
+static int stmt_binds_var(ASTNode* s, const char* name) {
+    return s && (s->type == AST_VARIABLE_DECLARATION || s->type == AST_ASSIGNMENT) && s->value &&
+           strcmp(s->value, name) == 0;
+}
+
+/* Does the one read of `name` in `fn` run more than once with no binding
+ * of `name` in between: is it inside a loop (or a closure body) that does
+ * not bind `name` unconditionally ahead of it? A function's locals live
+ * for the whole function (they are hoisted), so the read's next run sees
+ * what the last one left: after a move, nothing. */
+static int sole_read_repeats(ASTNode* fn, const char* name) {
+    enum { CAP = 512 };
+    ASTNode* path[CAP];
+    int n = path_to_var_read(fn, name, path, 0, CAP);
+    /* No read in the function's own tree: the read is one the codegen made
+     * (a `return match`'s result, re-dispatched as `return <temp>`), which
+     * runs once, on the way out. Too deep to trace: taken as repeating. */
+    if (n == 0) return 0;
+    if (n < 0) return 1;
+    int loop = -1;
+    for (int i = 1; i < n - 1; i++)
+        if (path[i]->type == AST_WHILE_LOOP || path[i]->type == AST_FOR_LOOP ||
+            path[i]->type == AST_CLOSURE)
+            loop = i;
+    if (loop < 0) return 0;
+    /* Rebound on every path from the loop's top to the read: each run has
+     * a value of its own to move. */
+    for (int j = loop + 1; j < n - 1; j++) {
+        ASTNode* p = path[j];
+        if (p->type != AST_BLOCK) continue;
+        for (int k = 0; k < p->child_count && p->children[k] != path[j + 1]; k++)
+            if (stmt_binds_var(p->children[k], name)) return 0;
+    }
+    return 1;
+}
+
 int alias_source_must_copy(CodeGenerator* gen, const char* src_name) {
     if (!gen || !gen->current_function || !src_name) return 1;
-    return count_var_identifier_uses(gen->current_function, src_name) > 1;
+    if (count_var_identifier_uses(gen->current_function, src_name) > 1) return 1;
+    /* Its only read, but one a loop runs again: moved on the first run, a
+     * later run read the emptied local (a slice filled from one local got
+     * the value in its first element only; an outer string handed to a
+     * loop local was gone the next time round). Taken there instead. */
+    return sole_read_repeats(gen->current_function, src_name);
 }
 
 /* #2461: taking a string into an owning slot (a local, a struct field, a
