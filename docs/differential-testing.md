@@ -232,10 +232,12 @@ shape of compiled code) are left out, each with its reason, in
 `tests/ae_sweep_prune_tsan.txt`.
 
 A data race, a lock-order inversion, a thread that ended and was never joined,
-or a call in a signal handler that is not async-signal-safe stops the program
-(`halt_on_error=1`), so the test fails, and the report goes to
-`build/tsan/reports/`. The summary groups them by the place TSan's SUMMARY line
-names and, for a race, the first frame of the other access, which is one row
+or a call in a signal handler that is not async-signal-safe is reported, and the
+program goes on (`halt_on_error=0`), so one run shows every race it meets; it
+still exits 66 at the end when it reported anything, so the test fails, and the
+run fails on any report. The reports go to `build/tsan/reports/`, one file
+per program with all of its reports. The summary groups them by the place
+TSan's SUMMARY line names and, for a race, the first frame of the other access, which is one row
 per root cause. Each thread keeps 512K accesses of history (`history_size=4`)
 so the other side of a race on a long-lived queue still has its stack, and a
 lock-order inversion shows both acquisitions (`second_deadlock_stack=1`). The

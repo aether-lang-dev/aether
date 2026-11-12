@@ -14,7 +14,8 @@
 # fails the run (SAN_LEAKS=report lists it without failing). SAN=tsan is
 # ThreadSanitizer under clang (TSAN_CC names another clang): a data race, a
 # lock-order inversion, a thread never joined or a call that is not
-# async-signal-safe in a signal handler stops the program. It runs the part
+# async-signal-safe in a signal handler is reported, and the program goes on
+# to report the rest and exits 66 at its end. It runs the part
 # of the corpus that puts two threads on the same memory, the actor,
 # scheduler and std.net tests (tests/tsan_sweep_select.txt).
 #
@@ -31,7 +32,8 @@
 # another compiler, and an instrumented object or program is never mixed with
 # a plain one.
 #
-# A report stops the program, so the test that ran it fails, and is written
+# A report stops the program (under TSan, fails it at its exit), so the test
+# that ran it fails, and is written
 # to build/<san>/reports/report.<program>.<pid> (the sanitizer's log_path),
 # where a test that expects its program to fail, or compares its stderr,
 # cannot hide it. The run fails on any report, and lists them grouped by
@@ -52,6 +54,9 @@ set -u
 # Flags that go after the command's own arguments, where a later one wins:
 # only TSan's -O1, below.
 tail_flags=""
+# How the summary says a program run met the sanitizer: an ASan or UBSan
+# error stops it; TSan reports every race and fails the run at its exit.
+verb="stopped by"
 san=${SAN:-ubsan}
 case "$san" in
     ubsan)
@@ -79,6 +84,7 @@ case "$san" in
         flags="-fsanitize=thread -fno-omit-frame-pointer -g"
         tail_flags="-O1"
         name="TSan"
+        verb="flagged by"
         hook="__tsan_"
         ;;
     *)
@@ -173,8 +179,11 @@ case "$san" in
         export ASAN_OPTIONS LSAN_OPTIONS
         ;;
     tsan)
-        # halt_on_error: the first report stops the program (exit 66), so
-        # the test that ran it fails, as under ASan and UBSan.
+        # halt_on_error=0, exitcode=66: a program goes on past a report, so
+        # one run shows every race it meets (halted at the first, a program
+        # hid the rest behind it), and still ends with 66 when it reported
+        # anything, so the test that ran it fails. The run fails on any
+        # report file either way, whatever the test made of the exit code.
         # second_deadlock_stack: a lock-order inversion shows where each
         # thread took both of its locks, not only the second.
         # history_size=4: each thread remembers 512K accesses (the default,
@@ -191,7 +200,7 @@ case "$san" in
         # suppressions: only code this repository does not own, each entry
         # with its reason (tests/tsan/suppressions.txt). A report in our code
         # is never suppressed.
-        TSAN_OPTIONS="halt_on_error=1:second_deadlock_stack=1:history_size=4:report_thread_leaks=1:report_signal_unsafe=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:suppressions=$root/tests/tsan/suppressions.txt:log_exe_name=1:log_path=$reports/report"
+        TSAN_OPTIONS="halt_on_error=0:exitcode=66:second_deadlock_stack=1:history_size=4:report_thread_leaks=1:report_signal_unsafe=1:allocator_may_return_null=1:handle_segv=0:handle_sigbus=0:handle_sigfpe=0:suppressions=$root/tests/tsan/suppressions.txt:log_exe_name=1:log_path=$reports/report"
         export TSAN_OPTIONS
         # TSan runs a program 5 to 15 times slower than a plain build. The
         # per-test limits are three times the sweep's and the C runner's
@@ -343,22 +352,34 @@ table() {
                 printf '%s\t%s\t%s\n' "$exe" "$loc" "${line#*: runtime error: }"
             done
         elif [ "$san" = tsan ]; then
-            # "SUMMARY: ThreadSanitizer: data race /path/f.c:12:5 in fn": the
-            # kind of report, then the top frame of the access it stopped at.
-            sum=$(grep -m1 '^SUMMARY: ThreadSanitizer: ' "$f" | sed 's/^SUMMARY: ThreadSanitizer: //')
-            [ -n "$sum" ] || sum=$(grep -m1 'ThreadSanitizer' "$f")
-            case "$sum" in
-                *" in "*)
-                    what=$(printf '%s\n' "$sum" | sed -E 's/^(.*) [^ ]+ in [^ ]+$/\1/')
-                    loc=$(printf '%s\n' "$sum" | sed -E 's/^.* ([^ ]+ in [^ ]+)$/\1/')
-                    ;;
-                *) what=$sum; loc="(no frame)" ;;
-            esac
-            # "  Previous write of size 4 at ... by thread T2:", then its
-            # frames ("#0 fn /path/f.c:40:3 (prog+0x...)").
-            prev=$(awk '/^  Previous /{ p = 1; next } p && /^ *#[0-9]+ /{ print $3 " in " $2; exit }' "$f")
-            [ -n "$prev" ] && loc="$loc, against $prev"
-            printf '%s\t%s\t%s\n' "$exe" "$loc" "$what"
+            # Every report in the file, one row each (a program goes on after
+            # its first, halt_on_error=0). "SUMMARY: ThreadSanitizer: data
+            # race /path/f.c:12:5 in fn" is the kind of report, then the top
+            # frame of the access it stopped at; for a race, the first frame
+            # under "  Previous write of size 4 at ... by thread T2:" is the
+            # other side. A frame with no symbols ends in "(BuildId: ...)",
+            # which is dropped. A file with no SUMMARY (TSan itself failed:
+            # FATAL, CHECK failed) is one row with its first such line.
+            awk -v exe="$exe" '
+                function row(s, prev,    what, loc) {
+                    gsub(/ \(BuildId: [0-9a-f]*\)/, "", s)
+                    if (match(s, / [^ ]+ in [^ ]+$/)) {
+                        what = substr(s, 1, RSTART - 1); loc = substr(s, RSTART + 1)
+                    } else { what = s; loc = "(no frame)" }
+                    if (prev != "") loc = loc ", against " prev
+                    printf "%s\t%s\t%s\n", exe, loc, what
+                    rows++
+                }
+                /^WARNING: ThreadSanitizer:/ { prev = ""; inprev = 0 }
+                /^  Previous / { inprev = 1; next }
+                inprev && prev == "" && /^ *#[0-9]+ / { prev = $3 " in " $2 }
+                /^SUMMARY: ThreadSanitizer: / {
+                    s = $0; sub(/^SUMMARY: ThreadSanitizer: /, "", s)
+                    row(s, prev); prev = ""; inprev = 0
+                }
+                fatal == "" && /(FATAL|ERROR): ThreadSanitizer|ThreadSanitizer: CHECK failed/ { fatal = $0 }
+                END { if (rows == 0 && fatal != "") row(fatal, "") }
+            ' "$f"
         else
             what=$(grep -m1 -E 'ERROR: (Address|Leak)Sanitizer' "$f" | sed 's/^.*Sanitizer: //; s/ on address.*//')
             loc=$(grep -E '^ *#[0-9]+ .* in ' "$f" | sed 's/^ *#[0-9]* 0x[0-9a-f]* in //' |
@@ -386,7 +407,7 @@ nl=$(printf '%s\n' $leaks | grep -c . || true)
 {
     echo "## The C unit tests and the .ae corpus${select:+ (the part ${select#"$root"/} picks)} under $name"
     echo
-    echo "$ne program run(s) stopped by $name."
+    echo "$ne program run(s) $verb $name."
     if [ "$ne" -gt 0 ]; then echo; table $errors; fi
     if [ "$san" = asan ]; then
         echo
@@ -401,14 +422,28 @@ nl=$(printf '%s\n' $leaks | grep -c . || true)
 cat "$dir/summary.md"
 [ -n "${GITHUB_STEP_SUMMARY:-}" ] && cat "$dir/summary.md" >> "$GITHUB_STEP_SUMMARY"
 if [ "$ne" -gt 0 ]; then
-    # A TSan report holds two stacks and where each thread was started.
-    lines=40
-    [ "$san" = tsan ] && lines=80
-    for f in $(printf '%s\n' $errors | head -20); do
-        echo "=== $f"
-        head -"$lines" "$f"
-    done
-    echo "test-$san: $ne program run(s) were stopped by $name; the reports are in build/$san/reports" >&2
+    if [ "$san" = tsan ]; then
+        # One full report for each place in the table (the two sides of a
+        # race, or the SUMMARY line of another kind), up to 40: the first
+        # file's copy of it. A file holds every report of its program.
+        # shellcheck disable=SC2086 # the report paths carry no spaces
+        awk '
+            /^WARNING: ThreadSanitizer:/ { blk = ""; inb = 1; prev = ""; ip = 0 }
+            inb { blk = blk $0 "\n" }
+            /^  Previous / { ip = 1 }
+            ip && prev == "" && /^ *#[0-9]+ / { prev = $3 }
+            /^SUMMARY: ThreadSanitizer: / {
+                key = $0 "|" prev; gsub(/ \(BuildId: [0-9a-f]*\)/, "", key)
+                if (!(key in seen) && n < 40) { seen[key] = 1; n++; printf "=== %s\n%s", FILENAME, blk }
+                inb = 0
+            }' $errors
+    else
+        for f in $(printf '%s\n' $errors | head -20); do
+            echo "=== $f"
+            head -40 "$f"
+        done
+    fi
+    echo "test-$san: $ne program run(s) were $verb $name; the reports are in build/$san/reports" >&2
     status=1
 fi
 if [ "$nl" -gt 0 ] && [ "$leaks_fail" = 1 ]; then

@@ -3484,8 +3484,9 @@ test-asan-ae:
 # .ae corpus that puts two threads on the same memory, the actor, scheduler
 # and std.net tests (tests/tsan_sweep_select.txt, less
 # tests/ae_sweep_prune_tsan.txt). A data race, a lock-order inversion, a
-# thread never joined or a signal-unsafe call in a handler stops the program
-# that made it, and the run fails on it, with the reports in
+# thread never joined or a signal-unsafe call in a handler is reported, the
+# program goes on to report the rest and exits 66, and the run fails on any
+# report, with the reports in
 # build/tsan/reports grouped by the two places that raced. The TSan options
 # are in tests/scripts/sanitizer_sweep.sh, the suppressions (third-party code
 # only, never ours) in tests/tsan/suppressions.txt. AE_SWEEP_SHARD=k/n splits
