@@ -151,7 +151,8 @@ const char* list_add(ArrayList* list, void* item) {
 /* A pinned string (a literal) is never released, so a container that
  * takes one stores it as an element it does not own. */
 static int is_pinned_string(const void* p) {
-    return is_aether_string(p) && ((const AetherString*)p)->ref_count == AETHER_STRING_PINNED_REFS;
+    return is_aether_string(p) &&
+           aether_string_count_now(&((const AetherString*)p)->ref_count) == AETHER_STRING_PINNED_REFS;
 }
 
 static int list_store_owned(ArrayList* list, const void* item) {
@@ -520,7 +521,7 @@ static unsigned int key_hash(const char* key, const char** data, unsigned int* l
  * the text is kept, more is copied. A pinned string is never freed, so
  * keeping it costs nothing. */
 static int key_block_is_tight(const AetherString* s) {
-    if (s->ref_count == AETHER_STRING_PINNED_REFS) return 1;
+    if (aether_string_count_now(&s->ref_count) == AETHER_STRING_PINNED_REFS) return 1;
     size_t need = s->length + 1;
     return s->capacity <= need + 16 + need / 8;
 }

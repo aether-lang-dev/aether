@@ -9778,6 +9778,18 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
      * (#2919) is counted atomically by the runtime, which also frees the
      * last reference. Same rules as string_retain and string_release. */
     print_line(gen, "struct _AeStrHdr { %s };", AE_STR_FIELDS_TEXT(AETHER_STRING_FIELDS));
+    /* A string's count, read where another thread may be changing it (a
+     * shared string's count is atomic, runtime/utils/aether_count.h): an
+     * atomic load, acquire, as aether_count_load is. A plain read of it
+     * raced the other threads' changes. MSVC, which has no __atomic
+     * builtins, gets a volatile read. */
+    print_line(gen, "static inline AETHER_MAYBE_UNUSED int aether_str_count_now(const int* p) {");
+    print_line(gen, "#if defined(_MSC_VER) && !defined(__clang__)");
+    print_line(gen, "    return *(const volatile int*)p;");
+    print_line(gen, "#else");
+    print_line(gen, "    return __atomic_load_n(p, __ATOMIC_ACQUIRE);");
+    print_line(gen, "#endif");
+    print_line(gen, "}");
     /* A take (R3): a counted string is retained (strings are immutable once
      * made) and a pinned one, a literal, handed over as it is; a plain C
      * string is the string a C place was given it from, retained, or else a
@@ -9791,7 +9803,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        struct _AeStrHdr* _h = (struct _AeStrHdr*)(void*)s;");
-    print_line(gen, "        int _rc = _h->ref_count;");
+    print_line(gen, "        int _rc = aether_str_count_now(&_h->ref_count);");
     print_line(gen, "        if (_rc == 0x%X) return s;", (unsigned)AETHER_STRING_PINNED_REFS);
     print_line(gen, "        if (_rc & 0x%X) string_retain(s); else _h->ref_count = _rc + 1;",
                (unsigned)AETHER_STRING_SHARED_BIT);
@@ -9808,7 +9820,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    const unsigned char* _p = (const unsigned char*)s;");
     print_line(gen, "    if (_p[0] == 0x%02X && _p[1] == 0x%02X && _p[2] == 0x%02X && _p[3] == 0x%02X &&",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
-    print_line(gen, "        ((const struct _AeStrHdr*)(const void*)s)->ref_count == 0x%X)",
+    print_line(gen, "        aether_str_count_now(&((const struct _AeStrHdr*)(const void*)s)->ref_count) == 0x%X)",
                (unsigned)AETHER_STRING_PINNED_REFS);
     print_line(gen, "        return (void*)((const struct _AeStrHdr*)(const void*)s)->data;");
     print_line(gen, "    return (void*)s;");
@@ -9869,7 +9881,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "    if (_hp[0] == 0x%02X && _hp[1] == 0x%02X && _hp[2] == 0x%02X && _hp[3] == 0x%02X) {",
                AE_STR_MAGIC_B0, AE_STR_MAGIC_B1, AE_STR_MAGIC_B2, AE_STR_MAGIC_B3);
     print_line(gen, "        struct _AeStrHdr* _h = (struct _AeStrHdr*)(void*)s;");
-    print_line(gen, "        int _rc = _h->ref_count;");
+    print_line(gen, "        int _rc = aether_str_count_now(&_h->ref_count);");
     print_line(gen, "        if (_rc == 0x%X) return;", (unsigned)AETHER_STRING_PINNED_REFS);
     print_line(gen, "        if (!(_rc & 0x%X) && _rc > 1) { _h->ref_count = _rc - 1; return; }",
                (unsigned)AETHER_STRING_SHARED_BIT);
@@ -10163,7 +10175,7 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "static inline AETHER_MAYBE_UNUSED const char* _aether_msg_str(const char* s, int owned) {");
     print_line(gen, "    if (!s) return s;");
     print_line(gen, "    if (owned && aether_str_is_counted(s)) {");
-    print_line(gen, "        int _rc = ((const struct _AeStrHdr*)(const void*)s)->ref_count;");
+    print_line(gen, "        int _rc = aether_str_count_now(&((const struct _AeStrHdr*)(const void*)s)->ref_count);");
     print_line(gen, "        if (_rc != 0x%X && (_rc & 0x%X) == 1) return s;",
                (unsigned)AETHER_STRING_PINNED_REFS, (unsigned)AETHER_STRING_COUNT_MASK);
     print_line(gen, "    }");
