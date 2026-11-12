@@ -3871,14 +3871,15 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
         }
         // No core delivers to it (a new actor) or none can yet (its core is
         // past this lifecycle's count): placed as any actor is, unless a
-        // core takes it first, which the compare-and-swap sees.
-        if (!routed) {
-            // In no list (#3540) and with no overflow: those of a
-            // lifecycle it was registered in before went with its tables.
-            atomic_init(&actor->inbox, NULL);
-            atomic_init(&actor->ready_queued, 0);
-            atomic_init(&actor->timer_slot, 0);
-        }
+        // core takes it first, which the compare-and-swap sees. Its overflow,
+        // ready list byte and timer slot are left as they are: a core that
+        // takes it before the compare-and-swap may have set them already,
+        // and a reset here, before it, wrote over them (the byte cleared
+        // under the core's entry, an overflow the core had started
+        // dropped). A new actor has them zeroed; one carried over a restart
+        // has them reset by teardown with the lists and queues they named;
+        // and a deregistered one is in no list, its countdown in no heap
+        // (scheduler_deregister_actor), its overflow still its own.
         core = register_actor_ex(actor, preferred_core, cur, 1);
         if (core == -2) continue;   // a core took it meanwhile: it keeps it
         atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
