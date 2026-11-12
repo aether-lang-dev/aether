@@ -3588,6 +3588,18 @@ void emit_composite_take(CodeGenerator* gen, ASTNode* e, Type* t) {
         emit_seq_take(gen, e);
         return;
     }
+    /* An `if` into an optional is taken arm by arm, each arm wrapped (or
+     * not) on its own: wrapped whole, a `none` arm became the payload. */
+    if (t->kind == TYPE_OPTIONAL && if_takes_by_branch(e)) {
+        fprintf(gen->output, "((");
+        generate_expression(gen, e->children[0]);
+        fprintf(gen->output, ") ? ");
+        emit_composite_take(gen, e->children[1], t);
+        fprintf(gen->output, " : ");
+        emit_composite_take(gen, e->children[2], t);
+        fprintf(gen->output, ")");
+        return;
+    }
     /* A bare value or `none` into an optional is wrapped, its value taken. */
     if (t->kind == TYPE_OPTIONAL && needs_optional_coerce(e, t)) {
         if (e->type == AST_NONE_LITERAL) {
@@ -8038,7 +8050,13 @@ static void emit_tuple_call_discard(CodeGenerator* gen, ASTNode* call) {
 
 static int emit_composite_passthrough_return(CodeGenerator* gen, ASTNode* v) {
     Type* rt = gen->current_func_return_type;
-    if (!rt || (rt->kind != TYPE_TUPLE && rt->kind != TYPE_SUM) || gen->in_main_function ||
+    /* An optional whose value owns (a struct with a string field, a sum, a
+     * tuple, a closure) is taken the same way: a local's value moved out of
+     * it or retained, so the local's exit drop leaves the caller its own.
+     * Copied bare, `return k` from `-> Key?` handed back the strings the
+     * exit drop then freed. (A `string?` has its own path above.) */
+    if (!rt || (rt->kind != TYPE_TUPLE && rt->kind != TYPE_SUM && rt->kind != TYPE_OPTIONAL) ||
+        gen->in_main_function ||
         !gen->current_function || !v || !v->node_type || !own_type_owns(gen, rt) ||
         (rt->kind == TYPE_TUPLE && v->node_type->kind != TYPE_TUPLE))
         return 0;
@@ -12812,8 +12830,14 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                  * as an array is: each arm's value taken into it, and its
                  * scope's exits drop it once the return has taken its copy.
                  * A sum that owns is one too (#3005). */
+                /* So is an optional that owns (not a `string?`, which
+                 * its own return path copies): declared bare, the arm's
+                 * store dropped what the uninitialised local held, and
+                 * the return, which takes a reference of its own, left
+                 * nothing to give the local's back. */
                 int own_ret = !arr_ret && rtt &&
-                              (rtt->kind == TYPE_TUPLE || rtt->kind == TYPE_SUM) &&
+                              (rtt->kind == TYPE_TUPLE || rtt->kind == TYPE_SUM ||
+                               (rtt->kind == TYPE_OPTIONAL && !is_opt_string_type(rtt))) &&
                               own_type_owns(gen, rtt);
                 print_indent(gen);
                 if (arr_ret)
@@ -13745,6 +13769,21 @@ static void generate_statement_body(CodeGenerator* gen, ASTNode* stmt) {
                         if (tuple_call_discard_owns(gen, inner)) {
                             gen->discard_call_node = NULL;
                             emit_tuple_call_discard(gen, inner);
+                        } else if (inner && inner->type == AST_FUNCTION_CALL &&
+                                   !call_is_extern(gen, inner) && inner->node_type &&
+                                   (inner->node_type->kind == TYPE_SUM ||
+                                    (inner->node_type->kind == TYPE_OPTIONAL &&
+                                     !is_opt_string_type(inner->node_type))) &&
+                                   own_type_owns(gen, inner->node_type)) {
+                            /* An optional or a sum that owns, handed over by
+                             * the call (R3) and thrown away: dropped, as a
+                             * local holding it would be. Discarded bare, its
+                             * strings leaked. */
+                            gen->discard_call_node = NULL;
+                            fprintf(gen->output, "{ %s _ae_dc = ", get_c_type(inner->node_type));
+                            generate_expression(gen, inner);
+                            fprintf(gen->output, "; %s(&_ae_dc); }",
+                                    own_fn(gen, inner->node_type, "drop"));
                         } else if (is_owned_opt_string_call(gen, inner)) {
                             gen->discard_call_node = NULL;
                             fprintf(gen->output, "{ %s _od = ", get_c_type(inner->node_type));
