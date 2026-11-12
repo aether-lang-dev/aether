@@ -835,7 +835,8 @@ NCSA Combined Log Format is the Apache default. File is opened
 `"ab"` so process restarts append rather than truncate. Every response
 the server sends is logged, one a middleware answered included: a
 proxied request, a 401 from basic auth, a 429 from the rate limiter
-(#3213). The logger is loop-safe (#3214): a gateway that logs keeps the
+(#3213). A head refused before it is a request (400, 414 or 431, the
+connection then closed) is not logged, as it is not counted in the metrics. The logger is loop-safe (#3214): a gateway that logs keeps the
 proxy's event loop, which writes the line itself.
 
 ---
@@ -878,6 +879,14 @@ character is written `?`), and a series is the labels as written: two
 paths that differ only past 255 bytes count in one series (#3282). Every
 series is in the scrape, however long it gets (#3264), and the scrape is
 written without holding the mutex the requests' counters take (#3280).
+
+What is counted is the requests the server parsed and served: the counters
+are a request hook, run with the request after its response. A head the
+server refuses before there is a request (400, 414 or 431, the connection
+then closed) counts in no series, whatever it was refused for: a NUL or a
+bare CR or LF in the head, its framing, its size, or a request line that is
+not method SP target SP version (#3664, #3666). So a client cannot send the
+`(other)` labels as a method: `(other)` is not a token.
 
 Custom hooks: `http_server_use_request_hook(server, hook, ud)` is a
 C-level extension point (declared in `std/net/aether_http_server.h`,
