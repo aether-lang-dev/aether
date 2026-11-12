@@ -404,6 +404,16 @@ static atomic_int g_overflow_total = 0;
 #define PARK_MS_MIN 1
 #define PARK_MS_MAX 32
 
+// How long a core with nothing to do spins before it parks (#3540): long
+// enough that a message that comes a moment later (the next ask of a round
+// trip, a reply on its way) finds it awake, short enough that an idle
+// program parks its cores at once (#1517). About what the 10,000 passes it
+// replaces took with a few actors per core on an x86 desktop (1.3 to 3 ms
+// measured); a pass that read every actor took longer.
+#ifndef AETHER_IDLE_SPIN_NS
+#define AETHER_IDLE_SPIN_NS 2000000ULL
+#endif
+
 // A core's park waits this long instead, when a test sets it (0: the
 // PARK_MS_MIN..PARK_MS_MAX steps above). Set to a minute, a wake that never
 // came shows as a stall of a minute rather than as a delay of up to 32 ms,
@@ -2593,6 +2603,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
 
     int idle_count = 0;
     int park_ms = PARK_MS_MIN;
+    uint64_t idle_since = 0;   // when this idle stretch began (#3540)
+    int spinning = 1;          // within AETHER_IDLE_SPIN_NS of it
 
     // From here on this thread reads its table: publish an epoch first (#2509).
     reclaim_core_online(sched);
@@ -2972,7 +2984,23 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             }
 
             // Keep spinning aggressively for high-throughput workloads
-            if (idle_count < 10000) {
+            // The spin before a park is a time, not a count of passes
+            // (#3540): it was 10,000 passes, calibrated against a pass that
+            // read every actor of the core; with the ready list a pass costs
+            // the same with 10 actors or a million, so the spin ends sooner
+            // in time (here 1.3 to 2 ms against 2 to 3 ms, and less where
+            // PAUSE is short, as on AMD), and a pause between two messages
+            // that outlasts it (an ask's round trip from another core on a
+            // loaded runner) parks the core, whose next message pays the
+            // park and its wake. The clock is read every 64 passes.
+            if (idle_count == 1) {
+                idle_since = aether_now_ns();
+                spinning = 1;
+            } else if (spinning && (idle_count & 63) == 0 &&
+                       aether_now_ns() - idle_since >= AETHER_IDLE_SPIN_NS) {
+                spinning = 0;
+            }
+            if (spinning) {
                 // Tight spin with architecture-specific pause
                 AETHER_PAUSE();
             } else if (tls_overflow_any) {
