@@ -2047,6 +2047,10 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 // reads as it stops, and one exchange each way when it left a message.
 // ---------------------------------------------------------------------------
 
+/* The entries a core's ready lists and timer heap have room for when
+ * scheduler_init makes them; each grows past it on demand. */
+#define READY_INITIAL 64
+
 typedef struct AetherTimer {
     uint64_t deadline;
     ActorBase* actor;
@@ -2064,7 +2068,7 @@ static void ready_out_of_memory(ActorBase* actor, const char* what) {
 
 static void ready_vec_push(ActorBase*** v, int* n, int* cap, ActorBase* actor) {
     if (unlikely(*n == *cap)) {
-        int grown_cap = *cap ? *cap * 2 : 64;
+        int grown_cap = *cap ? *cap * 2 : READY_INITIAL;
         ActorBase** grown = (ActorBase**)realloc(*v, (size_t)grown_cap * sizeof(ActorBase*));
         if (!grown) ready_out_of_memory(actor, "ready list");
         *v = grown;
@@ -2167,7 +2171,7 @@ static void timer_set_key(Scheduler* s, int i, uint64_t deadline) {
 
 static void timer_insert(Scheduler* s, ActorBase* actor, uint64_t deadline) {
     if (unlikely(s->timer_count == s->timer_cap)) {
-        int cap = s->timer_cap ? s->timer_cap * 2 : 64;
+        int cap = s->timer_cap ? s->timer_cap * 2 : READY_INITIAL;
         AetherTimer* grown = (AetherTimer*)realloc(s->timers, (size_t)cap * sizeof(AetherTimer));
         if (!grown) ready_out_of_memory(actor, "timer heap");
         s->timers = grown;
@@ -3226,21 +3230,28 @@ void scheduler_init(int cores) {
         schedulers[i].relief_cursor = 0;
         schedulers[i].coalesce_buffer.count = 0;
         schedulers[i].coalesce_buffer.next = 0;
-        // The ready list and the timer heap (#3540), grown on first use.
-        schedulers[i].ready = NULL;
+        // The ready list and the timer heap (#3540): made here with room for
+        // READY_INITIAL entries each, and grown past that on demand. Made
+        // on first use, as they were, a core's first push or countdown in a
+        // program's steady state allocated them then: memory held for the
+        // lifecycle, which a test that measures a window of steady work for
+        // growth (test_actor_ref_state_store) read as a leak whenever the
+        // window was the one that first stepped some core. Out of memory
+        // here, they start empty and grow on first use.
+        schedulers[i].ready = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
         schedulers[i].ready_count = 0;
-        schedulers[i].ready_cap = 0;
-        schedulers[i].ready_work = NULL;
+        schedulers[i].ready_cap = schedulers[i].ready ? READY_INITIAL : 0;
+        schedulers[i].ready_work = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
         schedulers[i].ready_work_count = 0;
-        schedulers[i].ready_work_cap = 0;
+        schedulers[i].ready_work_cap = schedulers[i].ready_work ? READY_INITIAL : 0;
         schedulers[i].ready_at = 0;
-        schedulers[i].timers = NULL;
+        schedulers[i].timers = (AetherTimer*)malloc(READY_INITIAL * sizeof(AetherTimer));
         schedulers[i].timer_count = 0;
-        schedulers[i].timer_cap = 0;
+        schedulers[i].timer_cap = schedulers[i].timers ? READY_INITIAL : 0;
         atomic_flag_clear_explicit(&schedulers[i].ready_in.lock, memory_order_relaxed);
         atomic_store_explicit(&schedulers[i].ready_in.count, 0, memory_order_relaxed);
-        schedulers[i].ready_in.list = NULL;
-        schedulers[i].ready_in.cap = 0;
+        schedulers[i].ready_in.list = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
+        schedulers[i].ready_in.cap = schedulers[i].ready_in.list ? READY_INITIAL : 0;
     }
     actor_park_init_once();
     atomic_store_explicit(&g_sched_state, 2, memory_order_release);
