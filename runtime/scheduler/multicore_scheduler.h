@@ -540,7 +540,9 @@ void scheduler_cleanup(void);
 /* An actor the caller allocated: zeroed before its first registration
  * (calloc, or memset), with its mailbox initialised and its step set. It
  * may be registered again after a shutdown; its count of messages in
- * flight carries over (#3090). */
+ * flight carries over (#3090), and so does a receive timeout it has armed,
+ * which its core fires from the registration on, as it does one armed
+ * before a first registration (#3540). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
 /* Out of its core's table. An entry for it may still wait in the core's
  * ready list or timer heap (#3540), which the core takes and drops once it

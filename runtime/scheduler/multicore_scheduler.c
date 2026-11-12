@@ -3779,17 +3779,16 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
      * (#3090). Read in this order, against a core's take of it (the bit,
      * then its id): a core id read here that a take stored has the bit
      * with it. */
+    int core;
     for (;;) {
         int cur = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
         int routed = atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_ROUTED;
         if (routed && cur >= 0 && cur < num_cores) {
-            int core = register_actor_ex(actor, cur, 0, 0);
+            core = register_actor_ex(actor, cur, 0, 0);
             atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
-            if (core >= 0 && preferred_core >= 0 && preferred_core < num_cores && preferred_core != core) {
+            if (core >= 0 && preferred_core >= 0 && preferred_core < num_cores && preferred_core != core)
                 atomic_store_explicit(&actor->migrate_to, preferred_core, memory_order_relaxed);
-                ready_push(actor);
-            }
-            return core;
+            break;
         }
         // No core delivers to it (a new actor) or none can yet (its core is
         // past this lifecycle's count): placed as any actor is, unless a
@@ -3801,11 +3800,20 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
             atomic_init(&actor->ready_queued, 0);
             atomic_init(&actor->timer_slot, 0);
         }
-        int core = register_actor_ex(actor, preferred_core, cur, 1);
+        core = register_actor_ex(actor, preferred_core, cur, 1);
         if (core == -2) continue;   // a core took it meanwhile: it keeps it
         atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
-        return core;
+        break;
     }
+    /* Its core looks at it once now (#3540), as the scan looked at every
+     * actor of its table on its next pass: the ready list brings a core
+     * only to the actors it is told of. A countdown armed before is found
+     * this way (one carried over a restart lost its heap entry with the
+     * last lifecycle's tables; one armed before the registration was told
+     * when it was on no core, and the push went nowhere), as are messages
+     * already in its mailbox and a move asked of it. */
+    ready_push(actor);
+    return core;
 }
 static int register_actor(ActorBase* actor, int preferred_core) {
     return register_actor_ex(actor, preferred_core, 0, 0);

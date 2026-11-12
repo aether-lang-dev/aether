@@ -2477,6 +2477,71 @@ void test_scheduler_end_during_shutdown_finalized_by_core(void) {
     ASSERT_EQ(1, finalized_after);
 }
 
+// A caller's actor (zeroed, its mailbox and step set, as the header asks).
+static void* caller_actor(size_t size, void (*step)(void*)) {
+    ActorBase* a = (ActorBase*)calloc(1, size);
+    if (!a) return NULL;
+    mailbox_init(&a->mailbox);
+    a->step = step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    return a;
+}
+
+static void arm_countdown(ActorBase* a, int ms) {
+    a->timeout_ns = (uint64_t)ms * 1000000ULL;
+    a->last_activity_ns = aether_now_ns();
+    scheduler_timeout_armed(a);
+}
+
+static int wait_in_heap(ActorBase* a) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(&a->timer_slot) == 0 && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(&a->timer_slot) != 0;
+}
+
+// A caller's countdown is the scheduler's to fire once the actor is
+// registered, whenever it was armed (#3540). The scan found such an actor in
+// its table on its next pass; the ready list finds an actor only when told:
+// one carried over a restart lost its countdown with the last lifecycle's
+// heap, and one armed before its registration was told when it was on no
+// core, and the push went nowhere.
+void test_ready_list_registration_finds_armed_countdown(void) {
+    RlTimed* carried = (RlTimed*)caller_actor(sizeof(RlTimed), rl_timed_step);
+    RlTimed* early = (RlTimed*)caller_actor(sizeof(RlTimed), rl_timed_step);
+    ASSERT_NOT_NULL(carried);
+    ASSERT_NOT_NULL(early);
+    atomic_init(&carried->fired, 0);
+    atomic_init(&early->fired, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)carried, 0);
+    // Armed in this lifecycle, due in the next.
+    arm_countdown((ActorBase*)carried, 300);
+    int in_heap = wait_in_heap((ActorBase*)carried);
+    scheduler_shutdown();
+    int fired_before = atomic_load(&carried->fired);
+
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    arm_countdown((ActorBase*)early, 50);   // before its registration
+    scheduler_register_actor((ActorBase*)carried, -1);
+    scheduler_register_actor((ActorBase*)early, -1);
+    int carried_fired = wait_count(&carried->fired, 1);
+    int early_fired = wait_count(&early->fired, 1);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(carried);
+    free(early);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(0, fired_before);
+    ASSERT_EQ(1, carried_fired);
+    ASSERT_EQ(1, early_fired);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2517,4 +2582,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler stepping loop yields to its queues", test_scheduler_stepping_loop_yields_to_queues, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler restart hands a carried actor over", test_scheduler_restart_hands_carried_actor_over, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler end during shutdown is finalized by the core", test_scheduler_end_during_shutdown_finalized_by_core, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a registration finds an armed countdown", test_ready_list_registration_finds_armed_countdown, TEST_CATEGORY_RUNTIME);
 }
