@@ -8,6 +8,7 @@
 #include <string.h>
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #ifdef _WIN32
 #include <windows.h>
 #define sleep_ms(ms) Sleep(ms)
@@ -79,16 +80,18 @@ TEST_CATEGORY(process_memory_is_reported_or_unsupported, TEST_CATEGORY_RUNTIME) 
 /* aether_thread_epoch changes when a thread starts and again when it ends
  * (#2551): a thread holds heap blocks of its own while it lives, so a heap
  * count is compared only between reads with the same epoch. */
-static volatile int g_release_waiter = 0;
-static volatile int g_waiter_running = 0;
+/* Flags between the test and its waiter thread: atomic (volatile ints raced,
+ * #3542). */
+static atomic_int g_release_waiter = 0;
+static atomic_int g_waiter_running = 0;
 
 /* A thread's start is reported on the thread itself, before its start
  * routine runs (on Windows, the loader's DLL_THREAD_ATTACH), so the
  * routine says it runs and the reader waits for that. */
 static void* epoch_waiter(void* arg) {
     (void)arg;
-    g_waiter_running = 1;
-    while (!g_release_waiter) sched_yield();
+    atomic_store(&g_waiter_running, 1);
+    while (!atomic_load(&g_release_waiter)) sched_yield();
     return NULL;
 }
 
@@ -115,11 +118,11 @@ TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RU
         }
         ASSERT_TRUE(stable >= 30);
     }
-    g_release_waiter = 0;
-    g_waiter_running = 0;
+    atomic_store(&g_release_waiter, 0);
+    atomic_store(&g_waiter_running, 0);
     pthread_t t;
     ASSERT_TRUE(pthread_create(&t, NULL, epoch_waiter, NULL) == 0);
-    while (!g_waiter_running) sched_yield();
+    while (!atomic_load(&g_waiter_running)) sched_yield();
     /* The start is counted by the time the thread runs on most platforms,
      * but wait for it a bounded while, as the end is waited for below. */
     int64_t running = aether_thread_epoch();
@@ -128,7 +131,7 @@ TEST_CATEGORY(thread_epoch_moves_when_a_thread_starts_and_ends, TEST_CATEGORY_RU
         running = aether_thread_epoch();
     }
     ASSERT_TRUE(running != before);
-    g_release_waiter = 1;
+    atomic_store(&g_release_waiter, 1);
     pthread_join(t, NULL);
     /* The end can be reported after the join returns: on macOS the Mach
      * thread finishes terminating on its own, and task_threads lists it
@@ -165,8 +168,8 @@ static DWORD WINAPI unreported_body(LPVOID arg) {
 TEST_CATEGORY(thread_epoch_moves_when_an_unreported_thread_runs, TEST_CATEGORY_RUNTIME) {
     for (int i = 0; i < 8; i++) {
         pthread_t t;
-        g_release_waiter = 1;
-        g_waiter_running = 0;
+        atomic_store(&g_release_waiter, 1);
+        atomic_store(&g_waiter_running, 0);
         ASSERT_TRUE(pthread_create(&t, NULL, epoch_waiter, NULL) == 0);
         pthread_join(t, NULL);
         ASSERT_TRUE(aether_thread_epoch() >= 0);

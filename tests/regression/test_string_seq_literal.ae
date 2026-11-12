@@ -97,7 +97,10 @@ main() {
     v ! Urls { sites: ["alpha", "beta", "gamma"], count: 3 }
     v ! Sites { sites: ["alpha", "beta", "gamma"] }
 
-    sleep(1000)
+    // Ten seconds: a guard, not a measure, which the passing run never
+    // reaches, and one second was too short under TSan (#3542), which runs
+    // a program 5 to 15 times slower.
+    sleep(10000)
     println("FAIL: timed out before both messages were verified")
     exit(1)
 }

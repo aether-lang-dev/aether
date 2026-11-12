@@ -32,6 +32,7 @@ trap 'rm -rf "$tmp" || true' EXIT
 cat > "$tmp/main.ae" <<'AE'
 import std.actors
 import std.worker
+import std.sync
 
 message Bump {}
 message Ask { from: actor_ref }
@@ -50,7 +51,7 @@ actor Spy {
     state last = -1
     receive {
         Tell(value) -> { last = value }
-        Drain(sink) -> { ref_set(sink, last) }
+        Drain(sink) -> { sync.atomic_store(sink, last) }
     }
 }
 
@@ -67,16 +68,28 @@ blast(job: ptr) -> ptr {
 
 // Every Bump sent before the Ask is counted before the Ask is answered
 // (a mailbox is FIFO); what varies is how soon the scheduler gets there.
+// The spy writes into a std.sync cell this thread polls (a ref is plain
+// memory, which the spy's thread and this one raced, #3542), one Drain at
+// a time: -2 before each, so none is on its way when the cell is freed.
 read_count(target: actor_ref, timeout_ms: int) -> int {
     spy = spawn(Spy())
     target ! Ask { from: spy }
-    cell = ref(-1)
-    for (waited = 0; waited < timeout_ms; waited = waited + 5) {
+    cell = sync.atomic_new(-1)
+    long got = -1
+    waited = 0
+    while got == -1 && waited < timeout_ms {
+        sync.atomic_store(cell, -2)
         spy ! Drain { sink: cell }
-        if ref_get(cell) != -1 { return ref_get(cell) }
-        sleep(5)
+        while sync.atomic_load(cell) == -2 && waited < timeout_ms {
+            sleep(5)
+            waited = waited + 5
+        }
+        got = sync.atomic_load(cell)
     }
-    return ref_get(cell)
+    if got == -2 { return -1 }   // a Drain is on its way: the cell outlives it
+    sync.atomic_free(cell)
+    int answer = got   // a count, well inside an int
+    return answer
 }
 
 main() {

@@ -6,32 +6,39 @@
 // up after two seconds and saw `ready` still 0, and with no timeout it would
 // have deadlocked. Every send now goes through the scheduler, so the handler
 // runs on a scheduler thread while main goes on and sets `ready`.
+//
+// `ready` is a std.sync cell, not a module var: main sets it while the
+// handler polls it on its own thread, and a plain int read on one thread
+// and written on another is a data race (#3542).
+
+import std.sync
 
 extern exit(code: int)
 
-var ready = 0
 var saw_ready = -1
 
-message Wait {}
+message Wait { ready: ptr }
 
 actor Waiter {
     receive {
-        Wait() -> {
+        Wait(ready) -> {
             waited = 0
-            while ready == 0 && waited < 2000 {
+            while sync.atomic_load(ready) == 0 && waited < 2000 {
                 sleep(1)
                 waited = waited + 1
             }
-            saw_ready = ready
+            saw_ready = sync.atomic_load(ready)
         }
     }
 }
 
 main() {
+    ready = sync.atomic_new(0)
     w = spawn(Waiter())
-    w ! Wait {}
-    ready = 1
+    w ! Wait { ready: ready }
+    sync.atomic_store(ready, 1)
     wait_for_idle()
+    sync.atomic_free(ready)
     if saw_ready != 1 {
         println("FAIL #3112: the handler ran inside the send and never saw main go on (${saw_ready})")
         exit(1)

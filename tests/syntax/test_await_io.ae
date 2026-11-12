@@ -58,10 +58,13 @@ main() {
         exit(1)
     }
 
-    sleep(500)
+    // The Reader exits the program (0) when IoReady arrives: wait well past
+    // that, so a slow machine (TSan runs a program 5 to 15 times slower,
+    // #3542) is not a failure. The fds are left open on the way out: the
+    // scheduler still has the read end in its poller, and closing it here,
+    // on another thread, raced its registration.
+    sleep(10000)
 
-    net.fd_close(write_fd)
-    net.fd_close(read_fd)
     println("FAIL: timed out waiting for IoReady")
     exit(1)
 }

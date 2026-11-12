@@ -24,6 +24,7 @@
 
 import std.spec
 import std.actors
+import std.sync
 
 message Bump {}
 // Ask the subject to report its count to `from`. The reply lands on a
@@ -50,7 +51,7 @@ actor Spy {
     state calls = 0
     receive {
         Tell(value) -> { last = value; calls = calls + 1 }
-        Drain(sink) -> { ref_set(sink, last) }
+        Drain(sink) -> { sync.atomic_store(sink, last) }
     }
 }
 
@@ -80,18 +81,30 @@ fn count_via_spy(target: actor_ref, n: int) -> int {
     // them, and a fixed sleep is a guess that a loaded machine loses.
     // This failed on a Windows CI runner while passing everywhere else.
     //
-    // Draining is idempotent, so asking again costs nothing, and -1 means
-    // the spy has not been told yet. A send that genuinely goes nowhere
-    // still fails, one second later than before.
-    cell = ref(-1)
-    for (waited = 0; waited < 1000; waited = waited + 5) {
+    // The spy writes what it was told into a std.sync cell, which this
+    // thread polls: the spy runs on a scheduler thread, and a ref is plain
+    // memory, which the two threads raced (#3542). One Drain at a time: the
+    // cell is set to -2 before each and the spy overwrites it, so none is
+    // left on its way when the cell is freed. -1 means the spy has not been
+    // told yet, and the next Drain asks again. A send that genuinely goes
+    // nowhere still fails, after five seconds.
+    cell = sync.atomic_new(-1)
+    long got = -1
+    waited = 0
+    while got == -1 && waited < 5000 {
+        sync.atomic_store(cell, -2)
         spy ! Drain { sink: cell }
-        if ref_get(cell) != -1 {
-            return ref_get(cell)
+        while sync.atomic_load(cell) == -2 && waited < 5000 {
+            sleep(5)
+            waited = waited + 5
         }
-        sleep(5)
+        got = sync.atomic_load(cell)
     }
-    return ref_get(cell)
+    // Still -2: a Drain is on its way, and the cell must outlive it.
+    if got == -2 { return -1 }
+    sync.atomic_free(cell)
+    int answer = got   // a count, well inside an int
+    return answer
 }
 
 main() {

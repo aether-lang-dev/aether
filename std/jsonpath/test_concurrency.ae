@@ -79,7 +79,10 @@ main() {
 
     // Collector exits successfully when all replies arrive. This is only a
     // guard for a dead mailbox or a broken actor hand-off.
-    sleep(1000)
+    // Ten seconds: a guard, not a measure, which the passing run never
+    // reaches, and one second was too short under TSan (#3542), which runs
+    // a program 5 to 15 times slower.
+    sleep(10000)
     println("FAIL: parser concurrency timed out")
     exit(1)
 }
