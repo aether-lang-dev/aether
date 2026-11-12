@@ -1157,7 +1157,14 @@ $(BUILD_FLAGS_STAMP): build-flags-force
 	    printf '%s' "$$digest" > "$@"; \
 	  fi
 
-$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/quote $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/std/posix $(OBJ_DIR)/std/posix/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
+# The generated headers come first, order-only: runtime/aether_abi.h includes
+# aether_version.h, and so does any source that includes it (the runtime's
+# exec, std.http's script gateway, tests/runtime/test_abi_layout.c). Only a few
+# objects named the header, so `make test` or `make test-build` in a fresh
+# checkout stopped at test_abi_layout.c with "aether_version.h: No such file
+# or directory" unless `make compiler` had run first. The asan, memory, dbg
+# and cov object rules below take it the same way.
+$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/quote $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/std/posix $(OBJ_DIR)/std/posix/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
 	@echo "Compiling $<..."
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -2388,19 +2395,19 @@ COV_LIB_OBJS = $(STD_SRC:%.c=$(COV_OBJ_DIR)/%.o) \
                $(RUNTIME_SRC:%.c=$(COV_OBJ_DIR)/%.o)
 COV_COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(COV_OBJ_DIR)/%.o)
 
-$(ASAN_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(ASAN_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) -c $< -o $@
 
-$(MEM_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(MEM_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) -c $< -o $@
 
-$(DBG_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(DBG_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) -c $< -o $@
 
-$(COV_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(COV_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) -c $< -o $@
 
