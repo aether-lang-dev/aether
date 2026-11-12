@@ -1023,15 +1023,21 @@ int64_t os_now_unix_ms_raw(void) {
  * is invariant across the OS lifetime (Win7+), so we cache it on first
  * call. Both functions are documented to always succeed on those
  * versions, so we treat a 0 frequency as the only failure mode. */
-static LARGE_INTEGER qpc_freq_cache = {0};
-static int qpc_freq_initialized = 0;
+/* The frequency, 0 until a call has read it: an atomic, as any thread may
+ * read the clock first (#3680). The value is all it publishes, and every
+ * thread that reads it computes the same, so two first calls at once only
+ * both ask the system. */
+static _Atomic int64_t qpc_freq_cache = 0;
 
 static int64_t qpc_freq_ticks_per_sec(void) {
-    if (!qpc_freq_initialized) {
-        if (!QueryPerformanceFrequency(&qpc_freq_cache)) return 0;
-        qpc_freq_initialized = 1;
+    int64_t freq = qpc_freq_cache;
+    if (freq == 0) {
+        LARGE_INTEGER f;
+        if (!QueryPerformanceFrequency(&f)) return 0;
+        freq = (int64_t)f.QuadPart;
+        qpc_freq_cache = freq;
     }
-    return (int64_t)qpc_freq_cache.QuadPart;
+    return freq;
 }
 
 int64_t os_now_monotonic_ms_raw(void) {

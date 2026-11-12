@@ -1,5 +1,6 @@
 #include "aether_numa.h"
 #include "config/aether_optimization_config.h"
+#include "utils/aether_once.h"
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
@@ -33,15 +34,17 @@ static void aligned_heap_free(void* ptr) {
 // Minimal stubs when NUMA is disabled (embedded, WASM, macOS, or -DAETHER_NO_NUMA)
 
 static aether_numa_topology_t g_topology = {0};
-static bool g_initialized = false;
+/* aether_once (#3680): the scheduler's start reads it, and a scheduler can
+ * start on demand on any thread. */
+static aether_once_t g_numa_once = AETHER_ONCE_INIT;
 
 aether_numa_topology_t aether_numa_init(void) {
-    if (g_initialized) return g_topology;
+    if (!aether_once_begin(&g_numa_once)) return g_topology;
     g_topology.num_nodes = 1;
     g_topology.num_cpus = 1;
     g_topology.cpu_to_node = NULL;
     g_topology.available = false;
-    g_initialized = true;
+    aether_once_done(&g_numa_once);
     return g_topology;
 }
 
@@ -53,7 +56,7 @@ void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
     return aligned_heap_alloc(size, align);
 }
 void aether_numa_free_aligned(void* ptr, size_t size) { (void)size; aligned_heap_free(ptr); }
-void aether_numa_cleanup(void) { g_initialized = false; }
+void aether_numa_cleanup(void) { aether_once_reset(&g_numa_once); }
 
 #else
 // Full NUMA implementation
@@ -71,15 +74,30 @@ void aether_numa_cleanup(void) { g_initialized = false; }
 #endif
 
 static aether_numa_topology_t g_topology = {0};
-static bool g_initialized = false;
+/* Detected once, by whichever thread starts a scheduler first (it can
+ * start on demand on any thread), and read by every spawn's allocation:
+ * aether_once (#3680), so a reader sees the whole topology and its map. */
+static aether_once_t g_numa_once = AETHER_ONCE_INIT;
+
+static aether_numa_topology_t numa_detect(void);
+
+aether_numa_topology_t aether_numa_init(void) {
+    if (aether_once_begin(&g_numa_once)) {
+        g_topology = numa_detect();
+        aether_once_done(&g_numa_once);
+    }
+    return g_topology;
+}
+
+/* Whether NUMA allocation is on: only once the topology is detected, read
+ * with the acquire that orders the topology's fields after it. */
+static int numa_on(void) {
+    return aether_once_is_done(&g_numa_once) && g_topology.available;
+}
 
 #ifdef _WIN32
 
-aether_numa_topology_t aether_numa_init(void) {
-    if (g_initialized) {
-        return g_topology;
-    }
-
+static aether_numa_topology_t numa_detect(void) {
     aether_numa_topology_t topo = {0};
     topo.available = false;
 
@@ -99,6 +117,7 @@ aether_numa_topology_t aether_numa_init(void) {
     // Allocate CPU to node mapping
     topo.cpu_to_node = (int*)malloc(sizeof(int) * topo.num_cpus);
     if (!topo.cpu_to_node) {
+        topo.available = false;   /* no map to read the nodes from */
         return topo;
     }
 
@@ -117,20 +136,18 @@ aether_numa_topology_t aether_numa_init(void) {
         }
     }
 
-    g_topology = topo;
-    g_initialized = true;
     return topo;
 }
 
 int aether_numa_node_of_cpu(int cpu_id) {
-    if (!g_initialized || !g_topology.available || cpu_id < 0 || cpu_id >= g_topology.num_cpus) {
+    if (!numa_on() || cpu_id < 0 || cpu_id >= g_topology.num_cpus) {
         return -1;
     }
     return g_topology.cpu_to_node[cpu_id];
 }
 
 void* aether_numa_alloc(size_t size, int node) {
-    if (!g_topology.available || node < 0 || node >= g_topology.num_nodes) {
+    if (!numa_on() || node < 0 || node >= g_topology.num_nodes) {
         return malloc(size);
     }
 
@@ -155,7 +172,7 @@ void* aether_numa_alloc(size_t size, int node) {
 void aether_numa_free(void* ptr, size_t size) {
     if (!ptr) return;
 
-    if (!g_topology.available) {
+    if (!numa_on()) {
         free(ptr);
         return;
     }
@@ -166,7 +183,7 @@ void aether_numa_free(void* ptr, size_t size) {
 }
 
 void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
-    if (g_topology.available && node >= 0 && node < g_topology.num_nodes) {
+    if (numa_on() && node >= 0 && node < g_topology.num_nodes) {
         // A VirtualAlloc region starts on the 64 KiB allocation granularity,
         // which covers any alignment this function accepts.
         void* ptr = VirtualAllocExNuma(GetCurrentProcess(), NULL, size,
@@ -182,17 +199,13 @@ void aether_numa_free_aligned(void* ptr, size_t size) {
     // As in aether_numa_free: only a VirtualAllocExNuma block is the base of a
     // region, so VirtualFree releases those and refuses a heap block, which
     // came from _aligned_malloc and goes back through _aligned_free.
-    if (g_topology.available && VirtualFree(ptr, 0, MEM_RELEASE)) return;
+    if (numa_on() && VirtualFree(ptr, 0, MEM_RELEASE)) return;
     aligned_heap_free(ptr);
 }
 
 #else // Linux/Unix
 
-aether_numa_topology_t aether_numa_init(void) {
-    if (g_initialized) {
-        return g_topology;
-    }
-
+static aether_numa_topology_t numa_detect(void) {
     aether_numa_topology_t topo = {0};
     topo.available = false;
 
@@ -231,13 +244,11 @@ aether_numa_topology_t aether_numa_init(void) {
     }
 #endif
 
-    g_topology = topo;
-    g_initialized = true;
     return topo;
 }
 
 int aether_numa_node_of_cpu(int cpu_id) {
-    if (!g_initialized || !g_topology.available || cpu_id < 0 || cpu_id >= g_topology.num_cpus) {
+    if (!numa_on() || cpu_id < 0 || cpu_id >= g_topology.num_cpus) {
         return -1;
     }
     return g_topology.cpu_to_node[cpu_id];
@@ -245,7 +256,7 @@ int aether_numa_node_of_cpu(int cpu_id) {
 
 void* aether_numa_alloc(size_t size, int node) {
 #ifdef HAVE_LIBNUMA
-    if (g_topology.available) {
+    if (numa_on()) {
         // Always use NUMA allocator when available so aether_numa_free (which
         // calls numa_free unconditionally) always receives a NUMA-allocated ptr.
         if (node >= 0 && node < g_topology.num_nodes) {
@@ -261,7 +272,7 @@ void aether_numa_free(void* ptr, size_t size) {
     if (!ptr) return;
 
 #ifdef HAVE_LIBNUMA
-    if (g_topology.available) {
+    if (numa_on()) {
         numa_free(ptr, size);
         return;
     }
@@ -274,7 +285,7 @@ void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
     // numa_alloc_* maps whole pages, so the block is page-aligned, which
     // covers any alignment this function accepts. The free below makes the
     // same choice on the same flag.
-    if (g_topology.available) return aether_numa_alloc(size, node);
+    if (numa_on()) return aether_numa_alloc(size, node);
 #else
     (void)node;
 #endif
@@ -284,7 +295,7 @@ void* aether_numa_alloc_aligned(size_t size, size_t align, int node) {
 void aether_numa_free_aligned(void* ptr, size_t size) {
     if (!ptr) return;
 #ifdef HAVE_LIBNUMA
-    if (g_topology.available) {
+    if (numa_on()) {
         numa_free(ptr, size);
         return;
     }
@@ -297,11 +308,11 @@ void aether_numa_free_aligned(void* ptr, size_t size) {
 #endif
 
 void aether_numa_cleanup(void) {
-    if (g_initialized && g_topology.cpu_to_node) {
+    if (aether_once_is_done(&g_numa_once) && g_topology.cpu_to_node) {
         free(g_topology.cpu_to_node);
         g_topology.cpu_to_node = NULL;
     }
-    g_initialized = false;
+    aether_once_reset(&g_numa_once);
 }
 
 #endif // AETHER_HAS_NUMA

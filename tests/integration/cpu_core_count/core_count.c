@@ -87,7 +87,7 @@ int main(void) {
     for (unsigned i = 0; i < sizeof(cases) / sizeof(cases[0]); i++) {
         package_count = cases[i][0];
         online_count = cases[i][1];
-        g_cpu_info_initialized = 0;
+        aether_once_reset(&g_cpu_info_once);   /* detect again, from the mock */
         memset(&g_cpu_info, 0, sizeof(g_cpu_info));
         int available = aether_cpu_available();
         int want = cases[i][2] < available ? cases[i][2] : available;

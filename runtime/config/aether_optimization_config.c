@@ -3,6 +3,7 @@
 
 #include "aether_optimization_config.h"
 #include "../utils/aether_cpu_detect.h"
+#include "../utils/aether_once.h"
 #include <stdio.h>
 #include <string.h>
 
@@ -25,12 +26,15 @@ AetherRuntimeConfig g_aether_config = {
     .messages_deduped = 0
 };
 
-static int g_hw_detected = 0;
+/* Detected once, by whichever thread starts a scheduler or configures the
+ * runtime first (scheduler_init can run on demand on any thread):
+ * aether_once (#3680), so another caller waits for g_hw_caps to be filled.
+ */
+static aether_once_t g_hw_once = AETHER_ONCE_INIT;
 
 // Detect hardware capabilities (called once at startup)
 void aether_detect_hardware(void) {
-    if (g_hw_detected) return;
-    g_hw_detected = 1;
+    if (!aether_once_begin(&g_hw_once)) return;
 
 #if AETHER_HAS_SIMD
     const CPUInfo* cpu = cpu_get_info();
@@ -77,6 +81,7 @@ void aether_detect_hardware(void) {
 #else
     g_hw_caps.cpu_pinning_available = false;
 #endif
+    aether_once_done(&g_hw_once);
 }
 
 // Configure runtime with user flags

@@ -275,6 +275,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #include <stdarg.h>   /* server_fail (#3131) */
 #include <errno.h>
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_once.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"  // ActorBase for actor dispatch (#2509)
 
 #ifdef _WIN32
@@ -1384,12 +1385,14 @@ static int conn_tls_accept(HttpConn* conn, SSL_CTX* ctx) {
  * defaults (TLS 1.2 minimum, all known ciphers) match the existing
  * client-side context in std/net/aether_http.c. */
 static void server_openssl_init_once(void) {
-    static int done = 0;
-    if (done) return;
+    /* aether_once (#3680): two servers given TLS on two threads at once ran
+     * the library's init twice, and one went on before it was done. */
+    static aether_once_t once = AETHER_ONCE_INIT;
+    if (!aether_once_begin(&once)) return;
     SSL_library_init();
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
-    done = 1;
+    aether_once_done(&once);
 }
 
 /* Security level 2 at least on the server context too (#3312), as
