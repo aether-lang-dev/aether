@@ -3710,12 +3710,16 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
     actor->scheduler_owned = 0;
     actor->release_message = NULL;   // its messages are the caller's (#3142)
     actor->step_payload = NULL;
-    atomic_init(&actor->thread_parked, 0);
-    atomic_init(&actor->death_watch, NULL);         // #2974
-    atomic_init(&actor->incarnation, 0);
-    atomic_init(&actor->mailbox_bound, 0);      // the generated spawn sets a bound (#2974)
-    atomic_init(&actor->mailbox_pending, 0);
-    atomic_init(&actor->full_drops, 0);
+    /* Stores, not atomic_init: a caller's actor can be registered again while
+     * a thread of the caller's is sending to it (above), and every send reads
+     * the bound and its count. atomic_init is a plain store, which raced
+     * those atomic loads. */
+    atomic_store_explicit(&actor->thread_parked, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->death_watch, NULL, memory_order_relaxed);         // #2974
+    atomic_store_explicit(&actor->incarnation, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->mailbox_bound, 0, memory_order_relaxed);      // the generated spawn sets a bound (#2974)
+    atomic_store_explicit(&actor->mailbox_pending, 0, memory_order_relaxed);
+    atomic_store_explicit(&actor->full_drops, 0, memory_order_relaxed);
     /* An actor a core may already be delivering to keeps that core (#3673):
      * one carried over a restart, whose messages since scheduler_init went
      * to the core its last lifecycle left in assigned_core, and one a core
