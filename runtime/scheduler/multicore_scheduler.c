@@ -413,6 +413,11 @@ static atomic_int g_overflow_total = 0;
 #ifndef AETHER_IDLE_SPIN_NS
 #define AETHER_IDLE_SPIN_NS 2000000ULL
 #endif
+// The passes of a spin that read no clock (#3540): AETHER_IDLE_SPIN_NS is
+// counted from the last of them.
+#ifndef AETHER_IDLE_SPIN_PASSES
+#define AETHER_IDLE_SPIN_PASSES 1024
+#endif
 
 // A core's park waits this long instead, when a test sets it (0: the
 // PARK_MS_MIN..PARK_MS_MAX steps above). Set to a minute, a wake that never
@@ -3078,10 +3083,16 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // PAUSE is short, as on AMD), and a pause between two messages
             // that outlasts it (an ask's round trip from another core on a
             // loaded runner) parks the core, whose next message pays the
-            // park and its wake. The clock is read every 64 passes.
-            if (idle_count == 1) {
-                idle_since = aether_now_ns();
+            // park and its wake. The clock is read first after
+            // AETHER_IDLE_SPIN_PASSES passes, then every 64: a pause shorter
+            // than those passes (a round trip's turn, the next message of a
+            // stream) reads no clock. Read at the first idle pass, it sat
+            // between a reply and the pickup of the next ask from a thread
+            // no core owns, a cost of one clock read per ask, which a slow
+            // clock source (a VM's) made large.
+            if (idle_count <= AETHER_IDLE_SPIN_PASSES) {
                 spinning = 1;
+                if (idle_count == AETHER_IDLE_SPIN_PASSES) idle_since = aether_now_ns();
             } else if (spinning && (idle_count & 63) == 0 &&
                        aether_now_ns() - idle_since >= AETHER_IDLE_SPIN_NS) {
                 spinning = 0;
