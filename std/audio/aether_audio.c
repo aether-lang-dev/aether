@@ -17,6 +17,8 @@
  * (they are below the FFI line, like OpenSSL's). */
 #include "aether_audio.h"
 #include "../../runtime/aether_resource_caps.h"
+#include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_once.h"
 
 #include <stdlib.h>
 #include <string.h>
@@ -127,20 +129,97 @@ double aether_audio_rendered_sample(int f, int ch) { (void)f; (void)ch; return 0
 
 static ma_engine g_engine;
 static ma_context g_null_ctx;
-static int g_engine_ready = 0;
 static int g_is_null = 0;
 static int g_headless = 0;
-static const char* g_audio_err = "";
+/* Every call writes it, on whatever thread the program makes the call
+ * from: an atomic pointer, each value a string literal. */
+static _Atomic(const char*) g_audio_err = "";
 
 /* Headless render block (aether_audio_render): the last mix pulled through
- * the graph, kept so a test can read peaks and samples back. */
+ * the graph, kept so a test can read peaks and samples back. Under
+ * g_engine_lock. */
 static float*  g_render = NULL;
 static size_t  g_render_bytes = 0;        /* allocation size, for the caps free */
 static size_t  g_render_cap_frames = 0;   /* allocated capacity, frames */
 static size_t  g_render_frames = 0;       /* frames in the last render */
 #define AUDIO_RENDER_MAX_FRAMES (1u << 22) /* ~87 s at 48 kHz; bounds the block */
 
-int aether_audio_open(void) {
+/* ---- the engine's lifetime (#3690) --------------------------------------
+ *
+ * The engine is one per process, and open, close and every call that uses
+ * it can come from any thread: the program's, an actor's, a worker's. It
+ * used to be a set of plain globals with no guard, so a close on one thread
+ * uninitialised the engine under a load, a play or a render on another, and
+ * two opens at once both initialised it.
+ *
+ * g_engine_lock guards the engine's state: whether it is open (g_engine_ready),
+ * whether a close is under way (g_engine_closing), how it was opened
+ * (g_is_null, g_headless), the headless render block, and the count of calls
+ * using it now (g_engine_users). open, open_headless and close run under it.
+ * Every other call that uses the engine or a source or group made on it takes
+ * a reference first (engine_enter), which fails once the engine is closed or
+ * closing, and gives it back after (engine_leave); a close waits, the lock
+ * released, until no reference is held, and an open that comes during a close
+ * waits for it to finish. The calls themselves do not hold the lock: two
+ * threads playing two sounds go on side by side, as miniaudio's engine allows,
+ * and its mixer thread never takes this lock.
+ *
+ * A program that opens, plays and closes on one thread does exactly what it
+ * did: the reference is taken and given back inside each call. What changes
+ * is what a close does to the sources and groups still live (the engine keeps
+ * a list of them under the lock): it takes them out of the graph before it
+ * frees the engine, where it used to free the graph under them, and a call on
+ * one afterwards (a contract violation that read freed memory) now refuses,
+ * with last_error "audio: the source's engine was closed". It can still be
+ * unloaded, or a group freed, as before.
+ *
+ * The lock is made once, by the first call on any thread (aether_once, #3680):
+ * the Windows thread shim's mutex has no static initialiser. */
+static aether_once_t   g_engine_lock_once = AETHER_ONCE_INIT;
+static pthread_mutex_t g_engine_lock;
+static pthread_cond_t  g_engine_idle;     /* signalled when users reach 0, and at a close's end */
+static int g_engine_ready = 0;
+static int g_engine_closing = 0;
+static int g_engine_users = 0;
+
+static void engine_lock(void) {
+    if (aether_once_begin(&g_engine_lock_once)) {
+        pthread_mutex_init(&g_engine_lock, NULL);
+        pthread_cond_init(&g_engine_idle, NULL);
+        aether_once_done(&g_engine_lock_once);
+    }
+    pthread_mutex_lock(&g_engine_lock);
+}
+
+static void engine_unlock(void) {
+    pthread_mutex_unlock(&g_engine_lock);
+}
+
+/* An open, or a close that finds a close already under way, waits for that
+ * one to finish; called with the lock held. */
+static void engine_wait_close(void) {
+    while (g_engine_closing) pthread_cond_wait(&g_engine_idle, &g_engine_lock);
+}
+
+/* A reference to the open engine for one call: 0, with last_error set, when
+ * it is not open (or is closing). */
+static int engine_enter(void) {
+    engine_lock();
+    int ok = g_engine_ready && !g_engine_closing;
+    if (ok) g_engine_users++;
+    engine_unlock();
+    if (!ok) g_audio_err = "audio: engine not open";
+    return ok;
+}
+
+static void engine_leave(void) {
+    engine_lock();
+    if (--g_engine_users == 0) pthread_cond_broadcast(&g_engine_idle);
+    engine_unlock();
+}
+
+/* The engine as open() makes it; the lock held. */
+static int engine_open_locked(void) {
     if (g_engine_ready) return 1;
     g_audio_err = "";
 
@@ -152,7 +231,7 @@ int aether_audio_open(void) {
     }
 
     /* Fallback: force the null backend so headless environments still get a
-     * fully-functional (silent) engine — decode, transport, seek, position
+     * fully-functional (silent) engine: decode, transport, seek, position
      * all work against the null device's steady clock. */
     ma_backend nullBackend = ma_backend_null;
     if (ma_context_init(&nullBackend, 1, NULL, &g_null_ctx) != MA_SUCCESS) {
@@ -171,12 +250,20 @@ int aether_audio_open(void) {
     return 1;
 }
 
+int aether_audio_open(void) {
+    engine_lock();
+    engine_wait_close();
+    int rc = engine_open_locked();
+    engine_unlock();
+    return rc;
+}
+
 /* Headless: an engine with no device and no mixer thread. Nothing advances
  * until render() pulls frames through the graph, so every number a test
  * reads back (position, played frames, peaks) is a function of the calls it
  * made, not of wall-clock time. This is what lets a headless test hold a mix
  * to numbers the way ae3d's renderers are held to pixels (#2205). */
-int aether_audio_open_headless(int sample_rate, int channels) {
+static int engine_open_headless_locked(int sample_rate, int channels) {
     if (g_engine_ready) { g_audio_err = "audio: engine already open"; return 0; }
     if (sample_rate <= 0) { g_audio_err = "audio: sample_rate must be > 0"; return 0; }
     if (channels <= 0)    { g_audio_err = "audio: channels must be > 0"; return 0; }
@@ -196,8 +283,26 @@ int aether_audio_open_headless(int sample_rate, int channels) {
     return 1;
 }
 
+int aether_audio_open_headless(int sample_rate, int channels) {
+    engine_lock();
+    engine_wait_close();
+    int rc = engine_open_headless_locked(sample_rate, channels);
+    engine_unlock();
+    return rc;
+}
+
+static void engine_detach_all_locked(void);   /* after the handle types */
+
+/* Closes the engine once no call is using it: new calls are refused from the
+ * moment it starts, the ones under way finish first. Every source and group
+ * still live is taken out of the graph before the engine is freed. */
 void aether_audio_close(void) {
-    if (!g_engine_ready) return;
+    engine_lock();
+    engine_wait_close();
+    if (!g_engine_ready) { engine_unlock(); return; }
+    g_engine_closing = 1;
+    while (g_engine_users > 0) pthread_cond_wait(&g_engine_idle, &g_engine_lock);
+    engine_detach_all_locked();
     if (g_render) {
         aether_caps_free(g_render, g_render_bytes);
         g_render = NULL;
@@ -210,23 +315,37 @@ void aether_audio_close(void) {
     g_engine_ready = 0;
     g_is_null = 0;
     g_headless = 0;
+    g_engine_closing = 0;
+    pthread_cond_broadcast(&g_engine_idle);
+    engine_unlock();
 }
 
 int aether_audio_is_null_backend(void) {
-    return g_is_null;
+    engine_lock();
+    int v = g_is_null;
+    engine_unlock();
+    return v;
 }
 
 int aether_audio_is_headless(void) {
-    return g_headless;
+    engine_lock();
+    int v = g_headless;
+    engine_unlock();
+    return v;
 }
 
+/* render and the reads of its block run under the lock: the block is one,
+ * shared by every thread that renders. */
 int aether_audio_render(int frames) {
-    if (!g_engine_ready || !g_headless) {
+    engine_lock();
+    if (!g_engine_ready || g_engine_closing || !g_headless) {
+        engine_unlock();
         g_audio_err = "audio: render needs a headless engine (open_headless)";
         return 0;
     }
-    if (frames <= 0) return 0;
+    if (frames <= 0) { engine_unlock(); return 0; }
     if ((unsigned)frames > AUDIO_RENDER_MAX_FRAMES) {
+        engine_unlock();
         g_audio_err = "audio: render block too large";
         return 0;
     }
@@ -238,6 +357,7 @@ int aether_audio_render(int frames) {
         if (!g_render) {
             g_render_bytes = 0;
             g_render_cap_frames = 0;
+            engine_unlock();
             g_audio_err = "audio: out of memory";
             return 0;
         }
@@ -246,28 +366,37 @@ int aether_audio_render(int frames) {
     ma_uint64 read = 0;
     ma_engine_read_pcm_frames(&g_engine, g_render, (ma_uint64)frames, &read);
     g_render_frames = (size_t)read;
+    engine_unlock();
     return (int)read;
 }
 
 double aether_audio_rendered_peak(int channel) {
-    if (!g_render || !g_engine_ready) return 0.0;
+    engine_lock();
+    if (!g_render || !g_engine_ready) { engine_unlock(); return 0.0; }
     ma_uint32 ch = ma_engine_get_channels(&g_engine);
-    if (channel < 0 || (ma_uint32)channel >= ch) return 0.0;
+    if (channel < 0 || (ma_uint32)channel >= ch) { engine_unlock(); return 0.0; }
     float peak = 0.0f;
     for (size_t i = 0; i < g_render_frames; i++) {
         float v = g_render[i * ch + (size_t)channel];
         if (v < 0) v = -v;
         if (v > peak) peak = v;
     }
+    engine_unlock();
     return (double)peak;
 }
 
 double aether_audio_rendered_sample(int frame, int channel) {
-    if (!g_render || !g_engine_ready) return 0.0;
+    engine_lock();
+    if (!g_render || !g_engine_ready) { engine_unlock(); return 0.0; }
     ma_uint32 ch = ma_engine_get_channels(&g_engine);
-    if (frame < 0 || (size_t)frame >= g_render_frames) return 0.0;
-    if (channel < 0 || (ma_uint32)channel >= ch) return 0.0;
-    return (double)g_render[(size_t)frame * ch + (size_t)channel];
+    if (frame < 0 || (size_t)frame >= g_render_frames ||
+        channel < 0 || (ma_uint32)channel >= ch) {
+        engine_unlock();
+        return 0.0;
+    }
+    double v = (double)g_render[(size_t)frame * ch + (size_t)channel];
+    engine_unlock();
+    return v;
 }
 
 const char* aether_audio_last_error(void) {
@@ -409,7 +538,7 @@ static const ma_node_vtable g_pan_vtable = { pan_process, NULL, 1, 1, 0 };
 
 /* ---- sound handle ------------------------------------------------------ */
 
-typedef struct {
+typedef struct AudioSound {
     ma_sound        sound;
     ma_decoder      decoder;
     ma_audio_buffer buffer;      /* raw-PCM sources use this instead */
@@ -431,11 +560,76 @@ typedef struct {
      * set) the clock still shows the pre-seek reading, which is ignored. */
     ma_uint64       played_base;
     ma_uint64       played_mark;
+    /* The engine's list of live sources, under g_engine_lock: a close takes
+     * every source still loaded out of the graph before it frees the engine,
+     * and marks it detached; every call on it is refused from then on, and
+     * unload frees what is left (#3690). */
+    struct AudioSound* live_prev;
+    struct AudioSound* live_next;
+    int             detached;
 } AudioSound;
 
-typedef struct {
+typedef struct AudioGroup {
     ma_sound_group group;
+    /* The engine's list of live groups, as a source's list (#3690). */
+    struct AudioGroup* live_prev;
+    struct AudioGroup* live_next;
+    int            detached;
 } AudioGroup;
+
+static AudioSound* g_live_sounds = NULL;   /* under g_engine_lock */
+static AudioGroup* g_live_groups = NULL;   /* under g_engine_lock */
+
+static void live_sound_link_locked(AudioSound* s) {
+    s->live_prev = NULL;
+    s->live_next = g_live_sounds;
+    if (g_live_sounds) g_live_sounds->live_prev = s;
+    g_live_sounds = s;
+}
+
+static void live_sound_unlink_locked(AudioSound* s) {
+    if (s->live_prev) s->live_prev->live_next = s->live_next;
+    else g_live_sounds = s->live_next;
+    if (s->live_next) s->live_next->live_prev = s->live_prev;
+    s->live_prev = s->live_next = NULL;
+}
+
+static void live_group_link_locked(AudioGroup* g) {
+    g->live_prev = NULL;
+    g->live_next = g_live_groups;
+    if (g_live_groups) g_live_groups->live_prev = g;
+    g_live_groups = g;
+}
+
+static void live_group_unlink_locked(AudioGroup* g) {
+    if (g->live_prev) g->live_prev->live_next = g->live_next;
+    else g_live_groups = g->live_next;
+    if (g->live_next) g->live_next->live_prev = g->live_prev;
+    g->live_prev = g->live_next = NULL;
+}
+
+/* A close takes every live source and group out of the engine's graph before
+ * ma_engine_uninit walks it: a node left attached would point the graph at
+ * memory the program frees later (or that an unload under way frees now).
+ * Sources first, then groups: a source's pan node may feed a group. What a
+ * source still owns apart from the graph (decoder, buffer, stream ring,
+ * bytes) stays for unload to free. The lock is held and no call holds a
+ * reference. */
+static void engine_detach_all_locked(void) {
+    while (g_live_sounds) {
+        AudioSound* s = g_live_sounds;
+        if (s->have_sound) { ma_sound_uninit(&s->sound); s->have_sound = 0; }
+        if (s->have_pan)   { ma_node_uninit(&s->pan, NULL); s->have_pan = 0; }
+        s->detached = 1;
+        live_sound_unlink_locked(s);
+    }
+    while (g_live_groups) {
+        AudioGroup* g = g_live_groups;
+        ma_sound_group_uninit(&g->group);
+        g->detached = 1;
+        live_group_unlink_locked(g);
+    }
+}
 
 static ma_uint32 pcm_frame_bytes(int sample_rate, int channels, int format);
 
@@ -454,6 +648,7 @@ static void sound_free(AudioSound* s) {
     if (s->data) aether_caps_free(s->data, s->data_len);
     aether_caps_free(s, sizeof(AudioSound));
 }
+
 
 static AudioSound* sound_alloc(void) {
     AudioSound* s = (AudioSound*)aether_caps_malloc(sizeof(AudioSound));
@@ -511,8 +706,7 @@ static int sound_attach(AudioSound* s, ma_data_source* ds) {
  * recognises) into a playable sound. Returns the handle or NULL, setting
  * g_audio_err on failure. The encoded bytes are copied and owned by the
  * handle so the caller's buffer need not outlive it. */
-void* aether_audio_load_wav(const char* data, int length) {
-    if (!g_engine_ready) { g_audio_err = "audio: engine not open"; return NULL; }
+static void* audio_load_wav_impl(const char* data, int length) {
     if (!data || length <= 0) { g_audio_err = "audio: empty input"; return NULL; }
 
     AudioSound* s = sound_alloc();
@@ -552,9 +746,8 @@ void* aether_audio_load_wav(const char* data, int length) {
  * position_ms/duration_ms/seek_ms/volume all work unchanged. They read
  * s->sound, never the decoder, which is why this drops in cleanly.
  * position_ms in particular keeps working as the A/V-sync master clock. */
-void* aether_audio_load_pcm(const char* data, int length,
+static void* audio_load_pcm_impl(const char* data, int length,
                             int sample_rate, int channels, int format) {
-    if (!g_engine_ready) { g_audio_err = "audio: engine not open"; return NULL; }
     if (!data || length <= 0) { g_audio_err = "audio: empty input"; return NULL; }
 
     ma_uint32 frame_bytes = pcm_frame_bytes(sample_rate, channels, format);
@@ -604,9 +797,8 @@ static ma_uint32 pcm_frame_bytes(int sample_rate, int channels, int format) {
 
 /* ---- queue source ------------------------------------------------------ */
 
-void* aether_audio_stream_open(int sample_rate, int channels, int format,
+static void* audio_stream_open_impl(int sample_rate, int channels, int format,
                                int capacity_frames) {
-    if (!g_engine_ready) { g_audio_err = "audio: engine not open"; return NULL; }
     if (!pcm_frame_bytes(sample_rate, channels, format)) return NULL;
     if (capacity_frames <= 0) { g_audio_err = "audio: capacity must be > 0"; return NULL; }
 
@@ -686,7 +878,7 @@ int64_t aether_audio_stream_underruns(void* sound) {
     return (int64_t)ma_atomic_uint64_get(&s->stream.underruns);
 }
 
-void aether_audio_unload(void* sound) {
+static void audio_unload_impl(void* sound) {
     if (!sound) return;
     sound_free((AudioSound*)sound);
 }
@@ -708,7 +900,7 @@ static void sound_seek(AudioSound* s, ma_uint64 target) {
     ma_sound_seek_to_pcm_frame(&s->sound, target);
 }
 
-int64_t aether_audio_played_frames(void* sound) {
+static int64_t audio_played_frames_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     if (sound_seek_pending(s)) return (int64_t)s->played_base;
@@ -719,7 +911,7 @@ int64_t aether_audio_played_frames(void* sound) {
 
 /* ---- transport --------------------------------------------------------- */
 
-int aether_audio_play(void* sound) {
+static int audio_play_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     /* If it finished, rewind so play() restarts rather than no-ops. */
@@ -729,14 +921,14 @@ int aether_audio_play(void* sound) {
     return ma_sound_start(&s->sound) == MA_SUCCESS ? 1 : 0;
 }
 
-int aether_audio_pause(void* sound) {
+static int audio_pause_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     /* ma_sound_stop halts playback but keeps the cursor — this is "pause". */
     return ma_sound_stop(&s->sound) == MA_SUCCESS ? 1 : 0;
 }
 
-int aether_audio_stop(void* sound) {
+static int audio_stop_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     ma_sound_stop(&s->sound);
@@ -744,14 +936,14 @@ int aether_audio_stop(void* sound) {
     return 1;
 }
 
-int aether_audio_is_playing(void* sound) {
+static int audio_is_playing_impl(void* sound) {
     if (!sound) return 0;
     return ma_sound_is_playing(&((AudioSound*)sound)->sound) ? 1 : 0;
 }
 
 /* ---- volume ------------------------------------------------------------ */
 
-int aether_audio_set_volume(void* sound, double v) {
+static int audio_set_volume_impl(void* sound, double v) {
     if (!sound) return 0;
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
@@ -759,7 +951,7 @@ int aether_audio_set_volume(void* sound, double v) {
     return 1;
 }
 
-double aether_audio_get_volume(void* sound) {
+static double audio_get_volume_impl(void* sound) {
     if (!sound) return 0.0;
     return (double)ma_sound_get_volume(&((AudioSound*)sound)->sound);
 }
@@ -777,7 +969,7 @@ static int64_t frames_to_ns(ma_uint64 frames, int rate) {
     return (int64_t)((double)frames * 1000000000.0 / (double)rate);
 }
 
-int64_t aether_audio_position_ns(void* sound) {
+static int64_t audio_position_ns_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     ma_uint64 cur = 0;
@@ -785,7 +977,7 @@ int64_t aether_audio_position_ns(void* sound) {
     return frames_to_ns(cur, sound_sample_rate(s));
 }
 
-int64_t aether_audio_duration_ns(void* sound) {
+static int64_t audio_duration_ns_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     ma_uint64 len = 0;
@@ -793,7 +985,7 @@ int64_t aether_audio_duration_ns(void* sound) {
     return frames_to_ns(len, sound_sample_rate(s));
 }
 
-int aether_audio_seek_ns(void* sound, int64_t ns) {
+static int audio_seek_ns_impl(void* sound, int64_t ns) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     /* ma_sound defers seeks to the next read, so the stream vtable's refusal
@@ -809,7 +1001,7 @@ int aether_audio_seek_ns(void* sound, int64_t ns) {
     return 1;
 }
 
-int aether_audio_channels(void* sound) {
+static int audio_channels_impl(void* sound) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     ma_uint32 ch = 0;
@@ -817,14 +1009,14 @@ int aether_audio_channels(void* sound) {
     return (int)ch;
 }
 
-int aether_audio_sample_rate(void* sound) {
+static int audio_sample_rate_impl(void* sound) {
     if (!sound) return 0;
     return sound_sample_rate((AudioSound*)sound);
 }
 
 /* ---- pan / pitch / looping / fade ------------------------------------- */
 
-int aether_audio_set_pan(void* sound, double pan) {
+static int audio_set_pan_impl(void* sound, double pan) {
     if (!sound) return 0;
     if (pan < -1.0) pan = -1.0;
     if (pan >  1.0) pan =  1.0;
@@ -832,24 +1024,24 @@ int aether_audio_set_pan(void* sound, double pan) {
     return 1;
 }
 
-double aether_audio_get_pan(void* sound) {
+static double audio_get_pan_impl(void* sound) {
     if (!sound) return 0.0;
     return (double)ma_atomic_float_get(&((AudioSound*)sound)->pan.pan);
 }
 
-int aether_audio_set_pitch(void* sound, double ratio) {
+static int audio_set_pitch_impl(void* sound, double ratio) {
     if (!sound) return 0;
     if (!(ratio > 0.0)) { g_audio_err = "audio: pitch ratio must be > 0"; return 0; }
     ma_sound_set_pitch(&((AudioSound*)sound)->sound, (float)ratio);
     return 1;
 }
 
-double aether_audio_get_pitch(void* sound) {
+static double audio_get_pitch_impl(void* sound) {
     if (!sound) return 1.0;
     return (double)ma_sound_get_pitch(&((AudioSound*)sound)->sound);
 }
 
-int aether_audio_set_looping(void* sound, int on) {
+static int audio_set_looping_impl(void* sound, int on) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     if (s->have_stream) { g_audio_err = "audio: a stream cannot loop"; return 0; }
@@ -857,12 +1049,12 @@ int aether_audio_set_looping(void* sound, int on) {
     return 1;
 }
 
-int aether_audio_is_looping(void* sound) {
+static int audio_is_looping_impl(void* sound) {
     if (!sound) return 0;
     return ma_sound_is_looping(&((AudioSound*)sound)->sound) ? 1 : 0;
 }
 
-int aether_audio_fade_ms(void* sound, double from, double to, int64_t ms) {
+static int audio_fade_ms_impl(void* sound, double from, double to, int64_t ms) {
     if (!sound) return 0;
     if (ms < 0) { g_audio_err = "audio: fade length must be >= 0"; return 0; }
     if (from > 1.0) from = 1.0;
@@ -876,8 +1068,7 @@ int aether_audio_fade_ms(void* sound, double from, double to, int64_t ms) {
 
 /* ---- groups ------------------------------------------------------------ */
 
-void* aether_audio_group_new(void) {
-    if (!g_engine_ready) { g_audio_err = "audio: engine not open"; return NULL; }
+static void* audio_group_new_impl(void) {
     AudioGroup* g = (AudioGroup*)aether_caps_malloc(sizeof(AudioGroup));
     if (!g) { g_audio_err = "audio: out of memory"; return NULL; }
     memset(g, 0, sizeof(*g));
@@ -890,14 +1081,14 @@ void* aether_audio_group_new(void) {
     return g;
 }
 
-void aether_audio_group_free(void* group) {
+static void audio_group_free_impl(void* group) {
     if (!group) return;
     AudioGroup* g = (AudioGroup*)group;
     ma_sound_group_uninit(&g->group);
     aether_caps_free(g, sizeof(AudioGroup));
 }
 
-int aether_audio_group_set_volume(void* group, double v) {
+static int audio_group_set_volume_impl(void* group, double v) {
     if (!group) return 0;
     if (v < 0.0) v = 0.0;
     if (v > 1.0) v = 1.0;
@@ -905,17 +1096,142 @@ int aether_audio_group_set_volume(void* group, double v) {
     return 1;
 }
 
-double aether_audio_group_get_volume(void* group) {
+static double audio_group_get_volume_impl(void* group) {
     if (!group) return 0.0;
     return (double)ma_sound_group_get_volume(&((AudioGroup*)group)->group);
 }
 
-int aether_audio_set_group(void* sound, void* group) {
+static int audio_set_group_impl(void* sound, void* group) {
     if (!sound) return 0;
     AudioSound* s = (AudioSound*)sound;
     ma_node* target = group ? (ma_node*)&((AudioGroup*)group)->group
                             : ma_engine_get_endpoint(&g_engine);
     return ma_node_attach_output_bus(&s->pan, 0, target, 0) == MA_SUCCESS ? 1 : 0;
+}
+
+
+/* ---- the guarded entry points (#3690) ----------------------------------
+ *
+ * Each takes a reference to the open engine around its implementation, so a
+ * close on another thread waits for it, and refuses (with the value a NULL
+ * source gives, and last_error "audio: engine not open") once the engine is
+ * closed or closing. A source or group the close detached is refused too
+ * ("audio: the source's engine was closed"), even when another open has come
+ * since: its nodes were in that engine's graph. */
+
+/* A load, a stream or a group made under a reference joins the engine's
+ * live list before the reference is given back, so a close that follows
+ * finds it. */
+#define AUDIO_MAKES(kind, fail, name, params, args)        \
+    void* aether_audio_##name params {                       \
+        if (!engine_enter()) return fail;                    \
+        void* r = audio_##name##_impl args;                  \
+        if (r) {                                             \
+            engine_lock();                                   \
+            live_##kind##_link_locked(r);                    \
+            engine_unlock();                                 \
+        }                                                    \
+        engine_leave();                                      \
+        return r;                                            \
+    }
+
+/* Whether a handle was detached by a close; read under a reference, which a
+ * close waits for, and written by the close under the lock that the
+ * reference was taken under. */
+static int handle_detached(int detached) {
+    if (!detached) return 0;
+    g_audio_err = "audio: the source's engine was closed";
+    return 1;
+}
+
+/* A call on a source (`src`) and/or a group (`grp`) under a reference; a
+ * NULL one is the implementation's to answer, as before. */
+#define AUDIO_ON(ret, fail, name, params, args, src, grp)                       \
+    ret aether_audio_##name params {                                             \
+        if (!engine_enter()) return fail;                                        \
+        AudioSound* s_ = (AudioSound*)(src);                                     \
+        AudioGroup* g_ = (AudioGroup*)(grp);                                     \
+        if ((s_ && handle_detached(s_->detached)) ||                             \
+            (g_ && handle_detached(g_->detached))) {                             \
+            engine_leave();                                                      \
+            return fail;                                                         \
+        }                                                                        \
+        ret r = audio_##name##_impl args;                                        \
+        engine_leave();                                                          \
+        return r;                                                                \
+    }
+
+AUDIO_MAKES(sound, NULL, load_wav, (const char* data, int length), (data, length))
+AUDIO_MAKES(sound, NULL, load_pcm,
+            (const char* data, int length, int sample_rate, int channels, int format),
+            (data, length, sample_rate, channels, format))
+AUDIO_MAKES(sound, NULL, stream_open,
+            (int sample_rate, int channels, int format, int capacity_frames),
+            (sample_rate, channels, format, capacity_frames))
+AUDIO_ON(int64_t, 0,    played_frames, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    play, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    pause, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    stop, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    is_playing, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    set_volume, (void* sound, double v), (sound, v), sound, NULL)
+AUDIO_ON(double,  0.0,  get_volume, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int64_t, 0,    position_ns, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int64_t, 0,    duration_ns, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    seek_ns, (void* sound, int64_t ns), (sound, ns), sound, NULL)
+AUDIO_ON(int,     0,    channels, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    sample_rate, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    set_pan, (void* sound, double pan), (sound, pan), sound, NULL)
+AUDIO_ON(double,  0.0,  get_pan, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    set_pitch, (void* sound, double ratio), (sound, ratio), sound, NULL)
+AUDIO_ON(double,  1.0,  get_pitch, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    set_looping, (void* sound, int on), (sound, on), sound, NULL)
+AUDIO_ON(int,     0,    is_looping, (void* sound), (sound), sound, NULL)
+AUDIO_ON(int,     0,    fade_ms, (void* sound, double from, double to, int64_t ms),
+         (sound, from, to, ms), sound, NULL)
+AUDIO_MAKES(group, NULL, group_new, (void), ())
+AUDIO_ON(int,     0,    group_set_volume, (void* group, double v), (group, v), NULL, group)
+AUDIO_ON(double,  0.0,  group_get_volume, (void* group), (group), NULL, group)
+AUDIO_ON(int,     0,    set_group, (void* sound, void* group), (sound, group), sound, group)
+
+/* Unloading a source, and freeing a group, still free it after its engine
+ * is closed (a program that closes first and frees after gets its memory
+ * back, as before): the close took it out of the graph, so what is left is
+ * the handle's own memory. A live one leaves the list and is freed under a
+ * reference, which a close waits for; one that comes during a close waits
+ * for it, so it is either still in the graph and freed from it, or already
+ * detached. */
+void aether_audio_unload(void* sound) {
+    if (!sound) return;
+    AudioSound* s = (AudioSound*)sound;
+    engine_lock();
+    engine_wait_close();
+    if (s->detached) {
+        engine_unlock();
+        sound_free(s);
+        return;
+    }
+    live_sound_unlink_locked(s);
+    g_engine_users++;
+    engine_unlock();
+    audio_unload_impl(s);
+    engine_leave();
+}
+
+void aether_audio_group_free(void* group) {
+    if (!group) return;
+    AudioGroup* g = (AudioGroup*)group;
+    engine_lock();
+    engine_wait_close();
+    if (g->detached) {
+        engine_unlock();
+        aether_caps_free(g, sizeof(AudioGroup));
+        return;
+    }
+    live_group_unlink_locked(g);
+    g_engine_users++;
+    engine_unlock();
+    audio_group_free_impl(g);
+    engine_leave();
 }
 
 #endif /* __wasi__ */

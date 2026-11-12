@@ -1,0 +1,113 @@
+// std.audio from several threads at once (#3690).
+//
+// The engine is one per process, and open, close and every call that uses
+// it can come from any thread. It was a set of plain globals with no guard:
+// two opens at once both initialised it, and a close on one thread freed it
+// under a load, a play or a render on another. Now the engine's lifetime is
+// guarded (std/audio/aether_audio.c, "the engine's lifetime"): open and
+// close run under one lock, every other call holds a reference that a close
+// waits for, and a call on a source of an engine since closed is refused.
+// It also holds the vendored miniaudio's re-attach to the right bus lock
+// (std/audio/miniaudio.h, "Aether patch"): without it two loads onto the
+// same output corrupt the graph's list and the next close never returns.
+//
+// Four actors, on the scheduler's cores, each open the headless engine,
+// load, play, pan, render and unload a clip, and close the engine every
+// third round, 300 rounds each, so every call meets every other on another
+// thread. Any one call may be refused (the engine closed or opened by
+// another actor in between); none may crash. After the churn a single
+// thread gets the numbers it always got: the engine is whole.
+
+import std.audio
+import std.bytes
+import std.sync
+
+extern exit(code: int)
+
+message Churn { rounds: int, done: ptr }
+
+// Interleaved 16-bit PCM: `frames` frames of `ch` channels, every sample
+// `sample16`. Returns (bytes, length).
+fn make_pcm(frames: int, ch: int, sample16: int) -> (string, int) {
+    total = frames * ch * 2
+    b = bytes.new(total)
+    i = 0
+    while i < frames * ch {
+        bytes.set_le16(b, i * 2, sample16 & 65535)
+        i = i + 1
+    }
+    return bytes.finish(b, total), total
+}
+
+actor Player {
+    receive {
+        Churn(rounds, done) -> {
+            pcm, n = make_pcm(256, 1, 4096)
+            for (i = 0; i < rounds; i = i + 1) {
+                // false while another actor has it open: go on with that one
+                _ = audio.open_headless(8000, 2)
+                src, err = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+                if err == "" {
+                    _ = audio.play(src)
+                    _ = audio.pan(src, 0.5)
+                    _ = audio.render(64)
+                    _ = audio.played_frames(src)
+                    audio.unload(src)
+                }
+                if i % 3 == 0 {
+                    audio.close()
+                }
+            }
+            _ = sync.atomic_add(done, 1)
+        }
+    }
+}
+
+fn near(a: float, b: float, tol: float) -> bool {
+    d = a - b
+    if d < 0.0 {
+        d = 0.0 - d
+    }
+    return d <= tol
+}
+
+main() {
+    done = sync.atomic_new(0)
+    players = 4
+    for (p = 0; p < players; p = p + 1) {
+        a = spawn(Player())
+        a ! Churn { rounds: 300, done: done }
+    }
+    wait_for_idle()
+    finished = sync.atomic_load(done)
+    sync.atomic_free(done)
+    if finished != players {
+        println("FAIL: ${finished} of ${players} players finished")
+        exit(1)
+    }
+    audio.close()
+
+    // One thread, a fresh engine: a second of mono at pan 0 sits at cos(pi/4)
+    // of its 0.125 in each ear, and render pulls exactly what it asks.
+    if !audio.open_headless(8000, 2) {
+        println("FAIL: open_headless after the churn: ${audio.last_error()}")
+        exit(1)
+    }
+    pcm, n = make_pcm(8000, 1, 4096)
+    src, err = audio.load_pcm(pcm, n, 8000, 1, audio.FORMAT_S16)
+    if err != "" {
+        println("FAIL: load after the churn: ${err}")
+        exit(1)
+    }
+    _ = audio.play(src)
+    got = audio.render(1000)
+    frames = audio.played_frames(src)
+    peak = audio.rendered_peak(0)
+    audio.unload(src)
+    audio.close()
+    if got != 1000 || frames != 1000 || !near(peak, 0.125 * 0.70710678, 0.001) {
+        println("FAIL: after the churn render gave ${got}, played ${frames}, peak ${peak}")
+        exit(1)
+    }
+    println("PASS: four actors opening, playing and closing the engine at once, then one thread's numbers")
+}
