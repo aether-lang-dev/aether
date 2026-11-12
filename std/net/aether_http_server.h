@@ -256,7 +256,12 @@ typedef struct HttpServer {
 
     // Middleware
     HttpMiddlewareNode* middleware_chain;
-    void* evloop;           /* HttpEvLoop*, when the proxy driver is running */
+    /* HttpEvLoop*, when the proxy driver is running. Set and cleared by the
+     * server's thread; read by the accessors on any thread and by the pool's
+     * workers. All of them under evloop_lock, and the clear comes before the
+     * loop is stopped and freed, so no reader holds a freed loop. */
+    void* evloop;
+    pthread_mutex_t evloop_lock;
 
     // Response transformers (#260 Tier 1). Run after the route
     // handler, before serialization. See

@@ -1457,6 +1457,7 @@ HttpServer* http_server_create(int port) {
     server->step_fn = NULL;
     server->park_lot = NULL;
     server->evloop = NULL;
+    pthread_mutex_init(&server->evloop_lock, NULL);
     server->conn_pool = NULL;
     server->accept_poller.fd = -1;
     server->accept_poller.backend_data = NULL;
@@ -3986,15 +3987,27 @@ int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
 /* Whether a gateway runs on the loop at all is otherwise invisible: the
  * responses are the same either way, by design (#3214). */
 int http_server_evloop_connections(HttpServer* server) {
-    return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int n = http_evloop_taken((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 int64_t http_server_evloop_wakeups(HttpServer* server) {
-    return server ? http_evloop_wakeups((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int64_t n = http_evloop_wakeups((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 int http_server_evloop_active(HttpServer* server) {
-    return server ? http_evloop_active((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int n = http_evloop_active((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 /* SSE route node (#260 Tier 2). */
@@ -7288,8 +7301,15 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      * yet and the worker path is still right below. */
     /* A server changed since the loop started may have a middleware ahead
      * of the proxy now, or a hook, that is not loop-safe (#3214). */
-    if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
-        if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
+    if (!server->h2_enabled) {
+        /* Under evloop_lock: the server's thread clears the pointer there
+         * before it stops and frees the loop, so the loop is alive for as
+         * long as this holds it. */
+        pthread_mutex_lock(&server->evloop_lock);
+        int taken = server->evloop && http_server_evloop_serves(server) &&
+                    http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0;
+        pthread_mutex_unlock(&server->evloop_lock);
+        if (taken) return;
     }
 
     /* Heap-allocated because a parked connection outlives the worker that
@@ -7878,7 +7898,10 @@ static int http_server_serve(HttpServer* server) {
         if (!server->h2_enabled) {
             int cores = aether_cpu_available();
             if (cores > 8) cores = 8;
-            server->evloop = http_evloop_start(server, cores);
+            HttpEvLoop* loop = http_evloop_start(server, cores);
+            pthread_mutex_lock(&server->evloop_lock);
+            server->evloop = loop;
+            pthread_mutex_unlock(&server->evloop_lock);
         }
 
         HttpConnectionPool* pool = http_pool_create(server);
@@ -7935,9 +7958,14 @@ static int http_server_serve(HttpServer* server) {
 #if AETHER_HAS_THREADS
         /* The driver holds connections of its own, so it stops before the
          * lot: its threads are what close them. */
-        if (server->evloop) {
-            http_evloop_stop((HttpEvLoop*)server->evloop);
+        {
+            /* Out of reach first, under the lock its readers take (the
+             * accessors, the pool's workers), then stopped and freed. */
+            pthread_mutex_lock(&server->evloop_lock);
+            HttpEvLoop* loop = (HttpEvLoop*)server->evloop;
             server->evloop = NULL;
+            pthread_mutex_unlock(&server->evloop_lock);
+            if (loop) http_evloop_stop(loop);
         }
         /* Close the lot before the pool: it resubmits into the pool, and a
          * connection woken into a destroyed pool would be closed twice. Free
@@ -8216,6 +8244,7 @@ void http_server_free(HttpServer* server) {
     pthread_cond_destroy(&server->run_done);
     pthread_mutex_destroy(&server->run_lock);
     pthread_mutex_destroy(&server->live_lock);
+    pthread_mutex_destroy(&server->evloop_lock);
     pthread_mutex_destroy(&server->tls_lock);
     pthread_mutex_destroy(&server->tls_config_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
