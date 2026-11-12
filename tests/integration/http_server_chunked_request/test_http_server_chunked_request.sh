@@ -201,6 +201,12 @@ expect_400 "whitespace between a header name and its colon" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length : 5\r\nConnection: close\r\n\r\nhello'
 expect_400 "an obs-fold continuation line" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+# A bare LF ended a line for the head check and not for the parser, so this
+# head framed a 5-byte body to one and held no Content-Length to the other.
+expect_400 "a header line ended by a bare LF" \
+    'POST /upload HTTP/1.1\r\nHost: x\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+expect_400 "a bare CR in a header value" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nX-A: a\rb\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
 # A request line with no version: the parser freed the method it had copied
 # twice, and the worker's heap was corrupted.
 expect_400 "a request line with no version" \

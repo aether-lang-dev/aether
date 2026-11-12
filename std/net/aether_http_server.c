@@ -5803,6 +5803,19 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * and the parser, which scans it as a C string, would stop there and
      * take the rest of the head for the body (#3254). */
     if (memchr(head, '\0', (size_t)(hdr_end - head))) return HTTP_HEAD_MALFORMED;
+    /* Every line of a head ends in CR LF, and a CR or an LF anywhere else
+     * makes it something other than a request too (RFC 9112 2.2: a bare CR
+     * is invalid, and a bare LF is a line end only to a recipient that
+     * chooses to read it so). The lines below are split at each LF, the
+     * parser splits them at each CR LF and the end of the head is the first
+     * CR LF CR LF, so with a bare one the three read different headers:
+     * "Host: a\nContent-Length: 2" was a length to this check and part of
+     * the Host value to the parser, and a bare CR in a value went on to an
+     * upstream that may take it for a line end (found by tests/fuzz/http_head). */
+    for (const char* p = head; (p = (const char*)memchr(p, '\r', (size_t)(hdr_end - p))) != NULL; p++)
+        if (p + 1 >= hdr_end || p[1] != '\n') return HTTP_HEAD_MALFORMED;
+    for (const char* p = head; (p = (const char*)memchr(p, '\n', (size_t)(hdr_end - p))) != NULL; p++)
+        if (p == head || p[-1] != '\r') return HTTP_HEAD_MALFORMED;
     /* A request line longer than the parser's line buffer is answered rather
      * than dropped, and it is checked here so the parser's own bound is never
      * the thing a client reaches. */

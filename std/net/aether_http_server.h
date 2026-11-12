@@ -1125,8 +1125,9 @@ int http_server_loop_plan(HttpServer* server, HttpLoopPlan* plan);
 // and Transfer-Encoding. `head` is the request line's first byte, `hdr_end`
 // the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length (0 when
 // absent) and *chunked; anything else is a refusal, which the worker path
-// answers: 400 for a head that is not a request (HTTP_HEAD_MALFORMED, a NUL
-// byte, #3254) or whose framing is in doubt, 414, 431.
+// answers: 400 for a head that is not a request (HTTP_HEAD_MALFORMED: a NUL
+// byte, #3254, or a CR or an LF that is not part of a CR LF) or whose framing
+// is in doubt, 414, 431.
 enum {
     HTTP_HEAD_OK           = 0,
     HTTP_HEAD_MALFORMED    = 1,

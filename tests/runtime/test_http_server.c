@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 #include "../../std/net/aether_http_server.h"
+#include "../../std/net/aether_http.h"   /* http_find_header_end */
 #include "../../std/http/proxy/aether_proxy.h"
 #include "../../std/http/proxy/aether_proxy_internal.h"
 #include "../../std/http/middleware/aether_middleware.h"
@@ -416,6 +417,39 @@ TEST(http_server_request_line_without_version_is_refused_once) {
     http_request_reset(&req);
     free(req.header_keys);
     free(req.header_values);
+}
+
+/* The head check's answer for `head` followed by the blank line. */
+static int head_check_of(const char* head, long* cl, int* chunked) {
+    char buf[512];
+    int n = snprintf(buf, sizeof buf, "%s\r\n\r\n", head);
+    const char* end = http_find_header_end(buf, (size_t)n);
+    if (!end) return -1;
+    return http_request_head_check(buf, end, cl, chunked);
+}
+
+TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
+    /* The check split lines at each LF, the parser at each CR LF, and the
+     * head ends at the first CR LF CR LF. With a bare LF the two read
+     * different headers: here the check framed a 2-byte body while the
+     * parser saw one header, Host, whose value held "\nContent-Length: 2".
+     * A bare CR stayed in a value the proxy forwards, to an upstream that
+     * may end the line there (RFC 9112 2.2; found by tests/fuzz/http_head).
+     * Both are a head that is not a request, answered 400 like a NUL. */
+    long cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("POST / HTTP/1.1\r\nHost: a\nContent-Length: 2", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\nHost: a", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\r\nX-A: a\rb", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\r\nX-A: a\r", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("\nGET / HTTP/1.1", &cl, &chunked));
+
+    /* CR LF line ends, as always. */
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 2", &cl, &chunked));
+    ASSERT_EQ(2, (int)cl);
+    ASSERT_EQ(0, chunked);
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("GET / HTTP/1.1", &cl, &chunked));
+    ASSERT_EQ(0, (int)cl);
 }
 
 TEST(http_server_body_without_content_length_keeps_nul_bytes) {
