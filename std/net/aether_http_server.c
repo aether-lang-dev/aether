@@ -2629,20 +2629,23 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
         free(server->host);
     }
     server->host = new_host;
-    server->port = port;
 
     // Resolve an OS-assigned port (port 0): the kernel picked a real
     // port at bind() time, but `port` is still 0 here. getsockname() the
     // bound socket and write the actual port back so dynamic-port users
     // (parallel test runners, the VCR embed layer) can read it via
     // http_server_port(). vcr_embed_abi_wish.md open question 3.
+    // One store, of the port as bound: another thread may be reading it
+    // (http_server_port) while the server's own thread binds.
+    int bound_port = port;
     if (port == 0) {
         struct sockaddr_storage bound;
         socklen_t blen = sizeof(bound);
         if (getsockname(server->socket_fd, (struct sockaddr*)&bound, &blen) == 0) {
-            server->port = aether_addr_port(&bound);
+            bound_port = aether_addr_port(&bound);
         }
     }
+    server->port = bound_port;
 
     return 0;
 }

@@ -191,7 +191,9 @@ struct HttpConn;
 
 typedef struct HttpServer {
     int socket_fd;
-    int port;
+    /* The port: read by any thread (http_server_port) while the thread that
+     * runs the server may be binding it, so atomic. */
+    _Atomic int port;
     char* host;
     /* Cleared by http_server_stop on any thread, read by the server's accept
      * loops on theirs, so atomic. */
