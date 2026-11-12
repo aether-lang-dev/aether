@@ -2936,17 +2936,34 @@ stats:
 	fi
 	@echo "==================================="
 
-# Parallel test execution
+# Parallel test execution: the runner `make test` or `make test-build` built,
+# one process per category, all at once. Each category's output goes to
+# $(BUILD_DIR)/test-parallel/<category>.log and is shown when it fails, and
+# the target fails when any category does. It used to end in a bare `wait`,
+# whose status is 0 whatever the runners returned, and it left out the
+# `other` category (every TEST() without one: the HTTP server and resolver
+# tests, the memory leak and stress tests, most of the compiler's).
+TEST_PARALLEL_CATEGORIES = compiler runtime collections network memory stdlib parser other
 test-parallel:
 	@echo "==================================="
 	@echo "Running Tests in Parallel"
 	@echo "==================================="
 	@echo "Testing by category..."
-	@for cat in compiler runtime collections network memory stdlib parser; do \
+	@mkdir -p $(BUILD_DIR)/test-parallel; \
+	pids=""; \
+	for cat in $(TEST_PARALLEL_CATEGORIES); do \
 		echo "  Testing $$cat..."; \
-		./$(BUILD_DIR)/test_runner$(EXE_EXT) --category=$$cat & \
+		./$(BUILD_DIR)/test_runner$(EXE_EXT) --category=$$cat > $(BUILD_DIR)/test-parallel/$$cat.log 2>&1 & \
+		pids="$$pids $$!:$$cat"; \
 	done; \
-	wait
+	status=0; \
+	for p in $$pids; do \
+		cat=$${p#*:}; \
+		if wait $${p%%:*}; then echo "  [PASS] $$cat"; \
+		else echo "  [FAIL] $$cat ($(BUILD_DIR)/test-parallel/$$cat.log):"; \
+		     sed 's/^/    /' $(BUILD_DIR)/test-parallel/$$cat.log; status=1; fi; \
+	done; \
+	exit $$status
 	@echo ""
 	@echo "All parallel tests complete!"
 
