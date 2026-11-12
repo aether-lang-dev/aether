@@ -998,7 +998,9 @@ static void overflow_flush_ex(int from_core, int own) {
             for (int i = 0; i < limit; i++) {
                 ActorBase* actor = b->actors[start + i];
                 Message msg = b->msgs[start + i];
-                int ac = atomic_load_explicit(&actor->assigned_core, memory_order_relaxed);
+                // Acquire, as in send_local_admitted: the mailbox is written below
+                // when this core has the actor, after another core may have had it.
+                int ac = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
                 if (unlikely(atomic_load_explicit(&actor->dead, memory_order_acquire))) {
                     // Released since it was sent: dropped and credited, as the
                     // core loop drops one (#1301), and uncounted (#3090). Put in
@@ -4035,11 +4037,15 @@ static void send_local_admitted(ActorBase* actor, Message msg) {
      * through the target core's queues. Written here, as it was from a
      * thread that is no core's, it was a second producer on the mailbox's
      * single producer ring, beside the core thread's own deliveries: a
-     * message overwrote another or was taken twice. */
+     * message overwrote another or was taken twice. Acquire: a core that has
+     * just been handed the actor (move_actor's release store of its id)
+     * writes the mailbox only once it sees what the core that had it wrote
+     * there, its tail and the count, last; read relaxed, its write raced
+     * the other core's last delivery. */
     if (unlikely(!actor->auto_process &&
                  (current_core_id < 0 ||
                   current_core_id != atomic_load_explicit(&actor->assigned_core,
-                                                          memory_order_relaxed)))) {
+                                                          memory_order_acquire)))) {
         send_remote_admitted(actor, msg, current_core_id);
         return;
     }
