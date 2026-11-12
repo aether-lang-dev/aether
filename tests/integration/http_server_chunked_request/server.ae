@@ -8,7 +8,7 @@ handle(req: ptr, res: ptr, ud: ptr) {
     body = http.request_body(req)
     http.response_set_status(res, 200)
     http.response_set_header(res, "Content-Type", "text/plain")
-    http.response_set_body(res, "len=${string.length(body)} body=[${body}]")
+    http.response_set_body(res, "bytes=${http.request_body_length(req)} len=${string.length(body)} body=[${body}]")
 }
 
 main() {

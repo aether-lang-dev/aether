@@ -177,6 +177,13 @@ expect_body "a chunked body with extensions did not arrive intact" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5 ; name=value\r\nhello\r\n6;q="a \\" b";flag\r\n world\r\n0;last\r\n\r\n' \
     'len=11 body=\[hello world\]'
 
+# A chunked body is binary like any other. The worker hands the decoded
+# payload to the parser with no Content-Length, and the parser took it with
+# strdup, so this one arrived as the single byte "a" (tests/fuzz/http_head).
+expect_body "a chunked body holding a NUL byte was cut at it" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\na\0b\r\n2\r\n\0c\r\n0\r\n\r\n' \
+    'bytes=5 '
+
 # A header value mentioning another header is not that header. A search that
 # is not anchored to the start of a line reads this as the framing.
 expect_body "a Content-Length inside another header's value was read as framing" \

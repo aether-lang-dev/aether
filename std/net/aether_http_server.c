@@ -3013,8 +3013,10 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     // byte count, clamped against `body_avail` (what's actually buffered
     // — defends against a malicious or buggy client lying with an
     // oversized Content-Length, which would otherwise memcpy past the
-    // buffer). Fall back to strdup/strlen only when Content-Length is
-    // absent (HTTP/1.0 text bodies, malformed client requests).
+    // buffer). Without a Content-Length the body is every byte of the
+    // slice after the head, counted by `len`: that is how the worker hands
+    // over a chunked body it decoded, and a strdup there cut a binary
+    // upload at its first NUL byte, the length with it.
     long body_cl = -1;
     for (int hi = 0; hi < req->header_count; hi++) {
         if (req->header_keys[hi] &&
@@ -3038,9 +3040,13 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
         } else {
             req->body_length = 0;
         }
-    } else if (header_start && *header_start) {
-        req->body = strdup(header_start);
-        req->body_length = req->body ? strlen(req->body) : 0;
+    } else if (body_avail > 0) {
+        req->body = (char*)malloc(body_avail + 1);
+        if (req->body) {
+            memcpy(req->body, header_start, body_avail);
+            req->body[body_avail] = '\0';
+        }
+        req->body_length = req->body ? body_avail : 0;
     } else {
         req->body = NULL;
         req->body_length = 0;

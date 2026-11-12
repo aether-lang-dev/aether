@@ -418,6 +418,33 @@ TEST(http_server_request_line_without_version_is_refused_once) {
     free(req.header_values);
 }
 
+TEST(http_server_body_without_content_length_keeps_nul_bytes) {
+    /* The worker decodes a chunked upload in place and hands the parser the
+     * head and the decoded payload, with no Content-Length, `len` counting
+     * both. The parser took that body with strdup, so `a 00 b` arrived as
+     * the one byte `a`, body_length 1, and a binary upload was cut at its
+     * first NUL (found by tests/fuzz/http_head). It is every byte `len`
+     * counts after the head. */
+    static const char head[] =
+        "POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+    char raw[128];
+    size_t hl = sizeof head - 1;
+    memcpy(raw, head, hl);
+    memcpy(raw + hl, "a\0b", 3);
+    raw[hl + 3] = '\0';
+    HttpRequest* req = http_parse_request_n(raw, hl + 3);
+    ASSERT_NOT_NULL(req);
+    ASSERT_EQ(3, (int)req->body_length);
+    ASSERT_EQ(0, memcmp(req->body, "a\0b", 3));
+    http_request_free(req);
+
+    /* Nothing after the head is no body, as before. */
+    req = http_parse_request_n(raw, hl);
+    ASSERT_NOT_NULL(req);
+    ASSERT_EQ(0, (int)req->body_length);
+    http_request_free(req);
+}
+
 /* Combined Log Format timestamps must be locale-independent.
  *
  * The month in CLF is the English three-letter abbreviation; it is a parseable
