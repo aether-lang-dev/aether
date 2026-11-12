@@ -297,6 +297,14 @@ typedef struct HttpServer {
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
 
+    // Actor dispatch mode: the worker actors given a connection that have
+    // not finished with the server yet, counted by dispatch_to_worker before
+    // the send and uncounted by http_conn_worker_step after its last use of
+    // the server. The run waits for it to come to 0 once its accept loops
+    // are over, as the thread-pool path joins its workers: a stop returns,
+    // and a free follows, only when no worker still reads the server.
+    _Atomic int actor_workers;
+
     // The connections whose worker is waiting for a request to begin, with
     // nothing of it read: http_server_stop shuts each one down, so a worker
     // blocked waiting for a client's next request (up to the idle timeout)

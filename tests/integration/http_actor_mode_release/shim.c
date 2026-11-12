@@ -4,7 +4,8 @@
  * that mode over loopback (fresh connections, keep-alive connections, peers
  * that close without sending, garbage requests) and reports how many actors
  * the scheduler holds during and after. It also checks that the stop closes
- * a connection still waiting for its first bytes (#3204). */
+ * a connection still waiting for its first bytes (#3204), and that a stop
+ * waits for the workers still serving (http_actor_stop_waits_probe). */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -21,6 +22,7 @@ int http_actor_release_probe(void) {
     printf("http_actor_mode_release: skipped on Windows\n");
     return 0;
 }
+int http_actor_stop_waits_probe(void) { return 0; }
 
 #else
 
@@ -31,6 +33,7 @@ int http_actor_release_probe(void) {
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
+#include <stdatomic.h>
 
 /* Defined in aether_http_server.c; std.http declares it as an extern. */
 int http_server_port(HttpServer* server);
@@ -214,6 +217,11 @@ int http_actor_release_probe(void) {
         close(silent);
     }
 
+    /* Freed once stopped: the stop has waited for its workers (see
+     * http_actor_stop_waits_probe), so none still reads it. */
+    http_server_free(g_server);
+    g_server = NULL;
+
     printf("requests=%d answered=%d max_extra_actors=%d extra_registered_after=%d "
            "extra_live_after=%d released_not_freed=%d silent_closed_at_stop=%d\n",
            requests, answered, max_extra, registered_after - registered_before,
@@ -223,6 +231,68 @@ int http_actor_release_probe(void) {
         silent_closed) {
         printf("http_actor_mode_release passed\n");
     }
+    return 0;
+}
+
+
+/* A stop waits for the worker actors serving connections. The run used to
+ * end once its accept loop was over, with workers still in a request, so
+ * the stop returned and the program freed the server while a worker still
+ * read it (TSan: the free against conn_serve's count, in
+ * http_server_multi_accept). A handler that takes 400 ms is in its request
+ * when the stop comes: it must have finished, and its response gone out,
+ * by the time the stop returns. */
+static atomic_int g_slow_started;
+static atomic_int g_slow_done;
+
+static void slow_handler(HttpRequest* req, HttpServerResponse* res, void* ud) {
+    (void)req; (void)ud;
+    atomic_store(&g_slow_started, 1);
+    sleep_ms(400);
+    http_response_set_status(res, 200);
+    http_response_set_body(res, "slow");
+    atomic_store(&g_slow_done, 1);
+}
+
+int http_actor_stop_waits_probe(void) {
+    g_server = http_server_create(0);
+    if (!g_server) { printf("FAIL: server_create\n"); return 1; }
+    http_server_get(g_server, "/slow", slow_handler, NULL);
+    http_server_set_actor_handler(g_server, worker_step,
+                                  aether_send_message,
+                                  (void* (*)(int, void (*)(void*), size_t))scheduler_spawn_actor,
+                                  (void (*)(void*))scheduler_release_actor);
+    if (http_server_bind_raw(g_server, "127.0.0.1", 0) < 0) { printf("FAIL: bind\n"); return 1; }
+    int port = http_server_port(g_server);
+    if (http_server_start_background_raw(g_server) < 0) { printf("FAIL: start\n"); return 1; }
+
+    int fd = connect_loopback(port);
+    if (fd < 0 || send_all(fd, "GET /slow HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") != 0) {
+        printf("FAIL: request\n");
+        return 1;
+    }
+    for (int w = 0; w < 500 && !atomic_load(&g_slow_started); w++) sleep_ms(10);
+    int started = atomic_load(&g_slow_started);
+
+    http_server_stop(g_server);
+    int done_at_stop = atomic_load(&g_slow_done);
+
+    char buf[1024];
+    size_t have = 0;
+    while (have < sizeof(buf) - 1) {
+        ssize_t n = recv(fd, buf + have, sizeof(buf) - 1 - have, 0);
+        if (n <= 0) break;
+        have += (size_t)n;
+    }
+    buf[have] = '\0';
+    int answered = strstr(buf, " 200 ") != NULL && strstr(buf, "slow") != NULL;
+    close(fd);
+
+    http_server_free(g_server);
+    g_server = NULL;
+    printf("handler_started=%d handler_done_when_stop_returned=%d answered=%d\n",
+           started, done_at_stop, answered);
+    if (started && done_at_stop && answered) printf("http_actor_stop_waits passed\n");
     return 0;
 }
 

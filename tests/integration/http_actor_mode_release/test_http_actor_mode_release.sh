@@ -13,6 +13,12 @@
 # actor count never rose by more than a handful and came back to where it
 # started, with every released worker freed. Before the fix it ended about
 # 380 actors up.
+#
+# Then a stop that comes while a worker is in a 400 ms request: the stop
+# must return only once that worker has finished with the server. It
+# returned as soon as the accept loop was over, and the program's free of
+# the server raced the worker still serving (TSan, in
+# http_server_multi_accept).
 
 # Actor dispatch mode is POSIX-only: the accept poller behind it is not
 # built on Windows, where the server always uses its thread pool.
@@ -49,6 +55,12 @@ fi
 
 if ! grep -q "http_actor_mode_release passed" "$TMPDIR/run.log"; then
     echo "  [FAIL] http_actor_mode_release: workers not released, or a waiting connection left open at stop"
+    sed 's/^/    /' "$TMPDIR/run.log" | head -30
+    exit 1
+fi
+
+if ! grep -q "http_actor_stop_waits passed" "$TMPDIR/run.log"; then
+    echo "  [FAIL] http_actor_mode_release: the stop returned before the worker serving a request had finished"
     sed 's/^/    /' "$TMPDIR/run.log" | head -30
     exit 1
 fi

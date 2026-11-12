@@ -1518,6 +1518,7 @@ HttpServer* http_server_create(int port) {
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
+    atomic_init(&server->actor_workers, 0);
     atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
@@ -7529,15 +7530,23 @@ static void http_conn_worker_step(void* self) {
     HttpConnWorker* worker = (HttpConnWorker*)self;
     HttpServer* server = worker->server;
     int had_message = atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) > 0;
+    /* One of the server's own threads while it serves the connection, as a
+     * pool worker is: a stop from its handler does not wait for the run,
+     * which waits for this worker (actor_workers). */
+    if (had_message) http_server_thread_enter(server);
     server->step_fn(self);
     // The only message a worker gets is its connection; once a step has taken
     // it, the worker is done. scheduler_release_actor() is safe to call from
     // the worker's own step: the free waits until the scheduler is done with
     // the actor.
-    if (had_message && server->release_fn &&
-        atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) == 0) {
-        server->release_fn(self);
-    }
+    void (*release)(void*) = server->release_fn;
+    int done = had_message &&
+        atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) == 0;
+    if (had_message) http_server_thread_leave(server);
+    /* The worker's last use of the server: from here a stop may return and
+     * the program free the server. */
+    if (done) atomic_fetch_sub_explicit(&server->actor_workers, 1, memory_order_release);
+    if (done && release) release(self);
 }
 
 // Dispatch a data-ready fd to a worker actor
@@ -7560,6 +7569,10 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
         // the pool's: nothing is written into it and it is not released.
         if (((ActorBase*)worker)->step == http_conn_worker_step) {
             ((HttpConnWorker*)worker)->server = server;
+            /* Counted until the worker is done with the server (the end of
+             * the step that takes this message): the run waits for it
+             * before it ends (actor_workers). */
+            atomic_fetch_add_explicit(&server->actor_workers, 1, memory_order_relaxed);
         }
         HttpConnectionMessage conn_msg;
         conn_msg.type = MSG_HTTP_CONNECTION;
@@ -7570,6 +7583,24 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
                           "Content-Length: 19\r\n\r\nService Unavailable";
         send(fd, err, strlen(err), MSG_NOSIGNAL);
         close(fd);
+    }
+}
+
+/* At the end of an actor-mode run, once its accept loops are over: wait for
+ * every worker given a connection to finish with the server, as the thread
+ * pool's run joins its workers. A stop has shut down the connections waiting
+ * for a request (live_fds), so a worker in a read returns at once and one in
+ * a handler finishes that request; a worker whose connection message has not
+ * been stepped yet takes it, sees the stop and closes it. Before this, the
+ * run ended with workers still serving, the stop returned, and the program's
+ * free of the server raced them (a worker reads the server through its last
+ * line, http_conn_worker_step). Acquire, paired with each worker's release
+ * of its count, so the free comes after the workers' last reads. */
+static void actor_workers_wait(HttpServer* server) {
+    int sleep_us = 100;
+    while (atomic_load_explicit(&server->actor_workers, memory_order_acquire) > 0) {
+        usleep((useconds_t)sleep_us);
+        if (sleep_us < 10000) sleep_us *= 2;
     }
 }
 
@@ -7934,6 +7965,8 @@ static int http_server_serve(HttpServer* server) {
 
         multi_accept_release(server, n_threads, n_threads);
 
+        actor_workers_wait(server);
+
     } else if (use_actor_mode) {
         // Single-accept with I/O poller (default): one accept thread waits for data
         // before dispatching to worker actors. Best for most workloads.
@@ -7959,6 +7992,8 @@ static int http_server_serve(HttpServer* server) {
         accept_poller_loop(server, server->socket_fd, &server->accept_poller);
 
         aether_io_poller_destroy(&server->accept_poller);
+
+        actor_workers_wait(server);
 
     } else
 #endif
