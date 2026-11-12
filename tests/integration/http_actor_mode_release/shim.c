@@ -4,8 +4,10 @@
  * that mode over loopback (fresh connections, keep-alive connections, peers
  * that close without sending, garbage requests) and reports how many actors
  * the scheduler holds during and after. It also checks that the stop closes
- * a connection still waiting for its first bytes (#3204), and that a stop
- * waits for the workers still serving (http_actor_stop_waits_probe). */
+ * a connection still waiting for its first bytes (#3204), that a stop
+ * waits for the workers still serving (http_actor_stop_waits_probe), and
+ * that a stop from an actor on a queued worker's core returns
+ * (http_actor_stop_on_core_probe, #3688). */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -23,6 +25,7 @@ int http_actor_release_probe(void) {
     return 0;
 }
 int http_actor_stop_waits_probe(void) { return 0; }
+int http_actor_stop_on_core_probe(void) { return 0; }
 
 #else
 
@@ -293,6 +296,100 @@ int http_actor_stop_waits_probe(void) {
     printf("handler_started=%d handler_done_when_stop_returned=%d answered=%d\n",
            started, done_at_stop, answered);
     if (started && done_at_stop && answered) printf("http_actor_stop_waits passed\n");
+    return 0;
+}
+
+
+/* A stop called from an actor whose core holds a worker not stepped yet
+ * (#3688). The run waited for every worker given a connection, and a queued
+ * worker can only be stepped by its own core, which a stop called in an
+ * actor's handler blocks until the run is over: the run waited for the
+ * worker, the worker for the core, the core for the run, and the process
+ * hung. The same with a one-core scheduler (the script runs this under
+ * `taskset -c 0` where it can) and any queued worker.
+ *
+ * Here the workers are spawned on core 0 (spawn_on_core0), and an actor on
+ * core 0 waits in its step for a connection's worker to be spawned, then
+ * stops the server. The stop must return (bounded here: a hang is a
+ * failure, not a stuck test), the program frees the server, and the queued
+ * worker, stepped once core 0 is free, closes its connection without
+ * serving it, with the server still whole for it. */
+static atomic_int g_core0_spawns;
+static atomic_int g_stop_returned;
+
+static void* spawn_on_core0(int core, void (*step)(void*), size_t size) {
+    (void)core;
+    void* actor = scheduler_spawn_actor(0, step, size);
+    if (actor) atomic_fetch_add(&g_core0_spawns, 1);
+    return actor;
+}
+
+static void stopper_step(void* self) {
+    ActorBase* actor = (ActorBase*)self;
+    Message msg;
+    if (!mailbox_receive(&actor->mailbox, &msg)) return;
+    aether_message_free_payload(&msg);
+    for (int w = 0; w < 1000 && atomic_load(&g_core0_spawns) == 0; w++) sleep_ms(5);
+    sleep_ms(50);   /* the worker's connection message goes out after its spawn */
+    http_server_stop(g_server);
+    atomic_store(&g_stop_returned, 1);
+    scheduler_release_actor(actor);   /* safe from its own step */
+}
+
+int http_actor_stop_on_core_probe(void) {
+    g_server = http_server_create(0);
+    if (!g_server) { printf("FAIL: server_create\n"); return 1; }
+    http_server_get(g_server, "/ping", ping_handler, NULL);
+    http_server_set_actor_handler(g_server, worker_step, aether_send_message, spawn_on_core0,
+                                  (void (*)(void*))scheduler_release_actor);
+    if (http_server_bind_raw(g_server, "127.0.0.1", 0) < 0) { printf("FAIL: bind\n"); return 1; }
+    int port = http_server_port(g_server);
+    if (http_server_start_background_raw(g_server) < 0) { printf("FAIL: start\n"); return 1; }
+
+    /* The stopper takes core 0 first; then a request, whose worker is
+     * spawned on core 0 behind it. */
+    ActorBase* stopper = scheduler_spawn_actor(0, stopper_step, sizeof(ActorBase));
+    if (!stopper) { printf("FAIL: spawn the stopper\n"); return 1; }
+    HttpConnectionMessage go;
+    go.type = MSG_HTTP_CONNECTION;
+    go.client_fd = -1;
+    aether_send_message(stopper, &go, sizeof(go));
+    sleep_ms(100);
+
+    int fd = connect_loopback(port);
+    if (fd < 0 || send_all(fd, "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") != 0) {
+        printf("FAIL: request\n");
+        return 1;
+    }
+
+    for (int w = 0; w < 1500 && !atomic_load(&g_stop_returned); w++) sleep_ms(10);
+    if (!atomic_load(&g_stop_returned)) {
+        printf("FAIL: the stop called on core 0, with a worker queued there, did not return in 15 s\n");
+        fflush(stdout);
+        _exit(1);   /* core 0 is blocked for good: nothing to clean up */
+    }
+
+    /* Freed by the program now; the queued worker still holds the server,
+     * and its step (worker_step) still reaches it through g_server, as a
+     * program's step reaches the server it captured. */
+    http_server_free(g_server);
+
+    /* The worker, stepped once core 0 is free, closes the connection. Its
+     * request is unread, so the close resets it: ECONNRESET on Linux and
+     * macOS, ECONNABORTED where Winsock is underneath (Cygwin). */
+    char buf[256];
+    size_t have = 0;
+    ssize_t n = 0;
+    while (have < sizeof(buf) - 1 && (n = recv(fd, buf + have, sizeof(buf) - 1 - have, 0)) > 0) {
+        have += (size_t)n;
+    }
+    int closed = n == 0 || (n < 0 && (errno == ECONNRESET || errno == ECONNABORTED));
+    close(fd);
+    printf("spawned_on_core0=%d stop_returned=%d connection_closed=%d bytes=%d\n",
+           atomic_load(&g_core0_spawns), atomic_load(&g_stop_returned), closed, (int)have);
+    if (closed && have == 0 && atomic_load(&g_core0_spawns) >= 1) {
+        printf("http_actor_stop_on_core passed\n");
+    }
     return 0;
 }
 

@@ -297,13 +297,19 @@ typedef struct HttpServer {
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
 
-    // Actor dispatch mode: the worker actors given a connection that have
-    // not finished with the server yet, counted by dispatch_to_worker before
-    // the send and uncounted by http_conn_worker_step after its last use of
-    // the server. The run waits for it to come to 0 once its accept loops
-    // are over, as the thread-pool path joins its workers: a stop returns,
-    // and a free follows, only when no worker still reads the server.
-    _Atomic int actor_workers;
+    // Actor dispatch mode (#3688). actor_refs: the server's references, its
+    // owner's (given back by http_server_free) and one for each worker actor
+    // given a connection, taken by dispatch_to_worker before the send and
+    // given back by http_conn_worker_step after its last use of the server.
+    // Whoever gives back the last frees the server, so a worker still queued
+    // when the program frees it (its core busy, or the stop called on that
+    // very core) finds it whole when it is stepped. actor_active: the workers
+    // inside a step with their connection, which the run waits for once its
+    // accept loops are over, as the thread-pool path joins its workers: they
+    // run on cores that are stepping. A queued worker is not waited for, since
+    // only its own core can step it and that core may be the one in the stop.
+    _Atomic int actor_refs;
+    _Atomic int actor_active;
 
     // The connections whose worker is waiting for a request to begin, with
     // nothing of it read: http_server_stop shuts each one down, so a worker
@@ -485,13 +491,24 @@ int http_server_start_raw(HttpServer* server);
 int http_server_start_background_raw(HttpServer* server);
 // Stop the server and wait until its run is over, whichever start began it
 // and whichever thread it runs on: when stop returns, its accept loop and
-// every worker are done, and the server may be freed or started again.
-// Called on one of the server's own threads (a handler, the monitor), it
-// only signals: the run ends once that call returns.
+// every worker serving a connection are done (each finishes the request it
+// is in), and the server may be freed or started again. Called on one of
+// the server's own threads (a handler, the monitor), it only signals: the
+// run ends once that call returns.
+// In actor dispatch mode (http_server_set_actor_handler) a worker actor
+// whose connection is still queued, not yet stepped, is not waited for: only
+// its own core can step it, and that may be the core the stop is called on
+// (from an actor's handler, or on a one-core scheduler). When it is stepped
+// it closes its connection without serving it (#3688).
 void http_server_stop(HttpServer* server);
 // Stop (as above) and free the server. Fatal on one of the server's own
 // threads while it runs, since the run still uses it: stop it there and
-// free it from the thread that started it.
+// free it from the thread that started it, or from any actor.
+// In actor dispatch mode a worker still queued holds the server: free gives
+// back the program's hold, and the server's memory (with what it owns: its
+// routes, middleware and their release callbacks) goes when the last such
+// worker is done, on that worker's thread. A worker that is never stepped
+// (the scheduler shut down before the free) keeps it.
 void http_server_free(HttpServer* server);
 // The run's threads say they are the server's, for the duration of the
 // run, so a stop on them does not wait for itself. Internal to std.net:
