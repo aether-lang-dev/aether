@@ -1,0 +1,336 @@
+// FreeBSD's regex regression suite, run on std.posix.regex.
+//
+// FreeBSD runs lib/libc/tests/regex as NetBSD's h_regex (main.c, split.c)
+// over the data files in std/posix/regex/tests/data/ (copied unchanged from
+// contrib/netbsd-tests/lib/libc/regex/data, see tests/data/PROVENANCE.md).
+// This is main.c's regress(), try(), options(), fixstr() and check() ported
+// to Aether: same file format, same flags, same verdicts, and a mismatch
+// report in main.c's words with the data line number.
+//
+// Differences from h_regex, each because the Aether surface has no knob for it:
+//   - the "P" (REG_POSIX) compile flag is ignored: it only means something in
+//     FreeBSD's separate libregex, and libc without it gives the same answers;
+//   - `-el` / `-er` (REG_LARGE / REG_BACKR) runs are left out: regexec drops
+//     those flags unless the engine is built with REDEBUG, so FreeBSD's three
+//     runs of each file are one run three times;
+//   - the regerror() self-checks at the end of regress() (REG_ITOA / REG_ATOI)
+//     have no counterpart: std.posix.regex returns regerror's text as err.
+//   - a pattern without "p" (REG_PEND) is cut at its first NUL and a subject
+//     without "#" (REG_STARTEND) at its first NUL, as C's strlen does, since
+//     std.posix.regex always passes lengths.
+
+import std.posix.regex
+import std.string
+import std.fs
+
+extern exit(code: int)
+
+// regerror's text for each REG_ name in the data files.
+err_text(name: string) -> string {
+    match (name) {
+        "NOMATCH" -> { return "regexec() failed to match" }
+        "BADPAT" -> { return "invalid regular expression" }
+        "ECOLLATE" -> { return "invalid collating element" }
+        "ECTYPE" -> { return "invalid character class" }
+        "EESCAPE" -> { return "trailing backslash (\\)" }
+        "ESUBREG" -> { return "invalid backreference number" }
+        "EBRACK" -> { return "brackets ([ ]) not balanced" }
+        "EPAREN" -> { return "parentheses not balanced" }
+        "EBRACE" -> { return "braces not balanced" }
+        "BADBR" -> { return "invalid repetition count(s)" }
+        "ERANGE" -> { return "invalid character range" }
+        "ESPACE" -> { return "out of memory" }
+        "BADRPT" -> { return "repetition-operator operand invalid" }
+        "EMPTY" -> { return "empty (sub)expression" }
+        "ASSERT" -> { return "\"can't happen\" -- you found a bug" }
+        "INVARG" -> { return "invalid argument to regex routine" }
+        "ILLSEQ" -> { return "illegal byte sequence" }
+        _ -> { return "?" }
+    }
+}
+
+// opt(): is flag character c in s?
+opt(c: string, s: string) -> int {
+    if string.index_of(s, c) >= 0 { return 1 }
+    return 0
+}
+
+// options('c', s), starting from main.c's copts = REG_EXTENDED.
+copts_of(s: string) -> int {
+    o = regex.EXTENDED
+    if opt("b", s) == 1 { o = o & (0 - 1 - regex.EXTENDED) }
+    if opt("i", s) == 1 { o = o | regex.ICASE }
+    if opt("s", s) == 1 { o = o | regex.NOSUB }
+    if opt("n", s) == 1 { o = o | regex.NEWLINE }
+    if opt("m", s) == 1 {
+        o = o & (0 - 1 - regex.EXTENDED)
+        o = o | regex.NOSPEC
+    }
+    return o
+}
+
+// options('e', s) without '#', which try() handles itself.
+eopts_of(s: string) -> int {
+    o = 0
+    if opt("^", s) == 1 { o = o | regex.NOTBOL }
+    if opt("$", s) == 1 { o = o | regex.NOTEOL }
+    return o
+}
+
+// fixstr(): N newline, T tab, S space, Z NUL.
+fixstr(s: string) -> string {
+    out = ""
+    n = string.length(s)
+    i = 0
+    while i < n {
+        c = string.char_at(s, i)
+        if c == 78 {
+            out = "${out}\n"
+        } else if c == 84 {
+            out = "${out}\t"
+        } else if c == 83 {
+            out = "${out} "
+        } else if c == 90 {
+            out = "${out}${string.from_char(0)}"
+        } else {
+            out = "${out}${string.from_char(c)}"
+        }
+        i = i + 1
+    }
+    return out
+}
+
+// The C string a char* sees: everything before the first NUL.
+cstr(s: string) -> string {
+    n = string.length(s)
+    i = 0
+    while i < n {
+        if string.char_at(s, i) == 0 { return string.substring(s, 0, i) }
+        i = i + 1
+    }
+    return s
+}
+
+// Fields separated by runs of tabs (split(inbuf, f, MAXF, "\t\t")).
+// Returns the field count; fields come back joined by \x01 for get_field.
+split_tabs(line: string) -> (int, string) {
+    parts = string.split(line, "\t")
+    n = string.array_size(parts)
+    joined = ""
+    count = 0
+    i = 0
+    while i < n {
+        p = string.array_get(parts, i)
+        if string.length(p) > 0 {
+            if count == 0 {
+                joined = p
+            } else {
+                joined = "${joined}${string.from_char(1)}${p}"
+            }
+            count = count + 1
+        }
+        i = i + 1
+    }
+    string.array_free(parts)
+    return count, joined
+}
+
+get_field(joined: string, i: int) -> string {
+    parts = string.split(joined, string.from_char(1))
+    v = ""
+    if i < string.array_size(parts) { v = string.array_get(parts, i) }
+    v2 = string.copy(v)
+    string.array_free(parts)
+    return v2
+}
+
+// check(): "" when slot (so, eo) of str agrees with should, else a complaint.
+// should "-" (or absent: has == 0) means the slot must not match; "@rest"
+// means a null match followed by rest.
+check(str: string, so: int, eo: int, has: int, should_in: string) -> string {
+    should = should_in
+    want = has
+    if want == 1 && should == "-" { want = 0 }
+    at = ""
+    has_at = 0
+    if want == 1 && string.length(should) > 0 && string.char_at(should, 0) == 64 {
+        at = string.substring(should, 1, string.length(should))
+        has_at = 1
+        should = ""
+    }
+    if so > eo || (so == -1 && eo != -1) || (so != -1 && eo == -1) || (so != -1 && so < 0) || (eo != -1 && eo < 0) {
+        return "start ${so} end ${eo}"
+    }
+    if so == -1 {
+        if want == 0 { return "" }
+        return "did not match"
+    }
+    if eo > string.length(str) {
+        return "start ${so} end ${eo}, past end of string"
+    }
+    got = string.substring(str, so, eo)
+    if want == 0 { return "matched `${got}'" }
+    if got != should { return "matched `${got}' instead" }
+    if string.length(should) > 0 { return "" }
+    if has_at == 0 { return "" }
+    // null match: what follows it must start with `at` (or be the end)
+    rest = string.substring(str, so, string.length(str))
+    if string.length(at) == 0 {
+        if string.length(rest) == 0 { return "" }
+        return "matched null at `${rest}'"
+    }
+    if string.starts_with(rest, at) == 1 { return "" }
+    return "matched null at `${rest}'"
+}
+
+// try(): one line of a data file with compile options copts. Returns the
+// number of failures (0 or more), printing each in main.c's words.
+try_case(line: int, f0: string, f1: string, f2: string, nf: int, f3: string, f4: string, copts: int) -> int {
+    ty = "ERE"
+    if (copts & regex.EXTENDED) == 0 { ty = "BRE" }
+    pat = fixstr(f0)
+    if opt("p", f1) == 0 { pat = cstr(pat) }
+    expect_c = opt("C", f1)
+    re, cerr = regex.compile(pat, copts)
+    if cerr != "" {
+        if expect_c == 1 && cerr == err_text(f2) { return 0 }
+        println("${line}: ${ty} error `${cerr}'")
+        return 1
+    }
+    if expect_c == 1 {
+        println("${line}: ${ty} should have given REG_${f2}")
+        regex.free(re)
+        return 1
+    }
+
+    subject = fixstr(f2)
+    start = 0
+    end = -1
+    if opt("#", f1) == 1 {
+        lp = string.index_of(f2, "(")
+        rp = string.index_of(f2, ")")
+        if lp < 0 || rp < 0 { println("${line}: bad STARTEND syntax") }
+        start = lp + 1
+        end = rp
+    } else {
+        subject = cstr(subject)
+    }
+    m = regex.match_new(re)
+    ok, eerr = regex.exec_range(re, subject, start, end, eopts_of(f1), m)
+    fails = 0
+    if eerr != "" {
+        println("${line}: ${ty} exec error `${eerr}'")
+        fails = 1
+    } else if ok == 0 {
+        if nf > 3 {
+            println("${line}: ${ty} did not match")
+            fails = 1
+        }
+    } else if nf <= 3 {
+        println("${line}: ${ty} exec should have failed")
+        fails = 1
+    } else if (copts & regex.NOSUB) == 0 {
+        g = check(f2, regex.match_start(m, 0), regex.match_end(m, 0), 1, f3)
+        if g != "" {
+            println("${line}: ${ty} ${g}")
+            fails = 1
+        } else if nf > 4 {
+            // subexpressions 1..9 against the comma-separated f4
+            shoulds = string.split(f4, ",")
+            ns = string.array_size(shoulds)
+            i = 1
+            while i < 10 {
+                has = 0
+                sh = ""
+                if i - 1 < ns {
+                    has = 1
+                    sh = string.array_get(shoulds, i - 1)
+                }
+                g2 = check(f2, regex.match_start(m, i), regex.match_end(m, i), has, sh)
+                if g2 != "" {
+                    println("${line}: ${ty} $${i} ${g2}")
+                    fails = fails + 1
+                }
+                i = i + 1
+            }
+            string.array_free(shoulds)
+        }
+    }
+    regex.match_free(m)
+    regex.free(re)
+    return fails
+}
+
+// regress() over one data file. Returns (cases, failures).
+run_file(path: string) -> (int, int) {
+    text, err = fs.read(path)
+    if err != "" {
+        println("FAIL: read ${path}: ${err}")
+        exit(1)
+    }
+    lines = string.split(text, "\n")
+    nl = string.array_size(lines)
+    cases = 0
+    fails = 0
+    i = 0
+    while i < nl {
+        ln = string.array_get(lines, i)
+        lineno = i + 1
+        i = i + 1
+        if string.length(ln) == 0 { continue }
+        if string.char_at(ln, 0) == 35 { continue }
+        nf, joined = split_tabs(ln)
+        if nf < 3 {
+            println("${path}:${lineno}: bad input")
+            fails = fails + 1
+            continue
+        }
+        fv0 = get_field(joined, 0)
+        fv1 = get_field(joined, 1)
+        fv2 = get_field(joined, 2)
+        fv3 = get_field(joined, 3)
+        fv4 = get_field(joined, 4)
+        if fv0 == "\"\"" { fv0 = "" }
+        if fv1 == "\"\"" { fv1 = "" }
+        if fv2 == "\"\"" { fv2 = "" }
+        if fv3 == "\"\"" { fv3 = "" }
+        if fv4 == "\"\"" { fv4 = "" }
+        co = copts_of(fv1)
+        cases = cases + 1
+        fails = fails + try_case(lineno, fv0, fv1, fv2, nf, fv3, fv4, co)
+        if opt("&", fv1) == 1 {
+            cases = cases + 1
+            fails = fails + try_case(lineno, fv0, fv1, fv2, nf, fv3, fv4, co & (0 - 1 - regex.EXTENDED))
+        }
+    }
+    string.array_free(lines)
+    return cases, fails
+}
+
+main() {
+    println("=== std.posix.regex: FreeBSD regex regression data ===")
+    names = ["basic", "paren", "anchor", "error", "meta", "backref",
+        "repet_ordinary", "repet_bounded", "repet_multi", "bracket",
+        "complex", "subtle", "c_comments", "subexp", "startend",
+        "nospec", "zero", "word_bound", "regress"]
+    total = 0
+    bad = 0
+    i = 0
+    while i < 19 {
+        name = names[i]
+        c, f = run_file("std/posix/regex/tests/data/${name}.in")
+        if f == 0 {
+            println("  PASS: ${name} (${c} cases)")
+        } else {
+            println("  FAIL: ${name}: ${f} of ${c} cases")
+        }
+        total = total + c
+        bad = bad + f
+        i = i + 1
+    }
+    if bad != 0 {
+        println("FAIL: ${bad} of ${total} cases")
+        exit(1)
+    }
+    println("PASS: all ${total} cases")
+}

@@ -261,6 +261,115 @@ includes package A, the condition is not imposed on package B unless it uses
 PCRE2 independently.
 ```
 
+## FreeBSD libc regex (Henry Spencer) — BSD-3-Clause
+
+Used by `std.posix.regex` (issue
+[#3652](https://github.com/aether-lang-dev/aether/issues/3652)). The directory
+`std/posix/regex/freebsd/` is Henry Spencer's regex engine as FreeBSD's libc
+carries it (`lib/libc/regex/` of <https://github.com/freebsd/freebsd-src>,
+commit `9d2cdb3fd5741685622b0b9c0e17e22583c9ceff`), altered: trimmed to UTF-8
+only and with its symbols renamed, as `std/posix/regex/freebsd/PROVENANCE.md`
+lists. Each source file carries this BSD-3-Clause notice:
+
+```
+Copyright (c) 1992, 1993, 1994 Henry Spencer.
+Copyright (c) 1992, 1993, 1994
+	The Regents of the University of California.  All rights reserved.
+
+This code is derived from software contributed to Berkeley by
+Henry Spencer.
+
+Redistribution and use in source and binary forms, with or without
+modification, are permitted provided that the following conditions
+are met:
+1. Redistributions of source code must retain the above copyright
+   notice, this list of conditions and the following disclaimer.
+2. Redistributions in binary form must reproduce the above copyright
+   notice, this list of conditions and the following disclaimer in the
+   documentation and/or other materials provided with the distribution.
+3. Neither the name of the University nor the names of its contributors
+   may be used to endorse or promote products derived from this software
+   without specific prior written permission.
+
+THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+SUCH DAMAGE.
+```
+
+`regcomp.c` adds "Copyright (c) 2011 The FreeBSD Foundation" (portions by
+David Chisnall under sponsorship from the FreeBSD Foundation) under the same
+terms. The engine's `COPYRIGHT` file, shipped beside it, also carries Henry
+Spencer's original notice:
+
+```
+Copyright 1992, 1993, 1994 Henry Spencer.  All rights reserved.
+This software is not subject to any license of the American Telephone
+and Telegraph Company or of the Regents of the University of California.
+
+Permission is granted to anyone to use this software for any purpose on
+any computer system, and to alter it and redistribute it, subject
+to the following restrictions:
+
+1. The author is not responsible for the consequences of use of this
+   software, no matter how awful, even if they arise from flaws in it.
+
+2. The origin of this software must not be misrepresented, either by
+   explicit claim or by omission.  Since few users ever read sources,
+   credits must appear in the documentation.
+
+3. Altered versions must be plainly marked as such, and must not be
+   misrepresented as being the original software.  Since few users
+   ever read sources, credits must appear in the documentation.
+
+4. This notice may not be removed or altered.
+
+=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=-=
+/*-
+ * Copyright (c) 1994
+ *	The Regents of the University of California.  All rights reserved.
+ *
+ * Redistribution and use in source and binary forms, with or without
+ * modification, are permitted provided that the following conditions
+ * are met:
+ * 1. Redistributions of source code must retain the above copyright
+ *    notice, this list of conditions and the following disclaimer.
+ * 2. Redistributions in binary form must reproduce the above copyright
+ *    notice, this list of conditions and the following disclaimer in the
+ *    documentation and/or other materials provided with the distribution.
+ * 3. All advertising materials mentioning features or use of this software
+ *    must display the following acknowledgement:
+ *	This product includes software developed by the University of
+ *	California, Berkeley and its contributors.
+ * 4. Neither the name of the University nor the names of its contributors
+ *    may be used to endorse or promote products derived from this software
+ *    without specific prior written permission.
+ *
+ * THIS SOFTWARE IS PROVIDED BY THE REGENTS AND CONTRIBUTORS ``AS IS'' AND
+ * ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE
+ * IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE
+ * ARE DISCLAIMED.  IN NO EVENT SHALL THE REGENTS OR CONTRIBUTORS BE LIABLE
+ * FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL
+ * DAMAGES (INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS
+ * OR SERVICES; LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION)
+ * HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT
+ * LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY
+ * OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF
+ * SUCH DAMAGE.
+ */
+```
+
+The regex test data in `std/posix/regex/tests/data/` comes from the same
+FreeBSD commit (`contrib/netbsd-tests/lib/libc/regex/data/`); the AT&T files
+under `att/` are Glenn Fowler's, published "license free".
+
 ## libfyaml — MIT License (bundling xxHash, BSD-2-Clause, and BLAKE3)
 
 Used by `std.yaml`. The directory `std/yaml/libfyaml/` is a byte-identical

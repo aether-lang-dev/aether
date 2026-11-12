@@ -69,6 +69,7 @@ header comment is the authoritative description.
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
 | `std.reflect` | Read a struct's field table from `@derive(schema)`: names, types, offsets, sizes, attributes. | 46 | [guide](../std/reflect/README.md) · [source](../std/reflect/module.ae) |
+| `std.posix.regex` | POSIX regular expressions (BRE and ERE, leftmost-longest, back-references), FreeBSD's libc engine. | 20 | [guide](../std/posix/regex/README.md) · [source](../std/posix/regex/module.ae) |
 | `std.quote` | The tree a `quote` trailing block hands to a function: typed nodes, captures read through their cells, and a printer. | 66 | [guide](../std/quote/README.md) · [source](../std/quote/module.ae) |
 | `std.regex` | Perl-compatible regular expressions, backed by PCRE2. | 27 | [guide](../std/regex/README.md) · [source](../std/regex/module.ae) |
 | `std.resp` | RESP codec (Redis Serialization Protocol): RESP3-native, RESP2-compatible, resumable decoder. | 42 | [guide](../std/resp/README.md) · [source](../std/resp/module.ae) |
