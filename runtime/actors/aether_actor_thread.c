@@ -18,7 +18,15 @@ extern AETHER_TLS int aether_in_actor_thread;   /* multicore_scheduler.c */
 
 int aether_actor_thread_start(pthread_t* thread, void* actor) {
 #if AETHER_HAS_THREADS
-    return pthread_create(thread, NULL, aether_actor_thread, actor);
+    /* Detached: nothing joins an actor's thread. It ends the actor and leaves
+     * by itself (aether_actor_thread, scheduler_actor_thread_exit), and a
+     * joinable thread that ends unjoined keeps its stack and its slot in the
+     * C library until the process does: one per auto_process actor that
+     * ever ran (TSan reported the leak, #3542). The id stays in *thread for
+     * what compares it. */
+    int rc = pthread_create(thread, NULL, aether_actor_thread, actor);
+    if (rc == 0) pthread_detach(*thread);
+    return rc;
 #else
     /* A runtime built without threads has none to give it, and a program
      * built with them can still link to it (ci-coop runs ordinary programs
