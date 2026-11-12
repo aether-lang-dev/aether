@@ -342,6 +342,10 @@ struct AetherWatch;  /* runtime/actors/aether_supervision.c */
  * keeps such an actor on that core, which is the one writer of its mailbox,
  * and clears the bit. */
 #define AETHER_EXIT_ROUTED    4
+/* A caller's actor scheduler_deregister_actor has taken out of its table
+ * (#3540): a core drops the ready list entries it takes for it and fires
+ * no countdown of it. scheduler_register_actor clears the bit. */
+#define AETHER_EXIT_DEREGISTERED 8
 
 /* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
  * another; the counts of messages in flight sit below it. */
@@ -473,6 +477,10 @@ typedef struct {
     // requests, and a death posted then is finalized by its poster. Under
     // control_lock; 0 again at scheduler_init.
     int             control_closed;
+    // 1 once the core's thread has left its loop and touches its ready
+    // lists and timer heap no more (#3540): a deregister then takes an
+    // actor out of them itself. 0 again at scheduler_init.
+    atomic_int      loop_left;
     // Where this core's next relief scan of its table starts (#3197).
     int             relief_cursor;
 
@@ -544,11 +552,12 @@ void scheduler_cleanup(void);
  * which its core fires from the registration on, as it does one armed
  * before a first registration (#3540). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
-/* Out of its core's table. An entry for it may still wait in the core's
- * ready list or timer heap (#3540), which the core takes and drops once it
- * sees the actor released: scheduler_release_actor, which ends an actor
- * through this, keeps the block until then. A caller that deregisters an
- * actor with work left and frees it at once leaves the core that entry. */
+/* Out of its core's table, and out of every core's ready list and timer
+ * heap (#3540): once it returns, no core reads the actor (one that has a
+ * receive timeout armed included), and the caller may free it, unless a
+ * message to it is still on its way. It waits for the actor's core to take
+ * a last entry for it: called from a step on another core, that core must
+ * not be waiting on this one. The actor may be registered again. */
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);

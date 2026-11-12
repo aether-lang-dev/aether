@@ -2542,6 +2542,130 @@ void test_ready_list_registration_finds_armed_countdown(void) {
     ASSERT_EQ(1, early_fired);
 }
 
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int fired;
+    atomic_int foreign;   // fired on a thread that is not its core's
+} MovedTimed;
+
+static void moved_timed_step(void* self) {
+    MovedTimed* a = (MovedTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->last_activity_ns = 0;
+        if (aether_core_id_get() != atomic_load(&a->assigned_core)) atomic_fetch_add(&a->foreign, 1);
+        atomic_fetch_add(&a->fired, 1);
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+// Deregistered with its countdown armed, then registered again on the other
+// core: the countdown fires once, on its new core (#3540). The deregister
+// left the countdown in its old core's heap, and that core stepped the actor
+// when it came due, while the actor was the other core's: two threads
+// stepping it, and its old core's heap still naming it.
+void test_ready_list_deregister_then_register_moves_countdown(void) {
+    MovedTimed* a = (MovedTimed*)caller_actor(sizeof(MovedTimed), moved_timed_step);
+    ASSERT_NOT_NULL(a);
+    atomic_init(&a->fired, 0);
+    atomic_init(&a->foreign, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, 0);
+    arm_countdown((ActorBase*)a, 200);
+    int in_heap = wait_in_heap((ActorBase*)a);
+    scheduler_deregister_actor((ActorBase*)a);
+    int core = scheduler_register_actor((ActorBase*)a, 1);
+    int fired = wait_count(&a->fired, 1);
+    sleep_ms(300);   // past the deadline again: no second firing
+    int fired_after = atomic_load(&a->fired);
+    int foreign = atomic_load(&a->foreign);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(a);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(1, core);
+    ASSERT_EQ(1, fired);
+    ASSERT_EQ(1, fired_after);
+    ASSERT_EQ(0, foreign);
+}
+
+// Make the `len` bytes at `page` (page aligned) unreadable, or writable again.
+static int forbid_pages(void* page, size_t len, int forbid) {
+#ifdef _WIN32
+    DWORD old;
+    return VirtualProtect(page, len, forbid ? PAGE_NOACCESS : PAGE_READWRITE, &old) ? 0 : -1;
+#else
+    return mprotect(page, len, forbid ? PROT_NONE : (PROT_READ | PROT_WRITE));
+#endif
+}
+
+static void* map_pages(size_t len) {
+#ifdef _WIN32
+    return VirtualAlloc(NULL, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+#endif
+}
+
+static void unmap_pages(void* p, size_t len) {
+#ifdef _WIN32
+    (void)len;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, len);
+#endif
+}
+
+static atomic_int g_freed_fired;
+
+static void freed_timed_step(void* self) {
+    (void)self;
+    atomic_fetch_add(&g_freed_fired, 1);
+}
+
+// A caller deregisters its actor with a countdown armed and frees it at once
+// (#3540): nothing of the scheduler reads the block after the deregister
+// returns, as with the scan, which looked only at its table. The countdown
+// stayed in its core's heap, which read the freed block when it came due.
+// The block's pages are made unreadable in place of the free, so a read
+// faults.
+void test_ready_list_deregister_then_free_with_countdown(void) {
+    size_t page = system_page_size();
+    size_t len = (sizeof(MovedTimed) + page - 1) & ~(page - 1);
+    MovedTimed* a = (MovedTimed*)map_pages(len);
+    ASSERT_NOT_NULL(a);
+    mailbox_init(&a->mailbox);
+    a->step = freed_timed_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_store(&g_freed_fired, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, 0);
+    arm_countdown((ActorBase*)a, 50);
+    int in_heap = wait_in_heap((ActorBase*)a);
+    scheduler_deregister_actor((ActorBase*)a);
+    int forbidden = forbid_pages(a, len, 1) == 0;
+    sleep_ms(300);   // past the deadline
+    int fired = atomic_load(&g_freed_fired);
+    if (forbidden) ASSERT_EQ(0, forbid_pages(a, len, 0));
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    unmap_pages(a, len);
+    ASSERT_TRUE(in_heap);
+    ASSERT_TRUE(forbidden);
+    ASSERT_EQ(0, fired);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2583,4 +2707,6 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler restart hands a carried actor over", test_scheduler_restart_hands_carried_actor_over, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler end during shutdown is finalized by the core", test_scheduler_end_during_shutdown_finalized_by_core, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a registration finds an armed countdown", test_ready_list_registration_finds_armed_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a countdown follows a deregister and a registration", test_ready_list_deregister_then_register_moves_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a deregistered actor's block is not read again", test_ready_list_deregister_then_free_with_countdown, TEST_CATEGORY_RUNTIME);
 }
