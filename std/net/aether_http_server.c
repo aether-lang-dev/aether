@@ -2867,7 +2867,26 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     if (!space) {
         return NULL;
     }
-    
+
+    /* method SP request-target SP HTTP-version (RFC 9112 3), the method a
+     * token and the target a non-empty run with no control byte in it. The
+     * parser took whatever lay between the spaces: "G@T", an empty method
+     * (" / HTTP/1.1"), an empty target ("GET  HTTP/1.1"), and a target with
+     * a tab or a CR in it, which the reverse proxy then wrote into the
+     * request line it sent upstream (found by tests/fuzz/http_head). Each
+     * is a request line that is not one, answered 400. */
+    {
+        const char* target = space + 1;
+        const char* target_end = strchr(target, ' ');
+        if (space == request_line || !target_end || target_end == target) return NULL;
+        *space = '\0';
+        int method_ok = http_header_name_ok(request_line);
+        *space = ' ';
+        if (!method_ok) return NULL;
+        for (const char* c = target; c < target_end; c++)
+            if ((unsigned char)*c < 0x20 || (unsigned char)*c == 0x7f) return NULL;
+    }
+
     int method_len = space - request_line;
     req->method = req_alloc(req, (size_t)method_len + 1);
     if (!req->method) return NULL;

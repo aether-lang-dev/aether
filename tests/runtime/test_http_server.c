@@ -468,6 +468,32 @@ TEST(http_server_header_value_loses_the_whitespace_around_it) {
     http_request_free(req);
 }
 
+TEST(http_server_request_line_is_method_target_version) {
+    /* method SP request-target SP HTTP-version (RFC 9112 3). The parser took
+     * whatever lay between the spaces, so these were served: a method that
+     * is not a token, an empty method, an empty target, and targets with a
+     * tab or a CR, which the reverse proxy wrote into its own request line
+     * upstream (found by tests/fuzz/http_head). */
+    ASSERT_NULL(http_parse_request("G@T / HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request(" / HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET  HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\tb HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\rb HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\x7f HTTP/1.1\r\n\r\n"));
+
+    /* Every token is a method, and a target may be any visible bytes. */
+    HttpRequest* req = http_parse_request("M-SEARCH * HTTP/1.1\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("M-SEARCH", req->method);
+    ASSERT_STREQ("*", req->path);
+    http_request_free(req);
+    req = http_parse_request("GET /caf\xc3\xa9?q=%20 HTTP/1.0\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("/caf\xc3\xa9", req->path);
+    ASSERT_STREQ("q=%20", req->query_string);
+    http_request_free(req);
+}
+
 TEST(http_server_body_without_content_length_keeps_nul_bytes) {
     /* The worker decodes a chunked upload in place and hands the parser the
      * head and the decoded payload, with no Content-Length, `len` counting

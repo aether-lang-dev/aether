@@ -211,6 +211,9 @@ expect_400 "a bare CR in a header value" \
 # twice, and the worker's heap was corrupted.
 expect_400 "a request line with no version" \
     'POST /upload\r\nHost: x\r\nConnection: close\r\n\r\n'
+# A request line is method SP target SP version, the method a token.
+expect_400 "a method that is not a token" \
+    'P@ST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
 
 # The request line and each header line are copied into fixed buffers. An
 # over-long one used to be copied in anyway, off the end of the stack frame,
