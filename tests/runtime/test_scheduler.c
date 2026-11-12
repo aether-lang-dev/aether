@@ -2396,6 +2396,87 @@ void test_scheduler_restart_hands_carried_actor_over(void) {
     ASSERT_EQ(0, bad);
 }
 
+// An actor ended while scheduler_shutdown() is stopping the cores (the
+// scheduler's state no longer "running", its threads not joined yet) has its
+// death finalized by its core, once its step returns, not by the thread that
+// ended it while the step still runs. A receive timeout's arm is still
+// stepped then (the shutdown does not wait for countdowns, #3219): it holds
+// at a gate while the main thread kills the actor.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int in_arm;
+    atomic_int finalized_in_arm;   // the death was finalized while the arm ran
+} GatedTimed;
+
+static atomic_int g_arm_gate;
+
+static void gated_timed_step(void* self) {
+    GatedTimed* a = (GatedTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->last_activity_ns = 0;
+        atomic_store(&a->in_arm, 1);
+        for (int w = 0; w < 10000 && !atomic_load(&g_arm_gate); w++) sleep_ms(1);
+        if (atomic_load_explicit(&a->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED)
+            atomic_store(&a->finalized_in_arm, 1);
+        atomic_store(&a->in_arm, 0);
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+static void* shutdown_thread(void* arg) {
+    (void)arg;
+    scheduler_shutdown();
+    return NULL;
+}
+
+void test_scheduler_end_during_shutdown_finalized_by_core(void) {
+    scheduler_init(2);
+    scheduler_start();
+    GatedTimed* a = (GatedTimed*)scheduler_spawn_actor(1, gated_timed_step, sizeof(GatedTimed));
+    CounterActor* probe = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
+                                                               sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(probe);
+    atomic_init(&a->in_arm, 0);
+    atomic_init(&a->finalized_in_arm, 0);
+    atomic_store(&g_arm_gate, 0);
+    a->timeout_ns = 5 * 1000000ULL;
+    a->last_activity_ns = aether_now_ns();
+    scheduler_timeout_armed((ActorBase*)a);
+    ASSERT_EQ(1, wait_count(&a->in_arm, 1));
+
+    // The shutdown waits for no countdown: it stops the scheduler and then
+    // joins core 1, which is in the arm.
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, shutdown_thread, NULL));
+    // Stopping: a send from this thread is refused from then on.
+    uint64_t refused = scheduler_stopped_sends();
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (scheduler_stopped_sends() == refused && (long long)get_time_ms() <= deadline) {
+        scheduler_send_remote((ActorBase*)probe, message_create_simple(1, 0, 0), -1);
+        sleep_ms(1);
+    }
+    int stopping = scheduler_stopped_sends() != refused;
+
+    scheduler_actor_end((ActorBase*)a, "killed", AETHER_ACTOR_KILLED);
+    int finalized_at_end = (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0;
+    atomic_store(&g_arm_gate, 1);
+    pthread_join(t, NULL);
+    int finalized_in_arm = atomic_load(&a->finalized_in_arm);
+    // And it was finalized: by the core, on its way out of its loop.
+    int finalized_after = (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0;
+    scheduler_cleanup();
+
+    ASSERT_TRUE(stopping);
+    ASSERT_EQ(0, finalized_at_end);
+    ASSERT_EQ(0, finalized_in_arm);
+    ASSERT_EQ(1, finalized_after);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2435,4 +2516,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: a moved actor is stepped on its new core", test_ready_list_moved_actor_stepped_on_new_core, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler stepping loop yields to its queues", test_scheduler_stepping_loop_yields_to_queues, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler restart hands a carried actor over", test_scheduler_restart_hands_carried_actor_over, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler end during shutdown is finalized by the core", test_scheduler_end_during_shutdown_finalized_by_core, TEST_CATEGORY_RUNTIME);
 }

@@ -709,10 +709,16 @@ void scheduler_actor_thread_finalize(ActorBase* actor) {
     if ((d & AETHER_ACTOR_ENDED) && !(d & AETHER_ACTOR_RELEASED)) actor_finalize(actor);
 }
 
-/* A finalize request for `actor`, to core `core`'s loop. */
-static void control_post(int core, ActorBase* actor) {
+/* A finalize request for `actor`, to core `core`'s loop. 0 when that loop
+ * takes no more (its thread has left it): the caller finalizes the death
+ * itself, as nothing steps the actor any more. */
+static int control_post(int core, ActorBase* actor) {
     Scheduler* s = &schedulers[core];
     while (atomic_flag_test_and_set_explicit(&s->control_lock, memory_order_acquire)) AETHER_PAUSE();
+    if (s->control_closed) {
+        atomic_flag_clear_explicit(&s->control_lock, memory_order_release);
+        return 0;
+    }
     if (s->control_count == s->control_cap) {
         int cap = s->control_cap ? s->control_cap * 2 : 8;
         ActorBase** grown = (ActorBase**)realloc(s->control, (size_t)cap * sizeof(ActorBase*));
@@ -720,7 +726,7 @@ static void control_post(int core, ActorBase* actor) {
             atomic_flag_clear_explicit(&s->control_lock, memory_order_release);
             fprintf(stderr, "aether: out of memory ending actor %d; it ends at its next step\n",
                     actor->id);
-            return;
+            return 1;
         }
         s->control = grown;
         s->control_cap = cap;
@@ -731,6 +737,7 @@ static void control_post(int core, ActorBase* actor) {
     atomic_fetch_add_explicit(&s->control_pending, 1, memory_order_release);
     atomic_flag_clear_explicit(&s->control_lock, memory_order_release);
     sched_wake(s);
+    return 1;
 }
 
 /* The core's finalize requests, on its thread where it steps nothing, or
@@ -752,8 +759,10 @@ static void control_run(Scheduler* sched) {
         if (!(d & AETHER_ACTOR_ENDED) || (d & AETHER_ACTOR_RELEASED) ||
             (atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED)) {
             // Nothing to do.
-        } else if (core != sched->core_id && core >= 0 && core < num_cores) {
-            control_post(core, actor);
+        } else if (core != sched->core_id && core >= 0 && core < num_cores &&
+                   control_post(core, actor)) {
+            // Its core's now. One that takes no more requests has left its
+            // loop and steps nothing: finalized here, below.
         } else if (!atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
             // Read again under the lock: a restart in place may have
             // brought it alive meanwhile (#2974).
@@ -814,15 +823,22 @@ int scheduler_actor_end(ActorBase* actor, const char* reason, int bit) {
      * scheduler_start makes the threads, and a request posted between the
      * two waited for a start that a C host may never make, so the death
      * was never finalized, no Down went out and no link took it. */
-    if (core >= 0 && core < num_cores && atomic_load(&g_sched_state) == 2 &&
-        atomic_load_explicit(&g_threads_started, memory_order_acquire)) {
-        control_post(core, actor);
-    } else {
-        // No core runs it (the scheduler is not running, or its threads are
-        // not started): nothing steps it or delivers to it, so it is
-        // finalized here.
-        actor_finalize(actor);
+    /* And while the cores are stopping (scheduler_shutdown has left the
+     * running state, but a core thread may still be in a step of the actor,
+     * a receive timeout's arm say, which the shutdown does not wait for):
+     * finalized here, it was drained and its watchers told while its
+     * handler ran on its core. Posted, the core finalizes it when the step
+     * returns, or on its way out of its loop; a core that has left its loop
+     * refuses the request, and nothing steps the actor any more. */
+    if (core >= 0 && core < num_cores &&
+        atomic_load_explicit(&g_threads_started, memory_order_acquire) &&
+        control_post(core, actor)) {
+        return 1;
     }
+    // No core runs it (the scheduler is not running, its threads are not
+    // started, or its core has left its loop): nothing steps it or delivers
+    // to it, so it is finalized here.
+    actor_finalize(actor);
     return 1;
 }
 
@@ -3017,6 +3033,14 @@ void* AETHER_HOT scheduler_thread(void* arg) {
         }
     }
 
+    // Its loop takes no more finalize requests (a death posted from now on
+    // is finalized by the thread that ended the actor), and what was posted
+    // is done here, now that the thread steps nothing (#2974).
+    while (atomic_flag_test_and_set_explicit(&sched->control_lock, memory_order_acquire)) AETHER_PAUSE();
+    sched->control_closed = 1;
+    atomic_flag_clear_explicit(&sched->control_lock, memory_order_release);
+    control_run(sched);
+
     // Final flush: drain any remaining overflow entries before thread exits.
     // scheduler_wait waits for count_pending_messages()==0 (which includes
     // g_overflow_total) before calling scheduler_stop, so normally overflow is
@@ -3159,6 +3183,7 @@ void scheduler_init(int cores) {
         schedulers[i].control = NULL;
         schedulers[i].control_count = 0;
         schedulers[i].control_cap = 0;
+        schedulers[i].control_closed = 0;
         schedulers[i].relief_cursor = 0;
         schedulers[i].coalesce_buffer.count = 0;
         schedulers[i].coalesce_buffer.next = 0;

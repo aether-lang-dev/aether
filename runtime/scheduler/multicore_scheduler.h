@@ -452,6 +452,10 @@ typedef struct {
     ActorBase**     control;
     int             control_count;
     int             control_cap;
+    // 1 once the core's thread has left its loop: it takes no more finalize
+    // requests, and a death posted then is finalized by its poster. Under
+    // control_lock; 0 again at scheduler_init.
+    int             control_closed;
     // Where this core's next relief scan of its table starts (#3197).
     int             relief_cursor;
 
