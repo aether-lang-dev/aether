@@ -37,3 +37,8 @@ examples/07-applications/01-word-count/sample.md text eol=lf
 # Fuzz seeds are raw CBOR: a seed of one 0x0a byte reads as text to git and
 # would become 0d 0a under autocrlf.
 tests/fuzz/cbor/corpus/** binary
+
+# FreeBSD's sed regression suite (std.sed's parity test and test_sed read these
+# byte for byte): keep them LF on a Windows autocrlf checkout, or every line
+# gains a CR and sed's output no longer matches the expected files.
+tests/integration/sed_parity/freebsd/** text eol=lf

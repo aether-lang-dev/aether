@@ -12,6 +12,10 @@ This gate reads every `*.sh` under tests/ except that helper and fails on a
 bodies set aside, unless the file asks `command -v <tool>` first (a diff
 shown when one is there, as a failure's detail, is fine).
 
+Not checked: test suites vendored unchanged from another project, which call
+diff themselves and are run only by a test that asks `command -v diff` before
+it starts them (FreeBSD's sed suite, run by tests/integration/sed_parity/).
+
 Run from the repository root; exit 1 listing every offender.
 """
 import os
@@ -22,6 +26,7 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import check_shell_kills as csk  # noqa: E402
 
 HELPER = os.path.join("tests", "lib", "same_bytes.sh")
+VENDORED = (os.path.join("tests", "integration", "sed_parity", "freebsd") + os.sep,)
 TOOL = re.compile(csk.CMD_START + r'(cmp|diff)(?=\s|$)')
 
 
@@ -52,7 +57,8 @@ def shell_sources(root):
         for name in names:
             if name.endswith(".sh"):
                 path = os.path.join(dirpath, name)
-                if os.path.relpath(path, root) != HELPER:
+                rel = os.path.relpath(path, root)
+                if rel != HELPER and not rel.startswith(VENDORED):
                     out.append(path)
     return sorted(out)
 
