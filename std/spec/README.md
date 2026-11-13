@@ -45,9 +45,12 @@ and you should `return` it from `main()`. A bare `main()` takes no return
 annotation (`main() -> int` is a parse error) and its return value becomes the
 process exit status, so the suite works as a test binary with no extra wiring.
 
-**Return it.** Dropping the value turns a failing suite green, because `main()`
-then falls through and exits 0. If you have cleanup to do after the run, keep
-the verdict and return it last:
+**Return it.** A failing suite whose `main()` drops the value still exits 1:
+`run_summary` notes the failure with the runtime, and a `main()` that would
+exit 0 exits 1 instead (it used to fall through and exit 0, a failing suite
+reported green). A status `main()` returns or exits with itself is kept, so
+returning the verdict remains the way to say it. If you have cleanup to do
+after the run, keep the verdict and return it last:
 
 ```aether,fragment
 _rc = spec.run_summary(fw)

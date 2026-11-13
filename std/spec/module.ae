@@ -115,6 +115,11 @@ exports(
 // documented tradeoff for ambient state.
 @extern("free") libc_free(p: ptr)
 
+// The runtime's note of a failure the process must exit with, even when
+// main() returns 0 (runtime/aether_runtime.c): run_summary makes it for a
+// failing suite.
+extern aether_note_failure(status: int)
+
 var current_fw: ptr = null
 
 // Whether output is coloured (#3180): -1 until the first coloured write
@@ -1130,6 +1135,13 @@ run_summary(fw: ptr) -> int {
     // caller that DROPS the value silently turns a failing suite green, so
     // the rule for every caller is: return it.
     if failed > 0 {
+        // Also noted with the runtime, so a main() that drops this value
+        // (`spec.run_summary(fw)` as its last statement) still exits 1: it
+        // fell off the end and exited 0, and `ae run`, `ae test` and every
+        // harness reading the status took the failing suite for a passing
+        // one. A main() that returns or exits with a status of its own keeps
+        // it.
+        aether_note_failure(1)
         return 1
     }
     // Return 0 explicitly rather than falling off the end.

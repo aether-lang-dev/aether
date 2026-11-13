@@ -70,8 +70,10 @@ all assertions passed, non-zero means at least one failed.
 when every case passed and `1` when any failed; it does not exit, so cleanup
 after it still runs. Return it from `main()`, as the example does: `main()`'s
 return value is the process exit code. A suite that calls it as a bare
-statement drops the verdict and exits 0 with failing cases, which `make
-check-tests` rejects for the repository's own suites.
+statement drops the verdict, but a failing one still exits 1: `run_summary`
+notes the failure with the runtime, and `main()`'s 0 becomes 1 (it exited 0
+before, which `make check-tests` still rejects for the repository's own
+suites). A non-zero status `main()` returns, or an `exit()`, is its own.
 
 ## Suites, context, and hooks
 

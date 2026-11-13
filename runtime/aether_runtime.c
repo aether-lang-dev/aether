@@ -240,6 +240,25 @@ void aether_runtime_shutdown(void) {
     g_runtime_initialized = 0;
 }
 
+/* The status the process exits with when main() itself says 0, so a
+ * failure noted on the way cannot turn into a successful exit. std.spec's
+ * run_summary notes a failing suite: a test whose main() dropped the verdict
+ * (`spec.run_summary(fw)` as a statement, not `return`) fell off the end and
+ * exited 0, so `ae run` and every harness reading the status took a failing
+ * suite for a passing one. The exit status is the process's by nature, so
+ * this is the one place it is kept; only a non-zero status is ever stored
+ * (a race between two stores leaves one of them, either a failure), and a
+ * main() that returns non-zero, or calls exit(), keeps its own status. */
+static volatile int aether_failure_status = 0;
+
+void aether_note_failure(int status) {
+    if (status != 0 && aether_failure_status == 0) aether_failure_status = status;
+}
+
+int aether_main_status(int rc) {
+    return rc != 0 ? rc : aether_failure_status;
+}
+
 // Command-line arguments
 int aether_argc = 0;
 char** aether_argv = NULL;
