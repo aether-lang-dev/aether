@@ -1,1 +1,0 @@
-- **std.sed uses the public array and file APIs (#3691).** Replace calls to other modules' raw bindings in the sed engine and parity fixture, clearing the raw-call CI gate, and use the short module-qualified names required by the warnings gate. The fixture also reports errors from closing an output file.
