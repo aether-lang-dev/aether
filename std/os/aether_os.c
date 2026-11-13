@@ -14,6 +14,23 @@ static char* aether_os_empty_heap(void) {
     return (char*)string_empty();
 }
 
+/* os.run_stdio's `stderr_to` (std.os STDERR_INHERIT, STDERR_DISCARD,
+ * STDERR_FILE): where the child's stderr goes. */
+#define OS_STDERR_INHERIT 0
+#define OS_STDERR_DISCARD 1
+#define OS_STDERR_FILE 2
+
+/* The reason a stderr choice is refused before anything is spawned, or
+ * NULL: an unknown mode, or a file mode with no path. */
+static inline const char* os_stdio_stderr_check(int stderr_to, const char* stderr_path) {
+    if (stderr_to != OS_STDERR_INHERIT && stderr_to != OS_STDERR_DISCARD &&
+        stderr_to != OS_STDERR_FILE)
+        return "os.run_stdio: stderr_to is not STDERR_INHERIT, STDERR_DISCARD or STDERR_FILE";
+    if (stderr_to == OS_STDERR_FILE && (!stderr_path || !stderr_path[0]))
+        return "os.run_stdio: STDERR_FILE needs a stderr_path";
+    return NULL;
+}
+
 // NOTE on aether_argv0 placement: the implementation lives in
 // runtime/aether_runtime.c next to the aether_argc / aether_argv it
 // reads. aether_os.c cannot reference those variables directly because
@@ -98,8 +115,9 @@ _tuple_int_int_int_string os_wait_any_timeout_raw(void* token_list, int secs) {
     _tuple_int_int_int_string out = { -1, -1, 0, "os.wait_any_timeout unavailable" };
     return out;
 }
-_tuple_int_int_int_string os_run_stdio_raw(const char* p, void* a, void* e) {
-    (void)p; (void)a; (void)e;
+_tuple_int_int_int_string os_run_stdio_raw(const char* p, void* a, void* e, int stderr_to,
+                                           const char* stderr_path, const char* cwd) {
+    (void)p; (void)a; (void)e; (void)stderr_to; (void)stderr_path; (void)cwd;
     _tuple_int_int_int_string out = { -1, -1, -1, "os.run_stdio unavailable" };
     return out;
 }
@@ -2212,8 +2230,11 @@ int aether_os_run_socket_hooked(const char* prog, void* argv_list, void* env_lis
 }
 
 /* os.run_stdio: spawn `prog` with its stdin and stdout each a pipe this
- * process keeps; stderr is inherited. Returns (to_child_fd, from_child_fd,
- * pid, "") or (-1, -1, -1, reason) with nothing left to reap. Both of the
+ * process keeps. Its stderr is this process's (stderr_to 0), nowhere
+ * (1, /dev/null) or the file stderr_path, created or truncated (2); a
+ * non-empty `cwd` is the directory it runs in. Returns (to_child_fd,
+ * from_child_fd, pid, "") or (-1, -1, -1, reason) with nothing left to
+ * reap. Both of the
  * parent's ends are close-on-exec, so a child started later (by this or
  * another thread) does not hold the conversation open. The env is the one
  * given, or this process's, with AETHER_IPC_KIND=stdio and no AETHER_IPC_FD:
@@ -2226,14 +2247,42 @@ int aether_os_run_socket_hooked(const char* prog, void* argv_list, void* env_lis
  * aether_fork, only async-signal-safe calls in the child, and a program
  * that cannot start reported through the exec-error pipe in this call's
  * own shape (#3170). */
-_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list) {
+_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list,
+                                           int stderr_to, const char* stderr_path,
+                                           const char* cwd) {
     _tuple_int_int_int_string out = { -1, -1, -1, "" };
     if (!prog) {
         out._3 = "null prog";
         return out;
     }
+    const char* serr = os_stdio_stderr_check(stderr_to, stderr_path);
+    if (serr) {
+        out._3 = serr;
+        return out;
+    }
     if (!aether_sandbox_check("exec", prog)) {
         out._3 = "denied by sandbox";
+        return out;
+    }
+    if (stderr_to == OS_STDERR_FILE && !aether_sandbox_check("fs", stderr_path)) {
+        out._3 = "denied by sandbox";
+        return out;
+    }
+    int has_cwd = cwd && cwd[0];
+
+    /* The child's stderr, opened here so a failure is this call's to report:
+     * /dev/null, or the file. Close-on-exec; the child installs it on 2. */
+    int err_fd = -1;
+    if (stderr_to == OS_STDERR_DISCARD) {
+        err_fd = open("/dev/null", O_WRONLY | O_CLOEXEC);
+    } else if (stderr_to == OS_STDERR_FILE) {
+        err_fd = open(stderr_path, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0644);
+    }
+    if (stderr_to != OS_STDERR_INHERIT && err_fd < 0) {
+        out._3 = aether_os_strerror_msg(stderr_to == OS_STDERR_FILE
+                                            ? "os.run_stdio: cannot open the stderr file"
+                                            : "os.run_stdio: cannot open /dev/null",
+                                        errno);
         return out;
     }
 
@@ -2242,17 +2291,20 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
     int inp[2], outp[2], errp[2];
     if (aether_pipe_cloexec(inp) != 0) {
         out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
+        if (err_fd >= 0) close(err_fd);
         return out;
     }
     if (aether_pipe_cloexec(outp) != 0) {
         out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
         close(inp[0]); close(inp[1]);
+        if (err_fd >= 0) close(err_fd);
         return out;
     }
     if (aether_pipe_cloexec(errp) != 0) {
         out._3 = aether_os_strerror_msg("os.run_stdio: pipe", errno);
         close(inp[0]); close(inp[1]);
         close(outp[0]); close(outp[1]);
+        if (err_fd >= 0) close(err_fd);
         return out;
     }
 
@@ -2262,6 +2314,7 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         close(inp[0]); close(inp[1]);
         close(outp[0]); close(outp[1]);
         close(errp[0]); close(errp[1]);
+        if (err_fd >= 0) close(err_fd);
         out._3 = xerr;
         return out;
     }
@@ -2275,6 +2328,7 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         close(inp[0]); close(inp[1]);
         close(outp[0]); close(outp[1]);
         close(errp[0]); close(errp[1]);
+        if (err_fd >= 0) close(err_fd);
         aether_exec_release(&x);
         out._3 = "env build failed";
         return out;
@@ -2285,14 +2339,17 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         close(inp[0]); close(inp[1]);
         close(outp[0]); close(outp[1]);
         close(errp[0]); close(errp[1]);
+        if (err_fd >= 0) close(err_fd);
         aether_exec_release(&x);
         out._3 = "fork failed";
         return out;
     }
     if (pid == 0) {
-        /* Child: inp[0] onto 0, outp[1] onto 1; stderr stays the parent's.
-         * Every end is lifted off 0..3 first (#3199), so installing one
-         * cannot overwrite another still to be installed. */
+        /* Child: inp[0] onto 0, outp[1] onto 1, and the stderr chosen onto
+         * 2 (left as the parent's when inherited). Every end is lifted off
+         * 0..3 first (#3199), so installing one cannot overwrite another
+         * still to be installed. A chdir that fails goes up the error pipe
+         * with 1 in the bits above its errno, told apart from the exec's. */
         aether_child_reset_signals();
         aether_child_keep_stdio();
         close(inp[1]);
@@ -2301,23 +2358,34 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
         int ef = aether_child_lift_fd(errp[1]);
         int in_fd = aether_child_lift_fd(inp[0]);
         int out_fd = aether_child_lift_fd(outp[1]);
-        if (in_fd < 0 || out_fd < 0) aether_child_exec_failed(ef);
+        int e_fd = err_fd >= 0 ? aether_child_lift_fd(err_fd) : -1;
+        if (in_fd < 0 || out_fd < 0 || (err_fd >= 0 && e_fd < 0)) aether_child_exec_failed(ef);
         if (aether_child_fd(in_fd, 0) < 0) aether_child_exec_failed(ef);
         if (aether_child_fd(out_fd, 1) < 0) aether_child_exec_failed(ef);
+        if (e_fd >= 0 && aether_child_fd(e_fd, 2) < 0) aether_child_exec_failed(ef);
         close(in_fd);
         close(out_fd);
+        if (e_fd >= 0) close(e_fd);
+        if (has_cwd && chdir(cwd) != 0) {
+            errno = (1 << 16) | (errno & 0xffff);
+            aether_child_exec_failed(ef);
+        }
         aether_child_exec(&x);
         aether_child_exec_failed(ef);
     }
     close(inp[0]);
     close(outp[1]);
+    if (err_fd >= 0) close(err_fd);
     aether_exec_release(&x);
     int exec_err = aether_exec_errno(errp);
     if (exec_err) {
         close(inp[1]);
         close(outp[0]);
         aether_reap_failed(pid);
-        out._3 = aether_exec_failure(exec_err);
+        out._3 = (exec_err >> 16) == 1
+                     ? aether_os_strerror_msg("os.run_stdio: cannot enter the working directory",
+                                              exec_err & 0xffff)
+                     : aether_exec_failure(exec_err);
         return out;
     }
     out._0 = inp[1];
@@ -3711,7 +3779,8 @@ static wchar_t* win_prepare_launch(const char* prog, void* argv_list, wchar_t** 
  * are NULL, invalid, not inheritable or repeated are left out (the list
  * refuses them); with none left the child inherits nothing. */
 static BOOL win_create_process_inheriting(wchar_t* app, wchar_t* cmdline, DWORD flags, void* wenv,
-                                          STARTUPINFOW* si, const HANDLE* handles, int n,
+                                          const wchar_t* wcwd, STARTUPINFOW* si,
+                                          const HANDLE* handles, int n,
                                           PROCESS_INFORMATION* pi) {
     HANDLE list[8];
     int m = 0;
@@ -3725,7 +3794,7 @@ static BOOL win_create_process_inheriting(wchar_t* app, wchar_t* cmdline, DWORD 
         if (!seen) list[m++] = h;
     }
     if (m == 0) {
-        return CreateProcessW(app, cmdline, NULL, NULL, FALSE, flags, wenv, NULL, si, pi);
+        return CreateProcessW(app, cmdline, NULL, NULL, FALSE, flags, wenv, wcwd, si, pi);
     }
     SIZE_T size = 0;
     InitializeProcThreadAttributeList(NULL, 1, 0, &size);
@@ -3744,7 +3813,7 @@ static BOOL win_create_process_inheriting(wchar_t* app, wchar_t* cmdline, DWORD 
         six.StartupInfo.cb = sizeof six;
         six.lpAttributeList = attrs;
         ok = CreateProcessW(app, cmdline, NULL, NULL, TRUE, flags | EXTENDED_STARTUPINFO_PRESENT,
-                            wenv, NULL, &six.StartupInfo, pi);
+                            wenv, wcwd, &six.StartupInfo, pi);
     }
     DeleteProcThreadAttributeList(attrs);
     free(attrs);
@@ -3803,7 +3872,7 @@ static int win_launch(const char* prog, void* argv_list, void* env_list,
      * the child inherits its own stdio and nothing else (#2917); otherwise
      * nothing. wenv NULL inherits the parent's environment. */
     HANDLE inherit[3] = { si.hStdInput, write_pipe, si.hStdError };
-    BOOL ok = win_create_process_inheriting(app, cmdline, flags, wenv, &si,
+    BOOL ok = win_create_process_inheriting(app, cmdline, flags, wenv, NULL, &si,
                                             inherit, capture_stdout ? 3 : 0, &pi);
 
     free(app);
@@ -3982,7 +4051,7 @@ static void winproc_remove(int token) {
  * child's stdin, stdout and stderr (os_run_stdio_raw): each must be
  * inheritable, and the child inherits those three and nothing else (#2917). */
 static HANDLE win_spawn_stdio(const char* prog, void* argv_list, void* env_list,
-                              const HANDLE* stdio) {
+                              const HANDLE* stdio, const wchar_t* wcwd) {
     wchar_t* app = NULL;
     wchar_t* cmdline = win_prepare_launch(prog, argv_list, &app);
     if (!cmdline) return NULL;
@@ -4012,7 +4081,7 @@ static HANDLE win_spawn_stdio(const char* prog, void* argv_list, void* env_list,
      * program (#2171); inherit parent env when wenv is NULL. Without stdio
      * the handle list is empty and the child inherits no handle at all. */
     BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT, wenv,
-                                            &si, stdio, stdio ? 3 : 0, &pi);
+                                            wcwd, &si, stdio, stdio ? 3 : 0, &pi);
 
     free(app);
     free(cmdline);
@@ -4027,7 +4096,7 @@ static HANDLE win_spawn_stdio(const char* prog, void* argv_list, void* env_list,
 }
 
 static HANDLE win_spawn(const char* prog, void* argv_list, void* env_list) {
-    return win_spawn_stdio(prog, argv_list, env_list, NULL);
+    return win_spawn_stdio(prog, argv_list, env_list, NULL, NULL);
 }
 
 /* Working-directory accessors — Windows. UTF-8 path in / UTF-8 path out,
@@ -4207,7 +4276,7 @@ _tuple_int_string os_spawn_to_raw(const char* prog, void* argv_list, void* env_l
     memset(&pi, 0, sizeof pi);
     HANDLE inherit[2] = { fh, nul };
     BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT | CREATE_SUSPENDED,
-                                            wenv, &si, inherit, 2, &pi);
+                                            wenv, NULL, &si, inherit, 2, &pi);
     free(app);
     free(cmdline);
     free(wenv);
@@ -4355,7 +4424,10 @@ _tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void*
 }
 
 /* os.run_stdio on Windows: the child's stdin and stdout are anonymous pipes
- * whose other ends this process keeps, its stderr this process's. The
+ * whose other ends this process keeps; its stderr this process's
+ * (stderr_to 0), NUL (1) or the file stderr_path, created or truncated (2),
+ * and a non-empty `cwd` its working directory (CreateProcessW's
+ * lpCurrentDirectory). The
  * parent's ends are made non-inheritable before the spawn and handed back
  * as binary CRT descriptors (_open_osfhandle), which std.ipc's write, read
  * and frame calls take as they take any; the child inherits its two pipe
@@ -4363,19 +4435,70 @@ _tuple_int_int_string os_run_socket_raw(const char* prog, void* argv_list, void*
  * os_spawn_raw's: os_wait_pid_raw, os_wait_pid_timeout_raw and os_kill_raw
  * take it. Returns (to_child_fd, from_child_fd, token, "") or
  * (-1, -1, -1, reason) with nothing left to reap. */
-_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list) {
+_tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, void* env_list,
+                                           int stderr_to, const char* stderr_path,
+                                           const char* cwd) {
     _tuple_int_int_int_string out = { -1, -1, -1, "" };
     if (!prog) { out._3 = "null prog"; return out; }
+    const char* serr = os_stdio_stderr_check(stderr_to, stderr_path);
+    if (serr) { out._3 = serr; return out; }
     if (!aether_sandbox_check("exec", prog)) { out._3 = "denied by sandbox"; return out; }
+    if (stderr_to == OS_STDERR_FILE && !aether_sandbox_check("fs", stderr_path)) {
+        out._3 = "denied by sandbox";
+        return out;
+    }
+
+    /* The working directory, checked here so a missing one is reported as
+     * that rather than as a spawn failure. */
+    wchar_t* wcwd = NULL;
+    if (cwd && cwd[0]) {
+        wcwd = utf8_to_wide(cwd);
+        DWORD attrs = wcwd ? GetFileAttributesW(wcwd) : INVALID_FILE_ATTRIBUTES;
+        if (attrs == INVALID_FILE_ATTRIBUTES || !(attrs & FILE_ATTRIBUTE_DIRECTORY)) {
+            free(wcwd);
+            out._3 = "os.run_stdio: cannot enter the working directory: not a directory";
+            return out;
+        }
+    }
 
     SECURITY_ATTRIBUTES sa;
     memset(&sa, 0, sizeof sa);
     sa.nLength = sizeof sa;
     sa.bInheritHandle = TRUE;
+
+    /* The child's stderr: NUL, or the file, opened inheritable for it. */
+    HANDLE err_h = NULL;
+    if (stderr_to != OS_STDERR_INHERIT) {
+        wchar_t* wpath = stderr_to == OS_STDERR_FILE ? utf8_to_wide(stderr_path) : NULL;
+        if (stderr_to == OS_STDERR_FILE && !wpath) {
+            free(wcwd);
+            out._3 = "os.run_stdio: bad stderr path";
+            return out;
+        }
+        err_h = CreateFileW(wpath ? wpath : L"NUL", GENERIC_WRITE,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &sa,
+                            stderr_to == OS_STDERR_FILE ? CREATE_ALWAYS : OPEN_EXISTING,
+                            FILE_ATTRIBUTE_NORMAL, NULL);
+        free(wpath);
+        if (err_h == INVALID_HANDLE_VALUE) {
+            free(wcwd);
+            out._3 = stderr_to == OS_STDERR_FILE ? "os.run_stdio: cannot open the stderr file"
+                                                 : "os.run_stdio: cannot open NUL";
+            return out;
+        }
+    }
+
     HANDLE in_r = NULL, in_w = NULL, out_r = NULL, out_w = NULL;
-    if (!CreatePipe(&in_r, &in_w, &sa, 0)) { out._3 = "os.run_stdio: pipe failed"; return out; }
+    if (!CreatePipe(&in_r, &in_w, &sa, 0)) {
+        if (err_h) CloseHandle(err_h);
+        free(wcwd);
+        out._3 = "os.run_stdio: pipe failed";
+        return out;
+    }
     if (!CreatePipe(&out_r, &out_w, &sa, 0)) {
         CloseHandle(in_r); CloseHandle(in_w);
+        if (err_h) CloseHandle(err_h);
+        free(wcwd);
         out._3 = "os.run_stdio: pipe failed";
         return out;
     }
@@ -4383,17 +4506,21 @@ _tuple_int_int_int_string os_run_stdio_raw(const char* prog, void* argv_list, vo
     if (!SetHandleInformation(in_w, HANDLE_FLAG_INHERIT, 0) ||
         !SetHandleInformation(out_r, HANDLE_FLAG_INHERIT, 0)) {
         CloseHandle(in_r); CloseHandle(in_w); CloseHandle(out_r); CloseHandle(out_w);
+        if (err_h) CloseHandle(err_h);
+        free(wcwd);
         out._3 = "os.run_stdio: pipe failed";
         return out;
     }
 
-    HANDLE stdio[3] = { in_r, out_w, GetStdHandle(STD_ERROR_HANDLE) };
-    HANDLE h = win_spawn_stdio(prog, argv_list, env_list, stdio);
+    HANDLE stdio[3] = { in_r, out_w, err_h ? err_h : GetStdHandle(STD_ERROR_HANDLE) };
+    HANDLE h = win_spawn_stdio(prog, argv_list, env_list, stdio, wcwd);
+    free(wcwd);
     /* The child's ends are its own now: closed here, so the parent's read
      * sees end of stream when the child exits and the child's sees it when
      * the parent closes to_child_fd. */
     CloseHandle(in_r);
     CloseHandle(out_w);
+    if (err_h) CloseHandle(err_h);
     if (!h) {
         CloseHandle(in_w); CloseHandle(out_r);
         out._3 = win_launch_error();
@@ -4724,7 +4851,7 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
      * inherits its three pipe ends and nothing else (#2917). */
     HANDLE inherit[3] = { in_r, out_w, err_w };
     BOOL ok = win_create_process_inheriting(app, cmdline, CREATE_UNICODE_ENVIRONMENT, wenv,
-                                            &si, inherit, 3, &pi);
+                                            NULL, &si, inherit, 3, &pi);
     free(app); free(cmdline); free(wenv);
     /* Close the child-side ends in the parent so EOF propagates correctly. */
     CloseHandle(in_r); CloseHandle(out_w); CloseHandle(err_w);

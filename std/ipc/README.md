@@ -259,7 +259,9 @@ the thread this removes.
 ## The stdio channel
 
 `os.run_stdio(prog, argv, env)` spawns the child with its stdin and stdout
-each a pipe the parent keeps (stderr is inherited) and returns
+each a pipe the parent keeps (stderr is inherited, unless the optional
+`stderr_to:` says `os.STDERR_DISCARD` or `os.STDERR_FILE` with a
+`stderr_path:`; an optional `cwd:` is the directory it runs in) and returns
 `(to_child_fd, from_child_fd, pid, err)`. Both descriptors are
 close-on-exec; `pid` is reaped with `os.wait_pid` (or bounded with
 `os.wait_pid_timeout`, ended with `os.kill`). The child's environment
