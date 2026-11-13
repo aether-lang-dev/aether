@@ -2466,7 +2466,7 @@ filter_date(ctx: ptr, val: string, format: string) -> (string, string) {
             if map_has(ctx, KEY_NOW) == 0 {
                 return value_nil(), "date: \"now\" needs the time: call context_set_now first"
             }
-            e, _nerr = string.to_long(map.lookup(ctx, KEY_NOW))
+            e, _nerr = string.to_long(ctx_text(ctx, KEY_NOW))
             epoch = e
         } else if all_digits(s) == 1 {
             e, eerr = string.to_long(s)
@@ -2768,6 +2768,13 @@ typed_of(ctx: ptr) -> ptr {
     return typed
 }
 
+// A context map's value under `key` as the string it is (every value the
+// context holds is one), or null when there is none.
+ctx_text(m: ptr, key: string) -> string {
+    v, _ = map.get_string(m, key)
+    return v
+}
+
 // Bind `name` to the packed value `v`, over whatever it was bound to.
 bind_value(ctx: ptr, name: string, v: string) {
     map_put_string_owned(typed_of(ctx), name, v)
@@ -2817,7 +2824,7 @@ bump_counter(ctx: ptr, name: string, direction: int) -> (string, string) {
         map_put(ctx, key, "-1")
         return "-1", ""
     }
-    cur_s = map.lookup(ctx, key)
+    cur_s = ctx_text(ctx, key)
     cur, err = string.to_int(cur_s)
     if err != "" {
         return "", string.concat("counter not an integer: ", cur_s)
@@ -2865,7 +2872,7 @@ cycle_emit(ctx: ptr, rest: string, full_body: string) -> (string, string) {
     key = string.concat("\x01cyc:", full_body)
     pos = 0
     if map_has(ctx, key) == 1 {
-        cur, err = string.to_int(map.lookup(ctx, key))
+        cur, err = string.to_int(ctx_text(ctx, key))
         if err == "" { pos = cur }
     }
     if pos >= ic { pos = pos % ic }
@@ -2984,7 +2991,7 @@ eval_value(ctx: ptr, text: string) -> (string, string) {
     // `block.super` inside a layout child block is the parent's content for
     // that block; outside an override it is nil, not an error.
     if string.equals(a, "block.super") == 1 {
-        if map_has(ctx, KEY_BLOCK_SUPER) == 1 { return value_str(map.lookup(ctx, KEY_BLOCK_SUPER)), "" }
+        if map_has(ctx, KEY_BLOCK_SUPER) == 1 { return value_str(ctx_text(ctx, KEY_BLOCK_SUPER)), "" }
         return value_nil(), ""
     }
     // A number literal keeps the text it was written with.
@@ -3852,7 +3859,7 @@ has_reversed(rest: string) -> int {
 save_value(ctx: ptr, name: string) -> (string, int) {
     typed = typed_of(ctx)
     if map_has(typed, name) == 0 { return "", 0 }
-    return string.copy(map.lookup(typed, name)), 1
+    return string.copy(ctx_text(typed, name)), 1
 }
 
 // Inverse of save_value.
@@ -4314,7 +4321,7 @@ get_include_root(ctx: ptr) -> (string, int) {
 // Read the current include-depth. 0 if unset.
 get_include_depth(ctx: ptr) -> int {
     if map_has(ctx, KEY_INCLUDE_DEPTH) == 0 { return 0 }
-    v = map.lookup(ctx, KEY_INCLUDE_DEPTH)
+    v = ctx_text(ctx, KEY_INCLUDE_DEPTH)
     n, _ = string.to_int(v)
     return n
 }
@@ -4461,7 +4468,7 @@ render_include_tag(outer_ctx: @keep ptr, rest: string, strict: int) -> (string, 
         map_put(child, KEY_INCLUDE_ROOT, root)
         pkey = partial_cache_key()
         if map_has(outer_ctx, pkey) == 1 { map_put(child, pkey, map.lookup(outer_ctx, pkey)) }
-        if map_has(outer_ctx, KEY_NOW) == 1 { map_put(child, KEY_NOW, string.copy(map.lookup(outer_ctx, KEY_NOW))) }
+        if map_has(outer_ctx, KEY_NOW) == 1 { map_put(child, KEY_NOW, string.copy(ctx_text(outer_ctx, KEY_NOW))) }
     }
     // Bump depth on the child ctx for both forms.
     map_put(child, KEY_INCLUDE_DEPTH, string.from_int(depth + 1))
@@ -5214,7 +5221,7 @@ store_collect(ctx: ptr, sp: ptr) {
     nk = map.keys_size(keys)
     i = 0
     while i < nk {
-        v = map.lookup(typed, map.keys_get(keys, i))
+        v = ctx_text(typed, map.keys_get(keys, i))
         if is_node_value(v) == 1 { string_list_add(pending, v) }
         i = i + 1
     }

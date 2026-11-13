@@ -418,12 +418,18 @@ print_help(cmd: *Command) {
 // The library never calls exit(): the caller owns the process's control flow.
 
 parse(cmd: *Command) -> (int, ptr, string) {
+    // The process's argv is C text; parse_list reads Aether strings
+    // (list.get_string), so each argument is copied into one for the parse.
+    // Every value the matches keep is a copy of its own.
     argv = list_new()
     cnt = args_count()
     for (i = 1; i < cnt; i++) {
-        list.add(argv, args_get(i))
+        list.add(argv, copy(args_get(i)))
     }
     res, matches, err = parse_list(cmd, argv)
+    for (j = 0; j < list_size(argv); j++) {
+        string_release(list.at(argv, j))
+    }
     list_free(argv)
     return res, matches, err
 }
@@ -471,7 +477,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
 
     i = 0
     while i < n_argv {
-        arg_str = list.at(argv, i)
+        arg_str, _ = list.get_string(argv, i)
 
         if string_equals(arg_str, "-h") == 1 || string_equals(arg_str, "--help") == 1 {
             // Do NOT exit here — report that help was requested and let the
@@ -506,7 +512,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
                     map_put(m.flags, a.name, a)
                 } else {
                     if i + 1 < n_argv {
-                        val = list.at(argv, i + 1)
+                        val, _ = list.get_string(argv, i + 1)
                         if value_ok(a, val) == 0 {
                             free_matches(m)
                             return RESULT_ERROR, null, int_error_msg(a, val)
@@ -531,7 +537,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
                     map_put(m.flags, a.name, a)
                 } else {
                     if i + 1 < n_argv {
-                        val = list.at(argv, i + 1)
+                        val, _ = list.get_string(argv, i + 1)
                         if value_ok(a, val) == 0 {
                             free_matches(m)
                             return RESULT_ERROR, null, int_error_msg(a, val)
@@ -629,7 +635,7 @@ parse_list_internal(cmd: *Command, argv: ptr) -> (int, ptr, string) {
 get_string(m: ptr, name: string) -> string {
     if m == null { return "" }
     matches = m as *ArgMatches
-    v = map.lookup(matches.values, name)
+    v, _ = map.get_string(matches.values, name)
     if v == null { return "" }
     return v
 }
@@ -640,7 +646,7 @@ get_string(m: ptr, name: string) -> string {
 get_int(m: ptr, name: string) -> (int, string) {
     if m == null { return 0, "no matches" }
     matches = m as *ArgMatches
-    v = map.lookup(matches.values, name)
+    v, _ = map.get_string(matches.values, name)
     if v == null {
         return 0, string_concat("argument not provided: ", name)
     }

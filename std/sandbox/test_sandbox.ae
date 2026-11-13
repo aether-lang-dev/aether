@@ -23,7 +23,9 @@ import std.audit
 
 extern exit(code: int)
 
-fn same(a: string, b: string) -> int { return string.equals(a, b) }
+// `a` is an element of the grant list, which holds C text (strdup'd), not
+// Aether strings: it stays a `ptr` here and goes to the C comparison as one.
+fn same(a: ptr, b: string) -> int { return string.equals(a, b) }
 
 // 1 when grant number i in `perms` is the (category, pattern) pair given.
 // Code running inside a sandbox that has been handed the grant list, the way

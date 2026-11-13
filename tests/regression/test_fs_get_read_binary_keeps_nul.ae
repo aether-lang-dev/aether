@@ -49,8 +49,7 @@ main() {
     }
     n = fs.get_read_binary_length()
     s = fs.get_read_binary()
-    got = bytes.new(n)
-    _ = bytes.copy_from_string(got, 0, s, n)
+    got = bytes.from_ptr(s, n)
     fs.release_read_binary()
     fs.delete(path)
 

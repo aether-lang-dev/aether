@@ -403,7 +403,8 @@ main() {
                 paths, err = query.paths(doc, "$.store.book[*]")
                 spec.assert_str_eq(err, "", "no error")
                 spec.assert_eq(list.size(paths), 4, "four paths")
-                spec.assert_str_eq(list.get_raw(paths, 0), "$['store']['book'][0]", "first path")
+                first, _ = list.get_string(paths, 0)
+                spec.assert_str_eq(first, "$['store']['book'][0]", "first path")
                 list.free(paths)
             }
             spec.it("copies paths while values remain borrowed from the document") callback {

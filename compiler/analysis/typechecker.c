@@ -3150,9 +3150,11 @@ static void reject_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
  * callee read the struct's bytes as characters. A refactor that turns a
  * string key into a struct handle (servirtium-vcr: ~165 functions) leaves
  * exactly these call sites behind. A binding and a `return` already refused
- * them. A bare `ptr` stays the universal pointer, both ways (an extern's
- * `-> ptr` result read as a string, a string handed to a `ptr` parameter),
- * and so does a pointer to a @c_struct overlay, a `void*` in C. */
+ * them. A bare `ptr` stays the universal pointer here, both ways (an
+ * extern's `-> ptr` result handed to an extern's `string` parameter, a string
+ * handed to a `ptr` parameter), and so does a pointer to a @c_struct
+ * overlay, a `void*` in C; a bare `ptr` into an Aether function's `string`
+ * parameter is refused by reject_ptr_for_string_argument. */
 static void reject_string_pointer_argument(ASTNode* call, ASTNode* arg, Type* arg_type,
                                            Type* param_type, int index,
                                            const char* param_name) {
@@ -3184,6 +3186,35 @@ static void reject_string_pointer_argument(ASTNode* call, ASTNode* arg, Type* ar
                         : "a string is not a struct pointer: pass the struct handle, "
                           "or declare the parameter `string` (or `ptr`) if it takes text",
                     arg->line, arg->column);
+}
+
+/* A bare `ptr` passed where an Aether function declares a `string`
+ * parameter (nib-code ask ptr-passed-as-string): the callee treats whatever
+ * the pointer points at, a JSON node, a list, a buffer, as an AetherString
+ * or a C string up to its first zero byte. A binding already refuses it
+ * (E0202, report_ptr_into_string); the argument had no check, so
+ * `takes(v)` with `v` a parsed JSON node compiled and read garbage. The
+ * same rule, the same code: the typed accessor, or `string.from_ptr(p)`
+ * where the pointer really is a C string, says it is text. A string-aware
+ * producer typed `ptr` is a string (is_string_producer_call), `null` is the
+ * empty string, and an extern's `string` parameter keeps taking a `ptr`:
+ * that is the C boundary, where a `const char*` is what both are. */
+static const char* ptr_string_accessor(ASTNode* e);
+static int is_string_producer_call(ASTNode* e);
+static void reject_ptr_for_string_argument(ASTNode* callee, ASTNode* call, ASTNode* arg,
+                                           Type* arg_type, Type* param_type, int index,
+                                           const char* param_name) {
+    if (!callee || callee->type == AST_EXTERN_FUNCTION || !arg || !arg_type || !param_type)
+        return;
+    if (param_type->kind != TYPE_STRING || param_type->distinct_name) return;
+    if (arg_type->kind != TYPE_PTR || arg_type->element_type || arg_type->distinct_name) return;
+    if (arg->type == AST_NULL_LITERAL || is_string_producer_call(arg)) return;
+    const char* msg = aether_internf(
+        "Argument %d '%s' of '%s': expected string, got ptr; a `ptr` given to a "
+        "`string` parameter would be read as text whatever it points at",
+        index, param_name ? param_name : "?", call->value ? call->value : "?");
+    const char* hint = aether_internf("say it is a string with `%s`", ptr_string_accessor(arg));
+    type_error_code_hint(msg, hint, arg->line, arg->column, AETHER_ERR_PTR_INTO_STRING);
 }
 
 /* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? A
@@ -13891,9 +13922,11 @@ static const char* ptr_string_accessor(ASTNode* e) {
         e = e->children[0];
     const char* f = (e && e->type == AST_FUNCTION_CALL) ? e->value : NULL;
     if (f) {
-        if (!strcmp(f, "map.get") || !strcmp(f, "map_get_raw") || !strcmp(f, "map.map_get_raw"))
+        if (!strcmp(f, "map.get") || !strcmp(f, "map_get_raw") || !strcmp(f, "map.map_get_raw") ||
+            !strcmp(f, "map.lookup") || !strcmp(f, "map.get_raw"))
             return "map.get_string(m, key)";
-        if (!strcmp(f, "list.get") || !strcmp(f, "list_get_raw") || !strcmp(f, "list.list_get_raw"))
+        if (!strcmp(f, "list.get") || !strcmp(f, "list_get_raw") || !strcmp(f, "list.list_get_raw") ||
+            !strcmp(f, "list.at") || !strcmp(f, "list.get_raw"))
             return "list.get_string(l, index)";
     }
     return "string.from_ptr(p)";
@@ -22567,6 +22600,12 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     int blk_inj = ctx_injected_by_block(symbol->node, call);
                     if (!blk_inj) {
                         reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                        /* Not where a block injects `_ctx`: which argument a
+                         * parameter takes there is not settled by position
+                         * (a trailing `callback` block the callee takes looks
+                         * the same), so a check could name the wrong one. */
+                        reject_ptr_for_string_argument(symbol->node, call, darg, da, param_type,
+                                                       arg_slot + 1, param->value);
                     } else if (arg_slot >= 1 && call->children[arg_slot - 1]) {
                         ASTNode* sarg = call->children[arg_slot - 1];
                         Type* sa = infer_type(sarg, table);

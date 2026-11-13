@@ -29,7 +29,7 @@ delete_recursive(dir: string) {
         })
     var i = list_size(list) - 1
     while i >= 0 {
-        p = list.at(list, i)
+        p, _ = list.get_string(list, i)
         st_kind, _st_size, _st_mtime, st_err = fs.file_stat(p)
         if st_kind == fs.STAT_KIND_DIR {
             fs.delete_dir(p)

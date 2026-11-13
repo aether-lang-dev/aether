@@ -82,7 +82,14 @@ str_of(v: string) -> string { return v }
 
 get(m: ptr, k: string) -> string {
     if map_has(m, k) == 0 { return "" }
-    return str_of(map.lookup(m, k))
+    v, _ = map.get_string(m, k)
+    return v
+}
+
+// Element `i` of a list of strings (every list here holds strings).
+str_at(l: ptr, i: int) -> string {
+    v, _ = list.get_string(l, i)
+    return v
 }
 
 put(m: ptr, k: string, v: string) {
@@ -828,7 +835,7 @@ require_command(c: string, owner: string) {
 select_selection(api: string, extensions: string) {
     i = 0
     while i < list_size(g_features) {
-        f = str_of(list.at(g_features, i))
+        f = str_at(g_features, i)
         if version_le(get(g_feat_number, f), api) == 1 { put(g_selected, f, "1") }
         i = i + 1
     }
@@ -848,7 +855,7 @@ select_selection(api: string, extensions: string) {
     // order, each block only when its `depends` holds.
     k = 0
     while k < list_size(g_order_owners) {
-        owner = str_of(list.at(g_order_owners, k))
+        owner = str_at(g_order_owners, k)
         if map_has(g_selected, owner) == 1 {
             reqs = lines_of(get(g_reqs, owner))
             r = 0
@@ -1058,7 +1065,7 @@ emit_module(path: string, api: string, extensions: string) {
     // and the extensions' spec versions and names.
     k = 0
     while k < list_size(g_ext_const_order) {
-        nm = str_of(list.at(g_ext_const_order, k))
+        nm = str_at(g_ext_const_order, k)
         v = get(g_ext_consts, nm)
         if string.equals(v, "=") == 1 {
             ty = get(g_const_type, nm)
@@ -1166,7 +1173,7 @@ emit_module(path: string, api: string, extensions: string) {
     done = map.new()
     oi = 0
     while oi < list_size(g_order) {
-        emit_struct(str_of(list.at(g_order, oi)), body, names, done)
+        emit_struct(str_at(g_order, oi), body, names, done)
         oi = oi + 1
     }
 
@@ -1233,7 +1240,7 @@ emit_module(path: string, api: string, extensions: string) {
     loads_dev = strbuilder.new(1 << 14)
     ci = 0
     while ci < list_size(g_req_cmd_order) {
-        c = str_of(list.at(g_req_cmd_order, ci))
+        c = str_at(g_req_cmd_order, ci)
         target = c
         alias = get(g_alias, c)
         if string.length(alias) > 0 { target = alias }
@@ -1659,7 +1666,7 @@ emit_dispatch(path: string, commands_path: string, api: string, extensions: stri
     strbuilder.append(sb, "#ifndef AETHER_VULKAN_DISPATCH_H\n#define AETHER_VULKAN_DISPATCH_H\n")
     oi = 0
     while oi < list_size(order) {
-        m = str_of(list.at(order, oi))
+        m = str_at(order, oi)
         body = get(groups, m)
         strbuilder.append(sb, "\n/* ${get(levels, m)} */\n#define ${m}(X) \\\n")
         // Drop the continuation after the last entry.

@@ -6,11 +6,14 @@
 import std.http
 import std.os
 import std.fs
+import std.string
 
 extern exit(code: int)
 
 handler(req: ptr, res: ptr, ud: ptr) {
-    http.serve_static(req, res, ud)
+    // The user data is the base directory main registered: os_getenv's C
+    // text, which string.from_cstr copies into a string.
+    http.serve_static(req, res, string.from_cstr(ud))
 }
 
 message StartSrv { raw: ptr }

@@ -139,8 +139,8 @@ main() {
             n = list.size(items)
             i = 0
             while i < n {
-                gi, _ = list.get(items, i)
-                ei, _ = list.get(exp, i)
+                gi, _ = list.get_string(items, i)
+                ei, _ = list.get_string(exp, i)
                 spec.assert_str_eq(gi, ei, "position ${i}")
                 i = i + 1
             }
