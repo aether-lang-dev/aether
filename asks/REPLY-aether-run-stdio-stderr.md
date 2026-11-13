@@ -3,7 +3,7 @@
 **Re:** nib-code `asks/aether-run-stdio-stderr.md` (branch `aether-port`),
 and the "no cwd" note in `asks/aether-fs-stat-flock-exclusive.md`
 
-**RESOLVED** in PR #PRNUM (branch `batch/nov13-naeb-asks`; the first
+**RESOLVED** in PR #3694 (branch `batch/nov13-naeb-asks`; the first
 release after 0.913.0 carries it).
 
 `os.run_stdio` keeps its shape and gains three optional parameters, given by

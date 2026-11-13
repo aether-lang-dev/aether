@@ -3,7 +3,7 @@
 **Re:** nib-code `asks/aether-push-call-result-string.md` (branch
 `aether-port`)
 
-**RESOLVED** in PR #PRNUM (branch `batch/nov13-naeb-asks`; the first
+**RESOLVED** in PR #3694 (branch `batch/nov13-naeb-asks`; the first
 release after 0.913.0 carries it).
 
 Cause, as the ask guessed: a statement destroys the owning structs its calls

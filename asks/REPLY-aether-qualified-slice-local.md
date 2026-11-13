@@ -3,7 +3,7 @@
 **Re:** nib-code `asks/aether-qualified-slice-local.md` (branch
 `aether-port`)
 
-**RESOLVED** in PR #PRNUM (branch `batch/nov13-naeb-asks`; the first
+**RESOLVED** in PR #3694 (branch `batch/nov13-naeb-asks`; the first
 release after 0.913.0 carries it).
 
 Cause: the statement dispatcher recognises a typed local by its shape before
