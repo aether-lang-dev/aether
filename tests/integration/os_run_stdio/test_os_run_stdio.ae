@@ -16,7 +16,10 @@
 //   - end of stream when the child exits, and wait_pid reaping its status;
 //     wait_pid_timeout and kill on the token;
 //   - a write to a child that is gone is an error, not SIGPIPE (a pipe has
-//     no MSG_NOSIGNAL: std.ipc blocks SIGPIPE for the write);
+//     no MSG_NOSIGNAL: std.ipc blocks SIGPIPE for the write), also from a
+//     worker thread whose write filled the pipe before the child was killed
+//     (macOS raises a pipe's SIGPIPE on the process, so the thread's mask
+//     alone did not hold it off: nib-code ask ipc-write-sigpipe);
 //   - the parent's ends are not inherited (POSIX), a missing program fails
 //     the spawn with nothing to reap;
 //   - the child's env carries AETHER_IPC_KIND=stdio and no AETHER_IPC_FD,
@@ -29,6 +32,8 @@ import std.io
 import std.fs
 import std.string
 import std.list
+import std.sync
+import std.worker
 
 const MAX = 1048576
 
@@ -54,6 +59,7 @@ frame_of(payload: string) -> string {
 //   "D"   nothing until the next frame arrives, then "late"
 //   "H"   two bytes of a frame, then a pause of 1.5 s, then the rest
 //   "K"   ipc.parent_channel_kind(), then "/" and AETHER_IPC_FD (or "-")
+//   "Z"   stop reading stdin (sleep), so the parent's writes fill the pipe
 child_main() {
     while true {
         req, err = ipc.read_frame(0, MAX)
@@ -83,6 +89,9 @@ child_main() {
                 fd = os.getenv("AETHER_IPC_FD")
                 if fd == null { fd = "-" }
                 ipc.write_frame(1, "${ipc.parent_channel_kind()}/${fd}")
+            } else if first == "Z" {
+                sleep(60000)
+                exit(5)
             } else if first == "H" {
                 wire = frame_of("never-whole")
                 ipc.write(1, string.substring(wire, 0, 2))
@@ -113,6 +122,65 @@ big_payload() -> string {
         s = string.concat(s, s)
     }
     return s
+}
+
+// On a worker, write 1 MiB to `to` (the stdin of a child that has stopped
+// reading, so the pipe fills) with ipc.write, or with ipc.write_some under
+// ipc.wait_writable when `some` is set. `state` ends 2 when a write said
+// the reader is gone, 1 when every byte went, which a killed reader cannot
+// take.
+start_filling_writer(to: int, some: bool, state: @keep ptr) {
+    big = "0123456789abcdef"
+    while string.length(big) < 1048576 {
+        big = string.concat(big, big)
+    }
+    worker.run_detached(|| {
+            if some {
+                off = 0
+                n = string.length(big)
+                while off < n {
+                    _ready, _werr = ipc.wait_writable(to, 50)
+                    wrote, err = ipc.write_some(to, big, off)
+                    if err != "" {
+                        sync.atomic_store(state, 2)
+                        return null
+                    }
+                    off = off + wrote
+                }
+                sync.atomic_store(state, 1)
+                return null
+            }
+            err = ipc.write(to, big)
+            if err != "" {
+                sync.atomic_store(state, 2)
+            } else {
+                sync.atomic_store(state, 1)
+            }
+            return null
+        })
+}
+
+// Fill a child's stdin from a worker, kill the child while the writer waits
+// on the full pipe, and expect the write to fail: before, it took SIGPIPE
+// and the whole process died (141) on macOS.
+writer_survives_killed_reader(some: bool) -> long {
+    to, from, pid, err = spawn_child()
+    if err != "" { return 0 - 1 }
+    _ = ipc.write_frame(to, "Z")
+    state = sync.atomic_new(0)
+    start_filling_writer(to, some, state)
+    sleep(300)
+    os.kill(pid, 9)
+    _code, _werr = os.wait_pid(pid)
+    waited = 0
+    while sync.atomic_load(state) == 0 && waited < 20000 {
+        sleep(10)
+        waited = waited + 10
+    }
+    got = sync.atomic_load(state)
+    io.fd_close(to)
+    io.fd_close(from)
+    return got
 }
 
 spawn_child() -> (int, int, int, string) {
@@ -260,6 +328,14 @@ main() {
             spec.assert_err_contains(gone, "ipc.write_frame", "an error naming the call")
             io.fd_close(to)
             io.fd_close(from)
+        }
+
+        spec.it("a worker's ipc.write to a full pipe whose reader is killed fails, not SIGPIPE") callback {
+            spec.assert_eq_long(writer_survives_killed_reader(false), 2, "ipc.write said the reader is gone")
+        }
+
+        spec.it("a worker's ipc.write_some to a full pipe whose reader is killed fails, not SIGPIPE") callback {
+            spec.assert_eq_long(writer_survives_killed_reader(true), 2, "ipc.write_some said the reader is gone")
         }
 
         if on_windows {

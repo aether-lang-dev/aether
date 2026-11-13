@@ -240,14 +240,36 @@ const char* ipc_parent_channel_kind_raw(void) {
     return "pipe";
 }
 
+/* macOS raises a write's SIGPIPE on the PROCESS, not the writing thread
+ * (xnu's dofilewrite, for a pipe; a socket without SO_NOSIGPIPE likewise),
+ * so the thread mask below holds it off only while no other thread leaves
+ * SIGPIPE unblocked: a worker writing a child's stdin while the main thread
+ * waited took the whole process down with 141 (nib-code ask
+ * ipc-write-sigpipe). The descriptor's own F_SETNOSIGPIPE (SO_NOSIGPIPE, for
+ * a socket) refuses the signal for every write to it, so each write std.ipc
+ * makes sets it first. That is the descriptor's state, not the process's:
+ * no handler or disposition changes, and other descriptors still raise
+ * SIGPIPE as their owners expect. It stays set (restoring it after the call
+ * would race another thread writing the same descriptor). */
+static void ipc_fd_nosigpipe(int fd) {
+#if defined(__APPLE__) && defined(F_SETNOSIGPIPE)
+    (void)fcntl(fd, F_SETNOSIGPIPE, 1);
+#else
+    (void)fd;
+#endif
+}
+
 #if IPC_HAS_SOCKETS
 /* write(2) to a pipe with SIGPIPE held off this thread: a reader that has
  * gone is EPIPE, not a signal that ends the process (a pipe has no
  * MSG_NOSIGNAL or SO_NOSIGPIPE). SIGPIPE is blocked for the call; when the
  * write raised one that was not already pending, it is taken off again with
  * sigwait (it is pending, so that returns at once) before the old mask comes
- * back. A SIGPIPE pending before the call is left for its owner. */
+ * back. A SIGPIPE pending before the call is left for its owner. Linux and
+ * the BSDs raise it on the writing thread, which the mask covers; macOS
+ * raises it on the process, which ipc_fd_nosigpipe covers. */
 static ssize_t ipc_write_nosigpipe(int fd, const void* buf, size_t len) {
+    ipc_fd_nosigpipe(fd);
     sigset_t pipe_only, old, pending;
     sigemptyset(&pipe_only);
     sigaddset(&pipe_only, SIGPIPE);
@@ -257,7 +279,11 @@ static ssize_t ipc_write_nosigpipe(int fd, const void* buf, size_t len) {
     if (pthread_sigmask(SIG_BLOCK, &pipe_only, &old) != 0) return write(fd, buf, len);
     ssize_t n = write(fd, buf, len);
     int e = errno;
-    if (n < 0 && e == EPIPE && !was_pending) {
+    /* Not only on EPIPE: a write the reader's exit interrupted returns what
+     * it had written so far and still raises SIGPIPE (Linux pipe_write),
+     * which the old mask would then deliver. Any SIGPIPE this call made is
+     * taken off. */
+    if (!was_pending) {
         sigemptyset(&pending);
         if (sigpending(&pending) == 0 && sigismember(&pending, SIGPIPE) == 1) {
             int sig = 0;
@@ -278,6 +304,7 @@ static ssize_t ipc_write_nosigpipe(int fd, const void* buf, size_t len) {
 static const char* ipc_write_all(int fd, const char* data, size_t len, const char* what) {
     int is_socket = IPC_HAS_SOCKETS;
     size_t done = 0;
+    ipc_fd_nosigpipe(fd);
     while (done < len) {
 #if IPC_HAS_SOCKETS
         ssize_t n = is_socket ? send(fd, data + done, len - done, IPC_NOSIGNAL)
@@ -361,6 +388,7 @@ const char* ipc_send_fd_raw(int ch, int fd, const void* payload) {
     memcpy(CMSG_DATA(cmsg), &fd, sizeof(int));
 
     ssize_t n;
+    ipc_fd_nosigpipe(ch);
     do { n = sendmsg(ch, &msg, IPC_NOSIGNAL); } while (n < 0 && errno == EINTR);
     if (n < 0) return ipc_errno_msg("ipc.send_fd", errno);
     if ((size_t)n < len) return ipc_write_all(ch, data + n, len - (size_t)n, "ipc.send_fd");

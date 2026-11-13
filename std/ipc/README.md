@@ -373,7 +373,11 @@ bounds how many descriptors one message is looked at for.
 
 - **Linux, FreeBSD, macOS:** both kinds of channel, the stdio channel, and
   descriptor passing. A write to a pipe whose reader has gone is `EPIPE`,
-  not SIGPIPE: std.ipc holds SIGPIPE off the writing thread for the write.
+  not SIGPIPE, from any thread: std.ipc holds SIGPIPE off the writing
+  thread for the write (Linux and the BSDs raise it there), and on macOS,
+  which raises it on the whole process, sets the descriptor's own
+  `F_SETNOSIGPIPE` before writing. No handler or signal disposition of the
+  process is changed.
 - **Windows:** no parent channel (`parent_channel()` is `-1`); `write`,
   `read`, `write_frame` and `read_frame` are plain CRT descriptor I/O, with
   the descriptor put in binary mode (a child's fd 0 is in text mode by
