@@ -6682,11 +6682,21 @@ void collect_stmt_struct_temps(CodeGenerator* gen, ASTNode* e,
         }
         (*nodes)[(*count)++] = e;
     }
+    /* `xs.push(v)` keeps `v`: the element takes it (emit_value_take moves a
+     * call's result in), so a struct a call returns there is the slice's,
+     * not the statement's. Collected as a temporary, it was destroyed once
+     * the statement was done and the element kept its freed strings. */
+    int push_call = e->type == AST_FUNCTION_CALL && e->value &&
+                    strcmp(e->value, "__slice_push") == 0 && e->child_count == 2;
     int lit_args = e->type == AST_FUNCTION_CALL &&
                    (!call_may_hand_back_args(gen, e) || call_returns_view_of_temp(gen, e) ||
                     call_returns_tuple_view_of_temp(gen, e));
     for (int i = 0; i < e->child_count; i++) {
         ASTNode* c = e->children[i];
+        if (push_call && i == 1) {
+            collect_value_struct_temps(gen, c, TEMP_KEPT, nodes, count, cap);
+            continue;
+        }
         if (lit_args && borrowed_struct_literal_arg(gen, e, c)) {
             if (*count == *cap) {
                 *cap = *cap ? *cap * 2 : 4;
