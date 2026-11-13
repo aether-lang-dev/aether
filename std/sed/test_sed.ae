@@ -147,18 +147,18 @@ lines_of(n: int) -> string {
 // regress.sh's inplace_test: -i and -I over five files in memory must give
 // what sed gives each file alone (-i) and all of them as one input (-I).
 inplace_test(expr: string) {
-    fsm = map.map_new()
-    ex = | p: string | { return map.map_has(fsm, p) }
+    fsm = map.new()
+    ex = | p: string | { return map.has(fsm, p) }
     rd = | p: string | {
         v, _e = map.get_string(fsm, p)
         return v
     }
     wr = | p: string, d: string, t: int | {
         if t == 1 {
-            map.map_put(fsm, p, d)
+            map.put(fsm, p, d)
         } else {
             old, _e2 = map.get_string(fsm, p)
-            map.map_put(fsm, p, "${old}${d}")
+            map.put(fsm, p, "${old}${d}")
         }
         return ""
     }
@@ -167,8 +167,8 @@ inplace_test(expr: string) {
     all = ""
     n = 5
     while n >= 1 {
-        map.map_put(fsm, "lines.in.${n}", lines_of(n))
-        map.map_put(fsm, "lines._in.${n}", lines_of(n))
+        map.put(fsm, "lines.in.${n}", lines_of(n))
+        map.put(fsm, "lines._in.${n}", lines_of(n))
         names = string.seq_cons("lines.in.${n}", names)
         _names = string.seq_cons("lines._in.${n}", _names)
         n = n - 1
@@ -209,7 +209,7 @@ inplace_test(expr: string) {
         m = m + 1
     }
     same("inplace -I ${expr}", spanned, sed1(expr, all))
-    map.map_free(fsm)
+    map.free(fsm)
 }
 
 inplace() {
@@ -224,22 +224,22 @@ inplace() {
 // sed2_test.sh's ATF cases.
 sed2() {
     // inplace_command_q: -i.bak with q keeps the backup and the lines so far
-    fsm = map.map_new()
-    ex = | p: string | { return map.map_has(fsm, p) }
+    fsm = map.new()
+    ex = | p: string | { return map.has(fsm, p) }
     rd = | p: string | {
         v, _e = map.get_string(fsm, p)
         return v
     }
     wr = | p: string, d: string, t: int | {
         if t == 1 {
-            map.map_put(fsm, p, d)
+            map.put(fsm, p, d)
         } else {
             old, _e2 = map.get_string(fsm, p)
-            map.map_put(fsm, p, "${old}${d}")
+            map.put(fsm, p, "${old}${d}")
         }
         return ""
     }
-    map.map_put(fsm, "a", "1\n2\n3\n")
+    map.put(fsm, "a", "1\n2\n3\n")
     same("inplace_command_q stdout", sed1("2q", "1\n2\n3\n"), "1\n2\n")
     o = sed.options()
     sed.in_place(o, ".bak")
@@ -254,7 +254,7 @@ sed2() {
     same("inplace_command_q a.bak", bak, "1\n2\n3\n")
     sed.free(p)
     sed.options_free(o)
-    map.map_free(fsm)
+    map.free(fsm)
 
     // escape_subst
     a2 = "a\nt\\t\n\tb\n\t\tc\r\n"

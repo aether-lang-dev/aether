@@ -1213,10 +1213,10 @@ compile_tr(ctx: *SedParse) -> *SedTr {
     // Generate a lookup table for single-byte characters. The first bytes
     // of multi-byte characters have their entries set to 0, which makes
     // do_tr() search the multibyte mappings.
-    tab = longarr.longarr_new_filled_raw(256, 0)
+    tab = longarr.new_filled(256, 0)!
     i = 0
     while i < 128 {
-        longarr.longarr_set_raw(tab, i, i)
+        longarr.set(tab, i, i)
         i = i + 1
     }
     y.bytetab = tab
@@ -1226,9 +1226,9 @@ compile_tr(ctx: *SedParse) -> *SedTr {
         oclen = u8len(old, op)
         nclen = u8len(nw, np)
         if oclen == 1 && nclen == 1 {
-            longarr.longarr_set_raw(tab, ch(old, op), ch(nw, np))
+            longarr.set(tab, ch(old, op), ch(nw, np))
         } else {
-            longarr.longarr_set_raw(tab, ch(old, op), 0)
+            longarr.set(tab, ch(old, op), 0)
             m = heap.new(SedTrMulti)
             m.from = string.substring(old, op, op + oclen)
             m.to = string.substring(nw, np, np + nclen)
@@ -1555,7 +1555,7 @@ free(prog: @frees ptr) {
                 heap.free(m)
                 m = mn
             }
-            longarr.longarr_free(cp.y.bytetab)
+            longarr.free(cp.y.bytetab)
             heap.free(cp.y)
         }
         heap.free(cp)
@@ -1792,23 +1792,23 @@ applies(st: *SedStream, cp: *SedCmd) -> int {
     if cp.a1 == null && cp.a2 == null {
         r = 1
     } else if cp.a2 != null {
-        sl = longarr.longarr_get_raw(st.startline, cp.idx)
+        sl = longarr.get(st.startline, cp.idx)!
         if sl > 0 {
             if cp.a2.kind == AT_RELLINE {
                 if st.linenum - sl <= cp.a2.line {
                     r = 1
                 } else {
-                    longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                    longarr.set(st.startline, cp.idx, 0)
                     r = 0
                 }
             } else if addr_match(st, cp.a2) == 1 {
-                longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                longarr.set(st.startline, cp.idx, 0)
                 st.lastaddr = 1
                 r = 1
             } else if cp.a2.kind == AT_LINE && st.linenum > cp.a2.line {
                 // We missed the 2nd address due to a branch, so just
                 // close the range and return false.
-                longarr.longarr_set_raw(st.startline, cp.idx, 0)
+                longarr.set(st.startline, cp.idx, 0)
                 r = 0
             } else {
                 r = 1
@@ -1821,7 +1821,7 @@ applies(st: *SedStream, cp: *SedCmd) -> int {
             if (cp.a2.kind == AT_LINE && st.linenum >= cp.a2.line) || (cp.a2.kind == AT_RELLINE && cp.a2.line == 0) {
                 st.lastaddr = 1
             } else {
-                longarr.longarr_set_raw(st.startline, cp.idx, st.linenum)
+                longarr.set(st.startline, cp.idx, st.linenum)
             }
             r = 1
         } else {
@@ -1840,7 +1840,7 @@ applies(st: *SedStream, cp: *SedCmd) -> int {
 // Reset the sed processor to its initial state.
 resetstate(st: *SedStream) {
     // Reset all in-range markers.
-    longarr.longarr_fill(st.startline, 0)
+    longarr.fill(st.startline, 0)
     // Clear out the hold space.
     st.hs = ""
     st.hs_null = 0
@@ -1974,7 +1974,7 @@ do_tr(st: *SedStream, y: *SedTr) {
     p = 0
     while p < left {
         b = string.char_at(ps, p)
-        c = longarr.longarr_get_raw(y.bytetab, b) as int
+        c = (longarr.get(y.bytetab, b)!) as int
         if c != 0 {
             strbuilder.append_byte(ys, c)
             p = p + 1
@@ -2393,7 +2393,7 @@ new_stream(pg: *SedProgram) -> *SedStream {
     st.pg = pg
     n = pg.ncmds
     if n < 1 { n = 1 }
-    st.startline = longarr.longarr_new_filled_raw(n, 0)
+    st.startline = longarr.new_filled(n, 0)!
     st.ps = ""
     st.pd = 0
     st.psanl = 0
@@ -2538,7 +2538,7 @@ stream_free(stream: @frees ptr) {
     strbuilder.free(st.out)
     regex.match_free(st.mbuf)
     regex.match_free(st.mone)
-    longarr.longarr_free(st.startline)
+    longarr.free(st.startline)
     heap.free(st)
 }
 

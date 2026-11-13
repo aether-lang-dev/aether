@@ -65,16 +65,15 @@ grant(o: ptr) {
         }
         mode = "ab"
         if trunc == 1 { mode = "wb" }
-        h = fs.file_open_raw(p, mode)
-        if h == null { return "cannot open for writing" }
+        h, err = fs.open(p, mode)
+        if err != "" { return err }
         if string.length(d) > 0 {
-            if fs.file_write_raw(h, d, string.length(d)) == 0 {
-                fs.file_close_raw(h)
+            if io.fd_write(fs.fd(h), string.bytes(d)) != 0 {
+                fs.close(h)
                 return "write failed"
             }
         }
-        fs.file_close_raw(h)
-        return ""
+        return fs.close(h)
     }
     sed.grant_files(o, ex, rd, wr)
 }
