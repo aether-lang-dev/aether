@@ -1,0 +1,13 @@
+// b.timing: the other `timing`, with its own `Rec`.
+exports(Rec, Model, mk2, mk_rec)
+extern malloc(size: int) -> ptr
+struct Rec { label: string m: int extra: int }
+struct Model { m: int }
+mk2() -> ptr {
+    c = malloc(sizeof(Model)) as *Model
+    c.m = 2
+    return c
+}
+mk_rec() -> Rec {
+    return Rec { label: "b", m: 20, extra: 5 }
+}

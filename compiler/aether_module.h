@@ -102,6 +102,10 @@ void module_assign_namespaces(void);
 ASTNode* module_ast_extern_named(const ASTNode* ast, const char* name);
 const char* module_namespace_of(const char* module_path);
 AetherModule* module_find_by_namespace(const char* ns);
+/* The last `.`-separated segment of a module path ("a.timing" -> "timing"):
+ * the prefix code writes for an unaliased import, whatever `ns` the module
+ * was given to keep it apart from another with the same last segment. */
+const char* module_last_segment(const char* path);
 /* The registered module whose source is `file_path` (compared as files, not
  * spellings), or NULL. */
 AetherModule* module_find_by_file(const char* file_path);

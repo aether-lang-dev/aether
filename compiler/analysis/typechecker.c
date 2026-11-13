@@ -6555,9 +6555,17 @@ static int qual_ast_has_type(const ASTNode* ast, const char* name) {
 /* The module `q` names where `ctx` is written, or NULL. An `import a.b` is
  * named by its namespace (`b`), its full path, or its alias. */
 static AetherModule* qual_resolve_module(const QualCtx* ctx, const char* q) {
+    /* What the code writes for a module is its alias or the path's last
+     * segment, not its namespace: two modules sharing a last segment
+     * (`a.timing`, `b.timing`) are kept apart as `a_timing` and `b_timing`,
+     * and a file importing either still writes `timing.T`. The merge
+     * (ss_qualifier_module) resolves it that way; matching only the
+     * namespace here refused every such type in every file, even one that
+     * imports only one of the two. */
     if (ctx->self && ctx->self->name &&
         (strcmp(q, ctx->self->name) == 0 ||
-         strcmp(q, module_namespace_of(ctx->self->name)) == 0))
+         strcmp(q, module_namespace_of(ctx->self->name)) == 0 ||
+         strcmp(q, module_last_segment(ctx->self->name)) == 0))
         return ctx->self;
     ASTNode* ast = ctx->imports_from;
     for (int i = 0; ast && i < ast->child_count; i++) {
@@ -6574,7 +6582,8 @@ static AetherModule* qual_resolve_module(const QualCtx* ctx, const char* q) {
         int named = (alias && strcmp(q, alias) == 0) ||
                     strcmp(q, imp->value) == 0 ||
                     strcmp(q, module_namespace_of(imp->value)) == 0 ||
-                    strcmp(q, get_namespace_from_path(imp->value)) == 0;
+                    strcmp(q, get_namespace_from_path(imp->value)) == 0 ||
+                    strcmp(q, module_last_segment(imp->value)) == 0;
         if (named) {
             AetherModule* m = module_find(imp->value);
             return m ? m : module_find_by_namespace(q);

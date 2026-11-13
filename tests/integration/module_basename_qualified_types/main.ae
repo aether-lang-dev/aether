@@ -1,0 +1,13 @@
+// Imports c (which imports a.timing) and b.timing: here `timing.T` means
+// b.timing's types, in c's files a.timing's.
+import c
+import b.timing
+main() {
+    println("${c.get()}")
+    m = timing.mk2() as *timing.Model
+    println("${m.m}")
+    let r: timing.Rec = timing.mk_rec()
+    println("${r.label}${r.m}${r.extra}")
+    h = c.holder()
+    println("${h.r.label}${c.rec_n(h.r)} ${h.calls[0].n}")
+}
