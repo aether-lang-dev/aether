@@ -14,6 +14,30 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.913.0]
+
+### Added
+
+- **std.sed: FreeBSD's sed as a library.** A file-by-file port of
+  `usr.bin/sed` (compile.c, process.c, main.c, misc.c) on std.posix.regex,
+  reshaped so a program can embed sed without a process or a shell:
+  `sed.compile(script, opts) -> (prog, err)` once, then `sed.run(prog,
+  input) -> (output, err)`, `sed.run_files(prog, names)`, or a stream
+  (`stream_new`, `stream_write`, `stream_close`) for input that arrives in
+  pieces. -n, -E, -s, -i, -I, -a, -e and -f are options. Errors are values
+  (sed's own messages), not exit(); every run keeps its state in its own
+  stream, so one program serves any number of runs; and `r`, `w` and
+  in-place editing reach files only through closures the caller grants, so
+  the module works in an `--emit=lib` build with no capabilities. FreeBSD's
+  sed tests are the parity oracle: multi_test.sh (130) and regress.sh (26)
+  run unchanged against a sed command line on the module, and every test
+  the host's BSD sed passes it passes too (all of them on FreeBSD); their
+  cases also run through the API on every target.
+
+### Fixed
+
+- **std.sed uses the public array and file APIs (#3691).** Replace calls to other modules' raw bindings in the sed engine and parity fixture, clearing the raw-call CI gate, and use the short module-qualified names required by the warnings gate. The fixture also reports errors from closing an output file.
+
 ## [0.912.0]
 
 ### Added

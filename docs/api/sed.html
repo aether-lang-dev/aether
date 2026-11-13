@@ -1,0 +1,284 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>sed - Aether</title>
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+<nav class="sidebar">
+  <div class="sidebar-header">
+    <h1><a href="index.html">Aether</a></h1>
+    <p class="tagline">Standard Library</p>
+  </div>
+  <input type="text" id="search" placeholder="Search sed..." onkeyup="searchModule()">
+  <h2>Exports</h2>
+  <ul class="function-nav">
+    <li><a href="#options">options</a></li>
+    <li><a href="#options_free">options_free</a></li>
+    <li><a href="#quiet">quiet</a></li>
+    <li><a href="#extended">extended</a></li>
+    <li><a href="#separate">separate</a></li>
+    <li><a href="#in_place">in_place</a></li>
+    <li><a href="#in_place_span">in_place_span</a></li>
+    <li><a href="#delay_wfiles">delay_wfiles</a></li>
+    <li><a href="#line_wrap">line_wrap</a></li>
+    <li><a href="#grant_files">grant_files</a></li>
+    <li><a href="#add_expression">add_expression</a></li>
+    <li><a href="#add_script">add_script</a></li>
+    <li><a href="#compile">compile</a></li>
+    <li><a href="#compile_units">compile_units</a></li>
+    <li><a href="#free">free</a></li>
+    <li><a href="#warnings">warnings</a></li>
+    <li><a href="#run">run</a></li>
+    <li><a href="#run_files">run_files</a></li>
+    <li><a href="#stream_new">stream_new</a></li>
+    <li><a href="#stream_write">stream_write</a></li>
+    <li><a href="#stream_close">stream_close</a></li>
+    <li><a href="#stream_done">stream_done</a></li>
+    <li><a href="#stream_free">stream_free</a></li>
+  </ul>
+  <hr>
+  <h2>Modules</h2>
+  <ul class="module-list">
+    <li><a href="actors.html">actors</a></li>
+    <li><a href="alloc.html">alloc</a></li>
+    <li><a href="arena.html">arena</a></li>
+    <li><a href="audio.html">audio</a></li>
+    <li><a href="audit.html">audit</a></li>
+    <li><a href="bignum.html">bignum</a></li>
+    <li><a href="bits.html">bits</a></li>
+    <li><a href="brotli.html">brotli</a></li>
+    <li><a href="bytes.html">bytes</a></li>
+    <li><a href="capsicum.html">capsicum</a></li>
+    <li><a href="cas.html">cas</a></li>
+    <li><a href="casper.html">casper</a></li>
+    <li><a href="cbor.html">cbor</a></li>
+    <li><a href="clapae.html">clapae</a></li>
+    <li><a href="collections.html">collections</a></li>
+    <li><a href="config.html">config</a></li>
+    <li><a href="cryptography.html">cryptography</a></li>
+    <li><a href="decimal.html">decimal</a></li>
+    <li><a href="deque.html">deque</a></li>
+    <li><a href="dir.html">dir</a></li>
+    <li><a href="dl.html">dl</a></li>
+    <li><a href="encoding.html">encoding</a></li>
+    <li><a href="file.html">file</a></li>
+    <li><a href="floatarr.html">floatarr</a></li>
+    <li><a href="fs.html">fs</a></li>
+    <li><a href="guest.html">guest</a></li>
+    <li><a href="hash.html">hash</a></li>
+    <li><a href="host.html">host</a></li>
+    <li><a href="http.html">http</a></li>
+    <li><a href="http1.html">http1</a></li>
+    <li><a href="intarr.html">intarr</a></li>
+    <li><a href="intmap.html">intmap</a></li>
+    <li><a href="io.html">io</a></li>
+    <li><a href="ipc.html">ipc</a></li>
+    <li><a href="json.html">json</a></li>
+    <li><a href="jsonpath.html">jsonpath</a></li>
+    <li><a href="ksuid.html">ksuid</a></li>
+    <li><a href="lanes.html">lanes</a></li>
+    <li><a href="language.html">language</a></li>
+    <li><a href="list.html">list</a></li>
+    <li><a href="log.html">log</a></li>
+    <li><a href="longarr.html">longarr</a></li>
+    <li><a href="lzf.html">lzf</a></li>
+    <li><a href="map.html">map</a></li>
+    <li><a href="math.html">math</a></li>
+    <li><a href="mem.html">mem</a></li>
+    <li><a href="message.html">message</a></li>
+    <li><a href="msgpack.html">msgpack</a></li>
+    <li><a href="mutation.html">mutation</a></li>
+    <li><a href="nanoid.html">nanoid</a></li>
+    <li><a href="net.html">net</a></li>
+    <li><a href="number.html">number</a></li>
+    <li><a href="observe.html">observe</a></li>
+    <li><a href="os.html">os</a></li>
+    <li><a href="path.html">path</a></li>
+    <li><a href="plural.html">plural</a></li>
+    <li><a href="pqueue.html">pqueue</a></li>
+    <li><a href="quote.html">quote</a></li>
+    <li><a href="reflect.html">reflect</a></li>
+    <li><a href="regex.html">regex</a></li>
+    <li><a href="resp.html">resp</a></li>
+    <li><a href="sandbox.html">sandbox</a></li>
+    <li><a href="schema.html">schema</a></li>
+    <li class="active"><a href="sed.html">sed</a></li>
+    <li><a href="set.html">set</a></li>
+    <li><a href="signal.html">signal</a></li>
+    <li><a href="snapshot.html">snapshot</a></li>
+    <li><a href="sort.html">sort</a></li>
+    <li><a href="spec.html">spec</a></li>
+    <li><a href="strarr.html">strarr</a></li>
+    <li><a href="strbuilder.html">strbuilder</a></li>
+    <li><a href="stream.html">stream</a></li>
+    <li><a href="string.html">string</a></li>
+    <li><a href="supervise.html">supervise</a></li>
+    <li><a href="sync.html">sync</a></li>
+    <li><a href="tar.html">tar</a></li>
+    <li><a href="tcp.html">tcp</a></li>
+    <li><a href="time.html">time</a></li>
+    <li><a href="tracking.html">tracking</a></li>
+    <li><a href="truetype.html">truetype</a></li>
+    <li><a href="tsid.html">tsid</a></li>
+    <li><a href="udp.html">udp</a></li>
+    <li><a href="ulid.html">ulid</a></li>
+    <li><a href="unicode.html">unicode</a></li>
+    <li><a href="url.html">url</a></li>
+    <li><a href="uuid.html">uuid</a></li>
+    <li><a href="worker.html">worker</a></li>
+    <li><a href="xml.html">xml</a></li>
+    <li><a href="yaml.html">yaml</a></li>
+    <li><a href="zip.html">zip</a></li>
+    <li><a href="zlib.html">zlib</a></li>
+    <li><a href="zstd.html">zstd</a></li>
+  </ul>
+</nav>
+<main class="content">
+  <div class="module-header">
+    <h1>sed</h1>
+    <p class="module-desc">std.sed — FreeBSD's sed (usr.bin/sed) as a library.</p>
+    <p class="import-line"><code>import std.sed</code></p>
+  </div>
+  <div class="functions" id="functions">
+    <div class="function" id="options" data-name="options">
+      <h3 class="function-name">options <span class="kind">fn</span></h3>
+      <pre class="usage"><code>options() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">Default options: what `sed script` does with no flags.</p>
+    </div>
+    <div class="function" id="options_free" data-name="options_free">
+      <h3 class="function-name">options_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>options_free(op)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr</span></p>
+    </div>
+    <div class="function" id="quiet" data-name="quiet">
+      <h3 class="function-name">quiet <span class="kind">fn</span></h3>
+      <pre class="usage"><code>quiet(op)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr</span></p>
+      <p class="doc">-n: print only what the script prints.</p>
+    </div>
+    <div class="function" id="extended" data-name="extended">
+      <h3 class="function-name">extended <span class="kind">fn</span></h3>
+      <pre class="usage"><code>extended(op)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr</span></p>
+      <p class="doc">-E: Extended regular expressions.</p>
+    </div>
+    <div class="function" id="separate" data-name="separate">
+      <h3 class="function-name">separate <span class="kind">fn</span></h3>
+      <pre class="usage"><code>separate(op)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr</span></p>
+      <p class="doc">-s: each input file on its own: line numbers restart, $ is each file's last line, and the hold space and ranges reset, as -i treats files.</p>
+    </div>
+    <div class="function" id="in_place" data-name="in_place">
+      <h3 class="function-name">in_place <span class="kind">fn</span></h3>
+      <pre class="usage"><code>in_place(op, suffix)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, suffix: string</span></p>
+      <p class="doc">-i suffix: edit the files run_files is given in place, one at a time (implies separate), keeping a copy of each as name + suffix unless suffix is &quot;&quot;. Needs grant_files.</p>
+    </div>
+    <div class="function" id="in_place_span" data-name="in_place_span">
+      <h3 class="function-name">in_place_span <span class="kind">fn</span></h3>
+      <pre class="usage"><code>in_place_span(op, suffix)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, suffix: string</span></p>
+      <p class="doc">-I suffix: as in_place, but line numbers, $ and the hold space span the files, as if they were one input.</p>
+    </div>
+    <div class="function" id="delay_wfiles" data-name="delay_wfiles">
+      <h3 class="function-name">delay_wfiles <span class="kind">fn</span></h3>
+      <pre class="usage"><code>delay_wfiles(op)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr</span></p>
+      <p class="doc">-a: create (truncate) w files when first written, not when a run starts.</p>
+    </div>
+    <div class="function" id="line_wrap" data-name="line_wrap">
+      <h3 class="function-name">line_wrap <span class="kind">fn</span></h3>
+      <pre class="usage"><code>line_wrap(op, n)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, n: int</span></p>
+      <p class="doc">The line length the l command folds at (FreeBSD: COLUMNS, the terminal's width, or 60 when output is not a terminal; here 60 unless set).</p>
+    </div>
+    <div class="function" id="grant_files" data-name="grant_files">
+      <h3 class="function-name">grant_files <span class="kind">fn</span></h3>
+      <pre class="usage"><code>grant_files(op, exists_fn, read_fn, write_fn)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, exists_fn: fn, read_fn: fn, write_fn: fn</span></p>
+      <p class="doc">Grant file access for r, w and the w flag of s, and for run_files and in-place editing. See SedFiles for the three closures.</p>
+    </div>
+    <div class="function" id="add_expression" data-name="add_expression">
+      <h3 class="function-name">add_expression <span class="kind">fn</span></h3>
+      <pre class="usage"><code>add_expression(op, text)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, text: string</span></p>
+      <p class="doc">-e text: a script unit for compile_units (a newline is added, as sed does).</p>
+    </div>
+    <div class="function" id="add_script" data-name="add_script">
+      <h3 class="function-name">add_script <span class="kind">fn</span></h3>
+      <pre class="usage"><code>add_script(op, name, text)</code></pre>
+      <p class="signature"><span class="sig-params">op: ptr, name: string, text: string</span></p>
+      <p class="doc">-f name: a script file's contents as a unit for compile_units; name is what error messages call it.</p>
+    </div>
+    <div class="function" id="compile" data-name="compile">
+      <h3 class="function-name">compile <span class="kind">fn</span></h3>
+      <pre class="usage"><code>compile(script, opts) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">script: string, opts: ptr</span></p>
+      <p class="doc">Compile one script, as `sed script` (or `sed -e script`) does. opts is from options(), or null for the defaults. Returns (prog, &quot;&quot;) or (null, err), err in sed's words (&quot;1: \&quot;s/a\&quot;: unterminated substitute pattern&quot;). Warnings (an unused label, ...) are in warnings(prog).</p>
+    </div>
+    <div class="function" id="compile_units" data-name="compile_units">
+      <h3 class="function-name">compile_units <span class="kind">fn</span></h3>
+      <pre class="usage"><code>compile_units(opts) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">opts: ptr</span></p>
+      <p class="doc">Compile the units added to opts with add_expression and add_script, in order, as `sed -e ... -f ...` does.</p>
+    </div>
+    <div class="function" id="free" data-name="free">
+      <h3 class="function-name">free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>free(pg as ptr) <span class="arrow">-&gt;</span> (_0, _1)</code></pre>
+      <p class="signature"><span class="sig-params">pg as ptr</span></p>
+    </div>
+    <div class="function" id="warnings" data-name="warnings">
+      <h3 class="function-name">warnings <span class="kind">fn</span></h3>
+      <pre class="usage"><code>warnings(prog) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">prog: ptr</span></p>
+      <p class="doc">What sed would have written to stderr while compiling: one warning a line.</p>
+    </div>
+    <div class="function" id="run" data-name="run">
+      <h3 class="function-name">run <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run(prog, input) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: ptr, input: string</span></p>
+      <p class="doc">Run prog over input, as `sed script &lt; input`. Returns (output, err).</p>
+    </div>
+    <div class="function" id="run_files" data-name="run_files">
+      <h3 class="function-name">run_files <span class="kind">fn</span></h3>
+      <pre class="usage"><code>run_files(prog, names) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">prog: ptr, names: *StringSeq</span></p>
+      <p class="doc">Run prog over files, as `sed script file...`, reading them through the closures grant_files gave. Returns (output, err). With in_place the output goes back into the files instead. A file that cannot be read is skipped and named in err (sed's warning and exit status 1), and the rest are still run, as sed does.</p>
+    </div>
+    <div class="function" id="stream_new" data-name="stream_new">
+      <h3 class="function-name">stream_new <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_new(prog) <span class="arrow">-&gt;</span> ptr!</code></pre>
+      <p class="signature"><span class="sig-params">prog: ptr</span></p>
+      <p class="doc">A stream over input that arrives in pieces (sed reading its stdin). Returns (stream, &quot;&quot;) or (null, err): err when the program opens w files it has no grant for, or edits in place (which needs run_files).</p>
+    </div>
+    <div class="function" id="stream_write" data-name="stream_write">
+      <h3 class="function-name">stream_write <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_write(stream, chunk) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">stream: ptr, chunk: string</span></p>
+      <p class="doc">Feed the next piece of input. Returns (output, err): the output the lines so far produced. A line is run once the byte after it has arrived (or stream_close says there is none), since $ depends on it.</p>
+    </div>
+    <div class="function" id="stream_close" data-name="stream_close">
+      <h3 class="function-name">stream_close <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_close(stream) <span class="arrow">-&gt;</span> (string, string)</code></pre>
+      <p class="signature"><span class="sig-params">stream: ptr</span></p>
+      <p class="doc">The input is complete: run what is left. Returns (output, err).</p>
+    </div>
+    <div class="function" id="stream_done" data-name="stream_done">
+      <h3 class="function-name">stream_done <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_done(stream) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">stream: ptr</span></p>
+      <p class="doc">1 when the program has finished (q, the end of the input, an error): more input would produce nothing.</p>
+    </div>
+    <div class="function" id="stream_free" data-name="stream_free">
+      <h3 class="function-name">stream_free <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stream_free(st as ptr) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">st as ptr</span></p>
+    </div>
+  </div>
+</main>
+<script src="search.js"></script>
+</body>
+</html>

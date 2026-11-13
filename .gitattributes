@@ -42,3 +42,8 @@ tests/fuzz/cbor/corpus/** binary
 # converted on commit or checkout is another input, an HTTP head with bare
 # LFs where the generator wrote CR LF.
 tests/fuzz/**/corpus/** binary
+
+# FreeBSD's sed regression suite (std.sed's parity test and test_sed read these
+# byte for byte): keep them LF on a Windows autocrlf checkout, or every line
+# gains a CR and sed's output no longer matches the expected files.
+tests/integration/sed_parity/freebsd/** text eol=lf
