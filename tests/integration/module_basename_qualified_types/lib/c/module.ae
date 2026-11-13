@@ -1,10 +1,13 @@
 // Imports only a.timing; its `timing.T` means a.timing's types.
 import a.timing
+extern free(p: ptr)
 exports(get, rec_n, Holder, holder)
 struct Holder { r: timing.Rec calls: timing.Call[] }
 get() -> int {
     c = timing.mk() as *timing.Call
-    return c.n
+    n = c.n
+    free(c)
+    return n
 }
 rec_n(r: timing.Rec) -> int {
     return r.n

@@ -2,10 +2,12 @@
 // b.timing's types, in c's files a.timing's.
 import c
 import b.timing
+extern free(p: ptr)
 main() {
     println("${c.get()}")
     m = timing.mk2() as *timing.Model
     println("${m.m}")
+    free(m)
     let r: timing.Rec = timing.mk_rec()
     println("${r.label}${r.m}${r.extra}")
     h = c.holder()

@@ -197,6 +197,8 @@ writer_survives_killed_reader(some: bool) -> long {
         waited = waited + 10
     }
     got = sync.atomic_load(state)
+    // The writer is done once it stored a verdict; only then is the cell ours.
+    if got != 0 { sync.atomic_free(state) }
     io.fd_close(to)
     io.fd_close(from)
     return got
