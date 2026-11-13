@@ -3268,6 +3268,10 @@ static void load_defines_from_toml(void) {
     "-lws2_32 -lcrypt32 -lgdi32 -luser32 -ladvapi32 -lbcrypt -ldbghelp"
 #endif
 
+static char* ae_flags_with_env(char* flags, const char* env_name, const char* what);
+
+/* The link takes AETHER_LDFLAGS_EXTRA from the environment after the
+ * manifest's link_flags, as compiles take AETHER_CFLAGS_EXTRA. */
 static const char* get_link_flags(void) {
     /* Read once and kept for the process: every compile asks. */
     static char* flags = NULL;
@@ -3276,17 +3280,17 @@ static const char* get_link_flags(void) {
     if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return "";
-
-    TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return "";
-
-    const char* val = toml_get_value(doc, "build", "link_flags");
-    if (val && !(flags = expand_env_vars(val))) {
-        fprintf(stderr, "ae: out of memory reading aether.toml [build] link_flags\n");
+    if (path_exists(ae_manifest_path())) {
+        TomlDocument* doc = toml_parse_file(ae_manifest_path());
+        if (doc) {
+            const char* val = toml_get_value(doc, "build", "link_flags");
+            if (val && !(flags = expand_env_vars(val))) {
+                fprintf(stderr, "ae: out of memory reading aether.toml [build] link_flags\n");
+            }
+            toml_free_document(doc);
+        }
     }
-
-    toml_free_document(doc);
+    flags = ae_flags_with_env(flags, "AETHER_LDFLAGS_EXTRA", "link flags");
     return flags ? flags : "";
 }
 
@@ -3990,6 +3994,29 @@ static const char* win_avx_stack_flags(const char* user_cflags) {
 // Returns empty string if not found or no aether.toml
 bool ae_build_size_mode(void) { return g_size; }
 
+/* `flags` (owned, may be NULL) with the environment variable `env_name`'s
+ * value appended after a space when it is set and not empty: the manifest's
+ * flags first, the environment's after, so a one-off build can add to a
+ * project's flags (`AETHER_CFLAGS_EXTRA="-fsanitize=address -g"`) without
+ * editing aether.toml. Returns the (re)allocated string, or `flags` as it
+ * was when there is nothing to add or no memory. */
+static char* ae_flags_with_env(char* flags, const char* env_name, const char* what) {
+    const char* extra = getenv(env_name);
+    if (!extra || !extra[0]) return flags;
+    char* both = flags && flags[0] ? ae_strdup_printf("%s %s", flags, extra)
+                                   : ae_strdup_printf("%s", extra);
+    if (!both) {
+        fprintf(stderr, "ae: out of memory adding %s to the %s\n", env_name, what);
+        return flags;
+    }
+    free(flags);
+    return both;
+}
+
+/* Every compile also takes AETHER_CFLAGS_EXTRA from the environment, after
+ * the manifest's cflags (ae_flags_with_env). It is what the ASan probes in
+ * tests/integration (closure_*_no_uaf) set; nothing read it, so they built
+ * uninstrumented and an ASan report could never appear. */
 const char* get_cflags(void) {
     /* Read once and kept for the process: every compile asks. */
     static char* flags = NULL;
@@ -3998,17 +4025,17 @@ const char* get_cflags(void) {
     if (checked) return flags ? flags : "";
     checked = true;
 
-    if (!path_exists(ae_manifest_path())) return "";
-
-    TomlDocument* doc = toml_parse_file(ae_manifest_path());
-    if (!doc) return "";
-
-    const char* val = toml_get_value(doc, "build", "cflags");
-    if (val && !(flags = expand_env_vars(val))) {
-        fprintf(stderr, "ae: out of memory reading aether.toml [build] cflags\n");
+    if (path_exists(ae_manifest_path())) {
+        TomlDocument* doc = toml_parse_file(ae_manifest_path());
+        if (doc) {
+            const char* val = toml_get_value(doc, "build", "cflags");
+            if (val && !(flags = expand_env_vars(val))) {
+                fprintf(stderr, "ae: out of memory reading aether.toml [build] cflags\n");
+            }
+            toml_free_document(doc);
+        }
     }
-
-    toml_free_document(doc);
+    flags = ae_flags_with_env(flags, "AETHER_CFLAGS_EXTRA", "C flags");
     return flags ? flags : "";
 }
 
