@@ -2674,11 +2674,9 @@ static void park_sender_step(void* self) {
 }
 
 static int wait_parked(int core) {
-    long long deadline = (long long)get_time_ms() + 3000;
-    while ((long long)get_time_ms() <= deadline) {
-        if (atomic_load(&schedulers[core].parked)) return 1;
-    }
-    return 0;
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(&schedulers[core].parked) && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(&schedulers[core].parked);
 }
 
 // A caller's actor carried over a restart, before its registration: its

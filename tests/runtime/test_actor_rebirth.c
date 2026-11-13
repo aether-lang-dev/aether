@@ -31,6 +31,7 @@
 #define rb_sleep_ms(ms) Sleep(ms)
 #else
 #include <unistd.h>
+#include <sched.h>
 #define rb_sleep_ms(ms) usleep((ms) * 1000)
 #endif
 
@@ -38,6 +39,7 @@
 #define RB_N 1500
 #define RB_K 150
 #define RB_MAX_INC 64
+#define RB_SPIN_NS 200000ULL
 
 enum { RB_NUMBER = 1, RB_GO = 2, RB_WATCH = 3, RB_RETRY = 4 };
 
@@ -443,12 +445,15 @@ static ActorBase* rb_spawn_timed(int core) {
 }
 
 static int rb_wait_until(ActorBase* a, int finalized, int ms) {
-    uint64_t until = aether_now_ns() + (uint64_t)ms * 1000000ULL;
+    uint64_t start = aether_now_ns();
+    uint64_t until = start + (uint64_t)ms * 1000000ULL;
     for (;;) {
         int ok = finalized ? (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0
                            : atomic_load(&a->ready_queued) == 0 && atomic_load(&a->timer_slot) != 0;
         if (ok) return 1;
-        if (aether_now_ns() > until) return 0;
+        uint64_t now = aether_now_ns();
+        if (now > until) return 0;
+        if (now - start > RB_SPIN_NS) sched_yield();
     }
 }
 
