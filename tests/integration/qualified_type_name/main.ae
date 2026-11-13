@@ -10,4 +10,12 @@ main() {
     a = bump(start) // 6
     b = bump(a) // 7
     println("${a.v} ${b.v}")
+    // The slice and array forms of the same typed local (nib-code ask
+    // qualified-slice-local): `lib.Box[] xs = []` stopped at the `[` with
+    // "Expected statement in block".
+    lib.Box[] xs = []
+    xs.push(lib.mk(8))
+    xs.push(b)
+    lib.Box[2] pair = [lib.mk(1), lib.mk(2)]
+    println("${xs.len} ${xs[0].v} ${xs[1].v} ${pair[0].v + pair[1].v}")
 }
