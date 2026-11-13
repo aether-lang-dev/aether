@@ -1307,22 +1307,34 @@ static int actor_table_find_locked(Scheduler* sched, ActorBase* actor, int hint)
     return -1;
 }
 
-// Appends `actor`. The caller has checked there is room.
+// Appends `actor`. The caller has checked there is room. The actor keeps its
+// slot (ActorBase.table_slot), the hint a find of it checks first (#3540).
 static inline void actor_table_push_locked(Scheduler* sched, ActorBase* actor) {
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
     int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
+    atomic_store_explicit(&actor->table_slot, count, memory_order_relaxed);
     atomic_store_explicit(&table->slots[count], actor, memory_order_release);
     atomic_store_explicit(&sched->actor_count, count + 1, memory_order_release);
 }
 
-// Removes slot `i` by moving the last actor into it.
+// Removes slot `i` by moving the last actor into it, which keeps its new
+// slot; the actor removed keeps none (-1).
 static inline void actor_table_remove_locked(Scheduler* sched, int i) {
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
     int last = atomic_load_explicit(&sched->actor_count, memory_order_relaxed) - 1;
+    ActorBase* gone = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
     ActorBase* moved = atomic_load_explicit(&table->slots[last], memory_order_relaxed);
     atomic_store_explicit(&table->slots[i], moved, memory_order_release);
     atomic_store_explicit(&table->slots[last], NULL, memory_order_release);
     atomic_store_explicit(&sched->actor_count, last, memory_order_release);
+    if (moved && moved != gone) atomic_store_explicit(&moved->table_slot, i, memory_order_relaxed);
+    if (gone) atomic_store_explicit(&gone->table_slot, -1, memory_order_relaxed);
+}
+
+/* The slot `actor` last had in its core's table: a hint, which a find under
+ * the table's lock checks before it scans (actor_table_find_locked). */
+static inline int actor_table_slot(ActorBase* actor) {
+    return atomic_load_explicit(&actor->table_slot, memory_order_relaxed);
 }
 
 // Replaces a full table with one twice its size. The new table is published
@@ -2519,7 +2531,7 @@ static int ready_service(Scheduler* sched, ActorBase* actor) {
     int mig = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
     if (unlikely(mig >= 0 && mig != me) &&
         atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me) {
-        int moved = move_actor(sched, actor, mig, -1, 0);
+        int moved = move_actor(sched, actor, mig, actor_table_slot(actor), 0);
         if (moved >= 0) did = 1;
         if (moved == 0) ready_push(actor);
     }
@@ -2912,7 +2924,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
             // as it used to be, each actor took the place its sender had just
             // left, and the chain only shifted.
             int ask = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
-            if (ask >= 0 && ask != sched->core_id && move_actor(sched, actor, ask, -1, 0) > 0) {
+            if (ask >= 0 && ask != sched->core_id &&
+                move_actor(sched, actor, ask, actor_table_slot(actor), 0) > 0) {
                 continue;
             }
 
@@ -2967,7 +2980,8 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                          atomic_load_explicit(&mig_actor->assigned_core, memory_order_relaxed) == sched->core_id)) {
                 // Asked again on the next pass while the ask stands (#3540),
                 // unless no move can be made from here (in no table).
-                if (move_actor(sched, mig_actor, mig_to, -1, 0) == 0) ready_push(mig_actor);
+                if (move_actor(sched, mig_actor, mig_to, actor_table_slot(mig_actor), 0) == 0)
+                    ready_push(mig_actor);
             }
         }
 
@@ -4002,7 +4016,7 @@ static int actor_table_leave(ActorBase* actor) {
         Scheduler* sched = &schedulers[core];
         spinlock_lock(&sched->actor_lock);
         if (atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == core) {
-            int at = actor_table_find_locked(sched, actor, -1);
+            int at = actor_table_find_locked(sched, actor, actor_table_slot(actor));
             if (at >= 0) actor_table_remove_locked(sched, at);
             spinlock_unlock(&sched->actor_lock);
             return 1;

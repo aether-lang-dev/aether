@@ -153,8 +153,8 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
  * Senders' reads of assigned_core and dead used to share the lines the
  * stepping core writes at every step (the mailbox count's, step_lock's), so
  * each send from another core cost the next step transfers of those lines
- * back to its core. sizeof(ActorBase) is 1712, as before, so an actor's
- * state starts where it did. On a target with 4-byte pointers the groups
+ * back to its core. sizeof(ActorBase) is 1720: the table slot (#3540) took
+ * the last line's free bytes. On a target with 4-byte pointers the groups
  * fall elsewhere on their lines; nothing reads a field by its offset. */
 #define AETHER_ACTOR_BASE_FIELDS \
     atomic_int active; \
@@ -288,7 +288,13 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * ordering rule, and were drained only while the mailbox held \
      * something; it sends through scheduler_send_many now (#3292). Kept \
      * for the layout; an actor's end frees one a C caller set. */ \
-    SPSCQueue* spsc_queue;
+    SPSCQueue* spsc_queue; \
+    /* Its slot in its core's table (#3540), -1 once taken out of it: set \
+     * where the table places it, moved with it when a removal moves it, \
+     * under the table's lock. A hint only, which a find checks before it \
+     * scans: a move asked through the ready list finds the actor at once, \
+     * as the scan's move, which knew the slot it was at, did. */ \
+    atomic_int table_slot;
 
 typedef struct {
     AETHER_ACTOR_BASE_FIELDS

@@ -2718,6 +2718,77 @@ void test_ready_list_move_of_actor_in_no_table_lets_core_park(void) {
     ASSERT_EQ(2, handled_after);
 }
 
+
+// Each actor keeps its slot in its core's table (#3540), the hint a move's
+// find checks first: a move asked through the ready list (a message-driven
+// one, #3090) found the actor by a walk of the whole table, under both
+// cores' locks, where the scan's move had the slot it was at. Placed,
+// removed from the middle (the last actor moves into the hole), moved to
+// another core by the messages a sender there sends it, and deregistered:
+// the slot an actor keeps is the one it is at, or -1 once it is in none.
+static int table_slots_agree(int core) {
+    AetherActorTable* table = atomic_load(&schedulers[core].actor_table);
+    int count = atomic_load(&schedulers[core].actor_count);
+    for (int i = 0; i < count; i++) {
+        ActorBase* a = atomic_load(&table->slots[i]);
+        if (a && atomic_load(&a->table_slot) != i) return 0;
+    }
+    return 1;
+}
+
+void test_ready_list_actor_keeps_its_table_slot(void) {
+    enum { N = 2000 };
+    scheduler_init(2);
+    RlActor* a[N];
+    for (int i = 0; i < N; i++) {
+        a[i] = rl_spawn(0);
+        ASSERT_NOT_NULL(a[i]);
+    }
+    int placed = table_slots_agree(0);
+    // Out of the middle, before the scheduler runs: each removal moves the
+    // last actor into the hole.
+    for (int i = 0; i < N; i += 3) scheduler_release_actor((ActorBase*)a[i]);
+    int after_release = table_slots_agree(0);
+    int released_none = 1;
+    for (int i = 0; i < N; i += 3)
+        if (atomic_load(&a[i]->table_slot) != -1) released_none = 0;
+    scheduler_start();
+    // Moved to core 1 by the messages its forwarder there sends it.
+    RlForwarder* fw = (RlForwarder*)scheduler_spawn_actor(1, rl_forwarder_step, sizeof(RlForwarder));
+    ASSERT_NOT_NULL(fw);
+    RlActor* t = a[N - 1];
+    fw->target = (ActorBase*)t;
+    fw->sender = 0;
+    fw->each = 4;
+    for (int r = 0; r < 50 && atomic_load(&t->assigned_core) != 1; r++) {
+        scheduler_send_remote((ActorBase*)fw, message_create_simple(1, 0, r * 4), -1);
+        sleep_ms(2);
+    }
+    scheduler_wait();
+    int moved = atomic_load(&t->assigned_core) == 1;
+    int agree_after_move = moved;
+    // Read under each core's lock: the cores run.
+    for (int c = 0; c < 2; c++) {
+        spinlock_lock(&schedulers[c].actor_lock);
+        if (!table_slots_agree(c)) agree_after_move = 0;
+        spinlock_unlock(&schedulers[c].actor_lock);
+    }
+    RlActor* caller = (RlActor*)caller_actor(sizeof(RlActor), rl_step);
+    ASSERT_NOT_NULL(caller);
+    scheduler_register_actor((ActorBase*)caller, 0);
+    scheduler_deregister_actor((ActorBase*)caller);
+    int deregistered = atomic_load(&caller->table_slot) == -1;
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(caller);
+    ASSERT_TRUE(placed);
+    ASSERT_TRUE(after_release);
+    ASSERT_TRUE(released_none);
+    ASSERT_TRUE(moved);
+    ASSERT_TRUE(agree_after_move);
+    ASSERT_TRUE(deregistered);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2762,4 +2833,5 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: a countdown follows a deregister and a registration", test_ready_list_deregister_then_register_moves_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a deregistered actor's block is not read again", test_ready_list_deregister_then_free_with_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a move of an actor in no table lets its core park", test_ready_list_move_of_actor_in_no_table_lets_core_park, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: an actor keeps its table slot", test_ready_list_actor_keeps_its_table_slot, TEST_CATEGORY_RUNTIME);
 }
