@@ -22,6 +22,7 @@
 // Aether surface; the driving shell test builds the two together.
 
 import std.http
+import std.sync
 import std.http.client
 import std.os
 
@@ -58,12 +59,14 @@ served(port: int, n: int) -> int {
 // Start `s` in the background with multi-accept on, after a server_bind on
 // port 0 when `prebind` is 1; check the port it reports and serve on it.
 run_case(label: string, prebind: int) {
-    heard_port = ref(0)
-    defer ref_free(heard_port)
+    // The listening closure runs on the server's thread and this one polls
+    // what it sets: std.sync cells, not refs, whose plain memory raced (#3542).
+    heard_port = sync.atomic_new(0)
+    defer sync.atomic_free(heard_port)
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     http.monitor(s) {
-        listening() | host: string, port: int | { ref_set(heard_port, port) }
+        listening() | host: string, port: int | { sync.atomic_store(heard_port, port) }
     }
     if multi_accept_actor_mode(s) != 0 {
         println("FAIL ${label}: no actor dispatch mode")
@@ -90,13 +93,13 @@ run_case(label: string, prebind: int) {
         exit(1)
     }
     waited = 0
-    while ref_get(heard_port) == 0 && waited < 250 {
+    while sync.atomic_load(heard_port) == 0 && waited < 250 {
         sleep(20)
         waited = waited + 1
     }
     port = http.server_port(s)
-    if ref_get(heard_port) == 0 || ref_get(heard_port) != port {
-        println("FAIL ${label}: listening reported port ${ref_get(heard_port)}, server_port ${port}")
+    if sync.atomic_load(heard_port) == 0 || sync.atomic_load(heard_port) != port {
+        println("FAIL ${label}: listening reported port ${sync.atomic_load(heard_port)}, server_port ${port}")
         exit(1)
     }
     if prebind == 1 && port != bound {

@@ -1,0 +1,10 @@
+// The data race canary of `make test-tsan` (#3542): canary.c stores to one
+// int from two threads with nothing ordering the stores, so a sanitized build
+// of it must be stopped with a ThreadSanitizer report. Built and run by
+// tests/scripts/sanitizer_sweep.sh, never by the sweep itself.
+
+extern tsan_canary_race(value: int) -> int
+
+main() {
+    println("race: ${tsan_canary_race(7)}")
+}

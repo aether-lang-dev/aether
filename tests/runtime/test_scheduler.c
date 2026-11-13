@@ -543,10 +543,8 @@ static void relay_step(void* self) {
     RelayActor* a = (RelayActor*)self;
     Message msg;
     if (mailbox_receive(&a->mailbox, &msg)) {
-        // Credited here as the core loop credits a step it runs itself:
-        // scheduler_wait() balances sent against processed.
-        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
-                                  memory_order_relaxed);
+        // Counted handled by the actor thread's loop, which steps it (#3464;
+        // a core's count is its own thread's to write, #3541).
         Message fwd = {1, 0, 0, NULL, {NULL, 0, 0}, NULL};
         scheduler_send_remote(a->target, fwd, -1);   // the core steps it
         atomic_store(&a->stepped, 1);
@@ -564,9 +562,7 @@ static void quitter_step(void* self) {
     ChurnActor* a = (ChurnActor*)self;
     Message msg;
     if (mailbox_receive(&a->mailbox, &msg)) {
-        atomic_fetch_add_explicit(&schedulers[a->assigned_core].messages_processed, 1,
-                                  memory_order_relaxed);
-        atomic_fetch_add(&g_churn_handled, 1);
+        atomic_fetch_add(&g_churn_handled, 1);   // counted handled by its thread's loop
         scheduler_release_actor((ActorBase*)a);   // from its own thread's step
     }
 }
@@ -1381,6 +1377,9 @@ void test_scheduler_fires_receive_timeouts(void) {
     ASSERT_EQ(0, pthread_create(&on_thread->thread, NULL, aether_actor_thread, on_thread));
     on_core->timeout_ns = 20 * 1000000ULL;
     on_core->last_activity_ns = aether_now_ns();
+    // Armed by hand, outside a step: its core is told, as the generated
+    // spawn tells it (#3540). An actor thread reads its own countdown.
+    scheduler_timeout_armed((ActorBase*)on_core);
 
     int core_fired = wait_count(&on_core->count, 1);
     int thread_fired = wait_count(&on_thread->count, 1);
@@ -1823,6 +1822,971 @@ void test_scheduler_stop_leaves_foreign_queue_alone(void) {
     scheduler_cleanup();
 }
 
+// A scheduler_send_local from a thread that is not the actor's core thread
+// (the main thread of a C host) wrote straight into the actor's mailbox while
+// the core thread delivered into it too: two producers on a single producer
+// ring, so messages were lost or delivered twice. The target counts each
+// sender's sequence; the main thread and an actor of the target's core send
+// at once.
+#define LS_EACH 100000
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int got;
+    atomic_int out_of_order;
+    int next[2];
+} LsTarget;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* target;
+    atomic_int done;
+} LsSender;
+
+static void ls_target_step(void* self) {
+    LsTarget* t = (LsTarget*)self;
+    Message msg;
+    if (!mailbox_receive(&t->mailbox, &msg)) return;
+    int from = msg.sender_id;
+    if (from < 0 || from > 1 || msg.payload_int != t->next[from]) {
+        atomic_fetch_add(&t->out_of_order, 1);
+        if (from >= 0 && from <= 1) t->next[from] = (int)msg.payload_int + 1;
+    } else {
+        t->next[from]++;
+    }
+    atomic_fetch_add(&t->got, 1);
+}
+
+static void ls_sender_step(void* self) {
+    LsSender* s = (LsSender*)self;
+    Message msg;
+    if (!mailbox_receive(&s->mailbox, &msg)) return;
+    // On the target's core thread: the same-core path.
+    for (int i = 0; i < LS_EACH; i++)
+        scheduler_send_local(s->target, message_create_simple(2, 1, i));
+    atomic_store(&s->done, 1);
+}
+
+void test_scheduler_send_local_from_foreign_thread(void) {
+    scheduler_init(1);
+    scheduler_start();
+    LsTarget* t = (LsTarget*)scheduler_spawn_actor(0, ls_target_step, sizeof(LsTarget));
+    LsSender* s = (LsSender*)scheduler_spawn_actor(0, ls_sender_step, sizeof(LsSender));
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(s);
+    atomic_init(&t->got, 0);
+    atomic_init(&t->out_of_order, 0);
+    t->next[0] = t->next[1] = 0;
+    s->target = (ActorBase*)t;
+    atomic_init(&s->done, 0);
+
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    for (int i = 0; i < LS_EACH; i++)
+        scheduler_send_local((ActorBase*)t, message_create_simple(2, 0, i));
+    ASSERT_EQ(1, wait_count(&s->done, 1));
+    int got = wait_count(&t->got, 2 * LS_EACH);
+    scheduler_wait();
+    int late = atomic_load(&t->got) - 2 * LS_EACH;   // delivered twice
+    int bad = atomic_load(&t->out_of_order);
+    int next0 = t->next[0], next1 = t->next[1];
+    scheduler_shutdown();
+    scheduler_cleanup();
+
+    ASSERT_EQ(2 * LS_EACH, got);
+    ASSERT_EQ(0, late);
+    ASSERT_EQ(0, bad);
+    ASSERT_EQ(LS_EACH, next0);
+    ASSERT_EQ(LS_EACH, next1);
+}
+
+// ---------------------------------------------------------------------------
+// The ready list and the timer heap (#3540): a core looks at the actors that
+// have work, not at every actor it has. Each test sets the cores' park to a
+// minute, so an actor the core is never brought back to shows as a stall of
+// the wait (10 s) rather than as a park's delay.
+// ---------------------------------------------------------------------------
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int handled;
+    atomic_int empty_steps;   // stepped with nothing to take
+    atomic_int out_of_order;
+    int chain;                // a Next(n) below it sends Next(n + 1) to itself
+    int next[8];              // each sender's next sequence number
+} RlActor;
+
+enum { RL_NEXT = 1, RL_SEQ = 2 };
+
+static void rl_step(void* self) {
+    RlActor* a = (RlActor*)self;
+    Message msg;
+    if (!mailbox_receive(&a->mailbox, &msg)) {
+        atomic_fetch_add(&a->empty_steps, 1);
+        return;
+    }
+    if (msg.type == RL_NEXT) {
+        // From its own step: never stepped inline, so the step leaves the
+        // message in the mailbox, and the core's ready list brings it back.
+        if (msg.payload_int + 1 < a->chain)
+            scheduler_send_local((ActorBase*)a, message_create_simple(RL_NEXT, 0, msg.payload_int + 1));
+    } else if (msg.type == RL_SEQ) {
+        int from = msg.sender_id;
+        if (from < 0 || from >= 8 || msg.payload_int != a->next[from]) {
+            atomic_fetch_add(&a->out_of_order, 1);
+            if (from >= 0 && from < 8) a->next[from] = (int)msg.payload_int + 1;
+        } else {
+            a->next[from]++;
+        }
+    }
+    atomic_fetch_add(&a->handled, 1);
+}
+
+static RlActor* rl_spawn(int core) {
+    RlActor* a = (RlActor*)scheduler_spawn_actor(core, rl_step, sizeof(RlActor));
+    if (!a) return NULL;
+    atomic_init(&a->handled, 0);
+    atomic_init(&a->empty_steps, 0);
+    atomic_init(&a->out_of_order, 0);
+    a->chain = 0;
+    for (int i = 0; i < 8; i++) a->next[i] = 0;
+    return a;
+}
+
+// An idle actor that receives after the core has been parked a long while,
+// among many idle actors, is stepped through all of its work: a chain of
+// 1,000 messages it sends itself, 64 steps at most per look, so the core
+// comes back to it through its ready list some 16 times.
+void test_ready_list_steps_actor_after_long_idle(void) {
+    scheduler_init(1);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    for (int i = 0; i < 10000; i++) ASSERT_NOT_NULL(rl_spawn(0));
+    RlActor* x = rl_spawn(0);
+    ASSERT_NOT_NULL(x);
+    x->chain = 1000;
+    int got[2];
+    for (int round = 0; round < 2; round++) {
+        sleep_ms(200);   // the core parks
+        scheduler_send_remote((ActorBase*)x, message_create_simple(RL_NEXT, 0, 0), -1);
+        got[round] = wait_count(&x->handled, 1000 * (round + 1));
+    }
+    int empty = atomic_load(&x->empty_steps);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(1000, got[0]);
+    ASSERT_EQ(2000, got[1]);
+    ASSERT_EQ(0, empty);
+}
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int fired;
+    atomic_llong fired_at_ns;
+} RlTimed;
+
+static void rl_timed_step(void* self) {
+    RlTimed* a = (RlTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->last_activity_ns = 0;   // fired: only a message arms it again
+        atomic_store(&a->fired_at_ns, (long long)aether_now_ns());
+        atomic_fetch_add(&a->fired, 1);
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+// A receive timeout fires once its deadline passes, with 20,000 idle actors
+// on its core and the core parked for up to a minute: the park sleeps no
+// longer than the earliest countdown in the core's timer heap. And a
+// released actor whose countdown is still in the heap is reclaimed: its core
+// takes it out of the heap when the reclaim asks it to.
+void test_ready_list_timeout_fires_on_time_among_idle_actors(void) {
+    scheduler_init(1);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    for (int i = 0; i < 20000; i++) ASSERT_NOT_NULL(rl_spawn(0));
+    RlTimed* t = (RlTimed*)scheduler_spawn_actor(0, rl_timed_step, sizeof(RlTimed));
+    RlTimed* late = (RlTimed*)scheduler_spawn_actor(0, rl_timed_step, sizeof(RlTimed));
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(late);
+    atomic_init(&t->fired, 0);
+    atomic_init(&late->fired, 0);
+    sleep_ms(100);   // the core parks
+    uint64_t armed = aether_now_ns();
+    t->timeout_ns = 50 * 1000000ULL;
+    t->last_activity_ns = armed;
+    scheduler_timeout_armed((ActorBase*)t);
+    late->timeout_ns = 60000 * 1000000ULL;   // a minute: still in the heap below
+    late->last_activity_ns = armed;
+    scheduler_timeout_armed((ActorBase*)late);
+    int fired = wait_count(&t->fired, 1);
+    long long after_ms = (atomic_load(&t->fired_at_ns) - (long long)armed) / 1000000LL;
+
+    sleep_ms(20);
+    int in_heap = atomic_load(&late->timer_slot) != 0;
+    scheduler_release_actor((ActorBase*)late);
+    int left = scheduler_reclaim_released();
+
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(1, fired);
+    ASSERT_TRUE(after_ms >= 50);
+    // On time: a Windows timed wait ends on its 15.6 ms tick, and a loaded
+    // runner is slow; a park that missed the deadline sleeps a minute.
+    ASSERT_TRUE(after_ms < 2000);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(0, left);
+}
+
+typedef struct {
+    ActorBase* target;
+    int sender;
+    int each;
+} RlSenderArgs;
+
+static void* rl_sender_thread(void* arg) {
+    RlSenderArgs* s = (RlSenderArgs*)arg;
+    for (int i = 0; i < s->each; i++) {
+        scheduler_send_remote(s->target, message_create_simple(RL_SEQ, s->sender, i), -1);
+        if ((i & 255) == 0) sleep_ms(1);   // the target's mailbox runs empty between bursts
+    }
+    return NULL;
+}
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* target;
+    int sender;
+    int each;
+} RlForwarder;
+
+// On a core thread: to another core's target, which asks it to move here.
+static void rl_forwarder_step(void* self) {
+    RlForwarder* f = (RlForwarder*)self;
+    Message msg;
+    if (!mailbox_receive(&f->mailbox, &msg)) return;
+    int base = (int)msg.payload_int;
+    for (int i = 0; i < f->each; i++)
+        scheduler_send_remote(f->target, message_create_simple(RL_SEQ, f->sender, base + i),
+                              aether_core_id_get());
+}
+
+// A mailbox that runs empty and fills again under senders on other cores and
+// on threads no core owns, while the target is asked to move from core to
+// core (each sender's core asks for it, #3090), loses no wakeup: every
+// message is handled, once, in its sender's order, though a core parks for a
+// minute when it is not woken.
+void test_ready_list_no_lost_wakeup_under_concurrent_senders(void) {
+    scheduler_init(4);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    RlActor* t = rl_spawn(0);
+    ASSERT_NOT_NULL(t);
+    RlForwarder* fw[3];
+    for (int k = 0; k < 3; k++) {
+        fw[k] = (RlForwarder*)scheduler_spawn_actor(k + 1, rl_forwarder_step, sizeof(RlForwarder));
+        ASSERT_NOT_NULL(fw[k]);
+        fw[k]->target = (ActorBase*)t;
+        fw[k]->sender = k;
+        fw[k]->each = 50;
+    }
+    const int rounds = 100, each = 2000;
+    pthread_t th[2];
+    RlSenderArgs args[2];
+    for (int k = 0; k < 2; k++) {
+        args[k].target = (ActorBase*)t;
+        args[k].sender = 3 + k;
+        args[k].each = each;
+        ASSERT_EQ(0, pthread_create(&th[k], NULL, rl_sender_thread, &args[k]));
+    }
+    int expected = 2 * each;
+    for (int r = 0; r < rounds; r++) {
+        for (int k = 0; k < 3; k++)
+            scheduler_send_remote((ActorBase*)fw[k], message_create_simple(1, 0, r * 50), -1);
+        expected += 3 * 50;
+        if (r % 10 == 0) sleep_ms(5);   // the cores park
+    }
+    for (int k = 0; k < 2; k++) pthread_join(th[k], NULL);
+    int got = wait_count(&t->handled, expected);
+    scheduler_wait();
+    int total = atomic_load(&t->handled);
+    int bad = atomic_load(&t->out_of_order);
+    int empty = atomic_load(&t->empty_steps);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(expected, got);
+    ASSERT_EQ(expected, total);   // none twice
+    ASSERT_EQ(0, bad);
+    ASSERT_EQ(0, empty);
+}
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* targets[16];
+    int ntargets;
+} RlFanout;
+
+// On core 1: one message to each target, all of core 0. Each target is
+// asked to move here (#3090), and its core moves it before it runs, with
+// the message in its mailbox.
+static void rl_fanout_step(void* self) {
+    RlFanout* f = (RlFanout*)self;
+    Message msg;
+    if (!mailbox_receive(&f->mailbox, &msg)) return;
+    for (int i = 0; i < f->ntargets; i++)
+        scheduler_send_remote(f->targets[i], message_create_simple(RL_SEQ, 0, msg.payload_int),
+                              aether_core_id_get());
+}
+
+// An actor moved to another core with a message in its mailbox, and nothing
+// sent to it after, is stepped there: the move brings the new core to it
+// through its ready list. Nothing else would: no message comes through the
+// new core's queues for it, and the old core no longer looks at it.
+void test_ready_list_moved_actor_stepped_on_new_core(void) {
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    RlFanout* f = (RlFanout*)scheduler_spawn_actor(1, rl_fanout_step, sizeof(RlFanout));
+    ASSERT_NOT_NULL(f);
+    RlActor* t[16];
+    f->ntargets = 16;
+    for (int i = 0; i < 16; i++) {
+        t[i] = rl_spawn(0);
+        ASSERT_NOT_NULL(t[i]);
+        f->targets[i] = (ActorBase*)t[i];
+    }
+    sleep_ms(100);   // both cores park
+    scheduler_send_remote((ActorBase*)f, message_create_simple(1, 0, 0), -1);
+    int handled = 0, moved = 0;
+    for (int i = 0; i < 16; i++) {
+        handled += wait_count(&t[i]->handled, 1);
+        moved += atomic_load(&t[i]->assigned_core) == 1;
+    }
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_EQ(16, handled);
+    ASSERT_TRUE(moved > 0);   // the path under test was taken
+}
+
+static atomic_int g_rl_hammer_stop;
+
+static void* rl_hammer_thread(void* arg) {
+    ActorBase* a = (ActorBase*)arg;
+    while (!atomic_load(&g_rl_hammer_stop)) scheduler_actor_revived(a);
+    return NULL;
+}
+
+// A push for an actor already in a ready list adds no entry: a thousand
+// pushes before the core runs leave one, and pushes from two threads the
+// whole time the actor takes 20,000 messages step none of them twice and
+// step it with an empty mailbox never.
+void test_ready_list_duplicates_do_not_double_step(void) {
+    scheduler_init(1);
+    scheduler_set_core_park_ms(60000);
+    RlActor* a = rl_spawn(0);
+    ASSERT_NOT_NULL(a);
+    for (int i = 0; i < 1000; i++) scheduler_actor_revived((ActorBase*)a);
+    int entries_before = atomic_load(&schedulers[0].ready_in.count);
+    int queued_before = atomic_load(&a->ready_queued);
+    scheduler_start();
+
+    atomic_store(&g_rl_hammer_stop, 0);
+    pthread_t th[2];
+    for (int k = 0; k < 2; k++) ASSERT_EQ(0, pthread_create(&th[k], NULL, rl_hammer_thread, a));
+    const int count = 20000;
+    for (int i = 0; i < count; i++) {
+        scheduler_send_remote((ActorBase*)a, message_create_simple(RL_SEQ, 0, i), -1);
+        if ((i & 1023) == 0) sleep_ms(1);
+    }
+    int got = wait_count(&a->handled, count);
+    atomic_store(&g_rl_hammer_stop, 1);
+    for (int k = 0; k < 2; k++) pthread_join(th[k], NULL);
+    scheduler_wait();
+    sleep_ms(50);   // the core takes the last push
+    int total = atomic_load(&a->handled);
+    int bad = atomic_load(&a->out_of_order);
+    int empty = atomic_load(&a->empty_steps);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    // Joined: the core's lists are readable here.
+    int left_local = schedulers[0].ready_count;
+    int left_in = atomic_load(&schedulers[0].ready_in.count);
+    int queued_after = atomic_load(&a->ready_queued);
+    scheduler_cleanup();
+    ASSERT_EQ(1, entries_before);
+    ASSERT_EQ(1, queued_before);
+    ASSERT_EQ(count, got);
+    ASSERT_EQ(count, total);
+    ASSERT_EQ(0, bad);
+    ASSERT_EQ(0, empty);
+    ASSERT_EQ(0, left_local);
+    ASSERT_EQ(0, left_in);
+    ASSERT_EQ(0, queued_after);
+}
+
+// #3541: a loop that steps one actor many times yields to the core's queues
+// once a message for another actor comes in, now on a hint word that senders
+// set rather than on every queue's head and tail. An actor ticks itself, a
+// millisecond a tick; a Look from the main thread to a second actor of its
+// core is handled within a few ticks, not after the loop's 64 (a message to
+// the ticking actor itself would end the loop anyway: counted in flight, it
+// sends the actor's next tick behind it, #3093).
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int ticks;
+    atomic_int stop;
+} TickerActor;
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    TickerActor* ticker;
+    atomic_int seen_at;   // the ticker's ticks when Look was handled, -1 before
+} WatcherActor;
+
+static void ticker_step(void* self) {
+    TickerActor* t = (TickerActor*)self;
+    Message msg;
+    if (!mailbox_receive(&t->mailbox, &msg)) return;
+    if (atomic_load(&t->stop)) return;
+    atomic_fetch_add(&t->ticks, 1);
+    sleep_ms(1);
+    scheduler_send_local((ActorBase*)t, message_create_simple(1, 0, 0));
+}
+
+static void watcher_step(void* self) {
+    WatcherActor* w = (WatcherActor*)self;
+    Message msg;
+    if (!mailbox_receive(&w->mailbox, &msg)) return;
+    atomic_store(&w->seen_at, atomic_load(&w->ticker->ticks));
+    atomic_store(&w->ticker->stop, 1);
+}
+
+void test_scheduler_stepping_loop_yields_to_queues(void) {
+    scheduler_init(1);
+    scheduler_start();
+    TickerActor* t = (TickerActor*)scheduler_spawn_actor(0, ticker_step, sizeof(TickerActor));
+    WatcherActor* w = (WatcherActor*)scheduler_spawn_actor(0, watcher_step, sizeof(WatcherActor));
+    ASSERT_NOT_NULL(t);
+    ASSERT_NOT_NULL(w);
+    atomic_init(&t->ticks, 0);
+    atomic_init(&t->stop, 0);
+    w->ticker = t;
+    atomic_init(&w->seen_at, -1);
+    scheduler_send_remote((ActorBase*)t, message_create_simple(1, 0, 0), -1);
+    int ticked = wait_count(&t->ticks, 10);
+    int at_send = atomic_load(&t->ticks);
+    scheduler_send_remote((ActorBase*)w, message_create_simple(2, 0, 0), -1);
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(&w->seen_at) < 0 && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    int seen_at = atomic_load(&w->seen_at);
+    atomic_store(&t->stop, 1);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(ticked >= 10);
+    ASSERT_TRUE(seen_at >= at_send);
+    // The tick under way when Look came, and slack for a slow timer: far
+    // below the loop's 64.
+    ASSERT_TRUE(seen_at - at_send <= 8);
+}
+
+// #3673: a caller's actor carried over scheduler restarts, with a thread no
+// core owns sending to it all along. Between a restart's scheduler_init and
+// the actor's registration, the sends go to the core its last lifecycle left
+// in assigned_core, and that core delivers them; the registration then gave
+// the actor the least loaded core, and both cores wrote its mailbox. Each
+// message carries a sequence; every one must arrive once, in order.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int got;
+    atomic_int out_of_order;
+    int next;
+} CarriedActor;
+
+static atomic_int g_carry_stop;
+static atomic_int g_carry_sending;
+static atomic_int g_carry_paused;
+static atomic_int g_carry_sent;   // sends the scheduler took (a refused one is not)
+
+static void carried_step(void* self) {
+    CarriedActor* a = (CarriedActor*)self;
+    Message msg;
+    if (!mailbox_receive(&a->mailbox, &msg)) return;
+    if (msg.payload_int != a->next) atomic_fetch_add(&a->out_of_order, 1);
+    a->next = (int)msg.payload_int + 1;
+    atomic_fetch_add(&a->got, 1);
+}
+
+static void* carry_sender(void* arg) {
+    ActorBase* a = (ActorBase*)arg;
+    int seq = 0;
+    while (!atomic_load(&g_carry_stop)) {
+        if (!atomic_load(&g_carry_sending)) {
+            atomic_store(&g_carry_paused, 1);
+            continue;
+        }
+        atomic_store(&g_carry_paused, 0);
+        uint64_t refused = scheduler_stopped_sends();
+        scheduler_send_remote(a, message_create_simple(1, 0, seq), -1);
+        // A send refused while the scheduler was down is no message: the
+        // sequence goes on from it.
+        if (scheduler_stopped_sends() == refused) {
+            seq++;
+            atomic_fetch_add(&g_carry_sent, 1);
+        }
+    }
+    return NULL;
+}
+
+static void carry_pause(void) {
+    atomic_store(&g_carry_sending, 0);
+    while (!atomic_load(&g_carry_paused)) {
+    }
+}
+
+void test_scheduler_restart_hands_carried_actor_over(void) {
+    CarriedActor* a = (CarriedActor*)calloc(1, sizeof(CarriedActor));
+    ASSERT_NOT_NULL(a);
+    mailbox_init(&a->mailbox);
+    a->step = carried_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_store(&g_carry_stop, 0);
+    atomic_store(&g_carry_paused, 0);
+    atomic_store(&g_carry_sent, 0);
+    scheduler_init(2);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, -1);
+    atomic_store(&g_carry_sending, 1);
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, carry_sender, a));
+    int lost = 0;
+    for (int round = 0; round < 20 && !lost; round++) {
+        sleep_ms(2);
+        carry_pause();
+        scheduler_shutdown();
+        if (atomic_load(&a->got) != atomic_load(&g_carry_sent)) lost = 1;
+        atomic_store(&g_carry_paused, 0);
+        atomic_store(&g_carry_sending, 1);
+        // Messages sent from here until the registration go to the core
+        // the actor had.
+        scheduler_init(2);
+        scheduler_start();
+        sleep_ms(1);
+        scheduler_register_actor((ActorBase*)a, -1);
+    }
+    sleep_ms(2);
+    carry_pause();
+    scheduler_shutdown();
+    int got = atomic_load(&a->got), sent = atomic_load(&g_carry_sent);
+    int bad = atomic_load(&a->out_of_order);
+    atomic_store(&g_carry_stop, 1);
+    atomic_store(&g_carry_sending, 1);
+    pthread_join(t, NULL);
+    scheduler_cleanup();
+    free(a);
+    ASSERT_EQ(0, lost);
+    ASSERT_EQ(sent, got);
+    ASSERT_EQ(0, bad);
+}
+
+// An actor ended while scheduler_shutdown() is stopping the cores (the
+// scheduler's state no longer "running", its threads not joined yet) has its
+// death finalized by its core, once its step returns, not by the thread that
+// ended it while the step still runs. A receive timeout's arm is still
+// stepped then (the shutdown does not wait for countdowns, #3219): it holds
+// at a gate while the main thread kills the actor.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int in_arm;
+    atomic_int finalized_in_arm;   // the death was finalized while the arm ran
+} GatedTimed;
+
+static atomic_int g_arm_gate;
+
+static void gated_timed_step(void* self) {
+    GatedTimed* a = (GatedTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->last_activity_ns = 0;
+        atomic_store(&a->in_arm, 1);
+        for (int w = 0; w < 10000 && !atomic_load(&g_arm_gate); w++) sleep_ms(1);
+        if (atomic_load_explicit(&a->exit_flags, memory_order_acquire) & AETHER_EXIT_FINALIZED)
+            atomic_store(&a->finalized_in_arm, 1);
+        atomic_store(&a->in_arm, 0);
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+static void* shutdown_thread(void* arg) {
+    (void)arg;
+    scheduler_shutdown();
+    return NULL;
+}
+
+void test_scheduler_end_during_shutdown_finalized_by_core(void) {
+    scheduler_init(2);
+    scheduler_start();
+    GatedTimed* a = (GatedTimed*)scheduler_spawn_actor(1, gated_timed_step, sizeof(GatedTimed));
+    CounterActor* probe = (CounterActor*)scheduler_spawn_actor(0, (void (*)(void*))counter_step,
+                                                               sizeof(CounterActor));
+    ASSERT_NOT_NULL(a);
+    ASSERT_NOT_NULL(probe);
+    atomic_init(&a->in_arm, 0);
+    atomic_init(&a->finalized_in_arm, 0);
+    atomic_store(&g_arm_gate, 0);
+    a->timeout_ns = 5 * 1000000ULL;
+    a->last_activity_ns = aether_now_ns();
+    scheduler_timeout_armed((ActorBase*)a);
+    ASSERT_EQ(1, wait_count(&a->in_arm, 1));
+
+    // The shutdown waits for no countdown: it stops the scheduler and then
+    // joins core 1, which is in the arm.
+    pthread_t t;
+    ASSERT_EQ(0, pthread_create(&t, NULL, shutdown_thread, NULL));
+    // Stopping: a send from this thread is refused from then on.
+    uint64_t refused = scheduler_stopped_sends();
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (scheduler_stopped_sends() == refused && (long long)get_time_ms() <= deadline) {
+        scheduler_send_remote((ActorBase*)probe, message_create_simple(1, 0, 0), -1);
+        sleep_ms(1);
+    }
+    int stopping = scheduler_stopped_sends() != refused;
+
+    scheduler_actor_end((ActorBase*)a, "killed", AETHER_ACTOR_KILLED);
+    int finalized_at_end = (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0;
+    atomic_store(&g_arm_gate, 1);
+    pthread_join(t, NULL);
+    int finalized_in_arm = atomic_load(&a->finalized_in_arm);
+    // And it was finalized: by the core, on its way out of its loop.
+    int finalized_after = (atomic_load(&a->exit_flags) & AETHER_EXIT_FINALIZED) != 0;
+    scheduler_cleanup();
+
+    ASSERT_TRUE(stopping);
+    ASSERT_EQ(0, finalized_at_end);
+    ASSERT_EQ(0, finalized_in_arm);
+    ASSERT_EQ(1, finalized_after);
+}
+
+// A caller's actor (zeroed, its mailbox and step set, as the header asks).
+static void* caller_actor(size_t size, void (*step)(void*)) {
+    ActorBase* a = (ActorBase*)calloc(1, size);
+    if (!a) return NULL;
+    mailbox_init(&a->mailbox);
+    a->step = step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    return a;
+}
+
+static void arm_countdown(ActorBase* a, int ms) {
+    a->timeout_ns = (uint64_t)ms * 1000000ULL;
+    a->last_activity_ns = aether_now_ns();
+    scheduler_timeout_armed(a);
+}
+
+static int wait_in_heap(ActorBase* a) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (atomic_load(&a->timer_slot) == 0 && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(&a->timer_slot) != 0;
+}
+
+// A caller's countdown is the scheduler's to fire once the actor is
+// registered, whenever it was armed (#3540). The scan found such an actor in
+// its table on its next pass; the ready list finds an actor only when told:
+// one carried over a restart lost its countdown with the last lifecycle's
+// heap, and one armed before its registration was told when it was on no
+// core, and the push went nowhere.
+void test_ready_list_registration_finds_armed_countdown(void) {
+    RlTimed* carried = (RlTimed*)caller_actor(sizeof(RlTimed), rl_timed_step);
+    RlTimed* early = (RlTimed*)caller_actor(sizeof(RlTimed), rl_timed_step);
+    ASSERT_NOT_NULL(carried);
+    ASSERT_NOT_NULL(early);
+    atomic_init(&carried->fired, 0);
+    atomic_init(&early->fired, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)carried, 0);
+    // Armed in this lifecycle, due in the next.
+    arm_countdown((ActorBase*)carried, 300);
+    int in_heap = wait_in_heap((ActorBase*)carried);
+    scheduler_shutdown();
+    int fired_before = atomic_load(&carried->fired);
+
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    arm_countdown((ActorBase*)early, 50);   // before its registration
+    scheduler_register_actor((ActorBase*)carried, -1);
+    scheduler_register_actor((ActorBase*)early, -1);
+    int carried_fired = wait_count(&carried->fired, 1);
+    int early_fired = wait_count(&early->fired, 1);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(carried);
+    free(early);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(0, fired_before);
+    ASSERT_EQ(1, carried_fired);
+    ASSERT_EQ(1, early_fired);
+}
+
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    atomic_int fired;
+    atomic_int foreign;   // fired on a thread that is not its core's
+} MovedTimed;
+
+static void moved_timed_step(void* self) {
+    MovedTimed* a = (MovedTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        a->last_activity_ns = 0;
+        if (aether_core_id_get() != atomic_load(&a->assigned_core)) atomic_fetch_add(&a->foreign, 1);
+        atomic_fetch_add(&a->fired, 1);
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+// Deregistered with its countdown armed, then registered again on the other
+// core: the countdown fires once, on its new core (#3540). The deregister
+// left the countdown in its old core's heap, and that core stepped the actor
+// when it came due, while the actor was the other core's: two threads
+// stepping it, and its old core's heap still naming it.
+void test_ready_list_deregister_then_register_moves_countdown(void) {
+    MovedTimed* a = (MovedTimed*)caller_actor(sizeof(MovedTimed), moved_timed_step);
+    ASSERT_NOT_NULL(a);
+    atomic_init(&a->fired, 0);
+    atomic_init(&a->foreign, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, 0);
+    arm_countdown((ActorBase*)a, 200);
+    int in_heap = wait_in_heap((ActorBase*)a);
+    scheduler_deregister_actor((ActorBase*)a);
+    int core = scheduler_register_actor((ActorBase*)a, 1);
+    int fired = wait_count(&a->fired, 1);
+    sleep_ms(300);   // past the deadline again: no second firing
+    int fired_after = atomic_load(&a->fired);
+    int foreign = atomic_load(&a->foreign);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(a);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(1, core);
+    ASSERT_EQ(1, fired);
+    ASSERT_EQ(1, fired_after);
+    ASSERT_EQ(0, foreign);
+}
+
+// Make the `len` bytes at `page` (page aligned) unreadable, or writable again.
+static int forbid_pages(void* page, size_t len, int forbid) {
+#ifdef _WIN32
+    DWORD old;
+    return VirtualProtect(page, len, forbid ? PAGE_NOACCESS : PAGE_READWRITE, &old) ? 0 : -1;
+#else
+    return mprotect(page, len, forbid ? PROT_NONE : (PROT_READ | PROT_WRITE));
+#endif
+}
+
+static void* map_pages(size_t len) {
+#ifdef _WIN32
+    return VirtualAlloc(NULL, len, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
+#else
+    void* p = mmap(NULL, len, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    return p == MAP_FAILED ? NULL : p;
+#endif
+}
+
+static void unmap_pages(void* p, size_t len) {
+#ifdef _WIN32
+    (void)len;
+    VirtualFree(p, 0, MEM_RELEASE);
+#else
+    munmap(p, len);
+#endif
+}
+
+static atomic_int g_freed_fired;
+
+static void freed_timed_step(void* self) {
+    (void)self;
+    atomic_fetch_add(&g_freed_fired, 1);
+}
+
+// A caller deregisters its actor with a countdown armed and frees it at once
+// (#3540): nothing of the scheduler reads the block after the deregister
+// returns, as with the scan, which looked only at its table. The countdown
+// stayed in its core's heap, which read the freed block when it came due.
+// The block's pages are made unreadable in place of the free, so a read
+// faults.
+void test_ready_list_deregister_then_free_with_countdown(void) {
+    size_t page = system_page_size();
+    size_t len = (sizeof(MovedTimed) + page - 1) & ~(page - 1);
+    MovedTimed* a = (MovedTimed*)map_pages(len);
+    ASSERT_NOT_NULL(a);
+    mailbox_init(&a->mailbox);
+    a->step = freed_timed_step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    atomic_store(&g_freed_fired, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)a, 0);
+    arm_countdown((ActorBase*)a, 50);
+    int in_heap = wait_in_heap((ActorBase*)a);
+    scheduler_deregister_actor((ActorBase*)a);
+    int forbidden = forbid_pages(a, len, 1) == 0;
+    sleep_ms(300);   // past the deadline
+    int fired = atomic_load(&g_freed_fired);
+    if (forbidden) ASSERT_EQ(0, forbid_pages(a, len, 0));
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    unmap_pages(a, len);
+    ASSERT_TRUE(in_heap);
+    ASSERT_TRUE(forbidden);
+    ASSERT_EQ(0, fired);
+}
+
+static void park_sender_step(void* self) {
+    LsSender* s = (LsSender*)self;
+    Message msg;
+    if (!mailbox_receive(&s->mailbox, &msg)) return;
+    scheduler_send_remote(s->target, message_create_simple(RL_SEQ, 0, 0), aether_core_id_get());
+}
+
+static int wait_parked(int core) {
+    long long deadline = (long long)get_time_ms() + 10000;
+    while (!atomic_load(&schedulers[core].parked) && (long long)get_time_ms() <= deadline) sleep_ms(1);
+    return atomic_load(&schedulers[core].parked);
+}
+
+// A caller's actor carried over a restart, before its registration: its
+// core delivers to it, but it is in no table. A sender on another core asks
+// it to move there (#3090); no move can take an actor that is in no table,
+// and the core asked again on every pass, never parking (#3540). The scan
+// never asked: it looked only at its table. The move waits for the
+// registration.
+void test_ready_list_move_of_actor_in_no_table_lets_core_park(void) {
+    RlActor* t = (RlActor*)caller_actor(sizeof(RlActor), rl_step);
+    ASSERT_NOT_NULL(t);
+    scheduler_init(2);
+    scheduler_start();
+    scheduler_register_actor((ActorBase*)t, 0);
+    scheduler_shutdown();
+
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    LsSender* s = (LsSender*)scheduler_spawn_actor(1, park_sender_step, sizeof(LsSender));
+    ASSERT_NOT_NULL(s);
+    s->target = (ActorBase*)t;
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    int handled = wait_count(&t->handled, 1);
+    int asked = atomic_load(&t->migrate_to) == 1;
+    int parked = wait_parked(0);
+    scheduler_register_actor((ActorBase*)t, -1);
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    int handled_after = wait_count(&t->handled, 2);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(t);
+    ASSERT_EQ(1, handled);
+    ASSERT_TRUE(asked);
+    ASSERT_TRUE(parked);
+    ASSERT_EQ(2, handled_after);
+}
+
+
+// Each actor keeps its slot in its core's table (#3540), the hint a move's
+// find checks first: a move asked through the ready list (a message-driven
+// one, #3090) found the actor by a walk of the whole table, under both
+// cores' locks, where the scan's move had the slot it was at. Placed,
+// removed from the middle (the last actor moves into the hole), moved to
+// another core by the messages a sender there sends it, and deregistered:
+// the slot an actor keeps is the one it is at, or -1 once it is in none.
+static int table_slots_agree(int core) {
+    AetherActorTable* table = atomic_load(&schedulers[core].actor_table);
+    int count = atomic_load(&schedulers[core].actor_count);
+    for (int i = 0; i < count; i++) {
+        ActorBase* a = atomic_load(&table->slots[i]);
+        if (a && atomic_load(&a->table_slot) != i) return 0;
+    }
+    return 1;
+}
+
+void test_ready_list_actor_keeps_its_table_slot(void) {
+    enum { N = 2000 };
+    scheduler_init(2);
+    RlActor* a[N];
+    for (int i = 0; i < N; i++) {
+        a[i] = rl_spawn(0);
+        ASSERT_NOT_NULL(a[i]);
+    }
+    int placed = table_slots_agree(0);
+    // Out of the middle, before the scheduler runs: each removal moves the
+    // last actor into the hole.
+    for (int i = 0; i < N; i += 3) scheduler_release_actor((ActorBase*)a[i]);
+    int after_release = table_slots_agree(0);
+    int released_none = 1;
+    for (int i = 0; i < N; i += 3)
+        if (atomic_load(&a[i]->table_slot) != -1) released_none = 0;
+    scheduler_start();
+    // Moved to core 1 by the messages its forwarder there sends it.
+    RlForwarder* fw = (RlForwarder*)scheduler_spawn_actor(1, rl_forwarder_step, sizeof(RlForwarder));
+    ASSERT_NOT_NULL(fw);
+    RlActor* t = a[N - 1];
+    fw->target = (ActorBase*)t;
+    fw->sender = 0;
+    fw->each = 4;
+    for (int r = 0; r < 50 && atomic_load(&t->assigned_core) != 1; r++) {
+        scheduler_send_remote((ActorBase*)fw, message_create_simple(1, 0, r * 4), -1);
+        sleep_ms(2);
+    }
+    scheduler_wait();
+    int moved = atomic_load(&t->assigned_core) == 1;
+    int agree_after_move = moved;
+    // Read under each core's lock: the cores run.
+    for (int c = 0; c < 2; c++) {
+        spinlock_lock(&schedulers[c].actor_lock);
+        if (!table_slots_agree(c)) agree_after_move = 0;
+        spinlock_unlock(&schedulers[c].actor_lock);
+    }
+    RlActor* caller = (RlActor*)caller_actor(sizeof(RlActor), rl_step);
+    ASSERT_NOT_NULL(caller);
+    scheduler_register_actor((ActorBase*)caller, 0);
+    scheduler_deregister_actor((ActorBase*)caller);
+    int deregistered = atomic_load(&caller->table_slot) == -1;
+    scheduler_shutdown();
+    scheduler_cleanup();
+    free(caller);
+    ASSERT_TRUE(placed);
+    ASSERT_TRUE(after_release);
+    ASSERT_TRUE(released_none);
+    ASSERT_TRUE(moved);
+    ASSERT_TRUE(agree_after_move);
+    ASSERT_TRUE(deregistered);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -1854,4 +2818,18 @@ void register_scheduler_tests(void) {
     register_test_with_category("Scheduler clean exit", test_scheduler_exit_clean, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler high throughput", test_scheduler_high_throughput, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler backpressure handling", test_scheduler_backpressure, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler send_local from a foreign thread loses nothing", test_scheduler_send_local_from_foreign_thread, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: an actor is stepped after a long idle", test_ready_list_steps_actor_after_long_idle, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a timeout fires on time among idle actors", test_ready_list_timeout_fires_on_time_among_idle_actors, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: no lost wakeup under concurrent senders", test_ready_list_no_lost_wakeup_under_concurrent_senders, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: duplicates do not double-step", test_ready_list_duplicates_do_not_double_step, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a moved actor is stepped on its new core", test_ready_list_moved_actor_stepped_on_new_core, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler stepping loop yields to its queues", test_scheduler_stepping_loop_yields_to_queues, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler restart hands a carried actor over", test_scheduler_restart_hands_carried_actor_over, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Scheduler end during shutdown is finalized by the core", test_scheduler_end_during_shutdown_finalized_by_core, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a registration finds an armed countdown", test_ready_list_registration_finds_armed_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a countdown follows a deregister and a registration", test_ready_list_deregister_then_register_moves_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a deregistered actor's block is not read again", test_ready_list_deregister_then_free_with_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a move of an actor in no table lets its core park", test_ready_list_move_of_actor_in_no_table_lets_core_park, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: an actor keeps its table slot", test_ready_list_actor_keeps_its_table_slot, TEST_CATEGORY_RUNTIME);
 }

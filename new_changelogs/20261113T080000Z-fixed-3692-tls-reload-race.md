@@ -1,0 +1,1 @@
+- **std.net: a TLS certificate reload no longer races the event loop (#3692).** A reload swaps the server's TLS context and flags under `tls_lock`, and the event loop's plan read them without it, and the accept paths read `tls_enabled` without it. The plan now reads them together under the lock, and `tls_enabled` is atomic.

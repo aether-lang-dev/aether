@@ -205,6 +205,57 @@ over `tests/regression` was the only leak check of generated code. CI runs
 the new target in `.github/workflows/asan.yml`, in two shards
 (`AE_SWEEP_SHARD`), on the same pull requests and nights as UBSan.
 
+## Data races: the threaded corpus under TSan
+
+The actors and the scheduler are lock-free code with a few hundred relaxed
+atomics, and std.net runs threads of its own (the server's accept and
+background threads, the event loop's drivers, the connection pool, the
+resolver). A race there passes every functional test until the interleaving
+that breaks it. `make test-tsan` (#3542) runs the same script under
+ThreadSanitizer (`SAN=tsan`), with clang (`TSAN_CC` names another): aetherc,
+`ae`, libaether, std and the C test runner are built with
+`-fsanitize=thread -g -O1`, through `build/tsan/bin/clang`, `gcc` and `cc`, all
+three running the one clang, since an object instrumented by gcc's TSan and one
+by clang's are not meant to share a program. `-O1` goes after each command's
+own flags, so every compile gets it.
+
+It runs the whole C unit runner, then only the part of the `.ae` corpus where
+two threads can meet: the programs that declare an actor, import std.net or
+what runs on it (std.http, std.actors, std.worker, std.supervise,
+std.stream), or start threads from a C host, and the shell tests of the HTTP
+stack and of the actors and the scheduler by name. The selection is a file of
+`text:` and `path:` patterns, `tests/tsan_sweep_select.txt`, read by
+`tests/scripts/sweep_select.sh` through `AE_SWEEP_SELECT` (which `make
+test-ae` takes too), so a new test that starts an actor is in the next run.
+Tests that check what TSan replaces (the sandbox's preload, a bound on RSS, the
+shape of compiled code) are left out, each with its reason, in
+`tests/ae_sweep_prune_tsan.txt`.
+
+A data race, a lock-order inversion, a thread that ended and was never joined,
+or a call in a signal handler that is not async-signal-safe is reported, and the
+program goes on (`halt_on_error=0`), so one run shows every race it meets; it
+still exits 66 at the end when it reported anything, so the test fails, and the
+run fails on any report. The reports go to `build/tsan/reports/`, one file
+per program with all of its reports. The summary groups them by the place
+TSan's SUMMARY line names and, for a race, the first frame of the other access, which is one row
+per root cause. Each thread keeps 512K accesses of history (`history_size=4`)
+so the other side of a race on a long-lived queue still has its stack, and a
+lock-order inversion shows both acquisitions (`second_deadlock_stack=1`). The
+suppressions file, `tests/tsan/suppressions.txt`, is for third-party code only,
+each entry with its reason; a report in our code is fixed, never suppressed.
+The canary, `tests/tsan/race.ae`, stores to one int from two threads with
+nothing ordering the stores, and must be stopped with a data race report
+before the corpus counts. The per-test time limits are three times the plain
+sweep's, since TSan runs a program 5 to 15 times slower.
+
+TSan maps its shadow memory at fixed addresses, so it does not start under
+`ulimit -v`, and before LLVM 18 not with the kernel's mmap randomization above
+28 bits; the script runs a probe first and says so. CI runs it in
+`.github/workflows/tsan.yml` on ubuntu-22.04 (clang 14, with
+`vm.mmap_rnd_bits=28`), in two shards, on the pull requests that touch the
+runtime, std, the compiler, `ae`, the Makefile or the sweep's scripts, every
+night on main, and by hand.
+
 ## Extending it
 
 The exe-vs-lib pair and the two optimisation levels are path comparisons; there

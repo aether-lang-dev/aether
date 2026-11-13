@@ -19,7 +19,8 @@
 # thirteen at four times the functions, about fifty at eight.
 #
 # The time is the CPU time of the compile's phases (`aetherc --time-phases`,
-# its second column), summed over three runs of each size taken in turn,
+# its second column), the fastest of three runs of each size, taken in turn
+# (a run a busy runner stalled counts for nothing),
 # not the wall clock: the sweep runs this beside other tests, many running a
 # scheduler on every core, and the longer compile's wall clock counted the
 # time it waited for a core (8.2x once on a Linux runner). CPU time moves
@@ -96,24 +97,24 @@ compile_ms() {
 
 chain 2000
 chain 16000
-small=0
-large=0
+small=
+large=
 for run in 1 2 3; do
     compile_ms 2000
-    small=$(( small + MS ))
+    { [ -z "$small" ] || [ "$MS" -lt "$small" ]; } && small=$MS
     compile_ms 16000
     if [ "$MS" -gt "$LIMIT_MS" ]; then
         echo "  [FAIL] order_effects_scaling: a chain of 16000 calls took ${MS} ms of CPU to compile (ceiling ${LIMIT_MS} ms)"
         exit 1
     fi
-    large=$(( large + MS ))
+    { [ -z "$large" ] || [ "$MS" -lt "$large" ]; } && large=$MS
 done
 
 # Below 50 ms a run the clock's grain decides: Windows charges CPU time a
 # clock tick, about 15.6 ms, at a time.
-[ "$small" -lt 150 ] && small=150
+[ "$small" -lt 50 ] && small=50
 if [ "$large" -ge $(( small * 24 )) ]; then
-    echo "  [FAIL] order_effects_scaling: 2000 calls compiled in ${small} ms of CPU, 16000 in ${large} ms (three runs each): eight times the functions cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
+    echo "  [FAIL] order_effects_scaling: 2000 calls compiled in ${small} ms of CPU, 16000 in ${large} ms (the fastest of three runs each): eight times the functions cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
     exit 1
 fi
 # The read of q.n comes first, ahead of the call that writes it.
@@ -121,5 +122,5 @@ if ! grep -q -E "_eo[0-9]* = |_AE_SEQ_LET" "$TMPDIR/chain16000.c"; then
     echo "  [FAIL] order_effects_scaling: q.n is not evaluated ahead of f0(p, 3)"
     exit 1
 fi
-echo "  [PASS] order_effects_scaling: 2000 calls in ${small} ms of CPU, 16000 in ${large} ms (three runs each)"
+echo "  [PASS] order_effects_scaling: 2000 calls in ${small} ms of CPU, 16000 in ${large} ms (the fastest of three runs each)"
 exit 0

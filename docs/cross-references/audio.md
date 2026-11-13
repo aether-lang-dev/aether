@@ -125,6 +125,11 @@ downstream C consumers; `dtoa.c` the one exception", plus the lzf precedent):
   GhostBSD/capsicum story)**, plus a **null backend**, which is the CI test
   story (§7). Decoders (dr_wav / dr_mp3 / dr_flac, same author & licence) come
   bundled: `wav + mp3` for v1 is zero extra dependencies.
+- **It carries one local patch, to re-apply when re-vendoring**:
+  `ma_node_input_bus_attach` detaches a re-attached output bus from the bus
+  it is attached to now, under that bus's lock (#3690); upstream, through
+  0.11.26, passes the new bus, which races another thread's attach on the old
+  one. The patched lines say so in a comment headed "Aether patch".
 - **The alternatives lose on the same axes**: PortAudio is a system dependency
   with no decoders; SDL_mixer drags SDL; OpenAL is 3D-game-shaped;
   per-platform hand C is five backends of Tier-3 work we'd own forever.

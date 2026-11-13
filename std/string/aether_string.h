@@ -14,6 +14,18 @@ typedef struct AetherString {
     AETHER_STRING_FIELDS
 } AetherString;
 
+// A string's count, read where another thread may be changing a shared
+// string's count at the same time (atomically, see runtime/utils/aether_count.h),
+// so the read is atomic too. Relaxed: is_aether_string looks only at its sign.
+// MSVC gets a volatile read, which it does not tear.
+static inline int aether_string_count_now(const int* p) {
+#if defined(_MSC_VER) && !defined(__clang__)
+    return *(const volatile int*)p;
+#else
+    return __atomic_load_n(p, __ATOMIC_RELAXED);
+#endif
+}
+
 // Check if a pointer is an AetherString (vs raw char*).
 //
 // Reads bytes from the pointer to look for the magic header. Done
@@ -40,7 +52,7 @@ static inline int is_aether_string(const void* ptr) {
      * to reject coincidental magic-bytes-in-payload before any
      * downstream s->data deref. */
     const AetherString* s = (const AetherString*)ptr;
-    if (s->ref_count < 0) return 0;
+    if (aether_string_count_now(&s->ref_count) < 0) return 0;
     if (s->capacity < s->length) return 0;
     if (!s->data) return 0;
     return 1;

@@ -74089,7 +74089,16 @@ static void ma_node_input_bus_attach(ma_node_input_bus* pInputBus, ma_node_outpu
 
         /* Detach from any existing attachment first if necessary. */
         if (pOldInputNode != NULL) {
-            ma_node_input_bus_detach__no_output_bus_lock(pInputBus, pOutputBus);
+            /*
+            Aether patch (#3690), upstream through v0.11.26: detach from the input bus the output bus
+            is attached to now, under that bus's lock and waiting on its iteration counter. Upstream
+            passed the new input bus here, so a re-attach unlinked the output bus from the old bus's
+            list under the new bus's lock: a concurrent attach or detach on the old bus (another
+            sound on the same endpoint, from another thread) raced it and left the list pointing at
+            a bus that believed itself detached, so a later uninit of that node looped forever.
+            */
+            ma_node_base* pOldInputNodeBase = (ma_node_base*)pOldInputNode;
+            ma_node_input_bus_detach__no_output_bus_lock(&pOldInputNodeBase->pInputBuses[pOutputBus->inputNodeInputBusIndex], pOutputBus);
         }
 
         /*

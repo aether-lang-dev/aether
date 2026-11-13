@@ -59,6 +59,15 @@ void register_test_with_category(const char* name, TestFunction func, TestCatego
     test_count++;
 }
 
+/* --list: every registered test, "<category>\t<name>", one a line, in the
+ * order they were registered; nothing is run. */
+void list_tests(void) {
+    for (int i = 0; i < test_count; i++) {
+        printf("%s\t%s\n", get_category_name(tests[i].category), tests[i].name);
+    }
+    fflush(stdout);
+}
+
 /* 64-bit: returned as a `long`, 32 bits on Windows, GetTickCount64 was
  * truncated after 24.8 days of uptime (#3096). */
 static long long get_time_ms(void) {

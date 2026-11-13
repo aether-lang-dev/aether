@@ -1,0 +1,172 @@
+// Writes the seed corpus for the JSON fuzz target into the directory named
+// on the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it). Edit this file, not the seeds.
+//
+// A seed is a document: RFC 8259's examples, numbers at the edges of int64
+// and double, strings with every escape and with UTF-8 good and bad,
+// nesting at the depth limit and one past it, and the near misses a lenient
+// parser accepts (trailing commas, leading zeros, comments, NaN).
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+// `hex` holds pairs of hex digits; each becomes one byte of `b`.
+fn put_hex(b: ptr, hex: string) {
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: bad hex ${hex}\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+}
+
+fn put_repeat(b: ptr, byte: int, count: int) {
+    i = 0
+    while i < count {
+        _a = strbuilder.append_byte(b, byte)
+        i = i + 1
+    }
+}
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A seed that is the text `s`, escapes and all.
+fn doc(dir: string, name: string, s: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, s)
+    write_seed(dir, name, b)
+}
+
+// `head`, then the bytes of `hex`, then `tail`: for a NUL or a byte that is
+// not UTF-8, which a literal cannot carry.
+fn mixed(dir: string, name: string, head: string, hex: string, tail: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, head)
+    put_hex(b, hex)
+    _c = strbuilder.append(b, tail)
+    write_seed(dir, name, b)
+}
+
+// `depth` arrays, one inside the next.
+fn nested(dir: string, name: string, depth: int) {
+    b = strbuilder.new(0)
+    put_repeat(b, 91, depth)
+    put_repeat(b, 93, depth)
+    write_seed(dir, name, b)
+}
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // RFC 8259 section 13.
+    doc(dir, "rfc_image", "{\"Image\": {\"Width\": 800, \"Height\": 600, \"Title\": \"View from 15th Floor\", \"Thumbnail\": {\"Url\": \"http://www.example.com/image/481989943\", \"Height\": 125, \"Width\": 100}, \"Animated\": false, \"IDs\": [116, 943, 234, 38793]}}")
+    doc(dir, "rfc_array", "[{\"precision\": \"zip\", \"Latitude\": 37.7668, \"Longitude\": -122.3959, \"Address\": \"\", \"City\": \"SAN FRANCISCO\", \"State\": \"CA\", \"Zip\": \"94107\", \"Country\": \"US\"}]")
+    doc(dir, "scalars", "[\"Hello world!\", 42, true, false, null]")
+    doc(dir, "whitespace", " \t\r\n{ \"a\" : [ 1 , 2 ] } \n")
+    doc(dir, "empty_containers", "[{}, [], {\"\": []}]")
+    doc(dir, "duplicate_keys", "{\"a\": 1, \"a\": 2}")
+
+    // Numbers.
+    doc(dir, "num_ints", "[0, -0, 1, -1, 9007199254740993, 9223372036854775807, -9223372036854775808, 9223372036854775808]")
+    doc(dir, "num_doubles", "[0.1, 1.0, 1e0, 1E+2, 2.5e-3, 1.7976931348623157e308, 5e-324, 2.2250738585072014e-308]")
+    doc(dir, "num_out_of_range", "[1e400, -1e400, 1e-400, 123456789012345678901234567890]")
+    // CI's first fuzz_json find (#3543): -1e0 is the double -1, written "-1"
+    // and read back as the integer -1, which the harness took for a change.
+    doc(dir, "num_negative_whole_doubles", "[1e400, -1e400, 1e-400, 12347671e400, -1e0]")
+    doc(dir, "num_signed_whole_doubles", "[-1e0, -2.0, -3E+2, -0e0, -0.0, 0.0, 4.0e0, -9007199254740992.0]")
+    doc(dir, "num_long_mantissa", "0.12345678901234567890123456789012345678901234567890123456789012345678901234567890")
+    doc(dir, "num_leading_zero", "01")
+    doc(dir, "num_plus", "+1")
+    doc(dir, "num_dot_first", ".5")
+    doc(dir, "num_dot_last", "1.")
+    doc(dir, "num_exp_empty", "1e")
+    doc(dir, "num_hex", "0x10")
+    doc(dir, "num_nan", "NaN")
+    doc(dir, "num_infinity", "[Infinity, -Infinity]")
+
+    // Strings.
+    doc(dir, "str_escapes", "\"\\\" \\\\ \\/ \\b \\f \\n \\r \\t \\u0041 \\u00e9 \\u20ac\"")
+    doc(dir, "str_nul_escape", "{\"k\\u0000ey\": \"va\\u0000lue\"}")
+    doc(dir, "str_surrogate_pair", "\"\\ud83d\\ude00\"")
+    doc(dir, "str_lone_high", "\"\\ud800\"")
+    doc(dir, "str_lone_low", "\"\\udc00\"")
+    doc(dir, "str_high_high", "\"\\ud800\\ud800\"")
+    doc(dir, "str_bad_escape", "\"\\x41\"")
+    doc(dir, "str_short_u", "\"\\u12\"")
+    doc(dir, "str_unterminated", "\"abc")
+    mixed(dir, "str_utf8", "\"", "c3a9e282acf09f9880", "\"")
+    mixed(dir, "str_raw_control", "\"a", "01", "b\"")
+    mixed(dir, "str_raw_tab", "\"a", "09", "b\"")
+    mixed(dir, "str_raw_del", "\"a", "7f", "b\"")
+    mixed(dir, "utf8_overlong", "\"", "c0af", "\"")
+    mixed(dir, "utf8_surrogate", "\"", "eda080", "\"")
+    mixed(dir, "utf8_past_max", "\"", "f4908080", "\"")
+    mixed(dir, "utf8_truncated", "\"", "e282", "\"")
+    mixed(dir, "utf8_lone_continuation", "\"", "80", "\"")
+    mixed(dir, "nul_after_value", "1", "00", "")
+    mixed(dir, "nul_inside_string", "\"a", "00", "b\"")
+    mixed(dir, "bom", "", "efbbbf", "{}")
+
+    // Near misses.
+    doc(dir, "trailing_comma_array", "[1,]")
+    doc(dir, "trailing_comma_object", "{\"a\":1,}")
+    doc(dir, "comment_line", "[1] // c")
+    doc(dir, "comment_block", "/* c */ [1]")
+    doc(dir, "single_quotes", "['a']")
+    doc(dir, "unquoted_key", "{a: 1}")
+    doc(dir, "two_values", "1 2")
+    doc(dir, "literal_case", "True")
+    doc(dir, "empty", "")
+    doc(dir, "only_whitespace", " \n ")
+
+    // Depth: a value at most 256 levels inside the outermost one. 257 arrays
+    // reach it, 258 go one past, and so does a value inside 257.
+    nested(dir, "arrays_257", 257)
+    nested(dir, "arrays_258", 258)
+    b = strbuilder.new(0)
+    put_repeat(b, 91, 257)
+    _v = strbuilder.append(b, "1")
+    put_repeat(b, 93, 257)
+    write_seed(dir, "value_in_257_arrays", b)
+    b = strbuilder.new(0)
+    i = 0
+    while i < 200 {
+        _o = strbuilder.append(b, "{\"k\":")
+        i = i + 1
+    }
+    _n = strbuilder.append(b, "null")
+    put_repeat(b, 125, 200)
+    write_seed(dir, "objects_200_deep", b)
+}

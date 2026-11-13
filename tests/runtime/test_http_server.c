@@ -16,6 +16,7 @@
 #include <unistd.h>
 #endif
 #include "../../std/net/aether_http_server.h"
+#include "../../std/net/aether_http.h"   /* http_find_header_end */
 #include "../../std/http/proxy/aether_proxy.h"
 #include "../../std/http/proxy/aether_proxy_internal.h"
 #include "../../std/http/middleware/aether_middleware.h"
@@ -394,6 +395,162 @@ TEST(http_server_post_with_oversized_content_length_clamps_safely) {
     http_request_free(req);
 }
 
+TEST(http_server_request_line_without_version_is_refused_once) {
+    /* "GET /x" has a method and a target and no version. The parser released
+     * the method it had copied without forgetting it, and
+     * http_parse_request_n then freed it again with the rest of the failed
+     * request: heap corruption from one request line any client can send
+     * (found by tests/fuzz/http_head; ASan reports the double free, a plain
+     * build on Windows died with 0xC0000374). */
+    ASSERT_NULL(http_parse_request("GET /x\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /x\r\nHost: a\r\n\r\n"));
+
+    /* Parsed into a request the caller reuses, the failure leaves nothing
+     * of itself behind for the caller's own free. */
+    HttpRequest req;
+    memset(&req, 0, sizeof req);
+    ASSERT_NULL(http_parse_request_into(&req, "GET /x\r\n\r\n", 10));
+    ASSERT_NULL(req.method);
+    http_request_reset(&req);
+    ASSERT_NOT_NULL(http_parse_request_into(&req, "GET /y HTTP/1.1\r\n\r\n", 19));
+    ASSERT_STREQ("/y", req.path);
+    http_request_reset(&req);
+    free(req.header_keys);
+    free(req.header_values);
+}
+
+/* The head check's answer for `head` followed by the blank line. */
+static int head_check_of(const char* head, long* cl, int* chunked) {
+    char buf[512];
+    int n = snprintf(buf, sizeof buf, "%s\r\n\r\n", head);
+    const char* end = http_find_header_end(buf, (size_t)n);
+    if (!end) return -1;
+    return http_request_head_check(buf, end, cl, chunked);
+}
+
+TEST(http_request_head_check_refuses_a_bare_cr_or_lf) {
+    /* The check split lines at each LF, the parser at each CR LF, and the
+     * head ends at the first CR LF CR LF. With a bare LF the two read
+     * different headers: here the check framed a 2-byte body while the
+     * parser saw one header, Host, whose value held "\nContent-Length: 2".
+     * A bare CR stayed in a value the proxy forwards, to an upstream that
+     * may end the line there (RFC 9112 2.2; found by tests/fuzz/http_head).
+     * Both are a head that is not a request, answered 400 like a NUL. */
+    long cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("POST / HTTP/1.1\r\nHost: a\nContent-Length: 2", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\nHost: a", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\r\nX-A: a\rb", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("GET / HTTP/1.1\r\nX-A: a\r", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_MALFORMED, head_check_of("\nGET / HTTP/1.1", &cl, &chunked));
+
+    /* CR LF line ends, as always. */
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("POST / HTTP/1.1\r\nHost: a\r\nContent-Length: 2", &cl, &chunked));
+    ASSERT_EQ(2, (int)cl);
+    ASSERT_EQ(0, chunked);
+    ASSERT_EQ(HTTP_HEAD_OK, head_check_of("GET / HTTP/1.1", &cl, &chunked));
+    ASSERT_EQ(0, (int)cl);
+}
+
+TEST(http_request_head_check_reads_transfer_encoding_as_one_list) {
+    /* The check searched the first Transfer-Encoding field for the word
+     * "chunked", so a coding that only contains it, chunked ahead of another
+     * coding, and chunked undone by a second field were all decoded as
+     * chunked, where a front end that reads the codings as RFC 9112 6.3 does
+     * finds no length (found by tests/fuzz/http_head). */
+    long cl = -1;
+    int chunked = -1;
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: xchunked", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, gzip", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked, chunked", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: chunked;x=1", &cl, &chunked));
+    ASSERT_EQ(HTTP_HEAD_BAD_FRAMING, head_check_of("POST / HTTP/1.1\r\nTransfer-Encoding: \"chunked\"", &cl, &chunked));
+
+    /* chunked last, alone, after other codings, or in a second field. */
+    const char* ok[] = {
+        "POST / HTTP/1.1\r\nTransfer-Encoding: chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: CHUNKED",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip, chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip;q=1 ,, chunked",
+        "POST / HTTP/1.1\r\nTransfer-Encoding: gzip\r\nTransfer-Encoding: chunked",
+    };
+    for (size_t i = 0; i < sizeof ok / sizeof ok[0]; i++) {
+        chunked = -1;
+        ASSERT_EQ(HTTP_HEAD_OK, head_check_of(ok[i], &cl, &chunked));
+        ASSERT_EQ(1, chunked);
+    }
+}
+
+TEST(http_server_header_value_loses_the_whitespace_around_it) {
+    /* field-line = field-name ":" OWS field-value OWS (RFC 9112 5), OWS a
+     * space or a tab. The parser dropped leading spaces only, so these were
+     * "\t tabbed", "trailing \t" and "\t" while the head check, reading the
+     * same lines, had "tabbed", "trailing" and "" (found by
+     * tests/fuzz/http_head). A space inside a value stays. */
+    HttpRequest* req = http_parse_request(
+        "GET / HTTP/1.1\r\nX-A:\t tabbed\r\nX-B: trailing \t\r\nX-C:\t\r\nX-D:  in side  \r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("tabbed", http_get_header(req, "X-A"));
+    ASSERT_STREQ("trailing", http_get_header(req, "X-B"));
+    ASSERT_STREQ("", http_get_header(req, "X-C"));
+    ASSERT_STREQ("in side", http_get_header(req, "X-D"));
+    http_request_free(req);
+}
+
+TEST(http_server_request_line_is_method_target_version) {
+    /* method SP request-target SP HTTP-version (RFC 9112 3). The parser took
+     * whatever lay between the spaces, so these were served: a method that
+     * is not a token, an empty method, an empty target, and targets with a
+     * tab or a CR, which the reverse proxy wrote into its own request line
+     * upstream (found by tests/fuzz/http_head). */
+    ASSERT_NULL(http_parse_request("G@T / HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request(" / HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET  HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\tb HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\rb HTTP/1.1\r\n\r\n"));
+    ASSERT_NULL(http_parse_request("GET /a\x7f HTTP/1.1\r\n\r\n"));
+
+    /* Every token is a method, and a target may be any visible bytes. */
+    HttpRequest* req = http_parse_request("M-SEARCH * HTTP/1.1\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("M-SEARCH", req->method);
+    ASSERT_STREQ("*", req->path);
+    http_request_free(req);
+    req = http_parse_request("GET /caf\xc3\xa9?q=%20 HTTP/1.0\r\n\r\n");
+    ASSERT_NOT_NULL(req);
+    ASSERT_STREQ("/caf\xc3\xa9", req->path);
+    ASSERT_STREQ("q=%20", req->query_string);
+    http_request_free(req);
+}
+
+TEST(http_server_body_without_content_length_keeps_nul_bytes) {
+    /* The worker decodes a chunked upload in place and hands the parser the
+     * head and the decoded payload, with no Content-Length, `len` counting
+     * both. The parser took that body with strdup, so `a 00 b` arrived as
+     * the one byte `a`, body_length 1, and a binary upload was cut at its
+     * first NUL (found by tests/fuzz/http_head). It is every byte `len`
+     * counts after the head. */
+    static const char head[] =
+        "POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\n\r\n";
+    char raw[128];
+    size_t hl = sizeof head - 1;
+    memcpy(raw, head, hl);
+    memcpy(raw + hl, "a\0b", 3);
+    raw[hl + 3] = '\0';
+    HttpRequest* req = http_parse_request_n(raw, hl + 3);
+    ASSERT_NOT_NULL(req);
+    ASSERT_EQ(3, (int)req->body_length);
+    ASSERT_EQ(0, memcmp(req->body, "a\0b", 3));
+    http_request_free(req);
+
+    /* Nothing after the head is no body, as before. */
+    req = http_parse_request_n(raw, hl);
+    ASSERT_NOT_NULL(req);
+    ASSERT_EQ(0, (int)req->body_length);
+    http_request_free(req);
+}
+
 /* Combined Log Format timestamps must be locale-independent.
  *
  * The month in CLF is the English three-letter abbreviation; it is a parseable
@@ -499,6 +656,50 @@ TEST(http_server_middleware_chain) {
     ASSERT_NOT_NULL(server->middleware_chain->next);
 
     http_server_free(server);
+}
+
+static int bearer_accepts_good(const char* token, void* ud) {
+    (void)ud;
+    return strcmp(token, "good") == 0;
+}
+
+/* The challenge a request's Authorization value gets from bearer_auth. */
+static const char* bearer_challenge_for(const char* raw, char* out, size_t cap) {
+    AetherBearerAuthOpts* o = aether_bearer_auth_opts_new("api", bearer_accepts_good, NULL);
+    HttpRequest* req = http_parse_request(raw);
+    HttpServerResponse* res = http_response_create();
+    out[0] = '\0';
+    if (o && req && res && aether_middleware_bearer_auth(req, res, o) == 0) {
+        for (int i = 0; i < res->header_count; i++)
+            if (strcasecmp(res->header_keys[i], "WWW-Authenticate") == 0)
+                snprintf(out, cap, "%s", res->header_values[i]);
+    } else {
+        snprintf(out, cap, "passed");
+    }
+    http_server_response_free(res);
+    http_request_free(req);
+    aether_bearer_auth_opts_free(o);
+    return out;
+}
+
+TEST(http_bearer_auth_reads_a_scheme_with_no_token) {
+    /* "Authorization: Bearer " is the scheme with no token, a malformed
+     * credential answered with error="invalid_token". The parser now trims
+     * the space after a value (RFC 9112 5), so the middleware sees "Bearer"
+     * and took it for no credential at all. */
+    char got[256];
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer \r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: bearer\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\", error=\"invalid_token\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer bad\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("Bearer realm=\"api\"",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearerx\r\n\r\n", got, sizeof got));
+    ASSERT_STREQ("passed",
+                 bearer_challenge_for("GET / HTTP/1.1\r\nAuthorization: Bearer good \r\n\r\n", got, sizeof got));
 }
 
 TEST(http_response_serialize_long_status_text) {

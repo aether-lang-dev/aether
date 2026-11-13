@@ -1157,7 +1157,14 @@ $(BUILD_FLAGS_STAMP): build-flags-force
 	    printf '%s' "$$digest" > "$@"; \
 	  fi
 
-$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/quote $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/std/posix $(OBJ_DIR)/std/posix/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
+# The generated headers come first, order-only: runtime/aether_abi.h includes
+# aether_version.h, and so does any source that includes it (the runtime's
+# exec, std.http's script gateway, tests/runtime/test_abi_layout.c). Only a few
+# objects named the header, so `make test` or `make test-build` in a fresh
+# checkout stopped at test_abi_layout.c with "aether_version.h: No such file
+# or directory" unless `make compiler` had run first. The asan, memory, dbg
+# and cov object rules below take it the same way.
+$(OBJ_DIR)/%.o: %.c $(BUILD_FLAGS_STAMP) | $(VERSION_HEADER) $(STDLIB_SYMS_HEADER) $(FRONTEND_ID_HEADER) $(OBJ_DIR)/compiler $(OBJ_DIR)/compiler/parser $(OBJ_DIR)/compiler/codegen $(OBJ_DIR)/compiler/analysis $(OBJ_DIR)/runtime $(OBJ_DIR)/runtime/actors $(OBJ_DIR)/runtime/sandbox $(OBJ_DIR)/runtime/scheduler $(OBJ_DIR)/runtime/memory $(OBJ_DIR)/runtime/config $(OBJ_DIR)/runtime/simd $(OBJ_DIR)/runtime/utils $(OBJ_DIR)/std $(OBJ_DIR)/std/string $(OBJ_DIR)/std/io $(OBJ_DIR)/std/math $(OBJ_DIR)/std/net $(OBJ_DIR)/std/udp $(OBJ_DIR)/std/fs $(OBJ_DIR)/std/log $(OBJ_DIR)/std/collections $(OBJ_DIR)/std/intmap $(OBJ_DIR)/std/json $(OBJ_DIR)/std/yaml $(OBJ_DIR)/std/xml $(OBJ_DIR)/std/os $(OBJ_DIR)/std/ipc $(OBJ_DIR)/std/mem $(OBJ_DIR)/std/cryptography $(OBJ_DIR)/std/cryptography/aes $(OBJ_DIR)/std/zlib $(OBJ_DIR)/std/brotli $(OBJ_DIR)/std/zstd $(OBJ_DIR)/std/lzf $(OBJ_DIR)/std/dl $(OBJ_DIR)/std/bytes $(OBJ_DIR)/std/bytes/cursor $(OBJ_DIR)/std/strbuilder $(OBJ_DIR)/std/config $(OBJ_DIR)/std/actors $(OBJ_DIR)/std/capsicum $(OBJ_DIR)/std/casper $(OBJ_DIR)/std/snapshot $(OBJ_DIR)/std/sync $(OBJ_DIR)/std/audio $(OBJ_DIR)/std/worker $(OBJ_DIR)/std/alloc $(OBJ_DIR)/std/tracking $(OBJ_DIR)/std/tar $(OBJ_DIR)/std/quote $(OBJ_DIR)/std/unicode $(OBJ_DIR)/std/unicode/utf8proc $(OBJ_DIR)/std/http $(OBJ_DIR)/std/http/middleware $(OBJ_DIR)/std/http/proxy $(OBJ_DIR)/std/http/script_gateway $(OBJ_DIR)/std/http/server $(OBJ_DIR)/std/http/server/h2 $(OBJ_DIR)/std/regex $(OBJ_DIR)/std/posix $(OBJ_DIR)/std/posix/regex $(OBJ_DIR)/lsp $(OBJ_DIR)/tests $(OBJ_DIR)/tests/compiler $(OBJ_DIR)/tests/memory $(OBJ_DIR)/tests/runtime
 	@echo "Compiling $<..."
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) -c $< -o $@
 
@@ -1344,6 +1351,14 @@ else ifneq ($(findstring MSYS,$(DETECTED_OS)),)
 else
 	./$(BUILD_DIR)/test_runner$(EXE_EXT)
 endif
+ifndef WINDOWS_NATIVE
+	@# Every test registered by hand is registered in every mode of the
+	@# runner, not only the full run (--category=NAME once left them out).
+	@# A shell script, so not under mingw32-make with cmd.exe, which may have
+	@# no sh: the check reads the sources, the same on every system, and every
+	@# other build runs it.
+	@sh tests/scripts/check_test_runner_list.sh ./$(BUILD_DIR)/test_runner$(EXE_EXT) $(filter %.c,$(TEST_SRC))
+endif
 
 # Fast test target (monolithic)
 test-fast: compiler-fast
@@ -1503,6 +1518,66 @@ fuzz-ipc-frames-corpus: compiler ae stdlib
 	@./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/ipc_frames/gen_corpus.ae 	    -o $(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT)
 	@./$(BUILD_DIR)/fuzz/gen_ipc_corpus$(EXE_EXT) tests/fuzz/ipc_frames/corpus
 
+# The C-parser fuzz targets (tests/fuzz/run_fuzz_c.sh): each harness compiles
+# the std sources it tests into itself, with the flags std objects are built
+# with, so those carry the fuzzer's coverage and the sanitizers.
+FUZZ_C_TARGETS = http_head http_chunked url json
+FUZZ_STD_CFLAGS = $(filter-out -MMD -MP -DAETHER_VERSION=%,$(AETHER_REQUIRED_CFLAGS))
+
+.PHONY: print-fuzz-std-cflags
+print-fuzz-std-cflags:
+	@echo '$(FUZZ_STD_CFLAGS)'
+
+.PHONY: fuzz-http-head fuzz-http-chunked fuzz-url fuzz-json
+# Coverage-guided fuzzing of the HTTP/1 request head on the server's path
+# (head check, chunked body, parse), the chunked body decoder, the client's
+# URL and Location parsers, and std.json, each checked against properties of
+# its contract (needs clang with libFuzzer). FUZZ_SECONDS sets the run time
+# (default 60).
+fuzz-http-head: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh http_head
+fuzz-http-chunked: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh http_chunked
+fuzz-url: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh url
+fuzz-json: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/run_fuzz_c.sh json
+
+.PHONY: fuzz-replay
+# The C-parser harnesses built with $(CC) and no libFuzzer, each dictionary
+# entry and each seed run through its property checks once: what can be
+# checked where clang has no libFuzzer (Windows among them). Every
+# dictionary, the CBOR and frame-reader ones too, is read as libFuzzer reads
+# it, so an entry it would refuse fails here rather than only on CI.
+fuzz-replay: compiler ae stdlib
+	@for t in $(FUZZ_C_TARGETS); do \
+	    FUZZ_REPLAY=1 CC='$(CC)' FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' \
+	        sh tests/fuzz/run_fuzz_c.sh $$t || exit 1; \
+	done
+	@./$(BUILD_DIR)/fuzz/json/replay_json$(EXE_EXT) \
+	    -check_dict=tests/fuzz/cbor/cbor.dict \
+	    -check_dict=tests/fuzz/ipc_frames/ipc_frames.dict
+
+.PHONY: fuzz-ci
+# Every fuzz target, FUZZ_SECONDS each (default 60): what the fuzz workflow
+# runs. Each runs even when an earlier one failed; reproducers stay in
+# build/fuzz/<target>/.
+fuzz-ci: compiler ae stdlib
+	@FUZZ_STD_CFLAGS='$(FUZZ_STD_CFLAGS)' sh tests/fuzz/fuzz_ci.sh
+
+.PHONY: fuzz-corpus
+# Rewrite the C-parser fuzzers' seed corpora from their generators
+# (tests/fuzz/<target>/gen_corpus.ae); the seeds are committed, so this is
+# only for when a generator changes.
+fuzz-corpus: compiler ae stdlib
+	@mkdir -p $(BUILD_DIR)/fuzz
+	@for t in $(FUZZ_C_TARGETS); do \
+	    ./$(BUILD_DIR)/ae$(EXE_EXT) build tests/fuzz/$$t/gen_corpus.ae \
+	        -o $(BUILD_DIR)/fuzz/gen_$${t}_corpus$(EXE_EXT) || exit 1; \
+	    rm -rf tests/fuzz/$$t/corpus; \
+	    ./$(BUILD_DIR)/fuzz/gen_$${t}_corpus$(EXE_EXT) tests/fuzz/$$t/corpus || exit 1; \
+	done
+
 # Test .ae source files - compiles and runs each test file.
 #
 # The shell tests run $(NPROC) at a time (SH_NPROC overrides). They were serial
@@ -1542,6 +1617,11 @@ fuzz-ipc-frames-corpus: compiler ae stdlib
 # trailing slash pins a directory (as in tests/ae_sweep_prune.txt). The shell
 # test directories are matched with a slash appended: dirname prints none, so
 # a pinned directory matched no shell test (#3539).
+#
+# AE_SWEEP_SELECT names a select file that keeps only the .ae programs and
+# shell test directories it picks, by path or by what their source does
+# (tests/scripts/sweep_select.sh). `make test-tsan` runs the actor, scheduler
+# and std.net tests this way (#3542); without it the sweep takes everything.
 ifdef WINDOWS_NATIVE
 test-ae: compiler ae stdlib
 	@echo ===================================
@@ -1566,7 +1646,11 @@ test-ae: compiler ae stdlib
 	if [ -n "$(AE_SWEEP_EXTRA_PRUNE)" ]; then \
 	  echo "  Extra prune list: $(AE_SWEEP_EXTRA_PRUNE) ($$(sed '/^#/d;/^$$/d' "$(AE_SWEEP_EXTRA_PRUNE)" | wc -l | tr -d ' ') patterns)"; \
 	fi; \
-	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" | sh tests/scripts/sweep_shard.sh \
+	[ -z "$(AE_SWEEP_SELECT)" ] || echo "  Select list: $(AE_SWEEP_SELECT)"; \
+	if [ -n "$(AE_SWEEP_SELECT)" ] && ! sh tests/scripts/sweep_select.sh "$(AE_SWEEP_SELECT)" < /dev/null > /dev/null; then \
+	    echo "  The select list is not readable or not well formed: nothing would run."; exit 2; \
+	fi; \
+	sh tests/scripts/ae_sweep_list.sh "$(AE_SWEEP_EXTRA_PRUNE)" "$(AE_SWEEP_SELECT)" | sh tests/scripts/sweep_shard.sh \
 	    > "$$tmpdir/units_ae.txt"; \
 	sh tests/scripts/sweep_cpu.sh mark "$$tmpdir" ae_start; \
 	xargs -P $(NPROC) -I{} sh "$$script" "{}" "$$tmpdir" "$$root" < "$$tmpdir/units_ae.txt"; \
@@ -1583,7 +1667,7 @@ test-ae: compiler ae stdlib
 	    | sed 's|/$$||' \
 	    | { if [ -n "$(AE_SWEEP_OPTIONAL)" ]; then cat; else \
 	          while read -r d; do [ -f "$$d/NEEDS_EXTERNAL_TOOLCHAIN" ] || echo "$$d"; done; fi; } \
-	    > "$$tmpdir/shdirs.txt"; \
+	    | sh tests/scripts/sweep_select.sh "$(AE_SWEEP_SELECT)" > "$$tmpdir/shdirs.txt"; \
 	{ for d in $$(cat "$$tmpdir/shdirs.txt"); do \
 	    if [ -f "$$d/DRIVERS_INDEPENDENT" ]; then find "$$d" -maxdepth 1 -name 'test_*.sh' | sort; fi; \
 	  done; \
@@ -2388,19 +2472,19 @@ COV_LIB_OBJS = $(STD_SRC:%.c=$(COV_OBJ_DIR)/%.o) \
                $(RUNTIME_SRC:%.c=$(COV_OBJ_DIR)/%.o)
 COV_COMPILER_LIB_OBJS = $(COMPILER_LIB_SRC:%.c=$(COV_OBJ_DIR)/%.o)
 
-$(ASAN_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(ASAN_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(ASAN_OPT) $(ASAN_FLAGS) -c $< -o $@
 
-$(MEM_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(MEM_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS) $(MEM_FLAGS) -c $< -o $@
 
-$(DBG_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(DBG_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(DBG_OPT) -c $< -o $@
 
-$(COV_OBJ_DIR)/%.o: %.c | $(FRONTEND_ID_HEADER)
+$(COV_OBJ_DIR)/%.o: %.c | $(VERSION_HEADER) $(FRONTEND_ID_HEADER)
 	@mkdir -p $(dir $@)
 	@$(CC) $(AETHER_REQUIRED_CFLAGS) $(CFLAGS_NO_OPT) $(COV_OPT) $(COV_FLAGS) -c $< -o $@
 
@@ -2926,17 +3010,34 @@ stats:
 	fi
 	@echo "==================================="
 
-# Parallel test execution
+# Parallel test execution: the runner `make test` or `make test-build` built,
+# one process per category, all at once. Each category's output goes to
+# $(BUILD_DIR)/test-parallel/<category>.log and is shown when it fails, and
+# the target fails when any category does. It used to end in a bare `wait`,
+# whose status is 0 whatever the runners returned, and it left out the
+# `other` category (every TEST() without one: the HTTP server and resolver
+# tests, the memory leak and stress tests, most of the compiler's).
+TEST_PARALLEL_CATEGORIES = compiler runtime collections network memory stdlib parser other
 test-parallel:
 	@echo "==================================="
 	@echo "Running Tests in Parallel"
 	@echo "==================================="
 	@echo "Testing by category..."
-	@for cat in compiler runtime collections network memory stdlib parser; do \
+	@mkdir -p $(BUILD_DIR)/test-parallel; \
+	pids=""; \
+	for cat in $(TEST_PARALLEL_CATEGORIES); do \
 		echo "  Testing $$cat..."; \
-		./$(BUILD_DIR)/test_runner$(EXE_EXT) --category=$$cat & \
+		./$(BUILD_DIR)/test_runner$(EXE_EXT) --category=$$cat > $(BUILD_DIR)/test-parallel/$$cat.log 2>&1 & \
+		pids="$$pids $$!:$$cat"; \
 	done; \
-	wait
+	status=0; \
+	for p in $$pids; do \
+		cat=$${p#*:}; \
+		if wait $${p%%:*}; then echo "  [PASS] $$cat"; \
+		else echo "  [FAIL] $$cat ($(BUILD_DIR)/test-parallel/$$cat.log):"; \
+		     sed 's/^/    /' $(BUILD_DIR)/test-parallel/$$cat.log; status=1; fi; \
+	done; \
+	exit $$status
 	@echo ""
 	@echo "All parallel tests complete!"
 
@@ -2995,6 +3096,7 @@ help:
 	@echo "  make test-valgrind  - Run tests with Valgrind"
 	@echo "  make test-asan      - Run tests with AddressSanitizer"
 	@echo "  make test-ubsan     - C unit tests + .ae corpus with everything under UBSan; fails on any report (Linux, macOS)"
+	@echo "  make test-tsan      - C unit tests + the actor, scheduler and std.net .ae tests under TSan (clang); fails on any report (Linux, macOS)"
 	@echo "  make self-test      - Test compiler on complex examples"
 	@echo ""
 	@echo "CI/CD Targets:"
@@ -3383,6 +3485,25 @@ SAN_LEAKS ?= fail
 .PHONY: test-asan-ae
 test-asan-ae:
 	@SAN=asan SAN_LEAKS="$(SAN_LEAKS)" MAKE="$(MAKE)" NPROC=$(NPROC) BASE_CC="$(BASE_CC)" sh tests/scripts/sanitizer_sweep.sh
+
+# The same under ThreadSanitizer (#3542), with clang (TSAN_CC names another):
+# aetherc, ae, libaether, std and the C test runner built with
+# -fsanitize=thread -g -O1, then the whole C unit runner and the part of the
+# .ae corpus that puts two threads on the same memory, the actor, scheduler
+# and std.net tests (tests/tsan_sweep_select.txt, less
+# tests/ae_sweep_prune_tsan.txt). A data race, a lock-order inversion, a
+# thread never joined or a signal-unsafe call in a handler is reported, the
+# program goes on to report the rest and exits 66, and the run fails on any
+# report, with the reports in
+# build/tsan/reports grouped by the two places that raced. The TSan options
+# are in tests/scripts/sanitizer_sweep.sh, the suppressions (third-party code
+# only, never ours) in tests/tsan/suppressions.txt. AE_SWEEP_SHARD=k/n splits
+# the corpus (tsan.yml runs it in shards). Linux or macOS, not under
+# `ulimit -v`: TSan maps its shadow memory at fixed addresses.
+TSAN_CC ?= clang
+.PHONY: test-tsan
+test-tsan:
+	@SAN=tsan TSAN_CC="$(TSAN_CC)" MAKE="$(MAKE)" NPROC=$(NPROC) sh tests/scripts/sanitizer_sweep.sh
 
 # -----------------------------------------------------------------
 # contrib/host bridge check

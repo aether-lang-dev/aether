@@ -1,0 +1,62 @@
+// A server's host set while it runs (http_server_set_host).
+//
+// A server started with no bind of the program's own binds on the thread
+// that runs it, and that bind replaced server->host (freed the string and
+// stored a copy) with no lock, while the program could set the host on its
+// own thread, freeing and storing it too: two frees of one string, or a
+// read of a freed one, and a data race under TSan whatever the timing. The
+// run now binds and reports a copy of the host made as it starts, and
+// every change of server->host is made under the server's run lock.
+//
+// Thirty runs, each started with no bind while this thread sets the host
+// over and over; each run must bind the host it started with, report it to
+// its monitor, and stop.
+
+import std.http
+import std.sync
+
+extern http_server_port(server: ptr) -> int
+extern sleep(ms: int)
+extern exit(code: int)
+
+main() {
+    failures = 0
+    for (cycle = 0; cycle < 30; cycle = cycle + 1) {
+        // 1 when the run's listening closure got 127.0.0.1, 2 for anything
+        // else: the closure runs on the server's thread, so a cell.
+        heard = sync.atomic_new(0)
+        s = http.server_create(0)
+        http.server_set_host(s, "127.0.0.1")
+        http.monitor(s) {
+            listening() | host: string, port: int | {
+                if host == "127.0.0.1" { sync.atomic_store(heard, 1) } else { sync.atomic_store(heard, 2) }
+            }
+        }
+        if http.server_start_background(s) != "" {
+            println("FAIL cycle ${cycle}: the server did not start")
+            exit(1)
+        }
+        // The run binds on its thread while this one sets the host.
+        for (i = 0; i < 200; i = i + 1) {
+            http.server_set_host(s, "127.0.0.1")
+        }
+        waited = 0
+        while sync.atomic_load(heard) == 0 && waited < 500 {
+            sleep(10)
+            waited = waited + 1
+        }
+        if sync.atomic_load(heard) != 1 {
+            println("FAIL cycle ${cycle}: the monitor heard ${sync.atomic_load(heard)}, not 127.0.0.1")
+            failures = failures + 1
+        }
+        if http_server_port(s) <= 0 {
+            println("FAIL cycle ${cycle}: no port bound")
+            failures = failures + 1
+        }
+        http.server_stop(s)
+        http.server_free(s)
+        sync.atomic_free(heard)
+    }
+    if failures > 0 { exit(1) }
+    println("HOST-OK")
+}

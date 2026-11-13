@@ -15,8 +15,8 @@
 # outer loop in the innermost body, so every such check walks them. The
 # program is compiled at D = 12 and D = 24: twice the depth must cost less
 # than eight times the CPU time (linear is two; the doubling cost was
-# thousands). The time is the CPU column of `aetherc --time-phases`, summed
-# over three runs of each, and the program at D = 24 also runs.
+# thousands). The time is the CPU column of `aetherc --time-phases`, the fastest
+# of three runs of each (a run a busy runner stalled counts for nothing), and the program at D = 24 also runs.
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -103,24 +103,24 @@ compile_ms() {
 
 nest 12
 nest 24
-small=0
-large=0
+small=
+large=
 for run in 1 2 3; do
     compile_ms 12
-    small=$(( small + MS ))
+    { [ -z "$small" ] || [ "$MS" -lt "$small" ]; } && small=$MS
     compile_ms 24
     if [ "$MS" -gt "$LIMIT_MS" ]; then
         echo "  [FAIL] $NAME: loops nested 24 deep took ${MS} ms of CPU to compile (ceiling ${LIMIT_MS} ms)"
         exit 1
     fi
-    large=$(( large + MS ))
+    { [ -z "$large" ] || [ "$MS" -lt "$large" ]; } && large=$MS
 done
 
 # Below 50 ms a run the clock's grain decides: Windows charges CPU time a
 # clock tick, about 15.6 ms, at a time.
-[ "$small" -lt 150 ] && small=150
+[ "$small" -lt 50 ] && small=50
 if [ "$large" -ge $(( small * 8 )) ]; then
-    echo "  [FAIL] $NAME: loops nested 12 deep compiled in ${small} ms of CPU, 24 deep in ${large} ms (three runs each): twice the depth cost $(( large / small ))x the time (linear is 2x)"
+    echo "  [FAIL] $NAME: loops nested 12 deep compiled in ${small} ms of CPU, 24 deep in ${large} ms (the fastest of three runs each): twice the depth cost $(( large / small ))x the time (linear is 2x)"
     exit 1
 fi
 
@@ -131,5 +131,5 @@ if [ -x "$AE" ] || [ -x "$AE.exe" ]; then
         exit 1
     fi
 fi
-echo "  [PASS] $NAME: loops nested 12 deep in ${small} ms of CPU, 24 deep in ${large} ms (three runs each)"
+echo "  [PASS] $NAME: loops nested 12 deep in ${small} ms of CPU, 24 deep in ${large} ms (the fastest of three runs each)"
 exit 0

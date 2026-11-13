@@ -145,7 +145,7 @@ When a cross-core send occurs, the sender sets a `migrate_to` hint on the target
 
 1. **After coalesce-buffer processing** (targeted, O(batch_size)): Immediately after delivering and processing messages from the coalesce buffer, the scheduler checks `migrate_to` on each actor it just processed. This provides fast migration response without scanning the full actor list.
 
-2. **During idle actor scan** (full scan, O(actor_count)): When no messages arrived from cross-core queues, the scheduler scans all local actors for pending migration hints. This catches any hints that were not processed in the targeted path.
+2. **From the ready list** (O(actors with work), #3540): a hint the targeted path could not act on (the move failed: a lock was taken, a message of the actor was in flight) pushes the actor on its core's ready list, and a work steal pushes the actor it asks for, so the core asks the move again on its next pass. The scheduler used to scan all local actors for pending hints whenever no message arrived through its queues, which loaded every actor of the core, idle ones included, on every idle pass.
 
 Migration uses ascending core-id lock ordering to prevent deadlock between concurrent migration and work-stealing operations. Both locks are acquired via non-blocking try-lock, if either lock is contended, migration is deferred to the next iteration. The actor is always processed before migration is attempted, ensuring progress even under constant migration pressure.
 
@@ -303,12 +303,14 @@ typedef struct {
 } Scheduler;
 ```
 
-Each scheduler core increments only its own counters, so there is no cross-core write contention on the hot path. The counters are declared `_Atomic uint64_t` because they are read cross-thread by the idle check, so the `++` compiles to a relaxed atomic read-modify-write rather than a barrier-heavy sequentially-consistent one; this keeps torn reads off weakly-ordered architectures (e.g. ARM64) without adding contention. The `wait_for_idle()` Aether builtin lowers to the C function `scheduler_wait()`, which sums across all cores to determine when all in-flight messages have been processed. `scheduler_wait()` is non-destructive -- it only waits for quiescence and does not stop scheduler threads, so it can be called multiple times between phases of message sending.
+Each scheduler core adds only to its own counters, so there is no cross-core write contention on the hot path. The counters are declared `_Atomic uint64_t` because they are read cross-thread by the idle check, which keeps torn reads off weakly-ordered architectures (e.g. ARM64). A core's thread is the only writer of its pair, so it adds with a load and a release store, not with an atomic read-modify-write (#3541): `++` on an `_Atomic` is a sequentially consistent one, a lock-prefixed instruction on x86 at every send and every inline step. Threads that are no core's (the main thread, a host's, an actor's own thread) count on shared counters with atomic adds. The `wait_for_idle()` Aether builtin lowers to the C function `scheduler_wait()`, which sums across all cores to determine when all in-flight messages have been processed. `scheduler_wait()` is non-destructive -- it only waits for quiescence and does not stop scheduler threads, so it can be called multiple times between phases of message sending.
 
 ```c
-// Hot path: no atomic contention
-if (current_core_id >= 0) {
-    schedulers[current_core_id].messages_sent++;
+// Hot path: no atomic read-modify-write (count_sent, #3541)
+if (t_core >= 0) {   // a core's own scheduler thread
+    _Atomic uint64_t* c = &schedulers[t_core].messages_sent;
+    atomic_store_explicit(c, atomic_load_explicit(c, memory_order_relaxed) + 1,
+                          memory_order_release);
 }
 
 // scheduler_wait(): sum across cores (rare operation)
@@ -319,7 +321,7 @@ for (int i = 0; i < num_cores; i++) {
 }
 ```
 
-Messages sent from the main thread (before scheduler threads start) use a separate atomic counter, but this path is infrequent. The pattern follows the Linux kernel's per-CPU counter design for scalable counting.
+Messages sent from the main thread or any other thread that is no core'"'"'s use a separate atomic counter, and so do the messages such threads handle (an actor'"'"'s own thread), but these paths are infrequent. The pattern follows the Linux kernel's per-CPU counter design for scalable counting.
 
 ## Rejected Optimizations
 
@@ -550,7 +552,7 @@ if (--_aether_reductions <= 0) { _aether_reductions = 10000; sched_yield(); }
 
 **Implementation:** `compiler/codegen/codegen_actor.c`, `runtime/scheduler/multicore_scheduler.h`
 
-`ActorBase` carries `timeout_ns` and `last_activity_ns`. The generated step function checks the nanosecond clock before `mailbox_receive()`. The scheduler polls timeout-active actors even when their mailbox is empty.
+`ActorBase` carries `timeout_ns` and `last_activity_ns`. The generated step function checks the nanosecond clock before `mailbox_receive()`. Each core keeps its actors' armed countdowns in a min-heap of deadlines (#3540) and steps an actor whose deadline has passed, with no message to step it for; it parks no longer than until the earliest deadline.
 
 ## References
 

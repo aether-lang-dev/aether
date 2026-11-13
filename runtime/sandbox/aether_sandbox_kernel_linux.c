@@ -14,6 +14,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -618,10 +619,11 @@ static int has_grant(void* grant_list, const char* category, const char* pattern
 }
 
 static void kernel_warn(AetherSandboxKernel* k, const char* what) {
-    static int warned_once = 0;
+    /* Printed once even when two threads spawn a sandboxed child at the same
+     * time: an atomic exchange, not a plain flag both could read clear (#3680). */
+    static _Atomic int warned_once = 0;
     k->warned = 1;
-    if (warned_once) return;
-    warned_once = 1;
+    if (atomic_exchange(&warned_once, 1)) return;
     fprintf(stderr,
             "[aether] WARNING: spawn_sandboxed: %s, so the child runs with the preload and "
             "seccomp only and a raw syscall can open what the grants do not allow "

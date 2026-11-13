@@ -31,8 +31,10 @@ on:
       - 'tests/scripts/sanitizer_sweep.sh'
       - 'tests/ae_sweep_prune_asan.txt'
       - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/sweep_select.sh'
       - 'tests/scripts/sweep_shard.sh'
       - 'tests/sweep_weights_linux.txt'
+      - 'tests/sweep_weights_linux_asan.txt'
       - 'tests/scripts/run_ae_test.sh'
       - 'tests/scripts/run_ae_sh_dir.sh'
       - 'tests/lib/sweep_timeout.sh'
@@ -75,8 +77,29 @@ jobs:
     - name: Install toolchain
       run: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
 
+    # The shards split the corpus by each test's cost under ASan (#3601):
+    # tests/sweep_weights_linux_asan.txt, made by tests/scripts/sweep_weights.sh
+    # from the timings this job uploads. The plain Linux leg's weights do not
+    # say what ASan costs (a build cost 1299 ms on average in one shard and
+    # 850 in the other with them): priced at ASan's measured costs, they split
+    # the corpus 3,192 / 2,773 CPU seconds, and ASan's own 2,982 / 2,982.
     - name: make test-asan-ae
-      run: AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
+      run: |
+        AE_SWEEP_WEIGHTS="$GITHUB_WORKSPACE/tests/sweep_weights_linux_asan.txt" \
+        AE_SWEEP_TIMINGS_OUT="$RUNNER_TEMP/sweep-timings.txt" \
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make test-asan-ae NPROC="$(nproc)" SAN_LEAKS=fail
+
+    - name: Upload the sweep's timings
+      if: always()
+      # Data for the shard weights (#3601), not a check: a failed upload
+      # (the runner could not reach the artifact service, ENOTFOUND on a
+      # macOS runner of PR #3671) does not fail a job whose tests passed.
+      continue-on-error: true
+      uses: actions/upload-artifact@v6
+      with:
+        name: sweep-timings-asan-${{ strategy.job-index }}
+        path: ${{ runner.temp }}/sweep-timings.txt
+        if-no-files-found: ignore
 
     - name: Upload the ASan reports
       if: failure()

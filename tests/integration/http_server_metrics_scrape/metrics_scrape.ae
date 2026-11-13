@@ -18,9 +18,20 @@
 // A request whose method and path are both "(other)", two whose paths
 // differ only past 300 bytes, one with a byte that is not UTF-8, requests to
 // distinct paths, then a scrape: the requests the scrape counts must add up
-// to every request made, it may list no more than 1025 series, none twice,
-// and no byte that is not UTF-8. The server listens on 127.0.0.1 and a port
-// the kernel picks.
+// to every request the server served, it may list no more than 1025 series,
+// none twice, and no byte that is not UTF-8. The server listens on 127.0.0.1
+// and a port the kernel picks.
+//
+// What the scrape counts is the requests the server parsed and served: the
+// metrics are a request hook, run with the request after its response. A
+// head the server refuses before there is a request, answered 400, 414 or
+// 431 on the connection and closed, is no request to a hook and counts in no
+// series, whatever it was refused for: a NUL, a bare CR or LF (#3664), its
+// framing, its size, or a request line that is not method SP target SP
+// version (#3666). "(other) (other) HTTP/1.1" is one since #3666, as "(other)"
+// is not a token: it was counted before, and is refused now, so a client can
+// no longer send the overflow series' labels as a method at all. It is still
+// sent, beside two other refusals, to hold all three to the same rule.
 
 import std.http
 import std.string
@@ -89,16 +100,29 @@ series_and_total(scrape: string) -> (int, int) {
     return series, total
 }
 
-// One request on a connection of its own, its response read, then closed.
-alone(port: int, request: string) {
+// One request on a connection of its own, its response read and returned,
+// then closed.
+alone(port: int, request: string) -> string {
     sock, err = tcp.connect("127.0.0.1", port)
     if err != "" {
         println("FAIL: connect")
         exit(1)
     }
     tcp.write(sock, request)
-    read_response(sock)
+    response = read_response(sock)
     tcp.close(sock)
+    return response
+}
+
+// 1 when `request`, alone on a connection, is refused with 400.
+refused(port: int, label: string, request: string) -> int {
+    response = alone(port, request)
+    if string.index_of(response, "HTTP/1.1 400 ") == 0 {
+        println("  PASS refused with 400: ${label}")
+        return 0
+    }
+    println("  FAIL not refused with 400: ${label}")
+    return 1
 }
 
 // How many times `needle` is in `hay`.
@@ -140,10 +164,13 @@ main() {
     }
 
     bad = 0
-    // The overflow series' labels sent by a client, and a path that is not
-    // UTF-8, each on a connection of its own: the server may close one whose
-    // request it refuses.
-    alone(port, "(other) (other) HTTP/1.1\r\nHost: x\r\n\r\n")
+    // Three requests refused before they are requests, by the request line,
+    // a bare LF and the framing, and a path that is not UTF-8, each on a
+    // connection of its own: the server closes one whose request it refuses.
+    // The refused ones count nowhere.
+    bad = bad + refused(port, "the overflow series' labels as method and path", "(other) (other) HTTP/1.1\r\nHost: x\r\n\r\n")
+    bad = bad + refused(port, "a header line ended by a bare LF", "GET /lf HTTP/1.1\nHost: x\r\n\r\n")
+    bad = bad + refused(port, "a Content-Length that is not a number", "GET /cl HTTP/1.1\r\nHost: x\r\nContent-Length: x\r\n\r\n")
     alone(port, "GET /bad\xff HTTP/1.1\r\nHost: x\r\n\r\n")
 
     // Two paths the label cannot tell apart.
@@ -153,12 +180,14 @@ main() {
     tcp.write(sock, "GET ${long_path}2 HTTP/1.1\r\nHost: x\r\n\r\n")
     read_response(sock)
 
-    // 120 series: past what 64 KB of scrape held, well within the bound.
+    // 120 series: past what 64 KB of scrape held, well within the bound. The
+    // requests served: /bad, the two long paths and these 120, 123; the three
+    // refused are not among them.
     spray(sock, 0, 120)
     tcp.write(sock, "GET /metrics HTTP/1.1\r\nHost: x\r\n\r\n")
     series, total = series_and_total(read_response(sock))
-    if total != 124 {
-        println("  FAIL the scrape counts every request: ${total} of 124 in ${series} series")
+    if total != 123 {
+        println("  FAIL the scrape counts every request: ${total} of 123 in ${series} series")
         bad = bad + 1
     } else {
         println("  PASS the scrape counts every request")
@@ -175,8 +204,8 @@ main() {
     } else {
         println("  PASS the series a client can create are bounded")
     }
-    if total != 1625 {
-        println("  FAIL the bounded scrape still counts every request: ${total} of 1625")
+    if total != 1624 {
+        println("  FAIL the bounded scrape still counts every request: ${total} of 1624")
         bad = bad + 1
     } else {
         println("  PASS the bounded scrape still counts every request")

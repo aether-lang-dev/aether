@@ -275,6 +275,7 @@ const char* http_request_header_value(HttpRequest* r, int i) { (void)r; (void)i;
 #include <stdarg.h>   /* server_fail (#3131) */
 #include <errno.h>
 #include "../../runtime/utils/aether_thread.h"
+#include "../../runtime/utils/aether_once.h"
 #include "../../runtime/scheduler/multicore_scheduler.h"  // ActorBase for actor dispatch (#2509)
 
 #ifdef _WIN32
@@ -1384,12 +1385,14 @@ static int conn_tls_accept(HttpConn* conn, SSL_CTX* ctx) {
  * defaults (TLS 1.2 minimum, all known ciphers) match the existing
  * client-side context in std/net/aether_http.c. */
 static void server_openssl_init_once(void) {
-    static int done = 0;
-    if (done) return;
+    /* aether_once (#3680): two servers given TLS on two threads at once ran
+     * the library's init twice, and one went on before it was done. */
+    static aether_once_t once = AETHER_ONCE_INIT;
+    if (!aether_once_begin(&once)) return;
     SSL_library_init();
     SSL_load_error_strings();
     OpenSSL_add_all_algorithms();
-    done = 1;
+    aether_once_done(&once);
 }
 
 /* Security level 2 at least on the server context too (#3312), as
@@ -1423,7 +1426,10 @@ static const char* http_strcasestr(const char* haystack, const char* needle) {
     return NULL;
 }
 
-static int http_server_initialized = 0;
+/* Read and set by whichever thread makes a server or a client first, so
+ * atomic. Two threads that both find it clear both start Winsock, which
+ * counts its starts; neither goes on before its own start has returned. */
+static _Atomic int http_server_initialized = 0;
 
 static void http_server_init(void) {
     if (http_server_initialized) return;
@@ -1433,6 +1439,36 @@ static void http_server_init(void) {
     #endif
     http_server_initialized = 1;
 }
+
+#if defined(_WIN32)
+/* The accept loop's wake on Windows, as the wake pipe is on POSIX: a UDP
+ * socket bound to loopback and connected to its own address, so one byte
+ * a stop sends to it makes it readable, and the loop's WSAPoll on it and
+ * the listening socket returns at once. Windows has no pipe a WSAPoll can
+ * wait on. Not inherited by children, non-blocking so the loop drains it
+ * without waiting. -1 when it cannot be made: the loop then sees a stop at
+ * its one-second timeout. */
+static int http_wake_socket_open(void) {
+    SOCKET s = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (s == INVALID_SOCKET) return -1;
+    SetHandleInformation((HANDLE)s, HANDLE_FLAG_INHERIT, 0);
+    struct sockaddr_in a;
+    memset(&a, 0, sizeof a);
+    a.sin_family = AF_INET;
+    a.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+    a.sin_port = 0;
+    int alen = (int)sizeof a;
+    u_long nonblocking = 1;
+    if (bind(s, (struct sockaddr*)&a, (int)sizeof a) != 0 ||
+        getsockname(s, (struct sockaddr*)&a, &alen) != 0 ||
+        connect(s, (struct sockaddr*)&a, (int)sizeof a) != 0 ||
+        ioctlsocket(s, FIONBIO, &nonblocking) != 0) {
+        closesocket(s);
+        return -1;
+    }
+    return (int)s;
+}
+#endif
 
 HttpServer* http_server_create(int port) {
     http_server_init();
@@ -1454,6 +1490,7 @@ HttpServer* http_server_create(int port) {
     server->step_fn = NULL;
     server->park_lot = NULL;
     server->evloop = NULL;
+    pthread_mutex_init(&server->evloop_lock, NULL);
     server->conn_pool = NULL;
     server->accept_poller.fd = -1;
     server->accept_poller.backend_data = NULL;
@@ -1484,6 +1521,8 @@ HttpServer* http_server_create(int port) {
     server->ready_check = NULL;
     server->ready_check_user_data = NULL;
     atomic_init(&server->inflight_connections, 0);
+    atomic_init(&server->actor_refs, 1);   /* the owner's, for http_server_free */
+    atomic_init(&server->actor_active, 0);
     atomic_init(&server->loop_plan_gen, 0);
     pthread_mutex_init(&server->live_lock, NULL);
     pthread_mutex_init(&server->tls_lock, NULL);
@@ -1510,6 +1549,8 @@ HttpServer* http_server_create(int port) {
     } else {
         server->wake_fds[0] = server->wake_fds[1] = -1;
     }
+#elif defined(_WIN32)
+    server->wake_fds[0] = http_wake_socket_open();   /* wake_fds[1] unused */
 #endif
     server->request_hook_chain = NULL;
     server->sse_routes = NULL;
@@ -1593,7 +1634,7 @@ int http_server_has_monitor(HttpServer* server) {
 }
 
 static void monitor_call_host_port(HttpMonitorClosure c, HttpServer* server) {
-    if (c.fn) ((void (*)(void*, const char*, int))c.fn)(c.env, server->host, server->port);
+    if (c.fn) ((void (*)(void*, const char*, int))c.fn)(c.env, server->run_host, server->port);
 }
 
 /* The server is accepting connections.
@@ -2552,12 +2593,24 @@ const char* http_server_set_h2_concurrent_dispatch_raw(HttpServer* server,
 #endif
 }
 
+/* server->host, replaced under run_lock: a run copies it there as it begins
+ * (server_run_begin), and the run's own bind replaces it from the run's
+ * thread, so a program that sets it, or binds, while a run is on does not
+ * free it under that copy or under the run's bind. The old string is freed
+ * outside the lock. */
+static void server_replace_host(HttpServer* server, char* copy) {
+    pthread_mutex_lock(&server->run_lock);
+    char* old = server->host;
+    server->host = copy;
+    pthread_mutex_unlock(&server->run_lock);
+    free(old);
+}
+
 void http_server_set_host(HttpServer* server, const char* host) {
     if (!server || !host || !*host) return;
     char* copy = strdup(host);
     if (!copy) return;
-    if (server->host) free(server->host);
-    server->host = copy;
+    server_replace_host(server, copy);
 }
 
 /* The last socket call's failure, as text: errno's on POSIX, the Winsock
@@ -2591,6 +2644,28 @@ const char* http_server_error(HttpServer* server) {
     return server ? server->error : "server is null";
 }
 
+/* The listening socket, as live_lock guards it (HttpServer.socket_fd): a
+ * stop reads it there from any thread. */
+static void server_set_listener(HttpServer* server, int fd) {
+    pthread_mutex_lock(&server->live_lock);
+    server->socket_fd = fd;
+    pthread_mutex_unlock(&server->live_lock);
+}
+
+/* Takes the listening socket out of the server, then closes it. */
+static void server_close_listener(HttpServer* server) {
+    pthread_mutex_lock(&server->live_lock);
+    int fd = server->socket_fd;
+    server->socket_fd = -1;
+    pthread_mutex_unlock(&server->live_lock);
+    if (fd < 0) return;
+#ifdef _WIN32
+    closesocket(fd);
+#else
+    close(fd);
+#endif
+}
+
 int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     /* A name binds the address it resolves to, never every interface
      * (#2639); "::" binds both families. See aether_addr_bind. */
@@ -2601,48 +2676,54 @@ int http_server_bind_raw(HttpServer* server, const char* host, int port) {
     if (aether_addr_bind(host, port, &addr, &addr_len) != 0)
         return server_fail(server, "cannot resolve host %s", host);
 
-    server->socket_fd = aether_addr_listen_socket(&addr);
-    if (server->socket_fd < 0)
+    /* Made in a local and published under live_lock once it listens: a stop
+     * on another thread reads the field there, and a failed bind leaves it
+     * -1, as it did. */
+    int fd = aether_addr_listen_socket(&addr);
+    if (fd < 0) {
+        server_set_listener(server, -1);
         return server_fail(server, "cannot create socket: %s", socket_error_text(why, sizeof why));
+    }
 
-    if (bind(server->socket_fd, (struct sockaddr*)&addr, addr_len) < 0) {
+    if (bind(fd, (struct sockaddr*)&addr, addr_len) < 0) {
         char where[300];
         server_fail(server, "cannot bind %s: %s", aether_addr_authority(where, sizeof where, host, port),
                     socket_error_text(why, sizeof why));
-        close(server->socket_fd);
-        server->socket_fd = -1;
+        close(fd);
+        server_set_listener(server, -1);
         return -1;
     }
-    
-    if (listen(server->socket_fd, server->max_connections) < 0) {
+
+    if (listen(fd, server->max_connections) < 0) {
         char where[300];
         server_fail(server, "cannot listen on %s: %s", aether_addr_authority(where, sizeof where, host, port),
                     socket_error_text(why, sizeof why));
-        close(server->socket_fd);
-        server->socket_fd = -1;
+        close(fd);
+        server_set_listener(server, -1);
         return -1;
     }
+    server_set_listener(server, fd);
     
-    // Update host and port (make copy of host string first)
+    // Update the host (a copy first: `host` may be the run's own copy).
     char* new_host = strdup(host);
-    if (server->host) {
-        free(server->host);
-    }
-    server->host = new_host;
-    server->port = port;
+    if (new_host) server_replace_host(server, new_host);
 
     // Resolve an OS-assigned port (port 0): the kernel picked a real
     // port at bind() time, but `port` is still 0 here. getsockname() the
     // bound socket and write the actual port back so dynamic-port users
     // (parallel test runners, the VCR embed layer) can read it via
     // http_server_port(). vcr_embed_abi_wish.md open question 3.
+    // One store, of the port as bound: another thread may be reading it
+    // (http_server_port) while the server's own thread binds.
+    int bound_port = port;
     if (port == 0) {
         struct sockaddr_storage bound;
         socklen_t blen = sizeof(bound);
-        if (getsockname(server->socket_fd, (struct sockaddr*)&bound, &blen) == 0) {
-            server->port = aether_addr_port(&bound);
+        if (getsockname(fd, (struct sockaddr*)&bound, &blen) == 0) {
+            bound_port = aether_addr_port(&bound);
         }
     }
+    server->port = bound_port;
 
     return 0;
 }
@@ -2867,7 +2948,26 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     if (!space) {
         return NULL;
     }
-    
+
+    /* method SP request-target SP HTTP-version (RFC 9112 3), the method a
+     * token and the target a non-empty run with no control byte in it. The
+     * parser took whatever lay between the spaces: "G@T", an empty method
+     * (" / HTTP/1.1"), an empty target ("GET  HTTP/1.1"), and a target with
+     * a tab or a CR in it, which the reverse proxy then wrote into the
+     * request line it sent upstream (found by tests/fuzz/http_head). Each
+     * is a request line that is not one, answered 400. */
+    {
+        const char* target = space + 1;
+        const char* target_end = strchr(target, ' ');
+        if (space == request_line || !target_end || target_end == target) return NULL;
+        *space = '\0';
+        int method_ok = http_header_name_ok(request_line);
+        *space = ' ';
+        if (!method_ok) return NULL;
+        for (const char* c = target; c < target_end; c++)
+            if ((unsigned char)*c < 0x20 || (unsigned char)*c == 0x7f) return NULL;
+    }
+
     int method_len = space - request_line;
     req->method = req_alloc(req, (size_t)method_len + 1);
     if (!req->method) return NULL;
@@ -2878,7 +2978,12 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     char* path_start = space + 1;
     char* path_end = strchr(path_start, ' ');
     if (!path_end) {
+        /* Released and forgotten: http_parse_request_n frees what a failed
+         * parse left in the request, and a request line with no version
+         * ("GET /x") had it free the method a second time, corrupting the
+         * heap on one line from any client (found by tests/fuzz/http_head). */
         req_release(req, req->method);
+        req->method = NULL;
         return NULL;
     }
 
@@ -2975,8 +3080,16 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
             char* key = header_line;
             char* value = colon + 1;
 
-            // Trim whitespace from value
-            while (*value == ' ') value++;
+            /* The value without the optional whitespace around it, a space
+             * or a tab on either side (RFC 9112 5: field-name ":" OWS
+             * field-value OWS), as the head check reads it. Only leading
+             * spaces went, so "X:\tv \t" was "\tv \t" here and "v" there, and
+             * a handler or an upstream comparing a value whole saw another
+             * one (found by tests/fuzz/http_head). */
+            while (*value == ' ' || *value == '\t') value++;
+            char* value_end = value + strlen(value);
+            while (value_end > value && (value_end[-1] == ' ' || value_end[-1] == '\t')) value_end--;
+            *value_end = '\0';
 
             // Store only if both copies succeed; a NULL key/value would later
             // crash header lookup (strcasecmp) or serialization (strlen).
@@ -3008,8 +3121,10 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
     // byte count, clamped against `body_avail` (what's actually buffered
     // — defends against a malicious or buggy client lying with an
     // oversized Content-Length, which would otherwise memcpy past the
-    // buffer). Fall back to strdup/strlen only when Content-Length is
-    // absent (HTTP/1.0 text bodies, malformed client requests).
+    // buffer). Without a Content-Length the body is every byte of the
+    // slice after the head, counted by `len`: that is how the worker hands
+    // over a chunked body it decoded, and a strdup there cut a binary
+    // upload at its first NUL byte, the length with it.
     long body_cl = -1;
     for (int hi = 0; hi < req->header_count; hi++) {
         if (req->header_keys[hi] &&
@@ -3033,9 +3148,13 @@ static HttpRequest* http_parse_request_n_impl(HttpRequest* req,
         } else {
             req->body_length = 0;
         }
-    } else if (header_start && *header_start) {
-        req->body = strdup(header_start);
-        req->body_length = req->body ? strlen(req->body) : 0;
+    } else if (body_avail > 0) {
+        req->body = (char*)malloc(body_avail + 1);
+        if (req->body) {
+            memcpy(req->body, header_start, body_avail);
+            req->body[body_avail] = '\0';
+        }
+        req->body_length = req->body ? body_avail : 0;
     } else {
         req->body = NULL;
         req->body_length = 0;
@@ -3883,10 +4002,20 @@ static void loop_plan_make(HttpServer* server, HttpLoopPlan* plan) {
     /* The loop carries a client's TLS through OpenSSL only. A server on the
      * pure-Aether stack (AETHER_PURE_TLS=1, or a build without OpenSSL) has
      * no OpenSSL context: the loop closed every connection it took for one,
-     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). */
-    if (server->tls_enabled) {
+     * and a build without OpenSSL read the TLS bytes as HTTP (#3256). The
+     * three fields are read together under tls_lock, which tls_apply_pem
+     * swaps them under: a certificate reload from another thread while the
+     * loop makes its plan raced with this read (TSan, #3542). */
+    pthread_mutex_lock(&server->tls_lock);
+    int tls_on = server->tls_enabled;
 #ifdef AETHER_HAS_OPENSSL
-        if (server->is_pure_tls || !server->tls_ctx) plan->chain_ok = 0;
+    int tls_pure = server->is_pure_tls;
+    int has_ctx = server->tls_ctx != NULL;
+#endif
+    pthread_mutex_unlock(&server->tls_lock);
+    if (tls_on) {
+#ifdef AETHER_HAS_OPENSSL
+        if (tls_pure || !has_ctx) plan->chain_ok = 0;
 #else
         plan->chain_ok = 0;
 #endif
@@ -3942,15 +4071,27 @@ int http_server_run_before_proxy(HttpServer* server, HttpRequest* req,
 /* Whether a gateway runs on the loop at all is otherwise invisible: the
  * responses are the same either way, by design (#3214). */
 int http_server_evloop_connections(HttpServer* server) {
-    return server ? http_evloop_taken((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int n = http_evloop_taken((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 int64_t http_server_evloop_wakeups(HttpServer* server) {
-    return server ? http_evloop_wakeups((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int64_t n = http_evloop_wakeups((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 int http_server_evloop_active(HttpServer* server) {
-    return server ? http_evloop_active((HttpEvLoop*)server->evloop) : 0;
+    if (!server) return 0;
+    pthread_mutex_lock(&server->evloop_lock);
+    int n = http_evloop_active((HttpEvLoop*)server->evloop);
+    pthread_mutex_unlock(&server->evloop_lock);
+    return n;
 }
 
 /* SSE route node (#260 Tier 2). */
@@ -5792,6 +5933,19 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * and the parser, which scans it as a C string, would stop there and
      * take the rest of the head for the body (#3254). */
     if (memchr(head, '\0', (size_t)(hdr_end - head))) return HTTP_HEAD_MALFORMED;
+    /* Every line of a head ends in CR LF, and a CR or an LF anywhere else
+     * makes it something other than a request too (RFC 9112 2.2: a bare CR
+     * is invalid, and a bare LF is a line end only to a recipient that
+     * chooses to read it so). The lines below are split at each LF, the
+     * parser splits them at each CR LF and the end of the head is the first
+     * CR LF CR LF, so with a bare one the three read different headers:
+     * "Host: a\nContent-Length: 2" was a length to this check and part of
+     * the Host value to the parser, and a bare CR in a value went on to an
+     * upstream that may take it for a line end (found by tests/fuzz/http_head). */
+    for (const char* p = head; (p = (const char*)memchr(p, '\r', (size_t)(hdr_end - p))) != NULL; p++)
+        if (p + 1 >= hdr_end || p[1] != '\n') return HTTP_HEAD_MALFORMED;
+    for (const char* p = head; (p = (const char*)memchr(p, '\n', (size_t)(hdr_end - p))) != NULL; p++)
+        if (p == head || p[-1] != '\r') return HTTP_HEAD_MALFORMED;
     /* A request line longer than the parser's line buffer is answered rather
      * than dropped, and it is checked here so the parser's own bound is never
      * the thing a client reaches. */
@@ -5800,11 +5954,11 @@ int http_request_head_check(const char* head, const char* hdr_end,
     if (rl_len >= HTTP_MAX_REQUEST_LINE) return HTTP_HEAD_URI_TOO_LONG;
 
     /* The first Content-Length where it lies in the head, compared whole
-     * with any later one. Transfer-Encoding is copied: a copy cut short can
-     * only lose the word "chunked", which refuses the request. */
+     * with any later one, and every Transfer-Encoding's codings, read where
+     * they lie as one list. */
     const char* cl_value = NULL;
     size_t cl_len = 0;
-    char te_value[256] = "";
+    HttpTeCodings te = { 0, 0, 0, 0 };
     int cl_count = 0, cl_differing = 0, te_count = 0, count = 0;
     for (const char* line = rl_end ? rl_end + 1 : hdr_end; line < hdr_end; ) {
         const char* eol = (const char*)memchr(line, '\n', (size_t)(hdr_end - line));
@@ -5842,11 +5996,8 @@ int http_request_head_check(const char* head, const char* hdr_end,
                 }
             } else if (head_line_value(line, line_len, "Transfer-Encoding", 17,
                                        &value, &value_len)) {
-                if (te_count++ == 0) {
-                    size_t n = value_len < sizeof te_value - 1 ? value_len : sizeof te_value - 1;
-                    memcpy(te_value, value, n);
-                    te_value[n] = '\0';
-                }
+                te_count++;
+                http_te_codings_add(&te, value, value_len);
             }
         }
         if (!eol) break;
@@ -5880,7 +6031,15 @@ int http_request_head_check(const char* head, const char* hdr_end,
      * two lengths are exactly what a smuggling pair is built from and no
      * legitimate sender emits both. */
     if (te_count > 0) {
-        *chunked = http_strcasestr(te_value, "chunked") != NULL;
+        /* chunked is the final coding, and named once, or the length of the
+         * body is not known (RFC 9112 6.3). The first field was searched for
+         * the word: "xchunked" and "chunked, gzip" were read as chunked,
+         * and a second field ("chunked", then "identity") was not read at
+         * all, where a front end reading the list whole finds no length and
+         * refuses, or reads to the close (found by tests/fuzz/http_head).
+         * Codings ahead of chunked ("gzip, chunked") stay the handler's to
+         * undo, as before. */
+        *chunked = http_te_is_chunked(&te);
         /* Both lengths present, or a coding this server cannot decode: refuse
          * the message rather than pick one of the two answers. */
         if (cl_count > 0 || !*chunked) return HTTP_HEAD_BAD_FRAMING;
@@ -7226,8 +7385,15 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
      * yet and the worker path is still right below. */
     /* A server changed since the loop started may have a middleware ahead
      * of the proxy now, or a hook, that is not loop-safe (#3214). */
-    if (server->evloop && !server->h2_enabled && http_server_evloop_serves(server)) {
-        if (http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0) return;
+    if (!server->h2_enabled) {
+        /* Under evloop_lock: the server's thread clears the pointer there
+         * before it stops and frees the loop, so the loop is alive for as
+         * long as this holds it. */
+        pthread_mutex_lock(&server->evloop_lock);
+        int taken = server->evloop && http_server_evloop_serves(server) &&
+                    http_evloop_submit((HttpEvLoop*)server->evloop, client_fd) == 0;
+        pthread_mutex_unlock(&server->evloop_lock);
+        if (taken) return;
     }
 
     /* Heap-allocated because a parked connection outlives the worker that
@@ -7374,19 +7540,39 @@ typedef struct {
     HttpServer* server;  // written before the connection message is sent
 } HttpConnWorker;
 
+static void server_unref(HttpServer* server);
+
 static void http_conn_worker_step(void* self) {
     HttpConnWorker* worker = (HttpConnWorker*)self;
     HttpServer* server = worker->server;
     int had_message = atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) > 0;
+    /* Active while it serves the connection, which the run waits for
+     * (actor_active). Sequentially consistent with the run's check, which
+     * comes after the stop set `stopping`: a worker that becomes active after
+     * the run found none sees the stop in its first read and closes the
+     * connection without serving it. And one of the server's own threads
+     * meanwhile, as a pool worker is: a stop from its handler does not wait
+     * for the run, which waits for this worker. */
+    if (had_message) {
+        atomic_fetch_add(&server->actor_active, 1);
+        http_server_thread_enter(server);
+    }
     server->step_fn(self);
     // The only message a worker gets is its connection; once a step has taken
     // it, the worker is done. scheduler_release_actor() is safe to call from
     // the worker's own step: the free waits until the scheduler is done with
     // the actor.
-    if (had_message && server->release_fn &&
-        atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) == 0) {
-        server->release_fn(self);
+    void (*release)(void*) = server->release_fn;
+    int done = had_message &&
+        atomic_load_explicit(&worker->mailbox.count, memory_order_acquire) == 0;
+    if (had_message) {
+        http_server_thread_leave(server);
+        atomic_fetch_sub_explicit(&server->actor_active, 1, memory_order_release);
     }
+    /* The worker's last use of the server: its reference, the last one when
+     * the program has freed the server already, which is then freed here. */
+    if (done) server_unref(server);
+    if (done && release) release(self);
 }
 
 // Dispatch a data-ready fd to a worker actor
@@ -7409,6 +7595,12 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
         // the pool's: nothing is written into it and it is not released.
         if (((ActorBase*)worker)->step == http_conn_worker_step) {
             ((HttpConnWorker*)worker)->server = server;
+            /* A reference to the server until the worker is done with it
+             * (the end of the step that takes this message): the server is
+             * not freed under it (actor_refs). Relaxed: the run holds the
+             * owner's reference while it dispatches (a free waits for the
+             * run), so the count cannot reach 0 meanwhile. */
+            atomic_fetch_add_explicit(&server->actor_refs, 1, memory_order_relaxed);
         }
         HttpConnectionMessage conn_msg;
         conn_msg.type = MSG_HTTP_CONNECTION;
@@ -7419,6 +7611,31 @@ static inline void dispatch_to_worker(HttpServer* server, int fd) {
                           "Content-Length: 19\r\n\r\nService Unavailable";
         send(fd, err, strlen(err), MSG_NOSIGNAL);
         close(fd);
+    }
+}
+
+/* At the end of an actor-mode run, once its accept loops are over: wait for
+ * the workers serving a connection now to finish it, as the thread pool's
+ * run joins its workers, so a stop returns with no handler of the run still
+ * going. A stop has shut down the connections waiting for a request
+ * (live_fds), so a worker in a read returns at once and one in a handler
+ * finishes that request. These run on cores that are stepping: the worker is
+ * in its step. A worker whose connection message has not been stepped yet is
+ * not waited for (#3688): only its own core steps it, and that core can be
+ * the one blocked in this run's stop (a stop called from an actor, a
+ * one-core scheduler), or gone (a scheduler shut down first). When stepped
+ * it sees the stop and closes its connection; its reference keeps the server
+ * whole until then (actor_refs, server_unref). Sequentially consistent, with
+ * the worker's increment, and acquire, paired with its release. */
+static void actor_workers_wait(HttpServer* server) {
+    /* The loops ended on the stop's `is_running = 0`, a plain store just
+     * before its `stopping`; see the stop first, so a worker that is not
+     * counted below reads it. */
+    while (!atomic_load(&server->stopping)) usleep(50);
+    int sleep_us = 100;
+    while (atomic_load(&server->actor_active) > 0) {
+        usleep((useconds_t)sleep_us);
+        if (sleep_us < 10000) sleep_us *= 2;
     }
 }
 
@@ -7578,6 +7795,18 @@ static int server_run_begin(HttpServer* server) {
         pthread_mutex_unlock(&server->run_lock);
         return server_fail(server, "the server is already running");
     }
+    /* The run's own copy of the host, made here, on the starting thread,
+     * before any thread of the run exists, and under run_lock, where the
+     * program's thread changes server->host (http_server_set_host, a bind).
+     * What the run binds and what its monitor reports is this copy, which
+     * nothing changes while it runs: server->host may be set again while
+     * the run is on, for the next start. */
+    char* run_host = strdup(server->host ? server->host : "0.0.0.0");
+    if (!run_host) {
+        pthread_mutex_unlock(&server->run_lock);
+        return server_fail(server, "out of memory for the host");
+    }
+    server->run_host = run_host;
     server->serving = 1;
     server->error[0] = '\0';
     server->is_running = 1;
@@ -7591,6 +7820,8 @@ static int server_run_begin(HttpServer* server) {
 static void server_run_end(HttpServer* server) {
     pthread_mutex_lock(&server->run_lock);
     server->serving = 0;
+    free(server->run_host);
+    server->run_host = NULL;
     pthread_cond_broadcast(&server->run_done);
     pthread_mutex_unlock(&server->run_lock);
 }
@@ -7616,6 +7847,10 @@ static int http_server_run(HttpServer* server) {
         monitor_stopped(server);
     }
     http_server_thread_leave(server);
+    /* A stop came: the listening socket is the run's to close now that no
+     * loop of it polls the socket any more (see http_server_stop). A run that
+     * ended without one (a failed start) leaves it as the bind left it. */
+    if (atomic_load(&server->stopping)) server_close_listener(server);
     server_run_end(server);
     return rc;
 }
@@ -7691,10 +7926,10 @@ static int http_server_serve(HttpServer* server) {
             int opt = 1;
             if (setsockopt(bound_fd, SOL_SOCKET, AETHER_REUSEPORT_LB, &opt, sizeof opt) != 0) {
                 server_fail(server, "cannot set SO_REUSEPORT on the socket bound to %s: %s",
-                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            aether_addr_authority(where, sizeof where, server->run_host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, 0);
-                server->socket_fd = bound_fd;   /* still the server's, as server_bind left it */
+                server_set_listener(server, bound_fd);   /* still the server's, as server_bind left it */
                 return -1;
             }
 #endif
@@ -7703,7 +7938,7 @@ static int http_server_serve(HttpServer* server) {
             server->accept_listen_fds[0] = bound_fd;   /* closed with the rest */
         } else {
             server->accept_listen_fds[0] = create_reuseport_socket(
-                server->host, server->port, server->max_connections);
+                server->run_host, server->port, server->max_connections);
             if (server->accept_listen_fds[0] >= 0 && server->port == 0) {
                 struct sockaddr_storage bound;
                 socklen_t blen = sizeof bound;
@@ -7715,11 +7950,11 @@ static int http_server_serve(HttpServer* server) {
         for (int i = 0; i < n_threads; i++) {
             if (i > 0) {
                 server->accept_listen_fds[i] = create_reuseport_socket(
-                    server->host, server->port, server->max_connections);
+                    server->run_host, server->port, server->max_connections);
             }
             if (server->accept_listen_fds[i] < 0) {
                 server_fail(server, "cannot open SO_REUSEPORT listener %d on %s: %s", i,
-                            aether_addr_authority(where, sizeof where, server->host, server->port),
+                            aether_addr_authority(where, sizeof where, server->run_host, server->port),
                             socket_error_text(why, sizeof why));
                 multi_accept_release(server, n_threads, i);
                 return -1;
@@ -7765,6 +8000,8 @@ static int http_server_serve(HttpServer* server) {
 
         multi_accept_release(server, n_threads, n_threads);
 
+        actor_workers_wait(server);
+
     } else if (use_actor_mode) {
         // Single-accept with I/O poller (default): one accept thread waits for data
         // before dispatching to worker actors. Best for most workloads.
@@ -7773,7 +8010,7 @@ static int http_server_serve(HttpServer* server) {
         // port back via http_server_port before starting the background
         // accept loop) — re-binding an open socket would fail.
         if (server->socket_fd < 0 &&
-            http_server_bind_raw(server, server->host, server->port) < 0) {
+            http_server_bind_raw(server, server->run_host, server->port) < 0) {
             return -1;
         }
 
@@ -7791,13 +8028,15 @@ static int http_server_serve(HttpServer* server) {
 
         aether_io_poller_destroy(&server->accept_poller);
 
+        actor_workers_wait(server);
+
     } else
 #endif
     {
         // Skip the bind if already bound synchronously (see the
         // use_actor_mode branch above for the embedding rationale).
         if (server->socket_fd < 0 &&
-            http_server_bind_raw(server, server->host, server->port) < 0) {
+            http_server_bind_raw(server, server->run_host, server->port) < 0) {
             return -1;
         }
 
@@ -7816,7 +8055,10 @@ static int http_server_serve(HttpServer* server) {
         if (!server->h2_enabled) {
             int cores = aether_cpu_available();
             if (cores > 8) cores = 8;
-            server->evloop = http_evloop_start(server, cores);
+            HttpEvLoop* loop = http_evloop_start(server, cores);
+            pthread_mutex_lock(&server->evloop_lock);
+            server->evloop = loop;
+            pthread_mutex_unlock(&server->evloop_lock);
         }
 
         HttpConnectionPool* pool = http_pool_create(server);
@@ -7847,6 +8089,25 @@ static int http_server_serve(HttpServer* server) {
                 while (read(server->wake_fds[0], drain, sizeof(drain)) > 0) { }
             }
             if (!(pfd[0].revents & (POLLIN | POLLERR | POLLHUP))) continue;
+#else
+            /* Windows, the same: the listening socket and the wake socket
+             * (http_wake_socket_open) in one WSAPoll. A stop sends a byte to
+             * the wake socket and leaves the listening socket open; it used
+             * to close it to end an accept() blocked on it, and the loop's
+             * next accept() could then take a socket another thread opened
+             * under the same number. The run closes it once this loop is
+             * over (http_server_run). */
+            WSAPOLLFD pfd[2] = {
+                { .fd = (SOCKET)server->socket_fd, .events = POLLRDNORM },
+                { .fd = (SOCKET)server->wake_fds[0], .events = POLLRDNORM },
+            };
+            int ready = WSAPoll(pfd, server->wake_fds[0] >= 0 ? 2 : 1, 1000);
+            if (ready <= 0) continue;
+            if (server->wake_fds[0] >= 0 && (pfd[1].revents & POLLRDNORM)) {
+                char drain[64];
+                while (recv((SOCKET)server->wake_fds[0], drain, (int)sizeof drain, 0) > 0) { }
+            }
+            if (!(pfd[0].revents & (POLLRDNORM | POLLERR | POLLHUP))) continue;
 #endif
 
             struct sockaddr_storage client_addr;
@@ -7873,9 +8134,14 @@ static int http_server_serve(HttpServer* server) {
 #if AETHER_HAS_THREADS
         /* The driver holds connections of its own, so it stops before the
          * lot: its threads are what close them. */
-        if (server->evloop) {
-            http_evloop_stop((HttpEvLoop*)server->evloop);
+        {
+            /* Out of reach first, under the lock its readers take (the
+             * accessors, the pool's workers), then stopped and freed. */
+            pthread_mutex_lock(&server->evloop_lock);
+            HttpEvLoop* loop = (HttpEvLoop*)server->evloop;
             server->evloop = NULL;
+            pthread_mutex_unlock(&server->evloop_lock);
+            if (loop) http_evloop_stop(loop);
         }
         /* Close the lot before the pool: it resubmits into the pool, and a
          * connection woken into a destroyed pool would be closed twice. Free
@@ -7983,6 +8249,12 @@ void http_server_stop(HttpServer* server) {
         ssize_t w = write(server->wake_fds[1], &b, 1);
         (void)w;   /* full pipe: a wake is already pending */
     }
+#elif defined(_WIN32)
+    /* Wake the WSAPoll loop the same way, through its wake socket. */
+    if (server->wake_fds[0] >= 0) {
+        char b = 1;
+        send((SOCKET)server->wake_fds[0], &b, 1, 0);   /* a full buffer: a wake is pending */
+    }
 #endif
 
     /* The accept pollers of actor dispatch mode, and multi-accept's listeners
@@ -8001,22 +8273,31 @@ void http_server_stop(HttpServer* server) {
      * A WSACleanup here ran under the server's own threads, which were still
      * returning from accept or closing a connection.
      *
-     * The socket is taken under live_lock, as multi-accept takes it to make
-     * it a listener: one of the two closes it. */
-    pthread_mutex_lock(&server->live_lock);
-    int listen_fd = server->socket_fd;
-    server->socket_fd = -1;
-    pthread_mutex_unlock(&server->live_lock);
-    if (listen_fd >= 0) {
-#ifdef _WIN32
-        closesocket(listen_fd);
-#else
-        /* Wakes a poll() on it at once where the platform does (Linux);
-         * close() alone leaves the loop to its one-second timeout. */
-        shutdown(listen_fd, SHUT_RDWR);
-        close(listen_fd);
+     * The listening socket, taken under live_lock (multi-accept takes it
+     * there to make it a listener, and a bind publishes it there). While a
+     * run is on, its accept loop polls and accepts on it, on the server's
+     * thread: the stop leaves it open, and the run closes it once its loop
+     * is over (http_server_run). The wake above ends the loop: the wake
+     * pipe on POSIX, the wake socket on Windows; on POSIX the stop also
+     * shuts the socket down, which wakes a poll() on it at once on Linux.
+     * Closed here under a running loop, as it was (on Windows always, to
+     * end an accept() blocked on it), its number could go to a socket or
+     * file another thread opened next, and the loop's next poll() or
+     * accept() used that one. With no run on, the stop closes it. The run
+     * closes it under live_lock before it ends under run_lock, so a stop
+     * that finds the run on finds the socket open or already taken, never
+     * closed under its shutdown. */
+    pthread_mutex_lock(&server->run_lock);
+    int running = server->serving;
+    if (running) {
+        pthread_mutex_lock(&server->live_lock);
+#ifndef _WIN32
+        if (server->socket_fd >= 0) shutdown(server->socket_fd, SHUT_RDWR);
 #endif
+        pthread_mutex_unlock(&server->live_lock);
     }
+    pthread_mutex_unlock(&server->run_lock);
+    if (!running) server_close_listener(server);
 
     /* Wake every worker waiting for a client's next request: that read
      * waits up to the idle timeout, and the pool (and the join below) would
@@ -8052,6 +8333,8 @@ void http_server_stop(HttpServer* server) {
 #endif
 }
 
+static void server_unref(HttpServer* server);
+
 void http_server_free(HttpServer* server) {
     if (!server) return;
 
@@ -8068,6 +8351,23 @@ void http_server_free(HttpServer* server) {
                         "from the thread that started it\n");
         abort();
     }
+    /* The owner's reference: the server is freed now, or, in actor dispatch
+     * mode with a worker still queued, by that worker once it is done
+     * (actor_refs, #3688). */
+    server_unref(server);
+}
+
+static void server_destroy(HttpServer* server);
+
+static void server_unref(HttpServer* server) {
+    if (atomic_fetch_sub_explicit(&server->actor_refs, 1, memory_order_acq_rel) == 1) {
+        server_destroy(server);
+    }
+}
+
+/* Frees the server and everything it owns, once no one holds it: the stop
+ * is done and every worker actor is finished with it. */
+static void server_destroy(HttpServer* server) {
     http_server_monitor_null_raw(server);   /* gives back the closures' environments */
 
 
@@ -8154,11 +8454,14 @@ void http_server_free(HttpServer* server) {
     pthread_cond_destroy(&server->run_done);
     pthread_mutex_destroy(&server->run_lock);
     pthread_mutex_destroy(&server->live_lock);
+    pthread_mutex_destroy(&server->evloop_lock);
     pthread_mutex_destroy(&server->tls_lock);
     pthread_mutex_destroy(&server->tls_config_lock);
 #if !defined(_WIN32) && !defined(__wasi__)
     if (server->wake_fds[0] >= 0) close(server->wake_fds[0]);
     if (server->wake_fds[1] >= 0) close(server->wake_fds[1]);
+#elif defined(_WIN32)
+    if (server->wake_fds[0] >= 0) closesocket((SOCKET)server->wake_fds[0]);
 #endif
     free(server);
 }

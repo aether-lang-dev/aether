@@ -5,6 +5,8 @@
 import std.http
 
 extern http_actor_release_probe() -> int
+extern http_actor_stop_waits_probe() -> int
+extern http_actor_stop_on_core_probe() -> int
 
 main() {
     // Touch std.http so the build links the server.
@@ -16,6 +18,14 @@ main() {
     rc = http_actor_release_probe()
     if rc != 0 {
         println("FAIL: probe returned ${rc}")
+    }
+    rc2 = http_actor_stop_waits_probe()
+    if rc2 != 0 {
+        println("FAIL: stop probe returned ${rc2}")
+    }
+    rc3 = http_actor_stop_on_core_probe()
+    if rc3 != 0 {
+        println("FAIL: stop-on-core probe returned ${rc3}")
     }
     http.server_free(s)
 }

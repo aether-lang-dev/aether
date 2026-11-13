@@ -3,6 +3,7 @@
 
 #include "aether_runtime.h"
 #include "utils/aether_cpu_detect.h"
+#include "utils/aether_once.h"
 #include <stdio.h>
 #include <stdlib.h>
 
@@ -125,12 +126,17 @@ void aether_thread_yield(void) {
 
 // Global runtime configuration
 static AetherRuntimeInitConfig g_runtime_config = {0};
-static int g_runtime_initialized = 0;
+/* Filled once, by an explicit aether_runtime_init or by the first
+ * aether_runtime_get_config on any thread: aether_once (#3680), so a
+ * reader on another thread waits for the whole configuration. */
+static aether_once_t g_runtime_once = AETHER_ONCE_INIT;
 
-// Initialize runtime with default settings
-void aether_runtime_init(int num_cores, int flags) {
-    if (g_runtime_initialized) {
-        fprintf(stderr, "Warning: Runtime already initialized\n");
+// Initialize runtime with default settings. `explicit_call`: a caller's own
+// aether_runtime_init, which is told when the runtime was set up already;
+// the lazy one in aether_runtime_get_config is not.
+static void runtime_init_once(int num_cores, int flags, int explicit_call) {
+    if (!aether_once_begin(&g_runtime_once)) {
+        if (explicit_call) fprintf(stderr, "Warning: Runtime already initialized\n");
         return;
     }
     
@@ -170,7 +176,8 @@ void aether_runtime_init(int num_cores, int flags) {
         (flags & AETHER_FLAG_ENABLE_SIMD) ||
         (flags & AETHER_FLAG_AUTO_DETECT && cpu->avx2_supported);
     
-    g_runtime_initialized = 1;
+    /* Done before the verbose print, which reads the configuration back. */
+    aether_once_done(&g_runtime_once);
     
     // Print configuration if verbose
     if (flags & AETHER_FLAG_VERBOSE) {
@@ -178,12 +185,14 @@ void aether_runtime_init(int num_cores, int flags) {
     }
 }
 
+void aether_runtime_init(int num_cores, int flags) {
+    runtime_init_once(num_cores, flags, 1);
+}
+
 // Get current runtime configuration
 const AetherRuntimeInitConfig* aether_runtime_get_config(void) {
-    if (!g_runtime_initialized) {
-        // Initialize with defaults on first access
-        aether_runtime_init(0, AETHER_FLAG_AUTO_DETECT);
-    }
+    // Initialize with defaults on first access (from any thread)
+    runtime_init_once(0, AETHER_FLAG_AUTO_DETECT, 0);
     return &g_runtime_config;
 }
 
@@ -237,7 +246,7 @@ void aether_runtime_print_config(void) {
 
 // Shutdown runtime
 void aether_runtime_shutdown(void) {
-    g_runtime_initialized = 0;
+    aether_once_reset(&g_runtime_once);
 }
 
 // Command-line arguments

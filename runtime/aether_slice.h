@@ -189,7 +189,7 @@ static inline void aether_slice_retain(AetherSlice s) {
     }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
-    int rc = h->refs;
+    int rc = aether_count_load(&h->refs);
     if (rc & AETHER_SLICE_SHARED_BIT) aether_count_inc(&h->refs);
     else h->refs = rc + 1;
 }
@@ -212,7 +212,7 @@ static inline void aether_slice_unref(AetherSlice s) {
     }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
-    int rc = h->refs;
+    int rc = aether_count_load(&h->refs);
     if (rc & AETHER_SLICE_SHARED_BIT) {
         if ((aether_count_dec(&h->refs) & AETHER_SLICE_COUNT_MASK) == 1) aether_slice_buf_free(h);
         return;
@@ -235,7 +235,7 @@ static inline void aether_slice_publish(AetherSlice s) {
     }
     if (!(s.flags & AETHER_SLICE_MADE)) return;
     AetherSliceBuf* h = aether_slice_buf(s);
-    if (h->refs & AETHER_SLICE_SHARED_BIT) return;
+    if (aether_count_load(&h->refs) & AETHER_SLICE_SHARED_BIT) return;
     if (aether_count_or(&h->refs, AETHER_SLICE_SHARED_BIT) & AETHER_SLICE_SHARED_BIT) return;
     if (h->ops && h->ops->publish) {
         char* e = (char*)h + AETHER_SLICE_HEAD;
@@ -537,7 +537,7 @@ static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
     int empty = s.ptr == NULL && s.len == 0;
     AetherSliceBuf* h = empty ? NULL : aether_slice_buf(s);
     uint64_t len = empty ? 0 : s.len;
-    int shared = h && (h->refs & AETHER_SLICE_COUNT_MASK) != 1;
+    int shared = h && (aether_count_load(&h->refs) & AETHER_SLICE_COUNT_MASK) != 1;
     int grown = !empty && (s.flags & AETHER_SLICE_GROWN);
     if (shared || !grown || len == aether_slice_grown_cap(len)) {
         uint64_t cap = aether_slice_grown_cap(len + 1);
@@ -565,8 +565,18 @@ static inline AetherSlice aether_slice_grow1(AetherSlice s, size_t elem_size,
             /* Another place holds the buffer too: it keeps it, and `s`
              * goes on in storage of its own, each element a copy that holds
              * what it held. */
-            memcpy(n, h, AETHER_SLICE_HEAD + (size_t)len * elem_size);
+            /* The header field by field, never the count: other holders
+             * change it at the same time (atomically), and a memcpy of the
+             * header read it with a plain load. The new buffer's count is
+             * its own, 1. */
+            memset(n, 0, AETHER_SLICE_HEAD);
             n->refs = 1;
+            n->reserved = h->reserved;
+            n->len = h->len;
+            n->elem_size = h->elem_size;
+            n->ops = h->ops;
+            memcpy((char*)n + AETHER_SLICE_HEAD, (const char*)h + AETHER_SLICE_HEAD,
+                   (size_t)len * elem_size);
             if (n->ops && n->ops->copy) {
                 char* e = (char*)n + AETHER_SLICE_HEAD;
                 for (uint64_t i = 0; i < len; i++) n->ops->copy(e + i * elem_size);

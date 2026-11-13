@@ -158,7 +158,7 @@ static void string_free_block(AetherString* s) {
 void string_retain(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
-    int rc = s->ref_count;
+    int rc = aether_count_load(&s->ref_count);
     /* A pinned string (a literal the compiler made static, #2520) is
      * never freed, so it is not counted either. */
     if (rc == AETHER_STRING_PINNED_REFS) return;
@@ -169,7 +169,7 @@ void string_retain(const void* str) {
 void string_release(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
-    int rc = s->ref_count;
+    int rc = aether_count_load(&s->ref_count);
     if (rc == AETHER_STRING_PINNED_REFS) return;   /* #2520 */
     if (rc & AETHER_STRING_SHARED_BIT) {
         if ((aether_count_dec(&s->ref_count) & AETHER_STRING_COUNT_MASK) == 1)
@@ -185,13 +185,13 @@ void string_release(const void* str) {
  * aether_string_view asks it. */
 int aether_string_counted(const void* str) {
     if (!str || !is_aether_string(str)) return 0;
-    return ((const AetherString*)str)->ref_count != AETHER_STRING_PINNED_REFS;
+    return aether_count_load(&((const AetherString*)str)->ref_count) != AETHER_STRING_PINNED_REFS;
 }
 
 void aether_string_publish(const void* str) {
     if (!str || !is_aether_string(str)) return;
     AetherString* s = (AetherString*)str;
-    int rc = s->ref_count;
+    int rc = aether_count_load(&s->ref_count);
     /* Already shared, other threads may be counting it: leave the field
      * alone. Not shared, no other thread can reach it yet. */
     if (rc == AETHER_STRING_PINNED_REFS || (rc & AETHER_STRING_SHARED_BIT)) return;
@@ -1455,7 +1455,7 @@ static AetherString* given_find_retained(const char* data) {
 static AetherString* given_counted(const void* s) {
     if (!s || !is_aether_string(s)) return NULL;
     AetherString* h = (AetherString*)s;
-    return h->ref_count == AETHER_STRING_PINNED_REFS ? NULL : h;
+    return aether_count_load(&h->ref_count) == AETHER_STRING_PINNED_REFS ? NULL : h;
 }
 
 const char* aether_string_give_c(const void* s) {

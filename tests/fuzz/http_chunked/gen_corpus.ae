@@ -1,0 +1,149 @@
+// Writes the seed corpus for the chunked transfer-coding fuzz target into
+// the directory named on the command line (corpus/ beside this file, as
+// `make fuzz-corpus` runs it). Edit this file, not the seeds.
+//
+// A seed is a chunked body as it arrives: whole ones, with extensions,
+// trailers and binary data, ones still arriving, sizes written every way a
+// reader has misread one, and lines at the length limit.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+fn hex_digit(c: int) -> int {
+    if c >= 48 && c <= 57 { return c - 48 }
+    if c >= 97 && c <= 102 { return c - 87 }
+    if c >= 65 && c <= 70 { return c - 55 }
+    return -1
+}
+
+// `hex` holds pairs of hex digits; each becomes one byte of `b`.
+fn put_hex(b: ptr, hex: string) {
+    n = string.length(hex)
+    i = 0
+    while i + 1 < n {
+        hi = hex_digit(string.char_at_n(hex, n, i))
+        lo = hex_digit(string.char_at_n(hex, n, i + 1))
+        if hi < 0 || lo < 0 {
+            _w = io.stdout_write("gen_corpus: bad hex ${hex}\n")
+            exit(1)
+        }
+        _a = strbuilder.append_byte(b, (hi << 4) | lo)
+        i = i + 2
+    }
+}
+
+fn put_repeat(b: ptr, byte: int, count: int) {
+    i = 0
+    while i < count {
+        _a = strbuilder.append_byte(b, byte)
+        i = i + 1
+    }
+}
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A seed that is the text `s`, escapes and all.
+fn text(dir: string, name: string, s: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, s)
+    write_seed(dir, name, b)
+}
+
+// `head`, then the bytes of `hex`, then `tail`: for a NUL, which a literal
+// cannot carry.
+fn mixed(dir: string, name: string, head: string, hex: string, tail: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, head)
+    put_hex(b, hex)
+    _c = strbuilder.append(b, tail)
+    write_seed(dir, name, b)
+}
+
+const END = "0\r\n\r\n"
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // Whole bodies.
+    text(dir, "terminal_only", END)
+    text(dir, "one_chunk", "5\r\nhello\r\n${END}")
+    text(dir, "three_chunks", "1\r\na\r\nA\r\n0123456789\r\n2\r\nbc\r\n${END}")
+    text(dir, "hex_cases", "a\r\n0123456789\r\nA\r\n0123456789\r\n00F\r\n0123456789abcde\r\n${END}")
+    text(dir, "extensions", "3;a\r\nabc\r\n3 ; b = c\r\ndef\r\n3;q=\"x\\\"y\\\\z\";t=1\r\nghi\r\n0;last\r\n\r\n")
+    text(dir, "trailers", "2\r\nab\r\n0\r\nX-Sum: 1\r\nX-Other: two words\r\n\r\n")
+    mixed(dir, "binary_data", "6\r\n", "000d0a300d0a", "\r\n${END}")
+    text(dir, "terminal_in_data", "7\r\n0\r\n\r\nxx\r\n${END}")
+    text(dir, "next_request_after", "1\r\nx\r\n${END}GET / HTTP/1.1\r\n\r\n")
+
+    // Still arriving: each answer is 0.
+    text(dir, "cut_in_size", "1")
+    text(dir, "cut_before_lf", "5\r")
+    text(dir, "cut_in_data", "5\r\nhel")
+    text(dir, "cut_before_data_crlf", "5\r\nhello")
+    text(dir, "cut_in_data_crlf", "5\r\nhello\r")
+    text(dir, "cut_in_trailers", "0\r\nX-T: 1\r\n")
+
+    // Sizes a reader has read some other way.
+    text(dir, "size_0x", "0x5\r\nhello\r\n${END}")
+    text(dir, "size_plus", "+5\r\nhello\r\n${END}")
+    text(dir, "size_space_before", " 5\r\nhello\r\n${END}")
+    text(dir, "size_space_after", "5 \r\nhello\r\n${END}")
+    text(dir, "size_16_digits_max", "7fffffffffffffff\r\nab")
+    text(dir, "size_16_digits_over", "8000000000000000\r\nab")
+    text(dir, "size_17_digits", "00000000000000005\r\nhello\r\n${END}")
+    text(dir, "size_empty", "\r\nhello\r\n${END}")
+    text(dir, "size_negative", "-1\r\nx\r\n${END}")
+
+    // Line endings.
+    text(dir, "bare_lf_size", "5\nhello\r\n${END}")
+    text(dir, "bare_lf_after_data", "5\r\nhello\n${END}")
+    text(dir, "cr_in_size_line", "5\r;x\r\nhello\r\n${END}")
+    text(dir, "data_not_crlf", "5\r\nhelloXY${END}")
+    text(dir, "bare_lf_trailer", "0\r\nX-T: 1\n\r\n")
+    text(dir, "cr_in_trailer", "0\r\nX-T: 1\r2\r\n\r\n")
+
+    // Extensions that are not the grammar's.
+    text(dir, "ext_no_name", "5;\r\nhello\r\n${END}")
+    text(dir, "ext_no_value", "5;a=\r\nhello\r\n${END}")
+    text(dir, "ext_open_quote", "5;a=\"x\r\nhello\r\n${END}")
+    text(dir, "ext_bad_byte", "5;a@b\r\nhello\r\n${END}")
+
+    // At the 1024-byte line limit, and one past it.
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, "1;a=")
+    put_repeat(b, 120, 1019)
+    _b = strbuilder.append(b, "\r\nx\r\n${END}")
+    write_seed(dir, "ext_line_1024", b)
+
+    b = strbuilder.new(0)
+    _c = strbuilder.append(b, "1;a=")
+    put_repeat(b, 120, 1020)
+    _d = strbuilder.append(b, "\r\nx\r\n${END}")
+    write_seed(dir, "ext_line_1025", b)
+
+    b = strbuilder.new(0)
+    _e = strbuilder.append(b, "1;a=")
+    put_repeat(b, 120, 1100)
+    write_seed(dir, "ext_line_unended", b)
+
+    text(dir, "empty", "")
+}
