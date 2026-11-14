@@ -14,6 +14,86 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.914.0]
+
+### Added
+
+- **`os.run_stdio` takes the child's stderr and working directory.** Optional
+  named arguments: `stderr_to: os.STDERR_DISCARD` sends the child's stderr
+  nowhere (`/dev/null`, `NUL`), `stderr_to: os.STDERR_FILE, stderr_path: p`
+  to a file (created or truncated), and `cwd: dir` runs it there; the default
+  is still this process's stderr and directory. A child that holds this
+  process's stderr keeps whoever reads it waiting after this process has gone,
+  which a child run unattended need not. A directory the child cannot enter
+  fails the spawn. POSIX and Windows (`lpCurrentDirectory`) alike (nib-code
+  ask run-stdio-stderr).
+
+### Changed
+
+- **A `ptr` passed to an Aether function's `string` parameter is E0202.**
+  The callee read whatever the pointer pointed at as text: nib passed a parsed
+  JSON node to `long_of(text: string)`, which compiled and read garbage. A
+  `ptr` bound to a `string` local was already refused; the argument now is
+  too, naming the parameter and the typed accessor (`map.get_string`,
+  `list.get_string`, `string.from_ptr`). `null`, a `string.*` producer and an
+  `extern`'s `string` parameter still take one. The in-tree callers it found
+  (std.spec's reports, std.clapae, std.schema, liquid, tinyweb, collate,
+  vkgen and some tests) read their strings with the typed accessors now;
+  `schema.parse` reports an input value that is not a string, and
+  `clapae.parse` copies the process's argv into strings (nib-code ask
+  ptr-passed-as-string).
+
+### Fixed
+
+- **`xs.push(f())` keeps the strings of the struct `f` returns.** The
+  statement collected the call's result as a temporary of its own and
+  destroyed it once done, though the new element had taken it, so the element
+  read freed strings (`[x hi]` printed `[]`). Binding the result to a local
+  first, or pushing a struct literal, was unaffected (nib-code ask
+  push-call-result-string).
+
+- **A typed local of a qualified type's slice or array parses.** `m.P[] xs =
+  []` and `m.P[4] ps` stopped at the `[` with "Expected statement in block":
+  the statement dispatcher took a qualified type name followed by `[` for an
+  expression, though `P[] xs = []` and a `m.P[]` parameter or field were
+  accepted (nib-code ask qualified-slice-local).
+
+- **Qualified types resolve when two modules share a last segment.** With
+  `a.timing` and `b.timing` in one program, every `timing.T` was refused
+  ("unknown module 'timing' in the type 'timing.Call'"), even in a file that
+  imports only one of them: the check of a type's qualifier matched it
+  against the module's namespace, which the collision had made `a_timing`,
+  not against what the file writes. Qualified calls were fixed in #2268
+  (nib-code ask module-basename-collision).
+
+- **`ipc.write` / `ipc.write_some` from a worker thread no longer end the
+  process with SIGPIPE.** A write that filled a child's stdin pipe and was
+  waiting when the child was killed took SIGPIPE and the process died (141),
+  though the docs promise an error. On Linux the interrupted write returned
+  its partial count and still raised the signal, which std.ipc took back only
+  on an EPIPE return; on macOS the signal is the process's, not the writing
+  thread's, so blocking it on that thread did not hold it off. std.ipc now
+  takes back any SIGPIPE its write raised, and on macOS sets the descriptor's
+  `F_SETNOSIGPIPE` first; no process-wide signal state is touched (nib-code
+  ask ipc-write-sigpipe).
+
+- **A failing std.spec suite exits non-zero even when `main()` drops the
+  verdict.** `spec.run_summary(fw)` as `main()`'s last statement fell off the
+  end and exited 0, so `ae run`, `ae test` and any harness reading the status
+  took the failing suite for a passing one. `run_summary` now notes a failure
+  with the runtime (`aether_note_failure`), and the generated `main()` exits
+  with it where it would have exited 0 (`aether_main_status`). A non-zero
+  status `main()` returns, or an `exit()`, is kept.
+
+- **`AETHER_CFLAGS_EXTRA` and `AETHER_LDFLAGS_EXTRA` are read.** Three ASan
+  regression tests (`closure_*_no_uaf`) set them to build their probes with
+  `-fsanitize=address`, but `ae` never read either, so the probes built
+  uninstrumented and the use-after-free they guard could not be reported.
+  `ae build`, `ae run` and `ae test` now add them to the compile and the link,
+  after `aether.toml`'s `[build]` flags and in the build cache's key
+  (docs/build-system.md). The three tests fall back to a plain build where the
+  toolchain has no ASan.
+
 ## [0.913.0]
 
 ### Added
