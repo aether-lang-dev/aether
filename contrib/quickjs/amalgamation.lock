@@ -13,6 +13,6 @@
 # To bump: change the three values, run the fetch script, run
 # contrib/quickjs/test_quickjs.ae, and update the version in
 # contrib/quickjs/README.md.
-QUICKJS_VERSION=0.17.0
-QUICKJS_URL=https://github.com/quickjs-ng/quickjs/releases/download/v0.17.0/quickjs-amalgam.zip
-QUICKJS_SHA256=a0955463c74809173a253ff87365095e6972e8b171cfb6aa8a1e781adf35cfeb
+QUICKJS_VERSION=0.18.0
+QUICKJS_URL=https://github.com/quickjs-ng/quickjs/releases/download/v0.18.0/quickjs-amalgam.zip
+QUICKJS_SHA256=6c05066a6b62b483e2ba0f83d7a16688c6958182b214bfd693529434cef84a9e

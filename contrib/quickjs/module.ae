@@ -1,13 +1,14 @@
 // contrib.quickjs — QuickJS (quickjs-ng), embedded: modern JavaScript
 // (ES2023: classes, async/await, Map/Set, ?., ??, modules) run inside an
-// Aether program, with per-entry time limits and a memory cap.
+// Aether program, with a host-controlled interrupt (a deadline, cancel and
+// stop cells) and a memory cap.
 // Import with: import contrib.quickjs
 //
 //   import contrib.quickjs
 //
 //   main() {
 //       q = quickjs.runtime(8192, 0)          // 8 MB heap cap, default stack
-//       quickjs.set_time_limit(q, 100)        // each entry: at most 100 ms
+//       quickjs.set_deadline_ns(q, quickjs.now_ns() + 100000000)   // stop JS 100 ms from now
 //       add = quickjs.function(q, "add", 2, |q: ptr, this_h: int, args: int| {
 //           return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
 //       })
@@ -42,20 +43,30 @@ import std.string
 @link("-lm")
 
 exports(
-    runtime, dispose, set_time_limit, last_error, handles, memory_used,
-    eval, eval_module, call, run_jobs,
+    runtime, dispose, last_error, handles, memory_used,
+    now_ns, set_deadline_ns, clear_deadline, deadline_ns, set_cancel_cell, set_stop_cell,
+    interrupted, clear_interrupted,
+    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP,
+    eval, eval_async, eval_module, call, run_jobs,
     function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
     parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
     get, set, get_index, set_index, length, keys,
     arg, arg_int, arg_float, arg_string, arg_bool, arg_count,
-    new_promise,
+    new_promise, promise_state, promise_result,
+    PROMISE_NOT_A_PROMISE, PROMISE_PENDING, PROMISE_FULFILLED, PROMISE_REJECTED,
     bytes_of, arg_bytes, new_uint8array
 )
 
 extern qjs_new(memory_kb: int, stack_kb: int) -> ptr
 extern qjs_free(q: ptr)
-extern qjs_set_time_limit(q: ptr, ms: int)
+extern qjs_now_ns() -> long
+extern qjs_set_deadline_ns(q: ptr, ns: long)
+extern qjs_deadline_ns(q: ptr) -> long
+extern qjs_set_cancel_cell(q: ptr, cell: ptr)
+extern qjs_set_stop_cell(q: ptr, cell: ptr)
+extern qjs_interrupted(q: ptr) -> int
+extern qjs_clear_interrupted(q: ptr)
 extern qjs_error(q: ptr) -> string
 extern qjs_handles(q: ptr) -> int
 extern qjs_memory_used(q: ptr) -> long
@@ -78,7 +89,9 @@ extern qjs_object(q: ptr) -> int
 extern qjs_array(q: ptr) -> int
 extern qjs_parse_json(q: ptr, text: string) -> int
 extern qjs_to_json(q: ptr, h: int) -> string
-extern qjs_to_string(q: ptr, h: int) -> string
+extern qjs_to_string(q: ptr, h: int) -> int
+extern qjs_scratch(q: ptr) -> ptr
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 extern qjs_to_int(q: ptr, h: int) -> int
 extern qjs_to_float(q: ptr, h: int) -> float
 extern qjs_to_bool(q: ptr, h: int) -> int
@@ -90,6 +103,8 @@ extern qjs_set_index(q: ptr, obj: int, i: int, v: int) -> int
 extern qjs_length(q: ptr, obj: int) -> int
 extern qjs_keys(q: ptr, obj: int) -> int
 extern qjs_new_promise(q: ptr) -> int
+extern qjs_promise_state(q: ptr, h: int) -> int
+extern qjs_promise_result(q: ptr, h: int) -> int
 extern qjs_u8_length(q: ptr, h: int) -> int
 extern qjs_u8_data(q: ptr, h: int) -> ptr
 extern qjs_new_uint8array(q: ptr, data: ptr, n: int) -> int
@@ -104,10 +119,66 @@ runtime(memory_kb: int, stack_kb: int) -> ptr { return qjs_new(memory_kb, stack_
 // Frees the runtime, every handle still held, and the host closures.
 dispose(q: ptr) { qjs_free(q) }
 
-// Milliseconds each entry into JS (an eval, a call, a run of the job queue)
-// may take before it is stopped with "InternalError: interrupted"; 0 for no
-// limit.
-set_time_limit(q: ptr, ms: int) { qjs_set_time_limit(q, ms) }
+// ---- interrupting JavaScript ----
+//
+// The host decides when JavaScript stops, per runtime: a deadline it sets and
+// moves itself, and two std.sync cells any thread may set. Running JS that
+// meets one is stopped with "InternalError: interrupted", which a script
+// cannot catch, whatever entered it: an eval, a call, run_jobs, or a
+// conversion that runs a getter, valueOf or toString (to_string, to_int,
+// get, ...). The runtime stays usable. QuickJS checks every few thousand
+// operations, so a busy loop stops within microseconds of a cell being set;
+// a single long native call (a huge regexp, say) is not interrupted midway.
+//
+// Threads: the cells may be set from any thread (Esc, SIGINT, a watchdog);
+// they are read with an acquire load. Everything else here, the deadline
+// included, belongs to the thread that runs the runtime.
+
+// What interrupted() says stopped JavaScript.
+const INTERRUPTED_NONE = 0
+const INTERRUPTED_DEADLINE = 1
+const INTERRUPTED_CANCEL = 2
+const INTERRUPTED_STOP = 3
+
+// Monotonic nanoseconds, the clock set_deadline_ns is on: the same clock as
+// std.os's now_monotonic_ns (CLOCK_MONOTONIC; QueryPerformanceCounter on
+// Windows), without importing std.os.
+now_ns() -> long { return qjs_now_ns() }
+
+// Stop JavaScript that runs at or after `ns` (on now_ns's clock): in this
+// entry and in every later one, until the host moves or clears it. It is not
+// reset per entry, so a budget of JS time across many entries is the host
+// setting `now_ns() + remaining` when JS starts running and taking the time
+// spent off `remaining` when it stops (clear_deadline while it waits on
+// something else). 0 means no deadline.
+set_deadline_ns(q: ptr, ns: long) { qjs_set_deadline_ns(q, ns) }
+
+// No deadline (as set_deadline_ns(q, 0)).
+clear_deadline(q: ptr) { qjs_set_deadline_ns(q, 0) }
+
+// The deadline set now, 0 for none.
+deadline_ns(q: ptr) -> long { return qjs_deadline_ns(q) }
+
+// A std.sync cell (sync.atomic_new) whose nonzero value stops JavaScript: a
+// cancel (Esc, SIGINT). null for none. The cell stays the host's: free it
+// after dispose, or after setting null here.
+set_cancel_cell(q: ptr, cell: ptr) { qjs_set_cancel_cell(q, cell) }
+
+// A second cell that stops JavaScript, reported as INTERRUPTED_STOP rather
+// than a cancel (a replay that diverged from its recording, say, whose
+// outcome is what the script threw, not "canceled"). Owned as the cancel
+// cell is.
+set_stop_cell(q: ptr, cell: ptr) { qjs_set_stop_cell(q, cell) }
+
+// Why JavaScript was first stopped since the runtime was made or
+// clear_interrupted: INTERRUPTED_NONE (0), INTERRUPTED_DEADLINE (1),
+// INTERRUPTED_CANCEL (2) or INTERRUPTED_STOP (3). When several hold at once
+// a cancel is reported over a deadline, and both over a stop. It stays put
+// while the host reads errors and values afterwards.
+interrupted(q: ptr) -> int { return qjs_interrupted(q) }
+
+// Forget the reason, before reusing the runtime for the next piece of work.
+clear_interrupted(q: ptr) { qjs_clear_interrupted(q) }
 
 // The text of the last exception, with its stack.
 last_error(q: ptr) -> string { return string.copy(qjs_error(q)) }
@@ -127,7 +198,29 @@ eval(q: ptr, code: string, filename: string) -> (int, string) {
     return h, ""
 }
 
-// Run a module (import/export, top-level await); its value is a promise.
+// Run a script that may `await` at top level, and keep its completion value
+// (what `eval` would give): (a promise, "") or (0, the exception's text) for
+// a script that does not parse or is interrupted before its first await. The
+// promise settles, as run_jobs runs what
+// the awaits queued, to an object { value: <the completion value> }, or is
+// rejected with what the script threw, so a throw before the first await is a
+// rejected promise too. An interrupt is never a rejection: after the first
+// await, run_jobs reports it and the promise stays pending. promise_state and promise_result read it:
+//
+//   p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+//   _n, _e = quickjs.run_jobs(q)
+//   if quickjs.promise_state(q, p) == quickjs.PROMISE_FULFILLED {
+//       r, _e2 = quickjs.promise_result(q, p)     // { value: 42 }
+//       v, _e3 = quickjs.get(q, r, "value")
+//   }
+eval_async(q: ptr, code: string, filename: string) -> (int, string) {
+    h = qjs_eval(q, code, filename, 4)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// Run a module (import/export, top-level await); its value is a promise
+// (a module has no completion value: eval_async keeps a script's).
 eval_module(q: ptr, code: string, filename: string) -> (int, string) {
     h = qjs_eval(q, code, filename, 1)
     if h < 0 { return 0, string.copy(qjs_error(q)) }
@@ -165,7 +258,11 @@ throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind
 
 // Throw again, from a host function, the exception a nested call or eval
 // just failed with: the same value, so its type, message and stack reach
-// the script intact. `return quickjs.rethrow(q)`.
+// the script intact. `return quickjs.rethrow(q)`. When the failure was the
+// host's own (a call of something not a function), it throws the error the
+// text names ("TypeError: not a function" is a TypeError). An
+// InternalError (a full heap, a host function that failed without
+// throwing) cannot be caught by the script: quickjs-ng makes them so.
 rethrow(q: ptr) -> int { return qjs_rethrow(q) }
 
 // globalThis[name] = v; v stays held by its handle.
@@ -207,7 +304,16 @@ parse_json(q: ptr, text: string) -> (int, string) {
 
 // JSON.stringify(h) ("" if it has no JSON form).
 to_json(q: ptr, h: int) -> string { return string.copy(qjs_to_json(q, h)) }
-to_string(q: ptr, h: int) -> string { return string.copy(qjs_to_string(q, h)) }
+
+// String(h): (the string, "") or ("", the exception's text) when the
+// conversion threw (a Symbol, a throwing toString) or was interrupted, so an
+// empty string is told apart from a failure. NUL bytes in the string are kept.
+to_string(q: ptr, h: int) -> (string, string) {
+    n = qjs_to_string(q, h)
+    if n < 0 { return "", string.copy(qjs_error(q)) }
+    return string_new_with_length(qjs_scratch(q), n), ""
+}
+
 to_int(q: ptr, h: int) -> int { return qjs_to_int(q, h) }
 to_float(q: ptr, h: int) -> float { return qjs_to_float(q, h) }
 to_bool(q: ptr, h: int) -> int { return qjs_to_bool(q, h) }
@@ -269,9 +375,11 @@ arg_float(q: ptr, args: int, i: int) -> float {
     return d
 }
 
+// String(argument i); "" when it has none (a Symbol, a throwing toString):
+// to_string(q, arg(...)) tells those apart.
 arg_string(q: ptr, args: int, i: int) -> string {
     h = qjs_get_index(q, args, i)
-    s = string.copy(qjs_to_string(q, h))
+    s, _err = to_string(q, h)
     qjs_release(q, h)
     return s
 }
@@ -323,3 +431,23 @@ new_uint8array(q: ptr, data: ptr, n: int) -> int { return qjs_new_uint8array(q, 
 // `promise`, and call `resolve` or `reject` when the answer arrives (say,
 // from an actor), then run_jobs so its awaits carry on.
 new_promise(q: ptr) -> int { return qjs_new_promise(q) }
+
+// What promise_state says a handle is.
+const PROMISE_NOT_A_PROMISE = -1
+const PROMISE_PENDING = 0
+const PROMISE_FULFILLED = 1
+const PROMISE_REJECTED = 2
+
+// Whether h is a promise and how it stands: PROMISE_NOT_A_PROMISE (-1),
+// PROMISE_PENDING (0), PROMISE_FULFILLED (1) or PROMISE_REJECTED (2). Runs no
+// JavaScript, so it is safe to ask between run_jobs calls.
+promise_state(q: ptr, h: int) -> int { return qjs_promise_state(q, h) }
+
+// What a settled promise holds: its value if it was fulfilled, the reason
+// (usually an Error) if it was rejected, as (handle, ""); (0, error) when h
+// is not a promise or is still pending. Release the handle.
+promise_result(q: ptr, h: int) -> (int, string) {
+    r = qjs_promise_result(q, h)
+    if r < 0 { return 0, string.copy(qjs_error(q)) }
+    return r, ""
+}

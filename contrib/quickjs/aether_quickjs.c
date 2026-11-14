@@ -26,6 +26,13 @@
  *
  * Handles are ints >= 1; -1 reports a JS exception, whose text qjs_error
  * gives. A runtime is used from one thread at a time.
+ *
+ * Interrupts are the host's: each runtime holds an absolute deadline on the
+ * monotonic clock (qjs_now_ns), which the host sets and moves itself and
+ * which no entry resets, and up to two std.sync cells, cancel and stop, that
+ * any thread may set. QuickJS polls interrupt_ while JavaScript runs, on the
+ * runtime's own thread; it reads only this runtime's fields, the cells with
+ * an acquire load. There is no process-wide state.
  */
 #include "amalgamation/quickjs-amalgam.c"
 
@@ -41,6 +48,11 @@
 /* Layout of the compiler's _AeClosure ({fn, env}); called as fn(env, args...). */
 typedef struct { void *fn; void *env; } AeQjsClosure;
 extern void aether_closure_env_free(void *env);
+/* std.sync's acquire load of a cell (std/sync/aether_sync.c). */
+extern int64_t aether_sync_atomic_load(void *cell);
+
+/* qjs_interrupted's answers: why JavaScript was stopped. */
+enum { QJS_INTERRUPT_NONE = 0, QJS_INTERRUPT_DEADLINE = 1, QJS_INTERRUPT_CANCEL = 2, QJS_INTERRUPT_STOP = 3 };
 
 typedef struct AeQjs {
     JSRuntime *rt;
@@ -53,34 +65,52 @@ typedef struct AeQjs {
     int live;               /* handles held, for leak checks */
     AeQjsClosure *fns;      /* host-function closures, by index */
     int nfns, capfns;
-    int64_t limit_ms;       /* per entry; 0 = none */
-    int64_t deadline_ms;    /* now + limit_ms at the current entry */
+    int64_t deadline_ns;    /* absolute, on qjs_now_ns's clock; 0 = none */
+    void *cancel_cell;      /* std.sync cell, the host's; nonzero stops JS */
+    void *stop_cell;        /* likewise, reported apart from a cancel */
+    int interrupted;        /* the first QJS_INTERRUPT_* since cleared */
     char *err;              /* the last exception, as text */
     JSValue exc;            /* ... and as the value itself, for qjs_rethrow */
     int has_exc;
     char *scratch;          /* the last string handed out */
 } AeQjs;
 
-static int64_t now_ms_(void) {
+/* Monotonic nanoseconds: the clock deadlines are on. The same sources as
+ * std.os's now_monotonic_ns (CLOCK_MONOTONIC; QueryPerformanceCounter on
+ * Windows), so the two agree, without this module needing std.os. */
+int64_t qjs_now_ns(void) {
 #ifdef _WIN32
-    return (int64_t)GetTickCount64();
+    LARGE_INTEGER f, c;
+    if (!QueryPerformanceFrequency(&f) || f.QuadPart <= 0 || !QueryPerformanceCounter(&c)) return 0;
+    /* Split, so ticks * 1e9 cannot overflow on a long uptime. */
+    int64_t freq = (int64_t)f.QuadPart, ticks = (int64_t)c.QuadPart;
+    return (ticks / freq) * 1000000000 + ((ticks % freq) * 1000000000) / freq;
 #else
     struct timespec ts;
-    clock_gettime(CLOCK_MONOTONIC, &ts);
-    return (int64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) != 0) return 0;
+    return (int64_t)ts.tv_sec * 1000000000 + (int64_t)ts.tv_nsec;
 #endif
 }
 
-static int interrupt_(JSRuntime *rt, void *opaque) {
+/* QuickJS's interrupt poll (every few thousand operations, on the thread
+ * running the JavaScript). A cancel is reported over a passed deadline, and
+ * both over a stop; the first reason sticks until qjs_clear_interrupted. */
+static int interrupt_(JSContext *ctx, void *opaque) {
     AeQjs *q = (AeQjs *)opaque;
-    (void)rt;
-    return q->deadline_ms != 0 && now_ms_() > q->deadline_ms;
+    int why = QJS_INTERRUPT_NONE;
+    (void)ctx;
+    if (q->cancel_cell && aether_sync_atomic_load(q->cancel_cell) != 0) why = QJS_INTERRUPT_CANCEL;
+    else if (q->deadline_ns != 0 && qjs_now_ns() >= q->deadline_ns) why = QJS_INTERRUPT_DEADLINE;
+    else if (q->stop_cell && aether_sync_atomic_load(q->stop_cell) != 0) why = QJS_INTERRUPT_STOP;
+    if (why == QJS_INTERRUPT_NONE) return 0;
+    if (q->interrupted == QJS_INTERRUPT_NONE) q->interrupted = why;
+    return 1;
 }
 
-/* Every entry into JS: a fresh deadline, and the stack top where we are now
- * (the host may call in from different depths). */
+/* Every entry into JS: the stack top where we are now (the host may call in
+ * from different depths). The interrupt needs nothing per entry: the
+ * deadline and the cells are the host's, and hold across entries. */
 static void enter_(AeQjs *q) {
-    q->deadline_ms = q->limit_ms > 0 ? now_ms_() + q->limit_ms : 0;
     JS_UpdateStackTop(q->rt);
 }
 
@@ -223,10 +253,20 @@ void qjs_free(void *qp) {
     free(q);
 }
 
-/* Milliseconds each entry into JS (an eval, a call, a run of the job queue)
- * may run before it is interrupted with "InternalError: interrupted"; 0 for
- * no limit. */
-void qjs_set_time_limit(void *qp, int ms) { ((AeQjs *)qp)->limit_ms = ms > 0 ? ms : 0; }
+/* JavaScript running at or after ns (qjs_now_ns's clock) is stopped with
+ * "InternalError: interrupted", in this entry and every later one until the
+ * host moves or clears it; 0 for no deadline. Set by the runtime's thread. */
+void qjs_set_deadline_ns(void *qp, int64_t ns) { ((AeQjs *)qp)->deadline_ns = ns; }
+int64_t qjs_deadline_ns(void *qp) { return ((AeQjs *)qp)->deadline_ns; }
+
+/* A std.sync cell whose nonzero value stops JavaScript (NULL for none). The
+ * cell is the host's: it must outlive the runtime or be unset first. */
+void qjs_set_cancel_cell(void *qp, void *cell) { ((AeQjs *)qp)->cancel_cell = cell; }
+void qjs_set_stop_cell(void *qp, void *cell) { ((AeQjs *)qp)->stop_cell = cell; }
+
+/* Why JavaScript was first interrupted since the last clear: a QJS_INTERRUPT_*. */
+int qjs_interrupted(void *qp) { return ((AeQjs *)qp)->interrupted; }
+void qjs_clear_interrupted(void *qp) { ((AeQjs *)qp)->interrupted = QJS_INTERRUPT_NONE; }
 
 /* The text of the last exception (empty if none). */
 const char *qjs_error(void *qp) { AeQjs *q = (AeQjs *)qp; return q && q->err ? q->err : ""; }
@@ -243,11 +283,14 @@ int64_t qjs_memory_used(void *qp) {
 
 /* ---- running code -------------------------------------------------------- */
 
-/* flags: 1 = a module (its result is a promise), 2 = strict. */
+/* flags: 1 = a module (its result is a promise), 2 = strict, 4 = a global
+ * script with top-level await (JS_EVAL_FLAG_ASYNC): its result is a promise
+ * that settles to { value: <the script's completion value> }. */
 int qjs_eval(void *qp, const char *code, const char *filename, int flags) {
     AeQjs *q = (AeQjs *)qp;
     int f = (flags & 1) ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
     if (flags & 2) f |= JS_EVAL_FLAG_STRICT;
+    if ((flags & 4) && !(flags & 1)) f |= JS_EVAL_FLAG_ASYNC;
     enter_(q);
     return result_(q, JS_Eval(q->ctx, code, strlen(code), filename, f));
 }
@@ -259,6 +302,7 @@ int qjs_call(void *qp, int fn, int this_h, int args) {
     if (!JS_IsFunction(q->ctx, f)) { set_err_(q, "TypeError: not a function"); return -1; }
     int64_t n = 0;
     JSValue *argv = NULL;
+    enter_(q);   /* reading args can run getters */
     if (args > 0) {
         JSValueConst a = get_(q, args);
         if (JS_GetLength(q->ctx, a, &n) < 0) return fail_(q);
@@ -267,7 +311,6 @@ int qjs_call(void *qp, int fn, int this_h, int args) {
         if (!argv) { set_err_(q, "InternalError: out of memory"); return -1; }
         for (int64_t i = 0; i < n; i++) argv[i] = JS_GetPropertyUint32(q->ctx, a, (uint32_t)i);
     }
-    enter_(q);
     JSValue r = JS_Call(q->ctx, f, get_(q, this_h), (int)n, (JSValueConst *)argv);
     for (int64_t i = 0; i < n; i++) JS_FreeValue(q->ctx, argv[i]);
     free(argv);
@@ -367,17 +410,30 @@ int qjs_throw(void *qp, const char *kind, const char *msg) {
 
 /* Throw the last exception again, the same value (its type, message and
  * stack), from inside a host function whose nested qjs_call or qjs_eval
- * failed; returns -1, which the host function returns. With no value kept
- * (the heap was full, or the error was the host's), an InternalError with
- * its text. */
+ * failed; returns -1, which the host function returns. With no value kept,
+ * the error was the host's ("TypeError: not a function") or the heap was
+ * full ("InternalError: out of memory ..."): the error its text names, with
+ * the rest as the message, or an Error with the whole text. Since
+ * quickjs-ng 0.18 an InternalError cannot be caught by the script, which
+ * is what a full heap should be; a host refusal stays catchable. */
 int qjs_rethrow(void *qp) {
     AeQjs *q = (AeQjs *)qp;
     if (q->has_exc) {
         JS_Throw(q->ctx, JS_DupValue(q->ctx, q->exc));
-    } else {
-        JS_ThrowInternalError(q->ctx, "%s", q->err ? q->err : "error");
+        return -1;
     }
-    return -1;
+    const char *text = q->err && *q->err ? q->err : "Error: error";
+    static const char *const kinds[] = { "TypeError", "RangeError", "SyntaxError", "ReferenceError" };
+    for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+        size_t n = strlen(kinds[i]);
+        if (strncmp(text, kinds[i], n) == 0 && text[n] == ':' && text[n + 1] == ' ')
+            return qjs_throw(q, kinds[i], text + n + 2);
+    }
+    if (strncmp(text, "InternalError: ", 15) == 0) {
+        JS_ThrowInternalError(q->ctx, "%s", text + 15);
+        return -1;
+    }
+    return qjs_throw(q, "Error", text);
 }
 
 /* ---- values -------------------------------------------------------------- */
@@ -425,20 +481,34 @@ const char *qjs_to_json(void *qp, int h) {
     return out;
 }
 
-/* String(h); valid until the next string this runtime hands out. */
-const char *qjs_to_string(void *qp, int h) {
+/* String(h), as UTF-8 in the runtime's scratch (qjs_scratch, valid until the
+ * next string this runtime hands out): its byte count, which may be 0 and may
+ * count NUL bytes, or -1 with qjs_error when the conversion threw (a Symbol,
+ * a throwing or interrupted toString) or there was no memory for it. */
+int qjs_to_string(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
+    enter_(q);
     size_t n;
     const char *c = JS_ToCStringLen(q->ctx, &n, get_(q, h));
-    if (!c) { fail_(q); return ""; }
-    const char *out = hand_out_(q, c, n);
+    if (!c) return fail_(q);
+    if (n > (size_t)0x7fffffff) {
+        JS_FreeCString(q->ctx, c);
+        set_err_(q, "RangeError: string too long");
+        return -1;
+    }
+    hand_out_(q, c, n);
     JS_FreeCString(q->ctx, c);
-    return out;
+    if (!q->scratch) { set_err_(q, "InternalError: out of memory"); return -1; }
+    return (int)n;
 }
+
+/* The bytes qjs_to_string last handed out. */
+const void *qjs_scratch(void *qp) { return ((AeQjs *)qp)->scratch; }
 
 int qjs_to_int(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
     int32_t n = 0;
+    enter_(q);
     if (JS_ToInt32(q->ctx, &n, get_(q, h)) < 0) fail_(q);
     return n;
 }
@@ -446,12 +516,14 @@ int qjs_to_int(void *qp, int h) {
 double qjs_to_float(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
     double d = 0;
+    enter_(q);
     if (JS_ToFloat64(q->ctx, &d, get_(q, h)) < 0) fail_(q);
     return d;
 }
 
 int qjs_to_bool(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
+    enter_(q);
     int b = JS_ToBool(q->ctx, get_(q, h));
     if (b < 0) { fail_(q); return 0; }
     return b;
@@ -509,6 +581,7 @@ int qjs_set_index(void *qp, int obj, int i, int val) {
 int qjs_length(void *qp, int obj) {
     AeQjs *q = (AeQjs *)qp;
     int64_t n = 0;
+    enter_(q);
     if (JS_GetLength(q->ctx, get_(q, obj), &n) < 0) return fail_(q);
     return (int)n;
 }
@@ -518,6 +591,7 @@ int qjs_keys(void *qp, int obj) {
     AeQjs *q = (AeQjs *)qp;
     JSPropertyEnum *tab = NULL;
     uint32_t len = 0;
+    enter_(q);
     if (JS_GetOwnPropertyNames(q->ctx, &tab, &len, get_(q, obj), JS_GPN_STRING_MASK | JS_GPN_ENUM_ONLY) < 0)
         return fail_(q);
     JSValue arr = JS_NewArray(q->ctx);
@@ -542,6 +616,25 @@ int qjs_new_promise(void *qp) {
     JS_SetPropertyStr(q->ctx, o, "resolve", funcs[0]);
     JS_SetPropertyStr(q->ctx, o, "reject", funcs[1]);
     return put_(q, o);
+}
+
+/* -1 when h is not a promise, else JS_PROMISE_PENDING (0), FULFILLED (1) or
+ * REJECTED (2). Runs no JavaScript. */
+int qjs_promise_state(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!valid_(q, h)) return -1;
+    return (int)JS_PromiseState(q->ctx, q->vals[h]);
+}
+
+/* The value a settled promise holds (its fulfilment value, or the reason it
+ * was rejected with), as a new handle; -1 with qjs_error when h is not a
+ * promise or is still pending. Runs no JavaScript. */
+int qjs_promise_result(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    int st = valid_(q, h) ? (int)JS_PromiseState(q->ctx, q->vals[h]) : -1;
+    if (st < 0) { set_err_(q, "TypeError: not a promise"); return -1; }
+    if (st == JS_PROMISE_PENDING) { set_err_(q, "TypeError: the promise is still pending"); return -1; }
+    return put_(q, JS_PromiseResult(q->ctx, q->vals[h]));
 }
 
 /* ---- bytes ---------------------------------------------------------------- */

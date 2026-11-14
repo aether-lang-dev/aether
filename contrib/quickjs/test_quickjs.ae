@@ -2,7 +2,8 @@
 //
 // Each case runs real JavaScript in a real runtime: modern syntax passed
 // through untouched, host functions both ways, exceptions with their stack,
-// the time limit and memory cap, JSON, a script awaiting a promise Aether
+// the interrupt (a deadline, cancel and stop cells set from another thread)
+// and the memory cap, JSON, a script awaiting a promise Aether
 // settles later, and the absence of quickjs-libc. Every case releases what
 // it took, and the last checks the runtime holds no handles.
 //
@@ -13,6 +14,7 @@ import std.bytes
 import std.mem
 import std.spec
 import std.string
+import std.sync
 
 extern exit(code: int)
 
@@ -32,14 +34,63 @@ sum_at(p: ptr, n: int) -> int {
     return t
 }
 
+// A deadline 20 s off, so a case whose cell failed to stop JavaScript fails
+// with the wrong reason instead of hanging the run.
+guard(q: ptr) { quickjs.set_deadline_ns(q, quickjs.now_ns() + 20000000000) }
+
 // The promise a host function handed a script, for a later case to settle.
 var pending_: int = 0
+
+// Set by the `mark` host function once a script is running, for the actor
+// that sets a cell from another thread.
+var started_: ptr = null
+
+// Waits (on its own scheduler thread) until `started` is set, then records
+// the time in `at` and sets `cell`: a cancel or stop from another thread.
+// Bounded: after 10 s it sets the cell anyway.
+message Arm { started: ptr, cell: ptr, at: ptr }
+
+actor Setter {
+    receive {
+        Arm(started, cell, at) -> {
+            limit = quickjs.now_ns() + 10000000000
+            spins = 0
+            while sync.atomic_load(started) == 0 && quickjs.now_ns() < limit {
+                spins = spins + 1
+            }
+            sync.atomic_store(at, quickjs.now_ns())
+            sync.atomic_store(cell, 1)
+        }
+    }
+}
+
+// Runs `code` (which calls mark()) while another thread sets `cell` once it
+// started: the reason interrupted() gives, and how long JS ran on after the
+// cell was set, in ns. A 30 s deadline keeps a lost actor from hanging the
+// run: it would show as INTERRUPTED_DEADLINE.
+stopped_from_another_thread(q: ptr, cell: @keep ptr, code: string) -> (int, long, string) {
+    sync.atomic_store(started_, 0)
+    sync.atomic_store(cell, 0)
+    at = sync.atomic_new(0)
+    quickjs.set_deadline_ns(q, quickjs.now_ns() + 30000000000)
+    setter = spawn(Setter())
+    setter ! Arm { started: started_, cell: cell, at: at }
+    _h, err = quickjs.eval(q, code, "spin.js")
+    stopped = quickjs.now_ns()
+    lag = stopped - sync.atomic_load(at)
+    why = quickjs.interrupted(q)
+    quickjs.clear_deadline(q)
+    quickjs.clear_interrupted(q)
+    sync.atomic_free(at)
+    return why, lag, err
+}
 
 eval_string(q: ptr, code: string) -> string {
     h, err = quickjs.eval(q, code, "test.js")
     if err != "" { return "ERROR: ${err}" }
-    s = quickjs.to_string(q, h)
+    s, serr = quickjs.to_string(q, h)
     quickjs.release(q, h)
+    if serr != "" { return "ERROR: ${serr}" }
     return s
 }
 
@@ -113,7 +164,8 @@ main() {
             _s2 = quickjs.set_index(q, args, 1, seven)
             r, cerr = quickjs.call(q, f, 0, args)
             spec.assert_str_eq(cerr, "", "called")
-            spec.assert_str_eq(quickjs.to_string(q, r), "x-7", "its result")
+            rs, _rse = quickjs.to_string(q, r)
+            spec.assert_str_eq(rs, "x-7", "its result")
             quickjs.release(q, r)
             quickjs.release(q, seven)
             quickjs.release(q, x)
@@ -139,7 +191,7 @@ main() {
             _h, err = quickjs.eval(q, "each(function () { null.x })", "t.js")
             spec.assert_contains(err, "TypeError", "uncaught, it reaches the host as itself")
         }
-        spec.it("with no exception value, rethrow raises an InternalError with the text") callback {
+        spec.it("with no exception value, rethrow raises the error the host's text names") callback {
             bad = quickjs.function(q, "bad", 0, | q: ptr, this_h: int, args: int | {
                     notfn = quickjs.new_int(q, 1)
                     _r, err = quickjs.call(q, notfn, 0, 0)
@@ -148,18 +200,21 @@ main() {
                 })
             quickjs.set_global(q, "bad", bad)
             quickjs.release(q, bad)
-            spec.assert_str_eq(eval_string(q, "try { bad() } catch (e) { e.name + ': ' + e.message }"),
-                "InternalError: TypeError: not a function", "the host's own error")
+            spec.assert_str_eq(eval_string(q, "try { bad() } catch (e) { (e instanceof TypeError) + ' ' + e.name + ': ' + e.message }"),
+                "true TypeError: not a function", "the host's own error, catchable")
         }
     }
 
     spec.describe(fw, "contrib.quickjs: limits") {
-        spec.it("stops a runaway script at the time limit, and keeps working") callback {
-            quickjs.set_time_limit(q, 50)
-            _h, err = quickjs.eval(q, "for (;;) {}", "loop.js")
-            spec.assert_contains(err, "interrupted", "stopped")
+        spec.it("stops a runaway script at the deadline, and keeps working") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            _h, err = quickjs.eval(q, "try { for (;;) {} } catch (e) { 'caught' }", "loop.js")
+            spec.assert_contains(err, "interrupted", "stopped, and the script could not catch it")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_NONE, "cleared")
             spec.assert_str_eq(eval_string(q, "6 * 7"), "42", "the runtime still runs code")
-            quickjs.set_time_limit(q, 0)
         }
         spec.it("refuses to grow past the memory cap") callback {
             small = quickjs.runtime(1024, 0)
@@ -173,12 +228,174 @@ main() {
         }
     }
 
+    spec.describe(fw, "contrib.quickjs: interrupts") {
+        started_ = sync.atomic_new(0)
+        mark = quickjs.function(q, "mark", 0, | q: ptr, this_h: int, args: int | {
+                sync.atomic_store(started_, 1)
+                return 0
+            })
+        quickjs.set_global(q, "mark", mark)
+        quickjs.release(q, mark)
+
+        spec.it("a cancel cell set from another thread stops a busy loop at once") callback {
+            cancel = sync.atomic_new(0)
+            quickjs.set_cancel_cell(q, cancel)
+            why, lag, err = stopped_from_another_thread(q, cancel, "mark(); for (;;) {}")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_eq(why, quickjs.INTERRUPTED_CANCEL, "by the cancel")
+            spec.assert_true(lag >= 0, "after the cell was set")
+            spec.assert_true(lag < 500000000, "within half a second of it (${lag} ns)")
+            // Still set: every entry stops, until the host clears the cell.
+            guard(q)
+            _h2, err2 = quickjs.eval(q, "for (;;) {}", "again.js")
+            spec.assert_contains(err2, "interrupted", "a set cell stops the next entry too")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "the cancel again")
+            quickjs.clear_deadline(q)
+            sync.atomic_store(cancel, 0)
+            quickjs.clear_interrupted(q)
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "cleared, the runtime runs code")
+            quickjs.set_cancel_cell(q, null)
+            sync.atomic_free(cancel)
+        }
+        spec.it("the deadline is the host's, cumulative across entries") callback {
+            // Ten entries of 100 ms against a 350 ms deadline: a limit reset
+            // per entry would never fire; this one stops the fourth and holds
+            // for every entry after it.
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 350000000)
+            first = -1
+            stopped = 0
+            i = 0
+            while i < 10 {
+                h, err = quickjs.eval(q, "{ const t0 = Date.now(); while (Date.now() - t0 < 100) {} }", "slice.js")
+                quickjs.release(q, h)
+                if err != "" {
+                    stopped = stopped + 1
+                    if first < 0 { first = i }
+                }
+                i = i + 1
+            }
+            spec.assert_true(first >= 2 && first <= 4, "stopped in the 3rd to 5th entry (the ${first + 1}th)")
+            spec.assert_eq(stopped, 10 - first, "and in every entry after it")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            spec.assert_true(quickjs.deadline_ns(q) != 0, "which stays set")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            spec.assert_eq(quickjs.deadline_ns(q), 0, "until cleared")
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "after which entries run")
+        }
+        spec.it("a deadline in the past stops the next entry, an eval or a call") callback {
+            f, _fe = quickjs.eval(q, "() => { for (;;) {} }", "f.js")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            _r, cerr = quickjs.call(q, f, 0, 0)
+            spec.assert_contains(cerr, "interrupted", "a call is stopped")
+            n, jerr = quickjs.run_jobs(q)
+            spec.assert_eq(n, 0, "run_jobs with nothing queued runs nothing")
+            spec.assert_str_eq(jerr, "", "and is not an error")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, f)
+        }
+        spec.it("conversions that run JavaScript are stopped too: toString, valueOf, a getter") callback {
+            o, _oe = quickjs.eval(q, "({ toString() { for (;;) {} }, valueOf() { for (;;) {} }, get x() { for (;;) {} } })", "o.js")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            s, serr = quickjs.to_string(q, o)
+            spec.assert_str_eq(s, "", "no string")
+            spec.assert_contains(serr, "interrupted", "a looping toString is stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            cancel = sync.atomic_new(1)
+            quickjs.set_cancel_cell(q, cancel)
+            guard(q)
+            _n = quickjs.to_int(q, o)
+            spec.assert_contains(quickjs.last_error(q), "interrupted", "a looping valueOf is stopped")
+            _x, gerr = quickjs.get(q, o, "x")
+            spec.assert_contains(gerr, "interrupted", "a looping getter is stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "by the cancel")
+            quickjs.clear_deadline(q)
+            quickjs.set_cancel_cell(q, null)
+            sync.atomic_free(cancel)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, o)
+        }
+        spec.it("a stop cell is reported apart from a cancel") callback {
+            stop = sync.atomic_new(0)
+            quickjs.set_stop_cell(q, stop)
+            why, lag, err = stopped_from_another_thread(q, stop, "mark(); for (;;) {}")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_eq(why, quickjs.INTERRUPTED_STOP, "by the stop, not a cancel")
+            spec.assert_true(lag < 500000000, "within half a second (${lag} ns)")
+            // Both set: the cancel is the one reported.
+            sync.atomic_store(stop, 1)
+            cancel = sync.atomic_new(1)
+            quickjs.set_cancel_cell(q, cancel)
+            guard(q)
+            _h, err2 = quickjs.eval(q, "for (;;) {}", "both.js")
+            spec.assert_contains(err2, "interrupted", "stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "a cancel over a stop")
+            quickjs.clear_deadline(q)
+            quickjs.set_cancel_cell(q, null)
+            quickjs.set_stop_cell(q, null)
+            quickjs.clear_interrupted(q)
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "with the cells unset, entries run")
+            sync.atomic_free(cancel)
+            sync.atomic_free(stop)
+        }
+        spec.it("the first reason stays while the host reads what happened") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            _h, err = quickjs.eval(q, "for (;;) {}", "d.js")
+            spec.assert_contains(err, "interrupted", "stopped")
+            quickjs.clear_deadline(q)
+            stop = sync.atomic_new(1)
+            quickjs.set_stop_cell(q, stop)
+            guard(q)
+            _h2, err2 = quickjs.eval(q, "for (;;) {}", "s.js")
+            quickjs.clear_deadline(q)
+            spec.assert_contains(err2, "interrupted", "stopped again, by the stop cell")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "the first reason, not the latest")
+            quickjs.set_stop_cell(q, null)
+            sync.atomic_free(stop)
+            quickjs.clear_interrupted(q)
+        }
+        spec.it("an async eval: interrupted before its first await is an error, after it run_jobs fails") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            p, err = quickjs.eval_async(q, "for (;;) {}", "a.js")
+            spec.assert_eq(p, 0, "no promise")
+            spec.assert_contains(err, "interrupted", "the interrupt")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            p2, err2 = quickjs.eval_async(q, "await 0; for (;;) {}", "b.js")
+            spec.assert_str_eq(err2, "", "started")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            n, jerr = quickjs.run_jobs(q)
+            spec.assert_eq(n, -1, "run_jobs fails")
+            spec.assert_contains(jerr, "interrupted", "with the interrupt")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "the deadline's")
+            spec.assert_eq(quickjs.promise_state(q, p2), quickjs.PROMISE_PENDING, "and the promise is not rejected: it stays pending")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, p2)
+        }
+        spec.it("a fresh runtime has no deadline, no cells and no reason") callback {
+            r = quickjs.runtime(0, 0)
+            spec.assert_eq(quickjs.deadline_ns(r), 0, "no deadline")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_NONE, "no reason")
+            h, err = quickjs.eval(r, "let n = 0; for (let i = 0; i < 1e6; i++) n += i; n", "n.js")
+            spec.assert_str_eq(err, "", "runs to the end")
+            quickjs.release(r, h)
+            quickjs.dispose(r)
+            spec.assert_true(quickjs.now_ns() > 0, "the clock runs")
+        }
+        _d = eval_string(q, "delete globalThis.mark")
+    }
+
     spec.describe(fw, "contrib.quickjs: data") {
         spec.it("round-trips JSON and reads properties") callback {
             o, err = quickjs.parse_json(q, "{\"name\":\"ana\",\"tags\":[\"a\",\"b\"]}")
             spec.assert_str_eq(err, "", "parsed")
             name, _e1 = quickjs.get(q, o, "name")
-            spec.assert_str_eq(quickjs.to_string(q, name), "ana", "a property")
+            ns, _nse = quickjs.to_string(q, name)
+            spec.assert_str_eq(ns, "ana", "a property")
             tags, _e2 = quickjs.get(q, o, "tags")
             spec.assert_eq(quickjs.length(q, tags), 2, "an array's length")
             spec.assert_str_eq(quickjs.type_of(q, tags), "array", "an array")
@@ -205,7 +422,8 @@ main() {
             quickjs.release(q, later)
             h, err = quickjs.eval(q, "globalThis.got = 'waiting'; (async () => { globalThis.got = (await later()) * 2 })(); got", "t.js")
             spec.assert_str_eq(err, "", "started")
-            spec.assert_str_eq(quickjs.to_string(q, h), "waiting", "still waiting")
+            ws, _wse = quickjs.to_string(q, h)
+            spec.assert_str_eq(ws, "waiting", "still waiting")
             quickjs.release(q, h)
             // The answer arrives (from an actor, say): resolve, then run the jobs.
             resolve, _e2 = quickjs.get(q, pending_, "resolve")
@@ -223,6 +441,180 @@ main() {
             quickjs.release(q, args)
             quickjs.release(q, resolve)
             quickjs.release(q, pending_)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: to_string") {
+        spec.it("tells an empty string from a failed conversion") callback {
+            e, _ee = quickjs.eval(q, "''", "e.js")
+            s, err = quickjs.to_string(q, e)
+            spec.assert_str_eq(s, "", "an empty string")
+            spec.assert_str_eq(err, "", "is not an error")
+            quickjs.release(q, e)
+            sym, _se = quickjs.eval(q, "Symbol('s')", "s.js")
+            s2, err2 = quickjs.to_string(q, sym)
+            spec.assert_str_eq(s2, "", "a Symbol has no string")
+            spec.assert_contains(err2, "TypeError", "and says why")
+            quickjs.release(q, sym)
+            o, _oe = quickjs.eval(q, "({ toString() { throw new RangeError('no text') } })", "o.js")
+            s3, err3 = quickjs.to_string(q, o)
+            spec.assert_str_eq(s3, "", "a throwing toString has no string")
+            spec.assert_contains(err3, "RangeError: no text", "and its error is the one thrown")
+            quickjs.release(q, o)
+            spec.assert_str_eq(eval_string(q, "'after'"), "after", "no exception left pending")
+        }
+        spec.it("converts values, keeping NUL bytes and UTF-8") callback {
+            v, _ve = quickjs.eval(q, "'a\\0b é'", "n.js")
+            s, err = quickjs.to_string(q, v)
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(string.length(s), 6, "a, NUL, b, space, two bytes of é")
+            spec.assert_true(string.starts_with(s, "a"), "starts with a")
+            quickjs.release(q, v)
+            n, _ne = quickjs.eval(q, "[1, 2.5, null]", "a.js")
+            s2, _e2 = quickjs.to_string(q, n)
+            spec.assert_str_eq(s2, "1,2.5,", "an array as String() gives it")
+            quickjs.release(q, n)
+            u, uerr = quickjs.to_string(q, 0)
+            spec.assert_str_eq(u, "undefined", "handle 0 is undefined")
+            spec.assert_str_eq(uerr, "", "not an error")
+        }
+        spec.it("arg_string still gives a plain string, empty when there is none") callback {
+            f = quickjs.function(q, "echo", 1, | q: ptr, this_h: int, args: int | {
+                    return quickjs.new_string(q, "[${quickjs.arg_string(q, args, 0)}]")
+                })
+            quickjs.set_global(q, "echo", f)
+            quickjs.release(q, f)
+            spec.assert_str_eq(eval_string(q, "echo('x') + echo('') + echo(Symbol())"), "[x][][]", "x, empty, and a Symbol as empty")
+            _d = eval_string(q, "delete globalThis.echo")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: promise state") {
+        spec.it("reads a fulfilled promise's state and value") callback {
+            p, err = quickjs.eval(q, "Promise.resolve(7)", "p.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled")
+            v, verr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(verr, "", "a result")
+            spec.assert_eq(quickjs.to_int(q, v), 7, "its value")
+            quickjs.release(q, v)
+            quickjs.release(q, p)
+        }
+        spec.it("reads a rejected promise's state and the reason it holds") callback {
+            p, err = quickjs.eval(q, "const r = Promise.reject(new RangeError('no')); r.catch(() => {}); r", "r.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_REJECTED, "rejected")
+            e, eerr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(eerr, "", "a result")
+            spec.assert_str_eq(quickjs.type_of(q, e), "error", "the reason is the error")
+            m, _me = quickjs.get(q, e, "message")
+            spec.assert_eq(quickjs.length(q, m), 2, "its message, 'no'")
+            quickjs.release(q, m)
+            quickjs.release(q, e)
+            quickjs.release(q, p)
+        }
+        spec.it("a pending promise has no result until the jobs that settle it run") callback {
+            p, err = quickjs.eval(q, "Promise.resolve(1).then(v => v + 41)", "t.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_PENDING, "pending before the jobs run")
+            nothing, perr = quickjs.promise_result(q, p)
+            spec.assert_eq(nothing, 0, "no handle")
+            spec.assert_contains(perr, "pending", "refused while pending")
+            _n, jerr = quickjs.run_jobs(q)
+            spec.assert_str_eq(jerr, "", "jobs ran")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled after")
+            v, _ve = quickjs.promise_result(q, p)
+            spec.assert_eq(quickjs.to_int(q, v), 42, "and holds the value")
+            quickjs.release(q, v)
+            forever, _fe = quickjs.eval(q, "new Promise(() => {})", "f.js")
+            spec.assert_eq(quickjs.promise_state(q, forever), quickjs.PROMISE_PENDING, "a promise nothing settles stays pending")
+            quickjs.release(q, forever)
+            quickjs.release(q, p)
+        }
+        spec.it("says what is not a promise") callback {
+            n, _e = quickjs.eval(q, "({ then() {} })", "n.js")
+            spec.assert_eq(quickjs.promise_state(q, n), quickjs.PROMISE_NOT_A_PROMISE, "a thenable is not a promise")
+            nothing, err = quickjs.promise_result(q, n)
+            spec.assert_eq(nothing, 0, "no handle")
+            spec.assert_contains(err, "not a promise", "refused")
+            quickjs.release(q, n)
+            spec.assert_eq(quickjs.promise_state(q, 0), quickjs.PROMISE_NOT_A_PROMISE, "handle 0 (undefined) is not one")
+            spec.assert_eq(quickjs.promise_state(q, 999999), quickjs.PROMISE_NOT_A_PROMISE, "nor is a handle never given out")
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: async global eval") {
+        spec.it("awaits at top level and keeps the script's completion value") callback {
+            // Neither eval (a SyntaxError) nor eval_module (no completion
+            // value) can run this and give back the 42.
+            _h, serr = quickjs.eval(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+            spec.assert_contains(serr, "SyntaxError", "plain eval refuses top-level await")
+            p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+            spec.assert_str_eq(err, "", "started")
+            spec.assert_str_eq(quickjs.type_of(q, p), "promise", "a promise")
+            _n, jerr = quickjs.run_jobs(q)
+            spec.assert_str_eq(jerr, "", "jobs ran")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled")
+            r, rerr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(rerr, "", "a result")
+            v, verr = quickjs.get(q, r, "value")
+            spec.assert_str_eq(verr, "", "it has a value")
+            spec.assert_eq(quickjs.to_int(q, v), 42, "the completion value, 42")
+            quickjs.release(q, v)
+            quickjs.release(q, r)
+            quickjs.release(q, p)
+        }
+        spec.it("waits on a promise the host settles, then completes") callback {
+            later = quickjs.function(q, "later2", 0, | q: ptr, this_h: int, args: int | {
+                    pending_ = quickjs.new_promise(q)
+                    lp, _e = quickjs.get(q, pending_, "promise")
+                    return lp
+                })
+            quickjs.set_global(q, "later2", later)
+            quickjs.release(q, later)
+            p, err = quickjs.eval_async(q, "const a = await later2(); const b = 'got ' + a; b", "w.js")
+            spec.assert_str_eq(err, "", "started")
+            _n0, _j0 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_PENDING, "pending while the host has not answered")
+            resolve, _e2 = quickjs.get(q, pending_, "resolve")
+            args = quickjs.new_array(q)
+            s = quickjs.new_string(q, "it")
+            _s = quickjs.set_index(q, args, 0, s)
+            rr, _ce = quickjs.call(q, resolve, 0, args)
+            _n1, _j1 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled once answered")
+            r, _re = quickjs.promise_result(q, p)
+            v, _ve = quickjs.get(q, r, "value")
+            spec.assert_eq(quickjs.length(q, v), 6, "'got it'")
+            quickjs.release(q, v)
+            quickjs.release(q, r)
+            quickjs.release(q, rr)
+            quickjs.release(q, s)
+            quickjs.release(q, args)
+            quickjs.release(q, resolve)
+            quickjs.release(q, pending_)
+            quickjs.release(q, p)
+            _d = eval_string(q, "delete globalThis.later2")
+        }
+        spec.it("a throw, before or after an await, rejects the promise") callback {
+            p, err = quickjs.eval_async(q, "null.x", "early.js")
+            spec.assert_str_eq(err, "", "not an exception: a rejection")
+            _n, _j = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_REJECTED, "rejected")
+            e, _ee = quickjs.promise_result(q, p)
+            spec.assert_str_eq(quickjs.type_of(q, e), "error", "with the TypeError")
+            quickjs.release(q, e)
+            quickjs.release(q, p)
+            p2, err2 = quickjs.eval_async(q, "await 1; throw new RangeError('late')", "late.js")
+            spec.assert_str_eq(err2, "", "started")
+            _n2, _j2 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p2), quickjs.PROMISE_REJECTED, "rejected after the await")
+            quickjs.release(q, p2)
+        }
+        spec.it("a script that does not parse is an error, not a promise") callback {
+            p, err = quickjs.eval_async(q, "const = ;", "bad.js")
+            spec.assert_eq(p, 0, "no handle")
+            spec.assert_contains(err, "SyntaxError", "the parse error")
         }
     }
 
@@ -297,8 +689,10 @@ main() {
                 })
             quickjs.set_global(q, "peek_bytes", g)
             quickjs.release(q, g)
-            u = eval_string(q, "const gone = new Uint8Array(new ArrayBuffer(8)); gone.buffer.transfer(); try { peek_bytes(gone) } catch (e) { e.message }")
-            spec.assert_str_eq(u, "host function failed without throwing", "nothing stale surfaces: ${u}")
+            // That is an InternalError, which (quickjs-ng 0.18) a script
+            // cannot catch: it reaches the host.
+            u = eval_string(q, "const gone = new Uint8Array(new ArrayBuffer(8)); gone.buffer.transfer(); try { peek_bytes(gone) } catch (e) { 'caught ' + e.message }")
+            spec.assert_true(string.starts_with(u, "ERROR: InternalError: host function failed without throwing"), "nothing stale surfaces: ${u}")
         }
         spec.it("new_uint8array hands a script a copy of the host's bytes") callback {
             b = bytes.new(4)

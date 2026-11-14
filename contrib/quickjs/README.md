@@ -11,7 +11,7 @@ import contrib.quickjs
 
 main() {
     q = quickjs.runtime(8192, 0)            // 8 MB heap cap, default stack
-    quickjs.set_time_limit(q, 100)          // each entry: at most 100 ms
+    quickjs.set_deadline_ns(q, quickjs.now_ns() + 100000000)   // stop JS 100 ms from now
 
     add = quickjs.function(q, "add", 2, | q: ptr, this_h: int, args: int | {
         return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
@@ -46,6 +46,14 @@ main() {
   there is no C to write per function.
 - **Errors** come back as `(value, error)`: the error is the exception's
   text with its stack, e.g. `TypeError: cannot read property 'x' of null`.
+  An `InternalError` (out of memory, interrupted, a host function that
+  failed without throwing) cannot be caught by the script, so it always
+  reaches the host.
+- **Strings**: `quickjs.to_string(q, h) -> (string, string)` is
+  `String(h)`, which runs a `toString` and can throw (a Symbol, a throwing
+  or interrupted `toString`): `("", error)` then, so an empty string is told
+  apart from a failure. NUL bytes in a JavaScript string are kept.
+  `arg_string` stays a plain string, `""` when the argument has none.
 
 ## Bytes
 
@@ -81,13 +89,64 @@ sum = quickjs.function(q, "sum", 1, | q: ptr, this_h: int, args: int | {
 
 ## Limits
 
-- `quickjs.set_time_limit(q, ms)`: each entry into JavaScript (an eval, a
-  call, a run of the job queue) is stopped after `ms` with
-  `InternalError: interrupted`; the runtime stays usable.
+- The interrupt, below: a deadline and cancel/stop cells that stop running
+  JavaScript with `InternalError: interrupted`; the runtime stays usable.
 - `quickjs.runtime(memory_kb, ...)`: allocation past the cap fails with
   `InternalError: out of memory`.
 - `stack_kb` caps the JavaScript stack (`RangeError: Maximum call stack
   size exceeded`).
+
+## Interrupting JavaScript
+
+When JavaScript stops is the host's decision, per runtime, and nothing
+resets it behind the host's back:
+
+- `quickjs.set_deadline_ns(q, ns)`: JavaScript running at or after `ns`, an
+  absolute time on `quickjs.now_ns()`'s monotonic clock (the same clock as
+  `os.now_monotonic_ns()`, `QueryPerformanceCounter` on Windows), is stopped,
+  in this entry and every later one, until the host moves it or calls
+  `quickjs.clear_deadline(q)`. `quickjs.deadline_ns(q)` reads it (0: none).
+- `quickjs.set_cancel_cell(q, cell)`: a `std.sync` cell
+  (`sync.atomic_new(0)`) whose nonzero value stops JavaScript. Any thread may
+  set it: an Esc key, a SIGINT watch, a watchdog.
+- `quickjs.set_stop_cell(q, cell)`: a second cell, reported apart from a
+  cancel, for a stop that is not the user's (a replay that diverged from
+  its recording, whose outcome is what the script threw, not "canceled").
+- `quickjs.interrupted(q) -> int`: why JavaScript was first stopped since
+  the runtime was made or `quickjs.clear_interrupted(q)`:
+  `quickjs.INTERRUPTED_NONE` (0), `INTERRUPTED_DEADLINE` (1),
+  `INTERRUPTED_CANCEL` (2), `INTERRUPTED_STOP` (3). When several hold at
+  once, a cancel is reported over a deadline and both over a stop. The
+  reason stays while the host reads errors and values afterwards.
+
+Every entry honours them: an eval, a call, `run_jobs`, and the conversions
+that can run JavaScript (`to_string` running a `toString`, `to_int` a
+`valueOf`, `get` a getter, `length`, `keys`). The interrupt is uncatchable
+by the script. In an `eval_async` script it is not a rejection: before the
+first `await` the eval returns the error, after it `run_jobs` does, and the
+promise stays pending. QuickJS polls every few thousand operations, so a
+busy loop stops within microseconds of a cell being set; one long native
+call (a huge regexp, say) is not interrupted midway.
+
+A budget of JavaScript time across many entries, which pauses while the
+host waits on other work, is the host setting the deadline when JS starts
+and taking the time spent off what is left when it stops:
+
+```aether
+quickjs.set_deadline_ns(q, quickjs.now_ns() + remaining)
+started = quickjs.now_ns()
+_n, err = quickjs.run_jobs(q)
+quickjs.clear_deadline(q)
+remaining = remaining - (quickjs.now_ns() - started)
+if quickjs.interrupted(q) == quickjs.INTERRUPTED_CANCEL { println("canceled") }
+```
+
+Threads and ownership: the cells are read with an acquire load and may be
+written from any thread. Everything else, the deadline included, belongs to
+the thread running the runtime. The cells stay the host's: free them
+(`sync.atomic_free`) after `quickjs.dispose`, or after unsetting them with
+`null`. There is no process-wide state: every runtime has its own deadline,
+cells and reason.
 
 ## Promises and actors
 
@@ -107,6 +166,40 @@ _r, _e2 = quickjs.call(q, resolve, 0, args_array)
 _n, _e3 = quickjs.run_jobs(q)               // the script's await continues
 ```
 
+### A script that awaits, and its value
+
+`quickjs.eval` runs a script and gives its completion value, but a
+top-level `await` is a SyntaxError there; `quickjs.eval_module` allows the
+`await` but a module has no completion value. `quickjs.eval_async(q, code,
+filename) -> (int, string)` does both (`JS_EVAL_FLAG_ASYNC`): it returns a
+promise that settles, as `run_jobs` runs what the awaits queued, to
+`{ value: <the completion value> }`, or is rejected with what the script
+threw (before its first `await` too). Only a script that does not parse is
+an error rather than a promise.
+
+```aether
+p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+_n, _e = quickjs.run_jobs(q)
+if quickjs.promise_state(q, p) == quickjs.PROMISE_FULFILLED {
+    r, _e2 = quickjs.promise_result(q, p)       // { value: 42 }
+    v, _e3 = quickjs.get(q, r, "value")
+    println(quickjs.to_int(q, v))               // 42
+    quickjs.release(q, v)
+    quickjs.release(q, r)
+}
+quickjs.release(q, p)
+```
+
+A host that holds a promise (one a script returned, or `eval_async`'s) can
+ask how it stands without running any JavaScript:
+
+- `quickjs.promise_state(q, h) -> int`: `quickjs.PROMISE_PENDING` (0),
+  `PROMISE_FULFILLED` (1), `PROMISE_REJECTED` (2), or
+  `PROMISE_NOT_A_PROMISE` (-1) for anything else, a thenable included.
+- `quickjs.promise_result(q, h) -> (int, string)`: what a settled promise
+  holds, its value or the reason it was rejected with, as a handle to
+  release; `(0, error)` for a pending promise or something that is not one.
+
 Callbacks work too: hold a JavaScript function's handle and
 `quickjs.call` it when the answer comes. JavaScript runs on one thread
 either way; actors are where the concurrency is.
@@ -118,7 +211,7 @@ Only what the host gives it. quickjs-ng's `quickjs-libc` (the `std` and
 `QJS_BUILD_LIBC`, which this module never defines, and there is no
 `require` or Node API. File, network and process access exist only as
 host functions you write. A script that loops forever or grows without
-bound is stopped by the limits above.
+bound is stopped by the interrupt and the limits above.
 
 ## Build
 
@@ -127,7 +220,7 @@ compiles the engine into the program (about 7 s the first time per
 target), natively or for `ae build --target=<triple>`.
 
 The engine is quickjs-ng's own single-file amalgamation (a release asset),
-pinned in `amalgamation.lock` (version **0.17.0**) and fetched by
+pinned in `amalgamation.lock` (version **0.18.0**) and fetched by
 `scripts/fetch-quickjs-amalgamation.sh` into `contrib/quickjs/amalgamation/`
 (gitignored), the way `contrib.sqlite` pins SQLite's. Release archives ship
 it, so an installed toolchain needs no network. In a source checkout, run
