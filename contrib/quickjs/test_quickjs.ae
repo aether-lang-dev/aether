@@ -88,8 +88,9 @@ stopped_from_another_thread(q: ptr, cell: @keep ptr, code: string) -> (int, long
 eval_string(q: ptr, code: string) -> string {
     h, err = quickjs.eval(q, code, "test.js")
     if err != "" { return "ERROR: ${err}" }
-    s = quickjs.to_string(q, h)
+    s, serr = quickjs.to_string(q, h)
     quickjs.release(q, h)
+    if serr != "" { return "ERROR: ${serr}" }
     return s
 }
 
@@ -163,7 +164,8 @@ main() {
             _s2 = quickjs.set_index(q, args, 1, seven)
             r, cerr = quickjs.call(q, f, 0, args)
             spec.assert_str_eq(cerr, "", "called")
-            spec.assert_str_eq(quickjs.to_string(q, r), "x-7", "its result")
+            rs, _rse = quickjs.to_string(q, r)
+            spec.assert_str_eq(rs, "x-7", "its result")
             quickjs.release(q, r)
             quickjs.release(q, seven)
             quickjs.release(q, x)
@@ -296,9 +298,9 @@ main() {
         spec.it("conversions that run JavaScript are stopped too: toString, valueOf, a getter") callback {
             o, _oe = quickjs.eval(q, "({ toString() { for (;;) {} }, valueOf() { for (;;) {} }, get x() { for (;;) {} } })", "o.js")
             quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
-            s = quickjs.to_string(q, o)
+            s, serr = quickjs.to_string(q, o)
             spec.assert_str_eq(s, "", "no string")
-            spec.assert_contains(quickjs.last_error(q), "interrupted", "a looping toString is stopped")
+            spec.assert_contains(serr, "interrupted", "a looping toString is stopped")
             spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
             quickjs.clear_deadline(q)
             quickjs.clear_interrupted(q)
@@ -392,7 +394,8 @@ main() {
             o, err = quickjs.parse_json(q, "{\"name\":\"ana\",\"tags\":[\"a\",\"b\"]}")
             spec.assert_str_eq(err, "", "parsed")
             name, _e1 = quickjs.get(q, o, "name")
-            spec.assert_str_eq(quickjs.to_string(q, name), "ana", "a property")
+            ns, _nse = quickjs.to_string(q, name)
+            spec.assert_str_eq(ns, "ana", "a property")
             tags, _e2 = quickjs.get(q, o, "tags")
             spec.assert_eq(quickjs.length(q, tags), 2, "an array's length")
             spec.assert_str_eq(quickjs.type_of(q, tags), "array", "an array")
@@ -419,7 +422,8 @@ main() {
             quickjs.release(q, later)
             h, err = quickjs.eval(q, "globalThis.got = 'waiting'; (async () => { globalThis.got = (await later()) * 2 })(); got", "t.js")
             spec.assert_str_eq(err, "", "started")
-            spec.assert_str_eq(quickjs.to_string(q, h), "waiting", "still waiting")
+            ws, _wse = quickjs.to_string(q, h)
+            spec.assert_str_eq(ws, "waiting", "still waiting")
             quickjs.release(q, h)
             // The answer arrives (from an actor, say): resolve, then run the jobs.
             resolve, _e2 = quickjs.get(q, pending_, "resolve")
@@ -437,6 +441,51 @@ main() {
             quickjs.release(q, args)
             quickjs.release(q, resolve)
             quickjs.release(q, pending_)
+        }
+    }
+
+    spec.describe(fw, "contrib.quickjs: to_string") {
+        spec.it("tells an empty string from a failed conversion") callback {
+            e, _ee = quickjs.eval(q, "''", "e.js")
+            s, err = quickjs.to_string(q, e)
+            spec.assert_str_eq(s, "", "an empty string")
+            spec.assert_str_eq(err, "", "is not an error")
+            quickjs.release(q, e)
+            sym, _se = quickjs.eval(q, "Symbol('s')", "s.js")
+            s2, err2 = quickjs.to_string(q, sym)
+            spec.assert_str_eq(s2, "", "a Symbol has no string")
+            spec.assert_contains(err2, "TypeError", "and says why")
+            quickjs.release(q, sym)
+            o, _oe = quickjs.eval(q, "({ toString() { throw new RangeError('no text') } })", "o.js")
+            s3, err3 = quickjs.to_string(q, o)
+            spec.assert_str_eq(s3, "", "a throwing toString has no string")
+            spec.assert_contains(err3, "RangeError: no text", "and its error is the one thrown")
+            quickjs.release(q, o)
+            spec.assert_str_eq(eval_string(q, "'after'"), "after", "no exception left pending")
+        }
+        spec.it("converts values, keeping NUL bytes and UTF-8") callback {
+            v, _ve = quickjs.eval(q, "'a\\0b é'", "n.js")
+            s, err = quickjs.to_string(q, v)
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(string.length(s), 6, "a, NUL, b, space, two bytes of é")
+            spec.assert_true(string.starts_with(s, "a"), "starts with a")
+            quickjs.release(q, v)
+            n, _ne = quickjs.eval(q, "[1, 2.5, null]", "a.js")
+            s2, _e2 = quickjs.to_string(q, n)
+            spec.assert_str_eq(s2, "1,2.5,", "an array as String() gives it")
+            quickjs.release(q, n)
+            u, uerr = quickjs.to_string(q, 0)
+            spec.assert_str_eq(u, "undefined", "handle 0 is undefined")
+            spec.assert_str_eq(uerr, "", "not an error")
+        }
+        spec.it("arg_string still gives a plain string, empty when there is none") callback {
+            f = quickjs.function(q, "echo", 1, | q: ptr, this_h: int, args: int | {
+                    return quickjs.new_string(q, "[${quickjs.arg_string(q, args, 0)}]")
+                })
+            quickjs.set_global(q, "echo", f)
+            quickjs.release(q, f)
+            spec.assert_str_eq(eval_string(q, "echo('x') + echo('') + echo(Symbol())"), "[x][][]", "x, empty, and a Symbol as empty")
+            _d = eval_string(q, "delete globalThis.echo")
         }
     }
 

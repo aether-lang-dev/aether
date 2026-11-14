@@ -468,17 +468,29 @@ const char *qjs_to_json(void *qp, int h) {
     return out;
 }
 
-/* String(h); valid until the next string this runtime hands out. */
-const char *qjs_to_string(void *qp, int h) {
+/* String(h), as UTF-8 in the runtime's scratch (qjs_scratch, valid until the
+ * next string this runtime hands out): its byte count, which may be 0 and may
+ * count NUL bytes, or -1 with qjs_error when the conversion threw (a Symbol,
+ * a throwing or interrupted toString) or there was no memory for it. */
+int qjs_to_string(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;
     enter_(q);
     size_t n;
     const char *c = JS_ToCStringLen(q->ctx, &n, get_(q, h));
-    if (!c) { fail_(q); return ""; }
-    const char *out = hand_out_(q, c, n);
+    if (!c) return fail_(q);
+    if (n > (size_t)0x7fffffff) {
+        JS_FreeCString(q->ctx, c);
+        set_err_(q, "RangeError: string too long");
+        return -1;
+    }
+    hand_out_(q, c, n);
     JS_FreeCString(q->ctx, c);
-    return out;
+    if (!q->scratch) { set_err_(q, "InternalError: out of memory"); return -1; }
+    return (int)n;
 }
+
+/* The bytes qjs_to_string last handed out. */
+const void *qjs_scratch(void *qp) { return ((AeQjs *)qp)->scratch; }
 
 int qjs_to_int(void *qp, int h) {
     AeQjs *q = (AeQjs *)qp;

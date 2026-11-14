@@ -46,6 +46,11 @@ main() {
   there is no C to write per function.
 - **Errors** come back as `(value, error)`: the error is the exception's
   text with its stack, e.g. `TypeError: cannot read property 'x' of null`.
+- **Strings**: `quickjs.to_string(q, h) -> (string, string)` is
+  `String(h)`, which runs a `toString` and can throw (a Symbol, a throwing
+  or interrupted `toString`): `("", error)` then, so an empty string is told
+  apart from a failure. NUL bytes in a JavaScript string are kept.
+  `arg_string` stays a plain string, `""` when the argument has none.
 
 ## Bytes
 

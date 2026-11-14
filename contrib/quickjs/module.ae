@@ -89,7 +89,9 @@ extern qjs_object(q: ptr) -> int
 extern qjs_array(q: ptr) -> int
 extern qjs_parse_json(q: ptr, text: string) -> int
 extern qjs_to_json(q: ptr, h: int) -> string
-extern qjs_to_string(q: ptr, h: int) -> string
+extern qjs_to_string(q: ptr, h: int) -> int
+extern qjs_scratch(q: ptr) -> ptr
+extern string_new_with_length(data: ptr, length: size_t) -> string @heap
 extern qjs_to_int(q: ptr, h: int) -> int
 extern qjs_to_float(q: ptr, h: int) -> float
 extern qjs_to_bool(q: ptr, h: int) -> int
@@ -298,7 +300,16 @@ parse_json(q: ptr, text: string) -> (int, string) {
 
 // JSON.stringify(h) ("" if it has no JSON form).
 to_json(q: ptr, h: int) -> string { return string.copy(qjs_to_json(q, h)) }
-to_string(q: ptr, h: int) -> string { return string.copy(qjs_to_string(q, h)) }
+
+// String(h): (the string, "") or ("", the exception's text) when the
+// conversion threw (a Symbol, a throwing toString) or was interrupted, so an
+// empty string is told apart from a failure. NUL bytes in the string are kept.
+to_string(q: ptr, h: int) -> (string, string) {
+    n = qjs_to_string(q, h)
+    if n < 0 { return "", string.copy(qjs_error(q)) }
+    return string_new_with_length(qjs_scratch(q), n), ""
+}
+
 to_int(q: ptr, h: int) -> int { return qjs_to_int(q, h) }
 to_float(q: ptr, h: int) -> float { return qjs_to_float(q, h) }
 to_bool(q: ptr, h: int) -> int { return qjs_to_bool(q, h) }
@@ -360,9 +371,11 @@ arg_float(q: ptr, args: int, i: int) -> float {
     return d
 }
 
+// String(argument i); "" when it has none (a Symbol, a throwing toString):
+// to_string(q, arg(...)) tells those apart.
 arg_string(q: ptr, args: int, i: int) -> string {
     h = qjs_get_index(q, args, i)
-    s = string.copy(qjs_to_string(q, h))
+    s, _err = to_string(q, h)
     qjs_release(q, h)
     return s
 }
