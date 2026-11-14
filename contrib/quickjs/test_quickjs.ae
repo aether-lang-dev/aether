@@ -191,7 +191,7 @@ main() {
             _h, err = quickjs.eval(q, "each(function () { null.x })", "t.js")
             spec.assert_contains(err, "TypeError", "uncaught, it reaches the host as itself")
         }
-        spec.it("with no exception value, rethrow raises an InternalError with the text") callback {
+        spec.it("with no exception value, rethrow raises the error the host's text names") callback {
             bad = quickjs.function(q, "bad", 0, | q: ptr, this_h: int, args: int | {
                     notfn = quickjs.new_int(q, 1)
                     _r, err = quickjs.call(q, notfn, 0, 0)
@@ -200,8 +200,8 @@ main() {
                 })
             quickjs.set_global(q, "bad", bad)
             quickjs.release(q, bad)
-            spec.assert_str_eq(eval_string(q, "try { bad() } catch (e) { e.name + ': ' + e.message }"),
-                "InternalError: TypeError: not a function", "the host's own error")
+            spec.assert_str_eq(eval_string(q, "try { bad() } catch (e) { (e instanceof TypeError) + ' ' + e.name + ': ' + e.message }"),
+                "true TypeError: not a function", "the host's own error, catchable")
         }
     }
 
@@ -689,8 +689,10 @@ main() {
                 })
             quickjs.set_global(q, "peek_bytes", g)
             quickjs.release(q, g)
-            u = eval_string(q, "const gone = new Uint8Array(new ArrayBuffer(8)); gone.buffer.transfer(); try { peek_bytes(gone) } catch (e) { e.message }")
-            spec.assert_str_eq(u, "host function failed without throwing", "nothing stale surfaces: ${u}")
+            // That is an InternalError, which (quickjs-ng 0.18) a script
+            // cannot catch: it reaches the host.
+            u = eval_string(q, "const gone = new Uint8Array(new ArrayBuffer(8)); gone.buffer.transfer(); try { peek_bytes(gone) } catch (e) { 'caught ' + e.message }")
+            spec.assert_true(string.starts_with(u, "ERROR: InternalError: host function failed without throwing"), "nothing stale surfaces: ${u}")
         }
         spec.it("new_uint8array hands a script a copy of the host's bytes") callback {
             b = bytes.new(4)

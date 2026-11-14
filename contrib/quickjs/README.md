@@ -46,6 +46,9 @@ main() {
   there is no C to write per function.
 - **Errors** come back as `(value, error)`: the error is the exception's
   text with its stack, e.g. `TypeError: cannot read property 'x' of null`.
+  An `InternalError` (out of memory, interrupted, a host function that
+  failed without throwing) cannot be caught by the script, so it always
+  reaches the host.
 - **Strings**: `quickjs.to_string(q, h) -> (string, string)` is
   `String(h)`, which runs a `toString` and can throw (a Symbol, a throwing
   or interrupted `toString`): `("", error)` then, so an empty string is told
@@ -217,7 +220,7 @@ compiles the engine into the program (about 7 s the first time per
 target), natively or for `ae build --target=<triple>`.
 
 The engine is quickjs-ng's own single-file amalgamation (a release asset),
-pinned in `amalgamation.lock` (version **0.17.0**) and fetched by
+pinned in `amalgamation.lock` (version **0.18.0**) and fetched by
 `scripts/fetch-quickjs-amalgamation.sh` into `contrib/quickjs/amalgamation/`
 (gitignored), the way `contrib.sqlite` pins SQLite's. Release archives ship
 it, so an installed toolchain needs no network. In a source checkout, run

@@ -95,10 +95,10 @@ int64_t qjs_now_ns(void) {
 /* QuickJS's interrupt poll (every few thousand operations, on the thread
  * running the JavaScript). A cancel is reported over a passed deadline, and
  * both over a stop; the first reason sticks until qjs_clear_interrupted. */
-static int interrupt_(JSRuntime *rt, void *opaque) {
+static int interrupt_(JSContext *ctx, void *opaque) {
     AeQjs *q = (AeQjs *)opaque;
     int why = QJS_INTERRUPT_NONE;
-    (void)rt;
+    (void)ctx;
     if (q->cancel_cell && aether_sync_atomic_load(q->cancel_cell) != 0) why = QJS_INTERRUPT_CANCEL;
     else if (q->deadline_ns != 0 && qjs_now_ns() >= q->deadline_ns) why = QJS_INTERRUPT_DEADLINE;
     else if (q->stop_cell && aether_sync_atomic_load(q->stop_cell) != 0) why = QJS_INTERRUPT_STOP;
@@ -410,17 +410,30 @@ int qjs_throw(void *qp, const char *kind, const char *msg) {
 
 /* Throw the last exception again, the same value (its type, message and
  * stack), from inside a host function whose nested qjs_call or qjs_eval
- * failed; returns -1, which the host function returns. With no value kept
- * (the heap was full, or the error was the host's), an InternalError with
- * its text. */
+ * failed; returns -1, which the host function returns. With no value kept,
+ * the error was the host's ("TypeError: not a function") or the heap was
+ * full ("InternalError: out of memory ..."): the error its text names, with
+ * the rest as the message, or an Error with the whole text. Since
+ * quickjs-ng 0.18 an InternalError cannot be caught by the script, which
+ * is what a full heap should be; a host refusal stays catchable. */
 int qjs_rethrow(void *qp) {
     AeQjs *q = (AeQjs *)qp;
     if (q->has_exc) {
         JS_Throw(q->ctx, JS_DupValue(q->ctx, q->exc));
-    } else {
-        JS_ThrowInternalError(q->ctx, "%s", q->err ? q->err : "error");
+        return -1;
     }
-    return -1;
+    const char *text = q->err && *q->err ? q->err : "Error: error";
+    static const char *const kinds[] = { "TypeError", "RangeError", "SyntaxError", "ReferenceError" };
+    for (size_t i = 0; i < sizeof kinds / sizeof kinds[0]; i++) {
+        size_t n = strlen(kinds[i]);
+        if (strncmp(text, kinds[i], n) == 0 && text[n] == ':' && text[n + 1] == ' ')
+            return qjs_throw(q, kinds[i], text + n + 2);
+    }
+    if (strncmp(text, "InternalError: ", 15) == 0) {
+        JS_ThrowInternalError(q->ctx, "%s", text + 15);
+        return -1;
+    }
+    return qjs_throw(q, "Error", text);
 }
 
 /* ---- values -------------------------------------------------------------- */

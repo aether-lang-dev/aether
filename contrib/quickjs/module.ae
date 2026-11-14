@@ -258,7 +258,11 @@ throw_error(q: ptr, kind: string, msg: string) -> int { return qjs_throw(q, kind
 
 // Throw again, from a host function, the exception a nested call or eval
 // just failed with: the same value, so its type, message and stack reach
-// the script intact. `return quickjs.rethrow(q)`.
+// the script intact. `return quickjs.rethrow(q)`. When the failure was the
+// host's own (a call of something not a function), it throws the error the
+// text names ("TypeError: not a function" is a TypeError). An
+// InternalError (a full heap, a host function that failed without
+// throwing) cannot be caught by the script: quickjs-ng makes them so.
 rethrow(q: ptr) -> int { return qjs_rethrow(q) }
 
 // globalThis[name] = v; v stays held by its handle.
