@@ -49,7 +49,8 @@ exports(
     parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
     get, set, get_index, set_index, length, keys,
     arg, arg_int, arg_float, arg_string, arg_bool, arg_count,
-    new_promise,
+    new_promise, promise_state, promise_result,
+    PROMISE_NOT_A_PROMISE, PROMISE_PENDING, PROMISE_FULFILLED, PROMISE_REJECTED,
     bytes_of, arg_bytes, new_uint8array
 )
 
@@ -90,6 +91,8 @@ extern qjs_set_index(q: ptr, obj: int, i: int, v: int) -> int
 extern qjs_length(q: ptr, obj: int) -> int
 extern qjs_keys(q: ptr, obj: int) -> int
 extern qjs_new_promise(q: ptr) -> int
+extern qjs_promise_state(q: ptr, h: int) -> int
+extern qjs_promise_result(q: ptr, h: int) -> int
 extern qjs_u8_length(q: ptr, h: int) -> int
 extern qjs_u8_data(q: ptr, h: int) -> ptr
 extern qjs_new_uint8array(q: ptr, data: ptr, n: int) -> int
@@ -323,3 +326,23 @@ new_uint8array(q: ptr, data: ptr, n: int) -> int { return qjs_new_uint8array(q, 
 // `promise`, and call `resolve` or `reject` when the answer arrives (say,
 // from an actor), then run_jobs so its awaits carry on.
 new_promise(q: ptr) -> int { return qjs_new_promise(q) }
+
+// What promise_state says a handle is.
+const PROMISE_NOT_A_PROMISE = -1
+const PROMISE_PENDING = 0
+const PROMISE_FULFILLED = 1
+const PROMISE_REJECTED = 2
+
+// Whether h is a promise and how it stands: PROMISE_NOT_A_PROMISE (-1),
+// PROMISE_PENDING (0), PROMISE_FULFILLED (1) or PROMISE_REJECTED (2). Runs no
+// JavaScript, so it is safe to ask between run_jobs calls.
+promise_state(q: ptr, h: int) -> int { return qjs_promise_state(q, h) }
+
+// What a settled promise holds: its value if it was fulfilled, the reason
+// (usually an Error) if it was rejected, as (handle, ""); (0, error) when h
+// is not a promise or is still pending. Release the handle.
+promise_result(q: ptr, h: int) -> (int, string) {
+    r = qjs_promise_result(q, h)
+    if r < 0 { return 0, string.copy(qjs_error(q)) }
+    return r, ""
+}

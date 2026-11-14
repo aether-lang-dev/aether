@@ -226,6 +226,60 @@ main() {
         }
     }
 
+    spec.describe(fw, "contrib.quickjs: promise state") {
+        spec.it("reads a fulfilled promise's state and value") callback {
+            p, err = quickjs.eval(q, "Promise.resolve(7)", "p.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled")
+            v, verr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(verr, "", "a result")
+            spec.assert_eq(quickjs.to_int(q, v), 7, "its value")
+            quickjs.release(q, v)
+            quickjs.release(q, p)
+        }
+        spec.it("reads a rejected promise's state and the reason it holds") callback {
+            p, err = quickjs.eval(q, "const r = Promise.reject(new RangeError('no')); r.catch(() => {}); r", "r.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_REJECTED, "rejected")
+            e, eerr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(eerr, "", "a result")
+            spec.assert_str_eq(quickjs.type_of(q, e), "error", "the reason is the error")
+            m, _me = quickjs.get(q, e, "message")
+            spec.assert_eq(quickjs.length(q, m), 2, "its message, 'no'")
+            quickjs.release(q, m)
+            quickjs.release(q, e)
+            quickjs.release(q, p)
+        }
+        spec.it("a pending promise has no result until the jobs that settle it run") callback {
+            p, err = quickjs.eval(q, "Promise.resolve(1).then(v => v + 41)", "t.js")
+            spec.assert_str_eq(err, "", "no error")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_PENDING, "pending before the jobs run")
+            nothing, perr = quickjs.promise_result(q, p)
+            spec.assert_eq(nothing, 0, "no handle")
+            spec.assert_contains(perr, "pending", "refused while pending")
+            _n, jerr = quickjs.run_jobs(q)
+            spec.assert_str_eq(jerr, "", "jobs ran")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled after")
+            v, _ve = quickjs.promise_result(q, p)
+            spec.assert_eq(quickjs.to_int(q, v), 42, "and holds the value")
+            quickjs.release(q, v)
+            forever, _fe = quickjs.eval(q, "new Promise(() => {})", "f.js")
+            spec.assert_eq(quickjs.promise_state(q, forever), quickjs.PROMISE_PENDING, "a promise nothing settles stays pending")
+            quickjs.release(q, forever)
+            quickjs.release(q, p)
+        }
+        spec.it("says what is not a promise") callback {
+            n, _e = quickjs.eval(q, "({ then() {} })", "n.js")
+            spec.assert_eq(quickjs.promise_state(q, n), quickjs.PROMISE_NOT_A_PROMISE, "a thenable is not a promise")
+            nothing, err = quickjs.promise_result(q, n)
+            spec.assert_eq(nothing, 0, "no handle")
+            spec.assert_contains(err, "not a promise", "refused")
+            quickjs.release(q, n)
+            spec.assert_eq(quickjs.promise_state(q, 0), quickjs.PROMISE_NOT_A_PROMISE, "handle 0 (undefined) is not one")
+            spec.assert_eq(quickjs.promise_state(q, 999999), quickjs.PROMISE_NOT_A_PROMISE, "nor is a handle never given out")
+        }
+    }
+
     spec.describe(fw, "contrib.quickjs: bytes") {
         spec.it("bytes_of reads a Uint8Array's own window of its buffer") callback {
             h, err = quickjs.eval(q, "new Uint8Array([9, 1, 2, 250]).subarray(1)", "b.js")

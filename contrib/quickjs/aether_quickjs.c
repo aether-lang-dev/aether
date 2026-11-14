@@ -544,6 +544,25 @@ int qjs_new_promise(void *qp) {
     return put_(q, o);
 }
 
+/* -1 when h is not a promise, else JS_PROMISE_PENDING (0), FULFILLED (1) or
+ * REJECTED (2). Runs no JavaScript. */
+int qjs_promise_state(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    if (!valid_(q, h)) return -1;
+    return (int)JS_PromiseState(q->ctx, q->vals[h]);
+}
+
+/* The value a settled promise holds (its fulfilment value, or the reason it
+ * was rejected with), as a new handle; -1 with qjs_error when h is not a
+ * promise or is still pending. Runs no JavaScript. */
+int qjs_promise_result(void *qp, int h) {
+    AeQjs *q = (AeQjs *)qp;
+    int st = valid_(q, h) ? (int)JS_PromiseState(q->ctx, q->vals[h]) : -1;
+    if (st < 0) { set_err_(q, "TypeError: not a promise"); return -1; }
+    if (st == JS_PROMISE_PENDING) { set_err_(q, "TypeError: the promise is still pending"); return -1; }
+    return put_(q, JS_PromiseResult(q->ctx, q->vals[h]));
+}
+
 /* ---- bytes ---------------------------------------------------------------- */
 
 /* The bytes of the Uint8Array / Uint8ClampedArray v (a view's own window of

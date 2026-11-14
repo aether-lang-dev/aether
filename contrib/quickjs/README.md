@@ -107,6 +107,16 @@ _r, _e2 = quickjs.call(q, resolve, 0, args_array)
 _n, _e3 = quickjs.run_jobs(q)               // the script's await continues
 ```
 
+A host that holds a promise (one a script returned, or `eval_async`'s) can
+ask how it stands without running any JavaScript:
+
+- `quickjs.promise_state(q, h) -> int`: `quickjs.PROMISE_PENDING` (0),
+  `PROMISE_FULFILLED` (1), `PROMISE_REJECTED` (2), or
+  `PROMISE_NOT_A_PROMISE` (-1) for anything else, a thenable included.
+- `quickjs.promise_result(q, h) -> (int, string)`: what a settled promise
+  holds, its value or the reason it was rejected with, as a handle to
+  release; `(0, error)` for a pending promise or something that is not one.
+
 Callbacks work too: hold a JavaScript function's handle and
 `quickjs.call` it when the answer comes. JavaScript runs on one thread
 either way; actors are where the concurrency is.
