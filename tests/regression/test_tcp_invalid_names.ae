@@ -1,0 +1,35 @@
+// A name in the .invalid domain does not exist (RFC 6761 6.4), answered at
+// once without asking DNS: a slow system resolver took longer than a proxy's
+// whole request budget to say so, and integration/http_proxy_dial_failure got
+// 504 for its "nohost.invalid" upstream where it expects 502 (macOS CI,
+// 2026-11-06 and 2026-11-14). Checked through std.tcp: each name fails to
+// connect, quickly, and a name that merely contains "invalid" is not one.
+
+import std.tcp
+import std.os
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+fn refused_at_once(name: string) {
+    t0 = os.now_monotonic_ms()
+    c, cerr = tcp.connect(name, 9)
+    took = os.now_monotonic_ms() - t0
+    check(c == null && cerr != "", "connect ${name} should fail, got '${cerr}'")
+    check(took < 200, "connect ${name} took ${took} ms: a resolver was asked")
+}
+
+main() {
+    refused_at_once("nohost.invalid")
+    refused_at_once("a.b.INVALID")
+    refused_at_once("nohost.invalid.")
+    refused_at_once("invalid")
+    println("PASS .invalid names fail at once")
+}
