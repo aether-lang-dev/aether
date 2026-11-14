@@ -14,6 +14,58 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.915.0]
+
+### Added
+
+- **`fs.stat`, advisory locks, exclusive creation, descriptor ops and
+  `os.environ`.** `fs.stat(path, follow)` returns a `Stat` value with kind,
+  mode (07777), nlink, ino, dev, size and a nanosecond `mtime_ns`, so
+  `(ino, size, mtime_ns)` tells whether a file changed since it was read and
+  the mode can be copied onto a replacement (`file_stat` has a seconds mtime
+  and no mode). `fs.lock_open` / `try_lock(fd, exclusive)` / `unlock` hold a
+  polled advisory lock (flock(2); LockFileEx on Windows);
+  `fs.create_exclusive(path, mode)` creates with `O_EXCL`; `fchmod`,
+  `fd_fsync`, `fd_truncate`, `fd_size` and `fd_pwrite_all` work on the same
+  descriptor std.io's `fd_*` calls take. Each returns `(value, KIND_*,
+  message)` and sets `last_os_error()`. `os.environ()` is the environment as
+  a `*StringSeq` of `NAME=value` copies, sandbox-filtered like `getenv`.
+  POSIX and Windows alike (nib-code ask aether-fs-stat-flock-exclusive).
+
+- **`os.signal_watch` and `io.set_echo`.** A program can survive Ctrl-C and
+  `kill -TERM` and wind down cleanly: `os.signal_watch([signal.SIGINT(),
+  signal.SIGTERM()])` counts those signals instead of letting them end the
+  process, `os.signal_received(w)` gives the number of one delivered since
+  the watch last reported it, and `os.signal_unwatch(w)` puts the earlier
+  disposition back once the last watch on a signal ends. Each watch keeps
+  its own place, so two watches both see a delivery. Windows maps Ctrl-C /
+  Ctrl-Break to SIGINT and console close, logoff and shutdown to SIGTERM.
+  `io.set_echo(fd, on)` turns a terminal's echo off for reading a secret and
+  returns whether it was on, so the caller restores it; a pipe or file is
+  left alone (termios `ECHO`; the console's `ENABLE_ECHO_INPUT` on Windows)
+  (nib-code ask aether-signal-flag-and-tty-echo).
+
+### Fixed
+
+- **Argument checks line up for a call that ends in a block.** Whether a
+  builder's `_ctx` is injected was decided by counting every closure out of
+  the call, so `each(c, name) callback { ... }` for `each(_ctx, name, cb: fn)`
+  looked injected and its arguments were checked one slot off; the ptr-as-string
+  check (E0202) was skipped for every call ending in a block for that reason.
+  The checker now uses codegen's rule (one argument fewer than the parameters,
+  a trailing DSL block not counted), so E0202 covers `label(raw) { ... }` and
+  `each(null, raw) callback { ... }`, and a float given to a `ptr` after an
+  injected `_ctx` (`setp(1, 0.5)` in a block) is refused instead of reaching C,
+  where the offset had been applied twice.
+
+- **`fs.rename` replaces an existing file on Windows, and `fs.write_atomic`
+  no longer deletes it first.** Both went through the CRT's `rename`, which
+  on Windows refuses an existing destination: `fs.rename(tmp, target)`, the
+  last step of every atomic replacement, failed there with "File exists",
+  and `write_atomic` removed the target before renaming, so a reader could
+  find it missing. Both now use `MoveFileExW(MOVEFILE_REPLACE_EXISTING)`, as
+  POSIX `rename(2)` replaces; a move across volumes still fails.
+
 ## [0.914.0]
 
 ### Added
