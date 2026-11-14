@@ -61,7 +61,11 @@ Write with the existing `io.fd_write(fd, string.bytes(s))` (loops on short
 writes and EINTR), so there is no `fs.fd_write_all`; rename with `fs.rename`.
 Windows: `_wsopen_s(_O_EXCL)`, the owner-write bit choosing read-only, as
 `fs.chmod` does; `fchmod` sets the read-only attribute through
-`SetFileInformationByHandle`; `fd_fsync` is `_commit`.
+`SetFileInformationByHandle`; `fd_fsync` is `_commit`. The last step needed
+a fix of its own: `fs.rename` refused an existing destination on Windows
+(the CRT's `rename`), so the replacement failed there with "File exists".
+It is `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` now, replacing as POSIX
+`rename(2)` does, and `fs.write_atomic` no longer deletes the target first.
 
 ## 4. The errno behind an error
 

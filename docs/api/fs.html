@@ -1058,7 +1058,7 @@
       <h3 class="function-name">rename <span class="kind">fn</span></h3>
       <pre class="usage"><code>rename(from, to) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">from: string, to: string</span></p>
-      <p class="doc">Rename `from` to `to` — thin POSIX rename(2) wrapper. Atomic when both sides are on the same filesystem. Returns &quot;&quot; on success, error on failure (e.g. cross-filesystem rename, destination dir not writable, source missing).</p>
+      <p class="doc">Rename `from` to `to`, replacing `to` if it exists (rename(2); on Windows MoveFileExW with MOVEFILE_REPLACE_EXISTING). Atomic when both sides are on the same filesystem. Returns &quot;&quot; on success, error on failure (e.g. cross-filesystem rename, destination dir not writable, source missing).</p>
     </div>
     <div class="function" id="file_stat" data-name="file_stat">
       <h3 class="function-name">file_stat <span class="kind">fn</span></h3>

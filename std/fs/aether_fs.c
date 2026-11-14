@@ -1390,6 +1390,42 @@ int fs_write_binary_raw(const char* path, const char* data, int length) {
     return 1;
 }
 
+/* rename(2), replacing `to` when it exists, on every platform. The CRT's
+ * rename on Windows refuses an existing destination, so fs.rename and
+ * fs.write_atomic failed there exactly where a replacement is the point
+ * (and write_atomic deleted the destination first, so a reader could find
+ * it missing). MoveFileExW with MOVEFILE_REPLACE_EXISTING replaces it in
+ * one call; without MOVEFILE_COPY_ALLOWED a move across volumes fails, as
+ * EXDEV does. 0, or -1 with errno set. */
+static int aether_fs_rename_over(const char* from, const char* to) {
+#ifdef _WIN32
+    size_t fb = 0, tb = 0;
+    wchar_t* wf = fs_win_wide(from, &fb);
+    wchar_t* wt = wf ? fs_win_wide(to, &tb) : NULL;
+    if (!wf || !wt) {
+        if (wf) aether_caps_free(wf, fb);
+        errno = EINVAL;
+        return -1;
+    }
+    BOOL ok = MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING);
+    DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    aether_caps_free(wf, fb);
+    aether_caps_free(wt, tb);
+    if (ok) return 0;
+    switch (err) {
+        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
+        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: errno = EACCES; break;
+        case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
+        case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: errno = EEXIST; break;
+        case ERROR_DISK_FULL: errno = ENOSPC; break;
+        default: errno = EIO; break;
+    }
+    return -1;
+#else
+    return rename(from, to);
+#endif
+}
+
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
     if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
     if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
@@ -1513,13 +1549,10 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
 
     // rename(2) is atomic on POSIX when src and dst are on the same
     // filesystem — which they always are here, since we put the tmp
-    // right next to the destination. On Windows rename will fail if
-    // the destination exists, so drop it first; we don't race-check
-    // because concurrent writers to the same path is already UB.
-#ifdef _WIN32
-    remove(path);
-#endif
-    if (rename(tmp, path) != 0) {
+    // right next to the destination. aether_fs_rename_over replaces the
+    // destination on Windows too, in one MoveFileExW, so a reader there
+    // never finds it missing either.
+    if (aether_fs_rename_over(tmp, path) != 0) {
         int err_rename = errno;
         remove(tmp);
         errno = err_rename;
@@ -1534,7 +1567,7 @@ int fs_rename_raw(const char* from, const char* to) {
         errno = EACCES;
         return 0;
     }
-    return rename(from, to) == 0 ? 1 : 0;
+    return aether_fs_rename_over(from, to) == 0 ? 1 : 0;
 }
 
 // Kind encoding for fs_stat_raw's out_kind:

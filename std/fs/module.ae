@@ -859,7 +859,8 @@ write_atomic(path: string, data: byte[]) -> {
     return ""
 }
 
-// Rename `from` to `to` — thin POSIX rename(2) wrapper. Atomic when
+// Rename `from` to `to`, replacing `to` if it exists (rename(2); on
+// Windows MoveFileExW with MOVEFILE_REPLACE_EXISTING). Atomic when
 // both sides are on the same filesystem. Returns "" on success,
 // error on failure (e.g. cross-filesystem rename, destination dir
 // not writable, source missing).
