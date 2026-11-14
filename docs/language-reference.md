@@ -5292,7 +5292,9 @@ declares a `string` parameter is E0202 too (`Argument 1 'text' of 'takes':
 expected string, got ptr`), since the callee would read it the same way. `null`
 and a `string.*` producer are accepted there as well, and an `extern`'s
 `string` parameter still takes a `ptr`: that is the C boundary, where both are
-a `char*`.
+a `char*`. A call that ends in a block is checked the same way: in
+`label(raw) { ... }` the block injects `label`'s `_ctx`, so `raw` is the
+argument for the parameter after it.
 
 ## Compiler Warnings
 

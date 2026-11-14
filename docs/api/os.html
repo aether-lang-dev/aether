@@ -102,6 +102,14 @@
     <li><a href="#getcwd_raw">getcwd_raw</a></li>
     <li><a href="#chdir">chdir</a></li>
     <li><a href="#getcwd">getcwd</a></li>
+    <li><a href="#environ_raw">environ_raw</a></li>
+    <li><a href="#environ">environ</a></li>
+    <li><a href="#signal_watch_raw">signal_watch_raw</a></li>
+    <li><a href="#signal_received_raw">signal_received_raw</a></li>
+    <li><a href="#signal_unwatch_raw">signal_unwatch_raw</a></li>
+    <li><a href="#signal_watch">signal_watch</a></li>
+    <li><a href="#signal_received">signal_received</a></li>
+    <li><a href="#signal_unwatch">signal_unwatch</a></li>
     <li><a href="#memory_resident">memory_resident</a></li>
     <li><a href="#memory_private">memory_private</a></li>
   </ul>
@@ -665,6 +673,46 @@
       <h3 class="function-name">getcwd <span class="kind">fn</span></h3>
       <pre class="usage"><code>getcwd() <span class="arrow">-&gt;</span> string</code></pre>
       <p class="doc">Current working directory, or &quot;&quot; on failure. Returns a fresh counted string the caller owns (the raw result is `@heap`, adopted at the call and released by the place that holds it).</p>
+    </div>
+    <div class="function" id="environ_raw" data-name="environ_raw">
+      <h3 class="function-name">environ_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>environ_raw() <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+      <p class="doc">This process's environment as a list of &quot;NAME=value&quot; strings, in the order the OS keeps them: what building a child's environment without some variables needs (os.getenv reads one name you already know). Each string is a copy, so a later setenv does not change the list. A name the sandbox grant list does not allow `env` for is left out, as getenv refuses it. On Windows the hidden &quot;=C:=C:\...&quot; per-drive directory entries are left out. for e in os.environ() { if !string.starts_with(e, &quot;AWS_&quot;) { ... } }</p>
+    </div>
+    <div class="function" id="environ" data-name="environ">
+      <h3 class="function-name">environ <span class="kind">fn</span></h3>
+      <pre class="usage"><code>environ() <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+    </div>
+    <div class="function" id="signal_watch_raw" data-name="signal_watch_raw">
+      <h3 class="function-name">signal_watch_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>signal_watch_raw(signals, n) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">signals: ptr, n: int</span></p>
+      <p class="doc">Signals as something to poll. `signal_watch([signal.SIGINT(), signal.SIGTERM()])` stops those signals ending the process: each delivery is counted instead, and `signal_received(w)` gives the number of a watched signal delivered since the watch last reported it (0 for none), one per call. A program that must not die on Ctrl-C polls it where it already waits (between reads, in a sleep loop) and winds down cleanly. `signal_unwatch(w)` ends the watch and frees it; when the last watch on a signal ends, what was there before (usually the default action) is back. w, err = os.signal_watch([signal.SIGINT(), signal.SIGTERM()]) defer os.signal_unwatch(w) while working { sig = os.signal_received(w) if sig == signal.SIGINT() { ... &quot;[interrupted by user]&quot; ... } ... } Each watch keeps its own place: two watches on SIGINT both see a Ctrl-C. The handler itself only adds one to a per-signal counter. SIGKILL and SIGSTOP cannot be watched; a number outside 1..64 is refused. Interrupted system calls are restarted (SA_RESTART). Windows has SIGINT (Ctrl-C, Ctrl-Break) and SIGTERM (the console closing, logoff, shutdown), through SetConsoleCtrlHandler; any other signal is refused there. For SIGTERM Windows ends the process about five seconds after the event whatever the program does, so poll often.</p>
+    </div>
+    <div class="function" id="signal_received_raw" data-name="signal_received_raw">
+      <h3 class="function-name">signal_received_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>signal_received_raw(watch) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">watch: ptr</span></p>
+    </div>
+    <div class="function" id="signal_unwatch_raw" data-name="signal_unwatch_raw">
+      <h3 class="function-name">signal_unwatch_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>signal_unwatch_raw(watch)</code></pre>
+      <p class="signature"><span class="sig-params">watch: ptr</span></p>
+    </div>
+    <div class="function" id="signal_watch" data-name="signal_watch">
+      <h3 class="function-name">signal_watch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>signal_watch(signals) <span class="arrow">-&gt;</span> (ptr, string)</code></pre>
+      <p class="signature"><span class="sig-params">signals: int[]</span></p>
+    </div>
+    <div class="function" id="signal_received" data-name="signal_received">
+      <h3 class="function-name">signal_received <span class="kind">fn</span></h3>
+      <pre class="usage"><code>signal_received(watch) <span class="arrow">-&gt;</span> int</code></pre>
+      <p class="signature"><span class="sig-params">watch: ptr</span></p>
+    </div>
+    <div class="function" id="signal_unwatch" data-name="signal_unwatch">
+      <h3 class="function-name">signal_unwatch <span class="kind">fn</span></h3>
+      <pre class="usage"><code>signal_unwatch(watch)</code></pre>
+      <p class="signature"><span class="sig-params">watch: ptr</span></p>
     </div>
     <div class="function" id="memory_resident" data-name="memory_resident">
       <h3 class="function-name">memory_resident <span class="kind">fn</span></h3>

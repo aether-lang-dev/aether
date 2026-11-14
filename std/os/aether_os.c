@@ -60,6 +60,13 @@ int os_execv(const char* p, void* a) { (void)p; (void)a; return -1; }
 char* os_which(const char* n) { (void)n; return NULL; }
 int os_chdir_raw(const char* p) { (void)p; return -1; }
 char* os_getcwd_raw(void) { return NULL; }
+void* os_environ_raw(void) { return NULL; }   /* the empty *StringSeq */
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_os;
+_tuple_ptr_string_os os_signal_watch_raw(const int* s, int n) {
+    (void)s; (void)n; _tuple_ptr_string_os out = { NULL, "os.signal_watch unavailable" }; return out;
+}
+int os_signal_received_raw(void* w) { (void)w; return 0; }
+void os_signal_unwatch_raw(void* w) { (void)w; }
 int os_run(const char* p, void* a, void* e) { (void)p; (void)a; (void)e; return -1; }
 char* os_run_capture_raw(const char* p, void* a, void* e) { (void)p; (void)a; (void)e; return NULL; }
 typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
@@ -177,6 +184,13 @@ char* os_which(const char* n) { (void)n; return NULL; }
 int os_getpid_raw(void) { return 0; }
 int os_user_id_raw(void) { return -1; }
 int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
+void* os_environ_raw(void) { return NULL; }   /* the empty *StringSeq */
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_os;
+_tuple_ptr_string_os os_signal_watch_raw(const int* s, int n) {
+    (void)s; (void)n; _tuple_ptr_string_os out = { NULL, "os.signal_watch unavailable" }; return out;
+}
+int os_signal_received_raw(void* w) { (void)w; return 0; }
+void os_signal_unwatch_raw(void* w) { (void)w; }
 
 #define AETHER_OS_PROCESS_STUBBED 1
 
@@ -4907,6 +4921,271 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
  * stub-first per the v1 design). */
 
 #endif // !_WIN32
+
+/* os.environ(): this process's environment as a *StringSeq of "NAME=value"
+ * strings, in the order the OS keeps them (nib-code ask
+ * aether-fs-stat-flock-exclusive, item 5: a child's environment built
+ * without some variables needs every one; std.os had getenv only). Each
+ * string is a counted copy, so a later setenv does not change the list. A
+ * name the sandbox does not grant `env` for is left out, as os.getenv
+ * refuses it. Windows: GetEnvironmentStringsW in UTF-8, without the
+ * "=C:=C:\..." per-drive directory entries, which are no variables. */
+struct StringSeq;
+extern struct StringSeq* string_seq_cons_adopt(const char* head, struct StringSeq* tail);
+extern void string_seq_free(struct StringSeq* s);
+
+static int os_environ_entry_granted(const char* entry, size_t len) {
+    const char* eq = memchr(entry, '=', len);
+    size_t nlen = eq ? (size_t)(eq - entry) : len;
+    char small[256];
+    char* name = nlen < sizeof small ? small : (char*)malloc(nlen + 1);
+    if (!name) return 0;
+    memcpy(name, entry, nlen);
+    name[nlen] = '\0';
+    int ok = aether_sandbox_check("env", name);
+    if (name != small) free(name);
+    return ok;
+}
+
+/* Cons `entries[0..n)` onto an empty seq back to front, so the seq reads in
+ * their order. Each entry is copied into a counted string the cell adopts. */
+static void* os_environ_seq(const char* const* entries, const size_t* lens, int n) {
+    struct StringSeq* seq = NULL;
+    for (int i = n - 1; i >= 0; i--) {
+        if (!os_environ_entry_granted(entries[i], lens[i])) continue;
+        AetherString* s = string_new_with_length(entries[i], lens[i]);
+        if (!s) continue;
+        struct StringSeq* cell = string_seq_cons_adopt((const char*)s, seq);
+        if (!cell) { string_release(s); continue; }
+        seq = cell;
+    }
+    return seq;
+}
+
+#ifdef _WIN32
+void* os_environ_raw(void) {
+    wchar_t* block = GetEnvironmentStringsW();
+    if (!block) return NULL;
+    int n = 0;
+    for (wchar_t* p = block; *p; p += wcslen(p) + 1) n++;
+    char** entries = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    size_t* lens = n ? (size_t*)calloc((size_t)n, sizeof(size_t)) : NULL;
+    int k = 0;
+    if (n && entries && lens) {
+        for (wchar_t* p = block; *p; p += wcslen(p) + 1) {
+            if (p[0] == L'=') continue;
+            int bytes = WideCharToMultiByte(CP_UTF8, 0, p, -1, NULL, 0, NULL, NULL);
+            if (bytes <= 0) continue;
+            char* u = (char*)malloc((size_t)bytes);
+            if (!u) continue;
+            WideCharToMultiByte(CP_UTF8, 0, p, -1, u, bytes, NULL, NULL);
+            entries[k] = u;
+            lens[k] = (size_t)bytes - 1;
+            k++;
+        }
+    }
+    FreeEnvironmentStringsW(block);
+    void* seq = os_environ_seq((const char* const*)entries, lens, k);
+    for (int i = 0; i < k; i++) free(entries[i]);
+    free(entries);
+    free(lens);
+    return seq;
+}
+#else
+void* os_environ_raw(void) {
+    char** env = aether_spawn_environ();
+    int n = 0;
+    while (env && env[n]) n++;
+    if (n == 0) return NULL;
+    size_t* lens = (size_t*)calloc((size_t)n, sizeof(size_t));
+    if (!lens) return NULL;
+    for (int i = 0; i < n; i++) lens[i] = strlen(env[i]);
+    void* seq = os_environ_seq((const char* const*)env, lens, n);
+    free(lens);
+    return seq;
+}
+#endif
+
+
+/* os.signal_watch / signal_received / signal_unwatch (nib-code ask
+ * aether-signal-flag-and-tty-echo): SIGINT and SIGTERM, and the other
+ * catchable signals, as something a program polls instead of the default
+ * action ending it.
+ *
+ * Where the state lives, and why any of it is process-wide: the kernel calls
+ * a handler with the signal number and nothing else (no user pointer), so
+ * whatever it records has to be reachable from the number alone. That is
+ * one delivery counter per signal, ae_sig_count, and nothing more: the
+ * handler only adds one to it (an atomic add, async-signal-safe), and no
+ * other code writes it. Everything a caller sees is in its own watch: the
+ * signals it asked for and the count it last saw of each. A watch reports a
+ * signal when its count moved since that watch last looked, so two watches
+ * on SIGINT both see a Ctrl-C and neither takes it from the other; there is
+ * no shared "last signal" slot to consume.
+ *
+ * The other process-wide state is the bookkeeping that puts the handler in
+ * and takes it out: how many watches hold each signal, and the disposition
+ * the first one replaced, restored when the last one goes. It is touched
+ * only by watch and unwatch, under a lock. */
+#define AE_SIG_LIMIT 65
+
+typedef struct {
+    int n;
+    int sigs[AE_SIG_LIMIT];
+    long seen[AE_SIG_LIMIT];
+} AeSignalWatch;
+
+typedef struct { void* _0; const char* _1; } _tuple_ptr_string_os;
+
+#ifdef _WIN32
+#include <signal.h>
+static volatile LONG ae_sig_count[AE_SIG_LIMIT];
+static volatile LONG ae_sig_watchers[AE_SIG_LIMIT];
+static SRWLOCK ae_sig_lock = SRWLOCK_INIT;
+static int ae_sig_ctrl_installed = 0;
+
+static long ae_sig_load(int sig) { return (long)InterlockedCompareExchange(&ae_sig_count[sig], 0, 0); }
+
+/* Console control events stand in for the two signals Windows has for a
+ * console program: Ctrl-C and Ctrl-Break are SIGINT; closing the console,
+ * logging off and shutting down are SIGTERM. TRUE (handled) only while a
+ * watch holds the signal, so the default ending applies otherwise. Windows
+ * ends the process as soon as a close, logoff or shutdown handler returns,
+ * so for those the handler waits (up to the five seconds Windows allows)
+ * while the program polls and finishes up. */
+static BOOL WINAPI ae_sig_ctrl_handler(DWORD event) {
+    int sig;
+    switch (event) {
+        case CTRL_C_EVENT: case CTRL_BREAK_EVENT: sig = SIGINT; break;
+        case CTRL_CLOSE_EVENT: case CTRL_LOGOFF_EVENT: case CTRL_SHUTDOWN_EVENT: sig = SIGTERM; break;
+        default: return FALSE;
+    }
+    if (InterlockedCompareExchange(&ae_sig_watchers[sig], 0, 0) == 0) return FALSE;
+    InterlockedIncrement(&ae_sig_count[sig]);
+    if (sig == SIGTERM) Sleep(5000);
+    return TRUE;
+}
+
+static const char* ae_sig_install(int sig) {
+    if (sig != SIGINT && sig != SIGTERM) return "os.signal_watch: only SIGINT and SIGTERM on Windows";
+    if (!ae_sig_ctrl_installed) {
+        if (!SetConsoleCtrlHandler(ae_sig_ctrl_handler, TRUE)) return "os.signal_watch: SetConsoleCtrlHandler failed";
+        ae_sig_ctrl_installed = 1;
+    }
+    return NULL;
+}
+
+static void ae_sig_restore(int sig) {
+    (void)sig;
+    for (int i = 1; i < AE_SIG_LIMIT; i++) if (ae_sig_watchers[i] > 0) return;
+    if (ae_sig_ctrl_installed) {
+        SetConsoleCtrlHandler(ae_sig_ctrl_handler, FALSE);
+        ae_sig_ctrl_installed = 0;
+    }
+}
+#define AE_SIG_LOCK() AcquireSRWLockExclusive(&ae_sig_lock)
+#define AE_SIG_UNLOCK() ReleaseSRWLockExclusive(&ae_sig_lock)
+#define AE_SIG_WATCHERS_ADD(sig, d) InterlockedExchangeAdd(&ae_sig_watchers[(sig)], (d))
+
+#else
+#include <signal.h>
+#include <pthread.h>
+static volatile int ae_sig_count[AE_SIG_LIMIT];
+static int ae_sig_watchers[AE_SIG_LIMIT];
+static struct sigaction ae_sig_prev[AE_SIG_LIMIT];
+static pthread_mutex_t ae_sig_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static void ae_sig_handler(int sig) {
+    if (sig > 0 && sig < AE_SIG_LIMIT) __atomic_fetch_add(&ae_sig_count[sig], 1, __ATOMIC_SEQ_CST);
+}
+
+static long ae_sig_load(int sig) { return (long)__atomic_load_n(&ae_sig_count[sig], __ATOMIC_SEQ_CST); }
+
+static const char* ae_sig_install(int sig) {
+    if (sig == SIGKILL || sig == SIGSTOP) return "os.signal_watch: SIGKILL and SIGSTOP cannot be caught";
+    struct sigaction sa;
+    memset(&sa, 0, sizeof sa);
+    sa.sa_handler = ae_sig_handler;
+    sigemptyset(&sa.sa_mask);
+    /* Interrupted reads and waits carry on: the watch is polled, so nothing
+     * needs a blocking call to fail with EINTR to notice the signal. */
+    sa.sa_flags = SA_RESTART;
+    if (sigaction(sig, &sa, &ae_sig_prev[sig]) != 0) return "os.signal_watch: sigaction failed";
+    return NULL;
+}
+
+static void ae_sig_restore(int sig) { (void)sigaction(sig, &ae_sig_prev[sig], NULL); }
+#define AE_SIG_LOCK() pthread_mutex_lock(&ae_sig_lock)
+#define AE_SIG_UNLOCK() pthread_mutex_unlock(&ae_sig_lock)
+#define AE_SIG_WATCHERS_ADD(sig, d) (ae_sig_watchers[(sig)] += (d))
+#endif
+
+/* Drop one hold on `sig`; the last puts back what was there before. */
+static void ae_sig_release(int sig) {
+    AE_SIG_WATCHERS_ADD(sig, -1);
+    if (ae_sig_watchers[sig] == 0) ae_sig_restore(sig);
+}
+
+/* A watch on the `n` signals in `sigs`: (watch, "") or (NULL, why). A
+ * number outside 1..64, or a signal that cannot be caught, refuses the whole
+ * watch and leaves every disposition as it was. */
+_tuple_ptr_string_os os_signal_watch_raw(const int* sigs, int n) {
+    _tuple_ptr_string_os out = { NULL, "" };
+    if (!sigs || n <= 0 || n >= AE_SIG_LIMIT) { out._1 = "os.signal_watch: give one to 64 signals"; return out; }
+    for (int i = 0; i < n; i++) {
+        if (sigs[i] <= 0 || sigs[i] >= AE_SIG_LIMIT) { out._1 = "os.signal_watch: not a signal number"; return out; }
+    }
+    AeSignalWatch* w = (AeSignalWatch*)calloc(1, sizeof *w);
+    if (!w) { out._1 = "os.signal_watch: out of memory"; return out; }
+    AE_SIG_LOCK();
+    for (int i = 0; i < n; i++) {
+        int sig = sigs[i];
+        int dup = 0;
+        for (int j = 0; j < w->n; j++) dup |= w->sigs[j] == sig;
+        if (dup) continue;
+        const char* why = ae_sig_watchers[sig] == 0 ? ae_sig_install(sig) : NULL;
+        if (why) {
+            for (int j = 0; j < w->n; j++) ae_sig_release(w->sigs[j]);
+            AE_SIG_UNLOCK();
+            free(w);
+            out._1 = why;
+            return out;
+        }
+        AE_SIG_WATCHERS_ADD(sig, 1);
+        w->sigs[w->n] = sig;
+        w->seen[w->n] = ae_sig_load(sig);
+        w->n++;
+    }
+    AE_SIG_UNLOCK();
+    out._0 = w;
+    return out;
+}
+
+/* The number of a watched signal delivered since this watch last reported
+ * it, or 0. One per call: when SIGINT and SIGTERM both came, the next call
+ * gives the other. */
+int os_signal_received_raw(void* watch) {
+    AeSignalWatch* w = (AeSignalWatch*)watch;
+    if (!w) return 0;
+    for (int i = 0; i < w->n; i++) {
+        long now = ae_sig_load(w->sigs[i]);
+        if (now != w->seen[i]) {
+            w->seen[i] = now;
+            return w->sigs[i];
+        }
+    }
+    return 0;
+}
+
+/* End the watch and free it. */
+void os_signal_unwatch_raw(void* watch) {
+    AeSignalWatch* w = (AeSignalWatch*)watch;
+    if (!w) return;
+    AE_SIG_LOCK();
+    for (int i = 0; i < w->n; i++) ae_sig_release(w->sigs[i]);
+    AE_SIG_UNLOCK();
+    free(w);
+}
 
 
 #endif // AETHER_HAS_FILESYSTEM

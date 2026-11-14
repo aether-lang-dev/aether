@@ -105,6 +105,29 @@
     <li><a href="#fsync">fsync</a></li>
     <li><a href="#file_fd_raw">file_fd_raw</a></li>
     <li><a href="#fd">fd</a></li>
+    <li><a href="#Stat">Stat</a></li>
+    <li><a href="#stat">stat</a></li>
+    <li><a href="#stat_fill_raw">stat_fill_raw</a></li>
+    <li><a href="#stat_new_raw">stat_new_raw</a></li>
+    <li><a href="#stat_free_raw">stat_free_raw</a></li>
+    <li><a href="#lock_open">lock_open</a></li>
+    <li><a href="#try_lock">try_lock</a></li>
+    <li><a href="#unlock">unlock</a></li>
+    <li><a href="#create_exclusive">create_exclusive</a></li>
+    <li><a href="#fchmod">fchmod</a></li>
+    <li><a href="#fd_fsync">fd_fsync</a></li>
+    <li><a href="#fd_truncate">fd_truncate</a></li>
+    <li><a href="#fd_size">fd_size</a></li>
+    <li><a href="#fd_pwrite_all">fd_pwrite_all</a></li>
+    <li><a href="#lock_open_raw">lock_open_raw</a></li>
+    <li><a href="#try_lock_raw">try_lock_raw</a></li>
+    <li><a href="#unlock_raw">unlock_raw</a></li>
+    <li><a href="#create_exclusive_raw">create_exclusive_raw</a></li>
+    <li><a href="#fchmod_raw">fchmod_raw</a></li>
+    <li><a href="#fd_fsync_raw">fd_fsync_raw</a></li>
+    <li><a href="#fd_truncate_raw">fd_truncate_raw</a></li>
+    <li><a href="#fd_size_raw">fd_size_raw</a></li>
+    <li><a href="#fd_pwrite_raw">fd_pwrite_raw</a></li>
     <li><a href="#glob_raw">glob_raw</a></li>
     <li><a href="#glob_multi_raw">glob_multi_raw</a></li>
     <li><a href="#walk_raw">walk_raw</a></li>
@@ -728,6 +751,131 @@
       <p class="signature"><span class="sig-params">file: ptr</span></p>
       <p class="doc">The OS-level file descriptor inside an open handle, or -1 on a null handle (#1003). Exists for capability plumbing: open through the stdlib, then narrow the descriptor with capsicum.rights_limit(fs.fd(handle), ...) before capsicum.enter(). The fd is owned by the handle — do not close it directly; it is released by close, which also frees the handle itself, so never call fd() on a handle that has been closed.</p>
     </div>
+    <div class="function" id="Stat" data-name="Stat">
+      <h3 class="function-name">Stat <span class="kind">struct</span></h3>
+      <pre class="usage"><code>struct Stat</code></pre>
+      <p class="doc">What `stat` reads. `kind` is a STAT_KIND_* value; `mode` the permission bits (07777, setuid/setgid/sticky included); `mtime_ns` the modification time in nanoseconds since the Unix epoch, so two writes in the same second differ. `ino` and `dev` together name the file: a rename keeps them, a replacement gets a new inode. On Windows `ino` is the file index, `dev` the volume serial number, and `mode` is 0666 (0444 read-only), with 0111 added for a directory, the CRT's model.</p>
+    </div>
+    <div class="function" id="stat" data-name="stat">
+      <h3 class="function-name">stat <span class="kind">fn</span></h3>
+      <pre class="usage"><code>stat(path, follow) <span class="arrow">-&gt;</span> (Stat, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string, follow: int</span></p>
+      <p class="doc">The metadata of `path`: (Stat, KIND_OK, &quot;&quot;) or (a zeroed Stat, KIND_*, msg). `follow` 1 follows a symlink to its target (stat(2)); 0 describes the link itself (lstat(2), kind STAT_KIND_SYMLINK). The Stat is a value, nothing to free. st, kind, err = fs.stat(path, 1) if kind != fs.KIND_OK { return err } if st.ino != seen.ino || st.mtime_ns != seen.mtime_ns { ... changed ... }</p>
+    </div>
+    <div class="function" id="stat_fill_raw" data-name="stat_fill_raw">
+      <h3 class="function-name">stat_fill_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stat_fill_raw(path, follow, out) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string, follow: int, out: ptr</span></p>
+    </div>
+    <div class="function" id="stat_new_raw" data-name="stat_new_raw">
+      <h3 class="function-name">stat_new_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stat_new_raw() <span class="arrow">-&gt;</span> ptr</code></pre>
+      <p class="doc">A Stat-sized block for fs_stat_fill_raw, and its release. Named for the module rather than malloc/free: a program's own `free(h: *Host)` would otherwise be what an unqualified `free(p)` here calls.</p>
+    </div>
+    <div class="function" id="stat_free_raw" data-name="stat_free_raw">
+      <h3 class="function-name">stat_free_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>stat_free_raw(p)</code></pre>
+      <p class="signature"><span class="sig-params">p: ptr</span></p>
+    </div>
+    <div class="function" id="lock_open" data-name="lock_open">
+      <h3 class="function-name">lock_open <span class="kind">fn</span></h3>
+      <pre class="usage"><code>lock_open(path) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+      <p class="doc">Open `path` to hold an advisory lock on, creating it (mode 0600) if it is not there and never truncating it: (fd, KIND_OK, &quot;&quot;) or (-1, KIND_*, msg). Open read-write and close-on-exec, so the holder can also keep a few bytes in it (fd_size / fd_truncate / fd_pwrite_all). Take the lock with try_lock.</p>
+    </div>
+    <div class="function" id="try_lock" data-name="try_lock">
+      <h3 class="function-name">try_lock <span class="kind">fn</span></h3>
+      <pre class="usage"><code>try_lock(fd, exclusive) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, exclusive: int</span></p>
+      <p class="doc">Take the whole-file advisory lock on `fd` without waiting: exclusive when `exclusive` is 1, shared when 0. (1, KIND_OK, &quot;&quot;) when taken, (0, KIND_OK, &quot;&quot;) when another holder has it, (0, KIND_*, msg) on an error. Poll it to wait, so the wait stays cancelable: fd, _, err = fs.lock_open(lock_path) got, kind, err = fs.try_lock(fd, 1) while got == 0 &amp;&amp; kind == fs.KIND_OK { sleep(50); got, kind, err = fs.try_lock(fd, 1) } POSIX flock(2): the lock belongs to the open file, so a second lock_open of the same path in this process is a separate holder and is refused while the first holds it. Windows: LockFileEx over the whole file, which also keeps other handles from writing the locked range.</p>
+    </div>
+    <div class="function" id="unlock" data-name="unlock">
+      <h3 class="function-name">unlock <span class="kind">fn</span></h3>
+      <pre class="usage"><code>unlock(fd) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">Release the lock try_lock took on `fd`; unlocking an fd that holds no lock succeeds. (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+    </div>
+    <div class="function" id="create_exclusive" data-name="create_exclusive">
+      <h3 class="function-name">create_exclusive <span class="kind">fn</span></h3>
+      <pre class="usage"><code>create_exclusive(path, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
+      <p class="doc">Create `path` for writing only if nothing is there (O_CREAT | O_EXCL, so a symlink planted at `path` is refused too), with permission bits `mode` less the umask: (fd, KIND_OK, &quot;&quot;) or (-1, KIND_EXISTS, msg) when it exists. Close-on-exec. The atomic-replacement step: create `.name-&lt;random&gt;` beside the target with 0600, write, fchmod to the old mode, fd_fsync, io.fd_close, fs.rename over the target. On Windows the owner-write bit decides read-only, as chmod's does.</p>
+    </div>
+    <div class="function" id="fchmod" data-name="fchmod">
+      <h3 class="function-name">fchmod <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fchmod(fd, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, mode: int</span></p>
+      <p class="doc">Set the permission bits (07777) of the open file `fd`. (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg). On Windows the owner-write bit toggles read-only, as chmod's does.</p>
+    </div>
+    <div class="function" id="fd_fsync" data-name="fd_fsync">
+      <h3 class="function-name">fd_fsync <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_fsync(fd) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">Flush the open file `fd` to the device (fsync(2); _commit on Windows). (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+    </div>
+    <div class="function" id="fd_truncate" data-name="fd_truncate">
+      <h3 class="function-name">fd_truncate <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_truncate(fd, length) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, length: long</span></p>
+      <p class="doc">Cut (or extend with zero bytes) the open file `fd` to `length` bytes. (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
+    </div>
+    <div class="function" id="fd_size" data-name="fd_size">
+      <h3 class="function-name">fd_size <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_size(fd) <span class="arrow">-&gt;</span> (long, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+      <p class="doc">The size of the open file `fd` in bytes: (size, KIND_OK, &quot;&quot;) or (-1, KIND_*, msg).</p>
+    </div>
+    <div class="function" id="fd_pwrite_all" data-name="fd_pwrite_all">
+      <h3 class="function-name">fd_pwrite_all <span class="kind">fn</span></h3>
+      <pre class="usage"><code>fd_pwrite_all(fd, data, offset) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, data: byte[], offset: long</span></p>
+      <p class="doc">Write every byte of `data` at byte `offset` of the open file `fd` (pwrite(2), looping on short writes and EINTR). On POSIX the file position does not move; on Windows it does (an OVERLAPPED WriteFile). (bytes written, KIND_OK, &quot;&quot;) or (bytes written before the failure, KIND_*, msg). For a string: `fs.fd_pwrite_all(fd, string.bytes(s), at)`.</p>
+    </div>
+    <div class="function" id="lock_open_raw" data-name="lock_open_raw">
+      <h3 class="function-name">lock_open_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>lock_open_raw(path) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string</span></p>
+    </div>
+    <div class="function" id="try_lock_raw" data-name="try_lock_raw">
+      <h3 class="function-name">try_lock_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>try_lock_raw(fd, exclusive) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, exclusive: int</span></p>
+    </div>
+    <div class="function" id="unlock_raw" data-name="unlock_raw">
+      <h3 class="function-name">unlock_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>unlock_raw(fd) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="create_exclusive_raw" data-name="create_exclusive_raw">
+      <h3 class="function-name">create_exclusive_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>create_exclusive_raw(path, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
+    </div>
+    <div class="function" id="fchmod_raw" data-name="fchmod_raw">
+      <h3 class="function-name">fchmod_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fchmod_raw(fd, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, mode: int</span></p>
+    </div>
+    <div class="function" id="fd_fsync_raw" data-name="fd_fsync_raw">
+      <h3 class="function-name">fd_fsync_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_fsync_raw(fd) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="fd_truncate_raw" data-name="fd_truncate_raw">
+      <h3 class="function-name">fd_truncate_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_truncate_raw(fd, length) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, length: long</span></p>
+    </div>
+    <div class="function" id="fd_size_raw" data-name="fd_size_raw">
+      <h3 class="function-name">fd_size_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_size_raw(fd) <span class="arrow">-&gt;</span> (long, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int</span></p>
+    </div>
+    <div class="function" id="fd_pwrite_raw" data-name="fd_pwrite_raw">
+      <h3 class="function-name">fd_pwrite_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>fd_pwrite_raw(fd, data, length, offset) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, data: ptr, length: int, offset: long</span></p>
+    </div>
     <div class="function" id="glob_raw" data-name="glob_raw">
       <h3 class="function-name">glob_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>glob_raw(pattern) <span class="arrow">-&gt;</span> ptr</code></pre>
@@ -910,7 +1058,7 @@
       <h3 class="function-name">rename <span class="kind">fn</span></h3>
       <pre class="usage"><code>rename(from, to) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">from: string, to: string</span></p>
-      <p class="doc">Rename `from` to `to` — thin POSIX rename(2) wrapper. Atomic when both sides are on the same filesystem. Returns &quot;&quot; on success, error on failure (e.g. cross-filesystem rename, destination dir not writable, source missing).</p>
+      <p class="doc">Rename `from` to `to`, replacing `to` if it exists (rename(2); on Windows MoveFileExW with MOVEFILE_REPLACE_EXISTING). Atomic when both sides are on the same filesystem. Returns &quot;&quot; on success, error on failure (e.g. cross-filesystem rename, destination dir not writable, source missing).</p>
     </div>
     <div class="function" id="file_stat" data-name="file_stat">
       <h3 class="function-name">file_stat <span class="kind">fn</span></h3>

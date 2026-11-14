@@ -32,6 +32,9 @@ exports(
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
     os_chdir_raw, os_getcwd_raw, chdir, getcwd,
+    os_environ_raw, environ,
+    os_signal_watch_raw, os_signal_received_raw, os_signal_unwatch_raw,
+    signal_watch, signal_received, signal_unwatch,
     memory_resident, memory_private
 )
 
@@ -651,6 +654,64 @@ getcwd() -> string {
         return ""
     }
     return string_concat(s, "")
+}
+
+// This process's environment as a list of "NAME=value" strings, in the
+// order the OS keeps them: what building a child's environment without some
+// variables needs (os.getenv reads one name you already know). Each string
+// is a copy, so a later setenv does not change the list. A name the sandbox
+// grant list does not allow `env` for is left out, as getenv refuses it. On
+// Windows the hidden "=C:=C:\..." per-drive directory entries are left out.
+//
+//     for e in os.environ() { if !string.starts_with(e, "AWS_") { ... } }
+extern os_environ_raw() -> *StringSeq @heap
+
+environ() -> *StringSeq {
+    return os_environ_raw()
+}
+
+// Signals as something to poll. `signal_watch([signal.SIGINT(),
+// signal.SIGTERM()])` stops those signals ending the process: each
+// delivery is counted instead, and `signal_received(w)` gives the number of
+// a watched signal delivered since the watch last reported it (0 for none),
+// one per call. A program that must not die on Ctrl-C polls it where it
+// already waits (between reads, in a sleep loop) and winds down cleanly.
+// `signal_unwatch(w)` ends the watch and frees it; when the last watch on a
+// signal ends, what was there before (usually the default action) is back.
+//
+//     w, err = os.signal_watch([signal.SIGINT(), signal.SIGTERM()])
+//     defer os.signal_unwatch(w)
+//     while working {
+//         sig = os.signal_received(w)
+//         if sig == signal.SIGINT() { ... "[interrupted by user]" ... }
+//         ...
+//     }
+//
+// Each watch keeps its own place: two watches on SIGINT both see a Ctrl-C.
+// The handler itself only adds one to a per-signal counter. SIGKILL and
+// SIGSTOP cannot be watched; a number outside 1..64 is refused. Interrupted
+// system calls are restarted (SA_RESTART). Windows has SIGINT (Ctrl-C,
+// Ctrl-Break) and SIGTERM (the console closing, logoff, shutdown), through
+// SetConsoleCtrlHandler; any other signal is refused there. For SIGTERM
+// Windows ends the process about five seconds after the event whatever the
+// program does, so poll often.
+extern os_signal_watch_raw(signals: ptr, n: int) -> (ptr, string)
+extern os_signal_received_raw(watch: ptr) -> int
+extern os_signal_unwatch_raw(watch: ptr)
+
+signal_watch(signals: int[]) -> (ptr, string) {
+    if signals.len <= 0 {
+        return null, "os.signal_watch: give one to 64 signals"
+    }
+    return os_signal_watch_raw(signals, signals.len)
+}
+
+signal_received(watch: ptr) -> int {
+    return os_signal_received_raw(watch)
+}
+
+signal_unwatch(watch: ptr) {
+    os_signal_unwatch_raw(watch)
 }
 
 // argv[0] — path the OS launched the current process with. Returns "" if

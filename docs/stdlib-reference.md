@@ -35,7 +35,7 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 14 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 150 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 173 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 22 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
@@ -43,7 +43,7 @@ header comment is the authoritative description.
 | `std.http1` | Pure-Aether HTTP/1.1 response reader (RFC 9112). | 15 | [guide](../std/http1/README.md) · [source](../std/http1/module.ae) |
 | `std.intarr` | Fixed-size packed-int buffer. | 15 | [guide](../std/intarr/README.md) · [source](../std/intarr/module.ae) |
 | `std.intmap` | Hash map from `long` keys to `long` values, for integer-keyed counting and lookup. | 12 | [guide](../std/intmap/README.md) · [source](../std/intmap/module.ae) |
-| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 46 | [full section](#io-stdio) |
+| `std.io` | Console output, whole-file reads and writes, file descriptors, environment variables. | 48 | [full section](#io-stdio) |
 | `std.ipc` | The channel to a parent process started by `std.os`: a report pipe, or a two-way socket that passes descriptors. | 40 | [guide](../std/ipc/README.md) · [source](../std/ipc/module.ae) |
 | `std.json` | JSON parsing, building and serialisation. | 52 | [full section](#json-stdjson) |
 | `std.jsonpath` | RFC 9535 JSONPath queries over parsed JSON, with a reusable compiled path. | 10 | [guide](../std/jsonpath/README.md) · [source](../std/jsonpath/module.ae) |
@@ -64,7 +64,7 @@ header comment is the authoritative description.
 | `std.net` | TCP sockets and the HTTP client and server externs. | 64 | [guide](../std/net/README.md) · [source](../std/net/module.ae) |
 | `std.number` | Locale-aware number, percent and currency formatting. | 15 | [guide](../std/number/README.md) · [source](../std/number/module.ae) |
 | `std.observe` | Observable struct models: run closures after every field store on a `struct T @observable` value. | 9 | [guide](../std/observe/README.md) · [source](../std/observe/module.ae) |
-| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 89 | [full section](#os-stdos) |
+| `std.os` | Shell and process execution: run, capture, spawn, pipes, wait. | 97 | [full section](#os-stdos) |
 | `std.path` | Lexical path manipulation, with no filesystem access. | 10 | [guide](../std/path/README.md) · [source](../std/path/module.ae) |
 | `std.plural` | CLDR plural-rule categories. | 2 | [guide](../std/plural/README.md) · [source](../std/plural/module.ae) |
 | `std.pqueue` | Priority queue over (priority, item) pairs, backed by a binary heap. | 9 | [guide](../std/pqueue/README.md) · [source](../std/pqueue/module.ae) |
@@ -2989,6 +2989,7 @@ main() {
 - `os.setenv(name, value)` → `string` - Set environment variable, returns "" on success or an error string. Same C-side function as `io.setenv` use `os.setenv` when you've already imported `std.os` for `os.getenv`.
 - `os.temp_dir()` → `string` - The directory for scratch files, with no trailing separator. Windows resolves it through `GetTempPathW` (which already does the documented `TMP` → `TEMP` → `USERPROFILE` → Windows-directory cascade); POSIX reads `TMPDIR` and falls back to `/tmp`. Always returns a non-empty path, so `"${os.temp_dir()}/name"` needs no check. **Prefer this to a hardcoded `/tmp`**, which works on POSIX and under an MSYS2 shell but fails on a native Windows build, a bug that passes every local check.
 - `os.unsetenv(name)` → `string` - Unset environment variable, returns "" on success or an error string. Same C-side function as `io.unsetenv`.
+- `os.environ()` → `*StringSeq` - The whole environment as `"NAME=value"` copies, in the order the OS keeps them; for building a child's environment from this one less some variables. A name the sandbox does not grant `env` for is left out, as `getenv` refuses it.
 - `os.getpid()` → `int` - Process identifier of the current process. POSIX `getpid(2)`; Windows `_getpid()`. Useful for tmpfile names (`/tmp/myprog.${os.getpid()}.tmp`), per-process locks, log prefixes, and stable tagging across forked children. Returns 0 on platforms compiled without filesystem support.
 - `os.memory_resident()` → `long` - The process's resident set in bytes, shared pages included (Windows working set, macOS `task_info`, Linux `/proc/self/statm`, FreeBSD `kinfo_proc`). `-1` where the platform does not report it.
 - `os.memory_private()` → `long` - Bytes the process alone is charged for: Windows private usage, macOS physical footprint (Activity Monitor's Memory), Linux resident minus shared. Page-granular, and counts mappings the allocator does not see; for the bytes the program holds on the heap use `mem.heap_in_use()` (exactly the blocks held where `mem.heap_in_use_exact()` is true: Windows, not under Wine, and a sanitizer's allocator; elsewhere from the allocator's statistics, which also count cached freed blocks). `-1` where the platform does not report it (FreeBSD).
@@ -3147,6 +3148,7 @@ spawned child exited 5
 - `os.socketpair()` → `(int, int, string)` - A connected `AF_UNIX` stream pair within one process, both ends close-on-exec (POSIX only)
 - `os_execv(prog, argv_list)` → `int` - Replace this process (on Windows: run it, then exit with its status); listed with the argv accessors above
 - `os.chdir(path)` → `string`, `os.getcwd()` → `string` - The working directory; `chdir` returns `""` or an error
+- `os.signal_watch(signals: int[])` → `(ptr, string)`, `os.signal_received(w)` → `int`, `os.signal_unwatch(w)` - Signals as something to poll: a watched signal no longer ends the process, each delivery is counted, and `signal_received(w)` gives the number of one delivered since that watch last reported it (0 for none), one per call. Each watch keeps its own place, so two watches both see a Ctrl-C. `signal_unwatch` frees the watch; when the last watch on a signal ends, its earlier disposition is back. SIGKILL and SIGSTOP are refused. Windows has SIGINT (Ctrl-C, Ctrl-Break) and SIGTERM (console close, logoff, shutdown) only
 - `os_which(name)` → `string` - The first match for `name` on `PATH`, or `""`
 
 ### Child-to-parent reports (`std.ipc`)
@@ -3678,6 +3680,7 @@ main() {
 - `io.stderr_write(data)` → `int` - Write `data` to fd 2 directly (length computed internally with `string.length`), bypassing stdio buffering. Returns the byte count actually written, or -1 on error. Loops on partial writes; retries `EINTR` on POSIX. Reach for this when output must reach the terminal / pipe before the process aborts, `println` and `io.print` are line-buffered on tty and block-buffered when piped, so the last few lines reliably get lost during a crash.
 - `io.stdout_write(data)` → `int` - Same shape as `stderr_write` but writes to fd 1. Useful for shell-pipe-friendly tools that need each record flushed before the next stage reads.
 - `io.is_terminal(fd)` → `bool` - Whether `fd` is a terminal a person reads (a console on Windows), not a pipe, a file or the null device. `io.is_terminal(1)` before colouring stdout; honour `NO_COLOR` and `FORCE_COLOR` too, as std.spec does. False for a descriptor that is not open, and in a build without a filesystem.
+- `io.set_echo(fd, on: bool)` → `(bool, string)` - Turn the terminal's echo of what is typed on `fd` off (for a password or key) or back on. Returns whether echo was on before, so `was, _ = io.set_echo(0, false)` then `io.set_echo(0, was)` puts back what was there; a descriptor that is not a terminal is left alone, `(false, "")`. POSIX termios `ECHO`, Windows the console's `ENABLE_ECHO_INPUT`.
 
 **File-descriptor lifecycle and bulk fd I/O:**
 - `io.fd_open_read(path)` → `(int, string)` - Open `path` for reading (POSIX `O_RDONLY` / Win `_O_RDONLY | _O_BINARY`). Returns `(fd, "")` on success, `(-1, error)` on failure.

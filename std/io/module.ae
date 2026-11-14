@@ -11,14 +11,14 @@ exports(
     io_read_file_raw, io_write_file_raw, io_append_file_raw, io_file_exists,
     io_delete_file_raw, io_file_info_raw, io_file_info_free,
     io_getenv, io_setenv_raw, io_unsetenv_raw,
-    io_stderr_write_raw, io_stdout_write_raw, io_is_terminal_raw,
+    io_stderr_write_raw, io_stdout_write_raw, io_is_terminal_raw, io_set_echo_raw,
     io_perror_raw, io_errno_message_raw,
     io_fd_open_read_tuple, io_fd_open_write_tuple, io_fd_close_raw,
     io_fd_read_n_tuple, io_fd_read_line_tuple, io_fd_read_line_status_tuple,
     io_fd_read_into_raw,
     read_file, write_file, append_file, delete_file, file_info,
     setenv, unsetenv,
-    stderr_write, stdout_write, is_terminal, perror, errno_message,
+    stderr_write, stdout_write, is_terminal, set_echo, perror, errno_message,
     fd_open_read, fd_open_write, fd_close,
     fd_write, fd_read_n, fd_read_into, fd_read_line, fd_read_line_status
 )
@@ -199,6 +199,24 @@ stdout_write(data: string) -> int {
 // a filesystem.
 is_terminal(fd: int) -> bool {
     return io_is_terminal_raw(fd) == 1
+}
+
+extern io_set_echo_raw(fd: int, on: int) -> (int, string)
+
+// Turn the terminal's echo of what is typed on `fd` on or off: off while
+// reading a password or an API key, so it does not appear on the screen.
+// Returns (was_on, err): whether echo was on before, so the caller puts back
+// what it found, and "" or why a terminal refused. A descriptor that is no
+// terminal (a pipe, a file) is left alone: (false, ""). POSIX termios ECHO
+// (switching off discards input typed before it); Windows the console's
+// ENABLE_ECHO_INPUT.
+//
+//     was, err = io.set_echo(0, false)
+//     defer io.set_echo(0, was)
+//     key = io.fd_read_line(0)
+set_echo(fd: int, on: bool) -> (bool, string) {
+    was, err = io_set_echo_raw(fd, if on { 1 } else { 0 })
+    return was == 1, err
 }
 
 // Print "name: <errno message>\n" to stderr — the POSIX perror(3).

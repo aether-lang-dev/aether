@@ -238,7 +238,7 @@
     <a href="fs.html" class="module-card">
       <h3>fs</h3>
       <p>std.fs - File System Module Import with: import std.fs Note: fs is otherwise extern-only (no std.string import) to stay a thin syscall layer.</p>
-      <span class="count">150 exports</span>
+      <span class="count">173 exports</span>
     </a>
     <a href="guest.html" class="module-card">
       <h3>guest</h3>
@@ -278,7 +278,7 @@
     <a href="io.html" class="module-card">
       <h3>io</h3>
       <p>std.io - Input/Output Module Import with: import std.io Raw externs end in `_raw` and return the C-style NULL/0/1 convention.</p>
-      <span class="count">46 exports</span>
+      <span class="count">48 exports</span>
     </a>
     <a href="ipc.html" class="module-card">
       <h3>ipc</h3>
@@ -383,7 +383,7 @@
     <a href="os.html" class="module-card">
       <h3>os</h3>
       <p>std.os - Shell &amp; Process Execution Import with: import std.os</p>
-      <span class="count">89 exports</span>
+      <span class="count">97 exports</span>
     </a>
     <a href="path.html" class="module-card">
       <h3>path</h3>
@@ -1197,6 +1197,29 @@
       <li class="function-item" data-name="fsync"><a href="fs.html#fsync"><span class="fn-name">fsync</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="file_fd_raw"><a href="fs.html#file_fd_raw"><span class="fn-name">file_fd_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="fd"><a href="fs.html#fd"><span class="fn-name">fd</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="Stat"><a href="fs.html#Stat"><span class="fn-name">Stat</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="stat"><a href="fs.html#stat"><span class="fn-name">stat</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="stat_fill_raw"><a href="fs.html#stat_fill_raw"><span class="fn-name">stat_fill_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="stat_new_raw"><a href="fs.html#stat_new_raw"><span class="fn-name">stat_new_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="stat_free_raw"><a href="fs.html#stat_free_raw"><span class="fn-name">stat_free_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="lock_open"><a href="fs.html#lock_open"><span class="fn-name">lock_open</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="try_lock"><a href="fs.html#try_lock"><span class="fn-name">try_lock</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="unlock"><a href="fs.html#unlock"><span class="fn-name">unlock</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="create_exclusive"><a href="fs.html#create_exclusive"><span class="fn-name">create_exclusive</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fchmod"><a href="fs.html#fchmod"><span class="fn-name">fchmod</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_fsync"><a href="fs.html#fd_fsync"><span class="fn-name">fd_fsync</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_truncate"><a href="fs.html#fd_truncate"><span class="fn-name">fd_truncate</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_size"><a href="fs.html#fd_size"><span class="fn-name">fd_size</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_pwrite_all"><a href="fs.html#fd_pwrite_all"><span class="fn-name">fd_pwrite_all</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="lock_open_raw"><a href="fs.html#lock_open_raw"><span class="fn-name">lock_open_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="try_lock_raw"><a href="fs.html#try_lock_raw"><span class="fn-name">try_lock_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="unlock_raw"><a href="fs.html#unlock_raw"><span class="fn-name">unlock_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="create_exclusive_raw"><a href="fs.html#create_exclusive_raw"><span class="fn-name">create_exclusive_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fchmod_raw"><a href="fs.html#fchmod_raw"><span class="fn-name">fchmod_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_fsync_raw"><a href="fs.html#fd_fsync_raw"><span class="fn-name">fd_fsync_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_truncate_raw"><a href="fs.html#fd_truncate_raw"><span class="fn-name">fd_truncate_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_size_raw"><a href="fs.html#fd_size_raw"><span class="fn-name">fd_size_raw</span><span class="fn-module">fs</span></a></li>
+      <li class="function-item" data-name="fd_pwrite_raw"><a href="fs.html#fd_pwrite_raw"><span class="fn-name">fd_pwrite_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="glob_raw"><a href="fs.html#glob_raw"><span class="fn-name">glob_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="glob_multi_raw"><a href="fs.html#glob_multi_raw"><span class="fn-name">glob_multi_raw</span><span class="fn-module">fs</span></a></li>
       <li class="function-item" data-name="walk_raw"><a href="fs.html#walk_raw"><span class="fn-name">walk_raw</span><span class="fn-module">fs</span></a></li>
@@ -1525,6 +1548,7 @@
       <li class="function-item" data-name="stderr_write_raw"><a href="io.html#stderr_write_raw"><span class="fn-name">stderr_write_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stdout_write_raw"><a href="io.html#stdout_write_raw"><span class="fn-name">stdout_write_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="is_terminal_raw"><a href="io.html#is_terminal_raw"><span class="fn-name">is_terminal_raw</span><span class="fn-module">io</span></a></li>
+      <li class="function-item" data-name="set_echo_raw"><a href="io.html#set_echo_raw"><span class="fn-name">set_echo_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="perror_raw"><a href="io.html#perror_raw"><span class="fn-name">perror_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="errno_message_raw"><a href="io.html#errno_message_raw"><span class="fn-name">errno_message_raw</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="fd_open_read_tuple"><a href="io.html#fd_open_read_tuple"><span class="fn-name">fd_open_read_tuple</span><span class="fn-module">io</span></a></li>
@@ -1544,6 +1568,7 @@
       <li class="function-item" data-name="stderr_write"><a href="io.html#stderr_write"><span class="fn-name">stderr_write</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="stdout_write"><a href="io.html#stdout_write"><span class="fn-name">stdout_write</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="is_terminal"><a href="io.html#is_terminal"><span class="fn-name">is_terminal</span><span class="fn-module">io</span></a></li>
+      <li class="function-item" data-name="set_echo"><a href="io.html#set_echo"><span class="fn-name">set_echo</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="perror"><a href="io.html#perror"><span class="fn-name">perror</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="errno_message"><a href="io.html#errno_message"><span class="fn-name">errno_message</span><span class="fn-module">io</span></a></li>
       <li class="function-item" data-name="fd_open_read"><a href="io.html#fd_open_read"><span class="fn-name">fd_open_read</span><span class="fn-module">io</span></a></li>
@@ -2236,6 +2261,14 @@
       <li class="function-item" data-name="getcwd_raw"><a href="os.html#getcwd_raw"><span class="fn-name">getcwd_raw</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="chdir"><a href="os.html#chdir"><span class="fn-name">chdir</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="getcwd"><a href="os.html#getcwd"><span class="fn-name">getcwd</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="environ_raw"><a href="os.html#environ_raw"><span class="fn-name">environ_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="environ"><a href="os.html#environ"><span class="fn-name">environ</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_watch_raw"><a href="os.html#signal_watch_raw"><span class="fn-name">signal_watch_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_received_raw"><a href="os.html#signal_received_raw"><span class="fn-name">signal_received_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_unwatch_raw"><a href="os.html#signal_unwatch_raw"><span class="fn-name">signal_unwatch_raw</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_watch"><a href="os.html#signal_watch"><span class="fn-name">signal_watch</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_received"><a href="os.html#signal_received"><span class="fn-name">signal_received</span><span class="fn-module">os</span></a></li>
+      <li class="function-item" data-name="signal_unwatch"><a href="os.html#signal_unwatch"><span class="fn-name">signal_unwatch</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="memory_resident"><a href="os.html#memory_resident"><span class="fn-name">memory_resident</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="memory_private"><a href="os.html#memory_private"><span class="fn-name">memory_private</span><span class="fn-module">os</span></a></li>
       <li class="function-item" data-name="join"><a href="path.html#join"><span class="fn-name">join</span><span class="fn-module">path</span></a></li>

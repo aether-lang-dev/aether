@@ -3217,31 +3217,40 @@ static void reject_ptr_for_string_argument(ASTNode* callee, ASTNode* call, ASTNo
     type_error_code_hint(msg, hint, arg->line, arg->column, AETHER_ERR_PTR_INTO_STRING);
 }
 
-/* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? A
- * builder's block supplies it, so the call gives one argument fewer than the
- * parameters (`input("order", "map")` for `input(_ctx, name, type)`), or
- * ends in a trailing block that no parameter takes (`vstack(4) { ... }` is
- * one argument and a block for two parameters). An extern's parameters are
- * plain identifiers, which has_ctx_first_param does not read, so the name is
+/* Does this call leave a `_ctx`-first callee's `_ctx` to be injected? The
+ * same rule codegen applies when it emits the call: the callee declares
+ * `_ctx: ptr` first and the call gives one argument fewer than the
+ * parameters, not counting a trailing DSL block, which is never an argument
+ * (`input("order", "map")` for `input(_ctx, name, type)`; `vstack(4) { ... }`
+ * is one argument and a block for two parameters). A closure written as an
+ * argument, `|x| { ... }` or a `callback { ... }` block, IS one: counting it
+ * out as well said `each(c, name) callback { ... }` for
+ * `each(_ctx, name, cb: fn)` had its `_ctx` injected, so the checks read
+ * every argument one slot off (and the ptr-as-string check was skipped for
+ * every call that ends in a block). An extern's parameters are plain
+ * identifiers, which has_ctx_first_param does not read, so the name is
  * looked for directly. */
 static int ctx_injected_by_block(ASTNode* fn, ASTNode* call) {
+    if (!fn || !call) return 0;
     int first = -1;
     for (int i = 0; i < fn->child_count && first < 0; i++) {
         if (is_call_param(fn, fn->children[i])) first = i;
     }
-    if (first < 0 || !fn->children[first]->value ||
-        strcmp(fn->children[first]->value, "_ctx") != 0)
+    if (first < 0) return 0;
+    ASTNode* ctx = fn->children[first];
+    if (!ctx->value || strcmp(ctx->value, "_ctx") != 0 || !ctx->node_type ||
+        ctx->node_type->kind != TYPE_PTR)
         return 0;
     int expected = 0;
     int limit = fn->type == AST_EXTERN_FUNCTION ? fn->child_count : fn->child_count - 1;
     for (int i = 0; i < limit; i++) {
         if (is_call_param(fn, fn->children[i])) expected++;
     }
-    int non_closure = 0;
+    int given = 0;
     for (int i = 0; i < call->child_count; i++) {
-        if (call->children[i] && call->children[i]->type != AST_CLOSURE) non_closure++;
+        if (call->children[i] && !ast_is_trailing_block(call->children[i])) given++;
     }
-    return call->child_count == expected - 1 || non_closure == expected - 1;
+    return given == expected - 1;
 }
 
 /* A float or a bool passed to a `ptr` parameter. Argument checking is
@@ -20862,8 +20871,7 @@ static int fold_clause_set_requires(ASTNode* call, ASTNode* fn) {
     for (int k = 0; k < set->count; k++) {
         ASTNode* clause = set->nodes[k];
         ContractEnv env = {{0}, {0}, 0, g_enum_program};
-        int expected = count_function_params(clause);
-        int offset = (has_ctx_first_param(clause) && call->child_count == expected - 1) ? -1 : 0;
+        int offset = ctx_injected_by_block(clause, call) ? -1 : 0;
         int can_match = 1, surely = 1, pos = 0;
         for (int i = 0; i < clause->child_count; i++) {
             ASTNode* p = clause->children[i];
@@ -22451,9 +22459,7 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         (symbol->node->type == AST_FUNCTION_DEFINITION ||
          symbol->node->type == AST_BUILDER_FUNCTION ||
          symbol->node->type == AST_EXTERN_FUNCTION)) {
-        int c_has_ctx = has_ctx_first_param(symbol->node);
-        int c_expected = count_function_params(symbol->node);
-        int c_arg_offset = (c_has_ctx && call->child_count == c_expected - 1) ? -1 : 0;
+        int c_arg_offset = ctx_injected_by_block(symbol->node, call) ? -1 : 0;
         int c_scan_limit = (symbol->node->type == AST_EXTERN_FUNCTION)
                            ? symbol->node->child_count
                            : symbol->node->child_count - 1;
@@ -22497,16 +22503,12 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
         (symbol->node->type == AST_FUNCTION_DEFINITION ||
          symbol->node->type == AST_BUILDER_FUNCTION ||
          symbol->node->type == AST_EXTERN_FUNCTION)) {
-        int has_ctx = has_ctx_first_param(symbol->node);
-        int arg_offset = 0;
-        int got = call->child_count;
-        int expected = count_function_params(symbol->node);
-        /* Mirror the arity logic at line ~3957: when the callee
-         * declares _ctx first and the caller's arg count is
-         * expected-1, the DSL auto-injects _ctx, so param index 0
-         * has no corresponding arg slot — skip it by starting
-         * arg_offset at -1 (param[1] aligns to arg[0]). */
-        if (has_ctx && got == expected - 1) arg_offset = -1;
+        /* When the DSL injects the callee's `_ctx` (one argument fewer
+         * than the parameters, a trailing block not counted), param index
+         * 0 has no argument slot: start arg_offset at -1 so param[1]
+         * aligns to arg[0]. The trailing block then lines up with no
+         * parameter. */
+        int arg_offset = ctx_injected_by_block(symbol->node, call) ? -1 : 0;
         int param_idx = 0;
         /* Contract folding, call-site tier (docs/contract-folding.md):
          * collect the parameter-name -> argument-expression bindings while
@@ -22593,25 +22595,9 @@ static int typecheck_function_call_inner(ASTNode* call, SymbolTable* table) {
                     reject_struct_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     reject_string_pointer_argument(call, darg, da, param_type, arg_slot + 1, param->value);
-                    /* A builder's `_ctx` that the trailing block injects has no
-                     * argument, and the arguments after it sit one slot earlier
-                     * than this loop's position (`vstack(4) { ... }` is one
-                     * argument and a block for two parameters). */
-                    int blk_inj = ctx_injected_by_block(symbol->node, call);
-                    if (!blk_inj) {
-                        reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
-                        /* Not where a block injects `_ctx`: which argument a
-                         * parameter takes there is not settled by position
-                         * (a trailing `callback` block the callee takes looks
-                         * the same), so a check could name the wrong one. */
-                        reject_ptr_for_string_argument(symbol->node, call, darg, da, param_type,
-                                                       arg_slot + 1, param->value);
-                    } else if (arg_slot >= 1 && call->children[arg_slot - 1]) {
-                        ASTNode* sarg = call->children[arg_slot - 1];
-                        Type* sa = infer_type(sarg, table);
-                        reject_scalar_for_ptr_argument(call, sarg, sa, param_type, arg_slot, param->value);
-                        if (sa) free_type(sa);
-                    }
+                    reject_scalar_for_ptr_argument(call, darg, da, param_type, arg_slot + 1, param->value);
+                    reject_ptr_for_string_argument(symbol->node, call, darg, da, param_type,
+                                                   arg_slot + 1, param->value);
                     reject_sized_array_argument(call, darg, da, param_type, arg_slot + 1, param->value);
                     int nominal = param_type->distinct_name || (da && da->distinct_name) ||
                                   param_type->kind == TYPE_BITSTRUCT ||

@@ -1,0 +1,70 @@
+// os.signal_watch / signal_received / signal_unwatch (nib-code ask
+// aether-signal-flag-and-tty-echo): a watched signal is counted instead of
+// ending the process, and each watch reports it once. Raised in-process
+// here; tests/integration/os_signal_watch sends them from outside.
+
+import std.os
+import std.signal
+
+extern exit(code: int)
+extern raise(sig: int) -> int
+
+// 1 when the check failed, so main can add them up.
+check(label: string, ok: bool) -> int {
+    if !ok {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  ok   ${label}")
+    return 0
+}
+
+main() {
+    fails = 0
+    windows = os.platform() == "windows"
+
+    // Refusals install nothing and give no watch.
+    k, kerr = os.signal_watch([signal.SIGKILL()])
+    fails = fails + check("SIGKILL is refused", k == null && kerr != "")
+    z, zerr = os.signal_watch([0])
+    fails = fails + check("0 is no signal", z == null && zerr != "")
+    big, berr = os.signal_watch([99])
+    fails = fails + check("99 is no signal", big == null && berr != "")
+    // A refusal part-way leaves the earlier signal of the list alone too.
+    mixed, merr = os.signal_watch([signal.SIGINT(), signal.SIGKILL()])
+    fails = fails + check("a list with SIGKILL is refused whole", mixed == null && merr != "")
+    fails = fails + check("signal_received on no watch is 0", os.signal_received(null) == 0)
+
+    w, err = os.signal_watch([signal.SIGINT(), signal.SIGTERM()])
+    fails = fails + check("watch SIGINT and SIGTERM (${err})", w != null && err == "")
+    fails = fails + check("nothing received yet", os.signal_received(w) == 0)
+
+    if !windows {
+        // Raised in-process; on Windows the console events are the signals,
+        // and a CRT raise() does not reach them.
+        other, _ = os.signal_watch([signal.SIGINT()])
+        raise(signal.SIGINT())
+        raise(signal.SIGTERM())
+        raise(signal.SIGINT())
+        a = os.signal_received(w)
+        b = os.signal_received(w)
+        fails = fails + check("both delivered, one per call (${a}, ${b})",
+            (a == signal.SIGINT() && b == signal.SIGTERM()) ||
+            (a == signal.SIGTERM() && b == signal.SIGINT()))
+        fails = fails + check("then none", os.signal_received(w) == 0)
+        fails = fails + check("a second watch sees SIGINT too", os.signal_received(other) == signal.SIGINT())
+        fails = fails + check("and not SIGTERM, which it does not watch", os.signal_received(other) == 0)
+        os.signal_unwatch(other)
+        // `w` still holds SIGINT, so a raise is still counted.
+        raise(signal.SIGINT())
+        fails = fails + check("the first watch still holds after the second ends",
+            os.signal_received(w) == signal.SIGINT())
+    }
+    os.signal_unwatch(w)
+
+    if fails > 0 {
+        println("${fails} failed")
+        exit(1)
+    }
+    println("all passed")
+}

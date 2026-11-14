@@ -98,6 +98,32 @@ _tuple_string_int_string fs_realpath_raw(const char* p) {
     _tuple_string_int_string out = { (const char*)string_empty(), AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
     return out;
 }
+/* The descriptor and full-stat calls: no filesystem in this build. */
+typedef struct { int64_t _0; int _1; const char* _2; } _tuple_long_int_string;
+static _tuple_int_int_string fs_unavail_iks(int value) {
+    _tuple_int_int_string out = { value, AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
+    return out;
+}
+_tuple_int_int_string fs_stat_fill_raw(const char* p, int f, void* o) {
+    (void)p; (void)f;
+    for (int i = 0; o && i < 48; i++) ((unsigned char*)o)[i] = 0;
+    return fs_unavail_iks(0);
+}
+void* fs_stat_new_raw(void) { return calloc(1, 48); }
+void fs_stat_free_raw(void* p) { free(p); }
+_tuple_int_int_string fs_lock_open_raw(const char* p) { (void)p; return fs_unavail_iks(-1); }
+_tuple_int_int_string fs_try_lock_raw(int fd, int e) { (void)fd; (void)e; return fs_unavail_iks(0); }
+_tuple_int_int_string fs_unlock_raw(int fd) { (void)fd; return fs_unavail_iks(0); }
+_tuple_int_int_string fs_create_exclusive_raw(const char* p, int m) { (void)p; (void)m; return fs_unavail_iks(-1); }
+_tuple_int_int_string fs_fchmod_raw(int fd, int m) { (void)fd; (void)m; return fs_unavail_iks(0); }
+_tuple_int_int_string fs_fd_fsync_raw(int fd) { (void)fd; return fs_unavail_iks(0); }
+_tuple_int_int_string fs_fd_truncate_raw(int fd, int64_t l) { (void)fd; (void)l; return fs_unavail_iks(0); }
+_tuple_long_int_string fs_fd_size_raw(int fd) {
+    (void)fd; _tuple_long_int_string out = { -1, AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" }; return out;
+}
+_tuple_int_int_string fs_fd_pwrite_raw(int fd, const char* d, int l, int64_t o) {
+    (void)fd; (void)d; (void)l; (void)o; return fs_unavail_iks(0);
+}
 char* path_join(const char* a, const char* b) { (void)a; (void)b; return NULL; }
 char* path_dirname(const char* p) { (void)p; return NULL; }
 char* path_basename(const char* p) { (void)p; return NULL; }
@@ -179,6 +205,9 @@ void fs_watch_close(void* w) { (void)w; }
 #else
     #include <dirent.h>
     #include <unistd.h>
+    #if !defined(__wasi__)
+        #include <sys/file.h>      // flock() for fs_try_lock_raw
+    #endif
     /* Per-platform zero-copy primitives for fs.copy.
      * Linux  : sys/sendfile.h + SYS_copy_file_range via syscall (no
      *          _GNU_SOURCE needed; avoids the feature-test macro
@@ -1361,6 +1390,42 @@ int fs_write_binary_raw(const char* path, const char* data, int length) {
     return 1;
 }
 
+/* rename(2), replacing `to` when it exists, on every platform. The CRT's
+ * rename on Windows refuses an existing destination, so fs.rename and
+ * fs.write_atomic failed there exactly where a replacement is the point
+ * (and write_atomic deleted the destination first, so a reader could find
+ * it missing). MoveFileExW with MOVEFILE_REPLACE_EXISTING replaces it in
+ * one call; without MOVEFILE_COPY_ALLOWED a move across volumes fails, as
+ * EXDEV does. 0, or -1 with errno set. */
+static int aether_fs_rename_over(const char* from, const char* to) {
+#ifdef _WIN32
+    size_t fb = 0, tb = 0;
+    wchar_t* wf = fs_win_wide(from, &fb);
+    wchar_t* wt = wf ? fs_win_wide(to, &tb) : NULL;
+    if (!wf || !wt) {
+        if (wf) aether_caps_free(wf, fb);
+        errno = EINVAL;
+        return -1;
+    }
+    BOOL ok = MoveFileExW(wf, wt, MOVEFILE_REPLACE_EXISTING);
+    DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    aether_caps_free(wf, fb);
+    aether_caps_free(wt, tb);
+    if (ok) return 0;
+    switch (err) {
+        case ERROR_FILE_NOT_FOUND: case ERROR_PATH_NOT_FOUND: errno = ENOENT; break;
+        case ERROR_ACCESS_DENIED: case ERROR_SHARING_VIOLATION: errno = EACCES; break;
+        case ERROR_NOT_SAME_DEVICE: errno = EXDEV; break;
+        case ERROR_ALREADY_EXISTS: case ERROR_FILE_EXISTS: errno = EEXIST; break;
+        case ERROR_DISK_FULL: errno = ENOSPC; break;
+        default: errno = EIO; break;
+    }
+    return -1;
+#else
+    return rename(from, to);
+#endif
+}
+
 int fs_write_atomic_raw(const char* path, const char* data, int length) {
     if (!path || length < 0 || (length > 0 && !data)) { errno = 0; return 0; }
     if (!aether_sandbox_check("fs_write", path)) { errno = EACCES; return 0; }
@@ -1484,13 +1549,10 @@ int fs_write_atomic_raw(const char* path, const char* data, int length) {
 
     // rename(2) is atomic on POSIX when src and dst are on the same
     // filesystem — which they always are here, since we put the tmp
-    // right next to the destination. On Windows rename will fail if
-    // the destination exists, so drop it first; we don't race-check
-    // because concurrent writers to the same path is already UB.
-#ifdef _WIN32
-    remove(path);
-#endif
-    if (rename(tmp, path) != 0) {
+    // right next to the destination. aether_fs_rename_over replaces the
+    // destination on Windows too, in one MoveFileExW, so a reader there
+    // never finds it missing either.
+    if (aether_fs_rename_over(tmp, path) != 0) {
         int err_rename = errno;
         remove(tmp);
         errno = err_rename;
@@ -1505,7 +1567,7 @@ int fs_rename_raw(const char* from, const char* to) {
         errno = EACCES;
         return 0;
     }
-    return rename(from, to) == 0 ? 1 : 0;
+    return aether_fs_rename_over(from, to) == 0 ? 1 : 0;
 }
 
 // Kind encoding for fs_stat_raw's out_kind:
@@ -4203,5 +4265,448 @@ void fs_watch_close(void* watch) {
     aether_caps_free(w, sizeof(AeFsWatch));
 }
 
-#endif // AETHER_HAS_FILESYSTEM
+/* ===================================================================
+ * Full stat, advisory locks, exclusive creation and descriptor ops
+ * (nib-code ask aether-fs-stat-flock-exclusive).
+ *
+ * file_stat gives kind, size and a seconds mtime; a program that wants to
+ * know whether a file changed since it last read it compares (inode, size,
+ * mtime in ns), and one that replaces a file atomically copies its mode
+ * onto the replacement. fs_stat_fill_raw reads all of them at once.
+ *
+ * The rest work on a descriptor, the same int std.io's fd_* calls take
+ * (io.fd_write writes to one, io.fd_close closes it): a lock file opened
+ * once and locked or unlocked with flock(2), a file created with O_EXCL
+ * and a mode, and fchmod / fsync / ftruncate / fstat-size / pwrite on it.
+ * On Windows the descriptor is a CRT one (_wopen), the lock is LockFileEx
+ * over the whole file, and fchmod toggles the read-only attribute from the
+ * owner-write bit as fs.chmod does.
+ *
+ * Every call returns the structured-error triple (value, KIND_*, message)
+ * and records the raw errno (GetLastError on Windows) for
+ * fs.last_os_error().
+ * =================================================================== */
 
+typedef struct {
+    int64_t _0;
+    int _1;
+    const char* _2;
+} _tuple_long_int_string;
+
+#if !defined(_WIN32) && !defined(O_CLOEXEC)
+#define O_CLOEXEC 0   /* a libc without it (an old WASI): the fd just stays inheritable */
+#endif
+
+/* Mirrors std/fs/module.ae's `struct Stat` field for field: two ints, then
+ * five 64-bit fields, so there is no padding to disagree about. */
+typedef struct {
+    int     kind;
+    int     mode;
+    int64_t nlink;
+    int64_t ino;
+    int64_t dev;
+    int64_t size;
+    int64_t mtime_ns;
+} AetherFsStat;
+
+#if defined(__GNUC__) || defined(__clang__)
+_Static_assert(sizeof(AetherFsStat) == 48, "AetherFsStat must match std.fs Stat");
+#endif
+
+/* The block std.fs's stat wrapper fills and copies out of. */
+void* fs_stat_new_raw(void) { return calloc(1, sizeof(AetherFsStat)); }
+void fs_stat_free_raw(void* p) { free(p); }
+
+static _tuple_int_int_string aether_fs_iks_val(int value) {
+    _tuple_int_int_string out = { value, aether_fs_errno_to_kind(0), "" };
+    return out;
+}
+
+static _tuple_int_int_string aether_fs_iks_errno(const char* msg) {
+    return aether_fs_iks_err(aether_fs_errno_to_kind(errno), msg);
+}
+
+#ifdef _WIN32
+#include <share.h>
+
+/* GetLastError's code as a kind, recorded for fs.last_os_error(). */
+static int aether_fs_win_kind(DWORD err) {
+    aether_fs_note_os_error((int)err);
+    switch (err) {
+        case ERROR_SUCCESS:            return AETHER_FS_KIND_OK;
+        case ERROR_FILE_NOT_FOUND:
+        case ERROR_PATH_NOT_FOUND:
+        case ERROR_INVALID_DRIVE:      return AETHER_FS_KIND_NOT_FOUND;
+        case ERROR_ACCESS_DENIED:
+        case ERROR_SHARING_VIOLATION:
+        case ERROR_LOCK_VIOLATION:     return AETHER_FS_KIND_PERMISSION_DENIED;
+        case ERROR_FILE_EXISTS:
+        case ERROR_ALREADY_EXISTS:     return AETHER_FS_KIND_EXISTS;
+        case ERROR_INVALID_HANDLE:
+        case ERROR_INVALID_PARAMETER:
+        case ERROR_INVALID_NAME:       return AETHER_FS_KIND_INVALID;
+        case ERROR_FILENAME_EXCED_RANGE: return AETHER_FS_KIND_NAME_TOO_LONG;
+        case ERROR_DISK_FULL:
+        case ERROR_HANDLE_DISK_FULL:   return AETHER_FS_KIND_NO_SPACE;
+        case ERROR_DIRECTORY:          return AETHER_FS_KIND_NOT_DIR;
+        case ERROR_CANT_RESOLVE_FILENAME: return AETHER_FS_KIND_LOOP;
+        default:                       return AETHER_FS_KIND_IO;
+    }
+}
+
+static _tuple_int_int_string aether_fs_iks_win(const char* msg) {
+    return aether_fs_iks_err(aether_fs_win_kind(GetLastError()), msg);
+}
+
+/* The OS handle behind a CRT descriptor, or INVALID_HANDLE_VALUE. */
+static HANDLE aether_fs_fd_handle(int fd) {
+    if (fd < 0) return INVALID_HANDLE_VALUE;
+    intptr_t h = _get_osfhandle(fd);
+    return h == -1 ? INVALID_HANDLE_VALUE : (HANDLE)h;
+}
+
+/* FILETIME (100 ns ticks since 1601) to ns since the Unix epoch. */
+static int64_t aether_fs_filetime_ns(FILETIME ft) {
+    uint64_t t = ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    return ((int64_t)t - 116444736000000000LL) * 100;
+}
+
+#ifndef IO_REPARSE_TAG_SYMLINK
+#define IO_REPARSE_TAG_SYMLINK 0xA000000CL
+#endif
+#endif /* _WIN32 */
+
+/* stat (follow != 0) or lstat into `out` (an AetherFsStat). Returns
+ * (1, KIND_OK, "") or (0, KIND_*, msg); `out` is zeroed on failure. */
+_tuple_int_int_string fs_stat_fill_raw(const char* path, int follow, void* out) {
+    AetherFsStat* s = (AetherFsStat*)out;
+    if (!s) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "stat: no Stat to fill");
+    memset(s, 0, sizeof *s);
+    if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "stat: null path");
+    if (!aether_sandbox_check("fs_read", path)) {
+        errno = EACCES;
+        return aether_fs_iks_errno("stat: denied by the sandbox");
+    }
+#ifdef _WIN32
+    size_t wbytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wbytes);
+    if (!wpath) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "stat: bad path");
+    DWORD flags = FILE_FLAG_BACKUP_SEMANTICS | (follow ? 0 : FILE_FLAG_OPEN_REPARSE_POINT);
+    HANDLE h = CreateFileW(wpath, FILE_READ_ATTRIBUTES,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, NULL,
+                           OPEN_EXISTING, flags, NULL);
+    aether_caps_free(wpath, wbytes);
+    if (h == INVALID_HANDLE_VALUE) return aether_fs_iks_win("stat failed");
+    BY_HANDLE_FILE_INFORMATION info;
+    if (!GetFileInformationByHandle(h, &info)) {
+        _tuple_int_int_string e = aether_fs_iks_win("stat failed");
+        CloseHandle(h);
+        return e;
+    }
+    int is_link = 0;
+    if (!follow && (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) {
+        FILE_ATTRIBUTE_TAG_INFO tag;
+        if (GetFileInformationByHandleEx(h, FileAttributeTagInfo, &tag, sizeof tag))
+            is_link = tag.ReparseTag == IO_REPARSE_TAG_SYMLINK;
+    }
+    CloseHandle(h);
+    int is_dir = (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+    s->kind = is_link ? FS_STAT_KIND_SYMLINK : is_dir ? FS_STAT_KIND_DIR : FS_STAT_KIND_FILE;
+    /* No POSIX mode on Windows: the CRT's stat model, read-only clears
+     * the write bits, a directory is searchable. */
+    s->mode = (info.dwFileAttributes & FILE_ATTRIBUTE_READONLY) ? 0444 : 0666;
+    if (is_dir) s->mode |= 0111;
+    s->nlink = (int64_t)info.nNumberOfLinks;
+    s->ino = (int64_t)(((uint64_t)info.nFileIndexHigh << 32) | info.nFileIndexLow);
+    s->dev = (int64_t)info.dwVolumeSerialNumber;
+    s->size = (int64_t)(((uint64_t)info.nFileSizeHigh << 32) | info.nFileSizeLow);
+    s->mtime_ns = aether_fs_filetime_ns(info.ftLastWriteTime);
+    return aether_fs_iks_val(1);
+#else
+    struct stat st;
+    if ((follow ? stat(path, &st) : lstat(path, &st)) != 0)
+        return aether_fs_iks_errno("stat failed");
+    if (S_ISREG(st.st_mode))       s->kind = FS_STAT_KIND_FILE;
+    else if (S_ISDIR(st.st_mode))  s->kind = FS_STAT_KIND_DIR;
+    else if (S_ISLNK(st.st_mode))  s->kind = FS_STAT_KIND_SYMLINK;
+    else if (S_ISSOCK(st.st_mode)) s->kind = FS_STAT_KIND_SOCKET;
+    else if (S_ISFIFO(st.st_mode)) s->kind = FS_STAT_KIND_FIFO;
+    else if (S_ISCHR(st.st_mode) || S_ISBLK(st.st_mode)) s->kind = FS_STAT_KIND_DEVICE;
+    else                           s->kind = FS_STAT_KIND_OTHER;
+    s->mode = (int)(st.st_mode & 07777);
+    s->nlink = (int64_t)st.st_nlink;
+    s->ino = (int64_t)st.st_ino;
+    s->dev = (int64_t)st.st_dev;
+    s->size = (int64_t)st.st_size;
+#if defined(__APPLE__)
+    s->mtime_ns = (int64_t)st.st_mtimespec.tv_sec * 1000000000LL + st.st_mtimespec.tv_nsec;
+#elif defined(__wasi__)
+    s->mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#else
+    s->mtime_ns = (int64_t)st.st_mtim.tv_sec * 1000000000LL + st.st_mtim.tv_nsec;
+#endif
+    return aether_fs_iks_val(1);
+#endif
+}
+
+/* Open (creating, mode 0600, never truncating) a file to hold an advisory
+ * lock on: (fd, KIND_OK, "") or (-1, KIND_*, msg). Read-write, so the
+ * holder can also record something in it; close-on-exec. */
+_tuple_int_int_string fs_lock_open_raw(const char* path) {
+    if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "lock_open: null path");
+    _tuple_int_int_string bad = { -1, 0, "" };
+    if (!aether_sandbox_check("fs_write", path)) {
+        errno = EACCES;
+        bad._1 = aether_fs_errno_to_kind(errno);
+        bad._2 = "lock_open: denied by the sandbox";
+        return bad;
+    }
+#ifdef _WIN32
+    size_t wbytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wbytes);
+    if (!wpath) { bad._1 = AETHER_FS_KIND_INVALID; bad._2 = "lock_open: bad path"; return bad; }
+    int fd = -1;
+    errno_t rc = _wsopen_s(&fd, wpath, _O_RDWR | _O_CREAT | _O_BINARY | _O_NOINHERIT,
+                           _SH_DENYNO, _S_IREAD | _S_IWRITE);
+    aether_caps_free(wpath, wbytes);
+    if (rc != 0 || fd < 0) {
+        bad._1 = aether_fs_errno_to_kind(errno ? errno : rc);
+        bad._2 = "lock_open failed";
+        return bad;
+    }
+    return aether_fs_iks_val(fd);
+#elif defined(__wasi__)
+    (void)path;
+    bad._1 = AETHER_FS_KIND_UNAVAILABLE; bad._2 = "lock_open: no locks on WASI";
+    return bad;
+#else
+    int fd = open(path, O_RDWR | O_CREAT | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        bad._1 = aether_fs_errno_to_kind(errno);
+        bad._2 = "lock_open failed";
+        return bad;
+    }
+    return aether_fs_iks_val(fd);
+#endif
+}
+
+/* Try to take the whole-file advisory lock on `fd` without waiting:
+ * exclusive (writer) when `exclusive` != 0, else shared. (1, OK, "") when
+ * taken, (0, OK, "") when another holder has it, (0, KIND_*, msg) on an
+ * error. Taking it again on the same fd converts the lock. */
+_tuple_int_int_string fs_try_lock_raw(int fd, int exclusive) {
+#ifdef _WIN32
+    HANDLE h = aether_fs_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "try_lock: not an open descriptor");
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    DWORD flags = LOCKFILE_FAIL_IMMEDIATELY | (exclusive ? LOCKFILE_EXCLUSIVE_LOCK : 0);
+    if (LockFileEx(h, flags, 0, MAXDWORD, MAXDWORD, &ov)) return aether_fs_iks_val(1);
+    DWORD err = GetLastError();
+    if (err == ERROR_LOCK_VIOLATION || err == ERROR_IO_PENDING) {
+        aether_fs_note_os_error((int)err);
+        _tuple_int_int_string held = { 0, AETHER_FS_KIND_OK, "" };
+        return held;
+    }
+    return aether_fs_iks_err(aether_fs_win_kind(err), "try_lock failed");
+#elif defined(__wasi__)
+    (void)fd; (void)exclusive;
+    return aether_fs_iks_err(AETHER_FS_KIND_UNAVAILABLE, "try_lock: no locks on WASI");
+#else
+    for (;;) {
+        if (flock(fd, (exclusive ? LOCK_EX : LOCK_SH) | LOCK_NB) == 0) return aether_fs_iks_val(1);
+        if (errno == EINTR) continue;
+        if (errno == EWOULDBLOCK || errno == EAGAIN) {
+            s_last_os_error = errno;
+            _tuple_int_int_string held = { 0, AETHER_FS_KIND_OK, "" };
+            return held;
+        }
+        return aether_fs_iks_errno("try_lock failed");
+    }
+#endif
+}
+
+/* Release the lock try_lock took on `fd` (closing the fd releases it too). */
+_tuple_int_int_string fs_unlock_raw(int fd) {
+#ifdef _WIN32
+    HANDLE h = aether_fs_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "unlock: not an open descriptor");
+    OVERLAPPED ov;
+    memset(&ov, 0, sizeof ov);
+    if (!UnlockFileEx(h, 0, MAXDWORD, MAXDWORD, &ov)) {
+        DWORD err = GetLastError();
+        /* Not locked: as flock(LOCK_UN) on an unlocked fd, not an error. */
+        if (err == ERROR_NOT_LOCKED) { aether_fs_note_os_error((int)err); return aether_fs_iks_val(1); }
+        return aether_fs_iks_err(aether_fs_win_kind(err), "unlock failed");
+    }
+    return aether_fs_iks_val(1);
+#elif defined(__wasi__)
+    (void)fd;
+    return aether_fs_iks_err(AETHER_FS_KIND_UNAVAILABLE, "unlock: no locks on WASI");
+#else
+    while (flock(fd, LOCK_UN) != 0) {
+        if (errno != EINTR) return aether_fs_iks_errno("unlock failed");
+    }
+    return aether_fs_iks_val(1);
+#endif
+}
+
+/* Create `path` for writing, failing with KIND_EXISTS if anything (a
+ * symlink included) is there: O_CREAT | O_EXCL, permission bits `mode`
+ * (less the umask), close-on-exec. (fd, OK, "") or (-1, KIND_*, msg). */
+_tuple_int_int_string fs_create_exclusive_raw(const char* path, int mode) {
+    _tuple_int_int_string bad = { -1, 0, "" };
+    if (!path) { bad._1 = AETHER_FS_KIND_INVALID; bad._2 = "create_exclusive: null path"; return bad; }
+    if (!aether_sandbox_check("fs_write", path)) {
+        errno = EACCES;
+        bad._1 = aether_fs_errno_to_kind(errno);
+        bad._2 = "create_exclusive: denied by the sandbox";
+        return bad;
+    }
+#ifdef _WIN32
+    size_t wbytes = 0;
+    wchar_t* wpath = fs_win_wide(path, &wbytes);
+    if (!wpath) { bad._1 = AETHER_FS_KIND_INVALID; bad._2 = "create_exclusive: bad path"; return bad; }
+    int fd = -1;
+    /* The owner-write bit decides read-only, as fs.chmod's does; the
+     * descriptor itself is open for writing either way. */
+    int pmode = (mode & 0200) ? (_S_IREAD | _S_IWRITE) : _S_IREAD;
+    errno_t rc = _wsopen_s(&fd, wpath, _O_WRONLY | _O_CREAT | _O_EXCL | _O_BINARY | _O_NOINHERIT,
+                           _SH_DENYNO, pmode);
+    aether_caps_free(wpath, wbytes);
+    if (rc != 0 || fd < 0) {
+        bad._1 = aether_fs_errno_to_kind(errno ? errno : rc);
+        bad._2 = "create_exclusive failed";
+        return bad;
+    }
+    return aether_fs_iks_val(fd);
+#else
+    int fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, (mode_t)(mode & 07777));
+    if (fd < 0) {
+        bad._1 = aether_fs_errno_to_kind(errno);
+        bad._2 = "create_exclusive failed";
+        return bad;
+    }
+    return aether_fs_iks_val(fd);
+#endif
+}
+
+/* Set the permission bits of the open file `fd` (on Windows the owner-write
+ * bit toggles read-only, as fs.chmod does). */
+_tuple_int_int_string fs_fchmod_raw(int fd, int mode) {
+#ifdef _WIN32
+    HANDLE h = aether_fs_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fchmod: not an open descriptor");
+    FILE_BASIC_INFO bi;
+    if (!GetFileInformationByHandleEx(h, FileBasicInfo, &bi, sizeof bi)) return aether_fs_iks_win("fchmod failed");
+    DWORD attrs = bi.FileAttributes;
+    if (mode & 0200) attrs &= ~(DWORD)FILE_ATTRIBUTE_READONLY;
+    else attrs |= FILE_ATTRIBUTE_READONLY;
+    if (attrs == 0) attrs = FILE_ATTRIBUTE_NORMAL;
+    bi.FileAttributes = attrs;
+    /* Zero leaves each time as it is. */
+    bi.CreationTime.QuadPart = 0; bi.LastAccessTime.QuadPart = 0;
+    bi.LastWriteTime.QuadPart = 0; bi.ChangeTime.QuadPart = 0;
+    if (!SetFileInformationByHandle(h, FileBasicInfo, &bi, sizeof bi)) return aether_fs_iks_win("fchmod failed");
+    return aether_fs_iks_val(1);
+#elif defined(__wasi__)
+    (void)fd; (void)mode;
+    return aether_fs_iks_err(AETHER_FS_KIND_UNAVAILABLE, "fchmod: no permission bits on WASI");
+#else
+    if (fchmod(fd, (mode_t)(mode & 07777)) != 0) return aether_fs_iks_errno("fchmod failed");
+    return aether_fs_iks_val(1);
+#endif
+}
+
+/* Flush the open file `fd` to the device: fsync(2), _commit on Windows. */
+_tuple_int_int_string fs_fd_fsync_raw(int fd) {
+#ifdef _WIN32
+    if (aether_fs_fd_handle(fd) == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fd_fsync: not an open descriptor");
+    if (_commit(fd) != 0) return aether_fs_iks_errno("fd_fsync failed");
+#else
+    while (fsync(fd) != 0) {
+        if (errno != EINTR) return aether_fs_iks_errno("fd_fsync failed");
+    }
+#endif
+    return aether_fs_iks_val(1);
+}
+
+/* Cut or extend the open file `fd` to `length` bytes. */
+_tuple_int_int_string fs_fd_truncate_raw(int fd, int64_t length) {
+    if (length < 0) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "fd_truncate: negative length");
+#ifdef _WIN32
+    if (aether_fs_fd_handle(fd) == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fd_truncate: not an open descriptor");
+    errno_t rc = _chsize_s(fd, length);
+    if (rc != 0) { errno = rc; return aether_fs_iks_errno("fd_truncate failed"); }
+#else
+    while (ftruncate(fd, (off_t)length) != 0) {
+        if (errno != EINTR) return aether_fs_iks_errno("fd_truncate failed");
+    }
+#endif
+    return aether_fs_iks_val(1);
+}
+
+/* The size of the open file `fd` in bytes: (size, OK, "") or
+ * (-1, KIND_*, msg). */
+_tuple_long_int_string fs_fd_size_raw(int fd) {
+    _tuple_long_int_string out = { -1, 0, "" };
+#ifdef _WIN32
+    HANDLE h = aether_fs_fd_handle(fd);
+    LARGE_INTEGER sz;
+    if (h == INVALID_HANDLE_VALUE || !GetFileSizeEx(h, &sz)) {
+        out._1 = aether_fs_win_kind(h == INVALID_HANDLE_VALUE ? ERROR_INVALID_HANDLE : GetLastError());
+        out._2 = "fd_size failed";
+        return out;
+    }
+    out._0 = (int64_t)sz.QuadPart;
+#else
+    struct stat st;
+    if (fstat(fd, &st) != 0) {
+        out._1 = aether_fs_errno_to_kind(errno);
+        out._2 = "fd_size failed";
+        return out;
+    }
+    out._0 = (int64_t)st.st_size;
+#endif
+    out._1 = aether_fs_errno_to_kind(0);
+    return out;
+}
+
+/* Write all `length` bytes of `data` at `offset` in the open file `fd`,
+ * without moving its file position (pwrite(2); on Windows an OVERLAPPED
+ * WriteFile, which does move it). (bytes, OK, "") or (written so far,
+ * KIND_*, msg); the count saturates at INT_MAX. */
+_tuple_int_int_string fs_fd_pwrite_raw(int fd, const char* data, int length, int64_t offset) {
+    if (length < 0 || offset < 0 || (!data && length > 0))
+        return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "fd_pwrite_all: bad arguments");
+    int64_t total = 0;
+#ifdef _WIN32
+    HANDLE h = aether_fs_fd_handle(fd);
+    if (h == INVALID_HANDLE_VALUE) return aether_fs_iks_err(aether_fs_win_kind(ERROR_INVALID_HANDLE), "fd_pwrite_all: not an open descriptor");
+    while (total < length) {
+        OVERLAPPED ov;
+        memset(&ov, 0, sizeof ov);
+        uint64_t at = (uint64_t)(offset + total);
+        ov.Offset = (DWORD)(at & 0xFFFFFFFFu);
+        ov.OffsetHigh = (DWORD)(at >> 32);
+        DWORD w = 0;
+        if (!WriteFile(h, data + total, (DWORD)(length - total), &w, &ov))
+            return aether_fs_iks_err_partial(total, aether_fs_win_kind(GetLastError()), "fd_pwrite_all failed");
+        if (w == 0) return aether_fs_iks_err_partial(total, AETHER_FS_KIND_IO, "fd_pwrite_all: wrote nothing");
+        total += w;
+    }
+#else
+    while (total < length) {
+        ssize_t w = pwrite(fd, data + total, (size_t)(length - total), (off_t)(offset + total));
+        if (w < 0) {
+            if (errno == EINTR) continue;
+            return aether_fs_iks_err_partial(total, aether_fs_errno_to_kind(errno), "fd_pwrite_all failed");
+        }
+        if (w == 0) return aether_fs_iks_err_partial(total, AETHER_FS_KIND_IO, "fd_pwrite_all: wrote nothing");
+        total += w;
+    }
+#endif
+    return aether_fs_iks_ok(total);
+}
+
+#endif // AETHER_HAS_FILESYSTEM
