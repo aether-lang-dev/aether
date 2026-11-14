@@ -60,6 +60,7 @@ int os_execv(const char* p, void* a) { (void)p; (void)a; return -1; }
 char* os_which(const char* n) { (void)n; return NULL; }
 int os_chdir_raw(const char* p) { (void)p; return -1; }
 char* os_getcwd_raw(void) { return NULL; }
+void* os_environ_raw(void) { return NULL; }   /* the empty *StringSeq */
 int os_run(const char* p, void* a, void* e) { (void)p; (void)a; (void)e; return -1; }
 char* os_run_capture_raw(const char* p, void* a, void* e) { (void)p; (void)a; (void)e; return NULL; }
 typedef struct { const char* _0; int _1; const char* _2; } _tuple_string_int_string;
@@ -177,6 +178,7 @@ char* os_which(const char* n) { (void)n; return NULL; }
 int os_getpid_raw(void) { return 0; }
 int os_user_id_raw(void) { return -1; }
 int os_kill_raw(int pid, int sig) { (void)pid; (void)sig; return -1; }
+void* os_environ_raw(void) { return NULL; }   /* the empty *StringSeq */
 
 #define AETHER_OS_PROCESS_STUBBED 1
 
@@ -4907,6 +4909,90 @@ _tuple_string_string_int_string os_run_full_raw(const char* prog, void* argv_lis
  * stub-first per the v1 design). */
 
 #endif // !_WIN32
+
+/* os.environ(): this process's environment as a *StringSeq of "NAME=value"
+ * strings, in the order the OS keeps them (nib-code ask
+ * aether-fs-stat-flock-exclusive, item 5: a child's environment built
+ * without some variables needs every one; std.os had getenv only). Each
+ * string is a counted copy, so a later setenv does not change the list. A
+ * name the sandbox does not grant `env` for is left out, as os.getenv
+ * refuses it. Windows: GetEnvironmentStringsW in UTF-8, without the
+ * "=C:=C:\..." per-drive directory entries, which are no variables. */
+struct StringSeq;
+extern struct StringSeq* string_seq_cons_adopt(const char* head, struct StringSeq* tail);
+extern void string_seq_free(struct StringSeq* s);
+
+static int os_environ_entry_granted(const char* entry, size_t len) {
+    const char* eq = memchr(entry, '=', len);
+    size_t nlen = eq ? (size_t)(eq - entry) : len;
+    char small[256];
+    char* name = nlen < sizeof small ? small : (char*)malloc(nlen + 1);
+    if (!name) return 0;
+    memcpy(name, entry, nlen);
+    name[nlen] = '\0';
+    int ok = aether_sandbox_check("env", name);
+    if (name != small) free(name);
+    return ok;
+}
+
+/* Cons `entries[0..n)` onto an empty seq back to front, so the seq reads in
+ * their order. Each entry is copied into a counted string the cell adopts. */
+static void* os_environ_seq(const char* const* entries, const size_t* lens, int n) {
+    struct StringSeq* seq = NULL;
+    for (int i = n - 1; i >= 0; i--) {
+        if (!os_environ_entry_granted(entries[i], lens[i])) continue;
+        AetherString* s = string_new_with_length(entries[i], lens[i]);
+        if (!s) continue;
+        struct StringSeq* cell = string_seq_cons_adopt((const char*)s, seq);
+        if (!cell) { string_release(s); continue; }
+        seq = cell;
+    }
+    return seq;
+}
+
+#ifdef _WIN32
+void* os_environ_raw(void) {
+    wchar_t* block = GetEnvironmentStringsW();
+    if (!block) return NULL;
+    int n = 0;
+    for (wchar_t* p = block; *p; p += wcslen(p) + 1) n++;
+    char** entries = n ? (char**)calloc((size_t)n, sizeof(char*)) : NULL;
+    size_t* lens = n ? (size_t*)calloc((size_t)n, sizeof(size_t)) : NULL;
+    int k = 0;
+    if (n && entries && lens) {
+        for (wchar_t* p = block; *p; p += wcslen(p) + 1) {
+            if (p[0] == L'=') continue;
+            int bytes = WideCharToMultiByte(CP_UTF8, 0, p, -1, NULL, 0, NULL, NULL);
+            if (bytes <= 0) continue;
+            char* u = (char*)malloc((size_t)bytes);
+            if (!u) continue;
+            WideCharToMultiByte(CP_UTF8, 0, p, -1, u, bytes, NULL, NULL);
+            entries[k] = u;
+            lens[k] = (size_t)bytes - 1;
+            k++;
+        }
+    }
+    FreeEnvironmentStringsW(block);
+    void* seq = os_environ_seq((const char* const*)entries, lens, k);
+    for (int i = 0; i < k; i++) free(entries[i]);
+    free(entries);
+    free(lens);
+    return seq;
+}
+#else
+void* os_environ_raw(void) {
+    char** env = aether_spawn_environ();
+    int n = 0;
+    while (env && env[n]) n++;
+    if (n == 0) return NULL;
+    size_t* lens = (size_t*)calloc((size_t)n, sizeof(size_t));
+    if (!lens) return NULL;
+    for (int i = 0; i < n; i++) lens[i] = strlen(env[i]);
+    void* seq = os_environ_seq((const char* const*)env, lens, n);
+    free(lens);
+    return seq;
+}
+#endif
 
 
 #endif // AETHER_HAS_FILESYSTEM

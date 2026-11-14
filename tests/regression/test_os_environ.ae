@@ -1,0 +1,59 @@
+// os.environ(): the process environment as a *StringSeq of "NAME=value"
+// (nib-code ask aether-fs-stat-flock-exclusive, item 5). nib builds a
+// child's environment without the credential variables, which needs every
+// variable; std.os had getenv only.
+
+import std.os
+import std.string
+
+extern exit(code: int)
+
+// How many entries of `env` are exactly `want`; -1 when an entry has no '='.
+count_of(env: *StringSeq, want: string) -> int {
+    n = 0
+    cur = env
+    while string.seq_is_empty(cur) == 0 {
+        e = string.seq_head(cur)
+        if string.index_of(e, "=") < 1 {
+            return -1
+        }
+        if e == want {
+            n = n + 1
+        }
+        cur = string.seq_tail(cur)
+    }
+    return n
+}
+
+main() {
+    fails = 0
+    os.setenv("AE_ENVIRON_PROBE", "a=b c")
+    before = os.environ()
+    n1 = count_of(before, "AE_ENVIRON_PROBE=a=b c")
+    if n1 != 1 {
+        println("FAIL: the probe appears ${n1} times, want once (-1: an entry without '=')")
+        fails = fails + 1
+    }
+    if string.seq_length(before) < 2 {
+        println("FAIL: only ${string.seq_length(before)} variables")
+        fails = fails + 1
+    }
+    os.unsetenv("AE_ENVIRON_PROBE")
+    after = os.environ()
+    if count_of(after, "AE_ENVIRON_PROBE=a=b c") != 0 {
+        println("FAIL: the probe is still listed after unsetenv")
+        fails = fails + 1
+    }
+    if count_of(before, "AE_ENVIRON_PROBE=a=b c") != 1 {
+        println("FAIL: the earlier list changed with the environment")
+        fails = fails + 1
+    }
+    if string.seq_length(after) != string.seq_length(before) - 1 {
+        println("FAIL: ${string.seq_length(after)} variables after unsetenv, ${string.seq_length(before)} before")
+        fails = fails + 1
+    }
+    if fails > 0 {
+        exit(1)
+    }
+    println("os.environ: ok")
+}

@@ -77,13 +77,57 @@ access, as `chmod 0o644` would. When the destination cannot be made
 owner-only, nothing is copied and the call fails (`KIND_IO`, or
 `KIND_PERMISSION_DENIED`).
 
+## Replacing a file other processes also edit
+
+`stat(path, follow)` returns a `Stat` value with what `file_stat` leaves out:
+the permission bits, the inode and device, the link count and a nanosecond
+mtime. Two writes of the same size in the same second differ in `mtime_ns`,
+and a file replaced by a rename has a new `ino`, so `(ino, size, mtime_ns)`
+tells whether a file changed since it was read. `follow` 0 describes a
+symlink itself.
+
+The descriptor calls work on the `int` std.io's `fd_*` calls take:
+`lock_open` and `try_lock` / `unlock` hold an advisory lock (flock(2),
+LockFileEx on Windows) that is polled rather than waited on, so a wait stays
+cancelable; `create_exclusive(path, mode)` creates with `O_EXCL`, the safe
+first step of an atomic replacement; `fchmod`, `fd_fsync`, `fd_truncate`,
+`fd_size` and `fd_pwrite_all` finish it. Write with `io.fd_write`, close
+with `io.fd_close`. They return `(value, KIND_*, message)`, as `copy` and
+`chmod` do.
+
+```aether
+import std.fs
+import std.io
+import std.string
+
+// Replace `path` with `text`, keeping its mode.
+replace(path: string, text: string) -> string {
+    old, kind, err = fs.stat(path, 1)
+    if kind != fs.KIND_OK { return err }
+    tmp = "${path}.new"
+    fd, _, cerr = fs.create_exclusive(tmp, 0o600)
+    if fd < 0 { return cerr }
+    if io.fd_write(fd, string.bytes(text)) != 0 { io.fd_close(fd); return "write failed" }
+    fs.fchmod(fd, old.mode)
+    fs.fd_fsync(fd)
+    io.fd_close(fd)
+    return fs.rename(tmp, path)
+}
+
+main() {
+    println(replace("/tmp/note.txt", "new text"))
+}
+```
+
 ## Exports
 
 `read`, `write`, `write_binary`, `write_atomic`, `read_binary`, `pread`,
 `pwrite`, `pread_into`, `copy`, `move`, `rename`, `delete`, `unlink`,
-`exists`, `size`, `mtime`, `file_stat`, `realpath`, `chmod`, `ftruncate`,
+`exists`, `size`, `mtime`, `file_stat`, `stat` (and `Stat`), `realpath`, `chmod`, `ftruncate`,
 `fsync`, `symlink`, `hard_link`, `readlink`; `create_dir`, `create_dir_with_mode`,
 `mkdir_p`, `delete_dir`, `list_dir`, `glob`, `glob_multi`, `walk`;
 `watch_open`, `watch_wait`, `watch_close`; `statvfs`, `mounts`, `block_info`;
+`lock_open`, `try_lock`, `unlock`, `create_exclusive`, `fchmod`, `fd_fsync`,
+`fd_truncate`, `fd_size`, `fd_pwrite_all`;
 `last_os_error` with the `KIND_*` constants; and the path helpers `clean`,
 `rel`, `join_clean`, `is_within_base`.

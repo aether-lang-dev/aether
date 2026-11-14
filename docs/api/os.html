@@ -102,6 +102,8 @@
     <li><a href="#getcwd_raw">getcwd_raw</a></li>
     <li><a href="#chdir">chdir</a></li>
     <li><a href="#getcwd">getcwd</a></li>
+    <li><a href="#environ_raw">environ_raw</a></li>
+    <li><a href="#environ">environ</a></li>
     <li><a href="#memory_resident">memory_resident</a></li>
     <li><a href="#memory_private">memory_private</a></li>
   </ul>
@@ -665,6 +667,15 @@
       <h3 class="function-name">getcwd <span class="kind">fn</span></h3>
       <pre class="usage"><code>getcwd() <span class="arrow">-&gt;</span> string</code></pre>
       <p class="doc">Current working directory, or &quot;&quot; on failure. Returns a fresh counted string the caller owns (the raw result is `@heap`, adopted at the call and released by the place that holds it).</p>
+    </div>
+    <div class="function" id="environ_raw" data-name="environ_raw">
+      <h3 class="function-name">environ_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>environ_raw() <span class="arrow">-&gt;</span> *StringSeq</code></pre>
+      <p class="doc">This process's environment as a list of &quot;NAME=value&quot; strings, in the order the OS keeps them: what building a child's environment without some variables needs (os.getenv reads one name you already know). Each string is a copy, so a later setenv does not change the list. A name the sandbox grant list does not allow `env` for is left out, as getenv refuses it. On Windows the hidden &quot;=C:=C:\...&quot; per-drive directory entries are left out. for e in os.environ() { if !string.starts_with(e, &quot;AWS_&quot;) { ... } }</p>
+    </div>
+    <div class="function" id="environ" data-name="environ">
+      <h3 class="function-name">environ <span class="kind">fn</span></h3>
+      <pre class="usage"><code>environ() <span class="arrow">-&gt;</span> *StringSeq</code></pre>
     </div>
     <div class="function" id="memory_resident" data-name="memory_resident">
       <h3 class="function-name">memory_resident <span class="kind">fn</span></h3>

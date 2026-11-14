@@ -58,6 +58,11 @@ exports(
     fs_release_pread, fs_ftruncate_raw, fs_fsync_raw,
     pwrite, pread, pread_into, ftruncate, fsync,
     file_fd_raw, fd,
+    Stat, stat, fs_stat_fill_raw, fs_stat_new_raw, fs_stat_free_raw,
+    lock_open, try_lock, unlock, create_exclusive,
+    fchmod, fd_fsync, fd_truncate, fd_size, fd_pwrite_all,
+    fs_lock_open_raw, fs_try_lock_raw, fs_unlock_raw, fs_create_exclusive_raw,
+    fs_fchmod_raw, fs_fd_fsync_raw, fs_fd_truncate_raw, fs_fd_size_raw, fs_fd_pwrite_raw,
     fs_glob_raw, fs_glob_multi_raw,
     fs_walk_raw, fs_watch_open_raw,
     open, close, read_all, read, write, delete, size, mtime, exists,
@@ -1262,6 +1267,155 @@ fsync(file: ptr) -> string {
 // never call fd() on a handle that has been closed.
 fd(file: ptr) -> int {
     return file_fd_raw(file)
+}
+
+// --- Full stat, advisory locks, exclusive creation, descriptor ops ----------
+//
+// For a program that coordinates edits to a file with other processes and
+// replaces it atomically (nib's file tools): see whether a file changed
+// since it was read (inode, size, nanosecond mtime), hold an advisory lock
+// on a lock file, create the replacement with O_EXCL and a mode, copy the
+// old mode onto it, flush it, and write records at their own offsets.
+//
+// The descriptor calls take the `int` fd std.io's fd_* calls take: write
+// with `io.fd_write(fd, string.bytes(s))`, close with `io.fd_close(fd)`
+// (closing also drops any lock held through it). Each returns the
+// structured-error triple `(value, KIND_*, message)`, as copy/move/realpath/
+// chmod do, and `last_os_error()` holds the raw errno behind a failure
+// (GetLastError's code on Windows).
+
+// What `stat` reads. `kind` is a STAT_KIND_* value; `mode` the permission
+// bits (07777, setuid/setgid/sticky included); `mtime_ns` the modification
+// time in nanoseconds since the Unix epoch, so two writes in the same second
+// differ. `ino` and `dev` together name the file: a rename keeps them, a
+// replacement gets a new inode. On Windows `ino` is the file index, `dev`
+// the volume serial number, and `mode` is 0666 (0444 read-only), with 0111
+// added for a directory, the CRT's model.
+struct Stat {
+    kind: int
+    mode: int
+    nlink: long
+    ino: long
+    dev: long
+    size: long
+    mtime_ns: long
+}
+
+extern fs_stat_fill_raw(path: string, follow: int, out: ptr) -> (int, int, string)
+extern fs_lock_open_raw(path: string) -> (int, int, string)
+extern fs_try_lock_raw(fd: int, exclusive: int) -> (int, int, string)
+extern fs_unlock_raw(fd: int) -> (int, int, string)
+extern fs_create_exclusive_raw(path: string, mode: int) -> (int, int, string)
+extern fs_fchmod_raw(fd: int, mode: int) -> (int, int, string)
+extern fs_fd_fsync_raw(fd: int) -> (int, int, string)
+extern fs_fd_truncate_raw(fd: int, length: long) -> (int, int, string)
+extern fs_fd_size_raw(fd: int) -> (long, int, string)
+extern fs_fd_pwrite_raw(fd: int, data: ptr, length: int, offset: long) -> (int, int, string)
+// A Stat-sized block for fs_stat_fill_raw, and its release. Named for the
+// module rather than malloc/free: a program's own `free(h: *Host)` would
+// otherwise be what an unqualified `free(p)` here calls.
+extern fs_stat_new_raw() -> ptr
+extern fs_stat_free_raw(p: ptr)
+
+// The metadata of `path`: (Stat, KIND_OK, "") or (a zeroed Stat, KIND_*,
+// msg). `follow` 1 follows a symlink to its target (stat(2)); 0 describes
+// the link itself (lstat(2), kind STAT_KIND_SYMLINK). The Stat is a value,
+// nothing to free.
+//
+//     st, kind, err = fs.stat(path, 1)
+//     if kind != fs.KIND_OK { return err }
+//     if st.ino != seen.ino || st.mtime_ns != seen.mtime_ns { ... changed ... }
+stat(path: string, follow: int) -> (Stat, int, string) {
+    p = fs_stat_new_raw() as *Stat
+    if p == null {
+        return Stat { kind: 0, mode: 0, nlink: 0, ino: 0, dev: 0, size: 0, mtime_ns: 0 }, KIND_NO_SPACE, "stat: out of memory"
+    }
+    _, kind, err = fs_stat_fill_raw(path, follow, p)
+    s = Stat { kind: p.kind, mode: p.mode, nlink: p.nlink, ino: p.ino, dev: p.dev, size: p.size, mtime_ns: p.mtime_ns }
+    fs_stat_free_raw(p)
+    return s, kind, err
+}
+
+// Open `path` to hold an advisory lock on, creating it (mode 0600) if it is
+// not there and never truncating it: (fd, KIND_OK, "") or (-1, KIND_*, msg).
+// Open read-write and close-on-exec, so the holder can also keep a few bytes
+// in it (fd_size / fd_truncate / fd_pwrite_all). Take the lock with try_lock.
+lock_open(path: string) -> (int, int, string) {
+    return fs_lock_open_raw(path)
+}
+
+// Take the whole-file advisory lock on `fd` without waiting: exclusive when
+// `exclusive` is 1, shared when 0. (1, KIND_OK, "") when taken, (0, KIND_OK,
+// "") when another holder has it, (0, KIND_*, msg) on an error. Poll it to
+// wait, so the wait stays cancelable:
+//
+//     fd, _, err = fs.lock_open(lock_path)
+//     got, kind, err = fs.try_lock(fd, 1)
+//     while got == 0 && kind == fs.KIND_OK { sleep(50); got, kind, err = fs.try_lock(fd, 1) }
+//
+// POSIX flock(2): the lock belongs to the open file, so a second lock_open
+// of the same path in this process is a separate holder and is refused
+// while the first holds it. Windows: LockFileEx over the whole file, which
+// also keeps other handles from writing the locked range.
+try_lock(fd: int, exclusive: int) -> (int, int, string) {
+    return fs_try_lock_raw(fd, exclusive)
+}
+
+// Release the lock try_lock took on `fd`; unlocking an fd that holds no
+// lock succeeds. (1, KIND_OK, "") or (0, KIND_*, msg).
+unlock(fd: int) -> (int, int, string) {
+    return fs_unlock_raw(fd)
+}
+
+// Create `path` for writing only if nothing is there (O_CREAT | O_EXCL, so a
+// symlink planted at `path` is refused too), with permission bits `mode`
+// less the umask: (fd, KIND_OK, "") or (-1, KIND_EXISTS, msg) when it
+// exists. Close-on-exec. The atomic-replacement step: create `.name-<random>`
+// beside the target with 0600, write, fchmod to the old mode, fd_fsync,
+// io.fd_close, fs.rename over the target. On Windows the owner-write bit
+// decides read-only, as chmod's does.
+create_exclusive(path: string, mode: int) -> (int, int, string) {
+    return fs_create_exclusive_raw(path, mode)
+}
+
+// Set the permission bits (07777) of the open file `fd`. (1, KIND_OK, "")
+// or (0, KIND_*, msg). On Windows the owner-write bit toggles read-only, as
+// chmod's does.
+fchmod(fd: int, mode: int) -> (int, int, string) {
+    return fs_fchmod_raw(fd, mode)
+}
+
+// Flush the open file `fd` to the device (fsync(2); _commit on Windows).
+// (1, KIND_OK, "") or (0, KIND_*, msg).
+fd_fsync(fd: int) -> (int, int, string) {
+    return fs_fd_fsync_raw(fd)
+}
+
+// Cut (or extend with zero bytes) the open file `fd` to `length` bytes.
+// (1, KIND_OK, "") or (0, KIND_*, msg).
+fd_truncate(fd: int, length: long) -> (int, int, string) {
+    return fs_fd_truncate_raw(fd, length)
+}
+
+// The size of the open file `fd` in bytes: (size, KIND_OK, "") or
+// (-1, KIND_*, msg).
+fd_size(fd: int) -> (long, int, string) {
+    return fs_fd_size_raw(fd)
+}
+
+// Write every byte of `data` at byte `offset` of the open file `fd`
+// (pwrite(2), looping on short writes and EINTR). On POSIX the file
+// position does not move; on Windows it does (an OVERLAPPED WriteFile).
+// (bytes written, KIND_OK, "") or (bytes written before the failure,
+// KIND_*, msg). For a string: `fs.fd_pwrite_all(fd, string.bytes(s), at)`.
+fd_pwrite_all(fd: int, data: byte[], offset: long) -> (int, int, string) {
+    if data.len < 0 {
+        unbounded_write("fd_pwrite_all")
+    }
+    if data.len == 0 {
+        return 0, KIND_OK, ""
+    }
+    return fs_fd_pwrite_raw(fd, data, data.len, offset)
 }
 
 // --- Recursive directory operations (#command-alikes) ------------------------

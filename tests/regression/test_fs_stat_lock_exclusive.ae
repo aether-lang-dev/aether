@@ -1,0 +1,138 @@
+// fs.stat, the advisory lock calls, fs.create_exclusive and the descriptor
+// calls (nib-code ask aether-fs-stat-flock-exclusive). nib's file tools see
+// whether a file changed since they read it from (inode, size, mtime in ns),
+// lock across processes on a lock file, and replace a file atomically
+// keeping its mode: create beside it with O_EXCL, write, fchmod, fsync,
+// rename. file_stat has kind, size and a seconds mtime only.
+
+import std.fs
+import std.io
+import std.os
+import std.string
+
+extern exit(code: int)
+
+// 1 when the check failed, so main can add them up.
+check(label: string, ok: int) -> int {
+    if ok == 0 {
+        println("  FAIL ${label}")
+        return 1
+    }
+    println("  ok   ${label}")
+    return 0
+}
+
+main() {
+    fails = 0
+    windows = os.platform() == "windows"
+    dir = "${os.temp_dir()}/aether_fs_stat_lock_${os.getpid()}"
+    _ = fs.remove_tree(dir)
+    fs.mkdir_p(dir)
+    target = "${dir}/target.txt"
+    fs.write(target, "hello")
+    _, _, _ = fs.chmod(target, 0o640)
+
+    // --- stat ---
+    st, kind, err = fs.stat(target, 1)
+    fails = fails + check("stat a file: KIND_OK (${err})", if kind == fs.KIND_OK { 1 } else { 0 })
+    fails = fails + check("kind is STAT_KIND_FILE", if st.kind == fs.STAT_KIND_FILE { 1 } else { 0 })
+    fails = fails + check("size is 5", if st.size == 5 { 1 } else { 0 })
+    fails = fails + check("nlink is 1", if st.nlink == 1 { 1 } else { 0 })
+    if windows {
+        fails = fails + check("mode is the CRT's 0666", if st.mode == 0o666 { 1 } else { 0 })
+    } else {
+        fails = fails + check("mode is 0640 (got ${st.mode})", if st.mode == 0o640 { 1 } else { 0 })
+        fails = fails + check("inode is set", if st.ino != 0 { 1 } else { 0 })
+    }
+    _k, _sz, secs, _e = fs.file_stat(target)
+    fails = fails + check("mtime_ns agrees with file_stat's seconds",
+        if st.mtime_ns / 1000000000 == secs { 1 } else { 0 })
+
+    // A rewrite in place keeps the inode; a replacement renamed over it
+    // does not, whatever the size and the second.
+    fs.write(target, "HELLO")
+    st2, _, _ = fs.stat(target, 1)
+    fails = fails + check("rewrite in place keeps ino and dev",
+        if st2.ino == st.ino && st2.dev == st.dev { 1 } else { 0 })
+
+    gone, gkind, gerr = fs.stat("${dir}/nope", 1)
+    fails = fails + check("missing path: KIND_NOT_FOUND", if gkind == fs.KIND_NOT_FOUND { 1 } else { 0 })
+    fails = fails + check("missing path: zeroed Stat, a message",
+        if gone.kind == 0 && gone.size == 0 && gerr != "" { 1 } else { 0 })
+
+    // lstat (follow 0) describes a link itself. Skip where links need a
+    // privilege this process lacks (Windows without developer mode).
+    link = "${dir}/link"
+    if fs.symlink(target, link) == "" {
+        ls, _, _ = fs.stat(link, 0)
+        fails = fails + check("follow 0 on a symlink: STAT_KIND_SYMLINK", if ls.kind == fs.STAT_KIND_SYMLINK { 1 } else { 0 })
+        fl, _, _ = fs.stat(link, 1)
+        fails = fails + check("follow 1 on a symlink: its target",
+            if fl.kind == fs.STAT_KIND_FILE && fl.ino == st2.ino { 1 } else { 0 })
+    }
+
+    // --- create_exclusive + descriptor ops: the atomic-replacement step ---
+    tmp = "${dir}/.nib-1"
+    fd, ckind, cerr = fs.create_exclusive(tmp, 0o600)
+    fails = fails + check("create_exclusive a new path (${cerr})", if fd >= 0 && ckind == fs.KIND_OK { 1 } else { 0 })
+    fd2, ekind, _ = fs.create_exclusive(tmp, 0o600)
+    fails = fails + check("create_exclusive an existing path: -1, KIND_EXISTS",
+        if fd2 == -1 && ekind == fs.KIND_EXISTS { 1 } else { 0 })
+    fails = fails + check("io.fd_write on it", if io.fd_write(fd, string.bytes("replaced")) == 0 { 1 } else { 0 })
+    n, pkind, _ = fs.fd_pwrite_all(fd, string.bytes("RE"), 0)
+    fails = fails + check("fd_pwrite_all at offset 0", if n == 2 && pkind == fs.KIND_OK { 1 } else { 0 })
+    sz, zkind, _ = fs.fd_size(fd)
+    fails = fails + check("fd_size is 8", if sz == 8 && zkind == fs.KIND_OK { 1 } else { 0 })
+    _, mkind, _ = fs.fchmod(fd, st.mode)
+    fails = fails + check("fchmod to the old mode", if mkind == fs.KIND_OK { 1 } else { 0 })
+    _, skind, _ = fs.fd_fsync(fd)
+    fails = fails + check("fd_fsync", if skind == fs.KIND_OK { 1 } else { 0 })
+    fails = fails + check("io.fd_close", if io.fd_close(fd) == "" { 1 } else { 0 })
+    tst, _, _ = fs.stat(tmp, 1)
+    if !windows {
+        fails = fails + check("the replacement has the old mode", if tst.mode == 0o640 { 1 } else { 0 })
+    }
+    fails = fails + check("rename over the target", if fs.rename(tmp, target) == "" { 1 } else { 0 })
+    rst, _, _ = fs.stat(target, 1)
+    content, _ = fs.read(target)
+    fails = fails + check("the target holds the new bytes", if content == "REplaced" { 1 } else { 0 })
+    if !windows {
+        fails = fails + check("the replacement is a new inode", if rst.ino != st2.ino { 1 } else { 0 })
+    }
+
+    // --- advisory locks ---
+    lock_path = "${dir}/lock"
+    fs.write(lock_path, "kept")
+    a, akind, aerr = fs.lock_open(lock_path)
+    fails = fails + check("lock_open (${aerr})", if a >= 0 && akind == fs.KIND_OK { 1 } else { 0 })
+    asz, _, _ = fs.fd_size(a)
+    fails = fails + check("lock_open does not truncate", if asz == 4 { 1 } else { 0 })
+    got, gk, _ = fs.try_lock(a, 1)
+    fails = fails + check("try_lock exclusive: taken", if got == 1 && gk == fs.KIND_OK { 1 } else { 0 })
+    b, _, _ = fs.lock_open(lock_path)
+    held, hk, _ = fs.try_lock(b, 1)
+    fails = fails + check("a second holder: 0, KIND_OK", if held == 0 && hk == fs.KIND_OK { 1 } else { 0 })
+    _, uk, _ = fs.unlock(a)
+    fails = fails + check("unlock", if uk == fs.KIND_OK { 1 } else { 0 })
+    got2, _, _ = fs.try_lock(b, 1)
+    fails = fails + check("the second holder takes it after unlock", if got2 == 1 { 1 } else { 0 })
+    _, tk, _ = fs.fd_truncate(b, 0)
+    fails = fails + check("fd_truncate the lock file", if tk == fs.KIND_OK { 1 } else { 0 })
+    bsz, _, _ = fs.fd_size(b)
+    fails = fails + check("fd_size after truncate is 0", if bsz == 0 { 1 } else { 0 })
+    io.fd_close(b)
+    // Closing the holder releases the lock.
+    got3, _, _ = fs.try_lock(a, 0)
+    fails = fails + check("closing the holder releases it (shared lock taken)", if got3 == 1 { 1 } else { 0 })
+    io.fd_close(a)
+
+    bad, bkind, _ = fs.try_lock(-1, 1)
+    fails = fails + check("try_lock on a bad fd: an error kind", if bad == 0 && bkind != fs.KIND_OK { 1 } else { 0 })
+
+    _ = fs.remove_tree(dir)
+    if fails > 0 {
+        println("${fails} failed")
+        exit(1)
+    }
+    println("all passed")
+}

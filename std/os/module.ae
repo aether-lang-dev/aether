@@ -32,6 +32,7 @@ exports(
     kill, wait_pid_timeout, run_supervised,
     os_run_full_raw, run_full,
     os_chdir_raw, os_getcwd_raw, chdir, getcwd,
+    os_environ_raw, environ,
     memory_resident, memory_private
 )
 
@@ -651,6 +652,20 @@ getcwd() -> string {
         return ""
     }
     return string_concat(s, "")
+}
+
+// This process's environment as a list of "NAME=value" strings, in the
+// order the OS keeps them: what building a child's environment without some
+// variables needs (os.getenv reads one name you already know). Each string
+// is a copy, so a later setenv does not change the list. A name the sandbox
+// grant list does not allow `env` for is left out, as getenv refuses it. On
+// Windows the hidden "=C:=C:\..." per-drive directory entries are left out.
+//
+//     for e in os.environ() { if !string.starts_with(e, "AWS_") { ... } }
+extern os_environ_raw() -> *StringSeq @heap
+
+environ() -> *StringSeq {
+    return os_environ_raw()
 }
 
 // argv[0] — path the OS launched the current process with. Returns "" if
