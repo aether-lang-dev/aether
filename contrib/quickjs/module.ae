@@ -1,13 +1,14 @@
 // contrib.quickjs — QuickJS (quickjs-ng), embedded: modern JavaScript
 // (ES2023: classes, async/await, Map/Set, ?., ??, modules) run inside an
-// Aether program, with per-entry time limits and a memory cap.
+// Aether program, with a host-controlled interrupt (a deadline, cancel and
+// stop cells) and a memory cap.
 // Import with: import contrib.quickjs
 //
 //   import contrib.quickjs
 //
 //   main() {
 //       q = quickjs.runtime(8192, 0)          // 8 MB heap cap, default stack
-//       quickjs.set_time_limit(q, 100)        // each entry: at most 100 ms
+//       quickjs.set_deadline_ns(q, quickjs.now_ns() + 100000000)   // stop JS 100 ms from now
 //       add = quickjs.function(q, "add", 2, |q: ptr, this_h: int, args: int| {
 //           return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
 //       })
@@ -42,7 +43,10 @@ import std.string
 @link("-lm")
 
 exports(
-    runtime, dispose, set_time_limit, last_error, handles, memory_used,
+    runtime, dispose, last_error, handles, memory_used,
+    now_ns, set_deadline_ns, clear_deadline, deadline_ns, set_cancel_cell, set_stop_cell,
+    interrupted, clear_interrupted,
+    INTERRUPTED_NONE, INTERRUPTED_DEADLINE, INTERRUPTED_CANCEL, INTERRUPTED_STOP,
     eval, eval_async, eval_module, call, run_jobs,
     function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
@@ -56,7 +60,13 @@ exports(
 
 extern qjs_new(memory_kb: int, stack_kb: int) -> ptr
 extern qjs_free(q: ptr)
-extern qjs_set_time_limit(q: ptr, ms: int)
+extern qjs_now_ns() -> long
+extern qjs_set_deadline_ns(q: ptr, ns: long)
+extern qjs_deadline_ns(q: ptr) -> long
+extern qjs_set_cancel_cell(q: ptr, cell: ptr)
+extern qjs_set_stop_cell(q: ptr, cell: ptr)
+extern qjs_interrupted(q: ptr) -> int
+extern qjs_clear_interrupted(q: ptr)
 extern qjs_error(q: ptr) -> string
 extern qjs_handles(q: ptr) -> int
 extern qjs_memory_used(q: ptr) -> long
@@ -107,10 +117,66 @@ runtime(memory_kb: int, stack_kb: int) -> ptr { return qjs_new(memory_kb, stack_
 // Frees the runtime, every handle still held, and the host closures.
 dispose(q: ptr) { qjs_free(q) }
 
-// Milliseconds each entry into JS (an eval, a call, a run of the job queue)
-// may take before it is stopped with "InternalError: interrupted"; 0 for no
-// limit.
-set_time_limit(q: ptr, ms: int) { qjs_set_time_limit(q, ms) }
+// ---- interrupting JavaScript ----
+//
+// The host decides when JavaScript stops, per runtime: a deadline it sets and
+// moves itself, and two std.sync cells any thread may set. Running JS that
+// meets one is stopped with "InternalError: interrupted", which a script
+// cannot catch, whatever entered it: an eval, a call, run_jobs, or a
+// conversion that runs a getter, valueOf or toString (to_string, to_int,
+// get, ...). The runtime stays usable. QuickJS checks every few thousand
+// operations, so a busy loop stops within microseconds of a cell being set;
+// a single long native call (a huge regexp, say) is not interrupted midway.
+//
+// Threads: the cells may be set from any thread (Esc, SIGINT, a watchdog);
+// they are read with an acquire load. Everything else here, the deadline
+// included, belongs to the thread that runs the runtime.
+
+// What interrupted() says stopped JavaScript.
+const INTERRUPTED_NONE = 0
+const INTERRUPTED_DEADLINE = 1
+const INTERRUPTED_CANCEL = 2
+const INTERRUPTED_STOP = 3
+
+// Monotonic nanoseconds, the clock set_deadline_ns is on: the same clock as
+// std.os's now_monotonic_ns (CLOCK_MONOTONIC; QueryPerformanceCounter on
+// Windows), without importing std.os.
+now_ns() -> long { return qjs_now_ns() }
+
+// Stop JavaScript that runs at or after `ns` (on now_ns's clock): in this
+// entry and in every later one, until the host moves or clears it. It is not
+// reset per entry, so a budget of JS time across many entries is the host
+// setting `now_ns() + remaining` when JS starts running and taking the time
+// spent off `remaining` when it stops (clear_deadline while it waits on
+// something else). 0 means no deadline.
+set_deadline_ns(q: ptr, ns: long) { qjs_set_deadline_ns(q, ns) }
+
+// No deadline (as set_deadline_ns(q, 0)).
+clear_deadline(q: ptr) { qjs_set_deadline_ns(q, 0) }
+
+// The deadline set now, 0 for none.
+deadline_ns(q: ptr) -> long { return qjs_deadline_ns(q) }
+
+// A std.sync cell (sync.atomic_new) whose nonzero value stops JavaScript: a
+// cancel (Esc, SIGINT). null for none. The cell stays the host's: free it
+// after dispose, or after setting null here.
+set_cancel_cell(q: ptr, cell: ptr) { qjs_set_cancel_cell(q, cell) }
+
+// A second cell that stops JavaScript, reported as INTERRUPTED_STOP rather
+// than a cancel (a replay that diverged from its recording, say, whose
+// outcome is what the script threw, not "canceled"). Owned as the cancel
+// cell is.
+set_stop_cell(q: ptr, cell: ptr) { qjs_set_stop_cell(q, cell) }
+
+// Why JavaScript was first stopped since the runtime was made or
+// clear_interrupted: INTERRUPTED_NONE (0), INTERRUPTED_DEADLINE (1),
+// INTERRUPTED_CANCEL (2) or INTERRUPTED_STOP (3). When several hold at once
+// a cancel is reported over a deadline, and both over a stop. It stays put
+// while the host reads errors and values afterwards.
+interrupted(q: ptr) -> int { return qjs_interrupted(q) }
+
+// Forget the reason, before reusing the runtime for the next piece of work.
+clear_interrupted(q: ptr) { qjs_clear_interrupted(q) }
 
 // The text of the last exception, with its stack.
 last_error(q: ptr) -> string { return string.copy(qjs_error(q)) }
@@ -132,10 +198,12 @@ eval(q: ptr, code: string, filename: string) -> (int, string) {
 
 // Run a script that may `await` at top level, and keep its completion value
 // (what `eval` would give): (a promise, "") or (0, the exception's text) for
-// a script that does not parse. The promise settles, as run_jobs runs what
+// a script that does not parse or is interrupted before its first await. The
+// promise settles, as run_jobs runs what
 // the awaits queued, to an object { value: <the completion value> }, or is
 // rejected with what the script threw, so a throw before the first await is a
-// rejected promise too. promise_state and promise_result read it:
+// rejected promise too. An interrupt is never a rejection: after the first
+// await, run_jobs reports it and the promise stays pending. promise_state and promise_result read it:
 //
 //   p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
 //   _n, _e = quickjs.run_jobs(q)

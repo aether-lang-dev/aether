@@ -11,7 +11,7 @@ import contrib.quickjs
 
 main() {
     q = quickjs.runtime(8192, 0)            // 8 MB heap cap, default stack
-    quickjs.set_time_limit(q, 100)          // each entry: at most 100 ms
+    quickjs.set_deadline_ns(q, quickjs.now_ns() + 100000000)   // stop JS 100 ms from now
 
     add = quickjs.function(q, "add", 2, | q: ptr, this_h: int, args: int | {
         return quickjs.new_int(q, quickjs.arg_int(q, args, 0) + quickjs.arg_int(q, args, 1))
@@ -81,13 +81,64 @@ sum = quickjs.function(q, "sum", 1, | q: ptr, this_h: int, args: int | {
 
 ## Limits
 
-- `quickjs.set_time_limit(q, ms)`: each entry into JavaScript (an eval, a
-  call, a run of the job queue) is stopped after `ms` with
-  `InternalError: interrupted`; the runtime stays usable.
+- The interrupt, below: a deadline and cancel/stop cells that stop running
+  JavaScript with `InternalError: interrupted`; the runtime stays usable.
 - `quickjs.runtime(memory_kb, ...)`: allocation past the cap fails with
   `InternalError: out of memory`.
 - `stack_kb` caps the JavaScript stack (`RangeError: Maximum call stack
   size exceeded`).
+
+## Interrupting JavaScript
+
+When JavaScript stops is the host's decision, per runtime, and nothing
+resets it behind the host's back:
+
+- `quickjs.set_deadline_ns(q, ns)`: JavaScript running at or after `ns`, an
+  absolute time on `quickjs.now_ns()`'s monotonic clock (the same clock as
+  `os.now_monotonic_ns()`, `QueryPerformanceCounter` on Windows), is stopped,
+  in this entry and every later one, until the host moves it or calls
+  `quickjs.clear_deadline(q)`. `quickjs.deadline_ns(q)` reads it (0: none).
+- `quickjs.set_cancel_cell(q, cell)`: a `std.sync` cell
+  (`sync.atomic_new(0)`) whose nonzero value stops JavaScript. Any thread may
+  set it: an Esc key, a SIGINT watch, a watchdog.
+- `quickjs.set_stop_cell(q, cell)`: a second cell, reported apart from a
+  cancel, for a stop that is not the user's (a replay that diverged from
+  its recording, whose outcome is what the script threw, not "canceled").
+- `quickjs.interrupted(q) -> int`: why JavaScript was first stopped since
+  the runtime was made or `quickjs.clear_interrupted(q)`:
+  `quickjs.INTERRUPTED_NONE` (0), `INTERRUPTED_DEADLINE` (1),
+  `INTERRUPTED_CANCEL` (2), `INTERRUPTED_STOP` (3). When several hold at
+  once, a cancel is reported over a deadline and both over a stop. The
+  reason stays while the host reads errors and values afterwards.
+
+Every entry honours them: an eval, a call, `run_jobs`, and the conversions
+that can run JavaScript (`to_string` running a `toString`, `to_int` a
+`valueOf`, `get` a getter, `length`, `keys`). The interrupt is uncatchable
+by the script. In an `eval_async` script it is not a rejection: before the
+first `await` the eval returns the error, after it `run_jobs` does, and the
+promise stays pending. QuickJS polls every few thousand operations, so a
+busy loop stops within microseconds of a cell being set; one long native
+call (a huge regexp, say) is not interrupted midway.
+
+A budget of JavaScript time across many entries, which pauses while the
+host waits on other work, is the host setting the deadline when JS starts
+and taking the time spent off what is left when it stops:
+
+```aether
+quickjs.set_deadline_ns(q, quickjs.now_ns() + remaining)
+started = quickjs.now_ns()
+_n, err = quickjs.run_jobs(q)
+quickjs.clear_deadline(q)
+remaining = remaining - (quickjs.now_ns() - started)
+if quickjs.interrupted(q) == quickjs.INTERRUPTED_CANCEL { println("canceled") }
+```
+
+Threads and ownership: the cells are read with an acquire load and may be
+written from any thread. Everything else, the deadline included, belongs to
+the thread running the runtime. The cells stay the host's: free them
+(`sync.atomic_free`) after `quickjs.dispose`, or after unsetting them with
+`null`. There is no process-wide state: every runtime has its own deadline,
+cells and reason.
 
 ## Promises and actors
 
@@ -152,7 +203,7 @@ Only what the host gives it. quickjs-ng's `quickjs-libc` (the `std` and
 `QJS_BUILD_LIBC`, which this module never defines, and there is no
 `require` or Node API. File, network and process access exist only as
 host functions you write. A script that loops forever or grows without
-bound is stopped by the limits above.
+bound is stopped by the interrupt and the limits above.
 
 ## Build
 

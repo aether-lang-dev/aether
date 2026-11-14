@@ -2,7 +2,8 @@
 //
 // Each case runs real JavaScript in a real runtime: modern syntax passed
 // through untouched, host functions both ways, exceptions with their stack,
-// the time limit and memory cap, JSON, a script awaiting a promise Aether
+// the interrupt (a deadline, cancel and stop cells set from another thread)
+// and the memory cap, JSON, a script awaiting a promise Aether
 // settles later, and the absence of quickjs-libc. Every case releases what
 // it took, and the last checks the runtime holds no handles.
 //
@@ -13,6 +14,7 @@ import std.bytes
 import std.mem
 import std.spec
 import std.string
+import std.sync
 
 extern exit(code: int)
 
@@ -32,8 +34,56 @@ sum_at(p: ptr, n: int) -> int {
     return t
 }
 
+// A deadline 20 s off, so a case whose cell failed to stop JavaScript fails
+// with the wrong reason instead of hanging the run.
+guard(q: ptr) { quickjs.set_deadline_ns(q, quickjs.now_ns() + 20000000000) }
+
 // The promise a host function handed a script, for a later case to settle.
 var pending_: int = 0
+
+// Set by the `mark` host function once a script is running, for the actor
+// that sets a cell from another thread.
+var started_: ptr = null
+
+// Waits (on its own scheduler thread) until `started` is set, then records
+// the time in `at` and sets `cell`: a cancel or stop from another thread.
+// Bounded: after 10 s it sets the cell anyway.
+message Arm { started: ptr, cell: ptr, at: ptr }
+
+actor Setter {
+    receive {
+        Arm(started, cell, at) -> {
+            limit = quickjs.now_ns() + 10000000000
+            spins = 0
+            while sync.atomic_load(started) == 0 && quickjs.now_ns() < limit {
+                spins = spins + 1
+            }
+            sync.atomic_store(at, quickjs.now_ns())
+            sync.atomic_store(cell, 1)
+        }
+    }
+}
+
+// Runs `code` (which calls mark()) while another thread sets `cell` once it
+// started: the reason interrupted() gives, and how long JS ran on after the
+// cell was set, in ns. A 30 s deadline keeps a lost actor from hanging the
+// run: it would show as INTERRUPTED_DEADLINE.
+stopped_from_another_thread(q: ptr, cell: @keep ptr, code: string) -> (int, long, string) {
+    sync.atomic_store(started_, 0)
+    sync.atomic_store(cell, 0)
+    at = sync.atomic_new(0)
+    quickjs.set_deadline_ns(q, quickjs.now_ns() + 30000000000)
+    setter = spawn(Setter())
+    setter ! Arm { started: started_, cell: cell, at: at }
+    _h, err = quickjs.eval(q, code, "spin.js")
+    stopped = quickjs.now_ns()
+    lag = stopped - sync.atomic_load(at)
+    why = quickjs.interrupted(q)
+    quickjs.clear_deadline(q)
+    quickjs.clear_interrupted(q)
+    sync.atomic_free(at)
+    return why, lag, err
+}
 
 eval_string(q: ptr, code: string) -> string {
     h, err = quickjs.eval(q, code, "test.js")
@@ -154,12 +204,15 @@ main() {
     }
 
     spec.describe(fw, "contrib.quickjs: limits") {
-        spec.it("stops a runaway script at the time limit, and keeps working") callback {
-            quickjs.set_time_limit(q, 50)
-            _h, err = quickjs.eval(q, "for (;;) {}", "loop.js")
-            spec.assert_contains(err, "interrupted", "stopped")
+        spec.it("stops a runaway script at the deadline, and keeps working") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            _h, err = quickjs.eval(q, "try { for (;;) {} } catch (e) { 'caught' }", "loop.js")
+            spec.assert_contains(err, "interrupted", "stopped, and the script could not catch it")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_NONE, "cleared")
             spec.assert_str_eq(eval_string(q, "6 * 7"), "42", "the runtime still runs code")
-            quickjs.set_time_limit(q, 0)
         }
         spec.it("refuses to grow past the memory cap") callback {
             small = quickjs.runtime(1024, 0)
@@ -171,6 +224,167 @@ main() {
             spec.assert_str_eq(eval_string(q, "[typeof std, typeof os, typeof require, typeof process].join(' ')"),
                 "undefined undefined undefined undefined", "no quickjs-libc, no Node")
         }
+    }
+
+    spec.describe(fw, "contrib.quickjs: interrupts") {
+        started_ = sync.atomic_new(0)
+        mark = quickjs.function(q, "mark", 0, | q: ptr, this_h: int, args: int | {
+                sync.atomic_store(started_, 1)
+                return 0
+            })
+        quickjs.set_global(q, "mark", mark)
+        quickjs.release(q, mark)
+
+        spec.it("a cancel cell set from another thread stops a busy loop at once") callback {
+            cancel = sync.atomic_new(0)
+            quickjs.set_cancel_cell(q, cancel)
+            why, lag, err = stopped_from_another_thread(q, cancel, "mark(); for (;;) {}")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_eq(why, quickjs.INTERRUPTED_CANCEL, "by the cancel")
+            spec.assert_true(lag >= 0, "after the cell was set")
+            spec.assert_true(lag < 500000000, "within half a second of it (${lag} ns)")
+            // Still set: every entry stops, until the host clears the cell.
+            guard(q)
+            _h2, err2 = quickjs.eval(q, "for (;;) {}", "again.js")
+            spec.assert_contains(err2, "interrupted", "a set cell stops the next entry too")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "the cancel again")
+            quickjs.clear_deadline(q)
+            sync.atomic_store(cancel, 0)
+            quickjs.clear_interrupted(q)
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "cleared, the runtime runs code")
+            quickjs.set_cancel_cell(q, null)
+            sync.atomic_free(cancel)
+        }
+        spec.it("the deadline is the host's, cumulative across entries") callback {
+            // Ten entries of 100 ms against a 350 ms deadline: a limit reset
+            // per entry would never fire; this one stops the fourth and holds
+            // for every entry after it.
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 350000000)
+            first = -1
+            stopped = 0
+            i = 0
+            while i < 10 {
+                h, err = quickjs.eval(q, "{ const t0 = Date.now(); while (Date.now() - t0 < 100) {} }", "slice.js")
+                quickjs.release(q, h)
+                if err != "" {
+                    stopped = stopped + 1
+                    if first < 0 { first = i }
+                }
+                i = i + 1
+            }
+            spec.assert_true(first >= 2 && first <= 4, "stopped in the 3rd to 5th entry (the ${first + 1}th)")
+            spec.assert_eq(stopped, 10 - first, "and in every entry after it")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            spec.assert_true(quickjs.deadline_ns(q) != 0, "which stays set")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            spec.assert_eq(quickjs.deadline_ns(q), 0, "until cleared")
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "after which entries run")
+        }
+        spec.it("a deadline in the past stops the next entry, an eval or a call") callback {
+            f, _fe = quickjs.eval(q, "() => { for (;;) {} }", "f.js")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            _r, cerr = quickjs.call(q, f, 0, 0)
+            spec.assert_contains(cerr, "interrupted", "a call is stopped")
+            n, jerr = quickjs.run_jobs(q)
+            spec.assert_eq(n, 0, "run_jobs with nothing queued runs nothing")
+            spec.assert_str_eq(jerr, "", "and is not an error")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, f)
+        }
+        spec.it("conversions that run JavaScript are stopped too: toString, valueOf, a getter") callback {
+            o, _oe = quickjs.eval(q, "({ toString() { for (;;) {} }, valueOf() { for (;;) {} }, get x() { for (;;) {} } })", "o.js")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            s = quickjs.to_string(q, o)
+            spec.assert_str_eq(s, "", "no string")
+            spec.assert_contains(quickjs.last_error(q), "interrupted", "a looping toString is stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "by the deadline")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            cancel = sync.atomic_new(1)
+            quickjs.set_cancel_cell(q, cancel)
+            guard(q)
+            _n = quickjs.to_int(q, o)
+            spec.assert_contains(quickjs.last_error(q), "interrupted", "a looping valueOf is stopped")
+            _x, gerr = quickjs.get(q, o, "x")
+            spec.assert_contains(gerr, "interrupted", "a looping getter is stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "by the cancel")
+            quickjs.clear_deadline(q)
+            quickjs.set_cancel_cell(q, null)
+            sync.atomic_free(cancel)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, o)
+        }
+        spec.it("a stop cell is reported apart from a cancel") callback {
+            stop = sync.atomic_new(0)
+            quickjs.set_stop_cell(q, stop)
+            why, lag, err = stopped_from_another_thread(q, stop, "mark(); for (;;) {}")
+            spec.assert_contains(err, "interrupted", "stopped")
+            spec.assert_eq(why, quickjs.INTERRUPTED_STOP, "by the stop, not a cancel")
+            spec.assert_true(lag < 500000000, "within half a second (${lag} ns)")
+            // Both set: the cancel is the one reported.
+            sync.atomic_store(stop, 1)
+            cancel = sync.atomic_new(1)
+            quickjs.set_cancel_cell(q, cancel)
+            guard(q)
+            _h, err2 = quickjs.eval(q, "for (;;) {}", "both.js")
+            spec.assert_contains(err2, "interrupted", "stopped")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_CANCEL, "a cancel over a stop")
+            quickjs.clear_deadline(q)
+            quickjs.set_cancel_cell(q, null)
+            quickjs.set_stop_cell(q, null)
+            quickjs.clear_interrupted(q)
+            spec.assert_str_eq(eval_string(q, "'runs'"), "runs", "with the cells unset, entries run")
+            sync.atomic_free(cancel)
+            sync.atomic_free(stop)
+        }
+        spec.it("the first reason stays while the host reads what happened") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            _h, err = quickjs.eval(q, "for (;;) {}", "d.js")
+            spec.assert_contains(err, "interrupted", "stopped")
+            quickjs.clear_deadline(q)
+            stop = sync.atomic_new(1)
+            quickjs.set_stop_cell(q, stop)
+            guard(q)
+            _h2, err2 = quickjs.eval(q, "for (;;) {}", "s.js")
+            quickjs.clear_deadline(q)
+            spec.assert_contains(err2, "interrupted", "stopped again, by the stop cell")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "the first reason, not the latest")
+            quickjs.set_stop_cell(q, null)
+            sync.atomic_free(stop)
+            quickjs.clear_interrupted(q)
+        }
+        spec.it("an async eval: interrupted before its first await is an error, after it run_jobs fails") callback {
+            quickjs.set_deadline_ns(q, quickjs.now_ns() - 1)
+            p, err = quickjs.eval_async(q, "for (;;) {}", "a.js")
+            spec.assert_eq(p, 0, "no promise")
+            spec.assert_contains(err, "interrupted", "the interrupt")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            p2, err2 = quickjs.eval_async(q, "await 0; for (;;) {}", "b.js")
+            spec.assert_str_eq(err2, "", "started")
+            quickjs.set_deadline_ns(q, quickjs.now_ns() + 50000000)
+            n, jerr = quickjs.run_jobs(q)
+            spec.assert_eq(n, -1, "run_jobs fails")
+            spec.assert_contains(jerr, "interrupted", "with the interrupt")
+            spec.assert_eq(quickjs.interrupted(q), quickjs.INTERRUPTED_DEADLINE, "the deadline's")
+            spec.assert_eq(quickjs.promise_state(q, p2), quickjs.PROMISE_PENDING, "and the promise is not rejected: it stays pending")
+            quickjs.clear_deadline(q)
+            quickjs.clear_interrupted(q)
+            quickjs.release(q, p2)
+        }
+        spec.it("a fresh runtime has no deadline, no cells and no reason") callback {
+            r = quickjs.runtime(0, 0)
+            spec.assert_eq(quickjs.deadline_ns(r), 0, "no deadline")
+            spec.assert_eq(quickjs.interrupted(r), quickjs.INTERRUPTED_NONE, "no reason")
+            h, err = quickjs.eval(r, "let n = 0; for (let i = 0; i < 1e6; i++) n += i; n", "n.js")
+            spec.assert_str_eq(err, "", "runs to the end")
+            quickjs.release(r, h)
+            quickjs.dispose(r)
+            spec.assert_true(quickjs.now_ns() > 0, "the clock runs")
+        }
+        _d = eval_string(q, "delete globalThis.mark")
     }
 
     spec.describe(fw, "contrib.quickjs: data") {
