@@ -89,6 +89,25 @@ main() {
 AE
 expect_error "$tmp/ctx_int.ae" "got int (an int)" "an int for _ctx was accepted"
 
+# A `_ctx` the call leaves out shifts the arguments by one: the float here
+# is the argument for `p`, two slots on. The check read it one slot further
+# off still (the offset applied twice), so the float went through to C.
+cat > "$tmp/ctx_shift.ae" <<'AE'
+setp(_ctx: ptr, n: int, p: ptr) {
+}
+
+panel(_ctx: ptr) {
+}
+
+main() {
+    panel() {
+        setp(1, 0.5)
+    }
+}
+AE
+expect_error "$tmp/ctx_shift.ae" "Argument 2 'p' of 'setp': expected ptr, got float (a float)" \
+    "a float after an injected _ctx was accepted"
+
 # What a ptr takes stays working.
 cat > "$tmp/ok.ae" <<'AE'
 import std.list
