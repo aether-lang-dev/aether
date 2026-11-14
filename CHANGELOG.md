@@ -14,6 +14,63 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.916.0]
+
+### Added
+
+- **`contrib.quickjs`: `promise_state` and `promise_result`.** A host holding
+  a promise handle can ask how it stands (`quickjs.PROMISE_PENDING`,
+  `PROMISE_FULFILLED`, `PROMISE_REJECTED`, or `PROMISE_NOT_A_PROMISE`) and
+  read what a settled one holds, its value or its rejection reason, without
+  running JavaScript; before, the only way was a `.then` that wrote to a
+  global (nib-code ask aether-quickjs-async-eval-and-interrupt).
+
+- **`contrib.quickjs`: `eval_async`, a script with top-level `await` that
+  keeps its completion value.** `quickjs.eval` refused `await` at top level
+  and `quickjs.eval_module` allows it but a module has no completion value;
+  `quickjs.eval_async(q, code, filename)` is a global eval with
+  `JS_EVAL_FLAG_ASYNC`, returning a promise that settles to
+  `{ value: <completion> }` (nib-code ask
+  aether-quickjs-async-eval-and-interrupt).
+
+### Changed
+
+- **`contrib.quickjs`: the interrupt is the host's, and `set_time_limit` is
+  gone.** `set_time_limit(q, ms)` restarted its deadline at every entry, so
+  a budget of JavaScript time across an eval and its job runs could not be
+  expressed, nothing could stop a busy loop from another thread, and
+  `to_string` (which never entered) ran under a stale deadline or none. Each
+  runtime now has an absolute deadline on `quickjs.now_ns()`'s monotonic
+  clock that the host sets and moves (`set_deadline_ns`, `clear_deadline`,
+  `deadline_ns`), a cancel and a stop `std.sync` cell any thread may set
+  (`set_cancel_cell`, `set_stop_cell`), and `interrupted(q)` saying which
+  stopped JavaScript first (`INTERRUPTED_DEADLINE`, `_CANCEL`, `_STOP`;
+  `clear_interrupted`). Every entry honours them, conversions that run a
+  `toString`, `valueOf` or getter included. **Migration:**
+  `quickjs.set_time_limit(q, ms)` before an entry is
+  `quickjs.set_deadline_ns(q, quickjs.now_ns() + ms * 1000000)`, and
+  `set_time_limit(q, 0)` is `quickjs.clear_deadline(q)` (nib-code ask
+  aether-quickjs-async-eval-and-interrupt).
+
+- **`contrib.quickjs`: `to_string` returns `(string, error)`.** It returned
+  `""` both for an empty string and for a conversion that threw (a Symbol,
+  a throwing or interrupted `toString`), so a host could not tell them
+  apart. `quickjs.to_string(q, h) -> (string, string)` gives `("", error)`
+  on a failure, and now keeps NUL bytes in the string. **Migration:**
+  `s = quickjs.to_string(q, h)` becomes `s, err = quickjs.to_string(q, h)`
+  (or `s, _err = ...` where a failure may read as empty). `arg_string` is
+  unchanged (nib-code ask aether-quickjs-async-eval-and-interrupt).
+
+- **`contrib.quickjs` runs quickjs-ng 0.18.0 (was 0.17.0).** The engine's
+  own changes include fixes for a use-after-free when a context runs out of
+  memory and in WeakMaps with symbol values, a JSON.stringify leak, and
+  asynchronous dynamic `import()`. One reaches scripts: an `InternalError`
+  (out of memory, interrupted, a host function that failed without
+  throwing) can no longer be caught by JavaScript. `quickjs.rethrow` with
+  no exception value kept now throws the error its text names
+  (`TypeError: not a function` is a catchable TypeError) rather than an
+  InternalError wrapping it.
+
 ## [0.915.0]
 
 ### Added
