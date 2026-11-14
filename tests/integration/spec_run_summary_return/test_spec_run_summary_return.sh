@@ -118,4 +118,83 @@ AEEOF
 "$AE" run "$TMP/passing.ae" >"$TMP/p.out" 2>&1 \
     || { sed 's/^/         /' "$TMP/p.out"; fail "a passing suite exited non-zero"; }
 
-echo "  [PASS] spec_run_summary_return: returns 0 captured, continues past the call, failure propagates through the return, cleanup runs on both paths"
+# --- a failing suite whose main() DROPS the verdict still exits non-zero ---
+# `spec.run_summary(fw)` as main()'s last statement fell off the end and
+# exited 0: `ae run` and `ae test` took the failing suite for a passing one
+# (nib's TUI suites ended that way). run_summary notes the failure with the
+# runtime, and main()'s 0 becomes 1. A status main() gives itself is kept.
+cat > "$TMP/dropped.ae" <<'AEEOF'
+import std.spec
+main() {
+    fw = spec.init()
+    spec.describe(fw, "arithmetic") {
+        spec.it("is deliberately wrong") callback {
+            spec.assert_eq(1 + 1, 3, "1+1 == 3")
+        }
+    }
+    spec.run_summary(fw)
+}
+AEEOF
+if "$AE" run "$TMP/dropped.ae" >"$TMP/d.out" 2>&1; then
+    sed 's/^/         /' "$TMP/d.out"
+    fail "ae run: a failing suite whose verdict main() dropped exited 0"
+fi
+( cd "$TMP" && "$AE" test dropped.ae >"$TMP/dt.out" 2>&1 ) && {
+    sed 's/^/         /' "$TMP/dt.out"
+    fail "ae test: a failing suite whose verdict main() dropped passed"
+}
+grep -q "dropped.ae.*FAIL" "$TMP/dt.out" \
+    || { sed 's/^/         /' "$TMP/dt.out"; fail "ae test did not report the dropped verdict as FAIL"; }
+
+cat > "$TMP/dropped_early_return.ae" <<'AEEOF'
+import std.spec
+main() {
+    fw = spec.init()
+    spec.describe(fw, "arithmetic") {
+        spec.it("is deliberately wrong") callback {
+            spec.assert_eq(1 + 1, 3, "1+1 == 3")
+        }
+    }
+    spec.run_summary(fw)
+    println("after")
+    return 0
+}
+AEEOF
+if "$AE" run "$TMP/dropped_early_return.ae" >"$TMP/de.out" 2>&1; then
+    sed 's/^/         /' "$TMP/de.out"
+    fail "a failing suite followed by main()'s own 'return 0' exited 0"
+fi
+
+cat > "$TMP/own_status.ae" <<'AEEOF'
+import std.spec
+main() {
+    fw = spec.init()
+    spec.describe(fw, "arithmetic") {
+        spec.it("is deliberately wrong") callback {
+            spec.assert_eq(1 + 1, 3, "1+1 == 3")
+        }
+    }
+    spec.run_summary(fw)
+    return 7
+}
+AEEOF
+rc=0
+"$AE" run "$TMP/own_status.ae" >"$TMP/os.out" 2>&1 || rc=$?
+[ "$rc" -eq 7 ] || { sed 's/^/         /' "$TMP/os.out"; fail "main()'s own status 7 became $rc"; }
+
+cat > "$TMP/dropped_green.ae" <<'AEEOF'
+import std.spec
+main() {
+    fw = spec.init()
+    spec.describe(fw, "arithmetic") {
+        spec.it("is right") callback {
+            spec.assert_eq(1 + 1, 2, "1+1 == 2")
+        }
+    }
+    spec.run_summary(fw)
+}
+AEEOF
+"$AE" run "$TMP/dropped_green.ae" >"$TMP/dg.out" 2>&1 \
+    || { sed 's/^/         /' "$TMP/dg.out"; fail "a passing suite whose verdict main() dropped exited non-zero"; }
+
+echo "  [PASS] spec_run_summary_return: returns 0 captured, continues past the call, failure propagates through the return or with it dropped, cleanup runs on both paths"

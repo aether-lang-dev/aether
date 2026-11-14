@@ -716,7 +716,7 @@ tw_start(srv: ptr) -> string {
     for (i = 0; i < n; i++) {
         entry, _ = list.get(routes, i)
         method, _ = map.get(entry, "method")
-        patt, _ = map.get(entry, "path")
+        patt, _ = map.get_string(entry, "path")
 
         // Pre-match this route's filter chain (method + path prefix) so the
         // dispatch trampoline can run them without per-request pattern work.
@@ -725,7 +725,7 @@ tw_start(srv: ptr) -> string {
         for (fi = 0; fi < fcount; fi++) {
             fe, _ = list.get(all_filters, fi)
             fm, _ = map.get(fe, "method")
-            fp, _ = map.get(fe, "path")
+            fp, _ = map.get_string(fe, "path")
             if filter_applies(fm, fp, method, patt) == 1 {
                 list.add(route_filters, fe)
             }

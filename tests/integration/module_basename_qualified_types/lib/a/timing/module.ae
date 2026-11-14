@@ -1,0 +1,14 @@
+// a.timing: shares its last segment with b.timing, and so does its struct
+// name (`Rec`), with a different layout.
+exports(Rec, Call, mk, mk_rec)
+extern malloc(size: int) -> ptr
+struct Rec { n: int label: string }
+struct Call { n: int }
+mk() -> ptr {
+    c = malloc(sizeof(Call)) as *Call
+    c.n = 1
+    return c
+}
+mk_rec() -> Rec {
+    return Rec { n: 10, label: "a" }
+}

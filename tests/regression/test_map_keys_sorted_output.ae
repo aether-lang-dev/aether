@@ -25,7 +25,7 @@ main() {
     i = 0
     while i < 7 {
         w = words[i]
-        cur, _ = map.get(m, w)
+        cur, _ = map.get_string(m, w)
         n = 0
         if cur != null {
             n, _ = string.to_int(cur)
@@ -56,11 +56,11 @@ main() {
     if string.compare(ordered[3], "pear") != 0 { fail("fourth key ${ordered[3]}, want pear") }
 
     // Counts still reachable through the sorted keys.
-    a, _ = map.get(m, ordered[0])
+    a, _ = map.get_string(m, ordered[0])
     av, _ = string.to_int(a)
     if av != 3 { fail("apple count ${av}, want 3") }
 
-    f, _ = map.get(m, ordered[2])
+    f, _ = map.get_string(m, ordered[2])
     fv, _ = string.to_int(f)
     if fv != 2 { fail("fig count ${fv}, want 2") }
 

@@ -13,7 +13,11 @@
 # Fixture (lib/lib.ae): struct Box + mk(). main.ae uses `lib.Box` as a
 # parameter type, a return type, and a C-style typed local.
 #
-# Acceptance: compiles, runs, prints "6 7".
+# The slice and array forms of the typed local, `lib.Box[] xs = []` and
+# `lib.Box[2] pair = [...]`, went to the expression parser and stopped at
+# the `[` (nib-code ask qualified-slice-local).
+#
+# Acceptance: compiles, runs, prints "6 7 2 8 7 3".
 
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
@@ -28,11 +32,11 @@ if [ "$rc" -ne 0 ]; then
 fi
 
 got=$(printf '%s\n' "$out" | grep -v '^[[:space:]]*$' | tr '\n' ' ' | sed 's/ *$//')
-if [ "$got" != "6 7" ]; then
-    echo "  [FAIL] qualified_type_name: expected '6 7', got '$got'"
+if [ "$got" != "6 7 2 8 7 3" ]; then
+    echo "  [FAIL] qualified_type_name: expected '6 7 2 8 7 3', got '$got'"
     echo "$out" | head -20 | sed 's/^/          /'
     exit 1
 fi
 
-echo "  [PASS] qualified_type_name: mod.Type accepted in param / return / typed-local positions"
+echo "  [PASS] qualified_type_name: mod.Type accepted in param / return / typed-local positions, and as a slice or array local"
 exit 0

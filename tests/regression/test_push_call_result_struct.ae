@@ -1,0 +1,82 @@
+// Regression: `xs.push(f())` kept the struct `f` returned with its strings
+// already freed (nib-code asks/aether-push-call-result-string.md).
+//
+// A statement destroys the owning structs its calls return and nothing in
+// it keeps (collect_stmt_struct_temps): a result thrown away, or a call's
+// argument the callee only borrows. The value of `xs.push(v)` is not one of
+// those: the new element takes it. The push's value was collected as a
+// temporary all the same, so the element was a shallow copy of a struct the
+// statement then dropped, and `xs[0].text` read freed memory (it printed
+// `[]`). `r = f(); xs.push(r)` and a pushed struct literal were fine.
+//
+// Covered: a call's result pushed, twice in a row, in a loop, from inside a
+// call's argument (whose own struct temporary must still be destroyed), an
+// `if` choosing between two calls, and a nested struct. The leak check runs
+// where the heap count is exact (mem.heap_in_use_exact).
+
+import std.mem
+import std.string
+
+extern exit(code: int)
+
+fn check(cond: bool, msg: string) {
+    if !cond {
+        println("FAIL: ${msg}")
+        exit(1)
+    }
+}
+
+struct R {
+    text: string
+    k: int
+}
+
+struct Outer {
+    name: string
+    inner: R
+}
+
+mk(t: string) -> R {
+    return R { text: "x ${t}", k: 3 }
+}
+
+mk_outer(t: string) -> Outer {
+    return Outer { name: string.concat(t, "-o"), inner: mk(t) }
+}
+
+label(r: R) -> string {
+    return r.text
+}
+
+round() -> string {
+    xs = make([]R, 0)
+    xs.push(mk("hi"))
+    xs.push(mk("there"))
+    for i in 0..3 {
+        xs.push(mk("n${i}"))
+    }
+    xs.push(mk(label(mk("inner"))))
+    flag = xs.len > 2
+    xs.push(if flag { mk("yes") } else { mk("no") })
+    os = make([]Outer, 0)
+    os.push(mk_outer("deep"))
+    out = ""
+    for j in 0..xs.len {
+        out = "${out}[${xs[j].text}]"
+    }
+    return "${out}{${os[0].name}|${os[0].inner.text}}"
+}
+
+main() {
+    println("=== test_push_call_result_struct ===")
+    got = round()
+    check(got == "[x hi][x there][x n0][x n1][x n2][x x inner][x yes]{deep-o|x deep}",
+        "pushed call results keep their strings (${got})")
+    if mem.heap_in_use_exact() {
+        grown = mem.steady_growth(|| {
+                _ = round()
+            }, 5)
+        check(grown == 0, "rounds grew the heap by ${grown} bytes in every run")
+    }
+    println("=== test_push_call_result_struct passed ===")
+}

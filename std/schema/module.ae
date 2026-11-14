@@ -727,7 +727,14 @@ parse(schema_ptr: ptr, input: ptr) -> (ptr, ptr) {
             continue
         }
 
-        raw, _ = map.get(input, f.name)
+        // The input map holds Aether strings (string -> string); a value
+        // that is some other pointer is reported, not read as text.
+        raw, rerr = map.get_string(input, f.name)
+        if rerr != "" {
+            push_error(errors, f.name, "invalid_type", "${f.name} is not a string in the input map")
+            i = i + 1
+            continue
+        }
 
         // 1. type check / coercion
         typed, tcode = check_type(raw, f.ty, s.strict)

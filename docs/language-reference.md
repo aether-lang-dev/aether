@@ -5196,7 +5196,7 @@ An error stops the build and prints its code, `error[E0301]: ...`, with the sour
 | `E0100` | Syntax: the source does not parse, or a reserved word stands where a name must |
 | `E0200` | Type mismatch, and the other type rules (a cast the types cannot justify, `string + string`, a `match` arm or `switch` case that can never equal the value it compares, an arm that gives no value to a `match` whose value is used: [Match Expressions](#match-expressions)) |
 | `E0201` | A fixed-size array as the result of a closure, an extern or a function type, alone or in a tuple (a named function returns one) ([What a `return` gives](#what-a-return-gives-e0200)) |
-| `E0202` | A bare `ptr` given to a `string` local, which would read it as text whatever it points at ([A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202)) |
+| `E0202` | A bare `ptr` given to a `string` local or to an Aether function's `string` parameter, which would read it as text whatever it points at ([A pointer given to a string local](#a-pointer-given-to-a-string-local-e0202)) |
 | `E0300` | Undefined variable, and a name in a `match` arm or `switch` case that is no variable, constant or member |
 | `E0301` | Undefined function, a function of a module the calling module does not import, or a function a local of its name hides ([a local's scope](#variables)) |
 | `E0302` | A type name that names no type of the program, as a local's, a parameter's or a field's type (`Shape s` with no `Shape`; `x and y`, where AND is `&&`) |
@@ -5286,6 +5286,13 @@ is something else. C text (a `char*` with no Aether header, as
 or `string.concat(p, "")`. A `ptr` result of a `string.*` function
 (`string.from_int`) is a string already and is accepted. This was the warning
 W1005 in 0.830.0 and 0.831.0.
+
+An argument is held to the same rule: a `ptr` passed where an Aether function
+declares a `string` parameter is E0202 too (`Argument 1 'text' of 'takes':
+expected string, got ptr`), since the callee would read it the same way. `null`
+and a `string.*` producer are accepted there as well, and an `extern`'s
+`string` parameter still takes a `ptr`: that is the C boundary, where both are
+a `char*`.
 
 ## Compiler Warnings
 

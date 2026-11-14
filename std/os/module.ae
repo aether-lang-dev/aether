@@ -25,7 +25,7 @@ exports(
     setenv, unsetenv,
     run_pipe, wait_pid, run_pipe_drain_and_wait,
     os_run_socket_raw, os_socketpair_raw, run_socket, socketpair,
-    os_run_stdio_raw, run_stdio,
+    os_run_stdio_raw, run_stdio, STDERR_INHERIT, STDERR_DISCARD, STDERR_FILE,
     spawn_proc, wait, wait_any, wait_any_timeout,
     os_spawn_to_raw, spawn_proc_to,
     os_kill_raw, os_wait_pid_timeout_raw, os_run_supervised_raw,
@@ -111,10 +111,18 @@ extern os_run_pipe_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 extern os_run_socket_raw(prog: string, argv: ptr, env: ptr) -> (int, int, string)
 extern os_socketpair_raw() -> (int, int, string)
 
-// Spawn `prog` with its stdin and stdout each a pipe the caller keeps;
-// stderr is inherited. Returns (to_child_fd, from_child_fd, pid, "") or
-// (-1, -1, -1, reason) with no child to reap. See run_stdio.
-extern os_run_stdio_raw(prog: string, argv: ptr, env: ptr) -> (int, int, int, string)
+// Spawn `prog` with its stdin and stdout each a pipe the caller keeps; its
+// stderr as `stderr_to` says (a STDERR_* below, `stderr_path` the file for
+// STDERR_FILE) and its working directory `cwd` ("" for this process's).
+// Returns (to_child_fd, from_child_fd, pid, "") or (-1, -1, -1, reason)
+// with no child to reap. See run_stdio.
+extern os_run_stdio_raw(prog: string, argv: ptr, env: ptr, stderr_to: int,
+    stderr_path: string, cwd: string) -> (int, int, int, string)
+
+// Where run_stdio sends the child's stderr.
+const STDERR_INHERIT = 0 // this process's stderr (the default, 0 in run_stdio's signature)
+const STDERR_DISCARD = 1 // nowhere: /dev/null, NUL on Windows
+const STDERR_FILE = 2 // the file `stderr_path`, created or truncated
 
 // Wait for a child to exit and reap it. Companion to
 // os_run_pipe_raw. Returns (exit_code, err). Calling this
@@ -369,7 +377,18 @@ run_socket(prog: string, argv: ptr, env: ptr) -> {
 }
 
 // Spawn `prog` with the child's stdin and stdout each a pipe this process
-// keeps, and its stderr this process's. Returns
+// keeps, and its stderr this process's unless `stderr_to` says otherwise:
+// STDERR_DISCARD sends it nowhere, STDERR_FILE to the file `stderr_path`
+// (created or truncated, relative to this process's directory). A child
+// that holds this process's stderr keeps whoever reads it waiting until
+// the child exits, even after this process has gone; a child started to
+// run unattended can be given none. A non-empty `cwd` is the directory the
+// child runs in; `prog` is still found as without it (a bare name on PATH,
+// a relative path from this process's directory). Both are optional, by
+// name: `os.run_stdio(prog, argv, null, stderr_to: os.STDERR_DISCARD,
+// cwd: dir)`. A directory the child cannot enter fails the spawn ("cannot
+// enter the working directory"), as a program that cannot start does.
+// Returns
 // (to_child_fd, from_child_fd, pid, "") on success, or (-1, -1, -1, err)
 // with no child to reap: "program not found" for a missing program, as
 // every spawn here gives it, "denied by sandbox" when the "exec" capability
@@ -403,8 +422,9 @@ run_socket(prog: string, argv: ptr, env: ptr) -> {
 // uses it, so CR/LF and 0x1a bytes go through as they are. wait_readable
 // and read_frame_timeout poll the pipe (PeekNamedPipe), so they notice
 // bytes and deadlines within about a timer tick (~16 ms).
-run_stdio(prog: string, argv: ptr, env: ptr) -> {
-    return os_run_stdio_raw(prog, argv, env)
+run_stdio(prog: string, argv: ptr, env: ptr, stderr_to: int = 0,
+    stderr_path: string = "", cwd: string = "") -> {
+    return os_run_stdio_raw(prog, argv, env, stderr_to, stderr_path, cwd)
 }
 
 // Create a connected pair of Unix domain sockets (AF_UNIX, SOCK_STREAM).

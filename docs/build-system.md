@@ -766,6 +766,19 @@ Cross-**OS** targets (for example Linux to macOS) need a matching C toolchain
 plus that OS's headers, which a stock cross-gcc does not carry: for those, use
 the `zig cc` backend below.
 
+### Extra C and link flags for one build (`$AETHER_CFLAGS_EXTRA` / `$AETHER_LDFLAGS_EXTRA`)
+
+`ae build`, `ae run` and `ae test` add `$AETHER_CFLAGS_EXTRA` to every compile
+of the generated C and `$AETHER_LDFLAGS_EXTRA` to the link, after
+`aether.toml`'s `[build] cflags` and `link_flags`, so a one-off build can add
+flags without editing the manifest. They are part of the build cache's key, as
+the manifest's flags are. A sanitizer run is the usual use:
+
+```bash
+AETHER_CFLAGS_EXTRA="-fsanitize=address -g" AETHER_LDFLAGS_EXTRA="-fsanitize=address" \
+    ae build probe.ae -o probe
+```
+
 ### `ae build --target=<triple>` (cross-OS via a `zig cc` backend)
 
 `ae build --target=<triple>` cross-compiles a foreign-OS/arch binary using

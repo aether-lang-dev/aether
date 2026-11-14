@@ -259,7 +259,9 @@ the thread this removes.
 ## The stdio channel
 
 `os.run_stdio(prog, argv, env)` spawns the child with its stdin and stdout
-each a pipe the parent keeps (stderr is inherited) and returns
+each a pipe the parent keeps (stderr is inherited, unless the optional
+`stderr_to:` says `os.STDERR_DISCARD` or `os.STDERR_FILE` with a
+`stderr_path:`; an optional `cwd:` is the directory it runs in) and returns
 `(to_child_fd, from_child_fd, pid, err)`. Both descriptors are
 close-on-exec; `pid` is reaped with `os.wait_pid` (or bounded with
 `os.wait_pid_timeout`, ended with `os.kill`). The child's environment
@@ -373,7 +375,11 @@ bounds how many descriptors one message is looked at for.
 
 - **Linux, FreeBSD, macOS:** both kinds of channel, the stdio channel, and
   descriptor passing. A write to a pipe whose reader has gone is `EPIPE`,
-  not SIGPIPE: std.ipc holds SIGPIPE off the writing thread for the write.
+  not SIGPIPE, from any thread: std.ipc holds SIGPIPE off the writing
+  thread for the write (Linux and the BSDs raise it there), and on macOS,
+  which raises it on the whole process, sets the descriptor's own
+  `F_SETNOSIGPIPE` before writing. No handler or signal disposition of the
+  process is changed.
 - **Windows:** no parent channel (`parent_channel()` is `-1`); `write`,
   `read`, `write_frame` and `read_frame` are plain CRT descriptor I/O, with
   the descriptor put in binary mode (a child's fd 0 is in text mode by

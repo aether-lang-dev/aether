@@ -115,6 +115,11 @@ exports(
 // documented tradeoff for ambient state.
 @extern("free") libc_free(p: ptr)
 
+// The runtime's note of a failure the process must exit with, even when
+// main() returns 0 (runtime/aether_runtime.c): run_summary makes it for a
+// failing suite.
+extern aether_note_failure(status: int)
+
 var current_fw: ptr = null
 
 // Whether output is coloured (#3180): -1 until the first coloured write
@@ -1130,6 +1135,13 @@ run_summary(fw: ptr) -> int {
     // caller that DROPS the value silently turns a failing suite green, so
     // the rule for every caller is: return it.
     if failed > 0 {
+        // Also noted with the runtime, so a main() that drops this value
+        // (`spec.run_summary(fw)` as its last statement) still exits 1: it
+        // fell off the end and exited 0, and `ae run`, `ae test` and every
+        // harness reading the status took the failing suite for a passing
+        // one. A main() that returns or exits with a status of its own keeps
+        // it.
+        aether_note_failure(1)
         return 1
     }
     // Return 0 explicitly rather than falling off the end.
@@ -1214,8 +1226,8 @@ _format_tap(fw: ptr) -> string {
     i = 0
     while i < n {
         it_rec = list.get_raw(its, i)
-        status = map.get_raw(it_rec, "status")
-        name = map.get_raw(it_rec, "name")
+        status, _ = map.get_string(it_rec, "status")
+        name, _ = map.get_string(it_rec, "name")
         idx = i + 1
         if string.equals(status, "PASS") == 1 {
             strbuilder.append(b, "ok ")
@@ -1229,7 +1241,7 @@ _format_tap(fw: ptr) -> string {
         // Diagnostic block for a failure, if a message was captured.
         if string.equals(status, "PASS") == 0 {
             if map.has(it_rec, "failure_message") == 1 {
-                msg = map.get_raw(it_rec, "failure_message")
+                msg, _ = map.get_string(it_rec, "failure_message")
                 strbuilder.append(b, "  ---\n  message: ")
                 strbuilder.append(b, _tap_yaml_scalar(msg))
                 strbuilder.append(b, "\n  ...\n")
@@ -1321,8 +1333,8 @@ _build_rows(its: ptr, n: int) -> string {
     i = 0
     while i < n {
         it_rec = list.get_raw(its, i)
-        status = map.get_raw(it_rec, "status")
-        name = map.get_raw(it_rec, "name")
+        status, _ = map.get_string(it_rec, "status")
+        name, _ = map.get_string(it_rec, "name")
         idx = i + 1
 
         // Base row: STATUS\tindex\t"name"  (\t=9, "=34)
@@ -1336,12 +1348,12 @@ _build_rows(its: ptr, n: int) -> string {
 
         // Per-row duration (ns): full precision, so sub-ms tests don't
         // all report 0.
-        dur_str = map.get_raw(it_rec, "duration_ns_str")
+        dur_str, _ = map.get_string(it_rec, "duration_ns_str")
         strbuilder.append_byte(b, 9)
         strbuilder.append(b, dur_str)
 
         if map.has(it_rec, "failure_message") == 1 {
-            msg = map.get_raw(it_rec, "failure_message")
+            msg, _ = map.get_string(it_rec, "failure_message")
             strbuilder.append_byte(b, 9)
             if string.length(msg) > 256 {
                 strbuilder.append(b, string.substring(msg, 0, 256))

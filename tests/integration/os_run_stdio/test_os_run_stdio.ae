@@ -16,11 +16,20 @@
 //   - end of stream when the child exits, and wait_pid reaping its status;
 //     wait_pid_timeout and kill on the token;
 //   - a write to a child that is gone is an error, not SIGPIPE (a pipe has
-//     no MSG_NOSIGNAL: std.ipc blocks SIGPIPE for the write);
+//     no MSG_NOSIGNAL: std.ipc blocks SIGPIPE for the write), also from a
+//     worker thread whose write filled the pipe before the child was killed
+//     (macOS raises a pipe's SIGPIPE on the process, so the thread's mask
+//     alone did not hold it off: nib-code ask ipc-write-sigpipe);
 //   - the parent's ends are not inherited (POSIX), a missing program fails
 //     the spawn with nothing to reap;
 //   - the child's env carries AETHER_IPC_KIND=stdio and no AETHER_IPC_FD,
-//     even when this process has one.
+//     even when this process has one;
+//   - the child's stderr inherited, discarded or written to a file, and its
+//     working directory (nib-code ask run-stdio-stderr): a "middle" copy of
+//     this program, run with its stderr captured, spawns the child, so what
+//     reaches its stderr and when it ends can be seen from outside. A
+//     discarded stderr lets the middle's reader finish while the child it
+//     left running still runs; a missing directory fails the spawn.
 
 import std.spec
 import std.ipc
@@ -29,6 +38,8 @@ import std.io
 import std.fs
 import std.string
 import std.list
+import std.sync
+import std.worker
 
 const MAX = 1048576
 
@@ -54,6 +65,9 @@ frame_of(payload: string) -> string {
 //   "D"   nothing until the next frame arrives, then "late"
 //   "H"   two bytes of a frame, then a pause of 1.5 s, then the rest
 //   "K"   ipc.parent_channel_kind(), then "/" and AETHER_IPC_FD (or "-")
+//   "Z"   stop reading stdin (sleep), so the parent's writes fill the pipe
+//   "W"   a line on stderr, then a "done" frame
+//   "P"   write the file cwd_probe.txt in the working directory, then "ok"
 child_main() {
     while true {
         req, err = ipc.read_frame(0, MAX)
@@ -83,6 +97,20 @@ child_main() {
                 fd = os.getenv("AETHER_IPC_FD")
                 if fd == null { fd = "-" }
                 ipc.write_frame(1, "${ipc.parent_channel_kind()}/${fd}")
+            } else if first == "W" {
+                ipc.write(2, "child stderr line\n")
+                ipc.write_frame(1, "done")
+            } else if first == "P" {
+                werr = fs.write_atomic("cwd_probe.txt", string.bytes("here"))
+                ipc.write_frame(1, if werr == "" { "ok" } else { werr })
+            } else if first == "Z" {
+                // Ended by a kill; gone by itself after a minute at most.
+                naps = 0
+                while naps < 600 {
+                    sleep(100)
+                    naps = naps + 1
+                }
+                exit(5)
             } else if first == "H" {
                 wire = frame_of("never-whole")
                 ipc.write(1, string.substring(wire, 0, 2))
@@ -115,6 +143,107 @@ big_payload() -> string {
     return s
 }
 
+// On a worker, write 1 MiB to `to` (the stdin of a child that has stopped
+// reading, so the pipe fills) with ipc.write, or with ipc.write_some under
+// ipc.wait_writable when `some` is set. `state` ends 2 when a write said
+// the reader is gone, 1 when every byte went, which a killed reader cannot
+// take.
+start_filling_writer(to: int, some: bool, state: @keep ptr) {
+    big = "0123456789abcdef"
+    while string.length(big) < 1048576 {
+        big = string.concat(big, big)
+    }
+    worker.run_detached(|| {
+            if some {
+                off = 0
+                n = string.length(big)
+                while off < n {
+                    _ready, _werr = ipc.wait_writable(to, 50)
+                    wrote, err = ipc.write_some(to, big, off)
+                    if err != "" {
+                        sync.atomic_store(state, 2)
+                        return null
+                    }
+                    off = off + wrote
+                }
+                sync.atomic_store(state, 1)
+                return null
+            }
+            err = ipc.write(to, big)
+            if err != "" {
+                sync.atomic_store(state, 2)
+            } else {
+                sync.atomic_store(state, 1)
+            }
+            return null
+        })
+}
+
+// Fill a child's stdin from a worker, kill the child while the writer waits
+// on the full pipe, and expect the write to fail: before, it took SIGPIPE
+// and the whole process died (141) on macOS.
+writer_survives_killed_reader(some: bool) -> long {
+    to, from, pid, err = spawn_child()
+    if err != "" { return 0 - 1 }
+    _ = ipc.write_frame(to, "Z")
+    state = sync.atomic_new(0)
+    start_filling_writer(to, some, state)
+    sleep(300)
+    os.kill(pid, 9)
+    _code, _werr = os.wait_pid(pid)
+    waited = 0
+    while sync.atomic_load(state) == 0 && waited < 20000 {
+        sleep(10)
+        waited = waited + 10
+    }
+    got = sync.atomic_load(state)
+    // The writer is done once it stored a verdict; only then is the cell ours.
+    if got != 0 { sync.atomic_free(state) }
+    io.fd_close(to)
+    io.fd_close(from)
+    return got
+}
+
+// The "middle" process: spawn the child with its stderr as `how` says
+// ("inherit", "discard"), ask it for a stderr line ("W"), or leave it
+// running ("Z", printing its pid on stdout so the test can end it), and
+// exit. The test reads what reached the middle's stderr.
+middle_main(how: string, ask: string) {
+    argv = list.new()
+    list.add(argv, "child")
+    mode = os.STDERR_INHERIT
+    if how == "discard" { mode = os.STDERR_DISCARD }
+    to, from, pid, err = os.run_stdio(os.argv0(), argv, null, stderr_to: mode)
+    list.free(argv)
+    if err != "" {
+        println("spawn: ${err}")
+        exit(3)
+    }
+    ipc.write_frame(to, ask)
+    if ask == "Z" {
+        println("${pid}")
+        exit(0)
+    }
+    _d, _e = ipc.read_frame(from, MAX)
+    io.fd_close(to)
+    _c, _w = os.wait_pid(pid)
+    io.fd_close(from)
+    exit(0)
+}
+
+// Run the middle with `how` and `ask`: (its stdout, its stderr, ms taken).
+run_middle(how: string, ask: string) -> (string, string, long) {
+    argv = list.new()
+    list.add(argv, "middle")
+    list.add(argv, how)
+    list.add(argv, ask)
+    t0 = os.now_monotonic_ms()
+    out, err_text, _code, _err = os.run_full(os.argv0(), argv, null, "")
+    took = os.now_monotonic_ms() - t0
+    list.free(argv)
+    return out, err_text, took
+}
+
 spawn_child() -> (int, int, int, string) {
     argv = list.new()
     list.add(argv, "child")
@@ -127,6 +256,10 @@ main() {
     if os.args_count() > 1 {
         if os.args_get(1) == "child" {
             child_main()
+            return
+        }
+        if os.args_get(1) == "middle" && os.args_count() > 3 {
+            middle_main(os.args_get(2), os.args_get(3))
             return
         }
     }
@@ -260,6 +393,89 @@ main() {
             spec.assert_err_contains(gone, "ipc.write_frame", "an error naming the call")
             io.fd_close(to)
             io.fd_close(from)
+        }
+
+        spec.it("a worker's ipc.write to a full pipe whose reader is killed fails, not SIGPIPE") callback {
+            spec.assert_eq_long(writer_survives_killed_reader(false), 2, "ipc.write said the reader is gone")
+        }
+
+        spec.it("a worker's ipc.write_some to a full pipe whose reader is killed fails, not SIGPIPE") callback {
+            spec.assert_eq_long(writer_survives_killed_reader(true), 2, "ipc.write_some said the reader is gone")
+        }
+
+        spec.it("gives the child this process's stderr by default") callback {
+            _out, err_text, _took = run_middle("inherit", "W")
+            spec.assert_true(string.contains(err_text, "child stderr line"), "the child's line reached the middle's stderr")
+        }
+
+        spec.it("discards the child's stderr with STDERR_DISCARD") callback {
+            _out, err_text, _took = run_middle("discard", "W")
+            spec.assert_false(string.contains(err_text, "child stderr line"), "nothing of the child's reached the middle's stderr")
+        }
+
+        spec.it("a discarded stderr does not keep the middle's reader waiting on a child left running") callback {
+            out, _err_text, took = run_middle("discard", "Z")
+            child, cerr = string.to_int(string.trim(out))
+            spec.assert_ok(cerr, "the middle printed the child's pid")
+            spec.assert_true(took < 20000, "the middle's stderr ended with the middle, not the child (${took} ms)")
+            if cerr == "" && child > 0 {
+                os.kill(child, 9)
+            }
+        }
+
+        spec.it("writes the child's stderr to a file with STDERR_FILE") callback {
+            path = "${os.temp_dir()}/os_run_stdio_err_${os.getpid()}.txt"
+            argv = list.new()
+            list.add(argv, "child")
+            to, from, pid, err = os.run_stdio(os.argv0(), argv, null, stderr_to: os.STDERR_FILE, stderr_path: path)
+            list.free(argv)
+            spec.assert_ok(err, "spawn")
+            spec.assert_ok(ipc.write_frame(to, "W"), "ask for a stderr line")
+            done, derr = ipc.read_frame(from, MAX)
+            spec.assert_ok(derr, "read the reply")
+            spec.assert_str_eq(done, "done", "the child answered")
+            io.fd_close(to)
+            _code, werr = os.wait_pid(pid)
+            spec.assert_ok(werr, "wait_pid")
+            io.fd_close(from)
+            text, rerr = fs.read(path)
+            spec.assert_ok(rerr, "read the stderr file")
+            spec.assert_true(string.contains(text, "child stderr line"), "the line is in the file")
+            fs.delete(path)
+        }
+
+        spec.it("runs the child in `cwd`, and refuses one it cannot enter") callback {
+            dir = "${os.temp_dir()}/os_run_stdio_cwd_${os.getpid()}"
+            _mk = fs.mkdir_p(dir)
+            argv = list.new()
+            list.add(argv, "child")
+            to, from, pid, err = os.run_stdio(os.argv0(), argv, null, cwd: dir)
+            spec.assert_ok(err, "spawn in the directory")
+            spec.assert_ok(ipc.write_frame(to, "P"), "ask for the probe file")
+            ok, oerr = ipc.read_frame(from, MAX)
+            spec.assert_ok(oerr, "read the reply")
+            spec.assert_str_eq(ok, "ok", "the child wrote its probe")
+            io.fd_close(to)
+            _code, werr = os.wait_pid(pid)
+            spec.assert_ok(werr, "wait_pid")
+            io.fd_close(from)
+            spec.assert_eq(fs.exists("${dir}/cwd_probe.txt"), 1, "the probe is in `cwd`")
+            fs.delete("${dir}/cwd_probe.txt")
+            fs.delete_dir(dir)
+
+            t2, f2, p2, e2 = os.run_stdio(os.argv0(), argv, null, cwd: "${dir}/missing")
+            spec.assert_err_contains(e2, "cannot enter the working directory", "a missing directory fails the spawn")
+            spec.assert_true(t2 == -1 && f2 == -1 && p2 == -1, "with nothing to reap")
+            list.free(argv)
+        }
+
+        spec.it("refuses an unknown stderr choice, and STDERR_FILE with no path") callback {
+            _a, _b, p1, e1 = os.run_stdio(os.argv0(), null, null, stderr_to: 7)
+            spec.assert_err_contains(e1, "stderr_to", "an unknown choice")
+            spec.assert_eq(p1, -1, "nothing spawned")
+            _c, _d, p2, e2 = os.run_stdio(os.argv0(), null, null, stderr_to: os.STDERR_FILE)
+            spec.assert_err_contains(e2, "needs a stderr_path", "a file with no path")
+            spec.assert_eq(p2, -1, "nothing spawned")
         }
 
         if on_windows {

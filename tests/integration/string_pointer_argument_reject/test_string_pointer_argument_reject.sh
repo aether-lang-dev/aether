@@ -79,8 +79,31 @@ main() {
 AE
 refuse string_to_ptr "Argument 1 'vc' of 'takes': expected *Vcr, got string"
 
-# What stays accepted: a bare ptr either way, null to a typed pointer, an
-# explicit `as ptr`, and the string field the caller meant.
+# A bare `ptr` into an Aether `string` parameter is refused too (E0202, the
+# rule a `string` local follows): `vc as ptr` no longer launders the struct
+# into the string (nib-code ask ptr-passed-as-string).
+cat > "$tmp/ptr_to_string.ae" <<'AE'
+struct Vcr { name: string; n: int }
+takes(key: string) -> int { return 0 }
+main() {
+    vc = heap.new(Vcr)
+    p = vc as ptr
+    println("${takes(p)}")
+}
+AE
+out="$(AETHER_HOME="$ROOT" "$AE" check "$tmp/ptr_to_string.ae" 2>&1)" && {
+    echo "  [FAIL] string_pointer_argument_reject: a bare ptr into a string parameter was accepted"
+    exit 1
+}
+case "$out" in
+    *"error[E0202]: Argument 1 'key' of 'takes': expected string, got ptr"*) ;;
+    *) echo "  [FAIL] string_pointer_argument_reject: ptr_to_string refused without E0202:"
+       printf '%s\n' "$out" | sed 's/^/        /'
+       exit 1 ;;
+esac
+
+# What stays accepted: a string into a bare ptr, null to a typed pointer, a
+# typed pointer into a bare ptr, and the string field the caller meant.
 cat > "$tmp/ok.ae" <<'AE'
 struct Vcr { name: string; n: int }
 takes(key: string) -> int { return 0 }
@@ -93,9 +116,7 @@ main() {
     b = takes_ptr("text")
     c = takes_vcr(null)
     d = takes_ptr(vc)
-    p = vc as ptr
-    e = takes(p)
-    println("${a + b + c + d + e}")
+    println("${a + b + c + d}")
 }
 AE
 out="$(AETHER_HOME="$ROOT" "$AE" check "$tmp/ok.ae" 2>&1)" || {

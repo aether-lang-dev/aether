@@ -3935,6 +3935,17 @@ static ASTNode* parse_statement_inner(Parser* parser) {
                        peek_ahead(parser, off + 1)->type == TOKEN_IDENTIFIER) {
                     off += 2;
                 }
+                /* The array and slice forms, `m.P[] xs = []` and
+                 * `m.P[4] ps`: each `[...]` on the type's line is part of
+                 * the type when a binding name follows it, as in the
+                 * unqualified `Pair[N] ps` above. An element read
+                 * (`a.b[i]`) is never followed by a name on its line. */
+                while (off > 1 && peek_ahead(parser, off) &&
+                       peek_ahead(parser, off)->type == TOKEN_LEFT_BRACKET) {
+                    int rbo = closing_bracket_offset(parser, off);
+                    if (rbo <= 0) break;
+                    off = rbo + 1;
+                }
                 /* `off` is past the dotted type name; a binding identifier
                  * here (and not another `.`/`(`) marks a typed declaration. */
                 Token* after = peek_ahead(parser, off);

@@ -1,0 +1,12 @@
+// The adjacent shim.c compiles only with AE_EXTRA_MARKER defined, which
+// only AETHER_CFLAGS_EXTRA supplies, and with aether.toml's cflags still
+// applied beside it (AE_TOML_MARKER).
+extern ae_cflags_extra_probe() -> int
+
+main() {
+    if ae_cflags_extra_probe() != 42 {
+        println("FAIL: probe value wrong")
+        exit(1)
+    }
+    println("OK")
+}

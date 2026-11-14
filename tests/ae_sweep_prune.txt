@@ -16,6 +16,7 @@ tests/integration/actor_state_base_member_reject/
 tests/integration/ae_inspect/
 tests/integration/ae_add_hash_pin/
 tests/integration/ae_add_release_artifact/
+tests/integration/ae_cflags_extra_env/
 tests/integration/ae_run_cflags/
 tests/integration/ae_run_ends_with_ae/
 tests/integration/sandbox_spawn_socket/

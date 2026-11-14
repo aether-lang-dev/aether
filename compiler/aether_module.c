@@ -497,7 +497,6 @@ AetherModule* module_find(const char* name) {
     return NULL;
 }
 
-static const char* module_last_segment(const char* path);  /* defined below */
 static ASTNode* unwrap_export(ASTNode* node);              /* defined below */
 
 static int module_is_shipped(const char* name) {
@@ -1969,7 +1968,7 @@ static int check_selective_import_exports(ASTNode* import_child,
 
 /* Last `.`-separated segment of a module path: "std.audio" -> "audio",
  * "audio" -> "audio". Returns a pointer into `path`. */
-static const char* module_last_segment(const char* path) {
+const char* module_last_segment(const char* path) {
     if (!path) return "";
     const char* dot = strrchr(path, '.');
     return dot ? dot + 1 : path;

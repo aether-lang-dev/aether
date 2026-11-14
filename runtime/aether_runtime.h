@@ -41,6 +41,12 @@ extern int aether_argc;
 extern char** aether_argv;
 void aether_args_init(int argc, char** argv);
 int aether_args_count(void);
+
+// The process's exit status when main() returns 0: a failure noted with
+// aether_note_failure (std.spec's run_summary, for a failing suite) is not
+// lost because main() dropped the verdict. A non-zero rc is kept as it is.
+void aether_note_failure(int status);
+int aether_main_status(int rc);
 const char* aether_args_get(int index);
 
 #ifdef _WIN32

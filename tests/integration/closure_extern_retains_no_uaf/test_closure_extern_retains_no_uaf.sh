@@ -25,8 +25,13 @@ build_log="$tmpdir/build.log"
 # Build with ASan so the UAF (if it ever regresses) surfaces as a
 # clear `heap-use-after-free` diagnostic rather than a stack-format
 # guess.
+# AETHER_CFLAGS_EXTRA / AETHER_LDFLAGS_EXTRA reach ae's compile and link
+# (they were never read before, so this built uninstrumented). A toolchain
+# without ASan (MinGW gcc) cannot link it: the probe then runs plain, which
+# still catches a crash, though not a quiet use-after-free.
 if ! AETHER_CFLAGS_EXTRA="-fsanitize=address -g" AETHER_LDFLAGS_EXTRA="-fsanitize=address" \
-       "$AE" build probe.ae -o "$tmpdir/probe" >"$build_log" 2>&1; then
+       "$AE" build probe.ae -o "$tmpdir/probe" >"$build_log" 2>&1 &&
+   ! "$AE" build probe.ae -o "$tmpdir/probe" >"$build_log" 2>&1; then
     echo "  [FAIL] closure_extern_retains_no_uaf: ae build failed"
     sed 's/^/    /' "$build_log" | head -30
     exit 1

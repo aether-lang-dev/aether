@@ -6365,10 +6365,13 @@ void generate_main_function(CodeGenerator* gen, ASTNode* main) {
     // Emit main function defers before return
     exit_scope(gen);
 
+    /* aether_main_status: a 0 from main() is not a success when the
+     * program noted a failure on the way (std.spec's run_summary with a
+     * failing suite whose verdict main() dropped). */
     if (needs_main_exit) {
-        print_line(gen, "return main_exit_ret;");
+        print_line(gen, "return aether_main_status(main_exit_ret);");
     } else {
-        print_line(gen, "return 0;");
+        print_line(gen, "return aether_main_status(0);");
     }
     unindent(gen);
     print_line(gen, "}");
@@ -10532,6 +10535,8 @@ void generate_program(CodeGenerator* gen, ASTNode* program) {
     print_line(gen, "");
     // Declare runtime args function (avoid full header to prevent conflicts with actor runtime)
     print_line(gen, "void aether_args_init(int argc, char** argv);");
+    // main()'s status, with a failure the program noted kept (std.spec).
+    print_line(gen, "int aether_main_status(int rc);");
     // Opt-in Capsicum self-sandbox hook (runtime/sandbox/capsicum_autosandbox.c).
     // No-op unless AETHER_CAPSICUM=1 and the platform is FreeBSD.
     print_line(gen, "void aether_capsicum_autosandbox(void);");

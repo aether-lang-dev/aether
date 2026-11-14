@@ -1,0 +1,7 @@
+[build]
+cflags = "-DAE_TOML_MARKER=2"
+
+[[bin]]
+name = "probe"
+path = "probe.ae"
+extra_sources = ["shim.c"]
