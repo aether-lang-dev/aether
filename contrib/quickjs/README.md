@@ -107,6 +107,30 @@ _r, _e2 = quickjs.call(q, resolve, 0, args_array)
 _n, _e3 = quickjs.run_jobs(q)               // the script's await continues
 ```
 
+### A script that awaits, and its value
+
+`quickjs.eval` runs a script and gives its completion value, but a
+top-level `await` is a SyntaxError there; `quickjs.eval_module` allows the
+`await` but a module has no completion value. `quickjs.eval_async(q, code,
+filename) -> (int, string)` does both (`JS_EVAL_FLAG_ASYNC`): it returns a
+promise that settles, as `run_jobs` runs what the awaits queued, to
+`{ value: <the completion value> }`, or is rejected with what the script
+threw (before its first `await` too). Only a script that does not parse is
+an error rather than a promise.
+
+```aether
+p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+_n, _e = quickjs.run_jobs(q)
+if quickjs.promise_state(q, p) == quickjs.PROMISE_FULFILLED {
+    r, _e2 = quickjs.promise_result(q, p)       // { value: 42 }
+    v, _e3 = quickjs.get(q, r, "value")
+    println(quickjs.to_int(q, v))               // 42
+    quickjs.release(q, v)
+    quickjs.release(q, r)
+}
+quickjs.release(q, p)
+```
+
 A host that holds a promise (one a script returned, or `eval_async`'s) can
 ask how it stands without running any JavaScript:
 

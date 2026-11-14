@@ -43,7 +43,7 @@ import std.string
 
 exports(
     runtime, dispose, set_time_limit, last_error, handles, memory_used,
-    eval, eval_module, call, run_jobs,
+    eval, eval_async, eval_module, call, run_jobs,
     function, throw_error, rethrow, set_global, get_global,
     release, dup, global, new_undefined, new_null, new_bool, new_int, new_float, new_string, new_object, new_array,
     parse_json, to_json, to_string, to_int, to_float, to_bool, type_of,
@@ -130,7 +130,27 @@ eval(q: ptr, code: string, filename: string) -> (int, string) {
     return h, ""
 }
 
-// Run a module (import/export, top-level await); its value is a promise.
+// Run a script that may `await` at top level, and keep its completion value
+// (what `eval` would give): (a promise, "") or (0, the exception's text) for
+// a script that does not parse. The promise settles, as run_jobs runs what
+// the awaits queued, to an object { value: <the completion value> }, or is
+// rejected with what the script threw, so a throw before the first await is a
+// rejected promise too. promise_state and promise_result read it:
+//
+//   p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+//   _n, _e = quickjs.run_jobs(q)
+//   if quickjs.promise_state(q, p) == quickjs.PROMISE_FULFILLED {
+//       r, _e2 = quickjs.promise_result(q, p)     // { value: 42 }
+//       v, _e3 = quickjs.get(q, r, "value")
+//   }
+eval_async(q: ptr, code: string, filename: string) -> (int, string) {
+    h = qjs_eval(q, code, filename, 4)
+    if h < 0 { return 0, string.copy(qjs_error(q)) }
+    return h, ""
+}
+
+// Run a module (import/export, top-level await); its value is a promise
+// (a module has no completion value: eval_async keeps a script's).
 eval_module(q: ptr, code: string, filename: string) -> (int, string) {
     h = qjs_eval(q, code, filename, 1)
     if h < 0 { return 0, string.copy(qjs_error(q)) }

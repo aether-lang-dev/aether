@@ -280,6 +280,81 @@ main() {
         }
     }
 
+    spec.describe(fw, "contrib.quickjs: async global eval") {
+        spec.it("awaits at top level and keeps the script's completion value") callback {
+            // Neither eval (a SyntaxError) nor eval_module (no completion
+            // value) can run this and give back the 42.
+            _h, serr = quickjs.eval(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+            spec.assert_contains(serr, "SyntaxError", "plain eval refuses top-level await")
+            p, err = quickjs.eval_async(q, "const x = await Promise.resolve(2); x * 21", "run.js")
+            spec.assert_str_eq(err, "", "started")
+            spec.assert_str_eq(quickjs.type_of(q, p), "promise", "a promise")
+            _n, jerr = quickjs.run_jobs(q)
+            spec.assert_str_eq(jerr, "", "jobs ran")
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled")
+            r, rerr = quickjs.promise_result(q, p)
+            spec.assert_str_eq(rerr, "", "a result")
+            v, verr = quickjs.get(q, r, "value")
+            spec.assert_str_eq(verr, "", "it has a value")
+            spec.assert_eq(quickjs.to_int(q, v), 42, "the completion value, 42")
+            quickjs.release(q, v)
+            quickjs.release(q, r)
+            quickjs.release(q, p)
+        }
+        spec.it("waits on a promise the host settles, then completes") callback {
+            later = quickjs.function(q, "later2", 0, | q: ptr, this_h: int, args: int | {
+                    pending_ = quickjs.new_promise(q)
+                    lp, _e = quickjs.get(q, pending_, "promise")
+                    return lp
+                })
+            quickjs.set_global(q, "later2", later)
+            quickjs.release(q, later)
+            p, err = quickjs.eval_async(q, "const a = await later2(); const b = 'got ' + a; b", "w.js")
+            spec.assert_str_eq(err, "", "started")
+            _n0, _j0 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_PENDING, "pending while the host has not answered")
+            resolve, _e2 = quickjs.get(q, pending_, "resolve")
+            args = quickjs.new_array(q)
+            s = quickjs.new_string(q, "it")
+            _s = quickjs.set_index(q, args, 0, s)
+            rr, _ce = quickjs.call(q, resolve, 0, args)
+            _n1, _j1 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_FULFILLED, "fulfilled once answered")
+            r, _re = quickjs.promise_result(q, p)
+            v, _ve = quickjs.get(q, r, "value")
+            spec.assert_eq(quickjs.length(q, v), 6, "'got it'")
+            quickjs.release(q, v)
+            quickjs.release(q, r)
+            quickjs.release(q, rr)
+            quickjs.release(q, s)
+            quickjs.release(q, args)
+            quickjs.release(q, resolve)
+            quickjs.release(q, pending_)
+            quickjs.release(q, p)
+            _d = eval_string(q, "delete globalThis.later2")
+        }
+        spec.it("a throw, before or after an await, rejects the promise") callback {
+            p, err = quickjs.eval_async(q, "null.x", "early.js")
+            spec.assert_str_eq(err, "", "not an exception: a rejection")
+            _n, _j = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p), quickjs.PROMISE_REJECTED, "rejected")
+            e, _ee = quickjs.promise_result(q, p)
+            spec.assert_str_eq(quickjs.type_of(q, e), "error", "with the TypeError")
+            quickjs.release(q, e)
+            quickjs.release(q, p)
+            p2, err2 = quickjs.eval_async(q, "await 1; throw new RangeError('late')", "late.js")
+            spec.assert_str_eq(err2, "", "started")
+            _n2, _j2 = quickjs.run_jobs(q)
+            spec.assert_eq(quickjs.promise_state(q, p2), quickjs.PROMISE_REJECTED, "rejected after the await")
+            quickjs.release(q, p2)
+        }
+        spec.it("a script that does not parse is an error, not a promise") callback {
+            p, err = quickjs.eval_async(q, "const = ;", "bad.js")
+            spec.assert_eq(p, 0, "no handle")
+            spec.assert_contains(err, "SyntaxError", "the parse error")
+        }
+    }
+
     spec.describe(fw, "contrib.quickjs: bytes") {
         spec.it("bytes_of reads a Uint8Array's own window of its buffer") callback {
             h, err = quickjs.eval(q, "new Uint8Array([9, 1, 2, 250]).subarray(1)", "b.js")

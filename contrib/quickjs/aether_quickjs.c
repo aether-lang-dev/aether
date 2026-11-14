@@ -243,11 +243,14 @@ int64_t qjs_memory_used(void *qp) {
 
 /* ---- running code -------------------------------------------------------- */
 
-/* flags: 1 = a module (its result is a promise), 2 = strict. */
+/* flags: 1 = a module (its result is a promise), 2 = strict, 4 = a global
+ * script with top-level await (JS_EVAL_FLAG_ASYNC): its result is a promise
+ * that settles to { value: <the script's completion value> }. */
 int qjs_eval(void *qp, const char *code, const char *filename, int flags) {
     AeQjs *q = (AeQjs *)qp;
     int f = (flags & 1) ? JS_EVAL_TYPE_MODULE : JS_EVAL_TYPE_GLOBAL;
     if (flags & 2) f |= JS_EVAL_FLAG_STRICT;
+    if ((flags & 4) && !(flags & 1)) f |= JS_EVAL_FLAG_ASYNC;
     enter_(q);
     return result_(q, JS_Eval(q->ctx, code, strlen(code), filename, f));
 }
