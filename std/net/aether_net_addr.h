@@ -148,6 +148,24 @@ static inline int aether_addr_is_localhost_name(const char* name) {
     return n > 10 && t[-1] == '.';      /* a non-empty label before it */
 }
 
+/* 1 when `name` is in the .invalid domain ("nohost.invalid", "x.INVALID.",
+ * "invalid"): RFC 6761 6.4 has resolvers answer every such name "no such
+ * name" at once, without asking DNS. Not every system resolver does; a slow
+ * one can take longer than a caller's whole budget to say so (a proxy then
+ * answers 504, not 502). Answered here instead. */
+static inline int aether_addr_is_invalid_name(const char* name) {
+    size_t n = strlen(name);
+    if (n > 0 && name[n - 1] == '.') n--;
+    if (n < 7) return 0;
+    const char* t = name + n - 7;
+    for (size_t i = 0; i < 7; i++) {
+        char c = t[i];
+        if (c >= 'A' && c <= 'Z') c = (char)(c - 'A' + 'a');
+        if (c != "invalid"[i]) return 0;
+    }
+    return n == 7 || t[-1] == '.';
+}
+
 /* The loopback addresses, port filled in: ::1 then 127.0.0.1, the order
  * getaddrinfo gives "localhost" on a host with IPv6 (RFC 6724). */
 static inline void aether_addr_loopback(int port, AetherAddrList* out) {
@@ -170,12 +188,14 @@ static inline void aether_addr_loopback(int port, AetherAddrList* out) {
  * -2 when the resolver says the name does not exist (EAI_NONAME, or
  * EAI_NODATA where there is one), which a cache drops the name for; or -1
  * for any other failure, a resolver that did not answer among them. A
- * localhost. name (aether_addr_is_localhost_name) is loopback, and no
- * resolver is asked. */
+ * localhost. name (aether_addr_is_localhost_name) is loopback and an
+ * .invalid one (aether_addr_is_invalid_name) does not exist; for neither is a
+ * resolver asked. */
 static inline int aether_addr_resolve(const char* host, int port, AetherAddrList* out) {
     char bare[256];
     out->n = 0;
     if (!aether_addr_unbracket(host, bare, sizeof bare) || !bare[0]) return -1;
+    if (aether_addr_is_invalid_name(bare)) return -2;
     if (aether_addr_is_localhost_name(bare)) {
         aether_addr_loopback(port, out);
         return 0;
