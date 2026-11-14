@@ -376,6 +376,11 @@ main() {
             to, from, pid, err = spawn_child()
             spec.assert_ok(err, "spawn")
             spec.assert_ok(ipc.write_frame(to, "H"), "ask for a stalled frame")
+            // The bounded read below must start inside the frame: wait for the
+            // child's first bytes, however slowly it starts (Windows CI).
+            ready, rerr = ipc.wait_readable(from, 20000)
+            spec.assert_ok(rerr, "wait_readable")
+            spec.assert_true(ready, "the child began its frame")
             _h, herr = ipc.read_frame_timeout(from, MAX, 300)
             spec.assert_str_eq(herr, ipc.TIMED_OUT_INSIDE_FRAME, "a timeout inside a frame")
 
