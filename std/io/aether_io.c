@@ -48,6 +48,7 @@ _tuple_ptrboolstr_io io_fd_read_line_status_tuple(int fd) { (void)fd; _tuple_ptr
 /* No descriptor layer in this build (the fd calls above are stubs too), so
  * nothing is a terminal (#3180). */
 int io_is_terminal_raw(int fd) { (void)fd; return 0; }
+_tuple_int_string_io io_set_echo_raw(int fd, int on) { (void)fd; (void)on; _tuple_int_string_io t; t._0 = 0; t._1 = ""; return t; }
 #else
 
 #include <stdio.h>
@@ -571,6 +572,43 @@ int io_is_terminal_raw(int fd) {
 int io_is_terminal_raw(int fd) {
     if (fd < 0) return 0;
     return isatty(fd) ? 1 : 0;
+}
+#endif
+
+/* io.set_echo (nib-code ask aether-signal-flag-and-tty-echo): turn the
+ * terminal's echo of what is typed on `fd` on or off, for reading a secret.
+ * Returns (1 if echo was on before, ""), so the caller puts back what it
+ * found; (0, "") when fd is not a terminal (nothing to change, not an error);
+ * (0, msg) when a terminal refused the change. POSIX termios ECHO;
+ * Windows the console's ENABLE_ECHO_INPUT. */
+#ifdef _WIN32
+_tuple_int_string_io io_set_echo_raw(int fd, int on) {
+    _tuple_int_string_io out; out._0 = 0; out._1 = "";
+    if (!io_is_terminal_raw(fd)) return out;
+    HANDLE h = (HANDLE)_get_osfhandle(fd);
+    DWORD mode = 0;
+    if (!GetConsoleMode(h, &mode)) return out;
+    out._0 = (mode & ENABLE_ECHO_INPUT) ? 1 : 0;
+    DWORD want = on ? (mode | ENABLE_ECHO_INPUT) : (mode & ~(DWORD)ENABLE_ECHO_INPUT);
+    if (want != mode && !SetConsoleMode(h, want)) out._1 = "cannot change the console's echo";
+    return out;
+}
+#else
+#include <termios.h>
+_tuple_int_string_io io_set_echo_raw(int fd, int on) {
+    _tuple_int_string_io out; out._0 = 0; out._1 = "";
+    struct termios t;
+    if (fd < 0 || !isatty(fd) || tcgetattr(fd, &t) != 0) return out;
+    out._0 = (t.c_lflag & ECHO) ? 1 : 0;
+    tcflag_t want = on ? (t.c_lflag | ECHO) : (t.c_lflag & ~(tcflag_t)ECHO);
+    if (want == t.c_lflag) return out;
+    t.c_lflag = want;
+    /* TCSAFLUSH: what was typed before echo went off is not read as the
+     * secret's start. */
+    while (tcsetattr(fd, on ? TCSANOW : TCSAFLUSH, &t) != 0) {
+        if (errno != EINTR) { out._1 = "cannot change the terminal's echo"; break; }
+    }
+    return out;
 }
 #endif
 

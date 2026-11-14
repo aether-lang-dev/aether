@@ -32,6 +32,7 @@
     <li><a href="#stderr_write_raw">stderr_write_raw</a></li>
     <li><a href="#stdout_write_raw">stdout_write_raw</a></li>
     <li><a href="#is_terminal_raw">is_terminal_raw</a></li>
+    <li><a href="#set_echo_raw">set_echo_raw</a></li>
     <li><a href="#perror_raw">perror_raw</a></li>
     <li><a href="#errno_message_raw">errno_message_raw</a></li>
     <li><a href="#fd_open_read_tuple">fd_open_read_tuple</a></li>
@@ -51,6 +52,7 @@
     <li><a href="#stderr_write">stderr_write</a></li>
     <li><a href="#stdout_write">stdout_write</a></li>
     <li><a href="#is_terminal">is_terminal</a></li>
+    <li><a href="#set_echo">set_echo</a></li>
     <li><a href="#perror">perror</a></li>
     <li><a href="#errno_message">errno_message</a></li>
     <li><a href="#fd_open_read">fd_open_read</a></li>
@@ -257,6 +259,11 @@
       <p class="signature"><span class="sig-params">fd: int</span></p>
       <p class="doc">1 when the descriptor is a terminal (a console on Windows). See is_terminal below.</p>
     </div>
+    <div class="function" id="set_echo_raw" data-name="set_echo_raw">
+      <h3 class="function-name">set_echo_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>set_echo_raw(fd, on) <span class="arrow">-&gt;</span> (int, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, on: int</span></p>
+    </div>
     <div class="function" id="perror_raw" data-name="perror_raw">
       <h3 class="function-name">perror_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>perror_raw(name)</code></pre>
@@ -363,6 +370,12 @@
       <pre class="usage"><code>is_terminal(fd) <span class="arrow">-&gt;</span> bool</code></pre>
       <p class="signature"><span class="sig-params">fd: int</span></p>
       <p class="doc">Whether `fd` is a terminal a person reads (on Windows, a console), not a pipe, a file or the null device: `io.is_terminal(1)` for stdout, `io.is_terminal(2)` for stderr. It is how a program decides to colour its output; NO_COLOR and FORCE_COLOR are the program's to check (std.spec does). False for a descriptor that is not open, and in a build without a filesystem.</p>
+    </div>
+    <div class="function" id="set_echo" data-name="set_echo">
+      <h3 class="function-name">set_echo <span class="kind">fn</span></h3>
+      <pre class="usage"><code>set_echo(fd, on) <span class="arrow">-&gt;</span> (bool, string)</code></pre>
+      <p class="signature"><span class="sig-params">fd: int, on: bool</span></p>
+      <p class="doc">Turn the terminal's echo of what is typed on `fd` on or off: off while reading a password or an API key, so it does not appear on the screen. Returns (was_on, err): whether echo was on before, so the caller puts back what it found, and &quot;&quot; or why a terminal refused. A descriptor that is no terminal (a pipe, a file) is left alone: (false, &quot;&quot;). POSIX termios ECHO (switching off discards input typed before it); Windows the console's ENABLE_ECHO_INPUT. was, err = io.set_echo(0, false) defer io.set_echo(0, was) key = io.fd_read_line(0)</p>
     </div>
     <div class="function" id="perror" data-name="perror">
       <h3 class="function-name">perror <span class="kind">fn</span></h3>
