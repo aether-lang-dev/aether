@@ -70,6 +70,9 @@ main() {
     round(port, "aether")
     round(port, "openssl")
     http.server_stop(s)
+    // Freed, as a server is once stopped: the ASan sweep fails on what a
+    // program leaves allocated, the server's TLS context among it.
+    http.server_free(s)
     println("DONE")
     exit(0)
 }
