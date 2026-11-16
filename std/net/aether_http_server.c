@@ -7431,6 +7431,22 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn->applied_recv_timeout_ms = -1;
 
     if (server->tls_enabled) {
+        /* The handshake is bounded as a request is (#3703): the receive and
+         * send timeouts conn_serve puts on the socket, the keep-alive idle
+         * timeout (30 s unless set), go on before it, so each of the
+         * handshake's reads and writes gives up after that long without
+         * progress and the connection closes, as a stalled request head
+         * does. Before, the socket had no timeout until conn_serve, and a
+         * client that sent a few bytes of a ClientHello and stopped held
+         * this worker (a pool thread, or an actor-mode worker's core) for
+         * as long as it kept the connection open. Both backends read and
+         * write this socket, OpenSSL's SSL_accept and the pure-Aether
+         * server's std.tcp. conn_serve applies the same values after, which
+         * it finds applied already. The event driver bounds its own
+         * handshake (ev_arm_idle). */
+        conn_apply_recv_timeout(server, conn);
+        conn_apply_send_timeout(server, conn);
+
         /* What this connection is accepted with, a reference taken under
          * the lock a re-load swaps it under, and given back once the
          * handshake is done (#3371). */

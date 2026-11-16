@@ -51,7 +51,7 @@ import std.cryptography
 extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 extern string_length(s: string) -> int
-extern tcp_socket_from_fd_owned(fd: int) -> ptr
+extern tcp_socket_adopt_fd(fd: int) -> ptr
 
 exports(
     accept, conn_send, conn_recv, close_conn, conn_key_update,
@@ -148,7 +148,6 @@ fn recio_compact(r: *RecordIO) {
 
 fn recio_fill(r: *RecordIO) -> int {
     recio_compact(r)
-    tries = 0
     filling = 1
     result = -1
     while filling == 1 {
@@ -167,13 +166,15 @@ fn recio_fill(r: *RecordIO) -> int {
                 result = -2
                 filling = 0
             } else if string.equals(err, "timeout") == 1 {
-                tries = tries + 1
-                if tries >= 500 {
-                    result = -1
-                    filling = 0
-                } else {
-                    sleep(10)
-                }
+                // In the handshake the same timeout ends it (#3703): the
+                // socket is a blocking one (std.tcp's, or std.http's adopted
+                // with its receive timeout), so a timed-out read has waited
+                // that whole timeout for a client that sent nothing. It was
+                // retried 500 times, 500 times the socket's timeout (30 s
+                // each by default), so a client that stalled in its
+                // ClientHello held the server's worker for hours.
+                result = -1
+                filling = 0
             } else {
                 result = -1
                 filling = 0
@@ -1838,7 +1839,9 @@ pure_tls_server_free_creds(creds: @frees ptr) {
 // still the server's after.
 @c_callback("aether_pure_tls_server_accept_creds")
 pure_tls_server_accept_creds(fd: int, creds: ptr) -> ptr {
-    sock = tcp_socket_from_fd_owned(fd)
+    // Adopted with the timeouts std.http put on it (#3703): the handshake
+    // waits on the client no longer than the server's receive timeout.
+    sock = tcp_socket_adopt_fd(fd)
     if sock == null { return null }
     if creds == null {
         tcp.close(sock)

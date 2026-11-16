@@ -47,6 +47,7 @@ int tcp_server_close(TcpServer* s) { (void)s; return 0; }
 int tcp_fd_raw(TcpSocket* s) { (void)s; return -1; }
 int tcp_server_fd_raw(TcpServer* s) { (void)s; return -1; }
 TcpSocket* tcp_socket_from_fd_owned(int fd) { (void)fd; return NULL; }
+TcpSocket* tcp_socket_adopt_fd(int fd) { (void)fd; return NULL; }
 int tcp_poll_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t; return -1; }
 int tcp_wait_writable_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
@@ -1070,14 +1071,17 @@ int tcp_server_fd_raw(TcpServer* server) {
     return server->fd;
 }
 
-TcpSocket* tcp_socket_from_fd_owned(int fd) {
+/* A connected descriptor as a std.tcp socket, blocking; `default_timeouts`
+ * puts std.tcp's 30 s receive and send timeouts on it, else it keeps the
+ * ones its owner set. */
+static TcpSocket* tcp_socket_wrap_fd(int fd, int default_timeouts) {
     if (fd < 0) return NULL;
     aether_net_init();
 #ifndef _WIN32
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 #endif
-    net_set_socket_timeouts(fd, 30);
+    if (default_timeouts) net_set_socket_timeouts(fd, 30);
     net_no_sigpipe(fd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
@@ -1088,6 +1092,18 @@ TcpSocket* tcp_socket_from_fd_owned(int fd) {
     sock->fd = fd;
     sock->connected = 1;
     return sock;
+}
+
+TcpSocket* tcp_socket_from_fd_owned(int fd) {
+    return tcp_socket_wrap_fd(fd, 1);
+}
+
+/* As tcp_socket_from_fd_owned, keeping the receive and send timeouts the
+ * descriptor's owner put on it (#3703): the pure-Aether TLS server's accept
+ * takes the HTTP server's descriptor this way, so its handshake is bounded
+ * by the server's receive timeout, not std.tcp's 30 s. */
+TcpSocket* tcp_socket_adopt_fd(int fd) {
+    return tcp_socket_wrap_fd(fd, 0);
 }
 
 /* Readiness primitives (#1092). A full-duplex relay must wait on both

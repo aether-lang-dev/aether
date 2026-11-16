@@ -534,6 +534,9 @@ void http_server_thread_leave(HttpServer* server);
 //   - idle_ms elapses with no new bytes (0 = use the default
 //     30-second SO_RCVTIMEO already applied by the connection
 //     handler).
+// The same idle timeout bounds each read and write of a TLS handshake, on
+// both backends (#3703): a client that stalls in its handshake is closed
+// as one that stalls in a request is.
 // Returns "" on success; "server is null" on bad input.
 const char* http_server_set_keepalive_raw(HttpServer* server,
                                           int enabled,

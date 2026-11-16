@@ -1,0 +1,21 @@
+// #3703: the TLS handshake is bounded by the server's receive timeout. The
+// work is in shim.c; this links the server and the pure-Aether TLS backend.
+
+import std.http
+import std.cryptography.tls13_server
+
+extern http_tls_handshake_timeout_probe() -> int
+
+main() {
+    // Touch std.http so the build links the server.
+    s = http.server_create(0)
+    if s == 0 {
+        println("FAIL: server_create")
+        return
+    }
+    rc = http_tls_handshake_timeout_probe()
+    if rc != 0 {
+        println("FAIL: probe returned ${rc}")
+    }
+    http.server_free(s)
+}
