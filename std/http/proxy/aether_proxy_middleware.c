@@ -288,8 +288,24 @@ char* aether_proxy_authority_of(const char* url) {
 
 /* ----- response writer ----- */
 
+/* The proxied body, set on `res` after the upstream's (or the cache's)
+ * headers were copied. An answer to HEAD carries no body and keeps the
+ * Content-Length it was given, which states the GET's (RFC 9110 9.3.2):
+ * setting the empty body would rewrite it to 0, and add a 0 the upstream
+ * never stated when it gave none (#3713). The event loop's direct
+ * pass-through keeps it the same way (#3710). */
+static void proxy_set_body(HttpServerResponse* res, const HttpRequest* req,
+                           const char* body, int body_length) {
+    if (req && req->method && strcmp(req->method, "HEAD") == 0) return;
+    if (body && body_length > 0) {
+        http_response_set_body_n(res, body, body_length);
+    } else {
+        http_response_set_body(res, "");
+    }
+}
+
 /* Apply a cache hit's snapshot to the inbound HttpServerResponse. */
-static void serve_from_cache(HttpServerResponse* res,
+static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
                              AetherProxyCacheEntry* e) {
     http_response_set_status(res, e->status_code);
     /* Replay headers (minus hop-by-hop, just in case). Also skip
@@ -305,11 +321,7 @@ static void serve_from_cache(HttpServerResponse* res,
         http_response_set_header(res, e->header_keys[i], e->header_values[i]);
     }
     http_response_set_header(res, "X-Cache", "HIT");
-    if (e->body && e->body_length > 0) {
-        http_response_set_body_n(res, e->body, e->body_length);
-    } else {
-        http_response_set_body(res, "");
-    }
+    proxy_set_body(res, req, e->body, (int)e->body_length);
 }
 
 /* ----- HTTP method classification + retry helpers ----- */
@@ -509,7 +521,7 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
             opts->cache, req->method, forward_path, req);
         if (hit) {
             atomic_fetch_add(&opts->pool->metric_cache_hits, 1);
-            serve_from_cache(res, hit);
+            serve_from_cache(res, req, hit);
             return 0;
         }
         atomic_fetch_add(&opts->pool->metric_cache_misses, 1);
@@ -884,11 +896,7 @@ static int px_copy(AetherProxyExchange* px) {
         http_response_free(px->resp);
         return 0;
     }
-    if (body && body_length > 0) {
-        http_response_set_body_n(res, body, body_length);
-    } else {
-        http_response_set_body(res, "");
-    }
+    proxy_set_body(res, req, body, body_length);
 
     /* ---- Cache store ---- */
     if (opts->cache && headers_block && req->method &&

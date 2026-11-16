@@ -5630,8 +5630,13 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
     /* A persistent connection needs a definite body length, or the client
      * cannot tell where this response ends and the next begins. Responses
      * built without a body carry no Content-Length (http_response_create
-     * sets only Content-Type and Server), so state it rather than close. */
-    if (will_keep_alive) {
+     * sets only Content-Type and Server), so state it rather than close.
+     * Not for an answer to HEAD: no body follows it whatever its fields say
+     * (RFC 9110 9.3.2), and a Content-Length there states the GET's length,
+     * so a 0 written for its empty body would misstate one it was not given
+     * (#3713). */
+    int head_only = req && req->method && strcmp(req->method, "HEAD") == 0;
+    if (will_keep_alive && !head_only) {
         int has_length = 0;
         for (int i = 0; i < res->header_count; i++) {
             if (strcasecmp(res->header_keys[i], "Content-Length") == 0 ||

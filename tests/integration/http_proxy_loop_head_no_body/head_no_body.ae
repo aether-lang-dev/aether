@@ -14,8 +14,9 @@
 // Content-Length and once ended by its close. Each goes to a bare proxy (the
 // event loop on Linux and macOS, the worker path on Windows) and to one
 // behind a program's middleware (the worker path everywhere): nothing may
-// follow the head. On the event loop the framed answer keeps Content-Length
-// 4 and the connection, and the unframed one ends the connection.
+// follow the head, and every path keeps the upstream's Content-Length, 4 or
+// none (the worker path said 0, #3713). On the event loop the framed answer
+// keeps the connection, and the unframed one ends it.
 
 import std.http
 import std.http.proxy
@@ -116,6 +117,8 @@ main() {
     // The event loop: the upstream's length kept, and the connection kept,
     // or closed when the upstream stated no length.
     loop_wants = ["200 length 4 head only kept", "200 length none head only closed"]
+    // Every path: the upstream's Content-Length as it stated it, or none (#3713).
+    lengths = ["4", "none"]
     names = ["bare proxy", "behind middleware"]
     on_loop = os.platform() != "windows"
 
@@ -153,7 +156,7 @@ main() {
             }
             sleep(100)
             got = probe(port)
-            ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "200 ") == 1
+            ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "200 length ${lengths[i]} ") == 1
             if ok && on_loop && g == 0 {
                 ok = got == loop_wants[i]
             }
