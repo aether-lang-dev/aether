@@ -24,7 +24,11 @@
 # core 0 (#3688): only core 0 can step that worker, and the run waited for
 # it while the stop held core 0, so the process hung. The run now waits only
 # for the workers in a step; the queued one holds the server until it is
-# stepped, closes its connection unserved, and gives the server back.
+# stepped, closes its connection unserved, and gives the server back. The
+# same round over TLS, through each backend the build has, with a client that
+# sends the first bytes of a handshake and stalls: the worker closes the
+# connection before any handshake, which waited on such a client with no
+# limit after the stop had returned.
 
 # Actor dispatch mode is POSIX-only: the accept poller behind it is not
 # built on Windows, where the server always uses its thread pool.
@@ -53,6 +57,20 @@ if ! AETHER_HOME="$ROOT" "$AE" build "$SCRIPT_DIR/probe.ae" -o "$TMPDIR/probe" \
     exit 1
 fi
 
+# A certificate for the stop-on-core probe's TLS rounds (each backend the
+# build has): a worker stepped after the stop closes its connection before
+# the handshake, which would wait on a slow client with no limit. Without
+# openssl(1) the probe runs plain only.
+tls_cert=""
+if command -v openssl >/dev/null 2>&1 &&
+   openssl req -x509 -newkey rsa:2048 -keyout "$TMPDIR/key.pem" -out "$TMPDIR/cert.pem" \
+       -days 1 -nodes -subj "/CN=localhost" >"$TMPDIR/openssl.log" 2>&1; then
+    tls_cert="$TMPDIR/cert.pem"
+    AE_PROBE_TLS_CERT="$tls_cert"
+    AE_PROBE_TLS_KEY="$TMPDIR/key.pem"
+    export AE_PROBE_TLS_CERT AE_PROBE_TLS_KEY
+fi
+
 if ! "$TMPDIR/probe" >"$TMPDIR/run.log" 2>&1; then
     echo "  [FAIL] http_actor_mode_release: probe exited non-zero"
     sed 's/^/    /' "$TMPDIR/run.log" | head -30
@@ -74,6 +92,14 @@ fi
 if ! grep -q "http_actor_stop_on_core passed" "$TMPDIR/run.log"; then
     echo "  [FAIL] http_actor_mode_release: a stop from an actor on a queued worker's core hung, or the worker did not close its connection"
     sed 's/^/    /' "$TMPDIR/run.log" | head -30
+    exit 1
+fi
+
+# With a certificate, at least one TLS backend must have run the round: a
+# build where both skip would hide the TLS case.
+if [ -n "$tls_cert" ] && grep -q "stop_on_core: tls_runs=0" "$TMPDIR/run.log"; then
+    echo "  [FAIL] http_actor_mode_release: no TLS backend ran the stop-on-core round"
+    sed 's/^/    /' "$TMPDIR/run.log" | grep 'stop_on_core' | head -10
     exit 1
 fi
 

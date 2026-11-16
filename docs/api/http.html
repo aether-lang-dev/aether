@@ -558,7 +558,7 @@
       <h3 class="function-name">server_drain_connection <span class="kind">extern</span></h3>
       <pre class="usage"><code>server_drain_connection(server, client_fd)</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, client_fd: int</span></p>
-      <p class="doc">Drain a single accepted connection through the full HTTP lifecycle: optional TLS handshake, request parsing loop with keep-alive, route dispatch, response emission, socket close. This is the building block that user-side actor step functions plug into when running the server in actor-dispatch mode (set via http_server_set_actor_handler) — the actor's step receives a MSG_HTTP_CONNECTION with a client_fd and should call this helper to get the same TLS / keep-alive / route-dispatch behaviour the thread-pool worker path uses. (#260 Tier 0 / Phase C3.)</p>
+      <p class="doc">Drain a single accepted connection through the full HTTP lifecycle: optional TLS handshake, request parsing loop with keep-alive, route dispatch, response emission, socket close. This is the building block that user-side actor step functions plug into when running the server in actor-dispatch mode (set via http_server_set_actor_handler) — the actor's step receives a MSG_HTTP_CONNECTION with a client_fd and should call this helper to get the same TLS / keep-alive / route-dispatch behaviour the thread-pool worker path uses. (#260 Tier 0 / Phase C3.) Once the server is stopping it closes the connection unserved, before any TLS handshake (#3688).</p>
     </div>
     <div class="function" id="server_shutdown_graceful_raw" data-name="server_shutdown_graceful_raw">
       <h3 class="function-name">server_shutdown_graceful_raw <span class="kind">extern</span></h3>

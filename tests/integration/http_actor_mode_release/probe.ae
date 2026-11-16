@@ -3,6 +3,7 @@
 // in shim.c; actor dispatch mode is reached from C, not from Aether code.
 
 import std.http
+import std.cryptography.tls13_server // the pure-Aether TLS backend, for the stop-on-core probe
 
 extern http_actor_release_probe() -> int
 extern http_actor_stop_waits_probe() -> int

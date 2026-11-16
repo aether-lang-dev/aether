@@ -7375,6 +7375,22 @@ static HttpConn* adopt_conn_new(int client_fd, void* ssl,
 void http_server_drain_connection(HttpServer* server, int client_fd) {
     if (!server || client_fd < 0) return;
 
+    /* A stopping server serves no connection it had not started on: closed
+     * unserved, before anything below can block. The TLS handshake reads
+     * from the client (up to its timeout) and came before conn_serve's
+     * first check of the stop, so a worker stepped after the stop (a
+     * connection's worker queued behind a stop called on its own core,
+     * #3688, or a pool worker that takes a queued connection) shook hands
+     * with a slow client after the stop had returned. A plain connection
+     * ended the same way, at its first read (conn_recv_request_start).
+     * Sequentially consistent, as that read: an actor worker counted as
+     * active after the run's last check of actor_active reads the stop
+     * here. */
+    if (atomic_load(&server->stopping)) {
+        close(client_fd);
+        return;
+    }
+
     /* A plain-HTTP connection to a server whose work is proxying goes to the
      * event driver, which runs many connections on one thread rather than
      * giving this one a thread of its own (#1758). Anything the driver does
@@ -7549,7 +7565,7 @@ static void http_conn_worker_step(void* self) {
     /* Active while it serves the connection, which the run waits for
      * (actor_active). Sequentially consistent with the run's check, which
      * comes after the stop set `stopping`: a worker that becomes active after
-     * the run found none sees the stop in its first read and closes the
+     * the run found none sees the stop as the drain begins and closes the
      * connection without serving it. And one of the server's own threads
      * meanwhile, as a pool worker is: a stop from its handler does not wait
      * for the run, which waits for this worker. */
