@@ -14,6 +14,460 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.918.0]
+
+### Added
+
+- **A ThreadSanitizer gate over the actors, the scheduler and std.net
+  (#3542).** `make test-tsan` builds aetherc, `ae`, libaether, std and the C
+  test runner with clang's `-fsanitize=thread -g -O1`, runs the whole C unit
+  runner, then the part of the `.ae` corpus where two threads can meet: every
+  program that declares an actor, imports std.net or what runs on it, or
+  starts threads from a C host, and the HTTP, actor and scheduler shell tests
+  (`tests/tsan_sweep_select.txt`, through the new `AE_SWEEP_SELECT` of `make
+  test-ae`). A data race, a lock-order inversion, a thread never joined or a
+  signal-unsafe call in a handler is reported, the program goes on to report
+  every other one it meets and exits 66, and the run fails on any report, with
+  the reports grouped by the two places that raced. Before the corpus counts,
+  a canary with a deliberate race must be stopped with a report. Suppressions
+  are for third-party code only. `.github/workflows/tsan.yml` runs it in two
+  shards on ubuntu-22.04 on the pull requests that touch the runtime, std,
+  the compiler or the sweep, and nightly.
+
+- **Fuzzers for the HTTP/1 request head, the chunked decoder, the URL readers and std.json, and a CI job for every fuzzer (#3543).** Four libFuzzer targets in `tests/fuzz/` (`make fuzz-http-head`, `fuzz-http-chunked`, `fuzz-url`, `fuzz-json`) compile the parser they test into themselves under ASan and UBSan and check properties of its contract, not only that nothing crashes: the server's head check against a model of RFC 9112's rules, and the parser reading the head as the check did, the body exactly what the framing says; the chunked decoder against a reference reading of RFC 9112 7.1, the same answer however the bytes are cut; `parse_url` against its contract, round-tripped, with a Location resolving to itself; std.json accepting exactly RFC 8259 and re-reading what it writes as the same value. Each has a seed corpus written by an Aether generator (`make fuzz-corpus`) and a dictionary. `make fuzz-ci` runs them and the CBOR and IPC frame fuzzers for `FUZZ_SECONDS` each (60), and `.github/workflows/fuzz.yml` runs that on Linux with clang 18 on pushes to main and on the PRs that touch `std/net`, `std/json`, `std/cbor`, `std/ipc` or `tests/fuzz`, uploading any reproducer. `make fuzz-replay` runs the seeds through the property checks with any C compiler, Windows included. The first runs found the seven HTTP and URL bugs fixed beside this.
+
+### Changed
+
+- **The ASan legs split the sweep by what each test costs under ASan (#3601).** They used the plain Linux leg's weights, and ASan's costs differ from those: on main a build cost 1299 ms on average in one shard and 850 ms in the other, and the two shards took 12.8 and 15.2 minutes on one run, 19.9 and 9.0 on another. The ASan job now keeps every test's time and uploads it, and `tests/sweep_weights_linux_asan.txt` is made from those times (`tests/scripts/sweep_weights.sh`). Priced at ASan's measured costs, the Linux weights split the corpus 3,192 / 2,773 CPU seconds, and ASan's own 2,982 / 2,982.
+
+- **A request line refused since #3666 is not counted in the metrics, as no refused head is (#3666).** The metrics and the access log are request hooks, run with a request the server parsed and served; a head refused before there is a request (400, 414 or 431, the connection closed) reaches neither, whatever it was refused for: a NUL, a bare CR or LF, its framing, its size, or a request line that is not method SP target SP version. `(other) (other) HTTP/1.1`, which `tests/integration/http_server_metrics_scrape` sent as a client using the overflow series' labels, was counted before #3666 and is refused now, since `(other)` is not a token. The test now expects it and two other refusals to be answered 400 and counted nowhere, and `docs/http-server.md` says what the metrics and the access log count.
+
+### Fixed
+
+- **`make test` and `make test-build` work in a fresh checkout (#3659).** The generated
+  `runtime/aether_version.h` was a prerequisite of only the few objects that
+  named it, while `runtime/aether_abi.h` includes it into every source that
+  includes that header. In a checkout where `make compiler` had not run first,
+  the test runner's build stopped at `tests/runtime/test_abi_layout.c` with
+  "aether_version.h: No such file or directory". Every object rule, the
+  sanitizer, memory, debug and coverage flavours included, now builds the
+  header first, as it already did the other generated headers.
+
+- **`scheduler_send_local` from a thread that is not the actor's core no
+  longer writes its mailbox (#3672).** From a thread no core owns (a C host's main
+  thread, say) it put the message straight into the actor's mailbox while
+  the actor's core thread delivered into the same mailbox: two producers on
+  a ring that takes one, so messages overwrote each other or were taken
+  twice. Such a send now goes through the actor's core, as
+  `scheduler_send_remote` sends it. In the new runtime test, the main
+  thread and an actor of the target's core each send 100,000 messages at
+  once; before, 12,990 arrived out of their sender's order (overwritten or
+  repeated), and now every one arrives once, in order.
+
+- **`test_runner --category=NAME` runs every test of the category (#3660).** The C
+  unit runner registered the tests it lists by hand (the scheduler, mailbox,
+  work-stealing, ask, actor death and rebirth suites, 69 tests) only on its
+  way to the full run, after the `--category` branch had already returned.
+  `--category=runtime` ran 110 of the 180 runtime tests and reported a pass.
+  The runner now registers every test before it reads its arguments, and a
+  new `--list` mode prints each registered test with its category; `make
+  test` checks that list against every `register_test_with_category()` call
+  in the runner's sources.
+
+- **`make test-parallel` fails when a category fails, and runs them all (#3661).** It
+  started one test runner per category in the background and ended with a
+  bare `wait`, whose status is 0 whatever the runners returned, so a failing
+  category still printed "All parallel tests complete!" and passed. It also
+  left out the `other` category, 267 of the runner's 693 tests on MinGW. It
+  now waits for each runner, shows the log of each category that failed, and
+  fails with it, over all eight categories.
+
+- **AGENTS.md says a runtime change needs `make stdlib` before `.ae`
+  tests (#3674).** Its rebuild table said a `runtime/**` change needs no rebuild for
+  `.ae` builds because the runtime is compiled into each one. In a source
+  tree with `build/libaether.a`, which every built tree has, `ae build`
+  links that archive and compiles the runtime only when it is missing, and
+  the build cache keys on the archive, so an edit to a runtime `.c` file
+  was not in the program at all until `make stdlib`, cache hit included.
+
+- **A chunked request body keeps its NUL bytes (#3663).** The worker decodes a chunked upload and hands the parser the head and the payload with no Content-Length, and the parser took that body with `strdup`, so a binary upload was cut at its first NUL byte, `request_body_length` with it: `a 00 b` arrived as the one byte `a`. A body without a Content-Length is every byte after the head. Found by the new HTTP head fuzzer (#3543).
+
+- **A request header's value loses the tabs and trailing spaces around it (#3665).** The parser dropped leading spaces only, so `X-A:\t v \t` read as `"\t v \t"` to a handler and an upstream, and as `"v"` to the head check that framed the same request. Both now trim a space or a tab on either side (RFC 9112 5). Found by the new HTTP head fuzzer (#3543).
+
+- **A request line that is not method SP target SP version is refused with 400 (#3666).** The parser took whatever lay between the spaces: a method that is not a token (`G@T`), an empty method or target, and a target holding a tab, a CR or another control byte, which the reverse proxy then wrote into the request line it sent upstream. The method is a token and the target has no control byte (RFC 9112 3); a target past ASCII is still taken. Found by the new HTTP head fuzzer (#3543).
+
+- **`http_uri_resolve` refuses a base whose authority holds a control byte (#3669).** It is NULL when either input is not a URI reference, and an authority with a control byte is not one, but only the reference's authority was checked: a relative Location takes the base's authority as it is, so `/x` against `http://a\x01b/` resolved to `http://a\x01b/x`. The client's own redirects were not reached this way, since `parse_url` refuses such a base before the first request. Found by the new URL fuzzer (#3543).
+
+- **A caller's actor carried over a scheduler restart keeps one core
+  delivering to it (#3673).** Sends from a thread no core owns, made after
+  `scheduler_init` and before `scheduler_register_actor`, went to the core
+  the actor's last lifecycle left it on, and that core delivered them; the
+  registration then gave the actor the least loaded core, and both cores
+  wrote its mailbox. A message for an actor whose core was none of the
+  lifecycle's was also delivered by whichever core took it. Such an actor
+  now keeps the core that delivers to it (a core asked for is asked of
+  that core as a move), and a core that meets an actor with no core takes
+  it before it delivers. In the new runtime test, a foreign thread sends a
+  sequence to a carried-over actor across 20 restarts: before, 45,000 to
+  270,000 messages arrived out of their order; now none.
+
+- **An actor ended while `scheduler_shutdown()` stops the cores has its
+  death finalized by its core (#3675).** A kill, a link's death or `scheduler_actor_end`
+  from another thread after the shutdown had left the running state, but
+  before the core threads were joined, finalized the death on the calling
+  thread at once: the actor's mailbox drained and its watchers told while
+  its core could still be stepping it (a receive timeout's arm, which the
+  shutdown does not wait for). Its core now finalizes it once the step
+  returns, or as its thread leaves its loop; a core that has left its loop
+  refuses the request, and the caller finalizes the death as before.
+
+- **The JSON fuzzer starts, and a dictionary libFuzzer cannot read fails `make fuzz-replay` (#3543).** Six entries of `tests/fuzz/json/json.dict` held a JSON escape written as `\/`, `\n` or `\u`, which libFuzzer's dictionary reader refuses ("ParseDictionaryFile: error in line 22"), so `fuzz_json` exited before fuzzing on CI. They are written `\\/`, `\\n` and so on. The replay driver now reads a dictionary as libFuzzer does (`-dict=`, the escapes `\\`, `\"` and `\xNN` only) and runs each entry as an input, and `make fuzz-replay` reads every target's dictionary, the CBOR and frame-reader ones included.
+
+- **The JSON fuzzer no longer takes a negative whole double for a changed value (#3543).** std.json writes a double with no fraction as JavaScript does, so `-1e0` is written `-1` and reads back as the integer -1. The harness allowed that for positive values and refused it for every negative one (it meant to refuse only a negative zero), and its first CI run reported `[1e400, -1e400, 1e-400, 12347671e400, -1e0]` as a failure. std.json was right; the check is, and the input is a seed.
+
+- **std.net: a server's running flag is atomic (#3676).** `http_server_stop`, on any
+  thread, cleared `is_running` while the server's accept loops read it on
+  theirs, with nothing ordering the two: a data race on every stop of a
+  running server, which ThreadSanitizer reported in 27 test programs
+  (`make test-tsan`, #3542). The flag is an atomic int now.
+
+- **std.net: `http_server_port` reads the port the server's thread binds
+  without a data race (#3678).** A server started in the background with no bind of
+  its own binds on its thread, while the program asks `http_server_port` on
+  another; the port was a plain int written there and read here, which
+  ThreadSanitizer reported in six programs (`make test-tsan`, #3542). It is
+  an atomic int now, written once with the port as bound.
+
+- **std.net: the one-time start of the network layer is free of a data
+  race (#3680).** A server made on one thread (an actor's) while a client connected
+  from another both read and set a plain flag that says Winsock is started;
+  ThreadSanitizer reported it in `http_ipv6` (`make test-tsan`, #3542). The
+  flag is atomic; two threads that both find it clear both start Winsock,
+  which counts its starts.
+
+- **std.net: the proxy event loop is never read after the server frees it (#3679).**
+  The server's thread set and cleared its event loop pointer and freed the
+  loop while `http_server_evloop_wakeups`, `_active` and `_connections` read
+  it on the program's thread, and while the pool's workers could still be
+  handing it a connection: a data race that ThreadSanitizer reported in two
+  proxy tests (`make test-tsan`, #3542), and a read of freed memory when a
+  reader lost the race to the free. The pointer is behind a lock of its own
+  now; the server clears it there before it stops and frees the loop.
+
+- **std.net: stopping a running server no longer closes the listening socket
+  under its accept loop (#3677).** `http_server_stop` closed the socket while the
+  server's thread could still be about to `poll()` or `accept()` on its
+  number, which by then the system could have given to a socket or file
+  another thread opened: the loop would wait on, or accept from, that one.
+  ThreadSanitizer reported the unguarded read of the number in six programs
+  (`make test-tsan`, #3542). On Linux, macOS and the BSDs a stop now only
+  shuts the socket down (the wake pipe ends the loop), and the run closes it
+  once its loop is over; with no run on, the stop closes it as before. A
+  bind publishes the socket under the server's lock, where a stop reads it.
+
+- **Actors: `wait_for_idle` reads a receive timeout's countdown without a
+  data race (#3681).** An actor's `receive ... after` countdown is armed and
+  disarmed by its step, on the core that runs it, while `wait_for_idle`
+  scans every actor for an armed countdown on the waiting thread; both
+  fields were plain integers, and ThreadSanitizer reported the pair in 13
+  programs that use `after` (`make test-tsan`, #3542). They are atomic now.
+
+- **Actors: a message dropped for a dead actor no longer reads the actor after
+  its block can be reused (#3682).** A core that found a message for an actor that
+  had died gave back the message's count in flight, then released the
+  message through the actor's own release function. The count is what keeps
+  a released actor's block from a new spawn, so a spawn in between could
+  re-initialize the block under the drop; the core also looked at the dead
+  actor's entry again later in the same pass. ThreadSanitizer reported both
+  (`make test-tsan`, #3542). The count is given back after the drop now, at
+  every place that drops one, and the core forgets the entry.
+
+- **Actors: a core that has just been handed an actor sees its mailbox as the
+  previous core left it (#3683).** A send from a core checked that the target was
+  its own with a relaxed load of the actor's core, then wrote the mailbox,
+  whose one writer is the core that has the actor. Right after a move, that
+  read did not order the new core's write after the old core's last
+  delivery: on a weakly ordered CPU the new core could read a stale tail and
+  overwrite a message. ThreadSanitizer reported it in `test_supervise` and
+  std.stream's test (`make test-tsan`, #3542). The check is an acquire load
+  now, pairing with the move's release store; so is the overflow flush's.
+
+- **Actors: registering a C caller's actor again while another thread sends
+  to it is free of a data race (#3684).** `scheduler_register_actor` reset the
+  actor's mailbox bound and its counts with `atomic_init`, which is a plain
+  store, while a thread of the caller's could be sending to the actor and
+  reading them; ThreadSanitizer reported it in `sched_foreign_send_lifecycle`
+  (`make test-tsan`, #3542). They are reset with atomic stores now.
+
+- **Strings and slices: a shared count is read atomically everywhere (#3685).** A
+  string or slice buffer reachable from several threads has an atomic count,
+  marked by a bit in it, but the code that decides between the atomic and
+  the plain path (retain, release, the check that a pointer is a string,
+  the generated release and hand-over helpers, a slice's grow in place) read
+  the count with a plain load while other threads changed it atomically.
+  ThreadSanitizer reported it in five programs (`make test-tsan`, #3542). The
+  count is read with an atomic load now; a slice grown in place, which
+  needs the count to be one, reads it with acquire.
+
+- **A core's ready lists and timer heap are made at `scheduler_init` (#3540).**
+  They were allocated on a core's first push or first receive timeout, so a
+  program's steady work allocated them whenever it first reached a core,
+  memory held for the lifecycle. A test that measures a window of steady
+  work for growth (test_actor_ref_state_store) read that as a leak of 512
+  bytes in 4 of 20 runs; it passes 20 of 20 now. Each core makes room for
+  64 entries in each at init and grows past that on demand.
+
+- **std.net: a server's host is not freed under its own run (#3687).** A server
+  started with no bind of the program's own binds on the thread that runs it,
+  and that bind freed and replaced `server->host` with no lock, while the
+  program could set the host (or bind) on its own thread, freeing and
+  replacing it too: two frees of one string, or a read of a freed one. A run
+  now binds and reports (to the monitor) a copy of the host made as it
+  starts, under the server's run lock, and every change of the host is made
+  under that lock. A host set while the server runs takes effect at the next
+  start.
+
+- **std.net on Windows: a stop wakes the server's accept loop instead of
+  closing the socket under it (#3677).** Windows was left out of #3677's fix:
+  its accept loop blocked in `accept()`, which only closing the listening
+  socket ended, so the stop still closed it under the loop, and the loop's
+  next `accept()` could take a socket another thread opened under the same
+  number. The loop now waits in `WSAPoll` on the listening socket and a
+  loopback wake socket of the server's, a stop sends the wake socket a byte
+  and leaves the listening socket open, and the run closes it once its loop
+  is over, as on POSIX. `http_server_stop` still returns once the run has
+  stopped.
+
+- **Actors: a send from a core to an actor just moved onto it orders its
+  mailbox write after the previous core's (#3683).** The fix for #3683 made
+  the ownership check of `send_local_admitted` an acquire, but the direct
+  delivery in `send_through_core`, which a death notice and every remote
+  send from a core take, still read the actor's core relaxed before writing
+  its mailbox. ThreadSanitizer reported it in the C runner and
+  `test_supervise` (`make test-tsan`, #3542). It is an acquire too now.
+
+- **std.net: the HTTP client's and the socket layer's once-flags are atomic
+  too (#3680).** #3680 made the HTTP server's start-Winsock-once flag atomic;
+  the HTTP client (`http_init`) and the socket layer (`aether_net_init`)
+  each kept a plain copy of it, which two threads making their first
+  request or socket at once raced. ThreadSanitizer reported the client's in
+  two proxy tests (`make test-tsan`, #3542).
+
+- **Slices: growing a shared slice copies its header without reading the
+  count (#3685).** An `append` to a slice whose buffer another place holds
+  copies the buffer, and it copied the header with `memcpy`, the count
+  included, while other holders changed the count atomically: one more
+  plain read of a shared count, which ThreadSanitizer reported in
+  `test_module_slice_var_threads` (`make test-tsan`, #3542). The header is
+  copied field by field now, the new buffer's count set to 1 as before.
+
+- **Actors: an actor's own thread no longer stays behind once it ends (#3689).** An
+  `auto_process` actor runs on a thread of its own, which nothing ever
+  joined: when it ended, the C library kept its stack and its record until
+  the process exited, one per such actor that ever ran. ThreadSanitizer
+  reported the leaked thread (`make test-tsan`, #3542). The thread is
+  detached when it starts, so it gives everything back as it ends.
+
+- **std.net: in actor dispatch mode a stop waits for the workers still
+  serving (#3688).** A server that hands each connection to a worker actor ended
+  its run as soon as its accept loops were over, with workers still in a
+  request, so `http_server_stop` returned and the program's
+  `http_server_free` freed the server while a worker still read it.
+  ThreadSanitizer reported the free against a worker in
+  `http_server_multi_accept` (`make test-tsan`, #3542). The run now waits,
+  as the thread pool's does, until every worker given a connection has
+  finished with the server.
+
+- **Runtime and std: every lazy one-time initialisation is a real once
+  (#3680).** Twelve more caches and one-time setups were guarded by a plain
+  flag that any thread could reach first: the CPU feature record, the
+  Windows clock frequency, the NUMA topology, the runtime configuration,
+  the hardware capabilities, the trace switch, the SIMD probe, std.json's
+  character table, the HTTP/2 base64 table, the OpenSSL legacy provider
+  for MD4, the HTTP server's OpenSSL init and the sandbox's one warning.
+  Two threads could both run the setup, and one could read a table or
+  record half written, or go on before the setup it needed was done. They
+  go through a new `aether_once` (runtime/utils/aether_once.h) now, whose
+  done flag is published with release and read with acquire, or through
+  an atomic where the value is all there is.
+
+- **The timing-ratio tests take each size's fastest run (#3686).** `lookup_index_scaling`, `loop_nest_scaling`, `merge_codegen_scaling` and `order_effects_scaling` summed three runs of each size, so one run a busy runner stalled was carried in full: `lookup_index_scaling` read 35x on a macOS x86_64 runner, where its rerun and every other leg were linear. Each size now counts its fastest of three runs: a stall counts for nothing, a quadratic cost shows in every run. Sizes and bounds are unchanged; the clock-grain floors are per run (30 and 50 ms).
+
+- **std.audio: the engine can be opened, used and closed from several
+  threads at once (#3690).** The engine was a set of plain globals with no
+  guard: two opens at once both initialised it, and a close on one thread
+  freed it under a load, a play or a render on another (four actors churning
+  it crashed every run). `open`, `open_headless` and `close` now run under one
+  lock, every other call holds a reference that `close` waits for, and an
+  `open` during a `close` waits for it. A source or group still live at
+  `close` is taken out of the mix before the engine is freed, where the graph
+  used to be freed under it; a call on it afterwards fails with
+  `last_error()` "audio: the source's engine was closed", and `unload` and
+  `group_free` still free it. A program that opens, plays and closes on one
+  thread behaves as before. The vendored miniaudio (0.11.25; 0.11.26, the
+  latest, has the same code) detached a re-attached node under the wrong
+  bus's lock, so two threads loading sounds onto the same output could
+  corrupt its list and hang a later close; it is patched in place, with a
+  comment at the patched lines. Covered by
+  `std/audio/test_audio_threads.ae`.
+
+- **A restarted actor's receive timeout is not lost to a racing revival
+  (#3540).** A restart in place tells the actor's core of the countdown
+  while the actor is still dead, then clears the death and tells it again.
+  A core that read the death for the first entry, and took the entry after
+  the second push had found it there and added none, went by the death it
+  had read: the countdown left the core's timer heap and the `after` never
+  fired. The core reads the death again once it has taken the entry.
+
+- **Runtime: a NUMA block is always freed by the allocator that made it
+  (#3680).** Whether the runtime allocates on NUMA nodes is decided once per
+  process, before its first block, and no longer read from the topology,
+  which a scheduler's shutdown resets before the core tables are freed. On a
+  host with more than one node, those frees after the shutdown (and a
+  restarted scheduler's first one) sent NUMA blocks to the heap's free, which
+  aborts on glibc and corrupts the heap on Windows. A build with libnuma also
+  no longer gives `numa_free` a heap block made before the first scheduler
+  started. Covered by `tests/integration/numa_alloc_mode`, which mocks two
+  nodes so it runs on any host.
+
+- **std.net: a TLS certificate reload no longer races the event loop (#3692).** A reload swaps the server's TLS context and flags under `tls_lock`, and the event loop's plan read them without it, and the accept paths read `tls_enabled` without it. The plan now reads them together under the lock, and `tls_enabled` is atomic.
+
+- **A caller's actor keeps its armed receive timeout across a restart, and
+  one armed before its registration fires (#3540).** A core looks only at
+  the actors it is told of; an actor carried over a scheduler restart lost
+  its timer heap entry with the last lifecycle's tables, and one armed
+  before its registration was told while it was on no core. The
+  registration now tells the actor's core to look at it once, as the old
+  scan did on its next pass.
+
+- **A deregistered actor is out of every ready list and timer heap when
+  `scheduler_deregister_actor` returns (#3540).** Its countdown stayed in
+  its core's heap: freed at once, the block was read when the countdown
+  came due; registered again, its old core stepped it while it was another
+  core's, or spun forever on an entry its slot no longer named. The
+  deregister now waits for its core to drop the actor, and a core fires
+  only countdowns its heap and the actor agree on.
+
+- **A core parks while an actor in no table has a move asked of it
+  (#3540).** A sender on another core asks its target to move there; a
+  target in no table (deregistered, or carried over a restart and not
+  registered yet) cannot move, and its core asked again on every pass and
+  never parked. Such a move now waits for the actor's registration.
+
+- **A registration racing a core's take of the actor leaves what the core
+  set (#3673).** `scheduler_register_actor` reset the actor's overflow,
+  ready list byte and timer slot before its compare-and-swap, while a core
+  that had just taken the actor could have set them: the byte was cleared
+  under the core's entry, and an overflow the core had started was
+  dropped. Nothing is reset there now; teardown and the deregister leave
+  them as a registration needs them.
+
+- **std.net: a stop called from an actor no longer hangs an actor-dispatch
+  server (#3688).** The run waited for every worker actor given a
+  connection, and a worker still queued can only be stepped by its own core:
+  a stop called in an actor's handler on that core (or on a one-core
+  scheduler) blocked the core until the run ended, and the run waited for the
+  worker, so the process hung. The run now waits only for the workers
+  serving a connection, which finish the request they are in, as before. A
+  worker still queued holds a reference to the server: when it is stepped it
+  closes its connection without serving it, and the server is freed by
+  whoever gives back the last reference, the program's `http_server_free` or
+  that worker. `aether_http_server.h` states the contract on
+  `http_server_stop` and `http_server_free`. Covered by
+  `tests/integration/http_actor_mode_release`, which stops the server from an
+  actor on a queued worker's core, and again on one core where `taskset` is
+  available.
+
+### Security
+
+- **A request line with no version no longer corrupts the server's heap (#3662).** `GET /x` has a method and a target and nothing after them. The parser released the method it had copied without forgetting it, and `http_parse_request_n` freed it a second time with the rest of the failed request, so one request line from any client corrupted the worker's heap (ASan reports the double free; a plain build on Windows died with 0xC0000374). It is refused with 400 and nothing freed twice. Found by the new HTTP head fuzzer (#3543).
+
+- **A request head with a bare CR or LF is refused with 400 (#3664).** The head check split lines at each LF, the parser at each CR LF, and the end of the head is the first CR LF CR LF, so a bare LF made the two read different headers: `Host: a\nContent-Length: 2` framed a 2-byte body to the check and was part of the Host value to the parser. A bare CR stayed in a value the reverse proxy forwards, to an upstream that may end the line there. RFC 9112 2.2 lets a server refuse both, and it now does, as it refuses a NUL. Found by the new HTTP head fuzzer (#3543).
+
+- **Transfer-Encoding is read as one list of codings, chunked last (#3667).** The server searched the first Transfer-Encoding field for the word `chunked`, so `xchunked`, `chunked, gzip`, and `chunked` followed by a second field `identity` were all decoded as chunked, where a front end that reads the codings as RFC 9112 6.3 does finds no length: the disagreement request smuggling is built from. The body is chunked when chunked is the final coding of all the fields together and named once, and anything else is refused (400). `gzip, chunked` is decoded as before, the gzip left to the handler. Found by the new HTTP head fuzzer (#3543).
+
+- **A URL whose host holds a control byte or a space is refused (#3668).** `parse_url` took any bytes up to the port, path, query or fragment as the host, and the host goes into the Host header, a proxy's request line and a CONNECT line as it is, so `http://evil\r\nX-Injected: 1\r\n/` from untrusted input put a header of its own into the request, and through a forward proxy reached it without a DNS lookup to stop it (CWE-93); a space split the proxy's request line. The same holds for a WebSocket URL and a proxy URL. Found by the new URL fuzzer (#3543).
+
+- **The HTTP client reads a response's Transfer-Encoding as one list, chunked last (#3670).** Its three readers of a response (the framing of a buffered one, its decoding, and the stream reader) and std.http1's reader searched the first Transfer-Encoding field for the word `chunked`, so `xchunked` and `chunked, gzip` were decoded as chunked and chunked in a second field was not seen. A body is now chunked when chunked is the final coding of all the fields together, named once and with no parameters (the server's reading since #3667). A response whose final coding is anything else is not refused: its body is read to the close of the connection as it came, and a Content-Length beside it is not used (RFC 9112 6.3); the connection is not reused.
+
+### Performance
+
+- **A scheduler core looks only at the actors that have work (#3540).**
+  Whenever no message came in through its queues, a core walked its whole
+  actor table, loading the mailbox count and `migrate_to` of every actor,
+  idle ones included, and reading the clock for each one with a receive
+  timeout: a cache miss per idle actor per pass. Each core now keeps a
+  ready list, which an actor joins when a delivery or a step leaves its
+  mailbox with a message, a move or a work steal asks something of it, or
+  another thread tells the core of it (a move onto the core, a restart in
+  place, a countdown armed at spawn), and a min-heap of its actors' receive
+  timeout deadlines, which it fires once due and parks no longer than. A
+  pass costs the actors with work, not the actors. With a ping-pong pair
+  beside idle actors (`make bench-core`'s idle rows, best of 5): 100,000
+  idle actors took the pair from 38 to 274 ns per message before and 43
+  now; 1,000,000 idle actors (the new `BENCH_IDLE_1M=1` row) from 5,855 to
+  80. C code that arms an actor's `timeout_ns` and `last_activity_ns` by
+  hand, outside the actor's step, tells its core with the new
+  `scheduler_timeout_armed(actor)`; the generated spawn does it for
+  `receive ... after`.
+
+- **A send and a step no longer pay atomic read-modify-writes on counts one
+  thread owns (#3541).** A mailbox is written by one thread at a time (the
+  core that runs its actor, or the actor's own thread, #3673), so its count
+  is now read and stored by that thread instead of atomically added to and
+  subtracted from; so are a core's own sent and handled counts, which
+  `wait_for_idle()` compares, while the threads that are no core's keep
+  atomic counts of their own. A core counts its load (`work_count`) as it
+  drains its queues, instead of every sender adding to it on a line of the
+  receiving core's, and the loops that step an actor many times yield to
+  the queues on one hint word that senders set, instead of loading the
+  head and tail of all 17 queues after every step. `make bench-core`
+  (best of 5): a one-int send went from 37.8 to 24.4 ns, a two-int one
+  from 46.2 to 35.9; the Savina ping-pong from 91 to 63 ns per message and
+  the thread ring from 46 to 35.
+
+- **A scheduler core spins for a time, not a count of passes, before it
+  parks (#3540).** The idle spin was 10,000 loop passes, set when a pass
+  read every actor of the core. With the ready list a pass costs the same
+  with ten actors or a million, so the spin ended sooner, and on a machine
+  whose pause instruction is short much sooner: a pause between two
+  messages longer than it parks the core, and the next message pays the
+  park and its wake. A core now spins for 2 ms (`AETHER_IDLE_SPIN_NS`),
+  about what the 10,000 passes took with a few actors per core on an x86
+  desktop, reading the clock every 64 passes. An idle program still parks
+  its cores: over 5 s of idleness it used 0 to 16 ms of CPU before and
+  after.
+
+- **A send from another core no longer costs the receiving core's next
+  step the lines it writes (#3540).** A sender reads the target's
+  `assigned_core`, `dead` and mailbox bound and counts its message in
+  `inflight`; the first two shared cache lines with the mailbox count and
+  the step lock, which the core running the actor writes at every step, so
+  each such send made that step fetch the lines back. The old scan of
+  every actor hid part of this by reading them on each idle pass; with the
+  ready list an ask from one core's actor to another's took 40 ns more from
+  the dequeue to the reply. `ActorBase`'s fields after the mailbox are now
+  in three cache lines: the stepping core's, what a sender touches, and
+  what changes at spawn or death, at the same size. Dequeue to reply went
+  from 117 ns to 66 (75 on the merge base), and `make bench-core`'s
+  ask_from_actor from +9.6% against the merge base to -3.8%,
+  ask_from_main from +11.0% to -1.3%.
+
+- **A core's spin before a park reads no clock for its first 1,024 passes
+  (#3540).** The spin, counted in time since #3540, read the clock on the
+  first idle pass of every pause, so each ask from a thread no core owns
+  paid a clock read between the reply and the pickup of the next ask. On a
+  clock source that is slow to read, as a VM's can be, that doubled
+  ask_from_main on CI. The clock is read once a pause outlasts the first
+  1,024 passes, then every 64 as before.
+
+- **A message-driven move finds its actor by the slot it keeps (#3540).**
+  Each actor keeps its slot in its core's table, and a move asked through
+  the ready list or on delivery checks it before it scans. It walked the
+  whole table under both cores' locks: with 100,000 actors on each of two
+  cores, a round that moves an actor took 24.8 us, and 0.9 us now, as with
+  1,000 actors.
+
 ## [0.917.0]
 
 ### Fixed
