@@ -14,6 +14,148 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.919.0]
+
+### Fixed
+
+- **std.net: a connection taken after the stop is closed before any TLS
+  handshake (#3688).** `http_server_drain_connection` did the TLS handshake
+  before its first check of the stop, and the handshake reads from the
+  client with no time limit. A worker actor queued behind a stop (on its own
+  core, or a one-core scheduler) and stepped after the stop had returned
+  shook hands with a slow client and held its core meanwhile, where a plain
+  connection was closed at its first read. The drain now closes the
+  connection unserved as soon as it finds the server stopping, before the
+  event-loop handoff and the handshake, whichever backend terminates TLS.
+  Covered by the stop-on-core probe in
+  `tests/integration/http_actor_mode_release`, now run plain and over TLS
+  through each backend the build has, with a client that stalls after the
+  first bytes of its handshake.
+
+- **std.net: the TLS handshake has a time limit (#3703).** A client that
+  sent the first bytes of a ClientHello and stopped held a server worker (a
+  pool thread, or an actor-mode worker's core) for as long as it kept the
+  connection open: `http_server_drain_connection` shook hands before it put
+  the receive timeout on the socket, and the pure-Aether TLS server then
+  replaced the socket's timeouts with std.tcp's 30 s and retried a timed-out
+  handshake read 500 times. The handshake now runs under the server's
+  keep-alive idle timeout (30 s unless set), the bound a request already
+  had: each read or write that makes no progress for that long ends the
+  handshake and the connection closes, as a stalled request head does. On
+  both backends: OpenSSL's, and the pure-Aether server's, which takes the
+  descriptor with the server's timeouts (std.net's new `tcp_socket_adopt_fd`)
+  and ends its handshake on the socket's own timeout. A client within the
+  timeout shakes hands as before, and the timeouts after the handshake are
+  unchanged. The event driver bounded its own handshake already. Covered by
+  `tests/integration/http_tls_handshake_timeout`.
+
+- **std.http.client: an https request through the pure-Aether TLS client
+  gives up on a silent server at the request's timeout (#3705).** The
+  client replaced the timeouts the request had put on the socket with
+  std.tcp's 30 s and retried a timed-out handshake read 50 times, so a
+  server that accepted the connection and never answered the ClientHello
+  held the request for about 25 minutes whatever its `set_timeout`. The
+  client now takes the descriptor with the request's timeouts (std.net's
+  `tcp_socket_adopt_fd`) and ends the handshake on a timed-out read, with
+  the error "no reply from the server within the timeout", as the OpenSSL
+  client already did. A request without a timeout waits as the OpenSSL
+  client does, and reads after the handshake are unchanged. Covered by
+  `tests/integration/https_client_handshake_timeout`, through each backend
+  the build has.
+
+- **std.http.client: a request's timeout means the same on both TLS
+  backends (#3706).** Through the pure-Aether client, a response that did
+  not come within the request's `set_timeout` was read again up to 50 times
+  (`RECIO_MAX_TIMEOUT_RETRIES`): a 500 ms timeout waited 25 s for a server
+  that sent nothing, and returned a reply that came at 4 s, where the
+  OpenSSL client fails at the first timeout. The retries date from when a
+  descriptor could arrive non-blocking and a brief pause read as a timeout
+  at once; the client's socket is now blocking with the caller's timeouts,
+  so a timed-out read has waited the whole timeout and ends the wait. The
+  connection survives it: `tls13_client.conn_recv` returns "timeout" (the
+  new `EV_TIMEOUT` event), and a caller of the module that wants an idle
+  stream may wait again. std.tcp now takes a receive that a signal
+  interrupted again instead of reporting it as "timeout", so the sentinel
+  means the socket's timeout. Covered by
+  `tests/integration/https_client_response_timeout`, through each backend
+  the build has.
+
+- **`scheduler_deregister_actor` waits for nothing again, and a caller may
+  still free the actor once it returns (#3540).** It waited for the actor's
+  core to drop the actor's ready list and timer entries: for the length of
+  an armed receive timeout (a minute's took a minute), forever on the
+  actor's own core, and two cores whose steps deregistered each other's
+  actors deadlocked. Each entry now names the table slot its actor was at,
+  and a core reads the actor only while its table holds it there, so the
+  deregister just leaves the table, in microseconds.
+
+- **Tests: the proxy tests' "cannot be reached" upstream is never a port a
+  gateway holds (#3709).** `http_proxy_loop_head_answers` took a stopped server's
+  port as an upstream nothing listens on and then bound its gateways to
+  ports the kernel picks, which can be that same port: the gateway then
+  proxied to itself, each hop adding an `X-Forwarded-For` entry until a
+  header line was too long, and the test read "431 and 24 bytes after the
+  head" (seen once on Linux). A gateway given that port is now set aside and
+  another made. `http_proxy_https_upstream` had the same shape; it binds
+  every server before it takes its closed port.
+
+- **A core parks while a move it was asked for waits for room on the
+  destination core (#3540).** A move to a core whose table is full cannot
+  be made until that table grows, and the core asked for it again on every
+  pass, never parking. It asks again when the actor next has work.
+
+- **std.http.proxy: a HEAD through the event loop gets the upstream's head
+  only (#3710).** The proxy event loop on Linux and macOS passed an
+  upstream's answer through from its receive buffer, all of it, so an
+  upstream that sent a body with its answer to HEAD had that body relayed,
+  and the client read it as the start of the next response. The loop now
+  ends a response where its own framing says (an answer to HEAD at its
+  head, as the worker path's client already did), on the pass-through path
+  and the copying one, keeps the upstream's Content-Length on an answer to
+  HEAD (RFC 9110 9.3.2 lets it state the GET's length), closes the client's
+  connection after the head when the upstream stated no length, and does
+  not pool an upstream connection that sent bytes past its response.
+  Covered by `tests/integration/http_proxy_loop_head_no_body`.
+
+- **std.http: a refusal to a HEAD carries the head only (#3711).** The
+  server's canned refusals of a request it will not read (431 for a header
+  line or a head too large, 414 for a request line too long, 413 for a
+  chunked body past its bound, 400 for framing it will not guess at or a
+  request that does not parse) were sent whole, body included, whatever the
+  method, so a HEAD got a body that a client reads as the start of the next
+  response (RFC 9110 9.3.2). Every refusal now goes through one helper that
+  sends the head only when the request's bytes say it is a HEAD, keeping
+  its Content-Length; one sent before the method has arrived goes out whole,
+  as before. Covered by `tests/integration/http_server_head_refusal`.
+
+- **An answer to HEAD through the proxy keeps the upstream's
+  Content-Length (#3713).** The proxy middleware set the empty body of a
+  HEAD answer, which rewrote the upstream's Content-Length to 0, and a cache
+  hit did the same; the server then added a 0 to a kept-alive HEAD answer
+  that stated no length. A client asking a resource's size by HEAD read 0.
+  The length is now the upstream's as it stated it, or none, on every path.
+
+- **A proxied or cached response keeps the upstream's last header field
+  (#3714).** The client keeps a response's header block cut at its blank
+  line, so the last field has no CRLF after it, and the proxy's copy of the
+  upstream's headers and the cache's snapshot of them took a line only when
+  it ended in CRLF: every response through the proxy middleware or from its
+  cache lost whatever field came last (an `ETag`, a `Set-Cookie`, a
+  `Location`). One line splitter now reads a header block for all three.
+
+- **A spawn no longer writes the actor fields a core may read once the
+  actor is in its core's table (#3540).** The generated `spawn_<Actor>`
+  set `active`, `migrate_to` and `auto_process` again after
+  `scheduler_spawn_actor` had set them and placed the actor, while a core
+  that moved another actor away could move this one into the hole and read
+  them (ThreadSanitizer). It now writes only the actor's state and what
+  differs, and a restart in place writes nothing a sender may be reading.
+
+- **The spawn's `AETHER_SINGLE_CORE` cache is atomic (#3712).** The
+  generated `spawn_<Actor>` kept the variable's value in a plain static,
+  and two threads making their first spawn of the same actor type both
+  wrote it: a data race. It is now loaded and stored relaxed.
+
 ## [0.918.0]
 
 ### Added
