@@ -78,6 +78,7 @@ The grant list and the block that enforces it come from `std.sandbox`:
 | `grant_fork()` | `fork` | a new process in a child `spawn_sandboxed` starts (threads need no grant) |
 | `grant_all()` | `*` | everything |
 | `grant_runtime(name)` | `fs_read` | what interpreter `name` needs to start, asked of it (below) |
+| `grant_without_landlock()` | (none) | lets `sandbox.spawn_socket` run on a kernel without Landlock |
 
 A Unix-domain socket is a file, and connecting to one takes write permission
 on it in the kernel too: `tcp.connect_unix(path)` and a `std.http.client`
@@ -89,7 +90,6 @@ socket's own path instead. The HTTP client asks on every request, so a
 connection pooled outside the block does not carry one made inside it. The
 `LD_PRELOAD` layer checks `AF_INET` and `AF_INET6` connects only; libc makes
 `AF_UNIX` ones of its own (nscd, syslog).
-| `grant_without_landlock()` | (none) | lets `sandbox.spawn_socket` run on a kernel without Landlock |
 
 The same grant list is what `spawn_sandboxed(perms, prog, ...)` hands a
 child process and what a host bridge takes as its `perms` argument
