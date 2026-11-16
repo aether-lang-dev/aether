@@ -111,10 +111,12 @@ main() {
     http.server_get(up, "/p", handle_up, 0)
     up_url = "http://127.0.0.1:${start(up)}"
 
-    // A port nothing listens on: a server's, once it has stopped.
+    // A port nothing listens on: a server's, once it has stopped. A server
+    // bound later can be given it (see the loop below).
     gone = http.server_create(0)
     http.server_set_host(gone, "127.0.0.1")
-    gone_url = "http://127.0.0.1:${start(gone)}"
+    gone_port = start(gone)
+    gone_url = "http://127.0.0.1:${gone_port}"
     http.server_stop(gone)
     http.server_free(gone)
 
@@ -137,6 +139,19 @@ main() {
         while g < 2 {
             s = gateway(urls[i], timeouts[i], g)
             port = start(s)
+            // The kernel can give a gateway the port the stopped server
+            // freed: its proxy then forwards to itself, each hop adding an
+            // X-Forwarded-For entry until a header line is too long, and the
+            // client reads that 431 ("431 and 24 bytes after the head", seen
+            // once on Linux). Such a gateway is set aside, held while another
+            // is made so that one cannot be given the port too.
+            if port == gone_port {
+                spare = s
+                s = gateway(urls[i], timeouts[i], g)
+                port = start(s)
+                http.server_stop(spare)
+                http.server_free(spare)
+            }
             sleep(100)
             got = probe(port, raws[i])
             if got != wants[i] {
