@@ -152,7 +152,7 @@ exports(
     verify_flight_auth,
     // Shared with std.cryptography.tls13_server
     transcript_hash_algo, finished_verify_data_algo, ALERT_CLOSE_NOTIFY, alert_name,
-    alert_event, transcript_retry, EV_NONE, EV_CLOSED, EV_ERROR
+    alert_event, transcript_retry, EV_NONE, EV_CLOSED, EV_ERROR, EV_TIMEOUT
 )
 
 // Handshake message types (RFC 8446 §4) seen in the server's flight.
@@ -421,10 +421,9 @@ struct RecordIO {
     off: int // consumed-so-far offset (records already returned)
     alert: int // the alert recio_next says to send, when it refuses a record
     ccs: int // the dummy change_cipher_spec records read in the handshake (#3379)
-    // 1 once the handshake is done (new_client_conn). Before, a read that
-    // times out is the socket's own timeout, which the caller set, and ends
-    // the handshake (#3703); after, it is retried (recio_fill).
-    after_hs: int
+    // 1 when the last read timed out (recio_fill): the socket's receive
+    // timeout, which its owner set (#3703).
+    timed_out: int
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -436,7 +435,7 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     r.off = 0
     r.alert = 0
     r.ccs = 0
-    r.after_hs = 0
+    r.timed_out = 0
     return r
 }
 
@@ -469,54 +468,38 @@ fn recio_compact(r: *RecordIO) {
     r.len = rest
 }
 
-// Pull more bytes from the socket into the buffer. Returns bytes read, -2
-// when a read in the handshake timed out (#3703), or <= 0 otherwise
-// on close/error.
+// Pull more bytes from the socket into the buffer. Returns the bytes read,
+// 0 for the server's close, -1 for an error, or -2 (r.timed_out set) when
+// the read timed out.
+//
+// A timed-out read is the socket's own receive timeout: the socket is a
+// blocking one (std.http's client adopts its descriptor with the request's
+// timeouts, tcp_socket_adopt_fd; std.tcp's own carry 30 s), and std.tcp
+// takes a read again when a signal interrupts it, so the read has waited
+// that whole timeout for a server that sent nothing. It ends the wait, in
+// the handshake and after it, as the OpenSSL client's does, so a timeout
+// the caller set means the same on both backends (#3703). Read 50 times
+// over, as it was (RECIO_MAX_TIMEOUT_RETRIES, from when a descriptor could
+// arrive non-blocking and a pause read as a timeout at once), a 500 ms
+// request timeout waited 25 s for a stalled response, and std.tcp's 30 s
+// 25 minutes. After the handshake the connection survives it: conn_recv
+// reports "timeout" and the caller may wait again (EV_TIMEOUT).
 fn recio_fill(r: *RecordIO) -> int {
     recio_compact(r)
-    // Retry on a would-block "timeout" (peer idle, not closed); only an orderly
-    // FIN or hard error is a real close. Without this, a server that pauses even
-    // briefly after the handshake (network latency to a real host) is mistaken
-    // for a dropped connection. -1 = closed/error, >0 = bytes buffered.
-    tries = 0
-    filling = 1
-    result = -1
-    while filling == 1 {
-        chunk, n, err = tcp.read_n(r.sock, 4096)
-        if string.equals(err, "") == 1 {
-            if n <= 0 { result = n; filling = 0 } else {
-                bytes.copy_from_string(r.buf, r.len, chunk, n)
-                r.len = r.len + n
-                result = n
-                filling = 0
-            }
-        } else {
-            if string.equals(err, "timeout") == 1 && r.after_hs == 0 {
-                // In the handshake a timed-out read ends it (#3703): the
-                // socket is blocking, adopted with the caller's timeouts, so
-                // the read has waited that whole timeout for a server that
-                // sent nothing. Retried, it waited 50 times std.tcp's 30 s.
-                result = -2
-                filling = 0
-            } else if string.equals(err, "timeout") == 1 {
-                // Idle read; retry a bounded number of times before giving up.
-                tries = tries + 1
-                if tries >= RECIO_MAX_TIMEOUT_RETRIES {
-                    result = -1
-                    filling = 0
-                }
-            } else {
-                result = -1
-                filling = 0
-            }
-        }
+    r.timed_out = 0
+    chunk, n, err = tcp.read_n(r.sock, 4096)
+    if string.equals(err, "") == 1 {
+        if n <= 0 { return n }
+        bytes.copy_from_string(r.buf, r.len, chunk, n)
+        r.len = r.len + n
+        return n
     }
-    return result
+    if string.equals(err, "timeout") == 1 {
+        r.timed_out = 1
+        return -2
+    }
+    return -1
 }
-
-// Bound on consecutive would-block retries in recio_fill. Each underlying recv
-// carries the OS socket timeout, so this caps the total post-handshake wait.
-const RECIO_MAX_TIMEOUT_RETRIES = 50
 
 // The ServerHello, whatever records it came in, as one record: a 5-byte
 // header, then the message (RFC 8446 5.1: a handshake message may be split
@@ -693,8 +676,6 @@ fn new_client_conn(sock: @keep ptr, rio: @keep ptr, suite: int, c_ap: @keep ptr,
     conn = malloc(sizeof(ClientConn)) as *ClientConn
     conn.sock = sock
     conn.rio = rio
-    hs_rio = rio as *RecordIO
-    hs_rio.after_hs = 1 // the handshake is done (#3703)
     conn.app_send = tls13_record.new_aead(aead, bytes.view(ck)[0..key_len], civ) as ptr
     conn.app_recv = tls13_record.new_aead(aead, bytes.view(sk)[0..key_len], siv) as ptr
     conn.res_master = res_master
@@ -2153,6 +2134,7 @@ const EV_DATA = 1 // application data
 const EV_CLOSED = 2 // the server's close_notify
 const EV_TICKET = 3 // a NewSessionTicket, now in c.ticket
 const EV_ERROR = 4 // the connection failed; its alert, if any, was sent
+const EV_TIMEOUT = 5 // a read timed out; the connection is still whole (#3703)
 
 // A fatal alert under the connection's application-traffic keys.
 fn send_alert_app(c: *ClientConn, desc: int) {
@@ -2199,8 +2181,12 @@ alert_event(level: int, desc: int, warnings: int) -> (int, int, string) {
 // Every refusal sends its alert before it returns.
 fn conn_next(c: *ClientConn) -> (int, ptr, int, string) {
     rio = c.rio as *RecordIO
+    rio.timed_out = 0 // this read's, not an earlier one's
     rec, rlen, e = recio_next(rio)
     if string.equals(e, "") != 1 {
+        // A read that timed out leaves the record half read and the
+        // connection whole: the caller is told, and may wait again.
+        if rio.timed_out == 1 { return EV_TIMEOUT, null, 0, "timeout" }
         if rio.alert != 0 { send_alert_app(c, rio.alert) }
         return EV_ERROR, null, 0, e
     }
@@ -2377,6 +2363,7 @@ conn_recv(conn: ptr) -> (ptr, int, string) {
             c.closed = 1
             return null, 0, ""
         }
+        if ev == EV_TIMEOUT { return null, 0, "timeout" }
         if ev == EV_ERROR {
             c.closed = 2
             return null, 0, err
@@ -2474,6 +2461,7 @@ conn_get_ticket(conn: ptr) -> (ptr, string) {
             c.closed = 1
             return null, "the server closed the connection before sending a NewSessionTicket"
         }
+        if ev == EV_TIMEOUT { return null, "no NewSessionTicket within the socket's timeout" }
         if ev == EV_ERROR {
             c.closed = 2
             return null, err

@@ -117,6 +117,23 @@ int aether_net_wouldblock(void) {
 #endif
 }
 
+/* recv(2) on a std.tcp socket, taken again when a signal interrupts it
+ * before any byte came: an interruption is not the peer going quiet, so
+ * the "timeout" a receive reports means the socket's receive timeout (or a
+ * non-blocking socket with nothing buffered), which a caller may take as
+ * the timeout it set (#3703). Windows has no EINTR. */
+static int net_recv(int fd, void* buf, int len) {
+    int received;
+    do {
+        received = (int)recv(fd, (char*)buf, len, 0);
+#ifndef _WIN32
+    } while (received < 0 && errno == EINTR);
+#else
+    } while (0);
+#endif
+    return received;
+}
+
 struct TcpSocket {
     int fd;
     int connected;
@@ -525,7 +542,7 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
      * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
-    int received = recv(sock->fd, buffer, max_bytes, 0);
+    int received = net_recv(sock->fd, buffer, max_bytes);
 
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes + 1);
@@ -562,7 +579,7 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
         return out;
     }
 
-    int received = recv(sock->fd, buffer, max_bytes, 0);
+    int received = net_recv(sock->fd, buffer, max_bytes);
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes);
         /* Split the failure branch (#1092): a would-block / recv-timeout means
@@ -729,7 +746,7 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
  * dead), a null/closed handle or a bad buffer. */
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
     if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
-    int received = recv(sock->fd, (char*)buf, cap, 0);
+    int received = net_recv(sock->fd, buf, cap);
     if (received > 0) return received;
     if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
     sock->connected = 0;
