@@ -1261,9 +1261,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "%s* spawn_%s(int preferred_core) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "// AETHER_SINGLE_CORE=1 forces all actors to core 0 (eliminates cross-core overhead)");
-    print_line(gen, "static int _single_core_cached = -1;");
-    print_line(gen, "if (_single_core_cached < 0) _single_core_cached = (getenv(\"AETHER_SINGLE_CORE\") != NULL);");
-    print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core_cached ? 0 : -1);");
+    /* Atomic, relaxed (#3712): spawns run on any thread, and two first
+     * spawns would write a plain static at once. Every thread computes the
+     * same value, so no ordering is needed. */
+    print_line(gen, "static _Atomic int _single_core_cached = -1;");
+    print_line(gen, "int _single_core = atomic_load_explicit(&_single_core_cached, memory_order_relaxed);");
+    print_line(gen, "if (_single_core < 0) {");
+    print_line(gen, "    _single_core = (getenv(\"AETHER_SINGLE_CORE\") != NULL);");
+    print_line(gen, "    atomic_store_explicit(&_single_core_cached, _single_core, memory_order_relaxed);");
+    print_line(gen, "}");
+    print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core ? 0 : -1);");
     print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))_aether_step_%s, sizeof(%s));",
                actor->value, actor->value, actor->value, actor->value);
     /* NULL means the allocation failed: nothing pools actors any more. The
