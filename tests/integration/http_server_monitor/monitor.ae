@@ -10,6 +10,7 @@
 // program's own lines.
 
 import std.http
+import std.sync
 import std.string
 
 extern http_server_port(server: ptr) -> int
@@ -18,22 +19,24 @@ extern exit(code: int)
 
 main() {
     failures = 0
-    heard_port = ref(0)
-    defer ref_free(heard_port)
-    heard_host = ref(0)
-    defer ref_free(heard_host)
-    heard_stop = ref(0)
-    defer ref_free(heard_stop)
+    // The listening closure runs on the server's thread and this one polls
+    // what it sets: std.sync cells, not refs, whose plain memory raced (#3542).
+    heard_port = sync.atomic_new(0)
+    defer sync.atomic_free(heard_port)
+    heard_host = sync.atomic_new(0)
+    defer sync.atomic_free(heard_host)
+    heard_stop = sync.atomic_new(0)
+    defer sync.atomic_free(heard_stop)
 
     s = http.server_create(0)
     http.server_set_host(s, "127.0.0.1")
     http.monitor(s) {
         listening() | host: string, port: int | {
-            ref_set(heard_port, port)
-            if host == "127.0.0.1" { ref_set(heard_host, 1) }
+            sync.atomic_store(heard_port, port)
+            if host == "127.0.0.1" { sync.atomic_store(heard_host, 1) }
         }
         stopped() | host: string, port: int | {
-            ref_set(heard_stop, ref_get(heard_stop) + 1)
+            _ = sync.atomic_add(heard_stop, 1)
         }
     }
     berr = http.server_bind(s, "127.0.0.1", 0)
@@ -42,15 +45,15 @@ main() {
     if http.server_start_background(s) != "" { println("FAIL start_background"); exit(1) }
 
     waited = 0
-    while ref_get(heard_port) == 0 && waited < 100 {
+    while sync.atomic_load(heard_port) == 0 && waited < 100 {
         sleep(20)
         waited = waited + 1
     }
-    if ref_get(heard_port) != port {
-        println("FAIL listening reported port ${ref_get(heard_port)}, the server is on ${port}")
+    if sync.atomic_load(heard_port) != port {
+        println("FAIL listening reported port ${sync.atomic_load(heard_port)}, the server is on ${port}")
         failures = failures + 1
     }
-    if ref_get(heard_host) != 1 {
+    if sync.atomic_load(heard_host) != 1 {
         println("FAIL listening did not report host 127.0.0.1")
         failures = failures + 1
     }
@@ -69,13 +72,13 @@ main() {
     }
     http.server_free(t)
 
-    if ref_get(heard_stop) != 0 {
+    if sync.atomic_load(heard_stop) != 0 {
         println("FAIL stopped fired while the server was running")
         failures = failures + 1
     }
     http.server_stop(s)
-    if ref_get(heard_stop) != 1 {
-        println("FAIL stopped fired ${ref_get(heard_stop)} times after the stop, expected 1")
+    if sync.atomic_load(heard_stop) != 1 {
+        println("FAIL stopped fired ${sync.atomic_load(heard_stop)} times after the stop, expected 1")
         failures = failures + 1
     }
     http.server_free(s)

@@ -177,6 +177,13 @@ expect_body "a chunked body with extensions did not arrive intact" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5 ; name=value\r\nhello\r\n6;q="a \\" b";flag\r\n world\r\n0;last\r\n\r\n' \
     'len=11 body=\[hello world\]'
 
+# A chunked body is binary like any other. The worker hands the decoded
+# payload to the parser with no Content-Length, and the parser took it with
+# strdup, so this one arrived as the single byte "a" (tests/fuzz/http_head).
+expect_body "a chunked body holding a NUL byte was cut at it" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n3\r\na\0b\r\n2\r\n\0c\r\n0\r\n\r\n' \
+    'bytes=5 '
+
 # A header value mentioning another header is not that header. A search that
 # is not anchored to the start of a line reads this as the framing.
 expect_body "a Content-Length inside another header's value was read as framing" \
@@ -194,6 +201,31 @@ expect_400 "whitespace between a header name and its colon" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nContent-Length : 5\r\nConnection: close\r\n\r\nhello'
 expect_400 "an obs-fold continuation line" \
     'POST /upload HTTP/1.1\r\nHost: x\r\nX-Fold: a\r\n b\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+# A bare LF ended a line for the head check and not for the parser, so this
+# head framed a 5-byte body to one and held no Content-Length to the other.
+expect_400 "a header line ended by a bare LF" \
+    'POST /upload HTTP/1.1\r\nHost: x\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+expect_400 "a bare CR in a header value" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nX-A: a\rb\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
+# Transfer-Encoding is a list of codings across all its fields, and the body
+# is chunked only when chunked is the last of them (RFC 9112 6.3). The first
+# field was searched for the word, so each of these was decoded as chunked.
+expect_400 "a coding that only contains the word chunked" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: xchunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_400 "chunked ahead of another coding" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked, gzip\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_400 "chunked followed by a second Transfer-Encoding field" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: chunked\r\nTransfer-Encoding: identity\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n'
+expect_body "chunked in a second Transfer-Encoding field was not decoded" \
+    'POST /upload HTTP/1.1\r\nHost: x\r\nTransfer-Encoding: identity\r\nTransfer-Encoding: chunked\r\nConnection: close\r\n\r\n5\r\nhello\r\n0\r\n\r\n' \
+    'len=5 body=\[hello\]'
+# A request line with no version: the parser freed the method it had copied
+# twice, and the worker's heap was corrupted.
+expect_400 "a request line with no version" \
+    'POST /upload\r\nHost: x\r\nConnection: close\r\n\r\n'
+# A request line is method SP target SP version, the method a token.
+expect_400 "a method that is not a token" \
+    'P@ST /upload HTTP/1.1\r\nHost: x\r\nContent-Length: 5\r\nConnection: close\r\n\r\nhello'
 
 # The request line and each header line are copied into fixed buffers. An
 # over-long one used to be copied in anyway, off the end of the stack frame,

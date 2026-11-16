@@ -6,6 +6,7 @@
 #include <stdint.h>
 #include <string.h>
 #include "aether_compiler.h"
+#include "aether_once.h"
 
 #ifdef __AVX2__
 #include <immintrin.h>
@@ -182,23 +183,25 @@ int count_active_actors_avx2(const uint8_t* active_flags, int count) {
 }
 #endif
 
-// Public API with runtime dispatch
-static int g_avx2_available = -1;  // -1 = not checked, 0 = no, 1 = yes
+// Public API with runtime dispatch. Resolved once, by whichever thread asks
+// first: aether_once (#3680), so another thread waits for the answer instead
+// of reading it half set or printing the line twice.
+static aether_once_t g_avx2_once = AETHER_ONCE_INIT;
+static int g_avx2_available = 0;
 
 void aether_simd_init(void) {
-    if (g_avx2_available == -1) {
+    if (aether_once_begin(&g_avx2_once)) {
         g_avx2_available = cpu_supports_avx2();
         if (g_avx2_available) {
             printf("[SIMD] AVX2 acceleration enabled (8-wide vectorization)\n");
         } else {
             printf("[SIMD] Using scalar fallback (no AVX2)\n");
         }
+        aether_once_done(&g_avx2_once);
     }
 }
 
 int aether_simd_is_available(void) {
-    if (g_avx2_available == -1) {
-        aether_simd_init();
-    }
+    aether_simd_init();
     return g_avx2_available;
 }

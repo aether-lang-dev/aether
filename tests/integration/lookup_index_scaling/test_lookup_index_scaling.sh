@@ -14,8 +14,10 @@
 # times the time. Linear is eight; the walks made it twelve at four times
 # the declarations, which is about 45 at eight.
 #
-# The time is the CPU time aetherc spent, summed over three runs of each
-# size taken in turn, not the wall clock: the sweep runs this beside other
+# The time is the CPU time aetherc spent, the fastest of three runs of
+# each size, taken in turn (a run a busy runner stalled counts for nothing,
+# where a sum carried it: 35x on a macOS x86_64 runner, linear on its rerun),
+# not the wall clock: the sweep runs this beside other
 # tests, many of them running a scheduler on every core, and the wall clock
 # of the longer compile counted the time it waited for a core. CPU time
 # moves too: a linear check at four times the size read 8.9x on a busy
@@ -83,21 +85,21 @@ check_ms() {
 
 program 1000
 program 8000
-small=0
-large=0
+small=
+large=
 for run in 1 2 3; do
     check_ms 1000
-    small=$(( small + MS ))
+    { [ -z "$small" ] || [ "$MS" -lt "$small" ]; } && small=$MS
     check_ms 8000
-    large=$(( large + MS ))
+    { [ -z "$large" ] || [ "$MS" -lt "$large" ]; } && large=$MS
 done
 
 # Below 30 ms a run the clock's grain decides: Windows charges CPU time a
 # clock tick, about 15.6 ms, at a time.
-[ "$small" -lt 90 ] && small=90
+[ "$small" -lt 30 ] && small=30
 if [ "$large" -ge $(( small * 24 )) ]; then
-    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (three runs each): eight times the declarations cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
+    echo "  [FAIL] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (the fastest of three runs each): eight times the declarations cost $(( large / small ))x the time (linear is 8x, the bound 24x)"
     exit 1
 fi
-echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (three runs each)"
+echo "  [PASS] $NAME: checked 1000 declarations in ${small} ms of CPU, 8000 in ${large} ms (the fastest of three runs each)"
 exit 0

@@ -12,16 +12,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <unistd.h>
 #include "aether_bounds_check.h"
 
 static int g_hold_ms;
-static volatile int g_held;
+/* Set by the holder once it has stdout, read by main until then: atomic,
+ * as a flag between two threads must be (a volatile int raced, #3542). */
+static atomic_int g_held;
 
 static void* holder(void* arg) {
     (void)arg;
     flockfile(stdout);
-    g_held = 1;
+    atomic_store(&g_held, 1);
     if (g_hold_ms < 0)
         for (;;) pause();
     usleep((useconds_t)g_hold_ms * 1000);
@@ -35,7 +38,7 @@ int main(int argc, char** argv) {
     printf("first line\nsecond line\n");
     pthread_t t;
     if (pthread_create(&t, NULL, holder, NULL) != 0) return 2;
-    while (!g_held) usleep(1000);
+    while (!atomic_load(&g_held)) usleep(1000);
     aether_check_array_access(5, 3, "xs", "held.c", 1);
     return 0;
 }

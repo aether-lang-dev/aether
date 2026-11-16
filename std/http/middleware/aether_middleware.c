@@ -268,7 +268,11 @@ int aether_middleware_bearer_auth(HttpRequest* req, HttpServerResponse* res, voi
     if (!o || !o->verify) return 1;
 
     const char* auth = http_get_header(req, "Authorization");
-    if (!auth || strncasecmp(auth, "Bearer ", 7) != 0) {
+    /* "Authorization: Bearer " arrives as "Bearer": a field value does not
+     * hold the whitespace after it (RFC 9112 5), and the parser trims it.
+     * It is the scheme with no token, as before. */
+    int scheme_only = auth && strcasecmp(auth, "Bearer") == 0;
+    if (!auth || (!scheme_only && strncasecmp(auth, "Bearer ", 7) != 0)) {
         /* No credential — base challenge, no `error` param. */
         bearer_challenge(res, o->realm, NULL);
         return 0;
@@ -279,7 +283,7 @@ int aether_middleware_bearer_auth(HttpRequest* req, HttpServerResponse* res, voi
      * "+" / "/" ) [ "=" *"=" ] but we don't enforce — verifiers
      * commonly accept tighter or looser shapes (JWTs are dotted,
      * opaque tokens are URL-safe base64, etc.). */
-    const char* token = auth + 7;
+    const char* token = scheme_only ? auth + 6 : auth + 7;
     while (*token == ' ' || *token == '\t') token++;
 
     if (!*token) {

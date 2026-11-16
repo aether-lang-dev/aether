@@ -1,0 +1,126 @@
+name: TSan
+
+# The C unit tests and the actor, scheduler and std.net part of the `make
+# test-ae` sweep under ThreadSanitizer, with aetherc, ae, libaether, std and
+# every program they build instrumented by clang: `make test-tsan` (#3542,
+# tests/scripts/sanitizer_sweep.sh). The runtime carries a few hundred relaxed
+# atomics in the actors and the scheduler, and std.net runs threads of its
+# own; before this nothing ran them under TSan. A data race, a lock-order
+# inversion, a thread never joined or a signal-unsafe call in a handler stops
+# the program that made it, and the job fails on any test failure and any
+# report, which the step summary groups by the two places that raced. The
+# part of the corpus is tests/tsan_sweep_select.txt: every program that
+# declares an actor, imports std.net or what runs on it, or starts threads
+# from a C host, and the HTTP, actor and scheduler shell tests by name.
+#
+# Two shards, as asan.yml has, the C unit tests in the first. Estimated before
+# the first run, from asan.yml's run on main of 2026-11-12 (toolchain 1 min,
+# C unit runner 8 s, the two halves of the sweep 11 and 13 min) and the plain
+# Linux sweep's per-test costs (tests/sweep_weights_linux.txt): the tests this
+# job picks are 652 of the sweep's 1928 test-seconds, a third. At twice ASan's
+# slowdown (TSan is 5 to 15 times a plain build, ASan about 2), that third is
+# about 16 minutes of sweep on 4 jobs: one job would take about 19 minutes,
+# two take about 11 each. The first runs' timings replace this estimate.
+# Same triggers as asan.yml, and tests/runtime too: the scheduler, mailbox
+# and actor C unit tests run under it.
+on:
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'compiler/**'
+      - 'runtime/**'
+      - 'std/**'
+      - 'tools/**'
+      - 'include/**'
+      - 'lsp/**'
+      - 'Makefile'
+      - 'tests/runtime/**'
+      - 'tests/tsan/**'
+      - 'tests/tsan_sweep_select.txt'
+      - 'tests/ae_sweep_prune_tsan.txt'
+      - 'tests/scripts/sanitizer_sweep.sh'
+      - 'tests/scripts/sweep_select.sh'
+      - 'tests/scripts/ae_sweep_list.sh'
+      - 'tests/scripts/sweep_shard.sh'
+      - 'tests/sweep_weights_linux.txt'
+      - 'tests/scripts/run_ae_test.sh'
+      - 'tests/scripts/run_ae_sh_dir.sh'
+      - 'tests/lib/sweep_timeout.sh'
+      - '.github/workflows/tsan.yml'
+      - '.github/actions/apt-install/**'
+  schedule:
+    - cron: '7 7 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# As in ci.yml: a new push to a PR cancels the run of the one before it.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  tsan:
+    name: Linux / Clang under TSan [${{ matrix.shard }}]
+    # The image and packages of ci.yml's Linux / Clang leg, so the sweep runs
+    # the same programs and shell tests with the same compiler (clang 14).
+    runs-on: ubuntu-22.04
+    # About four times the estimate (11 min), so a hang costs one cap.
+    timeout-minutes: 45
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [ '1/2', '2/2' ]
+
+    steps:
+    - uses: actions/checkout@v5
+
+    # From a cache of the packages' .deb files (#3602): the mirror served
+    # some legs at 39 kB/s in one run in three, six minutes or more.
+    - name: Install packages
+      uses: ./.github/actions/apt-install
+      with:
+        packages: clang make bc pkg-config libgtk-4-dev
+        scope: tsan ${{ matrix.shard }}
+
+    - name: Install toolchain
+      run: pip install --retries 10 --timeout 120 --break-system-packages websockets 2>/dev/null || pip install --retries 10 --timeout 120 websockets
+
+    # TSan maps its shadow memory at fixed addresses. The runner's kernel
+    # randomizes mmap with up to 32 bits, which can place a mapping where
+    # clang 14's TSan wants its shadow, and every instrumented program then
+    # dies before main ("FATAL: ThreadSanitizer: unexpected memory mapping").
+    # 28 bits keeps the layout TSan expects; LLVM 18 and later re-exec
+    # themselves without randomization instead. The script's probe says so
+    # if it still does not start.
+    - name: Let TSan map its shadow memory
+      run: sudo sysctl -w vm.mmap_rnd_bits=28
+
+    # One job per core, but no more than one per 3 GB of available memory:
+    # TSan takes 5 to 10 times the memory a program does (its shadow, and the
+    # access history of each thread: history_size=4, a few MB a thread), so an
+    # instrumented aetherc building a large program, or a server with its
+    # pool of threads, takes several times its plain size.
+    - name: make test-tsan
+      run: |
+        cores=$(nproc)
+        by_mem=$(awk '/^MemAvailable:/ { print int($2 / 3145728) }' /proc/meminfo)
+        by_mem=${by_mem:-$cores}
+        jobs=$(( by_mem < cores ? by_mem : cores ))
+        [ "$jobs" -ge 1 ] || jobs=1
+        echo "NPROC=$jobs: $cores cores, room for $by_mem jobs at 3 GB each"
+        AE_SWEEP_SHARD="${{ matrix.shard }}" make test-tsan NPROC="$jobs"
+
+    - name: Upload the TSan reports
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: tsan-reports-${{ strategy.job-index }}
+        path: |
+          build/tsan/reports/
+          build/tsan/summary.md
+          build/tsan/canary/
+          build/tsan/probe.log
+          build/tsan/probe.run.log
+        if-no-files-found: ignore

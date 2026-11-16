@@ -802,6 +802,51 @@ TEST_CATEGORY(http_resolve_location_redirect_rules, TEST_CATEGORY_NETWORK) {
     free(got);
 }
 
+/* A URL's host is written as it is into the Host header, a proxy's
+ * absolute-form request line and a CONNECT line. parse_url took any bytes up
+ * to the port, path, query or fragment, so a URL from untrusted input
+ * carried a header of its own into the request (CWE-93), and a space split
+ * the request line a proxy was sent (found by tests/fuzz/url). A host holds
+ * neither (RFC 3986 3.2.2). */
+/* http_uri_resolve is NULL when either input is not a URI reference, and an
+ * authority holding a control byte is not one. Only the reference's
+ * authority was checked, and a relative reference takes the base's, so
+ * "/x" against "http://a\x01b/" resolved to "http://a\x01b/x" (found by
+ * tests/fuzz/url). */
+TEST_CATEGORY(http_uri_resolve_refuses_a_base_authority_with_a_control_byte, TEST_CATEGORY_NETWORK) {
+    ASSERT_NULL(http_uri_resolve("http://a\x01" "b/", "/x"));
+    ASSERT_NULL(http_uri_resolve("http://a\rb/p", "q"));
+    ASSERT_NULL(http_resolve_location("a\x7f:80/p", "?y"));
+    /* The reference's own authority replaces the base's, and is held to the
+     * same rule. */
+    ASSERT_NULL(http_uri_resolve("http://ok/", "//a\x01" "b/x"));
+    char* got = http_uri_resolve("http://ok/p", "//other/x");
+    ASSERT_NOT_NULL(got);
+    ASSERT_STREQ("http://other/x", got);
+    free(got);
+}
+
+TEST_CATEGORY(http_url_host_holds_no_control_byte_or_space, TEST_CATEGORY_NETWORK) {
+    char host[256];
+    int port = 0, tls = 0;
+    char path[64];
+    ASSERT_EQ(0, parse_url("http://evil\r\nX-Injected: 1\r\n/", host, sizeof host, &port,
+                           path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a b/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a\tb/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://[::1\n]/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(0, parse_url("http://a\x7f/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_EQ(-1, http_parse_proxy_url("http://pro xy:3128", host, sizeof host, &port));
+    /* Hosts as they come, past ASCII included, still parse. */
+    ASSERT_EQ(1, parse_url("http://caf\xc3\xa9.example:8080/x", host, sizeof host, &port,
+                           path, sizeof path, &tls));
+    ASSERT_STREQ("caf\xc3\xa9.example", host);
+    ASSERT_EQ(8080, port);
+    ASSERT_EQ(1, parse_url("https://[::1]/", host, sizeof host, &port, path, sizeof path, &tls));
+    ASSERT_STREQ("::1", host);
+    ASSERT_EQ(443, port);
+}
+
 TEST_CATEGORY(http_parse_proxy_url_shapes, TEST_CATEGORY_NETWORK) {
     char host[256];
     int port = 0;
@@ -876,6 +921,49 @@ TEST_CATEGORY(http_response_head_reads_nul_and_bare_cr_as_sp, TEST_CATEGORY_NETW
     ASSERT_EQ(200, r->status_code);
     ASSERT_EQ(3, http_response_body_length(r));
     http_response_free(r);
+}
+
+/* A response's Transfer-Encoding is one list of codings across all its
+ * fields, and its body is chunked only when chunked is the final coding,
+ * named once (RFC 9112 6.3, #3670). The client searched the first field for
+ * the word, so "xchunked" and "chunked, gzip" were decoded and chunked in a
+ * second field was not. A body whose final coding is not chunked is the
+ * bytes up to the close, as they came. */
+static int body_is(HttpResponse* r, const char* want) {
+    size_t n = strlen(want);
+    return r && r->body && aether_string_length(r->body) == n &&
+           memcmp(aether_string_data(r->body), want, n) == 0;
+}
+
+TEST_CATEGORY(http_response_transfer_encoding_is_one_list, TEST_CATEGORY_NETWORK) {
+    static const char chunks[] = "5\r\nhello\r\n0\r\n\r\n";
+    static const struct { const char* head; int decoded; } cases[] = {
+        { "Transfer-Encoding: chunked\r\n", 1 },
+        { "Transfer-Encoding: CHUNKED\r\n", 1 },
+        { "Transfer-Encoding: gzip, chunked\r\n", 1 },
+        { "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n", 1 },
+        { "Transfer-Encoding: xchunked\r\n", 0 },
+        { "Transfer-Encoding: chunked, gzip\r\n", 0 },
+        { "Transfer-Encoding: chunked\r\nTransfer-Encoding: gzip\r\n", 0 },
+        { "Transfer-Encoding: chunked, chunked\r\n", 0 },
+        { "Transfer-Encoding: chunked;x=1\r\n", 0 },
+    };
+    for (size_t i = 0; i < sizeof cases / sizeof cases[0]; i++) {
+        char msg[256];
+        int n = snprintf(msg, sizeof msg, "HTTP/1.1 200 OK\r\n%s\r\n%s", cases[i].head, chunks);
+        HttpResponse* r = filled(msg, (size_t)n);
+        ASSERT_NULL(r->error);
+        ASSERT_TRUE(body_is(r, cases[i].decoded ? "hello" : chunks));
+        http_response_free(r);
+    }
+
+    int chunked = -1;
+    static const char two[] = "HTTP/1.1 200 OK\r\nTransfer-Encoding: gzip\r\nX: y\r\ntransfer-encoding: chunked";
+    ASSERT_EQ(2, http_te_in_block(two, two + sizeof two - 1, &chunked));
+    ASSERT_EQ(1, chunked);
+    static const char none[] = "HTTP/1.1 200 OK\r\nX-Transfer-Encoding: chunked\r\nX: Transfer-Encoding: chunked";
+    ASSERT_EQ(0, http_te_in_block(none, none + sizeof none - 1, &chunked));
+    ASSERT_EQ(0, chunked);
 }
 
 /* A control byte in a reference, read as a browser reads it (#3572, WHATWG

@@ -55,12 +55,35 @@ int main(void) {
         "0\r\n"
         "\r\n";
 
+    /* Transfer-Encoding read as one list (#3670): the path picks the
+     * fields, and the body is always "5 hello 0" in chunked framing. Where
+     * the final coding is not chunked, the body is those bytes as they are,
+     * read to the close, Content-Length or not (RFC 9112 6.3). */
+    static const struct { const char* path; const char* fields; } TE[] = {
+        { "/xchunked",    "Transfer-Encoding: xchunked\r\n" },
+        { "/chunked-gzip", "Transfer-Encoding: chunked, gzip\r\nContent-Length: 3\r\n" },
+        { "/two-fields",  "Transfer-Encoding: gzip\r\nTransfer-Encoding: chunked\r\n" },
+    };
+
     for (;;) {
         raw_sock cs = accept(ls, NULL, NULL);
         if (cs == RAW_SOCK_INVALID) continue;
         char buf[4096];
-        (void)recv(cs, buf, sizeof(buf), 0);   /* drain request; content ignored */
-        (void)raw_send_all(cs, RESP, strlen(RESP));
+        int got = (int)recv(cs, buf, sizeof(buf) - 1, 0);
+        buf[got > 0 ? got : 0] = '\0';
+        const char* resp = RESP;
+        char made[512];
+        for (size_t i = 0; i < sizeof TE / sizeof TE[0]; i++) {
+            size_t pl = strlen(TE[i].path);
+            if (strncmp(buf, "GET ", 4) == 0 && strncmp(buf + 4, TE[i].path, pl) == 0 &&
+                buf[4 + pl] == ' ') {
+                snprintf(made, sizeof made,
+                         "HTTP/1.1 200 OK\r\nConnection: close\r\n%s\r\n5\r\nhello\r\n0\r\n\r\n",
+                         TE[i].fields);
+                resp = made;
+            }
+        }
+        (void)raw_send_all(cs, resp, strlen(resp));
         raw_socket_close(cs);
     }
     return 0;

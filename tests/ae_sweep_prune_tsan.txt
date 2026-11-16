@@ -1,0 +1,43 @@
+# Tests the TSan sweep (`make test-tsan`, #3542) leaves out of the part of the
+# corpus it runs (tests/tsan_sweep_select.txt), as a fixed substring of the
+# path, the way tests/ae_sweep_prune.txt is read. Each one checks something
+# ThreadSanitizer replaces, so under it the test says nothing about the code;
+# every one still runs on the other legs.
+#
+# One reason per entry, and it has to be about what TSan changes, not about a
+# failure nobody looked at:
+#   SANDBOX     confines a child through the sandbox's preload library. The
+#               sweep builds that library with -fsanitize=thread too, and
+#               clang links the TSan runtime only into executables, so a
+#               child that is not instrumented (/bin/sh, a system tool) cannot
+#               resolve the library's TSan calls when it loads it.
+#   RSS         bounds the resident set, which under TSan holds its shadow
+#               memory and the history of every thread.
+#   CODE-SHAPE  reads the compiled code (inlining, vector instructions,
+#               FORTIFY's abort, debug info, -Werror warnings), which TSan's
+#               instrumentation and the sweep's -g -O1 change.
+#
+# Most of these are not picked by the select file today; they are listed so
+# that a test that later starts an actor does not bring them in.
+
+# SANDBOX
+tests/integration/sandbox_
+tests/integration/contrib_host_stunt/
+tests/integration/std_guest/
+
+# RSS
+tests/integration/bytes_finish_return_no_leak/
+tests/integration/heap_leak_cross_fn_recursion/
+tests/integration/heap_leak_interp_as_arg/
+tests/integration/heap_tracker_nested_tuple_err_no_leak/
+tests/integration/heap_tracker_return_escape_no_leak/
+tests/integration/panic_unwind_no_leak/
+tests/integration/std_strbuilder_no_leak/
+tests/integration/string_substring_n_no_leak/
+
+# CODE-SHAPE
+tests/integration/build_profile_flag/
+tests/integration/checksec_hardening/
+tests/integration/destructure_unused_local/
+tests/integration/lane_wide/
+tests/integration/packed_array_c_abi/

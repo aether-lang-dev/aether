@@ -18,6 +18,7 @@
 #endif
 
 #include "aether_cpu_available.h"
+#include "aether_once.h"
 
 #if AETHER_HAS_SIMD
    /* CPUID intrinsics come from different headers per toolchain. MSVC exposes
@@ -48,7 +49,10 @@ typedef struct {
 } CPUInfo;
 
 static CPUInfo g_cpu_info = {0};
-static int g_cpu_info_initialized = 0;
+/* Filled once, by whichever thread asks first (the scheduler's start, a
+ * server sizing its pools, a SIMD check), and read by all: aether_once, so
+ * a reader sees the whole record (#3680). */
+static aether_once_t g_cpu_info_once = AETHER_ONCE_INIT;
 
 #if AETHER_HAS_SIMD
 // CPUID wrapper
@@ -259,9 +263,9 @@ void cpu_detect_features(CPUInfo* info) {
 
 // Initialize and cache CPU info
 const CPUInfo* cpu_get_info(void) {
-    if (!g_cpu_info_initialized) {
+    if (aether_once_begin(&g_cpu_info_once)) {
         cpu_detect_features(&g_cpu_info);
-        g_cpu_info_initialized = 1;
+        aether_once_done(&g_cpu_info_once);
     }
     return &g_cpu_info;
 }

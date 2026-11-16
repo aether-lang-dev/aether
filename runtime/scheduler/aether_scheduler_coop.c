@@ -674,6 +674,18 @@ void scheduler_actor_revived(ActorBase* actor) {
     (void)actor;   // the next poll steps it
 }
 
+/* The cooperative poll looks at every actor's countdown itself (#3540 is
+ * the threaded scheduler's ready list). */
+void scheduler_timeout_armed(ActorBase* actor) {
+    (void)actor;
+}
+
+/* No actor thread runs here (aether_actor_thread_start refuses without
+ * threads); the call links, as the actor thread's loop does. */
+void scheduler_count_processed(int n) {
+    (void)n;
+}
+
 /* An ask the step leaves without a reply: its asker, polling, sees why. */
 static void coop_fail_slot(void* slot, int why) {
     ActorReplySlot* s = (ActorReplySlot*)slot;

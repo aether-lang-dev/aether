@@ -1,0 +1,71 @@
+// A stop ends a running server's accept loop by waking it, and the run
+// closes the listening socket once the loop is over (#3677).
+//
+// The stop used to close the listening socket under the loop to end it (on
+// Windows always, to end an accept() blocked on it), and the loop's next
+// poll() or accept() could then use a socket another thread had opened
+// under the same number. It now leaves the socket open and wakes the loop
+// (the wake pipe on POSIX, a loopback wake socket on Windows), and the run
+// closes the socket. Ten runs: each stop of a server whose loop is waiting
+// returns well inside the loop's one-second wait, which only the wake
+// gives it, and once it has returned the port takes no connection.
+
+import std.http
+import std.os
+import std.sync
+import std.tcp
+
+extern http_server_port(server: ptr) -> int
+extern sleep(ms: int)
+extern exit(code: int)
+
+main() {
+    failures = 0
+    for (cycle = 0; cycle < 10; cycle = cycle + 1) {
+        // The listening closure runs on the server's thread: a cell.
+        heard = sync.atomic_new(0)
+        s = http.server_create(0)
+        http.server_set_host(s, "127.0.0.1")
+        http.monitor(s) {
+            listening() | host: string, port: int | { sync.atomic_store(heard, port) }
+        }
+        berr = http.server_bind(s, "127.0.0.1", 0)
+        if berr != "" {
+            println("FAIL cycle ${cycle}: bind: ${berr}")
+            exit(1)
+        }
+        port = http_server_port(s)
+        if http.server_start_background(s) != "" {
+            println("FAIL cycle ${cycle}: the server did not start")
+            exit(1)
+        }
+        waited = 0
+        while sync.atomic_load(heard) == 0 && waited < 500 {
+            sleep(10)
+            waited = waited + 1
+        }
+        if sync.atomic_load(heard) == 0 {
+            println("FAIL cycle ${cycle}: the server never reported listening")
+            exit(1)
+        }
+        // Its accept loop now waits on the socket.
+        sleep(50)
+        started = os.now_unix_ms()
+        http.server_stop(s)
+        took = os.now_unix_ms() - started
+        if took >= 900 {
+            println("FAIL cycle ${cycle}: the stop took ${took} ms: the loop was not woken, it timed out")
+            failures = failures + 1
+        }
+        sock, cerr = tcp.connect_timeout("127.0.0.1", port, 500)
+        if cerr == "" {
+            println("FAIL cycle ${cycle}: port ${port} still takes connections after the stop")
+            tcp.close(sock)
+            failures = failures + 1
+        }
+        http.server_free(s)
+        sync.atomic_free(heard)
+    }
+    if failures > 0 { exit(1) }
+    println("STOP-WAKES-OK")
+}

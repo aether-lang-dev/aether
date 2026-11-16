@@ -127,6 +127,40 @@ int http_parse_count(const char* s, size_t n, int base, uint64_t max, uint64_t* 
     return 0;
 }
 
+/* One Transfer-Encoding field value's codings, read on top of the fields
+ * before it: a field that may appear more than once is one comma-separated
+ * list across all of them (RFC 9110 5.3). An element is a coding's name, a
+ * token, then its parameters after a ';'; an empty element is no element
+ * (RFC 9110 5.6.1). chunked takes no parameters (RFC 9112 7). */
+void http_te_codings_add(HttpTeCodings* t, const char* v, size_t n) {
+    size_t i = 0;
+    while (i <= n) {
+        size_t a = i;
+        while (i < n && v[i] != ',') i++;
+        size_t b = i++;
+        while (a < b && (v[a] == ' ' || v[a] == '\t')) a++;
+        while (b > a && (v[b - 1] == ' ' || v[b - 1] == '\t')) b--;
+        if (a == b) continue;
+        size_t e = a;
+        while (e < b && http_tchar[(unsigned char)v[e]]) e++;
+        /* Case-insensitive: of the token bytes, only a letter becomes one
+         * with 0x20 set. */
+        int chunked = e - a == 7;
+        for (size_t k = 0; chunked && k < 7; k++)
+            chunked = (v[a + k] | 0x20) == "chunked"[k];
+        size_t p = e;
+        while (p < b && (v[p] == ' ' || v[p] == '\t')) p++;
+        if (e == a || (p < b && (v[p] != ';' || chunked))) t->malformed = 1;
+        t->codings++;
+        t->chunked += chunked;
+        t->chunked_last = chunked;
+    }
+}
+
+int http_te_is_chunked(const HttpTeCodings* t) {
+    return !t->malformed && t->chunked == 1 && t->chunked_last;
+}
+
 int http_parse_port(const char* s, size_t n) {
     uint64_t v = 0;
     if (http_parse_count(s, n, 10, 65535, &v) != 0 || v == 0) return -1;
@@ -353,7 +387,10 @@ static int http_client_use_pure_tls(const HttpClientRequest* req);
 #endif
 #endif
 
-static int http_initialized = 0;
+/* Read and set by whichever thread makes the first request, so atomic, as
+ * the server's is (#3680). Two threads that both find it clear both start
+ * Winsock, which counts its starts. */
+static _Atomic int http_initialized = 0;
 
 static void http_init(void) {
     if (http_initialized) return;
@@ -1837,13 +1874,6 @@ void http_request_free_raw(HttpClientRequest* req) {
 /* Forward decls — defined below the static request() function. */
 static int header_already_set(const HttpClientRequest* req, const char* name);
 static char* http_extract_response_header(const char* hdr_block, const char* name);
-/* Decode HTTP/1.1 chunked transfer-encoding. Returns a malloc'd decoded
- * buffer (NUL-terminated; *out_len excludes the NUL) or NULL on malformed
- * framing (caller then keeps the raw body). Binary-safe (copies by
- * length). Defined below. */
-static int http_value_has_chunked(const char* v);
-static int http_value_has_chunked_n(const char* v, size_t len);
-static char* http_extract_response_header(const char* hdr_block, const char* name);
 
 /* Has the whole chunked body at `buf` arrived? 1 when it has, with
  * *frame_len the bytes it occupies, framing and trailers included; 0 when
@@ -2859,6 +2889,50 @@ static int http_dial(HttpClientRequest* req, AetherAddrList* addrs,
 }
 
 
+/* The Transfer-Encoding fields of the header block [block, end): how many
+ * there are, and in *chunked whether their codings, read as one list across
+ * every field, end in chunked (http_te_is_chunked). Each line is read as
+ * http_find_header_span reads it, anchored, the value where it lies with the
+ * whitespace around it dropped.
+ *
+ * The client's three readers of a response (the framing of a buffered one,
+ * its decoding, and the stream reader) searched the first field for the word
+ * "chunked" (#3670): "xchunked" and "chunked, gzip" were decoded as chunked,
+ * and chunked in a second field was not seen. When there is a field and its
+ * final coding is not chunked, the body runs to the close of the connection
+ * and Content-Length says nothing (RFC 9112 6.3). */
+int http_te_in_block(const char* block, const char* end, int* chunked) {
+    static const char name[] = "transfer-encoding";
+    HttpTeCodings te = { 0, 0, 0, 0 };
+    int fields = 0;
+    for (const char* line = block; line && line < end; ) {
+        const char* eol = (const char*)memchr(line, '\n', (size_t)(end - line));
+        const char* line_end = eol ? eol : end;
+        size_t n = (size_t)(line_end - line);
+        if (n && line[n - 1] == '\r') n--;
+        if (n > 17 && line[17] == ':') {
+            size_t k = 0;
+            for (; k < 17; k++) {
+                unsigned char c = (unsigned char)line[k];
+                if (c >= 'A' && c <= 'Z') c = (unsigned char)(c + 32);
+                if (c != (unsigned char)name[k]) break;
+            }
+            if (k == 17) {
+                const char* v = line + 18;
+                const char* v_end = line + n;
+                while (v < v_end && (*v == ' ' || *v == '\t')) v++;
+                while (v_end > v && (v_end[-1] == ' ' || v_end[-1] == '\t')) v_end--;
+                http_te_codings_add(&te, v, (size_t)(v_end - v));
+                fields++;
+            }
+        }
+        if (!eol) break;
+        line = eol + 1;
+    }
+    if (chunked) *chunked = fields > 0 && http_te_is_chunked(&te);
+    return fields;
+}
+
 /* Find a header by name in a header block, anchored to the start of each line.
  *
  * Anchoring matters: a substring search over the whole block also matches
@@ -3016,18 +3090,19 @@ static int http_response_is_complete(HttpRespFraming* f, char* buf, size_t len,
         http_head_section_repair(buf + skip, f->header_bytes - skip);
         const char* head = buf + skip;
 
-        /* Read Transfer-Encoding where it lies. Copying it out meant an
-         * allocation and a free per response, and any buffer it was copied
-         * into would have put a length limit on a header whose contents
-         * decide how the body is framed. */
-        const char* te = NULL;
-        size_t te_len = 0;
-        http_find_header_span(head, hend, "Transfer-Encoding",
-                              NULL, 0, NULL, &te, &te_len);
-        if (te && http_value_has_chunked_n(te, te_len)) {
+        /* Read Transfer-Encoding where it lies, every field of it as one
+         * list (#3670). Copying it out meant an allocation and a free per
+         * response, and any buffer it was copied into would have put a
+         * length limit on a header whose contents decide how the body is
+         * framed. A final coding other than chunked leaves the framing
+         * indefinite: the body runs to the close, and Content-Length is not
+         * read (RFC 9112 6.3). */
+        int te_chunked = 0;
+        int te_fields = http_te_in_block(head, hend, &te_chunked);
+        if (te_chunked) {
             f->chunked = 1;
             f->definite = 1;
-        } else {
+        } else if (te_fields == 0) {
             /* Anchored, and counted: a response naming two different lengths
              * has not said where its body ends, and picking one leaves the
              * bytes of the other in a connection this client may hand to the
@@ -3270,13 +3345,13 @@ void http_response_fill_from_bytes(HttpResponse* response,
      * only chunked bodies — already garbled today — change shape;
      * on malformed framing we keep the raw bytes. */
     const char* body_start = header_end + 4;
-    char* te = http_extract_response_header(buf, "Transfer-Encoding");
     char* dechunked = NULL;
     size_t dechunked_len = 0;
-    if (te && http_value_has_chunked(te)) {
+    int te_chunked = 0;
+    (void)http_te_in_block(buf, header_end, &te_chunked);   /* #3670 */
+    if (te_chunked) {
         dechunked = http_dechunk(body_start, body_bytes, &dechunked_len);
     }
-    free(te);
     if (dechunked) {
         response->body = string_new_with_length(dechunked, dechunked_len);
         free(dechunked);
@@ -4084,10 +4159,11 @@ send_request:
         int no_body = no_body_expected(response->status_code, method);
         int       is_chunked = 0;
         long long clen = -1;
-        char* te = http_extract_response_header(hb, "Transfer-Encoding");
-        if (te && http_value_has_chunked(te)) is_chunked = 1;
-        free(te);
-        if (!is_chunked) {
+        /* Every Transfer-Encoding field as one list (#3670): chunked last is
+         * chunked, and any other final coding is read to the close with its
+         * Content-Length unread, as the buffered reader frames it. */
+        int te_fields = http_te_in_block(hb, hend, &is_chunked);
+        if (te_fields == 0) {
             char* cl = http_extract_response_header(hb, "Content-Length");
             if (cl) {
                 /* Read as the buffered path reads it (#3520): strtoll took
@@ -4425,29 +4501,6 @@ static char* http_extract_response_header(const char* hdr_block, const char* nam
     return NULL;
 }
 
-/* Case-insensitive: does the Transfer-Encoding value name `chunked`?
- * `chunked` is the final (and in practice only) transfer coding we
- * decode; a comma-list like "gzip, chunked" still matches. */
-static int http_value_has_chunked_n(const char* v, size_t len) {
-    if (!v || len < 7) return 0;
-    /* Only the seven letters can produce these values with 0x20 set, so this
-     * is an exact case-insensitive compare and not a loose one. */
-    for (size_t i = 0; i + 7 <= len; i++) {
-        const char* p = v + i;
-        if ((p[0] | 0x20) == 'c' && (p[1] | 0x20) == 'h' &&
-            (p[2] | 0x20) == 'u' && (p[3] | 0x20) == 'n' &&
-            (p[4] | 0x20) == 'k' && (p[5] | 0x20) == 'e' &&
-            (p[6] | 0x20) == 'd') {
-            return 1;
-        }
-    }
-    return 0;
-}
-
-static int http_value_has_chunked(const char* v) {
-    return v ? http_value_has_chunked_n(v, strlen(v)) : 0;
-}
-
 /* Decode HTTP/1.1 chunked transfer-encoding (RFC 9112 7.1). `in` /
  * `in_len` is the raw chunk-framed body; writes the decoded length to
  * *out_len and returns a malloc'd buffer (NUL-terminated for
@@ -4623,6 +4676,14 @@ static char* http_uri_resolve_parts(const char* base, const HttpUriParts* bp, co
 static char* http_uri_resolve_ex(const char* base, const char* ref, int inherit_fragment) {
     HttpUriParts b;
     if (!base || !ref || http_uri_split(base, &b) != 0 || !b.has_scheme) return NULL;
+    /* The base's authority is copied into the result as it is, as the
+     * reference's is, so it is held to the same rule below: one with a
+     * control byte is no URI, and a relative Location against it resolved
+     * to a URI carrying that byte (found by tests/fuzz/url). */
+    for (size_t i = 0; b.has_authority && i < b.authority_len; i++) {
+        unsigned char c = (unsigned char)b.authority[i];
+        if (c < 0x20 || c == 0x7f) return NULL;
+    }
     /* A Location went into the next hop's request line as it was, so a
      * control byte in it ended or split that line (#3556). It is read as a
      * browser reads it (#3572): a TAB, an LF or a CR is removed

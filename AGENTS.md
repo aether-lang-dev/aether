@@ -597,7 +597,7 @@ workaround, they cover cases a porter often hand-rolls.
   | `docs/**`, any `.md` | none | nothing (doc-only) |
   | `compiler/**` (parser, analysis, typechecker, codegen) | `make compiler` | the targeted `tests/regression/*.ae` via `build/ae`, then `make test-ae` |
   | `std/<m>/**` | `make stdlib` | `rm -f build/test_*` (stale probe binaries), then that module's tests |
-  | `runtime/**` | none for `.ae` builds (runtime `.c` is compiled fresh into every `ae build`); `make test` relinks the C unit runner | `make test` + the affected `.ae` tests |
+  | `runtime/**` | `make stdlib`: a dev tree's `ae build` links `build/libaether.a` and compiles the runtime from source only when there is none (`tools/ae.c`), and its cache key reads the archive, not the runtime's `.c` files, so without the rebuild a `.ae` test keeps the old runtime (a cache hit, even); `make test` relinks the C unit runner from source | `make test` + the affected `.ae` tests |
   | `tools/ae.c` (the `ae` driver) | `make ae` | the relevant `tests/integration/*` |
   | `contrib/**` | `make contrib MODULES=<m>` | that module's `tests/integration/` test |
 

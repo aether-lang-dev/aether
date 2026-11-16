@@ -92,7 +92,8 @@ static inline int aether_url_request_target(char* dst, size_t cap, const char* r
 /* A URL authority `a` of `alen` bytes split into its host, without the
  * brackets of an IPv6 literal ("[::1]:8443" gives "::1"), and its port text,
  * *port_at NULL when there is none. An unclosed bracket, anything but a port
- * after the closing one, or a host that doesn't fit gives -1; else 0. */
+ * after the closing one, a host holding a control byte or a space, or a host
+ * that doesn't fit gives -1; else 0. */
 static inline int aether_addr_split_authority(const char* a, size_t alen, char* host, size_t cap,
                                               const char** port_at, size_t* port_len) {
     const char* end = a + alen;
@@ -116,6 +117,14 @@ static inline int aether_addr_split_authority(const char* a, size_t alen, char* 
     }
     size_t hlen = (size_t)(host_end - host_at);
     if (hlen >= cap) return -1;
+    /* No host holds a control byte or a space (RFC 3986 3.2.2), and the host
+     * is written as it is into a Host header, a proxy's request line and a
+     * CONNECT line: "http://a\r\nX-Injected: 1\r\n/" put a header of its own
+     * into the request (found by tests/fuzz/url). */
+    for (size_t i = 0; i < hlen; i++) {
+        unsigned char c = (unsigned char)host_at[i];
+        if (c <= 0x20 || c == 0x7f) return -1;
+    }
     memcpy(host, host_at, hlen);
     host[hlen] = '\0';
     if (colon) {

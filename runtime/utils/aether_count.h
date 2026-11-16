@@ -36,6 +36,30 @@ static inline int aether_count_or(int* p, int bits) {
 #endif
 }
 
+/* The count as it is now, for a decision another thread's change of it may
+ * race: whether it is shared (the flag bit), whether this is the last
+ * reference. Every read of a count that can be shared goes through here;
+ * a plain read of one raced the other threads' atomic changes.
+ * Acquire, so a count of one read here comes after every other holder's
+ * release of it (aether_count_dec), as a buffer mutated in place needs. */
+static inline int aether_count_load(const int* p) {
+#if !AETHER_HAS_THREADS
+    return *p;
+#elif defined(_MSC_VER) && !defined(__clang__)
+#  if defined(_M_ARM64)
+    return (int)__ldar32((unsigned __int32 volatile*)p);
+#  else
+    /* x86 and x64: a load is an acquire; the barrier keeps the compiler
+     * from moving later reads above it. */
+    int v = *(const volatile int*)p;
+    _ReadWriteBarrier();
+    return v;
+#  endif
+#else
+    return __atomic_load_n(p, __ATOMIC_ACQUIRE);
+#endif
+}
+
 /* Returns the count before the decrement. */
 static inline int aether_count_dec(int* p) {
 #if !AETHER_HAS_THREADS

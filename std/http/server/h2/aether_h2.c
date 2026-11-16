@@ -48,6 +48,7 @@
  * threadless shim's in the same TU. */
 #include "../../../../runtime/utils/aether_thread.h"
 #include "../../../../runtime/utils/aether_spawn.h"
+#include "../../../../runtime/utils/aether_once.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -1169,13 +1170,16 @@ static uint8_t* b64url_decode(const char* in, size_t in_len, size_t* out_len) {
     /* Initialise the rest to -1. The static initialiser handles the
      * named slots; everything else is zero, which we'd misread as
      * 'A'. Walk once and explicitly mark non-base64url bytes. */
-    static int initialised = 0;
+    /* Filled once by the first decode on any connection's thread: aether_once
+     * (#3680), so a decode on another thread waits for the whole table, and
+     * none reads it half filled or fills it twice. */
+    static aether_once_t lookup_once = AETHER_ONCE_INIT;
     static int8_t lookup[256];
-    if (!initialised) {
+    if (aether_once_begin(&lookup_once)) {
         for (int i = 0; i < 256; i++) lookup[i] = -1;
         for (int i = 0; i < 256; i++) if (T[i] != 0 || i == 'A') lookup[i] = T[i];
         lookup['A'] = 0;
-        initialised = 1;
+        aether_once_done(&lookup_once);
     }
 
     if (in_len == 0) {

@@ -1,6 +1,7 @@
 // Scheduling next to idle actors (#3518): one ping-pong pair passes
 // `count` messages while `idle` other actors sit with empty mailboxes. A
 // scheduler that reads every actor on each pass gets slower as `idle` grows.
+// BENCH_IDLE_1M=1 adds a row with 1M idle actors.
 //
 // Prints `row <name> <value> <unit>` lines for benchmarks/core/run.ae.
 
@@ -50,4 +51,9 @@ main() {
     println("row pingpong_idle_0 ${bench(0, count)} ns/msg")
     println("row pingpong_idle_1k ${bench(1000, count)} ns/msg")
     println("row pingpong_idle_100k ${bench(99000, count)} ns/msg")
+    // And 1M (#3540), when asked: the actors take about 1.7 GB.
+    big = os.getenv("BENCH_IDLE_1M")
+    if big != null && big == "1" {
+        println("row pingpong_idle_1m ${bench(900000, count)} ns/msg")
+    }
 }

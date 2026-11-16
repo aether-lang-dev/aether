@@ -1,0 +1,56 @@
+// A receive timeout fires among many idle actors (#3540). A core looks at the
+// actors it is told have work, not at every actor it has: the spawn tells
+// it of the countdown it arms, and the step of each Tick arms it again. The
+// poller's five ticks of 20 ms each come in well under a second with 50,000
+// idle actors spread over the cores; a core that missed the countdown would
+// leave the poller idle and the wait would return with fewer ticks.
+
+import std.os
+
+message Tick {}
+message Nothing {}
+
+extern exit(code: int)
+
+actor Idle {
+    receive {
+        Nothing() -> {}
+    }
+}
+
+actor Poller {
+    state ticks = 0
+
+    receive {
+        Tick -> { ticks = ticks + 1 }
+    } after 20 -> {
+        if ticks < 5 {
+            self ! Tick {}
+        }
+    }
+}
+
+main() {
+    println("=== a receive timeout fires among 50,000 idle actors (#3540) ===")
+    i = 0
+    while i < 50000 {
+        _x = spawn(Idle())
+        i = i + 1
+    }
+    t0 = os.now_monotonic_ns()
+    p = spawn(Poller())
+    wait_for_idle()
+    ms = (os.now_monotonic_ns() - t0) / 1000000
+    if p.ticks != 5 {
+        println("FAIL: the poller ticked ${p.ticks} time(s), expected 5")
+        exit(1)
+    }
+    // Five countdowns of 20 ms: 100 ms, each as late as a timed wait's tick
+    // (15.6 ms on Windows). Ten seconds is a stall, not a slow machine.
+    if ms > 10000 {
+        println("FAIL: five 20 ms ticks took ${ms} ms")
+        exit(1)
+    }
+    println("  PASS: five ticks, then idle")
+    println("All PASS")
+}

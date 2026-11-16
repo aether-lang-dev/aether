@@ -624,6 +624,11 @@ ActorBase* aether_rebirth_take(void (*step)(void*), size_t size) {
 }
 
 void scheduler_spawn_ready(ActorBase* a) {
+    /* A receive timeout the generated spawn armed: its core looks only at
+     * the actors it is told of (#3540). A rebirth's core is told again once
+     * it is alive (scheduler_actor_revived, below); told now, it finds the
+     * actor still dead and leaves it. */
+    if (unlikely(a && a->timeout_ns != 0)) scheduler_timeout_armed(a);
     if (likely(!aether_spawn_watched())) return;
     if (unlikely(t_capture_depth > t_capture_floor) && a) aether_actor_capture_note(a);
     if (likely(t_reborn != a) || !a) return;   // a fresh spawn: alive already

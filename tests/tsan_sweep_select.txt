@@ -1,0 +1,32 @@
+# The part of the `make test-ae` corpus `make test-tsan` runs (#3542): the
+# tests that put two threads on the same memory, which are the only ones a
+# ThreadSanitizer report can come from. Read by tests/scripts/sweep_select.sh:
+# `text:` is matched against a test's source (for a shell test, every .ae,
+# .sh and .c file in its directory), `path:` against its path, both as
+# extended regular expressions; a test either one picks runs.
+#
+# The selection is by what a test does, so a new test that declares an actor
+# or starts a server is in the next run without an edit here. A test this
+# misses runs on every other leg; only TSan does not see it.
+
+# The actors and the scheduler: a program that declares an actor runs the
+# scheduler's threads, its mailboxes, queues and overflow buffers.
+text:^[[:space:]]*actor[[:space:]]+[A-Za-z_]
+
+# std.net and what runs on it (std.http and its client, server, proxy and
+# park; std.actors' registry; std.worker's pool; std.supervise; std.stream):
+# each starts threads of its own (the server's accept and background threads,
+# the event loop's drivers, the connection pool, the resolver) or carries
+# messages between actors. std.tcp and std.udp alone are blocking sockets on
+# the calling thread, and are picked only with one of these.
+text:import[[:space:]]+std\.(net|http|actors|worker|supervise|stream)([^A-Za-z0-9_]|$)
+
+# A C host or shim that starts threads of its own and calls into libaether
+# from them (foreign_thread_send and its kind).
+text:pthread_create
+
+# The shell tests of std.net's HTTP stack, and of the actors and the
+# scheduler, by name: some build a program kept in another directory or
+# written by the script, which the text rules above cannot see.
+path:^tests/integration/(http|https|ws)_
+path:^tests/integration/(actor|sched|scheduler|mailbox)_

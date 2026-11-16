@@ -191,16 +191,31 @@ struct HttpConn;
 
 typedef struct HttpServer {
     int socket_fd;
-    int port;
+    /* The port: read by any thread (http_server_port) while the thread that
+     * runs the server may be binding it, so atomic. */
+    _Atomic int port;
+    /* The host to bind, as the program set it: replaced under run_lock
+     * (http_server_set_host, a bind), and copied there into run_host as a
+     * run begins. */
     char* host;
-    int is_running;
+    /* The run's own copy of host, made by server_run_begin before the run's
+     * thread starts and freed by server_run_end: what the run binds and its
+     * monitor reports, which a host set while it runs does not change. NULL
+     * between runs. */
+    char* run_host;
+    /* Cleared by http_server_stop on any thread, read by the server's accept
+     * loops on theirs, so atomic. */
+    _Atomic int is_running;
 
     // Server-side TLS (#260 Tier 0). When tls_enabled == 1, every
     // accepted connection is wrapped in SSL_accept before the HTTP
     // parse begins. tls_ctx is an SSL_CTX*, declared here as void*
     // so this header doesn't pull in <openssl/ssl.h> for callers
     // that don't need it. Lazy-allocated by http_server_set_tls.
-    int tls_enabled;
+    // Set from 0 to 1 by a certificate's first apply (under tls_lock and
+    // tls_config_lock) and read by the accept paths of the server's and the
+    // event loop's threads without them, so atomic (TSan, #3542).
+    _Atomic int tls_enabled;
     void* tls_ctx;
     int is_pure_tls;
     int tls_backend;            /* 0 default (AETHER_PURE_TLS, then the build),
@@ -252,7 +267,12 @@ typedef struct HttpServer {
 
     // Middleware
     HttpMiddlewareNode* middleware_chain;
-    void* evloop;           /* HttpEvLoop*, when the proxy driver is running */
+    /* HttpEvLoop*, when the proxy driver is running. Set and cleared by the
+     * server's thread; read by the accessors on any thread and by the pool's
+     * workers. All of them under evloop_lock, and the clear comes before the
+     * loop is stopped and freed, so no reader holds a freed loop. */
+    void* evloop;
+    pthread_mutex_t evloop_lock;
 
     // Response transformers (#260 Tier 1). Run after the route
     // handler, before serialization. See
@@ -279,6 +299,20 @@ typedef struct HttpServer {
     // Incremented at the top of http_server_drain_connection and
     // decremented at the bottom; the shutdown helper waits on this.
     _Atomic int inflight_connections;
+
+    // Actor dispatch mode (#3688). actor_refs: the server's references, its
+    // owner's (given back by http_server_free) and one for each worker actor
+    // given a connection, taken by dispatch_to_worker before the send and
+    // given back by http_conn_worker_step after its last use of the server.
+    // Whoever gives back the last frees the server, so a worker still queued
+    // when the program frees it (its core busy, or the stop called on that
+    // very core) finds it whole when it is stepped. actor_active: the workers
+    // inside a step with their connection, which the run waits for once its
+    // accept loops are over, as the thread-pool path joins its workers: they
+    // run on cores that are stepping. A queued worker is not waited for, since
+    // only its own core can step it and that core may be the one in the stop.
+    _Atomic int actor_refs;
+    _Atomic int actor_active;
 
     // The connections whose worker is waiting for a request to begin, with
     // nothing of it read: http_server_stop shuts each one down, so a worker
@@ -383,7 +417,10 @@ typedef struct HttpServer {
     // byte to wake_fds[1] so the accept loop's poll() returns at once. Linux
     // wakes a poll() on a socket that is shut down, but macOS and the BSDs
     // do not, and each stop waited out the loop's one-second timeout.
-    // -1 where there is none (Windows, WASI, or pipe() failed).
+    // On Windows wake_fds[0] is a loopback UDP socket connected to itself,
+    // which http_server_stop sends a byte to (WSAPoll cannot wait on a pipe),
+    // and wake_fds[1] is unused. -1 where there is none (WASI, or the pipe or
+    // socket could not be made).
     int wake_fds[2];
     // Why the last bind or start failed, "" when it did not (#3131). The
     // library reports through this and the return value, never by printing.
@@ -445,7 +482,9 @@ int  http_server_has_monitor(HttpServer* server);
 // interfaces). Pass "127.0.0.1" to bind loopback only — useful in
 // tests because macOS / Windows firewalls don't prompt on loopback
 // binds. A host name binds the IPv4 address it resolves to, and one
-// that does not resolve fails the bind (#2639). No-op if `host` is NULL
+// that does not resolve fails the bind (#2639). Set while the server runs,
+// it takes effect at the next start: a run binds and reports the host it
+// started with. No-op if `host` is NULL
 // or empty.
 void http_server_set_host(HttpServer* server, const char* host);
 // Start the server on the calling thread (returns when it stops) or on a
@@ -455,13 +494,24 @@ int http_server_start_raw(HttpServer* server);
 int http_server_start_background_raw(HttpServer* server);
 // Stop the server and wait until its run is over, whichever start began it
 // and whichever thread it runs on: when stop returns, its accept loop and
-// every worker are done, and the server may be freed or started again.
-// Called on one of the server's own threads (a handler, the monitor), it
-// only signals: the run ends once that call returns.
+// every worker serving a connection are done (each finishes the request it
+// is in), and the server may be freed or started again. Called on one of
+// the server's own threads (a handler, the monitor), it only signals: the
+// run ends once that call returns.
+// In actor dispatch mode (http_server_set_actor_handler) a worker actor
+// whose connection is still queued, not yet stepped, is not waited for: only
+// its own core can step it, and that may be the core the stop is called on
+// (from an actor's handler, or on a one-core scheduler). When it is stepped
+// it closes its connection without serving it (#3688).
 void http_server_stop(HttpServer* server);
 // Stop (as above) and free the server. Fatal on one of the server's own
 // threads while it runs, since the run still uses it: stop it there and
-// free it from the thread that started it.
+// free it from the thread that started it, or from any actor.
+// In actor dispatch mode a worker still queued holds the server: free gives
+// back the program's hold, and the server's memory (with what it owns: its
+// routes, middleware and their release callbacks) goes when the last such
+// worker is done, on that worker's thread. A worker that is never stepped
+// (the scheduler shut down before the free) keeps it.
 void http_server_free(HttpServer* server);
 // The run's threads say they are the server's, for the duration of the
 // run, so a stop on them does not wait for itself. Internal to std.net:
@@ -1125,8 +1175,9 @@ int http_server_loop_plan(HttpServer* server, HttpLoopPlan* plan);
 // and Transfer-Encoding. `head` is the request line's first byte, `hdr_end`
 // the blank line's "\r\n\r\n". HTTP_HEAD_OK fills *content_length (0 when
 // absent) and *chunked; anything else is a refusal, which the worker path
-// answers: 400 for a head that is not a request (HTTP_HEAD_MALFORMED, a NUL
-// byte, #3254) or whose framing is in doubt, 414, 431.
+// answers: 400 for a head that is not a request (HTTP_HEAD_MALFORMED: a NUL
+// byte, #3254, or a CR or an LF that is not part of a CR LF) or whose framing
+// is in doubt, 414, 431.
 enum {
     HTTP_HEAD_OK           = 0,
     HTTP_HEAD_MALFORMED    = 1,

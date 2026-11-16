@@ -1,0 +1,5 @@
+GET / HTTP/1.1
+Host:a
+X-A: 	 spaced 	 
+X-B:
+

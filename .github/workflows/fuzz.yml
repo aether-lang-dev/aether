@@ -1,0 +1,88 @@
+name: Fuzz
+
+# Coverage-guided fuzzing of the parsers that read what a peer sends (#3543):
+# std.cbor's decoder, std.ipc's frame reader, the HTTP/1 request head on the
+# server's path, the chunked body decoder, the client's URL and Location
+# readers, and std.json. Each target runs under libFuzzer, ASan and UBSan and
+# checks properties of its contract, not only that nothing crashes
+# (tests/fuzz/README.md): `make fuzz-ci`, every target for FUZZ_SECONDS from
+# its committed seed corpus.
+#
+# A short budget, 60 s a target: a parser's shallow bugs are found in seconds
+# from good seeds (a Content-Length truncation, a double free on a request
+# line with no version), and a longer run belongs on a developer's machine
+# with FUZZ_SECONDS. About 6 minutes of fuzzing and 4 of building. So it runs
+# on the PRs that change what it fuzzes or how, and on every push to main.
+#
+# On a failure the reproducers (crash-*, leak-*, timeout-*, oom-* under
+# build/fuzz/<target>/) are uploaded: rerun one with that target's binary,
+# or with `FUZZ_REPLAY=1 FUZZ_REPLAY_INPUTS=<file> sh tests/fuzz/run_fuzz_c.sh
+# <target>` on a machine without libFuzzer.
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main, develop ]
+    paths:
+      - 'std/net/**'
+      - 'std/json/**'
+      - 'std/cbor/**'
+      - 'std/ipc/**'
+      # The harnesses link the runtime and std.string and take their flags
+      # from the Makefile (FUZZ_STD_CFLAGS): a change there changes what is
+      # fuzzed.
+      - 'runtime/**'
+      - 'std/string/**'
+      - 'Makefile'
+      - 'tests/fuzz/**'
+      - '.github/workflows/fuzz.yml'
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: Seconds per target
+        required: false
+        default: '60'
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
+
+jobs:
+  fuzz:
+    name: Linux / Clang + libFuzzer
+    # Ubuntu 24.04's clang is 18, whose libFuzzer and sanitizer runtimes are
+    # in libclang-rt-18-dev.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+
+    steps:
+    - uses: actions/checkout@v5
+
+    - name: Install packages
+      uses: ./.github/actions/apt-install
+      with:
+        packages: clang libclang-rt-18-dev make bc pkg-config
+        scope: fuzz
+
+    - name: Build the toolchain
+      run: make -j"$(nproc)" compiler ae stdlib
+
+    - name: make fuzz-ci
+      env:
+        FUZZ_SECONDS: ${{ github.event.inputs.seconds || '60' }}
+      run: make fuzz-ci
+
+    - name: Upload the reproducers
+      if: failure()
+      uses: actions/upload-artifact@v6
+      with:
+        name: fuzz-reproducers
+        path: |
+          build/fuzz/*/crash-*
+          build/fuzz/*/leak-*
+          build/fuzz/*/timeout-*
+          build/fuzz/*/oom-*
+        if-no-files-found: ignore

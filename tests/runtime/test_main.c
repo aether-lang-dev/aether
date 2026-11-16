@@ -25,6 +25,7 @@ void print_test_help(const char* program) {
     printf("  %s                    Run all tests\n", program);
     printf("  %s --category=NAME    Run tests in specific category\n", program);
     printf("  %s --list-categories  List all test categories\n", program);
+    printf("  %s --list             List every test (category, tab, name); run none\n", program);
     printf("  %s --help             Show this help\n", program);
     printf("\n");
     printf("Categories:\n");
@@ -38,7 +39,33 @@ void print_test_help(const char* program) {
     printf("  other       - Miscellaneous tests\n");
 }
 
+/* The tests registered by hand, beside the TEST() ones their constructors
+ * register before main. Every mode runs after this: --category=NAME once
+ * ran before it, so a category run left out every test below (all of
+ * test_scheduler.c and the rest of the scheduler, mailbox and actor
+ * suites) and still reported a pass. */
+static void register_all_tests(void) {
+    register_scheduler_tests();
+    register_stress_tests();
+    register_zerocopy_tests();
+    register_lockfree_mailbox_tests();
+    register_memory_arena_tests();
+    register_memory_pool_tests();
+    register_lexer_tests();
+    register_scheduler_optimization_tests();
+    register_worksteal_race_tests();
+    register_ask_relief_tests();
+    register_sender_move_order_tests();
+    register_actor_thread_sends_tests();
+    register_overflow_reentry_tests();
+    register_actor_death_tests();
+    register_actor_rebirth_tests();
+    register_mailbox_bound_tests();
+}
+
 int main(int argc, char** argv) {
+    register_all_tests();
+
     // Parse arguments
     if (argc > 1) {
         if (strcmp(argv[1], "--help") == 0 || strcmp(argv[1], "-h") == 0) {
@@ -50,6 +77,11 @@ int main(int argc, char** argv) {
             printf("Available test categories:\n");
             printf("  compiler\n  runtime\n  collections\n  network\n");
             printf("  memory\n  stdlib\n  parser\n  other\n");
+            return 0;
+        }
+
+        if (strcmp(argv[1], "--list") == 0) {
+            list_tests();
             return 0;
         }
         
@@ -82,24 +114,6 @@ int main(int argc, char** argv) {
     
     printf("Aether Language Test Suite\n");
     printf("==========================\n\n");
-    
-    // Register tests
-    register_scheduler_tests();
-    register_stress_tests();
-    register_zerocopy_tests();
-    register_lockfree_mailbox_tests();
-    register_memory_arena_tests();
-    register_memory_pool_tests();
-    register_lexer_tests();
-    register_scheduler_optimization_tests();
-    register_worksteal_race_tests();
-    register_ask_relief_tests();
-    register_sender_move_order_tests();
-    register_actor_thread_sends_tests();
-    register_overflow_reentry_tests();
-    register_actor_death_tests();
-    register_actor_rebirth_tests();
-    register_mailbox_bound_tests();
     
     run_all_tests();
 

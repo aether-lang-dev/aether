@@ -60,6 +60,13 @@ The device is process-global: `open` and `close` take no handle. Sources are
 individual, loaded and `unload`ed separately, and `play`/`pause`/`stop` act on
 one.
 
+Every call can come from any thread, actors included. `close` waits for the
+calls under way to finish and refuses new ones from the moment it starts; an
+`open` that comes during a `close` waits for it. A source or group still live
+at `close` is taken out of the mix first: calls on it afterwards fail with
+`last_error()` "audio: the source's engine was closed" (even after another
+`open`), and `unload` or `group_free` still frees it.
+
 `last_error()` returns the backend's own diagnostic, which is more specific
 than the error string when a device refuses to open.
 

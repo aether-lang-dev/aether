@@ -15,6 +15,7 @@
 #include <string.h>
 
 #include "../scheduler/multicore_scheduler.h"
+#include "aether_once.h"
 
 extern AETHER_TLS int current_core_id;
 uint64_t aether_now_ns(void);
@@ -44,7 +45,10 @@ typedef struct {
 static TraceBuffer g_trace_buffers[TRACE_SLOTS];
 
 static const char* g_trace_path = NULL;
-static int g_trace_state = -1;          /* -1 unresolved, 0 off, 1 on */
+/* Resolved once, by whichever thread traces first (a send on any core):
+ * aether_once (#3680), so the path is set before anyone reads it on. */
+static aether_once_t g_trace_once = AETHER_ONCE_INIT;
+static int g_trace_on = 0;
 static int g_trace_flushed = 0;
 
 /* Message-name table, registered by generated code. */
@@ -59,17 +63,19 @@ static const char* const k_kind_names[AE_TRACE_KIND_COUNT] = {
 
 int aether_trace_enabled(void) {
     /* Resolved once. A traced build with AETHER_TRACE unset must still cost
-     * nothing measurable, so this settles to a plain load of an int. */
-    if (g_trace_state < 0) {
+     * nothing measurable: past the first call this is one acquire load (a
+     * plain load on x86) and a load of an int. */
+    if (aether_once_begin(&g_trace_once)) {
         const char* p = getenv("AETHER_TRACE");
         if (p && *p) {
             g_trace_path = p;
-            g_trace_state = 1;
+            g_trace_on = 1;
         } else {
-            g_trace_state = 0;
+            g_trace_on = 0;
         }
+        aether_once_done(&g_trace_once);
     }
-    return g_trace_state;
+    return g_trace_on;
 }
 
 void aether_trace_register_message_names(const char* const* names, int count, int base_id) {

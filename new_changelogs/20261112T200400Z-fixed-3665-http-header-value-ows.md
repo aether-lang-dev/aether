@@ -1,0 +1,1 @@
+- **A request header's value loses the tabs and trailing spaces around it (#3665).** The parser dropped leading spaces only, so `X-A:\t v \t` read as `"\t v \t"` to a handler and an upstream, and as `"v"` to the head check that framed the same request. Both now trim a space or a tab on either side (RFC 9112 5). Found by the new HTTP head fuzzer (#3543).

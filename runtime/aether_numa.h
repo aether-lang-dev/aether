@@ -70,7 +70,10 @@ void* aether_numa_alloc_aligned(size_t size, size_t align, int node);
 void aether_numa_free_aligned(void* ptr, size_t size);
 
 /**
- * Cleanup NUMA subsystem.
+ * Cleanup NUMA subsystem: releases the CPU map, so the next aether_numa_init
+ * detects the topology again. How blocks are allocated is decided once per
+ * process and is not reset: a block allocated before the cleanup is still
+ * freed, after it, by the allocator that made it.
  */
 void aether_numa_cleanup(void);
 

@@ -292,7 +292,12 @@ The `ActorBase` contains:
 - `spsc_queue`: unused, NULL (kept for the layout, #3292)
 - `reply_slot`: Non-NULL during ask/reply (`_Atomic` pointer)
 - `step_lock`: Prevents concurrent `step()` during work-steal handoff (`atomic_flag`)
-- `timeout_ns`, `last_activity_ns`: Receive timeout and when idling began
+- `timeout_ns`, `last_activity_ns`: Receive timeout and when idling began.
+  Armed outside the actor's own step (at spawn, by hand), the countdown is
+  told to the actor's core with `scheduler_timeout_armed(actor)`: a core
+  looks at the actors it is told of, not at every actor it has (#3540)
+- `timer_slot`, `ready_queued`: The core's timer heap and ready list (#3540);
+  the scheduler's own, zero in a new actor
 - `dead`: Set once the actor panicked or was released; it is skipped after
 - `alloc_size`, `destroy_state`, `scheduler_owned`: How the scheduler frees it
 - `inbox`, `thread_parked`: For an actor with its own thread (`auto_process`),

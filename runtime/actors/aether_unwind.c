@@ -63,8 +63,10 @@ AetherJmpFrame* aether_try_push(void) {
 }
 
 /* aether_frames.h. NULL until a library call ran on some thread of this
- * runtime copy: until then no step can find an execution to put aside. */
-void (*_Atomic aether_step_execs_hook)(AetherExecAside* s, int hide) = NULL;
+ * runtime copy: until then no step can find an execution to put aside. NULL
+ * as every object of static storage starts, with no `= NULL`: clang 14
+ * refuses that for an _Atomic function pointer under -fsanitize=thread. */
+void (*_Atomic aether_step_execs_hook)(AetherExecAside* s, int hide);
 
 /* The executions an actor step runs inside are not its own (#3392): it is
  * code a library call reached, a send's inline step or a cooperative ask's

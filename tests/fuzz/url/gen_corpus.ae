@@ -1,0 +1,122 @@
+// Writes the seed corpus for the URL fuzz target into the directory named
+// on the command line (corpus/ beside this file, as `make fuzz-corpus` runs
+// it). Edit this file, not the seeds.
+//
+// A seed is a URL, then optionally a NUL and a Location to resolve against
+// it: hosts, ports and targets of every shape parse_url reads, and relative
+// references of every kind RFC 3986 5.4 lists, with the bytes a Location may
+// hold that a request line may not.
+import std.os
+import std.io
+import std.fs
+import std.string
+import std.strbuilder
+
+extern exit(code: int)
+
+fn write_seed(dir: string, name: string, b: ptr) {
+    err = fs.write_binary("${dir}/${name}", strbuilder.finish_with_length(b))
+    if err != "" {
+        _w = io.stdout_write("gen_corpus: ${name}: ${err}\n")
+        exit(1)
+    }
+}
+
+// A URL alone.
+fn url(dir: string, name: string, u: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, u)
+    write_seed(dir, name, b)
+}
+
+// A URL, a NUL, and a Location to resolve against it.
+fn loc(dir: string, name: string, u: string, location: string) {
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, u)
+    _b = strbuilder.append_byte(b, 0)
+    _c = strbuilder.append(b, location)
+    write_seed(dir, name, b)
+}
+
+fn put_repeat(b: ptr, byte: int, count: int) {
+    i = 0
+    while i < count {
+        _a = strbuilder.append_byte(b, byte)
+        i = i + 1
+    }
+}
+
+const BASE = "http://h.example:8080/a/b/c?q=1#f"
+
+main() {
+    if os.args_count() < 2 {
+        _w = io.stdout_write("usage: gen_corpus <corpus-dir>\n")
+        exit(2)
+    }
+    dir = os.args_get(1)
+    merr = fs.mkdir_p(dir)
+    if merr != "" {
+        _w = io.stdout_write("gen_corpus: ${dir}: ${merr}\n")
+        exit(1)
+    }
+
+    // URLs parse_url takes.
+    url(dir, "http_plain", "http://example.com/path?x=1")
+    url(dir, "https_port", "https://example.com:8443/p")
+    url(dir, "no_scheme", "example.com:81/p")
+    url(dir, "query_no_path", "http://h:8080?x=1")
+    url(dir, "fragment_only", "http://h#frag")
+    url(dir, "ipv6", "http://[::1]/x")
+    url(dir, "ipv6_port", "https://[2001:db8::1]:443/x?y#z")
+    url(dir, "port_max", "http://h:65535/")
+    url(dir, "empty_target", "http://h")
+
+    // URLs it refuses.
+    url(dir, "port_zero", "http://h:0/")
+    url(dir, "port_over", "http://h:65536/")
+    url(dir, "port_tail", "http://h:80abc/")
+    url(dir, "port_sign", "http://h:+80/")
+    url(dir, "port_empty", "http://h:/")
+    url(dir, "port_long_zeros", "http://h:000080/")
+    url(dir, "ipv6_unclosed", "http://[::1/x")
+    url(dir, "ipv6_junk_after", "http://[::1]x:80/")
+    url(dir, "userinfo", "http://user:pw@h/")
+    url(dir, "host_space", "http://a b/")
+    url(dir, "host_crlf", "http://evil\r\nX-Injected: 1\r\n/")
+    url(dir, "host_tab", "http://a\tb/")
+    url(dir, "empty_host", "http:///p")
+
+    b = strbuilder.new(0)
+    _a = strbuilder.append(b, "http://")
+    put_repeat(b, 104, 300)
+    _b = strbuilder.append(b, "/")
+    write_seed(dir, "host_too_long", b)
+
+    // Locations: RFC 3986 5.4's normal and abnormal examples, on a base
+    // with a port, a query and a fragment.
+    loc(dir, "loc_relative", BASE, "g")
+    loc(dir, "loc_dot", BASE, "./g")
+    loc(dir, "loc_dotdot", BASE, "../../../g")
+    loc(dir, "loc_absolute_path", BASE, "/g/./h/../i")
+    loc(dir, "loc_network_path", BASE, "//other:81/x")
+    loc(dir, "loc_query", BASE, "?y")
+    loc(dir, "loc_fragment", BASE, "#s")
+    loc(dir, "loc_empty", BASE, "")
+    loc(dir, "loc_absolute", BASE, "HTTPS://Other.Example/x")
+    loc(dir, "loc_scheme_only", BASE, "http:g")
+    loc(dir, "loc_dot_slash_slash", BASE, "http:.//g")
+    loc(dir, "loc_bad_scheme", BASE, "1a:b")
+    loc(dir, "loc_mailto", BASE, "mailto:a@b")
+    loc(dir, "loc_ipv6_base", "http://[::1]:8080/a", "/b")
+    loc(dir, "loc_no_scheme_base", "h:81/a/b", "c")
+
+    // Bytes a Location may hold and a request line may not.
+    loc(dir, "loc_space", BASE, "/a b?c d#e f")
+    loc(dir, "loc_tab_lf_cr", BASE, "/a\tb\nc\rd")
+    loc(dir, "loc_control", BASE, "/a\x01b\x7f")
+    loc(dir, "loc_non_ascii", BASE, "/caf\xc3\xa9")
+    loc(dir, "loc_authority_control", BASE, "//a\x01b/x")
+    loc(dir, "loc_authority_space", BASE, "//a b/x")
+    loc(dir, "loc_authority_crlf", BASE, "//evil\r\nX: 1/x")
+    loc(dir, "loc_base_authority_control", "http://a\x01b/p", "/x")
+}

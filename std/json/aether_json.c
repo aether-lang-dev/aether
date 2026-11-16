@@ -47,6 +47,7 @@
 // RFC 8259 fixes '.' as the decimal separator — number text must not follow
 // the ambient LC_NUMERIC in either direction.
 #include "../../runtime/aether_locale_num.h"
+#include "../../runtime/utils/aether_once.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -425,17 +426,20 @@ static const uint8_t JSON_CC[256] = {
 // Multi-byte UTF-8 lead bytes (>=0x80) are NOT marked CC_STR_OK — the
 // fast string scan falls through to the DFA for them, which is the
 // correct behavior (validation required).
-static int g_cc_inited = 0;
+/* Filled once by the first parse on any thread: aether_once (#3680), so a
+ * parse on another thread waits for the whole table (a plain flag let it
+ * read the table half filled, and two threads fill it at once). */
+static aether_once_t g_cc_once = AETHER_ONCE_INIT;
 static uint8_t JSON_CC_RW[256];  // mutable copy used at runtime
 
 static void cc_init(void) {
-    if (g_cc_inited) return;
+    if (!aether_once_begin(&g_cc_once)) return;
     memcpy(JSON_CC_RW, JSON_CC, sizeof(JSON_CC_RW));
     for (int c = 0x20; c < 0x80; c++) {
         if (c == '"' || c == '\\') continue;
         JSON_CC_RW[c] |= CC_STR_OK;
     }
-    g_cc_inited = 1;
+    aether_once_done(&g_cc_once);
 }
 
 #define CC(c) (JSON_CC_RW[(unsigned char)(c)])

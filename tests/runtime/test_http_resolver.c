@@ -388,6 +388,18 @@ typedef struct {
     AetherProxyOpts* opts;
 } RsGateway;
 
+/* The server's event loop, read as the server's own readers read it: under
+ * evloop_lock, which the server's thread holds to publish it (#3679). A
+ * volatile read of the field raced that store, and what the test did with
+ * the loop next (its resolver, made by the server's thread) came after
+ * nothing the test had synchronized with (#3542). */
+static HttpEvLoop* rs_evloop(HttpServer* s) {
+    pthread_mutex_lock(&s->evloop_lock);
+    HttpEvLoop* loop = (HttpEvLoop*)s->evloop;
+    pthread_mutex_unlock(&s->evloop_lock);
+    return loop;
+}
+
 static int rs_gateway(RsGateway* g, const char* upstream, int timeout_sec) {
     HttpServer* gw = http_server_create(0);
     if (gw) http_server_set_host(gw, "127.0.0.1");
@@ -401,7 +413,7 @@ static int rs_gateway(RsGateway* g, const char* upstream, int timeout_sec) {
     if (!rs_start(g->server)) return 0;
     /* The server's own thread starts the loop, after start returns: give it
      * a moment. A build without the loop never has one. */
-    for (int i = 0; i < 300 && !*(void* volatile*)&g->server->evloop; i++) usleep(10000);
+    for (int i = 0; i < 300 && !rs_evloop(g->server); i++) usleep(10000);
     return 1;
 }
 
@@ -428,14 +440,14 @@ TEST_CATEGORY(http_proxy_loop_waits_on_a_lookup_without_holding_its_drivers,
 
     RsGateway g = { 0 }, g2 = { 0 };
     ASSERT_TRUE(rs_gateway(&g, url, 30));   /* room for the slowest runner */
-    if (!g.server->evloop) {             /* no loop on this build: nothing to see */
+    if (!rs_evloop(g.server)) {             /* no loop on this build: nothing to see */
         rs_gateway_free(&g);
         http_server_stop(up);
         http_server_free(up);
         return;
     }
     rs_reset(0, 0);
-    http_resolver_set_lookup(http_evloop_resolver((HttpEvLoop*)g.server->evloop), rs_lookup);
+    http_resolver_set_lookup(http_evloop_resolver(rs_evloop(g.server)), rs_lookup);
     int port = http_server_port(g.server);
 
     int a = rs_send(port, "/p");
@@ -467,7 +479,7 @@ TEST_CATEGORY(http_proxy_loop_waits_on_a_lookup_without_holding_its_drivers,
     rs_reset(0, 0);
     snprintf(url, sizeof(url), "http://slow2.test:%d", up_port);
     ASSERT_TRUE(rs_gateway(&g2, url, 1));
-    http_resolver_set_lookup(http_evloop_resolver((HttpEvLoop*)g2.server->evloop), rs_lookup);
+    http_resolver_set_lookup(http_evloop_resolver(rs_evloop(g2.server)), rs_lookup);
     int c = rs_send(http_server_port(g2.server), "/p/slow");
     ASSERT_TRUE(c >= 0);
     ASSERT_EQ(1, rs_wait_for(&rs_lookups, 1));
