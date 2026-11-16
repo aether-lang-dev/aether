@@ -938,6 +938,24 @@ static int direct_status_of(const char* raw, size_t raw_len) {
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
 }
 
+/* Whether the head's fields (`raw`, `header_bytes` bytes, the status line
+ * first) state the body's length: a Content-Length, or a Transfer-Encoding,
+ * whose final coding decides where the body ends. */
+static int direct_head_states_length(const char* raw, size_t header_bytes) {
+    const char* p = memchr(raw, '\n', header_bytes);
+    const char* end = raw + header_bytes;
+    while (p && ++p < end) {
+        const char* cr = memchr(p, '\r', (size_t)(end - p));
+        if (!cr) break;
+        size_t kl = 0;
+        while (p + kl < cr && p[kl] != ':') kl++;
+        if ((kl == 14 && http_ci_eq(p, "Content-Length", 14)) ||
+            (kl == 17 && http_ci_eq(p, "Transfer-Encoding", 17))) return 1;
+        p = memchr(cr, '\n', (size_t)(end - cr));
+    }
+    return 0;
+}
+
 int aether_proxy_direct_ok(const AetherProxyExchange* px) {
     if (!px || !px->opts) return 0;
     /* A cache has to keep the headers and body, and a transformer has to be
@@ -986,6 +1004,14 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
     out->status   = status;
     out->body     = raw + header_bytes;
     out->body_len = body_len;
+    /* An answer to HEAD carries no body (RFC 9110 9.3.2), whatever the
+     * upstream sent after its head (#3710). */
+    out->head_only = px->req && px->req->method && strcmp(px->req->method, "HEAD") == 0;
+    out->length_unknown = 0;
+    if (out->head_only) {
+        out->body_len = 0;
+        out->length_unknown = !direct_head_states_length(raw, header_bytes);
+    }
     return 0;
 }
 
@@ -1081,7 +1107,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * whose upstream length describes a body that is not being
          * forwarded, comes out as 0 rather than as that length. Emitted here
          * in the upstream's position so the header order matches. */
-        if (kl == 14 && http_ci_eq(p, "Content-Length", 14)) {
+        /* An answer to HEAD keeps the upstream's, which states the GET's
+         * length (RFC 9110 9.3.2), and is copied below like any field. */
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && !d->head_only) {
             char cl[48];
             size_t cn = 16;
             memcpy(cl, "Content-Length: ", 16);
@@ -1114,8 +1142,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
 
     /* An upstream that sent no Content-Length still gets one, appended, which
      * is where the copying path puts it when the header did not already
-     * exist to be replaced. */
-    if (!saw_content_length) {
+     * exist to be replaced. Not an answer to HEAD: a length its upstream did
+     * not state would be one the GET may not have (#3710). */
+    if (!saw_content_length && !d->head_only) {
         char cl[48];
         size_t cn = 16;
         memcpy(cl, "Content-Length: ", 16);

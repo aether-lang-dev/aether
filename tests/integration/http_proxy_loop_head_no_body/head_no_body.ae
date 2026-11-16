@@ -1,0 +1,178 @@
+// A HEAD through the proxy gets the upstream's head only, whatever the
+// upstream sends after it (#3710).
+//
+// RFC 9110 9.3.2: an answer to HEAD carries no body. The proxy event loop on
+// Linux and macOS passed an upstream's answer through from its receive
+// buffer, all of it: an upstream that sent a body with its answer to HEAD
+// had that body relayed to the client, which reads it as the start of the
+// next response. The loop now ends the response where its own framing says,
+// which for an answer to HEAD is its head, keeps the upstream's
+// Content-Length as sent (it may state the GET's length), and closes the
+// client's connection after the head when the upstream stated no length.
+//
+// A raw upstream answers each HEAD with a body, once framed by
+// Content-Length and once ended by its close. Each goes to a bare proxy (the
+// event loop on Linux and macOS, the worker path on Windows) and to one
+// behind a program's middleware (the worker path everywhere): nothing may
+// follow the head. On the event loop the framed answer keeps Content-Length
+// 4 and the connection, and the unframed one ends the connection.
+
+import std.http
+import std.http.proxy
+import std.os
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+message Serve { srv: ptr, answer: string }
+
+// Accept one connection on `srv`, read its request head, send `answer` and
+// close.
+actor Upstream {
+    receive {
+        Serve(srv, answer) -> {
+            sock, aerr = tcp.accept(srv)
+            if aerr == "" {
+                req = ""
+                t = 0
+                while t < 50 && string.index_of(req, "\r\n\r\n") < 0 {
+                    chunk, rerr = tcp.read(sock, 4096)
+                    if rerr != "" || string.length(chunk) == 0 {
+                        t = 50
+                    } else {
+                        req = string.concat(req, chunk)
+                    }
+                    t = t + 1
+                }
+                tcp.write(sock, answer)
+                sleep(200)
+                tcp.close(sock)
+            }
+        }
+    }
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+// The value of the head's Content-Length, or "none".
+content_length(head: string) -> string {
+    at = string.index_of(head, "\r\nContent-Length: ")
+    if at < 0 {
+        return "none"
+    }
+    rest = string.substring(head, at + 18, string.length(head))
+    return string.substring(rest, 0, string.index_of(rest, "\r\n"))
+}
+
+// A HEAD on a connection of its own that asks to stay open: the status, the
+// Content-Length, "head only" or how many bytes followed the head, and
+// whether the server closed the connection within two seconds.
+probe(port: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "HEAD /p HTTP/1.1\r\nHost: x\r\n\r\n")
+    wire = ""
+    closed = "kept"
+    tries = 0
+    while tries < 20 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                closed = "closed"
+                tries = 20
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    end = string.index_of(wire, "\r\n\r\n")
+    if string.length(wire) < 12 || end < 0 {
+        return "no answer"
+    }
+    status = string.substring(wire, 9, 12)
+    cl = content_length(string.substring(wire, 0, end + 2))
+    after = string.length(wire) - (end + 4)
+    tail = "head only"
+    if after > 0 {
+        tail = "${after} bytes after the head"
+    }
+    return "${status} length ${cl} ${tail} ${closed}"
+}
+
+main() {
+    println("=== a HEAD through the proxy gets the upstream's head only (#3710) ===")
+    labels = ["an upstream answer framed by Content-Length",
+        "an upstream answer ended by its close"]
+    answers = ["HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 4\r\n\r\nBODY",
+        "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\n\r\nBODY"]
+    // The event loop: the upstream's length kept, and the connection kept,
+    // or closed when the upstream stated no length.
+    loop_wants = ["200 length 4 head only kept", "200 length none head only closed"]
+    names = ["bare proxy", "behind middleware"]
+    on_loop = os.platform() != "windows"
+
+    bad = 0
+    i = 0
+    while i < 2 {
+        g = 0
+        while g < 2 {
+            srv, lerr = tcp.listen_on("127.0.0.1", 0)
+            if lerr != "" {
+                println("FAIL: listen: ${lerr}")
+                exit(1)
+            }
+            up = spawn(Upstream())
+            up ! Serve { srv: srv, answer: answers[i] }
+            s = http.server_create(0)
+            http.server_set_host(s, "127.0.0.1")
+            if g == 1 {
+                http.server_use_middleware(s, mw_pass, 0)
+            }
+            merr = proxy.mount_simple(s, "/", "http://127.0.0.1:${tcp.server_port(srv)}", 5)
+            if merr != "" {
+                println("FAIL: mount: ${merr}")
+                exit(1)
+            }
+            if http.server_bind(s, "127.0.0.1", 0) != "" {
+                println("FAIL: bind")
+                exit(1)
+            }
+            port = http.server_port(s)
+            serr = http.server_start_background(s)
+            if serr != "" {
+                println("FAIL: ${serr}")
+                exit(1)
+            }
+            sleep(100)
+            got = probe(port)
+            ok = string.index_of(got, " head only ") >= 0 && string.starts_with(got, "200 ") == 1
+            if ok && on_loop && g == 0 {
+                ok = got == loop_wants[i]
+            }
+            if ok {
+                println("  PASS ${labels[i]} (${names[g]}): ${got}")
+            } else {
+                println("  FAIL ${labels[i]} (${names[g]}): got '${got}'")
+                bad = bad + 1
+            }
+            http.server_stop(s)
+            http.server_free(s)
+            tcp.server_close(srv)
+            g = g + 1
+        }
+        i = i + 1
+    }
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

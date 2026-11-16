@@ -1599,6 +1599,21 @@ static int ev_out_put(EvConn* c, size_t* len, const char* s, size_t n) {
  * Returns 1 when it answered, 0 when the caller should take the copying path,
  * -1 when the head could not be finished and the connection has to close.
  */
+/* Where the upstream's response ends in the receive buffer: where its own
+ * framing says (http_exchange's, which ends any answer to HEAD at its head,
+ * no_body_expected), not where the last read stopped. An upstream that sent
+ * a body with its answer to HEAD, or more than its Content-Length, sent
+ * bytes that are not the response's, and they were relayed as its body
+ * (#3710). A response that ended at the close, or whose framing is not
+ * known, is all that was read. */
+static size_t ev_response_end(const EvConn* c) {
+    const HttpRespFraming* f = &c->x.framing;
+    if (c->x.complete && f->definite && !f->chunked && !f->invalid &&
+        f->body_target >= f->header_bytes && f->body_target <= c->x.len)
+        return f->body_target;
+    return c->x.len;
+}
+
 static int ev_try_direct(EvDriver* d, EvConn* c) {
     if (!aether_proxy_direct_ok(&c->px))                     return 0;
     if (!c->x.complete || c->x.framing.invalid)              return 0;
@@ -1614,7 +1629,7 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     if (c->hooked || c->before_proxy)                        return 0;
 
     AetherProxyDirect direct;
-    if (aether_proxy_direct_take(&c->px, 0, c->x.buf, c->x.len,
+    if (aether_proxy_direct_take(&c->px, 0, c->x.buf, ev_response_end(c),
                                  c->x.framing.header_bytes, &direct) != 0) return 0;
 
     /* The response is recorded from here on (metrics, breaker, in-flight), so
@@ -1632,6 +1647,15 @@ static int ev_try_direct(EvDriver* d, EvConn* c) {
     int keep = http_server_keep_alive_lines(d->loop->server, c->req, direct.status,
                                             c->requests_served, lines, sizeof(lines),
                                             &lines_len);
+    /* An answer to HEAD whose upstream stated no length: the GET's body would
+     * have ended at the close, so this connection ends after the head (#3710),
+     * whatever the keep-alive policy would have kept. */
+    if (direct.head_only && direct.length_unknown) {
+        static const char close_line[] = "Connection: close\r\n";
+        lines_len = sizeof(close_line) - 1;
+        memcpy(lines, close_line, lines_len);
+        keep = 0;
+    }
     head_len -= 2;
     if (ev_out_put(c, &head_len, lines, lines_len) != 0 ||
         ev_out_put(c, &head_len, "\r\n", 2) != 0) return -1;
@@ -1672,7 +1696,11 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
      * that. */
     int keep = c->x.complete && !c->x.framing.invalid &&
                c->x.framing.header_bytes > 0 &&
-               http_response_head_keeps_conn(c->x.buf, c->x.framing.header_bytes);
+               http_response_head_keeps_conn(c->x.buf, c->x.framing.header_bytes) &&
+               /* Bytes past where the response ended (a body sent with an
+                * answer to HEAD) put the connection out of step: the next
+                * request's answer would start with them (#3710). */
+               c->x.len == ev_response_end(c);
     int was_reused = c->up.reused;
     size_t got = c->x.len;
     if (c->up_watched || c->up_in_poller) aether_io_poller_remove(&d->poller, c->up.t.sockfd);
@@ -1710,7 +1738,7 @@ static int ev_finish_upstream(EvDriver* d, EvConn* c) {
 
     HttpResponse* resp = http_response_alloc_empty();
     if (!resp) return -1;
-    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, c->x.len);
+    if (c->x.buf) http_response_fill_from_bytes(resp, c->x.buf, ev_response_end(c));
     c->px.resp = resp;
     ev_release_attempt(c);
 
