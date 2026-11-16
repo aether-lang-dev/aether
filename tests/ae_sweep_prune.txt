@@ -188,6 +188,7 @@ tests/integration/http_server_keepalive/
 tests/integration/http_server_observability/
 tests/integration/http_server_ops/
 tests/integration/http_server_sse/
+tests/integration/https_client_handshake_timeout/
 tests/integration/https_client_response_timeout/
 tests/integration/https_pure_tls_vertical/
 tests/integration/https_client_pure_tls/
