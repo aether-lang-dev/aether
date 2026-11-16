@@ -89,7 +89,9 @@ AEOF
 # build WHAT EXPECTED [env assignments...]: build, run, compare.
 build_expect() {
     what="$1"; want="$2"; shift 2
-    if ! env "$@" "$AE" build main.ae --extra shim.c -o ./app >"$TMP/build.log" 2>&1; then
+    # The build before, kept: a missed hit shows both builds' key parts.
+    [ -f "$TMP/build.log" ] && cp "$TMP/build.log" "$TMP/prev.log"
+    if ! env "$@" "$AE" build -v main.ae --extra shim.c -o ./app >"$TMP/build.log" 2>&1; then
         echo "  [FAIL] cache_c_compiler_identity: build failed ($what)"
         sed 's/^/        /' "$TMP/build.log" | head -10
         exit 1
@@ -110,7 +112,11 @@ write_wrapper "$TMP/ccC" 3
 expect_hit() {
     if ! grep -q "cache hit" "$TMP/build.log"; then
         echo "  [FAIL] cache_c_compiler_identity: an unchanged rebuild did not hit the cache ($1)"
-        sed 's/^/        /' "$TMP/build.log" | head -5
+        # Which part of the key moved: the build that published, then this one.
+        echo "        the build before:"
+        grep "\[cache\]" "$TMP/prev.log" 2>/dev/null | sed 's/^/          /'
+        echo "        this build:"
+        grep "\[cache\]" "$TMP/build.log" | sed 's/^/          /'
         exit 1
     fi
 }
