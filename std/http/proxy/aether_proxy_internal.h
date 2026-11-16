@@ -30,6 +30,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -406,5 +407,22 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
 int aether_proxy_direct_head(const AetherProxyDirect* d,
                              const char* raw, size_t header_bytes,
                              char** buf, size_t* cap, size_t* out_len);
+
+/* One line of a response's header block (http_response_headers): the line
+ * at `p` ends at *eol, and the return is where the next one starts. The
+ * client cuts the block at the blank line, so its last field has no CRLF
+ * after it and ends where the block does; a splitter that took only lines
+ * ending in CRLF dropped that field from every proxied and cached response
+ * (#3714). strchr for the carriage return rather than strstr for the pair:
+ * the setup a two-byte needle costs is paid once per header, and this runs
+ * for every header of every proxied response. The client turned every bare
+ * CR into a space (#3572), so a CR here is a line end; were one not followed
+ * by its LF, the line ends there and so does the block. */
+static inline const char* aether_proxy_block_line(const char* p, const char** eol) {
+    const char* cr = strchr(p, '\r');
+    if (cr && cr[1] == '\n') { *eol = cr; return cr + 2; }
+    *eol = cr ? cr : p + strlen(p);
+    return p + strlen(p);
+}
 
 #endif  /* AETHER_PROXY_INTERNAL_H */

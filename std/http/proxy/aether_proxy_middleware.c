@@ -823,12 +823,9 @@ static int px_copy(AetherProxyExchange* px) {
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
-            /* strchr for the carriage return rather than strstr for the pair:
-             * the setup a two-byte needle costs is paid once per header, and
-             * this loop runs for every header of every proxied response. */
-            const char* cr = strchr(p, '\r');
-            if (!cr || cr[1] != '\n') break;
-            const char* eol = cr;
+            /* The last field has no CRLF after it (#3714). */
+            const char* eol;
+            const char* next = aether_proxy_block_line(p, &eol);
             const char* colon = memchr(p, ':', (size_t)(eol - p));
             if (colon) {
                 size_t kl = (size_t)(colon - p);
@@ -850,7 +847,7 @@ static int px_copy(AetherProxyExchange* px) {
                         char* val = stackval;
                         if (vl >= sizeof(stackval)) {
                             val = (char*)malloc(vl + 1);
-                            if (!val) { p = eol + 2; continue; }
+                            if (!val) { p = next; continue; }
                         }
                         memcpy(val, v, vl);
                         val[vl] = '\0';
@@ -860,7 +857,7 @@ static int px_copy(AetherProxyExchange* px) {
                     }
                 }
             }
-            p = eol + 2;
+            p = next;
         }
     }
     if (!seen_content_type) {

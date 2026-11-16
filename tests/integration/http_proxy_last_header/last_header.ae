@@ -1,0 +1,185 @@
+// A proxied response keeps the upstream's last header field (#3714).
+//
+// The HTTP client keeps a response's header block cut at the blank line, so
+// its last field has no CRLF after it. The proxy's copy of the upstream's
+// headers and the cache's snapshot of them took a line only when it ended
+// in CRLF, so every response proxied through the middleware or replayed
+// from the cache lost the upstream's last field: here `X-Last`, in practice
+// whatever came last (an ETag, a Set-Cookie, a Location).
+//
+// A raw upstream answers a GET with `X-Last: yes` as its last field. It goes
+// through a bare proxy (the event loop on Linux and macOS), one behind a
+// program's middleware (the copying path everywhere), and one with a cache,
+// asked twice: the second answer is a cache hit, which the upstream never
+// sees. Every answer must carry `X-Last: yes`.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+message Serve { srv: ptr, answer: string }
+
+// Accept one connection on `srv`, read its request head, send `answer` and
+// close.
+actor Upstream {
+    receive {
+        Serve(srv, answer) -> {
+            sock, aerr = tcp.accept(srv)
+            if aerr == "" {
+                req = ""
+                t = 0
+                while t < 50 && string.index_of(req, "\r\n\r\n") < 0 {
+                    chunk, rerr = tcp.read(sock, 4096)
+                    if rerr != "" || string.length(chunk) == 0 {
+                        t = 50
+                    } else {
+                        req = string.concat(req, chunk)
+                    }
+                    t = t + 1
+                }
+                tcp.write(sock, answer)
+                sleep(200)
+                tcp.close(sock)
+            }
+        }
+    }
+}
+
+@c_callback mw_pass(req: ptr, res: ptr, ud: ptr) -> int {
+    return 1
+}
+
+// A GET on a connection of its own: "X-Last yes" when the answer's head
+// carries the field, otherwise what came back.
+probe(port: int) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "GET /p HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 30 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 30
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    end = string.index_of(wire, "\r\n\r\n")
+    if end < 0 {
+        return "no answer"
+    }
+    head = string.substring(wire, 0, end + 2)
+    if string.index_of(head, "\r\nX-Last: yes\r\n") >= 0 {
+        return "X-Last yes"
+    }
+    return "no X-Last in '${string.replace(head, "\r\n", " | ")}'"
+}
+
+report(label: string, got: string) -> int {
+    if got == "X-Last yes" {
+        println("  PASS ${label}")
+        return 0
+    }
+    println("  FAIL ${label}: ${got}")
+    return 1
+}
+
+main() {
+    println("=== a proxied response keeps the upstream's last header field (#3714) ===")
+    answer = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: max-age=60\r\nX-Last: yes\r\n\r\nok"
+    names = ["bare proxy", "behind middleware"]
+    bad = 0
+
+    g = 0
+    while g < 2 {
+        srv, lerr = tcp.listen_on("127.0.0.1", 0)
+        if lerr != "" {
+            println("FAIL: listen: ${lerr}")
+            exit(1)
+        }
+        up = spawn(Upstream())
+        up ! Serve { srv: srv, answer: answer }
+        s = http.server_create(0)
+        http.server_set_host(s, "127.0.0.1")
+        if g == 1 {
+            http.server_use_middleware(s, mw_pass, 0)
+        }
+        merr = proxy.mount_simple(s, "/", "http://127.0.0.1:${tcp.server_port(srv)}", 5)
+        if merr != "" {
+            println("FAIL: mount: ${merr}")
+            exit(1)
+        }
+        if http.server_bind(s, "127.0.0.1", 0) != "" {
+            println("FAIL: bind")
+            exit(1)
+        }
+        serr = http.server_start_background(s)
+        if serr != "" {
+            println("FAIL: ${serr}")
+            exit(1)
+        }
+        sleep(100)
+        bad = bad + report(names[g], probe(http.server_port(s)))
+        http.server_stop(s)
+        http.server_free(s)
+        tcp.server_close(srv)
+        g = g + 1
+    }
+
+    // The cache: a miss the upstream answers, then a hit it never sees.
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up = spawn(Upstream())
+    up ! Serve { srv: srv, answer: answer }
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    proxy.upstream_add(pool, "http://127.0.0.1:${tcp.server_port(srv)}", 1)
+    cache = proxy.cache_new(16, 65536, 60, "method_url")
+    opts = proxy.opts_new()
+    proxy.opts_bind_cache(opts, cache)
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    merr = proxy.mount(s, "/", pool, opts)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    serr = http.server_start_background(s)
+    if serr != "" {
+        println("FAIL: ${serr}")
+        exit(1)
+    }
+    sleep(100)
+    port = http.server_port(s)
+    bad = bad + report("cache miss", probe(port))
+    bad = bad + report("cache hit", probe(port))
+    http.server_stop(s)
+    http.server_free(s)
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
+    proxy.cache_free(cache)
+    tcp.server_close(srv)
+
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}
