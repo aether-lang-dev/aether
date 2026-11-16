@@ -98,6 +98,7 @@ extern AETHER_TLS void* g_current_reply_slot;
  * that has work is pushed there for its core's loop to look at, and what a
  * step leaves (a message, an armed receive timeout) is read after it. */
 static void ready_push(ActorBase* actor);
+static void ready_push_fresh(ActorBase* actor, int core, int slot);
 static void ready_after_step(ActorBase* actor);
 
 // --------------------------------------------------------------------------
@@ -1308,27 +1309,35 @@ static int actor_table_find_locked(Scheduler* sched, ActorBase* actor, int hint)
 }
 
 // Appends `actor`. The caller has checked there is room. The actor keeps its
-// slot (ActorBase.table_slot), the hint a find of it checks first (#3540).
-static inline void actor_table_push_locked(Scheduler* sched, ActorBase* actor) {
+// slot (ActorBase.table_slot), the hint a find of it checks first and the
+// tag of its ready list and timer heap entries (#3540). With `fresh`, the
+// core gets an entry for it at that slot whatever entries it had (a move, a
+// caller's registration): an entry made for a slot it is no longer at is
+// dropped unread, so a placement makes one that holds. Under the table's
+// lock, so the actor cannot leave the table, and be freed, meanwhile.
+static inline void actor_table_push_locked(Scheduler* sched, ActorBase* actor, int fresh) {
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
     int count = atomic_load_explicit(&sched->actor_count, memory_order_relaxed);
     atomic_store_explicit(&actor->table_slot, count, memory_order_relaxed);
     atomic_store_explicit(&table->slots[count], actor, memory_order_release);
     atomic_store_explicit(&sched->actor_count, count + 1, memory_order_release);
+    if (fresh) ready_push_fresh(actor, sched->core_id, count);
 }
 
 // Removes slot `i` by moving the last actor into it, which keeps its new
-// slot; the actor removed keeps none (-1).
+// slot and gets an entry for it there (its entries name the slot it left);
+// the actor removed keeps none (-1).
 static inline void actor_table_remove_locked(Scheduler* sched, int i) {
     AetherActorTable* table = atomic_load_explicit(&sched->actor_table, memory_order_relaxed);
     int last = atomic_load_explicit(&sched->actor_count, memory_order_relaxed) - 1;
     ActorBase* gone = atomic_load_explicit(&table->slots[i], memory_order_relaxed);
     ActorBase* moved = atomic_load_explicit(&table->slots[last], memory_order_relaxed);
+    if (moved && moved != gone) atomic_store_explicit(&moved->table_slot, i, memory_order_relaxed);
     atomic_store_explicit(&table->slots[i], moved, memory_order_release);
     atomic_store_explicit(&table->slots[last], NULL, memory_order_release);
     atomic_store_explicit(&sched->actor_count, last, memory_order_release);
-    if (moved && moved != gone) atomic_store_explicit(&moved->table_slot, i, memory_order_relaxed);
     if (gone) atomic_store_explicit(&gone->table_slot, -1, memory_order_relaxed);
+    if (moved && moved != gone) ready_push_fresh(moved, sched->core_id, i);
 }
 
 /* The slot `actor` last had in its core's table: a hint, which a find under
@@ -1646,11 +1655,10 @@ static ActorBase* tombstone_take(size_t size) {
     TombstoneBucket* b = tombstone_bucket_locked(size, 0);
     for (int k = b ? b->count - 1 : -1; k >= 0 && !actor; k--) {
         if (atomic_load_explicit(&b->blocks[k]->inflight, memory_order_acquire) != 0) continue;
-        // Nor one a core's ready list or timer heap still names (#3540): the
-        // reclaim keeps those, so none is kept here, but a block is handed
-        // to a new actor only when nothing of the scheduler's refers to it.
-        if (atomic_load_explicit(&b->blocks[k]->ready_queued, memory_order_acquire) != 0 ||
-            atomic_load_explicit(&b->blocks[k]->timer_slot, memory_order_acquire) != 0) continue;
+        // An entry a core's ready list or timer heap may still hold for the
+        // block is not a reason to keep it (#3540): a core reads an entry's
+        // actor only while its table holds it at the entry's slot, and a
+        // block placed there again is that actor, which a look costs nothing.
         actor = b->blocks[k];
         b->blocks[k] = b->blocks[--b->count];
     }
@@ -1883,22 +1891,14 @@ static void actor_reclaim(int wait) {
         if (e != 0 && e < oldest) oldest = e;
     }
 
-    // Past every reader's epoch, and named by no core's ready list or timer
-    // heap (#3540): a core that takes such an entry reads the death bits
-    // first and lets go of the actor with its last write, the clear the
-    // loads below read. One still in a heap has its core told, which takes
-    // it out; it waits here, in its place, until then.
+    // Past every reader's epoch. An entry a core's ready list or timer heap
+    // still holds for it does not keep it (#3540): a retired actor is out of
+    // its table, and a core reads an entry's actor only while its table
+    // holds it at the entry's slot; a core that read it there before the
+    // release is in a pass that holds the actor's epoch back.
     int passed = 0, kept = 0;
     while (passed < g_retired_count && g_retired[passed].epoch < oldest) {
-        ActorBase* actor = g_retired[passed].actor;
-        int queued = atomic_load_explicit(&actor->ready_queued, memory_order_acquire) != 0;
-        int timed = atomic_load_explicit(&actor->timer_slot, memory_order_acquire) != 0;
-        if (queued || timed) {
-            if (!queued) ready_push(actor);
-            g_retired[kept++] = g_retired[passed];
-        } else {
-            actor_free_now(actor);
-        }
+        actor_free_now(g_retired[passed].actor);
         passed++;
     }
     if (passed > kept) {
@@ -2022,10 +2022,11 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 //    disarms it, its handling's end arms it again), so a key that comes due
 //    is checked against the actor and moved on, or dropped when disarmed.
 //    The park sleeps no longer than the earliest key.
-//  - A move onto the core (move_actor pushes the actor to its new core),
-//    a restart in place (scheduler_actor_revived), and an entry that reached
-//    the wrong core because the actor moved after its push (that core
-//    forwards it).
+//  - A placement in the core's table at a slot the actor's entries do not
+//    name: a move onto the core, a caller's registration, the removal of
+//    another actor that moves it into the hole. Each makes a fresh entry
+//    for the new slot, whatever entries the actor had. And a restart in
+//    place (scheduler_actor_revived).
 //
 // Who pushes: the core's own thread onto its `ready` vector, any other
 // thread onto its `ready_in`, a vector under a spinlock that the core takes
@@ -2037,26 +2038,30 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 // cleared and pushes again, or its exchange comes first and the core's
 // exchange, which reads it, sees what the pusher wrote before (the mailbox,
 // the countdown). The owner core's own push skips the exchange when it reads
-// the byte set: the entry is then in its own lists, or in another core's,
-// which forwards it here.
+// the byte set: the entry is then in its own lists.
 //
-// The entry is in the lists of the core the actor was on when it was
-// pushed. A move does not take it out (the source would have to search its
-// list): the source takes it later, sees the actor is another core's, and
-// pushes it there. While the source waits in an ask, its relief does that
-// for the actors it moved away (ready_forward_moved). The timer heap entry
-// does go with a move: the source removes it (timer_slot gives its place)
-// before the actor is the destination's, and the destination reads the
-// countdown when it takes the actor.
+// An entry names the actor and the slot of the core's table the actor was
+// at (ActorBase.table_slot), and so does a timer heap entry. A core reads an
+// entry's actor only once its table holds that actor at that slot: one read
+// of the table, which holds the pointer, and none of the actor. An entry
+// that does not hold (the actor moved to another core, left its table by a
+// deregister or a release, or sits at another slot since a removal moved
+// it) is dropped unread. So a deregister only leaves the table and returns,
+// waiting for no core, and a caller may free the actor then: no entry it
+// left is read again. Every placement at a slot the entries do not name
+// makes a fresh entry (above), so an actor in a table always has one that
+// holds while ready_queued is set; a dropped entry leaves ready_queued as it
+// is, the fresh one clears it. The timer heap entry goes with a move too:
+// the source removes it before the actor is the destination's, and the
+// destination reads the countdown when it takes the actor's fresh entry.
 //
-// A released actor (#2509) keeps its block until no entry refers to it: the
-// reclaim frees it only once `ready_queued` and `timer_slot` are both 0, and
-// wakes the core of one still in a heap. A core that takes an entry reads
-// the death bits before it clears `ready_queued`; it touches nothing of a
-// released actor after that clear and the removal of its timer, so a
-// reclaim that sees both 0 has nothing to wait for. A core that reads the
-// actor alive is in a pass that began before the release was retired, which
-// holds the actor's epoch back (the reclamation notes above).
+// A released actor (#2509) leaves its table before it is retired, so its
+// entries are dropped unread, and its block is freed once the epochs allow
+// whatever entries remain: a core that read the actor through its table
+// before the release is in a pass that holds the actor's epoch back (the
+// reclamation notes above). A block placed again at the same slot is that
+// slot's actor, and an old entry for it is a look at it, which a ready list
+// entry may always be.
 //
 // The pass is O(actors with work), not O(actors). The cost on the busy
 // paths: a load of the receive timeout's interval after each step (on the
@@ -2071,7 +2076,17 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 typedef struct AetherTimer {
     uint64_t deadline;
     ActorBase* actor;
+    int slot;   // the table slot the actor was at, as a ready list entry's
 } AetherTimer;
+
+/* Whether core `s`'s table holds `actor` at `slot`: an entry for it holds,
+ * and the actor may be read. Reads the table, which holds the pointer, and
+ * nothing of the actor (#3540). */
+static inline int entry_holds(Scheduler* s, ActorBase* actor, int slot) {
+    AetherActorTable* table = atomic_load_explicit(&s->actor_table, memory_order_acquire);
+    return table && slot >= 0 && slot < table->capacity &&
+           atomic_load_explicit(&table->slots[slot], memory_order_acquire) == actor;
+}
 
 /* Out of memory for a ready list or the timer heap: an actor with work left
  * where no core would look at it waits forever, so the process stops, as an
@@ -2083,24 +2098,24 @@ static void ready_out_of_memory(ActorBase* actor, const char* what) {
     abort();
 }
 
-static void ready_vec_push(ActorBase*** v, int* n, int* cap, ActorBase* actor) {
+static void ready_vec_push(AetherReady** v, int* n, int* cap, AetherReady e) {
     if (unlikely(*n == *cap)) {
         int grown_cap = *cap ? *cap * 2 : READY_INITIAL;
-        ActorBase** grown = (ActorBase**)realloc(*v, (size_t)grown_cap * sizeof(ActorBase*));
-        if (!grown) ready_out_of_memory(actor, "ready list");
+        AetherReady* grown = (AetherReady*)realloc(*v, (size_t)grown_cap * sizeof(AetherReady));
+        if (!grown) ready_out_of_memory(NULL, "ready list");
         *v = grown;
         *cap = grown_cap;
     }
-    (*v)[(*n)++] = actor;
+    (*v)[(*n)++] = e;
 }
 
 /* An entry from another thread: into the core's ready_in, and the core is
  * woken (its park reads ready_in.count after its fence, sched_wake has the
  * other). */
-static void ready_push_in(Scheduler* s, ActorBase* actor) {
+static void ready_push_in(Scheduler* s, AetherReady e) {
     while (atomic_flag_test_and_set_explicit(&s->ready_in.lock, memory_order_acquire)) AETHER_PAUSE();
     int n = atomic_load_explicit(&s->ready_in.count, memory_order_relaxed);
-    ready_vec_push(&s->ready_in.list, &n, &s->ready_in.cap, actor);
+    ready_vec_push(&s->ready_in.list, &n, &s->ready_in.cap, e);
     atomic_store_explicit(&s->ready_in.count, n, memory_order_release);
     atomic_flag_clear_explicit(&s->ready_in.lock, memory_order_release);
     sched_wake(s);
@@ -2138,29 +2153,34 @@ static void ready_push(ActorBase* actor) {
         return;
     }
     Scheduler* s = &schedulers[core];
-    if (core == me) ready_vec_push(&s->ready, &s->ready_count, &s->ready_cap, actor);
-    else ready_push_in(s, actor);
+    // Tagged with the slot it is at, read under the claim: a removal that
+    // moves it to another slot after this read makes an entry for that one.
+    AetherReady e = { actor, atomic_load_explicit(&actor->table_slot, memory_order_acquire) };
+    if (core == me) ready_vec_push(&s->ready, &s->ready_count, &s->ready_cap, e);
+    else ready_push_in(s, e);
 }
 
-/* An entry `sched` took for an actor that is core `core`'s: passed there as
- * it is, with ready_queued still set, so no push meanwhile finds the actor
- * in no list and adds a second entry, and no deregister (which waits for
- * ready_queued to clear) sees it in none while this thread still reads it:
- * nothing of the actor is read here once the entry is in the other core's
- * list. An actor on no core any more has its entry dropped. */
-static void ready_pass_on(Scheduler* sched, ActorBase* actor, int core) {
-    if (core == sched->core_id)
-        ready_vec_push(&sched->ready, &sched->ready_count, &sched->ready_cap, actor);
-    else if (core >= 0 && core < num_cores)
-        ready_push_in(&schedulers[core], actor);
-    else
-        atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);
+/* An entry for `actor` at `slot` of core `core`'s table, whatever entries it
+ * has: they name another slot or core and are dropped unread, and the byte
+ * is set again so the push of nothing else adds a second one before this
+ * is taken. Under the table's lock (actor_table_push_locked,
+ * actor_table_remove_locked), so the actor is in the table, and stays. */
+static void ready_push_fresh(ActorBase* actor, int core, int slot) {
+    if (unlikely(actor->auto_process)) return;   // its own thread runs it
+    atomic_exchange_explicit(&actor->ready_queued, 1, memory_order_acq_rel);
+    AetherReady e = { actor, slot };
+    Scheduler* s = &schedulers[core];
+    if (core == t_core) ready_vec_push(&s->ready, &s->ready_count, &s->ready_cap, e);
+    else ready_push_in(s, e);
 }
 
-/* The heap's slot i holds `t`, and the actor knows where. */
+/* The heap's slot i holds `t`, and the actor knows where, when the entry
+ * holds: one that does not (its actor left this core's table, maybe freed)
+ * is moved with the others and its actor is not written (#3540). */
 static inline void timer_place(Scheduler* s, int i, AetherTimer t) {
     s->timers[i] = t;
-    atomic_store_explicit(&t.actor->timer_slot, i + 1, memory_order_relaxed);
+    if (entry_holds(s, t.actor, t.slot))
+        atomic_store_explicit(&t.actor->timer_slot, i + 1, memory_order_relaxed);
 }
 
 static void timer_sift_up(Scheduler* s, int i) {
@@ -2201,7 +2221,7 @@ static void timer_set_key(Scheduler* s, int i, uint64_t deadline) {
     else timer_sift_down(s, i);
 }
 
-static void timer_insert(Scheduler* s, ActorBase* actor, uint64_t deadline) {
+static void timer_insert(Scheduler* s, ActorBase* actor, int slot, uint64_t deadline) {
     if (unlikely(s->timer_count == s->timer_cap)) {
         int cap = s->timer_cap ? s->timer_cap * 2 : READY_INITIAL;
         AetherTimer* grown = (AetherTimer*)realloc(s->timers, (size_t)cap * sizeof(AetherTimer));
@@ -2209,7 +2229,7 @@ static void timer_insert(Scheduler* s, ActorBase* actor, uint64_t deadline) {
         s->timers = grown;
         s->timer_cap = cap;
     }
-    AetherTimer t = { deadline, actor };
+    AetherTimer t = { deadline, actor, slot };
     s->timers[s->timer_count++] = t;
     timer_sift_up(s, s->timer_count - 1);
 }
@@ -2224,8 +2244,7 @@ static void timer_remove_at(Scheduler* s, int i) {
     }
 }
 
-/* Out of the heap. Its slot is cleared last: the reclaim of a released
- * actor reads it, and so does a deregister (scheduler_deregister_actor). */
+/* Out of the heap: an actor this core's table holds. */
 static void timer_remove(Scheduler* s, ActorBase* actor) {
     int i = timer_index(s, actor);
     if (i < 0) return;
@@ -2235,39 +2254,24 @@ static void timer_remove(Scheduler* s, ActorBase* actor) {
 
 /* The heap follows the actor's countdown, on its core's thread: in it with
  * a key no later than the deadline while the countdown is armed, out of it
- * while it is not. */
-static void timer_sync(Scheduler* s, ActorBase* actor) {
+ * while it is not. `slot`: where this core's table holds the actor, the
+ * entry's tag; an actor it holds nowhere (-1) has no countdown here. */
+static void timer_sync(Scheduler* s, ActorBase* actor, int slot) {
     uint64_t armed = actor->last_activity_ns;
     uint64_t interval = actor->timeout_ns;
     int i = timer_index(s, actor);
-    if (interval == 0 || armed == 0 || !actor->step ||
-        atomic_load_explicit(&actor->dead, memory_order_acquire) != 0 ||
-        (atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_DEREGISTERED)) {
+    if (interval == 0 || armed == 0 || !actor->step || slot < 0 ||
+        atomic_load_explicit(&actor->dead, memory_order_acquire) != 0) {
         if (i >= 0) timer_remove(s, actor);
         return;
     }
     uint64_t deadline = armed + interval;
-    if (i < 0) timer_insert(s, actor, deadline);
-    else if (deadline < s->timers[i].deadline) timer_set_key(s, i, deadline);
-}
-
-/* Takes `actor` out of `s`'s ready lists (each entry naming it becomes NULL,
- * which a pass skips) and its countdown out of `s`'s timer heap. On `s`'s
- * own thread, or while no thread runs `s`'s loop. Returns whether an entry
- * was found: ready_queued is then the caller's to clear. */
-static int ready_forget_on(Scheduler* s, ActorBase* actor) {
-    timer_remove(s, actor);
-    int found = 0;
-    for (int i = 0; i < s->ready_count; i++)
-        if (s->ready[i] == actor) { s->ready[i] = NULL; found = 1; }
-    for (int i = s->ready_at; i < s->ready_work_count; i++)
-        if (s->ready_work[i] == actor) { s->ready_work[i] = NULL; found = 1; }
-    while (atomic_flag_test_and_set_explicit(&s->ready_in.lock, memory_order_acquire)) AETHER_PAUSE();
-    int n = atomic_load_explicit(&s->ready_in.count, memory_order_relaxed);
-    for (int i = 0; i < n; i++)
-        if (s->ready_in.list[i] == actor) { s->ready_in.list[i] = NULL; found = 1; }
-    atomic_flag_clear_explicit(&s->ready_in.lock, memory_order_release);
-    return found;
+    if (i < 0) {
+        timer_insert(s, actor, slot, deadline);
+        return;
+    }
+    s->timers[i].slot = slot;   // where it is now, if a removal moved it
+    if (deadline < s->timers[i].deadline) timer_set_key(s, i, deadline);
 }
 
 /* After a step of a core's actor with a receive timeout, on the thread that
@@ -2279,7 +2283,7 @@ static int ready_forget_on(Scheduler* s, ActorBase* actor) {
 static void ready_after_step(ActorBase* actor) {
     int me = t_core;
     if (me >= 0 && atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me)
-        timer_sync(&schedulers[me], actor);
+        timer_sync(&schedulers[me], actor, actor_table_slot(actor));
     else
         ready_push(actor);   // its core reads the countdown when it takes it
 }
@@ -2335,9 +2339,11 @@ static int core_outbound_idle(int core) {
 // core. Returns 1 when moved; the new core is woken to step whatever is in
 // the mailbox that moved with it. Returns 0, the actor where it was, when a
 // lock is taken or a message is in flight: a move to ask again. Returns -1
-// when no move is to be made from here: the actor is in no table of this
-// core (deregistered, or carried over a restart and not registered yet,
-// #3540), ended, its own thread's, or `dst` names no other core.
+// when no move is to be made from here now: the actor is in no table of
+// this core (deregistered, or carried over a restart and not registered
+// yet, #3540), ended, its own thread's, `dst` names no other core, or the
+// destination's table is full (it grows at a registration; the move is
+// asked again when the actor next has work).
 // `onto_waiter`: a relief's move (#3197), which may take the actor onto a
 // core blocked in an ask when that ask waits on this very actor.
 static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint, int onto_waiter) {
@@ -2376,8 +2382,8 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     }
     int moved = 0;
     int at = actor_table_find_locked(sched, actor, slot_hint);
-    int in_table = at >= 0;
-    if (!actor_table_has_room_locked(to)) at = -1;
+    int movable = at >= 0 && actor_table_has_room_locked(to);
+    if (!movable) at = -1;
     if (at >= 0 && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
         if (move_begin(actor)) {
             // Its countdown leaves this core's timer heap before the actor
@@ -2388,7 +2394,11 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
             actor_table_remove_locked(sched, at);
             atomic_store_explicit(&actor->assigned_core, dst, memory_order_release);
             atomic_store_explicit(&actor->migrate_to, -1, memory_order_relaxed);
-            actor_table_push_locked(to, actor);
+            // With a fresh entry on the new core, which looks at what moved
+            // with it (its mailbox, its countdown), made while both locks
+            // keep the actor in a table (#3540). Its entries left here
+            // name this core and are dropped unread.
+            actor_table_push_locked(to, actor, 1);
             move_end(actor);
             moved = 1;
         }
@@ -2408,11 +2418,7 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     }
     atomic_flag_clear_explicit(&second->lock, memory_order_release);
     atomic_flag_clear_explicit(&first->lock, memory_order_release);
-    // The new core looks at what moved with it (its mailbox, its countdown)
-    // through its ready list (#3540), which wakes it. An entry still in this
-    // core's lists is forwarded there when this core takes it.
-    if (moved) ready_push(actor);
-    return moved ? 1 : (in_table ? 0 : -1);
+    return moved ? 1 : (movable ? 0 : -1);
 }
 
 // Step `actor`, this core's, once to make room in its full mailbox, so a
@@ -2444,32 +2450,18 @@ static int make_room(Scheduler* sched, ActorBase* actor) {
  * steps nothing: the actor's messages stepped, a move asked of it made, its
  * countdown in the heap, as the scan did for each actor with work. Returns 1
  * when there was something to do. */
-static int ready_service(Scheduler* sched, ActorBase* actor) {
+static int ready_service(Scheduler* sched, ActorBase* actor, int slot) {
     const int me = sched->core_id;
-    // The death bits first: a released actor's block can be reclaimed once
-    // `ready_queued` is 0, so nothing of it is touched after the clear.
+    // Not read unless this core's table holds it where the entry says: an
+    // actor that moved on has a fresh entry on its new core, and one that
+    // left every table (a deregister, a release) may be freed already.
+    if (!entry_holds(sched, actor, slot)) return 0;
     int dead = atomic_load_explicit(&actor->dead, memory_order_acquire);
     if (unlikely(dead & AETHER_ACTOR_RELEASED)) {
-        if (atomic_load_explicit(&actor->assigned_core, memory_order_acquire) == me)
-            timer_remove(sched, actor);
+        // Released, its table not left yet: it steps no more.
+        timer_remove(sched, actor);
         atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);
         return 0;
-    }
-    int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-    if (unlikely(atomic_load_explicit(&actor->exit_flags, memory_order_acquire) &
-                 AETHER_EXIT_DEREGISTERED)) {
-        // Deregistered (scheduler_deregister_actor): its countdown leaves
-        // the heap and its entry goes, and nothing of it is touched after
-        // the clear, which the deregister waits for: its caller may free
-        // it then.
-        if (core == me) timer_remove(sched, actor);
-        atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);
-        return 0;
-    }
-    if (core != me) {
-        // Moved since it was pushed: its core looks at it.
-        ready_pass_on(sched, actor, core);
-        return 1;
     }
     // Cleared before the look: a push from now on adds an entry again.
     atomic_exchange_explicit(&actor->ready_queued, 0, memory_order_acq_rel);
@@ -2531,14 +2523,15 @@ static int ready_service(Scheduler* sched, ActorBase* actor) {
     int mig = atomic_load_explicit(&actor->migrate_to, memory_order_relaxed);
     if (unlikely(mig >= 0 && mig != me) &&
         atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me) {
-        int moved = move_actor(sched, actor, mig, actor_table_slot(actor), 0);
+        int moved = move_actor(sched, actor, mig, slot, 0);
         if (moved >= 0) did = 1;
         if (moved == 0) ready_push(actor);
     }
-    // Its countdown, as the step or a spawn left it.
+    // Its countdown, as the step or a spawn left it, at the slot it is at
+    // now (a step can move it, a release of another actor too).
     if (actor->timeout_ns != 0 &&
         atomic_load_explicit(&actor->assigned_core, memory_order_relaxed) == me)
-        timer_sync(sched, actor);
+        timer_sync(sched, actor, actor_table_slot(actor));
     return did;
 }
 
@@ -2549,7 +2542,7 @@ static int ready_pass(Scheduler* sched) {
     if (sched->ready_count == 0) return 0;
     // The list becomes the pass's, and an empty vector (the last pass's)
     // takes the pushes made meanwhile.
-    ActorBase** work = sched->ready;
+    AetherReady* work = sched->ready;
     int work_cap = sched->ready_cap;
     sched->ready_work_count = sched->ready_count;
     sched->ready = sched->ready_work;
@@ -2558,11 +2551,9 @@ static int ready_pass(Scheduler* sched) {
     sched->ready_work = work;
     sched->ready_work_cap = work_cap;
     int did = 0;
-    // ready_at is the core's, not a local: a relief during a step here
-    // forwards the entries still ahead of it (ready_forward_moved).
     for (sched->ready_at = 0; sched->ready_at < sched->ready_work_count;) {
-        ActorBase* actor = sched->ready_work[sched->ready_at++];
-        if (actor && ready_service(sched, actor)) did = 1;
+        AetherReady e = sched->ready_work[sched->ready_at++];
+        if (ready_service(sched, e.actor, e.slot)) did = 1;
     }
     sched->ready_work_count = 0;
     sched->ready_at = 0;
@@ -2574,28 +2565,26 @@ static int ready_pass(Scheduler* sched) {
 static int timers_fire(Scheduler* sched) {
     if (likely(sched->timer_count == 0)) return 0;
     uint64_t now = aether_now_ns();
-    const int me = sched->core_id;
     int did = 0;
     while (sched->timer_count > 0 && sched->timers[0].deadline <= now) {
         ActorBase* actor = sched->timers[0].actor;
-        // The heap names actors of this core, each through the slot it
-        // keeps (a move and a deregister take the countdown out first). An
-        // entry that does not hold to that goes, its actor not stepped: one
-        // whose actor's slot names another entry was removed through that
-        // slot, which removed nothing, and the loop came back to it forever;
-        // one whose actor is another core's had this thread step it beside
-        // its core's.
-        int top = timer_index(sched, actor);
-        if (unlikely(top != 0 ||
-                     atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != me)) {
+        int slot = sched->timers[0].slot;
+        // An entry whose actor this core's table no longer holds at its slot
+        // goes unread (#3540): the actor left (a deregister, a release, a
+        // move) and may be freed; a move or a removal that moved it made a
+        // fresh ready entry, whose look puts its countdown back. One the
+        // actor's slot does not name (a second entry for it) goes too, the
+        // slot left to the entry it names. Neither is stepped: before, the
+        // second was removed through a slot naming no entry of the heap,
+        // which removed nothing, and the loop came back to it forever.
+        if (unlikely(!entry_holds(sched, actor, slot) || timer_index(sched, actor) != 0)) {
             timer_remove_at(sched, 0);
             continue;
         }
         uint64_t armed = actor->last_activity_ns;
         if (actor->timeout_ns == 0 || armed == 0 || !actor->step ||
-            atomic_load_explicit(&actor->dead, memory_order_acquire) != 0 ||
-            (atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_DEREGISTERED)) {
-            timer_remove(sched, actor);   // disarmed since, ended, or deregistered
+            atomic_load_explicit(&actor->dead, memory_order_acquire) != 0) {
+            timer_remove(sched, actor);   // disarmed since, or ended
             continue;
         }
         uint64_t due = armed + actor->timeout_ns;
@@ -2626,7 +2615,7 @@ static int timers_fire(Scheduler* sched) {
                 atomic_load_explicit(&actor->dead, memory_order_acquire) == 0)
                 timer_set_key(sched, i, now + 1);
             else
-                timer_sync(sched, actor);
+                timer_sync(sched, actor, actor_table_slot(actor));
         }
     }
     return did;
@@ -2643,46 +2632,6 @@ static int timers_park_ms(Scheduler* sched, int ms) {
     return until < (uint64_t)ms ? (int)until : ms;
 }
 
-/* A relief moved actors off this core while its thread waits in an ask
- * (#3197): their entries still in this core's lists go to their new cores,
- * which would otherwise not look at them before the ask ends. */
-/* An entry of this core's for an actor that is another core's now: taken
- * here, as ready_service takes one, and passed to that core. Steps nothing. */
-static void ready_forward(Scheduler* sched, ActorBase* actor) {
-    if (atomic_load_explicit(&actor->dead, memory_order_acquire) & AETHER_ACTOR_RELEASED) {
-        atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);   // the last touch
-        return;
-    }
-    // To the core it is on now (back here, if it came back).
-    ready_pass_on(sched, actor, atomic_load_explicit(&actor->assigned_core, memory_order_acquire));
-}
-
-static void ready_forward_moved(Scheduler* sched) {
-    ready_take_in(sched);
-    const int me = sched->core_id;
-    for (int k = sched->ready_at; k < sched->ready_work_count; k++) {
-        ActorBase* actor = sched->ready_work[k];
-        if (actor && atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != me) {
-            sched->ready_work[k] = NULL;
-            ready_forward(sched, actor);
-        }
-    }
-    // Taken out of `ready` first: a forward pushes back into it an actor
-    // that came back here meanwhile.
-    ActorBase** moved = NULL;
-    int nmoved = 0, cap_moved = 0, kept = 0;
-    for (int k = 0; k < sched->ready_count; k++) {
-        ActorBase* actor = sched->ready[k];
-        if (!actor) continue;   // taken out by a deregister
-        if (atomic_load_explicit(&actor->assigned_core, memory_order_acquire) != me)
-            ready_vec_push(&moved, &nmoved, &cap_moved, actor);
-        else
-            sched->ready[kept++] = actor;
-    }
-    sched->ready_count = kept;
-    for (int k = 0; k < nmoved; k++) ready_forward(sched, moved[k]);
-    free(moved);
-}
 
 void* AETHER_HOT scheduler_thread(void* arg) {
     Scheduler* sched = (Scheduler*)arg;
@@ -3077,14 +3026,17 @@ void* AETHER_HOT scheduler_thread(void* arg) {
                                     break;
                                 }
                             }
+                            // The victim looks at the ask on its next pass,
+                            // through its ready list (#3540): nothing else would
+                            // bring it to an actor that has no message coming.
+                            // Pushed under the victim's lock, while the actor is
+                            // in its table: a deregister takes that lock, so the
+                            // actor is not freed under the push.
+                            if (asked) ready_push(asked);
                             atomic_flag_clear_explicit(&second_lock->lock, memory_order_release);
                         }
                         atomic_flag_clear_explicit(&first_lock->lock, memory_order_release);
                     }
-                    // The victim looks at the ask on its next pass, through its
-                    // ready list (#3540): nothing else would bring it to an actor
-                    // that has no message coming.
-                    if (asked) ready_push(asked);
                 }
             }
 
@@ -3204,9 +3156,6 @@ void* AETHER_HOT scheduler_thread(void* arg) {
     reclaim_core_offline(sched);
     actor_reclaim(0);
     t_core = -1;
-    // Its ready lists and timer heap are touched by no thread now: a
-    // deregister takes an actor out of them itself (ready_forget).
-    atomic_store_explicit(&sched->loop_left, 1, memory_order_release);
 
     aether_unwind_thread_cleanup();
 
@@ -3337,7 +3286,6 @@ void scheduler_init(int cores) {
         schedulers[i].control_count = 0;
         schedulers[i].control_cap = 0;
         schedulers[i].control_closed = 0;
-        atomic_store_explicit(&schedulers[i].loop_left, 0, memory_order_relaxed);
         schedulers[i].relief_cursor = 0;
         schedulers[i].coalesce_buffer.count = 0;
         schedulers[i].coalesce_buffer.next = 0;
@@ -3349,10 +3297,10 @@ void scheduler_init(int cores) {
         // growth (test_actor_ref_state_store) read as a leak whenever the
         // window was the one that first stepped some core. Out of memory
         // here, they start empty and grow on first use.
-        schedulers[i].ready = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
+        schedulers[i].ready = (AetherReady*)malloc(READY_INITIAL * sizeof(AetherReady));
         schedulers[i].ready_count = 0;
         schedulers[i].ready_cap = schedulers[i].ready ? READY_INITIAL : 0;
-        schedulers[i].ready_work = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
+        schedulers[i].ready_work = (AetherReady*)malloc(READY_INITIAL * sizeof(AetherReady));
         schedulers[i].ready_work_count = 0;
         schedulers[i].ready_work_cap = schedulers[i].ready_work ? READY_INITIAL : 0;
         schedulers[i].ready_at = 0;
@@ -3361,7 +3309,7 @@ void scheduler_init(int cores) {
         schedulers[i].timer_cap = schedulers[i].timers ? READY_INITIAL : 0;
         atomic_flag_clear_explicit(&schedulers[i].ready_in.lock, memory_order_relaxed);
         atomic_store_explicit(&schedulers[i].ready_in.count, 0, memory_order_relaxed);
-        schedulers[i].ready_in.list = (ActorBase**)malloc(READY_INITIAL * sizeof(ActorBase*));
+        schedulers[i].ready_in.list = (AetherReady*)malloc(READY_INITIAL * sizeof(AetherReady));
         schedulers[i].ready_in.cap = schedulers[i].ready_in.list ? READY_INITIAL : 0;
     }
     actor_park_init_once();
@@ -3888,10 +3836,12 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
         int cur = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
         int routed = atomic_load_explicit(&actor->exit_flags, memory_order_acquire) & AETHER_EXIT_ROUTED;
         if (routed && cur >= 0 && cur < num_cores) {
+            // The move asked before the placement, whose fresh entry has
+            // the core look at it.
+            if (preferred_core >= 0 && preferred_core < num_cores && preferred_core != cur)
+                atomic_store_explicit(&actor->migrate_to, preferred_core, memory_order_relaxed);
             core = register_actor_ex(actor, cur, 0, 0);
             atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
-            if (core >= 0 && preferred_core >= 0 && preferred_core < num_cores && preferred_core != core)
-                atomic_store_explicit(&actor->migrate_to, preferred_core, memory_order_relaxed);
             break;
         }
         // No core delivers to it (a new actor) or none can yet (its core is
@@ -3903,21 +3853,22 @@ int scheduler_register_actor(ActorBase* actor, int preferred_core) {
         // under the core's entry, an overflow the core had started
         // dropped). A new actor has them zeroed; one carried over a restart
         // has them reset by teardown with the lists and queues they named;
-        // and a deregistered one is in no list, its countdown in no heap
-        // (scheduler_deregister_actor), its overflow still its own.
+        // a deregistered one has entries that name no table it is in, which
+        // its cores drop unread, and its overflow is still its own.
         core = register_actor_ex(actor, preferred_core, cur, 1);
         if (core == -2) continue;   // a core took it meanwhile: it keeps it
         atomic_store_explicit(&actor->exit_flags, 0, memory_order_release);
         break;
     }
-    /* Its core looks at it once now (#3540), as the scan looked at every
-     * actor of its table on its next pass: the ready list brings a core
-     * only to the actors it is told of. A countdown armed before is found
-     * this way (one carried over a restart lost its heap entry with the
-     * last lifecycle's tables; one armed before the registration was told
-     * when it was on no core, and the push went nowhere), as are messages
-     * already in its mailbox and a move asked of it. */
-    ready_push(actor);
+    /* Its core looked at it once at the placement (#3540), as the scan
+     * looked at every actor of its table on its next pass: the ready list
+     * brings a core only to the actors it is told of, and the placement of
+     * a caller's actor makes it a fresh entry (actor_table_push_locked). A
+     * countdown armed before is found this way (one carried over a restart
+     * lost its heap entry with the last lifecycle's tables; one armed
+     * before the registration was told when it was on no core, and the
+     * push went nowhere), as are messages already in its mailbox and a move
+     * asked of it. */
     return core;
 }
 static int register_actor(ActorBase* actor, int preferred_core) {
@@ -3993,7 +3944,10 @@ static int register_actor_ex(ActorBase* actor, int preferred_core, int expect, i
     // The SPSC queue and an actor thread's inbox are both made on first use
     // (saves 3 KB/actor).
 
-    actor_table_push_locked(sched, actor);
+    // A caller's actor gets a fresh entry (scheduler_register_actor); a
+    // spawned one has nothing to look at yet, and its first push tags the
+    // slot it has.
+    actor_table_push_locked(sched, actor, !actor->scheduler_owned);
 
     spinlock_unlock(&sched->actor_lock);
 
@@ -4025,62 +3979,17 @@ static int actor_table_leave(ActorBase* actor) {
     }
 }
 
-/* Whether no thread runs core `core`'s loop: its ready lists and timer heap
- * are then any thread's to change. */
-static int core_loop_quiet(int core) {
-    return !atomic_load_explicit(&g_threads_started, memory_order_acquire) ||
-           atomic_load_explicit(&schedulers[core].loop_left, memory_order_acquire);
-}
 
-/* Until no core's list holds an entry for `actor` and no heap its countdown,
- * taking them out itself from the cores no thread runs. */
-static void ready_forget_wait(ActorBase* actor) {
-    for (unsigned spin = 0;
-         atomic_load_explicit(&actor->ready_queued, memory_order_acquire) != 0 ||
-         atomic_load_explicit(&actor->timer_slot, memory_order_acquire) != 0;
-         spin++) {
-        if ((spin & 255) == 0) {
-            for (int k = 0; k < num_cores; k++)
-                if (core_loop_quiet(k) && ready_forget_on(&schedulers[k], actor))
-                    atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);
-        }
-        if (spin > 64) aether_sched_yield();
-        else AETHER_PAUSE();
-    }
-}
-
-/* A deregistered actor out of every ready list and timer heap (#3540), and
- * looked at by its core no more: nothing of the scheduler reads it once this
- * returns, and its caller may free it, as with the scan, which looked only
- * at its table. Marked first (AETHER_EXIT_DEREGISTERED), so its core drops
- * the entries it takes for it and fires no countdown of it. Then a first
- * wait, for an entry that may be in another core's list (one pushed before
- * a move, which that core passes on), and a fresh entry on its core, which
- * its core takes after anything it was doing with the actor: a step, a
- * countdown. On its core's own thread (a step deregistering an actor of its
- * core) its lists are this thread's, and it takes it out of them itself. A
- * core that no thread runs, it takes it out of itself. A thread that runs
- * another core waits for the actor's core: deregistering the actor of a
- * core that waits on this one (an ask) waits until that ask ends. */
-static void ready_forget(ActorBase* actor) {
-    if (actor->auto_process) return;   // in no core's lists: its own thread runs it
-    atomic_fetch_or_explicit(&actor->exit_flags, AETHER_EXIT_DEREGISTERED, memory_order_acq_rel);
-    int core = atomic_load_explicit(&actor->assigned_core, memory_order_acquire);
-    if (core < 0 || core >= num_cores) return;
-    if (t_core == core) {
-        if (ready_forget_on(&schedulers[core], actor))
-            atomic_store_explicit(&actor->ready_queued, 0, memory_order_release);
-        ready_forget_wait(actor);
-        return;
-    }
-    ready_forget_wait(actor);
-    ready_push(actor);
-    ready_forget_wait(actor);
-}
-
+/* Out of its core's table, and so out of the scheduler's reach (#3540): its
+ * entries in the cores' ready lists and timer heaps name a table slot that
+ * no longer holds it, and their cores drop them without reading the actor.
+ * Nothing to wait for: a deregister never waited before the ready list, and
+ * one that waited for the cores to drop the entries held its caller for
+ * the length of an armed countdown, forever on the actor's own core, and
+ * deadlocked two cores whose steps deregistered each other's actors. */
 void scheduler_deregister_actor(ActorBase* actor) {
     if (!actor) return;
-    if (actor_table_leave(actor)) ready_forget(actor);
+    (void)actor_table_leave(actor);
 }
 
 // ---------------------------------------------------------------------------
@@ -4855,8 +4764,10 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
     atomic_init(&actor->assigned_core, preferred_core);
     atomic_init(&actor->migrate_to, -1);
     atomic_init(&actor->reply_slot, NULL);
-    atomic_init(&actor->ready_queued, 0);        // #3540: a reused block has no entry left
-    atomic_init(&actor->timer_slot, 0);   // (tombstone_take)
+    // #3540: entries a reused block's last actor left name a slot it is
+    // not at, or are a look at this actor, if it lands at the same one.
+    atomic_init(&actor->ready_queued, 0);
+    atomic_init(&actor->timer_slot, 0);
     atomic_flag_clear_explicit(&actor->step_lock, memory_order_relaxed);
     actor->timeout_ns = 0;
     actor->last_activity_ns = 0;
@@ -4873,9 +4784,8 @@ ActorBase* scheduler_spawn_actor(int preferred_core, void (*step)(void*), size_t
 // The rest of a release, once the actor is marked and nothing of its own
 // runs it any more: out of its table, off the count, retired.
 static void actor_end(ActorBase* actor) {
-    // Out of its table only: its entries in the ready lists and the heap
-    // go when its core takes them, which the reclaim of its block waits for
-    // (a release never waits here: a step can release its own actor).
+    // Out of its table: its entries in the ready lists and the heap are
+    // dropped unread from then on (#3540).
     (void)actor_table_leave(actor);
 
     // Track actor count for inline mode auto-detection
@@ -5226,9 +5136,9 @@ static int ask_relieve(Scheduler* sched) {
     control_run(sched);   // deaths to finalize (#2974); one stepping here waits for its step
     overflow_flush_ex(sched->core_id, 0);
     int placed = relief_deliver(sched);
+    // Each actor it moves has a fresh entry on its new core (#3540), which
+    // looks at it before this ask ends; its entries left here are dropped.
     int moved = relief_evacuate(sched);
-    // Their entries in this core's ready list go with them (#3540).
-    if (moved > 0) ready_forward_moved(sched);
     return placed + moved > 0;
 }
 

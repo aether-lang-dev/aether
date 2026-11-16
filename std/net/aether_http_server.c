@@ -5630,8 +5630,13 @@ static int response_settle_keep_alive(HttpServer* server, HttpRequest* req,
     /* A persistent connection needs a definite body length, or the client
      * cannot tell where this response ends and the next begins. Responses
      * built without a body carry no Content-Length (http_response_create
-     * sets only Content-Type and Server), so state it rather than close. */
-    if (will_keep_alive) {
+     * sets only Content-Type and Server), so state it rather than close.
+     * Not for an answer to HEAD: no body follows it whatever its fields say
+     * (RFC 9110 9.3.2), and a Content-Length there states the GET's length,
+     * so a 0 written for its empty body would misstate one it was not given
+     * (#3713). */
+    int head_only = req && req->method && strcmp(req->method, "HEAD") == 0;
+    if (will_keep_alive && !head_only) {
         int has_length = 0;
         for (int i = 0; i < res->header_count; i++) {
             if (strcasecmp(res->header_keys[i], "Content-Length") == 0 ||
@@ -6051,7 +6056,34 @@ int http_request_head_check(const char* head, const char* hdr_end,
  * declares no length in advance, so nothing else bounds it. */
 #define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
 
-static void conn_send_headers_too_large(HttpConn* conn) {
+/* The request whose bytes start at `req` (`len` of them, read so far) is
+ * known to be a HEAD: its request line begins with that method and the space
+ * after it. A request whose method has not arrived whole is not known to be
+ * one. */
+static int request_bytes_are_head(const char* req, size_t len) {
+    return req && len >= 5 && memcmp(req, "HEAD ", 5) == 0;
+}
+
+/* Send a canned refusal, `msg` (`len` bytes: status line, headers, the blank
+ * line, then a body), to the request whose bytes start at `req`, and close in
+ * stages like every refusal of a request not read to its end (#3252). To a
+ * request known to be a HEAD, the head only (#3711): RFC 9110 9.3.2, an
+ * answer to HEAD carries no body, and a client reads one as the start of the
+ * next response. The head keeps its Content-Length, which may state the
+ * length the answer to a GET would have had. A refusal sent before the method
+ * is known goes out whole, as before. Every refusal below goes through here. */
+static void conn_send_refusal(HttpConn* conn, const char* req, size_t req_len,
+                              const char* msg, size_t len) {
+    size_t n = len;
+    if (request_bytes_are_head(req, req_len)) {
+        const char* end = strstr(msg, "\r\n\r\n");
+        if (end) n = (size_t)(end - msg) + 4;
+    }
+    conn_send(conn, msg, (int)n);
+    conn->linger_on_close = 1;
+}
+
+static void conn_send_headers_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 431 Request Header Fields Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6059,8 +6091,7 @@ static void conn_send_headers_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "header line is too long\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* A head that does not fit the connection buffer: answered 431 and closed in
@@ -6068,7 +6099,7 @@ static void conn_send_headers_too_large(HttpConn* conn) {
  * closed with nothing written and the rest of the head unread, and the reset
  * that sends could destroy the response to the request before it, which the
  * client had received but not yet read. */
-static void conn_send_head_too_large(HttpConn* conn) {
+static void conn_send_head_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 431 Request Header Fields Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6076,11 +6107,10 @@ static void conn_send_head_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request head is too large\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
-static void conn_send_uri_too_long(HttpConn* conn) {
+static void conn_send_uri_too_long(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 414 URI Too Long\r\n"
         "Content-Type: text/plain\r\n"
@@ -6088,11 +6118,10 @@ static void conn_send_uri_too_long(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request line is too long\r\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
-static void conn_send_payload_too_large(HttpConn* conn) {
+static void conn_send_payload_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 413 Payload Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6100,15 +6129,14 @@ static void conn_send_payload_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request body exceeds server limit\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* Refuse a message whose framing this server will not guess at, and say so
  * before closing. A framing error cannot be answered on a kept-alive
  * connection, because where the next request starts is exactly what is in
  * doubt. */
-static void conn_send_bad_framing(HttpConn* conn) {
+static void conn_send_bad_framing(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 400 Bad Request\r\n"
         "Content-Type: text/plain\r\n"
@@ -6116,12 +6144,11 @@ static void conn_send_bad_framing(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request framing is ambiguous or unsupported\r\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* #2760: a request whose request line or headers do not parse. */
-static void conn_send_bad_request_line(HttpConn* conn) {
+static void conn_send_bad_request_line(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 400 Bad Request\r\n"
         "Content-Type: text/plain\r\n"
@@ -6129,8 +6156,7 @@ static void conn_send_bad_request_line(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "malformed HTTP request";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
@@ -6270,7 +6296,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * (#3253). */
         if (conn->write_pos - conn->read_pos + 1 >= HTTP_CONN_BUF_CAP ||
             conn->write_pos + 1 >= conn->buf_cap) {
-            conn_send_head_too_large(conn);
+            conn_send_head_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
             return 0;
         }
         int n = conn->write_pos == conn->read_pos
@@ -6296,20 +6322,21 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     /* The same bound on a head found whole in a buffer larger than that,
      * which a read can fill in one go (#3253). */
     if (header_size >= HTTP_CONN_BUF_CAP) {
-        conn_send_head_too_large(conn);
+        conn_send_head_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
         return 0;
     }
 
     /* Resolve Content-Length and ensure the full body is buffered, once the
      * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
+    size_t head_have = (size_t)(conn->write_pos - conn->read_pos);
     long content_length = 0;
     int te_chunked = 0;
     switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
-    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn);  return 0;
-    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn);      return 0;
-    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn); return 0;
-    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn);       return 0;
+    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn, head_start, head_have); return 0;
     default: break;
     }
     /* #626 (upload half) — streaming-body decision. A body whose
@@ -6340,7 +6367,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                 if (framed > 0) break;
                 /* Not chunked framing: more bytes will not make it so. */
                 if (framed < 0) {
-                    conn_send_bad_framing(conn);
+                    conn_send_bad_framing(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
                 /* A chunked body declares no length up front, so the only
@@ -6348,7 +6375,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                  * sender that never emits the terminal chunk grows this
                  * buffer for as long as it cares to keep writing. */
                 if (have > HTTP_MAX_CHUNKED_BODY) {
-                    conn_send_payload_too_large(conn);
+                    conn_send_payload_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
             }
@@ -6366,7 +6393,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         char* body_start = conn->buf + conn->read_pos + header_size;
         char* decoded = http_dechunk(body_start, frame_len, &decoded_len);
         if (!decoded) {
-            conn_send_bad_framing(conn);
+            conn_send_bad_framing(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
             return 0;
         }
         /* Anything past the terminal chunk is the next pipelined request, not
@@ -6436,7 +6463,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * connection ends: where a next request would start is in doubt,
          * and a client that sent garbage was left holding the connection
          * open with no reply until its own timeout. */
-        conn_send_bad_request_line(conn);
+        conn_send_bad_request_line(conn, req_start, (size_t)request_total);
         return 0;
     }
 
@@ -7375,6 +7402,22 @@ static HttpConn* adopt_conn_new(int client_fd, void* ssl,
 void http_server_drain_connection(HttpServer* server, int client_fd) {
     if (!server || client_fd < 0) return;
 
+    /* A stopping server serves no connection it had not started on: closed
+     * unserved, before anything below can block. The TLS handshake reads
+     * from the client (up to its timeout) and came before conn_serve's
+     * first check of the stop, so a worker stepped after the stop (a
+     * connection's worker queued behind a stop called on its own core,
+     * #3688, or a pool worker that takes a queued connection) shook hands
+     * with a slow client after the stop had returned. A plain connection
+     * ended the same way, at its first read (conn_recv_request_start).
+     * Sequentially consistent, as that read: an actor worker counted as
+     * active after the run's last check of actor_active reads the stop
+     * here. */
+    if (atomic_load(&server->stopping)) {
+        close(client_fd);
+        return;
+    }
+
     /* A plain-HTTP connection to a server whose work is proxying goes to the
      * event driver, which runs many connections on one thread rather than
      * giving this one a thread of its own (#1758). Anything the driver does
@@ -7415,6 +7458,22 @@ void http_server_drain_connection(HttpServer* server, int client_fd) {
     conn->applied_recv_timeout_ms = -1;
 
     if (server->tls_enabled) {
+        /* The handshake is bounded as a request is (#3703): the receive and
+         * send timeouts conn_serve puts on the socket, the keep-alive idle
+         * timeout (30 s unless set), go on before it, so each of the
+         * handshake's reads and writes gives up after that long without
+         * progress and the connection closes, as a stalled request head
+         * does. Before, the socket had no timeout until conn_serve, and a
+         * client that sent a few bytes of a ClientHello and stopped held
+         * this worker (a pool thread, or an actor-mode worker's core) for
+         * as long as it kept the connection open. Both backends read and
+         * write this socket, OpenSSL's SSL_accept and the pure-Aether
+         * server's std.tcp. conn_serve applies the same values after, which
+         * it finds applied already. The event driver bounds its own
+         * handshake (ev_arm_idle). */
+        conn_apply_recv_timeout(server, conn);
+        conn_apply_send_timeout(server, conn);
+
         /* What this connection is accepted with, a reference taken under
          * the lock a re-load swaps it under, and given back once the
          * handshake is done (#3371). */
@@ -7549,7 +7608,7 @@ static void http_conn_worker_step(void* self) {
     /* Active while it serves the connection, which the run waits for
      * (actor_active). Sequentially consistent with the run's check, which
      * comes after the stop set `stopping`: a worker that becomes active after
-     * the run found none sees the stop in its first read and closes the
+     * the run found none sees the stop as the drain begins and closes the
      * connection without serving it. And one of the server's own threads
      * meanwhile, as a pool worker is: a stop from its handler does not wait
      * for the run, which waits for this worker. */

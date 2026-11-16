@@ -313,7 +313,11 @@ int http_actor_stop_waits_probe(void) {
  * stops the server. The stop must return (bounded here: a hang is a
  * failure, not a stuck test), the program frees the server, and the queued
  * worker, stepped once core 0 is free, closes its connection without
- * serving it, with the server still whole for it. */
+ * serving it, with the server still whole for it. Then over TLS through
+ * each backend the build has, with a client that stalls after the first
+ * bytes of its handshake: the drain did the handshake before it checked the
+ * stop, and a handshake waits on such a client with no limit, so core 0
+ * stayed blocked after the stop had returned. */
 static atomic_int g_core0_spawns;
 static atomic_int g_stop_returned;
 
@@ -336,35 +340,59 @@ static void stopper_step(void* self) {
     scheduler_release_actor(actor);   /* safe from its own step */
 }
 
-int http_actor_stop_on_core_probe(void) {
+/* One round: a server, plain or terminating TLS through `backend` ("openssl"
+ * or "aether"), stopped from core 0 with a connection's worker queued there.
+ * 1 passed, 0 failed, -1 when this build cannot terminate TLS that way. */
+static int stop_on_core_once(const char* backend, const char* cert, const char* key) {
+    const char* label = backend ? backend : "plain";
+    atomic_store(&g_core0_spawns, 0);
+    atomic_store(&g_stop_returned, 0);
     g_server = http_server_create(0);
-    if (!g_server) { printf("FAIL: server_create\n"); return 1; }
+    if (!g_server) { printf("FAIL: server_create\n"); return 0; }
     http_server_get(g_server, "/ping", ping_handler, NULL);
+    if (backend) {
+        const char* err = http_server_set_tls_raw(g_server, cert, key);
+        if (err && *err) {
+            printf("stop_on_core[%s]: skipped, set_tls: %s\n", label, err);
+            http_server_free(g_server);
+            return -1;
+        }
+        err = http_server_set_tls_backend_raw(g_server, backend);
+        if (err && *err) {
+            printf("stop_on_core[%s]: skipped, backend: %s\n", label, err);
+            http_server_free(g_server);
+            return -1;
+        }
+    }
     http_server_set_actor_handler(g_server, worker_step, aether_send_message, spawn_on_core0,
                                   (void (*)(void*))scheduler_release_actor);
-    if (http_server_bind_raw(g_server, "127.0.0.1", 0) < 0) { printf("FAIL: bind\n"); return 1; }
+    if (http_server_bind_raw(g_server, "127.0.0.1", 0) < 0) { printf("FAIL: bind\n"); return 0; }
     int port = http_server_port(g_server);
-    if (http_server_start_background_raw(g_server) < 0) { printf("FAIL: start\n"); return 1; }
+    if (http_server_start_background_raw(g_server) < 0) { printf("FAIL: start\n"); return 0; }
 
-    /* The stopper takes core 0 first; then a request, whose worker is
+    /* The stopper takes core 0 first; then a connection, whose worker is
      * spawned on core 0 behind it. */
     ActorBase* stopper = scheduler_spawn_actor(0, stopper_step, sizeof(ActorBase));
-    if (!stopper) { printf("FAIL: spawn the stopper\n"); return 1; }
+    if (!stopper) { printf("FAIL: spawn the stopper\n"); return 0; }
     HttpConnectionMessage go;
     go.type = MSG_HTTP_CONNECTION;
     go.client_fd = -1;
     aether_send_message(stopper, &go, sizeof(go));
     sleep_ms(100);
 
+    /* Plain: a whole request. TLS: the first bytes of a ClientHello's record
+     * header and then nothing, a slow client, which a handshake would wait
+     * on with no time limit. */
     int fd = connect_loopback(port);
-    if (fd < 0 || send_all(fd, "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") != 0) {
-        printf("FAIL: request\n");
-        return 1;
-    }
+    int sent = fd >= 0 && (backend
+        ? send(fd, "\x16\x03\x01", 3, 0) == 3
+        : send_all(fd, "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n") == 0);
+    if (!sent) { printf("FAIL: request\n"); return 0; }
 
     for (int w = 0; w < 1500 && !atomic_load(&g_stop_returned); w++) sleep_ms(10);
     if (!atomic_load(&g_stop_returned)) {
-        printf("FAIL: the stop called on core 0, with a worker queued there, did not return in 15 s\n");
+        printf("FAIL: stop_on_core[%s]: the stop called on core 0, with a worker queued there, "
+               "did not return in 15 s\n", label);
         fflush(stdout);
         _exit(1);   /* core 0 is blocked for good: nothing to clean up */
     }
@@ -374,8 +402,9 @@ int http_actor_stop_on_core_probe(void) {
      * program's step reaches the server it captured. */
     http_server_free(g_server);
 
-    /* The worker, stepped once core 0 is free, closes the connection. Its
-     * request is unread, so the close resets it: ECONNRESET on Linux and
+    /* The worker, stepped once core 0 is free, closes the connection before
+     * reading it, TLS or not; within the client's 5 s receive timeout. Its
+     * bytes are unread, so the close resets it: ECONNRESET on Linux and
      * macOS, ECONNABORTED where Winsock is underneath (Cygwin). */
     char buf[256];
     size_t have = 0;
@@ -385,11 +414,30 @@ int http_actor_stop_on_core_probe(void) {
     }
     int closed = n == 0 || (n < 0 && (errno == ECONNRESET || errno == ECONNABORTED));
     close(fd);
-    printf("spawned_on_core0=%d stop_returned=%d connection_closed=%d bytes=%d\n",
-           atomic_load(&g_core0_spawns), atomic_load(&g_stop_returned), closed, (int)have);
-    if (closed && have == 0 && atomic_load(&g_core0_spawns) >= 1) {
-        printf("http_actor_stop_on_core passed\n");
+    int ok = closed && have == 0 && atomic_load(&g_core0_spawns) >= 1;
+    printf("stop_on_core[%s]: spawned_on_core0=%d stop_returned=%d connection_closed=%d bytes=%d %s\n",
+           label, atomic_load(&g_core0_spawns), atomic_load(&g_stop_returned), closed, (int)have,
+           ok ? "passed" : "FAILED");
+    return ok ? 1 : 0;
+}
+
+/* Plain, then TLS through each backend this build has when the script gave
+ * a certificate (AE_PROBE_TLS_CERT, AE_PROBE_TLS_KEY). */
+int http_actor_stop_on_core_probe(void) {
+    int ok = stop_on_core_once(NULL, NULL, NULL) == 1;
+    const char* cert = getenv("AE_PROBE_TLS_CERT");
+    const char* key = getenv("AE_PROBE_TLS_KEY");
+    int tls_runs = 0;
+    if (cert && *cert && key && *key) {
+        static const char* backends[] = {"openssl", "aether"};
+        for (int i = 0; i < 2; i++) {
+            int r = stop_on_core_once(backends[i], cert, key);
+            if (r == 0) ok = 0;
+            if (r >= 0) tls_runs++;
+        }
     }
+    printf("stop_on_core: tls_runs=%d\n", tls_runs);
+    if (ok) printf("http_actor_stop_on_core passed\n");
     return 0;
 }
 

@@ -47,6 +47,7 @@ int tcp_server_close(TcpServer* s) { (void)s; return 0; }
 int tcp_fd_raw(TcpSocket* s) { (void)s; return -1; }
 int tcp_server_fd_raw(TcpServer* s) { (void)s; return -1; }
 TcpSocket* tcp_socket_from_fd_owned(int fd) { (void)fd; return NULL; }
+TcpSocket* tcp_socket_adopt_fd(int fd) { (void)fd; return NULL; }
 int tcp_poll_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
 int tcp_poll2_raw(TcpSocket* a, TcpSocket* b, int t) { (void)a; (void)b; (void)t; return -1; }
 int tcp_wait_writable_raw(TcpSocket* s, int t) { (void)s; (void)t; return -1; }
@@ -114,6 +115,23 @@ int aether_net_wouldblock(void) {
 #else
     return errno == EAGAIN || errno == EWOULDBLOCK || errno == EINTR;
 #endif
+}
+
+/* recv(2) on a std.tcp socket, taken again when a signal interrupts it
+ * before any byte came: an interruption is not the peer going quiet, so
+ * the "timeout" a receive reports means the socket's receive timeout (or a
+ * non-blocking socket with nothing buffered), which a caller may take as
+ * the timeout it set (#3703). Windows has no EINTR. */
+static int net_recv(int fd, void* buf, int len) {
+    int received;
+    do {
+        received = (int)recv(fd, (char*)buf, len, 0);
+#ifndef _WIN32
+    } while (received < 0 && errno == EINTR);
+#else
+    } while (0);
+#endif
+    return received;
 }
 
 struct TcpSocket {
@@ -524,7 +542,7 @@ char* tcp_receive_raw(TcpSocket* sock, int max_bytes) {
      * The buffer becomes the payload of the counted string returned. */
     char* buffer = (char*)aether_caps_malloc((size_t)max_bytes + 1);
     if (!buffer) return NULL;
-    int received = recv(sock->fd, buffer, max_bytes, 0);
+    int received = net_recv(sock->fd, buffer, max_bytes);
 
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes + 1);
@@ -561,7 +579,7 @@ TcpReceiveResult tcp_receive_n_raw(TcpSocket* sock, int max_bytes) {
         return out;
     }
 
-    int received = recv(sock->fd, buffer, max_bytes, 0);
+    int received = net_recv(sock->fd, buffer, max_bytes);
     if (received <= 0) {
         aether_caps_free(buffer, (size_t)max_bytes);
         /* Split the failure branch (#1092): a would-block / recv-timeout means
@@ -728,7 +746,7 @@ int tcp_send_all_raw(TcpSocket* sock, const void* data, int length) {
  * dead), a null/closed handle or a bad buffer. */
 int tcp_receive_into_raw(TcpSocket* sock, void* buf, int cap) {
     if (!sock || !sock->connected || !buf || cap <= 0) return TCP_RECV_CLOSED;
-    int received = recv(sock->fd, (char*)buf, cap, 0);
+    int received = net_recv(sock->fd, buf, cap);
     if (received > 0) return received;
     if (received < 0 && aether_net_wouldblock()) return TCP_RECV_TIMEOUT;
     sock->connected = 0;
@@ -1070,14 +1088,17 @@ int tcp_server_fd_raw(TcpServer* server) {
     return server->fd;
 }
 
-TcpSocket* tcp_socket_from_fd_owned(int fd) {
+/* A connected descriptor as a std.tcp socket, blocking; `default_timeouts`
+ * puts std.tcp's 30 s receive and send timeouts on it, else it keeps the
+ * ones its owner set. */
+static TcpSocket* tcp_socket_wrap_fd(int fd, int default_timeouts) {
     if (fd < 0) return NULL;
     aether_net_init();
 #ifndef _WIN32
     int flags = fcntl(fd, F_GETFL, 0);
     if (flags >= 0) fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
 #endif
-    net_set_socket_timeouts(fd, 30);
+    if (default_timeouts) net_set_socket_timeouts(fd, 30);
     net_no_sigpipe(fd);
 
     TcpSocket* sock = (TcpSocket*)malloc(sizeof(TcpSocket));
@@ -1088,6 +1109,18 @@ TcpSocket* tcp_socket_from_fd_owned(int fd) {
     sock->fd = fd;
     sock->connected = 1;
     return sock;
+}
+
+TcpSocket* tcp_socket_from_fd_owned(int fd) {
+    return tcp_socket_wrap_fd(fd, 1);
+}
+
+/* As tcp_socket_from_fd_owned, keeping the receive and send timeouts the
+ * descriptor's owner put on it (#3703): the pure-Aether TLS server's accept
+ * takes the HTTP server's descriptor this way, so its handshake is bounded
+ * by the server's receive timeout, not std.tcp's 30 s. */
+TcpSocket* tcp_socket_adopt_fd(int fd) {
+    return tcp_socket_wrap_fd(fd, 0);
 }
 
 /* Readiness primitives (#1092). A full-duplex relay must wait on both

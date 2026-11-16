@@ -30,6 +30,7 @@
 #include <stdatomic.h>
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 #ifdef __cplusplus
 extern "C" {
@@ -373,6 +374,14 @@ typedef struct {
     int         status;
     const char* body;       /* into the caller's receive buffer, not a copy */
     size_t      body_len;
+    /* The answer to a HEAD (#3710): its head only, whatever the upstream sent
+     * after its head, with the upstream's Content-Length as sent (RFC 9110
+     * 9.3.2: it may state the GET's length). */
+    int         head_only;
+    /* A HEAD answer whose upstream head states no length (no Content-Length,
+     * not chunked): the GET's body would have ended at the close, so the
+     * connection to the client closes after the head. */
+    int         length_unknown;
 } AetherProxyDirect;
 
 /* Whether this exchange can answer without materialising the response.
@@ -385,7 +394,9 @@ int aether_proxy_direct_ok(const AetherProxyExchange* px);
  * or -1 when this response is not one to pass through and the caller should
  * take the copying path instead. After 0 the response is recorded: the caller
  * must not take the copying path for it, which records it again, and closes
- * the connection if it cannot write the head (#3244). */
+ * the connection if it cannot write the head (#3244). `raw_len` is where the
+ * response ends by its own framing, not how much the caller has read: bytes
+ * past it are not the response's (#3710). */
 int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
                              const char* raw, size_t raw_len,
                              size_t header_bytes, AetherProxyDirect* out);
@@ -396,5 +407,22 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
 int aether_proxy_direct_head(const AetherProxyDirect* d,
                              const char* raw, size_t header_bytes,
                              char** buf, size_t* cap, size_t* out_len);
+
+/* One line of a response's header block (http_response_headers): the line
+ * at `p` ends at *eol, and the return is where the next one starts. The
+ * client cuts the block at the blank line, so its last field has no CRLF
+ * after it and ends where the block does; a splitter that took only lines
+ * ending in CRLF dropped that field from every proxied and cached response
+ * (#3714). strchr for the carriage return rather than strstr for the pair:
+ * the setup a two-byte needle costs is paid once per header, and this runs
+ * for every header of every proxied response. The client turned every bare
+ * CR into a space (#3572), so a CR here is a line end; were one not followed
+ * by its LF, the line ends there and so does the block. */
+static inline const char* aether_proxy_block_line(const char* p, const char** eol) {
+    const char* cr = strchr(p, '\r');
+    if (cr && cr[1] == '\n') { *eol = cr; return cr + 2; }
+    *eol = cr ? cr : p + strlen(p);
+    return p + strlen(p);
+}
 
 #endif  /* AETHER_PROXY_INTERNAL_H */

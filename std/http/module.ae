@@ -829,7 +829,9 @@ ws_close(ws: ptr, code: int, reason: string) {
 // http_server_set_actor_handler) — the actor's step receives a
 // MSG_HTTP_CONNECTION with a client_fd and should call this helper
 // to get the same TLS / keep-alive / route-dispatch behaviour the
-// thread-pool worker path uses. (#260 Tier 0 / Phase C3.)
+// thread-pool worker path uses. (#260 Tier 0 / Phase C3.) Once the server
+// is stopping it closes the connection unserved, before any TLS handshake
+// (#3688).
 extern http_server_drain_connection(server: ptr, client_fd: int)
 
 // Go-style wrappers for server lifecycle. Return "" on success, error

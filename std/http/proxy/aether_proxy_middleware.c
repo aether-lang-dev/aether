@@ -288,8 +288,24 @@ char* aether_proxy_authority_of(const char* url) {
 
 /* ----- response writer ----- */
 
+/* The proxied body, set on `res` after the upstream's (or the cache's)
+ * headers were copied. An answer to HEAD carries no body and keeps the
+ * Content-Length it was given, which states the GET's (RFC 9110 9.3.2):
+ * setting the empty body would rewrite it to 0, and add a 0 the upstream
+ * never stated when it gave none (#3713). The event loop's direct
+ * pass-through keeps it the same way (#3710). */
+static void proxy_set_body(HttpServerResponse* res, const HttpRequest* req,
+                           const char* body, int body_length) {
+    if (req && req->method && strcmp(req->method, "HEAD") == 0) return;
+    if (body && body_length > 0) {
+        http_response_set_body_n(res, body, body_length);
+    } else {
+        http_response_set_body(res, "");
+    }
+}
+
 /* Apply a cache hit's snapshot to the inbound HttpServerResponse. */
-static void serve_from_cache(HttpServerResponse* res,
+static void serve_from_cache(HttpServerResponse* res, const HttpRequest* req,
                              AetherProxyCacheEntry* e) {
     http_response_set_status(res, e->status_code);
     /* Replay headers (minus hop-by-hop, just in case). Also skip
@@ -305,11 +321,7 @@ static void serve_from_cache(HttpServerResponse* res,
         http_response_set_header(res, e->header_keys[i], e->header_values[i]);
     }
     http_response_set_header(res, "X-Cache", "HIT");
-    if (e->body && e->body_length > 0) {
-        http_response_set_body_n(res, e->body, e->body_length);
-    } else {
-        http_response_set_body(res, "");
-    }
+    proxy_set_body(res, req, e->body, (int)e->body_length);
 }
 
 /* ----- HTTP method classification + retry helpers ----- */
@@ -509,7 +521,7 @@ int aether_proxy_exchange_begin(AetherProxyExchange* px,
             opts->cache, req->method, forward_path, req);
         if (hit) {
             atomic_fetch_add(&opts->pool->metric_cache_hits, 1);
-            serve_from_cache(res, hit);
+            serve_from_cache(res, req, hit);
             return 0;
         }
         atomic_fetch_add(&opts->pool->metric_cache_misses, 1);
@@ -823,12 +835,9 @@ static int px_copy(AetherProxyExchange* px) {
     if (headers_block) {
         const char* p = headers_block;
         while (*p) {
-            /* strchr for the carriage return rather than strstr for the pair:
-             * the setup a two-byte needle costs is paid once per header, and
-             * this loop runs for every header of every proxied response. */
-            const char* cr = strchr(p, '\r');
-            if (!cr || cr[1] != '\n') break;
-            const char* eol = cr;
+            /* The last field has no CRLF after it (#3714). */
+            const char* eol;
+            const char* next = aether_proxy_block_line(p, &eol);
             const char* colon = memchr(p, ':', (size_t)(eol - p));
             if (colon) {
                 size_t kl = (size_t)(colon - p);
@@ -850,7 +859,7 @@ static int px_copy(AetherProxyExchange* px) {
                         char* val = stackval;
                         if (vl >= sizeof(stackval)) {
                             val = (char*)malloc(vl + 1);
-                            if (!val) { p = eol + 2; continue; }
+                            if (!val) { p = next; continue; }
                         }
                         memcpy(val, v, vl);
                         val[vl] = '\0';
@@ -860,7 +869,7 @@ static int px_copy(AetherProxyExchange* px) {
                     }
                 }
             }
-            p = eol + 2;
+            p = next;
         }
     }
     if (!seen_content_type) {
@@ -887,11 +896,7 @@ static int px_copy(AetherProxyExchange* px) {
         http_response_free(px->resp);
         return 0;
     }
-    if (body && body_length > 0) {
-        http_response_set_body_n(res, body, body_length);
-    } else {
-        http_response_set_body(res, "");
-    }
+    proxy_set_body(res, req, body, body_length);
 
     /* ---- Cache store ---- */
     if (opts->cache && headers_block && req->method &&
@@ -936,6 +941,24 @@ static int direct_status_of(const char* raw, size_t raw_len) {
         !isdigit((unsigned char)d[2])) return 0;
     if ((size_t)(d - raw) + 3 < raw_len && isdigit((unsigned char)d[3])) return 0;
     return (d[0] - '0') * 100 + (d[1] - '0') * 10 + (d[2] - '0');
+}
+
+/* Whether the head's fields (`raw`, `header_bytes` bytes, the status line
+ * first) state the body's length: a Content-Length, or a Transfer-Encoding,
+ * whose final coding decides where the body ends. */
+static int direct_head_states_length(const char* raw, size_t header_bytes) {
+    const char* p = memchr(raw, '\n', header_bytes);
+    const char* end = raw + header_bytes;
+    while (p && ++p < end) {
+        const char* cr = memchr(p, '\r', (size_t)(end - p));
+        if (!cr) break;
+        size_t kl = 0;
+        while (p + kl < cr && p[kl] != ':') kl++;
+        if ((kl == 14 && http_ci_eq(p, "Content-Length", 14)) ||
+            (kl == 17 && http_ci_eq(p, "Transfer-Encoding", 17))) return 1;
+        p = memchr(cr, '\n', (size_t)(end - cr));
+    }
+    return 0;
 }
 
 int aether_proxy_direct_ok(const AetherProxyExchange* px) {
@@ -986,6 +1009,14 @@ int aether_proxy_direct_take(AetherProxyExchange* px, int64_t elapsed_ms,
     out->status   = status;
     out->body     = raw + header_bytes;
     out->body_len = body_len;
+    /* An answer to HEAD carries no body (RFC 9110 9.3.2), whatever the
+     * upstream sent after its head (#3710). */
+    out->head_only = px->req && px->req->method && strcmp(px->req->method, "HEAD") == 0;
+    out->length_unknown = 0;
+    if (out->head_only) {
+        out->body_len = 0;
+        out->length_unknown = !direct_head_states_length(raw, header_bytes);
+    }
     return 0;
 }
 
@@ -1081,7 +1112,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
          * whose upstream length describes a body that is not being
          * forwarded, comes out as 0 rather than as that length. Emitted here
          * in the upstream's position so the header order matches. */
-        if (kl == 14 && http_ci_eq(p, "Content-Length", 14)) {
+        /* An answer to HEAD keeps the upstream's, which states the GET's
+         * length (RFC 9110 9.3.2), and is copied below like any field. */
+        if (kl == 14 && http_ci_eq(p, "Content-Length", 14) && !d->head_only) {
             char cl[48];
             size_t cn = 16;
             memcpy(cl, "Content-Length: ", 16);
@@ -1114,8 +1147,9 @@ int aether_proxy_direct_head(const AetherProxyDirect* d,
 
     /* An upstream that sent no Content-Length still gets one, appended, which
      * is where the copying path puts it when the header did not already
-     * exist to be replaced. */
-    if (!saw_content_length) {
+     * exist to be replaced. Not an answer to HEAD: a length its upstream did
+     * not state would be one the GET may not have (#3710). */
+    if (!saw_content_length && !d->head_only) {
         char cl[48];
         size_t cn = 16;
         memcpy(cl, "Content-Length: ", 16);

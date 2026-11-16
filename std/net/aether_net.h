@@ -96,6 +96,9 @@ int tcp_server_fd_raw(TcpServer* server);
 // Adopt an already-connected OS fd into a std.tcp socket handle.
 // Ownership transfers to the returned TcpSocket; tcp_close closes it.
 TcpSocket* tcp_socket_from_fd_owned(int fd);
+// The same, keeping the receive and send timeouts the owner set on the fd
+// rather than putting std.tcp's 30 s ones on it (#3703).
+TcpSocket* tcp_socket_adopt_fd(int fd);
 
 // Readiness primitives for full-duplex relaying (#1092). Wrap poll(2);
 // neither reads nor mutates the socket's connected flag.

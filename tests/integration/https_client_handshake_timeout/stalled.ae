@@ -1,0 +1,55 @@
+// An https request to a server that accepts the connection and never
+// answers its ClientHello (#3703's client side): the handshake must give up
+// at the request's timeout, through each TLS backend the build has.
+//
+// The listener never accepts: the kernel completes the connection on its
+// backlog, so the client's ClientHello is taken and nothing comes back. The
+// request's timeout is 500 ms; the client must fail within a few times
+// that. The pure-Aether client put std.tcp's 30 s timeouts on the socket in
+// place of the request's and retried a timed-out read 50 times, so it waited
+// about 25 minutes; the script bounds the run and reports that as a hang.
+//
+// Prints, per backend, "ROUND <backend> ELAPSED <ms> ERR <error>", or
+// "ROUND <backend> SKIPPED <why>" for a backend this build has not.
+
+import std.http.client
+import std.cryptography.tls13_client
+import std.tcp
+import std.os
+
+extern exit(code: int)
+
+round(port: int, backend: string) {
+    req = client.request("GET", "https://127.0.0.1:${port}/")
+    client.set_timeout(req, 500ms)
+    client.set_insecure(req, 1)
+    berr = client.set_tls_backend(req, backend)
+    if berr != "" {
+        println("ROUND ${backend} SKIPPED ${berr}")
+        client.request_free(req)
+        return
+    }
+    t0 = os.now_monotonic_ms()
+    resp, err = client.send_request(req)
+    elapsed = os.now_monotonic_ms() - t0
+    client.request_free(req)
+    if err == "" {
+        client.response_free(resp)
+        println("ROUND ${backend} ELAPSED ${elapsed} ERR none: a response from a server that sends nothing")
+        return
+    }
+    println("ROUND ${backend} ELAPSED ${elapsed} ERR ${err}")
+}
+
+main() {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    port = tcp.server_port(srv)
+    round(port, "aether")
+    round(port, "openssl")
+    tcp.server_close(srv)
+    println("DONE")
+}

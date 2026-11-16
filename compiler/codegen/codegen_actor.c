@@ -1261,9 +1261,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
     print_line(gen, "%s* spawn_%s(int preferred_core) {", actor->value, actor->value);
     indent(gen);
     print_line(gen, "// AETHER_SINGLE_CORE=1 forces all actors to core 0 (eliminates cross-core overhead)");
-    print_line(gen, "static int _single_core_cached = -1;");
-    print_line(gen, "if (_single_core_cached < 0) _single_core_cached = (getenv(\"AETHER_SINGLE_CORE\") != NULL);");
-    print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core_cached ? 0 : -1);");
+    /* Atomic, relaxed (#3712): spawns run on any thread, and two first
+     * spawns would write a plain static at once. Every thread computes the
+     * same value, so no ordering is needed. */
+    print_line(gen, "static _Atomic int _single_core_cached = -1;");
+    print_line(gen, "int _single_core = atomic_load_explicit(&_single_core_cached, memory_order_relaxed);");
+    print_line(gen, "if (_single_core < 0) {");
+    print_line(gen, "    _single_core = (getenv(\"AETHER_SINGLE_CORE\") != NULL);");
+    print_line(gen, "    atomic_store_explicit(&_single_core_cached, _single_core, memory_order_relaxed);");
+    print_line(gen, "}");
+    print_line(gen, "int core = (preferred_core >= 0) ? preferred_core : (_single_core ? 0 : -1);");
     print_line(gen, "%s* actor = (%s*)scheduler_spawn_actor(core, (void (*)(void*))_aether_step_%s, sizeof(%s));",
                actor->value, actor->value, actor->value, actor->value);
     /* NULL means the allocation failed: nothing pools actors any more. The
@@ -1271,11 +1278,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
      * its block came from an allocator that scheduler_release_actor's free
      * does not match (#2485). */
     print_line(gen, "if (!actor) return NULL;");
-    print_line(gen, "atomic_init(&actor->_aether_base.active, 0);  // inactive until first message send");
-    print_line(gen, "atomic_init(&actor->_aether_base.migrate_to, -1);");
-    /* Not `dead`: a fresh block is alive from scheduler_spawn_actor, and a
-     * restart's block (#2974) stays dead until it is ready, below. */
-    print_line(gen, "actor->_aether_base.auto_process = 0;");
+    /* Nothing of the base the scheduler reads is written here (#3540):
+     * scheduler_spawn_actor sets it (active 0, migrate_to -1, auto_process
+     * 0, alive) before it puts the actor in its core's table, and a
+     * restart's block (#2974) has it set by aether_rebirth_take. From that
+     * table insert on, another core can read the actor (a move of another
+     * actor moves this one into the hole and makes it a ready list entry),
+     * and the writes that repeated those values here raced its reads. */
     if (actor_mailbox_bound(actor) > 0)
         print_line(gen, "atomic_store_explicit(&actor->_aether_base.mailbox_bound, %d, memory_order_relaxed);   /* @mailbox (#2974) */",
                    actor_mailbox_bound(actor));
@@ -1319,9 +1328,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     }
-    print_line(gen, "actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
-    if (program_releases_messages(gen))
-        print_line(gen, "actor->_aether_base.release_message = _aether_release_message;   /* #3142 */");
+    /* Written only when they differ: a restart's block (#2974) has them
+     * already, and a sender dropping a message to the dead actor reads
+     * release_message meanwhile (#3540). A fresh block reaches no other
+     * thread's drop before this function returns it. */
+    print_line(gen, "if (actor->_aether_base.destroy_state != _aether_state_drop_%s)", actor->value);
+    print_line(gen, "    actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
+    if (program_releases_messages(gen)) {
+        print_line(gen, "if (actor->_aether_base.release_message != _aether_release_message)");
+        print_line(gen, "    actor->_aether_base.release_message = _aether_release_message;   /* #3142 */");
+    }
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates

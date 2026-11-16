@@ -502,7 +502,9 @@ int http_server_start_background_raw(HttpServer* server);
 // whose connection is still queued, not yet stepped, is not waited for: only
 // its own core can step it, and that may be the core the stop is called on
 // (from an actor's handler, or on a one-core scheduler). When it is stepped
-// it closes its connection without serving it (#3688).
+// it closes its connection without serving it, TLS ones before any
+// handshake (#3688): http_server_drain_connection serves nothing once the
+// server is stopping.
 void http_server_stop(HttpServer* server);
 // Stop (as above) and free the server. Fatal on one of the server's own
 // threads while it runs, since the run still uses it: stop it there and
@@ -532,6 +534,9 @@ void http_server_thread_leave(HttpServer* server);
 //   - idle_ms elapses with no new bytes (0 = use the default
 //     30-second SO_RCVTIMEO already applied by the connection
 //     handler).
+// The same idle timeout bounds each read and write of a TLS handshake, on
+// both backends (#3703): a client that stalls in its handshake is closed
+// as one that stalls in a request is.
 // Returns "" on success; "server is null" on bad input.
 const char* http_server_set_keepalive_raw(HttpServer* server,
                                           int enabled,

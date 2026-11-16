@@ -487,11 +487,12 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
      * lookup path can replay them onto HttpServerResponse. */
     int hdr_count = 0;
     const char* p = response_headers ? response_headers : "";
+    /* The block's last field has no CRLF after it (#3714). */
     while (*p) {
-        const char* eol = strstr(p, "\r\n");
-        if (!eol) break;
-        if (strchr(p, ':') && strchr(p, ':') < eol) hdr_count++;
-        p = eol + 2;
+        const char* eol;
+        const char* next = aether_proxy_block_line(p, &eol);
+        if (memchr(p, ':', (size_t)(eol - p))) hdr_count++;
+        p = next;
     }
     if (hdr_count > 0) {
         e->header_keys   = (char**)calloc((size_t)hdr_count, sizeof(char*));
@@ -500,10 +501,10 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
             int idx = 0;
             p = response_headers;
             while (*p && idx < hdr_count) {
-                const char* eol = strstr(p, "\r\n");
-                if (!eol) break;
-                const char* colon = strchr(p, ':');
-                if (colon && colon < eol) {
+                const char* eol;
+                const char* next = aether_proxy_block_line(p, &eol);
+                const char* colon = memchr(p, ':', (size_t)(eol - p));
+                if (colon) {
                     size_t kl = (size_t)(colon - p);
                     const char* v = colon + 1;
                     while (v < eol && (*v == ' ' || *v == '\t')) v++;
@@ -518,7 +519,7 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
                         idx++;
                     }
                 }
-                p = eol + 2;
+                p = next;
             }
             e->header_count = idx;
         }

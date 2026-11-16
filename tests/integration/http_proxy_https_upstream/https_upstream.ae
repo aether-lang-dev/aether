@@ -42,17 +42,30 @@ handle_add(req: ptr, res: ptr, pool: ptr) {
     http.response_set_body(res, "busy")
 }
 
-start(server: ptr) -> int {
+// Bind `server` to 127.0.0.1 and a port the kernel picks, without serving
+// yet: a server bound holds its port, so a port taken afterwards cannot be
+// one of its (see closed_port).
+bind_local(server: ptr) -> int {
     if http.server_bind(server, "127.0.0.1", 0) != "" {
         println("FAIL: bind")
         exit(1)
     }
+    return http.server_port(server)
+}
+
+// Serve on the port bind_local took.
+serve_bound(server: ptr) {
     err = http.server_start_background(server)
     if err != "" {
         println("FAIL: ${err}")
         exit(1)
     }
-    return http.server_port(server)
+}
+
+start(server: ptr) -> int {
+    port = bind_local(server)
+    serve_bound(server)
+    return port
 }
 
 need(label: string, err: string) {
@@ -127,14 +140,28 @@ main() {
     http.server_set_host(upstream, "127.0.0.1")
     http.server_get(upstream, "/p", handle_up, 0)
     plain_url = "http://127.0.0.1:${start(upstream)}"
-    tls_url = "https://127.0.0.1:${closed_port()}"
 
     tls_only = http.server_create(0)
     http.server_set_host(tls_only, "127.0.0.1")
-    need("mount", proxy.mount_simple(tls_only, "/", tls_url, 5))
-
     mixed = http.server_create(0)
     http.server_set_host(mixed, "127.0.0.1")
+    busy = http.server_create(0)
+    http.server_set_host(busy, "127.0.0.1")
+    late = http.server_create(0)
+    http.server_set_host(late, "127.0.0.1")
+    // Every server is bound before the port nothing listens on is taken. A
+    // listener's port, once closed, can be the next one the kernel gives a
+    // server: a gateway given it proxies to itself, and the https upstream
+    // that "cannot be reached" answers (http_proxy_loop_head_answers met
+    // that once on Linux).
+    tls_port = bind_local(tls_only)
+    mixed_port = bind_local(mixed)
+    busy_port = bind_local(busy)
+    late_port = bind_local(late)
+    tls_url = "https://127.0.0.1:${closed_port()}"
+
+    need("mount", proxy.mount_simple(tls_only, "/", tls_url, 5))
+
     pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
     if pool == 0 {
         println("FAIL: upstream_pool_new")
@@ -147,24 +174,21 @@ main() {
     // A gateway whose only upstream answers 503 and adds the https one to
     // the pool while the request is on its way: the proxy's retries reach it
     // in the middle of the exchange.
-    busy = http.server_create(0)
-    http.server_set_host(busy, "127.0.0.1")
-    late = http.server_create(0)
-    http.server_set_host(late, "127.0.0.1")
     late_pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
     if late_pool == 0 {
         println("FAIL: upstream_pool_new")
         exit(1)
     }
     http.server_get(busy, "/p", handle_add, late_pool)
-    need("upstream_add", proxy.upstream_add(late_pool, "http://127.0.0.1:${start(busy)}", 1))
+    need("upstream_add", proxy.upstream_add(late_pool, "http://127.0.0.1:${busy_port}", 1))
     late_opts = proxy.opts_new()
     need("retry policy", proxy.opts_set_retry_policy(late_opts, 3, 1))
     need("mount", proxy.mount(late, "/", late_pool, late_opts))
 
-    tls_port = start(tls_only)
-    mixed_port = start(mixed)
-    late_port = start(late)
+    serve_bound(busy)
+    serve_bound(tls_only)
+    serve_bound(mixed)
+    serve_bound(late)
     sleep(200)
 
     bad = 0

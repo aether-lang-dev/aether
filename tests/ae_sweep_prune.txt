@@ -138,6 +138,7 @@ tests/integration/heap_new_pod/
 tests/integration/heap_tracker_nested_tuple_err_no_leak/
 tests/integration/heap_tracker_return_escape_no_leak/
 tests/integration/http_actor_mode_release/
+tests/integration/http_tls_handshake_timeout/
 tests/integration/http_server_hook_state/
 tests/integration/http_auth/
 tests/integration/http_client_bad_status/
@@ -187,6 +188,8 @@ tests/integration/http_server_keepalive/
 tests/integration/http_server_observability/
 tests/integration/http_server_ops/
 tests/integration/http_server_sse/
+tests/integration/https_client_handshake_timeout/
+tests/integration/https_client_response_timeout/
 tests/integration/https_pure_tls_vertical/
 tests/integration/https_client_pure_tls/
 tests/integration/https_windows_trust/

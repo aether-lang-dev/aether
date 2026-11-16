@@ -1824,6 +1824,11 @@ unsigned long long compute_cache_key(const char* ae_file,
     if (key.oom && tc.verbose) fprintf(stderr, "[cache] no key: out of memory\n");
     memo_save();
     unsigned long long h = (complete && !key.oom) ? fnv64_str(key.buf) : 0;
+    /* What the key is made of, under -v: when two builds of the same source
+     * disagree on a key, these lines say which part moved (the source, the
+     * compiler, the driver, the C compiler's identity, a library, the headers,
+     * the dependencies), where the hash alone says only that one did. */
+    if (tc.verbose && key.buf) fprintf(stderr, "[cache] key parts: %s\n", key.buf);
     free(key.buf);
     if (!complete || key.oom) return 0;
     return h ? h : 1ULL;
