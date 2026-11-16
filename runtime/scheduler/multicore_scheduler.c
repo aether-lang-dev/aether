@@ -2339,9 +2339,11 @@ static int core_outbound_idle(int core) {
 // core. Returns 1 when moved; the new core is woken to step whatever is in
 // the mailbox that moved with it. Returns 0, the actor where it was, when a
 // lock is taken or a message is in flight: a move to ask again. Returns -1
-// when no move is to be made from here: the actor is in no table of this
-// core (deregistered, or carried over a restart and not registered yet,
-// #3540), ended, its own thread's, or `dst` names no other core.
+// when no move is to be made from here now: the actor is in no table of
+// this core (deregistered, or carried over a restart and not registered
+// yet, #3540), ended, its own thread's, `dst` names no other core, or the
+// destination's table is full (it grows at a registration; the move is
+// asked again when the actor next has work).
 // `onto_waiter`: a relief's move (#3197), which may take the actor onto a
 // core blocked in an ask when that ask waits on this very actor.
 static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint, int onto_waiter) {
@@ -2380,8 +2382,8 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     }
     int moved = 0;
     int at = actor_table_find_locked(sched, actor, slot_hint);
-    int in_table = at >= 0;
-    if (!actor_table_has_room_locked(to)) at = -1;
+    int movable = at >= 0 && actor_table_has_room_locked(to);
+    if (!movable) at = -1;
     if (at >= 0 && !atomic_flag_test_and_set_explicit(&actor->step_lock, memory_order_acquire)) {
         if (move_begin(actor)) {
             // Its countdown leaves this core's timer heap before the actor
@@ -2416,7 +2418,7 @@ static int move_actor(Scheduler* sched, ActorBase* actor, int dst, int slot_hint
     }
     atomic_flag_clear_explicit(&second->lock, memory_order_release);
     atomic_flag_clear_explicit(&first->lock, memory_order_release);
-    return moved ? 1 : (in_table ? 0 : -1);
+    return moved ? 1 : (movable ? 0 : -1);
 }
 
 // Step `actor`, this core's, once to make room in its full mailbox, so a

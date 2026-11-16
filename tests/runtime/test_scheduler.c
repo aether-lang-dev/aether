@@ -2931,6 +2931,41 @@ void test_deregister_from_steps_of_two_cores(void) {
     ASSERT_TRUE(worst >= 0 && worst < 50000000LL);
 }
 
+// A move to a core whose table is full cannot be made until the table
+// grows (a registration grows it); the core asked again on every pass and
+// never parked (#3540). It asks again when the actor next has work.
+void test_move_to_full_table_lets_core_park(void) {
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    RlActor* t = rl_spawn(0);
+    ASSERT_NOT_NULL(t);
+    LsSender* s = (LsSender*)scheduler_spawn_actor(1, park_sender_step, sizeof(LsSender));
+    ASSERT_NOT_NULL(s);
+    s->target = (ActorBase*)t;
+    // Core 1's table full: spawned into until its count reaches its room.
+    int filled = 0;
+    for (int i = 0; i < 1000000; i++) {
+        spinlock_lock(&schedulers[1].actor_lock);
+        AetherActorTable* table = atomic_load(&schedulers[1].actor_table);
+        int full = atomic_load(&schedulers[1].actor_count) == table->capacity;
+        spinlock_unlock(&schedulers[1].actor_lock);
+        if (full) { filled = 1; break; }
+        if (!rl_spawn(1)) break;
+    }
+    scheduler_send_remote((ActorBase*)s, message_create_simple(1, 0, 0), -1);
+    int handled = wait_count(&t->handled, 1);
+    int asked = atomic_load(&t->migrate_to) == 1;
+    int parked = wait_parked(0);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(filled);
+    ASSERT_EQ(1, handled);
+    ASSERT_TRUE(asked);
+    ASSERT_TRUE(parked);
+}
+
 // Two threads deregister caller's actors at once after a shutdown, each
 // actor with a countdown in its core's heap: a deregister edited the heap
 // and lists of a core no thread ran any more itself, under no lock but
@@ -3039,5 +3074,6 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: an actor keeps its table slot", test_ready_list_actor_keeps_its_table_slot, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Deregister: returns at once with a minute's countdown armed", test_deregister_returns_with_minute_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Deregister: from steps of two cores, each other's actors", test_deregister_from_steps_of_two_cores, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Ready list: a move to a full table lets its core park", test_move_to_full_table_lets_core_park, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Deregister: two threads after a shutdown", test_deregister_after_shutdown_from_two_threads, TEST_CATEGORY_RUNTIME);
 }
