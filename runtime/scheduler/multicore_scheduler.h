@@ -293,7 +293,9 @@ struct ActorInbox;   /* runtime/actors/aether_actor_inbox.h */
      * where the table places it, moved with it when a removal moves it, \
      * under the table's lock. A hint only, which a find checks before it \
      * scans: a move asked through the ready list finds the actor at once, \
-     * as the scan's move, which knew the slot it was at, did. */ \
+     * as the scan's move, which knew the slot it was at, did. And the tag \
+     * of its ready list and timer heap entries: a core reads the actor of \
+     * an entry only while its table holds it at that slot. */ \
     atomic_int table_slot;
 
 typedef struct {
@@ -348,10 +350,6 @@ struct AetherWatch;  /* runtime/actors/aether_supervision.c */
  * keeps such an actor on that core, which is the one writer of its mailbox,
  * and clears the bit. */
 #define AETHER_EXIT_ROUTED    4
-/* A caller's actor scheduler_deregister_actor has taken out of its table
- * (#3540): a core drops the ready list entries it takes for it and fires
- * no countdown of it. scheduler_register_actor clears the bit. */
-#define AETHER_EXIT_DEREGISTERED 8
 
 /* ActorBase.inflight (#3090, #3093): set while the actor's core moves it to
  * another; the counts of messages in flight sit below it. */
@@ -389,6 +387,14 @@ typedef struct AetherActorTable {
     int capacity;
     _Atomic(ActorBase*) slots[];
 } AetherActorTable;
+
+/* A ready list entry (#3540): the actor, and the slot of its core's table it
+ * was at when the entry was made. The core reads the actor only while the
+ * table holds it there. */
+typedef struct {
+    ActorBase* actor;
+    int slot;
+} AetherReady;
 
 typedef struct {
     int core_id;
@@ -483,10 +489,6 @@ typedef struct {
     // requests, and a death posted then is finalized by its poster. Under
     // control_lock; 0 again at scheduler_init.
     int             control_closed;
-    // 1 once the core's thread has left its loop and touches its ready
-    // lists and timer heap no more (#3540): a deregister then takes an
-    // actor out of them itself. 0 again at scheduler_init.
-    atomic_int      loop_left;
     // Where this core's next relief scan of its table starts (#3197).
     int             relief_cursor;
 
@@ -500,10 +502,10 @@ typedef struct {
     // at instead of every actor it has. See the notes above scheduler_thread
     // in multicore_scheduler.c. All of it but `ready_in` is this core's
     // thread's alone.
-    ActorBase** ready;                // the actors to look at in the next pass
+    AetherReady* ready;               // the actors to look at in the next pass
     int ready_count;
     int ready_cap;
-    ActorBase** ready_work;           // the pass under way: [ready_at, ready_work_count)
+    AetherReady* ready_work;          // the pass under way: [ready_at, ready_work_count)
     int ready_work_count;
     int ready_work_cap;
     int ready_at;
@@ -515,7 +517,7 @@ typedef struct {
     struct {
         atomic_flag lock;
         atomic_int count;
-        ActorBase** list;
+        AetherReady* list;
         int cap;
     } AETHER_ALIGNED(64) ready_in;
 } Scheduler;
@@ -558,12 +560,12 @@ void scheduler_cleanup(void);
  * which its core fires from the registration on, as it does one armed
  * before a first registration (#3540). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
-/* Out of its core's table, and out of every core's ready list and timer
- * heap (#3540): once it returns, no core reads the actor (one that has a
- * receive timeout armed included), and the caller may free it, unless a
- * message to it is still on its way. It waits for the actor's core to take
- * a last entry for it: called from a step on another core, that core must
- * not be waiting on this one. The actor may be registered again. */
+/* Out of its core's table. It waits for nothing: the entries the actor has
+ * in the cores' ready lists and timer heaps (#3540) name a table slot that
+ * no longer holds it, and their cores drop them without reading it, so the
+ * caller may free it once this returns (one with a receive timeout armed
+ * included), unless a message to it is still on its way. The actor may be
+ * registered again. */
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);

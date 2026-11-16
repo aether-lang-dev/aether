@@ -2787,6 +2787,211 @@ void test_ready_list_actor_keeps_its_table_slot(void) {
     ASSERT_TRUE(deregistered);
 }
 
+
+// A deregister waits for nothing (#3540): no core, no countdown. It made
+// the actor's core drop its entries and waited for it, so a countdown armed
+// for a minute held it a minute, one on the caller's own core could hold it
+// forever, and two cores whose steps deregistered each other's actors waited
+// on each other. It leaves the table and returns; the entries the actor had
+// are dropped by their cores, which find it in no table and do not read it.
+static double deregister_us(ActorBase* a) {
+    uint64_t t0 = aether_now_ns();
+    scheduler_deregister_actor(a);
+    return (double)(aether_now_ns() - t0) / 1000.0;
+}
+
+static MovedTimed* mapped_timed(size_t* len, void (*step)(void*)) {
+    size_t page = system_page_size();
+    *len = (sizeof(MovedTimed) + page - 1) & ~(page - 1);
+    MovedTimed* a = (MovedTimed*)map_pages(*len);
+    if (!a) return NULL;
+    mailbox_init(&a->mailbox);
+    a->step = step;
+    atomic_init(&a->assigned_core, -1);
+    atomic_init(&a->migrate_to, -1);
+    return a;
+}
+
+// From main: an idle actor with a countdown armed for a minute, in its
+// core's heap and in no ready list, is deregistered in microseconds, and
+// its block, made unreadable at once in place of a free, is not read or
+// written while its core goes on: countdowns of other actors enter its heap
+// above the minute's, move its entry and come due.
+void test_deregister_returns_with_minute_countdown(void) {
+    size_t len;
+    MovedTimed* a = mapped_timed(&len, freed_timed_step);
+    ASSERT_NOT_NULL(a);
+    atomic_store(&g_freed_fired, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    RlTimed* tm[8];
+    for (int i = 0; i < 8; i++) {
+        tm[i] = (RlTimed*)scheduler_spawn_actor(0, rl_timed_step, sizeof(RlTimed));
+        ASSERT_NOT_NULL(tm[i]);
+        atomic_init(&tm[i]->fired, 0);
+    }
+    scheduler_register_actor((ActorBase*)a, 0);
+    arm_countdown((ActorBase*)a, 60000);
+    int in_heap = wait_in_heap((ActorBase*)a);
+    double us = deregister_us((ActorBase*)a);
+    int forbidden = forbid_pages(a, len, 1) == 0;
+    for (int i = 0; i < 8; i++) arm_countdown((ActorBase*)tm[i], 5 + i);
+    int handled = 0;
+    for (int i = 0; i < 8; i++) handled += wait_count(&tm[i]->fired, 1);
+    if (forbidden) ASSERT_EQ(0, forbid_pages(a, len, 0));
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    unmap_pages(a, len);
+    printf("    (deregister with a minute's countdown armed: %.1f us)\n", us);
+    ASSERT_TRUE(in_heap);
+    ASSERT_TRUE(forbidden);
+    ASSERT_EQ(8, handled);
+    ASSERT_EQ(0, atomic_load(&g_freed_fired));
+    ASSERT_TRUE(us < 50000.0);   // microseconds here; generous for a loaded runner
+}
+
+// From steps. Two cores' steps each deregister the other core's actor and
+// an actor of their own core, every one with a countdown armed for a
+// minute, both at once: both return, each deregister in microseconds.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* victims[2];
+    atomic_llong worst_ns;
+    atomic_int done;
+} DeregStepper;
+
+static atomic_int g_dereg_arrived;
+
+static void dereg_step(void* self) {
+    DeregStepper* d = (DeregStepper*)self;
+    Message msg;
+    if (!mailbox_receive(&d->mailbox, &msg)) return;
+    // Both steps at once, as far as the two cores allow.
+    atomic_fetch_add(&g_dereg_arrived, 1);
+    uint64_t until = aether_now_ns() + 1000000000ULL;
+    while (atomic_load(&g_dereg_arrived) < 2 && aether_now_ns() < until) {
+    }
+    long long worst = 0;
+    for (int k = 0; k < 2; k++) {
+        uint64_t t0 = aether_now_ns();
+        scheduler_deregister_actor(d->victims[k]);
+        long long ns = (long long)(aether_now_ns() - t0);
+        if (ns > worst) worst = ns;
+    }
+    atomic_store(&d->worst_ns, worst);
+    atomic_fetch_add(&d->done, 1);
+}
+
+void test_deregister_from_steps_of_two_cores(void) {
+    MovedTimed* v[2][2];   // v[core][k]: core's own (k 0) and the other's (k 1)
+    for (int c = 0; c < 2; c++)
+        for (int k = 0; k < 2; k++) {
+            v[c][k] = (MovedTimed*)caller_actor(sizeof(MovedTimed), moved_timed_step);
+            ASSERT_NOT_NULL(v[c][k]);
+        }
+    atomic_store(&g_dereg_arrived, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    DeregStepper* s[2];
+    for (int c = 0; c < 2; c++) {
+        s[c] = (DeregStepper*)scheduler_spawn_actor(c, dereg_step, sizeof(DeregStepper));
+        ASSERT_NOT_NULL(s[c]);
+        atomic_init(&s[c]->worst_ns, -1);
+        atomic_init(&s[c]->done, 0);
+    }
+    int in_heap = 1;
+    for (int c = 0; c < 2; c++)
+        for (int k = 0; k < 2; k++) {
+            // v[c][0] is on core c, v[c][1] on the other core.
+            scheduler_register_actor((ActorBase*)v[c][k], k == 0 ? c : 1 - c);
+            arm_countdown((ActorBase*)v[c][k], 60000);
+            if (!wait_in_heap((ActorBase*)v[c][k])) in_heap = 0;
+        }
+    for (int c = 0; c < 2; c++) {
+        s[c]->victims[0] = (ActorBase*)v[c][0];
+        s[c]->victims[1] = (ActorBase*)v[c][1];
+    }
+    for (int c = 0; c < 2; c++) scheduler_send_remote((ActorBase*)s[c], message_create_simple(1, 0, 0), -1);
+    int done0 = wait_count(&s[0]->done, 1);
+    int done1 = wait_count(&s[1]->done, 1);
+    long long worst = atomic_load(&s[0]->worst_ns);
+    if (atomic_load(&s[1]->worst_ns) > worst) worst = atomic_load(&s[1]->worst_ns);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    for (int c = 0; c < 2; c++)
+        for (int k = 0; k < 2; k++) free(v[c][k]);
+    printf("    (slowest deregister from a step: %.1f us)\n", (double)worst / 1000.0);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(1, done0);
+    ASSERT_EQ(1, done1);
+    ASSERT_TRUE(worst >= 0 && worst < 50000000LL);
+}
+
+// Two threads deregister caller's actors at once after a shutdown, each
+// actor with a countdown in its core's heap: a deregister edited the heap
+// and lists of a core no thread ran any more itself, under no lock but
+// ready_in's, and two of them at once corrupted them (#3540). It edits
+// neither now: the heap is as the shutdown left it, every countdown in it.
+// And a scheduler started again fires a countdown armed then.
+typedef struct {
+    ActorBase** actors;
+    int n;
+} DeregBatch;
+
+static void* dereg_batch_thread(void* arg) {
+    DeregBatch* b = (DeregBatch*)arg;
+    for (int i = 0; i < b->n; i++) scheduler_deregister_actor(b->actors[i]);
+    return NULL;
+}
+
+void test_deregister_after_shutdown_from_two_threads(void) {
+    enum { N = 2000 };
+    ActorBase** all = (ActorBase**)calloc(2 * N, sizeof(ActorBase*));
+    ASSERT_NOT_NULL(all);
+    scheduler_init(1);
+    scheduler_start();
+    int made = 1, in_heap = 1;
+    for (int i = 0; i < 2 * N; i++) {
+        all[i] = (ActorBase*)caller_actor(sizeof(RlTimed), rl_timed_step);
+        if (!all[i]) { made = 0; break; }
+        scheduler_register_actor(all[i], 0);
+        arm_countdown(all[i], 60000);
+    }
+    for (int i = 0; made && i < 2 * N; i++)
+        if (!wait_in_heap(all[i])) in_heap = 0;
+    scheduler_shutdown();
+    int before = schedulers[0].timer_count;
+    DeregBatch b[2] = { { all, N }, { all + N, N } };
+    pthread_t th[2];
+    for (int k = 0; k < 2; k++) ASSERT_EQ(0, pthread_create(&th[k], NULL, dereg_batch_thread, &b[k]));
+    for (int k = 0; k < 2; k++) pthread_join(th[k], NULL);
+    int after = schedulers[0].timer_count;
+    scheduler_init(1);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    RlTimed* late = (RlTimed*)caller_actor(sizeof(RlTimed), rl_timed_step);
+    ASSERT_NOT_NULL(late);
+    atomic_init(&late->fired, 0);
+    scheduler_register_actor((ActorBase*)late, 0);
+    arm_countdown((ActorBase*)late, 20);
+    int fired = wait_count(&late->fired, 1);
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    for (int i = 0; i < 2 * N; i++) free(all[i]);
+    free(all);
+    free(late);
+    ASSERT_TRUE(made);
+    ASSERT_TRUE(in_heap);
+    ASSERT_EQ(2 * N, before);
+    ASSERT_EQ(before, after);   // untouched by the deregisters
+    ASSERT_EQ(1, fired);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -2832,4 +3037,7 @@ void register_scheduler_tests(void) {
     register_test_with_category("Ready list: a deregistered actor's block is not read again", test_ready_list_deregister_then_free_with_countdown, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a move of an actor in no table lets its core park", test_ready_list_move_of_actor_in_no_table_lets_core_park, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: an actor keeps its table slot", test_ready_list_actor_keeps_its_table_slot, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Deregister: returns at once with a minute's countdown armed", test_deregister_returns_with_minute_countdown, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Deregister: from steps of two cores, each other's actors", test_deregister_from_steps_of_two_cores, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Deregister: two threads after a shutdown", test_deregister_after_shutdown_from_two_threads, TEST_CATEGORY_RUNTIME);
 }
