@@ -1,0 +1,120 @@
+// A refusal to a HEAD carries the head only (#3711).
+//
+// RFC 9110 9.3.2: an answer to HEAD carries no body. The server's refusals of
+// a request it will not read (a header line too long, a request line too
+// long, framing it will not guess at) were canned responses sent whole, body
+// included, whatever the method: a HEAD got "header line is too long" after
+// the head, which a client reads as the start of the next response. A refusal
+// now goes out as its head only when the request's bytes say it is a HEAD.
+//
+// Each request goes on a connection of its own to a server on 127.0.0.1 and
+// a port the kernel picks, and is read until the server closes: the status,
+// then "head only" when nothing followed the blank line that ends the head,
+// else how many bytes did. A GET refused the same way keeps its body.
+
+import std.http
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+handle_p(req: ptr, res: ptr, ud: ptr) {
+    http.response_set_status(res, 200)
+    http.response_set_body(res, "ok")
+}
+
+// `n` copies of "a".
+filler(n: int) -> string {
+    s = "a"
+    while string.length(s) * 2 <= n {
+        s = string.concat(s, s)
+    }
+    while string.length(s) < n {
+        s = string.concat(s, "a")
+    }
+    return s
+}
+
+probe(port: int, raw: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, raw)
+    wire = ""
+    tries = 0
+    while tries < 50 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 50
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    end = string.index_of(wire, "\r\n\r\n")
+    if string.length(wire) < 12 || end < 0 {
+        return "no answer"
+    }
+    status = string.substring(wire, 9, 12)
+    after = string.length(wire) - (end + 4)
+    if after == 0 {
+        return "${status} head only"
+    }
+    return "${status} and ${after} bytes after the head"
+}
+
+main() {
+    println("=== a refusal to a HEAD carries the head only (#3711) ===")
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    http.server_get(s, "/p", handle_p, 0)
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    port = http.server_port(s)
+    serr = http.server_start_background(s)
+    if serr != "" {
+        println("FAIL: ${serr}")
+        exit(1)
+    }
+    sleep(100)
+
+    long_line = "X-Long: ${filler(1100)}\r\n"
+    long_uri = "/${filler(2100)}"
+    labels = ["a HEAD with a header line too long (431)",
+        "a HEAD with a request line too long (414)",
+        "a HEAD with framing the server will not guess at (400)",
+        "a GET with a header line too long keeps its body (431)"]
+    raws = ["HEAD /p HTTP/1.1\r\nHost: x\r\n${long_line}\r\n",
+        "HEAD ${long_uri} HTTP/1.1\r\nHost: x\r\n\r\n",
+        "HEAD /p HTTP/1.1\r\nHost: x\r\nContent-Length: 1\r\nTransfer-Encoding: chunked\r\n\r\n",
+        "GET /p HTTP/1.1\r\nHost: x\r\n${long_line}\r\n"]
+    wants = ["431 head only", "414 head only", "400 head only",
+        "431 and 24 bytes after the head"]
+
+    bad = 0
+    i = 0
+    while i < 4 {
+        got = probe(port, raws[i])
+        if got != wants[i] {
+            println("  FAIL ${labels[i]}: got '${got}', expected '${wants[i]}'")
+            bad = bad + 1
+        } else {
+            println("  PASS ${labels[i]}")
+        }
+        i = i + 1
+    }
+    http.server_stop(s)
+    http.server_free(s)
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

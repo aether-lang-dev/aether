@@ -6051,7 +6051,34 @@ int http_request_head_check(const char* head, const char* hdr_end,
  * declares no length in advance, so nothing else bounds it. */
 #define HTTP_MAX_CHUNKED_BODY (8 * 1024 * 1024)
 
-static void conn_send_headers_too_large(HttpConn* conn) {
+/* The request whose bytes start at `req` (`len` of them, read so far) is
+ * known to be a HEAD: its request line begins with that method and the space
+ * after it. A request whose method has not arrived whole is not known to be
+ * one. */
+static int request_bytes_are_head(const char* req, size_t len) {
+    return req && len >= 5 && memcmp(req, "HEAD ", 5) == 0;
+}
+
+/* Send a canned refusal, `msg` (`len` bytes: status line, headers, the blank
+ * line, then a body), to the request whose bytes start at `req`, and close in
+ * stages like every refusal of a request not read to its end (#3252). To a
+ * request known to be a HEAD, the head only (#3711): RFC 9110 9.3.2, an
+ * answer to HEAD carries no body, and a client reads one as the start of the
+ * next response. The head keeps its Content-Length, which may state the
+ * length the answer to a GET would have had. A refusal sent before the method
+ * is known goes out whole, as before. Every refusal below goes through here. */
+static void conn_send_refusal(HttpConn* conn, const char* req, size_t req_len,
+                              const char* msg, size_t len) {
+    size_t n = len;
+    if (request_bytes_are_head(req, req_len)) {
+        const char* end = strstr(msg, "\r\n\r\n");
+        if (end) n = (size_t)(end - msg) + 4;
+    }
+    conn_send(conn, msg, (int)n);
+    conn->linger_on_close = 1;
+}
+
+static void conn_send_headers_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 431 Request Header Fields Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6059,8 +6086,7 @@ static void conn_send_headers_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "header line is too long\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* A head that does not fit the connection buffer: answered 431 and closed in
@@ -6068,7 +6094,7 @@ static void conn_send_headers_too_large(HttpConn* conn) {
  * closed with nothing written and the rest of the head unread, and the reset
  * that sends could destroy the response to the request before it, which the
  * client had received but not yet read. */
-static void conn_send_head_too_large(HttpConn* conn) {
+static void conn_send_head_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 431 Request Header Fields Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6076,11 +6102,10 @@ static void conn_send_head_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request head is too large\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
-static void conn_send_uri_too_long(HttpConn* conn) {
+static void conn_send_uri_too_long(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 414 URI Too Long\r\n"
         "Content-Type: text/plain\r\n"
@@ -6088,11 +6113,10 @@ static void conn_send_uri_too_long(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request line is too long\r\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
-static void conn_send_payload_too_large(HttpConn* conn) {
+static void conn_send_payload_too_large(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 413 Payload Too Large\r\n"
         "Content-Type: text/plain\r\n"
@@ -6100,15 +6124,14 @@ static void conn_send_payload_too_large(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request body exceeds server limit\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* Refuse a message whose framing this server will not guess at, and say so
  * before closing. A framing error cannot be answered on a kept-alive
  * connection, because where the next request starts is exactly what is in
  * doubt. */
-static void conn_send_bad_framing(HttpConn* conn) {
+static void conn_send_bad_framing(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 400 Bad Request\r\n"
         "Content-Type: text/plain\r\n"
@@ -6116,12 +6139,11 @@ static void conn_send_bad_framing(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "request framing is ambiguous or unsupported\r\n";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 /* #2760: a request whose request line or headers do not parse. */
-static void conn_send_bad_request_line(HttpConn* conn) {
+static void conn_send_bad_request_line(HttpConn* conn, const char* req, size_t req_len) {
     static const char msg[] =
         "HTTP/1.1 400 Bad Request\r\n"
         "Content-Type: text/plain\r\n"
@@ -6129,8 +6151,7 @@ static void conn_send_bad_request_line(HttpConn* conn) {
         "Connection: close\r\n"
         "\r\n"
         "malformed HTTP request";
-    conn_send(conn, msg, (int)(sizeof(msg) - 1));
-    conn->linger_on_close = 1;
+    conn_send_refusal(conn, req, req_len, msg, sizeof(msg) - 1);
 }
 
 static void conn_set_recv_timeout(HttpConn* c, int ms);
@@ -6270,7 +6291,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * (#3253). */
         if (conn->write_pos - conn->read_pos + 1 >= HTTP_CONN_BUF_CAP ||
             conn->write_pos + 1 >= conn->buf_cap) {
-            conn_send_head_too_large(conn);
+            conn_send_head_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
             return 0;
         }
         int n = conn->write_pos == conn->read_pos
@@ -6296,20 +6317,21 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
     /* The same bound on a head found whole in a buffer larger than that,
      * which a read can fill in one go (#3253). */
     if (header_size >= HTTP_CONN_BUF_CAP) {
-        conn_send_head_too_large(conn);
+        conn_send_head_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
         return 0;
     }
 
     /* Resolve Content-Length and ensure the full body is buffered, once the
      * head has passed the checks the proxy event loop makes too (#3236). */
     const char* head_start = conn->buf + conn->read_pos;
+    size_t head_have = (size_t)(conn->write_pos - conn->read_pos);
     long content_length = 0;
     int te_chunked = 0;
     switch (http_request_head_check(head_start, hdr_end, &content_length, &te_chunked)) {
-    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn);  return 0;
-    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn);      return 0;
-    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn); return 0;
-    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn);       return 0;
+    case HTTP_HEAD_MALFORMED:    conn_send_bad_request_line(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_URI_TOO_LONG: conn_send_uri_too_long(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_TOO_LARGE:    conn_send_headers_too_large(conn, head_start, head_have); return 0;
+    case HTTP_HEAD_BAD_FRAMING:  conn_send_bad_framing(conn, head_start, head_have); return 0;
     default: break;
     }
     /* #626 (upload half) — streaming-body decision. A body whose
@@ -6340,7 +6362,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                 if (framed > 0) break;
                 /* Not chunked framing: more bytes will not make it so. */
                 if (framed < 0) {
-                    conn_send_bad_framing(conn);
+                    conn_send_bad_framing(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
                 /* A chunked body declares no length up front, so the only
@@ -6348,7 +6370,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
                  * sender that never emits the terminal chunk grows this
                  * buffer for as long as it cares to keep writing. */
                 if (have > HTTP_MAX_CHUNKED_BODY) {
-                    conn_send_payload_too_large(conn);
+                    conn_send_payload_too_large(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
                     return 0;
                 }
             }
@@ -6366,7 +6388,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
         char* body_start = conn->buf + conn->read_pos + header_size;
         char* decoded = http_dechunk(body_start, frame_len, &decoded_len);
         if (!decoded) {
-            conn_send_bad_framing(conn);
+            conn_send_bad_framing(conn, conn->buf + conn->read_pos, (size_t)(conn->write_pos - conn->read_pos));
             return 0;
         }
         /* Anything past the terminal chunk is the next pipelined request, not
@@ -6436,7 +6458,7 @@ static int handle_one_request(HttpServer* server, HttpConn* conn,
          * connection ends: where a next request would start is in doubt,
          * and a client that sent garbage was left holding the connection
          * open with no reply until its own timeout. */
-        conn_send_bad_request_line(conn);
+        conn_send_bad_request_line(conn, req_start, (size_t)request_total);
         return 0;
     }
 
