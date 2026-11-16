@@ -1,0 +1,88 @@
+// Regression test (#3540): spawns from main while the cores move actors.
+//
+// A generated spawn took the actor from scheduler_spawn_actor, which had
+// already put it in its core's table, and then set again three fields the
+// scheduler had set before that (active, migrate_to, auto_process). A core
+// that moved another actor away moved the newest actor of its table into
+// the hole, and made it a fresh ready list entry, reading auto_process while
+// the spawn wrote it; taking the entry, it read migrate_to while the spawn
+// wrote it. ThreadSanitizer reported both (tests/integration
+// actor_state_ref_name_not_type's uses.ae, `make test-tsan`). The spawn no
+// longer writes what the scheduler set before the actor was published.
+//
+// Two kickers, on two cores, each send a target hits in turn, so the target
+// is asked to move to each one's core and moves back and forth (#3090).
+// Main meanwhile spawns tallies, which land last in those cores' tables.
+// The counts show every message handled once; the race shows only under
+// ThreadSanitizer, which this test is picked for (it declares actors).
+
+extern exit(code: int)
+
+message Go { n: int }
+message Hit {}
+message Bump {}
+message Get {}
+message Count { v: int }
+
+actor Target {
+    state hits = 0
+    receive {
+        Hit -> { hits = hits + 1 }
+        Get -> { reply Count { v: hits } }
+    }
+}
+
+actor Kicker {
+    state target = 0
+    receive {
+        Go(n) -> {
+            i = 0
+            while i < n {
+                target ! Hit {}
+                i = i + 1
+            }
+        }
+    }
+}
+
+actor Tally {
+    state seen = 0
+    state label = "tally"
+    receive {
+        Bump -> { seen = seen + 1 }
+        Get -> { reply Count { v: seen } }
+    }
+}
+
+main() {
+    t = spawn(Target())
+    k0 = spawn(Kicker(), core: 0)
+    k1 = spawn(Kicker(), core: 1)
+    k0.target = t
+    k1.target = t
+
+    rounds = 200
+    per_go = 50
+    tallied = 0
+    r = 0
+    while r < rounds {
+        k0 ! Go { n: per_go }
+        k1 ! Go { n: per_go }
+        y = spawn(Tally())
+        y ! Bump {}
+        v, err = y ? Get {}
+        if err == "" { tallied = tallied + v }
+        r = r + 1
+    }
+    wait_for_idle()
+    hits, herr = t ? Get {}
+    if herr != "" { println("ask failed: ${herr}") }
+    println("tallies ${tallied} of ${rounds}")
+    println("hits ${hits} of ${rounds * per_go * 2}")
+    if tallied == rounds && hits == rounds * per_go * 2 {
+        println("PASS")
+    } else {
+        println("FAIL")
+        exit(1)
+    }
+}

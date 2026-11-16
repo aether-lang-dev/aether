@@ -1271,11 +1271,13 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
      * its block came from an allocator that scheduler_release_actor's free
      * does not match (#2485). */
     print_line(gen, "if (!actor) return NULL;");
-    print_line(gen, "atomic_init(&actor->_aether_base.active, 0);  // inactive until first message send");
-    print_line(gen, "atomic_init(&actor->_aether_base.migrate_to, -1);");
-    /* Not `dead`: a fresh block is alive from scheduler_spawn_actor, and a
-     * restart's block (#2974) stays dead until it is ready, below. */
-    print_line(gen, "actor->_aether_base.auto_process = 0;");
+    /* Nothing of the base the scheduler reads is written here (#3540):
+     * scheduler_spawn_actor sets it (active 0, migrate_to -1, auto_process
+     * 0, alive) before it puts the actor in its core's table, and a
+     * restart's block (#2974) has it set by aether_rebirth_take. From that
+     * table insert on, another core can read the actor (a move of another
+     * actor moves this one into the hole and makes it a ready list entry),
+     * and the writes that repeated those values here raced its reads. */
     if (actor_mailbox_bound(actor) > 0)
         print_line(gen, "atomic_store_explicit(&actor->_aether_base.mailbox_bound, %d, memory_order_relaxed);   /* @mailbox (#2974) */",
                    actor_mailbox_bound(actor));
@@ -1319,9 +1321,16 @@ void generate_actor_definition(CodeGenerator* gen, ASTNode* actor) {
             }
         }
     }
-    print_line(gen, "actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
-    if (program_releases_messages(gen))
-        print_line(gen, "actor->_aether_base.release_message = _aether_release_message;   /* #3142 */");
+    /* Written only when they differ: a restart's block (#2974) has them
+     * already, and a sender dropping a message to the dead actor reads
+     * release_message meanwhile (#3540). A fresh block reaches no other
+     * thread's drop before this function returns it. */
+    print_line(gen, "if (actor->_aether_base.destroy_state != _aether_state_drop_%s)", actor->value);
+    print_line(gen, "    actor->_aether_base.destroy_state = _aether_state_drop_%s;   /* #2528 */", actor->value);
+    if (program_releases_messages(gen)) {
+        print_line(gen, "if (actor->_aether_base.release_message != _aether_release_message)");
+        print_line(gen, "    actor->_aether_base.release_message = _aether_release_message;   /* #3142 */");
+    }
 
     // Auto-initialize "my_ref" to the actor's own pointer so it is valid
     // immediately after spawn — no Setup message needed.  This eliminates
