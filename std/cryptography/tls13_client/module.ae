@@ -133,7 +133,7 @@ extern malloc(size: int) -> ptr
 @extern("free") libc_free(p: ptr)
 // Adopt an already-connected fd (the http client hands us one, possibly a
 // forward-proxy CONNECT tunnel). Declared here as the server module does.
-extern tcp_socket_from_fd_owned(fd: int) -> ptr
+extern tcp_socket_adopt_fd(fd: int) -> ptr
 extern string_length(s: string) -> int
 
 exports(
@@ -421,6 +421,10 @@ struct RecordIO {
     off: int // consumed-so-far offset (records already returned)
     alert: int // the alert recio_next says to send, when it refuses a record
     ccs: int // the dummy change_cipher_spec records read in the handshake (#3379)
+    // 1 once the handshake is done (new_client_conn). Before, a read that
+    // times out is the socket's own timeout, which the caller set, and ends
+    // the handshake (#3703); after, it is retried (recio_fill).
+    after_hs: int
 }
 
 fn recio_new(sock: @keep ptr) -> *RecordIO {
@@ -432,6 +436,7 @@ fn recio_new(sock: @keep ptr) -> *RecordIO {
     r.off = 0
     r.alert = 0
     r.ccs = 0
+    r.after_hs = 0
     return r
 }
 
@@ -464,7 +469,8 @@ fn recio_compact(r: *RecordIO) {
     r.len = rest
 }
 
-// Pull more bytes from the socket into the buffer. Returns bytes read, or <= 0
+// Pull more bytes from the socket into the buffer. Returns bytes read, -2
+// when a read in the handshake timed out (#3703), or <= 0 otherwise
 // on close/error.
 fn recio_fill(r: *RecordIO) -> int {
     recio_compact(r)
@@ -485,7 +491,14 @@ fn recio_fill(r: *RecordIO) -> int {
                 filling = 0
             }
         } else {
-            if string.equals(err, "timeout") == 1 {
+            if string.equals(err, "timeout") == 1 && r.after_hs == 0 {
+                // In the handshake a timed-out read ends it (#3703): the
+                // socket is blocking, adopted with the caller's timeouts, so
+                // the read has waited that whole timeout for a server that
+                // sent nothing. Retried, it waited 50 times std.tcp's 30 s.
+                result = -2
+                filling = 0
+            } else if string.equals(err, "timeout") == 1 {
                 // Idle read; retry a bounded number of times before giving up.
                 tries = tries + 1
                 if tries >= RECIO_MAX_TIMEOUT_RETRIES {
@@ -624,6 +637,9 @@ fn recio_next(r: *RecordIO) -> (ptr, int, string) {
         }
         // Need more bytes.
         got = recio_fill(r)
+        if got == -2 {
+            return null, 0, "record: no reply from the server within the timeout"
+        }
         if got <= 0 {
             return null, 0, "record: connection closed before a full record"
         }
@@ -677,6 +693,8 @@ fn new_client_conn(sock: @keep ptr, rio: @keep ptr, suite: int, c_ap: @keep ptr,
     conn = malloc(sizeof(ClientConn)) as *ClientConn
     conn.sock = sock
     conn.rio = rio
+    hs_rio = rio as *RecordIO
+    hs_rio.after_hs = 1 // the handshake is done (#3703)
     conn.app_send = tls13_record.new_aead(aead, bytes.view(ck)[0..key_len], civ) as ptr
     conn.app_recv = tls13_record.new_aead(aead, bytes.view(sk)[0..key_len], siv) as ptr
     conn.res_master = res_master
@@ -3502,7 +3520,10 @@ extern aether_callback_set_reason(reason: string)
 
 @c_callback("aether_pure_tls_client_connect")
 pure_tls_client_connect(fd: int, host: string, verify_mode: int, cafile: string) -> ptr {
-    sock = tcp_socket_from_fd_owned(fd)
+    // Adopted with the timeouts the caller (std.http's client) put on it
+    // (#3703): the handshake waits on the server no longer than the
+    // request's timeout, not std.tcp's 30 s.
+    sock = tcp_socket_adopt_fd(fd)
     if sock == null {
         aether_callback_set_reason("could not adopt the connected socket")
         return null
