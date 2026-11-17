@@ -1,0 +1,181 @@
+// HEAD and GET through a cache keyed without the method (#3719, #3720).
+//
+// The proxy cache's "url" key leaves the method out, so a HEAD and a GET of
+// one URL share an entry.
+// - #3720: an answer to HEAD was stored too. It has no body, so a GET after
+//   it was served an empty 200 until the entry expired. A HEAD answer is no
+//   longer stored under that key; the GET reaches the upstream.
+// - #3719: a HEAD answered from a stored GET that the upstream sent chunked
+//   stated no length: the stored fields carry only a Transfer-Encoding,
+//   which goes as hop-by-hop. It now states the GET body's length.
+//
+// A raw upstream answers by method, on as many connections as it is asked.
+
+import std.http
+import std.http.proxy
+import std.string
+import std.tcp
+
+extern exit(code: int)
+
+message Serve { srv: ptr, get_answer: string, head_answer: string, conns: int }
+
+// Accept `conns` connections on `srv`, one at a time; answer each request
+// with `head_answer` or `get_answer` by its method, then close.
+actor Upstream {
+    receive {
+        Serve(srv, get_answer, head_answer, conns) -> {
+            c = 0
+            while c < conns {
+                sock, aerr = tcp.accept(srv)
+                if aerr != "" {
+                    c = conns
+                } else {
+                    req = ""
+                    t = 0
+                    while t < 50 && string.index_of(req, "\r\n\r\n") < 0 {
+                        chunk, rerr = tcp.read(sock, 4096)
+                        if rerr != "" || string.length(chunk) == 0 {
+                            t = 50
+                        } else {
+                            req = string.concat(req, chunk)
+                        }
+                        t = t + 1
+                    }
+                    if string.starts_with(req, "HEAD ") == 1 {
+                        tcp.write(sock, head_answer)
+                    } else {
+                        tcp.write(sock, get_answer)
+                    }
+                    sleep(100)
+                    tcp.close(sock)
+                    c = c + 1
+                }
+            }
+        }
+    }
+}
+
+// The value of the head's Content-Length, or "none".
+content_length(head: string) -> string {
+    at = string.index_of(head, "\r\nContent-Length: ")
+    if at < 0 {
+        return "none"
+    }
+    rest = string.substring(head, at + 18, string.length(head))
+    return string.substring(rest, 0, string.index_of(rest, "\r\n"))
+}
+
+// `method` /f on a connection of its own: "<status> length <cl> body <n>".
+probe(port: int, method: string) -> string {
+    sock, cerr = tcp.connect("127.0.0.1", port)
+    if cerr != "" {
+        return "connect failed"
+    }
+    tcp.write(sock, "${method} /f HTTP/1.1\r\nHost: x\r\nConnection: close\r\n\r\n")
+    wire = ""
+    tries = 0
+    while tries < 30 {
+        ready, _perr = tcp.poll(sock, 100)
+        if ready {
+            chunk, rerr = tcp.read(sock, 4096)
+            if rerr != "" || string.length(chunk) == 0 {
+                tries = 30
+            } else {
+                wire = string.concat(wire, chunk)
+            }
+        }
+        tries = tries + 1
+    }
+    tcp.close(sock)
+    end = string.index_of(wire, "\r\n\r\n")
+    if string.length(wire) < 12 || end < 0 {
+        return "no answer"
+    }
+    status = string.substring(wire, 9, 12)
+    cl = content_length(string.substring(wire, 0, end + 2))
+    body = string.length(wire) - (end + 4)
+    return "${status} length ${cl} body ${body}"
+}
+
+// A proxy on its own port with a "url"-keyed cache in front of an upstream
+// that serves `conns` connections. Returns the server, the pool, the opts,
+// the cache and the upstream listener, for teardown.
+start(get_answer: string, head_answer: string, conns: int) -> (ptr, ptr, ptr, ptr, ptr) {
+    srv, lerr = tcp.listen_on("127.0.0.1", 0)
+    if lerr != "" {
+        println("FAIL: listen: ${lerr}")
+        exit(1)
+    }
+    up = spawn(Upstream())
+    up ! Serve { srv: srv, get_answer: get_answer, head_answer: head_answer, conns: conns }
+    pool = proxy.upstream_pool_new("round_robin", 5, 0, 0)
+    proxy.upstream_add(pool, "http://127.0.0.1:${tcp.server_port(srv)}", 1)
+    cache = proxy.cache_new(16, 65536, 60, "url")
+    opts = proxy.opts_new()
+    proxy.opts_bind_cache(opts, cache)
+    s = http.server_create(0)
+    http.server_set_host(s, "127.0.0.1")
+    merr = proxy.mount(s, "/", pool, opts)
+    if merr != "" {
+        println("FAIL: mount: ${merr}")
+        exit(1)
+    }
+    if http.server_bind(s, "127.0.0.1", 0) != "" {
+        println("FAIL: bind")
+        exit(1)
+    }
+    serr = http.server_start_background(s)
+    if serr != "" {
+        println("FAIL: ${serr}")
+        exit(1)
+    }
+    sleep(100)
+    return s, pool, opts, cache, srv
+}
+
+stop(s: ptr, pool: ptr, opts: ptr, cache: ptr, srv: ptr) {
+    http.server_stop(s)
+    http.server_free(s)
+    proxy.opts_free(opts)
+    proxy.upstream_pool_free(pool)
+    proxy.cache_free(cache)
+    tcp.server_close(srv)
+}
+
+check(label: string, got: string, want: string) -> int {
+    if got == want {
+        println("  PASS ${label}: ${got}")
+        return 0
+    }
+    println("  FAIL ${label}: got '${got}', expected '${want}'")
+    return 1
+}
+
+main() {
+    println("=== HEAD and GET through a cache keyed by url (#3719, #3720) ===")
+    bad = 0
+
+    // #3720: a HEAD first, then a GET. The GET must reach the upstream and
+    // get its body, not the stored HEAD's empty answer.
+    framed_get = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: max-age=60\r\n\r\nok"
+    framed_head = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nContent-Length: 2\r\nCache-Control: max-age=60\r\n\r\n"
+    s, pool, opts, cache, srv = start(framed_get, framed_head, 2)
+    bad = bad + check("HEAD first", probe(http.server_port(s), "HEAD"), "200 length 2 body 0")
+    bad = bad + check("then GET (#3720)", probe(http.server_port(s), "GET"), "200 length 2 body 2")
+    stop(s, pool, opts, cache, srv)
+
+    // #3719: a GET the upstream sends chunked, then a HEAD answered from
+    // the stored GET: it states the body's length and sends none.
+    chunked_get = "HTTP/1.1 200 OK\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nCache-Control: max-age=60\r\n\r\n2\r\nok\r\n0\r\n\r\n"
+    s2, pool2, opts2, cache2, srv2 = start(chunked_get, framed_head, 1)
+    bad = bad + check("chunked GET first", probe(http.server_port(s2), "GET"), "200 length 2 body 2")
+    bad = bad + check("then HEAD from the cache (#3719)", probe(http.server_port(s2), "HEAD"), "200 length 2 body 0")
+    stop(s2, pool2, opts2, cache2, srv2)
+
+    if bad > 0 {
+        println("FAIL: ${bad} case(s)")
+        exit(1)
+    }
+    println("All PASS")
+}

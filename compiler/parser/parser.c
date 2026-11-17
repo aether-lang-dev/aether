@@ -9412,6 +9412,68 @@ static void apply_import_hiding(ASTNode* program) {
     }
 }
 
+/* A `const` or `var` name declared twice at the top of one file (#3708).
+ * Nothing diagnosed it: in a module the merge kept the first declaration
+ * and dropped the second without a word, so every use read a value its
+ * author had replaced, and in a program both reached the generated C, where
+ * only the C compiler objected, naming a line of generated C. A file is
+ * checked once, here, after only the taken arm of every `when` was parsed
+ * in, so a name declared once per arm is not a repeat. Sorted, not compared
+ * pairwise: a file can declare thousands of names (#2907). */
+typedef struct {
+    const char* name;
+    const ASTNode* node;
+} TopLevelName;
+
+static int top_level_name_cmp(const void* a, const void* b) {
+    const TopLevelName* x = a;
+    const TopLevelName* y = b;
+    int c = strcmp(x->name, y->name);
+    if (c) return c;
+    if (x->node->line != y->node->line) return x->node->line < y->node->line ? -1 : 1;
+    return (x->node->column > y->node->column) - (x->node->column < y->node->column);
+}
+
+static const char* top_level_word(const ASTNode* n) {
+    return n->annotation && strcmp(n->annotation, "global_var") == 0 ? "var" : "const";
+}
+
+static void report_repeated_top_level_names(Parser* parser, ASTNode* program) {
+    if (parser->suppress_errors) return;
+    int n = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        const ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value) n++;
+    }
+    if (n < 2) return;
+    TopLevelName* names = malloc((size_t)n * sizeof *names);
+    if (!names) return;
+    int k = 0;
+    for (int i = 0; i < program->child_count; i++) {
+        const ASTNode* c = program->children[i];
+        if (c && c->type == AST_CONST_DECLARATION && c->value)
+            names[k++] = (TopLevelName){ c->value, c };
+    }
+    qsort(names, (size_t)n, sizeof *names, top_level_name_cmp);
+    int first = 0;
+    for (int i = 1; i < n; i++) {
+        if (strcmp(names[i].name, names[first].name) != 0) {
+            first = i;
+            continue;
+        }
+        const ASTNode* d = names[i].node;
+        const ASTNode* f = names[first].node;
+        char msg[1024];   /* four names of at most 200 bytes and the text */
+        snprintf(msg, sizeof msg,
+                 "'%.200s' is declared twice at the top of this file: `%s %.200s` here, "
+                 "and `%s %.200s` at line %d. Rename or remove one; a second declaration "
+                 "does not replace the first",
+                 d->value, top_level_word(d), d->value, top_level_word(f), f->value, f->line);
+        aether_error_with_code(msg, d->line, d->column, AETHER_ERR_REDEFINITION);
+    }
+    free(names);
+}
+
 ASTNode* parse_program(Parser* parser) {
     ASTNode* program = create_ast_node(AST_PROGRAM, NULL, 0, 0);
 
@@ -9434,6 +9496,7 @@ ASTNode* parse_program(Parser* parser) {
         if (parser->current_token == start_token) advance_token(parser);
     }
 
+    report_repeated_top_level_names(parser, program);
     apply_import_hiding(program);
     return program;
 }

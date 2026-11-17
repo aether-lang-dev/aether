@@ -1360,8 +1360,9 @@ static unsigned long long c_compiler_fingerprint(void) {
         if (word[0] == '-' || strchr(word, '=')) continue;
         char* resolved = resolve_program(word);
         if (!resolved) continue;
+        unsigned long long driver_hash = file_hash(resolved);
         h = (h * 1099511628211ULL) ^ fnv64_str(resolved);
-        h = (h * 1099511628211ULL) ^ file_hash(resolved);
+        h = (h * 1099511628211ULL) ^ driver_hash;
         /* The file found on PATH may be a trampoline whose bytes never
          * change when the compiler behind it does: macOS's /usr/bin/gcc
          * and /usr/bin/clang (xcrun shims, switched by xcode-select or an
@@ -1370,25 +1371,37 @@ static unsigned long long c_compiler_fingerprint(void) {
          * its first line of `--version` is folded in too; a program with
          * no such line folds in nothing. */
         char* cmd = str_join4("\"", 1, resolved, "\" --version", "");
-        free(resolved);
-        if (!cmd) continue;
+        if (!cmd) { free(resolved); continue; }
         /* Spawned directly, as every compile step is (#3532): popen hands
          * the line to cmd.exe on Windows, a second process start that was
          * about half of this probe's 23 ms there. */
         char out_path[1200];
         snprintf(out_path, sizeof(out_path), "%s/ae_ccver_%d.out", get_temp_dir(),
                  (int)getpid());
-        run_cmd_capture_stdout(cmd, out_path);
+        int version_rc = run_cmd_capture_stdout(cmd, out_path);
         free(cmd);
+        char line[512];
+        int have_line = 0;
         FILE* vf = fopen(out_path, "r");
         if (vf) {
-            char line[512];
             if (fgets(line, sizeof(line), vf)) {
+                have_line = 1;
                 h = (h * 1099511628211ULL) ^ fnv64_str(line);
             }
             fclose(vf);
         }
         remove(out_path);
+        /* Each part of the compiler's identity, under -v (#3707): an
+         * unchanged rebuild that missed the cache on macOS x86 computed
+         * another ccid than the build before it, and the one input that
+         * comes from running a program rather than reading a file is this
+         * `--version` line, whose run's outcome the key does not see. */
+        if (tc.verbose) {
+            if (have_line) line[strcspn(line, "\r\n")] = '\0';
+            fprintf(stderr, "[cache] ccid: %s file=%016llx version rc=%d line=%s\n", resolved,
+                    driver_hash, version_rc, have_line ? line : "none");
+        }
+        free(resolved);
     }
     free(word);
     free(owned);
