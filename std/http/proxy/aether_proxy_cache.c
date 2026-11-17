@@ -360,6 +360,12 @@ void aether_proxy_cache_store(AetherProxyCache* cache,
 
     /* Cacheability gate — RFC 7234 conservative subset. */
     if (strcmp(method, "GET") != 0 && strcmp(method, "HEAD") != 0) return;
+    /* An answer to HEAD has no body, so it can answer only a HEAD: under a
+     * key that leaves the method out, a GET would be served it as an empty
+     * 200 until it expired (#3720). A HEAD there is answered from a stored
+     * GET instead (serve_from_cache). */
+    if (strcmp(method, "HEAD") == 0 && cache->key_strategy == AETHER_PROXY_CACHE_KEY_URL)
+        return;
     int cacheable_status =
         status_code == 200 || status_code == 203 || status_code == 204 ||
         status_code == 300 || status_code == 301 || status_code == 404 ||
