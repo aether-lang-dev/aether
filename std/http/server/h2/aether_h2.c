@@ -31,6 +31,7 @@
 
 #include <nghttp2/nghttp2.h>
 #include "../../../net/aether_http_server.h"
+#include "../../../cryptography/aether_cryptography.h"
 
 /* Per-stream concurrent dispatch (#260 follow-up) is POSIX-only.
  * The worker pool relies on pipe(2) + poll(2) for cross-thread
@@ -48,7 +49,6 @@
  * threadless shim's in the same TU. */
 #include "../../../../runtime/utils/aether_thread.h"
 #include "../../../../runtime/utils/aether_spawn.h"
-#include "../../../../runtime/utils/aether_once.h"
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
@@ -1150,70 +1150,6 @@ void aether_h2_session_initiate_goaway(AetherH2Session* sess) {
  * the 101 line before the first drain.
  * ------------------------------------------------------------------ */
 
-/* base64url decode (no padding) into a freshly-malloc'd buffer.
- * Returns the buffer (NUL-terminated for safety) or NULL on bad
- * input. *out_len receives the decoded byte count. */
-static uint8_t* b64url_decode(const char* in, size_t in_len, size_t* out_len) {
-    static const int8_t T[256] = {
-        ['A']=0,['B']=1,['C']=2,['D']=3,['E']=4,['F']=5,['G']=6,['H']=7,
-        ['I']=8,['J']=9,['K']=10,['L']=11,['M']=12,['N']=13,['O']=14,['P']=15,
-        ['Q']=16,['R']=17,['S']=18,['T']=19,['U']=20,['V']=21,['W']=22,['X']=23,
-        ['Y']=24,['Z']=25,
-        ['a']=26,['b']=27,['c']=28,['d']=29,['e']=30,['f']=31,['g']=32,['h']=33,
-        ['i']=34,['j']=35,['k']=36,['l']=37,['m']=38,['n']=39,['o']=40,['p']=41,
-        ['q']=42,['r']=43,['s']=44,['t']=45,['u']=46,['v']=47,['w']=48,['x']=49,
-        ['y']=50,['z']=51,
-        ['0']=52,['1']=53,['2']=54,['3']=55,['4']=56,['5']=57,['6']=58,['7']=59,
-        ['8']=60,['9']=61,
-        ['-']=62,['_']=63,
-    };
-    /* Initialise the rest to -1. The static initialiser handles the
-     * named slots; everything else is zero, which we'd misread as
-     * 'A'. Walk once and explicitly mark non-base64url bytes. */
-    /* Filled once by the first decode on any connection's thread: aether_once
-     * (#3680), so a decode on another thread waits for the whole table, and
-     * none reads it half filled or fills it twice. */
-    static aether_once_t lookup_once = AETHER_ONCE_INIT;
-    static int8_t lookup[256];
-    if (aether_once_begin(&lookup_once)) {
-        for (int i = 0; i < 256; i++) lookup[i] = -1;
-        for (int i = 0; i < 256; i++) if (T[i] != 0 || i == 'A') lookup[i] = T[i];
-        lookup['A'] = 0;
-        aether_once_done(&lookup_once);
-    }
-
-    if (in_len == 0) {
-        *out_len = 0;
-        uint8_t* zero = malloc(1);
-        if (zero) zero[0] = '\0';
-        return zero;
-    }
-    /* Output upper bound: ceil(in_len * 3 / 4). */
-    size_t cap = (in_len * 3) / 4 + 4;
-    uint8_t* out = malloc(cap);
-    if (!out) return NULL;
-    size_t op = 0;
-    /* `v` keeps only the bits not yet written, fewer than 8 between
-     * characters. An int that kept every bit overflowed after six
-     * characters, which C leaves undefined (#2488, the same decoder shape
-     * UBSan found in std/http/middleware). */
-    unsigned int v = 0;
-    int bits = 0;
-    for (size_t i = 0; i < in_len; i++) {
-        int8_t c = lookup[(unsigned char)in[i]];
-        if (c < 0) { free(out); return NULL; }
-        v = (v << 6) | (unsigned int)c;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out[op++] = (uint8_t)((v >> bits) & 0xff);
-            v &= (1u << bits) - 1u;
-        }
-    }
-    *out_len = op;
-    return out;
-}
-
 AetherH2Session* aether_h2_session_from_h2c_upgrade(
     HttpServer* server,
     void* conn_userdata,
@@ -1226,13 +1162,15 @@ AetherH2Session* aether_h2_session_from_h2c_upgrade(
     AetherH2Session* sess = aether_h2_session_new(server, conn_userdata);
     if (!sess) return NULL;
 
-    /* Decode SETTINGS payload (base64url, no padding per RFC 7540). */
+    /* Decode SETTINGS payload (base64url, RFC 7540 §3.2.1) with
+     * std.cryptography's decoder, the only one in the tree. RFC 7540 says
+     * the client leaves off the padding; trailing `=` is accepted anyway. */
     size_t settings_len = 0;
     uint8_t* settings_buf = NULL;
     if (http2_settings_b64) {
-        settings_buf = b64url_decode(http2_settings_b64,
-                                     strlen(http2_settings_b64),
-                                     &settings_len);
+        settings_buf = cryptography_base64_decode_buf(http2_settings_b64,
+                                                      strlen(http2_settings_b64),
+                                                      1, &settings_len);
         if (!settings_buf) {
             aether_h2_session_free(sess);
             return NULL;

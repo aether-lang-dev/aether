@@ -14,6 +14,7 @@
 // and register the middleware with the server.
 #include "aether_middleware.h"
 #include "../../../runtime/aether_resource_caps.h"
+#include "../../cryptography/aether_cryptography.h"
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -128,46 +129,6 @@ void aether_basic_auth_opts_free(AetherBasicAuthOpts* o) {
     free(o);
 }
 
-/* RFC 4648 base64 alphabet. Decoding tolerant of whitespace + padding. */
-static int b64_decode_char(int c) {
-    if (c >= 'A' && c <= 'Z') return c - 'A';
-    if (c >= 'a' && c <= 'z') return c - 'a' + 26;
-    if (c >= '0' && c <= '9') return c - '0' + 52;
-    if (c == '+') return 62;
-    if (c == '/') return 63;
-    return -1;
-}
-
-/* Decode a base64 string. Caller frees. Returns NULL on malformed
- * input. *out_len receives the decoded byte count. */
-static char* b64_decode(const char* src, size_t* out_len) {
-    size_t src_len = strlen(src);
-    char* out = (char*)malloc(src_len + 1);
-    if (!out) return NULL;
-    /* `val` keeps only the bits not yet written, fewer than 8 between
-     * characters. An int that kept every bit overflowed after six
-     * characters, which C leaves undefined (UBSan, #2488). */
-    int bits = 0;
-    unsigned int val = 0;
-    size_t out_pos = 0;
-    for (size_t i = 0; i < src_len; i++) {
-        int c = (unsigned char)src[i];
-        if (c == '=' || c == '\r' || c == '\n' || c == ' ' || c == '\t') continue;
-        int d = b64_decode_char(c);
-        if (d < 0) { free(out); return NULL; }
-        val = (val << 6) | (unsigned int)d;
-        bits += 6;
-        if (bits >= 8) {
-            bits -= 8;
-            out[out_pos++] = (char)((val >> bits) & 0xff);
-            val &= (1u << bits) - 1u;
-        }
-    }
-    out[out_pos] = '\0';
-    *out_len = out_pos;
-    return out;
-}
-
 int aether_middleware_basic_auth(HttpRequest* req, HttpServerResponse* res, void* user_data) {
     AetherBasicAuthOpts* o = (AetherBasicAuthOpts*)user_data;
     if (!o || !o->verify) return 1;
@@ -185,8 +146,10 @@ int aether_middleware_basic_auth(HttpRequest* req, HttpServerResponse* res, void
     const char* b64 = auth + 6;
     while (*b64 == ' ' || *b64 == '\t') b64++;
 
+    /* std.cryptography's decoder, the only one in the tree. A malformed
+     * credential (bad character, `=` before the end) is a 400 here. */
     size_t dec_len = 0;
-    char* decoded = b64_decode(b64, &dec_len);
+    char* decoded = (char*)cryptography_base64_decode_buf(b64, strlen(b64), 0, &dec_len);
     if (!decoded) {
         http_response_set_status(res, 400);
         http_response_set_body(res, "Bad Authorization header");

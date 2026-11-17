@@ -523,10 +523,81 @@ char* cryptography_base64url_encode_padded_raw(const char* data, int length) {
     return ae_b64_encode(data, length, 1, 1);
 }
 
-/* Decode in the chosen alphabet. The result is handed straight back as an
- * owned, length-carrying AetherString (embedded NULs and high bytes intact),
- * or NULL for malformed input / OOM: no shared state between calls, so
- * concurrent decodes cannot see each other. */
+/* The one base64 decoder in this tree. std.encoding's base64_decode and
+ * base64url_decode reach it through the two _owned entry points below; the
+ * HTTP basic-auth middleware and the HTTP/2 h2c upgrade (HTTP2-Settings)
+ * reach it through cryptography_base64_decode_buf. Those two used to carry
+ * their own copies, and the copies drifted: basic auth still skipped `=`
+ * anywhere in the input after this one stopped doing so.
+ *
+ * It decodes one character at a time, on purpose. Java4Shell
+ * (CVE-2026-114938, Nov 2026) was a heap overflow in OpenJDK's AVX-512
+ * base64 fast path: a padded tail ("=", "X=", "XY=", ...) after whole groups
+ * gave an output length of -1, which the vector store mask read as "all 64
+ * bytes". We don't think a vector path is worth having here:
+ *   - the inputs are small (auth headers, PEM, JWTs, HTTP2-Settings, a few
+ *     hundred bytes to a few KB), and a scalar decoder at 1-2 GB/s is not
+ *     the bottleneck of anything that calls it;
+ *   - the bug lived in exactly the code a vector path adds, the tail
+ *     handling, and it shipped in a mature, heavily reviewed JDK;
+ *   - a port of a SIMD library would be C intrinsics outside the language,
+ *     or a vector feature in Aether justified only by a codec.
+ * If a workload ever shows base64 in a profile, add a separate, opt-in fast
+ * entry point, fuzzed byte for byte against this one under ASan, rather than
+ * replacing it. tests/regression/base64_padded_tail_no_overflow.ae is the
+ * tail sweep any such path must also pass.
+ *
+ * The output can never outgrow ae_b64_decoded_cap(in_len): every 4 data
+ * characters give 3 bytes and whitespace and `=` give none. The buffer is
+ * sized from the input, never from the padding, and each store is checked
+ * against `cap` as well. */
+static size_t ae_b64_decoded_cap(size_t in_len) {
+    return (in_len / 4) * 3 + 3;
+}
+
+/* Decode `in_len` raw bytes into `out` (room for `cap` bytes). Returns the
+ * decoded length, or -1 for malformed input.
+ *
+ * Whitespace (line-wrapped input) is skipped. `=` is padding only: it may
+ * appear only after the last data character, at most twice, and padded
+ * input must come to a multiple of 4. A data length of 1 mod 4 cannot be
+ * produced by any encoder, and the bits left over after the last whole byte
+ * must be zero, so every input has one meaning. All three used to pass: `=`
+ * was skipped anywhere ("Zm9v=Zm9v" decoded to "foofoo"), "Z" decoded to
+ * nothing, and "Zh==" to the same byte as "Zg==", each with no error. */
+static long ae_b64_decode_into(const unsigned char* in, size_t in_len, int url,
+                               unsigned char* out, size_t cap) {
+    unsigned acc = 0;
+    int nbits = 0;
+    size_t o = 0;
+    size_t data_chars = 0, pad_chars = 0;
+    for (size_t i = 0; i < in_len; i++) {
+        unsigned char c = in[i];
+        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
+        if (c == '=') { pad_chars++; continue; }
+        int v = ae_b64_value(c, url);
+        if (v < 0 || pad_chars > 0) return -1;   /* bad char, or data after padding */
+        data_chars++;
+        acc = (acc << 6) | (unsigned)v;
+        nbits += 6;
+        if (nbits >= 8) {
+            nbits -= 8;
+            if (o >= cap) return -1;              /* cannot happen; see the cap above */
+            out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
+        }
+    }
+    if (data_chars % 4 == 1 || pad_chars > 2 ||
+        (pad_chars > 0 && (data_chars + pad_chars) % 4 != 0) ||
+        (acc & ((1u << nbits) - 1u)) != 0) {
+        return -1;
+    }
+    return (long)o;
+}
+
+/* The result is handed straight back as an owned, length-carrying
+ * AetherString (embedded NULs and high bytes intact), or NULL for malformed
+ * input / OOM: no shared state between calls, so concurrent decodes cannot
+ * see each other. */
 static char* ae_b64_decode(const char* b64, int url) {
     if (!b64) return NULL;
 
@@ -536,46 +607,16 @@ static char* ae_b64_decode(const char* b64, int url) {
 
     /* Decoding "" is a valid request yielding zero bytes. +1 for the NUL
      * string_adopt_caps_buffer expects after the payload. */
-    size_t out_alloc = (in_len / 4) * 3 + 3 + 1;
+    size_t cap = ae_b64_decoded_cap(in_len);
+    size_t out_alloc = cap + 1;
     unsigned char* out = (unsigned char*)aether_caps_malloc(out_alloc);
     if (!out) return NULL;
 
-    /* Whitespace (line-wrapped input) is skipped. `=` is padding only: it
-     * may appear only after the last data character, at most twice, and
-     * padded input must come to a multiple of 4. A data length of 1 mod 4
-     * cannot be produced by any encoder, and the bits left over after the
-     * last whole byte must be zero, so every input has one meaning. All
-     * three used to pass: `=` was skipped anywhere ("Zm9v=Zm9v" decoded to
-     * "foofoo"), "Z" decoded to nothing, and "Zh==" to the same byte as
-     * "Zg==", each with no error. */
-    unsigned acc = 0;
-    int nbits = 0;
-    size_t o = 0;
-    size_t data_chars = 0, pad_chars = 0;
-    int bad = 0;
-    for (size_t i = 0; i < in_len && !bad; i++) {
-        unsigned char c = in[i];
-        if (c == '\n' || c == '\r' || c == ' ' || c == '\t') continue;
-        if (c == '=') { pad_chars++; continue; }
-        int v = ae_b64_value(c, url);
-        if (v < 0 || pad_chars > 0) { bad = 1; break; }   /* data after padding */
-        data_chars++;
-        acc = (acc << 6) | (unsigned)v;
-        nbits += 6;
-        if (nbits >= 8) {
-            nbits -= 8;
-            if (o < out_alloc - 1) out[o++] = (unsigned char)((acc >> nbits) & 0xFF);
-        }
-    }
-    if (!bad && (data_chars % 4 == 1 || pad_chars > 2 ||
-                 (pad_chars > 0 && (data_chars + pad_chars) % 4 != 0) ||
-                 (acc & ((1u << nbits) - 1u)) != 0)) {
-        bad = 1;
-    }
-    if (bad) { aether_caps_free(out, out_alloc); return NULL; }
+    long n = ae_b64_decode_into(in, in_len, url, out, cap);
+    if (n < 0) { aether_caps_free(out, out_alloc); return NULL; }
 
-    out[o] = '\0';
-    return (char*)string_adopt_caps_buffer((char*)out, o, out_alloc);
+    out[n] = '\0';
+    return (char*)string_adopt_caps_buffer((char*)out, (size_t)n, out_alloc);
 }
 
 char* cryptography_base64_decode_owned(const char* b64) {
@@ -584,6 +625,24 @@ char* cryptography_base64_decode_owned(const char* b64) {
 
 char* cryptography_base64url_decode_owned(const char* b64) {
     return ae_b64_decode(b64, 1);
+}
+
+/* For C callers holding raw text (an HTTP header). Takes an explicit length
+ * and does NOT go through cryptography_unwrap_bytes, for the reason given
+ * above the encoder: a header is attacker-chosen bytes, and one beginning
+ * DE C0 57 AE would be read as an AetherString header. */
+unsigned char* cryptography_base64_decode_buf(const char* in, size_t in_len,
+                                              int url, size_t* out_len) {
+    if (out_len) *out_len = 0;
+    if (!in && in_len > 0) return NULL;
+    size_t cap = ae_b64_decoded_cap(in_len);
+    unsigned char* out = (unsigned char*)malloc(cap + 1);
+    if (!out) return NULL;
+    long n = ae_b64_decode_into((const unsigned char*)in, in_len, url, out, cap);
+    if (n < 0) { free(out); return NULL; }
+    out[n] = '\0';
+    if (out_len) *out_len = (size_t)n;
+    return out;
 }
 
 

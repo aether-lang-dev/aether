@@ -115,6 +115,17 @@ if [ "$status" != "401" ]; then
     exit 1
 fi
 
+# --- auth: `=` inside the credentials -> 400 ---
+# "YWxpY2U6c2VjcmV0" is alice:secret. With an `=` in the middle the old
+# private decoder in aether_middleware.c skipped it and let alice in; the
+# shared std.cryptography decoder takes `=` only as trailing padding.
+status=$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+    -H "Authorization: Basic YWxp=Y2U6c2VjcmV0" -H "Host: localhost" "$URL")
+if [ "$status" != "400" ]; then
+    echo "  [FAIL] auth: '=' inside the base64 expected 400; got $status"
+    exit 1
+fi
+
 # --- auth: correct creds -> 200 ---
 HEADERS="$TMPDIR/h2"
 BODY="$TMPDIR/b2"
