@@ -14,6 +14,49 @@ cut while your branch is open cannot fold your entry into the released section.
 
 ## [current]
 
+## [0.920.0]
+
+### Added
+
+- **`ae build -v` prints each part of the C compiler's identity in the cache
+  key (#3707):** the driver's path and content hash, and the exit code and
+  first line of its `--version`, so a cache miss traced to a moving compiler
+  identity shows which part moved.
+
+### Fixed
+
+- **A deregister from a host thread waits for a core still looking at the
+  actor, so the free after it is safe (#3718).** Since v0.919.0
+  `scheduler_deregister_actor` only took the actor out of its core's table,
+  but a core that had just found it there went on to read and write it (a
+  ready list entry's look, a due receive timeout's step, a timer heap move),
+  so a free right after the call could land under that use. Each core now
+  names the actor it looks at, and a deregister on a thread that runs no
+  actors waits for that look to end: at most the step under way, never a
+  countdown, never on its own core. From inside a step it does not wait for
+  a step of the actor on another core (two steps deregistering each other's
+  actors would wait on each other); the header says when that caller may
+  free.
+
+- **A `const` or `var` name declared twice at the top of one file is a
+  compile error (#3708).** Nothing diagnosed it: in a module the second
+  declaration was dropped without a word and every use read the first value,
+  and in a program both reached the generated C, where only the C compiler
+  objected. The second declaration now gets E0400 at its own line, naming
+  the line of the first. One name per arm of a top-level `when` is still one
+  declaration.
+
+- **A HEAD the proxy answers from a cached GET states that GET's length
+  (#3719).** With the `url` cache key a HEAD can be served a stored GET.
+  Since #3713 it kept the stored fields as they were, and a GET the upstream
+  sent chunked left none that states a length, so the answer stated none.
+  It now states the stored body's length when the fields state none.
+
+- **Under the `url` cache key the proxy no longer stores answers to HEAD
+  (#3720).** The key leaves the method out, so a stored HEAD answer, which
+  has no body, was served to a GET of the same URL as an empty 200 until it
+  expired. A HEAD there is answered from a stored GET instead.
+
 ## [0.919.0]
 
 ### Fixed
