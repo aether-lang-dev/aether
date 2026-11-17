@@ -3027,6 +3027,229 @@ void test_deregister_after_shutdown_from_two_threads(void) {
     ASSERT_EQ(1, fired);
 }
 
+// Host threads deregister caller's actors and free them at once while the
+// cores look at them (#3718). A core checks that its table holds an actor
+// without the table's lock, then reads and writes the actor; a deregister
+// only left the table and returned, so a free right after it could land
+// between the check and the use. Each block's pages are made unreadable in
+// place of the free, so a late read or write faults.
+//  - Due countdowns: each actor's countdown step tells its host thread it
+//    runs, then spins a few milliseconds and counts itself in its block; the
+//    host thread deregisters and frees the actor as soon as it is told. The
+//    step, and the core's writes after it (the step lock, the heap), wrote
+//    the freed block. Now the deregister returns once the step is over.
+//  - Removals: the host threads deregister actors from the middle of the
+//    tables, each removal moving the last actor into the hole with a fresh
+//    entry, which its core takes and looks at while another host thread may
+//    deregister and free that actor. Their countdowns come due every
+//    millisecond or so and arm again, so the heaps move their entries too.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    int index;
+    int rearm;            // arm again when fired (the removals' actors)
+    atomic_int fired;
+} LateTimed;
+
+enum { LATE_STEPPED = 8, LATE_CHURN = 64, LATE_ALL = LATE_STEPPED + LATE_CHURN, LATE_HOSTS = 2 };
+
+static atomic_int g_late_in_step[LATE_ALL];   // outside the blocks, which go
+static atomic_int g_late_start;
+
+static void late_step(void* self) {
+    LateTimed* a = (LateTimed*)self;
+    if (a->timeout_ns > 0 && a->last_activity_ns > 0 &&
+        atomic_load_explicit(&a->mailbox.count, memory_order_relaxed) == 0 &&
+        aether_now_ns() - a->last_activity_ns >= a->timeout_ns) {
+        if (a->rearm) {
+            a->last_activity_ns = aether_now_ns();
+            atomic_fetch_add(&a->fired, 1);
+            return;
+        }
+        a->last_activity_ns = 0;
+        int k = a->index;
+        atomic_store(&g_late_in_step[k], 1);
+        uint64_t until = aether_now_ns() + 5000000ULL;   // 5 ms
+        while (aether_now_ns() < until) {
+        }
+        atomic_fetch_add(&a->fired, 1);   // after its host thread was told
+        return;
+    }
+    Message msg;
+    (void)mailbox_receive(&a->mailbox, &msg);
+}
+
+typedef struct {
+    LateTimed** actors;
+    size_t len;
+    int host;
+    atomic_int told;      // stepped actors whose step was seen under way
+    atomic_int forbidden; // blocks made unreadable
+} LateHost;
+
+static void* late_host_thread(void* arg) {
+    LateHost* h = (LateHost*)arg;
+    while (!atomic_load(&g_late_start)) {
+    }
+    // Each stepped actor of this host, as soon as its step runs.
+    for (int k = h->host; k < LATE_STEPPED; k += LATE_HOSTS) {
+        uint64_t until = aether_now_ns() + 10000000000ULL;
+        while (!atomic_load(&g_late_in_step[k]) && aether_now_ns() < until) {
+        }
+        if (!atomic_load(&g_late_in_step[k])) continue;
+        atomic_fetch_add(&h->told, 1);
+        scheduler_deregister_actor((ActorBase*)h->actors[k]);
+        if (forbid_pages(h->actors[k], h->len, 1) == 0) atomic_fetch_add(&h->forbidden, 1);
+    }
+    // Then the removals: this host's share, from the middle out, a little
+    // apart so the cores look at the moved actors' fresh entries meanwhile.
+    for (int j = 0; j < LATE_CHURN / LATE_HOSTS; j++) {
+        int k = LATE_STEPPED + ((j * 7) % (LATE_CHURN / LATE_HOSTS)) * LATE_HOSTS + h->host;
+        scheduler_deregister_actor((ActorBase*)h->actors[k]);
+        if (forbid_pages(h->actors[k], h->len, 1) == 0) atomic_fetch_add(&h->forbidden, 1);
+        uint64_t until = aether_now_ns() + 20000ULL;   // 20 us
+        while (aether_now_ns() < until) {
+        }
+    }
+    return NULL;
+}
+
+void test_deregister_then_free_while_cores_look(void) {
+    enum { ROUNDS = 4 };
+    size_t page = system_page_size();
+    size_t len = (sizeof(LateTimed) + page - 1) & ~(page - 1);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    int made = 1, told = 0, forbidden = 0, fired_once = 0, threads = 1;
+    for (int r = 0; r < ROUNDS && made && threads; r++) {
+        LateTimed* actors[LATE_ALL];
+        for (int k = 0; k < LATE_ALL; k++) {
+            actors[k] = (LateTimed*)map_pages(len);
+            if (!actors[k]) {
+                made = 0;
+                for (int m = 0; m < k; m++) unmap_pages(actors[m], len);
+                break;
+            }
+            mailbox_init(&actors[k]->mailbox);
+            actors[k]->step = late_step;
+            atomic_init(&actors[k]->assigned_core, -1);
+            atomic_init(&actors[k]->migrate_to, -1);
+            actors[k]->index = k;
+            actors[k]->rearm = k >= LATE_STEPPED;
+            atomic_init(&actors[k]->fired, 0);
+            atomic_store(&g_late_in_step[k], 0);
+        }
+        if (!made) break;
+        atomic_store(&g_late_start, 0);
+        for (int k = 0; k < LATE_ALL; k++)
+            scheduler_register_actor((ActorBase*)actors[k], k < LATE_STEPPED ? k % 2 : (k / 2) % 2);
+        // The removals' actors fire every 1 to 2 ms from now on; the stepped
+        // ones a little later, spread over their cores.
+        for (int k = LATE_STEPPED; k < LATE_ALL; k++) arm_countdown((ActorBase*)actors[k], 1 + k % 2);
+        for (int k = 0; k < LATE_STEPPED; k++) arm_countdown((ActorBase*)actors[k], 5 + k);
+        LateHost hosts[LATE_HOSTS];
+        pthread_t th[LATE_HOSTS];
+        for (int t = 0; t < LATE_HOSTS; t++) {
+            hosts[t].actors = actors;
+            hosts[t].len = len;
+            hosts[t].host = t;
+            atomic_init(&hosts[t].told, 0);
+            atomic_init(&hosts[t].forbidden, 0);
+            if (pthread_create(&th[t], NULL, late_host_thread, &hosts[t]) != 0) threads = 0;
+        }
+        atomic_store(&g_late_start, 1);
+        for (int t = 0; t < LATE_HOSTS; t++) pthread_join(th[t], NULL);
+        sleep_ms(20);   // the cores go on past the heap entries left behind
+        for (int t = 0; t < LATE_HOSTS; t++) {
+            told += atomic_load(&hosts[t].told);
+            forbidden += atomic_load(&hosts[t].forbidden);
+        }
+        for (int k = 0; k < LATE_ALL; k++) {
+            forbid_pages(actors[k], len, 0);
+            if (k < LATE_STEPPED && atomic_load(&actors[k]->fired) == 1) fired_once++;
+        }
+        for (int k = 0; k < LATE_ALL; k++) unmap_pages(actors[k], len);
+    }
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    ASSERT_TRUE(made);
+    ASSERT_TRUE(threads);
+    ASSERT_EQ(ROUNDS * LATE_STEPPED, told);
+    ASSERT_EQ(ROUNDS * LATE_ALL, forbidden);
+    ASSERT_EQ(ROUNDS * LATE_STEPPED, fired_once);
+}
+
+// Two cores' countdown steps each deregister the other's actor while both
+// are being stepped (#3718): a deregister on a thread that runs actors does
+// not wait for a step under way on another core, so both return, each in
+// microseconds. Waiting for it, each would wait on the other forever.
+typedef struct {
+    AETHER_ACTOR_BASE_FIELDS
+    ActorBase* other;
+    atomic_llong took_ns;
+    atomic_int done;
+} MutualDereg;
+
+static atomic_int g_mutual_arrived;
+
+static void mutual_dereg_step(void* self) {
+    MutualDereg* d = (MutualDereg*)self;
+    if (!(d->timeout_ns > 0 && d->last_activity_ns > 0 &&
+          atomic_load_explicit(&d->mailbox.count, memory_order_relaxed) == 0 &&
+          aether_now_ns() - d->last_activity_ns >= d->timeout_ns)) {
+        Message msg;
+        (void)mailbox_receive(&d->mailbox, &msg);
+        return;
+    }
+    d->last_activity_ns = 0;
+    atomic_fetch_add(&g_mutual_arrived, 1);
+    uint64_t until = aether_now_ns() + 1000000000ULL;
+    while (atomic_load(&g_mutual_arrived) < 2 && aether_now_ns() < until) {
+    }
+    uint64_t t0 = aether_now_ns();
+    scheduler_deregister_actor(d->other);
+    atomic_store(&d->took_ns, (long long)(aether_now_ns() - t0));
+    // Still being stepped while the other's deregister may run.
+    until = aether_now_ns() + 2000000ULL;
+    while (aether_now_ns() < until) {
+    }
+    atomic_fetch_add(&d->done, 1);
+}
+
+void test_deregister_from_steps_of_each_other_while_stepped(void) {
+    MutualDereg* d[2];
+    for (int c = 0; c < 2; c++) {
+        d[c] = (MutualDereg*)caller_actor(sizeof(MutualDereg), mutual_dereg_step);
+        ASSERT_NOT_NULL(d[c]);
+        atomic_init(&d[c]->took_ns, -1);
+        atomic_init(&d[c]->done, 0);
+    }
+    d[0]->other = (ActorBase*)d[1];
+    d[1]->other = (ActorBase*)d[0];
+    atomic_store(&g_mutual_arrived, 0);
+    scheduler_init(2);
+    scheduler_set_core_park_ms(60000);
+    scheduler_start();
+    for (int c = 0; c < 2; c++) scheduler_register_actor((ActorBase*)d[c], c);
+    for (int c = 0; c < 2; c++) arm_countdown((ActorBase*)d[c], 5);
+    int done0 = wait_count(&d[0]->done, 1);
+    int done1 = wait_count(&d[1]->done, 1);
+    long long worst = atomic_load(&d[0]->took_ns);
+    if (atomic_load(&d[1]->took_ns) > worst) worst = atomic_load(&d[1]->took_ns);
+    int out = atomic_load(&d[0]->table_slot) == -1 && atomic_load(&d[1]->table_slot) == -1;
+    scheduler_set_core_park_ms(0);
+    scheduler_shutdown();
+    scheduler_cleanup();
+    for (int c = 0; c < 2; c++) free(d[c]);
+    printf("    (slowest deregister of an actor stepped on the other core: %.1f us)\n",
+           (double)worst / 1000.0);
+    ASSERT_EQ(1, done0);
+    ASSERT_EQ(1, done1);
+    ASSERT_TRUE(out);
+    ASSERT_TRUE(worst >= 0 && worst < 50000000LL);
+}
+
 void register_scheduler_tests(void) {
     register_test_with_category("Mailbox basic operations", test_mailbox_basic, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Scheduler bidirectional ping-pong", test_scheduler_bidirectional, TEST_CATEGORY_RUNTIME);
@@ -3076,4 +3299,6 @@ void register_scheduler_tests(void) {
     register_test_with_category("Deregister: from steps of two cores, each other's actors", test_deregister_from_steps_of_two_cores, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Ready list: a move to a full table lets its core park", test_move_to_full_table_lets_core_park, TEST_CATEGORY_RUNTIME);
     register_test_with_category("Deregister: two threads after a shutdown", test_deregister_after_shutdown_from_two_threads, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Deregister: host threads free actors the cores look at", test_deregister_then_free_while_cores_look, TEST_CATEGORY_RUNTIME);
+    register_test_with_category("Deregister: two steps, each other's actor while stepped", test_deregister_from_steps_of_each_other_while_stepped, TEST_CATEGORY_RUNTIME);
 }

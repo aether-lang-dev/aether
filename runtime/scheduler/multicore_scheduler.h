@@ -512,6 +512,18 @@ typedef struct {
     struct AetherTimer* timers;       // a min-heap of receive timeout deadlines
     int timer_count;
     int timer_cap;
+    // The actor this core's thread is looking at, for a deregister on
+    // another thread to wait out (#3718): each word is published before the
+    // table check that lets the core read the actor, and cleared when the
+    // look is over. Written by this core's thread alone. See "A deregister
+    // waits for the looks under way" in multicore_scheduler.c.
+    //  - serving: a ready list entry's or a due countdown's actor, its step
+    //    included; bit 0 is set while the step runs.
+    //  - placing: the actor whose timer_slot a move in the heap writes.
+    //  - relieving: the actor a relief's scan of the table looks at (#3197).
+    _Atomic uintptr_t       serving;
+    _Atomic(ActorBase*)     placing;
+    _Atomic(ActorBase*)     relieving;
     // Entries pushed by other threads, under `lock`; taken into `ready` by
     // the core. On a line of their own: other threads write it.
     struct {
@@ -560,12 +572,26 @@ void scheduler_cleanup(void);
  * which its core fires from the registration on, as it does one armed
  * before a first registration (#3540). */
 int scheduler_register_actor(ActorBase* actor, int preferred_core);
-/* Out of its core's table. It waits for nothing: the entries the actor has
- * in the cores' ready lists and timer heaps (#3540) name a table slot that
- * no longer holds it, and their cores drop them without reading it, so the
- * caller may free it once this returns (one with a receive timeout armed
- * included), unless a message to it is still on its way. The actor may be
- * registered again. */
+/* Out of its core's table. The entries the actor has in the cores' ready
+ * lists and timer heaps (#3540) name a table slot that no longer holds it,
+ * and their cores drop them without reading it. A core may be past that
+ * check already, looking at the actor, stepping it for a ready list entry
+ * or a due countdown, or moving its timer heap entry (#3718):
+ *  - On a thread that runs no actors (main, a host's thread) it waits for
+ *    such a look on another core to end: the step under way, if any, never
+ *    a countdown's length. So the caller may free the actor once this
+ *    returns, one with a receive timeout armed included, unless a message
+ *    to it is still on its way or being handled.
+ *  - On a thread that runs actors (a core's, in a step or a death hook; an
+ *    actor's own thread) it waits for the looks that step nothing, but not
+ *    for a step of the actor under way on another core: two steps that
+ *    deregister each other's actors would wait on each other. Free the
+ *    actor at once only when it cannot be being stepped (no message to it
+ *    on its way or being handled, no receive timeout of it due); otherwise
+ *    leave the free to a thread that runs no actors, whose deregister of it
+ *    (again) waits, or end an actor the scheduler spawned with
+ *    scheduler_release_actor, which frees it once no thread holds it.
+ * It never waits on its own core. The actor may be registered again. */
 void scheduler_deregister_actor(ActorBase* actor);
 void scheduler_send_local(ActorBase* actor, Message msg);
 void scheduler_send_remote(ActorBase* actor, Message msg, int from_core);
