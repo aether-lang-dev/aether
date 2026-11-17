@@ -18,6 +18,7 @@
 #endif
 #ifdef __linux__
 #include <fcntl.h>
+#include <sys/syscall.h>      // __NR_membarrier (#3718)
 #endif
 #include <errno.h>
 #include <time.h>
@@ -2074,11 +2075,13 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 // .placing, .relieving), one per kind of look, since one kind runs inside
 // another (a heap move inside a ready list look, a relief inside a step):
 //
-//   core:       W = actor (seq_cst);  load table, slot (seq_cst);  use;
+//   core:       W = actor (LOOK_NAME);  load table, slot (seq_cst);  use;
 //               W = 0 (release)
 //   deregister: slot = other (under the table's lock);  fence (seq_cst);
+//               the heavy barrier, where there is one (looks_barrier);
 //               load W (seq_cst);  wait while it names the actor
 //
+// Where there is no heavy barrier, LOOK_NAME is a seq_cst store and this is
 // Dekker's pair: of the core's store to W and the deregister's fence, one
 // comes first in the single order of seq_cst operations. Core first: the
 // deregister's load of W comes after both, so it reads the actor or a later
@@ -2088,13 +2091,50 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 // it, so the core reads the slot as the deregister left it (or later) and
 // drops the entry unread. A stale table pointer (one a growth replaced)
 // cannot be read either: the growth's store comes before the fence too. A
-// look that begins after the deregister read W is the second case. The
-// steal reads the victim's table under its lock, which the deregister takes
-// too, and needs no word. A walk of the tables by a thread no core owns
-// (scheduler_wait's look for countdowns) holds an external reader slot
-// with a fence, the same pair, so a deregister waits for each walk under
-// way; a message's delivery and handling are the caller's (a deregister
-// does not wait for a message on its way).
+// look that begins after the deregister read W is the second case.
+//
+// A seq_cst store is a full barrier on x86 (an xchg), on every look, which
+// is a look per message where each message wakes its actor: on Linux CI
+// send_string_fresh went from 101 to 112 ns a message.
+// So where the system has a barrier that every thread of the process runs
+// at once, the cost goes to the deregister, which is rare (a caller's actor:
+// scheduler_release_actor does not deregister). That is the asymmetric
+// barrier of hazard pointers (folly's asymmetricLightBarrier and
+// asymmetricHeavyBarrier). LOOK_NAME is then a release store and a compiler
+// barrier (atomic_signal_fence), which keeps the store before the table's
+// loads in the instructions the core runs, and the deregister, after its
+// fence, makes every thread of the process run a full memory barrier before
+// it goes on: membarrier(MEMBARRIER_CMD_PRIVATE_EXPEDITED), on Linux only
+// (elsewhere the store stays seq_cst, see AETHER_LOOK_BARRIER). The core's
+// thread runs that barrier
+// at some point B of its instructions, after the deregister's slot store is
+// visible to it (the deregister's fence, and the call's own barrier, come
+// first) and before the call returns. B after the store of W: the store is
+// visible before the call returns, and the deregister's load of W reads the
+// actor or a later value, each stored with a release. B before the store:
+// the table's loads come after B too, so they read the slot as the
+// deregister left it, and a stale table pointer cannot be read either; the
+// core drops the entry unread. A look that begins after the call is the
+// second case. Without the compiler
+// barrier the compiler could sink the store below the loads, and B could
+// fall between them. Linux asks for a registration at scheduler_init
+// (MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED); a kernel or a seccomp filter
+// that refuses it leaves the seq_cst store, chosen by a flag the cores read
+// at each look. The seq_cst store stays on AArch64, where it is an stlr and
+// the loads ldar, cheap already (and TLB tricks for a heavy barrier do not
+// interrupt the other cores there); on macOS, the BSDs and other systems,
+// which have no such call; on Android, whose seccomp policy ends a process
+// on a call it does not allow instead of refusing it; and under
+// ThreadSanitizer, which does not model the call's barrier.
+//
+// The steal reads the victim's table under its lock, which the deregister
+// takes too, and needs no word. A walk of the tables by a thread no core
+// owns (scheduler_wait's look for countdowns) holds an external reader slot
+// with a seq_cst fence after it, and the deregister keeps its own fence
+// before the heavy barrier, so the two fences are the same pair as above:
+// a deregister waits for each walk under way. A message's delivery and
+// handling are the caller's (a deregister does not wait for a message on
+// its way).
 //
 // Each wait is bounded by the look under way: a look that steps nothing
 // runs no actor code and takes no lock it waits on, and one that steps
@@ -2106,15 +2146,108 @@ static inline int has_pending_cross_core(Scheduler* sched) {
 // stepped, and wait on each other. The core marks the step in its word
 // (bit 0 of `serving`), and such a deregister waits only for the looks
 // that step nothing; the free is the caller's to time (the header says
-// how). The cost on the busy path: one seq_cst store and one plain store
-// per ready list look and per due countdown, and the table check's loads
-// made seq_cst, which are plain loads on x86 and ldar on AArch64.
+// how). The cost on the busy path: two plain stores per ready list look and
+// per due countdown where there is a heavy barrier (a seq_cst store and a
+// plain one elsewhere), and the table check's loads made seq_cst, which are
+// plain loads on x86 and ldar on AArch64. The cost of a deregister: the
+// heavy barrier, a system call that interrupts each CPU running a thread of
+// the process.
 //
 // The pass is O(actors with work), not O(actors). The cost on the busy
 // paths: a load of the receive timeout's interval after each step (on the
 // line the step's death check reads), the mailbox count a loop already
 // reads as it stops, and one exchange each way when it left a message.
 // ---------------------------------------------------------------------------
+
+/* The barrier pair of a look and a deregister (#3718, the notes above):
+ * LOOK_NAME stores a core's word, looks_barrier is the deregister's side,
+ * looks_barrier_init (scheduler_init) asks Linux for the registration. */
+#if defined(__SANITIZE_THREAD__)
+#  define AETHER_LOOK_TSAN 1
+#elif defined(__has_feature)
+#  if __has_feature(thread_sanitizer)
+#    define AETHER_LOOK_TSAN 1
+#  endif
+#endif
+#ifndef AETHER_LOOK_TSAN
+#  define AETHER_LOOK_TSAN 0
+#endif
+
+#define AETHER_LOOK_SEQ_CST    0   /* a seq_cst store; the fence alone */
+#define AETHER_LOOK_MEMBARRIER 1   /* Linux, once registered */
+/* Windows keeps the seq_cst store, measured: with a release store and
+ * FlushProcessWriteBuffers on the deregister's side, pingpong_idle_1k and
+ * _100k ran about 1 ns per message slower than with the xchg on an
+ * i7-13700K (23.2 -> 24.2, 27.0 -> 28.2 ns, best of 25), and the send rows
+ * gained nothing. Linux CI is where the xchg showed (send_string_fresh). */
+#if AETHER_LOOK_TSAN || defined(__aarch64__) || defined(_M_ARM64) || defined(_M_ARM64EC)
+#  define AETHER_LOOK_BARRIER AETHER_LOOK_SEQ_CST
+#elif defined(__linux__) && !defined(__ANDROID__) && !defined(__EMSCRIPTEN__) && \
+      !defined(__wasi__) && defined(__NR_membarrier)
+#  define AETHER_LOOK_BARRIER AETHER_LOOK_MEMBARRIER
+#else
+#  define AETHER_LOOK_BARRIER AETHER_LOOK_SEQ_CST
+#endif
+
+#define LOOK_NAME_LIGHT(w, v) do {                                  \
+        atomic_store_explicit((w), (v), memory_order_release);      \
+        atomic_signal_fence(memory_order_seq_cst);                  \
+    } while (0)
+
+#if AETHER_LOOK_BARRIER == AETHER_LOOK_MEMBARRIER
+/* The commands of <linux/membarrier.h> (Linux 4.14), by value: the header
+ * is not on every system that has the call. */
+#define AETHER_MEMBARRIER_CMD_QUERY                       0
+#define AETHER_MEMBARRIER_CMD_PRIVATE_EXPEDITED           (1 << 3)
+#define AETHER_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED  (1 << 4)
+
+/* 1 once the process is registered: set by scheduler_init before the cores'
+ * threads start, read at each look (a branch that always goes one way). */
+static _Atomic int g_look_membarrier = 0;
+
+static inline long look_membarrier(int cmd) {
+    return syscall(__NR_membarrier, cmd, 0, 0);
+}
+
+#define LOOK_NAME(w, v) do {                                                    \
+        if (likely(atomic_load_explicit(&g_look_membarrier, memory_order_relaxed))) \
+            LOOK_NAME_LIGHT(w, v);                                              \
+        else                                                                    \
+            atomic_store_explicit((w), (v), memory_order_seq_cst);              \
+    } while (0)
+#else
+#define LOOK_NAME(w, v) atomic_store_explicit((w), (v), memory_order_seq_cst)
+#endif
+
+static void looks_barrier_init(void) {
+#if AETHER_LOOK_BARRIER == AETHER_LOOK_MEMBARRIER
+    long cmds = look_membarrier(AETHER_MEMBARRIER_CMD_QUERY);
+    int ok = cmds > 0 && (cmds & AETHER_MEMBARRIER_CMD_PRIVATE_EXPEDITED) &&
+             look_membarrier(AETHER_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) == 0;
+    atomic_store_explicit(&g_look_membarrier, ok, memory_order_relaxed);
+#endif
+}
+
+/* The deregister's side: after the table's slot store, before it reads the
+ * cores' words. */
+static void looks_barrier(void) {
+    // Pairs with a seq_cst LOOK_NAME, and with an external reader's fence.
+    atomic_thread_fence(memory_order_seq_cst);
+#if AETHER_LOOK_BARRIER == AETHER_LOOK_MEMBARRIER
+    if (!atomic_load_explicit(&g_look_membarrier, memory_order_relaxed)) return;
+    if (look_membarrier(AETHER_MEMBARRIER_CMD_PRIVATE_EXPEDITED) == 0) return;
+    // Refused once registered: a fork's child may not be. Registered again,
+    // or the cores' release stores are not ordered and a free could land
+    // under a look: the process stops.
+    if (look_membarrier(AETHER_MEMBARRIER_CMD_REGISTER_PRIVATE_EXPEDITED) == 0 &&
+        look_membarrier(AETHER_MEMBARRIER_CMD_PRIVATE_EXPEDITED) == 0) return;
+    int err = errno;
+    aether_fatal_flush();   /* the program's lines first (#3435, aether_fatal.h) */
+    fprintf(stderr, "aether: membarrier refused after its registration (%s); a "
+                    "deregister cannot wait for the cores' looks\n", strerror(err));
+    abort();
+#endif
+}
 
 /* The entries a core's ready lists and timer heap have room for when
  * scheduler_init makes them; each grows past it on demand. */
@@ -2130,7 +2263,9 @@ typedef struct AetherTimer {
  * and the actor may be read. Reads the table, which holds the pointer, and
  * nothing of the actor (#3540). Called on `s`'s thread after one of its
  * words names the actor (#3718): its loads are seq_cst, the second half of
- * the pair with a deregister's fence (the notes above). */
+ * the pair with a deregister's fence where LOOK_NAME is a seq_cst store;
+ * where there is a heavy barrier, it orders them instead (the notes
+ * above). */
 static inline int entry_holds(Scheduler* s, ActorBase* actor, int slot) {
     AetherActorTable* table = atomic_load_explicit(&s->actor_table, memory_order_seq_cst);
     return table && slot >= 0 && slot < table->capacity &&
@@ -2230,7 +2365,7 @@ static void ready_push_fresh(ActorBase* actor, int core, int slot) {
  * deregister waits for the write (#3718). */
 static inline void timer_place(Scheduler* s, int i, AetherTimer t) {
     s->timers[i] = t;
-    atomic_store_explicit(&s->placing, t.actor, memory_order_seq_cst);
+    LOOK_NAME(&s->placing, t.actor);
     if (entry_holds(s, t.actor, t.slot))
         atomic_store_explicit(&t.actor->timer_slot, i + 1, memory_order_relaxed);
     atomic_store_explicit(&s->placing, NULL, memory_order_release);
@@ -2597,7 +2732,7 @@ static int ready_look(Scheduler* sched, ActorBase* actor, int slot) {
  * table check to its end, the step included: a deregister on another
  * thread waits for it (#3718, the notes above). */
 static inline int ready_service(Scheduler* sched, ActorBase* actor, int slot) {
-    atomic_store_explicit(&sched->serving, (uintptr_t)actor, memory_order_seq_cst);
+    LOOK_NAME(&sched->serving, (uintptr_t)actor);
     int did = ready_look(sched, actor, slot);
     atomic_store_explicit(&sched->serving, 0, memory_order_release);
     return did;
@@ -2640,7 +2775,7 @@ static int timers_fire(Scheduler* sched) {
         // Named before the check, until the next entry's or the end, its
         // step included: a deregister on another thread waits for the look
         // (#3718, the notes above).
-        atomic_store_explicit(&sched->serving, (uintptr_t)actor, memory_order_seq_cst);
+        LOOK_NAME(&sched->serving, (uintptr_t)actor);
         // An entry whose actor this core's table no longer holds at its slot
         // goes unread (#3540): the actor left (a deregister, a release, a
         // move) and may be freed; a move or a removal that moved it made a
@@ -3302,7 +3437,11 @@ void scheduler_init(int cores) {
         if (cores <= 0 || cores > MAX_CORES) cores = 4;
     }
     num_cores = cores;
-    
+
+    // The deregister's heavy barrier, chosen before the cores' threads
+    // start, which read the choice at each look (#3718).
+    looks_barrier_init();
+
     for (int i = 0; i < num_cores; i++) {
         schedulers[i].core_id = i;
         
@@ -4061,7 +4200,7 @@ static int actor_table_leave(ActorBase* actor) {
 
 /* After `actor` left its table: until no look at it that passed its table
  * check before is under way on another thread (#3718, "A deregister waits
- * for the looks under way" above). A look that began after the fence below
+ * for the looks under way" above). A look that began after the barrier below
  * finds the actor in no table and does not read it. On a thread that runs
  * actors (as scheduler_wait tells them), not for a step: the actor's step on
  * another core could be waiting on this thread's. */
@@ -4069,7 +4208,7 @@ static void deregister_wait_looks(ActorBase* actor) {
     int runs_actors = g_aether_in_actor_step || current_core_id >= 0 || aether_in_actor_thread;
     uintptr_t named = (uintptr_t)actor;
     // The pair's other half: the table's slot was stored under its lock.
-    atomic_thread_fence(memory_order_seq_cst);
+    looks_barrier();
     for (int c = 0; c < num_cores; c++) {
         if (c == t_core) continue;   // its own: no look is under way here now
         Scheduler* s = &schedulers[c];
@@ -5236,7 +5375,7 @@ static int relief_evacuate(Scheduler* sched) {
         if (!actor || actor == waited) continue;
         // Named in `relieving` and the table read again before the actor
         // is: a deregister on another thread waits for the look (#3718).
-        atomic_store_explicit(&sched->relieving, actor, memory_order_seq_cst);
+        LOOK_NAME(&sched->relieving, actor);
         if (entry_holds(sched, actor, i) && !actor->auto_process && actor->step &&
             atomic_load_explicit(&actor->inflight, memory_order_acquire) == 0) {
             uint64_t armed = actor->last_activity_ns;

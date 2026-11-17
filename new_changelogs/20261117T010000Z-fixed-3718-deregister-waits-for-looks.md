@@ -9,4 +9,7 @@
   countdown, never on its own core. From inside a step it does not wait for
   a step of the actor on another core (two steps deregistering each other's
   actors would wait on each other); the header says when that caller may
-  free.
+  free. On Linux (ARM64 aside) naming the actor costs a core a plain store,
+  and the deregister pays instead with a barrier every thread of the
+  process runs (membarrier); elsewhere it is a seq_cst store, which on
+  ARM64 is already cheap and on Windows measured no slower.
