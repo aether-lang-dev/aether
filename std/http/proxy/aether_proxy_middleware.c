@@ -296,7 +296,22 @@ char* aether_proxy_authority_of(const char* url) {
  * pass-through keeps it the same way (#3710). */
 static void proxy_set_body(HttpServerResponse* res, const HttpRequest* req,
                            const char* body, int body_length) {
-    if (req && req->method && strcmp(req->method, "HEAD") == 0) return;
+    if (req && req->method && strcmp(req->method, "HEAD") == 0) {
+        /* A body here is a GET's: a cache keyed without the method answers
+         * a HEAD from a stored GET. Its length is the one the answer to
+         * HEAD states, when the stored fields state none: an upstream that
+         * sent the GET chunked left only a Transfer-Encoding, which goes as
+         * hop-by-hop (#3719). An answer from the upstream to the HEAD itself
+         * has no body and keeps its fields as they are. */
+        if (body && body_length > 0) {
+            for (int i = 0; i < res->header_count; i++)
+                if (strcasecmp(res->header_keys[i], "Content-Length") == 0) return;
+            char len[24];
+            snprintf(len, sizeof(len), "%d", body_length);
+            http_response_set_header(res, "Content-Length", len);
+        }
+        return;
+    }
     if (body && body_length > 0) {
         http_response_set_body_n(res, body, body_length);
     } else {
