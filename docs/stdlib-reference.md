@@ -35,7 +35,7 @@ header comment is the authoritative description.
 | `std.encoding` | Hex, Base64, Base32 and CSV field codecs. | 14 | [guide](../std/encoding/README.md) · [source](../std/encoding/module.ae) |
 | `std.file` | File operations, re-exported from `std.fs`. | 16 | [guide](../std/file/README.md) · [source](../std/file/module.ae) |
 | `std.floatarr` | Fixed-size packed-double buffer. | 15 | [guide](../std/floatarr/README.md) · [source](../std/floatarr/module.ae) |
-| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 173 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
+| `std.fs` | Files, directories, metadata, recursive walk, and change watching. | 176 | [guide](../std/fs/README.md) · [source](../std/fs/module.ae) |
 | `std.guest` | A guest in a sandboxed child process and the protocol to it: the host's side, with the worker's side in `std.guest.child`. | 22 | [guide](../std/guest/README.md) · [source](../std/guest/module.ae) |
 | `std.hash` | Fast non-cryptographic hashes and checksums: FNV, MurmurHash3, SipHash, CRC-32. | 6 | [guide](../std/hash/README.md) · [source](../std/hash/module.ae) |
 | `std.host` | Primitives for Aether scripts embedded in a host application. | 33 | [guide](../std/host/README.md) · [source](../std/host/module.ae) |
@@ -1301,7 +1301,7 @@ main() {
 - `fs.write_atomic(path, data: byte[])` → `string` - Stage to `<path>.tmp.<pid>.<n>`, fsync, rename over destination. Binary-safe: the length travels with the slice (`string.bytes(s)` for a string, `bytes.view(buf)` for a `std.bytes` buffer). The tmp file is created with `O_CREAT|O_EXCL|O_NOFOLLOW` so an attacker who pre-plants a symlink at the predictable tmp path can't trick the write into following it; permissions track the process umask exactly as the previous `fopen("wb")` would have.
 - `fs.write_binary(path, data: byte[])` → `string` - Non-atomic `fopen("wb")` + `fwrite` + `fclose`. Binary-safe: the length travels with the slice. Cheaper than `write_atomic` when a partial file on crash is acceptable (scratch writes, caches).
 - `fs.rename(from, to)` → `string` - POSIX `rename(2)` wrapper. Atomic when source and target are on the same filesystem.
-- `fs.create_dir_with_mode(path, mode)` → `string` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. Windows ignores the mode at the directory layer; the parameter is accepted for portability.
+- `fs.create_dir_with_mode(path, mode)` → `(int, int, string)` - Like `fs.create_dir` but takes an explicit POSIX mode (0777-masked). Use this for private dirs (e.g. `0o700` for keys), sets the bits at creation time, closing the `mkdir` → `chmod` race window. On Windows a mode with no group or other bit creates the directory with an owner-only DACL; any other mode inherits the folder's. Returns `(1, KIND_OK, "")` or `(0, KIND_*, msg)`.
 - `fs.mtime(path)` → `(int, string)` - File's mtime as Unix epoch seconds, in the standard `(value, err)` shape. Distinguishes "stat failed" from "file's mtime is 0 (1970 epoch)", the older `file_mtime` extern collapsed both into a single 0 sentinel and is kept only for back-compat.
 - `fs.file_stat(path)` → `(kind, size, mtime, err)` - One `lstat(2)`; symlinks report kind 3, target is not followed. Kind is 1 = file, 2 = directory, 3 = symlink, 4 = other, 5 = socket, 6 = FIFO, 7 = device (char and block devices share 7). Sockets, FIFOs and devices are distinguished on POSIX only; Windows reports them as 4. Use the `fs.STAT_KIND_*` constants rather than the literals.
 - `fs.is_socket(path)` → `int` - 1 if `path` is a UNIX-domain socket, 0 otherwise (including when nothing is there). Unlike `fs.is_symlink` this **follows** symlinks, since a caller asking "is this a socket" wants the target. POSIX only; always 0 on Windows. Pair it with `os.user_id()` to locate a per-user runtime socket such as `/run/user/${os.user_id()}/podman/podman.sock`.
@@ -1343,9 +1343,13 @@ if kind == fs.KIND_OK {
 | `KIND_NO_SPACE` | 9 | `ENOSPC` |
 | `KIND_IS_DIR` | 10 | `EISDIR` |
 | `KIND_NOT_DIR` | 11 | `ENOTDIR` |
+| `KIND_READ_ONLY_FS` | 12 | `EROFS`; Windows `ERROR_WRITE_PROTECT` |
+| `KIND_BUSY` | 13 | `EBUSY`, `ETXTBSY`; Windows sharing and lock violations (the file is in use) |
+| `KIND_FILE_TOO_BIG` | 14 | `EFBIG`; Windows `ERROR_FILE_TOO_LARGE` |
 | `KIND_UNAVAILABLE` | 99 | platform feature compiled out |
 
 **Functions:**
+- `fs.unlink(path)` → `(int, int, string)` Remove a file or symlink, never a directory. A directory is `KIND_IS_DIR` on every platform (macOS and the BSDs report `EPERM` for it); on Windows a file another process holds open is `KIND_BUSY`.
 - `fs.copy(src, dst)` → `(int, int, string)` Copy file contents; preserves source mode bits. Symlinks in `src` are followed (matches POSIX `cp` without `-P`); `dst` is overwritten if it exists; `dst` cannot be an existing directory (returns `KIND_IS_DIR`). On partial failure, the bytes count reflects how far the copy got.
 
   Performance: zero-copy via the platform's best primitive, Linux `copy_file_range(2)` (reflinks on btrfs/XFS) → `sendfile(2)`; macOS `fcopyfile(COPYFILE_DATA)` (APFS clone on same-volume); Windows `CopyFileExW` (kernel block copy). An 8 MiB read/write loop is the portable fallback for filesystems that reject the kernel primitives. The byte count saturates at `INT_MAX` for files larger than 2³¹ bytes, the data is still copied correctly; only the reported count is truncated.

@@ -185,6 +185,9 @@
     <li><a href="#KIND_NO_SPACE">KIND_NO_SPACE</a></li>
     <li><a href="#KIND_IS_DIR">KIND_IS_DIR</a></li>
     <li><a href="#KIND_NOT_DIR">KIND_NOT_DIR</a></li>
+    <li><a href="#KIND_READ_ONLY_FS">KIND_READ_ONLY_FS</a></li>
+    <li><a href="#KIND_BUSY">KIND_BUSY</a></li>
+    <li><a href="#KIND_FILE_TOO_BIG">KIND_FILE_TOO_BIG</a></li>
     <li><a href="#KIND_UNAVAILABLE">KIND_UNAVAILABLE</a></li>
     <li><a href="#last_os_error">last_os_error</a></li>
     <li><a href="#error_message">error_message</a></li>
@@ -367,7 +370,7 @@
       <h3 class="function-name">symlink_raw <span class="kind">extern</span></h3>
       <pre class="usage"><code>symlink_raw(target, link_path) <span class="arrow">-&gt;</span> int</code></pre>
       <p class="signature"><span class="sig-params">target: string, link_path: string</span></p>
-      <p class="doc">Symbolic-link operations (raw externs). POSIX symlink(2) / readlink(2) / lstat(2); on Windows CreateSymbolicLinkW, the link's own reparse data and the directory entry's reparse tag. fs_symlink_raw:    create a symlink at `link_path` pointing to `target`. `target` is recorded verbatim (relative stays relative); Windows stores its separators as backslashes. fs_readlink_raw:   read a symlink's target (on Windows, a junction's too). Returns null if not a link. `@heap`: a fresh counted string the tracker frees. fs_is_symlink:     does NOT follow; returns 1 only for the link itself. On Windows a junction counts: it redirects resolution exactly as a symlink does (any name-surrogate reparse point). Pure boolean query, no wrapper (matches file_exists). fs_unlink_raw:     remove a file or symlink (NOT a directory).</p>
+      <p class="doc">Symbolic-link operations (raw externs). POSIX symlink(2) / readlink(2) / lstat(2); on Windows CreateSymbolicLinkW, the link's own reparse data and the directory entry's reparse tag. fs_symlink_raw:    create a symlink at `link_path` pointing to `target`. `target` is recorded verbatim (relative stays relative); Windows stores its separators as backslashes. fs_readlink_raw:   read a symlink's target (on Windows, a junction's too). Returns null if not a link. `@heap`: a fresh counted string the tracker frees. fs_is_symlink:     does NOT follow; returns 1 only for the link itself. On Windows a junction counts: it redirects resolution exactly as a symlink does (any name-surrogate reparse point). Pure boolean query, no wrapper (matches file_exists). fs_unlink_raw:     remove a file or symlink (NOT a directory): (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg).</p>
     </div>
     <div class="function" id="hard_link_raw" data-name="hard_link_raw">
       <h3 class="function-name">hard_link_raw <span class="kind">extern</span></h3>
@@ -393,7 +396,7 @@
     </div>
     <div class="function" id="unlink_raw" data-name="unlink_raw">
       <h3 class="function-name">unlink_raw <span class="kind">extern</span></h3>
-      <pre class="usage"><code>unlink_raw(path) <span class="arrow">-&gt;</span> int</code></pre>
+      <pre class="usage"><code>unlink_raw(path) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
     </div>
     <div class="function" id="make_temp_dir_raw" data-name="make_temp_dir_raw">
@@ -960,9 +963,9 @@
     </div>
     <div class="function" id="create_dir_with_mode" data-name="create_dir_with_mode">
       <h3 class="function-name">create_dir_with_mode <span class="kind">fn</span></h3>
-      <pre class="usage"><code>create_dir_with_mode(path, mode) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>create_dir_with_mode(path, mode) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string, mode: int</span></p>
-      <p class="doc">Like `create_dir` but with an explicit POSIX-style mode (0777-masked). Use this when the directory needs to be private — e.g. `fs.create_dir_with_mode(&quot;/run/myapp/keys&quot;, 448)` for 0o700 — without the mkdir-then-chmod race the &quot;always 0755 + shell out to chmod&quot; workaround would open. On Windows a mode with no group or other bit (0o700) creates the directory with an owner-only DACL (the current user, SYSTEM and Administrators; see `chmod`), inherited by what is made in it; any other mode inherits the parent folder's access.</p>
+      <p class="doc">Like `create_dir` but with an explicit POSIX-style mode (0777-masked). Use this when the directory needs to be private — e.g. `fs.create_dir_with_mode(&quot;/run/myapp/keys&quot;, 448)` for 0o700 — without the mkdir-then-chmod race the &quot;always 0755 + shell out to chmod&quot; workaround would open. On Windows a mode with no group or other bit (0o700) creates the directory with an owner-only DACL (the current user, SYSTEM and Administrators; see `chmod`), inherited by what is made in it; any other mode inherits the parent folder's access. Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg): KIND_EXISTS when something is already at `path`, KIND_NOT_FOUND when a parent is missing.</p>
     </div>
     <div class="function" id="delete_dir" data-name="delete_dir">
       <h3 class="function-name">delete_dir <span class="kind">fn</span></h3>
@@ -996,9 +999,9 @@
     </div>
     <div class="function" id="unlink" data-name="unlink">
       <h3 class="function-name">unlink <span class="kind">fn</span></h3>
-      <pre class="usage"><code>unlink(path) <span class="arrow">-&gt;</span> string</code></pre>
+      <pre class="usage"><code>unlink(path) <span class="arrow">-&gt;</span> (int, int, string)</code></pre>
       <p class="signature"><span class="sig-params">path: string</span></p>
-      <p class="doc">Remove a file or symlink. Refuses to remove a directory — use `delete_dir` for that. Returns &quot;&quot; on success, error on failure.</p>
+      <p class="doc">Remove a file or symlink. Refuses to remove a directory — use `delete_dir` for that. Returns (1, KIND_OK, &quot;&quot;) or (0, KIND_*, msg); a directory is KIND_IS_DIR on every platform (macOS and the BSDs say EPERM, which would otherwise read as a permission problem), a file another process holds open on Windows is KIND_BUSY.</p>
     </div>
     <div class="function" id="list_dir" data-name="list_dir">
       <h3 class="function-name">list_dir <span class="kind">fn</span></h3>
@@ -1145,7 +1148,7 @@
     <div class="function" id="KIND_OK" data-name="KIND_OK">
       <h3 class="function-name">KIND_OK <span class="kind">const</span></h3>
       <pre class="usage"><code>KIND_OK = 0</code></pre>
-      <p class="doc">---- Structured-error kinds (pilot — issue #392) ---- Returned as the second element of the (value, kind, message) tuple from `copy`, `move`, `realpath`, and `chmod`. Switch on these to programmatically discriminate between common failure modes without parsing the human-readable message. Non-fs callers should treat any non-zero kind as &quot;an error happened&quot; — the message remains the authoritative human-readable diagnostic. Values are stable; new kinds may be appended (always with a fresh integer above the existing range) but existing values are part of the surface contract. Mirror these in std/fs/aether_fs.h as AETHER_FS_KIND_* macros so the C side and the Aether surface remain in lock-step.</p>
+      <p class="doc">---- Structured-error kinds (pilot — issue #392) ---- Returned as the second element of the (value, kind, message) tuple from `copy`, `move`, `realpath`, `chmod`, `unlink`, `create_dir_with_mode` and the descriptor calls. Switch on these to programmatically discriminate between common failure modes without parsing the human-readable message. Non-fs callers should treat any non-zero kind as &quot;an error happened&quot; — the message remains the authoritative human-readable diagnostic. Values are stable; new kinds may be appended (always with a fresh integer above the existing range) but existing values are part of the surface contract. Mirror these in std/fs/aether_fs.h as AETHER_FS_KIND_* macros so the C side and the Aether surface remain in lock-step.</p>
     </div>
     <div class="function" id="KIND_NOT_FOUND" data-name="KIND_NOT_FOUND">
       <h3 class="function-name">KIND_NOT_FOUND <span class="kind">const</span></h3>
@@ -1190,6 +1193,18 @@
     <div class="function" id="KIND_NOT_DIR" data-name="KIND_NOT_DIR">
       <h3 class="function-name">KIND_NOT_DIR <span class="kind">const</span></h3>
       <pre class="usage"><code>KIND_NOT_DIR = 11</code></pre>
+    </div>
+    <div class="function" id="KIND_READ_ONLY_FS" data-name="KIND_READ_ONLY_FS">
+      <h3 class="function-name">KIND_READ_ONLY_FS <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_READ_ONLY_FS = 12</code></pre>
+    </div>
+    <div class="function" id="KIND_BUSY" data-name="KIND_BUSY">
+      <h3 class="function-name">KIND_BUSY <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_BUSY = 13</code></pre>
+    </div>
+    <div class="function" id="KIND_FILE_TOO_BIG" data-name="KIND_FILE_TOO_BIG">
+      <h3 class="function-name">KIND_FILE_TOO_BIG <span class="kind">const</span></h3>
+      <pre class="usage"><code>KIND_FILE_TOO_BIG = 14</code></pre>
     </div>
     <div class="function" id="KIND_UNAVAILABLE" data-name="KIND_UNAVAILABLE">
       <h3 class="function-name">KIND_UNAVAILABLE <span class="kind">const</span></h3>

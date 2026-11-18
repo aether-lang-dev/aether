@@ -86,7 +86,7 @@ main() {
         }
 
         // 10. fs.unlink: remove the symlink (the target file stays)
-        err = fs.unlink("build/test_fs_bundle/single/link.txt")
+        _lok, _lkind, err = fs.unlink("build/test_fs_bundle/single/link.txt")
         if err != "" {
             fail("fs.unlink should remove the symlink: ${err}")
         }
@@ -103,7 +103,7 @@ main() {
     // ---- Non-symlink sub-cases (11 through 13), on every platform ----
 
     // 11. fs.unlink: remove a regular file
-    err = fs.unlink("build/test_fs_bundle/a/target.txt")
+    _fok, _fkind, err = fs.unlink("build/test_fs_bundle/a/target.txt")
     if err != "" {
         fail("fs.unlink should remove a regular file: ${err}")
     }
@@ -111,17 +111,23 @@ main() {
         fail("file should be gone after fs.unlink")
     }
 
-    // 12. fs.unlink refuses to remove a directory
-    if fs.unlink("build/test_fs_bundle/a") == "" {
+    // 12. fs.unlink refuses to remove a directory, and says it is one on
+    // every platform (macOS and the BSDs report EPERM for it)
+    dok, dkind, _dmsg = fs.unlink("build/test_fs_bundle/a")
+    if dok != 0 {
         fail("fs.unlink should refuse to remove a directory")
+    }
+    if dkind != fs.KIND_IS_DIR {
+        fail("fs.unlink on a directory should be KIND_IS_DIR, got ${dkind}")
     }
     if fs.dir_exists("build/test_fs_bundle/a") != 1 {
         fail("directory should still exist after fs.unlink refused")
     }
 
-    // 13. fs.unlink of a missing path is an error
-    if fs.unlink("build/test_fs_bundle/never/existed") == "" {
-        fail("fs.unlink on a missing path should be an error")
+    // 13. fs.unlink of a missing path is KIND_NOT_FOUND
+    mok, mkind, _mmsg = fs.unlink("build/test_fs_bundle/never/existed")
+    if mok != 0 || mkind != fs.KIND_NOT_FOUND {
+        fail("fs.unlink on a missing path should be KIND_NOT_FOUND, got ${mok} ${mkind}")
     }
 
     // Cleanup

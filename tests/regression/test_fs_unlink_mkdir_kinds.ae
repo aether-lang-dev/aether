@@ -1,0 +1,59 @@
+// fs.unlink and fs.create_dir_with_mode say why they failed, as a KIND_*,
+// rather than one fixed string. Callers used to guess: naeb's /undo stat'ed
+// the path after a failed unlink and called anything not a directory
+// "AccessDenied". On Windows a file another process (here, this one) holds
+// open cannot be deleted; that is KIND_BUSY, not a permission problem.
+
+import std.fs
+import std.string
+
+extern exit(code: int)
+
+check(what: string, ok: bool) {
+    if !ok {
+        println("FAIL: ${what}")
+        exit(1)
+    }
+}
+
+main() {
+    base = "build/test_fs_unlink_mkdir_kinds"
+    fs.remove_tree(base)
+    fs.mkdir_p(base)
+
+    d = "${base}/private"
+    ok, k, m = fs.create_dir_with_mode(d, 0o700)
+    check("create_dir_with_mode: ${m}", ok == 1 && k == fs.KIND_OK && m == "")
+    ok2, k2, _m2 = fs.create_dir_with_mode(d, 0o700)
+    check("again is KIND_EXISTS, got ${k2}", ok2 == 0 && k2 == fs.KIND_EXISTS)
+    ok3, k3, _m3 = fs.create_dir_with_mode("${base}/no/parent", 0o700)
+    check("missing parent is KIND_NOT_FOUND, got ${k3}", ok3 == 0 && k3 == fs.KIND_NOT_FOUND)
+    println("  PASS: create_dir_with_mode reports OK, EXISTS, NOT_FOUND")
+
+    u, uk, _um = fs.unlink(d)
+    check("unlink of a directory is KIND_IS_DIR, got ${uk}", u == 0 && uk == fs.KIND_IS_DIR)
+    check("and the directory is still there", fs.dir_exists(d) == 1)
+    println("  PASS: unlink of a directory is KIND_IS_DIR")
+
+    f = "${base}/held.txt"
+    werr = fs.write_binary(f, string.bytes("held open"))
+    check("write ${werr}", werr == "")
+    h, oerr = fs.open(f, "r")
+    check("open ${oerr}", oerr == "")
+    hok, hk, _hm = fs.unlink(f)
+    when target.os == "windows" {
+        check("unlink of an open file on Windows is KIND_BUSY, got ${hk}", hok == 0 && hk == fs.KIND_BUSY)
+        fs.close(h)
+        aok, ak, am = fs.unlink(f)
+        check("unlink after close: ${ak} ${am}", aok == 1 && ak == fs.KIND_OK)
+        println("  PASS: unlink of an open file is KIND_BUSY, then works once closed")
+    } else {
+        check("unlink of an open file on POSIX succeeds, got ${hk}", hok == 1 && hk == fs.KIND_OK)
+        fs.close(h)
+        println("  PASS: unlink of an open file succeeds on POSIX")
+    }
+    check("the file is gone", fs.exists(f) == 0)
+
+    fs.remove_tree(base)
+    println("=== All cases passed ===")
+}

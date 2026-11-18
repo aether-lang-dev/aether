@@ -585,11 +585,18 @@ static Symbol* lookup_symbol_in(SymbolTable* table, const char* name, const char
      * builtin. A name the module declares itself is its own, though: its
      * struct identical to the program's is merged as that one (#2129). */
     if (symbol && merged_from && !table->parent && symbol->walk_id == 0 &&
-        is_program_own_decl(symbol) && !module_declares(merged_from, name)) {
-        symbol = lookup_file_symbol_for_module(table, name);
-        if (!symbol) {
-            OwnExtern* own = own_extern_decl(merged_from, name);
-            return own ? own_extern_decl_symbol(own, name) : NULL;
+        is_program_own_decl(symbol)) {
+        /* A module that declares the name as an extern means that extern,
+         * not the program's function of the same name: std.cryptography's
+         * `extern free(p: ptr)` beside a program's `free(a, b)` checked
+         * every `free(ctx)` in it against the program's (and codegen then
+         * called it). Asked before module_declares, which counts the extern
+         * as the module's declaration and so kept the program's symbol. */
+        OwnExtern* own = own_extern_decl(merged_from, name);
+        if (own) return own_extern_decl_symbol(own, name);
+        if (!module_declares(merged_from, name)) {
+            symbol = lookup_file_symbol_for_module(table, name);
+            if (!symbol) return NULL;
         }
     }
     /* The program's own top-level `var`s are the program's: a module's code

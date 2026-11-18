@@ -1300,7 +1300,10 @@ extract(data: byte[], dest_dir: string, options: ExtractOptions) -> string {
                     out_err = rerr
                 } else {
                     var uerr: string = ""
-                    if existing == 1 { uerr = fs.unlink(full) }
+                    if existing == 1 {
+                        _unlinked, _unlink_kind, unlink_msg = fs.unlink(full)
+                        uerr = unlink_msg
+                    }
                     if string.equals(uerr, "") != 1 {
                         out_err = "zip: cannot replace '${name}': ${uerr}"
                     } else {

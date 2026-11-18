@@ -29,7 +29,6 @@ char* fs_make_temp_dir_raw(const char* d, const char* p) { (void)d; (void)p; ret
 char* fs_make_temp_file_raw(const char* d, const char* p) { (void)d; (void)p; return NULL; }
 int fs_is_symlink(const char* p) { (void)p; return 0; }
 int fs_is_socket(const char* p) { (void)p; return 0; }
-int fs_unlink_raw(const char* p) { (void)p; return 0; }
 int fs_write_binary_raw(const char* p, const char* d, int l) {
     (void)p; (void)d; (void)l; return 0;
 }
@@ -88,6 +87,16 @@ _tuple_int_int_string fs_move_raw(const char* s, const char* d) {
     return out;
 }
 _tuple_int_int_string fs_chmod_raw(const char* p, int m) {
+    (void)p; (void)m;
+    _tuple_int_int_string out = { 0, AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
+    return out;
+}
+_tuple_int_int_string fs_unlink_raw(const char* p) {
+    (void)p;
+    _tuple_int_int_string out = { 0, AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
+    return out;
+}
+_tuple_int_int_string dir_create_mode_raw(const char* p, int m) {
     (void)p; (void)m;
     _tuple_int_int_string out = { 0, AETHER_FS_KIND_UNAVAILABLE, "fs unavailable" };
     return out;
@@ -895,34 +904,35 @@ int dir_create_raw(const char* path) {
 // fs_chmod_raw describes, in the same CreateDirectoryW call, so it is
 // never visible with its folder's broader entries. Any other mode is
 // a plain mkdir that inherits its folder's.
-int dir_create_mode_raw(const char* path, int mode) {
+static int aether_fs_errno_to_kind(int err);
 #ifdef _WIN32
-    if (!path) return 0;
-    if ((mode & 077) != 0) return _mkdir(path) == 0 ? 1 : 0;
+static int aether_fs_win_kind(DWORD err);
+#endif
+
+/* The OS step of dir_create_mode_raw (below, with the other kind-reporting
+ * primitives): AETHER_FS_KIND_OK, or the kind of the failure. */
+static int dir_create_mode_os(const char* path, int mode) {
+#ifdef _WIN32
     size_t wbytes = 0;
     wchar_t* wpath = fs_win_wide(path, &wbytes);
-    if (!wpath) { errno = EINVAL; return 0; }
-    PSECURITY_DESCRIPTOR sd = fs_win_private_sd(1);
-    BOOL ok = FALSE;
-    DWORD err = ERROR_INVALID_SECURITY_DESCR;
-    if (sd) {
-        SECURITY_ATTRIBUTES sa = { sizeof sa, sd, FALSE };
-        ok = CreateDirectoryW(wpath, &sa);
-        err = ok ? ERROR_SUCCESS : GetLastError();
-        LocalFree(sd);
+    if (!wpath) return AETHER_FS_KIND_INVALID;
+    PSECURITY_DESCRIPTOR sd = NULL;
+    if ((mode & 077) == 0) {
+        sd = fs_win_private_sd(1);
+        if (!sd) {
+            aether_caps_free(wpath, wbytes);
+            return aether_fs_win_kind(ERROR_INVALID_SECURITY_DESCR);
+        }
     }
+    SECURITY_ATTRIBUTES sa = { sizeof sa, sd, FALSE };
+    BOOL ok = CreateDirectoryW(wpath, sd ? &sa : NULL);
+    DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    if (sd) LocalFree(sd);
     aether_caps_free(wpath, wbytes);
-    if (!ok) {
-        /* errno for the callers that read it, as _mkdir would set it. */
-        errno = err == ERROR_ALREADY_EXISTS ? EEXIST
-              : (err == ERROR_PATH_NOT_FOUND || err == ERROR_FILE_NOT_FOUND) ? ENOENT
-              : err == ERROR_ACCESS_DENIED ? EACCES : EIO;
-        return 0;
-    }
-    return 1;
+    return aether_fs_win_kind(err);
 #else
-    if (!path) return 0;
-    return mkdir(path, (mode_t)(mode & 0777)) == 0 ? 1 : 0;
+    return mkdir(path, (mode_t)(mode & 0777)) == 0 ? aether_fs_errno_to_kind(0)
+                                                   : aether_fs_errno_to_kind(errno);
 #endif
 }
 
@@ -1093,12 +1103,20 @@ int fs_is_socket(const char* path) {
     return S_ISSOCK(st.st_mode) ? 1 : 0;
 }
 
-// Remove a file or symlink. Will NOT remove a directory — use dir_delete
-// for that. Returns 1 on success, 0 on failure.
-int fs_unlink_raw(const char* path) {
-    if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
-    return unlink(path) == 0 ? 1 : 0;
+// The OS step of fs_unlink_raw (below): remove a file or symlink, never a
+// directory. AETHER_FS_KIND_OK, or the kind of the failure. A directory is
+// KIND_IS_DIR on every platform: Linux says EISDIR, but macOS and the BSDs
+// say EPERM, which would otherwise read as a permission problem.
+static int fs_unlink_os(const char* path) {
+    if (unlink(path) == 0) return aether_fs_errno_to_kind(0);
+    int err = errno;
+    struct stat st;
+    if ((err == EPERM || err == EACCES || err == EISDIR) &&
+        lstat(path, &st) == 0 && S_ISDIR(st.st_mode)) {
+        aether_fs_errno_to_kind(err);   /* fs.last_os_error() keeps the real code */
+        return AETHER_FS_KIND_IS_DIR;
+    }
+    return aether_fs_errno_to_kind(err);
 }
 
 #else // _WIN32
@@ -1322,23 +1340,27 @@ int fs_is_symlink(const char* path) {
            IsReparseTagNameSurrogate(fd.dwReserved0);
 }
 int fs_is_socket(const char* p) { (void)p; return 0; }
-/* Remove a file or a symlink, never a directory — the POSIX contract. A
- * link to a directory is a directory entry to Windows, so it is removed
- * with RemoveDirectoryW, which takes the link and leaves the target. */
-int fs_unlink_raw(const char* path) {
-    if (!path) return 0;
-    if (!aether_sandbox_check("fs_write", path)) return 0;
-    if (fs_is_symlink(path)) {
-        size_t wp_bytes = 0;
-        wchar_t* wp = fs_win_wide(path, &wp_bytes);
-        if (!wp) return 0;
-        DWORD attrs = GetFileAttributesW(wp);
-        BOOL ok = (attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY))
-                  ? RemoveDirectoryW(wp) : DeleteFileW(wp);
+/* The OS step of fs_unlink_raw: remove a file or a symlink, never a
+ * directory, the POSIX contract. A link to a directory is a directory entry
+ * to Windows, so it is removed with RemoveDirectoryW, which takes the link
+ * and leaves the target. A real directory is KIND_IS_DIR, as on POSIX. */
+static int fs_unlink_os(const char* path) {
+    size_t wp_bytes = 0;
+    wchar_t* wp = fs_win_wide(path, &wp_bytes);
+    if (!wp) return AETHER_FS_KIND_INVALID;
+    DWORD attrs = GetFileAttributesW(wp);
+    BOOL is_dir = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_DIRECTORY);
+    BOOL is_link = attrs != INVALID_FILE_ATTRIBUTES && (attrs & FILE_ATTRIBUTE_REPARSE_POINT) &&
+                   fs_is_symlink(path);
+    if (is_dir && !is_link) {
         aether_caps_free(wp, wp_bytes);
-        return ok ? 1 : 0;
+        aether_fs_win_kind(ERROR_ACCESS_DENIED);   /* what DeleteFileW says for one */
+        return AETHER_FS_KIND_IS_DIR;
     }
-    return _unlink(path) == 0 ? 1 : 0;
+    BOOL ok = is_dir ? RemoveDirectoryW(wp) : DeleteFileW(wp);
+    DWORD err = ok ? ERROR_SUCCESS : GetLastError();
+    aether_caps_free(wp, wp_bytes);
+    return aether_fs_win_kind(err);
 }
 
 #endif // !_WIN32
@@ -2394,6 +2416,18 @@ static int aether_fs_errno_to_kind(int err) {
 #ifdef ENOTDIR
         case ENOTDIR:      return AETHER_FS_KIND_NOT_DIR;
 #endif
+#ifdef EROFS
+        case EROFS:        return AETHER_FS_KIND_READ_ONLY_FS;
+#endif
+#ifdef EBUSY
+        case EBUSY:        return AETHER_FS_KIND_BUSY;
+#endif
+#if defined(ETXTBSY) && (!defined(EBUSY) || ETXTBSY != EBUSY)
+        case ETXTBSY:      return AETHER_FS_KIND_BUSY;   /* a running program's file */
+#endif
+#ifdef EFBIG
+        case EFBIG:        return AETHER_FS_KIND_FILE_TOO_BIG;
+#endif
         default:           return AETHER_FS_KIND_IO;
     }
 }
@@ -3086,6 +3120,57 @@ _tuple_int_int_string fs_chmod_raw(const char* path, int mode) {
     _tuple_int_int_string out = { 1, aether_fs_errno_to_kind(0), "" };
     return out;
 #endif
+}
+
+/* What a failed kind-reporting primitive says, as a static literal. */
+static const char* aether_fs_kind_text(int kind) {
+    switch (kind) {
+        case AETHER_FS_KIND_NOT_FOUND:         return "not found";
+        case AETHER_FS_KIND_PERMISSION_DENIED: return "permission denied";
+        case AETHER_FS_KIND_EXISTS:            return "already exists";
+        case AETHER_FS_KIND_CROSS_DEVICE:      return "across filesystems";
+        case AETHER_FS_KIND_INVALID:           return "invalid argument";
+        case AETHER_FS_KIND_LOOP:              return "symlink loop";
+        case AETHER_FS_KIND_NAME_TOO_LONG:     return "name too long";
+        case AETHER_FS_KIND_NO_SPACE:          return "no space left";
+        case AETHER_FS_KIND_IS_DIR:            return "is a directory";
+        case AETHER_FS_KIND_NOT_DIR:           return "a path component is not a directory";
+        case AETHER_FS_KIND_READ_ONLY_FS:      return "read-only file system";
+        case AETHER_FS_KIND_BUSY:              return "in use";
+        case AETHER_FS_KIND_FILE_TOO_BIG:      return "file too big";
+        default:                               return "I/O error";
+    }
+}
+
+/* fs_unlink_raw — remove a file or symlink, never a directory. Returns
+ * (1, KIND_OK, "") or (0, KIND_*, msg); a directory is KIND_IS_DIR. */
+_tuple_int_int_string fs_unlink_raw(const char* path) {
+    s_last_os_error = 0;   /* #1378: report only this call's code */
+    if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
+    if (!aether_sandbox_check("fs_write", path)) {
+        return aether_fs_iks_err(AETHER_FS_KIND_PERMISSION_DENIED,
+                                 "sandbox: cannot unlink path");
+    }
+    int kind = fs_unlink_os(path);
+    if (kind != AETHER_FS_KIND_OK) return aether_fs_iks_err(kind, aether_fs_kind_text(kind));
+    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    return out;
+}
+
+/* dir_create_mode_raw — mkdir with an explicit mode, masked with 0777 so a
+ * caller cannot set bits the kernel would reinterpret. Creating a private
+ * directory (0700) this way has no mkdir-then-chmod race. Windows has no
+ * mode bits: a mode with no group or other bit creates the directory with
+ * the owner-only DACL fs_chmod_raw describes, in the same CreateDirectoryW
+ * call, so it is never visible with its folder's broader entries; any other
+ * mode inherits the folder's. Returns (1, KIND_OK, "") or (0, KIND_*, msg). */
+_tuple_int_int_string dir_create_mode_raw(const char* path, int mode) {
+    s_last_os_error = 0;
+    if (!path) return aether_fs_iks_err(AETHER_FS_KIND_INVALID, "null path");
+    int kind = dir_create_mode_os(path, mode);
+    if (kind != AETHER_FS_KIND_OK) return aether_fs_iks_err(kind, aether_fs_kind_text(kind));
+    _tuple_int_int_string out = { 1, AETHER_FS_KIND_OK, "" };
+    return out;
 }
 
 // Path operations
@@ -4337,9 +4422,15 @@ static int aether_fs_win_kind(DWORD err) {
         case ERROR_FILE_NOT_FOUND:
         case ERROR_PATH_NOT_FOUND:
         case ERROR_INVALID_DRIVE:      return AETHER_FS_KIND_NOT_FOUND;
-        case ERROR_ACCESS_DENIED:
+        case ERROR_ACCESS_DENIED:      return AETHER_FS_KIND_PERMISSION_DENIED;
+        /* Another process has the file open or locked: in use, not refused. */
         case ERROR_SHARING_VIOLATION:
-        case ERROR_LOCK_VIOLATION:     return AETHER_FS_KIND_PERMISSION_DENIED;
+        case ERROR_LOCK_VIOLATION:
+        case ERROR_BUSY:
+        case ERROR_PATH_BUSY:
+        case ERROR_DRIVE_LOCKED:       return AETHER_FS_KIND_BUSY;
+        case ERROR_WRITE_PROTECT:      return AETHER_FS_KIND_READ_ONLY_FS;
+        case ERROR_FILE_TOO_LARGE:     return AETHER_FS_KIND_FILE_TOO_BIG;
         case ERROR_FILE_EXISTS:
         case ERROR_ALREADY_EXISTS:     return AETHER_FS_KIND_EXISTS;
         case ERROR_INVALID_HANDLE:

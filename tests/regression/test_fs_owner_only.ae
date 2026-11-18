@@ -107,7 +107,8 @@ main() {
         println("  PASS: chmod 0o400 is owner-only and read-only")
 
         keys = "${dir}/keys"
-        check(fs.create_dir_with_mode(keys, 0o700) == "", "create_dir_with_mode 0o700")
+        kok, _kk, kmsg = fs.create_dir_with_mode(keys, 0o700)
+        check(kok == 1, "create_dir_with_mode 0o700: ${kmsg}")
         kd = dacl_of(keys)
         owner_only("create_dir_with_mode 0o700", kd, false)
         check(string.contains(kd, "OICI") == 1, "the directory's entries are not inheritable: ${kd}")
@@ -141,7 +142,8 @@ main() {
         println("  PASS: fs.copy keeps an owner-only file owner-only, and a plain one plain")
 
         open_dir = "${dir}/open"
-        check(fs.create_dir_with_mode(open_dir, 0o755) == "", "create_dir_with_mode 0o755")
+        ook, _ok_kind, omsg = fs.create_dir_with_mode(open_dir, 0o755)
+        check(ook == 1, "create_dir_with_mode 0o755: ${omsg}")
         check(string.contains(dacl_of(open_dir), "ID;") == 1, "0o755 should inherit")
         println("  PASS: create_dir_with_mode 0o755 inherits its folder's access")
 
@@ -157,7 +159,8 @@ main() {
         check(serr == "" && sstatus == 0 && string.starts_with(st, "-rw-------") == 1,
             "mode after 0o600: ${st}")
         keys = "${dir}/keys"
-        check(fs.create_dir_with_mode(keys, 0o700) == "", "create_dir_with_mode 0o700")
+        kok, _kk, kmsg = fs.create_dir_with_mode(keys, 0o700)
+        check(kok == 1, "create_dir_with_mode 0o700: ${kmsg}")
         lb = list_of("-c", "ls -ld '${keys}'")
         ks, kstatus, kerr = os.run_capture("/bin/sh", lb, null)
         list.free(lb)

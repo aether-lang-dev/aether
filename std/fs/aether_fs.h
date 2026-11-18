@@ -24,6 +24,9 @@
 #define AETHER_FS_KIND_NO_SPACE          9
 #define AETHER_FS_KIND_IS_DIR           10
 #define AETHER_FS_KIND_NOT_DIR          11
+#define AETHER_FS_KIND_READ_ONLY_FS     12
+#define AETHER_FS_KIND_BUSY             13
+#define AETHER_FS_KIND_FILE_TOO_BIG     14
 #define AETHER_FS_KIND_UNAVAILABLE      99
 
 // File operations
@@ -93,8 +96,9 @@ int fs_mkdir_p_raw(const char* path);
 //               only; returns 0 on Windows.
 //
 // fs_unlink_raw: remove a file or symlink. Will NOT remove a directory
-//                — use dir_delete_raw for that. Returns 1 on success,
-//                0 on failure.
+//                — use dir_delete_raw for that. Returns the (int, int,
+//                string) tuple, so it is declared with the pilot
+//                primitives below, not here.
 int   fs_symlink_raw(const char* target, const char* link_path);
 int   fs_hard_link_raw(const char* target, const char* link_path);
 char* fs_readlink_raw(const char* path);
@@ -111,7 +115,6 @@ int   fs_is_socket(const char* path);
 // Platform path separator: "/" on POSIX, "\\" on Windows. Static
 // literal, never freed. #1369
 const char* path_separator(void);
-int   fs_unlink_raw(const char* path);
 
 // Non-atomic binary write to `path` — opens "wb", writes exactly
 // `length` bytes, closes. Binary-safe (embedded NULs OK) because
@@ -209,7 +212,8 @@ int   fs_get_read_binary_length(void);
 void  fs_release_read_binary(void);
 
 /* The structured-error pilot primitives (#391 + #392) — fs_copy_raw,
- * fs_move_raw, fs_realpath_raw, fs_chmod_raw — return the codegen-
+ * fs_move_raw, fs_realpath_raw, fs_chmod_raw, and fs_unlink_raw /
+ * dir_create_mode_raw since they report a kind too — return the codegen-
  * emitted (int, int, string) / (string, int, string) tuple ABI and
  * have no C-visible declarations in this header (they're only ever
  * called from generated Aether code, the same way fs_read_binary_tuple
