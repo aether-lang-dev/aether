@@ -180,7 +180,9 @@ try:
         if not chunk:
             break
         data += chunk
-except socket.timeout:
+except OSError:
+    # A refused upgrade closes with our preface unread: Linux reports
+    # that as end of stream, macOS as ECONNRESET. Either is "closed".
     pass
 print("served" if b"h2-ok" in data else "closed")
 ' "$PORT" "$1"
