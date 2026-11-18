@@ -36,8 +36,11 @@ main() {
     assert_eq("KIND_NO_SPACE", fs.KIND_NO_SPACE, 9)
     assert_eq("KIND_IS_DIR", fs.KIND_IS_DIR, 10)
     assert_eq("KIND_NOT_DIR", fs.KIND_NOT_DIR, 11)
+    assert_eq("KIND_READ_ONLY_FS", fs.KIND_READ_ONLY_FS, 12)
+    assert_eq("KIND_BUSY", fs.KIND_BUSY, 13)
+    assert_eq("KIND_FILE_TOO_BIG", fs.KIND_FILE_TOO_BIG, 14)
     assert_eq("KIND_UNAVAILABLE", fs.KIND_UNAVAILABLE, 99)
 
-    println("  PASS: all 13 KIND_* values match committed contract")
+    println("  PASS: all 16 KIND_* values match committed contract")
     println("=== All cases passed ===")
 }

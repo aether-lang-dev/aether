@@ -164,7 +164,7 @@ main() {
     _d2 = fs.delete("${base}/sub/b.txt")
     _d3 = fs.delete("${base}/a.txt")
     if have_symlink == 1 {
-        _d4 = fs.unlink("${base}/link")
+        fs.unlink("${base}/link")
     }
     _d5 = fs.delete_dir("${base}/sub/deep")
     _d6 = fs.delete_dir("${base}/sub")

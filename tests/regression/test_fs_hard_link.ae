@@ -47,7 +47,7 @@ main() {
     dir_err = fs.hard_link("${base}", "${base}/dir_link")
     check("a directory cannot be hard-linked", string.length(dir_err) > 0)
 
-    _u = fs.unlink(a)
+    fs.unlink(a)
     got3, _r3 = fs.read(b)
     check("removing one name leaves the file", string.equals(got3, "changed through a") == 1)
 

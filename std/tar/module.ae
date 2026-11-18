@@ -1337,7 +1337,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
                     return "file '${name}' already exists and overwrite is disabled"
                 }
                 // Unlink old path if it exists to allow fresh write
-                unlink_err = fs.unlink(target.path)
+                _unlinked, _unlink_kind, unlink_err = fs.unlink(target.path)
                 if unlink_err != "" {
                     heap.free(target)
                     return "cannot replace existing path '${name}': ${unlink_err}"
@@ -1396,7 +1396,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
                     heap.free(target)
                     return "directory destination '${name}' is a symlink"
                 }
-                unlink_err = fs.unlink(target.path)
+                _unlinked, _unlink_kind, unlink_err = fs.unlink(target.path)
                 if unlink_err != "" {
                     heap.free(target)
                     return "cannot replace symlink '${name}': ${unlink_err}"
@@ -1416,7 +1416,7 @@ extract(archive_path: string, destination: string, options: ExtractOptions) -> s
                     heap.free(target)
                     return "symlink destination '${name}' already exists"
                 }
-                unlink_err = fs.unlink(target.path)
+                _unlinked, _unlink_kind, unlink_err = fs.unlink(target.path)
                 if unlink_err != "" {
                     heap.free(target)
                     return "cannot replace existing path '${name}': ${unlink_err}"

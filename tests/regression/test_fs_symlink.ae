@@ -78,11 +78,14 @@ main() {
         check("stored with backslashes (${got3})", got3 == "sub\\..\\target.txt")
         content3, _ = fs.read(nested)
         check("and resolves", content3 == "through the link")
-        check("unlink nested", fs.unlink(nested) == "")
+        un, _unk, _unm = fs.unlink(nested)
+        check("unlink nested", un == 1)
     }
 
-    check("unlink the file link", fs.unlink(file_link) == "")
-    check("unlink the dir link", fs.unlink(dir_link) == "")
+    uf, _ufk, _ufm = fs.unlink(file_link)
+    check("unlink the file link", uf == 1)
+    ud, _udk, _udm = fs.unlink(dir_link)
+    check("unlink the dir link", ud == 1)
     check("target survives", fs.file_exists(target) == 1)
     check("sub survives", fs.dir_exists(sub) == 1)
     check("links are gone", fs.is_symlink(file_link) == 0 && fs.dir_exists(dir_link) == 0)

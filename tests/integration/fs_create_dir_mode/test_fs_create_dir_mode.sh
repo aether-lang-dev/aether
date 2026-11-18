@@ -26,8 +26,8 @@ import std.fs
 
 main() {
     // 448 == 0o700
-    err = fs.create_dir_with_mode("$target", 448)
-    if err != "" {
+    ok, _kind, err = fs.create_dir_with_mode("$target", 448)
+    if ok != 1 {
         println("create_dir_with_mode failed: \${err}")
         return
     }

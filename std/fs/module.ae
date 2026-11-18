@@ -78,13 +78,15 @@ exports(
     KIND_OK, KIND_NOT_FOUND, KIND_PERMISSION_DENIED, KIND_EXISTS,
     KIND_CROSS_DEVICE, KIND_IO, KIND_INVALID, KIND_LOOP,
     KIND_NAME_TOO_LONG, KIND_NO_SPACE, KIND_IS_DIR, KIND_NOT_DIR,
+    KIND_READ_ONLY_FS, KIND_BUSY, KIND_FILE_TOO_BIG,
     KIND_UNAVAILABLE,
     last_os_error, fs_error_message
 )
 
 // ---- Structured-error kinds (pilot — issue #392) ----
 // Returned as the second element of the (value, kind, message) tuple
-// from `copy`, `move`, `realpath`, and `chmod`. Switch on these to
+// from `copy`, `move`, `realpath`, `chmod`, `unlink`,
+// `create_dir_with_mode` and the descriptor calls. Switch on these to
 // programmatically discriminate between common failure modes without
 // parsing the human-readable message. Non-fs callers should treat
 // any non-zero kind as "an error happened" — the message remains the
@@ -107,6 +109,9 @@ const KIND_NAME_TOO_LONG = 8 // ENAMETOOLONG
 const KIND_NO_SPACE = 9 // ENOSPC — disk full
 const KIND_IS_DIR = 10 // EISDIR — operation on a directory where a regular file was required (or vice-versa for copy/move src)
 const KIND_NOT_DIR = 11 // ENOTDIR — component of path is not a directory
+const KIND_READ_ONLY_FS = 12 // EROFS; Windows ERROR_WRITE_PROTECT
+const KIND_BUSY = 13 // EBUSY, ETXTBSY; Windows sharing/lock violations: the file is in use
+const KIND_FILE_TOO_BIG = 14 // EFBIG; Windows ERROR_FILE_TOO_LARGE
 const KIND_UNAVAILABLE = 99 // platform feature compiled out (reserved for follow-up modules; fs primitives never return this)
 
 // File operations - raw externs
@@ -142,7 +147,8 @@ extern file_mtime_raw(path: string) -> long
 // Directory operations - raw externs
 extern dir_exists(path: string) -> int
 extern dir_create_raw(path: string) -> int
-extern dir_create_mode_raw(path: string, mode: int) -> int
+// (1, KIND_OK, "") or (0, KIND_*, msg); see create_dir_with_mode.
+extern dir_create_mode_raw(path: string, mode: int) -> (int, int, string)
 extern dir_delete_raw(path: string) -> int
 extern dir_list_raw(path: string) -> ptr
 
@@ -165,7 +171,8 @@ extern fs_mkdir_p_raw(path: string) -> int
 //                      exactly as a symlink does (any name-surrogate reparse
 //                      point). Pure boolean query, no wrapper (matches
 //                      file_exists).
-//   fs_unlink_raw:     remove a file or symlink (NOT a directory).
+//   fs_unlink_raw:     remove a file or symlink (NOT a directory):
+//                      (1, KIND_OK, "") or (0, KIND_*, msg).
 extern fs_symlink_raw(target: string, link_path: string) -> int
 //   fs_hard_link_raw:  a second name (`link_path`) for the file at `target`;
 //                      same filesystem, files only. 1 on success.
@@ -181,7 +188,7 @@ extern fs_is_symlink(path: string) -> int
 //                      symlinks). POSIX only; returns 0 on Windows. Pure
 //                      boolean query, no wrapper (matches fs_is_symlink). #1368
 extern fs_is_socket(path: string) -> int
-extern fs_unlink_raw(path: string) -> int
+extern fs_unlink_raw(path: string) -> (int, int, string)
 
 // Non-atomic binary write: fopen("wb") + fwrite(len bytes) + fclose.
 // Binary-safe because length is explicit. Cheaper than fs_write_atomic_raw
@@ -588,12 +595,10 @@ create_dir(path: string) -> {
 // (0o700) creates the directory with an owner-only DACL (the current
 // user, SYSTEM and Administrators; see `chmod`), inherited by what is
 // made in it; any other mode inherits the parent folder's access.
+// Returns (1, KIND_OK, "") or (0, KIND_*, msg): KIND_EXISTS when something is
+// already at `path`, KIND_NOT_FOUND when a parent is missing.
 create_dir_with_mode(path: string, mode: int) -> {
-    ok = dir_create_mode_raw(path, mode)
-    if ok == 0 {
-        return "cannot create directory"
-    }
-    return ""
+    return dir_create_mode_raw(path, mode)
 }
 
 // Delete a directory. Returns "" on success, error on failure.
@@ -697,13 +702,12 @@ make_temp_file(dir: string, prefix: string) -> {
 }
 
 // Remove a file or symlink. Refuses to remove a directory — use
-// `delete_dir` for that. Returns "" on success, error on failure.
+// `delete_dir` for that. Returns (1, KIND_OK, "") or (0, KIND_*, msg);
+// a directory is KIND_IS_DIR on every platform (macOS and the BSDs say
+// EPERM, which would otherwise read as a permission problem), a file
+// another process holds open on Windows is KIND_BUSY.
 unlink(path: string) -> {
-    ok = fs_unlink_raw(path)
-    if ok == 0 {
-        return "cannot unlink"
-    }
-    return ""
+    return fs_unlink_raw(path)
 }
 
 // List directory contents.
@@ -1551,12 +1555,14 @@ remove_tree(path: string) -> string {
     // file_stat follows links, so a junction looked like a directory and
     // remove_tree deleted the files of the directory it pointed at. Checked
     // before existence, which follows the link and misses a dangling one.
-    // `return unlink(path)`, as the file branch returns delete(path): an
-    // interpolated error built here would make every return of this
-    // function a fresh heap string, which its recursive caller does not
-    // free (each link in a tree leaked one).
+    // unlink's message is a static literal from the C side, returned as is,
+    // as the file branch returns delete(path): an interpolated error built
+    // here would make every return of this function a fresh heap string,
+    // which its recursive caller does not free (each link in a tree leaked
+    // one).
     if fs_is_symlink(path) == 1 {
-        return unlink(path)
+        _ok, _kind, msg = unlink(path)
+        return msg
     }
     // Not present → nothing to do.
     if fs_path_exists(path) == 0 { return "" }
