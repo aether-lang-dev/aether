@@ -6006,11 +6006,14 @@ static void parse_place_destructure(Parser* parser, ASTNode* block) {
 }
 
 ASTNode* parse_block(Parser* parser) {
+    Token* open = peek_token(parser);
+    int opened = open && open->type == TOKEN_LEFT_BRACE;
     expect_token(parser, TOKEN_LEFT_BRACE);
 
     ASTNode* block = create_ast_node(AST_BLOCK, NULL, 0, 0);
 
-    while (!block_closes(parser, block)) {
+    int closed = 0;
+    while (!(closed = block_closes(parser, block))) {
         /* CRITICAL: the depth guard returns without consuming a token, so the
          * force-advance below would otherwise emit one error per remaining
          * token. The file is already known unparseable at this point. */
@@ -6114,7 +6117,17 @@ ASTNode* parse_block(Parser* parser) {
 
         if (is_at_end(parser)) break;
     }
-    
+
+    /* The file ended inside the block: a body missing its last `}` parsed
+     * as if the end of the file closed it, and compiled. Said at the brace
+     * that opened it, since the end of the file is not where the mistake
+     * is. A depth-limit stop has said why already. */
+    if (!closed && opened && !parser->depth_exceeded && !parser->suppress_errors) {
+        aether_error_full("unclosed '{': the file ends before the '}' that closes this block",
+                          open->line, open->column,
+                          "add the missing '}' where the block should end", NULL,
+                          AETHER_ERR_SYNTAX);
+    }
     return block;
 }
 
