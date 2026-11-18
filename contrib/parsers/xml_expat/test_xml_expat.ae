@@ -588,6 +588,7 @@ main() {
                 println("  PASS: SVG fragment — 3 rects counted, width sum = 80")
             }
         }
-
-        return spec.run_summary(fw)
     }
+
+    return spec.run_summary(fw)
+}
