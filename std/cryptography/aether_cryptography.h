@@ -24,6 +24,8 @@
 #ifndef AETHER_CRYPTOGRAPHY_H
 #define AETHER_CRYPTOGRAPHY_H
 
+#include <stddef.h>
+
 /* Return a lowercase-hex digest (40 chars for SHA-1, 64 chars for
  * SHA-256) as a fresh counted AetherString (cast to char*), or NULL on
  * failure. Caller owns it and releases it with string_release().
@@ -156,6 +158,14 @@ char* cryptography_base64url_encode_padded_raw(const char* data, int length);
  * input and skip line breaks. */
 char* cryptography_base64_decode_owned(const char* b64);
 char* cryptography_base64url_decode_owned(const char* b64);
+
+/* The same decoder for C callers holding raw text with a length (an HTTP
+ * header): `url` != 0 selects the RFC 4648 §5 alphabet (`-_`), 0 the §4
+ * one (`+/`). Returns a malloc'd buffer of *out_len bytes plus a trailing
+ * NUL, which the caller free()s, or NULL for malformed input / OOM. The
+ * input is never sniffed for an AetherString header. */
+unsigned char* cryptography_base64_decode_buf(const char* in, size_t in_len,
+                                              int url, size_t* out_len);
 
 /* CSPRNG (#630). The cryptographically-secure RNG missing from
  * std.math (which is a seedable PRNG, fine for sampling, NOT for

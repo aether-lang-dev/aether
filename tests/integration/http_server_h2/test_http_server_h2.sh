@@ -155,6 +155,45 @@ HTTPVER3=$(curl --silent --show-error --max-time 5 \
 grep -q '^h2-ok$' "$TMPDIR/up.body" || { echo "  [FAIL] upgrade body mismatch"; cat "$TMPDIR/up.body"; exit 1; }
 
 # ----------------------------------------------------------------
+# Test 3b — HTTP2-Settings is decoded in the base64url alphabet, by
+# std.cryptography's shared decoder. "AAQAAP__" is one SETTINGS entry,
+# INITIAL_WINDOW_SIZE = 65535, spelt with the url-only `_`: the upgrade
+# must complete and serve stream 1. "AAQAAP//" is the same bytes in the
+# standard alphabet, which base64url rejects: the server has already sent
+# its 101 by then, so it closes with no h2 frames after it. Raw sockets,
+# since curl writes its own HTTP2-Settings.
+# ----------------------------------------------------------------
+if command -v python3 >/dev/null 2>&1; then
+    h2c_probe() {
+        python3 -I -c '
+import socket, sys
+s = socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=5)
+s.sendall(("GET / HTTP/1.1\r\nHost: localhost\r\n"
+           "Connection: Upgrade, HTTP2-Settings\r\nUpgrade: h2c\r\n"
+           "HTTP2-Settings: " + sys.argv[2] + "\r\n\r\n").encode())
+# The client preface and an empty SETTINGS frame, as RFC 7540 3.5 asks.
+s.sendall(b"PRI * HTTP/2.0\r\n\r\nSM\r\n\r\n" + bytes([0, 0, 0, 4, 0, 0, 0, 0, 0]))
+data = b""
+try:
+    while b"h2-ok" not in data:
+        chunk = s.recv(65536)
+        if not chunk:
+            break
+        data += chunk
+except OSError:
+    # A refused upgrade closes with our preface unread: Linux reports
+    # that as end of stream, macOS as ECONNRESET. Either is "closed".
+    pass
+print("served" if b"h2-ok" in data else "closed")
+' "$PORT" "$1"
+    }
+    got=$(h2c_probe "AAQAAP__")
+    [ "$got" = "served" ] || { echo "  [FAIL] h2c upgrade with base64url settings: $got"; exit 1; }
+    got=$(h2c_probe "AAQAAP//")
+    [ "$got" = "closed" ] || { echo "  [FAIL] h2c upgrade accepted standard-alphabet settings: $got"; exit 1; }
+fi
+
+# ----------------------------------------------------------------
 # Test 4 — Multiplexed concurrent streams. -Z drives 10 GETs in
 # parallel; with --http2-prior-knowledge curl reuses one TCP
 # connection and multiplexes the requests as separate h2 streams.
