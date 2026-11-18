@@ -7128,16 +7128,23 @@ static void rename_calls_to(ASTNode* node, const char* from, const char* to) {
     }
 }
 
-/* Rename every reference to a renamed top-level function: calls anywhere,
-   plus bare value references in function bodies that do not rebind the name.
-   Walks the program's top-level children so each function body is a separate
-   shadowing decision. */
+/* Rename every reference to a renamed top-level function of the program:
+   calls anywhere in the program's own code, plus bare value references in
+   function bodies that do not rebind the name. Walks the program's top-level
+   children so each function body is a separate shadowing decision.
+
+   Code merged in from a module is left alone: a module's body never resolves
+   to the program's own functions (#3088), so a bare `free(ctx)` there is the
+   module's own `extern free`. Renaming it too sent std.cryptography's frees,
+   and any module's call to an extern the program happened to define a
+   function of the same name for (`abs`, `close`, `read`), to the program's
+   function, with no diagnostic. */
 static void rename_all_refs_to(ASTNode* program, const char* from, const char* to) {
     if (!program) return;
-    rename_calls_to(program, from, to);
     for (int i = 0; i < program->child_count; i++) {
         ASTNode* top = program->children[i];
-        if (!top) continue;
+        if (!top || top->is_imported || top->origin_module) continue;
+        rename_calls_to(top, from, to);
         /* The definition's own name lives on the node's value, not in an
            AST_IDENTIFIER child, so bodies are all we need to walk. */
         if (subtree_rebinds_name(top, from)) continue;
@@ -7151,8 +7158,10 @@ static void rename_all_refs_to(ASTNode* program, const char* from, const char* t
    definition `static` removes the cross-TU collision but not this one, so
    rename the user's function to the same `ae_` spelling safe_c_name already
    uses for libc collisions. Dotted stdlib calls (`string.replace_all`) carry a
-   different AST value and are untouched; a bare call resolves to the user's
-   function, which is what gets renamed with it. */
+   different AST value and are untouched; a bare call in the program's own
+   code resolves to the user's function, which is what gets renamed with it. A
+   module's bare call is to its own extern and keeps the name (see
+   rename_all_refs_to). */
 /* A leading underscore at file scope is RESERVED for the C implementation
    (C11 §7.1.3), and MSVCRT/UCRT use that namespace heavily: _write, _read,
    _open, _close, _access, _aligned_malloc and dozens more are real declared
