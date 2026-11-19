@@ -394,10 +394,12 @@ static void ll_net_handled(void* grant_list, uint64_t* net) {
 
 static int ll_grants(AetherSandboxKernel* k, void* grant_list, uint64_t net, char* err, size_t errsz) {
     int n = list_size(grant_list);
+    int names_host = 0;
     for (int i = 0; i + 1 < n; i += 2) {
         const char* cat = aether_string_data(list_get_raw(grant_list, i));
         const char* pat = aether_string_data(list_get_raw(grant_list, i + 1));
         if (!cat || !pat) continue;
+        if (strcmp(cat, "tcp") == 0 && aether_landlock_names_host(pat)) names_host = 1;
         int rc = 0;
         if (strcmp(cat, "fs_read") == 0) rc = ll_pattern(k, pat, LL_READ);
         else if (strcmp(cat, "fs_write") == 0) rc = ll_pattern(k, pat, LL_WRITE);
@@ -425,6 +427,14 @@ static int ll_grants(AetherSandboxKernel* k, void* grant_list, uint64_t net, cha
                      cat, pat, strerror(errno));
             return -1;
         }
+    }
+    // A host named by a tcp grant is resolved by the C library, which reads
+    // its configuration through an open no wrapper sees.
+    const char* failed = NULL;
+    AetherLandlock l = { k->landlock_fd, k->landlock_fs };
+    if (names_host && aether_landlock_resolver(&l, &failed) != 0) {
+        snprintf(err, errsz, "cannot add a Landlock rule for %s: %s", failed, strerror(errno));
+        return -1;
     }
     return 0;
 }
@@ -552,81 +562,11 @@ int aether_sandbox_kernel_prepare(AetherSandboxKernel* k, void* grant_list,
     return 0;
 }
 
-// The ELF interpreter (PT_INTERP) of `path` into `out`: 1, or 0 when it has
-// none (static, not ELF).
-static uint64_t elf_rd(const unsigned char* p, int bytes, int le) {
-    uint64_t v = 0;
-    for (int b = 0; b < bytes; b++)
-        v |= (uint64_t)p[le ? b : bytes - 1 - b] << (8 * b);
-    return v;
-}
-
-static int elf_interp(const char* path, char* out, size_t outsz) {
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    if (fd < 0) return 0;
-    unsigned char h[64];
-    int found = 0;
-    if (pread(fd, h, sizeof h, 0) == (ssize_t)sizeof h && memcmp(h, "\177ELF", 4) == 0) {
-        int is64 = h[4] == 2, le = h[5] == 1;
-        uint64_t phoff = is64 ? elf_rd(h + 32, 8, le) : elf_rd(h + 28, 4, le);
-        uint64_t phentsize = elf_rd(h + (is64 ? 54 : 42), 2, le);
-        uint64_t phnum = elf_rd(h + (is64 ? 56 : 44), 2, le);
-        for (uint64_t i = 0; i < phnum && i < 128 && !found; i++) {
-            unsigned char ph[64];
-            if (phentsize > sizeof ph || phentsize < (is64 ? 56u : 32u)) break;
-            if (pread(fd, ph, (size_t)phentsize, (off_t)(phoff + i * phentsize)) != (ssize_t)phentsize)
-                break;
-            if (elf_rd(ph, 4, le) != 3 /* PT_INTERP */) continue;
-            uint64_t off = is64 ? elf_rd(ph + 8, 8, le) : elf_rd(ph + 4, 4, le);
-            uint64_t sz = is64 ? elf_rd(ph + 32, 8, le) : elf_rd(ph + 16, 4, le);
-            if (sz == 0 || sz >= outsz) break;
-            if (pread(fd, out, (size_t)sz, (off_t)off) == (ssize_t)sz) {
-                out[sz] = '\0';
-                found = out[0] == '/';
-            }
-        }
-    }
-    close(fd);
-    return found;
-}
-
-// The program at `path`, its interpreter and the loader's floor. `depth`
-// stops a #! chain.
+// The program at `path`, its interpreter and the loader's floor
+// (aether_landlock_program, which the exec grants use too).
 static int ll_program(AetherSandboxKernel* k, const char* path, const char* sh_path, int depth) {
-    if (ll_rule(k, path, LL_EXEC) != 0) return -1;
-    char interp[PATH_MAX];
-    if (elf_interp(path, interp, sizeof interp)) {
-        if (ll_rule(k, interp, LL_EXEC) != 0) return -1;
-        // The loader's floor: the libraries beside the interpreter, read
-        // only and not listed (the multiarch lib directory on Debian and
-        // Ubuntu, /usr/lib on Arch and Fedora).
-        char real[PATH_MAX];
-        if (realpath(interp, real)) {
-            char* slash = strrchr(real, '/');
-            if (slash && slash != real) {
-                *slash = '\0';
-                if (ll_rule(k, real, LL_FS_READ_FILE) != 0) return -1;
-            }
-        }
-        return 0;
-    }
-    // A #! script: its interpreter.
-    int fd = open(path, O_RDONLY | O_CLOEXEC);
-    char head[PATH_MAX + 2];
-    ssize_t n = fd >= 0 ? pread(fd, head, sizeof head - 1, 0) : -1;
-    if (fd >= 0) close(fd);
-    if (n > 2 && head[0] == '#' && head[1] == '!') {
-        head[n] = '\0';
-        char* p = head + 2;
-        while (*p == ' ' || *p == '\t') p++;
-        p[strcspn(p, " \t\r\n")] = '\0';
-        if (p[0] == '/' && depth < 4) return ll_program(k, p, sh_path, depth + 1);
-        return 0;
-    }
-    if (n >= 4 && memcmp(head, "\177ELF", 4) == 0) return 0;   // static ELF
-    // Neither: the spawn runs it under /bin/sh.
-    if (sh_path && depth == 0) return ll_program(k, sh_path, NULL, depth + 1);
-    return 0;
+    AetherLandlock l = { k->landlock_fd, k->landlock_fs };
+    return aether_landlock_program(&l, path, sh_path, depth);
 }
 
 int aether_sandbox_kernel_exec_fenced(const AetherSandboxKernel* k) {
@@ -657,15 +597,14 @@ int aether_sandbox_kernel_program(AetherSandboxKernel* k, const char* path,
                                   const char* sh_path, char* err, size_t errsz) {
     if (kernel_filter(k, path, sh_path, err, errsz) != 0) return -1;
     if (k->landlock_fd < 0) return 0;
-    static const char* const floor_read[] = {
-        "/etc/ld.so.cache",       // the loader's index
-        "/usr/lib/locale",        // glibc's locale archive
-        "/dev/urandom",
-    };
+    // The program and what it needs to start, and the floor a running
+    // program needs (aether_landlock_floor, the preload's backstop's too).
     int rc = ll_program(k, path, sh_path, 0);
-    for (size_t i = 0; rc == 0 && i < sizeof floor_read / sizeof floor_read[0]; i++)
-        rc = ll_rule(k, floor_read[i], LL_FS_READ_FILE);
-    if (rc == 0) rc = ll_rule(k, "/dev/null", LL_FS_READ_FILE | LL_FS_WRITE_FILE);
+    const char* failed = NULL;
+    if (rc == 0) {
+        AetherLandlock l = { k->landlock_fd, k->landlock_fs };
+        rc = aether_landlock_floor(&l, NULL, NULL, &failed);
+    }
     if (rc != 0) {
         snprintf(err, errsz, "cannot add the Landlock rules to start %s: %s", path, strerror(errno));
         if (k->flags & AETHER_SBX_STRICT) return -1;

@@ -337,16 +337,44 @@ static void landlock_backstop(void) {
             snprintf(why, sizeof why, "landlock: no rule for the %s grant '%s' (%s); "
                      "the permanent policy holds at libc only", cat, pat, strerror(errno));
     }
-    // The floor a running program needs past its own image: the loader's
-    // cache and the directory of its C library (a later dlopen), the locale
-    // archive, /dev/null and /dev/urandom.
-    static const char* const floor_read[] = { "/etc/ld.so.cache", "/usr/lib/locale", "/dev/urandom" };
-    for (size_t i = 0; !why[0] && i < sizeof floor_read / sizeof floor_read[0]; i++)
-        if (aether_landlock_rule(&l, floor_read[i], LL_FS_READ_FILE) != 0)
+    // The floor a running program needs past its own image
+    // (aether_landlock_floor, the spawn's too), with this library and the
+    // grant file, which a child it starts reads before its main to keep the
+    // policy, and the shared memory the grants came from; the directory of
+    // its C library (a later dlopen); with an exec grant, the interpreter
+    // this program was started with, which a child built the same way needs
+    // (an exec grant naming a program adds that program's own); with a tcp
+    // grant that names a host, what the C library reads to resolve it.
+    char self_so[PATH_MAX];
+    const char* preload_path = NULL;
+    Dl_info self_info;
+    if (dladdr((void*)landlock_backstop, &self_info) && self_info.dli_fname &&
+        realpath(self_info.dli_fname, self_so))
+        preload_path = self_so;
+    const char* grants_path = real_getenv ? real_getenv("AETHER_SANDBOX_GRANTS") : NULL;
+    const char* failed = NULL;
+    if (!why[0] && aether_landlock_floor(&l, preload_path, grants_path, &failed) != 0)
+        snprintf(why, sizeof why, "landlock: no rule for %s (%s); the permanent policy holds at libc only",
+                 failed, strerror(errno));
+    const char* shm = real_getenv ? real_getenv("AETHER_SANDBOX_SHM") : NULL;
+    if (!why[0] && shm && shm[0]) {
+        char shm_path[PATH_MAX];
+        int w = snprintf(shm_path, sizeof shm_path, "/dev/shm/%s", shm[0] == '/' ? shm + 1 : shm);
+        if (w > 0 && (size_t)w < sizeof shm_path && aether_landlock_rule(&l, shm_path, LL_FS_READ_FILE) != 0)
             snprintf(why, sizeof why, "landlock: no rule for %s; the permanent policy holds at libc only",
-                     floor_read[i]);
-    if (!why[0] && aether_landlock_rule(&l, "/dev/null", LL_FS_READ_FILE | LL_FS_WRITE_FILE) != 0)
-        snprintf(why, sizeof why, "landlock: no rule for /dev/null; the permanent policy holds at libc only");
+                     shm_path);
+    }
+    int has_exec = 0, names_host = 0;
+    for (int i = 0; i < grant_count; i++) {
+        if (strcmp(grants[i].cat, "exec") == 0) has_exec = 1;
+        if (strcmp(grants[i].cat, "tcp") == 0 && aether_landlock_names_host(grants[i].pat)) names_host = 1;
+    }
+    if (!why[0] && has_exec && aether_landlock_interp(&l, "/proc/self/exe") < 0)
+        snprintf(why, sizeof why, "landlock: no rule for this program's interpreter (%s); the permanent "
+                 "policy holds at libc only", strerror(errno));
+    if (!why[0] && names_host && aether_landlock_resolver(&l, &failed) != 0)
+        snprintf(why, sizeof why, "landlock: no rule for %s (%s); the permanent policy holds at libc only",
+                 failed, strerror(errno));
     Dl_info info;
     void* in_libc = (void*)real_open;
     if (!why[0] && real_open && dladdr(in_libc, &info) && info.dli_fname) {

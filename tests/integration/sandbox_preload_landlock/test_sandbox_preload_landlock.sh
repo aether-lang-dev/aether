@@ -94,6 +94,40 @@ expect "a grant Landlock cannot express: the policy stays at libc" "$?" 0
 grep -q "landlock: the fs_read grant '\*.log' cannot be a Landlock rule" "$TMP/err" ||
     { echo "  [FAIL] suffix: the log does not say why the kernel does not hold it"; fail=1; }
 
+# An exec grant under the kernel's hold: the program starts (Landlock needs
+# EXECUTE on its ELF interpreter too, and on a "#!" script's interpreter),
+# and keeps the preload and its grants (the library and the grant file are
+# readable to it), so its own log says the policy is held again.
+LS="$(command -v ls)"
+case "$LS" in
+    /*)
+        printf 'fs_read:%s/*\nfs_read:%s\nexec:%s\npolicy:permanent\n' "$TMP/box" "$TMP/box" "$LS" \
+            > "$TMP/exec.grants"
+        LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/exec.grants" AETHER_SANDBOX_LOG=stderr \
+            "$TMP/probe" exec "$LS" "$TMP/box" </dev/null >"$TMP/out" 2>"$TMP/err"
+        got=$?
+        expect "permanent with exec:$LS: the granted program starts" "$got" 0
+        grep -q 'inside.txt' "$TMP/out" ||
+            { echo "  [FAIL] exec: ls did not list the box"; sed 's/^/    /' "$TMP/err"; fail=1; }
+        held=$(grep -c 'landlock: the permanent policy is held by the kernel too' "$TMP/err")
+        if [ "$held" -ge 2 ]; then
+            echo "  [PASS] the started program kept the preload and its grants"
+        else
+            echo "  [FAIL] the started program did not keep the preload (the policy was held $held time(s))"
+            sed 's/^/    /' "$TMP/err"
+            fail=1
+        fi ;;
+    *) echo "  [SKIP] exec: no ls on PATH" ;;
+esac
+if [ -x /bin/sh ]; then
+    printf '#!/bin/sh\nexit 5\n' > "$TMP/box/run.sh"
+    chmod 755 "$TMP/box/run.sh"
+    printf 'fs_read:%s/*\nexec:%s/run.sh\npolicy:permanent\n' "$TMP/box" "$TMP/box" > "$TMP/script.grants"
+    LD_PRELOAD="$LIB" AETHER_SANDBOX_GRANTS="$TMP/script.grants" AETHER_SANDBOX_LOG=stderr \
+        "$TMP/probe" exec "$TMP/box/run.sh" </dev/null >"$TMP/out" 2>"$TMP/err"
+    expect "permanent with a #! script's exec grant: the script runs under its interpreter" "$?" 5
+fi
+
 echo ""
 echo "sandbox_preload_landlock: $([ "$fail" -eq 0 ] && echo PASS || echo FAIL)"
 [ "$fail" -eq 0 ]

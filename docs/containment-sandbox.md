@@ -556,7 +556,18 @@ the process.
   ABI 4 and up (with no tcp grant, connect is refused; a tcp grant with no
   port or a `tcp_listen` grant leaves that right to the wrappers), and the
   floor a running program needs is added (the loader's cache and its C
-  library's directory, the locale archive, `/dev/null`, `/dev/urandom`).
+  library's directory, the locale archive, `/dev/null`, `/dev/urandom`),
+  with the preload library, the grant file and the shared memory the grants
+  came from, which a program it starts reads to keep the policy. A program
+  an `exec` grant names gets what the kernel needs to start it, its ELF
+  interpreter and the libraries beside it, or a `#!` script's interpreter,
+  and with any `exec` grant this program's own interpreter is executable;
+  with a tcp grant that names a host, the files the C library reads to
+  resolve it (`/etc/resolv.conf`, `/etc/hosts`, `/etc/nsswitch.conf`,
+  `/etc/host.conf`, `/etc/gai.conf`, `/etc/localtime`) are readable. An fs
+  grant becomes a rule only on what the libc check would match: a path
+  spelt through a symlink, and an entry of "/dir/name*" that is a symlink,
+  get none, so no rule reaches the tree a symlink points at.
   The log is opened first, and the restriction sets `PR_SET_NO_NEW_PRIVS`,
   so a set-user-ID program the process starts no longer gains its owner's
   rights. Without the line nothing changes. On a kernel without Landlock,

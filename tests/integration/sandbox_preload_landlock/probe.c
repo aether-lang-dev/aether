@@ -4,6 +4,10 @@
 // on this architecture, 2 a usage error.
 //
 //   probe <raw|libc> <file>
+//   probe exec <program> [args...]
+//
+// `exec` replaces the probe with <program> (execv): its exit status is the
+// program's, or 3 when the exec was refused (EACCES, EPERM), 4 otherwise.
 //
 // `raw` issues openat as a bare syscall instruction, which no libc wrapper
 // sees: only the kernel (Landlock) can refuse it. `libc` calls open().
@@ -40,6 +44,10 @@ static long raw_openat(int dirfd, const char* path, long flags) {
 }
 
 int main(int argc, char** argv) {
+    if (argc >= 3 && strcmp(argv[1], "exec") == 0) {
+        execv(argv[2], argv + 2);
+        return (errno == EACCES || errno == EPERM) ? 3 : 4;
+    }
     if (argc != 3) {
         fprintf(stderr, "usage: %s <raw|libc> <file>\n", argv[0]);
         return 2;
