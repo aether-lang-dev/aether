@@ -32,6 +32,12 @@
  *   sleep       a handler that sleeps 1.5 s between two reads of a body
  *               that has all arrived: the server's own time does not count
  *               against the client (200, read=40000)
+ *
+ * On Linux and macOS the same against the proxy event loop, a gateway that
+ * proxies to an upstream (#3737, #3750): a slow head, a slow body, a slow
+ * handshake, a body above the minimum rate (200), and its connection bound:
+ * four connections partway through a head and a fifth refused 503, four
+ * silent ones and a fifth served while a silent one is closed.
  */
 
 #include <stdio.h>
@@ -487,6 +493,223 @@ static void round_sleep(void) {
     report(label, status == 200 && strcmp(body, "read=40000") == 0, elapsed, status, body);
 }
 
+#ifndef _WIN32
+/* ---- the proxy event loop (Linux and macOS) ----
+ *
+ * A server whose only work is a reverse proxy to plain upstreams is served
+ * by the event loop, not a worker per connection. Its idle timer moved with
+ * every byte, and it had no head or body deadline and no bound on the
+ * connections it held, so a client sending a byte just inside the idle
+ * timeout kept a slot for ever and enough of them used up the process's
+ * descriptors. Its gateways here have a 5 s idle timeout, so only the
+ * budgets (1 s) can end a slow client within LIMIT_MS. */
+
+void* aether_proxy_pool_new(int algo, int request_timeout_sec, int dial_timeout_ms,
+                            int max_inflight_per_up);
+const char* aether_proxy_upstream_add(void* pool, const char* base_url, int weight);
+void* aether_proxy_opts_new(void);
+const char* aether_proxy_use_reverse_proxy(HttpServer* server, const char* path_prefix,
+                                           void* pool, void* opts);
+void aether_proxy_opts_free(void* opts);
+void aether_proxy_pool_free(void* pool);
+int http_server_evloop_connections(HttpServer* server);
+
+static HttpServer* g_upstream;
+static int g_upstream_port;
+
+/* The upstream every gateway proxies to: a worker-path server. */
+static int loop_upstream(void) {
+    if (g_upstream) return 1;
+    g_upstream = http_server_create(0);
+    if (!g_upstream) return 0;
+    http_server_get(g_upstream, "/ping", ping_handler, NULL);
+    http_server_post(g_upstream, "/len", len_handler, NULL);
+    if (http_server_bind_raw(g_upstream, "127.0.0.1", 0) < 0 ||
+        http_server_start_background_raw(g_upstream) < 0) return 0;
+    g_upstream_port = http_server_port(g_upstream);
+    return 1;
+}
+
+typedef struct { HttpServer* server; void* pool; void* opts; } Gateway;
+
+/* A gateway on the event loop: the round's budgets, a 5 s idle timeout,
+ * at most `max_conns` connections on the loop (0 for the default), TLS
+ * through OpenSSL when `tls`. server is NULL when it cannot run. */
+static Gateway loop_gateway(const char* label, int tls, int max_conns) {
+    Gateway g = { NULL, NULL, NULL };
+    if (!loop_upstream()) { printf("FAIL: [%s] upstream\n", label); g_fail++; return g; }
+    HttpServer* s = http_server_create(0);
+    if (!s) { printf("FAIL: [%s] server_create\n", label); g_fail++; return g; }
+    const char* err = http_server_set_keepalive_raw(s, 1, 0, 5000LL * 1000000LL);
+    if (!*err) err = http_server_set_head_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL);
+    if (!*err) err = http_server_set_body_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL, MIN_RATE);
+    if (!*err) err = http_server_set_tls_handshake_timeout_raw(s, (int64_t)BUDGET_MS * 1000000LL);
+    if (!*err && max_conns) err = http_server_set_loop_max_connections_raw(s, max_conns);
+    if (*err) {
+        printf("FAIL: [%s] a limit setter refused: %s\n", label, err);
+        g_fail++;
+        http_server_free(s);
+        return g;
+    }
+    if (tls) {
+        if (!g_cert) { printf("round[%s]: skipped, no certificate\n", label); http_server_free(s); return g; }
+        err = http_server_set_tls_raw(s, g_cert, g_key);
+        if (!*err) err = http_server_set_tls_backend_raw(s, "openssl");
+        if (*err) { printf("round[%s]: skipped, %s\n", label, err); http_server_free(s); return g; }
+    }
+    void* pool = aether_proxy_pool_new(0 /* round robin */, 10, 0, 0);
+    char up[64];
+    snprintf(up, sizeof(up), "http://127.0.0.1:%d", g_upstream_port);
+    void* opts = aether_proxy_opts_new();
+    if (!pool || !opts || *aether_proxy_upstream_add(pool, up, 1) ||
+        *aether_proxy_use_reverse_proxy(s, "/", pool, opts) ||
+        http_server_bind_raw(s, "127.0.0.1", 0) < 0 ||
+        http_server_start_background_raw(s) < 0) {
+        printf("FAIL: [%s] gateway setup: %s\n", label, http_server_error(s));
+        g_fail++;
+        http_server_free(s);
+        return g;
+    }
+    g.server = s;
+    g.pool = pool;
+    g.opts = opts;
+    return g;
+}
+
+static void loop_gateway_free(Gateway g) {
+    if (!g.server) return;
+    http_server_free(g.server);
+    aether_proxy_opts_free(g.opts);
+    aether_proxy_pool_free(g.pool);
+}
+
+/* The round ran on the loop, or says why not. */
+static int on_loop(Gateway g, const char* label) {
+    if (http_server_evloop_connections(g.server) > 0) return 1;
+    printf("round[%s]: the gateway was not served by the event loop\n", label);
+    g_fail++;
+    return 0;
+}
+
+/* A slow head, a slow body read by the loop, and a slow handshake, on the
+ * loop; answered 408 (closed for the handshake) within LIMIT_MS. */
+static void round_loop_slow(const char* kind) {
+    char label[64];
+    snprintf(label, sizeof(label), "loop %s", kind);
+    int tls = strcmp(kind, "handshake") == 0;
+    Gateway g = loop_gateway(label, tls, 0);
+    if (!g.server) return;
+    client_sock s = client_connect(http_server_port(g.server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); loop_gateway_free(g); return; }
+    int64_t t0 = now_ms();
+    int64_t elapsed;
+    int want = 408;
+    if (tls) {
+        unsigned char rec[5 + 512];
+        memset(rec, 0, sizeof(rec));
+        rec[0] = 0x16; rec[1] = 0x03; rec[2] = 0x01; rec[3] = 0x02; rec[4] = 0x00;
+        send_all(s, rec, 5);
+        elapsed = trickle(s, rec + 5, 512, t0);
+        want = 0;
+    } else if (strcmp(kind, "head") == 0) {
+        static const char head[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Pad: "
+                                   "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\r\n\r\n";
+        elapsed = trickle(s, head, (int)sizeof(head) - 1, t0);
+    } else {
+        static const char head[] = "POST /len HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 100\r\n\r\n";
+        static char slow[100];
+        memset(slow, 'y', sizeof(slow));
+        send_all(s, head, (int)sizeof(head) - 1);
+        elapsed = trickle(s, slow, (int)sizeof(slow), t0);
+    }
+    int status = elapsed >= 0 ? read_status(s, NULL, NULL, 0) : -1;
+    client_close(s);
+    int ran = on_loop(g, label);
+    loop_gateway_free(g);
+    if (ran) expect_cut(label, elapsed, status, want);
+}
+
+/* 12000 bytes at 4000 a second through the loop: past the 1 s budget, but
+ * above the minimum rate. */
+static void round_loop_rate(void) {
+    const char* label = "loop rate";
+    Gateway g = loop_gateway(label, 0, 0);
+    if (!g.server) return;
+    client_sock s = client_connect(http_server_port(g.server));
+    if (s == CLIENT_BAD) { report(label, 0, -1, -1, "connect"); loop_gateway_free(g); return; }
+    static const char head[] = "POST /len HTTP/1.1\r\nHost: 127.0.0.1\r\nContent-Length: 12000\r\n\r\n";
+    static char chunk[1000];
+    memset(chunk, 'z', sizeof(chunk));
+    int64_t t0 = now_ms();
+    send_all(s, head, (int)sizeof(head) - 1);
+    for (int i = 0; i < 12; i++) {
+        sleep_ms(250);
+        send_all(s, chunk, (int)sizeof(chunk));
+    }
+    char body[128] = "";
+    int status = read_status(s, NULL, body, (int)sizeof(body));
+    int64_t elapsed = now_ms() - t0;
+    client_close(s);
+    int ran = on_loop(g, label);
+    loop_gateway_free(g);
+    if (ran) report(label, status == 200 && strcmp(body, "len=12000") == 0, elapsed, status, body);
+}
+
+/* The loop's connection bound, 4 here. Four connections partway through a
+ * head hold their slots, and a fifth is refused at once with 503. Four that
+ * have sent nothing yield: a fifth with a request is served, and the oldest
+ * silent one is closed to make room. */
+static void round_loop_slots(void) {
+    const char* label = "loop slots";
+    Gateway g = loop_gateway(label, 0, 4);
+    if (!g.server) return;
+    int port = http_server_port(g.server);
+    client_sock held[4];
+    static const char part[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nX-Pad: a";
+    for (int i = 0; i < 4; i++) {
+        held[i] = client_connect(port);
+        if (held[i] != CLIENT_BAD) send_all(held[i], part, (int)sizeof(part) - 1);
+    }
+    sleep_ms(200);
+    static const char req[] = "GET /ping HTTP/1.1\r\nHost: 127.0.0.1\r\nConnection: close\r\n\r\n";
+    client_sock s = client_connect(port);
+    int64_t t0 = now_ms();
+    if (s != CLIENT_BAD) send_all(s, req, (int)sizeof(req) - 1);
+    int status = s != CLIENT_BAD && readable(s, 3000) ? read_status(s, NULL, NULL, 0) : -1;
+    int64_t elapsed = now_ms() - t0;
+    if (s != CLIENT_BAD) client_close(s);
+    for (int i = 0; i < 4; i++) if (held[i] != CLIENT_BAD) client_close(held[i]);
+    int ran = on_loop(g, label);
+    if (ran) report("loop slots full of heads", status == 503 && elapsed < 1000, elapsed, status,
+                    "a fifth is refused 503");
+
+    /* Four silent connections, then a request. */
+    sleep_ms(300);   /* the four above closed on the loop */
+    for (int i = 0; i < 4; i++) held[i] = client_connect(port);
+    sleep_ms(600);   /* the loop's sweep has counted them (every 250 ms) */
+    s = client_connect(port);
+    t0 = now_ms();
+    char body[64] = "";
+    if (s != CLIENT_BAD) send_all(s, req, (int)sizeof(req) - 1);
+    status = s != CLIENT_BAD && readable(s, 3000) ? read_status(s, NULL, body, (int)sizeof(body)) : -1;
+    elapsed = now_ms() - t0;
+    /* One of the silent ones was closed for it (the oldest on the loop
+     * thread it went to): readable, at its end. */
+    int evicted = 0;
+    for (int i = 0; i < 4; i++) {
+        char b;
+        if (held[i] != CLIENT_BAD && readable(held[i], i == 0 ? 500 : 0) &&
+            recv(held[i], &b, 1, 0) <= 0)
+            evicted = 1;
+    }
+    if (s != CLIENT_BAD) client_close(s);
+    for (int i = 0; i < 4; i++) if (held[i] != CLIENT_BAD) client_close(held[i]);
+    loop_gateway_free(g);
+    if (ran) report("loop slots full of silent connections", status == 200 && evicted && elapsed < 1000,
+                    elapsed, status, evicted ? "a silent one closed" : "none closed");
+}
+#endif
+
 int http_slow_clients_probe(void) {
 #ifdef _WIN32
     WSADATA wsa;
@@ -508,6 +731,18 @@ int http_slow_clients_probe(void) {
     if (WANT("stall")) round_body(PLAIN, "stall");
     if (WANT("rate")) for (int b = PLAIN; b <= AETHER; b++) round_rate(b);
     if (WANT("sleep")) round_sleep();
+#ifndef _WIN32
+    if (WANT("loop")) {
+        round_loop_slow("head");
+        round_loop_slow("body");
+        round_loop_slow("handshake");
+        round_loop_rate();
+        round_loop_slots();
+    }
+    if (g_upstream) http_server_free(g_upstream);
+#else
+    printf("loop rounds: skipped, the proxy event loop runs on Linux and macOS only\n");
+#endif
 
     printf("rounds passed=%d failed=%d\n", g_pass, g_fail);
     if (g_fail == 0 && g_pass > 0) printf("http_server_slow_clients passed\n");

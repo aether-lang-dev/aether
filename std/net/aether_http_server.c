@@ -224,6 +224,7 @@ const char* http_server_set_head_timeout_raw(HttpServer* s, int64_t t) { (void)s
 const char* http_server_set_body_timeout_raw(HttpServer* s, int64_t t, int64_t r) { (void)s; (void)t; (void)r; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_tls_handshake_timeout_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
 const char* http_server_set_h2_max_age_raw(HttpServer* s, int64_t t) { (void)s; (void)t; return "HTTP server unavailable: networking not built in"; }
+const char* http_server_set_loop_max_connections_raw(HttpServer* s, int m) { (void)s; (void)m; return "HTTP server unavailable: networking not built in"; }
 void http_ws_close(HttpWsConn* w, int c, const char* r) { (void)w; (void)c; (void)r; }
 void http_server_add_route(HttpServer* s, const char* m, const char* p, HttpHandler h, void* u) { (void)s; (void)m; (void)p; (void)h; (void)u; }
 void http_server_get(HttpServer* s, const char* p, HttpHandler h, void* u) { (void)s; (void)p; (void)h; (void)u; }
@@ -1995,6 +1996,15 @@ const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_n
     if (!server) return "server is null";
     if (timeout_ns < 0) return "HTTP/2 connection age must not be negative";
     server->limits.h2_max_age_ms = limits_timeout_ms(timeout_ns);
+    return "";
+}
+
+/* The proxy event loop's connection bound (#3750); 0 for its default, read
+ * when the loop starts (http_evloop_max_connections). */
+const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections) {
+    if (!server) return "server is null";
+    if (max_connections < 0) return "the event loop's connection bound must not be negative";
+    server->limits.loop_max_connections = max_connections;
     return "";
 }
 

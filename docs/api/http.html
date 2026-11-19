@@ -72,6 +72,8 @@
     <li><a href="#server_set_tls_handshake_timeout">server_set_tls_handshake_timeout</a></li>
     <li><a href="#server_set_h2_max_age_raw">server_set_h2_max_age_raw</a></li>
     <li><a href="#server_set_h2_max_age">server_set_h2_max_age</a></li>
+    <li><a href="#server_set_loop_max_connections_raw">server_set_loop_max_connections_raw</a></li>
+    <li><a href="#server_set_loop_max_connections">server_set_loop_max_connections</a></li>
     <li><a href="#server_set_h2_raw">server_set_h2_raw</a></li>
     <li><a href="#server_set_h2">server_set_h2</a></li>
     <li><a href="#server_set_multi_accept_raw">server_set_multi_accept_raw</a></li>
@@ -589,6 +591,17 @@
       <h3 class="function-name">server_set_h2_max_age <span class="kind">fn</span></h3>
       <pre class="usage"><code>server_set_h2_max_age(server, timeout) <span class="arrow">-&gt;</span> string</code></pre>
       <p class="signature"><span class="sig-params">server: ptr, timeout: Duration</span></p>
+    </div>
+    <div class="function" id="server_set_loop_max_connections_raw" data-name="server_set_loop_max_connections_raw">
+      <h3 class="function-name">server_set_loop_max_connections_raw <span class="kind">extern</span></h3>
+      <pre class="usage"><code>server_set_loop_max_connections_raw(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
+      <p class="doc">The most connections the proxy event loop holds at once (#3750). The loop runs on Linux and macOS for a server whose work is a reverse proxy to plain upstreams. 0, the default, is half the process's open-file limit less 64, read when the loop starts, since each proxied connection takes an upstream descriptor too. At the bound the loop closes the connection that has waited longest with nothing of a request sent, and answers a new one 503 when there is none. Returns &quot;&quot; or why the value was refused.</p>
+    </div>
+    <div class="function" id="server_set_loop_max_connections" data-name="server_set_loop_max_connections">
+      <h3 class="function-name">server_set_loop_max_connections <span class="kind">fn</span></h3>
+      <pre class="usage"><code>server_set_loop_max_connections(server, max_connections) <span class="arrow">-&gt;</span> string</code></pre>
+      <p class="signature"><span class="sig-params">server: ptr, max_connections: int</span></p>
     </div>
     <div class="function" id="server_set_h2_raw" data-name="server_set_h2_raw">
       <h3 class="function-name">server_set_h2_raw <span class="kind">extern</span></h3>

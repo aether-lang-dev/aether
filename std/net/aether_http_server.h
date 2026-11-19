@@ -227,6 +227,15 @@ struct HttpConn;
 //   h2_max_concurrent_streams 100      server_set_h2                     the new stream is reset
 //   h2_max_header_list        32 KiB   none                              431, the stream reset
 //   h2_max_age_ms             1 h      server_set_h2_max_age             GOAWAY, then closed
+//   loop_max_connections      derived  server_set_loop_max_connections   oldest silent one closed, else 503
+//
+// The proxy event loop (Linux and macOS, a server whose work is a reverse
+// proxy) holds the same head, body and handshake budgets, by the clock. Its
+// connection bound, loop_max_connections, is 0 by default: half the
+// process's open-file limit, less 64, when the loop starts, since each
+// proxied connection needs an upstream descriptor too. At it, the loop
+// closes its oldest connection that has sent nothing of a request (a kept
+// one between requests, or a fresh one), and answers 503 when there is none.
 //
 // HTTP/2 also holds no more than max_body of request bodies on one
 // connection (a stream past it is refused), resets a stream whose request
@@ -290,6 +299,9 @@ typedef struct HttpServerLimits {
     // SETTINGS_MAX_HEADER_LIST_SIZE counts one (name, value and 32 bytes a
     // field); advertised in that setting.
     int     h2_max_header_list;
+    // The most connections the proxy event loop holds at once; 0 for half
+    // the process's open-file limit less 64, read when the loop starts.
+    int     loop_max_connections;
     // How long an HTTP/2 connection may live: past it the server sends
     // GOAWAY, lets the streams it has finish, and closes, no later than
     // idle_timeout_ms after. An HTTP/2 connection with no stream open
@@ -1241,6 +1253,13 @@ const char* http_server_set_tls_handshake_timeout_raw(HttpServer* server, int64_
 // with no stream open closes after the idle timeout whatever this is.
 // Returns "" or why the value was refused.
 const char* http_server_set_h2_max_age_raw(HttpServer* server, int64_t timeout_ns);
+
+// The most connections the proxy event loop holds at once (limits.
+// loop_max_connections); 0 for the default, half the process's open-file
+// limit less 64 when the loop starts. At it the loop closes its oldest
+// connection that has sent nothing of a request, else answers 503. Returns
+// "" or why the value was refused.
+const char* http_server_set_loop_max_connections_raw(HttpServer* server, int max_connections);
 
 // Sibling of http_request_body — returns the body's byte length so
 // callers can read NUL-bearing payloads (svn PUT, image uploads,

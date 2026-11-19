@@ -8,6 +8,11 @@
 # by a minimum rate), answered 408 or closed past it. shim.c has the rounds;
 # the old code failed every one but rate and sleep, which must succeed.
 #
+# On Linux and macOS it does the same against the proxy event loop, a
+# gateway proxying to an upstream, whose idle timer moved with every byte:
+# a slow head, body and handshake, a body above the minimum rate, and the
+# loop's connection bound (server_set_loop_max_connections).
+#
 # The TLS rounds need openssl(1) for a certificate; the ones that send a
 # TLS head or body slowly need the build to link OpenSSL, for a client.
 

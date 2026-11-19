@@ -1,10 +1,12 @@
 // The slow and abusive client harness (#3737, #3750): every time limit a
 // server puts on a client, driven by a client that keeps just inside the
 // per-read idle timeout. The work is in shim.c; this links the server, the
-// pure-Aether TLS backend, and the TLS client the script picked.
+// reverse proxy (for the event loop's rounds), the pure-Aether TLS backend,
+// and the TLS client the script picked.
 
 import std.http
 import std.cryptography.tls13_server
+import std.http.proxy
 
 extern http_slow_clients_probe() -> int
 

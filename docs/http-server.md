@@ -1167,6 +1167,15 @@ timeout of `0ns` turns that bound off.
 | HTTP/2 request, from its first HEADERS | the head and body budgets | as those | the stream is reset (`CANCEL`) |
 | HTTP/2 connection with no stream open | the idle timeout | as that | `GOAWAY`; closed |
 | HTTP/2 connection's age | 1 h | `server_set_h2_max_age` | graceful `GOAWAY`; closed when its streams are done |
+| Connections the proxy event loop holds | half the process's open-file limit, less 64 | `server_set_loop_max_connections` | the connection that has waited longest with nothing of a request sent is closed; with none, the new one gets `503` |
+
+The proxy event loop (Linux and macOS, for a server whose work is a
+reverse proxy to plain upstreams) holds the same head, body and handshake
+budgets as the worker path, by the clock, since it reads a request whole
+before anything runs on it; a slow request gets the same `408`. Its idle
+timer moves with every byte, as a receive timeout does, so before these
+budgets a client that sent a byte just inside it held a slot for ever.
+
 
 Fixed limits, which size buffers and have no setter: a request head
 16 KiB (`431`), a request line 2 KiB (`414`), a header line 1 KiB and 50

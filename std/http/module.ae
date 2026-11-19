@@ -47,6 +47,7 @@ exports(
     http_server_set_body_timeout_raw, server_set_body_timeout,
     http_server_set_tls_handshake_timeout_raw, server_set_tls_handshake_timeout,
     http_server_set_h2_max_age_raw, server_set_h2_max_age,
+    http_server_set_loop_max_connections_raw, server_set_loop_max_connections,
     http_server_set_h2_raw, server_set_h2,
     http_server_set_multi_accept_raw, server_set_multi_accept,
     http_server_set_h2_concurrent_dispatch_raw, server_set_h2_concurrent_dispatch,
@@ -490,6 +491,19 @@ extern http_server_set_h2_max_age_raw(server: ptr, timeout_ns: long) -> string
 
 server_set_h2_max_age(server: ptr, timeout: Duration) -> string {
     return http_server_set_h2_max_age_raw(server, timeout.ns)
+}
+
+// The most connections the proxy event loop holds at once (#3750). The loop
+// runs on Linux and macOS for a server whose work is a reverse proxy to
+// plain upstreams. 0, the default, is half the process's open-file limit
+// less 64, read when the loop starts, since each proxied connection takes
+// an upstream descriptor too. At the bound the loop closes the connection
+// that has waited longest with nothing of a request sent, and answers a new
+// one 503 when there is none. Returns "" or why the value was refused.
+extern http_server_set_loop_max_connections_raw(server: ptr, max_connections: int) -> string
+
+server_set_loop_max_connections(server: ptr, max_connections: int) -> string {
+    return http_server_set_loop_max_connections_raw(server, max_connections)
 }
 
 // Graceful shutdown (#260 Tier 3). Stops accepting new connections,

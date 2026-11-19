@@ -59,6 +59,7 @@
 #ifndef _WIN32
 #include <fcntl.h>
 #include <sys/socket.h>
+#include <sys/resource.h>   /* getrlimit: the loop's default connection bound */
 #endif
 
 typedef enum {
@@ -71,6 +72,8 @@ typedef enum {
     EV_UPSTREAM_RECV,    /* reading the response from the upstream */
     EV_BACKOFF,          /* waiting out a retry's backoff, on a timer (#3232) */
     EV_CLIENT_SEND,      /* writing the response to the client */
+    EV_LINGER,           /* a refusal sent; the client's rest read and
+                          * dropped until it closes (ev_refuse) */
     EV_CLOSING
 } EvState;
 
@@ -131,6 +134,14 @@ typedef struct EvConn {
 
     int64_t  idle_due;           /* when a quiet client is closed, 0 = not
                                   * waiting on it (ev_arm_idle, #3269) */
+    /* The request's own deadline, 0 for none (ev_arm_request, #3737): its
+     * head within head_timeout_ms of its first byte, then its body within
+     * body_timeout_ms of the head's end plus a second for every
+     * body_min_rate bytes. The idle timer moves with every byte, so a
+     * client that sent one just inside it held its slot for ever. */
+    int64_t  req_started_ms;     /* the request's first byte */
+    int64_t  body_started_ms;    /* the end of its head */
+    int64_t  req_due_ms;
     int64_t  deadline_ms;        /* when the upstream call gives up, 0 = none;
                                   * a `long` before, 32 bits on Windows, where
                                   * the clock went negative after 24.8 days of
@@ -248,6 +259,10 @@ typedef struct {
      * by this driver alone; read relaxed by whoever asks (#3258). */
     _Atomic int64_t wakeups;
     int64_t        next_idle_sweep_ms;   /* ev_sweep_idle (#3269) */
+    /* How many of its connections have sent nothing of a request, as of its
+     * last sweep: where a connection that arrives at the loop's bound goes,
+     * since only the driver that owns one may close it (#3750). */
+    atomic_int     silent_hint;
 
     /* What serving a request here takes from the server (whether the loop
      * may, the proxy's options, the middleware ahead of it), kept and
@@ -261,6 +276,10 @@ struct HttpEvLoop {
     EvDriver*   drivers;
     int         driver_count;
     atomic_int  active;
+    /* The most connections the drivers hold at once (#3750): the server's
+     * limits.loop_max_connections, or half the process's open-file limit
+     * less 64 (ev_max_connections). */
+    int         max_active;
     atomic_int  taken;           /* connections taken since the start (#3214) */
     atomic_int  stopping;
     atomic_int  next_driver;     /* round-robin placement of new connections */
@@ -381,6 +400,9 @@ static void ev_conn_reset_request(EvDriver* d, EvConn* c) {
     c->in_total = 0;
     c->in_scanned = 0;
     c->in_hdr_end = 0;
+    c->req_started_ms = 0;   /* the next request's clocks start afresh */
+    c->body_started_ms = 0;
+    c->req_due_ms = 0;
 
     /* The head buffer stays with the connection and is only grown. Every
      * request on it builds a head of about the same size, so after the first
@@ -801,6 +823,9 @@ static int ev_level_settle(EvDriver* d, EvConn* c) {
     case EV_READ_REQUEST:
     case EV_TLS_HANDSHAKE:
         client = c->tls_want == 2 ? AETHER_IO_WRITE : AETHER_IO_READ;
+        break;
+    case EV_LINGER:
+        client = AETHER_IO_READ;
         break;
     case EV_CLIENT_SEND:
         client = c->tls_want == 1 ? AETHER_IO_READ : AETHER_IO_WRITE;
@@ -1370,6 +1395,102 @@ static void ev_arm_idle(EvDriver* d, EvConn* c) {
     c->idle_due = aether_proxy_now_ms() + ms;
 }
 
+/* The request's own deadline (#3737), as the worker path keeps it: the head
+ * within head_timeout_ms of its first byte, then the body within
+ * body_timeout_ms of the head's end, plus a second for every body_min_rate
+ * bytes of it. The idle timer above moves with every byte, so it alone let
+ * a client that sent one just inside it hold this slot for ever, and enough
+ * such clients every descriptor the process has. By the clock: the loop
+ * reads a body before anything runs on it, so all of its time is time spent
+ * waiting on the client. Called each time the request's read waits. */
+static void ev_arm_request(EvDriver* d, EvConn* c) {
+    const HttpServerLimits* lim = &d->loop->server->limits;
+    c->req_due_ms = 0;
+    if (c->in_len == 0) return;   /* none begun: the idle timeout's to bound */
+    int64_t now = aether_proxy_now_ms();
+    if (!c->req_started_ms) c->req_started_ms = now;
+    if (!c->in_hdr_end) {
+        if (lim->head_timeout_ms > 0) c->req_due_ms = c->req_started_ms + lim->head_timeout_ms;
+        return;
+    }
+    if (!c->body_started_ms) c->body_started_ms = now;
+    if (lim->body_timeout_ms > 0) {
+        int64_t due = c->body_started_ms + lim->body_timeout_ms;
+        if (lim->body_min_rate > 0)
+            due += (int64_t)(c->in_len - c->in_hdr_end) * 1000 / lim->body_min_rate;
+        c->req_due_ms = due;
+    }
+}
+
+/* The refusals the loop writes itself, with nothing of the request read
+ * that the worker path would have to answer. */
+static const char EV_HEAD_TIMEOUT[] =
+    "HTTP/1.1 408 Request Timeout\r\nContent-Type: text/plain\r\n"
+    "Content-Length: 23\r\nConnection: close\r\n\r\nrequest head timed out\n";
+static const char EV_BODY_TIMEOUT[] =
+    "HTTP/1.1 408 Request Timeout\r\nContent-Type: text/plain\r\n"
+    "Content-Length: 23\r\nConnection: close\r\n\r\nrequest body timed out\n";
+static const char EV_AT_CAPACITY[] =
+    "HTTP/1.1 503 Service Unavailable\r\nContent-Type: text/plain\r\n"
+    "Content-Length: 19\r\nRetry-After: 1\r\nConnection: close\r\n\r\nserver at capacity\n";
+
+/* How long a refused connection is read and dropped before it closes. */
+#define EV_LINGER_MS 2000
+#define EV_LINGER_FULL_MS 500
+
+/* Write a refusal to `c` without waiting (best effort: it is a few dozen
+ * bytes, and a client that cannot take them is closed all the same), stop
+ * sending, and linger: what the client still sends is read and dropped
+ * until it closes or `linger_ms` passes. Closing over unread bytes answers
+ * them with a reset, which can destroy the refusal before the client reads
+ * it, as the worker path's refusals know (conn_linger). */
+static void ev_refuse(EvDriver* d, EvConn* c, const char* msg, size_t len, int linger_ms) {
+#ifdef AETHER_HAS_OPENSSL
+    if (c->ssl) (void)ev_client_write(c, msg, len);
+    else
+#endif
+    (void)send(c->client_fd, msg, len, AE_SEND_NOSIGNAL | MSG_DONTWAIT);
+    shutdown(c->client_fd, SHUT_WR);
+    ev_timer_set(d, c, 0);
+    c->state = EV_LINGER;
+    c->req_due_ms = 0;
+    c->idle_due = aether_proxy_now_ms() + linger_ms;
+}
+
+/* The most connections the loop holds at once (#3750): the server's
+ * limits.loop_max_connections, else half the process's open-file limit less
+ * 64, since each proxied connection takes an upstream descriptor as well.
+ * The loop had no bound at all: a client could open connections until the
+ * process had no descriptor left, for anything. */
+static int ev_max_connections(HttpServer* server) {
+    int n = server->limits.loop_max_connections;
+    if (n > 0) return n;
+    struct rlimit rl;
+    if (getrlimit(RLIMIT_NOFILE, &rl) != 0 || rl.rlim_cur == RLIM_INFINITY) return 32768;
+    long long m = ((long long)rl.rlim_cur - 64) / 2;
+    if (m < 16) m = 16;
+    if (m > 32768) m = 32768;
+    return (int)m;
+}
+
+/* At the bound, make room for `fresh`: close this driver's connection that
+ * has waited longest with nothing of a request sent, a kept one between
+ * requests or a new one, as a server that runs out of connections reuses
+ * its idle ones. A connection partway through a request keeps its slot; its
+ * own deadline bounds it. 1 when one was closed. */
+static int ev_evict_silent(EvDriver* d, EvConn* fresh) {
+    EvConn* oldest = NULL;
+    for (int fd = 0; fd < d->by_fd_cap; fd++) {
+        EvConn* c = d->by_fd[fd];
+        if (!c || c == fresh || c->client_fd != fd) continue;
+        if (c->state != EV_READ_REQUEST || c->in_len != 0 || !c->idle_due) continue;
+        if (!oldest || c->idle_due < oldest->idle_due) oldest = c;
+    }
+    if (!oldest) return 0;
+    ev_conn_close(d, oldest);
+    return 1;
+}
+
 /* How often ev_sweep_idle looks, and so how late past its idle timeout a
  * quiet connection may close. */
 #define EV_IDLE_SWEEP_MS 250
@@ -1382,13 +1503,27 @@ static void ev_arm_idle(EvDriver* d, EvConn* c) {
 static void ev_sweep_idle(EvDriver* d, int64_t now) {
     if (now < d->next_idle_sweep_ms) return;
     d->next_idle_sweep_ms = now + EV_IDLE_SWEEP_MS;
+    int silent = 0;
     for (int fd = 0; fd < d->by_fd_cap; fd++) {
         EvConn* c = d->by_fd[fd];
-        if (!c || c->client_fd != fd || !c->idle_due || c->idle_due > now) continue;
+        if (!c || c->client_fd != fd) continue;
+        /* A request past its own deadline (ev_arm_request, #3737): 408,
+         * then the linger. */
+        if (c->state == EV_READ_REQUEST && c->req_due_ms && c->req_due_ms <= now) {
+            if (c->in_hdr_end)
+                ev_refuse(d, c, EV_BODY_TIMEOUT, sizeof(EV_BODY_TIMEOUT) - 1, EV_LINGER_MS);
+            else
+                ev_refuse(d, c, EV_HEAD_TIMEOUT, sizeof(EV_HEAD_TIMEOUT) - 1, EV_LINGER_MS);
+            if (!d->edge_triggered && ev_level_settle(d, c) != 0) ev_conn_close(d, c);
+            continue;
+        }
+        if (c->state == EV_READ_REQUEST && c->in_len == 0 && c->idle_due > now) silent++;
+        if (!c->idle_due || c->idle_due > now) continue;
         if (c->state == EV_READ_REQUEST || c->state == EV_TLS_HANDSHAKE ||
-            c->state == EV_CLIENT_SEND)
+            c->state == EV_CLIENT_SEND || c->state == EV_LINGER)
             ev_conn_close(d, c);
     }
+    atomic_store(&d->silent_hint, silent);
 }
 
 /* A deadline in the heap has passed: a retry's backoff is over, or the
@@ -1774,6 +1909,8 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
             /* Waiting on the client: no longer than the idle timeout since
              * its last byte (#3243). */
             if (r == 0 && (c->in_len != had || c->idle_due == 0)) ev_arm_idle(d, c);
+            /* And no later than the request's own deadline (#3737). */
+            if (r == 0) ev_arm_request(d, c);
             if (r <= 0) return r;
             c->idle_due = 0;   /* the request is here */
             r = ev_begin_upstream(d, c);
@@ -1783,7 +1920,16 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
 #ifdef AETHER_HAS_OPENSSL
         case EV_TLS_HANDSHAKE: {
             int r = ev_step_tls_handshake(d, c);
-            if (r == 0 && c->idle_due == 0) ev_arm_idle(d, c);   /* #3243 */
+            /* The whole handshake within the server's handshake budget, no
+             * longer than the idle timeout either: armed once, start to
+             * finish (#3243, #3737). */
+            if (r == 0 && c->idle_due == 0) {
+                const HttpServerLimits* lim = &d->loop->server->limits;
+                int ms = lim->idle_timeout_ms;
+                if (lim->tls_handshake_timeout_ms > 0 && lim->tls_handshake_timeout_ms < ms)
+                    ms = lim->tls_handshake_timeout_ms;
+                c->idle_due = aether_proxy_now_ms() + ms;
+            }
             if (r <= 0) return r;
             c->idle_due = 0;
             continue;
@@ -1884,6 +2030,20 @@ static int ev_advance_states(EvDriver* d, EvConn* c) {
             ev_conn_reset_request(d, c);
             c->state = EV_READ_REQUEST;
             continue;
+        }
+        case EV_LINGER: {
+            /* A refusal is out (ev_refuse): read what the client still
+             * sends and drop it, until it closes; the sweep closes it at
+             * idle_due otherwise. */
+            char sink[4096];
+            for (;;) {
+                ssize_t got = recv(c->client_fd, sink, sizeof(sink), 0);
+                if (got > 0) continue;
+                if (got == 0) return -1;
+                if (errno == EINTR) continue;
+                if (errno == EAGAIN || errno == EWOULDBLOCK) return 0;
+                return -1;
+            }
         }
         case EV_CLOSING:
         default:
@@ -1998,12 +2158,25 @@ static void ev_take_submissions(EvDriver* d) {
             c->state = EV_TLS_HANDSHAKE;
         }
 #endif
-        atomic_fetch_add(&d->loop->active, 1);
+        int held = atomic_fetch_add(&d->loop->active, 1) + 1;
         atomic_fetch_add(&d->loop->taken, 1);
 
         /* Watched once, for as long as this driver owns it. Every later wait
          * on this descriptor is then free. */
         if (ev_watch(d, fd, c) != 0) { ev_conn_close(d, c); continue; }
+
+        /* Past the loop's connection bound (#3750): room is made by closing
+         * the oldest connection that has sent nothing of a request; with
+         * none, this one is answered 503 and lingers briefly, or over TLS,
+         * where a plaintext answer means nothing, is closed. */
+        if (d->loop->max_active > 0 && held > d->loop->max_active && !ev_evict_silent(d, c)) {
+#ifdef AETHER_HAS_OPENSSL
+            if (c->ssl) { ev_conn_close(d, c); continue; }
+#endif
+            ev_refuse(d, c, EV_AT_CAPACITY, sizeof(EV_AT_CAPACITY) - 1, EV_LINGER_FULL_MS);
+            if (ev_advance(d, c) < 0) ev_conn_close(d, c);
+            continue;
+        }
         if (ev_advance(d, c) < 0) ev_conn_close(d, c);
     }
     /* The resolver answered (ev_names_answered): the flag is read after the
@@ -2081,6 +2254,18 @@ int http_evloop_submit(HttpEvLoop* loop, int client_fd) {
     /* Round-robin. A connection is placed once and then belongs to that
      * driver, so this is the only point where the choice is made. */
     int start = atomic_fetch_add(&loop->next_driver, 1);
+    /* At the loop's bound, to a driver that holds a connection with nothing
+     * of a request sent, which it closes to make room (ev_evict_silent,
+     * #3750): only its own driver may close one. */
+    if (loop->max_active > 0 && atomic_load(&loop->active) >= loop->max_active) {
+        for (int i = 0; i < loop->driver_count; i++) {
+            EvDriver* d = &loop->drivers[(start + i) % loop->driver_count];
+            if (!atomic_load(&d->started) || atomic_load(&d->silent_hint) <= 0) continue;
+            atomic_fetch_sub(&d->silent_hint, 1);
+            if (write(d->wake_w, &client_fd, sizeof(client_fd)) == (ssize_t)sizeof(client_fd))
+                return 0;
+        }
+    }
     for (int i = 0; i < loop->driver_count; i++) {
         EvDriver* d = &loop->drivers[(start + i) % loop->driver_count];
         if (!atomic_load(&d->started)) continue;
@@ -2099,6 +2284,7 @@ static int ev_driver_init(HttpEvLoop* loop, EvDriver* d, int index) {
     d->wake_r = d->wake_w = -1;
     atomic_init(&d->wakeups, 0);
     atomic_init(&d->started, 0);
+    atomic_init(&d->silent_hint, 0);
     atomic_init(&d->answered, 0);
     if (pthread_mutex_init(&d->answered_lock, NULL) != 0) return -1;
 
@@ -2153,6 +2339,7 @@ HttpEvLoop* http_evloop_start(HttpServer* server, int threads) {
     atomic_init(&loop->next_driver, 0);
     atomic_init(&loop->body_held, 0);
     loop->body_slots = http_pool_default_workers();
+    loop->max_active = ev_max_connections(server);
     /* Before the drivers, which ask it from their first dial. Without one a
      * dial would look names up on the driver's thread, so no resolver, no
      * loop (#3267). */
